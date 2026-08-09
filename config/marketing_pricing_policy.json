@@ -108,7 +108,7 @@
     "sales30dScope": "same_standard_goods_sn_across_19_stores",
     "pricingAction": {
       "mode": "move_up_one_price_tier",
-      "globalExposureTop5": "restore_latest_approved_ordinary_link_price",
+      "globalExposureTop5": "restore_latest_approved_canonical_ordinary_price",
       "ordinaryLinks": "recalculate_with_ordinary_target_margin_plus_5_percentage_points",
       "mechanicallyReduceDisplayedDiscountBy5Pct": false,
       "platformMinimumDiscountOrMaximumSignupPriceWins": true,
@@ -122,7 +122,11 @@
       "new_listing_or_new_product_top5_treatment",
       "ordinary_activity_baseline"
     ],
-    "manualSpecialDiscountAction": "do_not_auto_override_list_for_user_review"
+    "manualSpecialDiscountAction": "do_not_auto_override_list_for_user_review",
+    "inventoryEvidence": {
+      "normalizeCanonicalByStandardGoodsCode": true,
+      "currentCompleteSnapshotOmittedKnownZero": "use_latest_et_09_running_balance_zero_as_matched_zero"
+    }
   },
   "ordinaryMarketing": {
     "mustSignupDuringSignupWindow": true,

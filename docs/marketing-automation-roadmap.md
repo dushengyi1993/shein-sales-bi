@@ -39,7 +39,8 @@
 - 执行代码已由 `lib/marketing_activity_inventory_transaction.mjs`、`lib/marketing_activity_inventory_openapi.mjs` 和 `lib/marketing_activity_inventory_integration.mjs` 实现，并接入三个普通活动 runner、人工特殊恢复、目标价漂移、新链接/重新上架/漏兜底及高点击专属折扣。旧 ET 门控持久补量的真实执行已永久禁用；任一入口缺 live 最低值、锁、恢复或恢复后双回读能力时仍按 blocker fail closed。
 - 新报名、补报或重建普通活动/限时折扣时，若 ET 当天已匹配运营可售 `<= 10`，且同一标准货号跨 19 店近 30 天有效销量合计 `> 30`，价格档位上移一级：全局最新 7 天曝光 Top5 恢复到普通链接最新已批准价；普通链接按普通目标利润率加 5 个百分点重算。平台允许价优先，成本/底价/利润线仍是硬门禁。
 - 不追溯改写正常旧活动；ET 恢复 `> 10` 后，后续新活动恢复原档位，不污染最新已批准基准。优先级为“ET 低库存畅销品收回 > 自动高点击专属折扣 > 新链接/新品 Top5 > 普通基准”；人工特殊折扣不自动覆盖，单独列用户审核。
-- 价格收回由 `lib/marketing_low_et_fast_seller_pricing.mjs` 统一实现：先按 ET/30 天销量短路，再按 `store + SKC` 精确读取该链接普通档批准价；Top5 缺精确链接普通档价时 fail closed，不得用同货号中位数替代。普通活动 dry-run 输出证据 hash，execute 必须携带并重读；四类限时折扣执行器也会重读当天 ET、30 天销量和 Top5 后拒绝 stale rescue。
+- 价格收回由 `lib/marketing_low_et_fast_seller_pricing.mjs` 统一实现：先按 ET/30 天销量短路；Top5 按标准货号统一恢复最新批准的普通链接档价，不再依赖单店单链接历史价。只有该标准货号缺统一普通档价时才 fail closed。普通活动 dry-run 输出证据 hash，execute 必须携带并重读；四类限时折扣执行器也会重读当天 ET、30 天销量和 Top5 后拒绝 stale rescue。
+- ET 当天完整快照若省略零库存商品，仓库视图会用 09 散件仓最新流水零余额回填为“已匹配、可售 0”；标准货号代码相同但一侧带中文品名时统一归并。不得把这两类情况继续列为 `missing_current_day_matched_et_inventory`。
 
 ## 2. 价格栈判定规则
 
@@ -81,7 +82,7 @@
 - 云端 guard timer 负责完整 live scan、精确计划和建队列，不持有写授权。本地 Codex heartbeat 每天 `11:10` 只启动一次，读取当天精确事实后持续处理同一队列直至终态：不弹前端的 headless Chrome 按 3–4 店一批执行负责人长期授权内的限时折扣动作并完成受影响店回读；默认 4 店，资源不足降为 3 店，批内跨店并行但同店写链路严格串行，整批终态后关闭全部 Profile 再开下一批。最后只做一次19店全量回读和一次群报。云端 repair 仅在 `20:45/21:15` 做本机未闭环的应急兜底，每段最多 1 店/1组。
 - 复核频率按风险分层。云端 timer 每日做一次 19 店完整基线；动作后只复扫受影响店并与成功基线合并，最终由云端 browserless 全店复核。普通活动/价格栈浏览器补扫按候选店铺最小集合串行执行，跑完关闭；不得恢复无差别19店前端扫描。
 - repair worker 的最终闭环必须按固定顺序执行：19 店普通活动/优惠券 session HTTP stack review 刷新 → 19 店价格栈 final scan → guard 重建。价格栈放在最后，避免待生效活动在 stack review 期间跨过开始时间，又被旧价格快照重新判为缺口。大批修复可能超过 `30` 分钟的同轮证据时差；如果不刷新 stack review，guard 会把已被当日 live 证据取代的历史 coupon/overlap 中间文件重新判成 stale blocker。最终 stack review 是 browserless session HTTP 刷新，不得回退为逐店前端扫描。
-- 飞书交付是最终闭环产物，不是 worker 进度通知。发送器要求队列已终态，且最终 guard 时间不早于队列终态和执行结果；blocked 队列还必须在最终扫描后重建当前 repair plans，并由 `check_marketing_terminal_report_readiness.mjs` 证明每个计划键已执行或已取得本轮安全阻断证据。发现未处理键时重建队列并延后发送，不得把第一次 blocked 当成日报终点。每日只交付一段简短最终结论和一个合并后的 `marketing-daily-final-YYYY-MM-DD.md`，guard 与 execution 文件仅作为生成素材保留在云端。
+- 最终日报采用双通道：飞书交付一段简短最终结论和一个合并后的 `marketing-daily-final-YYYY-MM-DD.md`；当前 Codex 本任务同时正常输出有排版的人话日报。飞书附件不能替代本任务回复，本任务回复也不能替代飞书交付。两边都不是 worker 进度通知：要求队列已终态，且最终 guard 时间不早于队列终态和执行结果；blocked 队列还必须在最终扫描后重建当前 repair plans，并由 `check_marketing_terminal_report_readiness.mjs` 证明每个计划键已执行或已取得本轮安全阻断证据。发现未处理键时重建队列并延后双通道发送，不得把第一次 blocked 当成日报终点；guard 与 execution 文件仅作为生成素材保留在云端。
 - `source stale` 只表示证据需要刷新，不等于可以自动全店 live scan；如果没有低价止损、补券窗口或用户授权，日报只能报告“需补证据/等待窗口”，不得用全量前端扫描替代判断。
 - 若调用 `scripts/marketing/submit_coupon_activity_goods.mjs`，必须带 `--dry-run` 或 `--no-submit`。
 - 默认禁止本地 heartbeat 向无授权的写入型脚本传 `--execute`。长期授权例外包括：已批准普通活动在报名截止前新出现的可报差额、限时折扣价格漂移修复、登记中的人工特殊折扣恢复、新链接/新上架 7 天/重新上架无活动/漏限时折扣兜底，以及满足严格 7 日指标的高点击低转化专属折扣。上述例外现在以本机后台 headless 执行为主，不逐次索要人工确认，但每轮必须自动计算并校验精确 payload/work hash，同时通过授权 ID/上下文、身份、价格栈、库存/平台校验、dry-run 和执行后 live 回读。未批准的新普通活动、优惠券取消、补预算和无证据写入仍不得自动执行。

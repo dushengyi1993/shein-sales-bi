@@ -19,6 +19,8 @@ import {fileURLToPath} from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_PROFILES_ROOT = path.join(ROOT, 'profiles');
 const DEFAULT_CACHE_ROOT = path.join(process.env.LOCALAPPDATA || ROOT, 'SheinBI', 'browser-cache');
+const CACHE_ROOT_MARKER = '.shein-bi-disposable-cache-root';
+const CACHE_ROOT_MARKER_CONTENT = 'shein-bi-disposable-browser-cache-v1\n';
 
 const PROFILE_CACHE_PATHS = [
   'OptGuideOnDeviceModel',
@@ -64,6 +66,40 @@ function parseArgs(argv) {
 function isWithin(root, target) {
   const relative = path.relative(path.resolve(root), path.resolve(target));
   return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+async function validateDisposableCacheRoot(cacheRoot) {
+  const resolved = path.resolve(cacheRoot);
+  if (resolved === path.parse(resolved).root) {
+    return {ok: false, reason: 'cache_root_is_filesystem_root', resolved};
+  }
+  if (path.basename(resolved).toLowerCase() !== 'browser-cache') {
+    return {ok: false, reason: 'cache_root_basename_mismatch', resolved};
+  }
+  let rootStat;
+  try {
+    rootStat = await fsp.lstat(resolved);
+  } catch (error) {
+    return {ok: false, reason: error?.code === 'ENOENT' ? 'cache_root_missing' : 'cache_root_stat_failed', resolved};
+  }
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    return {ok: false, reason: 'cache_root_not_real_directory', resolved};
+  }
+  const marker = path.join(resolved, CACHE_ROOT_MARKER);
+  let markerStat;
+  try {
+    markerStat = await fsp.lstat(marker);
+  } catch (error) {
+    return {ok: false, reason: error?.code === 'ENOENT' ? 'cache_root_marker_missing' : 'cache_root_marker_stat_failed', resolved, marker};
+  }
+  if (!markerStat.isFile() || markerStat.isSymbolicLink()) {
+    return {ok: false, reason: 'cache_root_marker_not_real_file', resolved, marker};
+  }
+  const content = await fsp.readFile(marker, 'utf8').catch(() => null);
+  if (content !== CACHE_ROOT_MARKER_CONTENT) {
+    return {ok: false, reason: 'cache_root_marker_mismatch', resolved, marker};
+  }
+  return {ok: true, reason: 'verified', resolved, marker};
 }
 
 async function dirBytes(root) {
@@ -120,6 +156,7 @@ async function main() {
     host: os.hostname(),
     profilesRoot,
     cacheRoot: args.cacheRoot,
+    cacheRootValidation: null,
     profilesScanned: profiles.length,
     profilesSkippedActive: [],
     targets: [],
@@ -152,22 +189,29 @@ async function main() {
     }
   }
 
-  // The new shared disposable cache has no login/session data.  It may be
-  // reclaimed only when no SHEIN store profile is active.
+  // The shared disposable cache has no login/session data. It may be reclaimed
+  // only when no SHEIN store profile is active and its marker proves that the
+  // caller did not redirect --cache-root to an arbitrary directory.
   if (active.size === 0 && fs.existsSync(args.cacheRoot)) {
-    const bytes = await dirBytes(args.cacheRoot);
-    const item = {profile: 'shared-browser-cache', path: args.cacheRoot, bytes, removed: false};
-    if (args.apply) {
-      try {
-        await fsp.rm(args.cacheRoot, {recursive: true, force: true});
-        item.removed = true;
-        report.reclaimedBytes += bytes;
-      } catch (error) {
-        item.error = error?.code || error?.message || String(error);
-        report.errors.push({path: args.cacheRoot, error: item.error});
+    const validation = await validateDisposableCacheRoot(args.cacheRoot);
+    report.cacheRootValidation = validation;
+    if (!validation.ok) {
+      report.errors.push({path: validation.resolved, error: validation.reason});
+    } else {
+      const bytes = await dirBytes(validation.resolved);
+      const item = {profile: 'shared-browser-cache', path: validation.resolved, bytes, removed: false};
+      if (args.apply) {
+        try {
+          await fsp.rm(validation.resolved, {recursive: true, force: true});
+          item.removed = true;
+          report.reclaimedBytes += bytes;
+        } catch (error) {
+          item.error = error?.code || error?.message || String(error);
+          report.errors.push({path: validation.resolved, error: item.error});
+        }
       }
+      report.targets.push(item);
     }
-    report.targets.push(item);
   }
 
   report.ok = report.errors.length === 0;

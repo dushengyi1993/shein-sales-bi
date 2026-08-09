@@ -478,6 +478,8 @@ for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime
     sourceCostMap: rel(costMapPath),
     sourceGuard: sourceGuardPath ? rel(sourceGuardPath) : '',
     pricingPolicy: rel(policyPath),
+    sourceRawLinkHistory: rel(linkHistoryDir),
+    sourceStoresConfig: rel(storesConfigPath),
     endTime: storeRows[0].endTime,
     activityStock: storeRows[0].activityStock,
     activityNamePrefix: storeActivityNamePrefix,

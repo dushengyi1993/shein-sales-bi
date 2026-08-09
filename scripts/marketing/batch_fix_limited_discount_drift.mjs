@@ -232,8 +232,14 @@ async function loadToolOutputFromStdout(commandResult) {
 }
 
 async function launchStore(storeKey) {
-  const result = await runCommand(process.execPath, ['scripts/launch_store_browser.mjs', storeKey, '--headless'], {
-    timeoutMs: 30000,
+  const result = await runCommand(process.execPath, [
+    'scripts/launch_store_browser.mjs',
+    storeKey,
+    '--headless',
+    '--url',
+    'https://sso.geiwohuo.com/#/mbrs/marketing/list',
+  ], {
+    timeoutMs: 60000,
   });
   if (!result.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${result.stderr || result.stdout}`);
   await sleep(3000);

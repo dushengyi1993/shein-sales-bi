@@ -864,6 +864,19 @@ latest_box AS (
   ORDER BY b.fetched_at DESC NULLS LAST, b.batch_id DESC
   LIMIT 1
 ),
+latest_running AS (
+  SELECT DISTINCT ON (match_key, storeroom_name)
+    standard_goods_sn,
+    match_key,
+    title_cn,
+    storeroom_name,
+    balance,
+    created_time,
+    updated_at
+  FROM fact.et_stock_running
+  WHERE coalesce(match_key,'') <> ''
+  ORDER BY match_key, storeroom_name, created_time DESC NULLS LAST, updated_at DESC NULLS LAST
+),
 store_agg_raw AS (
   SELECT
     standard_goods_sn,
@@ -898,6 +911,30 @@ store_agg AS (
     max(store_snapshot_date) AS store_snapshot_date
   FROM store_agg_raw
   GROUP BY match_key
+),
+known_zero_store AS (
+  SELECT
+    max(r.standard_goods_sn) AS standard_goods_sn,
+    r.match_key,
+    max(r.title_cn) FILTER (WHERE coalesce(r.title_cn,'') <> '') AS sample_title_cn,
+    0::numeric AS loose_total_qty,
+    0::numeric AS loose_sellable_qty,
+    0::numeric AS rtv_qty,
+    0::numeric AS damaged_qty,
+    0::numeric AS scrap_qty,
+    'ETRUH09散件仓（ET流水零余额回填）'::text AS loose_warehouses,
+    (SELECT snapshot_date FROM latest_store) AS store_snapshot_date
+  FROM latest_running r
+  WHERE (r.storeroom_name LIKE '%09%' OR r.storeroom_name ILIKE '%散件%')
+    AND coalesce(r.balance,0) = 0
+    AND NOT EXISTS (SELECT 1 FROM store_agg s WHERE s.match_key = r.match_key)
+    AND (SELECT snapshot_date FROM latest_store) IS NOT NULL
+  GROUP BY r.match_key
+),
+store_agg_complete AS (
+  SELECT * FROM store_agg
+  UNION ALL
+  SELECT * FROM known_zero_store
 ),
 box_agg_raw AS (
   SELECT
@@ -956,7 +993,7 @@ SELECT
     WHEN coalesce(s.match_key,b.match_key) = 'SK03038' THEN '09_loose_plus_01_full_carton_exception'
     ELSE '09_loose_only'
   END::text AS operational_stock_policy
-FROM store_agg s
+FROM store_agg_complete s
 FULL JOIN box_agg b
   ON b.match_key = s.match_key;
 

@@ -10,6 +10,7 @@ const linkFetcher = fs.readFileSync(path.join(root, 'scripts', 'fetch_shein_link
 const server = fs.readFileSync(path.join(root, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
 const client = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'client.js'), 'utf8');
 const prewarm = fs.readFileSync(path.join(root, 'scripts', 'prewarm_bi_portal_sections.sh'), 'utf8');
+const warehouseSchema = fs.readFileSync(path.join(root, 'infra', 'warehouse', 'schema.sql'), 'utf8');
 
 for (const source of [generator, server, client, prewarm]) {
   assert.match(source, /productSalesDaily/, 'productSalesDaily must exist across generator, server, client, and prewarm');
@@ -68,5 +69,8 @@ assert.match(inventorySql, /round\(et_ship_arrived_quantity::numeric, 0\) AS arr
 assert.match(inventorySql, /least\(et_ship_first_arrived_date, cost_first_arrived_date\) AS first_arrived_date/, 'first arrival must be the earliest known arrival');
 assert.match(inventorySql, /greatest\(et_ship_latest_arrived_date, cost_latest_arrived_date\) AS latest_arrived_date/, 'latest arrival must be the latest known arrival');
 assert.match(inventorySql, /inventory_match_status = 'matched' AND coalesce\(et_estimated_available_qty,0\) <= 0/, 'only fresh ET matches can be labelled out of stock');
+assert.match(warehouseSchema, /latest_running AS \(/, 'ET current inventory view must retain latest running-balance evidence');
+assert.match(warehouseSchema, /ET流水零余额回填/, 'current complete snapshots must carry forward known zero 09-warehouse balances instead of reporting them unmatched');
+assert.match(warehouseSchema, /FROM store_agg_complete s/, 'ET inventory view must include zero-balance carry-forward rows');
 
 console.log('bi_product_section_contract: slim sales/traffic sections, inventory cost continuity, and bounded matrix rendering checks passed');

@@ -12,13 +12,27 @@ import {
   applyLowEtFastSellerPricePullback,
   buildLowEtFastSellerPricingContext,
 } from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {
+  assessLatestRawMarketingLinkCoverage,
+  collectLatestRawMarketingLinkRows,
+  mergeMarketingLinkRows,
+} from '../../lib/marketing_latest_raw_link_overlay.mjs';
+import {buildLinkRowIndexFromBi} from '../../lib/marketing_pricing_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_ACTIVITY_NAME_PREFIX = '限时折扣目标价漂移修复';
 const DEFAULT_ACTIVITY_STOCK = 10;
 
 function parseArgs(argv) {
-  const args = {guard: '', outDir: '', endTime: '', activityNamePrefix: DEFAULT_ACTIVITY_NAME_PREFIX, maxRows: 0};
+  const args = {
+    guard: '',
+    outDir: '',
+    endTime: '',
+    activityNamePrefix: DEFAULT_ACTIVITY_NAME_PREFIX,
+    maxRows: 0,
+    rawLinkHistory: '',
+    storesConfig: '',
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--guard') args.guard = path.resolve(argv[++i] || '');
@@ -31,6 +45,10 @@ function parseArgs(argv) {
     else if (a.startsWith('--activity-name-prefix=')) args.activityNamePrefix = String(a.slice('--activity-name-prefix='.length));
     else if (a === '--max-rows') args.maxRows = Number(argv[++i] || 0);
     else if (a.startsWith('--max-rows=')) args.maxRows = Number(a.slice('--max-rows='.length));
+    else if (a === '--raw-link-history') args.rawLinkHistory = path.resolve(argv[++i] || '');
+    else if (a.startsWith('--raw-link-history=')) args.rawLinkHistory = path.resolve(a.slice('--raw-link-history='.length));
+    else if (a === '--stores-config') args.storesConfig = path.resolve(argv[++i] || '');
+    else if (a.startsWith('--stores-config=')) args.storesConfig = path.resolve(a.slice('--stores-config='.length));
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!args.guard) throw new Error('Missing --guard');
@@ -239,15 +257,43 @@ async function main() {
   const sourceInventoryTrend = guard.highClickLowConversionSpecial?.sourceInventoryTrend || 'outputs/bi-portal/sections/inventoryTrend.json';
   const sourceCostMap = guard.highClickLowConversionSpecial?.sourceCostMap || 'tmp/mbrs/marketing-cost-map.json';
   const sourcePriceOverrides = guard.limitedDiscountTargetPriceDrift?.planSourcePath || guard.targetPlanSelection?.priceOverrides || '';
-  const [linksDataDoc, inventoryTrendDoc, baselineDoc, costDoc] = await Promise.all([
+  const sourceRawLinkHistory = args.rawLinkHistory || 'outputs/shein_links';
+  const sourceStoresConfig = args.storesConfig || 'config/stores.json';
+  const [linksDataDoc, inventoryTrendDoc, baselineDoc, costDoc, storesConfig] = await Promise.all([
     fs.readFile(path.resolve(ROOT, sourceLinksData), 'utf8').then(JSON.parse),
     fs.readFile(path.resolve(ROOT, sourceInventoryTrend), 'utf8').then(JSON.parse),
     fs.readFile(path.resolve(ROOT, sourcePriceOverrides), 'utf8').then(JSON.parse),
     fs.readFile(path.resolve(ROOT, sourceCostMap), 'utf8').then(JSON.parse),
+    fs.readFile(path.resolve(ROOT, sourceStoresConfig), 'utf8').then(JSON.parse),
   ]);
+  const storeKeys = [...new Set((storesConfig?.stores || [])
+    .filter(store => store?.enabled !== false)
+    .map(store => String(store?.storeKey || store?.key || store?.store || '').trim().toUpperCase())
+    .filter(Boolean))].sort();
+  const latestRawLinks = collectLatestRawMarketingLinkRows({
+    historyDir: path.resolve(ROOT, sourceRawLinkHistory),
+    reportDate: guard.reportDate,
+    storeKeys,
+  });
+  const latestRawCoverage = assessLatestRawMarketingLinkCoverage({
+    sourceFiles: latestRawLinks.sourceFiles,
+    errors: latestRawLinks.errors,
+    storeKeys,
+  });
+  if (!latestRawCoverage.complete) {
+    throw new Error(
+      `Low-ET raw-link overlay incomplete: missing=${latestRawCoverage.missingStoreKeys.join(',') || '(none)'} `
+      + `parseErrors=${latestRawCoverage.parseErrorCount}`,
+    );
+  }
+  const linkRowIndex = buildLinkRowIndexFromBi(linksDataDoc);
+  const mergedLinks = mergeMarketingLinkRows(
+    [...linkRowIndex.byLinkKey.values()],
+    latestRawLinks.rows,
+  );
   const lowEtContext = buildLowEtFastSellerPricingContext({
     inventoryTrendDoc,
-    linksDataDoc,
+    linksDataDoc: {storeLinks: mergedLinks.rows},
     baselineDoc,
     costDoc,
     marketingPolicy: pricingPolicy,
@@ -279,6 +325,8 @@ async function main() {
       sourceLinksData,
       sourceInventoryTrend,
       sourceCostMap,
+      sourceRawLinkHistory,
+      sourceStoresConfig,
       sourceLimitedDiscountName: group.limitedDiscountName,
       sourceLimitedDiscountEnd: group.limitedDiscountEnd,
       endTime,

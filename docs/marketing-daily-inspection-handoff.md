@@ -81,7 +81,7 @@ guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结
 - 修复 worker 在 `10:50/12:50/14:50/16:50/18:50/19:30` 运行，单轮按总预算最多处理 `8` 个活动组、最长 `40` 分钟；一个阶段提前完成时会用剩余预算继续下一阶段，不再空耗整个时间窗。同店复用浏览器，成功组可 resume，失败/阻断组不会被误记为完成。
 - 每个替换组仍先 preflight/dry-run，再锁定旧活动完整快照和精确 hash。真实删除、目标活动创建、回读与补偿由事务执行器统一管理；目标创建失败时自动恢复旧保护。dry-run 不得进入删除或任何真实写路径。
 - 修复队列全部组完成后，最终闭环顺序固定为：先用 session HTTP 刷新 19 店普通活动/优惠券 stack review，再做 19 店价格栈 final live readback，最后重建 guard。价格栈必须最后扫，避免刚创建的待生效活动在 stack review 期间跨过开始时间后，又被旧价格快照误判为缺失。修复耗时超过同轮证据时差时，不得沿用巡检开始时的旧 stack review，让已被 live 证据替代的优惠券中间文件重新变成 stale blocker。巡检 watchdog 与修复 watchdog 分别验收，后者必须在 `20:00` 前确认修复闭环或明确剩余 blocker。
-- 飞书日报只能在最终 19 店 stack review、价格栈 readback 和 guard 重建之后发送。队列刚进入 `blocked`、某个 worker 阶段结束或 execution summary 刚落盘都只是中间态；blocked 队列完成最终扫描后必须重建四类 repair plan，并用 `check_marketing_terminal_report_readiness.mjs` 按精确 `store+SKC` 核对：新出现且尚未执行/安全阻断的行必须重新入队，不能先发日报。发送器仍须校验最终 guard 的时间晚于终态队列和执行结果。群内固定只发“一段最终结论 + 一个 `marketing-daily-final-YYYY-MM-DD.md` 附件”，不得再分别发送 guard/execution 两个附件，也不得把 guard 的只读“不能自动执行”标题当成整轮执行结论。
+- 最终日报必须双通道交付，二者缺一不可：飞书群固定只发“一段最终结论 + 一个 `marketing-daily-final-YYYY-MM-DD.md` 附件”；当前 Codex 本任务仍须正常输出有排版的人话日报，不能用飞书消息或附件代替本任务回复，也不能因为飞书已发送就在本任务静默。两边都只能在最终 19 店 stack review、价格栈 readback 和 guard 重建之后发送。队列刚进入 `blocked`、某个 worker 阶段结束或 execution summary 刚落盘都只是中间态；blocked 队列完成最终扫描后必须重建四类 repair plan，并用 `check_marketing_terminal_report_readiness.mjs` 按精确 `store+SKC` 核对：新出现且尚未执行/安全阻断的行必须重新入队。发送器仍须校验最终 guard 的时间晚于终态队列和执行结果；不得分别发送 guard/execution 两个附件，也不得把 guard 的只读“不能自动执行”标题当成整轮执行结论。
 - 候选范围同时包括持续在售老链接的 `30` 天兜底，以及新品/重新上架的 `7` 天兜底；两者都以精确 `storeKey + SKC` manifest 为准。价格漂移阶段与兜底阶段必须键级互斥，发现重叠直接拒绝建队列，不能重复修同一链接。
 - 高点击低转化专属折扣优先于普通漏兜底/新品/重新上架阶段。普通兜底计划器必须读取同一 guard 的 `highClickLowConversionSpecial.rows`，把这些精确 `storeKey + SKC` 记为 `handled_by_high_click_special_stage` 并从普通 rescue 中剔除；队列构建器仍对未被上游解释的任何跨阶段重复 fail closed。2026-07-30 已修复因 `DL::sv260208174499165647929` 同时进入高点击与普通兜底而导致整条 repair queue 无法生成的问题。
 
@@ -154,7 +154,7 @@ guard 只生成并锁定队列，不执行任何写入。价格决策先按“ET
 
 执行器若尚不能输出补量前三字段快照、平台最低值来源、库存锁、`finally` 恢复尝试、恢复后库存和恢复后报名状态，必须 fail closed 为“报名库存事务能力未就绪”；禁止继续调用旧 ET 门控持久补量并把它记成成功。
 
-当前代码状态（2026-08-02）：共享报名库存事务已实现并接入三个普通活动 runner，以及人工特殊恢复、目标价漂移、新链接/重新上架/漏兜底、高点击专属折扣。旧 `manage_manual_limited_discount_inventory.mjs --execute` 已永久 fail closed。低 ET 畅销品价格收回也已接入上述新报名/补报/重建路径；Top5 只允许恢复同一 `store + SKC` 的精确普通档批准价，缺精确链接价不得用货号中位数代替。执行前证据漂移必须重建计划或阻断。该状态描述本地待发布代码能力，不代表生产已经部署，生产版本仍以主任务最终发布验收为准。
+当前代码状态（2026-08-09）：共享报名库存事务已实现并接入三个普通活动 runner，以及人工特殊恢复、目标价漂移、新链接/重新上架/漏兜底、高点击专属折扣。旧 `manage_manual_limited_discount_inventory.mjs --execute` 已永久 fail closed。低 ET 畅销品价格收回也已接入上述新报名/补报/重建路径；Top5 按标准货号统一恢复最新批准的普通链接档价，不要求同一 `store + SKC` 存在单店历史价。ET 当天完整快照省略零库存商品时，用 09 散件仓最新流水零余额回填为“已匹配、可售 0”；货号代码相同但一侧带中文品名时统一归并。执行前证据漂移必须重建计划或阻断。生产是否已部署仍以主任务最终发布验收为准。
 
 普通兜底的 live 覆盖判定与价格漂移守卫一致：已有合规限时折扣价不低于当前目标价时视为已覆盖，不为追新基准自动降价或每日延长活动；低于目标价时仍必须进入修复。人工特殊限时折扣不适用该宽松判定，仍必须精确匹配登记价、库存和截止时间。
 

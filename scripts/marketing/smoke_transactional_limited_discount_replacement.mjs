@@ -73,7 +73,7 @@ let full;
 if(state.desiredCovered){
   full={ok:true,alreadyCovered:true,before:{conflictActivities:[{activity_id:333,act_name:'目标限时折扣',state:3,start_time:'2026-01-01 00:00:00',end_time:'2099-12-31 23:59:59',targetSkcs:[row.skc],extraSkcs:[],targetGoods:[{skc:row.skc,product_act_price:row.limitedDiscountPrice,attend_num_sum:10,stock_num:10}]}]},validation:{missing:[],invalid:[{skc:row.skc,reason:'query_goods error_code',error_code:'mrs-simple_platform_limit_discounts-0006'}]},after:null};
 }else if(state.oldCovered){
-  full={ok:true,before:{conflictActivities:[{activity_id:111,act_name:'旧限时折扣',state:3,start_time:'2026-01-01 00:00:00',end_time:'2099-12-31 23:59:59',targetSkcs:[row.skc],extraSkcs:[],targetGoods:[{skc:row.skc,product_act_price:70,attend_num_sum:10,stock_num:10}]}]},validation:{missing:[],invalid:[{skc:row.skc,reason:'query_goods error_code',error_code:'mrs-simple_platform_limit_discounts-0006'}]},after:null};
+  full={ok:false,reason:'unsafe mixed activity',before:{conflictActivities:[{activity_id:111,act_name:'旧混合限时折扣',state:3,start_time:'2026-01-01 00:00:00',end_time:'2099-12-31 23:59:59',targetSkcs:[row.skc],extraSkcs:['EXTRA-SKC'],targetGoods:[{skc:row.skc,product_act_price:70,attend_num_sum:10,stock_num:10}]}]},validation:{missing:[],invalid:[{skc:row.skc,reason:'query_goods error_code',error_code:'mrs-simple_platform_limit_discounts-0004'}]},after:null};
 }else if(!compensation&&!state.allowDesired){
   full={ok:false,reason:'platform blocked',before:{conflictActivities:[]},validation:{missing:[],invalid:[{skc:row.skc,reason:'query_goods error_code',error_code:'mrs-simple_platform_limit_discounts-0004'}]},after:null};
 }else if(!compensation&&!execute){
@@ -100,9 +100,9 @@ const argv=process.argv.slice(2);
 const execute=argv.includes('--execute');
 const state=JSON.parse(await fs.readFile(process.env.SMOKE_STATE,'utf8'));
 await fs.appendFile(process.env.SMOKE_EVENTS,JSON.stringify({tool:'remove',execute})+'\\n');
-const before={totalSkcs:1,skcs:['SMOKE-SKC-1'],removeSkcsPresent:['SMOKE-SKC-1'],missingToRemove:[],preserveSkcs:[],goods:[{skc:'SMOKE-SKC-1',sku_supplier_no:'SMOKE',product_act_price:70,attend_num_sum:10,stock_num:10}]};
+const before={totalSkcs:2,skcs:['SMOKE-SKC-1','EXTRA-SKC'],removeSkcsPresent:['SMOKE-SKC-1'],missingToRemove:[],preserveSkcs:['EXTRA-SKC'],goods:[{skc:'SMOKE-SKC-1',sku_supplier_no:'SMOKE',product_act_price:70,attend_num_sum:10,stock_num:10},{skc:'EXTRA-SKC',sku_supplier_no:'EXTRA',product_act_price:75,attend_num_sum:10,stock_num:10}]};
 let after=null;
-if(execute){state.oldCovered=false;await fs.writeFile(process.env.SMOKE_STATE,JSON.stringify(state));after={totalSkcs:0,skcs:[],stillPresent:[],missingPreserved:[],unexpectedAdded:[],goods:[]};}
+if(execute){state.oldCovered=false;await fs.writeFile(process.env.SMOKE_STATE,JSON.stringify(state));after={totalSkcs:1,skcs:['EXTRA-SKC'],stillPresent:[],missingPreserved:[],unexpectedAdded:[],goods:[before.goods[1]]};}
 const full={ok:true,results:[{ok:true,before,after,dryRunOnly:!execute}]};
 const out=path.join(process.env.SMOKE_DIR,'remove-'+Date.now()+'-'+Math.random()+'.json');
 await fs.writeFile(out,JSON.stringify(full));
@@ -153,6 +153,7 @@ console.log(JSON.stringify({ok:true,out}));
   const restoreIndex = events.findIndex(event => event.tool === 'apply' && event.execute && event.compensation);
   assert(snapshotIndex >= 0 && snapshotIndex < destructiveIndex, 'snapshot must be locked before deletion');
   assert(restoreIndex > destructiveIndex, 'compensation must run after failed post-delete validation');
+  assert.equal(events.filter(event => event.tool === 'remove' && event.execute).length, 1, 'mixed activity replacement removes only the target SKC once');
 
   await fs.writeFile(statePath, JSON.stringify({...finalState, allowDesired: true, desiredCovered: false}), 'utf8');
   await fs.writeFile(eventPath, '', 'utf8');
@@ -174,7 +175,7 @@ console.log(JSON.stringify({ok:true,out}));
 
   console.log(JSON.stringify({
     ok: true,
-    test: 'limited_discount_replacement_is_read_only_compensates_and_retries_after_safe_block',
+    test: 'mixed_0004_limited_discount_replacement_snapshots_target_only_compensates_and_retries',
   }));
 } finally {
   await fs.rm(temp, {recursive: true, force: true});

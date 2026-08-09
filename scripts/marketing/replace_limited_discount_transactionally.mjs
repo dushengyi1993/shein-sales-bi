@@ -22,7 +22,9 @@ import {
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const ROOT = path.resolve(
+  process.env.SHEIN_BI_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..'),
+);
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
 const DEFAULT_JOURNAL_DIR = path.join(ROOT, 'state/marketing-replacement-transactions');
 const APPLY_SCRIPT = process.env.SHEIN_MARKETING_APPLY_SCRIPT || 'scripts/marketing/apply_hl_limited_discount_rescue.mjs';
@@ -205,13 +207,20 @@ function conflictActivities(full) {
   })).filter(activity => Number.isFinite(activity.activityId) && activity.activityId > 0);
 }
 
-function invalidBySkc(full) {
+function invalidBySkc(full, conflicts = []) {
   const result = new Map();
+  const conflictTargetSkcs = new Set(
+    conflicts.flatMap(activity => activity.targetSkcs || []).map(skc => String(skc || '').trim()).filter(Boolean),
+  );
   for (const row of full?.validation?.invalid || []) {
     const skc = String(row?.skc || '').trim();
     if (!skc) continue;
+    const conflictCode = String(row.error_code || '');
     const oldConflictOnly = row.reason === 'query_goods error_code'
-      && row.error_code === 'mrs-simple_platform_limit_discounts-0006';
+      && (
+        conflictCode === 'mrs-simple_platform_limit_discounts-0006'
+        || (conflictCode === 'mrs-simple_platform_limit_discounts-0004' && conflictTargetSkcs.has(skc))
+      );
     if (oldConflictOnly) continue;
     if (!result.has(skc)) result.set(skc, []);
     result.get(skc).push(row);
@@ -486,10 +495,10 @@ async function main() {
   }
 
   const initial = await applyRescue({args, rescuePath: args.rescue, execute: false});
-  const initialInvalid = invalidBySkc(initial.full);
+  const initialConflicts = conflictActivities(initial.full);
+  const initialInvalid = invalidBySkc(initial.full, initialConflicts);
   const initiallyBlockedSkcs = [...initialInvalid.keys()];
   const eligibleRows = rows.filter(row => !initialInvalid.has(String(row.skc)));
-  const initialConflicts = conflictActivities(initial.full);
   const result = {
     ok: false,
     safe: true,

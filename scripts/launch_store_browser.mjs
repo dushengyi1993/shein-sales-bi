@@ -129,11 +129,34 @@ const profileDir = path.join(ROOT, 'profiles', `persistent-${store.profileKey}-p
 const localCacheRoot = process.env.SHEIN_BI_LOCAL_BROWSER_CACHE_ROOT
   ? path.resolve(process.env.SHEIN_BI_LOCAL_BROWSER_CACHE_ROOT)
   : path.join(process.env.LOCALAPPDATA || ROOT, 'SheinBI', 'browser-cache');
+const cacheRootMarker = path.join(localCacheRoot, '.shein-bi-disposable-cache-root');
+const cacheRootMarkerContent = 'shein-bi-disposable-browser-cache-v1\n';
 const cacheDir = process.platform === 'win32'
   ? path.join(localCacheRoot, String(store.profileKey || store.storeKey).toLowerCase())
   : path.join(profileDir, 'cache');
 const logDir = path.join(ROOT, 'logs');
 fs.mkdirSync(profileDir, {recursive: true});
+if (process.platform === 'win32') {
+  if (localCacheRoot === path.parse(localCacheRoot).root || path.basename(localCacheRoot).toLowerCase() !== 'browser-cache') {
+    throw new Error(`Unsafe SHEIN_BI_LOCAL_BROWSER_CACHE_ROOT: ${localCacheRoot}`);
+  }
+  fs.mkdirSync(localCacheRoot, {recursive: true});
+  const rootStat = fs.lstatSync(localCacheRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`Disposable browser cache root must be a real directory: ${localCacheRoot}`);
+  }
+  if (fs.existsSync(cacheRootMarker)) {
+    const markerStat = fs.lstatSync(cacheRootMarker);
+    const markerContent = markerStat.isFile() && !markerStat.isSymbolicLink()
+      ? fs.readFileSync(cacheRootMarker, 'utf8')
+      : '';
+    if (markerContent !== cacheRootMarkerContent) {
+      throw new Error(`Disposable browser cache marker mismatch: ${cacheRootMarker}`);
+    }
+  } else {
+    fs.writeFileSync(cacheRootMarker, cacheRootMarkerContent, {encoding: 'utf8', flag: 'wx'});
+  }
+}
 fs.mkdirSync(cacheDir, {recursive: true});
 fs.mkdirSync(logDir, {recursive: true});
 const profileName = ensureProfileName(profileDir, store);
