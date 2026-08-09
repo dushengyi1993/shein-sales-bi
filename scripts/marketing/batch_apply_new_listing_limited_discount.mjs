@@ -125,6 +125,21 @@ async function runCommand(command, commandArgs, options = {}) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let settled = false;
+    const finish = code => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        ok: code === 0 && !timedOut,
+        exitCode: code,
+        timedOut,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        stdout,
+        stderr,
+      });
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       try { child.kill('SIGKILL'); } catch {}
@@ -140,13 +155,16 @@ async function runCommand(command, commandArgs, options = {}) {
       process.stderr.write(chunk);
     });
     child.on('error', error => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       resolve({ok: false, exitCode: null, timedOut, startedAt, finishedAt: new Date().toISOString(), stdout, stderr, error: error.message});
     });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve({ok: code === 0 && !timedOut, exitCode: code, timedOut, startedAt, finishedAt: new Date().toISOString(), stdout, stderr});
-    });
+    child.on('close', finish);
+    // Some browser-backed helpers leave inherited pipe handles open after the
+    // direct child has exited. Do not hold the inventory transaction and its
+    // finally restore path hostage to those unrelated handles.
+    child.on('exit', code => setTimeout(() => finish(code), 500));
   });
 }
 
@@ -189,7 +207,13 @@ function storeConfigByKey() {
 }
 
 async function launchStore(storeKey) {
-  return await runCommand(process.execPath, ['scripts/launch_store_browser.mjs', storeKey, '--headless'], {timeoutMs: 45000});
+  return await runCommand(process.execPath, [
+    'scripts/launch_store_browser.mjs',
+    storeKey,
+    '--headless',
+    '--url',
+    'https://sso.geiwohuo.com/#/mbrs/marketing/list',
+  ], {timeoutMs: 60000});
 }
 
 async function closeStore(storeKey) {
@@ -285,13 +309,27 @@ function classifyBlockedDryRun(full) {
   return {type: 'dry_run_not_ok', reason};
 }
 
-function transactionBlockedSkcs(full) {
+function transactionBlockedSkcs(full, inventoryTransactionPlan = null) {
   const blocked = [];
+  const inventoryTransactionSkcs = new Set(
+    (inventoryTransactionPlan?.rows || [])
+      .filter(row => row?.requiresTemporaryRaise === true)
+      .map(row => String(row?.skc || '').trim())
+      .filter(Boolean),
+  );
   for (const row of full?.validation?.invalid || []) {
+    const skc = String(row?.skc || '').trim();
     const isExistingActivityConflict = row?.reason === 'query_goods error_code'
       && row?.error_code === 'mrs-simple_platform_limit_discounts-0006';
     const handledByInventoryTransaction = row?.reason === 'inventory below configured activity stock';
-    if (!isExistingActivityConflict && !handledByInventoryTransaction && row?.skc) blocked.push(String(row.skc));
+    const sameSkcHasInventoryTransaction = inventoryTransactionSkcs.has(skc);
+    const inventoryMinimumOrPlatformGate = sameSkcHasInventoryTransaction && (
+      row?.reason === 'inventory below min_stock'
+      || row?.error_code === 'mrs-simple_platform_limit_discounts-101018'
+    );
+    if (!isExistingActivityConflict && !handledByInventoryTransaction && !inventoryMinimumOrPlatformGate && skc) {
+      blocked.push(skc);
+    }
   }
   for (const skc of full?.validation?.missing || []) blocked.push(String(skc));
   for (const row of full?.skippedUnreportable || []) {
@@ -402,7 +440,10 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       return record;
     }
 
-    const blockedSkcs = transactionBlockedSkcs(dryRun.full);
+    const blockedSkcs = transactionBlockedSkcs(
+      dryRun.full,
+      record.inventoryTransactionPlan,
+    );
     if (blockedSkcs.length) {
       const subset = await writeInventoryExecutableSubset({
         storeKey,

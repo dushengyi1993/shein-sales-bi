@@ -203,6 +203,8 @@ for (const key of ['manual', 'drift', 'fallback']) {
   assert.match(sources[key], /executeLimitedDiscountWithInventoryTransaction/, key);
   assert.doesNotMatch(sources[key], /manage_manual_limited_discount_inventory\.mjs/, key);
 }
+assert.match(sources.fallback, /inventoryMinimumOrPlatformGate/);
+assert.match(sources.fallback, /mrs-simple_platform_limit_discounts-101018/);
 assert.match(sources.highClick, /batch_restore_manual_limited_discounts\.mjs/);
 for (const key of ['store', 'chunk', 'singleton']) {
   assert.match(sources[key], /executeOrdinaryActivityWithInventoryTransaction/, key);
@@ -215,7 +217,7 @@ assert.match(sources.legacy, /Legacy persistent marketing inventory top-up is di
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 48,
+  checks: 50,
   ordinaryRunners: 3,
   limitedDiscountPaths: 4,
   legacyPersistentTopUpExecutable: false,
