@@ -213,7 +213,8 @@
 
 - 营销活动半自动：
 
-  - `marketing/build_marketing_cost_map.py`
+  - `marketing/build_marketing_cost_map.py`：生成商品成本与共享货盘仓储成本映射；仓储余额使用已单位化计费库存分母，并以 fresh matched 运营库存做日期/数量交叉校验，证据冲突时 fail closed。
+  - `marketing/smoke_marketing_cost_map_model.mjs` / `marketing/test_marketing_cost_map_model.py`：验证整箱单位化后的成本、15%数量容差、日期门禁、零数量语义、独立 section 新鲜度、未匹配阻断和兼容字段。
 
   - `marketing/export_dsy_marketing_standards.mjs`：只读导出 DSY 营销活动填报标准。用户要先审核标准时，先跑 `--stores DL,DX,FY,LQ,NM,HL,JY,ZL,TS,MZ --all-open`，排除优惠券活动，输出明细和“按标准货号一行”的审核表；价格规则读取 `config/marketing_pricing_policy.json`，可按 BI 曝光量识别同一标准货号在所有店铺、所有链接中的全局曝光前五链接利润率差异。
 
