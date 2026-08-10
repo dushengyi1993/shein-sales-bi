@@ -74,13 +74,34 @@ async function psql(args, sql, {readOnly = false} = {}) {
   const child = spawn(command, commandArgs, {stdio: ['pipe','pipe','pipe'], windowsHide: true});
   const stdout = [];
   const stderr = [];
+  let stdinError = null;
+  let spawnError = null;
   child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)));
   child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
-  child.stdin.end(sql);
-  const code = await new Promise(resolve => child.on('close', resolve));
+  // PostgreSQL can intentionally reject a stale source snapshot before Node
+  // has finished flushing a large COPY payload.  Capture that EPIPE so the
+  // caller sees the real psql error instead of an unhandled stream crash.
+  child.stdin.on('error', error => { stdinError = error; });
+  const completion = new Promise(resolve => {
+    child.once('error', error => { spawnError = error; });
+    child.once('close', (code, signal) => resolve({code, signal}));
+  });
+  try {
+    child.stdin.end(sql);
+  } catch (error) {
+    stdinError = error;
+  }
+  const {code, signal} = await completion;
   const out = Buffer.concat(stdout).toString('utf8');
   const err = Buffer.concat(stderr).toString('utf8');
-  if (code !== 0) throw new Error(`psql failed (${code})\n${err.slice(-5000)}`);
+  if (spawnError) throw new Error(`psql spawn failed: ${spawnError.message || spawnError}`);
+  if (code !== 0 || stdinError) {
+    const status = code ?? `signal=${signal || 'unknown'}`;
+    const stdinDetail = stdinError
+      ? `\nstdin write failed (${stdinError.code || 'unknown'}): ${stdinError.message || stdinError}`
+      : '';
+    throw new Error(`psql failed (${status})${stdinDetail}\n${err.slice(-5000)}`);
+  }
   return {stdout: out, stderr: err};
 }
 

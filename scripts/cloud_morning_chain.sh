@@ -305,26 +305,31 @@ case "$STAGE" in
     wait_for_catchup_startup_window
     write_state "running" "one daily coordinator is refreshing all 19 stores; the previous complete BI snapshot stays visible until the run is complete"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-all.json"
-    run_all_store_fetch "$RESULT_FILE"
     MISSING_STORES="$(missing_exact_date_stores)"
-    RETRY_ROUND=0
-    while [[ -n "$MISSING_STORES" ]]; do
-      require_run_budget "store-retry"
-      RETRY_ROUND=$((RETRY_ROUND + 1))
-      echo "[cloud_morning_chain] retryRound=$RETRY_ROUND missingStores=$MISSING_STORES; retrying only those stores inside the same run"
-      if (( RETRY_ROUND > 1 )); then
-        sleep "${SHEIN_BI_MORNING_STORE_RETRY_DELAY_SEC:-120}"
-      fi
-      SHEIN_LINK_BUSINESS_STORES="$MISSING_STORES" \
-      SHEIN_LINK_BUSINESS_FETCH_ONLY=1 \
-      SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1 \
-      SHEIN_LINK_BUSINESS_CHUNK_RESULT_FILE="$STATE_DIR/${RUN_DATE}-retry-${RETRY_ROUND}.json" \
-      SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=1 \
-      SHEIN_LINK_BUSINESS_PER_STORE_BROWSER_WRAPPER=1 \
-      SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
-        bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
+    if [[ -z "$MISSING_STORES" ]]; then
+      echo "[cloud_morning_chain] resume-skip all-store fetch; exact-date evidence already exists for all enabled stores"
+    else
+      run_all_store_fetch "$RESULT_FILE"
       MISSING_STORES="$(missing_exact_date_stores)"
-    done
+      RETRY_ROUND=0
+      while [[ -n "$MISSING_STORES" ]]; do
+        require_run_budget "store-retry"
+        RETRY_ROUND=$((RETRY_ROUND + 1))
+        echo "[cloud_morning_chain] retryRound=$RETRY_ROUND missingStores=$MISSING_STORES; retrying only those stores inside the same run"
+        if (( RETRY_ROUND > 1 )); then
+          sleep "${SHEIN_BI_MORNING_STORE_RETRY_DELAY_SEC:-120}"
+        fi
+        SHEIN_LINK_BUSINESS_STORES="$MISSING_STORES" \
+        SHEIN_LINK_BUSINESS_FETCH_ONLY=1 \
+        SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1 \
+        SHEIN_LINK_BUSINESS_CHUNK_RESULT_FILE="$STATE_DIR/${RUN_DATE}-retry-${RETRY_ROUND}.json" \
+        SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=1 \
+        SHEIN_LINK_BUSINESS_PER_STORE_BROWSER_WRAPPER=1 \
+        SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+          bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
+        MISSING_STORES="$(missing_exact_date_stores)"
+      done
+    fi
 
     if pipeline_marker_done "morning-supplements"; then
       echo "[cloud_morning_chain] resume-skip completed supplements/Portal checkpoint; continuing with inventory in the same logical daily run"
@@ -338,6 +343,8 @@ case "$STAGE" in
           SUPPLEMENT_STATUS=$?
         fi
         if [[ "$SUPPLEMENT_STATUS" -ne 75 ]]; then
+          write_state "failed" "daily supplements failed status=$SUPPLEMENT_STATUS; the previous complete BI snapshot remains active"
+          write_marker "morning-all" "failed" "daily supplements failed status=$SUPPLEMENT_STATUS" "$LOG_FILE" >/dev/null || true
           exit "$SUPPLEMENT_STATUS"
         fi
         SUPPLEMENT_RETRY_ROUND=$((SUPPLEMENT_RETRY_ROUND + 1))

@@ -196,11 +196,12 @@ case "$LINK_BUSINESS_MODE" in
     ;;
   finalize)
     echo "[cloud_daily_refresh] step=link-business mode=finalize date=$DATE"
-    set +e
-    SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
-      bash scripts/cloud_link_business_sync.sh "$DATE"
-    LINK_BUSINESS_STATUS=$?
-    set -e
+    if SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+      bash scripts/cloud_link_business_sync.sh "$DATE"; then
+      LINK_BUSINESS_STATUS=0
+    else
+      LINK_BUSINESS_STATUS=$?
+    fi
     if [[ "$LINK_BUSINESS_STATUS" -ne 0 ]]; then
       DAILY_WARNINGS+=("link-business finalize failed")
       echo "[cloud_daily_refresh] WARN link/business final merge failed; continue non-link supplements but keep prior complete link snapshot" >&2
@@ -325,10 +326,11 @@ COST_LEDGER_STATUS=0
 CRITICAL_PORTAL_STATUS=0
 if [[ "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "1" || "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "true" ]]; then
   echo "[cloud_daily_refresh] step=inventory-cost-ledger"
-  set +e
-  bash scripts/refresh_inventory_cost_ledger.sh
-  COST_LEDGER_STATUS=$?
-  set -e
+  if bash scripts/refresh_inventory_cost_ledger.sh; then
+    COST_LEDGER_STATUS=0
+  else
+    COST_LEDGER_STATUS=$?
+  fi
   if [[ "$COST_LEDGER_STATUS" -ne 0 ]]; then
     DAILY_WARNINGS+=("inventory cost ledger refresh failed status=$COST_LEDGER_STATUS")
     echo "[cloud_daily_refresh] WARN inventory cost ledger refresh failed; retain the previous complete profit cache" >&2
@@ -342,19 +344,21 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
     echo "[cloud_daily_refresh] WARN portal refresh lock busy after ${PORTAL_REFRESH_LOCK_WAIT_SEC}s; skip portal generation/prewarm this run" >&2
   else
     if [[ "$COST_LEDGER_STATUS" -eq 0 && "${SHEIN_BI_PROFIT_MART_REFRESH_DISABLED:-0}" != "1" ]]; then
-      set +e
-      bash scripts/refresh_profit_marts.sh
-      PROFIT_MART_STATUS=$?
-      set -e
+      if bash scripts/refresh_profit_marts.sh; then
+        PROFIT_MART_STATUS=0
+      else
+        PROFIT_MART_STATUS=$?
+      fi
       if [[ "$PROFIT_MART_STATUS" -ne 0 ]]; then
         DAILY_WARNINGS+=("profit mart refresh failed status=$PROFIT_MART_STATUS")
         echo "[cloud_daily_refresh] WARN profit mart refresh failed; portal will retain the last complete cache" >&2
       fi
     fi
-    set +e
-    node scripts/audit_bi_warehouse.mjs
-    AUDIT_STATUS=$?
-    set -e
+    if node scripts/audit_bi_warehouse.mjs; then
+      AUDIT_STATUS=0
+    else
+      AUDIT_STATUS=$?
+    fi
     if [[ "$AUDIT_STATUS" -ne 0 ]]; then
       DAILY_WARNINGS+=("warehouse audit status=$AUDIT_STATUS")
       echo "[cloud_daily_refresh] BI audit finished with status=$AUDIT_STATUS; continue portal generation so the page can show the audit result" >&2

@@ -175,6 +175,10 @@ assert.match(morning, /pipeline_marker_done "morning-supplements"/,
   'a restarted coordinator must resume after the completed atomic publish checkpoint instead of rebuilding it');
 assert.match(morning, /pipeline_marker_done "daily-operating-refresh"/,
   'a completed business date must be an idempotent no-op when the service is started again');
+assert.match(morning, /resume-skip all-store fetch; exact-date evidence already exists for all enabled stores/,
+  'a restarted failed morning publish must reuse complete exact-date store evidence');
+assert.match(morning, /daily supplements failed status=\$SUPPLEMENT_STATUS; the previous complete BI snapshot remains active/,
+  'a terminal supplement failure must not leave the coordinator state stuck at running');
 assert.match(morning, /daily inventory guard is waiting for host capacity inside the same run/,
   'temporary resource pressure must keep the inventory stage in the same coordinator run');
 assert.match(morning, /if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1[\s\S]*inventory_status=\$\?/,
@@ -193,6 +197,19 @@ assert.doesNotMatch(linkBusinessSync, /^\s*wait\s*(?:\|\|\s*true)?\s*$/m,
 const dailyRefresh = read('scripts/cloud_daily_refresh.sh');
 assert.match(dailyRefresh, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS/);
 assert.match(dailyRefresh, /prior complete Portal snapshot retained/);
+assert.match(dailyRefresh, /if bash scripts\/refresh_inventory_cost_ledger\.sh; then[\s\S]*COST_LEDGER_STATUS=0[\s\S]*COST_LEDGER_STATUS=\$\?/,
+  'an expected cost-ledger retry must be captured by a conditional instead of tripping the ERR trap');
+assert.match(dailyRefresh, /if bash scripts\/refresh_profit_marts\.sh; then[\s\S]*PROFIT_MART_STATUS=0[\s\S]*PROFIT_MART_STATUS=\$\?/,
+  'a retained prior profit mart must remain a warning rather than aborting the daily publish');
+assert.match(dailyRefresh, /if node scripts\/audit_bi_warehouse\.mjs; then[\s\S]*AUDIT_STATUS=0[\s\S]*AUDIT_STATUS=\$\?/,
+  'a nonzero audit result must still allow the Portal to publish its audit evidence');
+const etForwarderSync = read('scripts/cloud_et_forwarder_sync.sh');
+assert.match(etForwarderSync, /SHEIN_ET_SYNC_PREWARM_SECTIONS-orders,waybills,afterSales/,
+  'the ET checkpoint must not synchronously wait for the multi-minute inventory trend projection');
+assert.match(etForwarderSync, /SHEIN_ET_SYNC_PREWARM_SECTION_TIMEOUT_SECONDS:-45/,
+  'synchronous ET projections must stay inside the checkpoint deadline');
+assert.match(etForwarderSync, /--sections "\$PORTAL_REFRESH_SECTIONS"/,
+  'every ET-dependent section must be handed to the bounded queue after warehouse commit');
 assert.match(linkBusinessSync, /write_chunk_result "warning"/,
   'fetch-only chunks must preserve partial progress as warning evidence instead of aborting at the first store');
 assert.match(read('scripts/cloud_link_business_store_fetch.sh'), /--fast-start/);
