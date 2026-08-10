@@ -159,7 +159,14 @@ box_items AS (
     box_id,
     coalesce(nullif(standard_goods_sn,''), match_key) AS standard_goods_sn,
     coalesce(dim.product_match_key(standard_goods_sn), nullif(match_key,'')) AS match_key,
-    sum(coalesce(real_quantity, case_quantity, 0)) AS item_quantity
+    -- Keep unitized box quantity aligned with infra/warehouse/schema.sql.
+    -- A non-positive RealQuantity is not a usable expanded count;
+    -- positive CaseQuantity is the authoritative unit fallback.
+    sum(CASE
+      WHEN real_quantity > 0 THEN real_quantity
+      WHEN case_quantity > 0 THEN case_quantity
+      ELSE 0
+    END) AS item_quantity
   FROM fact.et_box_item
   WHERE coalesce(box_id,'') <> ''
     AND coalesce(standard_goods_sn, match_key, '') <> ''

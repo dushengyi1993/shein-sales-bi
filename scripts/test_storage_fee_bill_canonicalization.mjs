@@ -189,6 +189,17 @@ assert.match(schema, /superseded_bill_detail_fallback/);
 assert.match(schema, /raw_summary->>'ClientId'/);
 assert.match(schema, /f\.canonical_income_bill_id/);
 assert.match(schema, /f\.fee_shown_fee_rmb \/ nullif\(sum\(coalesce\(d\.shown_fee_rmb,0\)\),0\) AS detail_bill_scale/);
+const positiveBoxQuantity = /sum\(CASE\s+WHEN real_quantity > 0 THEN real_quantity\s+WHEN case_quantity > 0 THEN case_quantity\s+ELSE 0\s+END\) AS item_quantity/;
+assert.match(schema, positiveBoxQuantity,
+  'box storage allocation must fall back from non-positive RealQuantity to positive CaseQuantity');
+assert.match(refresh, positiveBoxQuantity,
+  'refresh SQL must preserve the positive unitized box-item denominator');
+assert.doesNotMatch(schema, /sum\(coalesce\(real_quantity,\s*case_quantity,\s*0\)\) AS item_quantity/,
+  'zero RealQuantity must not erase a positive CaseQuantity');
+assert.doesNotMatch(refresh, /sum\(coalesce\(real_quantity,\s*case_quantity,\s*0\)\) AS item_quantity/,
+  'refresh SQL must not reintroduce the zero-quantity box bug');
+assert.doesNotMatch(schema, /sum\(coalesce\(nullif\(real_quantity,\s*0\),\s*case_quantity,\s*0\)\) AS item_quantity/,
+  'negative RealQuantity must not remain authoritative');
 assert.match(schema, /fallback_bill_daily AS/);
 assert.match(refresh, /fallback_bill_daily AS/);
 assert.match(refresh, /FROM mart\.et_storage_fee_bill_canonical/);

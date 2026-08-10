@@ -18,7 +18,11 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 import {normalizeInventoryProjection} from '../../lib/inventory_projection_contract.mjs';
-import {buildSharedStorageCostIndex, findSharedStorageCost} from '../../lib/marketing_shared_storage_cost.mjs';
+import {
+  buildSharedStorageCostIndex,
+  findSharedStorageCost,
+  storageEvidenceBlocksSharedFallback,
+} from '../../lib/marketing_shared_storage_cost.mjs';
 import {
   addBiPortalSourceArgs,
   normalizeBiPortalSourceArgs,
@@ -158,7 +162,7 @@ const DETAIL_HEADERS = [
   '店铺','分组','活动类型','活动ID','活动名称','报名截止','普通活动开始','普通活动结束','时间窗口是否重叠',
   'SKC','SKU','供方货号','标准货号','商品标题/中文名',
   '原始价SAR','当前售价SAR','价格字段来源','平台最低降幅%',
-  '商品完整成本SAR','仓储费摊销SAR/件','含仓储费成本SAR','仓储口径',
+  '商品完整成本SAR','仓储费摊销SAR/件','含仓储费成本SAR','仓储口径','仓储证据状态',
   '本次建议普通活动价SAR','本次建议普通活动折扣%','普通营销活动价/折扣',
   '优惠券活动ID/名称','优惠券券档/风险折扣','优惠券券后价SAR',
   '限时折扣名称','限时折扣价SAR',
@@ -1353,6 +1357,9 @@ function buildDetailRow(store, activity, activityDetail, row, couponContext) {
   if (overlappingCoupons.length) risk.push(`可能叠加优惠券，按最高商家承担 ${couponRatePct}% 测算`);
   if (cost.productCostSar === null) risk.push('商品成本缺失');
   if (cost.storageUnitCostSar === null) risk.push('仓储费缺失/估算缺失，不能按0安全通过');
+  if (cost.storageQuantityEvidenceStatus && cost.storageQuantityEvidenceStatus !== 'fresh_quantity_crosscheck_passed') {
+    risk.push(`仓储证据冲突:${cost.storageQuantityEvidenceStatus}`);
+  }
   if (fullMargin !== null && fullMargin < 0.15) risk.push(`含仓储费利润率低于15%红线：${pct(fullMargin)}`);
   else if (fullMargin !== null && fullMargin < 0.20) risk.push(`含仓储费利润率低于20%默认线：${pct(fullMargin)}`);
   if (pricing.platformAdjusted) risk.push('平台最低折扣压低建议价');
@@ -1382,6 +1389,7 @@ function buildDetailRow(store, activity, activityDetail, row, couponContext) {
     '仓储费摊销SAR/件': num(cost.storageUnitCostSar),
     '含仓储费成本SAR': num(cost.fullCostSar),
     '仓储口径': cost.storageMethod || (cost.storageUnitCostSar === null ? 'missing' : ''),
+    '仓储证据状态': cost.storageQuantityEvidenceStatus || '',
     '本次建议普通活动价SAR': num(pricing.suggestedMarketingPrice),
     '本次建议普通活动折扣%': num(pricing.suggestedMarketingDiscountPct),
     '普通营销活动价/折扣': [
@@ -1547,7 +1555,8 @@ function lookupDepletion(storeKey, canonical, supplierNo) {
 function lookupCostInfo(keys) {
   const trueCost = lookupTrueCost(keys);
   const fallbackCost = lookupCost(keys);
-  const sharedStorageCost = findSharedStorageCost(sharedStorageCostIndex, keys);
+  const storageEvidenceBlocked = storageEvidenceBlocksSharedFallback(trueCost);
+  const sharedStorageCost = storageEvidenceBlocked ? null : findSharedStorageCost(sharedStorageCostIndex, keys);
   const productCostSar = numValue(trueCost?.unitCostSar)
     ?? numValue(trueCost?.productUnitCostSar)
     ?? fallbackCost;
@@ -1562,7 +1571,11 @@ function lookupCostInfo(keys) {
     productCostSar,
     storageUnitCostSar,
     fullCostSar,
-    storageMethod: mappedStorageMethod || sharedStorageCost?.storageMethod || '',
+    storageMethod: storageEvidenceBlocked
+      ? `blocked:${trueCost.storageQuantityEvidenceStatus}`
+      : (mappedStorageMethod || sharedStorageCost?.storageMethod || ''),
+    storageQuantityEvidenceStatus: trueCost?.storageQuantityEvidenceStatus || '',
+    storageAllocationQuantitySource: trueCost?.storageAllocationQuantitySource || '',
     raw: trueCost ? {...trueCost, sharedStorageCostFallback: sharedStorageCost || null} : sharedStorageCost,
   };
 }

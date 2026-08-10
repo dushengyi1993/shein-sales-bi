@@ -3,7 +3,11 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import { SpreadsheetFile, Workbook } from '@oai/artifact-tool';
 import { normalizeGoodsSnDetailed } from '../../lib/product_sku_normalizer.mjs';
-import {buildSharedStorageCostIndex, findSharedStorageCost} from '../../lib/marketing_shared_storage_cost.mjs';
+import {
+  buildSharedStorageCostIndex,
+  findSharedStorageCost,
+  storageEvidenceBlocksSharedFallback,
+} from '../../lib/marketing_shared_storage_cost.mjs';
 import {
   assessLatestRawMarketingLinkCoverage,
   collectLatestRawMarketingLinkRows,
@@ -498,6 +502,8 @@ for (const [sku, group] of bySku.entries()) {
           ].filter(Boolean).join('；'),
       cost: roundOrNull(productCost, 4),
       storageUnitCostSar: roundOrNull(r._cloudCost.storageUnitCostSar, 4),
+      storageQuantityEvidenceStatus: r._cloudCost.storageQuantityEvidenceStatus || '',
+      storageAllocationQuantitySource: r._cloudCost.storageAllocationQuantitySource || '',
       fullCost: roundOrNull(fullCost, 4),
       marginBeforeStorage: roundOrNull(marginBeforeStorage, 4),
       marginAfterStorage: roundOrNull(marginAfterStorage, 4),
@@ -534,6 +540,7 @@ for (const [sku, group] of bySku.entries()) {
   const cloudProfit = mostCommonObject(group.map(r => r._cloudCost.profitRow).filter(Boolean));
   const storageFeeTotals = group.map(r => r._cloudCost.storageFeeSar).filter(v => v !== null && v !== undefined && Number(v) >= 0);
   const storageQtyBases = group.map(r => r._cloudCost.quantityBasis).filter(v => v !== null && v !== undefined && Number(v) >= 0);
+  const storageEvidenceStatuses = uniq(group.map(r => r._cloudCost.storageQuantityEvidenceStatus).filter(Boolean));
   const sourceLabels = uniq(group.map(r => r._cloudCost.source).filter(Boolean));
   approvalRows.push({
     '系统结论': status,
@@ -547,6 +554,7 @@ for (const [sku, group] of bySku.entries()) {
     '仓储费SAR/件': range(storageKnownValues),
     '含仓储成本SAR': range(fullCostValues),
     '仓储口径': mostCommon(group.map(r => r._cloudCost.storageMethod).filter(Boolean)) || 'missing',
+    '仓储证据状态': storageEvidenceStatuses.join(' / '),
     '云端仓储总费SAR': range(storageFeeTotals),
     '云端仓储数量基准': range(storageQtyBases),
     '云端历史不含仓储利润率': isNum(cloudProfit?.profit_margin_before_storage) ? pct(cloudProfit.profit_margin_before_storage) : '',
@@ -757,12 +765,12 @@ const confirmHeaders = [
   '商品成本SAR（不含仓储）','仓储费SAR/件','含仓储成本SAR','建议最终成交价SAR',
   '曝光规则目标利润率','曝光前五建议最终成交价SAR','其他链接建议最终成交价SAR',
   '新上架7天内按前五力度SKC',
-  '不含仓储利润率','含仓储利润率','仓储口径','店铺差异我怎么处理','需要你确认',
+  '不含仓储利润率','含仓储利润率','仓储口径','仓储证据状态','店铺差异我怎么处理','需要你确认',
   '你的确认最终价SAR','你的确认利润率%','备注/是否同意'
 ];
 const detailHeaders = [
   '系统结论','标准货号','代表供方货号','覆盖店铺数','覆盖店铺','活动ID','当前售价范围SAR',
-  '商品成本SAR（不含仓储）','仓储费SAR/件','含仓储成本SAR','仓储口径','云端仓储总费SAR','云端仓储数量基准',
+  '商品成本SAR（不含仓储）','仓储费SAR/件','含仓储成本SAR','仓储口径','仓储证据状态','云端仓储总费SAR','云端仓储数量基准',
   '云端历史不含仓储利润率','云端历史含仓储利润率','云端成本来源','货号复核原因','系统目标','建议最终成交价SAR',
   '曝光前五SKC','本表命中曝光前五SKC','新上架7天内按前五力度SKC','曝光规则目标利润率','曝光前五建议最终成交价SAR','其他链接建议最终成交价SAR','建议普通活动价SAR',
   '如果只叠15%券普通活动价需≥SAR','如果叠50%券普通活动价需≥SAR','平台允许活动价上限范围SAR','推荐活动组合',
@@ -785,6 +793,7 @@ const confirmRows = approvalRows.map(r => ({
   '不含仓储利润率': r['不含仓储利润率'],
   '含仓储利润率': r['含仓储利润率'],
   '仓储口径': r['仓储口径'],
+  '仓储证据状态': r['仓储证据状态'],
   '店铺差异我怎么处理': r['给你看-店铺差异处理'],
   '需要你确认': r['你只需确认'],
   '你的确认最终价SAR': '',
@@ -1033,12 +1042,17 @@ for (let c = 0; c < blockedHeaders.length; c++) blockedSheet.getRangeByIndexes(0
 blockedSheet.tables.add(`A1:${colName(blockedHeaders.length)}${blockedRows.length + 1}`, true, `BlockedItems${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium3';
 
 const riskHeaders = ['店铺','活动ID','标准货号','SKC','风险类型','建议报名价SAR','不含仓储利润率','含仓储利润率','处理结论','备注/修改意见'];
-const riskSourceRows = executionRows.filter(r => r.platformAdjusted || r.storageUnitCostSar === null || r.storageUnitCostSar === undefined || (isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin));
+const riskSourceRows = executionRows.filter(r =>
+  r.platformAdjusted
+  || r.storageUnitCostSar === null
+  || r.storageUnitCostSar === undefined
+  || (r.storageQuantityEvidenceStatus && r.storageQuantityEvidenceStatus !== 'fresh_quantity_crosscheck_passed')
+  || (isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin));
 const riskRows = riskSourceRows.length ? riskSourceRows.map(r => [
   r.storeKey, r.activityId, r.canonical, r.skc,
-  [r.platformAdjusted ? '平台最低降幅压价' : '', r.storageUnitCostSar === null || r.storageUnitCostSar === undefined ? '仓储展示缺失' : '', isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin ? '含仓储利润率低于15%' : ''].filter(Boolean).join('；'),
+  [r.platformAdjusted ? '平台最低降幅压价' : '', r.storageUnitCostSar === null || r.storageUnitCostSar === undefined ? '仓储展示缺失' : '', r.storageQuantityEvidenceStatus && r.storageQuantityEvidenceStatus !== 'fresh_quantity_crosscheck_passed' ? `仓储证据冲突:${r.storageQuantityEvidenceStatus}` : '', isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin ? '含仓储利润率低于15%' : ''].filter(Boolean).join('；'),
   r.targetPrice, r.marginBeforeStorage, r.marginAfterStorage,
-  r.selected ? '商品成本边界通过，可进入普通活动待确认；仓储风险单列展示。' : '已阻塞，不进入报名。', '',
+  r.selected ? '商品成本边界通过，可进入普通活动待确认；仓储风险单列展示。' : '已阻塞，不进入报名。', r.storageAllocationQuantitySource || '',
 ]) : [['','','','','无风险项','','','','','']];
 const riskSheet = workbook.worksheets.add('低价补救与风险项');
 riskSheet.showGridLines = false;
@@ -1283,14 +1297,19 @@ function lookupCloudCostInfo(keys) {
     ?? costMapValue;
   const storageFeeSar = numValue(trueCost?.storageFeeSar) ?? numValue(profitRow?.storage_fee_sar);
   const quantityBasis = numValue(trueCost?.quantityBasis) ?? null;
-  const sharedStorageCost = findSharedStorageCost(sharedStorageCostIndex, keys);
+  const storageEvidenceBlocked = storageEvidenceBlocksSharedFallback(trueCost);
+  const sharedStorageCost = storageEvidenceBlocked ? null : findSharedStorageCost(sharedStorageCostIndex, keys);
   let storageUnitCostSar = numValue(trueCost?.storageUnitCostSar);
   if (storageUnitCostSar === null) storageUnitCostSar = numValue(trueCost?.storageUnitCostSar30d);
   if (storageUnitCostSar === null) storageUnitCostSar = numValue(sharedStorageCost?.storageUnitCostSar);
   const fullUnitCostSar = positiveOrNull(trueCost?.trueUnitCostSar)
     ?? (productUnitCostSar !== null && storageUnitCostSar !== null ? Number(productUnitCostSar) + Number(storageUnitCostSar) : null);
   const mappedStorageMethod = /^(?:missing|unknown)$/i.test(String(trueCost?.storageMethod || '').trim()) ? '' : trueCost?.storageMethod;
-  const storageMethodRaw = String(mappedStorageMethod || profitRow?.storage_fee_method || sharedStorageCost?.storageMethod || '').trim() || (storageUnitCostSar === 0 ? 'cloud_zero_storage_fee' : 'missing');
+  const storageMethodRaw = String(
+    storageEvidenceBlocked
+      ? `blocked:${trueCost.storageQuantityEvidenceStatus}`
+      : (mappedStorageMethod || profitRow?.storage_fee_method || sharedStorageCost?.storageMethod || ''),
+  ).trim() || (storageUnitCostSar === 0 ? 'cloud_zero_storage_fee' : 'missing');
   const storageMethod = trueCost?.storageUnitBasis ? `${storageMethodRaw} / ${trueCost.storageUnitBasis}` : storageMethodRaw;
   const source = sharedStorageCost && !mappedStorageMethod
     ? sharedStorageCost.source
@@ -1304,6 +1323,8 @@ function lookupCloudCostInfo(keys) {
     storageRecent30FeeSar: roundOrNull(trueCost?.storageRecent30FeeSar, 4),
     storageRecent30Days: roundOrNull(trueCost?.storageRecent30Days, 4),
     storageUnitBasis: trueCost?.storageUnitBasis || '',
+    storageQuantityEvidenceStatus: trueCost?.storageQuantityEvidenceStatus || '',
+    storageAllocationQuantitySource: trueCost?.storageAllocationQuantitySource || '',
     storageMethod,
     source,
     profitRow,
@@ -1330,6 +1351,8 @@ function costInfoFromActivityRow(row) {
     storageRecent30FeeSar: roundOrNull(rawCost.storageRecent30FeeSar, 4),
     storageRecent30Days: roundOrNull(rawCost.storageRecent30Days, 4),
     storageUnitBasis: rawCost.storageUnitBasis || '',
+    storageQuantityEvidenceStatus: rawCost.storageQuantityEvidenceStatus || '',
+    storageAllocationQuantitySource: rawCost.storageAllocationQuantitySource || '',
     storageMethod: rawCost.storageMethod || (storageUnitCostSar === null ? 'missing' : 'activity_review_row_cost'),
     source: rawCost.source ? `activity_review_row:${rawCost.source}` : 'activity_review_row_cost',
     profitRow: null,

@@ -14,6 +14,7 @@ const tests = [
   'scripts/marketing/smoke_bounded_fallback_resume.mjs',
   'scripts/marketing/smoke_high_click_special_policy.mjs',
   'scripts/marketing/smoke_shared_storage_cost.mjs',
+  'scripts/marketing/smoke_marketing_cost_map_model.mjs',
   'scripts/marketing/smoke_ordinary_campaign_approval.mjs',
   'scripts/marketing/smoke_limited_discount_target_price_guard.mjs',
   'scripts/marketing/smoke_marketing_classifiers.mjs',

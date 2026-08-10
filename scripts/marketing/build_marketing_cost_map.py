@@ -8,10 +8,8 @@ script is committed so the workflow can be reproduced on another machine.
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from openpyxl import load_workbook
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +20,10 @@ COST_INPUT_CANDIDATES = [
 OUTPUT = ROOT / "tmp" / "mbrs" / "marketing-cost-map.json"
 BI_PATH = ROOT / "outputs" / "bi-portal" / "data.json"
 BI_PROFIT_SECTION_PATH = ROOT / "outputs" / "bi-portal" / "sections" / "profit.json"
+BI_INVENTORY_SECTION_PATH = ROOT / "outputs" / "bi-portal" / "sections" / "inventoryTrend.json"
 CNY_TO_SAR = 1 / 1.8
+MAX_STORAGE_INVENTORY_DATE_GAP_DAYS = 2
+MAX_STORAGE_INVENTORY_QUANTITY_RELATIVE_DIFFERENCE = 0.15
 
 
 def clean(value) -> str:
@@ -67,6 +68,97 @@ def parse_date(value):
         return None
 
 
+def parse_timestamp(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def extract_section(document: dict, key: str) -> dict | None:
+    if not isinstance(document, dict):
+        return None
+    data = document.get("data") if isinstance(document.get("data"), dict) else document
+    section = data.get(key) if isinstance(data, dict) else None
+    return section if isinstance(section, dict) else None
+
+
+def prefer_section_payload(bi: dict, section_document: dict, key: str) -> bool:
+    """Use a targeted section when it is at least as fresh as full data.json."""
+
+    section = extract_section(section_document, key)
+    if section is None:
+        return False
+    if not isinstance(bi.get(key), dict) or not bi[key]:
+        return True
+    full_generated_at = parse_timestamp(bi.get("generatedAt"))
+    section_generated_at = parse_timestamp(section_document.get("generatedAt"))
+    if section_generated_at is None:
+        return full_generated_at is None
+    if full_generated_at is None:
+        return True
+    return section_generated_at >= full_generated_at
+
+
+def build_operational_inventory_map(bi: dict) -> dict[str, dict]:
+    """Index ET inventory used only to cross-check the billing denominator."""
+
+    out: dict[str, dict] = {}
+    rows = (bi.get("inventoryDepletion") or {}).get("products") or []
+    for row in rows:
+        standard = clean(row.get("standard_goods_sn"))
+        key = compact(standard or row.get("match_key"))
+        if not key:
+            continue
+        match_status = clean(row.get("inventory_match_status")).lower()
+        sellable = num(
+            row.get("current_sellable_quantity")
+            if row.get("current_sellable_quantity") is not None
+            else row.get("et_estimated_available_qty")
+        )
+        damaged = num(row.get("et_damaged_qty"))
+        damaged = max(float(damaged or 0.0), 0.0)
+        physical_quantity = None
+        if match_status == "matched" and sellable is not None and sellable >= 0:
+            physical_quantity = max(float(sellable), 0.0) + damaged
+        operational_stock_policy = clean(row.get("et_operational_stock_policy"))
+        store_snapshot_date = parse_date(row.get("et_store_snapshot_date"))
+        box_snapshot_date = parse_date(row.get("et_box_snapshot_date"))
+        if "full_carton" in operational_stock_policy.lower():
+            # A blended loose + full-carton quantity is only as fresh as its
+            # older contributing snapshot.  Do not let a fresh box snapshot
+            # conceal stale loose-stock evidence (or vice versa).
+            required_dates = [store_snapshot_date, box_snapshot_date]
+            snapshot_date = min(required_dates) if all(required_dates) else None
+        else:
+            # Loose-only operational quantity comes from the store snapshot.
+            # A fresh box snapshot must not conceal missing/stale loose stock.
+            snapshot_date = store_snapshot_date
+        evidence = {
+            "standard": standard,
+            "matchStatus": match_status or "missing",
+            "sellableQuantity": None if sellable is None else round(max(float(sellable), 0.0), 4),
+            "damagedQuantity": round(damaged, 4),
+            "physicalQuantity": None if physical_quantity is None else round(physical_quantity, 4),
+            "snapshotDate": snapshot_date,
+            "operationalStockPolicy": operational_stock_policy,
+        }
+        for candidate in {key, compact(standard), compact(row.get("match_key"))}:
+            if candidate:
+                out[candidate] = evidence
+    return out
+
+
+def storage_inventory_dates_are_compatible(storage_date, inventory_date) -> tuple[bool, int | None]:
+    if storage_date is None or inventory_date is None:
+        return False, None
+    gap_days = abs((storage_date - inventory_date).days)
+    return gap_days <= MAX_STORAGE_INVENTORY_DATE_GAP_DAYS, gap_days
+
+
 def build_storage_unit_map(bi: dict) -> dict[str, dict]:
     """Build storage cost per sellable unit from ET product storage daily rows.
 
@@ -79,10 +171,17 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
     day's storage fee to the inventory cost balance; when the charged quantity
     drops, the sold/outbound units take away their proportional accumulated
     balance. This removes storage cost that belongs to units no longer in
-    storage while avoiding unsupported batch/serial assumptions.
+    storage while avoiding unsupported batch/serial assumptions.  The billing
+    detail is unitized upstream (including box-item CaseQuantity fallback) and
+    remains the denominator because its scope matches the fee numerator.  A
+    fresh, matched operational sellable + damaged quantity is only a bounded
+    cross-check: stale evidence or a relative mismatch above 15% makes the
+    storage unit cost unavailable instead of silently diluting it with newly
+    arrived or otherwise unbilled stock.
     """
 
     rows = (bi.get("profit") or {}).get("productStorageDaily") or []
+    operational_inventory_by_key = build_operational_inventory_map(bi)
     dated = [parse_date(r.get("date")) for r in rows]
     max_date = max((d for d in dated if d), default=None)
     cutoff = max_date - timedelta(days=29) if max_date else None
@@ -109,6 +208,7 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
             "quantityDays": 0.0,
             "currentQuantity": None,
             "inventoryCostBalanceSar": 0.0,
+            "nonpositiveQuantityFeeDays": 0,
             "methods": set(),
             "maxDate": None,
             "minDate": None,
@@ -117,7 +217,9 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
         inventory_cost_balance = 0.0
         for row in sku_rows:
             fee = num(row.get("storage_fee_sar"))
-            quantity = num(row.get("storage_quantity")) or num(row.get("quantity"))
+            quantity = num(row.get("storage_quantity"))
+            if quantity is None:
+                quantity = num(row.get("quantity"))
             unit = num(row.get("storage_fee_per_unit_sar"))
             if unit is None and fee is not None and quantity and quantity > 0:
                 unit = fee / quantity
@@ -134,6 +236,9 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
                     inventory_cost_balance = max(0.0, inventory_cost_balance - previous_average * outbound_quantity)
                 previous_quantity = current_quantity
                 rec["currentQuantity"] = current_quantity
+
+            if fee is not None and abs(float(fee)) > 1e-9 and (quantity is None or quantity <= 0):
+                rec["nonpositiveQuantityFeeDays"] += 1
 
             if fee is not None:
                 rec["totalFeeSar"] += fee
@@ -157,16 +262,87 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     for key, rec in by_key.items():
-        current_quantity = rec["currentQuantity"] or 0.0
-        unit = (rec["inventoryCostBalanceSar"] / current_quantity) if current_quantity > 0 else None
+        billed_current_quantity = rec["currentQuantity"] or 0.0
+        inventory = operational_inventory_by_key.get(key)
+        operational_quantity = num(inventory.get("physicalQuantity")) if inventory else None
+        inventory_compatible, date_gap_days = storage_inventory_dates_are_compatible(
+            rec["maxDate"],
+            inventory.get("snapshotDate") if inventory else None,
+        )
+
+        candidate_unit = (
+            rec["inventoryCostBalanceSar"] / billed_current_quantity
+            if billed_current_quantity > 0
+            else None
+        )
+        quantity_ratio = (
+            operational_quantity / billed_current_quantity
+            if operational_quantity is not None and billed_current_quantity > 0
+            else None
+        )
+        quantity_relative_difference = (
+            abs(operational_quantity - billed_current_quantity)
+            / max(operational_quantity, billed_current_quantity)
+            if operational_quantity is not None
+            and operational_quantity > 0
+            and billed_current_quantity > 0
+            else None
+        )
+
+        allocation_quantity = None
+        allocation_source = "blocked_missing_inventory_crosscheck"
+        evidence_status = "missing_inventory_crosscheck"
+        if rec["nonpositiveQuantityFeeDays"] > 0:
+            allocation_source = "blocked_historical_nonpositive_quantity_with_fee"
+            evidence_status = "historical_nonpositive_quantity_with_fee"
+        elif inventory:
+            if inventory.get("matchStatus") != "matched" or operational_quantity is None:
+                allocation_source = "blocked_inventory_not_fresh_matched"
+                evidence_status = "inventory_not_fresh_matched"
+            elif not inventory_compatible:
+                allocation_source = "blocked_inventory_storage_date_mismatch"
+                evidence_status = "inventory_storage_date_mismatch"
+            elif billed_current_quantity <= 0 or operational_quantity <= 0:
+                allocation_source = "blocked_nonpositive_quantity"
+                evidence_status = "nonpositive_quantity_evidence"
+            elif quantity_relative_difference is None or quantity_relative_difference > MAX_STORAGE_INVENTORY_QUANTITY_RELATIVE_DIFFERENCE:
+                allocation_source = "blocked_inventory_storage_quantity_mismatch"
+                evidence_status = "inventory_storage_quantity_mismatch"
+            else:
+                allocation_quantity = billed_current_quantity
+                allocation_source = "unitized_storage_daily_billed_current_quantity"
+                evidence_status = "fresh_quantity_crosscheck_passed"
+
+        unit = candidate_unit if allocation_quantity is not None else None
+        storage_unit_basis = (
+            "moving_average_remaining_inventory_storage_cost_over_unitized_billed_inventory"
+            if unit is not None
+            else "suspect_quantity_evidence_fail_closed"
+        )
         out[key] = {
             "standard": rec["standard"],
             "storageUnitCostSar": None if unit is None else round(unit, 4),
+            "storageUnitCostCandidateSar": None if candidate_unit is None else round(candidate_unit, 4),
             "storageRecent30UnitCostSar": round(rec["recent30UnitSar"], 4) if rec["recent30Days"] else None,
             "storageAllHistoryUnitCostSar": round(rec["allUnitSar"], 4) if rec["allDays"] else None,
             "storageFeeSar": round(rec["totalFeeSar"], 4),
             "storageInventoryCostBalanceSar": round(rec["inventoryCostBalanceSar"], 4),
-            "storageCurrentQuantity": round(current_quantity, 4),
+            # Backward-compatible field: this remains the current quantity in
+            # the storage-fee detail, not the widened shared allocation pool.
+            "storageCurrentQuantity": round(billed_current_quantity, 4),
+            "storageBilledCurrentQuantity": round(billed_current_quantity, 4),
+            "storageOperationalSellableQuantity": None if not inventory else inventory.get("sellableQuantity"),
+            "storageOperationalDamagedQuantity": None if not inventory else inventory.get("damagedQuantity"),
+            "storageOperationalPhysicalQuantity": None if operational_quantity is None else round(operational_quantity, 4),
+            "storageOperationalInventorySnapshotDate": None if not inventory or inventory.get("snapshotDate") is None else inventory["snapshotDate"].isoformat(),
+            "storageOperationalStockPolicy": "" if not inventory else inventory.get("operationalStockPolicy"),
+            "storageAllocationQuantity": None if allocation_quantity is None else round(allocation_quantity, 4),
+            "storageAllocationQuantitySource": allocation_source,
+            "storageQuantityEvidenceStatus": evidence_status,
+            "storageQuantityDateGapDays": date_gap_days,
+            "storageQuantityRatioOperationalToBilled": None if quantity_ratio is None else round(quantity_ratio, 4),
+            "storageQuantityRelativeDifference": None if quantity_relative_difference is None else round(quantity_relative_difference, 4),
+            "storageNonpositiveQuantityFeeDays": rec["nonpositiveQuantityFeeDays"],
             "storageRecent30FeeSar": round(rec["recent30FeeSar"], 4),
             "storageQuantityDays": round(rec["quantityDays"], 4),
             "storageRecent30Days": rec["recent30Days"],
@@ -174,7 +350,7 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
             "storageMethod": " / ".join(sorted(rec["methods"])) or "missing",
             "storageSourceDateMin": rec["minDate"].isoformat() if rec["minDate"] else None,
             "storageSourceDateMax": rec["maxDate"].isoformat() if rec["maxDate"] else None,
-            "storageUnitBasis": "moving_average_remaining_inventory_storage_cost",
+            "storageUnitBasis": storage_unit_basis,
         }
     return out
 
@@ -186,13 +362,18 @@ def build_true_cost_map(cost_map: dict[str, float]) -> dict[str, dict]:
         bi = json.loads(BI_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    if not (bi.get("profit") or {}).get("productStorageDaily") and BI_PROFIT_SECTION_PATH.exists():
+    if BI_PROFIT_SECTION_PATH.exists():
         try:
             section_doc = json.loads(BI_PROFIT_SECTION_PATH.read_text(encoding="utf-8"))
-            section_data = section_doc.get("data") if isinstance(section_doc.get("data"), dict) else section_doc
-            section_profit = section_data.get("profit") if isinstance(section_data, dict) else None
-            if isinstance(section_profit, dict):
-                bi["profit"] = section_profit
+            if prefer_section_payload(bi, section_doc, "profit"):
+                bi["profit"] = extract_section(section_doc, "profit")
+        except Exception:
+            pass
+    if BI_INVENTORY_SECTION_PATH.exists():
+        try:
+            section_doc = json.loads(BI_INVENTORY_SECTION_PATH.read_text(encoding="utf-8"))
+            if prefer_section_payload(bi, section_doc, "inventoryDepletion"):
+                bi["inventoryDepletion"] = extract_section(section_doc, "inventoryDepletion")
         except Exception:
             pass
     products = (bi.get("profit") or {}).get("products") or []
@@ -247,6 +428,20 @@ def build_true_cost_map(cost_map: dict[str, float]) -> dict[str, dict]:
             "storageFeeSar": None if storage_fee is None else round(storage_fee, 4),
             "quantityBasis": None if storage is None else storage.get("storageQuantityDays"),
             "storageCurrentQuantity": None if storage is None else storage.get("storageCurrentQuantity"),
+            "storageUnitCostCandidateSar": None if storage is None else storage.get("storageUnitCostCandidateSar"),
+            "storageBilledCurrentQuantity": None if storage is None else storage.get("storageBilledCurrentQuantity"),
+            "storageOperationalSellableQuantity": None if storage is None else storage.get("storageOperationalSellableQuantity"),
+            "storageOperationalDamagedQuantity": None if storage is None else storage.get("storageOperationalDamagedQuantity"),
+            "storageOperationalPhysicalQuantity": None if storage is None else storage.get("storageOperationalPhysicalQuantity"),
+            "storageOperationalInventorySnapshotDate": None if storage is None else storage.get("storageOperationalInventorySnapshotDate"),
+            "storageOperationalStockPolicy": None if storage is None else storage.get("storageOperationalStockPolicy"),
+            "storageAllocationQuantity": None if storage is None else storage.get("storageAllocationQuantity"),
+            "storageAllocationQuantitySource": None if storage is None else storage.get("storageAllocationQuantitySource"),
+            "storageQuantityEvidenceStatus": None if storage is None else storage.get("storageQuantityEvidenceStatus"),
+            "storageQuantityDateGapDays": None if storage is None else storage.get("storageQuantityDateGapDays"),
+            "storageQuantityRatioOperationalToBilled": None if storage is None else storage.get("storageQuantityRatioOperationalToBilled"),
+            "storageQuantityRelativeDifference": None if storage is None else storage.get("storageQuantityRelativeDifference"),
+            "storageNonpositiveQuantityFeeDays": None if storage is None else storage.get("storageNonpositiveQuantityFeeDays"),
             "storageInventoryCostBalanceSar": None if storage is None else storage.get("storageInventoryCostBalanceSar"),
             "storageAllHistoryUnitCostSar": None if storage is None else storage.get("storageAllHistoryUnitCostSar"),
             "storageRecent30UnitCostSar": None if storage is None else storage.get("storageRecent30UnitCostSar"),
@@ -273,6 +468,8 @@ def resolve_cost_input() -> Path:
 
 
 def main() -> None:
+    from openpyxl import load_workbook
+
     input_path = resolve_cost_input()
     wb = load_workbook(input_path, data_only=True)
     ws = wb["成本"] if "成本" in wb.sheetnames else wb.worksheets[0]
