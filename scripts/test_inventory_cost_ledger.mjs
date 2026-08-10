@@ -123,6 +123,9 @@ assert.equal(negativeRtvRow.valueAfterSar, 0);
 assert.equal(negativeRtvRow.valuationStatus, 'rtv_shortfall_settled');
 
 const rebuildScript = await fs.readFile(new URL('./rebuild_inventory_cost_ledger.mjs', import.meta.url), 'utf8');
+assert.match(rebuildScript, /child\.stdin\.on\('error'/,
+  'a rejected stale snapshot must surface the psql error instead of crashing on an unhandled EPIPE');
+assert.match(rebuildScript, /stdin write failed/);
 assert.match(rebuildScript, /status='frozen'/);
 assert.match(rebuildScript, /effective_at::date < \$\{cutoff\}/);
 assert.match(rebuildScript, /oi\.created_date < \$\{cutoff\}/);

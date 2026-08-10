@@ -266,15 +266,29 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
           if [[ "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" == "1" ]]; then
             echo "[cloud_et_forwarder_sync] lightweight section refresh disabled by SHEIN_BI_PORTAL_PREWARM_DISABLED=1"
           else
-            echo "[cloud_et_forwarder_sync] lightweight section refresh sections=$PORTAL_REFRESH_SECTIONS"
-            SHEIN_BI_PORTAL_PREWARM_SECTIONS="${SHEIN_ET_SYNC_PREWARM_SECTIONS:-orders,waybills,afterSales,inventoryTrend}" \
-            SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
-            SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
-              bash scripts/prewarm_bi_portal_sections.sh
-            bash scripts/enqueue_bi_portal_sections.sh \
-              --sections inventoryTrend \
-              --priority 40 \
-              --reason "et-forwarder-$DATE-$MODE"
+            SYNC_PREWARM_SECTIONS="${SHEIN_ET_SYNC_PREWARM_SECTIONS-orders,waybills,afterSales}"
+            if [[ -n "$SYNC_PREWARM_SECTIONS" ]]; then
+              echo "[cloud_et_forwarder_sync] bounded synchronous section refresh sections=$SYNC_PREWARM_SECTIONS"
+              if SHEIN_BI_PORTAL_PREWARM_SECTIONS="$SYNC_PREWARM_SECTIONS" \
+                SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS="${SHEIN_ET_SYNC_PREWARM_SECTION_TIMEOUT_SECONDS:-45}" \
+                SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+                SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
+                  bash scripts/prewarm_bi_portal_sections.sh; then
+                echo "[cloud_et_forwarder_sync] synchronous sections refreshed sections=$SYNC_PREWARM_SECTIONS"
+              else
+                PREWARM_STATUS=$?
+                echo "[cloud_et_forwarder_sync] WARN synchronous section refresh failed status=$PREWARM_STATUS; ET warehouse data remains committed and the bounded queue will retry" >&2
+              fi
+            fi
+            if bash scripts/enqueue_bi_portal_sections.sh \
+                --sections "$PORTAL_REFRESH_SECTIONS" \
+                --priority 40 \
+                --reason "et-forwarder-$DATE-$MODE"; then
+              echo "[cloud_et_forwarder_sync] Portal sections queued sections=$PORTAL_REFRESH_SECTIONS"
+            else
+              QUEUE_STATUS=$?
+              echo "[cloud_et_forwarder_sync] WARN Portal section queue failed status=$QUEUE_STATUS; retain the committed ET warehouse batch" >&2
+            fi
           fi
           ;;
         none|off|0|false)
