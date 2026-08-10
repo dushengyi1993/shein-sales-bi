@@ -207,20 +207,17 @@ function conflictActivities(full) {
   })).filter(activity => Number.isFinite(activity.activityId) && activity.activityId > 0);
 }
 
-function invalidBySkc(full, conflicts = []) {
+function invalidBySkc(full) {
   const result = new Map();
-  const conflictTargetSkcs = new Set(
-    conflicts.flatMap(activity => activity.targetSkcs || []).map(skc => String(skc || '').trim()).filter(Boolean),
-  );
   for (const row of full?.validation?.invalid || []) {
     const skc = String(row?.skc || '').trim();
     if (!skc) continue;
     const conflictCode = String(row.error_code || '');
+    // 0004 can mean the SKC is no longer on shelf even when a stale activity
+    // still lists it. Only the explicit 0006 activity-occupancy code is safe
+    // to defer until after the old protection is transactionally removed.
     const oldConflictOnly = row.reason === 'query_goods error_code'
-      && (
-        conflictCode === 'mrs-simple_platform_limit_discounts-0006'
-        || (conflictCode === 'mrs-simple_platform_limit_discounts-0004' && conflictTargetSkcs.has(skc))
-      );
+      && conflictCode === 'mrs-simple_platform_limit_discounts-0006';
     if (oldConflictOnly) continue;
     if (!result.has(skc)) result.set(skc, []);
     result.get(skc).push(row);
@@ -230,6 +227,31 @@ function invalidBySkc(full, conflicts = []) {
     if (!value) continue;
     if (!result.has(value)) result.set(value, []);
     result.get(value).push({skc: value, reason: 'query_goods missing'});
+  }
+  return result;
+}
+
+function initialInvalidBySkc(full, conflicts = []) {
+  const result = invalidBySkc(full);
+  const explicitActivityConflictSkcs = new Set(
+    (full?.validation?.invalid || [])
+      .filter(row => row?.reason === 'query_goods error_code'
+        && row?.error_code === 'mrs-simple_platform_limit_discounts-0006')
+      .map(row => String(row?.skc || '').trim())
+      .filter(Boolean),
+  );
+  const conflictingSkcs = new Set(
+    conflicts.flatMap(activity => activity.targetSkcs || [])
+      .map(skc => String(skc || '').trim())
+      .filter(Boolean),
+  );
+  for (const skc of conflictingSkcs) {
+    if (explicitActivityConflictSkcs.has(skc)) continue;
+    if (!result.has(skc)) result.set(skc, []);
+    result.get(skc).push({
+      skc,
+      reason: 'limited-discount conflict lacks explicit 0006 occupancy evidence',
+    });
   }
   return result;
 }
@@ -495,8 +517,9 @@ async function main() {
   }
 
   const initial = await applyRescue({args, rescuePath: args.rescue, execute: false});
+  if (!initial.full) throw new Error('Initial transactional preflight did not produce a readable artifact');
   const initialConflicts = conflictActivities(initial.full);
-  const initialInvalid = invalidBySkc(initial.full, initialConflicts);
+  const initialInvalid = initialInvalidBySkc(initial.full, initialConflicts);
   const initiallyBlockedSkcs = [...initialInvalid.keys()];
   const eligibleRows = rows.filter(row => !initialInvalid.has(String(row.skc)));
   const result = {
@@ -522,7 +545,22 @@ async function main() {
     compensation: null,
     uncoveredSkcs: [],
   };
-  if (!initial.full) throw new Error('Initial transactional preflight did not produce a readable artifact');
+
+  // The initial preflight is atomic for the whole activity group. A blocked
+  // SKC must not be silently removed from a subset while sibling SKCs proceed.
+  // This gate deliberately runs before the exact-coverage shortcut because an
+  // off-shelf 0004 row can remain in a stale activity at the requested price.
+  if (initiallyBlockedSkcs.length) {
+    result.status = 'initial_platform_blocked_preserved';
+    result.terminal = true;
+    journal.result = result;
+    journal.terminal = true;
+    await persistJournal('safe_blocked');
+    await writeJsonAtomic(outputPath, result);
+    console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
+    process.exitCode = 2;
+    return;
+  }
 
   const initiallyExactCovered = exactCoveredSkcs(initial.full, rows, rescue);
   if (initiallyExactCovered.size === rows.length) {
@@ -535,18 +573,6 @@ async function main() {
     await persistJournal('completed');
     await writeJsonAtomic(outputPath, result);
     console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
-    return;
-  }
-
-  if (!eligibleRows.length) {
-    result.status = 'initial_platform_blocked_preserved';
-    result.terminal = true;
-    journal.result = result;
-    journal.terminal = true;
-    await persistJournal('safe_blocked');
-    await writeJsonAtomic(outputPath, result);
-    console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
-    process.exitCode = 2;
     return;
   }
 
