@@ -35,6 +35,7 @@ const ISO=v=>String(v||'').slice(0,10);
 const pad2=v=>String(v).padStart(2,'0');
 function parseDateOnly(v){const m=String(v||'').slice(0,10).match(/^(\d{4})-(\d{2})-(\d{2})$/);return m?new Date(Number(m[1]),Number(m[2])-1,Number(m[3])):null}
 function isoDate(d){return d instanceof Date&&!Number.isNaN(d.getTime())?`${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`:''}
+function validDateOnly(v){const text=String(v||'');if(!/^\d{4}-\d{2}-\d{2}$/.test(text))return false;const d=parseDateOnly(text);return!!d&&isoDate(d)===text}
 function addDateDays(dateText,days){const d=parseDateOnly(dateText)||new Date();d.setDate(d.getDate()+Number(days||0));return isoDate(d)}
 function monthStart(dateText){const d=parseDateOnly(dateText)||new Date();return isoDate(new Date(d.getFullYear(),d.getMonth(),1))}
 function addMonths(dateText,months){const d=parseDateOnly(monthStart(dateText))||new Date();return isoDate(new Date(d.getFullYear(),d.getMonth()+Number(months||0),1))}
@@ -89,10 +90,25 @@ function uniq(xs){return Array.from(new Set(xs.filter(Boolean)))}
 
 function avg(rows){const rev=sumFirst(rows,['sales_sar','net_revenue_sar']),q=sum(rows,['quantity']);return q?rev/q:0}
 
-function merge(x,source=''){if(!x||typeof x!=='object')return;const payload=x.data&&typeof x.data==='object'?x.data:x;const prevDates=D.dates&&typeof D.dates==='object'?{...D.dates}:null;const prevNames=D.productDisplayNames&&typeof D.productDisplayNames==='object'?{...D.productDisplayNames}:null;const prevOverlay=Array.isArray(D.productStateOverlay)?D.productStateOverlay:null;Object.assign(D,payload);if(prevOverlay&&!Object.prototype.hasOwnProperty.call(payload,'productStateOverlay'))D.productStateOverlay=prevOverlay;const generatedAt=String(x.generatedAt||'');if(generatedAt)for(const key of Object.keys(payload))DG[key]={generatedAt,source};DATA_ANCHOR_CACHE={key:'',value:''};PRICE_META=new WeakMap();if(prevDates&&payload.dates&&typeof payload.dates==='object')D.dates={...prevDates,...payload.dates};if(prevNames&&payload.productDisplayNames&&typeof payload.productDisplayNames==='object')D.productDisplayNames={...prevNames,...payload.productDisplayNames};if(x.generatedAt)D.__latestSectionGeneratedAt=x.generatedAt}
+function merge(x,source=''){
+  if(!x||typeof x!=='object')return;
+  const payload=x.data&&typeof x.data==='object'?x.data:x,live=payload?.liveSalesToday;
+  if(source==='liveSalesToday'&&(!validDateOnly(live?.date)||!Array.isArray(live?.items)))throw Error('今日实时销售日期或数据结构不完整，已拒绝覆盖当前经营数据');
+  const prevDates=D.dates&&typeof D.dates==='object'?{...D.dates}:null;
+  const prevNames=D.productDisplayNames&&typeof D.productDisplayNames==='object'?{...D.productDisplayNames}:null;
+  const prevOverlay=Array.isArray(D.productStateOverlay)?D.productStateOverlay:null;
+  Object.assign(D,payload);
+  if(prevOverlay&&!Object.prototype.hasOwnProperty.call(payload,'productStateOverlay'))D.productStateOverlay=prevOverlay;
+  const generatedAt=String(x.generatedAt||'');
+  if(generatedAt)for(const key of Object.keys(payload))DG[key]={generatedAt,source};
+  DATA_ANCHOR_CACHE={key:'',value:''};PRICE_META=new WeakMap();
+  if(prevDates&&payload.dates&&typeof payload.dates==='object')D.dates={...prevDates,...payload.dates};
+  if(prevNames&&payload.productDisplayNames&&typeof payload.productDisplayNames==='object')D.productDisplayNames={...prevNames,...payload.productDisplayNames};
+  if(x.generatedAt)D.__latestSectionGeneratedAt=x.generatedAt;
+}
 function replaceRankingDate(rows,date,next){return[...A(rows).filter(r=>ISO(r?.date)!==date),...next]}
 function applyLiveOrderRankingOverlay(){
-  const date=ISO(D.liveSalesToday?.date),items=A(D.liveSalesToday?.items);if(!date||!D.rankings)return;
+  const date=ISO(D.liveSalesToday?.date),items=D.liveSalesToday?.items;if(!date||!Array.isArray(items)||!D.rankings)return;
   const storeMap=new Map(),productMap=new Map(),storeProductMap=new Map(),paymentMap=new Map(),storeProductPaymentMap=new Map();
   const bucket=(map,key,seed)=>{if(!map.has(key))map.set(key,{...seed,orderNos:new Set(),grossOrderNos:new Set(),stores:new Set()});return map.get(key)};
   for(const item of items){
@@ -240,20 +256,20 @@ function chips(ns){return'<div class="sects">'+(ns||[]).map(n=>{const st=SS[n]||
 function wait(n,t='正在从云端 section API 加载数据…'){const s=SS[n]||{};if(s.status==='error')return`<div class="error" role="alert"><b>${H(SL[n]||n)} 加载失败</b><br>${H(s.error)}<p><button type="button" class="btn" data-load="${H(n)}">重试</button></p></div>`;load(n,true);const slow=s.startedAt&&Date.now()-s.startedAt>LOAD_HINT_MS;return`<div class="loading" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span><span>${H(t)}${slow?'<small>若正在刷新新 section，会先尝试读取可用缓存；旧缓存会在页面顶部明确标黄提示，不会静默冒充最新。</small>':''}</span></div>`}
 
 function collectDates(){const ds=[];
-[D.dates?.salesDate,D.dates?.businessDate,D.dates?.linkDate].forEach(v=>{const d=ISO(v);if(d)ds.push(d)});
+[D.liveSalesToday?.date,D.dates?.salesDate,D.dates?.businessDate,D.dates?.linkDate].forEach(v=>{const d=ISO(v);if(d)ds.push(d)});
 [...A(D.rankings?.dailyStores),...A(D.rankings?.dailyStoreProducts),...A(D.rankings?.dailyProducts),...A(D.productSalesDaily),...A(D.homeTrafficDaily),...A(D.homeProfitSummary?.dailyScopes),...A(D.profit?.dailyStoreProducts),...A(D.afterSales),...A(D.orders),...A(D.productTrafficDaily),...A(D.inventoryTrend),...A(D.inventoryDepletion?.visibleTrend)].forEach(r=>{const d=dt(r);if(d)ds.push(d)});
 return ds.filter(Boolean).sort()}
 
-function dataAnchorDate(){const key=[genAt(),A(D.rankings?.dailyStores).length,A(D.rankings?.dailyStoreProducts).length,A(D.rankings?.dailyProducts).length,A(D.productSalesDaily).length,A(D.homeTrafficDaily).length,A(D.homeProfitSummary?.dailyScopes).length,A(D.profit?.dailyStoreProducts).length,A(D.afterSales).length,A(D.orders).length,A(D.productTrafficDaily).length,A(D.inventoryTrend).length,A(D.inventoryDepletion?.visibleTrend).length].join('|');if(DATA_ANCHOR_CACHE.key===key&&DATA_ANCHOR_CACHE.value)return DATA_ANCHOR_CACHE.value;const value=collectDates().at(-1)||ISO(new Date().toISOString());DATA_ANCHOR_CACHE={key,value};return value}
+function dataAnchorDate(){const key=[genAt(),ISO(D.liveSalesToday?.date),A(D.rankings?.dailyStores).length,A(D.rankings?.dailyStoreProducts).length,A(D.rankings?.dailyProducts).length,A(D.productSalesDaily).length,A(D.homeTrafficDaily).length,A(D.homeProfitSummary?.dailyScopes).length,A(D.profit?.dailyStoreProducts).length,A(D.afterSales).length,A(D.orders).length,A(D.productTrafficDaily).length,A(D.inventoryTrend).length,A(D.inventoryDepletion?.visibleTrend).length].join('|');if(DATA_ANCHOR_CACHE.key===key&&DATA_ANCHOR_CACHE.value)return DATA_ANCHOR_CACHE.value;const value=collectDates().at(-1)||isoDate(new Date());DATA_ANCHOR_CACHE={key,value};return value}
 
-function computePresetRange(key,anchor=dataAnchorDate()){const a=ISO(anchor)||ISO(new Date().toISOString());const m=monthStart(a);switch(String(key||'today')){case'yesterday':return{start:addDateDays(a,-1),end:addDateDays(a,-1)};case'last3':return{start:addDateDays(a,-2),end:a};case'last7':return{start:addDateDays(a,-6),end:a};case'last15':return{start:addDateDays(a,-14),end:a};case'last30':return{start:addDateDays(a,-29),end:a};case'thisMonth':return{start:m,end:a};case'lastMonth':{const s=addMonths(m,-1);return{start:s,end:monthEnd(s)}}case'last3Months':return{start:addMonths(m,-2),end:a};case'lastYear':return{start:addDateDays(a,-364),end:a};case'today':default:return{start:a,end:a}}}
+function computePresetRange(key,anchor=dataAnchorDate()){const a=ISO(anchor)||isoDate(new Date());const m=monthStart(a);switch(String(key||'today')){case'yesterday':return{start:addDateDays(a,-1),end:addDateDays(a,-1)};case'last3':return{start:addDateDays(a,-2),end:a};case'last7':return{start:addDateDays(a,-6),end:a};case'last15':return{start:addDateDays(a,-14),end:a};case'last30':return{start:addDateDays(a,-29),end:a};case'thisMonth':return{start:m,end:a};case'lastMonth':{const s=addMonths(m,-1);return{start:s,end:monthEnd(s)}}case'last3Months':return{start:addMonths(m,-2),end:a};case'lastYear':return{start:addDateDays(a,-364),end:a};case'today':default:return{start:a,end:a}}}
 
 function calendarMonthStart(dateText){return monthStart(dateText||dataAnchorDate())}
 function addCalendarMonths(dateText,months){return addMonths(dateText||dataAnchorDate(),months)}
 function monthTitle(dateText){const d=parseDateOnly(dateText)||new Date();return `${d.getFullYear()} 年 ${d.getMonth()+1} 月`}
 function selectedRangeText(){dates(false);return S.start===S.end?S.start:`${S.start} ~ ${S.end}`}
 function applyPreset(key){const r=computePresetRange(key,dataAnchorDate());S.rangePreset=key;S.start=r.start;S.end=r.end;S.rangeOpen=false;S.calendarStartMonth=calendarMonthStart(r.start);S.calendarEndMonth=calendarMonthStart(r.end===r.start?addCalendarMonths(r.start,1):r.end);S.orderPage=1;S.returnPage=1;S.productPage=1;S.trafficPage=1}
-function dates(force=false){if(!force&&S.start&&S.end)return;applyPreset(S.rangePreset||'today')}
+function dates(force=false){const preset=S.rangePreset||'today';if(S.start&&S.end&&preset==='custom')return;const next=computePresetRange(preset,dataAnchorDate());if(!force&&S.start===next.start&&S.end===next.end)return;applyPreset(preset)}
 function preset(days){const map={1:'today',3:'last3',7:'last7',15:'last15',30:'last30',365:'lastYear'};applyPreset(map[Number(days)]||'last7');sync(false);render();ensure(S.tab,true)}
 
 function renderCalendarPanel(monthDate,role){const first=parseDateOnly(calendarMonthStart(monthDate))||new Date();const y=first.getFullYear(),m=first.getMonth();const offset=(first.getDay()+6)%7;const gridStart=new Date(y,m,1-offset);const days=[];for(let i=0;i<42;i++){const d=new Date(gridStart.getFullYear(),gridStart.getMonth(),gridStart.getDate()+i);const iso=isoDate(d);const selected=iso===(role==='start'?S.start:S.end);const cls=['calendar-day',d.getMonth()===m?'':'out',iso>=S.start&&iso<=S.end?'in-range':'',iso===S.start?'start':'',iso===S.end?'end':''].filter(Boolean).join(' ');days.push(`<button type="button" class="${cls}" data-calendar-date="${H(iso)}" data-calendar-role="${H(role)}" aria-label="${H(iso)}，设为${role==='start'?'开始':'结束'}日期" aria-pressed="${selected?'true':'false'}">${d.getDate()}</button>`)}return `<div class="range-calendar-panel"><div class="calendar-panel-head"><div><span class="sub">${role==='start'?'开始时间':'结束时间'}</span><h4>${H(monthTitle(monthDate))}</h4></div><div class="calendar-nav"><button type="button" data-calendar-shift="${H(role)}" data-calendar-delta="-1" aria-label="上个月">‹</button><button type="button" data-calendar-shift="${H(role)}" data-calendar-delta="1" aria-label="下个月">›</button></div></div><div class="calendar-week" aria-hidden="true"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div class="calendar-days">${days.join('')}</div></div>`}

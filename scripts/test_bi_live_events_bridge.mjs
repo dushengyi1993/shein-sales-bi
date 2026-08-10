@@ -137,7 +137,7 @@ assert.match(productionClient, /function applyLiveOrderRowsOverlay\(\)/, 'live o
 assert.match(productionClient, /orders:\['orders','liveSalesToday'\]/, 'opening the order center must load the same current-day live source as the homepage');
 assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='orders'\)applyLiveOrderRowsOverlay\(\)/, 'the order overlay must be independent of section response order');
 assert.match(productionClient, /实时订单 ·/, 'live order rows must be labelled plainly while slower logistics enrichment catches up');
-assert.match(productionClient, /if\(!date\|\|!D\.rankings\)return;/, 'a verified zero-order live day must clear stale cached rankings instead of preserving old sales');
+assert.match(productionClient, /if\(!date\|\|!Array\.isArray\(items\)\|\|!D\.rankings\)return;/, 'an explicit zero-order live day may clear stale cached rankings while a missing items field must fail closed');
 assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='homeRankings'\|\|n==='rankings'\)applyLiveOrderRankingOverlay\(\)/, 'initial section loading must reconcile cached rankings with live sales regardless of response order');
 assert.match(productionClient, /const liveSalesState=sourceState\('liveSalesToday',A\(D\.liveSalesToday\?\.items\)\);const rankingsState=combineSourceState\(sourceState\('homeRankings',s\.rows\),liveSalesState\)/, 'the homepage must wait for the live overlay and distinguish unavailable data from a business zero');
 assert.match(productionClient, /const LIVE_ORDER_SECTIONS=\['liveSalesToday'\]/, 'live orders refresh one lightweight source instead of rebuilding large order and scatter caches per browser');

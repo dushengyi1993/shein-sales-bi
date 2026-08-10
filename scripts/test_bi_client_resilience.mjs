@@ -16,6 +16,118 @@ assert.match(source, /if\(n==='liveSalesToday'\)LAST_LIVE_REFRESH_MS=Date\.now\(
   'every accepted live-order projection records the last successful refresh time');
 assert.match(source, /async function revalidateCore\(\).*liveDue=now-LAST_LIVE_REFRESH_MS>=CORE_VISIBLE_POLL_MS.*if\(liveDue\)await load\('liveSalesToday',true,true\)/,
   'the five-minute visible-tab fallback force-refreshes live orders when SSE delivery is missed');
+assert.match(source, /\[D\.liveSalesToday\?\.date,D\.dates\?\.salesDate,D\.dates\?\.businessDate,D\.dates\?\.linkDate\]/,
+  'the authoritative live-sales business date participates in the page date anchor even before the first order arrives');
+assert.match(source, /const key=\[genAt\(\),ISO\(D\.liveSalesToday\?\.date\),/,
+  'the date-anchor cache is invalidated when the live-sales business date rolls over');
+assert.match(source, /function validDateOnly\(v\).*\^\\d\{4\}-\\d\{2\}-\\d\{2\}\$.*isoDate\(d\)===text/,
+  'live-sales dates use strict calendar validation instead of accepting any ten-character prefix');
+assert.match(source, /source==='liveSalesToday'&&\(!validDateOnly\(live\?\.date\)\|\|!Array\.isArray\(live\?\.items\)\).*已拒绝覆盖当前经营数据/,
+  'an incomplete live-sales payload fails closed before it can replace usable business data');
+assert.match(source, /items=D\.liveSalesToday\?\.items;if\(!date\|\|!Array\.isArray\(items\)\|\|!D\.rankings\)return/,
+  'a missing live-sales items field cannot be normalized into an explicit zero-order overlay');
+assert.match(source, /function dates\(force=false\)\{const preset=S\.rangePreset\|\|'today';if\(S\.start&&S\.end&&preset==='custom'\)return;const next=computePresetRange\(preset,dataAnchorDate\(\)\);if\(!force&&S\.start===next\.start&&S\.end===next\.end\)return;applyPreset\(preset\)\}/,
+  'non-custom date presets follow a newer data anchor while an operator-selected custom range stays fixed');
+
+const sourceLines = source.split(/\r?\n/);
+const functionLine = name => sourceLines.find(line => line.startsWith(`function ${name}(`)) || '';
+const collectDatesStart = source.indexOf('function collectDates()');
+const collectDatesEnd = source.indexOf('\nfunction dataAnchorDate()', collectDatesStart);
+const collectDatesSource = source.slice(collectDatesStart, collectDatesEnd);
+const dateRuntimeParts = [
+  functionLine('parseDateOnly'), functionLine('isoDate'), functionLine('validDateOnly'), functionLine('addDateDays'),
+  functionLine('monthStart'), functionLine('addMonths'), functionLine('monthEnd'),
+  collectDatesSource, functionLine('dataAnchorDate'), functionLine('computePresetRange'),
+  functionLine('calendarMonthStart'), functionLine('addCalendarMonths'),
+  functionLine('applyPreset'), functionLine('dates'),
+];
+assert.ok(dateRuntimeParts.every(Boolean), 'date rollover functions are extractable for integrated behavior checks');
+const dateRuntimeSource = dateRuntimeParts.join('\n');
+const makeDateRuntime = (data, state, DateCtor=Date) => Function('D', 'S', 'Date', `
+  const A=v=>Array.isArray(v)?v:[];
+  const ISO=v=>String(v||'').slice(0,10);
+  const pad2=v=>String(v).padStart(2,'0');
+  function dt(r){return ISO(r?.date||r?.stat_date||r?.created_date||r?.snapshot_date)}
+  function genAt(){return String(D.generatedAt||'core-generation')}
+  let DATA_ANCHOR_CACHE={key:'',value:''};
+  ${dateRuntimeSource}
+  return {dataAnchorDate,dates};
+`)(data, state, DateCtor);
+{
+  const data = {dates:{salesDate:'2026-08-10'}, liveSalesToday:{date:'2026-08-11', items:[]}};
+  const state = {rangePreset:'today', start:'2026-08-10', end:'2026-08-10'};
+  makeDateRuntime(data, state).dates(false);
+  assert.deepEqual({start:state.start,end:state.end}, {start:'2026-08-11',end:'2026-08-11'},
+    'today preset advances across midnight from the real live-sales anchor, including an explicit zero-order day');
+}
+{
+  const state = {rangePreset:'custom', start:'2026-08-10', end:'2026-08-10'};
+  const runtime = makeDateRuntime({liveSalesToday:{date:'2026-08-11',items:[]}}, state);
+  runtime.dates(false);
+  runtime.dates(true);
+  assert.deepEqual({start:state.start,end:state.end}, {start:'2026-08-10',end:'2026-08-10'},
+    'custom date range survives both background refresh and forced core retry');
+}
+{
+  const data = {liveSalesToday:{date:'2026-08-10',items:[]}};
+  const runtime = makeDateRuntime(data, {rangePreset:'today',start:'',end:''});
+  assert.equal(runtime.dataAnchorDate(), '2026-08-10');
+  data.liveSalesToday.date='2026-08-11';
+  assert.equal(runtime.dataAnchorDate(), '2026-08-11', 'date-anchor cache notices a live business-date rollover');
+}
+{
+  class LocalMidnightDate {
+    getTime(){return 1}
+    getFullYear(){return 2026}
+    getMonth(){return 7}
+    getDate(){return 11}
+    toISOString(){return '2026-08-10T16:15:00.000Z'}
+  }
+  const runtime = makeDateRuntime({}, {rangePreset:'today',start:'',end:''}, LocalMidnightDate);
+  assert.equal(runtime.dataAnchorDate(), '2026-08-11', 'fallback uses the browser-local date instead of the previous UTC date near midnight');
+}
+{
+  const mergeStart=source.indexOf("function merge(x,source='')");
+  const mergeEnd=source.indexOf('\nfunction replaceRankingDate(',mergeStart);
+  const mergeSource=source.slice(mergeStart,mergeEnd);
+  const data={liveSalesToday:{date:'2026-08-10',items:[{order_no:'kept'}]}};
+  const merge=Function('D',`
+    const pad2=v=>String(v).padStart(2,'0');
+    const ISO=v=>String(v||'').slice(0,10);
+    ${functionLine('parseDateOnly')}
+    ${functionLine('isoDate')}
+    ${functionLine('validDateOnly')}
+    let DG={},DATA_ANCHOR_CACHE={key:'',value:''},PRICE_META=new WeakMap();
+    ${mergeSource}
+    return merge;
+  `)(data);
+  for(const badDate of ['not-a-date','2026-02-31']){
+    assert.throws(()=>merge({data:{liveSalesToday:{date:badDate,items:[]}}},'liveSalesToday'),/已拒绝覆盖当前经营数据/);
+    assert.equal(data.liveSalesToday.date,'2026-08-10','invalid live date cannot replace the previous complete payload');
+    assert.equal(data.liveSalesToday.items[0].order_no,'kept','invalid live date cannot erase previous order facts');
+  }
+}
+{
+  const overlayStart=source.indexOf('function applyLiveOrderRankingOverlay()');
+  const overlayEnd=source.indexOf('\nfunction liveOrderKey(',overlayStart);
+  const overlaySource=source.slice(overlayStart,overlayEnd);
+  const runOverlay=data=>Function('D','ISO',`
+    const A=v=>Array.isArray(v)?v:[];
+    const N=v=>{const n=Number(v??0);return Number.isFinite(n)?n:0};
+    const sk=r=>String(r?.store_key||r?.storeKey||'').trim().toUpperCase();
+    const smeta=new Map();
+    let DATA_ANCHOR_CACHE={key:'',value:''};
+    ${functionLine('replaceRankingDate')}
+    ${overlaySource}
+    applyLiveOrderRankingOverlay();
+  `)(data,v=>String(v||'').slice(0,10));
+  const data={liveSalesToday:{date:'2026-08-11'},rankings:{dailyStores:[{date:'2026-08-11',sales_sar:123}]}};
+  runOverlay(data);
+  assert.equal(data.rankings.dailyStores[0].sales_sar,123,'missing items preserves the previous complete ranking instead of fabricating zero');
+  data.liveSalesToday.items=[];
+  runOverlay(data);
+  assert.deepEqual(data.rankings.dailyStores,[],'an explicit empty items array is accepted as a verified zero-order day');
+}
 assert.doesNotMatch(source.match(/async function revalidateCore\(\)[^\n]*/)?.[0] || '', /load\('orders'/,
   'the missed-SSE fallback must not rebuild the large historical orders section');
 assert.match(source, /function scheduleSectionRecheck\(n\)/, 'stale sections schedule an automatic recheck');
