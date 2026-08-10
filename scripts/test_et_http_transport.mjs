@@ -10,6 +10,9 @@ import {EtHttpClient} from './fetch_et_forwarder.mjs';
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-et-http-test-'));
 const sessionPath = path.join(tempDir, 'session.local.json');
 let loginCalls = 0;
+let detailCalls = 0;
+let notFoundCalls = 0;
+let always500Calls = 0;
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
@@ -44,6 +47,29 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({state: 'success'}));
     return;
   }
+  if (url.pathname === '/Delivery/Outbound/DetailForm') {
+    detailCalls += 1;
+    if (detailCalls < 3) {
+      res.statusCode = 500;
+      res.end('temporary server error');
+      return;
+    }
+    res.setHeader('Content-Type', 'text/html');
+    res.end('<html><head><script>window.x = 1;</script><style>body{}</style></head><body><div>Hello&nbsp;World &amp; more</div></body></html>');
+    return;
+  }
+  if (url.pathname === '/Test/NotFound') {
+    notFoundCalls += 1;
+    res.statusCode = 404;
+    res.end('missing page');
+    return;
+  }
+  if (url.pathname === '/Test/Always500') {
+    always500Calls += 1;
+    res.statusCode = 500;
+    res.end('permanent server error');
+    return;
+  }
   res.statusCode = 404;
   res.end('not found');
 });
@@ -71,6 +97,46 @@ try {
   const reused = await EtHttpClient.load({baseUrl, sessionPath});
   assert.equal((await reused.probe()).ok, true, 'a later ET run must reuse the cookie jar without Chrome/login');
   assert.equal(loginCalls, 1);
+
+  const previousAttempts = process.env.SHEIN_ET_HTTP_READ_ATTEMPTS;
+  try {
+    process.env.SHEIN_ET_HTTP_READ_ATTEMPTS = 'not-a-number';
+    const detail = await reused.fetchText('/Delivery/Outbound/DetailForm?id=100');
+    assert.equal(detailCalls, 3, 'an invalid attempts value must fall back to the default bounded attempts');
+    assert.equal(detail, 'Hello World & more', 'HTML must be normalized to plain text');
+  } finally {
+    if (previousAttempts === undefined) delete process.env.SHEIN_ET_HTTP_READ_ATTEMPTS;
+    else process.env.SHEIN_ET_HTTP_READ_ATTEMPTS = previousAttempts;
+  }
+
+  try {
+    process.env.SHEIN_ET_HTTP_READ_ATTEMPTS = '2';
+    await assert.rejects(
+      reused.fetchText('/Test/Always500'),
+      (error) => {
+        assert.match(String(error?.message || error), /status=500/);
+        assert.equal(error?.httpStatus, 500);
+        return true;
+      },
+      'a constant 500 must fail with the original ET HTTP text fetch error'
+    );
+  } finally {
+    if (previousAttempts === undefined) delete process.env.SHEIN_ET_HTTP_READ_ATTEMPTS;
+    else process.env.SHEIN_ET_HTTP_READ_ATTEMPTS = previousAttempts;
+  }
+  assert.equal(always500Calls, 2, 'a constant 500 must be attempted exactly maxAttempts times');
+
+  await assert.rejects(
+    reused.fetchText('/Test/NotFound'),
+    (error) => {
+      assert.match(String(error?.message || error), /status=404/);
+      assert.equal(error?.httpStatus, 404);
+      return true;
+    },
+    'a permanent 4xx must fail with the original ET HTTP text fetch error'
+  );
+  assert.equal(notFoundCalls, 1, 'a non-retryable 4xx must not be retried');
+
   console.log(JSON.stringify({ok: true, transport: 'http', loginCalls}, null, 2));
 } finally {
   await new Promise(resolve => server.close(resolve));
