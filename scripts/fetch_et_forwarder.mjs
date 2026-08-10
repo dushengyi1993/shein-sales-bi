@@ -652,22 +652,46 @@ export class EtHttpClient {
   }
 
   async fetchText(url) {
-    const response = await this.request(url, {
-      headers: {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
-    });
-    const html = await response.text();
-    if (!response.ok || /\/Login\//i.test(response.url)) {
-      throw new Error(`ET HTTP text fetch failed status=${response.status} url=${url} head=${html.slice(0, 400)}`);
+    const rawAttempts = process.env.SHEIN_ET_HTTP_READ_ATTEMPTS;
+    const parsedAttempts = rawAttempts === undefined || String(rawAttempts).trim() === '' ? 3 : Number(rawAttempts);
+    const maxAttempts = Math.min(5, Math.max(1, Number.isFinite(parsedAttempts) ? Math.trunc(parsedAttempts) : 3));
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await this.request(url, {
+          headers: {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'},
+        });
+        const html = await response.text();
+        if (!response.ok || /\/Login\//i.test(response.url)) {
+          const error = new Error(`ET HTTP text fetch failed status=${response.status} url=${url} head=${html.slice(0, 400)}`);
+          error.httpStatus = response.status;
+          throw error;
+        }
+        return html
+          .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&nbsp;/gi, ' ')
+          .replace(/&amp;/gi, '&')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 12000);
+      } catch (error) {
+        lastError = error;
+        const status = Number(error?.httpStatus || 0);
+        const transportError = error?.name === 'TimeoutError'
+          || /timeout|aborted|ECONNRESET|EPIPE|fetch failed/i.test(String(error?.message || error));
+        const retryable = status === 408
+          || status === 429
+          || status >= 500
+          || (status === 0 && transportError);
+        if (!retryable || attempt >= maxAttempts) throw error;
+        const delayMs = Math.min(4_000, 750 * attempt);
+        console.warn(`[et-http] read retry endpoint=${url} attempt=${attempt}/${maxAttempts} reason=${error?.name || 'error'} delayMs=${delayMs}`);
+        await sleep(delayMs);
+      }
     }
-    return html
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 12000);
+    throw lastError || new Error(`ET HTTP text fetch failed url=${url}`);
   }
 
   async probe() {

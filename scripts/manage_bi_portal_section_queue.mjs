@@ -170,7 +170,11 @@ export function claimNext(queue, {
   // daily/page caches pending forever.  Age lowers the effective priority by
   // one point every two minutes, but never ahead of an explicit priority-0
   // operator refresh.  This keeps urgent work urgent while placing a hard
-  // bound on starvation for the rest of the queue.
+  // bound on starvation for the rest of the queue.  Within an equal effective
+  // priority, the explicit owner priority decides before age, so an aged
+  // priority-10 home partition still beats an older aged priority-50 background
+  // job even though an even older background job wins over one that has not
+  // aged yet.
   const effectivePriority = entry => {
     const priority = Math.max(0, Number(entry.priority || 0));
     if (priority === 0) return 0;
@@ -183,8 +187,8 @@ export function claimNext(queue, {
     .filter(entry => entry.status === 'pending')
     .sort((left, right) => (
       effectivePriority(left) - effectivePriority(right)
-      || String(left.requestedAt || '').localeCompare(String(right.requestedAt || ''))
       || Number(left.priority || 0) - Number(right.priority || 0)
+      || String(left.requestedAt || '').localeCompare(String(right.requestedAt || ''))
       || String(left.section).localeCompare(String(right.section))
     ));
   const entry = pending[0];

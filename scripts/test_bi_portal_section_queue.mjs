@@ -94,6 +94,24 @@ const agedClaim = claimNext(starvationQueue, {
 });
 assert.equal(agedClaim.section, 'oldBackground', 'aged background work must not starve behind recurring fresh accounting work');
 
+const tieQueue = {version: 1, updatedAt: '', entries: []};
+enqueueSections(tieQueue, {
+  sections: ['olderBackground'],
+  priority: 50,
+  now: start,
+});
+enqueueSections(tieQueue, {
+  sections: ['newerOwnerView'],
+  priority: 10,
+  now: new Date(start.getTime() + 80 * 60_000),
+});
+const tieClaim = claimNext(tieQueue, {
+  leaseSeconds: 60,
+  leaseId: 'lease-tie',
+  now: new Date(start.getTime() + 100 * 60_000),
+});
+assert.equal(tieClaim.section, 'newerOwnerView', 'when effective priorities tie, explicit owner priority must beat older background priority');
+
 const forcedQueue = {version: 1, updatedAt: '', entries: []};
 enqueueSections(forcedQueue, {sections: ['veryOldBackground'], priority: 50, now: start});
 enqueueSections(forcedQueue, {sections: ['ownerForced'], priority: 0, now: new Date(start.getTime() + 10 * 60 * 60_000)});
