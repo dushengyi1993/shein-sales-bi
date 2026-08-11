@@ -39,12 +39,12 @@ await fs.writeFile(path.join(portalDir, 'data.json'), JSON.stringify({
   __sections: {
     mode: 'api',
     generatedAt: portalGeneration,
-    keys: ['rankings', 'liveSalesToday'],
+    keys: ['homeRankings', 'liveSalesToday'],
     loaded: ['core'],
   },
 }), 'utf8');
 for (const [section, data] of Object.entries({
-  rankings: {
+  homeRankings: {
     rankings: {
       salesSummary: [{period_key: 'day', start_date: '2026-07-28', end_date: '2026-07-28', gross_sales_sar: 300, sales_sar: 300, gross_orders: 3, orders: 3, gross_quantity: 3, quantity: 3}],
       dailyStores: [
@@ -317,7 +317,7 @@ try {
   check('operator direct query manifest artifact count', directQueryManifest.artifacts?.length, 1);
   check('operator direct query mode', directQueryData.mode, 'direct-bi-data');
   check('operator direct query response marks no AI', directQueryData.aiInvoked, false);
-  check('operator direct query loads rankings', directQueryData.sections?.loaded || [], rows => rows.includes('rankings'));
+  check('operator direct query loads warmed home rankings', directQueryData.sections?.loaded || [], rows => rows.includes('homeRankings'));
   check('operator direct query loads live sales', directQueryData.sections?.loaded || [], rows => rows.includes('liveSalesToday'));
   check('operator direct query preserves complete store rows', directQueryData.data?.rankings?.dailyStores?.length, 2);
 
