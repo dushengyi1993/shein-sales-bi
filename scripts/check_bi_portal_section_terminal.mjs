@@ -9,11 +9,12 @@
 // response, a stale/failed-refresh header, or a non-terminal artifact is
 // never success.
 //
-// Large sections (profit is ~98MB) are validated with a bounded head read,
-// never a full parse. homeProfit is small and derived, so its structure is
-// validated by parsing the whole file; profit is validated by confirming the
-// dailyStoreProducts array key opens inside the bounded head. Section data is
-// never printed: the report contains only metadata and a reason code.
+// Large sections (profit is ~98MB) are never fully parsed. Metadata comes from
+// a bounded head read; the required dailyStoreProducts array key is located by
+// a constant-memory streaming scan because production serializers may place it
+// after other profit keys. homeProfit is small and derived, so its structure is
+// validated by parsing the whole file. Section data is never printed: the
+// report contains only metadata and a reason code.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,6 +25,8 @@ const DEFAULT_HEAD_BYTES = 64 * 1024;
 const MIN_HEAD_BYTES = 4 * 1024;
 const MAX_HEAD_BYTES = 1024 * 1024;
 const HOME_PROFIT_MAX_SIZE = 64 * 1024 * 1024;
+const STREAM_SCAN_CHUNK_BYTES = 1024 * 1024;
+const STREAM_SCAN_CARRY_CHARS = 256;
 
 function usage(message = '') {
   if (message) console.error(message);
@@ -72,6 +75,29 @@ function readHead(file, headBytes) {
     const buffer = Buffer.alloc(length);
     const bytesRead = fs.readSync(handle, buffer, 0, length, 0);
     return {size, text: buffer.subarray(0, bytesRead).toString('utf8')};
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
+function scanForJsonArrayKey(file, key) {
+  const handle = fs.openSync(file, 'r');
+  const buffer = Buffer.alloc(STREAM_SCAN_CHUNK_BYTES);
+  const escapedKey = String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`"${escapedKey}"\\s*:\\s*\\[`);
+  let position = 0;
+  let carry = '';
+  let scannedBytes = 0;
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, position);
+      if (bytesRead <= 0) return {found: false, scannedBytes};
+      scannedBytes += bytesRead;
+      const text = carry + buffer.subarray(0, bytesRead).toString('utf8');
+      if (pattern.test(text)) return {found: true, scannedBytes};
+      carry = text.slice(-STREAM_SCAN_CARRY_CHARS);
+      position += bytesRead;
+    }
   } finally {
     fs.closeSync(handle);
   }
@@ -127,11 +153,14 @@ export function validateTerminalArtifact({root, section, headBytes = DEFAULT_HEA
     return {ok: false, reason: 'section_data_missing', section: normalizedSection, coreGeneratedAt, sectionGeneratedAt};
   }
 
+  let profitScanBytes = 0;
   if (normalizedSection === 'profit') {
-    // writeBiSectionCache serializes data before the huge arrays and the
-    // generator writes dailyStoreProducts as the first profit key, so a
-    // bounded head read proves the array opens. Anything else fails closed.
-    if (!/"dailyStoreProducts"\s*:\s*\[/.test(head.text)) {
+    // Production profit key order is not fixed. Scan incrementally without
+    // retaining or parsing the 98MB payload; anything missing still fails
+    // closed.
+    const scan = scanForJsonArrayKey(sectionFile, 'dailyStoreProducts');
+    profitScanBytes = scan.scannedBytes;
+    if (!scan.found) {
       return {
         ok: false,
         reason: 'profit_daily_store_products_missing',
@@ -176,6 +205,7 @@ export function validateTerminalArtifact({root, section, headBytes = DEFAULT_HEA
     sectionGeneratedAt,
     size: head.size,
     headBytes,
+    ...(normalizedSection === 'profit' ? {profitScanBytes} : {}),
   };
 }
 

@@ -97,7 +97,8 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   }
 }
 
-// ---- Validator: profit requires the dailyStoreProducts array (bounded head).
+// ---- Validator: profit requires the dailyStoreProducts array even when
+// production key ordering places it beyond the bounded metadata head.
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-profit-'));
   try {
@@ -106,17 +107,20 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'profit_daily_store_products_missing');
 
-    // A large profit artifact (larger than the head) still validates through
-    // the bounded head read; the opening of dailyStoreProducts is serialized
-    // before the huge array.
+    // A large prefix intentionally pushes dailyStoreProducts beyond the
+    // default 64KB metadata head. The validator must find it with a
+    // constant-memory streaming scan instead of assuming object key order.
     const rows = Array.from({length: 50_000}, (_, index) => ({
       date: '2026-08-10',
       store_key: 'JSH',
       standard_goods_sn: `ABC-${String(index).padStart(6, '0')}`,
       net_revenue_sar: index,
     }));
-    makePortal(dir, {section: 'profit', extra: {data: {profit: {dailyStoreProducts: rows}}}});
-    assert.equal(validateTerminalArtifact({root: dir, section: 'profit'}).ok, true, 'large profit must validate via bounded head');
+    makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: rows, dailyStoreProducts: []}}}});
+    const reordered = validateTerminalArtifact({root: dir, section: 'profit'});
+    assert.equal(reordered.ok, true, 'large reordered profit must validate via streaming key scan');
+    assert.ok(reordered.profitScanBytes > 1024 * 1024,
+      'fixture must place dailyStoreProducts beyond both the metadata head and the first scan chunk');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
