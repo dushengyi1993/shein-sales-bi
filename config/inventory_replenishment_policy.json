@@ -1,6 +1,6 @@
 {
   "schemaVersion": "daily-inventory-replenishment-policy/v1",
-  "policyVersion": "2026-08-07.1",
+  "policyVersion": "2026-08-12.1",
   "timezone": "Asia/Shanghai",
   "triggerUsableInventoryAtOrBelow": 20,
   "targetUsableInventory": 100,
@@ -40,6 +40,14 @@
   "inventoryShelfStatusSourcePriority": ["linksData_four_state", "openapi_fallback"],
   "ignoreSoldOutWhenSameStoreHasOnShelfCanonical": true,
   "soldOutRequiresOtherStoreOnShelfWithStock": true,
+  "allStoreSoldOutBootstrap": {
+    "enabled": true,
+    "targetUsableInventory": 10,
+    "maxSeedsPerCanonical": 1,
+    "requireNoSellingStore": true,
+    "excludeSeedFromCrossStoreSellingEvidence": true,
+    "ranking": ["c7Exposure", "c7GoodsVisitors", "c7SaleCount", "storeKey", "skc"]
+  },
   "requireExactlyOneSku": true,
   "maxOpenApiSnapshotAgeHours": 2,
   "maxBiSnapshotAgeHours": 4,

@@ -138,6 +138,7 @@ const tests = [
   'scripts/test_bi_product_profit_section_contract.mjs',
   'scripts/test_inventory_projection_contract.mjs',
   'scripts/test_inventory_replenishment_policy.mjs',
+  'scripts/test_inventory_bootstrap_lock_registry.mjs',
   'scripts/test_daily_inventory_replenishment_plan.mjs',
   'scripts/test_et_low_inventory_safety_guard.mjs',
   'scripts/test_inventory_cost_ledger.mjs',

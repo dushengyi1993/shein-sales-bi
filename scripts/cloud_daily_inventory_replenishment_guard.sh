@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 DATE="$(TZ=Asia/Shanghai date +%F)"
 RUNTIME_ROOT="${SHEIN_BI_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/daily-inventory-replenishment}"
+BOOTSTRAP_LOCK_FILE="${SHEIN_BI_INVENTORY_BOOTSTRAP_LOCK_FILE:-$RUNTIME_ROOT/all-store-sold-out-bootstrap-locks.json}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 LINKS_DATA_FILE="${SHEIN_BI_LINKS_DATA_FILE:-$ROOT/outputs/bi-portal/sections/linksData.json}"
 LINKS_MAX_AGE_SECONDS="${SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS:-1800}"
@@ -77,7 +78,10 @@ ensure_links_data_fresh() {
 build_plan() {
   local status
   set +e
-  node scripts/inventory/build_daily_inventory_replenishment_plan.mjs --date "$DATE" --out "$PLAN"
+  node scripts/inventory/build_daily_inventory_replenishment_plan.mjs \
+    --date "$DATE" \
+    --bootstrap-lock-file "$BOOTSTRAP_LOCK_FILE" \
+    --out "$PLAN"
   status=$?
   set -e
   return "$status"
@@ -153,6 +157,7 @@ fi
 set +e
 node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
   --plan "$PLAN" \
+  --bootstrap-lock-file "$BOOTSTRAP_LOCK_FILE" \
   --execute \
   --execution-mode automatic \
   --confirm-hash "$HASH" \
