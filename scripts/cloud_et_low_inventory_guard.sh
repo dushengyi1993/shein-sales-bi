@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 DATE="$(TZ=Asia/Shanghai date +%F)"
 RUNTIME_ROOT="${SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/et-low-inventory-guard}"
+BOOTSTRAP_LOCK_FILE="${SHEIN_BI_INVENTORY_BOOTSTRAP_LOCK_FILE:-/srv/shein-bi/runtime/daily-inventory-replenishment/all-store-sold-out-bootstrap-locks.json}"
 MANIFEST="${SHEIN_ET_LATEST_MANIFEST:-$ROOT/outputs/et-forwarder/latest-manifest.json}"
 LOCK="$ROOT/state/locks/daily-inventory-replenishment.lock"
 STATE="$RUNTIME_ROOT/state/latest.json"
@@ -54,6 +55,7 @@ BUILD_STATUS=0
 node scripts/inventory/build_daily_inventory_replenishment_plan.mjs \
   --date "$DATE" \
   --operation-mode et_low_inventory_safety \
+  --bootstrap-lock-file "$BOOTSTRAP_LOCK_FILE" \
   --out "$SOURCE_PLAN" || BUILD_STATUS=$?
 if [[ ! -s "$SOURCE_PLAN" ]]; then
   echo "[et_low_inventory_guard] source planner did not produce a plan status=$BUILD_STATUS" >&2
@@ -97,6 +99,7 @@ fi
 set +e
 node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
   --plan "$PLAN" \
+  --bootstrap-lock-file "$BOOTSTRAP_LOCK_FILE" \
   --execute \
   --execution-mode automatic \
   --confirm-hash "$HASH" \

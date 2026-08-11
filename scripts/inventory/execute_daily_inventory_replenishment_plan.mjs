@@ -6,9 +6,16 @@ import {
   assertDailyInventoryExecutionAuthorization,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
+  normalizeOpenApiProductCatalog,
   resolveInventoryShelfStatus,
+  selectAllStoreSoldOutBootstrapSeed,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
+import {
+  activateInventoryBootstrapLock,
+  readInventoryBootstrapLockRegistry,
+  reserveInventoryBootstrapLock,
+} from '../../lib/inventory_bootstrap_lock_registry.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../../lib/shein_openapi_client.mjs';
 import {selectVirtualInventoryWarehouseCode} from '../../lib/shein_inventory_warehouse.mjs';
 import {
@@ -29,6 +36,8 @@ function parseArgs(argv) {
     config: process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json'),
     biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
     linksData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
+    bootstrapLockFile: process.env.SHEIN_BI_INVENTORY_BOOTSTRAP_LOCK_FILE
+      || path.join(ROOT, 'state', 'inventory', 'all-store-sold-out-bootstrap-locks.json'),
     out: '',
     execute: false,
     executionMode: 'manual_review',
@@ -42,6 +51,7 @@ function parseArgs(argv) {
     else if (a === '--config') args.config = path.resolve(argv[++i] || '');
     else if (a === '--bi-data') args.biData = path.resolve(argv[++i] || '');
     else if (a === '--links-data') args.linksData = path.resolve(argv[++i] || '');
+    else if (a === '--bootstrap-lock-file') args.bootstrapLockFile = path.resolve(argv[++i] || '');
     else if (a === '--out') args.out = path.resolve(argv[++i] || '');
     else if (a === '--max-rows') args.maxRows = Number(argv[++i]);
     else if (a === '--execute') args.execute = true;
@@ -138,6 +148,24 @@ async function readStock(client, skuCode) {
   };
 }
 
+async function readCurrentProductCatalog(client, {pageSize = 10, maxPages = 1000} = {}) {
+  const rows = [];
+  for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
+    const response = await requestWithRateLimitRetry(client, '/open-api/goods/searchProduct', {
+      method: 'POST',
+      body: {pageNum, pageSize, languageList: ['en']},
+      headers: {language: 'en'},
+    });
+    if (String(response.data?.code) !== '0') {
+      throw new Error(`searchProduct failed page=${pageNum}: ${response.data?.code} ${response.data?.msg || ''}`);
+    }
+    const pageRows = asArray(response.data?.info?.data);
+    rows.push(...pageRows);
+    if (pageRows.length < pageSize) return normalizeOpenApiProductCatalog(rows);
+  }
+  throw new Error(`product/query exceeded ${maxPages} pages`);
+}
+
 async function resolveMissingVirtualInventoryWarehouseCode(client) {
   const response = await requestWithRateLimitRetry(client, '/open-api/msc/warehouse/list', {
     method: 'GET',
@@ -149,7 +177,7 @@ async function resolveMissingVirtualInventoryWarehouseCode(client) {
   return selectVirtualInventoryWarehouseCode(response.data?.info, {site: 'shein-sa'});
 }
 
-async function assertStillListed(client, row) {
+async function readLiveListing(client, row) {
   const response = await requestWithRateLimitRetry(client, '/open-api/goods/spu-info', {
     method: 'POST',
     body: {spuName: row.spu, languageList: ['en']},
@@ -161,19 +189,29 @@ async function assertStillListed(client, row) {
   const shelf = asArray(skc.shelfStatusInfoList).find(item => String(item?.siteAbbr || '').toLowerCase() === 'shein-sa')
     || asArray(skc.shelfStatusInfoList)[0];
   const liveShelfStatus = String(shelf?.shelfStatus ?? '');
-  const eligibleStatuses = new Set((policy.eligibleShelfStatusCodes || ['1']).map(String));
-  if (!eligibleStatuses.has(liveShelfStatus)) throw new Error(`${row.skc} shelf status is no longer eligible: ${liveShelfStatus}`);
   const liveSkuCodes = new Set(asArray(skc.skuInfoList).map(item => String(item?.skuCode || '')).filter(Boolean));
   if (!liveSkuCodes.has(row.skuCode)) throw new Error(`${row.skc} SKU mapping changed`);
+  const liveSupplierCode = String(skc?.supplierCode || response.data?.info?.supplierCode || '').trim();
+  return {liveShelfStatus, liveSkuCodes: [...liveSkuCodes].sort(), liveSupplierCode};
+}
+
+async function assertStillListed(client, row) {
+  const live = await readLiveListing(client, row);
+  const eligibleStatuses = new Set((policy.eligibleShelfStatusCodes || ['1']).map(String));
+  if (!eligibleStatuses.has(live.liveShelfStatus)) {
+    throw new Error(`${row.skc} shelf status is no longer eligible: ${live.liveShelfStatus}`);
+  }
+  return live;
 }
 
 const args = parseArgs(process.argv.slice(2));
-const [plan, policy, config, biDocument, linksDocument] = await Promise.all([
+const [plan, policy, config, biDocument, linksDocument, bootstrapLockState] = await Promise.all([
   readJson(args.plan),
   readJson(args.policy),
   readJson(args.config),
   readJson(args.biData),
   readJson(args.linksData),
+  readInventoryBootstrapLockRegistry(args.bootstrapLockFile),
 ]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
 const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
@@ -189,10 +227,15 @@ const expectedHash = stableInventoryHash({
   policyVersion: plan.policyVersion,
   actionable: plan.actionable,
   lowEtAllocations: plan.lowEtAllocations,
+  ...(plan.bootstrapGroups ? {bootstrapGroups: plan.bootstrapGroups} : {}),
+  ...(plan.bootstrapLockRegistry?.hash ? {bootstrapRegistryHash: plan.bootstrapLockRegistry.hash} : {}),
   sourceEvidence: asArray(plan.sourceEvidence).map(({ageHours: _ageHours, ...evidence}) => evidence),
   ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
 });
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
+if (plan.bootstrapLockRegistry?.hash && String(plan.bootstrapLockRegistry.hash) !== String(bootstrapLockState.hash || '')) {
+  throw new Error('Inventory bootstrap lock registry changed after plan');
+}
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 if (plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
@@ -220,6 +263,7 @@ for (const evidence of asArray(plan.sourceEvidence).filter(row => currentSourceT
   }
 }
 const rows = asArray(plan.actionable).slice(0, args.maxRows);
+const bootstrapGroupsByKey = new Map(asArray(plan.bootstrapGroups).map(group => [String(group?.matchKey || '').toUpperCase(), group]));
 if (plan?.executionConstraints?.decreaseOnly === true && rows.some(row => (
   Number(row.targetUsableInventory) >= Number(row.platformUsableInventory)
 ))) {
@@ -281,6 +325,16 @@ for (const metrics of linkMetricRows) {
 }
 const results = [];
 const clients = new Map();
+let executionBootstrapRegistryHash = bootstrapLockState.hash;
+async function getStoreClient(storeKey) {
+  const normalizedStoreKey = String(storeKey || '').trim().toUpperCase();
+  let client = clients.get(normalizedStoreKey);
+  if (!client) {
+    client = await createStoreClient(config, normalizedStoreKey);
+    clients.set(normalizedStoreKey, client);
+  }
+  return client;
+}
 for (const row of rows) {
   const result = {storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode, canonical: row.canonical, state: 'planned'};
   try {
@@ -324,6 +378,51 @@ for (const row of rows) {
     if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
       throw new Error('7-day sales/exposure evidence changed after plan');
     }
+    if (row.ruleClass === 'all_store_sold_out_bootstrap_seed') {
+      const matchKey = String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase();
+      const group = bootstrapGroupsByKey.get(matchKey);
+      if (!group || !['new_seed', 'locked_seed'].includes(String(group.state || ''))) {
+        throw new Error('Bootstrap group evidence is missing or blocked');
+      }
+      if (
+        String(group.seed?.storeKey || '').toUpperCase() !== String(row.storeKey || '').toUpperCase()
+        || String(group.seed?.skc || '') !== String(row.skc || '')
+        || String(group.seed?.skuCode || '') !== String(row.skuCode || '')
+      ) throw new Error('Bootstrap seed identity does not match approved group');
+      const currentLock = bootstrapLockState.registry.locks[matchKey] || null;
+      if (row.bootstrapRole === 'new_seed' && currentLock) throw new Error('Bootstrap seed was locked after plan generation');
+      if (row.bootstrapRole === 'locked_seed' && (
+        !currentLock
+        || String(currentLock.storeKey) !== String(row.storeKey || '').toUpperCase()
+        || String(currentLock.skc) !== String(row.skc || '')
+        || String(currentLock.skuCode) !== String(row.skuCode || '')
+      )) throw new Error('Bootstrap locked seed identity changed after plan');
+      const approvedBootstrapTarget = Number(policy?.allStoreSoldOutBootstrap?.targetUsableInventory ?? 10);
+      if (approvedTarget !== approvedBootstrapTarget || Number(group.targetUsableInventory) !== approvedBootstrapTarget) {
+        throw new Error('Bootstrap target does not match current policy');
+      }
+      if (group.state === 'new_seed') {
+        const rankedCandidates = asArray(group.rankedStoreCandidates);
+        const selection = selectAllStoreSoldOutBootstrapSeed(rankedCandidates, policy);
+        if (
+          String(selection.seed?.storeKey || '').toUpperCase() !== String(row.storeKey || '').toUpperCase()
+          || String(selection.seed?.skc || '') !== String(row.skc || '')
+        ) throw new Error('Bootstrap seed ranking changed after plan');
+        for (const candidate of rankedCandidates) {
+          const currentCandidate = linkMetricsByKey.get(`${String(candidate.storeKey || '').toUpperCase()}::${String(candidate.skc || '')}`);
+          if (!currentCandidate) throw new Error(`Bootstrap candidate metrics unavailable: ${candidate.storeKey}/${candidate.skc}`);
+          if (
+            Number(currentCandidate.c7_eps_uv) !== Number(candidate.c7Exposure)
+            || Number(currentCandidate.c7_goods_uv) !== Number(candidate.c7GoodsVisitors)
+            || Number(currentCandidate.c7_sale_cnt) !== Number(candidate.c7SaleCount)
+            || resolveInventoryShelfStatus(currentCandidate).code !== '3'
+          ) throw new Error(`Bootstrap candidate evidence changed: ${candidate.storeKey}/${candidate.skc}`);
+        }
+        if (Number(group.existingUsableTotal || 0) + Number(group.plannedIncrement || 0) > etQty) {
+          throw new Error('Bootstrap group budget exceeds current ET sellable inventory');
+        }
+      }
+    }
     if (row.ruleClass === 'low_et_top_exposure_allocation') {
       if (etQty > Number(policy.lowEtAllocationAtOrBelow ?? 10)) throw new Error(`ET no longer requires physical allocation: ${etQty}`);
       if (etQty < Number(row.plannedAllocationTotal || 0)) {
@@ -343,18 +442,112 @@ for (const row of rows) {
       results.push({...result, state: 'dry_run_ready', etSellableInventory: etQty});
       continue;
     }
-    let client = clients.get(row.storeKey);
-    if (!client) {
-      client = await createStoreClient(config, row.storeKey);
-      clients.set(row.storeKey, client);
-    }
+    const bootstrapMatchKey = String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase();
+    const bootstrapGroup = row.ruleClass === 'all_store_sold_out_bootstrap_seed'
+      ? bootstrapGroupsByKey.get(bootstrapMatchKey)
+      : null;
+    const bootstrapGroupLockFile = path.join(
+      ROOT,
+      'state',
+      'locks',
+      `daily-inventory-bootstrap-${bootstrapMatchKey}`.replace(/[^A-Za-z0-9_.-]/g, '_'),
+    );
+    const releaseBootstrapGroup = bootstrapGroup
+      ? await acquireCrossProcessTicketLock(bootstrapGroupLockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000})
+      : async () => {};
     const lockFile = path.join(ROOT, 'state', 'locks', `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
-    const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
     try {
-      await assertStillListed(client, row);
-      let before = await readStock(client, row.skuCode);
+      const client = await getStoreClient(row.storeKey);
+      if (bootstrapGroup) {
+        const liveRegistry = await readInventoryBootstrapLockRegistry(args.bootstrapLockFile);
+        if (liveRegistry.hash !== executionBootstrapRegistryHash) {
+          throw new Error('Inventory bootstrap lock registry changed during execution');
+        }
+        const liveLock = liveRegistry.registry.locks[bootstrapMatchKey] || null;
+        if (liveLock && (
+          String(liveLock.storeKey) !== String(row.storeKey || '').toUpperCase()
+          || String(liveLock.skc) !== String(row.skc || '')
+          || String(liveLock.skuCode) !== String(row.skuCode || '')
+        )) throw new Error('Bootstrap canonical was reserved by another seed');
+        if (liveLock && row.bootstrapRole === 'new_seed' && String(liveLock.planHash) !== String(plan.payloadHash)) {
+          throw new Error('Bootstrap canonical was reserved by another plan; rebuild required');
+        }
+      }
+      const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
+      try {
+        await assertStillListed(client, row);
+        let before = await readStock(client, row.skuCode);
+      if (bootstrapGroup) {
+        const expectedCatalogs = bootstrapGroup.storeCatalogs && typeof bootstrapGroup.storeCatalogs === 'object'
+          ? bootstrapGroup.storeCatalogs
+          : {};
+        const expectedStores = Object.keys(expectedCatalogs).sort();
+        if (!expectedStores.length) throw new Error('Bootstrap store catalog evidence is missing');
+        for (const storeKey of expectedStores) {
+          const storeClient = await getStoreClient(storeKey);
+          const liveCatalog = await readCurrentProductCatalog(storeClient);
+          const expectedCatalog = expectedCatalogs[storeKey];
+          const liveCatalogHash = stableInventoryHash(liveCatalog);
+          if (liveCatalog.length !== Number(expectedCatalog?.rowCount) || liveCatalogHash !== String(expectedCatalog?.hash || '')) {
+            throw new Error(`Bootstrap store product catalog changed after plan: ${storeKey}`);
+          }
+        }
+        let liveExistingUsableTotal = 0;
+          for (const groupLink of asArray(bootstrapGroup.groupLinks)) {
+            const groupClient = await getStoreClient(groupLink.storeKey);
+            const liveListing = await readLiveListing(groupClient, groupLink);
+            if (canonicalInventoryKey(liveListing.liveSupplierCode) !== bootstrapMatchKey) {
+              throw new Error(`Bootstrap group canonical changed or is unavailable: ${groupLink.storeKey}/${groupLink.skc}`);
+            }
+            if (liveListing.liveSkuCodes.length !== 1 || liveListing.liveSkuCodes[0] !== String(groupLink.skuCode || '')) {
+              throw new Error(`Bootstrap group SKU cardinality changed: ${groupLink.storeKey}/${groupLink.skc}`);
+            }
+            if (String(liveListing.liveShelfStatus) !== String(groupLink.shelfStatusCode || '')) {
+              throw new Error(`Bootstrap group shelf status changed: ${groupLink.storeKey}/${groupLink.skc}`);
+            }
+            const liveStock = await readStock(groupClient, groupLink.skuCode);
+            if (['1', '3'].includes(String(liveListing.liveShelfStatus))) {
+              liveExistingUsableTotal += Math.max(0, Number(liveStock.totalUsableInventory || 0));
+            }
+            const isSeed = (
+              String(groupLink.storeKey || '').toUpperCase() === String(row.storeKey || '').toUpperCase()
+              && String(groupLink.skc || '') === String(row.skc || '')
+              && String(groupLink.skuCode || '') === String(row.skuCode || '')
+            );
+            if (!isSeed && ['1', '3'].includes(String(liveListing.liveShelfStatus)) && liveStock.totalUsableInventory > 0) {
+              throw new Error(`Bootstrap group gained usable inventory: ${groupLink.storeKey}/${groupLink.skc}`);
+            }
+            if (isSeed) before = liveStock;
+          }
+          const livePlannedIncrement = Math.max(0, approvedTarget - Number(before.totalUsableInventory || 0));
+          if (liveExistingUsableTotal + livePlannedIncrement > etQty) {
+            throw new Error('Bootstrap live group budget exceeds current ET sellable inventory');
+          }
+        }
       if (before.totalUsableInventory === approvedTarget) {
-        results.push({...result, state: 'skipped_target_already_matched', before});
+        let bootstrapLock = null;
+        if (row.ruleClass === 'all_store_sold_out_bootstrap_seed') {
+          const lockEntry = {
+            matchKey: String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase(),
+            canonical: row.canonical,
+            storeKey: row.storeKey,
+            skc: row.skc,
+            skuCode: row.skuCode,
+            targetUsableInventory: approvedTarget,
+            policyVersion: policy.policyVersion,
+            planHash: plan.payloadHash,
+          };
+          if (row.bootstrapRole === 'new_seed') {
+            const reservation = await reserveInventoryBootstrapLock(args.bootstrapLockFile, lockEntry, {
+              expectedRegistryHash: executionBootstrapRegistryHash,
+            });
+            executionBootstrapRegistryHash = reservation.hash;
+          }
+          const activation = await activateInventoryBootstrapLock(args.bootstrapLockFile, lockEntry);
+          executionBootstrapRegistryHash = activation.hash;
+          bootstrapLock = activation.entry;
+        }
+        results.push({...result, state: 'skipped_target_already_matched', before, bootstrapLock});
         continue;
       }
       if (plan?.executionConstraints?.decreaseOnly === true && before.totalUsableInventory < approvedTarget) {
@@ -373,6 +566,21 @@ for (const row of rows) {
           results.push({...result, state: 'skipped_recovered', before});
           continue;
         }
+      }
+      if (row.ruleClass === 'all_store_sold_out_bootstrap_seed' && row.bootstrapRole === 'new_seed') {
+        const reservation = await reserveInventoryBootstrapLock(args.bootstrapLockFile, {
+          matchKey: bootstrapMatchKey,
+          canonical: row.canonical,
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          targetUsableInventory: approvedTarget,
+          policyVersion: policy.policyVersion,
+          planHash: plan.payloadHash,
+        }, {
+          expectedRegistryHash: executionBootstrapRegistryHash,
+        });
+        executionBootstrapRegistryHash = reservation.hash;
       }
       const warehouseCode = before.stockRowMissing
         ? await resolveMissingVirtualInventoryWarehouseCode(client)
@@ -415,9 +623,27 @@ for (const row of rows) {
         }
       }
       if (after.totalUsableInventory !== approvedTarget) throw new Error(`readback usable inventory ${after.totalUsableInventory} does not match target ${approvedTarget}`);
-      results.push({...result, state: 'updated_readback_matched', before, after, writes});
+      let bootstrapLock = null;
+      if (row.ruleClass === 'all_store_sold_out_bootstrap_seed') {
+        const activation = await activateInventoryBootstrapLock(args.bootstrapLockFile, {
+          matchKey: String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase(),
+          canonical: row.canonical,
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          targetUsableInventory: approvedTarget,
+          policyVersion: policy.policyVersion,
+          planHash: plan.payloadHash,
+        });
+        executionBootstrapRegistryHash = activation.hash;
+        bootstrapLock = activation.entry;
+      }
+        results.push({...result, state: 'updated_readback_matched', before, after, writes, bootstrapLock});
+      } finally {
+        await release();
+      }
     } finally {
-      await release();
+      await releaseBootstrapGroup();
     }
   } catch (error) {
     results.push({...result, state: 'blocked', error: error.message});
