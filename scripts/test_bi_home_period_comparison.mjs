@@ -41,6 +41,23 @@ assert.equal(context.periodDelta(1,-2,{profit:true}).label,'转盈');
 assert.equal(context.periodDelta(.264,.2,{kind:'rate'}).label,'↑ 6.4个百分点');
 assert.equal(context.periodDelta(3,null).label,'','missing previous value must not become zero');
 
+const presentation={M2:v=>Number(v).toLocaleString('zh-CN',{maximumFractionDigits:2}),H:v=>String(v??''),periodDelta:context.periodDelta};
+vm.createContext(presentation);
+vm.runInContext([lineFunction('periodCompareLine'),lineFunction('rankMovement'),lineFunction('rankPeriodComparison'),'this.periodCompareLine=periodCompareLine;this.rankMovement=rankMovement;this.rankPeriodComparison=rankPeriodComparison;'].join('\n'),presentation);
+const rmbComparison=presentation.periodCompareLine(120,100,{unit:'RMB',showDelta:false});
+assert.match(rmbComparison,/前期 100 RMB/);
+assert.doesNotMatch(rmbComparison,/↑|↓|新增|持平/,'RMB conversion must not duplicate the SAR delta badge');
+assert.deepEqual({...presentation.rankMovement(1,3,true)},{label:'↑2位',tone:'up'});
+assert.deepEqual({...presentation.rankMovement(4,2,true)},{label:'↓2位',tone:'down'});
+assert.deepEqual({...presentation.rankMovement(2,2,true)},{label:'持平',tone:'flat'});
+assert.deepEqual({...presentation.rankMovement(1,null,true)},{label:'新上榜',tone:'new'});
+assert.deepEqual({...presentation.rankMovement(1,null,false)},{label:'',tone:'flat'});
+assert.match(presentation.rankPeriodComparison({key:'A',value:120},1,new Map(),{periodCompare:true,previousAvailable:false}),/前期 —/);
+assert.doesNotMatch(presentation.rankPeriodComparison({key:'A',value:120},1,new Map(),{periodCompare:true,previousAvailable:false}),/新上榜/,'unavailable previous data must not become a new-entry claim');
+assert.match(presentation.rankPeriodComparison({key:'A',value:120},1,new Map(),{periodCompare:true,previousAvailable:true}),/新上榜/);
+assert.match(presentation.rankPeriodComparison({key:'A',value:120},1,new Map([['A',{key:'A',value:100,rank:3}]]),{periodCompare:true,previousAvailable:true,previousValueFormatter:v=>v+' SAR'}),/前期 #3 · 100 SAR/);
+assert.match(presentation.rankPeriodComparison({key:'A',value:120},1,new Map([['A',{key:'A',value:100,rank:3}]]),{periodCompare:true,previousAvailable:true,previousValueFormatter:v=>v+' SAR'}),/↑2位/);
+
 const aggregate={
   S:{q:'',scope:'ALL'},D:{liveSalesToday:{date:'2026-08-11',items:[{}]},rankings:{}},
   A:v=>Array.isArray(v)?v:[],ISO:v=>String(v||'').slice(0,10),
@@ -111,13 +128,25 @@ assert.match(client,/前期暂无可核验快照/);
 assert.match(client,/不会拿当前库存倒推/);
 assert.match(client,/previous==null\?'—'/,'missing comparison must render an em dash');
 
-for(const name of ['homeRankList','storeRanks','storeQtyRanks','productRanks','productQtyRanks']){
-  const source=lineFunction(name);
-  assert.doesNotMatch(source,/periodCompare|previousPeriod|previousRank/,`${name} must remain comparison-free until ranking design is approved`);
-}
+assert.match(lineFunction('periodCompareLine'),/showDelta===false/);
+assert.equal((client.match(/unit:'RMB'[^}]*showDelta:false/g)||[]).length,8,'all eight SAR-derived RMB comparison cells must suppress duplicate delta badges');
+assert.match(lineFunction('homeRankList'),/rankPeriodComparison/);
+assert.match(lineFunction('homeRankList'),/opt\.periodCompare\?'period-rank-list':''/,'only approved homepage ranking calls should receive the larger comparison layout');
+assert.match(lineFunction('homeRankList'),/Math\.abs\(N\(it\.value\)\)\/max\*100/,'ranking bar length must remain based on current value only');
+assert.doesNotMatch(lineFunction('homeRankList'),/previous\.value\)\/max/,'previous values must not change the current bar scale');
+assert.match(lineFunction('home'),/previousStoreSales/);
+assert.match(lineFunction('home'),/previousStoreQty/);
+assert.match(lineFunction('home'),/previousProductSales/);
+assert.match(lineFunction('home'),/previousProductQty/);
+assert.match(lineFunction('home'),/本期 \$\{ctx\.currentText\} · 前期 \$\{ctx\.previousText\}/);
+assert.match(lineFunction('storeRanks'),/storeRanksFromRows\(sales\(\)\)/,'current store ranking must keep the existing selected-range source');
+assert.match(lineFunction('productRanks'),/productRanksFromRows\(psales\(\)\)/,'current product ranking must keep the existing selected-range source');
 
 assert.match(styles,/\.period-compare\{/);
 assert.match(styles,/\.period-delta\.up/);
+assert.match(styles,/\.rank-period-compare\{/);
+assert.match(styles,/\.rank-movement\.new/);
+assert.match(styles,/\.period-rank-list \.rank-item\{/);
 assert.match(styles,/@media\(max-width:1180px\)/);
 assert.match(styles,/@media\(max-width:820px\)/);
 assert.match(styles,/@media\(max-width:720px\)/,'390px layout must use the <=720px rules');
