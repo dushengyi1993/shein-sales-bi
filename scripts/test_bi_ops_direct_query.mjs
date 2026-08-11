@@ -18,8 +18,15 @@ assert.deepEqual(
 const todayPlan = planBiOpsDirectQuerySections('今天全部店铺销售额和订单数是多少');
 assert.deepEqual(
   todayPlan.sections,
-  ['rankings', 'liveSalesToday'],
-  'today sales must include complete rankings and the live event-backed section',
+  ['homeRankings', 'liveSalesToday'],
+  'today sales must use the warmed compact baseline and the live event-backed section',
+);
+
+const periodPlan = planBiOpsDirectQuerySections('本月全部店铺销售排行和趋势');
+assert.deepEqual(
+  periodPlan.sections,
+  ['rankings'],
+  'period and trend requests must retain the complete rankings section',
 );
 
 assert.throws(
