@@ -86,6 +86,10 @@ const tests = [
   'scripts/test_partner_cli_portal_release.mjs',
   'scripts/test_partner_cli_release_pipeline.mjs',
   'scripts/test_link_ops_publish_asset_binding.mjs',
+  'scripts/test_link_ops_product_descriptions.mjs',
+  'scripts/test_link_ops_description_material_extract.mjs',
+  'scripts/test_link_ops_extract_sk11004.mjs',
+  'scripts/test_link_ops_prepare_descriptions_flow.mjs',
   'scripts/test_link_ops_executor_copy_batch_features.mjs',
   'scripts/test_link_ops_image_role_planner.mjs',
   'scripts/test_link_retire_candidate_policy.mjs',
@@ -172,10 +176,16 @@ const tests = [
 const failures = [];
 for (const file of tests) {
   const startedAt = Date.now();
+  // This integration test intentionally starts an isolated portal plus fake
+  // OpenAPI and exercises the complete bind/dry-run/execute/readback matrix.
+  // Keep the default fail-fast budget for every other deterministic test.
+  const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
+    ? 120_000
+    : 30_000;
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),
     encoding: 'utf8',
-    timeout: 30_000,
+    timeout,
     maxBuffer: 32 * 1024 * 1024,
   });
   const durationMs = Date.now() - startedAt;

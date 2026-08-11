@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "version": "2026.08.06.3",
+  "version": "2026.08.11.1",
   "entrypoint": "scripts/bi_ops_cli.mjs",
   "bootstrap": "scripts/partner_cli_bootstrap.mjs",
   "codexSkill": "codex/skills/shein-bi-ops/SKILL.md",
@@ -16,6 +16,8 @@
     "lib/partner_cli_updater.mjs",
     "lib/link_ops_image_role_planner.mjs",
     "lib/link_ops_duplicate_publish_override.mjs",
+    "lib/link_ops_product_descriptions.mjs",
+    "lib/link_ops_description_material_extract.mjs",
     "lib/shein_product_identifiers.mjs",
     "lib/owner_knowledge_distribution.mjs",
     "lib/owner_knowledge_policy.mjs",

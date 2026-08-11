@@ -79,6 +79,20 @@ if (!cliText.includes("--sku-code') args.skuCodeList.push(...splitListPreserveCa
   || !cliText.includes("--supplier-sku') args.supplierSkuList.push(...splitListPreserveCase")) {
   throw new Error('partner CLI must preserve case-sensitive SKU and supplier SKU values');
 }
+for (const requiredModule of [
+  'lib/link_ops_product_descriptions.mjs',
+  'lib/link_ops_description_material_extract.mjs',
+]) {
+  if (!manifest.files.includes(requiredModule)) {
+    throw new Error(`partner package must include ${requiredModule}`);
+  }
+  const moduleText = await fs.readFile(path.join(ROOT, requiredModule), 'utf8');
+  if (moduleText.includes('\r')) throw new Error(`${requiredModule} must use LF line endings`);
+}
+if (!cliText.includes("from '../lib/link_ops_product_descriptions.mjs'")
+  || !cliText.includes("from '../lib/link_ops_description_material_extract.mjs'")) {
+  throw new Error('partner CLI imports of description modules are missing from the packaged CLI');
+}
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'partner-cli-package-'));
 try {

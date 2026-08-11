@@ -83,6 +83,18 @@ import {
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {buildPendingListingImageCorrection} from '../lib/link_ops_pending_listing_image_correction.mjs';
 import {
+  buildDescriptionPayloadRows,
+  descriptionBindingRequestKey,
+  describeDescriptionMaterial,
+  sha256StableJson,
+  validateDescriptionMaterialJson,
+  validateDescriptionBindingLock,
+  DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+  DESCRIPTION_PUBLISH_LANGUAGES,
+  DESCRIPTION_SOURCE_PROOF,
+} from '../lib/link_ops_product_descriptions.mjs';
+import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
+import {
   ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT,
   normalizeAdditionalDuplicatePublishOverrideInput,
 } from '../lib/link_ops_duplicate_publish_override.mjs';
@@ -2503,6 +2515,16 @@ async function appendAudit(file, entry) {
   await fs.appendFile(file, JSON.stringify(entry) + '\n', 'utf8');
 }
 
+async function appendDescriptionBindingAudit(file, entry) {
+  const failureMarker = String(process.env.SHEIN_BI_TEST_DESCRIPTION_AUDIT_FAIL_FILE || '');
+  if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+    const error = new Error('injected description binding audit failure');
+    error.code = 'DESCRIPTION_AUDIT_INJECTED_FAILURE';
+    throw error;
+  }
+  return appendAudit(file, entry);
+}
+
 function compactLinkOpsAuditEntry(entry) {
   const task = entry?.task && typeof entry.task === 'object' ? entry.task : {};
   const writeAudit = task.writeAudit && typeof task.writeAudit === 'object' ? task.writeAudit : null;
@@ -3634,14 +3656,69 @@ function projectLinkOpsPublishResultForClient(publishResult) {
 
 function projectLinkOpsProductExecutorForClient(executor) {
   if (!executor || typeof executor !== 'object') return null;
-  const publishResult = executor.publishResult || executor.result?.publishResult || null;
+  const result = executor.result && typeof executor.result === 'object' ? executor.result : executor;
+  const publishResult = result.publishResult || executor.publishResult || null;
+  const payload = result.payload && typeof result.payload === 'object' ? result.payload : {};
+  const summary = payload.summary && typeof payload.summary === 'object' ? payload.summary : {};
+  const readback = result.readback && typeof result.readback === 'object' ? result.readback : null;
+  const descriptionReadback = readback?.descriptionReadback && typeof readback.descriptionReadback === 'object'
+    ? readback.descriptionReadback
+    : null;
+  const safeSha256 = value => {
+    const hash = String(value || '').toLowerCase();
+    return /^[a-f0-9]{64}$/.test(hash) ? hash : '';
+  };
+  const safeDescriptionLanguages = new Set(['ar', 'en']);
   return {
-    storeKey: String(executor.storeKey || executor.result?.storeKey || '').toUpperCase(),
-    sourceStore: String(executor.sourceStore || executor.result?.sourceStore || '').toUpperCase(),
-    sourceSkc: sanitizeLinkOpsClientText(executor.sourceSkc || executor.result?.sourceSkc || '', 120),
-    mode: projectLinkOpsClientMode(executor.mode || executor.result?.mode || ''),
-    state: String(executor.state || executor.status || executor.result?.state || ''),
-    status: String(executor.status || executor.result?.status || ''),
+    storeKey: String(result.storeKey || executor.storeKey || '').toUpperCase(),
+    sourceStore: String(result.sourceStore || executor.sourceStore || '').toUpperCase(),
+    sourceSkc: sanitizeLinkOpsClientText(result.sourceSkc || executor.sourceSkc || '', 120),
+    mode: projectLinkOpsClientMode(result.mode || executor.mode || ''),
+    state: String(result.state || executor.state || executor.status || ''),
+    status: String(result.status || executor.status || ''),
+    payload: {
+      found: Boolean(payload.found || payload.payloadHash),
+      payloadHash: safeSha256(payload.payloadHash),
+      payloadHashAlgorithm: sanitizeLinkOpsClientText(payload.payloadHashAlgorithm || '', 60),
+      summary: {
+        descriptionCount: Number(summary.descriptionCount ?? 0) || 0,
+        descriptionLanguages: asArray(summary.descriptionLanguages)
+          .map(x => String(x).toLowerCase())
+          .filter(language => safeDescriptionLanguages.has(language))
+          .slice(0, 2),
+        descriptionLineCounts: summary.descriptionLineCounts && typeof summary.descriptionLineCounts === 'object'
+          ? Object.fromEntries(Object.entries(summary.descriptionLineCounts)
+              .filter(([key]) => safeDescriptionLanguages.has(String(key).toLowerCase()))
+              .map(([key, value]) => [String(key).toLowerCase(), Number(value) || 0]))
+          : {},
+        descriptionHashes: summary.descriptionHashes && typeof summary.descriptionHashes === 'object'
+          ? Object.fromEntries(Object.entries(summary.descriptionHashes)
+              .filter(([key]) => safeDescriptionLanguages.has(String(key).toLowerCase()))
+              .map(([key, value]) => [String(key).toLowerCase(), safeSha256(value)]))
+          : {},
+        descriptionBindingLocked: Boolean(summary.descriptionBindingLocked),
+      },
+    },
+    readback: readback ? {
+      ok: Boolean(readback.ok),
+      status: sanitizeLinkOpsClientText(readback.status || '', 120),
+      descriptionReadback: descriptionReadback ? {
+        ok: Boolean(descriptionReadback.ok),
+        status: sanitizeLinkOpsClientText(descriptionReadback.status || '', 120),
+        summary: descriptionReadback.summary && typeof descriptionReadback.summary === 'object'
+          ? Object.fromEntries(Object.entries(descriptionReadback.summary)
+            .filter(([language]) => safeDescriptionLanguages.has(String(language).toLowerCase()))
+            .map(([language, entry]) => [
+            String(language).toLowerCase(),
+            {
+              count: Number(entry?.count ?? 0) || 0,
+              lineCounts: asArray(entry?.lineCounts).map(value => Number(value) || 0),
+              hashes: asArray(entry?.hashes).map(safeSha256),
+            },
+          ]))
+          : {},
+      } : null,
+    } : null,
     publishResult: projectLinkOpsPublishResultForClient(publishResult),
   };
 }
@@ -3833,6 +3910,9 @@ function projectLinkOpsTaskForClient(task) {
   const intents = asArray(task?.intents).map(x => String(x || '').trim()).filter(Boolean).slice(0, 12);
   return {
     id: String(task?.id || ''),
+    repositoryRevision: Number.isSafeInteger(Number(task?.repositoryRevision)) && Number(task.repositoryRevision) > 0
+      ? Number(task.repositoryRevision)
+      : null,
     title: sanitizeLinkOpsClientText(task?.title || '', 160),
     status: String(task?.status || ''),
     progress: normalizeProgress(task?.progress, 0),
@@ -3849,6 +3929,9 @@ function projectLinkOpsTaskForClient(task) {
     planning: projectLinkOpsPlanningForClient(task?.planning),
     preflight,
     execution,
+    descriptionMaterialBinding: task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
+      ? projectDescriptionBindingCommit(task)
+      : null,
     assets: asArray(task?.assets).map(projectLinkOpsAssetForClient).slice(0, 30),
   };
 }
@@ -4329,13 +4412,17 @@ function assetKindForMime(mime) {
 
 function buildAssetRecord({taskId = '', sessionId = '', file, buffer, storedPath, actor, req}) {
   const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  const mime = String(file.type || '').toLowerCase().trim();
+  const approvedPublishPayload = mime === 'application/json'
+    && file?.sourceApproved === true
+    && String(file?.approvalKind || '') === 'human_reviewed_publish_payload';
   return {
     id: `loa_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
     taskId,
     sessionId,
     originalName: String(file.name || 'asset').slice(0, 180),
-    mime: String(file.type || '').toLowerCase().trim(),
-    kind: assetKindForMime(String(file.type || '').toLowerCase().trim()),
+    mime,
+    kind: assetKindForMime(mime),
     bytes: buffer.length,
     sha256,
     storedName: path.basename(storedPath),
@@ -4343,6 +4430,10 @@ function buildAssetRecord({taskId = '', sessionId = '', file, buffer, storedPath
     uploadedAt: new Date().toISOString(),
     uploadedBy: actorLabel(actor, req),
     uploadedByUser: actorUser(actor, req),
+    sourceApproved: approvedPublishPayload,
+    approvalKind: approvedPublishPayload ? 'human_reviewed_publish_payload' : '',
+    approvedAt: approvedPublishPayload ? new Date().toISOString() : '',
+    approvedByUser: approvedPublishPayload ? actorUser(actor, req) : '',
   };
 }
 
@@ -5950,6 +6041,513 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     },
     stderrTail: String(result.stderr || '').slice(-1200),
   };
+}
+
+/**
+ * Clone of the publish payload without the description field, used to prove
+ * that description binding changes exactly one field.
+ */
+function stripPublishDescriptionField(payload) {
+  const next = JSON.parse(JSON.stringify(payload || {}));
+  delete next.multi_language_desc_list;
+  return next;
+}
+
+const DESCRIPTION_SOURCE_MAX_BYTES = 1_500_000;
+
+function decodeReviewedDescriptionSourceFile(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('必须上传实际审核 HTML 字节，不能只提交自报 material/hash');
+  }
+  const keys = Object.keys(value).sort();
+  if (keys.join(',') !== 'dataBase64,name') {
+    throw new Error('sourceFile 必须严格只含 name/dataBase64');
+  }
+  const name = String(value.name || '').trim();
+  if (!name || path.basename(name) !== name || name.includes('/') || name.includes('\\') || !/\.html?$/i.test(name)) {
+    throw new Error('sourceFile.name 必须是 HTML 文件 basename');
+  }
+  const raw = String(value.dataBase64 || '');
+  if (!raw || raw.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw)) {
+    throw new Error('sourceFile.dataBase64 不是严格 base64');
+  }
+  const bytes = Buffer.from(raw, 'base64');
+  if (!bytes.length || bytes.length > DESCRIPTION_SOURCE_MAX_BYTES || bytes.toString('base64') !== raw) {
+    throw new Error(`审核 HTML 字节大小必须在 1-${DESCRIPTION_SOURCE_MAX_BYTES} bytes 且 base64 可逆`);
+  }
+  let htmlText;
+  try {
+    htmlText = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+  } catch {
+    throw new Error('审核 HTML 必须是有效 UTF-8');
+  }
+  return {name, bytes, htmlText};
+}
+
+function descriptionBindingWriteEvidence(task) {
+  const reasons = [];
+  const submittedStates = new Set([
+    'submitted',
+    'submitted_but_readback_pending',
+    'submitted_readback_failed',
+    'submitted_readback_matched',
+    'suspicious_write_attempted',
+    'needs_manual_resolve',
+    'publish_pre_valid_failed',
+  ]);
+  const add = reason => {
+    if (reason && !reasons.includes(reason)) reasons.push(reason);
+  };
+  const inspectRun = (run, label, depth = 0) => {
+    if (depth > 6) return;
+    const value = run?.result && typeof run.result === 'object' ? run.result : run;
+    if (!value || typeof value !== 'object') return;
+    for (const field of ['actualWriteSubmitted', 'sheinWriteAttempted', 'issuedExecuteToExecutor', 'submittedPossibly', 'suspiciousWriteAttempted']) {
+      if (value[field] === true) add(`${label}.${field}`);
+    }
+    if (value.publishResult && typeof value.publishResult === 'object') add(`${label}.publishResult`);
+    for (const field of ['state', 'status', 'finalState', 'lifecycleStatus']) {
+      const state = String(value[field] || '').trim();
+      if (submittedStates.has(state)) add(`${label}.${field}=${state}`);
+    }
+    if (asArray(value.openapiCalls).some(call => String(call?.name || '').toLowerCase() === 'publishoredit'
+      || String(call?.path || '').includes('/goods/product/publishOrEdit'))) {
+      add(`${label}.publishOrEditCall`);
+    }
+    for (const nestedKey of ['writeAudit', 'execution', 'lifecycle']) {
+      if (value[nestedKey] && typeof value[nestedKey] === 'object') inspectRun(value[nestedKey], `${label}.${nestedKey}`, depth + 1);
+    }
+    for (const [index, entry] of asArray(value.executorEvidence).entries()) inspectRun(entry, `${label}.executorEvidence[${index}]`, depth + 1);
+  };
+  const execution = task?.execution && typeof task.execution === 'object' ? task.execution : {};
+  const writeAudit = execution.writeAudit && typeof execution.writeAudit === 'object' ? execution.writeAudit : {};
+  const topLevelWriteAudit = task?.writeAudit && typeof task.writeAudit === 'object' ? task.writeAudit : {};
+  for (const [label, value] of [['execution', execution], ['writeAudit', writeAudit], ['task.writeAudit', topLevelWriteAudit]]) {
+    for (const field of ['actualWriteSubmitted', 'sheinWriteAttempted', 'issuedExecuteToExecutor', 'submittedPossibly', 'suspiciousWriteAttempted', 'submitted']) {
+      if (value[field] === true) add(`${label}.${field}`);
+    }
+  }
+  if (task?.lifecycle?.locked === true || task?.lifecycle?.needsManualResolve === true || task?.lifecycle?.manualResolution) {
+    add('lifecycle.locked_or_resolved');
+  }
+  inspectRun(execution.hlOpenApiExecutor, 'execution.hlOpenApiExecutor');
+  for (const [index, run] of asArray(execution.openApiProductExecutors).entries()) inspectRun(run, `execution.openApiProductExecutors[${index}]`);
+  for (const [index, run] of asArray(writeAudit.executorEvidence).entries()) inspectRun(run, `writeAudit.executorEvidence[${index}]`);
+  inspectRun(topLevelWriteAudit, 'task.writeAudit');
+  for (const [index, entry] of asArray(task?.executionHistory).entries()) inspectRun(entry, `executionHistory[${index}]`);
+  for (const [index, entry] of asArray(task?.history).entries()) inspectRun(entry, `history[${index}]`);
+  inspectRun(task, 'task');
+  return {ok: reasons.length === 0, reasons};
+}
+
+async function descriptionBindingHistoricalAuditEvidence(file, taskId) {
+  let text;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (error) {
+    return {ok: false, unavailable: true, reasons: ['historical_audit_unavailable'], errorCode: error?.code || ''};
+  }
+  const id = String(taskId || '');
+  const reasons = [];
+  // Never truncate the append-only audit when deciding whether a task may be
+  // reset for description binding. A sufficiently old publish attempt is
+  // still production evidence; dropping it behind a fixed tail window could
+  // turn a historical write into an apparently clean task.
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  for (const [lineIndex, line] of lines.entries()) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      return {
+        ok: false,
+        unavailable: true,
+        reasons: ['historical_audit_malformed'],
+        errorCode: 'AUDIT_JSONL_MALFORMED',
+        malformedLine: lineIndex + 1,
+      };
+    }
+    const entryTaskId = String(
+      entry?.task?.id
+      || entry?.taskId
+      || entry?.execution?.taskId
+      || entry?.writeAudit?.taskId
+      || entry?.task?.writeAudit?.taskId
+      || '',
+    );
+    if (!id || entryTaskId !== id) continue;
+    for (const [label, value] of [['entry', entry], ['task', entry?.task || {}]]) {
+      const evidence = descriptionBindingWriteEvidence(value);
+      for (const reason of evidence.reasons) {
+        const tagged = `audit.${label}.${reason}`;
+        if (!reasons.includes(tagged)) reasons.push(tagged);
+      }
+    }
+  }
+  return {ok: reasons.length === 0, unavailable: false, reasons};
+}
+
+/**
+ * Canonical fingerprint of every image-bearing part of the publish payload.
+ * Description binding must leave it byte-identical.
+ */
+function publishImageStructureFingerprint(payload) {
+  const skcList = Array.isArray(payload?.skc_list) ? payload.skc_list : [];
+  return JSON.stringify({
+    is_spu_pic: payload?.is_spu_pic ?? null,
+    image_info: payload?.image_info ?? null,
+    skc_list: skcList.map(skc => ({
+      skc_name: skc?.skc_name ?? null,
+      image_info: skc?.image_info ?? null,
+      site_detail_image_info_list: skc?.site_detail_image_info_list ?? null,
+      sku_list: Array.isArray(skc?.sku_list)
+        ? skc.sku_list.map(sku => ({sku_code: sku?.sku_code ?? null, image_info: sku?.image_info ?? null}))
+        : [],
+    })),
+  });
+}
+
+/**
+ * Binds the strictly validated 审核资料 三语核心卖点 material to the same
+ * unsubmitted copy_product_draft task. Only multi_language_desc_list changes;
+ * image structure and every other payload field stay byte-identical. The old
+ * execution/preflight/payload hash is invalidated and the task returns to
+ * needs_repreflight. Persisted binding/audit records carry hashes only.
+ */
+function bindApprovedDescriptionMaterialToTask(task, targetStore, material, actor, req, {
+  sourceByteLength,
+  baseTaskRevision,
+  bindingRequestKey,
+} = {}) {
+  if (!task || typeof task !== 'object') throw new Error('Task not found');
+  if (taskRequiresOwnerLifecycleResolve(task)) {
+    const error = new Error('该任务已进入提交后待回读/人工处理状态，不能绑定描述素材');
+    error.status = 409;
+    throw error;
+  }
+  const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
+  if (!intents.includes('copy_product_draft')) {
+    const error = new Error('审核资料描述绑定只支持 copy_product_draft 任务');
+    error.status = 409;
+    throw error;
+  }
+  const maintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent));
+  if (maintenanceIntents.length) {
+    const error = new Error(`描述绑定任务不能混入其他维护写动作：${maintenanceIntents.join(', ')}`);
+    error.status = 409;
+    throw error;
+  }
+  if (['done', 'archived'].includes(String(task?.status || ''))) {
+    const error = new Error(`任务状态 ${task.status} 已终结，不能绑定描述素材`);
+    error.status = 409;
+    throw error;
+  }
+  const priorWriteEvidence = descriptionBindingWriteEvidence(task);
+  if (!priorWriteEvidence.ok) {
+    const error = new Error(`任务已有真实写入/提交不确定性证据，禁止绑定描述或重置执行状态：${priorWriteEvidence.reasons.join(', ')}`);
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE';
+    throw error;
+  }
+  const writeStores = taskWriteStores(task);
+  if (writeStores.length !== 1 || writeStores[0] !== targetStore) {
+    const error = new Error(`目标店铺 ${targetStore} 不是该任务的唯一写入店（当前 ${writeStores.join('/') || '(empty)'}）`);
+    error.status = 409;
+    throw error;
+  }
+  const denied = requireWriteStores(actor, [targetStore]);
+  if (denied) {
+    const error = new Error(denied.error || '当前账号没有目标店铺写权限');
+    error.status = 403;
+    error.response = denied;
+    throw error;
+  }
+  const originalPayload = task.openapiPublishPayload;
+  if (!originalPayload || typeof originalPayload !== 'object' || Array.isArray(originalPayload)) {
+    const error = new Error('任务没有可绑定描述的 openapiPublishPayload');
+    error.status = 409;
+    throw error;
+  }
+  for (const field of ['multiLanguageDescList', 'productMultiDescList', 'product_multi_desc_list']) {
+    if (Object.prototype.hasOwnProperty.call(originalPayload, field)) {
+      const error = new Error(`任务 payload 含禁止的描述别名字段 ${field}；请先重建受控 payload`);
+      error.status = 409;
+      throw error;
+    }
+  }
+  if (!Number.isSafeInteger(Number(baseTaskRevision)) || Number(baseTaskRevision) <= 0) {
+    const error = new Error('描述绑定缺少正整数 baseTaskRevision，不能执行 CAS');
+    error.status = 409;
+    throw error;
+  }
+  if (!Number.isSafeInteger(Number(sourceByteLength)) || Number(sourceByteLength) <= 0) {
+    const error = new Error('描述绑定缺少审核 HTML 字节长度证明');
+    error.status = 400;
+    throw error;
+  }
+  const hashBefore = linkOpsPayloadHash(stripPublishDescriptionField(originalPayload));
+  const imageFingerprintBefore = publishImageStructureFingerprint(originalPayload);
+  const boundPayload = JSON.parse(JSON.stringify(originalPayload));
+  boundPayload.multi_language_desc_list = buildDescriptionPayloadRows(material);
+  delete boundPayload.multiLanguageDescList;
+  const hashWithoutDescAfter = linkOpsPayloadHash(stripPublishDescriptionField(boundPayload));
+  if (hashWithoutDescAfter !== hashBefore) {
+    const error = new Error('描述绑定不得改动发布 payload 的其他任何字段');
+    error.status = 409;
+    throw error;
+  }
+  const imageFingerprintAfter = publishImageStructureFingerprint(boundPayload);
+  if (imageFingerprintAfter !== imageFingerprintBefore) {
+    const error = new Error('描述绑定不得改动任何图片结构');
+    error.status = 409;
+    throw error;
+  }
+  const imageBindingFingerprint = String(task?.publishAssetBinding?.bindingFingerprint || '');
+  const now = new Date().toISOString();
+  const summary = describeDescriptionMaterial(material);
+  const newPayloadHash = sha256StableJson(boundPayload);
+  if (newPayloadHash !== linkOpsPayloadHash(boundPayload)) {
+    throw new Error('描述绑定 payload hash 算法与 link-ops canonical hash 不一致');
+  }
+  const resetNote = '审核资料三语核心卖点描述已绑定（ar/en 各5行，zh-cn 仅材料审计）；旧预演/提交锁全部作废，必须重新预演后才能提交。';
+  const nextTask = {
+    ...task,
+    openapiPublishPayload: boundPayload,
+    preflight: {
+      ok: false,
+      blockers: ['审核资料三语核心卖点描述已绑定到同一 copy_product_draft 任务，需要基于新 payload 重新预演。'],
+      warnings: [],
+    },
+    lifecycle: {
+      lifecycleStatus: 'needs_repreflight',
+      status: 'needs_repreflight',
+      locked: false,
+      terminal: false,
+      needsManualResolve: false,
+    },
+    descriptionMaterialBinding: {
+      schemaVersion: 1,
+      kind: 'copy_product_draft',
+      sourceApproved: true,
+      authority: 'human_reviewed_source',
+      sourceProof: DESCRIPTION_SOURCE_PROOF,
+      targetStore,
+      boundAt: now,
+      boundByUser: actorUser(actor, req),
+      baseTaskRevision: Number(baseTaskRevision),
+      bindingRequestKey,
+      sourceLabel: material.sourceLabel,
+      sourceByteLength: Number(sourceByteLength),
+      sourceFileSha256: material.sourceFileSha256,
+      contentSha256: summary.contentSha256,
+      publishLanguages: [...DESCRIPTION_PUBLISH_LANGUAGES],
+      lineCounts: summary.lineCounts,
+      hashes: summary.hashes,
+      newPayloadHash,
+      payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+      imageBindingFingerprint,
+    },
+    execution: {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      state: 'needs_repreflight',
+      canAutoSubmit: false,
+      canSilentWrite: false,
+      autoConfirmed: false,
+      confirmTextPresent: false,
+      executeAllowed: false,
+      requestedRealSubmit: false,
+      issuedExecuteToExecutor: false,
+      sheinWriteAttempted: false,
+      actualWriteSubmitted: false,
+      realSubmitBoundary: '描述绑定已作废旧预演与提交锁；必须重新 dry-run 锁定新 payload hash 后才能执行。',
+      openApiProductExecutors: [],
+      linkMaintenanceExecutors: [],
+      linkMaintenancePrechecks: [],
+      hlOpenApiExecutor: null,
+      preflight: {
+        ok: false,
+        blockers: ['审核资料三语核心卖点描述已绑定到同一 copy_product_draft 任务，需要基于新 payload 重新预演。'],
+        warnings: [],
+      },
+      writeAudit: {
+        ...(task.execution?.writeAudit && typeof task.execution.writeAudit === 'object' ? task.execution.writeAudit : {}),
+        requestedMode: 'dry-run',
+        submitted: false,
+        actualWriteSubmitted: false,
+        sheinWriteAttempted: false,
+        issuedExecuteToExecutor: false,
+        executeAllowed: false,
+        requestedRealSubmit: false,
+        invalidatedByDescriptionBindingAt: now,
+        invalidatedByDescriptionBinding: true,
+      },
+    },
+    note: String(task?.note || '').trim()
+      ? `${String(task.note).trim()}；${resetNote}`
+      : resetNote,
+    updatedAt: now,
+  };
+  nextTask.history = appendTaskHistory(nextTask, 'approved_description_material_bound', actor, req, {
+    targetStore,
+    sourceLabel: material.sourceLabel,
+    sourceFileSha256: material.sourceFileSha256,
+    contentSha256: summary.contentSha256,
+    publishLanguages: summary.publishLanguages,
+    lineCounts: summary.lineCounts,
+    hashes: summary.hashes,
+    newPayloadHash,
+    payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+    sourceProof: DESCRIPTION_SOURCE_PROOF,
+    sourceByteLength: Number(sourceByteLength),
+    baseTaskRevision: Number(baseTaskRevision),
+    bindingRequestKey,
+    imageBindingFingerprint,
+    preflightReset: true,
+    lifecycleReset: true,
+    writeAuditReset: true,
+    oldPayloadHashInvalidated: true,
+  });
+  const bindingGate = validateDescriptionBindingLock(nextTask, boundPayload);
+  if (!bindingGate.ok) {
+    const error = new Error(`描述绑定生成结果未通过最终锁校验：${bindingGate.blockers.join('；')}`);
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_LOCK_INVALID';
+    throw error;
+  }
+  return {
+    task: nextTask,
+    binding: {
+      targetStore,
+      payloadSource: 'task',
+      sourceLabel: material.sourceLabel,
+      sourceFileSha256: material.sourceFileSha256,
+      contentSha256: summary.contentSha256,
+      publishLanguages: [...summary.publishLanguages],
+      lineCounts: {...summary.lineCounts},
+      hashes: {...summary.hashes},
+      newPayloadHash,
+      payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+      sourceProof: DESCRIPTION_SOURCE_PROOF,
+      sourceByteLength: Number(sourceByteLength),
+      baseTaskRevision: Number(baseTaskRevision),
+      bindingRequestKey,
+      preflightInvalidated: true,
+      imageBindingFingerprintUnchanged: true,
+    },
+  };
+}
+
+function projectDescriptionBindingCommit(task, {idempotentReplay = false} = {}) {
+  const binding = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
+    ? task.descriptionMaterialBinding
+    : {};
+  return {
+    targetStore: String(binding.targetStore || ''),
+    sourceLabel: String(binding.sourceLabel || ''),
+    sourceFileSha256: String(binding.sourceFileSha256 || ''),
+    sourceByteLength: Number(binding.sourceByteLength || 0),
+    sourceProof: String(binding.sourceProof || ''),
+    contentSha256: String(binding.contentSha256 || ''),
+    publishLanguages: asArray(binding.publishLanguages).map(String),
+    lineCounts: binding.lineCounts && typeof binding.lineCounts === 'object' ? {...binding.lineCounts} : {},
+    hashes: binding.hashes && typeof binding.hashes === 'object' ? {...binding.hashes} : {},
+    newPayloadHash: String(binding.newPayloadHash || ''),
+    payloadHashAlgorithm: String(binding.payloadHashAlgorithm || ''),
+    baseTaskRevision: Number(binding.baseTaskRevision || 0),
+    bindingRequestKey: String(binding.bindingRequestKey || ''),
+    preflightInvalidated: true,
+    imageBindingFingerprintUnchanged: true,
+    idempotentReplay,
+  };
+}
+
+async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetStore, actor, req) {
+  if (task?.openapiPublishPayload && typeof task.openapiPublishPayload === 'object' && !Array.isArray(task.openapiPublishPayload)) {
+    return {task, materialized: false};
+  }
+  const priorWriteEvidence = descriptionBindingWriteEvidence(task);
+  if (!priorWriteEvidence.ok) {
+    const error = new Error(`任务已有真实写入/提交不确定性证据，禁止物化发布 payload：${priorWriteEvidence.reasons.join(', ')}`);
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE';
+    throw error;
+  }
+  const captured = await runOpenApiProductExecutorForStore(
+    task,
+    args,
+    {mode: 'dry-run', source: 'description_binding_payload_materialization', actorForWriteGate: actor},
+    targetStore,
+    {capturePublishPayload: true},
+  );
+  const payload = captured?.capturedPublishPayload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    const error = new Error('无法从当前任务的受控 source snapshot/asset 物化发布 payload；请先补齐源店、源 SKC 或已审图片准备');
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_PAYLOAD_MATERIALIZATION_FAILED';
+    error.response = {
+      ok: false,
+      error: error.message,
+      code: error.code,
+      blockerCount: asArray(captured?.result?.blockers).length,
+      warningCount: asArray(captured?.result?.warnings).length,
+    };
+    throw error;
+  }
+  const payloadSource = String(captured?.result?.payload?.source || '');
+  const snapshotSource = ['webapi_snapshot', 'bi_portal_webapi_snapshot'].includes(payloadSource);
+  const payloadAssetId = String(captured?.result?.payload?.assetId || '');
+  const payloadAssetSha256 = String(captured?.result?.payload?.assetSha256 || '').toLowerCase();
+  const approvedPayloadAsset = payloadSource === 'asset_json'
+    ? asArray(task?.assets).find(asset => (
+        String(asset?.id || '') === payloadAssetId
+        && asset?.sourceApproved === true
+        && String(asset?.approvalKind || '') === 'human_reviewed_publish_payload'
+        && /^[a-f0-9]{64}$/i.test(String(asset?.sha256 || ''))
+        && String(asset?.sha256 || '').toLowerCase() === payloadAssetSha256
+      ))
+    : null;
+  if (!snapshotSource && !approvedPayloadAsset) {
+    const error = new Error(`物化 payload provenance 不受信任（source=${payloadSource || '(missing)'}）；只允许正式 source snapshot 或人工审核 JSON asset`);
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_PAYLOAD_PROVENANCE_REJECTED';
+    throw error;
+  }
+  const capturedHash = sha256StableJson(payload);
+  const executorHash = String(captured?.result?.payload?.payloadHash || '');
+  if (executorHash && capturedHash !== executorHash) {
+    const error = new Error('物化 payload hash 与受控 executor dry-run capture 不一致');
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_PAYLOAD_MATERIALIZATION_HASH_MISMATCH';
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const nextTask = {
+    ...task,
+    openapiPublishPayload: payload,
+    descriptionPayloadMaterialization: {
+      schemaVersion: 1,
+      source: 'openapi_executor_dry_run_capture',
+      payloadSource,
+      payloadAssetSha256: approvedPayloadAsset ? payloadAssetSha256 : '',
+      targetStore,
+      materializedAt: now,
+      payloadHash: capturedHash,
+      payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+      blockerCount: asArray(captured?.result?.blockers).length,
+      warningCount: asArray(captured?.result?.warnings).length,
+    },
+    updatedAt: now,
+  };
+  nextTask.history = appendTaskHistory(nextTask, 'description_payload_materialized', actor, req, {
+    targetStore,
+    payloadHash: capturedHash,
+    payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+    payloadSource,
+    payloadAssetSha256: approvedPayloadAsset ? payloadAssetSha256 : '',
+    blockerCount: asArray(captured?.result?.blockers).length,
+    warningCount: asArray(captured?.result?.warnings).length,
+  });
+  return {task: nextTask, materialized: true};
 }
 
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
@@ -10989,6 +11587,234 @@ async function main() {
             error: String(error?.message || error).slice(0, 500),
           });
           return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error)});
+        } finally {
+          linkOpsExecutionLocks.delete(lockId);
+        }
+      }
+      if (url.pathname === '/api/link-ops-prepare-descriptions') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const actorGate = requireConcreteOperatorActor(actor);
+        if (actorGate) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-descriptions-denied', actor, ...requestMeta(req), denied: actorGate});
+          return sendJson(res, 403, actorGate);
+        }
+        let body;
+        try {
+          body = await readBodyJson(req, 2 * 1024 * 1024);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        const taskRef = String(body.taskId || body.id || '').trim();
+        if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+        const targetStore = String(body.store || body.storeKey || '').trim().toUpperCase();
+        if (!targetStore) return sendJson(res, 400, {ok: false, error: 'Missing target store'});
+        if (body.sourceApproved !== true) {
+          return sendJson(res, 400, {ok: false, error: '必须明确 sourceApproved=true 才能绑定人工审核三语核心卖点描述素材'});
+        }
+        const allowedBodyKeys = ['expectedRevision', 'materialJson', 'sourceApproved', 'sourceFile', 'store', 'taskId'];
+        const unknownBodyKeys = Object.keys(body || {}).filter(key => !allowedBodyKeys.includes(key));
+        if (unknownBodyKeys.length) {
+          return sendJson(res, 400, {ok: false, error: `描述绑定请求包含不允许字段：${unknownBodyKeys.join('/')}`});
+        }
+        let material;
+        let reviewedSource;
+        try {
+          reviewedSource = decodeReviewedDescriptionSourceFile(body.sourceFile);
+          const verified = verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
+            material: body.materialJson || null,
+            sourceFileBasename: reviewedSource.name,
+            sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
+          });
+          material = validateDescriptionMaterialJson(verified.material);
+        } catch (error) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: error?.message || String(error),
+            code: error?.code || 'DESCRIPTION_SOURCE_VERIFICATION_FAILED',
+          });
+        }
+        const materialSummary = describeDescriptionMaterial(material);
+        const expectedRevision = Number.isFinite(Number(body.expectedRevision)) && Number(body.expectedRevision) > 0
+          ? Math.trunc(Number(body.expectedRevision))
+          : null;
+        if (!expectedRevision) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: '描述绑定必须携带当前正整数 expectedRevision；请先精确读取任务后再绑定',
+            code: 'LINK_OPS_REVISION_REQUIRED',
+          });
+        }
+        let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+        let found;
+        try {
+          found = findLinkOpsTaskOrThrow(current, taskRef);
+        } catch (error) {
+          const message = error?.message || String(error);
+          return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+        }
+        const access = authorizeLinkOpsRecord(actor, found.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+        if (!access.ok) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-descriptions-denied', actor, ...requestMeta(req), task: {id: found.task.id}, denied: access.denied});
+          return sendJson(res, 403, access.denied);
+        }
+        const task = access.record;
+        const currentRevision = Number(task.repositoryRevision || 0);
+        const bindingRequestKey = descriptionBindingRequestKey({
+          taskId: taskRef,
+          targetStore,
+          baseTaskRevision: expectedRevision,
+          contentSha256: materialSummary.contentSha256,
+        });
+        if (!currentRevision || currentRevision !== expectedRevision) {
+          const existingBinding = task?.descriptionMaterialBinding;
+          const existingGate = validateDescriptionBindingLock(task, task?.openapiPublishPayload);
+          const idempotentReplay = existingBinding?.bindingRequestKey === bindingRequestKey
+            && existingBinding?.sourceFileSha256 === materialSummary.sourceFileSha256
+            && existingBinding?.contentSha256 === materialSummary.contentSha256
+            && existingGate.ok;
+          if (idempotentReplay) {
+            let auditPending = false;
+            try {
+              await appendDescriptionBindingAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-descriptions-idempotent-replay',
+                actor,
+                ...requestMeta(req),
+                task: {id: task.id, revision: currentRevision},
+                binding: projectDescriptionBindingCommit(task, {idempotentReplay: true}),
+              });
+            } catch {
+              auditPending = true;
+            }
+            return sendJson(res, 200, {
+              ok: !auditPending,
+              bindingCommitted: true,
+              repositoryEventCommitted: true,
+              readbackVerified: true,
+              auditPending,
+              stage: auditPending ? 'binding_committed_audit_pending' : 'binding_committed_verified',
+              task: projectLinkOpsTaskForClient(task),
+              binding: projectDescriptionBindingCommit(task, {idempotentReplay: true}),
+            });
+          }
+          try {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-descriptions-revision-conflict', actor, ...requestMeta(req), task: {id: found.task.id, revision: currentRevision, expectedRevision}});
+          } catch {}
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务 revision 已变化：期望 ${expectedRevision}，当前 ${currentRevision || '(unknown)'}；请重新读取任务后重试`,
+            code: 'LINK_OPS_REVISION_CONFLICT',
+            retryable: true,
+          });
+        }
+        const historicalAuditEvidence = await descriptionBindingHistoricalAuditEvidence(args.auditFile, taskRef);
+        if (historicalAuditEvidence.unavailable) {
+          return sendJson(res, 503, {
+            ok: false,
+            error: '任务历史审计当前不可读，无法证明从未尝试生产写；描述绑定已按失败关闭',
+            code: 'DESCRIPTION_BINDING_AUDIT_UNAVAILABLE',
+          });
+        }
+        if (!historicalAuditEvidence.ok) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务历史审计已有生产写入/提交不确定性证据，禁止绑定描述：${historicalAuditEvidence.reasons.join(', ')}`,
+            code: 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE',
+          });
+        }
+        const lockId = String(access.record.id || taskRef);
+        if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
+        linkOpsExecutionLocks.add(lockId);
+        try {
+          const materialized = await materializeDescriptionBindingPayloadIfNeeded(task, args, targetStore, actor, req);
+          const bound = bindApprovedDescriptionMaterialToTask(materialized.task, targetStore, material, actor, req, {
+            sourceByteLength: reviewedSource.bytes.length,
+            baseTaskRevision: currentRevision,
+            bindingRequestKey,
+          });
+          // Atomic single-task CAS: the write itself is conditional on the
+          // revision that was read above; a concurrent change between read and
+          // write throws LinkOpsRevisionConflictError (HTTP 409) instead of a
+          // whole-store stale overwrite.
+          if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+            const error = new Error('描述绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用');
+            error.status = 503;
+            error.code = 'DESCRIPTION_BINDING_GATEWAY_UNAVAILABLE';
+            throw error;
+          }
+          const persisted = await args.linkOpsStoreGateway.updateTaskRecord(taskRef, bound.task, {
+            expectedRevision: currentRevision,
+            actorUser: actorUser(actor, req),
+          });
+          let readbackTask = persisted;
+          let readbackVerified = false;
+          try {
+            const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
+            const verifyGate = validateDescriptionBindingLock(verifyFound.task, verifyFound.task?.openapiPublishPayload);
+            if (verifyFound.task?.descriptionMaterialBinding?.bindingRequestKey === bindingRequestKey
+              && Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)
+              && verifyGate.ok) {
+              readbackTask = verifyFound.task;
+              readbackVerified = true;
+            }
+          } catch {}
+          let auditPending = false;
+          try {
+            await appendDescriptionBindingAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-descriptions-bound',
+              actor,
+              ...requestMeta(req),
+              task: {id: persisted.id, revision: persisted.repositoryRevision, stores: taskTargetStores(persisted), writeStores: taskWriteStores(persisted)},
+              binding: projectDescriptionBindingCommit(persisted),
+            });
+          } catch {
+            auditPending = true;
+          }
+          return sendJson(res, 200, {
+            ok: readbackVerified && !auditPending,
+            bindingCommitted: true,
+            repositoryEventCommitted: true,
+            readbackVerified,
+            auditPending,
+            stage: !readbackVerified
+              ? 'binding_committed_readback_unverified'
+              : auditPending
+                ? 'binding_committed_audit_pending'
+                : 'binding_committed_verified',
+            task: projectLinkOpsTaskForClient(readbackTask),
+            binding: projectDescriptionBindingCommit(readbackTask),
+          });
+        } catch (error) {
+          const mapped = linkOpsRepositoryHttpDetails(error);
+          if (mapped) {
+            try {
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-descriptions-failed',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef},
+                error: String(error?.message || error).slice(0, 500),
+                code: error?.code || mapped.body?.code || '',
+              });
+            } catch {}
+            return sendJson(res, mapped.status, mapped.body);
+          }
+          try {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-descriptions-failed',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              error: String(error?.message || error).slice(0, 500),
+              code: error?.code || '',
+            });
+          } catch {}
+          return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error), code: error?.code || ''});
         } finally {
           linkOpsExecutionLocks.delete(lockId);
         }

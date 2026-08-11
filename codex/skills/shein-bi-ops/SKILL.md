@@ -101,6 +101,27 @@ Never upload images separately and then create a new shortened task. Keep one ta
 
 Pass `--title-ar` / `--title-en` and `--category-id` when those exact values are known. This command verifies local dimensions, uploads selected files, binds returned URLs and explicit fields to the **same task**, then reruns preflight. It does not perform final publish.
 
+For a copy_product_draft task whose reviewed 审核资料 contains a 三语核心卖点
+section (HTML with a unique `section#s09`), bind the verbatim ar/en 5-line
+descriptions to the **same task** instead of inventing or mapping text:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-descriptions --task-id <task-id> --store <target-store> --source-file '<reviewed-html-file>' [--material-json <optional-material.json>]
+```
+
+The command extracts EN/AR code lines and the Chinese displaybox lines from the
+unique `section#s09`, computes the source-file SHA256 from the actual bytes,
+uploads those actual HTML bytes to the controlled endpoint, and requires the
+server to independently recompute the file SHA and re-extract every line
+byte-for-byte. It binds fixed ar/en 5-line descriptions (zh-cn stays
+audit-only), invalidates the old preflight and reruns preflight. The binding is
+the final material mutation: complete reviewed image/publish preparation first.
+The command fresh-reads and CAS-locks the task repository revision; a committed
+binding whose audit/readback is pending is reported as that exact stage and is
+not blindly rebound.
+It never rewrites, translates or auto-maps descriptions. A copy_product_draft
+final publish payload without bound ar/en 5-line descriptions is a blocker.
+
 Before asking for final confirmation, verify the returned evidence includes:
 
 - the same task ID;
