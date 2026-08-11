@@ -20,6 +20,7 @@ import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {sha256Utf8} from '../lib/link_ops_product_descriptions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEEP_TEMP = process.argv.includes('--keep-temp');
@@ -137,6 +138,33 @@ const taskStandardGoodsSn = productCase.productRefs[0];
 const targetSupplierCode = productCase.targetSupplierCode;
 const targetSupplierSku = productCase.targetSupplierSku;
 const publishTraceId = 'trace-copy-success-smoke';
+const descriptionLines = {
+  ar: ['نقطة مراجعة أولى', 'نقطة مراجعة ثانية', 'نقطة مراجعة ثالثة', 'نقطة مراجعة رابعة', 'نقطة مراجعة خامسة'],
+  en: [
+    `Reviewed long point ${'x'.repeat(360)}`,
+    'Reviewed  point with preserved double spaces',
+    'Reviewed point three',
+    'Reviewed point four',
+    'Reviewed point five',
+  ],
+  'zh-cn': ['审核卖点一', '审核卖点二', '审核卖点三', '审核卖点四', '审核卖点五'],
+};
+const descriptionSourceHtml = `<!doctype html><html><body><section id="s09">
+<article class="card"><h3>英文</h3><code>${descriptionLines.en.join('\n')}</code></article>
+<article class="card"><h3>阿文</h3><code>${descriptionLines.ar.join('\n')}</code></article>
+<div class="displaybox">${descriptionLines['zh-cn'].map(line => `<div>${line}</div>`).join('')}</div>
+</section></body></html>`;
+const descriptionSourceBytes = Buffer.from(descriptionSourceHtml, 'utf8');
+const descriptionMaterial = {
+  schemaVersion: 1,
+  sourceLabel: 'copy-success-reviewed.html',
+  sourceFileSha256: sha256Utf8(descriptionSourceBytes),
+  rows: Object.fromEntries(Object.entries(descriptionLines).map(([language, lines]) => [language, {
+    language,
+    lines,
+    sha256: sha256Utf8(lines.join('\n')),
+  }])),
+};
 const publishPayload = {
   category_id: 123456,
   product_type_id: 789,
@@ -304,7 +332,11 @@ const fakeOpenApi = http.createServer(async (req, res) => {
         info: {
           success: false,
           pre_valid_result: [
-            {module: 'baseInfo', form_name: '商品标题', messages: ['商品标题不能为空']},
+            {
+              module: descriptionLines.en[2],
+              form_name: descriptionLines.en[1],
+              messages: ['商品标题不能为空', `echo:${descriptionLines.en[0]}`, `spacing:${descriptionLines.en[1]}`],
+            },
             {module: 'attribute', form_name: '商品属性', messages: ['产品型号，为必填项']},
           ],
         },
@@ -436,12 +468,19 @@ const fakeOpenApi = http.createServer(async (req, res) => {
   }
   if (pathname === '/open-api/goods/spu-info') {
     const requestedSpu = String(body.json?.spuName || '').trim();
-    if (requestedSpu === 'v-smoke-copy-product' && !WEAK_READBACK_ONLY && !SEARCH_PRODUCT_READBACK) {
+    const searchProductAlreadyCalled = fakeOpenApiCalls.some(call => call.path === '/open-api/goods/searchProduct');
+    if (requestedSpu === 'v-smoke-copy-product'
+      && !WEAK_READBACK_ONLY
+      && (!SEARCH_PRODUCT_READBACK || searchProductAlreadyCalled)) {
       return sendJson(res, {
         code: '0',
         msg: 'OK',
         info: {
           spuName: 'v-smoke-copy-product',
+          productMultiDescList: [
+            {language: 'ar', productDesc: descriptionLines.ar.join('\n')},
+            {language: 'en', productDesc: descriptionLines.en.join('\n')},
+          ],
           skcInfoList: [{
             skcName: 'sv-smoke-copy-product',
             supplierCode: targetSupplierCode,
@@ -736,6 +775,8 @@ try {
       files: [{
         name: 'publish-payload.json',
         type: 'application/json',
+        sourceApproved: true,
+        approvalKind: 'human_reviewed_publish_payload',
         dataBase64: b64Json({publishPayload}),
       }, ...(ASSET_BINDING ? [{
         name: 'approved-local-main.png',
@@ -871,20 +912,40 @@ try {
     check('approved update_images without SKU image remains warning only', maintenanceExecutors?.[0]?.adapterEvidence?.imagePayloadInspection?.warnings || [], rows => asArray(rows).some(row => /未提供 SKU 图/.test(String(row))));
   }
 
-  let dryRun = null;
-  let dryRunTask = uploaded.json?.task || {};
-  if (!CHAT_NATURAL) {
-    dryRun = await req('/api/link-ops-execute', {
-      method: 'POST',
-      cookie,
-      body: {id: taskId, mode: 'dry-run', source: 'copy_success_smoke'},
-    });
-    dryRunTask = dryRun.json?.task || {};
-  }
+  // Descriptions are the final reviewed-material mutation: bind after any
+  // approved image/publish preparation so the strict bound payload hash also
+  // locks the current image structure.
+  const descriptionBindBaseTask = await rawTaskById(taskId);
+  const descriptionBind = await req('/api/link-ops-prepare-descriptions', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId,
+      store: 'HL',
+      sourceApproved: true,
+      materialJson: descriptionMaterial,
+      sourceFile: {
+        name: 'copy-success-reviewed.html',
+        dataBase64: descriptionSourceBytes.toString('base64'),
+      },
+      expectedRevision: descriptionBindBaseTask?.repositoryRevision,
+    },
+  });
+  check('reviewed descriptions bind to same task', descriptionBind.status, 200);
+  check('reviewed description binding committed and read back', descriptionBind.json?.bindingCommitted === true && descriptionBind.json?.readbackVerified === true, true);
+  check('reviewed description binding keeps task id', descriptionBind.json?.task?.id, taskId);
+  check('reviewed description binding carries exact English hash', descriptionBind.json?.binding?.hashes?.en, descriptionMaterial.rows.en.sha256);
+
+  const dryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: taskId, mode: 'dry-run', source: 'copy_success_smoke'},
+  });
+  const dryRunTask = dryRun.json?.task || {};
   const dryRunRawTask = await rawTaskById(taskId);
   const dryRunEvidence = executorEvidenceFromAudit(dryRunRawTask?.execution?.writeAudit || dryRun?.json?.execution?.writeAudit || dryRunTask?.execution?.writeAudit, 'HL');
   const dryRunPayloadHash = dryRunEvidence?.payloadHash || dryRunRawTask?.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash || dryRunTask?.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash || '';
-  check('dry-run status', CHAT_NATURAL ? uploaded.status : dryRun.status, 200);
+  check('dry-run status', dryRun.status, 200);
   check('dry-run task waiting_review', dryRunTask.status, 'waiting_review');
   check('dry-run locks payload hash', Boolean(dryRunPayloadHash), true);
   check('dry-run does not publish', Boolean((dryRun?.json?.execution?.writeAudit || dryRunRawTask?.execution?.writeAudit)?.sheinWriteAttempted), false);
@@ -912,7 +973,11 @@ try {
     check('prevalid-retry first confirm does not close task', firstRetryRawTask?.status || '', 'waiting_review');
     check('prevalid-retry answer does not make operator guess platform fields', firstRetryAnswer, text => !/你也可以.*补|直接在聊天里补/i.test(String(text || '')));
     check('prevalid-retry answer explains automatic recheck before retry', firstRetryAnswer, text => /自动重新整理并检查|资料检查通过前不会再次提交/.test(String(text || '')));
-    check('prevalid-retry answer de-duplicates platform field messages', (firstRetryAnswer.match(/商品标题不能为空/g) || []).length, 1);
+    check('prevalid-retry answer keeps platform free text hash-only', firstRetryAnswer, text => (
+      /平台回显内容已脱敏/.test(String(text || ''))
+      && !/商品标题不能为空/.test(String(text || ''))
+      && !String(text || '').includes(descriptionLines.en[0].slice(0, 80))
+    ));
     executed = await req('/api/link-ops-chats', {
       method: 'POST',
       cookie,
@@ -961,6 +1026,15 @@ try {
     check('pre-valid executor evidence state', execEvidence?.state || '', 'publish_pre_valid_failed');
     check('pre-valid executor ok false', Boolean(execEvidence?.ok), false);
     check('pre-valid readback skipped', execEvidence?.readback?.status || '', 'planned_not_run');
+    check('pre-valid stored evidence redacts echoed description text', JSON.stringify(executedRawTask?.execution || {}), text => (
+      !text.includes(descriptionLines.en[0])
+      && !text.includes(descriptionLines.en[0].slice(0, 200))
+      && !text.includes(descriptionLines.en[1])
+      && !text.includes(descriptionLines.en[1].replace(/\s+/g, ' '))
+      && !text.includes(descriptionLines.en[2])
+      && !text.includes(descriptionLines.ar[0])
+      && text.includes('平台回显内容已脱敏')
+    ));
   } else {
     check('execute actual write submitted flag', Boolean(writeAudit?.actualWriteSubmitted), true);
   }
@@ -1121,6 +1195,11 @@ try {
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = Array.isArray(tasks.tasks) ? tasks.tasks.length : 0;
   result.summary.auditLines = auditText.trim() ? auditText.trim().split(/\r?\n/).length : 0;
+  if (PREVALID_FAIL) {
+    check('pre-valid audit redacts echoed description text', auditText, text => (
+      !text.includes(descriptionLines.en[0]) && !text.includes(descriptionLines.ar[0])
+    ));
+  }
   check('task count', result.summary.taskCount, ASSET_BINDING ? 3 : 1);
   check('audit lines >= expected', result.summary.auditLines, n => n >= (WEAK_READBACK_ONLY ? 8 : 5));
 

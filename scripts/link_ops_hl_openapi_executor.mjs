@@ -27,6 +27,12 @@ import {
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {evaluateAdditionalDuplicatePublishOverride} from '../lib/link_ops_duplicate_publish_override.mjs';
+import {
+  evaluateDescriptionReadback,
+  describePublishPayloadDescription,
+  validateDescriptionBindingLock,
+  validatePublishPayloadDescription,
+} from '../lib/link_ops_product_descriptions.mjs';
 import {isSheinSkc, sameSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
   createLoopbackTestWebhookWriteGuard,
@@ -578,25 +584,17 @@ function looksLikePublishPayload(value) {
     && (value.multi_language_name_list || value.multiLanguageNameList || value.product_attribute_list || value.productAttributeList || value.skc_list || value.skcList));
 }
 
-function findPayloadDeep(value, depth = 0) {
-  if (!value || typeof value !== 'object' || depth > 6) return null;
+function findPayloadInApprovedJsonEnvelope(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   if (looksLikePublishPayload(value)) return value;
   const directKeys = ['openapiPublishPayload', 'sheinOpenapiPublishPayload', 'publishPayload', 'publishOrEditPayload'];
-  for (const key of directKeys) {
-    if (looksLikePublishPayload(value[key])) return value[key];
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findPayloadDeep(item, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-  for (const item of Object.values(value)) {
-    const found = findPayloadDeep(item, depth + 1);
-    if (found) return found;
-  }
-  return null;
+  const candidates = directKeys
+    .filter(key => looksLikePublishPayload(value[key]))
+    .map(key => value[key]);
+  // Approved JSON assets may be the payload itself or one explicit root
+  // wrapper. Never recursively promote payload-looking objects from
+  // history/debug/log/result or any other nested path.
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 async function tryReadJsonAsset(task, asset) {
@@ -612,13 +610,20 @@ async function tryReadJsonAsset(task, asset) {
   const root = path.resolve(ROOT);
   if (!path.resolve(stored).startsWith(root + path.sep)) return null;
   try {
-    const json = await readJson(stored);
-    const payload = findPayloadDeep(json);
+    const bytes = await fs.readFile(stored);
+    const actualAssetSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+    const declaredAssetSha256 = String(asset?.sha256 || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(declaredAssetSha256) || declaredAssetSha256 !== actualAssetSha256) {
+      throw new Error('JSON asset bytes no longer match the upload-time sha256');
+    }
+    const json = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+    const payload = findPayloadInApprovedJsonEnvelope(json);
     if (!payload) return null;
     return {
       source: 'asset_json',
       assetId: asset.id || '',
       assetName: name,
+      assetSha256: actualAssetSha256,
       path: rel(stored),
       payload,
     };
@@ -634,8 +639,12 @@ async function tryReadJsonAsset(task, asset) {
 }
 
 async function findPublishPayload(task) {
-  const fromTask = findPayloadDeep(task);
-  if (fromTask) return {source: 'task', payload: jsonClone(fromTask)};
+  const directKeys = ['openapiPublishPayload', 'sheinOpenapiPublishPayload', 'publishPayload', 'publishOrEditPayload'];
+  for (const key of directKeys) {
+    if (looksLikePublishPayload(task?.[key])) {
+      return {source: `task.${key}`, payload: jsonClone(task[key])};
+    }
+  }
   for (const asset of asArray(task?.assets)) {
     const fromAsset = await tryReadJsonAsset(task, asset);
     if (fromAsset?.payload) return {...fromAsset, payload: jsonClone(fromAsset.payload)};
@@ -645,7 +654,31 @@ async function findPublishPayload(task) {
 
 async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
   const existing = await findPublishPayload(task);
-  if (existing?.payload) return existing;
+  if (existing?.payload) {
+    // A server-bound task keeps the reviewed payload at the task root. Retain
+    // that payload as the only publish source, but hydrate read-only source
+    // metadata from the deterministic snapshot so live en/ar title enrichment
+    // still knows the exact source store and SPU. Never replace or merge the
+    // bound payload with a snapshot payload here.
+    const inferred = inferSourceProductFromTask(task, {targetStore});
+    if (!inferred.sourceStore || !inferred.sourceSkc) return {...existing, inferred};
+    try {
+      const generated = await buildProductDraftFromSnapshots({
+        sourceStore: inferred.sourceStore,
+        sourceSkc: inferred.sourceSkc,
+        date: 'latest',
+        targetStore,
+      });
+      return {
+        ...existing,
+        inferred,
+        generatedDraft: summarizeDraftForExecutor(generated),
+        canonicalDraft: generated.canonicalDraft,
+      };
+    } catch {
+      return {...existing, inferred};
+    }
+  }
   if (taskHasUnboundImageAssets(task)) {
     return {
       source: 'unbound_image_assets',
@@ -2158,6 +2191,8 @@ function validatePublishPayload(payload) {
   if (!has('source_system', 'sourceSystem')) blockers.push('缺 source_system=OpenAPI。');
   if (!arr('multi_language_name_list', 'multiLanguageNameList').length) blockers.push('缺 multi_language_name_list：至少需要商品标题/多语言名称。');
   if (!arr('product_attribute_list', 'productAttributeList').length) blockers.push('缺 product_attribute_list：需要类目属性模板和源商品参数。');
+  const descriptionGate = validatePublishPayloadDescription(payload);
+  blockers.push(...descriptionGate.blockers);
   const siteList = arr('site_list', 'siteList');
   if (!siteList.length) {
     blockers.push('缺 site_list：沙特站应包含 shein / shein-sa。');
@@ -2233,17 +2268,43 @@ function publishInfoHasExplicitSuccess(info) {
 
 function publishResultSucceeded(result) {
   if (!result || String(result.code ?? '') !== '0') return false;
-  if (publishInfoHasExplicitSuccess(result.info)) return result.info.success === true;
-  return true;
+  // Phase A contract: publishOrEdit success requires code=0 AND explicit
+  // info.success===true. A code=0 response without an explicit success flag is
+  // not proof of acceptance and must never be treated as success.
+  return publishInfoHasExplicitSuccess(result.info) && result.info.success === true;
 }
 
-function publishPreValidMessages(info) {
+function descriptionSensitiveFragments(payload) {
+  const fragments = [];
+  for (const row of asArray(payload?.multi_language_desc_list)) {
+    const name = typeof row?.name === 'string' ? row.name : '';
+    if (name) fragments.push(name);
+    for (const line of name.split('\n')) {
+      if (line.length >= 4) fragments.push(line);
+    }
+  }
+  return [...new Set(fragments)];
+}
+
+function sanitizePublishPlatformText(value, payload, max = 300) {
+  const raw = String(value ?? '');
+  if (!raw.trim()) return '';
+  // Redact before normalization/truncation. Otherwise a >max single-line
+  // description or whitespace-variant echo can leak a long prefix while no
+  // longer matching the exact reviewed fragment.
+  if (descriptionSensitiveFragments(payload).length) {
+    return `[平台回显内容已脱敏 sha256=${crypto.createHash('sha256').update(raw, 'utf8').digest('hex')}]`;
+  }
+  return safeString(raw, max);
+}
+
+function publishPreValidMessages(info, payload) {
   const rows = asArray(info?.pre_valid_result || info?.preValidResult);
   const messages = [];
   for (const row of rows) {
-    const label = safeString(row?.form_name || row?.form || row?.module || '平台预校验', 80);
+    const label = sanitizePublishPlatformText(row?.form_name || row?.form || row?.module || '平台预校验', payload, 80);
     for (const msg of asArray(row?.messages || row?.message)) {
-      const text = safeString(msg, 300);
+      const text = sanitizePublishPlatformText(msg, payload, 300);
       if (text) messages.push(`${label}：${text}`);
     }
   }
@@ -2253,10 +2314,44 @@ function publishPreValidMessages(info) {
   return [...new Set(messages)];
 }
 
+function compactPublishResultForStorage(result, payload) {
+  if (!result || typeof result !== 'object') return null;
+  const info = result.info && typeof result.info === 'object' ? result.info : {};
+  const preValidResult = asArray(info.pre_valid_result || info.preValidResult).slice(0, 30).map(row => ({
+    module: sanitizePublishPlatformText(row?.module || '', payload, 80),
+    form_name: sanitizePublishPlatformText(row?.form_name || row?.form || '', payload, 120),
+    messages: asArray(row?.messages || row?.message)
+      .map(message => sanitizePublishPlatformText(message, payload, 300))
+      .filter(Boolean)
+      .slice(0, 10),
+  }));
+  const skcList = asArray(info.skc_list || info.skcList).slice(0, 30).map(skc => ({
+    skc_name: safeString(skc?.skc_name || skc?.skcName || '', 120),
+    sku_list: asArray(skc?.sku_list || skc?.skuList).slice(0, 100).map(sku => ({
+      sku_code: safeString(sku?.sku_code || sku?.skuCode || '', 120),
+    })),
+  }));
+  return {
+    httpStatus: Number(result.httpStatus || 0) || null,
+    code: result.code == null ? null : String(result.code),
+    msg: sanitizePublishPlatformText(result.msg || '', payload, 300),
+    traceId: safeString(result.traceId || '', 180) || null,
+    info: {
+      success: info.success === true,
+      taskNo: safeString(info.taskNo || info.task_no || '', 180),
+      spu_name: safeString(info.spu_name || info.spuName || '', 120),
+      version: safeString(info.version || '', 180),
+      skc_list: skcList,
+      pre_valid_result: preValidResult,
+    },
+  };
+}
+
 function extractPayloadSummary(payload) {
   const skcList = asArray(payload?.skc_list || payload?.skcList);
   const skuCount = skcList.reduce((sum, skc) => sum + asArray(skc?.sku_list || skc?.skuList).length, 0);
   return {
+    ...describePublishPayloadDescription(payload),
     categoryId: payload?.category_id ?? payload?.categoryId ?? null,
     productTypeId: payload?.product_type_id ?? payload?.productTypeId ?? null,
     brandCode: payload?.brand_code ?? payload?.brandCode ?? null,
@@ -2589,7 +2684,7 @@ function matchProductReadbackRows(rows, fingerprint) {
   };
 }
 
-async function readbackPublishedProduct(client, fingerprint, {enabled = false} = {}) {
+async function readbackPublishedProduct(client, fingerprint, {enabled = false, task = null} = {}) {
   const startedAt = new Date().toISOString();
   const calls = [];
   const targetSupplierSkus = asArray(fingerprint?.targetSupplierSkus).filter(Boolean);
@@ -2633,6 +2728,52 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
     targetPlatformSkcNameCount: targetPlatformSkcNames.length,
     reliableMatchRequires: 'publishOrEdit 返回的 SPU/SKC/SKU 或目标商家 SKU/商家货号命中；源 SKC、货号文本只作弱证据。',
   };
+  const descriptionBinding = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
+    ? task.descriptionMaterialBinding
+    : null;
+  const verifyMatchedRowsDescription = async (matchedRows, label) => {
+    if (!descriptionBinding) {
+      return {
+        ok: true,
+        status: 'description_readback_not_required',
+        descriptionReadback: {ok: true, status: 'description_readback_not_required', blockers: [], summary: {}},
+      };
+    }
+    const spuNames = [...new Set(asArray(matchedRows).map(row => safeString(row?.spuName || '', 120)).filter(Boolean))];
+    if (spuNames.length !== 1) {
+      return {
+        ok: false,
+        status: 'description_readback_unverifiable',
+        descriptionReadback: {
+          ok: false,
+          status: 'description_readback_unverifiable',
+          blockers: [`强身份回读没有得到唯一 SPU（count=${spuNames.length}），无法精确回读描述`],
+          summary: {},
+        },
+      };
+    }
+    const spuName = spuNames[0];
+    const response = await client.request('/open-api/goods/spu-info', {
+      method: 'POST',
+      body: {spuName, languageList: ['en', 'ar']},
+      headers: {language: 'en'},
+    });
+    calls.push(compactCallResult(`${label}-description-spu-info-${spuName}`, '/open-api/goods/spu-info', 'POST', response));
+    if (!response.ok || String(response.data?.code) !== '0' || !response.data?.info || typeof response.data.info !== 'object') {
+      return {
+        ok: false,
+        status: 'description_readback_unverifiable',
+        descriptionReadback: {
+          ok: false,
+          status: 'description_readback_unverifiable',
+          blockers: ['官方 spu-info 描述回读失败或缺少 info，不能以商品列表命中代替描述终态回读'],
+          summary: {},
+        },
+      };
+    }
+    const descriptionReadback = evaluateDescriptionReadback(descriptionBinding, response.data.info);
+    return {ok: descriptionReadback.ok, status: descriptionReadback.status, descriptionReadback};
+  };
   if (!enabled) {
     return {
       ok: false,
@@ -2671,6 +2812,27 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
       if (!info) continue;
       const matched = matchProductReadbackRows([info], fingerprint);
       if (matched.strong.length) {
+        // Phase A live description gate: identity strongly matched, but the
+        // spu-info productMultiDescList must still carry ar/en exactly once
+        // each with hashes equal to the task's descriptionMaterialBinding.
+        const descriptionReadback = task?.descriptionMaterialBinding
+          ? evaluateDescriptionReadback(task.descriptionMaterialBinding, info)
+          : null;
+        if (descriptionReadback && !descriptionReadback.ok) {
+          return {
+            ok: false,
+            status: descriptionReadback.status,
+            startedAt,
+            endedAt: new Date().toISOString(),
+            plan,
+            calls,
+            scannedRows: 1,
+            matchedRows: matched.strong,
+            weakMatchedRows: matched.weak,
+            descriptionReadback,
+            note: 'publishOrEdit 返回的 SPU 已在官方 spu-info 强匹配，但 live 商品描述与审核资料绑定哈希不一致/缺失/重复；不能按已闭环处理，必须人工核销。',
+          };
+        }
         return {
           ok: true,
           status: 'matched_publish_spu_in_spu_info',
@@ -2681,6 +2843,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
           scannedRows: 1,
           matchedRows: matched.strong,
           weakMatchedRows: matched.weak,
+          descriptionReadback: descriptionReadback || {ok: true, status: 'description_readback_not_required', blockers: [], summary: {}},
           note: '已用 publishOrEdit 返回的 SPU 编号调用官方 spu-info，并强匹配到平台返回的新 SPU/SKC/SKU；该证据可证明 SHEIN 已接收并生成商品记录，后续仍需结合审核状态判断是否已上架。',
         };
       }
@@ -2724,6 +2887,22 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
       const matched = matchProductReadbackRows(rows, fingerprint);
       allWeakMatches.push(...matched.weak);
       if (matched.strong.length) {
+        const descriptionVerification = await verifyMatchedRowsDescription(matched.strong, attempt.name);
+        if (!descriptionVerification.ok) {
+          return {
+            ok: false,
+            status: descriptionVerification.status,
+            startedAt,
+            endedAt: new Date().toISOString(),
+            plan,
+            calls,
+            scannedRows: rows.length,
+            matchedRows: matched.strong,
+            weakMatchedRows: allWeakMatches.slice(0, 20),
+            descriptionReadback: descriptionVerification.descriptionReadback,
+            note: '官方商品综合查询已强匹配，但审核资料描述未完成精确 spu-info 回读；不能按已闭环处理。',
+          };
+        }
         return {
           ok: true,
           status: 'matched_publish_identifier_in_search_product',
@@ -2734,6 +2913,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
           scannedRows: rows.length,
           matchedRows: matched.strong,
           weakMatchedRows: allWeakMatches.slice(0, 20),
+          descriptionReadback: descriptionVerification.descriptionReadback,
           note: '已用 publishOrEdit 返回的 SPU/SKC/SKU 或目标商家编号调用官方 searchProduct，并强匹配到新商品记录；该证据可证明 SHEIN 已接收并可被官方商品综合查询命中，后续仍需结合审核/上架状态判断是否已前台可售。',
         };
       }
@@ -2767,6 +2947,22 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
       const matched = matchProductReadbackRows(rows, fingerprint);
       allWeakMatches.push(...matched.weak);
       if (matched.strong.length) {
+        const descriptionVerification = await verifyMatchedRowsDescription(matched.strong, `product-query-page-${pageNum}`);
+        if (!descriptionVerification.ok) {
+          return {
+            ok: false,
+            status: descriptionVerification.status,
+            startedAt,
+            endedAt: new Date().toISOString(),
+            plan,
+            calls,
+            scannedRows,
+            matchedRows: matched.strong,
+            weakMatchedRows: allWeakMatches.slice(0, 20),
+            descriptionReadback: descriptionVerification.descriptionReadback,
+            note: 'OpenAPI 商品列表已强匹配，但审核资料描述未完成精确 spu-info 回读；不能按已闭环处理。',
+          };
+        }
         return {
           ok: true,
           status: 'matched_strong_fingerprint_in_product_query',
@@ -2777,6 +2973,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false} =
           scannedRows,
           matchedRows: matched.strong,
           weakMatchedRows: allWeakMatches.slice(0, 20),
+          descriptionReadback: descriptionVerification.descriptionReadback,
           note: '已在 OpenAPI 商品列表回读中找到目标商家 SKU / 商家货号强指纹匹配的商品行；仍需结合 SHEIN 审核状态判断最终上架结果。',
         };
       }
@@ -3089,6 +3286,13 @@ async function main() {
     payloadHash = sha256Stable(publishPayload);
     appendUnique(warnings, payloadValidation.warnings);
     appendUnique(blockers, payloadValidation.blockers);
+    // Reviewed-material binding lock: the final payload's ar/en description
+    // hashes must equal the task's descriptionMaterialBinding hashes. Passing
+    // the 5-line shape is not enough; any byte drift blocks dry-run/execute.
+    const finalDescriptionGate = validatePublishPayloadDescription(publishPayload);
+    const descriptionBindingLock = validateDescriptionBindingLock(task, publishPayload);
+    payloadSummary.descriptionBindingLocked = finalDescriptionGate.ok && descriptionBindingLock.ok;
+    appendUnique(blockers, descriptionBindingLock.blockers);
   } else {
     appendUnique(blockers, payloadValidation.blockers);
     if (payloadFound?.generationError) appendUnique(warnings, `自动生成源商品草稿失败：${payloadFound.generationError}`);
@@ -3144,14 +3348,14 @@ async function main() {
         method: 'POST',
         httpStatus: publishResult.httpStatus,
         code: publishResult.code,
-        msg: publishResult.msg,
+        msg: sanitizePublishPlatformText(publishResult.msg, publishPayload, 300),
         traceId: publishResult.traceId,
       });
-      if (publishResult.code !== '0') {
-        blockers.push(`publishOrEdit 返回失败：${safeString(publishResult.msg || publishResult.code || '未知错误')}`);
+      if (String(publishResult.code ?? '') !== '0') {
+        blockers.push(`publishOrEdit 返回失败：${sanitizePublishPlatformText(publishResult.msg || publishResult.code || '未知错误', publishPayload, 300)}`);
       } else if (!publishResultSucceeded(publishResult)) {
-        const preValidMessages = publishPreValidMessages(publishResult.info);
-        blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || safeString(publishResult.msg || '未知原因')}`);
+        const preValidMessages = publishPreValidMessages(publishResult.info, publishPayload);
+        blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || sanitizePublishPlatformText(publishResult.msg || '未知原因', publishPayload, 300)}`);
       }
     }
   }
@@ -3166,12 +3370,14 @@ async function main() {
   });
   const readback = await readbackPublishedProduct(client, readbackFingerprint, {
     enabled: publishSucceeded,
+    task,
   });
   readbackFingerprint.readbackStatus = readback.status;
 
   const state = args.mode === 'execute'
     ? (publishSucceeded ? 'submitted' : (publishPreValidFailed ? 'publish_pre_valid_failed' : 'blocked'))
     : (readyForSubmit ? 'ready_for_submit' : 'blocked');
+  const storedPublishResult = compactPublishResultForStorage(publishResult, publishPayload);
   const output = {
     ok: blockers.length === 0,
     runId,
@@ -3226,6 +3432,7 @@ async function main() {
       source: payloadFound?.source || null,
       assetId: payloadFound?.assetId || null,
       assetName: payloadFound?.assetName || null,
+      assetSha256: payloadFound?.assetSha256 || null,
       safeDefaults,
       manualAttributeOverrides,
       payloadHash,
@@ -3248,7 +3455,7 @@ async function main() {
     readback,
     blockers,
     warnings,
-    publishResult,
+    publishResult: storedPublishResult,
     safety: {
       canSilentWrite: false,
       executeRequiresConfirm: SUBMIT_CONFIRM_TEXT,
@@ -3289,4 +3496,6 @@ export const __testHooks = {
   shufflePublishDetailImages,
   ensurePublishImageSortGlobalUnique,
   normalizePublishImageType,
+  publishResultSucceeded,
+  sanitizePublishPlatformText,
 };

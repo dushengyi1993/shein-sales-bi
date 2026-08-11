@@ -64,7 +64,11 @@ function assertNoRawTaskLeak(label, json) {
   const raw = JSON.stringify(json || {});
   check(`${label} raw task history stripped`, raw, x => !/"history"\s*:/.test(x) && !/"executionHistory"\s*:/.test(x));
   check(`${label} request metadata stripped`, raw, x => !/"requestMeta"\s*:/.test(x) && !/userAgent|should-not-leak/.test(x));
-  check(`${label} internal confirm and hash stripped`, raw, x => !/SHEIN_OPENAPI_SUBMIT|payloadHash|abc123-should-not-leak|confirmTextPresent|realSubmitWhitelistChecks/.test(x));
+  check(`${label} internal confirm and unsafe hash stripped`, raw, x => {
+    const hashes = [...x.matchAll(/"payloadHash":"([^"]*)"/g)].map(match => match[1]);
+    return !/SHEIN_OPENAPI_SUBMIT|abc123-should-not-leak|confirmTextPresent|realSubmitWhitelistChecks/.test(x)
+      && hashes.every(hash => hash === '' || /^[a-f0-9]{64}$/.test(hash));
+  });
   check(`${label} old cross-entry wording stripped`, raw, x => !/飞书|只读建议|回到 BI|dry-run|dry_run|payload hash|store identity mismatch|account_and_merchant_mismatch|查看审计|HL 仓库列表/.test(x));
   return raw;
 }
@@ -148,6 +152,21 @@ try {
         }],
       },
       lifecycle: {lifecycleStatus: 'link_maintenance_preflight_ready'},
+      descriptionMaterialBinding: {
+        targetStore: 'DX',
+        sourceLabel: 'reviewed-source.html',
+        sourceFileSha256: '1'.repeat(64),
+        sourceByteLength: 1234,
+        sourceProof: 'server_verified_html_section_s09',
+        contentSha256: '2'.repeat(64),
+        publishLanguages: ['ar', 'en'],
+        lineCounts: {ar: 5, en: 5, 'zh-cn': 5},
+        hashes: {ar: '3'.repeat(64), en: '4'.repeat(64), 'zh-cn': '5'.repeat(64)},
+        newPayloadHash: '6'.repeat(64),
+        payloadHashAlgorithm: 'sha256-stable-json-v1',
+        baseTaskRevision: 7,
+        bindingRequestKey: '7'.repeat(64),
+      },
       history: [{event: 'old_bad_text', note: '当前飞书是只读建议通道，回到 BI，输入 SHEIN_OPENAPI_SUBMIT'}],
       executionHistory: [{event: 'old_internal', message: 'account_and_merchant_mismatch payload hash'}],
       createdAt: new Date().toISOString(),
@@ -334,6 +353,12 @@ try {
   check('target store preserved', task.targets?.stores || [], xs => Array.isArray(xs) && xs.includes('DX'));
   check('operation summary preserved', task.execution?.linkMaintenancePrechecks?.[0]?.payload?.summary?.operations || [], xs => Array.isArray(xs) && xs.includes('update_inventory'));
   check('matched link count preserved', task.execution?.linkMaintenancePrechecks?.[0]?.adapterEvidence?.matchedLinksCount, 1);
+  check('safe description binding identity is projected for idempotent CLI replay', task.descriptionMaterialBinding || {}, value => (
+    value?.baseTaskRevision === 7
+    && value?.bindingRequestKey === '7'.repeat(64)
+    && value?.contentSha256 === '2'.repeat(64)
+    && !Object.prototype.hasOwnProperty.call(value, 'boundByUser')
+  ));
   assertNoRawTaskLeak('GET /api/link-ops-tasks', tasks.json);
   const copyTask = tasks.json?.data?.tasks?.find(row => row?.id === 'lot_projection_copy_0002') || {};
   check('old copy task target normalized to write store only', copyTask.targets?.stores || [], xs => Array.isArray(xs) && xs.length === 1 && xs.includes('DL'));
@@ -398,7 +423,7 @@ try {
   check('assets POST status', uploaded.status, 200);
   check('assets POST projected asset count', uploaded.json?.assets?.length || 0, 2);
   check('assets POST accepts xlsx as spreadsheet', uploaded.json?.assets?.some?.(a => a.name === 'projection-plan.xlsx' && a.kind === 'spreadsheet'), true);
-  check('assets POST hides sha256/path', JSON.stringify(uploaded.json || {}), x => !/sha256|storedRelativePath|storedName/.test(x));
+  check('assets POST hides raw asset sha256/path', JSON.stringify(uploaded.json || {}), x => !/"sha256"\s*:|storedRelativePath|storedName/.test(x));
   assertNoRawTaskLeak('POST /api/link-ops-assets', uploaded.json);
 
   const sessionUploaded = await req(baseUrl, '/api/link-ops-assets', {
@@ -418,7 +443,7 @@ try {
   check('session assets POST does not require task', sessionUploaded.json?.task, null);
   check('session assets POST projects asset in session', sessionUploaded.json?.session?.assets?.some?.(a => a.name === 'session-upload-note.txt' && a.kind === 'text'), true);
   check('session assets POST writes human chat message', sessionUploaded.json?.session?.messages?.at?.(-1)?.content || '', x => /当前会话资料|已放到当前会话资料/.test(String(x)));
-  check('session assets POST hides sha256/path', JSON.stringify(sessionUploaded.json || {}), x => !/sha256|storedRelativePath|storedName/.test(x));
+  check('session assets POST hides raw asset sha256/path', JSON.stringify(sessionUploaded.json || {}), x => !/"sha256"\s*:|storedRelativePath|storedName/.test(x));
   assertNoRawTaskLeak('POST /api/link-ops-assets session-only', sessionUploaded.json);
 
   const chatWithSessionAsset = await req(baseUrl, '/api/link-ops-chats', {

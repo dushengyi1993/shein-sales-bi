@@ -25,6 +25,13 @@ import {
 } from '../lib/partner_cli_updater.mjs';
 import {planLinkOpsImageRoles} from '../lib/link_ops_image_role_planner.mjs';
 import {ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT} from '../lib/link_ops_duplicate_publish_override.mjs';
+import {
+  buildPrepareDescriptionsCliOutput,
+  describeDescriptionMaterial,
+  descriptionBindingRequestKey,
+  validateDescriptionMaterialJson,
+} from '../lib/link_ops_product_descriptions.mjs';
+import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -84,6 +91,9 @@ function parseArgs(argv) {
     titleAr: '',
     titleEn: '',
     outputFile: '',
+    materialJsonFile: '',
+    sourceFile: '',
+    expectedRevision: null,
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
     format: '',
@@ -166,6 +176,9 @@ function parseArgs(argv) {
     else if (a === '--title-ar') args.titleAr = String(argv[++i] || '').trim();
     else if (a === '--title-en') args.titleEn = String(argv[++i] || '').trim();
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
+    else if (a === '--material-json') args.materialJsonFile = path.resolve(String(argv[++i] || '').trim());
+    else if (a === '--source-file') args.sourceFile = path.resolve(String(argv[++i] || '').trim());
+    else if (a === '--expected-revision') args.expectedRevision = Number(argv[++i]);
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
@@ -271,6 +284,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
+  node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
@@ -327,6 +341,9 @@ Options:
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
   --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
+  --source-file     prepare-descriptions 必填；实际审核资料 HTML（唯一 section#s09），工具从文件字节计算 SHA 并逐字提取三语各5行
+  --material-json   prepare-descriptions 可选；提供时逐字核验其 ar/en/zh-cn 行与实际 section#s09 一致，任一字节不同即拒绝
+  --expected-revision prepare-descriptions 用；任务当前 repository revision，可选项，绑定前做 CAS 校验
   --source-task-id    prepare-publish 的 update_images 模式；从指定已提交发布任务的 publishResult/readbackFingerprint 精确继承 SPU/SKC/SKU
                       prepare-pending-image-correction 会复用任务中现有已审图片绑定，不重复上传图片
   --standard-goods-sn / --supply-price / --inventory
@@ -352,6 +369,9 @@ Safety:
   - 用户当轮明确指令和“已审可用”素材高于 AI 语义推断；标题未采用某参数不等于图片禁用。
   - plan-images 只做本地图包角色规划，备用目录和明确“产品封面/AB测试”图不提交；会读取真实尺寸再判断方形图。
   - prepare-publish 上传后把图片 URL 和显式字段绑定回同一 task，再重新预演；不会新建替代任务，也不会静默复制源图。
+  - prepare-descriptions 用确定性 extractor 从实际 HTML 唯一 section#s09 逐字提取“三语核心卖点”（英文/阿文 code、中文 displaybox，
+    各恰好5行），以文件字节计算 sourceFileSha256 并逐字核验；绑定为固定 ar/en 各5行（zh-cn 仅材料审计SHA），
+    绑定后旧预演锁作废并重新预演；不会生成/翻译/改写描述，不会自动映射源 OpenAPI 商品描述，也不会重传图片。
   - retire-candidates 只生成下架候选明细，不执行下架；固定排除有新品标签、首次上架 15 天内或缺首次上架时间的链接，并要求人工确认。
   - 本机不处于受控云端执行边界，不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
   - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
@@ -477,7 +497,7 @@ function biLoginRequiredError({expired = false} = {}) {
   return err;
 }
 
-async function request(args, pathname, {method = 'GET', body, auth = true} = {}) {
+async function request(args, pathname, {method = 'GET', body, auth = true, allowJsonFailure = false} = {}) {
   const headers = {'accept': 'application/json', 'user-agent': `shein-bi-ops-cli/${BI_OPS_CLI_VERSION}`};
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) {
@@ -496,7 +516,7 @@ async function request(args, pathname, {method = 'GET', body, auth = true} = {})
   } catch {
     json = {raw: text};
   }
-  if (!res.ok || json.ok === false) {
+  if (!res.ok || (json.ok === false && !allowJsonFailure)) {
     if (auth && res.status === 401) {
       const err = biLoginRequiredError({expired: true});
       err.response = json;
@@ -515,6 +535,7 @@ const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'chat', 'tasks', 'create', 'operate', 'preflight', 'execute', 'resolve', 'audit',
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
   'prepare-publish', 'prepare_publish',
+  'prepare-descriptions', 'prepare_descriptions',
   'prepare-pending-image-correction', 'prepare_pending_image_correction',
 ]);
 
@@ -1104,6 +1125,219 @@ async function runPreparePublish(args) {
   });
 }
 
+async function runPrepareDescriptions(args) {
+  if (!args.taskId) throw new Error('prepare-descriptions requires --task-id <id>');
+  if (!args.sourceFile) throw new Error('prepare-descriptions requires --source-file <实际审核资料HTML>');
+  const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
+  if (!store) throw new Error('prepare-descriptions requires --store <target store>');
+  let sourceBytes;
+  try {
+    sourceBytes = await fs.readFile(args.sourceFile);
+  } catch {
+    throw new Error(`无法读取审核资料文件：${path.basename(args.sourceFile) || '(unknown)'}`);
+  }
+  const htmlText = sourceBytes.toString('utf8');
+  let providedMaterial = null;
+  if (args.materialJsonFile) {
+    providedMaterial = JSON.parse(await fs.readFile(args.materialJsonFile, 'utf8'));
+  }
+  const verified = verifyDescriptionMaterialAgainstHtml(htmlText, sourceBytes, {
+    material: providedMaterial,
+    sourceFileBasename: path.basename(args.sourceFile),
+    sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
+  });
+  const material = validateDescriptionMaterialJson(verified.material);
+  const summary = describeDescriptionMaterial(material);
+  const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
+  const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
+  if (!currentTask) throw new Error('当前账号无法精确读取目标 task，描述未绑定');
+  const liveRevision = Number(currentTask.repositoryRevision || 0);
+  if (!Number.isSafeInteger(liveRevision) || liveRevision <= 0) {
+    throw new Error('目标 task 未返回可用于 CAS 的正整数 repositoryRevision，描述未绑定');
+  }
+  const existingBinding = currentTask?.descriptionMaterialBinding && typeof currentTask.descriptionMaterialBinding === 'object'
+    ? currentTask.descriptionMaterialBinding
+    : null;
+  const existingBaseRevision = Number(existingBinding?.baseTaskRevision || 0);
+  const existingBindingRequestKey = Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
+    ? descriptionBindingRequestKey({
+        taskId: args.taskId,
+        targetStore: store,
+        baseTaskRevision: existingBaseRevision,
+        contentSha256: summary.contentSha256,
+      })
+    : '';
+  const exactExistingBinding = Boolean(
+    existingBinding
+    && String(existingBinding.targetStore || '').toUpperCase() === store.toUpperCase()
+    && String(existingBinding.sourceFileSha256 || '').toLowerCase() === summary.sourceFileSha256
+    && String(existingBinding.contentSha256 || '').toLowerCase() === summary.contentSha256
+    && String(existingBinding.bindingRequestKey || '').toLowerCase() === existingBindingRequestKey,
+  );
+  const explicitExpectedRevision = Number.isFinite(args.expectedRevision) && args.expectedRevision > 0
+    ? Math.trunc(args.expectedRevision)
+    : null;
+  if (explicitExpectedRevision
+    && explicitExpectedRevision !== liveRevision
+    && !(exactExistingBinding && explicitExpectedRevision === existingBaseRevision)) {
+    throw new Error(`目标 task revision 已变化：命令期望 ${explicitExpectedRevision}，实时读取为 ${liveRevision}；描述未绑定`);
+  }
+  // When the previous request committed the binding but failed only while
+  // appending external audit, replay the original request identity. Sending
+  // the new task revision would create a new request key and bind twice.
+  const requestRevision = exactExistingBinding
+    ? existingBaseRevision
+    : (explicitExpectedRevision || liveRevision);
+  const bindBody = {
+    taskId: args.taskId,
+    store,
+    sourceApproved: true,
+    materialJson: material,
+    sourceFile: {
+      name: path.basename(args.sourceFile),
+      dataBase64: sourceBytes.toString('base64'),
+    },
+    expectedRevision: requestRevision,
+  };
+  let bindJson;
+  try {
+    ({json: bindJson} = await request(args, '/api/link-ops-prepare-descriptions', {
+      method: 'POST',
+      body: bindBody,
+      allowJsonFailure: true,
+    }));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'prepare-descriptions',
+      taskId: args.taskId,
+      store,
+      stage: 'binding_not_committed',
+      bindingCommitted: false,
+      code: error?.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '描述绑定失败').slice(0, 500),
+      material: {
+        sourceLabel: summary.sourceLabel,
+        sourceFileSha256: summary.sourceFileSha256,
+        contentSha256: summary.contentSha256,
+        lineCounts: summary.lineCounts,
+        hashes: summary.hashes,
+      },
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const binding = bindJson.binding || {};
+  if (bindJson.bindingCommitted !== true || bindJson.readbackVerified !== true || bindJson.auditPending === true || bindJson.ok !== true) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'prepare-descriptions',
+      taskId: args.taskId,
+      store,
+      stage: String(bindJson.stage || 'binding_state_uncertain'),
+      bindingCommitted: bindJson.bindingCommitted === true,
+      repositoryEventCommitted: bindJson.repositoryEventCommitted === true,
+      readbackVerified: bindJson.readbackVerified === true,
+      auditPending: bindJson.auditPending === true,
+      material: {
+        sourceLabel: summary.sourceLabel,
+        sourceFileSha256: summary.sourceFileSha256,
+        contentSha256: summary.contentSha256,
+        lineCounts: summary.lineCounts,
+        hashes: summary.hashes,
+      },
+      bound: {
+        targetStore: String(binding.targetStore || ''),
+        newPayloadHash: String(binding.newPayloadHash || ''),
+        bindingRequestKey: String(binding.bindingRequestKey || ''),
+      },
+      safety: {realPublishOccurred: false, dryRunAttempted: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  if (String(bindJson?.task?.id || '') !== args.taskId) {
+    throw new Error('云端没有确认描述绑定仍是同一 task，已停止重新预演');
+  }
+  if (String(binding.targetStore || '').toUpperCase() !== store.toUpperCase()) {
+    throw new Error('云端描述绑定目标店铺与请求不一致，已停止重新预演');
+  }
+  for (const language of ['ar', 'en', 'zh-cn']) {
+    if (String(binding.hashes?.[language] || '').toLowerCase() !== String(summary.hashes?.[language] || '').toLowerCase()) {
+      throw new Error(`云端描述绑定 ${language} hash 与本地审核资料不一致，已停止重新预演`);
+    }
+  }
+  if (String(binding.sourceFileSha256 || '').toLowerCase() !== summary.sourceFileSha256
+    || String(binding.contentSha256 || '').toLowerCase() !== summary.contentSha256) {
+    throw new Error('云端描述绑定的源文件/content hash 与本地审核资料不一致，已停止重新预演');
+  }
+  let preflightJson;
+  try {
+    ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
+      method: 'POST',
+      body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_descriptions'},
+    }));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'prepare-descriptions',
+      taskId: args.taskId,
+      store,
+      stage: 'binding_committed_dry_run_failed',
+      bindingCommitted: true,
+      readbackVerified: true,
+      auditPending: false,
+      code: error?.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '重新预演失败').slice(0, 500),
+      material: {
+        sourceLabel: summary.sourceLabel,
+        sourceFileSha256: summary.sourceFileSha256,
+        contentSha256: summary.contentSha256,
+        lineCounts: summary.lineCounts,
+        hashes: summary.hashes,
+      },
+      bound: {
+        targetStore: String(binding.targetStore || ''),
+        newPayloadHash: String(binding.newPayloadHash || ''),
+        bindingRequestKey: String(binding.bindingRequestKey || ''),
+      },
+      safety: {realPublishOccurred: false, retryBinding: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const execution = preflightJson.execution || {};
+  const productExecutor = execution.openApiProductExecutors?.[0] || execution.hlOpenApiExecutor || {};
+  const payloadSummary = productExecutor.payload?.summary || {};
+  const dryRun = {
+    state: String(execution.state || ''),
+    ok: execution.preflight?.ok === true,
+    blockerCount: Array.isArray(execution.preflight?.blockers) ? execution.preflight.blockers.length : 0,
+    payloadHash: productExecutor.payload?.payloadHash || '',
+    descriptionCount: Number(payloadSummary.descriptionCount || 0),
+    descriptionLanguages: Array.isArray(payloadSummary.descriptionLanguages) ? payloadSummary.descriptionLanguages : [],
+    descriptionLineCounts: payloadSummary.descriptionLineCounts || {},
+    descriptionHashes: payloadSummary.descriptionHashes || {},
+    descriptionBindingLocked: payloadSummary.descriptionBindingLocked === true,
+  };
+  // Terminal output carries hashes/counts/languages only. Full description text
+  // never leaves the local source file into CLI stdout.
+  const output = buildPrepareDescriptionsCliOutput({
+    summary,
+    binding: {...binding, sameTask: true},
+    dryRun,
+    taskId: args.taskId,
+    store,
+  });
+  print(output);
+  if (!output.ok) process.exitCode = 1;
+}
+
 async function runPreparePendingImageCorrection(args) {
   if (!args.taskId) throw new Error('prepare-pending-image-correction requires --task-id <id>');
   if (!args.sourceTaskId) throw new Error('prepare-pending-image-correction requires --source-task-id <published task id>');
@@ -1419,6 +1653,10 @@ async function main() {
     await runPreparePublish(args);
     return;
   }
+  if (args.command === 'prepare-descriptions' || args.command === 'prepare_descriptions') {
+    await runPrepareDescriptions(args);
+    return;
+  }
   if (args.command === 'prepare-pending-image-correction' || args.command === 'prepare_pending_image_correction') {
     await runPreparePendingImageCorrection(args);
     return;
@@ -1633,10 +1871,9 @@ async function main() {
 main().catch(err => {
   const out = {
     ok: false,
-    error: err?.message || String(err),
+    error: String(err?.message || String(err)).replace(/[A-Za-z]:[\\/][^\r\n"']+/g, '[local-path-redacted]').slice(0, 1000),
     code: err?.code || null,
     status: err?.status || null,
-    response: err?.response || null,
   };
   console.error(JSON.stringify(out, null, 2));
   process.exitCode = 1;

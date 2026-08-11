@@ -25,6 +25,18 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+check('numeric OpenAPI code 0 plus explicit success true is accepted', __testHooks.publishResultSucceeded({code: 0, info: {success: true}}), true);
+check('string OpenAPI code 0 plus explicit success true is accepted', __testHooks.publishResultSucceeded({code: '0', info: {success: true}}), true);
+check('code 0 without explicit success is rejected', __testHooks.publishResultSucceeded({code: 0, info: {}}), false);
+const sensitiveLine = `Reviewed long point ${'x'.repeat(360)}`;
+const sensitivePayload = {multi_language_desc_list: [{language: 'en', name: `${sensitiveLine}\nline two\nline three\nline four\nline five`}]};
+const sanitizedLongEcho = __testHooks.sanitizePublishPlatformText(sensitiveLine, sensitivePayload, 300);
+check('long single-line description echo is hash-only before truncation', sanitizedLongEcho, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes(sensitiveLine.slice(0, 80)));
+const spacedLine = 'Reviewed  point with preserved double spaces';
+const spacedPayload = {multi_language_desc_list: [{language: 'en', name: `${spacedLine}\nline two\nline three\nline four\nline five`}]};
+const sanitizedSpacedEcho = __testHooks.sanitizePublishPlatformText(spacedLine.replace(/\s+/g, ' '), spacedPayload, 300);
+check('whitespace-variant description echo is hash-only', sanitizedSpacedEcho, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes('Reviewed point'));
+
 const basePayload = {
   product_attribute_list: [
     {attribute_id: 147, attribute_value_id: 1047, attribute_name: 'Power Supply'},

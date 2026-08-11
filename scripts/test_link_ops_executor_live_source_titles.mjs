@@ -17,6 +17,16 @@ import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {buildProductDraftFromSnapshots} from '../lib/link_ops_product_draft_mapper.mjs';
+import {
+  DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+  DESCRIPTION_SOURCE_PROOF,
+  buildDescriptionPayloadRows,
+  describeDescriptionMaterial,
+  descriptionBindingRequestKey,
+  sha256StableJson,
+  sha256Utf8,
+} from '../lib/link_ops_product_descriptions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE_STORE = 'Z9T';
@@ -24,6 +34,32 @@ const SOURCE_SKC = 'sv99999999999999';
 const SOURCE_SPU = 'LIVE-SOURCE-SPU-001';
 const EN_TITLE = 'Live source English title';
 const AR_TITLE = 'عنوان عربي من رابط المصدر';
+const DESCRIPTION_SOURCE_BYTES = Buffer.from('reviewed live-source-title smoke fixture', 'utf8');
+const DESCRIPTION_SOURCE_LABEL = 'live-source-title-reviewed-fixture.html';
+const DESCRIPTION_SOURCE_FILE_SHA256 = sha256Utf8(DESCRIPTION_SOURCE_BYTES);
+const DESCRIPTION_LINES = Object.freeze({
+  ar: Object.freeze([
+    'ميزة عربية تجريبية أولى',
+    'ميزة عربية تجريبية ثانية',
+    'ميزة عربية تجريبية ثالثة',
+    'ميزة عربية تجريبية رابعة',
+    'ميزة عربية تجريبية خامسة',
+  ]),
+  en: Object.freeze([
+    'Reviewed English feature one',
+    'Reviewed English feature two',
+    'Reviewed English feature three',
+    'Reviewed English feature four',
+    'Reviewed English feature five',
+  ]),
+  'zh-cn': Object.freeze([
+    '审核中文卖点一',
+    '审核中文卖点二',
+    '审核中文卖点三',
+    '审核中文卖点四',
+    '审核中文卖点五',
+  ]),
+});
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-live-source-title-'));
@@ -209,6 +245,35 @@ try {
     detailResults: [{ok: true, info: sourceSpuInfo({includeArabic: false})}],
   });
 
+  const descriptionMaterial = {
+    schemaVersion: 1,
+    sourceLabel: DESCRIPTION_SOURCE_LABEL,
+    sourceFileSha256: DESCRIPTION_SOURCE_FILE_SHA256,
+    rows: Object.fromEntries(Object.entries(DESCRIPTION_LINES).map(([language, lines]) => [language, {
+      language,
+      lines: [...lines],
+      sha256: sha256Utf8(lines.join('\n')),
+    }])),
+  };
+  const descriptionSummary = describeDescriptionMaterial(descriptionMaterial);
+  const generatedDraft = await buildProductDraftFromSnapshots({
+    sourceStore: SOURCE_STORE,
+    sourceSkc: SOURCE_SKC,
+    date: 'latest',
+    targetStore: 'HL',
+  });
+  const openapiPublishPayload = {
+    ...generatedDraft.openapiPublishPayloadDraft,
+    multi_language_desc_list: buildDescriptionPayloadRows(descriptionMaterial),
+  };
+  const baseTaskRevision = 1;
+  const bindingRequestKey = descriptionBindingRequestKey({
+    taskId: 'live_source_title_smoke',
+    targetStore: 'HL',
+    baseTaskRevision,
+    contentSha256: descriptionSummary.contentSha256,
+  });
+
   const configFile = path.join(tmpRoot, 'openapi.json');
   await writeJson(configFile, {
     environment: 'live-source-title-smoke',
@@ -227,8 +292,33 @@ try {
       intents: ['copy_product_draft'],
       sourceStore: SOURCE_STORE,
       sourceSkc: SOURCE_SKC,
+      repositoryRevision: baseTaskRevision + 1,
+      openapiPublishPayload,
+      descriptionMaterialBinding: {
+        authority: 'human_reviewed_source',
+        baseTaskRevision,
+        bindingRequestKey,
+        boundAt: '2026-08-11T00:00:00.000Z',
+        boundByUser: 'test-user',
+        contentSha256: descriptionSummary.contentSha256,
+        hashes: descriptionSummary.hashes,
+        imageBindingFingerprint: '',
+        kind: 'copy_product_draft',
+        lineCounts: descriptionSummary.lineCounts,
+        newPayloadHash: sha256StableJson(openapiPublishPayload),
+        payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+        publishLanguages: descriptionSummary.publishLanguages,
+        schemaVersion: descriptionSummary.schemaVersion,
+        sourceApproved: true,
+        sourceByteLength: DESCRIPTION_SOURCE_BYTES.byteLength,
+        sourceFileSha256: DESCRIPTION_SOURCE_FILE_SHA256,
+        sourceLabel: DESCRIPTION_SOURCE_LABEL,
+        sourceProof: DESCRIPTION_SOURCE_PROOF,
+        targetStore: 'HL',
+      },
       targets: {
         stores: ['HL'],
+        writeStores: ['HL'],
         sourceStores: [SOURCE_STORE],
         productRefs: [SOURCE_SKC],
       },
