@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
+PORTAL_ROOT="${SHEIN_BI_PORTAL_ROOT:-$ROOT/outputs/bi-portal}"
 QUEUE_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_FILE:-$ROOT/state/portal-section-queue/queue.json}"
 LOCK_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-section-queue.lock}"
 MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-3}"
@@ -12,6 +13,9 @@ SCHEDULED_ENTRY="${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-0}"
 DEADLINE_MINUTE="${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE:-}"
 START_HOUR="$(date +%H)"
 START_MINUTE="$(date +%M)"
+
+# Never leak the per-section curl header file, even on early exit paths.
+trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 
 [[ "$MAX_SECTIONS" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$SECTION_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || exit 64
@@ -49,6 +53,7 @@ queue_command() {
 }
 
 echo "[portal-section-worker] start maxSections=$MAX_SECTIONS"
+FAILED_SECTIONS=()
 for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   NOW_EPOCH="$(date +%s)"
   CURRENT_HOUR="$(date +%Y-%m-%dT%H)"
@@ -76,16 +81,59 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   echo "[portal-section-worker] section=$SECTION attempt=$index"
   CURL_TIMEOUT="$SECTION_TIMEOUT"
   if (( CURL_TIMEOUT > REMAINING_SEC - 5 )); then CURL_TIMEOUT=$((REMAINING_SEC - 5)); fi
-  if curl -fsS --max-time "$CURL_TIMEOUT" \
+  HEADERS_FILE="$(mktemp)"
+  # -f is deliberately not used: 202/403/503 responses must be classified
+  # explicitly. Only a real HTTP 200 may even be considered for completion.
+  set +e
+  HTTP_CODE="$(curl -sS --max-time "$CURL_TIMEOUT" \
+    -D "$HEADERS_FILE" -o /dev/null -w '%{http_code}' \
     -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
-    "$PORTAL_URL/api/bi/section/$SECTION?refresh=1" >/dev/null; then
-    queue_command complete --section "$SECTION" --lease-id "$LEASE_ID" >/dev/null
-    echo "[portal-section-worker] section=$SECTION done"
-  else
-    STATUS=$?
+    "$PORTAL_URL/api/bi/section/$SECTION?refresh=1")"
+  CURL_STATUS=$?
+  set -e
+  if [[ "$CURL_STATUS" -ne 0 ]]; then
     queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
-      --error "curl status=$STATUS" >/dev/null
-    echo "[portal-section-worker] section=$SECTION failed status=$STATUS" >&2
+      --error "curl status=$CURL_STATUS" >/dev/null
+    echo "[portal-section-worker] section=$SECTION failed status=$CURL_STATUS" >&2
+    FAILED_SECTIONS+=("$SECTION:$CURL_STATUS")
+  elif [[ "$HTTP_CODE" != "200" ]]; then
+    # A 202 pending / 403 / 503 / 500 is never a completed section: the cache
+    # is not terminal yet. Fail the lease so the entry stays in the queue.
+    queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
+      --error "curl http=$HTTP_CODE non-200 never completes" >/dev/null
+    echo "[portal-section-worker] section=$SECTION failed status=$HTTP_CODE (non-200)" >&2
+    FAILED_SECTIONS+=("$SECTION:$HTTP_CODE")
+  elif grep -qiE '^X-BI-Section-(Stale|Refresh-Failed):[[:space:]]*true' "$HEADERS_FILE"; then
+    # A 200 that still carries a stale-source or failed-refresh marker is a
+    # failed refresh, not a completed section. Only a fresh, healthy cache may
+    # complete the queue entry.
+    STATUS=78
+    queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
+      --error "curl status=200 but stale/failed refresh header" >/dev/null
+    echo "[portal-section-worker] section=$SECTION failed status=$STATUS (2xx carried stale/failed refresh marker)" >&2
+    FAILED_SECTIONS+=("$SECTION:$STATUS")
+  else
+    # A clean 200 is still not terminal until the artifact on disk matches the
+    # current core generation. Verify the exact section file readback.
+    set +e
+    TERMINAL_REPORT="$(node scripts/check_bi_portal_section_terminal.mjs \
+      --root "$PORTAL_ROOT" --section "$SECTION" 2>&1)"
+    TERMINAL_STATUS=$?
+    set -e
+    if [[ "$TERMINAL_STATUS" -eq 0 ]]; then
+      queue_command complete --section "$SECTION" --lease-id "$LEASE_ID" >/dev/null
+      echo "[portal-section-worker] section=$SECTION done"
+    else
+      queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
+        --error "terminal readback failed code=$TERMINAL_STATUS" >/dev/null
+      echo "[portal-section-worker] section=$SECTION failed status=$TERMINAL_STATUS (terminal readback: $(printf '%s' "$TERMINAL_REPORT" | tail -c 240))" >&2
+      FAILED_SECTIONS+=("$SECTION:$TERMINAL_STATUS")
+    fi
   fi
+  rm -f "$HEADERS_FILE"
 done
+if [[ "${#FAILED_SECTIONS[@]}" -gt 0 ]]; then
+  echo "[portal-section-worker] failed sections=$(IFS=,; echo "${FAILED_SECTIONS[*]}")" >&2
+  exit 1
+fi
 echo "[portal-section-worker] done"

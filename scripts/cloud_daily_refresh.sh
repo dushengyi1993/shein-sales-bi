@@ -340,6 +340,7 @@ fi
 prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 {
   if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then
+    CRITICAL_PORTAL_STATUS=75
     DAILY_WARNINGS+=("portal refresh lock busy")
     echo "[cloud_daily_refresh] WARN portal refresh lock busy after ${PORTAL_REFRESH_LOCK_WAIT_SEC}s; skip portal generation/prewarm this run" >&2
   else
@@ -395,7 +396,7 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
       # sections were only queued two-at-a-time, so recurring order/return
       # refreshes could leave the homepage on a multi-day fallback even though
       # the daily run had already been marked done.
-      CRITICAL_PORTAL_SECTIONS="${SHEIN_BI_DAILY_CRITICAL_PORTAL_SECTIONS:-homeRankings,homeTrafficDaily,priceScatter,afterSales,orders,homeProfit}"
+      CRITICAL_PORTAL_SECTIONS="${SHEIN_BI_DAILY_CRITICAL_PORTAL_SECTIONS:-homeRankings,homeTrafficDaily,priceScatter,afterSales,orders,profit,homeProfit}"
       echo "[cloud_daily_refresh] refresh homepage-critical sections synchronously sections=$CRITICAL_PORTAL_SECTIONS"
       if SHEIN_BI_PORTAL_PREWARM_SECTIONS="$CRITICAL_PORTAL_SECTIONS" \
         SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
@@ -409,7 +410,7 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
       fi
 
       if bash scripts/enqueue_bi_portal_sections.sh \
-          --sections actions,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings,profit \
+          --sections actions,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings \
           --priority 50 \
           --reason "daily-refresh-$DATE"; then
         echo "[cloud_daily_refresh] non-critical portal sections queued for bounded host-locked refresh"
