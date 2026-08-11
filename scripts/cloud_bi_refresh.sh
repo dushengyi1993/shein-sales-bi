@@ -238,11 +238,19 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 
     if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
       bash scripts/enqueue_bi_portal_sections.sh \
-        --sections homeRankings,afterSales,orders,homeProfit,homeTrafficDaily,priceScatter \
+        --sections homeRankings,afterSales,orders \
+        --priority 4 \
+        --reason "sales-$MODE-$DATE"
+      bash scripts/enqueue_bi_portal_sections.sh \
+        --sections profit \
+        --priority 5 \
+        --reason "sales-$MODE-$DATE"
+      bash scripts/enqueue_bi_portal_sections.sh \
+        --sections homeProfit,homeTrafficDaily,priceScatter \
         --priority 10 \
         --reason "sales-$MODE-$DATE"
       bash scripts/enqueue_bi_portal_sections.sh \
-        --sections actions,linksData,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings,profit \
+        --sections actions,linksData,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings \
         --priority 50 \
         --reason "sales-$MODE-$DATE"
       echo "[cloud_bi_refresh] portal sections queued for bounded host-locked refresh"

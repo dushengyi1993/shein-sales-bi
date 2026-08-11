@@ -7212,9 +7212,11 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
   // A user pressing "force refresh" must not sit behind background rebuilds.
   // Normal first-screen sections share the same priority as the other home
   // accounting cards; all remaining sections keep the background default.
-  const priority = options.force === true
-    ? '0'
-    : (BI_OWNER_VISIBLE_PRIORITY_SECTIONS.has(section) ? '10' : '50');
+  const priority = options.priority != null
+    ? String(options.priority)
+    : (options.force === true
+      ? '0'
+      : (BI_OWNER_VISIBLE_PRIORITY_SECTIONS.has(section) ? '10' : '50'));
   const reason = String(options.reason || `portal-${generatedAt || 'current'}`).slice(0, 240);
   const child = spawn('/usr/bin/env', [
     'bash',
@@ -7254,6 +7256,7 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
     return enqueueHostLockedBiSection(section, generatedAt, {
       reason: force ? `portal-force-${generatedAt || 'current'}` : `portal-cache-miss-${generatedAt || 'current'}`,
       force,
+      priority: options.priority,
     });
   }
   // One section/generation may have only one producer. Previously force
@@ -7331,11 +7334,14 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
 }
 
 async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
+  if (!String(generatedAt || '')) return null;
   const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
-  const profitCache = currentProfitCache || await readBiSectionCacheAnyGeneratedAt(root, 'profit');
-  if (!profitCache?.data?.profit) return null;
-  const sourceGeneratedAt = String(profitCache.generatedAt || '');
-  const data = buildHomeProfitSummaryFromProfitData(profitCache.data, {
+  // homeProfit must derive only from the profit cache of the exact current
+  // core generation. An older profit cache is never a valid homeProfit source:
+  // serving it would let an outdated profit summary masquerade as current.
+  if (!isCurrentProfitSectionCache(currentProfitCache, generatedAt)) return null;
+  const sourceGeneratedAt = String(currentProfitCache.generatedAt || '');
+  const data = buildHomeProfitSummaryFromProfitData(currentProfitCache.data, {
     sourceGeneratedAt,
     staleSource: Boolean(generatedAt && sourceGeneratedAt && sourceGeneratedAt !== String(generatedAt || '')),
   });
@@ -7344,6 +7350,224 @@ async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
     timedOut: false,
     stderr: '',
   });
+}
+
+// Request-state productProfit section: never persisted, never prewarmed,
+// never enqueued to the external section queue. It derives rows only from the
+// profit cache of the exact current core generation. To avoid re-parsing the
+// multi-megabyte profit cache on every keystroke, one in-memory index is kept
+// per published artifact revision; it retains only dailyStoreProducts grouped by standard
+// product code plus a small lowercase search key, never monthGroups/products/
+// storage or any other large profit payload. A generation or artifact revision
+// change replaces it.
+let biProductProfitIndex = null;
+let biProductProfitIndexPromise = null;
+
+function isCurrentProfitSectionCache(cache, generatedAt) {
+  const expected = String(generatedAt || '');
+  return Boolean(
+    expected
+    && String(cache?.generatedAt || '') === expected
+    && Array.isArray(cache?.data?.profit?.dailyStoreProducts),
+  );
+}
+
+async function readBiSectionArtifactIdentity(root, section) {
+  const file = path.join(root, 'sections', `${section}.json`);
+  let handle;
+  try {
+    handle = await fs.open(file, 'r');
+    const stat = await handle.stat();
+    const buffer = Buffer.alloc(Math.min(8192, Math.max(1, Number(stat.size || 0))));
+    const {bytesRead} = await handle.read(buffer, 0, buffer.length, 0);
+    const head = buffer.subarray(0, bytesRead).toString('utf8');
+    const stringField = field => new RegExp(`"${field}"\\s*:\\s*"([^"]*)"`).exec(head)?.[1] || '';
+    const generatedAt = stringField('generatedAt');
+    const cachedAt = stringField('cachedAt');
+    if (!generatedAt || !cachedAt) return null;
+    return {
+      generatedAt,
+      cachedAt,
+      size: Number(stat.size || 0),
+      mtimeMs: Number(stat.mtimeMs || 0),
+      cacheKey: `${path.resolve(root)}|${section}|${generatedAt}|${cachedAt}|${Number(stat.size || 0)}|${Number(stat.mtimeMs || 0)}`,
+    };
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+function buildBiProductProfitIndex(profitCache, cacheKey = '', productDisplayNames = {}) {
+  const profit = profitCache?.data?.profit && typeof profitCache.data.profit === 'object' ? profitCache.data.profit : {};
+  const rows = Array.isArray(profit.dailyStoreProducts) ? profit.dailyStoreProducts : [];
+  const byProduct = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const code = String(row.standard_goods_sn || row.goods_sn || row.raw_goods_sn || '').trim();
+    if (!code) continue;
+    let entry = byProduct.get(code);
+    if (!entry) {
+      entry = {
+        codeLower: code.toLowerCase(),
+        searchText: [code, productDisplayNames?.[code]].filter(Boolean).join('|').toLowerCase(),
+        rows: [],
+      };
+      byProduct.set(code, entry);
+    }
+    entry.rows.push(row);
+  }
+  return {
+    cacheKey,
+    generatedAt: String(profitCache.generatedAt || ''),
+    sourceCachedAt: String(profitCache.cachedAt || ''),
+    builtAt: new Date().toISOString(),
+    byProduct,
+  };
+}
+
+async function loadCurrentBiProductProfitIndex(root, generatedAt, retry = 0) {
+  if (!String(generatedAt || '')) return null;
+  const before = await readBiSectionArtifactIdentity(root, 'profit');
+  if (!before || before.generatedAt !== String(generatedAt || '')) return null;
+  const cacheKey = before.cacheKey;
+  if (biProductProfitIndex?.cacheKey === cacheKey) return biProductProfitIndex;
+
+  if (biProductProfitIndexPromise?.cacheKey !== cacheKey) {
+    // Serialize artifact revisions so two 98MB cache parses cannot overlap.
+    // The holder is keyed by root + current artifact identity. A request for a
+    // newer revision may wait for the older parse, but can never reuse or
+    // publish the older rows.
+    const previous = biProductProfitIndexPromise?.promise?.catch(() => null);
+    const holder = {cacheKey, promise: null};
+    holder.promise = (async () => {
+      if (previous) await previous;
+      const profitCache = await readBiSectionCache(root, 'profit', generatedAt).catch(() => null);
+      if (!isCurrentProfitSectionCache(profitCache, generatedAt) || String(profitCache.cachedAt || '') !== before.cachedAt) return null;
+      const core = await readJsonFile(path.join(root, 'data.json'), {});
+      const productDisplayNames = core?.productDisplayNames && typeof core.productDisplayNames === 'object'
+        ? core.productDisplayNames
+        : {};
+      const index = buildBiProductProfitIndex(profitCache, cacheKey, productDisplayNames);
+      const after = await readBiSectionArtifactIdentity(root, 'profit');
+      if (!after || after.cacheKey !== cacheKey) return null;
+      biProductProfitIndex = index;
+      return index;
+    })().finally(() => {
+      if (biProductProfitIndexPromise === holder) biProductProfitIndexPromise = null;
+    });
+    biProductProfitIndexPromise = holder;
+  }
+
+  const holder = biProductProfitIndexPromise;
+  const index = await holder.promise;
+  if (index?.cacheKey === cacheKey) return index;
+  return retry < 1 ? loadCurrentBiProductProfitIndex(root, generatedAt, retry + 1) : null;
+}
+
+async function loadBiProductProfitSection(args, root, options = {}) {
+  const q = String(options.q || '').trim();
+  if (!q) {
+    return {status: 400, payload: {ok: false, section: 'productProfit', error: 'productProfit requires a non-empty q'}};
+  }
+  if (q.length > 64) {
+    return {status: 400, payload: {ok: false, section: 'productProfit', error: 'productProfit q exceeds 64 characters'}};
+  }
+  const meta = await readBiPortalCoreMeta(root);
+  if (meta.mode !== 'api') {
+    return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section: 'productProfit', mode: meta.mode}};
+  }
+  const generatedAt = String(meta.generatedAt || '');
+  if (!generatedAt) {
+    return {status: 503, payload: {ok: false, section: 'productProfit', error: 'productProfit requires a non-empty core generation'}};
+  }
+  const index = await loadCurrentBiProductProfitIndex(root, generatedAt);
+  if (!index) {
+    // No current-generation profit cache: never read anyGeneratedAt, never
+    // serve rows from an older profit. Read-only mode must not enqueue work.
+    if (options.allowGenerate === false) {
+      return {
+        status: 503,
+        payload: {
+          ok: false,
+          section: 'productProfit',
+          generatedAt,
+          error: 'productProfit requires a current profit section cache; generation is disabled',
+        },
+      };
+    }
+    const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, 'profit', generatedAt, {
+      priority: '5',
+      reason: `productProfit-cache-miss-${generatedAt || 'current'}`,
+    });
+    return {
+      status: 202,
+      payload: {
+        ok: true,
+        section: 'productProfit',
+        generatedAt,
+        pendingSection: true,
+        cacheHit: false,
+        refreshScheduled: Boolean(refreshScheduled),
+        coreGeneratedAt: generatedAt,
+      },
+    };
+  }
+  const query = q.toLowerCase();
+  const hasActor = Boolean(options.actor && typeof options.actor === 'object');
+  const allowedStores = normalizeStoreList(hasActor ? options.actor.readStores || [] : []);
+  const storeSet = !hasActor || allowedStores.includes('*') ? null : new Set(allowedStores);
+  const exact = Array.from(index.byProduct.values()).find(entry => entry.codeLower === query);
+  const matchedEntries = exact
+    ? [exact]
+    : Array.from(index.byProduct.values()).filter(entry => entry.searchText.includes(query));
+  if (matchedEntries.length > 4) {
+    return {
+      status: 422,
+      payload: {ok: false, section: 'productProfit', generatedAt, error: 'productProfit q is too broad; select a more specific product code'},
+    };
+  }
+  const rows = [];
+  for (const entry of matchedEntries) {
+    for (const row of entry.rows) {
+      if (storeSet && !storeSet.has(String(row.store_key || '').trim().toUpperCase())) continue;
+      rows.push(row);
+    }
+  }
+  if (!exact && rows.length > 5_000) {
+    return {
+      status: 422,
+      payload: {ok: false, section: 'productProfit', generatedAt, error: 'productProfit result is too large; select one exact product code'},
+    };
+  }
+  const [latestMeta, latestArtifact] = await Promise.all([
+    readBiPortalCoreMeta(root).catch(() => null),
+    readBiSectionArtifactIdentity(root, 'profit'),
+  ]);
+  if (String(latestMeta?.generatedAt || '') !== generatedAt || latestArtifact?.cacheKey !== index.cacheKey) {
+    if (options.generationRetry !== true) {
+      return loadBiProductProfitSection(args, root, {...options, generationRetry: true});
+    }
+    return {status: 503, payload: {ok: false, section: 'productProfit', error: 'productProfit source changed during request; retry'}};
+  }
+  return {
+    status: 200,
+    payload: {
+      ok: true,
+      section: 'productProfit',
+      generatedAt,
+      cachedAt: index.sourceCachedAt || index.builtAt,
+      cacheHit: true,
+      data: {
+        productProfit: {
+          rows,
+          sourceGeneratedAt: index.generatedAt,
+          staleSource: false,
+        },
+      },
+    },
+  };
 }
 
 async function refreshProfitMarts(args) {
@@ -7626,12 +7850,22 @@ async function loadBiSection(args, root, section, options = {}) {
   const force = !!options.force;
   const allowGenerate = options.allowGenerate !== false;
   const allowStale = options.allowStale !== false;
+  if (section === 'productProfit') {
+    // Request-state productProfit is deliberately outside BI_PORTAL_SECTION_KEYS:
+    // it must never be prewarmed, never enter the external section queue, and
+    // never be persisted. It only derives rows from the current-generation
+    // profit cache and is filtered again by actor.readStores below.
+    return loadBiProductProfitSection(args, root, options);
+  }
   if (!BI_PORTAL_SECTION_KEYS.has(section)) {
     return {status: 404, payload: {ok: false, error: 'Unknown BI section', section}};
   }
   const meta = await readBiPortalCoreMeta(root);
   if (meta.mode !== 'api' && !force) {
     return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
+  }
+  if (section === 'homeProfit' && !String(meta.generatedAt || '')) {
+    return {status: 503, payload: {ok: false, section, error: 'homeProfit requires a non-empty core generation'}};
   }
   if (!force && allowGenerate) {
     const failure = biSectionRefreshFailures.get(biSectionRefreshFailureKey(root, section));
@@ -7653,6 +7887,63 @@ async function loadBiSection(args, root, section, options = {}) {
   if (force && options.asyncRefresh) {
     if (!allowGenerate) {
       return {status: 403, payload: {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'}};
+    }
+    if (section === 'homeProfit') {
+      // Async force refresh must stay fail-closed for homeProfit: an old-source
+      // summary is never valid data. Derive inline from the current-generation
+      // profit cache when present; otherwise enqueue profit at dependency
+      // priority and fail with 503 (this branch is force-only).
+      const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt).catch(() => null);
+      if (!isCurrentProfitSectionCache(currentProfitCache, meta.generatedAt)) {
+        const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, 'profit', meta.generatedAt, {
+          priority: '5',
+          reason: `homeProfit-async-needs-profit-${meta.generatedAt || 'current'}`,
+        });
+        return {
+          status: 503,
+          payload: {
+            ok: false,
+            section,
+            generatedAt: meta.generatedAt,
+            pendingSection: true,
+            cacheHit: false,
+            refreshScheduled: Boolean(refreshScheduled),
+            coreGeneratedAt: meta.generatedAt,
+            error: 'homeProfit requires a current profit section cache; profit refresh queued',
+          },
+        };
+      }
+      const deriveKey = `${root}|${section}|${meta.generatedAt || ''}|derive`;
+      if (!biSectionInFlight.has(deriveKey)) {
+        biSectionInFlight.set(deriveKey, deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt).finally(() => {
+          biSectionInFlight.delete(deriveKey);
+        }));
+      }
+      try {
+        const derived = await biSectionInFlight.get(deriveKey);
+        clearBiSectionRefreshFailure(root, section);
+        if (derived) {
+          const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, {
+            ...options,
+            extraFields: {
+              ...(options.extraFields || {}),
+              coreGeneratedAt: meta.generatedAt,
+            },
+          });
+          if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+          return {status: 200, payload: {...derived, cacheHit: false, coreGeneratedAt: meta.generatedAt}};
+        }
+      } catch (error) {
+        recordBiSectionRefreshFailure(root, section, error);
+        return {
+          status: 503,
+          payload: {ok: false, section, generatedAt: meta.generatedAt, error: error?.message || String(error || 'homeProfit derivation failed')},
+        };
+      }
+      return {
+        status: 503,
+        payload: {ok: false, section, generatedAt: meta.generatedAt, error: 'homeProfit could not be derived from the current profit section cache'},
+      };
     }
     const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
       force: true,
@@ -7695,19 +7986,69 @@ async function loadBiSection(args, root, section, options = {}) {
   }
   if (section === 'homeProfit') {
     const cached = !force ? await readBiSectionCache(root, section, meta.generatedAt) : null;
-    const cachedSourceGeneratedAt = String(cached?.data?.homeProfitSummary?.sourceGeneratedAt || '');
-    if (cached && cachedSourceGeneratedAt === String(meta.generatedAt || '')) {
+    const cachedSummary = cached?.data?.homeProfitSummary;
+    const cachedSourceGeneratedAt = String(cachedSummary?.sourceGeneratedAt || '');
+    const sourceFresh = Boolean(
+      cached
+      && cachedSourceGeneratedAt === String(meta.generatedAt || '')
+      && cachedSummary?.staleSource === false
+      && Array.isArray(cachedSummary?.dailyScopes),
+    );
+    if (sourceFresh) {
       const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
       if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
       return {status: 200, payload: {...cached, cacheHit: true}};
     }
-    if (cached && cachedSourceGeneratedAt !== String(meta.generatedAt || '')) {
-      const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt);
-      if (!currentProfitCache) {
-        const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
-        if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
-        return {status: 200, payload: {...cached, cacheHit: true}};
+    // A stale-source homeProfit cache is never a valid 200: only the current
+    // core generation's profit cache may back homeProfit. Without it, enqueue
+    // profit at dependency priority (merged by key) and fail closed.
+    const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt).catch(() => null);
+    if (!isCurrentProfitSectionCache(currentProfitCache, meta.generatedAt)) {
+      if (!allowGenerate) {
+        return {
+          status: 503,
+          payload: {
+            ok: false,
+            section,
+            generatedAt: meta.generatedAt,
+            pendingSection: true,
+            cacheHit: false,
+            refreshScheduled: false,
+            coreGeneratedAt: meta.generatedAt,
+            error: 'homeProfit requires a current profit section cache; generation is disabled',
+          },
+        };
       }
+      const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, 'profit', meta.generatedAt, {
+        priority: '5',
+        reason: `homeProfit-needs-profit-${meta.generatedAt || 'current'}`,
+      });
+      const pending = {
+        ok: true,
+        section,
+        generatedAt: meta.generatedAt,
+        pendingSection: true,
+        cacheHit: false,
+        refreshScheduled: Boolean(refreshScheduled),
+        coreGeneratedAt: meta.generatedAt,
+      };
+      if (force || options.hostLockedWorker === true) {
+        return {
+          status: 503,
+          payload: {
+            ...pending,
+            ok: false,
+            error: 'homeProfit requires a current profit section cache; profit refresh queued',
+          },
+        };
+      }
+      return {
+        status: 202,
+        payload: {
+          ...pending,
+          error: 'homeProfit requires a current profit section cache; profit refresh queued',
+        },
+      };
     }
     if (!allowGenerate) {
       return {
@@ -8194,8 +8535,17 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
       const sectionStartedAt = Date.now();
       try {
         const existingCache = await readBiSectionCache(root, section, generatedAt).catch(() => null);
-        const existingHomeProfitSource = String(existingCache?.data?.homeProfitSummary?.sourceGeneratedAt || '');
-        if (existingCache && (section !== 'homeProfit' || existingHomeProfitSource === generatedAt)) {
+        const existingHomeProfit = existingCache?.data?.homeProfitSummary;
+        const existingIsTerminal = section === 'profit'
+          ? isCurrentProfitSectionCache(existingCache, generatedAt)
+          : section === 'homeProfit'
+            ? Boolean(
+              String(existingHomeProfit?.sourceGeneratedAt || '') === generatedAt
+              && existingHomeProfit?.staleSource === false
+              && Array.isArray(existingHomeProfit?.dailyScopes)
+            )
+            : Boolean(existingCache);
+        if (existingIsTerminal) {
           results.push({section, status: 200, durationMs: Date.now() - sectionStartedAt, ok: true, cacheHit: true});
           logBiPortalCoreWarmup('section-skip-cache', {section, generatedAt});
           continue;
@@ -8208,7 +8558,9 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
           skipCoreWarmupWait: true,
         });
         const durationMs = Date.now() - sectionStartedAt;
-        const ok = result?.status >= 200 && result.status < 300;
+        // A queued 202 is not warm. Keep health in error/running state until
+        // the next pass reads the terminal current-generation artifact.
+        const ok = result?.status === 200;
         results.push({section, status: result?.status || 0, durationMs, ok});
         logBiPortalCoreWarmup('section', {
           section,
@@ -8216,7 +8568,7 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
           durationMs,
           cacheMode: result?.rawBody ? 'raw' : 'json',
         });
-        if (!ok) failures.push({section, status: result?.status || 0, error: result?.payload?.error || 'non-2xx'});
+        if (!ok) failures.push({section, status: result?.status || 0, error: result?.payload?.error || 'non-200'});
       } catch (err) {
         const durationMs = Date.now() - sectionStartedAt;
         const error = err?.message || String(err || 'section failed');
@@ -10064,6 +10416,7 @@ async function main() {
           const force = url.searchParams.get('refresh') === '1';
           const asyncRefresh = force && ['1', 'true', 'yes'].includes(String(url.searchParams.get('async') || '').toLowerCase());
           const refreshToken = String(url.searchParams.get('refreshToken') || '').slice(0, 160);
+          const q = String(url.searchParams.get('q') || '').trim();
           const hostLockedWorker = isTrustedInternalRequest(req)
             && String(req.headers['x-shein-bi-host-locked-worker'] || '') === '1';
           const allowGenerate = allowGenerateSections;
@@ -10078,6 +10431,8 @@ async function main() {
               hostLockedWorker,
               allowGenerate,
               gzip: acceptsGzip(req.headers['accept-encoding']),
+              q,
+              actor,
             });
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
