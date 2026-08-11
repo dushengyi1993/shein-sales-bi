@@ -63,6 +63,7 @@ const tests = [
   'scripts/test_session_manager_webapi_export_contract.mjs',
   'scripts/test_bi_client_resilience.mjs',
   'scripts/test_bi_frontend_accessibility.mjs',
+  'scripts/test_bi_home_period_comparison.mjs',
   'scripts/test_bi_section_cache.mjs',
   'scripts/test_bi_portal_section_queue.mjs',
   'scripts/test_bi_portal_section_terminal.mjs',
