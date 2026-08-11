@@ -205,30 +205,32 @@ run_terminal_final_snapshot() {
   # Every terminal report is built after a fresh browserless ordinary/coupon
   # snapshot and a final 19-store price readback. A blocked queue is not a
   # report-ready state by itself.
-  lease_action heartbeat
+  lease_action heartbeat || return $?
   timeout -k "$STACK_REVIEW_KILL_AFTER_SEC" "$STACK_REVIEW_TIMEOUT_SEC" \
     node scripts/marketing/export_marketing_stack_review.mjs \
       --batch-size 3 \
       --session-http \
       --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
-      --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
-  lease_action heartbeat
+      --cloud-bi-root "$GUARD_CLOUD_BI_ROOT" || return $?
+  lease_action heartbeat || return $?
   timeout -k "$SCAN_KILL_AFTER_SEC" "$SCAN_TIMEOUT_SEC" \
     node scripts/marketing/scan_current_marketing_prices_for_bi.mjs \
       --group ALL --page-size 500 --store-attempts 3 \
       --session-http --session-concurrency "${SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY:-3}" \
-      --out "$scan_out"
-  lease_action heartbeat
+      --out "$scan_out" || return $?
+  lease_action heartbeat || return $?
   node scripts/marketing/build_marketing_daily_guard_report.mjs \
     --date "$DATE" --max-age-hours "$GUARD_MAX_AGE_HOURS" \
-    --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
+    --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" --cloud-bi-root "$GUARD_CLOUD_BI_ROOT" || return $?
   FINAL_SCAN_OUT="$scan_out"
+  echo "[cloud_marketing_repair] publish terminal marketing live snapshot to BI portal queue"
+  bash scripts/publish_marketing_price_leads_to_bi.sh || return $?
 }
 
 run_final_readback() {
-  run_terminal_final_snapshot
-  build_current_repair_plans
-  rebuild_repair_queue
+  run_terminal_final_snapshot || return $?
+  build_current_repair_plans || return $?
+  rebuild_repair_queue || return $?
 }
 
 build_current_repair_plans() {
@@ -237,27 +239,28 @@ build_current_repair_plans() {
   guard_out="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
   node scripts/marketing/build_high_click_special_discount_plan.mjs \
     --date "$DATE" --guard "$guard_out" \
-    --out "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json"
-  price_overrides="$(GUARD_FILE="$guard_out" node -e "const j=require(process.env.GUARD_FILE);process.stdout.write(String(j.targetPlanSelection?.priceOverrides||''))")"
+    --out "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json" || return $?
+  price_overrides="$(GUARD_FILE="$guard_out" node -e "const j=require(process.env.GUARD_FILE);process.stdout.write(String(j.targetPlanSelection?.priceOverrides||''))")" || return $?
   [[ -n "$price_overrides" ]] || return 2
   if [[ "$price_overrides" == /* ]]; then price_path="$price_overrides"; else price_path="$ROOT/$price_overrides"; fi
   node scripts/marketing/build_new_listing_limited_discount_plan.mjs \
     --date "$DATE" --source-guard "$guard_out" --exclude-manual-special true --price-overrides "$price_path" \
-    --current-marketing-live-scan "$scan_out"
-  manual_count="$(GUARD_FILE="$guard_out" node -e "const j=require(process.env.GUARD_FILE);process.stdout.write(String(Number(j.manualSpecialLimitedDiscount?.actionCount||0)))")"
+    --current-marketing-live-scan "$scan_out" || return $?
+  manual_count="$(GUARD_FILE="$guard_out" node -e "const j=require(process.env.GUARD_FILE);process.stdout.write(String(Number(j.manualSpecialLimitedDiscount?.actionCount||0)))")" || return $?
   manual_plan="$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-plan.json"
   if [[ "$manual_count" -gt 0 ]]; then
     node scripts/marketing/build_manual_limited_discount_restore_plan.mjs \
       --guard "$guard_out" \
-      --out-dir "$(dirname "$manual_plan")"
+      --out-dir "$(dirname "$manual_plan")" || return $?
   fi
-  drift_count="$(GUARD_FILE="$guard_out" node -e "const j=require(process.env.GUARD_FILE);process.stdout.write(String((j.limitedDiscountTargetPriceDrift?.belowRows||[]).length))")"
+  drift_count="$(GUARD_FILE="$guard_out" node -e "const j=require(process.env.GUARD_FILE);process.stdout.write(String((j.limitedDiscountTargetPriceDrift?.belowRows||[]).length))")" || return $?
   if [[ "$drift_count" -gt 0 ]]; then
     node scripts/marketing/build_limited_discount_drift_rescue_plan.mjs \
       --guard "$guard_out" \
       --out-dir "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}" \
-      --end-time "$(TZ="$TZ_NAME" date -d "$DATE +7 days" +%F) 23:59:59"
+      --end-time "$(TZ="$TZ_NAME" date -d "$DATE +7 days" +%F) 23:59:59" || return $?
   fi
+  return 0
 }
 
 rebuild_repair_queue() {
@@ -270,7 +273,7 @@ rebuild_repair_queue() {
     --manual-plan "$manual_plan" \
     --drift-plan-dir "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}" \
     --fallback-plan "$ROOT/outputs/reports/new-listing-7d-limited-discount-plan-${DATE}.json" \
-    --queue "$QUEUE_FILE"
+    --queue "$QUEUE_FILE" || return $?
 }
 
 terminal_report_ready() {

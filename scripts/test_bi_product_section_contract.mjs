@@ -41,6 +41,61 @@ const productTrafficSql = standaloneSections.match(/productTrafficDaily:\s*`[\s\
 assert.match(productTrafficSql, /raw_product_traffic AS MATERIALIZED/);
 assert.match(productTrafficSql, /product_traffic_keys AS MATERIALIZED/);
 assert.match(productTrafficSql, /latest_link_status AS MATERIALIZED/);
+assert.match(
+  productTrafficSql,
+  /store_latest_link AS \(\s*SELECT store_key, max\(snapshot_date\) AS link_date\s*FROM fact\.link_master_snapshot\s*GROUP BY store_key/,
+  'standalone traffic SQL must anchor first_shelf_time on each store latest link snapshot',
+);
+assert.match(
+  productTrafficSql,
+  /JOIN store_latest_link sll\s+ON sll\.store_key = l\.store_key\s+AND sll\.link_date = l\.snapshot_date/,
+  'standalone latest_link_status must read the per-store latest snapshot only',
+);
+assert.equal(
+  (productTrafficSql.match(/max\(l\.first_shelf_time\) AS first_shelf_time/g) || []).length,
+  2,
+  'standalone traffic SQL must publish first_shelf_time both in latest_link_status and in the emitted rows',
+);
+assert.match(
+  productTrafficSql,
+  /LEFT JOIN latest_link_status l ON l\.store_key = r\.store_key AND l\.skc = r\.skc/,
+  'standalone traffic rows must join current link facts without date alignment',
+);
+
+const coreTrafficSql = generator.slice(
+  generator.indexOf('product_traffic_daily AS (', generator.indexOf('store_latest_perf AS (')),
+  generator.indexOf('trend_business_daily AS ('),
+);
+const coreLatestLinkAt = generator.indexOf('store_latest_link AS (', generator.indexOf('actions AS ('));
+const coreLatestLinkSql = generator.slice(coreLatestLinkAt, generator.indexOf('store_latest_perf AS (', coreLatestLinkAt));
+assert.match(coreLatestLinkSql, /latest_link_status AS MATERIALIZED \(/, 'core traffic must deduplicate the latest link snapshot before joining metrics');
+assert.match(coreLatestLinkSql, /max\(l\.first_shelf_time\) AS first_shelf_time/);
+assert.match(coreLatestLinkSql, /GROUP BY l\.store_key, l\.skc/, 'core latest link facts must be unique per store and SKC');
+assert.match(coreTrafficSql, /max\(l\.first_shelf_time\) AS first_shelf_time/, 'core traffic SQL must publish first_shelf_time');
+assert.match(
+  coreTrafficSql,
+  /LEFT JOIN latest_link_status l\s+ON l\.store_key = p\.store_key\s+AND l\.skc = p\.skc/,
+  'core traffic must join one deduplicated current link fact per store and SKC',
+);
+assert.doesNotMatch(coreTrafficSql, /l\.snapshot_date = p\.date/, 'core traffic must not align link facts to the performance date');
+
+assert.match(client, /trafficSortHead\('firstShelf','首次上架'\)/, 'traffic detail must expose a sortable first-shelf column');
+assert.match(
+  client,
+  /if\(key==='firstShelf'\)return String\(r\.first_shelf_time\|\|''\)/,
+  'traffic first-shelf sort must compare the raw timestamp string',
+);
+assert.match(
+  client,
+  /if\(key==='firstShelf'\)\{const am=!av,bm=!bv;if\(am!==bm\)return am\?1:-1\}/,
+  'traffic first-shelf sorting must keep missing timestamps last in both directions',
+);
+assert.match(
+  client,
+  /\['status','store','product','skc','tags','firstShelf'\]\.includes\(k\)\?'asc':'desc'/,
+  'traffic first-shelf column must default to ascending order like other text columns',
+);
+assert.match(client, /fmtStamp\(r\.first_shelf_time\)/, 'traffic detail row must render first shelf time via the timestamp formatter');
 
 const linksDataSql = generator.slice(
   generator.indexOf('store_latest_perf AS ('),
@@ -73,4 +128,4 @@ assert.match(warehouseSchema, /latest_running AS \(/, 'ET current inventory view
 assert.match(warehouseSchema, /ET流水零余额回填/, 'current complete snapshots must carry forward known zero 09-warehouse balances instead of reporting them unmatched');
 assert.match(warehouseSchema, /FROM store_agg_complete s/, 'ET inventory view must include zero-balance carry-forward rows');
 
-console.log('bi_product_section_contract: slim sales/traffic sections, inventory cost continuity, and bounded matrix rendering checks passed');
+console.log('bi_product_section_contract: slim sales/traffic sections, traffic first-shelf column, inventory cost continuity, and bounded matrix rendering checks passed');
