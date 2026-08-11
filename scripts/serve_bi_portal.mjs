@@ -255,7 +255,7 @@ const BI_OWNER_VISIBLE_PRIORITY_SECTIONS = new Set([
 const BI_EXTERNAL_SECTION_QUEUE_ENABLED = process.platform !== 'win32'
   && !['0', 'false', 'no', 'off'].includes(String(process.env.SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED || '1').trim().toLowerCase());
 const biExternalSectionQueuePending = new Set();
-const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['homeRankings', 'profit', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter', 'waybills'];
+const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter', 'waybills'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
   generatedAt: '',
@@ -7762,6 +7762,7 @@ function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
       dailyScopes,
       source: 'profit_section_cache',
       sourceGeneratedAt: String(sourceMeta.sourceGeneratedAt || ''),
+      sourceCachedAt: String(sourceMeta.sourceCachedAt || ''),
       staleSource: Boolean(sourceMeta.staleSource),
     },
   };
@@ -7839,6 +7840,51 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
   const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
   timer.unref?.();
   return true;
+}
+
+async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = {}) {
+  if (!BI_EXTERNAL_SECTION_QUEUE_ENABLED) {
+    throw new Error('live accounting requires the external host-locked section queue');
+  }
+  const groups = [];
+  for (const item of plan || []) {
+    const section = String(item?.section || '');
+    const priority = Number(item?.priority);
+    if (!BI_PORTAL_SECTION_KEYS.has(section) || !Number.isSafeInteger(priority)) {
+      throw new Error(`invalid live accounting queue item: ${section || 'missing'}:${item?.priority}`);
+    }
+    let group = groups.find(candidate => candidate.priority === priority);
+    if (!group) {
+      group = {priority, sections: []};
+      groups.push(group);
+    }
+    group.sections.push(section);
+  }
+  const reason = String(options.reason || `live-accounting-${generatedAt || 'current'}`).slice(0, 240);
+  for (const group of groups) {
+    const run = await runChildProcess('/usr/bin/env', [
+      'bash',
+      path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
+      '--sections', group.sections.join(','),
+      '--priority', String(group.priority),
+      '--reason', reason,
+    ], {
+      cwd: ROOT,
+      timeoutMs: 30_000,
+    });
+    if (!run.ok) {
+      throw new Error(
+        `live accounting queue persistence failed: priority=${group.priority} code=${run.code} timedOut=${run.timedOut}`,
+      );
+    }
+    for (const section of group.sections) {
+      const key = `${section}|${generatedAt || ''}`;
+      biExternalSectionQueuePending.add(key);
+      const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
+      timer.unref?.();
+    }
+  }
+  return {queued: true, sections: groups.flatMap(group => group.sections)};
 }
 
 function sectionRequiresHostLockedWorker(section, options = {}) {
@@ -7941,6 +7987,7 @@ async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
   const sourceGeneratedAt = String(currentProfitCache.generatedAt || '');
   const data = buildHomeProfitSummaryFromProfitData(currentProfitCache.data, {
     sourceGeneratedAt,
+    sourceCachedAt: String(currentProfitCache.cachedAt || ''),
     staleSource: Boolean(generatedAt && sourceGeneratedAt && sourceGeneratedAt !== String(generatedAt || '')),
   });
   return writeBiSectionCache(root, 'homeProfit', generatedAt, data, {
@@ -7961,12 +8008,17 @@ async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
 let biProductProfitIndex = null;
 let biProductProfitIndexPromise = null;
 
-function isCurrentProfitSectionCache(cache, generatedAt) {
+function isCurrentProfitSectionCache(cache, generatedAt, minCachedAt = '') {
   const expected = String(generatedAt || '');
+  const minimum = Date.parse(String(minCachedAt || ''));
+  const cached = Date.parse(String(cache?.cachedAt || ''));
   return Boolean(
     expected
     && String(cache?.generatedAt || '') === expected
     && Array.isArray(cache?.data?.profit?.dailyStoreProducts),
+  ) && (
+    Number.isNaN(minimum)
+    || (!Number.isNaN(cached) && cached >= minimum)
   );
 }
 
@@ -8286,6 +8338,22 @@ SELECT jsonb_build_object(
   return JSON.parse(String(run.stdout || '{}').trim() || '{}');
 }
 
+async function readProfitAccountingState(args, generatedAt = '') {
+  const freshness = await readProfitMartCacheFreshness(args);
+  const decision = evaluateProfitMartCacheFreshness(freshness, {
+    coreGeneratedAt: generatedAt,
+    allowedCoreSkewMs: Math.max(
+      0,
+      Number(process.env.SHEIN_BI_PROFIT_MART_CORE_SKEW_MS || PROFIT_MART_CORE_SKEW_MS),
+    ),
+  });
+  return {
+    freshness,
+    decision,
+    minimumPublishedAt: String(freshness.metaRefreshedAt || ''),
+  };
+}
+
 async function ensureProfitMartCacheFresh(args, generatedAt = '') {
   if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') return null;
   if (biProfitMartFreshnessPromise) return biProfitMartFreshnessPromise;
@@ -8354,24 +8422,31 @@ async function generateBiSection(args, root, section, generatedAt) {
   // published cache avoids expanding mart.profit_order_item on every trend
   // request, which previously turned one portal warmup into a 10+ minute SQL.
   const profitBackedSections = new Set(['profit', 'homeProfit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend']);
-  // homeRankings and homeProfit are homepage historical baselines. Current-day
-  // sales and profit are overlaid from liveSalesToday in the client, so
-  // rebuilding the inventory-cost ledger before either lightweight section
-  // only blocks the homepage without improving the displayed current-day fact.
-  // The live-accounting worker remains responsible for publishing a new
-  // complete profit cache; later lightweight refreshes then read it.
-  const accountingFreshnessRequiredSections = new Set(['profit', 'rankings', 'productSalesDaily', 'inventoryTrend']);
+  // Cached current-day sales remain fast through liveSalesToday. Whenever the
+  // durable historical homepage baseline is actually regenerated, however, it
+  // must not publish from an older profit cache: after midnight the live
+  // overlay has moved on and homeRankings becomes the selected-day authority.
+  const accountingFreshnessRequiredSections = new Set(['profit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend']);
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
   const refreshRun = sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)
     ? await ensureProfitMartCacheFresh(args, generatedAt)
     : null;
   if (sourceMode === 'cache' && section === 'homeProfit') {
-    const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
-    if (!currentProfitCache) {
+    const accountingState = await readProfitAccountingState(args, generatedAt);
+    let currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+    if (
+      !accountingState.decision.fresh
+      || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, accountingState.minimumPublishedAt)
+    ) {
       const generated = await generateBiSection(args, root, 'profit', generatedAt);
       if (!generated?.data?.profit) {
         throw new Error('homeProfit requires a fresh profit section cache');
+      }
+      currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+      const after = await readProfitAccountingState(args, generatedAt);
+      if (!after.decision.fresh || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
+        throw new Error('homeProfit profit source remained stale after canonical refresh');
       }
     }
     const derived = await deriveHomeProfitSectionFromProfitCache(root, generatedAt);
@@ -8464,6 +8539,75 @@ async function loadBiSection(args, root, section, options = {}) {
   }
   if (section === 'homeProfit' && !String(meta.generatedAt || '')) {
     return {status: 503, payload: {ok: false, section, error: 'homeProfit requires a non-empty core generation'}};
+  }
+  if (
+    BI_EXTERNAL_SECTION_QUEUE_ENABLED
+    && options.hostLockedWorker !== true
+    && ['homeRankings', 'homeProfit'].includes(section)
+  ) {
+    let accountingState;
+    try {
+      accountingState = await readProfitAccountingState(args, meta.generatedAt);
+    } catch (error) {
+      recordBiSectionRefreshFailure(root, section, error);
+      return {
+        status: 503,
+        payload: {
+          ok: false,
+          section,
+          generatedAt: meta.generatedAt,
+          pendingSection: true,
+          cacheHit: false,
+          refreshScheduled: false,
+          error: 'homepage accounting freshness could not be verified',
+        },
+      };
+    }
+    const existing = await readBiSectionCache(root, section, meta.generatedAt).catch(() => null);
+    const sourcePublishedAt = section === 'homeProfit'
+      ? String(existing?.data?.homeProfitSummary?.sourceCachedAt || '')
+      : String(existing?.cachedAt || '');
+    const minimum = Date.parse(accountingState.minimumPublishedAt);
+    const source = Date.parse(sourcePublishedAt);
+    const sourceCurrent = accountingState.decision.fresh
+      && !Number.isNaN(minimum)
+      && !Number.isNaN(source)
+      && source >= minimum;
+    if (!sourceCurrent) {
+      try {
+        await persistHostLockedBiSectionPlan(liveAccountingQueuePlan({kind: 'order'}), meta.generatedAt, {
+          reason: `homepage-accounting-stale-${meta.generatedAt || 'current'}`,
+        });
+      } catch (error) {
+        recordBiSectionRefreshFailure(root, section, error);
+        return {
+          status: 503,
+          payload: {
+            ok: false,
+            section,
+            generatedAt: meta.generatedAt,
+            pendingSection: true,
+            cacheHit: false,
+            refreshScheduled: false,
+            error: 'homepage accounting is stale and durable refresh enqueue failed',
+          },
+        };
+      }
+      return {
+        status: force ? 503 : 202,
+        payload: {
+          ok: !force,
+          section,
+          generatedAt: meta.generatedAt,
+          pendingSection: true,
+          cacheHit: false,
+          refreshScheduled: true,
+          queuedForHostLockedWorker: true,
+          accountingPending: true,
+          error: 'homepage accounting is catching up to newer order facts',
+        },
+      };
+    }
   }
   if (!force && allowGenerate) {
     const failure = biSectionRefreshFailures.get(biSectionRefreshFailureKey(root, section));
@@ -8900,6 +9044,36 @@ export function liveSectionsForBiUpdate(kind, event = {}) {
     sections.push('homeRankings', 'rankings', 'profit', 'homeProfit');
   }
   return [...new Set(sections)];
+}
+
+export function liveAccountingQueuePlan(event = {}) {
+  const accountingKinds = new Set([
+    event?.kind,
+    ...(Array.isArray(event?.accountingKinds) ? event.accountingKinds : []),
+  ].map(value => String(value || '')));
+  const hasOrder = accountingKinds.has('order');
+  const hasReturn = accountingKinds.has('return');
+  if (!hasOrder && !hasReturn) return [];
+
+  // Current-day orders are immediately visible through liveSalesToday, but
+  // they must still advance the canonical profit cache before the date rolls
+  // over and that live overlay moves to the next day. Keep the accounting
+  // dependency lane ahead of ordinary section work so one safe worker slot can
+  // publish profit first and the historical homepage baseline second.
+  const canonical = [
+    {section: 'profit', priority: 5},
+    {section: 'homeRankings', priority: 5},
+    {section: 'homeProfit', priority: 5},
+  ];
+  if (!hasReturn && event?.refreshHistoricalSections !== true) return canonical;
+  return [
+    ...canonical,
+    {section: 'orders', priority: 10},
+    {section: 'afterSales', priority: 10},
+    {section: 'productSalesDaily', priority: 50},
+    {section: 'inventoryTrend', priority: 50},
+    {section: 'rankings', priority: 50},
+  ];
 }
 
 function livePgClientConfig(env = process.env) {
@@ -9892,12 +10066,6 @@ async function main() {
     liveAccountingRefreshPendingEvent = null;
     liveAccountingRefreshRunning = true;
     let liveProjectionRefreshed = false;
-    const accountingKinds = new Set([
-      sourceEvent?.kind,
-      ...(Array.isArray(sourceEvent?.accountingKinds) ? sourceEvent.accountingKinds : []),
-    ].map(value => String(value || '')));
-    const canonicalAccountingRequired = accountingKinds.has('return')
-      || sourceEvent?.refreshHistoricalSections === true;
     try {
       const meta = await readBiPortalCoreMeta(root);
       const generatedAt = String(meta?.generatedAt || '');
@@ -9914,16 +10082,11 @@ async function main() {
         occurredAt: new Date().toISOString(),
         liveProjectionRefreshed: true,
       });
-      if (!canonicalAccountingRequired) return;
-
-      const queuedSections = sourceEvent?.refreshHistoricalSections
-        ? ['orders', 'afterSales', 'productSalesDaily', 'inventoryTrend', 'homeRankings', 'rankings', 'profit', 'homeProfit']
-        : ['orders', 'afterSales', 'profit', 'homeProfit'];
-      for (const section of queuedSections) {
-        enqueueHostLockedBiSection(section, generatedAt, {
-          reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
-        });
-      }
+      const accountingQueue = liveAccountingQueuePlan(sourceEvent);
+      if (!accountingQueue.length) return;
+      await persistHostLockedBiSectionPlan(accountingQueue, generatedAt, {
+        reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
+      });
       biLiveUpdateBridge?.publish({
         ...sourceEvent,
         occurredAt: new Date().toISOString(),

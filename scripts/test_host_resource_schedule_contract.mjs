@@ -298,10 +298,14 @@ const liveWorker = portal.slice(
   portal.indexOf('const mergeLiveAccountingRefreshEvent ='),
 );
 assert.ok(
-  liveWorker.indexOf("generateBiSection(args, root, 'liveSalesToday'") < liveWorker.indexOf('enqueueHostLockedBiSection(section, generatedAt'),
+  liveWorker.indexOf("generateBiSection(args, root, 'liveSalesToday'") < liveWorker.indexOf('persistHostLockedBiSectionPlan(accountingQueue, generatedAt'),
   'liveSalesToday must publish before canonical accounting enters the host-locked queue',
 );
-assert.match(liveWorker, /if \(!canonicalAccountingRequired\) return;/);
+assert.match(liveWorker, /const accountingQueue = liveAccountingQueuePlan\(sourceEvent\);/,
+  'current-day orders must enter the deferred canonical accounting plan after the live projection publishes');
+assert.match(liveWorker, /if \(!accountingQueue\.length\) return;/);
+assert.doesNotMatch(liveWorker, /canonicalAccountingRequired/,
+  'current-day orders must not be excluded from deferred accounting');
 assert.match(liveWorker, /liveProjectionRefreshed: true/);
 assert.doesNotMatch(liveWorker, /ensureProfitMartCacheFresh/,
   'the Portal live fast lane must never rebuild the cost ledger itself');

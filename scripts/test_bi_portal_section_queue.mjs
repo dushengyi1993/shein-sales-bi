@@ -50,9 +50,8 @@ const at = offsetMs => new Date(start.getTime() + offsetMs);
   assert.equal(claim.section, 'zeta', 'same-priority entries must claim by sequence, not section name');
 }
 
-// ---- A failed section backs off deterministically; the next claim must go
-// to another section and the failed one must stay unclaimable until
-// nextAttemptAt.
+// ---- A failed profit section backs off deterministically and keeps its
+// dependent homepage section blocked until canonical accounting succeeds.
 {
   const queue = {version: 1, updatedAt: '', entries: []};
   enqueueSections(queue, {sections: ['profit', 'homeProfit'], priority: 50, now: at(0)});
@@ -68,13 +67,14 @@ const at = offsetMs => new Date(start.getTime() + offsetMs);
   const failed = queue.entries.find(entry => entry.section === 'profit');
   assert.equal(failed.status, 'pending');
   assert.equal(failed.nextAttemptAt, at(62_000).toISOString(), 'fail must set a deterministic nextAttemptAt');
-  const next = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-home-profit-2', now: at(3_000)});
-  assert.equal(next.section, 'homeProfit', 'a backed-off section must not block other work');
-  assert.equal(claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-none', now: at(4_000)}), null,
-    'the failed section must not be immediately re-claimed by the same worker');
+  assert.equal(claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-none', now: at(3_000)}), null,
+    'a backed-off profit refresh must keep homeProfit fail-closed');
   const retried = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-profit-3', now: at(62_000)});
   assert.equal(retried.section, 'profit');
   assert.equal(retried.attempts, 2, 'backoff must not reset the attempt counter');
+  completeClaim(queue, {section: 'profit', leaseId: 'lease-profit-3', now: at(62_500)});
+  const next = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-home-profit-2', now: at(63_000)});
+  assert.equal(next.section, 'homeProfit', 'homeProfit may continue after canonical profit completes');
 }
 
 // ---- An explicit re-enqueue of a pending failed section is a fresh request
@@ -108,9 +108,13 @@ const at = offsetMs => new Date(start.getTime() + offsetMs);
   assert.equal(claim.requestRevision, 1);
   assert.equal(claim.claimedRevision, 1);
   enqueueSections(queue, {sections: ['orders'], priority: 0, reason: 'force', now: at(2_000)});
+  for (let index = 0; index < 20; index += 1) {
+    enqueueSections(queue, {sections: ['orders'], priority: 0, reason: `burst-${index}`, now: at(2_100 + index)});
+  }
   const running = queue.entries.find(entry => entry.section === 'orders');
   assert.equal(running.requestRevision, 2, 'running re-enqueue must bump requestRevision');
   assert.equal(running.rerun, true, 'running re-enqueue must mark the rerun');
+  assert.equal(running.reasons.length, 21, 'coalesced events retain audit reasons without creating more rerun revisions');
   assert.equal(running.status, 'running', 'running re-enqueue must keep the active lease');
   const completed = completeClaim(queue, {section: 'orders', leaseId: 'lease-orders-1', now: at(3_000)});
   assert.equal(completed, false, 'complete of a superseded revision must not delete the entry');
@@ -225,29 +229,100 @@ const at = offsetMs => new Date(start.getTime() + offsetMs);
   assert.deepEqual(queue.entries.find(entry => entry.section === 'homeRankings').reasons, ['morning', 'live-return']);
 
   const first = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-1', now: at(2_000)});
-  assert.equal(first.section, 'homeRankings');
+  assert.equal(first.section, 'orders', 'unrelated owner-visible work keeps its normal priority');
   assert.equal(first.attempts, 1);
-  completeClaim(queue, {section: 'homeRankings', leaseId: 'lease-1', now: at(2_500)});
-  assert.equal(queue.entries.some(entry => entry.section === 'homeRankings'), false);
-
-  const second = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-2', now: at(3_000)});
-  assert.equal(second.section, 'orders');
-  failClaim(queue, {section: 'orders', leaseId: 'lease-2', error: 'temporary', now: at(4_000), backoffSeconds: 0});
+  failClaim(queue, {section: 'orders', leaseId: 'lease-1', error: 'temporary', now: at(2_500), backoffSeconds: 0});
   assert.equal(queue.entries.find(entry => entry.section === 'orders').status, 'pending');
 
-  const retried = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-3', now: at(5_000)});
+  const retried = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-2', now: at(3_000)});
   assert.equal(retried.section, 'orders');
   assert.equal(retried.attempts, 2);
 
   // Let the lease expire without completing: recovery must re-issue it.
-  const recovered = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-4', now: at(70_000)});
+  const recovered = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-3', now: at(64_000)});
   assert.equal(recovered.section, 'orders');
   assert.equal(recovered.attempts, 3);
+  completeClaim(queue, {section: 'orders', leaseId: 'lease-3', now: at(64_500)});
+
+  const profit = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-profit', now: at(65_000)});
+  assert.equal(profit.section, 'profit', 'homeRankings remains blocked until its background profit dependency runs');
+  completeClaim(queue, {section: 'profit', leaseId: 'lease-profit', now: at(65_500)});
+  const rankings = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-rankings', now: at(66_000)});
+  assert.equal(rankings.section, 'homeRankings');
+  completeClaim(queue, {section: 'homeRankings', leaseId: 'lease-rankings', now: at(66_500)});
 
   const defaultLeaseQueue = {version: 1, updatedAt: '', entries: []};
   enqueueSections(defaultLeaseQueue, {sections: ['orders'], now: at(0)});
   const defaultLease = claimNext(defaultLeaseQueue, {now: at(1_000)});
   assert.match(defaultLease.leaseId, /^[0-9a-f-]{36}$/i);
+}
+
+// ---- Profit is a hard dependency for historical homepage artifacts. A force
+// refresh must not republish homeRankings/homeProfit from an older cache while
+// canonical accounting is pending or backing off.
+{
+  const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['homeRankings', 'homeProfit'], priority: 0, reason: 'operator-force', now: at(0)});
+  enqueueSections(queue, {sections: ['profit'], priority: 5, reason: 'live-order', now: at(1_000)});
+  enqueueSections(queue, {sections: ['orders'], priority: 10, reason: 'independent', now: at(2_000)});
+
+  const profit = claimNext(queue, {leaseSeconds: 60, leaseId: 'profit-lease', now: at(3_000)});
+  assert.equal(profit.section, 'profit', 'profit dependency must beat priority-0 homepage dependents');
+  failClaim(queue, {section: 'profit', leaseId: 'profit-lease', error: 'temporary', now: at(4_000), backoffSeconds: 60});
+
+  const independent = claimNext(queue, {leaseSeconds: 60, leaseId: 'orders-lease', now: at(5_000)});
+  assert.equal(independent.section, 'orders', 'unrelated work may proceed while profit is backing off');
+  completeClaim(queue, {section: 'orders', leaseId: 'orders-lease', now: at(5_500)});
+  assert.equal(claimNext(queue, {leaseSeconds: 60, leaseId: 'blocked-lease', now: at(6_000)}), null,
+    'homepage dependents must remain blocked for the full profit backoff');
+
+  const profitRetry = claimNext(queue, {leaseSeconds: 60, leaseId: 'profit-retry', now: at(65_000)});
+  assert.equal(profitRetry.section, 'profit');
+  completeClaim(queue, {section: 'profit', leaseId: 'profit-retry', now: at(65_500)});
+  const rankings = claimNext(queue, {leaseSeconds: 60, leaseId: 'rankings-lease', now: at(66_000)});
+  assert.equal(rankings.section, 'homeRankings', 'homeRankings may run only after profit completes');
+  completeClaim(queue, {section: 'homeRankings', leaseId: 'rankings-lease', now: at(66_500)});
+  const homeProfit = claimNext(queue, {leaseSeconds: 60, leaseId: 'home-profit-lease', now: at(67_000)});
+  assert.equal(homeProfit.section, 'homeProfit', 'homeProfit follows the refreshed historical sales baseline');
+}
+
+// ---- Continuous order bursts cannot keep claiming only profit forever. A
+// superseded successful lease moves behind homeRankings, whose own freshness
+// guard can safely publish the latest completed accounting snapshot.
+{
+  const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['profit', 'homeRankings', 'homeProfit'], priority: 5, reason: 'live-order', now: at(0)});
+  const claims = [];
+  for (let round = 0; round < 3; round += 1) {
+    const leaseId = `continuous-${round}`;
+    const claimed = claimNext(queue, {leaseSeconds: 60, leaseId, now: at(1_000 + round * 2_000)});
+    claims.push(claimed.section);
+    enqueueSections(queue, {
+      sections: ['profit', 'homeRankings', 'homeProfit'],
+      priority: 5,
+      reason: `live-order-${round}`,
+      now: at(1_500 + round * 2_000),
+    });
+    assert.equal(completeClaim(queue, {section: claimed.section, leaseId, now: at(2_000 + round * 2_000)}), false);
+  }
+  assert.deepEqual(claims, ['profit', 'homeRankings', 'profit'],
+    'superseded canonical work must yield round-robin instead of livelocking on profit');
+  assert.equal(queue.entries.find(entry => entry.section === 'homeProfit').status, 'pending',
+    'homeProfit remains fail-closed until one profit revision completes quietly');
+}
+
+// ---- A superseded failure is not a completed accounting snapshot. It must
+// keep homeRankings behind profit even though a newer revision is waiting.
+{
+  const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['profit', 'homeRankings', 'homeProfit'], priority: 5, now: at(0)});
+  const profit = claimNext(queue, {leaseSeconds: 60, leaseId: 'failed-profit', now: at(1_000)});
+  enqueueSections(queue, {sections: ['profit', 'homeRankings', 'homeProfit'], priority: 5, now: at(1_500)});
+  failClaim(queue, {section: 'profit', leaseId: 'failed-profit', error: 'refresh failed', now: at(2_000), backoffSeconds: 60});
+  assert.equal(queue.entries.find(entry => entry.section === 'profit').dependencyYield, false,
+    'a failed profit lease must never advertise a successful dependency snapshot');
+  assert.equal(claimNext(queue, {leaseSeconds: 60, leaseId: 'failed-profit-retry', now: at(2_500)}).section, 'profit',
+    'profit must retry before either homepage dependent after a superseded failure');
 }
 
 // ---- Starvation, effective-priority tie, and forced priority-0 semantics.
