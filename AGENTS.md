@@ -19,6 +19,8 @@ This applies equally to every partner/operator using the managed CLI:
 - The legacy CLI command `ask` is only a compatibility alias for `query` and no longer calls `/api/ops-agent/ask`. New instructions must use `query`.
 - Do not use `chat` for a read-only question. `chat` is reserved for controlled operations or an explicit test of the web conversation product.
 - If automatic section selection is insufficient, rerun `query` with explicit `--sections`; do not fall back to a question bot or browser scraping.
+- A `query --out <file>` run atomically replaces `<file>` and writes `<file>.manifest.json`. Inspect the compact manifest first; read the full data artifact only after its outcome, section coverage, provenance, and hash verify. The CLI performs one bounded readiness wait for incomplete sections. If it still reports `incomplete`, report the exact section issues instead of looping the same query or treating unavailable data as zero.
+- For cloud runtime acceptance, run `capture_ops_runtime_snapshot.mjs` once before issuing individual `systemctl`, health, or source probes. Expand to targeted probes only for blockers named by that snapshot. This snapshot is read-only and never substitutes for business OpenAPI evidence.
 
 For partner/operator image work:
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import {CLOUD_TIMER_UNITS} from '../lib/cloud_runtime_inventory.mjs';
 
 const script = fs.readFileSync(new URL('./cloud_disk_maintenance.sh', import.meta.url), 'utf8');
 const service = fs.readFileSync(new URL('../infra/systemd/shein-bi-cloud-disk-maintenance.service', import.meta.url), 'utf8');
@@ -35,7 +36,7 @@ assert.match(timer, /^OnCalendar=\*-\*-\* 00:10:00 Asia\/Shanghai$/m);
 assert.match(timer, /^Persistent=false$/m);
 assert.match(journal, /^SystemMaxUse=1G$/m);
 assert.match(journal, /^SystemKeepFree=5G$/m);
-assert.match(watchdog, /shein-bi-cloud-disk-maintenance\.timer/);
+assert.ok(CLOUD_TIMER_UNITS.includes('shein-bi-cloud-disk-maintenance.timer'));
 assert.match(watchdog, /usedPercent >= 93/);
 assert.match(watchdog, /usedPercent >= 88/);
 assert.match(watchdog, /usedPercent >= 80/);

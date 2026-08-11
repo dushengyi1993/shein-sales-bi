@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {CLOUD_SERVICE_UNITS, CLOUD_TIMER_UNITS} from '../lib/cloud_runtime_inventory.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8');
@@ -80,9 +81,9 @@ assert.match(timer, /RandomizedDelaySec=15/,
   'stock refresh jitter must stay bounded while the :12 run feeds the inventory marker');
 assert.match(timer, /Persistent=false/,
   'missed stock refreshes must not burst after downtime');
-assert.match(watchdog, /'shein-bi-cloud-openapi-stock-refresh\.service'/,
+assert.ok(CLOUD_SERVICE_UNITS.includes('shein-bi-cloud-openapi-stock-refresh.service'),
   'watchdog must report a failed current-stock refresh service');
-assert.match(watchdog, /'shein-bi-cloud-openapi-stock-refresh\.timer'/,
+assert.ok(CLOUD_TIMER_UNITS.includes('shein-bi-cloud-openapi-stock-refresh.timer'),
   'watchdog must verify the current-stock refresh schedule is enabled');
 assert.match(portalService, /ExecStartPre=\/usr\/bin\/node scripts\/generate_bi_portal_shell\.mjs/,
   'every Portal restart must rebuild the deployed shell from the current client source');

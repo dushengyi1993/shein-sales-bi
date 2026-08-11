@@ -362,6 +362,8 @@ assert.match(watchdogSource, /productReconciliationHealth/);
 assert.match(watchdogSource, /inspectReleaseSourceState/);
 assert.match(watchdogSource, /deployed_release\.json/);
 assert.match(watchdogSource, /releaseSourceState/);
+assert.match(watchdogSource, /systemdSnapshot\.ok/);
+assert.match(watchdogSource, /systemd 批量快照不完整/);
 assert.match(watchdogSource, /assessDailyOpenapiSalesRecovery/);
 assert.match(watchdogSource, /daily_link_openapi_sales_recovery/);
 assert.match(watchdogSource, /resolveMarketingScanEvidencePath/);

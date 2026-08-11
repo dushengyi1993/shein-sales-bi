@@ -20,54 +20,21 @@ import {
 } from '../lib/cloud_watchdog_issue_collapse.mjs';
 import {assessSessionManagerManualRecovery} from '../lib/cloud_manual_login_recovery.mjs';
 import {inspectReleaseSourceState} from './check_release_source_state.mjs';
+import {
+  CLOUD_ALWAYS_RUNNING_UNITS,
+  CLOUD_AUXILIARY_UNITS,
+  CLOUD_RUNTIME_UNITS,
+  CLOUD_SERVICE_UNITS,
+  CLOUD_TIMER_UNITS,
+} from '../lib/cloud_runtime_inventory.mjs';
+import {collectSystemdUnitSnapshot} from '../lib/systemd_unit_snapshot.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_STATE_DIR = path.join(ROOT, 'state', 'cloud_ops_watchdog');
 const DEFAULT_LOG_DIR = process.env.SHEIN_CLOUD_WATCHDOG_LOG_DIR || '/srv/shein-bi/logs/cloud-watchdog';
-const UNIT_NAMES = [
-  'shein-bi-portal.service',
-  'shein-bi-webhook.service',
-  'shein-bi-cloud-yesterday.service',
-  'shein-bi-db-backup.service',
-  'shein-bi-cloud-et-forwarder.service',
-  'shein-bi-et-low-inventory-guard.service',
-  'shein-bi-et-low-inventory-recheck.service',
-  'shein-bi-cloud-daily-refresh.service',
-  'shein-bi-cloud-session-manager.service',
-  'shein-bi-cloud-openapi-stock-refresh.service',
-  'shein-bi-cloud-today-sales-reconcile.service',
-  'shein-bi-cloud-manual-login-recovery.service',
-  'shein-bi-cloud-morning-chain.service',
-  'shein-bi-cloud-rtv-verify.service',
-  'shein-bi-cloud-order-closure.service',
-  'shein-bi-daily-inventory-replenishment-guard.service',
-  'shein-bi-cloud-portal-section-queue.service',
-  'shein-bi-cloud-et-storage-fee.service',
-  'shein-bi-cloud-disk-maintenance.service',
-];
-const ALWAYS_RUNNING_UNITS = new Set(['shein-bi-portal.service', 'shein-bi-webhook.service']);
-const TIMER_NAMES = [
-  'shein-bi-cloud-yesterday.timer',
-  'shein-bi-db-backup.timer',
-  'shein-bi-cloud-et-forwarder.timer',
-  'shein-bi-et-low-inventory-recheck.timer',
-  'shein-bi-cloud-morning-chain.timer',
-  'shein-bi-cloud-session-manager.timer',
-  'shein-bi-cloud-openapi-stock-refresh.timer',
-  'shein-bi-cloud-today-sales-reconcile.timer',
-  'shein-bi-cloud-manual-login-recovery.timer',
-  'shein-bi-cloud-rtv-verify.timer',
-  'shein-bi-cloud-order-closure.timer',
-  'shein-bi-cloud-portal-section-queue.timer',
-  'shein-bi-cloud-et-storage-fee.timer',
-  'shein-bi-cloud-marketing-live-guard.timer',
-  // Cloud marketing repair is intentionally disabled. The guarded repair
-  // queue is inspected separately and is handed to the local browser lane
-  // when cloud capacity is not suitable for transactional writes.
-  'shein-bi-cloud-browser-cleanup.timer',
-  'shein-bi-cloud-disk-maintenance.timer',
-  'shein-bi-cloud-watchdog.timer',
-];
+const UNIT_NAMES = CLOUD_SERVICE_UNITS;
+const ALWAYS_RUNNING_UNITS = new Set(CLOUD_ALWAYS_RUNNING_UNITS);
+const TIMER_NAMES = CLOUD_TIMER_UNITS;
 
 function parseArgs(argv) {
   const args = {
@@ -117,16 +84,6 @@ function run(command, args, options = {}) {
       resolve({ok: code === 0 && !timedOut, code: timedOut ? -2 : code, stdout, stderr, timedOut});
     });
   });
-}
-
-async function systemctlShow(name) {
-  const res = await run('systemctl', ['show', name, '--no-pager', '--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StateChangeTimestamp,ActiveEnterTimestamp,ExecMainStartTimestamp,ExecMainExitTimestamp']);
-  const data = {};
-  for (const line of String(res.stdout || '').split(/\r?\n/)) {
-    const idx = line.indexOf('=');
-    if (idx > 0) data[line.slice(0, idx)] = line.slice(idx + 1);
-  }
-  return {name, ok: res.ok, code: res.code, ...data, stderr: res.stderr};
 }
 
 function parseDate(value) {
@@ -525,9 +482,17 @@ async function main() {
     process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
   );
   let sessionManagerManualRecovery = {recovered: false, reason: 'session_manager_unit_not_checked'};
+  const systemdSnapshot = await collectSystemdUnitSnapshot(CLOUD_RUNTIME_UNITS);
+  if (!systemdSnapshot.ok) {
+    const incompleteUnits = systemdSnapshot.requested.filter(name => systemdSnapshot.units[name]?.complete !== true);
+    issues.push(`systemd 批量快照不完整：units=${incompleteUnits.join(',') || '-'}；停止按缺失字段判断运行态`);
+  }
+  const systemctlShow = name => systemdSnapshot.units[name] || {
+    name, ok: false, code: 1, LoadState: 'unknown', ActiveState: 'unknown', Result: 'unknown',
+  };
   const units = [];
   for (const unit of UNIT_NAMES) {
-    const status = await systemctlShow(unit);
+    const status = systemctlShow(unit);
     units.push(status);
     if (status.LoadState === 'not-found') continue;
     const {
@@ -575,7 +540,7 @@ async function main() {
   }
   const timers = [];
   for (const timer of TIMER_NAMES) {
-    const status = await systemctlShow(timer);
+    const status = systemctlShow(timer);
     timers.push(status);
     if (status.LoadState === 'not-found') continue;
     if (status.ActiveState !== 'active') {
@@ -585,7 +550,7 @@ async function main() {
 
   const marketingGuardState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last.json'));
   const marketingGuardLastOkState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last-ok.json'));
-  const marketingGuardService = await systemctlShow('shein-bi-cloud-marketing-live-guard.service');
+  const marketingGuardService = systemctlShow(CLOUD_AUXILIARY_UNITS[0]);
   const marketingGuardHealth = assessDailyMarketingGuardHealth({
     guardState: marketingGuardState,
     lastOkState: marketingGuardLastOkState,
@@ -597,7 +562,7 @@ async function main() {
   }
   const marketingRepairQueue = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_marketing_live_guard', 'repair-queues', `marketing-repair-${marketingGuardHealth.today}.json`));
   const marketingRepairState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-repair-last.json'));
-  const marketingRepairService = await systemctlShow('shein-bi-cloud-marketing-repair.service');
+  const marketingRepairService = systemctlShow(CLOUD_AUXILIARY_UNITS[1]);
   const marketingRepairHealth = assessDailyMarketingRepairHealth({
     queueState: marketingRepairQueue,
     repairState: marketingRepairState,
@@ -848,6 +813,7 @@ async function main() {
     orderClosure,
     units,
     timers,
+    runtimeProbe: {systemctlCommandCount: systemdSnapshot.commandCount, requestedUnitCount: systemdSnapshot.requested.length},
   };
   await fs.writeFile(logFile, JSON.stringify(report, null, 2), 'utf8');
 
