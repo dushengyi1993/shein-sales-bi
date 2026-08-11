@@ -158,6 +158,7 @@ assert.match(morning, /SHEIN_LINK_BUSINESS_ALLOW_PARTIAL=1/,
 assert.doesNotMatch(morning, /chunk-1\)|chunk-2\)|supplements\)/,
   'the production coordinator must not retain callable split-stage entry points');
 assert.match(morning, /morning-links-ready/);
+assert.match(morning, /resume-skip all-store fetch[\s\S]*build_morning_resume_evidence\.mjs/);
 assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize/);
 assert.match(morning, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1/,
   'the unified coordinator must not publish when any store or metric readiness gate is incomplete');

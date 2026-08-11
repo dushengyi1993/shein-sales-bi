@@ -308,6 +308,7 @@ case "$STAGE" in
     MISSING_STORES="$(missing_exact_date_stores)"
     if [[ -z "$MISSING_STORES" ]]; then
       echo "[cloud_morning_chain] resume-skip all-store fetch; exact-date evidence already exists for all enabled stores"
+      node scripts/build_morning_resume_evidence.mjs --date "$DATA_DATE" --out "$RESULT_FILE"
     else
       run_all_store_fetch "$RESULT_FILE"
       MISSING_STORES="$(missing_exact_date_stores)"

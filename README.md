@@ -51,9 +51,10 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - 同步 ET 货代仓：`bash scripts/cloud_et_forwarder_sync.sh <scope>`（`<scope>` 按运维文档取值）
 - 同步/回灌 ET 仓储费：`bash scripts/cloud_et_storage_fee_sync.sh daily [YYYY-MM-DD]` / `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`
 - 仓储费利润对账：`node scripts/check_storage_fee_profit.mjs --mode local --start YYYY-MM-DD --end YYYY-MM-DD`
-- 跑云端 watchdog：`node scripts/cloud_ops_watchdog.mjs --dry-run`
+- 跑云端 watchdog：`node scripts/cloud_ops_watchdog.mjs --dry-run`（systemd 状态已合并为一次批量读取）
+- 生成紧凑云端运行态证据：`node scripts/capture_ops_runtime_snapshot.mjs --out-dir <全新目录> --expected-commit <release-tag>`；后续用 `node scripts/inspect_ops_run.mjs --manifest <目录>/manifest.json` 先读摘要，再按 blocker 定向展开。
 - OpenAPI 商品/链接运营 CLI：`node scripts/bi_ops_cli.mjs --help`
-- 团队自动运营：普通成员使用 BI 网页；Owner/合伙人的只读经营问题统一用 `node scripts/bi_ops_cli.mjs query --text "..." --out <json>`，由当前 Codex 直接分析返回的结构化 `data`。`chat` 只用于受控运营动作或显式测试网页会话产品，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划；旧 `ask` 只是 `query` 兼容别名。`--scope-all` 仅全局只读，不扩大写权限。
+- 团队自动运营：普通成员使用 BI 网页；Owner/合伙人的只读经营问题统一用 `node scripts/bi_ops_cli.mjs query --text "..." --out <json>`。CLI 最多等待 30 秒收口正在生成的 section，原子写完整数据和相邻 `<json>.manifest.json`；当前 Codex 先检查 manifest 的 outcome/coverage/hash，再按需读取 `data`。`chat` 只用于受控运营动作或显式测试网页会话产品，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划；旧 `ask` 只是 `query` 兼容别名。`--scope-all` 仅全局只读，不扩大写权限。
 - 负责人经验同步：`npm run owner-knowledge:scan`、`npm run owner-knowledge:sync`、`npm run owner-knowledge:status`；本机采用事件驱动 + 60 分钟兜底，active 规则发布到 GitHub `owner-knowledge` 分支。合伙人 CLI 用 `node scripts/bi_ops_cli.mjs knowledge-status` 检查任务前原子缓存；运行边界见 `docs/owner-knowledge-sync.md`。
 - 构建合伙人最小 CLI 包：`npm run partner-cli:package`；ZIP 与 SHA-256 写入忽略目录 `outputs/releases/`，不包含凭证和生产运行态。
 - 批量复制商品到多店：`node scripts/link_ops_hl_openapi_executor.mjs --help`（支持 `supplyPriceRange`、`shuffleImages`、`inferInputCurrentOverride`；价格/图片洗牌在同一任务内确定性复现，真实写仍须预演、精确 payload hash、确认和回读）

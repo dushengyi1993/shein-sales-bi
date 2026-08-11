@@ -308,12 +308,36 @@ try {
   expectCliOk('operator direct query', operatorDirectQuery);
   check('operator direct query invokes no AI', operatorDirectQuery.json?.aiInvoked, false);
   check('operator direct query writes result file', fssync.existsSync(directQueryFile), true);
+  check('operator direct query writes evidence manifest', fssync.existsSync(`${directQueryFile}.manifest.json`), true);
+  check('operator direct query compact outcome', operatorDirectQuery.json?.outcome, 'succeeded');
+  check('operator direct query manifest hash', operatorDirectQuery.json?.manifestSha256, value => /^[a-f0-9]{64}$/.test(String(value || '')));
   const directQueryData = JSON.parse(await fs.readFile(directQueryFile, 'utf8'));
+  const directQueryManifest = JSON.parse(await fs.readFile(`${directQueryFile}.manifest.json`, 'utf8'));
+  check('operator direct query manifest schema', directQueryManifest.schemaVersion, 'shein-ops-run-manifest/v1');
+  check('operator direct query manifest artifact count', directQueryManifest.artifacts?.length, 1);
   check('operator direct query mode', directQueryData.mode, 'direct-bi-data');
   check('operator direct query response marks no AI', directQueryData.aiInvoked, false);
   check('operator direct query loads rankings', directQueryData.sections?.loaded || [], rows => rows.includes('rankings'));
   check('operator direct query loads live sales', directQueryData.sections?.loaded || [], rows => rows.includes('liveSalesToday'));
   check('operator direct query preserves complete store rows', directQueryData.data?.rankings?.dailyStores?.length, 2);
+
+  const incompleteQueryFile = path.join(tmpRoot, 'operator-incomplete-query.json');
+  await fs.writeFile(incompleteQueryFile, '{"stale":true}\n', 'utf8');
+  const operatorIncompleteQuery = await runCli([
+    '--session-file', operatorSessionFile,
+    'query',
+    '--text', '查询当前售后数据',
+    '--sections', 'afterSales',
+    '--wait-seconds', '0',
+    '--out', incompleteQueryFile,
+  ]);
+  check('incomplete query uses deferred exit', operatorIncompleteQuery.code, 75);
+  check('incomplete query returns compact outcome', operatorIncompleteQuery.json?.outcome, 'incomplete');
+  check('incomplete query writes evidence manifest', fssync.existsSync(`${incompleteQueryFile}.manifest.json`), true);
+  const incompleteQueryData = JSON.parse(await fs.readFile(incompleteQueryFile, 'utf8'));
+  check('incomplete query atomically replaces stale output', incompleteQueryData.stale, undefined);
+  check('incomplete query evidence is not success', incompleteQueryData.ok, false);
+  check('incomplete query keeps exact failure code', incompleteQueryData.error?.code, 'BI_QUERY_DATA_INCOMPLETE');
 
   const legacyAskFile = path.join(tmpRoot, 'operator-legacy-ask.json');
   const operatorLegacyAsk = await runCli([

@@ -114,7 +114,7 @@ node scripts/bi_ops_cli.mjs jobs --scope-all  # 仅 Owner 全局只读
 - `--profile fast|balanced|deep|owner` 只改变理解深度。默认分层是 Luna low 20 秒、Terra low 45 秒、Terra medium 90 秒、Sol high 300 秒、Owner Sol high 600 秒；`xhigh` 只在 Owner 人工明确要求时使用，网页不启用 max/ultra。
 - 合伙人 CLI 写操作由本机 Codex 直接提交结构化 `operation/store/product/parameters`，响应固定标明 `aiInvoked=false`；不会再经过云端 `intent_plan` 或关键词权限判断。网页自然语言会话仍可保留后台理解，但它不能修改结构化任务事实或扩展权限。
 - 飞书问数已主动暂停，生产 `shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`；团队网页和 Owner CLI 不依赖它。
-- Owner/合伙人 CLI 的经营问数统一使用 `query` 读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表，也不再把问题转给云端问数模型。`query` 只按关键词确定性选择数据分区并返回完整结构化行，响应固定标明 `aiInvoked=false`；当前电脑上的 Codex 自己完成筛选、计算和说明。近 7 天链接多条件筛选应直接用链接行计算：曝光用 `c7_eps_uv`、销量用 `c7_sale_cnt`、加车访客用 `c7_cart_uv`，点击率按 `c7_goods_uv / c7_eps_uv` 重算；不得把商品访客误当成加车访客。该链路支持全部 19 店和按店筛选；链接 section 与小时级销售 core 代次不同时，只有业务日期兼容规则通过才可读取，不能把正常日更链接数据误判为缺报表。
+- Owner/合伙人 CLI 的经营问数统一使用 `query` 读取云端 BI section，不依赖伙伴电脑里的完整项目或本地 V3 报表，也不再把问题转给云端问数模型。`query` 只按关键词确定性选择数据分区并返回完整结构化行，响应固定标明 `aiInvoked=false`；当前电脑上的 Codex 自己完成筛选、计算和说明。使用 `--out` 时，CLI 会在同一进程内有界等待正在生成的 section，原子写结果及相邻 `.manifest.json`；先核对 manifest 的 outcome、coverage 和 SHA-256，再读取完整 `data`。近 7 天链接多条件筛选应直接用链接行计算：曝光用 `c7_eps_uv`、销量用 `c7_sale_cnt`、加车访客用 `c7_cart_uv`，点击率按 `c7_goods_uv / c7_eps_uv` 重算；不得把商品访客误当成加车访客。该链路支持全部 19 店和按店筛选；链接 section 与小时级销售 core 代次不同时，只有业务日期兼容规则通过才可读取，不能把正常日更链接数据误判为缺报表。
 
 ### 负责人规则如何传给团队
 

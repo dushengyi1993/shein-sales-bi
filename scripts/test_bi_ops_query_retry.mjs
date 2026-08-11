@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+
+import {isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
+
+assert.equal(isIncompleteBiQueryError({status: 503}), false);
+assert.equal(isIncompleteBiQueryError({response: {code: 'BI_QUERY_DATA_INCOMPLETE'}}), true);
+assert.equal(isIncompleteBiQueryError({status: 503, response: {code: 'UPSTREAM_UNAVAILABLE'}}), false);
+assert.equal(isIncompleteBiQueryError({status: 401}), false);
+
+let clock = 0;
+let attempts = 0;
+const completed = await runBiQueryWithWait(async () => {
+  attempts += 1;
+  if (attempts < 3) {
+    const error = new Error('warming');
+    error.status = 503;
+    error.response = {code: 'BI_QUERY_DATA_INCOMPLETE'};
+    throw error;
+  }
+  return {ok: true};
+}, {
+  waitSeconds: 5,
+  intervalMs: 1_000,
+  now: () => clock,
+  sleep: async ms => { clock += ms; },
+});
+assert.deepEqual(completed.value, {ok: true});
+assert.equal(completed.attempts, 3);
+assert.equal(completed.waitedMs, 2_000);
+
+clock = 0;
+await assert.rejects(
+  () => runBiQueryWithWait(async () => {
+    const error = new Error('still warming');
+    error.status = 503;
+    error.response = {code: 'BI_QUERY_DATA_INCOMPLETE'};
+    throw error;
+  }, {
+    waitSeconds: 1,
+    intervalMs: 1_000,
+    now: () => clock,
+    sleep: async ms => { clock += ms; },
+  }),
+  error => error.queryAttempts === 2 && error.queryWaitedMs === 1_000,
+);
+
+let nonRetryAttempts = 0;
+await assert.rejects(
+  () => runBiQueryWithWait(async () => {
+    nonRetryAttempts += 1;
+    const error = new Error('unauthorized');
+    error.status = 401;
+    throw error;
+  }, {waitSeconds: 30}),
+  error => error.queryAttempts === 1,
+);
+assert.equal(nonRetryAttempts, 1);
+
+let upstreamAttempts = 0;
+await assert.rejects(
+  () => runBiQueryWithWait(async () => {
+    upstreamAttempts += 1;
+    const error = new Error('upstream unavailable');
+    error.status = 503;
+    error.response = {code: 'UPSTREAM_UNAVAILABLE'};
+    throw error;
+  }, {waitSeconds: 30}),
+  error => error.queryAttempts === 1 && error.response?.code === 'UPSTREAM_UNAVAILABLE',
+);
+assert.equal(upstreamAttempts, 1);
+
+await assert.rejects(
+  () => runBiQueryWithWait(({signal}) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})), {once: true});
+  }), {waitSeconds: 0, requestTimeoutMs: 25}),
+  error => error.code === 'BI_QUERY_REQUEST_TIMEOUT' && error.queryAttempts === 1,
+);
+
+console.log(JSON.stringify({ok: true, checks: ['bounded_retry', 'deadline_abort', 'non_target_503', 'non_retryable_error']}, null, 2));

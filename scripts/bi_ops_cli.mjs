@@ -32,6 +32,9 @@ import {
   validateDescriptionMaterialJson,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
+import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
+import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
+import {isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -68,6 +71,7 @@ function parseArgs(argv) {
     status: '',
     globalView: false,
     waitSeconds: 0,
+    waitSecondsProvided: false,
     note: '',
     docEvidenceFile: '',
     storeProbeFile: '',
@@ -151,7 +155,10 @@ function parseArgs(argv) {
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
     else if (a === '--status') args.status = String(argv[++i] || '').trim();
     else if (a === '--all' || a === '--scope-all') args.globalView = true;
-    else if (a === '--wait-seconds') args.waitSeconds = Number(argv[++i] || 0);
+    else if (a === '--wait-seconds') {
+      args.waitSeconds = Number(argv[++i] || 0);
+      args.waitSecondsProvided = true;
+    }
     else if (a === '--note') args.note = String(argv[++i] || '').trim();
     else if (a === '--doc-evidence') args.docEvidenceFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-probe') args.storeProbeFile = path.resolve(String(argv[++i] || ''));
@@ -360,7 +367,7 @@ Options:
   --category       publish-standard/search-product 用；末级分类 ID
   --page-size      search-product 用；最大 10
   --sections       query 用；显式指定 rankings / linksData / productState / profit / inventoryTrend / orders / priceScatter / afterSales / comments / rtvData / waybills 等数据分区
-  --out            query 用；把完整结构化数据写入文件，终端只返回路径和数据口径
+  --out            query 用；把完整结构化数据原子写入文件，并生成相邻 manifest；终端只返回紧凑证据索引
 
 Safety:
   - 密码只用于 login 请求，不写入 session 文件。
@@ -497,7 +504,7 @@ function biLoginRequiredError({expired = false} = {}) {
   return err;
 }
 
-async function request(args, pathname, {method = 'GET', body, auth = true, allowJsonFailure = false} = {}) {
+async function request(args, pathname, {method = 'GET', body, auth = true, allowJsonFailure = false, signal} = {}) {
   const headers = {'accept': 'application/json', 'user-agent': `shein-bi-ops-cli/${BI_OPS_CLI_VERSION}`};
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth) {
@@ -508,6 +515,7 @@ async function request(args, pathname, {method = 'GET', body, auth = true, allow
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
   const text = await res.text();
   let json;
@@ -1510,11 +1518,81 @@ async function waitForLinkOpsJob(args, jobId) {
 
 async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
   if (!args.text) throw new Error(`${legacyAlias ? 'ask' : 'query'} requires --text`);
+  const startedAt = new Date().toISOString();
   const query = new URLSearchParams({q: args.text, source: 'codex_desktop_cli'});
   const stores = [...new Set([...(args.stores || []), ...(args.sourceStores || [])])];
   if (stores.length) query.set('stores', stores.join(','));
   if (args.sections.length) query.set('sections', [...new Set(args.sections)].join(','));
-  const {json} = await request(args, `/api/bi/query-data?${query.toString()}`);
+  let json;
+  let queryAttempts = 0;
+  let queryWaitedMs = 0;
+  try {
+    const queryResult = await runBiQueryWithWait(
+      ({signal}) => request(args, `/api/bi/query-data?${query.toString()}`, {signal}),
+      {waitSeconds: args.waitSecondsProvided ? args.waitSeconds : 30},
+    );
+    ({json} = queryResult.value);
+    queryAttempts = queryResult.attempts;
+    queryWaitedMs = queryResult.waitedMs;
+  } catch (error) {
+    queryAttempts = Number(error?.queryAttempts) || 1;
+    queryWaitedMs = Number(error?.queryWaitedMs) || 0;
+    if (!args.outputFile) throw error;
+    const response = error?.response && typeof error.response === 'object' ? error.response : {};
+    const responseCode = String(response.code || error?.code || '').trim();
+    const incomplete = isIncompleteBiQueryError(error);
+    const sectionIssues = Array.isArray(response?.sections?.issues)
+      ? response.sections.issues.map(item => ({
+          section: String(item?.section || ''),
+          status: String(item?.status || ''),
+          expectedGeneratedAt: String(item?.expectedGeneratedAt || ''),
+          generatedAt: String(item?.generatedAt || ''),
+        }))
+      : [];
+    const output = {
+      ok: false,
+      mode: 'direct-bi-data',
+      readOnly: true,
+      aiInvoked: false,
+      question: args.text,
+      generatedAt: new Date().toISOString(),
+      sections: {requested: [...new Set(args.sections)], loaded: [], issues: sectionIssues},
+      scope: {requestedStores: stores},
+      rowCounts: {},
+      error: {
+        code: responseCode || (incomplete ? 'BI_QUERY_DATA_INCOMPLETE' : 'BI_QUERY_FAILED'),
+        status: Number(error?.status) || null,
+        message: String(error?.message || 'BI query failed').slice(0, 500),
+      },
+      cli: {
+        command: legacyAlias ? 'ask' : 'query',
+        legacyAlias,
+        note: '失败证据已原子覆盖输出文件，未沿用旧查询结果',
+      },
+    };
+    const finishedAt = new Date().toISOString();
+    await invalidateOpsRunManifest(`${args.outputFile}.manifest.json`);
+    await writeJsonFileAtomic(args.outputFile, output, {mode: 0o600});
+    try { await fs.chmod(args.outputFile, 0o600); } catch {}
+    const run = buildOpsRun({
+      operation: 'bi_ops_query', mode: 'read', readOnly: true,
+      outcome: incomplete ? 'incomplete' : 'failed', startedAt, finishedAt,
+      source: {authority: 'cloud_bi_query_data', asOf: finishedAt},
+      scope: {stores},
+      coverage: {requestedSections: [...new Set(args.sections)], loadedSections: [], issueCount: sectionIssues.length},
+      summary: {question: args.text, rowCounts: {}, errorCode: output.error.code},
+      metrics: {queryAttempts, queryWaitedMs},
+      blockers: sectionIssues.length ? sectionIssues : [{code: output.error.code, message: output.error.message}],
+    });
+    const manifest = await writeOpsRunManifest({
+      manifestFile: `${args.outputFile}.manifest.json`,
+      run,
+      artifacts: [{file: args.outputFile, role: 'query_evidence'}],
+    });
+    print({...compactOpsRun(run, manifest), savedTo: args.outputFile});
+    process.exitCode = run.exitCode;
+    return;
+  }
   const output = {
     ...json,
     cli: {
@@ -1530,23 +1608,44 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
     return;
   }
   await fs.mkdir(path.dirname(args.outputFile), {recursive: true});
-  await fs.writeFile(args.outputFile, `${JSON.stringify(output, null, 2)}\n`, {encoding: 'utf8', mode: 0o600});
+  await invalidateOpsRunManifest(`${args.outputFile}.manifest.json`);
+  await writeJsonFileAtomic(args.outputFile, output, {mode: 0o600});
   try { await fs.chmod(args.outputFile, 0o600); } catch {}
-  print({
-    ok: true,
-    mode: output.mode,
-    readOnly: true,
-    aiInvoked: false,
-    savedTo: args.outputFile,
-    question: output.question,
-    generatedAt: output.generatedAt,
-    salesUpdatedAt: output.salesUpdatedAt,
-    linkUpdatedAt: output.linkUpdatedAt,
-    sections: output.sections,
+  const finishedAt = new Date().toISOString();
+  const businessDateCandidate = String(
+    output.data?.dates?.salesDate
+      || output.data?.dates?.businessDate
+      || output.salesUpdatedAt
+      || output.generatedAt
+      || '',
+  ).slice(0, 10);
+  const businessDate = /^\d{4}-\d{2}-\d{2}$/.test(businessDateCandidate) ? businessDateCandidate : '';
+  const run = buildOpsRun({
+    operation: 'bi_ops_query', mode: 'read', readOnly: true,
+    outcome: output.ok === false ? 'incomplete' : 'succeeded', startedAt, finishedAt,
+    source: {
+      authority: 'cloud_bi_query_data',
+      asOf: output.generatedAt || finishedAt,
+      businessDate,
+      sections: output.sections?.loaded || [],
+    },
     scope: output.scope,
-    rowCounts: output.rowCounts,
-    cli: output.cli,
+    coverage: {
+      requestedSections: output.sections?.requested || [],
+      loadedSections: output.sections?.loaded || [],
+      issueCount: output.sections?.issues?.length || 0,
+    },
+    summary: {question: output.question, rowCounts: output.rowCounts},
+    metrics: {queryAttempts, queryWaitedMs},
+    blockers: output.sections?.issues || [],
   });
+  const manifest = await writeOpsRunManifest({
+    manifestFile: `${args.outputFile}.manifest.json`,
+    run,
+    artifacts: [{file: args.outputFile, role: 'query_evidence'}],
+  });
+  print({...compactOpsRun(run, manifest), savedTo: args.outputFile, aiInvoked: false, cli: output.cli});
+  if (!run.ok) process.exitCode = run.exitCode;
 }
 
 async function main() {

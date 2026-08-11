@@ -666,6 +666,17 @@
 - 关键回归：`test_bi_ops_agent_governor.mjs`、`test_bi_ops_intent_planner.mjs`、`test_bi_ops_model_policy.mjs`、`test_bi_ops_query_context.mjs`、`test_bi_ops_intent_job_flow.mjs`、`test_bi_ops_multitenant_isolation.mjs`、`test_link_ops_*`、`test_migrate_link_ops_runtime_to_postgres.mjs`、`test_owner_knowledge_*`、`test_partner_knowledge_cache.mjs`。以上均已纳入 `scripts/run_deterministic_tests.mjs`。
 - `scripts/lark_sales_qa_bot.mjs` 和对应 unit 仅保留审计/未来恢复能力；生产 service 当前必须 `disabled + inactive`。
 
+## 项目工作流与紧凑证据
+
+- `lib/ops_run_bundle.mjs`：统一新运维入口的 outcome、退出码、覆盖摘要、敏感键拒绝与 artifact SHA-256 manifest。
+- `scripts/inspect_ops_run.mjs`：只读验证 manifest 和产物 hash，并输出供主任务优先读取的紧凑摘要。
+- `scripts/capture_ops_runtime_snapshot.mjs`：云端一次读取部署源码、受管 systemd units/timers、Portal/Webhook 健康状态；不执行恢复或业务写入。
+- `lib/systemd_unit_snapshot.mjs` / `lib/cloud_runtime_inventory.mjs`：把 watchdog 的逐 unit `systemctl show` 合并为一次调用，并共享 unit 清单。
+- `lib/bi_ops_query_retry.mjs`：只对 `BI_QUERY_DATA_INCOMPLETE` 做同进程、有上限的 section readiness 等待；鉴权和其它错误不重试。
+- `scripts/pipeline_marker.mjs`：marker 写入时锁定 evidence bytes/SHA-256；消费者可在业务日迁移后启用 `--require-evidence`。
+- `scripts/build_morning_resume_evidence.mjs`：morning-chain 已有全部逐店精确日期产物而跳过重复抓取时，确定性汇总现存 19 店双域文件及 hash，避免恢复路径依赖不存在的旧 chunk 文件。
+- 契约与边界：`docs/ops-workflow-contract.md`。
+
 ## 后续整理建议
 
 

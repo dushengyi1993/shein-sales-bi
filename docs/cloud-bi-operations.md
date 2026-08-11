@@ -296,6 +296,8 @@ GitHub 应保存：
 
 - 服务器本机访问 `/api/health` 或带有效 BI 登录会话访问应返回 `200` 且 `ok=true`；未登录公网访问应返回 `401` 或跳转登录。
 
+- 发布或综合巡检验收先运行 `node scripts/capture_ops_runtime_snapshot.mjs --out-dir <全新目录> --expected-commit <release-tag>`。它在一次 `systemctl show` 中读取全部受管 unit/timer，并同时核对部署标记、源码与 Portal/Webhook health；先看相邻 manifest 的紧凑结果，只对 blocker 再做单项探针。
+
 - `shein-bi-cloud-today.timer` 应为 `not-found/disabled/inactive`；`shein-bi-cloud-today.service` 只作人工灾备，不在 watchdog 必需 unit 清单中。
 - 所有 `state/locks/*.lock` 应为 `0660 root|sheinops:sheinops`，同时可被 root / sheinops 写入但不能 world-write。
 - `shein-bi-db-backup.timer` 应每日生成 `shein_bi.dump` 与 `metabase.dump`。
