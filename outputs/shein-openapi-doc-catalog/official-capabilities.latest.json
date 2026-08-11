@@ -59,10 +59,10 @@
       "Webhook": 22
     },
     "byStatus": {
-      "integrated_read_parallel": 13,
-      "candidate_unimplemented": 97,
+      "integrated_read_parallel": 14,
+      "candidate_unimplemented": 95,
       "support_candidate": 13,
-      "controlled_write_adapter": 13,
+      "controlled_write_adapter": 14,
       "official_available_out_of_current_scope": 75,
       "schema_ready_adapter_next": 6,
       "webhook_candidate": 22
@@ -73,9 +73,9 @@
       "webhook": 22
     },
     "byRisk": {
-      "medium": 77,
+      "medium": 76,
       "low": 94,
-      "high": 68
+      "high": 69
     }
   },
   "capabilities": [
@@ -1703,13 +1703,13 @@
       "endpoint": "/open-api/goods/discuss/query-discuss-list",
       "isEvaluate": 0,
       "official_available": true,
-      "project_status": "candidate_unimplemented",
+      "project_status": "integrated_read_parallel",
       "risk_level": "low",
       "read_or_write": "read",
       "auth_scope": "需要开放平台应用、店铺授权 openKeyId/secretKey、IP 白名单和对应业务权限包。",
-      "project_owner": "openapi_capability_registry",
-      "project_evidence": "",
-      "cli_next_step": "按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。",
+      "project_owner": "pending_discuss_batch",
+      "project_evidence": "pending_discuss_batch scan 已按 enabled 店铺串行查询、完整分页、身份校验和脱敏落盘。",
+      "cli_next_step": "每日只读巡检仅使用专用 scan；缺店、失败或重复键均 fail closed。",
       "docUrl": "https://open.sheincorp.com/documents/apidoc/detail/3001891"
     },
     {
@@ -1726,13 +1726,13 @@
       "endpoint": "/open-api/goods/discuss/process-discuss",
       "isEvaluate": 0,
       "official_available": true,
-      "project_status": "candidate_unimplemented",
-      "risk_level": "medium",
+      "project_status": "controlled_write_adapter",
+      "risk_level": "high",
       "read_or_write": "write",
       "auth_scope": "需要开放平台应用、店铺授权 openKeyId/secretKey、IP 白名单和对应业务权限包。",
-      "project_owner": "openapi_capability_registry",
-      "project_evidence": "",
-      "cli_next_step": "按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。",
+      "project_owner": "pending_discuss_batch",
+      "project_evidence": "pending_discuss_batch 受控接受/拒绝待议价单；逐项实时校验、单次写和终态回读",
+      "cli_next_step": "保持 safeWriteOperations、fresh scan、逐项/逐店/整批 hash、当前任务确认、单次写和终态回读边界。",
       "docUrl": "https://open.sheincorp.com/documents/apidoc/detail/3001892"
     },
     {

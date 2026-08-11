@@ -22,6 +22,7 @@
 - 2026-07-26 起，19 店生产凭据统一挂在 DL 半托 App 下；每个店铺仍使用自己的 OpenKey/secretKey，不能跨店复制。切换后只读探测为 19/19，受控写前检为 19/19。
 - 19 店官方 OpenAPI 授权、云端白名单、只读探针和脱敏能力总账已完成；销售、退货退款、商品/链接基础资料仍写 `fact.openapi_*` / `mart.openapi_*_reconciliation` 隔离层，不直接覆盖生产事实源。
 - 自动化运营受控写适配器已接入 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。真实提交必须走 BI 账号 `writeStores`、`safeWriteOperations` 动作总闸门、dry-run `payloadHash`、任务 `waiting_review`、确认和回读/审计。
+- 待议价另有主代理专用 `pending_discuss_batch`：`scan` 只读覆盖 19 店，`preflight` 锁定逐项/逐店/整批 hash，`execute` 使用动作总闸门 `process_pending_discuss`、固定云端根目录/锁路径、当前任务确认、单次写和 status 3/4 终态回读；它不进入合作方通用 CLI，也不授权每日 automation 执行写入。
 - `copy_product_draft` 已使用 OpenAPI 商品详情 / `spu-info` mapper 还原类目、属性、图片、SKU、供货价、库存和尺寸重量等关键发布字段；强指纹回读未命中时只能人工核销，不能用平台 SKU、源 SKC 或货号文本弱匹配自动判完成。
 - 新上品、复制上品、补链接等从未上过架的新链接默认 `shelf_way=2`，并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。维护已有链接的 `activate_link` / `retire_link` 才按用户指令改变现有链接状态。
 - TZ/JSH/TZZ/XC 等店铺身份校验允许静态 `merchantId` fallback，但只能在配置真相匹配且无 GS 账号冲突时使用；不得运行时自动回填或放宽 `account_mismatch`。
