@@ -116,6 +116,7 @@ function normalizeQueue(queue) {
     }
     entry.nextAttemptAt = typeof entry.nextAttemptAt === 'string' ? entry.nextAttemptAt : '';
     entry.rerun = Boolean(entry.rerun);
+    entry.dependencyYield = Boolean(entry.dependencyYield);
     const priority = Number(entry.priority ?? 50);
     entry.priority = Number.isSafeInteger(priority) && priority >= 0 ? priority : 50;
     if (!['pending', 'running'].includes(entry.status)) entry.status = 'pending';
@@ -195,6 +196,7 @@ export function enqueueSections(queue, {
         requestRevision: 1,
         claimedRevision: 0,
         rerun: false,
+        dependencyYield: false,
         status: 'pending',
         requestedAt: nowIso,
         updatedAt: nowIso,
@@ -208,7 +210,13 @@ export function enqueueSections(queue, {
       queue.entries.push(entry);
     } else {
       entry.priority = Math.min(Number(entry.priority ?? priority), priority);
-      entry.requestRevision = (Number(entry.requestRevision || 0) || 0) + 1;
+      // One running lease needs at most one coalesced rerun. Repeated events
+      // during the same build update its audit metadata without creating an
+      // unbounded revision chase that can starve dependent homepage sections.
+      const alreadyHasRerun = entry.status === 'running' && entry.rerun === true;
+      if (!alreadyHasRerun) {
+        entry.requestRevision = (Number(entry.requestRevision || 0) || 0) + 1;
+      }
       entry.updatedAt = nowIso;
       // An explicit new request supersedes failure backoff. The revision
       // guard still prevents an older running lease from completing it.
@@ -231,6 +239,17 @@ export function claimNext(queue, {
 } = {}) {
   const nowMillis = now.getTime();
   recoverExpired(queue, nowMillis);
+  // A dependent homepage artifact must never publish from the old profit
+  // cache while a newer profit request is pending, running, or backing off.
+  // This is a dependency barrier, not just a priority hint: even a priority-0
+  // force refresh waits for the canonical profit entry to finish.
+  const profitEntry = queue.entries.find(entry => (
+    entry.section === 'profit' && ['pending', 'running'].includes(entry.status)
+  ));
+  const profitBlocksHomeRankings = Boolean(
+    profitEntry && (profitEntry.status === 'running' || profitEntry.dependencyYield !== true)
+  );
+  const profitBlocksHomeProfit = Boolean(profitEntry);
   // A steady stream of priority-10 accounting work used to keep priority-50
   // daily/page caches pending forever.  Age lowers the effective priority by
   // one point every two minutes, but never ahead of an explicit priority-0
@@ -255,6 +274,8 @@ export function claimNext(queue, {
   const pending = queue.entries
     .filter(entry => {
       if (entry.status !== 'pending') return false;
+      if (entry.section === 'homeRankings' && profitBlocksHomeRankings) return false;
+      if (entry.section === 'homeProfit' && profitBlocksHomeProfit) return false;
       const nextAttemptAt = Date.parse(entry.nextAttemptAt || '');
       return Number.isNaN(nextAttemptAt) || nextAttemptAt <= nowMillis;
     })
@@ -274,6 +295,7 @@ export function claimNext(queue, {
   entry.leaseExpiresAt = new Date(nowMillis + leaseSeconds * 1_000).toISOString();
   entry.claimedRevision = Number(entry.requestRevision || 0);
   entry.rerun = false;
+  entry.dependencyYield = false;
   entry.updatedAt = now.toISOString();
   return {...entry};
 }
@@ -294,6 +316,9 @@ export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) 
     entry.leaseId = '';
     entry.leaseExpiresAt = '';
     entry.nextAttemptAt = '';
+    entry.dependencyYield = entry.section === 'profit';
+    queue.nextSequence = Math.max(Number(queue.nextSequence || 0), ...queue.entries.map(item => Number(item.sequence || 0))) + 1;
+    entry.sequence = queue.nextSequence;
     entry.lastError = `complete superseded by requestRevision=${Number(entry.requestRevision)}`;
     entry.updatedAt = now.toISOString();
     return false;
@@ -327,6 +352,11 @@ export function failClaim(queue, {
   entry.nextAttemptAt = newerRevisionPending
     ? ''
     : new Date(now.getTime() + delaySeconds * 1_000).toISOString();
+  entry.dependencyYield = false;
+  if (newerRevisionPending) {
+    queue.nextSequence = Math.max(Number(queue.nextSequence || 0), ...queue.entries.map(item => Number(item.sequence || 0))) + 1;
+    entry.sequence = queue.nextSequence;
+  }
   entry.lastError = String(error || 'section refresh failed').slice(0, 1_000);
   entry.updatedAt = now.toISOString();
   return true;

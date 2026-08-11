@@ -11,6 +11,7 @@ import {fileURLToPath} from 'node:url';
 import {
   createBiLiveUpdateBridge,
   liveAccountingEnabled,
+  liveAccountingQueuePlan,
   liveSectionsForBiUpdate,
   normalizeBiLiveUpdatePayload,
 } from './serve_bi_portal.mjs';
@@ -73,6 +74,30 @@ assert.deepEqual(
 assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
 assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['inventoryStock']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
+assert.deepEqual(
+  liveAccountingQueuePlan({kind: 'order'}),
+  [
+    {section: 'profit', priority: 5},
+    {section: 'homeRankings', priority: 5},
+    {section: 'homeProfit', priority: 5},
+  ],
+  'a current-day order must advance canonical accounting before its live overlay rolls into history',
+);
+assert.deepEqual(
+  liveAccountingQueuePlan({kind: 'return', refreshHistoricalSections: true}),
+  [
+    {section: 'profit', priority: 5},
+    {section: 'homeRankings', priority: 5},
+    {section: 'homeProfit', priority: 5},
+    {section: 'orders', priority: 10},
+    {section: 'afterSales', priority: 10},
+    {section: 'productSalesDaily', priority: 50},
+    {section: 'inventoryTrend', priority: 50},
+    {section: 'rankings', priority: 50},
+  ],
+  'returns must preserve the full historical invalidation set behind canonical accounting',
+);
+assert.deepEqual(liveAccountingQueuePlan({kind: 'product'}), [], 'non-accounting events must not enqueue profit work');
 assert.equal(normalizeBiLiveUpdatePayload('{"event":"unknown"}', fixedNow), null);
 assert.equal(normalizeBiLiveUpdatePayload('{"eventFamily":"inventory_warning"}', fixedNow)?.kind, 'platform');
 assert.equal(normalizeBiLiveUpdatePayload('{"kind":"inventory_refresh"}', fixedNow)?.kind, 'inventory');
@@ -191,6 +216,16 @@ assert.match(portalServer, /liveAccountingRefreshStopped[\s\S]*!liveAccountingEn
   'disabled live updates must not leave a startup accounting timer or generator behind');
 assert.match(portalServer, /enqueueHostLockedBiSection\(section, generatedAt,[\s\S]*live-accounting-/,
   'returns and historical mutations must queue canonical accounting behind the shared host lock');
+assert.match(portalServer, /await persistHostLockedBiSectionPlan\(accountingQueue, generatedAt,[\s\S]*live-accounting-/,
+  'live accounting must wait for durable queue persistence before reporting that work is queued');
+assert.match(portalServer, /live accounting queue persistence failed/,
+  'a lock timeout or enqueue failure must remain observable and enter the accounting retry path');
+assert.match(portalServer, /homepage accounting is catching up to newer order facts/,
+  'a historical homepage cache older than canonical accounting must fail closed instead of serving stale sales');
+assert.match(portalServer, /sourceCachedAt: String\(sourceMeta\.sourceCachedAt \|\| ''\)/,
+  'homeProfit must retain the exact profit artifact revision used for derivation');
+assert.match(portalServer, /accountingFreshnessRequiredSections = new Set\(\['profit', 'homeRankings', 'rankings'/,
+  'a regenerated historical homepage baseline must verify profit freshness before publication');
 assert.match(portalServer, /'orderFactUpdatedAt', \(SELECT max\(updated_at\) FROM fact\.order_item\)/,
   'a zeroed cancellation row must still invalidate the moving-average ledger and profit cache');
 assert.match(portalServer, /'accountingInputUpdatedAt', greatest\([\s\S]*fact\.after_sales_item[\s\S]*fact\.openapi_return_item/,
@@ -249,8 +284,11 @@ try {
   assert.match(initial, /event: ready/);
   stream.destroy();
 } finally {
-  server.kill('SIGTERM');
-  await new Promise(resolve => server.once('exit', resolve));
+  if (server.exitCode === null && server.signalCode === null) {
+    const exited = new Promise(resolve => server.once('exit', resolve));
+    server.kill('SIGTERM');
+    await exited;
+  }
   await fs.rm(temp, {recursive: true, force: true});
 }
 
