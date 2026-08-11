@@ -38,6 +38,14 @@ StateChangeTimestamp=
 ActiveEnterTimestamp=
 ExecMainStartTimestamp=
 ExecMainExitTimestamp=
+
+Id=shein-bi-daily.timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Result=success
+StateChangeTimestamp=
+ActiveEnterTimestamp=
 `;
 
 const parsed = parseSystemdShowMany(fixture, [
@@ -49,6 +57,16 @@ assert.equal(parsed['missing.service'].LoadState, 'unknown');
 assert.equal(parsed['not-found.service'].LoadState, 'not-found');
 assert.equal(parsed['not-found.service'].complete, true);
 assert.equal(parsed['not-found.service'].ok, false);
+assert.equal(parsed['shein-bi-daily.timer'].complete, true);
+assert.equal(parsed['shein-bi-daily.timer'].ok, true);
+
+const serviceWithoutExecMain = parseSystemdShowMany(
+  'Id=no-exec.service\nLoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nStateChangeTimestamp=\nActiveEnterTimestamp=\n',
+  ['no-exec.service'],
+  {code: 0},
+);
+assert.equal(serviceWithoutExecMain['no-exec.service'].complete, false);
+assert.ok(serviceWithoutExecMain['no-exec.service'].missingProperties.includes('ExecMainStatus'));
 
 const incomplete = parseSystemdShowMany('Id=partial.service\nLoadState=loaded\n', ['partial.service'], {code: 1});
 assert.equal(incomplete['partial.service'].complete, false);
