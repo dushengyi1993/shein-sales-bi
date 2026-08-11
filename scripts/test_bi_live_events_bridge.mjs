@@ -10,6 +10,7 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {
   createBiLiveUpdateBridge,
+  liveAccountingEnabled,
   liveSectionsForBiUpdate,
   normalizeBiLiveUpdatePayload,
 } from './serve_bi_portal.mjs';
@@ -30,6 +31,13 @@ class FakePgClient extends EventEmitter {
 }
 
 const fixedNow = new Date('2026-07-23T12:00:00.000Z');
+assert.equal(liveAccountingEnabled({SHEIN_BI_LIVE_UPDATES_ENABLED: '0'}), false,
+  'disabling live updates must also suppress startup accounting by default');
+assert.equal(liveAccountingEnabled({SHEIN_BI_LIVE_UPDATES_ENABLED: '0', SHEIN_BI_LIVE_ACCOUNTING_ENABLED: '1'}), true,
+  'operators may explicitly keep startup accounting enabled while LISTEN/SSE updates are disabled');
+assert.equal(liveAccountingEnabled({SHEIN_BI_LIVE_UPDATES_ENABLED: '1', SHEIN_BI_LIVE_ACCOUNTING_ENABLED: '0'}), false,
+  'tests and maintenance modes may explicitly suppress accounting without disabling LISTEN/SSE updates');
+assert.equal(liveAccountingEnabled({}), true, 'production live accounting remains enabled by default');
 const order = normalizeBiLiveUpdatePayload(JSON.stringify({
   eventFamily: 'order', storeKey: 'tz', orderId: 'GSH18A51T000BED', updatedAt: '2026-07-23T11:59:59.000Z',
 }), fixedNow);
@@ -179,6 +187,8 @@ assert.doesNotMatch(generator.match(/liveSalesToday:[\s\S]*?`,\n  homeTrafficDai
 assert.doesNotMatch(portalServer, /createBiLiveCoreRefreshScheduler|live core refresh failed/, 'one webhook must not launch a full 40+ second portal rebuild');
 assert.match(portalServer, /SHEIN_BI_LIVE_ACCOUNTING_DEBOUNCE_MS \|\| 45_000/,
   'order and return events must coalesce into an event-driven accounting refresh');
+assert.match(portalServer, /liveAccountingRefreshStopped[\s\S]*!liveAccountingEnabled\(process\.env\)[\s\S]*!allowGenerateSections/,
+  'disabled live updates must not leave a startup accounting timer or generator behind');
 assert.match(portalServer, /enqueueHostLockedBiSection\(section, generatedAt,[\s\S]*live-accounting-/,
   'returns and historical mutations must queue canonical accounting behind the shared host lock');
 assert.match(portalServer, /'orderFactUpdatedAt', \(SELECT max\(updated_at\) FROM fact\.order_item\)/,

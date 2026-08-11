@@ -138,6 +138,24 @@ console.log(JSON.stringify({ok:true,out}));
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescuePath)).digest('hex');
   const multiRescueHash = crypto.createHash('sha256').update(await fs.readFile(multiRescuePath)).digest('hex');
 
+  const cloudGateOnly = process.platform !== 'win32'
+    && await pathExists('/srv/shein-bi')
+    && await pathExists('/run/lock/shein-host-heavy.lock')
+    && process.env.SHEIN_BI_HOST_HEAVY_DOMAIN !== 'marketing-repair';
+  if (cloudGateOnly) {
+    const gateDir = path.join(temp, 'cloud-gate');
+    const gateProbe = await run([
+      '--store', 'DL', '--port', '9999', '--rescue', rescuePath,
+      '--expected-rescue-hash', rescueHash, '--execute',
+      '--transaction-id', 'smoke-cloud-write-gate-fail-closed',
+      '--out-dir', gateDir, '--journal-dir', path.join(gateDir, 'journals'),
+    ], env);
+    assert.equal(gateProbe.code, 4, gateProbe.stderr || gateProbe.stdout);
+    assert.match(gateProbe.stderr, /cloud_marketing_write_requires_(shared_host_wrapper|marketing_repair_domain)/);
+    const cloudEvents = (await fs.readFile(eventPath, 'utf8').catch(() => '')).trim();
+    assert.equal(cloudEvents, '', 'cloud gate rejection must occur before either fake adapter executes');
+    console.log(JSON.stringify({ok: true, test: 'cloud_marketing_write_gate_fail_closed'}));
+  } else {
   const dryDir = path.join(temp, 'dry');
   const dry = await run([
     '--store', 'DL', '--port', '9999', '--rescue', rescuePath,
@@ -255,6 +273,16 @@ console.log(JSON.stringify({ok:true,out}));
     ok: true,
     test: '0004_blocks_before_delete_and_mixed_0006_replacement_compensates_and_retries',
   }));
+  }
 } finally {
   await fs.rm(temp, {recursive: true, force: true});
+}
+
+async function pathExists(target) {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
 }

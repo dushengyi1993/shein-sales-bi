@@ -202,6 +202,20 @@ await fs.promises.writeFile(authFile, JSON.stringify({users: [
   {username: 'empty-test', password: 'correct-password', role: 'admin', readStores: []},
 ]}));
 
+const isolatedPortalEnv = {
+  ...process.env,
+  NODE_ENV: 'test',
+  SHEIN_LINK_OPS_STORE: 'json',
+  SHEIN_WEBHOOK_REPOSITORY_ENABLED: '0',
+  SHEIN_BI_LIVE_UPDATES_ENABLED: '0',
+  SHEIN_BI_LIVE_ACCOUNTING_ENABLED: '0',
+  SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED: '0',
+  SHEIN_BI_CORE_WARMUP_DISABLED: '1',
+  SHEIN_BI_INTENT_PLANNER_ENABLED: '0',
+  SHEIN_BI_JOB_WORKER_ENABLED: '0',
+  SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR: '',
+};
+
 const child = spawn(process.execPath, [
   path.join(root, 'scripts', 'serve_bi_portal.mjs'),
   '--host', '127.0.0.1', '--port', String(port), '--dir', portalDir,
@@ -211,7 +225,7 @@ const child = spawn(process.execPath, [
   '--manual-login-state-file', path.join(temp, 'manual-login.json'), '--audit-file', path.join(temp, 'audit.jsonl'),
 ], {
   cwd: root,
-  env: {...process.env, SHEIN_BI_LIVE_UPDATES_ENABLED: '0', SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED: '0'},
+  env: isolatedPortalEnv,
   stdio: ['ignore', 'ignore', 'pipe'],
 });
 let stderr = '';
@@ -259,9 +273,10 @@ try {
   assert.equal((await fetch(`${base}/api/bi/section/productProfit?q=ABC-100`, {headers: {cookie: scopedCookie}})).status, 503);
   assert.equal((await fetch(`${base}/api/bi/section/homeProfit`, {headers: {cookie: scopedCookie}})).status, 503);
 } finally {
-  child.kill('SIGTERM');
-  await new Promise(resolve => child.once('exit', resolve));
-  await fs.promises.rm(temp, {recursive: true, force: true});
+  await cleanup([
+    ['stop isolated product-profit portal', () => stopChild(child, 'isolated product-profit portal')],
+    ['remove isolated product-profit files', () => fs.promises.rm(temp, {recursive: true, force: true})],
+  ]);
 }
 
 const readOnlyTemp = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'shein-bi-home-profit-read-only-'));
@@ -287,7 +302,7 @@ const readOnlyChild = spawn(process.execPath, [
   '--manual-login-state-file', path.join(readOnlyTemp, 'manual-login.json'), '--audit-file', path.join(readOnlyTemp, 'audit.jsonl'),
 ], {
   cwd: root,
-  env: {...process.env, SHEIN_BI_LIVE_UPDATES_ENABLED: '0', SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED: '0'},
+  env: isolatedPortalEnv,
   stdio: ['ignore', 'ignore', 'pipe'],
 });
 let readOnlyStderr = '';
@@ -302,9 +317,10 @@ try {
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(fs.existsSync(path.join(readOnlySections, 'profit.json')), false, 'read-only homeProfit must not generate a profit cache');
 } finally {
-  readOnlyChild.kill('SIGTERM');
-  await new Promise(resolve => readOnlyChild.once('exit', resolve));
-  await fs.promises.rm(readOnlyTemp, {recursive: true, force: true});
+  await cleanup([
+    ['stop isolated read-only profit portal', () => stopChild(readOnlyChild, 'isolated read-only profit portal')],
+    ['remove isolated read-only profit files', () => fs.promises.rm(readOnlyTemp, {recursive: true, force: true})],
+  ]);
 }
 
 console.log('bi_product_profit_section_contract: request-state productProfit, q isolation, and fail-closed homeProfit passed');
@@ -339,4 +355,43 @@ async function login(base, username) {
   });
   assert.equal(response.status, 200, `login failed for ${username}`);
   return String(response.headers.get('set-cookie') || '').split(';')[0];
+}
+
+async function stopChild(child, label, {graceMs = 5_000, killMs = 2_000} = {}) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  child.kill('SIGTERM');
+  if (await waitForChildExit(child, graceMs)) return;
+  child.kill('SIGKILL');
+  if (!await waitForChildExit(child, killMs)) {
+    throw new Error(`${label} did not exit after SIGKILL`);
+  }
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+  });
+}
+
+async function cleanup(steps) {
+  const errors = [];
+  for (const [label, operation] of steps) {
+    try {
+      await operation();
+    } catch (error) {
+      errors.push(new Error(`${label}: ${error?.message || error}`, {cause: error}));
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, 'isolated portal cleanup failed');
 }
