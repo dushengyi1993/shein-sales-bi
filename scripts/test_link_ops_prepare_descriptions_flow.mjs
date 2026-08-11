@@ -411,8 +411,16 @@ const portal = spawn(process.execPath, [
   env: {
     ...process.env,
     NODE_ENV: 'test',
+    SHEIN_LINK_OPS_STORE: 'json',
+    SHEIN_WEBHOOK_REPOSITORY_ENABLED: '0',
+    SHEIN_BI_LIVE_UPDATES_ENABLED: '0',
+    SHEIN_BI_LIVE_ACCOUNTING_ENABLED: '0',
+    SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED: '0',
     SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
     SHEIN_BI_CORE_WARMUP_DISABLED: '1',
+    SHEIN_BI_INTENT_PLANNER_ENABLED: '0',
+    SHEIN_BI_JOB_WORKER_ENABLED: '0',
+    SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR: '',
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
     SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
@@ -1091,8 +1099,71 @@ try {
   cleanupOnExit = failed.length === 0;
   if (failed.length) process.exitCode = 1;
 } finally {
-  portal.kill();
-  await new Promise(resolve => fakeOpenApi.close(resolve));
-  await sleep(250);
-  if (cleanupOnExit) await fs.rm(tmpRoot, {recursive: true, force: true});
+  const cleanupErrors = [];
+  for (const [label, operation] of [
+    ['stop isolated description portal', () => stopChild(portal, 'isolated description portal')],
+    ['close fake OpenAPI server', () => closeServer(fakeOpenApi, 'fake OpenAPI server')],
+    ['remove isolated description files', async () => {
+      await sleep(250);
+      if (cleanupOnExit) await fs.rm(tmpRoot, {recursive: true, force: true});
+    }],
+  ]) {
+    try {
+      await operation();
+    } catch (error) {
+      cleanupErrors.push(new Error(`${label}: ${error?.message || error}`, {cause: error}));
+    }
+  }
+  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'description flow cleanup failed');
+}
+
+async function stopChild(child, label, {graceMs = 5_000, killMs = 2_000} = {}) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  child.kill('SIGTERM');
+  if (await waitForChildExit(child, graceMs)) return;
+  child.kill('SIGKILL');
+  if (!await waitForChildExit(child, killMs)) {
+    throw new Error(`${label} did not exit after SIGKILL`);
+  }
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+  });
+}
+
+async function closeServer(server, label, {graceMs = 2_000, forceMs = 2_000} = {}) {
+  if (!server?.listening) return;
+  const closed = new Promise((resolve, reject) => {
+    server.close(error => error ? reject(error) : resolve());
+  });
+  if (await waitForPromise(closed, graceMs)) return;
+  server.closeAllConnections?.();
+  if (!await waitForPromise(closed, forceMs)) {
+    throw new Error(`${label} did not close after terminating connections`);
+  }
+}
+
+async function waitForPromise(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

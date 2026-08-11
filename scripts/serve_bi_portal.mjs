@@ -8797,6 +8797,14 @@ function liveUpdatesEnabled(env = process.env) {
   return !['0', 'false', 'no', 'off'].includes(String(env.SHEIN_BI_LIVE_UPDATES_ENABLED || '1').trim().toLowerCase());
 }
 
+export function liveAccountingEnabled(env = process.env) {
+  const configured = env.SHEIN_BI_LIVE_ACCOUNTING_ENABLED;
+  if (configured === undefined || configured === null || String(configured).trim() === '') {
+    return liveUpdatesEnabled(env);
+  }
+  return !['0', 'false', 'no', 'off'].includes(String(configured).trim().toLowerCase());
+}
+
 function boundedLiveText(value, limit = 160) {
   return String(value ?? '').trim().replace(/[\r\n]+/g, ' ').slice(0, limit);
 }
@@ -9973,6 +9981,7 @@ async function main() {
   const scheduleLiveAccountingRefresh = event => {
     if (
       liveAccountingRefreshStopped
+      || !liveAccountingEnabled(process.env)
       || !allowGenerateSections
       || !['order','return'].includes(String(event?.kind || ''))
     ) return;
