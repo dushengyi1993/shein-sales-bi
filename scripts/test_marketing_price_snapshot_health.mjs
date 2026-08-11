@@ -24,6 +24,11 @@ try {
   assert.equal(snapshot.freshness.status, 'stale');
   assert.equal(snapshot.generatedAt, existing.generatedAt, 'a degraded check must not pretend the previous snapshot was regenerated');
   assert.deepEqual(snapshot.rows, existing.rows, 'a degraded check must preserve the last complete evidence rows');
+  const staleRequired = spawnSync(process.execPath, [script, '--source-root', root, '--out', out, '--require-fresh'], {encoding: 'utf8'});
+  assert.notEqual(staleRequired.status, 0, 'a freshness-gated BI publish must reject a stale preserved snapshot');
+  snapshot = JSON.parse(await fs.readFile(out, 'utf8'));
+  assert.equal(snapshot.freshness.status, 'stale', 'freshness-gated rejection must preserve stale metadata for diagnosis');
+  assert.deepEqual(snapshot.rows, existing.rows, 'freshness-gated rejection must preserve the last complete rows');
 
   const emptyEvidenceDir = path.join(root, 'tmp', 'mbrs', 'marketing-stack-review-empty');
   await fs.mkdir(emptyEvidenceDir, {recursive: true});
@@ -44,6 +49,11 @@ try {
   snapshot = JSON.parse(await fs.readFile(out, 'utf8'));
   assert.equal(snapshot.freshness.status, 'error', 'a malformed evidence file must be visible as degraded metadata');
   assert.deepEqual(snapshot.rows, existing.rows, 'a malformed evidence file must not replace a complete prior snapshot with partial rows');
+  const corruptRequired = spawnSync(process.execPath, [script, '--source-root', root, '--out', out, '--require-fresh'], {encoding: 'utf8'});
+  assert.notEqual(corruptRequired.status, 0, 'a freshness-gated BI publish must reject malformed active evidence');
+  snapshot = JSON.parse(await fs.readFile(out, 'utf8'));
+  assert.equal(snapshot.freshness.status, 'error');
+  assert.deepEqual(snapshot.rows, existing.rows);
   await fs.rm(path.join(root, 'tmp'), {recursive: true, force: true});
 
   const failed = spawnSync(process.execPath, [

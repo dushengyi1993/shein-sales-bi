@@ -171,7 +171,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。普通当天订单只刷新 `liveSalesToday`，不会等待移动加权成本；退货和历史订单变动把 `orders/afterSales/profit/homeProfit` 等 canonical accounting section 加入 host-locked 队列，并在页面标注利润待同步。Portal 进程本身不得直接启动成本台账重算。
 - 营销修复队列必须区分“系统失败”和“业务条件不满足”。库存不足、平台明确拒绝且旧活动保护仍完整的链接，在当天不可变 manifest 内记为 `blocked`，不得每个窗口重复执行或把 worker 标成 `failed`；下一天的新 guard/fingerprint 会自动重新评估。网络、浏览器、鉴权、读回失败仍记为 `failed` 并重试/告警。某阶段存在安全业务阻塞时，worker 仍应继续处理后续互不重叠的修复阶段，最后以人话报告未执行原因。
 - 实时销售直接查询当天 `fact.order_item`，利润只读取同一次原子发布的 `mart.profit_order_item_cache` 与仓储费 cache。新订单尚未进入 cache，或已有订单行的金额/数量与 cache 不一致时，API 都返回 `accountingPending=true`，实时销售先采用正式事实行，页面显示利润正在补成本；相同内容的幂等 Webhook 重放不会误报待补账。禁止用静态单位成本、旧利润或零值掩盖这个时间差。
-- `productTrafficDaily` section 当前是日期 × 店铺 × 标准货号 × SKC 粒度，并从最新链接主快照带出 `shelf_status_name`、`is_on_shelf`、`is_sold_out`、`is_out_shelf` 等字段。流量页前端按顶部时间范围聚合成店铺 × 标准货号 × SKC 明细，默认只看已上架链接；若要追溯历史某日当时的上架状态，需要另做日期对齐的历史状态层，不能把当前快照解释成历史状态事实。
+- `productTrafficDaily` section 当前是日期 × 店铺 × 标准货号 × SKC 粒度，并从每店最新链接主快照带出 `shelf_status_name`、`is_on_shelf`、`is_sold_out`、`is_out_shelf`、`first_shelf_time`（首次上架，属当前链接事实）等字段。流量页前端按顶部时间范围聚合成店铺 × 标准货号 × SKC 明细，默认只看已上架链接，明细表含可排序列“首次上架”；若要追溯历史某日当时的上架状态或首次上架时间，需要另做日期对齐的历史状态层，不能把当前快照解释成历史状态事实。
 - 数据库备份入口：`scripts/cloud_db_backup.sh`
 
 - ET 云端入口：`scripts/cloud_et_forwarder_sync.sh today`

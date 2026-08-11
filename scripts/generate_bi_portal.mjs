@@ -631,6 +631,7 @@ latest_link_status AS MATERIALIZED (
     l.skc,
     max(nullif(l.shelf_status, '')) AS shelf_status,
     max(nullif(l.shelf_status_name, '')) AS shelf_status_name,
+    max(l.first_shelf_time) AS first_shelf_time,
     bool_or(coalesce(l.is_on_shelf, false)) AS is_on_shelf,
     bool_or(coalesce(l.is_wait_shelf, false)) AS is_wait_shelf,
     bool_or(coalesce(l.is_sold_out, false)) AS is_sold_out,
@@ -675,6 +676,7 @@ product_traffic_daily AS (
       nullif(r.skc, '') AS skc,
       max(l.shelf_status) AS shelf_status,
       max(l.shelf_status_name) AS shelf_status_name,
+      max(l.first_shelf_time) AS first_shelf_time,
       bool_or(coalesce(l.is_on_shelf, false)) AS is_on_shelf,
       bool_or(coalesce(l.is_wait_shelf, false)) AS is_wait_shelf,
       bool_or(coalesce(l.is_sold_out, false)) AS is_sold_out,
@@ -1983,6 +1985,25 @@ store_latest_link AS (
   SELECT store_key, max(snapshot_date) AS link_date
   FROM fact.link_master_snapshot
   GROUP BY store_key
+),
+latest_link_status AS MATERIALIZED (
+  SELECT
+    l.store_key,
+    l.skc,
+    max(nullif(l.shelf_status, '')) AS shelf_status,
+    max(nullif(l.shelf_status_name, '')) AS shelf_status_name,
+    max(l.first_shelf_time) AS first_shelf_time,
+    bool_or(coalesce(l.is_on_shelf, false)) AS is_on_shelf,
+    bool_or(coalesce(l.is_wait_shelf, false)) AS is_wait_shelf,
+    bool_or(coalesce(l.is_sold_out, false)) AS is_sold_out,
+    bool_or(coalesce(l.is_out_shelf, false)) AS is_out_shelf
+  FROM fact.link_master_snapshot l
+  JOIN store_latest_link sll
+    ON sll.store_key = l.store_key
+   AND sll.link_date = l.snapshot_date
+  WHERE coalesce(l.is_hard_dead, false) = false
+    AND coalesce(l.skc, '') <> ''
+  GROUP BY l.store_key, l.skc
 ),
 store_latest_perf AS (
   SELECT store_key, max(date) AS perf_date
@@ -4986,6 +5007,7 @@ product_traffic_daily AS (
       nullif(p.skc, '') AS skc,
       max(nullif(l.shelf_status, '')) AS shelf_status,
       max(nullif(l.shelf_status_name, '')) AS shelf_status_name,
+      max(l.first_shelf_time) AS first_shelf_time,
       bool_or(coalesce(l.is_on_shelf, false)) AS is_on_shelf,
       bool_or(coalesce(l.is_wait_shelf, false)) AS is_wait_shelf,
       bool_or(coalesce(l.is_sold_out, false)) AS is_sold_out,
@@ -4996,13 +5018,9 @@ product_traffic_daily AS (
       round(sum(coalesce(p.goods_uv, 0))::numeric, 0) AS goods_uv,
       round(sum(coalesce(p.cart_uv, 0))::numeric, 0) AS cart_uv
     FROM fact.link_performance_daily p
-    LEFT JOIN store_latest_link sll
-      ON sll.store_key = p.store_key
-    LEFT JOIN fact.link_master_snapshot l
-      ON l.snapshot_date = sll.link_date
-     AND l.store_key = p.store_key
+    LEFT JOIN latest_link_status l
+      ON l.store_key = p.store_key
      AND l.skc = p.skc
-     AND coalesce(l.is_hard_dead,false) = false
     WHERE coalesce(p.standard_goods_sn, '') <> ''
       AND coalesce(dim.product_canonical_sn(p.standard_goods_sn), '') <> ''
       AND coalesce(p.skc, '') <> ''

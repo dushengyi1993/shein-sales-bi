@@ -295,7 +295,7 @@
 
   - `lib/browser_task_lease.mjs` / `smoke_browser_task_lease.mjs`：实际启动浏览器的任务按“任务 × 店铺”获取、心跳和释放租约；过期或 owner PID 已死亡才回收。`shein-bi-cloud-browser-cleanup.timer` 只在 `03:45/09:50/21:00` 回收过期租约并清理未受有效租约保护的孤儿浏览器。纯 session HTTP guard 不申请租约。
 
-  - `cloud_marketing_live_guard.sh` 与营销修复 queue/worker：完整巡检与大批写入解耦。guard 只做一次 stack review、一次价格层 scan、一次报告/建队列；不启动浏览器、不清理浏览器、不持有写授权。`2026-07-18` 生产基线为 19 店 `157s`、1516 行、Chrome `0 -> 0`。当次实时券/活动价证据完整时，旧 coupon/low-price/old-ordinary 中间扫描只作历史审计；实时证据不完整则 fail closed。worker 于 `10:50/12:50/14:50/16:50/18:50/19:30` 每轮最多 8 组，强制精确 work hash、事务补偿和最终全店 readback。
+  - `cloud_marketing_live_guard.sh` 与营销修复 queue/worker：完整巡检与大批写入解耦。guard 只做一次 stack review、一次价格层 scan、一次报告/建队列；不启动浏览器、不清理浏览器、不持有写授权。成功的实时价格扫描和 repair 终态复扫会调用 `publish_marketing_price_leads_to_bi.sh`，先用既有确定性导出器更新营销价格包，再只把 `linksData` 放入既有 Portal section 队列；不另建 timer、不在持有 host-heavy lock 时同步预热。发布失败会让 guard/worker fail closed，不能继续报 ok。`2026-07-18` 生产基线为 19 店 `157s`、1516 行、Chrome `0 -> 0`。当次实时券/活动价证据完整时，旧 coupon/low-price/old-ordinary 中间扫描只作历史审计；实时证据不完整则 fail closed。worker 于 `10:50/12:50/14:50/16:50/18:50/19:30` 每轮最多 8 组，强制精确 work hash、事务补偿和最终全店 readback。
 
   - `marketing/split_recreate_mixed_limited_discount.mjs`：仅保留历史 dry-run/计划核对；旧“先结束整场再拆分重建”的 `--execute` 已禁用。真实替换必须改走 `replace_limited_discount_transactionally.mjs`，不能恢复旧入口。
 

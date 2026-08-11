@@ -22,6 +22,7 @@ function parseArgs(argv) {
     maxOverrideFiles: 80,
     keepExistingOnEmpty: true,
     injectFailureBeforeWrite: false,
+    requireFresh: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -30,6 +31,7 @@ function parseArgs(argv) {
     else if (a === '--max-override-files') args.maxOverrideFiles = Number(argv[++i] || args.maxOverrideFiles);
     else if (a === '--allow-empty-overwrite') args.keepExistingOnEmpty = false;
     else if (a === '--inject-failure-before-write') args.injectFailureBeforeWrite = true;
+    else if (a === '--require-fresh') args.requireFresh = true;
   }
   return args;
 }
@@ -492,7 +494,8 @@ async function main() {
         status: 'error',
         reason: `本轮有 ${activeSourceReadErrors.length} 个营销价格证据文件无法读取：${activeSourceReadErrors.slice(0, 3).join('；')}`,
       });
-      console.log(JSON.stringify({ok: true, degraded: true, freshness: payload.freshness, out: args.out, rowCount: payload.rowCount}, null, 2));
+      console.log(JSON.stringify({ok: !args.requireFresh, degraded: true, requireFresh: args.requireFresh, freshness: payload.freshness, out: args.out, rowCount: payload.rowCount}, null, 2));
+      if (args.requireFresh) process.exitCode = 2;
       return;
     }
     if (!rows.length && args.keepExistingOnEmpty) {
@@ -502,7 +505,8 @@ async function main() {
           ? '本轮读到营销价格证据文件，但没有形成任何有效价格行；为避免空结果覆盖，保留上一份完整快照。'
           : '本轮未找到任何营销价格证据源，保留上一份完整快照。',
       });
-      console.log(JSON.stringify({ok: true, degraded: true, freshness: payload.freshness, out: args.out, rowCount: payload.rowCount}, null, 2));
+      console.log(JSON.stringify({ok: !args.requireFresh, degraded: true, requireFresh: args.requireFresh, freshness: payload.freshness, out: args.out, rowCount: payload.rowCount}, null, 2));
+      if (args.requireFresh) process.exitCode = 2;
       return;
     }
     if (args.injectFailureBeforeWrite) throw new Error('injected marketing price export failure before publish');
