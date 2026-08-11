@@ -33,6 +33,7 @@ const ALLOWED_REAL_SUBMIT_OPERATIONS = new Set([
   'update_supply_price',
   'update_product_price',
   'certificate_review',
+  'process_pending_discuss',
 ]);
 
 function parseArgs(argv) {

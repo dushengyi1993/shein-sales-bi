@@ -335,6 +335,8 @@
 
   - `probe_shein_openapi_all_stores.mjs`：19 店 OpenAPI 授权/探针汇总；未授权店只输出 pending/incomplete，不打印密钥。
 
+  - `pending_discuss_batch.mjs` / `lib/pending_discuss_batch.mjs`：半托待议价专用确定性批处理。`scan` 串行覆盖 19 个 enabled 店、严格身份校验并完整分页查询 `discussStatus=1`；`preflight` 将标准货号级 accept/reject 决策展开为逐项/逐店/整批哈希；`execute` 仅在云端环境门、固定确认文本、未过期 `batchHash` 和逐项实时无漂移校验后单次写入，任何不确定写或终态未证立即停止，最后全店复扫。每日巡检只能用 `scan`，不会发群或创建调度。
+
   - `fetch_shein_openapi_sales.mjs`
 
   - `reconcile_shein_openapi_hl_sales.mjs`

@@ -76,6 +76,9 @@ const CHECK_FILES = [
   'scripts/test_shein_openapi_doc_detail_parser.mjs',
   'scripts/check_bi_ops_maintenance_readiness.mjs',
   'scripts/test_bi_ops_maintenance_readiness.mjs',
+  'lib/pending_discuss_batch.mjs',
+  'scripts/pending_discuss_batch.mjs',
+  'scripts/test_pending_discuss_batch.mjs',
 ];
 const DIFF_CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
@@ -142,9 +145,13 @@ const DIFF_CHECK_FILES = [
   'scripts/test_shein_openapi_doc_detail_parser.mjs',
   'scripts/check_bi_ops_maintenance_readiness.mjs',
   'scripts/test_bi_ops_maintenance_readiness.mjs',
+  'lib/pending_discuss_batch.mjs',
+  'scripts/pending_discuss_batch.mjs',
+  'scripts/test_pending_discuss_batch.mjs',
   'docs/partner-codex-ops-setup.md',
   'docs/bi-ops-openapi-automation-plan.md',
   'docs/shein-openapi-integration.md',
+  'docs/pending-discuss-batch.md',
 ];
 const BI_OPS_V2_JS_FILES = [
   'lib/warehouse_pg.mjs',

@@ -166,6 +166,7 @@ const tests = [
   'scripts/test_local_repo_hygiene_contract.mjs',
   'scripts/test_chrome_tmp_hygiene.mjs',
   'scripts/test_bi_ops_portal_shell_sync.mjs',
+  'scripts/test_pending_discuss_batch.mjs',
 ];
 
 const failures = [];

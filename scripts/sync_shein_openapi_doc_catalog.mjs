@@ -36,6 +36,7 @@ const INTEGRATED_READ_ENDPOINTS = new Set([
   '/open-api/finance/report-order-list',
   '/open-api/finance/get-check-order-list',
   '/open-api/finance/get-check-order-detail',
+  '/open-api/goods/discuss/query-discuss-list',
 ]);
 
 const CONTROLLED_WRITE_ENDPOINTS = new Map([
@@ -52,6 +53,7 @@ const CONTROLLED_WRITE_ENDPOINTS = new Map([
   ['/open-api/goods/save-or-update-supplier-certificate', 'certificate_review 店铺证书池创建/编辑'],
   ['/open-api/goods/save-certificate-pool-skc-bind', 'certificate_review SKC 绑定证书池'],
   ['/open-api/goods-compliance/update-skc-warning-certificate', 'certificate_review / compliance 警告语维护'],
+  ['/open-api/goods/discuss/process-discuss', 'pending_discuss_batch 受控接受/拒绝待议价单；逐项实时校验、单次写和终态回读'],
 ]);
 
 const SUPPORT_ENDPOINTS = new Map([
@@ -202,14 +204,20 @@ function classify(row) {
     nextStep = '如业务需要实时通知，先设计签名校验、幂等、重放防护和事件落库，再接收回调。';
   } else if (INTEGRATED_READ_ENDPOINTS.has(endpoint)) {
     projectStatus = 'integrated_read_parallel';
-    owner = 'openapi_reconciliation_layer';
-    evidence = '已进入 19 店 OpenAPI 授权/探针/隔离对账或现有只读探针链路。';
-    nextStep = '继续按数据域双跑对账；稳定前不替换生产事实源。';
+    owner = endpoint === '/open-api/goods/discuss/query-discuss-list' ? 'pending_discuss_batch' : 'openapi_reconciliation_layer';
+    evidence = endpoint === '/open-api/goods/discuss/query-discuss-list'
+      ? 'pending_discuss_batch scan 已按 enabled 店铺串行查询、完整分页、身份校验和脱敏落盘。'
+      : '已进入 19 店 OpenAPI 授权/探针/隔离对账或现有只读探针链路。';
+    nextStep = endpoint === '/open-api/goods/discuss/query-discuss-list'
+      ? '每日只读巡检仅使用专用 scan；缺店、失败或重复键均 fail closed。'
+      : '继续按数据域双跑对账；稳定前不替换生产事实源。';
   } else if (CONTROLLED_WRITE_ENDPOINTS.has(endpoint)) {
     projectStatus = 'controlled_write_adapter';
-    owner = 'link_ops_controlled_executor';
+    owner = endpoint === '/open-api/goods/discuss/process-discuss' ? 'pending_discuss_batch' : 'link_ops_controlled_executor';
     evidence = CONTROLLED_WRITE_ENDPOINTS.get(endpoint);
-    nextStep = '保持 BI 权限、safeWriteOperations、真实写白名单、payloadHash、确认和回读/人工核销边界。';
+    nextStep = endpoint === '/open-api/goods/discuss/process-discuss'
+      ? '保持 safeWriteOperations、fresh scan、逐项/逐店/整批 hash、当前任务确认、单次写和终态回读边界。'
+      : '保持 BI 权限、safeWriteOperations、真实写白名单、payloadHash、确认和回读/人工核销边界。';
   } else if (SUPPORT_ENDPOINTS.has(endpoint)) {
     projectStatus = HIGH_VALUE_NEXT_ENDPOINTS.has(endpoint) ? 'schema_ready_adapter_next' : 'support_candidate';
     owner = 'link_ops_executor_support';

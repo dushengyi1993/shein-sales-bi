@@ -13,8 +13,8 @@ node scripts/bi_ops_cli.mjs official-capabilities --write-default-markdown --pre
 ## 总览
 
 - 当前官方目录接口数：243（OpenAPI 220，Webhook 23）；下方 OpenAPI 逐项表仍保留 2026-07-03 基础快照，Webhook 已补 2026-07-19 新增项。
-- 项目已接只读并行层：13。
-- 项目已接受控写适配器：13。
+- 项目已接只读并行层：14。
+- 项目已接受控写适配器：14。
 - 首批应补 adapter/schema 的官方能力：6。
 
 ## 项目状态口径
@@ -126,8 +126,8 @@ node scripts/bi_ops_cli.mjs official-capabilities --write-default-markdown --pre
 | 价格 | 3001885 | 获取成本价涨价原因枚举值 | POST | /open-api/goods/query-change-price-reason | read | candidate_unimplemented | high | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
 | 价格 | 3001886 | 价格证明材料上传 | POST | /open-api/goods/discuss/upload-discuss-file | write | candidate_unimplemented | medium | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
 | 价格 | 3001890 | 查询建议零售价审核记录 | POST | /open-api/goods-recommend-retail-price-audit/search | read | candidate_unimplemented | high | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
-| 价格 | 3001891 | 获取议价单列表 | POST | /open-api/goods/discuss/query-discuss-list | read | candidate_unimplemented | low | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
-| 价格 | 3001892 | 处理议价单 | POST | /open-api/goods/discuss/process-discuss | write | candidate_unimplemented | medium | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
+| 价格 | 3001891 | 获取议价单列表 | POST | /open-api/goods/discuss/query-discuss-list | read | integrated_read_parallel | low | 每日只读巡检仅使用专用 scan；缺店、失败或重复键均 fail closed。 |
+| 价格 | 3001892 | 处理议价单 | POST | /open-api/goods/discuss/process-discuss | write | controlled_write_adapter | high | 保持 safeWriteOperations、fresh scan、逐项/逐店/整批 hash、当前任务确认、单次写和终态回读边界。 |
 | 价格 | 3001893 | 查询商品建议零售价 | POST | /open-api/goods-recommend-retail-price/search | read | candidate_unimplemented | high | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
 | 价格 | 3001894 | 查询建议零售价填写规则 | POST | /open-api/goods/query-recommend-retail-price-rule | read | candidate_unimplemented | high | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
 | 价格 | 3001895 | 提交建议零售价 | POST | /open-api/goods-recommend-retail-price/batch-save | write | candidate_unimplemented | high | 按官方 schema 做只读探针或 dry-run 适配器；未验证前不开放真实写。 |
