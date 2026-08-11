@@ -184,11 +184,11 @@ for (const file of tests) {
   const startedAt = Date.now();
   // This integration test intentionally starts an isolated portal plus fake
   // OpenAPI and exercises the complete bind/dry-run/execute/readback matrix.
-  // The isolated matrix takes about 132 seconds on the production-sized cloud
-  // host, so retain bounded headroom without widening the default budget.
+  // The isolated matrix has taken 132-175 seconds on the production-sized
+  // cloud host, so retain bounded headroom without widening the default budget.
   // Keep the default fail-fast budget for every other deterministic test.
   const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
-    ? 180_000
+    ? 240_000
     : 30_000;
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),
