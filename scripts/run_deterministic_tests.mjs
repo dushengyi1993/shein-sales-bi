@@ -181,6 +181,7 @@ const tests = [
   'scripts/test_chrome_tmp_hygiene.mjs',
   'scripts/test_bi_ops_portal_shell_sync.mjs',
   'scripts/test_pending_discuss_batch.mjs',
+  'scripts/test_pending_discuss_daily.mjs',
 ];
 
 const failures = [];

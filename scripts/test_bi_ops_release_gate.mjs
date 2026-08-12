@@ -79,6 +79,9 @@ const CHECK_FILES = [
   'lib/pending_discuss_batch.mjs',
   'scripts/pending_discuss_batch.mjs',
   'scripts/test_pending_discuss_batch.mjs',
+  'lib/pending_discuss_daily.mjs',
+  'scripts/pending_discuss_daily.mjs',
+  'scripts/test_pending_discuss_daily.mjs',
 ];
 const DIFF_CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
@@ -148,6 +151,9 @@ const DIFF_CHECK_FILES = [
   'lib/pending_discuss_batch.mjs',
   'scripts/pending_discuss_batch.mjs',
   'scripts/test_pending_discuss_batch.mjs',
+  'lib/pending_discuss_daily.mjs',
+  'scripts/pending_discuss_daily.mjs',
+  'scripts/test_pending_discuss_daily.mjs',
   'docs/partner-codex-ops-setup.md',
   'docs/ops-workflow-contract.md',
   'docs/bi-ops-openapi-automation-plan.md',

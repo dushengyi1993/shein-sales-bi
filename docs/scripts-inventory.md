@@ -335,7 +335,7 @@
 
   - `probe_shein_openapi_all_stores.mjs`：19 店 OpenAPI 授权/探针汇总；未授权店只输出 pending/incomplete，不打印密钥。
 
-  - `pending_discuss_batch.mjs` / `lib/pending_discuss_batch.mjs`：半托待议价专用确定性批处理。`scan` 串行覆盖 19 个 enabled 店、严格身份校验并完整分页查询 `discussStatus=1`；`preflight` 将标准货号级 accept/reject 决策展开为逐项/逐店/整批哈希；`execute` 仅在云端环境门、固定确认文本、未过期 `batchHash` 和逐项实时无漂移校验后单次写入，任何不确定写或终态未证立即停止，最后全店复扫。每日巡检只能用 `scan`，不会发群或创建调度。
+  - `pending_discuss_daily.mjs` / `lib/pending_discuss_daily.mjs`：每日 heartbeat 的单命令快路径；复用一次既有 scan，完成 hash 自校验、人话归并报告、团队群发送与严格消息回执，失败时不发送且不把缺失报成 0。`pending_discuss_batch.mjs` / `lib/pending_discuss_batch.mjs` 继续承载 `scan` / `preflight` / `execute`；写入门和终态回读不变。
 
   - `fetch_shein_openapi_sales.mjs`
 
@@ -561,14 +561,9 @@
 
 
 
-## 临时探索 / 排障探针，后续可考虑归档
-- `marketing/probe_remove_skc_from_limited_discount.mjs`：只读 CDP/Fetch 探针，拦截限时折扣编辑页的 remove/delete 请求并 abort，不执行。
-- `marketing/probe2_remove_skc.mjs`：FY 浏览器探针，拦截营销 API 调用以发现 remove-SKC 端点。
-- `marketing/probe_remove_skc_v3.mjs` ~ `v7.mjs`：系列只读探针，尝试多种编辑/详情/管理 URL 和 UI 交互以发现 remove 控件，均不确认删除。非生产脚本，可归档。
+## 临时探索 / 排障探针
 
-
-
-这些不是生产主链路。为了避免误删，目前先保留；确需归档时再创建明确的归档目录或迁入 `tools/probes/`，并同步更新本清单。
+旧 remove-SKC CDP 探针已在工作流 V2 清理；正式入口为 `marketing/remove_skc_from_limited_discount.mjs` 与事务包装器，不再保留无引用的 v2-v7 探索脚本。
 
 
 
