@@ -238,10 +238,44 @@ function runLark(args) {
     child.stdout.on('data', chunk => stdout += chunk);
     child.stderr.on('data', chunk => stderr += chunk);
     child.on('error', reject);
-    child.on('close', code => code === 0
-      ? resolve({stdout, stderr})
-      : reject(new Error(`lark-cli exited ${code}: ${stderr || stdout}`)));
+    child.on('close', code => {
+      if (code !== 0) {
+        // Never echo lark-cli output: stdout/stderr may carry message_id or
+        // recipient IDs, which must not reach state or console.
+        reject(new Error(`lark-cli exited ${code}`));
+        return;
+      }
+      resolve({stdout, stderr, accepted: larkSendAccepted(stdout)});
+    });
   });
+}
+
+function findLarkField(node, names, depth = 0) {
+  if (node == null || typeof node !== 'object' || depth > 5) return undefined;
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(node, name)) return node[name];
+  }
+  for (const key of ['data', 'result', 'response', 'message']) {
+    const child = node[key];
+    if (child && typeof child === 'object') {
+      const found = findLarkField(child, names, depth + 1);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
+
+export function larkSendAccepted(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(stdout ?? '').trim());
+  } catch {
+    return {ok: false, reason: 'non_json_response'};
+  }
+  if (findLarkField(parsed, ['ok']) !== true) return {ok: false, reason: 'response_ok_not_true'};
+  const messageId = findLarkField(parsed, ['message_id', 'messageId']);
+  if (typeof messageId !== 'string' || messageId.length === 0) return {ok: false, reason: 'message_id_missing'};
+  return {ok: true};
 }
 
 async function writeState(file, state) {
@@ -340,14 +374,20 @@ async function main() {
   const shortHash = fingerprint.slice(0, 8);
 
   if (!state.summarySent) {
-    await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--markdown', summary,
+    const summarySend = await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--markdown', summary,
       '--idempotency-key', `mkt-day-${compactDate}-sum-${shortHash}`]);
+    if (!summarySend.accepted.ok) {
+      throw new Error(`summary delivery not accepted by lark-cli (${summarySend.accepted.reason}); state stays unsent`);
+    }
     state.summarySent = true;
     await writeState(statePath, state);
   }
   if (!state.finalReportSent) {
-    await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--file', path.relative(ROOT, finalMdPath),
+    const finalSend = await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--file', path.relative(ROOT, finalMdPath),
       '--idempotency-key', `mkt-day-${compactDate}-final-${shortHash}`]);
+    if (!finalSend.accepted.ok) {
+      throw new Error(`final report delivery not accepted by lark-cli (${finalSend.accepted.reason}); state stays unsent`);
+    }
     state.finalReportSent = true;
     await writeState(statePath, state);
   }

@@ -13,6 +13,7 @@ import {
   exitCodeForOutcome,
   invalidateOpsRunManifest,
   verifyOpsRunManifest,
+  writeOpsJsonArtifactAtomic,
   writeOpsRunManifest,
 } from '../lib/ops_run_bundle.mjs';
 
@@ -39,6 +40,18 @@ try {
   });
   assert.equal(run.durationMs, 1000);
   assert.equal(run.ok, true);
+
+  const compactArtifactFile = path.join(tmp, 'compact-evidence.json');
+  const compactArtifact = await writeOpsJsonArtifactAtomic(compactArtifactFile, {ok: true, rows: [1, 2, 3]});
+  compactArtifact.role = 'compact_evidence';
+  assert.equal(await fs.readFile(compactArtifactFile, 'utf8'), '{"ok":true,"rows":[1,2,3]}\n');
+  const compactManifestFile = path.join(tmp, 'compact-manifest.json');
+  await writeOpsRunManifest({
+    manifestFile: compactManifestFile,
+    run,
+    artifacts: [compactArtifact],
+  });
+  assert.equal((await verifyOpsRunManifest(compactManifestFile)).ok, true);
 
   const manifestFile = path.join(tmp, 'manifest.json');
   const written = await writeOpsRunManifest({
@@ -81,4 +94,4 @@ try {
   await fs.rm(tmp, {recursive: true, force: true});
 }
 
-console.log(JSON.stringify({ok: true, checks: ['outcomes', 'manifest_hashes', 'tamper_detection', 'manifest_invalidation', 'verified_top_level_status', 'sensitive_key_rejection']}, null, 2));
+console.log(JSON.stringify({ok: true, checks: ['outcomes', 'single_pass_compact_artifact', 'manifest_hashes', 'tamper_detection', 'manifest_invalidation', 'verified_top_level_status', 'sensitive_key_rejection']}, null, 2));

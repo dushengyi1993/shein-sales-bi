@@ -33,7 +33,7 @@ import {
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
-import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
+import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsJsonArtifactAtomic, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
 import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -42,6 +42,7 @@ const DEFAULT_SESSION_FILE = process.env.SHEIN_BI_OPS_SESSION_FILE
   || path.join(os.homedir(), '.shein-bi', 'ops-session.json');
 const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const LOCAL_OPENAPI_TEST_OVERRIDE = process.env.SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR === '1';
+const PARTNER_CHECK_TTL_MS = Math.max(0, Number(process.env.SHEIN_BI_PARTNER_CHECK_TTL_MS || 5 * 60_000));
 
 function parseArgs(argv) {
   const args = {
@@ -298,7 +299,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
-  node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
+  node scripts/bi_ops_cli.mjs retire-candidates --file <query.json|enriched.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs transform-pic --store FY --image-type 2 --url <https://...> [--mode dry-run|execute]
   node scripts/bi_ops_cli.mjs audit-status --store FY --spu <SPU> [--mode dry-run|execute]
@@ -571,6 +572,7 @@ async function refreshPartnerCli(args, {force = false, checkOnly = false} = {}) 
     installRoot,
     force,
     checkOnly,
+    maxAgeMs: force ? 0 : PARTNER_CHECK_TTL_MS,
   });
   if (result.updated && !args.json) process.stderr.write(`CLI 已安全更新：${result.currentVersion} -> ${result.latestVersion}\n`);
   return result;
@@ -584,7 +586,7 @@ async function refreshPartnerCliAndRelaunchIfNeeded(args, {force = false} = {}) 
   return {relaunched: true, result, relaunched};
 }
 
-async function refreshPartnerKnowledge(args, {strict = false} = {}) {
+async function refreshPartnerKnowledge(args, {strict = false, force = false} = {}) {
   const session = await readSession(args.sessionFile);
   if (!session.cookie) {
     if (strict) throw new Error('尚未登录 BI，无法检查负责人规则版本');
@@ -596,6 +598,7 @@ async function refreshPartnerKnowledge(args, {strict = false} = {}) {
     cacheDir: args.knowledgeCacheDir,
     cliVersion: BI_OPS_CLI_VERSION,
     strict,
+    maxAgeMs: force ? 0 : PARTNER_CHECK_TTL_MS,
   });
   if (result.updated && !args.json) {
     process.stderr.write(`负责人规则已更新并校验：${String(result.manifest?.sourceCommit || result.manifest?.fingerprint || '').slice(0, 12)}\n`);
@@ -1888,8 +1891,8 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
     };
     const finishedAt = new Date().toISOString();
     await invalidateOpsRunManifest(`${args.outputFile}.manifest.json`);
-    await writeJsonFileAtomic(args.outputFile, output, {mode: 0o600});
-    try { await fs.chmod(args.outputFile, 0o600); } catch {}
+    const artifact = await writeOpsJsonArtifactAtomic(args.outputFile, output, {mode: 0o600});
+    artifact.role = 'query_evidence';
     const run = buildOpsRun({
       operation: 'bi_ops_query', mode: 'read', readOnly: true,
       outcome: incomplete ? 'incomplete' : 'failed', startedAt, finishedAt,
@@ -1903,7 +1906,7 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
     const manifest = await writeOpsRunManifest({
       manifestFile: `${args.outputFile}.manifest.json`,
       run,
-      artifacts: [{file: args.outputFile, role: 'query_evidence'}],
+      artifacts: [artifact],
     });
     print({...compactOpsRun(run, manifest), savedTo: args.outputFile});
     process.exitCode = run.exitCode;
@@ -1925,8 +1928,8 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
   }
   await fs.mkdir(path.dirname(args.outputFile), {recursive: true});
   await invalidateOpsRunManifest(`${args.outputFile}.manifest.json`);
-  await writeJsonFileAtomic(args.outputFile, output, {mode: 0o600});
-  try { await fs.chmod(args.outputFile, 0o600); } catch {}
+  const artifact = await writeOpsJsonArtifactAtomic(args.outputFile, output, {mode: 0o600});
+  artifact.role = 'query_evidence';
   const finishedAt = new Date().toISOString();
   const businessDateCandidate = String(
     output.data?.dates?.salesDate
@@ -1958,7 +1961,7 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
   const manifest = await writeOpsRunManifest({
     manifestFile: `${args.outputFile}.manifest.json`,
     run,
-    artifacts: [{file: args.outputFile, role: 'query_evidence'}],
+    artifacts: [artifact],
   });
   print({...compactOpsRun(run, manifest), savedTo: args.outputFile, aiInvoked: false, cli: output.cli});
   if (!run.ok) process.exitCode = run.exitCode;
@@ -2028,7 +2031,7 @@ async function main() {
     return;
   }
   if (args.command === 'knowledge-status' || args.command === 'knowledge_status') {
-    const knowledge = await refreshPartnerKnowledge(args, {strict: true});
+    const knowledge = await refreshPartnerKnowledge(args, {strict: true, force: true});
     print({ok: true, version: BI_OPS_CLI_VERSION, knowledge});
     return;
   }
@@ -2044,11 +2047,11 @@ async function main() {
     return;
   }
   if (AUTO_UPDATE_COMMANDS.has(args.command)) {
-    const update = await refreshPartnerCliAndRelaunchIfNeeded(args);
+    const update = await refreshPartnerCliAndRelaunchIfNeeded(args, {force: args.command === 'execute'});
     if (update.relaunched) return;
   }
   if (KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
-    await refreshPartnerKnowledge(args, {strict: args.command === 'execute'});
+    await refreshPartnerKnowledge(args, {strict: args.command === 'execute', force: args.command === 'execute'});
   }
   if (args.command === 'doctor') {
     const report = await runDoctor(args);

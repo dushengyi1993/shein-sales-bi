@@ -195,7 +195,10 @@ assert.match(guardScript, /STOCK_NOT_BEFORE="\$\{SHEIN_BI_INVENTORY_STOCK_NOT_BE
 assert.match(dailyCoordinator, /run_inventory_stage/);
 assert.match(dailyCoordinator, /SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="\$\{RUN_DATE\}T00:00:00\+08:00"/);
 assert.match(dailyCoordinator, /cloud_daily_inventory_replenishment_guard\.sh/);
-assert.match(executorScript, /Always publish the complete terminal envelope\.\s*await writeResultFile\(results\);/);
+assert.match(executorScript, /append-only in the journal[\s\S]*await writeResultFile\(results\);/);
+assert.equal((executorScript.match(/await writeResultFile\(results\);/g) || []).length, 1, 'inventory executor writes the full result envelope once');
+assert.match(executorScript, /if \(readbackAttempt > 1\) await sleep\(/, 'inventory executor performs immediate first readback');
+assert.match(executorScript, /\.journal\.ndjson/, 'inventory executor preserves incremental progress in an append-only journal');
 assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);
 assert.match(executorScript, /assertCurrentInventoryListingIdentity/);
 assert.match(executorScript, /linksData canonical identity changed or is unavailable/);
