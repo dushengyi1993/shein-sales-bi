@@ -272,6 +272,7 @@ try {
     targetStore: 'HL',
     baseTaskRevision,
     contentSha256: descriptionSummary.contentSha256,
+    sourceProof: DESCRIPTION_SOURCE_PROOF,
   });
 
   const configFile = path.join(tmpRoot, 'openapi.json');

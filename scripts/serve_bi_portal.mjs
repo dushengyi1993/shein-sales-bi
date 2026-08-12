@@ -6580,6 +6580,7 @@ function publishImageStructureFingerprint(payload) {
  */
 function bindApprovedDescriptionMaterialToTask(task, targetStore, material, actor, req, {
   sourceByteLength,
+  sectionUsed = 's09',
   baseTaskRevision,
   bindingRequestKey,
 } = {}) {
@@ -6669,6 +6670,9 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
   const imageBindingFingerprint = String(task?.publishAssetBinding?.bindingFingerprint || '');
   const now = new Date().toISOString();
   const summary = describeDescriptionMaterial(material);
+  const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
+    ? DESCRIPTION_SOURCE_PROOF_S9
+    : DESCRIPTION_SOURCE_PROOF;
   const newPayloadHash = sha256StableJson(boundPayload);
   if (newPayloadHash !== linkOpsPayloadHash(boundPayload)) {
     throw new Error('描述绑定 payload hash 算法与 link-ops canonical hash 不一致');
@@ -6694,7 +6698,7 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
       kind: 'copy_product_draft',
       sourceApproved: true,
       authority: 'human_reviewed_source',
-      sourceProof: DESCRIPTION_SOURCE_PROOF,
+      sourceProof,
       targetStore,
       boundAt: now,
       boundByUser: actorUser(actor, req),
@@ -6761,7 +6765,7 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
     hashes: summary.hashes,
     newPayloadHash,
     payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
-    sourceProof: DESCRIPTION_SOURCE_PROOF,
+    sourceProof,
     sourceByteLength: Number(sourceByteLength),
     baseTaskRevision: Number(baseTaskRevision),
     bindingRequestKey,
@@ -12614,20 +12618,31 @@ async function main() {
         if (body.sourceApproved !== true) {
           return sendJson(res, 400, {ok: false, error: '必须明确 sourceApproved=true 才能绑定人工审核三语核心卖点描述素材'});
         }
-        const allowedBodyKeys = ['expectedRevision', 'materialJson', 'sourceApproved', 'sourceFile', 'store', 'taskId'];
+        const allowedBodyKeys = ['expectedRevision', 'materialJson', 'section', 'sourceApproved', 'sourceFile', 'store', 'taskId'];
         const unknownBodyKeys = Object.keys(body || {}).filter(key => !allowedBodyKeys.includes(key));
         if (unknownBodyKeys.length) {
           return sendJson(res, 400, {ok: false, error: `描述绑定请求包含不允许字段：${unknownBodyKeys.join('/')}`});
         }
         let material;
         let reviewedSource;
+        const section = String(body.section || 'auto').trim().toLowerCase();
+        if (!['s09', 's9', 'auto'].includes(section)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `section 必须是 auto/s09/s9（当前 ${section || '(empty)'}）`,
+            code: 'DESCRIPTION_SECTION_INVALID',
+          });
+        }
+        let sectionUsed = '';
         try {
           reviewedSource = decodeReviewedDescriptionSourceFile(body.sourceFile);
           const verified = verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
             material: body.materialJson || null,
             sourceFileBasename: reviewedSource.name,
             sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
+            section,
           });
+          sectionUsed = verified.sectionUsed;
           material = validateDescriptionMaterialJson(verified.material);
         } catch (error) {
           return sendJson(res, 400, {
@@ -12662,18 +12677,31 @@ async function main() {
         }
         const task = access.record;
         const currentRevision = Number(task.repositoryRevision || 0);
+        const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
+          ? DESCRIPTION_SOURCE_PROOF_S9
+          : DESCRIPTION_SOURCE_PROOF;
         const bindingRequestKey = descriptionBindingRequestKey({
           taskId: taskRef,
           targetStore,
           baseTaskRevision: expectedRevision,
           contentSha256: materialSummary.contentSha256,
+          sourceProof,
         });
+        const legacyS09BindingRequestKey = sourceProof === DESCRIPTION_SOURCE_PROOF
+          ? descriptionBindingRequestKey({
+              taskId: taskRef,
+              targetStore,
+              baseTaskRevision: expectedRevision,
+              contentSha256: materialSummary.contentSha256,
+            })
+          : '';
         if (!currentRevision || currentRevision !== expectedRevision) {
           const existingBinding = task?.descriptionMaterialBinding;
           const existingGate = validateDescriptionBindingLock(task, task?.openapiPublishPayload);
-          const idempotentReplay = existingBinding?.bindingRequestKey === bindingRequestKey
+          const idempotentReplay = [bindingRequestKey, legacyS09BindingRequestKey].filter(Boolean).includes(existingBinding?.bindingRequestKey)
             && existingBinding?.sourceFileSha256 === materialSummary.sourceFileSha256
             && existingBinding?.contentSha256 === materialSummary.contentSha256
+            && existingBinding?.sourceProof === sourceProof
             && existingGate.ok;
           if (idempotentReplay) {
             let auditPending = false;
@@ -12734,6 +12762,7 @@ async function main() {
             sourceByteLength: reviewedSource.bytes.length,
             baseTaskRevision: currentRevision,
             bindingRequestKey,
+            sectionUsed,
           });
           // Atomic single-task CAS: the write itself is conditional on the
           // revision that was read above; a concurrent change between read and
