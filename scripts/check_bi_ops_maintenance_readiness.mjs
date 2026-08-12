@@ -29,6 +29,14 @@ const OPERATION_CONTRACTS = {
     requiredReadbackFields: ['title'],
     policy: '存量商品局部编辑动作；必须验证只改标题的最小 payload、旧值备份和标题回读。',
   },
+  update_description: {
+    label: '回填商品描述',
+    docId: '3001810',
+    endpoint: '/open-api/goods/product/partialEdit',
+    requiredDocKeywords: ['multi_language_desc_list', 'spu_name'],
+    requiredReadbackFields: ['productMultiDescList', 'spuName'],
+    policy: '历史商品描述回填动作；描述只来自服务端独立核验的实际审核 HTML（s09/s9）；必须验证最小 partialEdit body（spu_name + multi_language_desc_list）、check-edit-permission/query-document-state 门禁和 spu-info 描述 hash 强回读。',
+  },
   update_images: {
     label: '换图',
     docId: '3001810',

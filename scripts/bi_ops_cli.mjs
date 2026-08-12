@@ -185,6 +185,7 @@ function parseArgs(argv) {
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--material-json') args.materialJsonFile = path.resolve(String(argv[++i] || '').trim());
     else if (a === '--source-file') args.sourceFile = path.resolve(String(argv[++i] || '').trim());
+    else if (a === '--section') args.section = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--expected-revision') args.expectedRevision = Number(argv[++i]);
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
@@ -292,6 +293,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--material-json <可选：待核验material.json>] [--expected-revision <n>]
+  node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <v3-times.csv> --performance-date 2026-07-04 [--out <dir>]
   node scripts/bi_ops_cli.mjs upload-pic --store FY --image-type 2 --file <image.jpg> [--mode dry-run|execute]
@@ -544,6 +546,7 @@ const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
   'prepare-publish', 'prepare_publish',
   'prepare-descriptions', 'prepare_descriptions',
+  'update-description', 'update_description',
   'prepare-pending-image-correction', 'prepare_pending_image_correction',
 ]);
 
@@ -1346,6 +1349,312 @@ async function runPrepareDescriptions(args) {
   if (!output.ok) process.exitCode = 1;
 }
 
+async function runUpdateDescription(args) {
+  if (!args.sourceTaskId) throw new Error('update-description requires --source-task-id <历史发布任务id>');
+  if (!args.sourceFile) throw new Error('update-description requires --source-file <实际审核资料HTML>');
+  const storeCandidates = [...new Set(
+    [...(args.writeStores || []), ...(args.stores || [])]
+      .map(value => String(value || '').trim().toUpperCase())
+      .filter(Boolean)
+  )];
+  if (storeCandidates.length !== 1) {
+    throw new Error(`update-description 必须精确单个 --store（多个/零个均拒绝）；当前解析到 ${storeCandidates.length} 个店铺：${storeCandidates.join('/') || '(empty)'}`);
+  }
+  const store = storeCandidates[0];
+  const spu = [...new Set(args.spuList || [])].map(value => String(value || '').trim()).filter(Boolean);
+  if (spu.length !== 1) throw new Error('update-description 必须精确单个 --spu <唯一SPU>');
+  const skc = [...new Set(args.skcList || [])].map(value => String(value || '').trim()).filter(Boolean);
+  if (skc.length > 1) throw new Error('update-description 只允许一个 --skc');
+  const section = ['s09', 's9', 'auto'].includes(String(args.section || 'auto'))
+    ? String(args.section || 'auto')
+    : 'auto';
+  let sourceBytes;
+  try {
+    sourceBytes = await fs.readFile(args.sourceFile);
+  } catch {
+    throw new Error(`无法读取审核资料文件：${path.basename(args.sourceFile) || '(unknown)'}`);
+  }
+  const htmlText = sourceBytes.toString('utf8');
+  let providedMaterial = null;
+  if (args.materialJsonFile) {
+    providedMaterial = JSON.parse(await fs.readFile(args.materialJsonFile, 'utf8'));
+  }
+  let verified;
+  try {
+    verified = verifyDescriptionMaterialAgainstHtml(htmlText, sourceBytes, {
+      material: providedMaterial,
+      sourceFileBasename: path.basename(args.sourceFile),
+      sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
+      section,
+    });
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'update-description',
+      stage: 'local_source_rejected',
+      code: error?.code || 'DESCRIPTION_SOURCE_VERIFICATION_FAILED',
+      error: String(error?.message || error).slice(0, 500),
+      safety: {noTaskCreated: true, realWriteOccurred: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const material = validateDescriptionMaterialJson(verified.material);
+  const summary = describeDescriptionMaterial(material);
+  // 1) Create an independent maintenance task. The historical publish task is
+  // only source evidence and is never modified.
+  const createBody = {
+    command: `历史商品描述回填：${store} 店 SPU ${spu[0]}（来源发布任务 ${args.sourceTaskId}）`,
+    source: 'codex_desktop_cli_structured_update_description',
+    intents: ['update_description'],
+    targets: {stores: [store], writeStores: [store], productRefs: [spu[0]]},
+    parameters: {
+      sourceTaskId: args.sourceTaskId,
+      spuName: spu[0],
+      ...(skc.length ? {skcName: skc[0]} : {}),
+    },
+  };
+  let createdJson;
+  try {
+    ({json: createdJson} = await request(args, '/api/link-ops-tasks', {method: 'POST', body: createBody}));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'update-description',
+      stage: 'task_creation_failed',
+      status: error?.status || null,
+      error: String(error?.message || '创建 update_description 任务失败').slice(0, 500),
+      safety: {noTaskCreated: true, realWriteOccurred: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const taskId = String(createdJson?.task?.id || createdJson?.data?.task?.id || '');
+  if (!taskId) throw new Error('云端未返回新建 update_description 任务 id');
+  const createdWriteStore = String(createdJson?.task?.targets?.writeStores?.[0] || createdJson?.task?.targets?.stores?.[0] || '').toUpperCase();
+  if (createdWriteStore !== store.toUpperCase()) {
+    throw new Error('云端新建任务的唯一写入店与请求不一致，已停止绑定');
+  }
+  // 2) Fresh-read the task revision, then bind with server-side HTML
+  // verification (idempotent replay reuses the original request identity).
+  const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
+  const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === taskId) || null;
+  if (!currentTask) throw new Error('当前账号无法精确读取新建任务 revision，描述未绑定');
+  const liveRevision = Number(currentTask.repositoryRevision || 0);
+  if (!Number.isSafeInteger(liveRevision) || liveRevision <= 0) {
+    throw new Error('新建任务未返回可用于 CAS 的正整数 repositoryRevision，描述未绑定');
+  }
+  const existingBinding = currentTask?.descriptionMaterialBinding && typeof currentTask.descriptionMaterialBinding === 'object'
+    ? currentTask.descriptionMaterialBinding
+    : null;
+  const existingBaseRevision = Number(existingBinding?.baseTaskRevision || 0);
+  const existingBindingRequestKey = Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
+    ? descriptionBindingRequestKey({
+        taskId,
+        targetStore: store,
+        baseTaskRevision: existingBaseRevision,
+        contentSha256: summary.contentSha256,
+      })
+    : '';
+  const exactExistingBinding = Boolean(
+    existingBinding
+    && String(existingBinding.targetStore || '').toUpperCase() === store.toUpperCase()
+    && String(existingBinding.targetSpu || '').toLowerCase() === spu[0].toLowerCase()
+    && String(existingBinding.sourceFileSha256 || '').toLowerCase() === summary.sourceFileSha256
+    && String(existingBinding.contentSha256 || '').toLowerCase() === summary.contentSha256
+    && String(existingBinding.bindingRequestKey || '').toLowerCase() === existingBindingRequestKey,
+  );
+  const explicitExpectedRevision = Number.isFinite(args.expectedRevision) && args.expectedRevision > 0
+    ? Math.trunc(args.expectedRevision)
+    : null;
+  if (explicitExpectedRevision
+    && explicitExpectedRevision !== liveRevision
+    && !(exactExistingBinding && explicitExpectedRevision === existingBaseRevision)) {
+    throw new Error(`新建任务 revision 已变化：命令期望 ${explicitExpectedRevision}，实时读取为 ${liveRevision}；描述未绑定`);
+  }
+  const requestRevision = exactExistingBinding ? existingBaseRevision : (explicitExpectedRevision || liveRevision);
+  const bindBody = {
+    taskId,
+    store,
+    sourceApproved: true,
+    materialJson: material,
+    sourceFile: {
+      name: path.basename(args.sourceFile),
+      dataBase64: sourceBytes.toString('base64'),
+    },
+    section,
+    expectedRevision: requestRevision,
+  };
+  let bindJson;
+  try {
+    ({json: bindJson} = await request(args, '/api/link-ops-prepare-update-description', {
+      method: 'POST',
+      body: bindBody,
+      allowJsonFailure: true,
+    }));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'update-description',
+      taskId,
+      store,
+      stage: 'binding_not_committed',
+      bindingCommitted: false,
+      code: error?.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '描述绑定失败').slice(0, 500),
+      material: {
+        sourceLabel: summary.sourceLabel,
+        sourceFileSha256: summary.sourceFileSha256,
+        contentSha256: summary.contentSha256,
+        lineCounts: summary.lineCounts,
+        hashes: summary.hashes,
+      },
+      safety: {realWriteOccurred: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const binding = bindJson.binding || {};
+  if (bindJson.bindingCommitted !== true || bindJson.readbackVerified !== true || bindJson.auditPending === true || bindJson.ok !== true) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'update-description',
+      taskId,
+      store,
+      stage: String(bindJson.stage || 'binding_state_uncertain'),
+      bindingCommitted: bindJson.bindingCommitted === true,
+      repositoryEventCommitted: bindJson.repositoryEventCommitted === true,
+      readbackVerified: bindJson.readbackVerified === true,
+      auditPending: bindJson.auditPending === true,
+      material: {
+        sourceLabel: summary.sourceLabel,
+        sourceFileSha256: summary.sourceFileSha256,
+        contentSha256: summary.contentSha256,
+        lineCounts: summary.lineCounts,
+        hashes: summary.hashes,
+      },
+      bound: {
+        targetStore: String(binding.targetStore || ''),
+        targetSpu: String(binding.targetSpu || ''),
+        sourceTaskId: String(binding.sourceTaskId || ''),
+        newPayloadHash: String(binding.newPayloadHash || ''),
+      },
+      safety: {realWriteOccurred: false, dryRunAttempted: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  if (String(bindJson?.task?.id || '') !== taskId) throw new Error('云端没有确认描述绑定仍是同一任务，已停止重新预演');
+  if (String(binding.targetStore || '').toUpperCase() !== store.toUpperCase()) throw new Error('云端描述绑定目标店铺与请求不一致，已停止重新预演');
+  if (String(binding.targetSpu || '').toLowerCase() !== spu[0].toLowerCase()) throw new Error('云端描述绑定目标 SPU 与请求不一致，已停止重新预演');
+  if (String(binding.sourceTaskId || '') !== args.sourceTaskId) throw new Error('云端描述绑定来源任务与请求不一致，已停止重新预演');
+  for (const language of ['ar', 'en', 'zh-cn']) {
+    if (String(binding.hashes?.[language] || '').toLowerCase() !== String(summary.hashes?.[language] || '').toLowerCase()) {
+      throw new Error(`云端描述绑定 ${language} hash 与本地审核资料不一致，已停止重新预演`);
+    }
+  }
+  if (String(binding.sourceFileSha256 || '').toLowerCase() !== summary.sourceFileSha256
+    || String(binding.contentSha256 || '').toLowerCase() !== summary.contentSha256) {
+    throw new Error('云端描述绑定的源文件/content hash 与本地审核资料不一致，已停止重新预演');
+  }
+  // 3) Re-dry-run the same task to lock the exact payload hash.
+  let preflightJson;
+  try {
+    ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
+      method: 'POST',
+      body: {id: taskId, mode: 'dry-run', source: 'codex_desktop_cli_update_description'},
+    }));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'update-description',
+      taskId,
+      store,
+      stage: 'binding_committed_dry_run_failed',
+      bindingCommitted: true,
+      readbackVerified: true,
+      auditPending: false,
+      code: error?.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '重新预演失败').slice(0, 500),
+      material: {
+        sourceLabel: summary.sourceLabel,
+        sourceFileSha256: summary.sourceFileSha256,
+        contentSha256: summary.contentSha256,
+        lineCounts: summary.lineCounts,
+        hashes: summary.hashes,
+      },
+      bound: {
+        targetStore: String(binding.targetStore || ''),
+        targetSpu: String(binding.targetSpu || ''),
+        sourceTaskId: String(binding.sourceTaskId || ''),
+        newPayloadHash: String(binding.newPayloadHash || ''),
+      },
+      safety: {realWriteOccurred: false, retryBinding: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const execution = preflightJson.execution || {};
+  const maintenanceExecutor = (execution.linkMaintenanceExecutors || [])[0] || {};
+  const executorSummary = maintenanceExecutor.payload?.summary || {};
+  const descriptionUpdate = executorSummary.descriptionUpdate || {};
+  const dryRun = {
+    state: String(execution.state || ''),
+    ok: execution.preflight?.ok === true,
+    blockerCount: Array.isArray(execution.preflight?.blockers) ? execution.preflight.blockers.length : 0,
+    payloadHash: String(executorSummary.payloadHash || maintenanceExecutor.payload?.payloadHash || ''),
+    descriptionCount: Number(descriptionUpdate.descriptionCount || 0),
+    spuName: String(descriptionUpdate.spuName || ''),
+    descriptionPayloadHash: String(descriptionUpdate.payloadHash || ''),
+    descriptionBindingLocked: Number(descriptionUpdate.descriptionCount || 0) === 2
+      && String(descriptionUpdate.payloadHash || '').toLowerCase() === String(binding.newPayloadHash || '').toLowerCase(),
+  };
+  const output = {
+    ok: dryRun.ok && dryRun.descriptionBindingLocked
+      && dryRun.descriptionCount === 2
+      && dryRun.payloadHash.length === 64,
+    aiInvoked: false,
+    command: 'update-description',
+    taskId,
+    store,
+    material: {
+      sourceLabel: summary.sourceLabel,
+      sourceFileSha256: summary.sourceFileSha256,
+      contentSha256: summary.contentSha256,
+      sectionUsed: verified.sectionUsed,
+      publishLanguages: [...summary.publishLanguages],
+      lineCounts: {...summary.lineCounts},
+      hashes: {...summary.hashes},
+    },
+    bound: {
+      targetStore: String(binding.targetStore || ''),
+      targetSpu: String(binding.targetSpu || ''),
+      sourceTaskId: String(binding.sourceTaskId || ''),
+      sourceProof: String(binding.sourceProof || ''),
+      newPayloadHash: String(binding.newPayloadHash || ''),
+      preflightInvalidated: true,
+    },
+    dryRun,
+    safety: {
+      verbatimOnly: true,
+      noAutoMapFromSource: true,
+      minimalPartialEditOnly: true,
+      oldPublishTaskUntouched: true,
+      realWriteOccurred: false,
+      nextStep: '核对新预演的 payloadHash 和描述 hash；只有用户明确确认后才调用 execute。',
+    },
+  };
+  print(output);
+  if (!output.ok) process.exitCode = 1;
+}
+
 async function runPreparePendingImageCorrection(args) {
   if (!args.taskId) throw new Error('prepare-pending-image-correction requires --task-id <id>');
   if (!args.sourceTaskId) throw new Error('prepare-pending-image-correction requires --source-task-id <published task id>');
@@ -1754,6 +2063,10 @@ async function main() {
   }
   if (args.command === 'prepare-descriptions' || args.command === 'prepare_descriptions') {
     await runPrepareDescriptions(args);
+    return;
+  }
+  if (args.command === 'update-description' || args.command === 'update_description') {
+    await runUpdateDescription(args);
     return;
   }
   if (args.command === 'prepare-pending-image-correction' || args.command === 'prepare_pending_image_correction') {

@@ -89,9 +89,12 @@ import {
   sha256StableJson,
   validateDescriptionMaterialJson,
   validateDescriptionBindingLock,
+  buildUpdateDescriptionPayload,
+  validateUpdateDescriptionBindingLock,
   DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
   DESCRIPTION_PUBLISH_LANGUAGES,
   DESCRIPTION_SOURCE_PROOF,
+  DESCRIPTION_SOURCE_PROOF_S9,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {
@@ -312,6 +315,7 @@ const LINK_MAINTENANCE_INTENTS = new Set([
   'activate_link',
   'retire_link',
   'update_title',
+  'update_description',
   'update_images',
   'update_inventory',
   'update_supply_price',
@@ -343,6 +347,13 @@ const LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES = {
     docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
     evidence: 'SHEIN 官方文档索引显示存在 Product Partial Edit（商品局部编辑）接口，更适合存量链接标题维护。',
     missing: ['生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + 回读/人工核销。'],
+  },
+  update_description: {
+    endpoint: '/open-api/goods/product/partialEdit',
+    label: '商品局部编辑（描述回填）',
+    docUrl: 'https://open.sheincorp.com/documents/apidoc/detail/3001810',
+    evidence: 'SHEIN 官方 partialEdit（docId 3001810）schema 包含 multi_language_desc_list（元素严格 {language,name}，name ≤5000 字符、不支持 emoji）；编辑前需 check-edit-permission（docId 3001380，请求 spuName，响应 info.editable/reason）确认可编辑，并用 query-document-state（docId 3001368，spuList[{spuName}]，skcList.documentState：1待审核/5申诉中禁止编辑）确认无审核公文。',
+    missing: ['生产真实提交仍需窄范围 safeWriteOperations + 账号店铺写权限 + 系统检查 payload hash + spu-info 描述 hash 强回读/人工核销。'],
   },
   update_images: {
     endpoint: '/open-api/goods/product/partialEdit',
@@ -419,6 +430,15 @@ const LINK_OPS_ACTION_CAPABILITY_DEFS = [
     precheck: true,
     realSubmit: false,
     reason: '已接入官方商品局部编辑 OpenAPI 执行器；默认 系统检查 锁定标题 payload，真实改标题必须通过动作总闸门、账号店铺写权限、确认文本并完成回读/人工核销。',
+  },
+  {
+    key: 'update_description',
+    label: '回填商品描述',
+    intent: 'update_description',
+    stage: 'link_maintenance_dry_run',
+    precheck: true,
+    realSubmit: false,
+    reason: '已接入官方 partialEdit 描述回填执行器；描述只能来自服务端独立核验的实际审核 HTML（s09/s9）逐字绑定，只提交最小 spu_name + multi_language_desc_list，执行前必须通过 spu-info 身份/当前描述 hash、query-document-state、check-edit-permission 门禁，回读必须 spu-info 描述 hash 精确匹配，否则 pending/manual resolve。',
   },
   {
     key: 'update_images',
@@ -2678,6 +2698,9 @@ function inferLinkOpsIntent(command) {
   const copySourceTitleHint = isCopySourceTitleHint(text, copyProductIntent);
   const explicitUpdateTitleIntent = isExplicitUpdateTitleIntent(text);
   if ((/标题|title/.test(lower) && !copySourceTitleHint) || explicitUpdateTitleIntent) intents.push('update_title');
+  if (!copyProductIntent && !intents.includes('update_title') && /(?:更新|改|回填|补|替换|核验)?\s*(?:商品)?描述|(?:update|backfill).*desc/.test(lower)) {
+    intents.push('update_description');
+  }
   if (/主图|图片|套图|image|photo|pic/.test(lower)) intents.push('update_images');
   if (/库存|补库存|改库存|虚拟库存|stock|inventory/.test(lower)) intents.push('update_inventory');
   const supplyPriceIntent = /供货价|成本价|cost price|supply price|cost\b/.test(lower);
@@ -2695,6 +2718,7 @@ function linkOpsIntentLabel(intent) {
   return ({
     copy_product_draft: '补链接/复制上品',
     update_title: '换标题',
+    update_description: '回填商品描述',
     update_images: '换图',
     update_inventory: '改库存',
     update_supply_price: '改供货价',
@@ -3419,6 +3443,9 @@ function normalizeStructuredLinkOpsParameters(value) {
     productPrice: finite('productPrice', {min: 0.01, max: 1_000_000}),
     title: text('title', 1_000),
     titleAr: text('titleAr', 1_000),
+    spuName: text('spuName', 120),
+    skcName: text('skcName', 160),
+    sourceTaskId: text('sourceTaskId', 120),
     currency: (text('currency', 12) || 'SAR').toUpperCase(),
     standardGoodsSn: text('standardGoodsSn', 200),
     actionNote: text('actionNote', 1_000),
@@ -3432,6 +3459,9 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
   if (command.length > 2000) throw new Error('Command too long');
   const now = new Date().toISOString();
   const structuredIntents = normalizeStructuredLinkOpsIntents(body.intents || body.operations || body.operation);
+  if (structuredIntents.includes('update_description') && structuredIntents.length !== 1) {
+    throw new Error('update_description 必须单独提交（历史描述回填任务不能混入其他结构化动作）');
+  }
   const intents = normalizeIntentsForCommand(
     structuredIntents.length ? structuredIntents : inferLinkOpsIntent(command),
     command,
@@ -3443,6 +3473,9 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
   ));
   if (structuredParameters.standardGoodsSn && !targets.productRefs.includes(structuredParameters.standardGoodsSn)) {
     targets.productRefs = [...targets.productRefs, structuredParameters.standardGoodsSn].slice(0, 24);
+  }
+  if (structuredParameters.spuName && !targets.productRefs.includes(structuredParameters.spuName)) {
+    targets.productRefs = [...targets.productRefs, structuredParameters.spuName].slice(0, 24);
   }
   const id = `lot_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   return bindLinkOpsRecordToActor({
@@ -3727,6 +3760,7 @@ function projectLinkOpsProductExecutorForClient(executor) {
 
 function projectLinkOpsMaintenanceExecutorForClient(executor) {
   if (!executor || typeof executor !== 'object') return null;
+  const safeSha = value => /^[a-f0-9]{64}$/i.test(String(value || '')) ? String(value).toLowerCase() : '';
   const result = executor.result && typeof executor.result === 'object' ? executor.result : executor;
   const payload = result.payload && typeof result.payload === 'object'
     ? result.payload
@@ -3748,7 +3782,17 @@ function projectLinkOpsMaintenanceExecutorForClient(executor) {
     adapterEvidence: {matchedLinksCount},
     payload: {
       found: Boolean(payload.found || payload.payloadHash || operations.length),
-      summary: {operations},
+      summary: {
+        operations,
+        ...(payload.payloadHash ? {payloadHash: safeSha(payload.payloadHash)} : {}),
+        ...(payload.summary?.descriptionUpdate && typeof payload.summary.descriptionUpdate === 'object'
+          ? {descriptionUpdate: {
+              spuName: sanitizeLinkOpsClientText(String(payload.summary.descriptionUpdate.spuName || ''), 120),
+              payloadHash: safeSha(String(payload.summary.descriptionUpdate.payloadHash || '')),
+              descriptionCount: Number(payload.summary.descriptionUpdate.descriptionCount || 0),
+            }}
+          : {}),
+      },
     },
     publishResult: projectLinkOpsPublishResultForClient(result.publishResult || executor.publishResult || null),
     readbackStatus: sanitizeLinkOpsClientText(result.readbackStatus || result.readback?.status || executor.readbackStatus || '', 120),
@@ -3932,7 +3976,9 @@ function projectLinkOpsTaskForClient(task) {
     preflight,
     execution,
     descriptionMaterialBinding: task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
-      ? projectDescriptionBindingCommit(task)
+      ? (task.descriptionMaterialBinding.kind === 'update_description'
+        ? projectUpdateDescriptionBindingCommit(task)
+        : projectDescriptionBindingCommit(task))
       : null,
     assets: asArray(task?.assets).map(projectLinkOpsAssetForClient).slice(0, 30),
   };
@@ -5074,19 +5120,34 @@ async function executeChatNaturalLanguageTask({task, taskData, session, userMess
   }
   if (id) linkOpsExecutionLocks.add(id);
   try {
-    const updated = await startControlledLinkOpsExecution(task, actor, req, args, {
+    const {task: updated, writeClaim: executionWriteClaim} = await startControlledLinkOpsExecution(task, actor, req, args, {
       mode: 'execute',
       executionMode: 'execute',
       confirm: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
       confirmText: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
       source: 'chat_natural_language_execute',
     });
-    const tasks = current.tasks.slice();
-    const idx = tasks.findIndex(t => String(t.id || '') === String(updated.id || ''));
-    if (idx >= 0) tasks[idx] = updated;
-    else tasks.unshift(updated);
-    const nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
-    await writeLinkOpsTaskStore(args, nextData);
+    let nextData;
+    if (executionWriteClaim) {
+      // Claim path: single-task CAS only, never a whole-store replace.
+      const persisted = await persistClaimedLinkOpsExecutionResult(args, {
+        taskId: String(updated.id || ''),
+        next: updated,
+        writeClaim: executionWriteClaim,
+        actorUser: actorUser(actor, req),
+        now: new Date().toISOString(),
+      });
+      updated.task = persisted;
+      updated.execution = persisted.execution;
+      nextData = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+    } else {
+      const tasks = current.tasks.slice();
+      const idx = tasks.findIndex(t => String(t.id || '') === String(updated.id || ''));
+      if (idx >= 0) tasks[idx] = updated;
+      else tasks.unshift(updated);
+      nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
+      await writeLinkOpsTaskStore(args, nextData);
+    }
     await appendAudit(args.auditFile, {
       at: new Date().toISOString(),
       type: 'link-ops-chat-natural-execute',
@@ -5277,7 +5338,7 @@ async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req
   }
   if (lockId) linkOpsExecutionLocks.add(lockId);
   try {
-    const checked = await startControlledLinkOpsExecution(task, actor, req, args, {
+    const {task: checked} = await startControlledLinkOpsExecution(task, actor, req, args, {
       mode: 'dry-run',
       executionMode: 'dry-run',
       source: 'chat_immediate_system_check',
@@ -5729,11 +5790,30 @@ function classifyLinkOpsLifecycle({
   executorState,
   submitted,
   suspiciousWriteAttempted = false,
+  descriptionAlreadyMatched = false,
   ok,
   executorResults = [],
   originalStatus = '',
 }) {
   const readbacks = executorReadbackOutcomes(executorResults);
+  if (descriptionAlreadyMatched && !submitted && !suspiciousWriteAttempted) {
+    return {
+      version: 1,
+      fromStatus: originalStatus,
+      toStatus: originalStatus === 'waiting_review' ? 'waiting_review' : '',
+      status: 'description_already_matched',
+      lifecycleStatus: 'description_already_matched',
+      terminal: false,
+      locked: false,
+      needsManualResolve: false,
+      requestedMode,
+      executorState,
+      submitted: false,
+      submittedPossibly: false,
+      readbacks,
+      note: 'live 商品描述已与审核资料目标逐字一致（already_matched），本次跳过写入；该状态不构成提交证明。',
+    };
+  }
   if (executorState === 'pending_listing_image_correction_recovery_required') {
     return {
       version: 1,
@@ -5927,6 +6007,71 @@ function payloadHashForMaintenanceFromTaskExecution(task, storeKey = '', operati
   return hash || '';
 }
 
+/**
+ * Durable write-attempt claim for update_description. Executed through the
+ * atomic single-task CAS (repositoryRevision predicate), so a process crash
+ * between the claim and the partialEdit leaves a persisted claim that blocks
+ * any repeated submit until manual resolution. The executor requires the
+ * claim nonce/taskId/expectedPayloadHash/operation to match before writing.
+ */
+async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, storeKey, expectedPayloadHash, now}) {
+  if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+    return {ok: false, code: 'DESCRIPTION_WRITE_CLAIM_GATEWAY_UNAVAILABLE', error: 'write-claim 需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用，禁止真实提交。'};
+  }
+  let current;
+  let found;
+  try {
+    current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+    found = findLinkOpsTaskOrThrow(current, task.id);
+  } catch (error) {
+    return {ok: false, code: 'LINK_OPS_REVISION_CONFLICT', error: `write-claim 无法重读任务：${error?.message || error}`};
+  }
+  const record = found.task;
+  const currentRevision = Number(record.repositoryRevision || 0);
+  if (!currentRevision) return {ok: false, code: 'LINK_OPS_REVISION_REQUIRED', error: 'write-claim 需要任务存在 repositoryRevision'};
+  const existingClaim = record?.execution?.writeClaim && typeof record.execution.writeClaim === 'object'
+    ? record.execution.writeClaim
+    : null;
+  if (existingClaim && ['claimed', 'unconfirmed'].includes(String(existingClaim.state || ''))) {
+    return {
+      ok: false,
+      code: 'DESCRIPTION_WRITE_CLAIM_ACTIVE',
+      error: `该任务已有进行中/未确认的写 claim（state=${existingClaim.state}，claimId=${existingClaim.claimId}），禁止重复提交 partialEdit；请由全店管理账号人工核销后再处理。`,
+    };
+  }
+  const claim = {
+    schemaVersion: 1,
+    claimId: `wc_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`,
+    nonce: crypto.randomBytes(16).toString('hex'),
+    taskId: String(record.id || ''),
+    storeKey: String(storeKey || '').trim().toUpperCase(),
+    operations: ['update_description'],
+    expectedPayloadHash: String(expectedPayloadHash || ''),
+    claimedAt: now,
+    claimedBy: actorUser(actor, req),
+    state: 'claimed',
+  };
+  const nextTask = {
+    ...record,
+    execution: {
+      ...(record.execution && typeof record.execution === 'object' ? record.execution : {}),
+      writeClaim: claim,
+    },
+    updatedAt: now,
+  };
+  try {
+    const persisted = await args.linkOpsStoreGateway.updateTaskRecord(String(record.id || ''), nextTask, {
+      expectedRevision: currentRevision,
+      actorUser: actorUser(actor, req),
+    });
+    return {ok: true, claim, task: persisted, revision: Number(persisted.repositoryRevision || 0)};
+  } catch (error) {
+    const mapped = linkOpsRepositoryHttpDetails(error);
+    if (mapped) return {ok: false, code: mapped.body?.code || 'LINK_OPS_REVISION_CONFLICT', error: mapped.body?.error || 'write-claim CAS 冲突'};
+    return {ok: false, code: 'DESCRIPTION_WRITE_CLAIM_FAILED', error: `write-claim 持久化失败：${String(error?.message || error).slice(0, 300)}`};
+  }
+}
+
 async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey = '', executionContext = {}) {
   const targetStore = String(storeKey || '').trim().toUpperCase();
   if (!targetStore) throw new Error('Missing OpenAPI product executor target store');
@@ -6056,6 +6201,216 @@ function stripPublishDescriptionField(payload) {
 }
 
 const DESCRIPTION_SOURCE_MAX_BYTES = 1_500_000;
+const DESCRIPTION_MATERIAL_STATE_DIR = 'state/description-material';
+const DESCRIPTION_MATERIAL_DIR_MODE = 0o700;
+const DESCRIPTION_MATERIAL_FILE_MODE = 0o600;
+
+function samePath(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  if (a === b) return true;
+  if (process.platform === 'win32') return a.toLowerCase() === b.toLowerCase();
+  return false;
+}
+
+/**
+ * Permission-model gate for private description material. POSIX platforms
+ * enforce 0700/0600 with an actual stat check (fail-closed: chmod or stat
+ * verification failure refuses the write). Windows has no POSIX mode bits and
+ * no built-in verifiable ACL primitive here, so writing private material is
+ * refused unless an explicit test override opts into an unverified model.
+ */
+function materialPermissionModel() {
+  if (process.platform !== 'win32') return {ok: true, model: 'posix'};
+  if (process.env.NODE_ENV === 'test'
+    && String(process.env.SHEIN_LINK_OPS_TEST_ALLOW_UNVERIFIED_MATERIAL_PERMS || '') === '1') {
+    return {ok: true, model: 'windows_test_override'};
+  }
+  return {ok: false, model: 'unsupported'};
+}
+
+async function assertPrivateMaterialMode(pathLike, expectedMode, {label} = {}) {
+  const model = materialPermissionModel();
+  if (model.model !== 'posix') return model;
+  const stat = await fs.stat(pathLike);
+  const actual = stat.mode & 0o777;
+  if (actual !== expectedMode) {
+    throw Object.assign(new Error(`${label} mode ${actual.toString(8)} !== ${expectedMode.toString(8)}；权限验证失败，拒绝继续（fail-closed）`), {
+      code: 'DESCRIPTION_MATERIAL_PERMISSION_VIOLATION',
+    });
+  }
+  return model;
+}
+
+/**
+ * Resolves a descriptionUpdatePayloadRef.relativePath strictly inside the
+ * repository root. Rejects any parent-directory traversal ("..") and any
+ * resolved path that is not a direct descendant of ROOT.
+ */
+function resolveStoredDescriptionPayloadPath(relativePath) {
+  const raw = String(relativePath || '');
+  if (!raw || raw.includes('..') || raw.startsWith('/') || raw.startsWith('\\')) return null;
+  const rootPrefix = path.resolve(ROOT);
+  const resolved = path.resolve(rootPrefix, raw);
+  if (resolved !== rootPrefix && !resolved.startsWith(rootPrefix + path.sep)) return null;
+  if (!resolved.endsWith('.json')) return null;
+  return resolved;
+}
+
+/**
+ * Ensures the runtime material directory exists with mode 0700 and is not a
+ * symlink/reparse point escaping the repository root.
+ */
+async function ensureDescriptionMaterialDir() {
+  const model = materialPermissionModel();
+  if (!model.ok) {
+    const error = new Error('当前平台（Windows）无 POSIX mode 且无内置可验证 ACL 原语；拒绝写入私密描述材料。生产环境必须为 Linux 并验证目录 0700/文件 0600，测试通道需显式 SHEIN_LINK_OPS_TEST_ALLOW_UNVERIFIED_MATERIAL_PERMS=1。');
+    error.status = 403;
+    throw Object.assign(error, {
+      code: 'DESCRIPTION_MATERIAL_PERMISSION_UNSUPPORTED',
+    });
+  }
+  const dir = path.join(ROOT, DESCRIPTION_MATERIAL_STATE_DIR);
+  await fs.mkdir(dir, {recursive: true, mode: DESCRIPTION_MATERIAL_DIR_MODE});
+  const rootReal = await fs.realpath(ROOT);
+  const dirReal = await fs.realpath(dir);
+  if (!samePath(dirReal, rootReal) && !dirReal.toLowerCase().startsWith(rootReal.toLowerCase() + path.sep.toLowerCase())) {
+    throw new Error('description material dir must stay inside the repository root (symlink/reparse escape rejected)');
+  }
+  await fs.chmod(dir, DESCRIPTION_MATERIAL_DIR_MODE);
+  await assertPrivateMaterialMode(dir, DESCRIPTION_MATERIAL_DIR_MODE, {label: 'description material dir'});
+  return dir;
+}
+
+/**
+ * Rejects symlink/reparse material files: the real path of the file must
+ * still be the exact file we opened inside the controlled directory.
+ */
+async function verifyDescriptionMaterialFileNotLink(dir, file) {
+  const dirReal = await fs.realpath(dir);
+  const fileReal = await fs.realpath(file).catch(() => null);
+  const expected = path.join(dirReal, path.basename(file));
+  if (!fileReal || !samePath(fileReal, expected)) {
+    throw new Error('description material file must not be a symlink/reparse point');
+  }
+  return fileReal;
+}
+
+/**
+ * The description body text of an update_description task is never persisted
+ * in the task record. It lives only in a permission-restricted runtime file
+ * (mode 0600) keyed by task id + payload hash; the task record carries only
+ * the relative pointer plus file/payload hashes. The executor reads the file
+ * into memory per run and never persists the body back.
+ */
+async function writeStoredUpdateDescriptionPayload(taskId, payload) {
+  const payloadHash = sha256StableJson(payload);
+  const fileName = `${safeTaskId(taskId)}-${payloadHash}.json`;
+  const dir = await ensureDescriptionMaterialDir();
+  const file = path.join(dir, fileName);
+  const bytes = Buffer.from(`${JSON.stringify(payload)}\n`, 'utf8');
+  const fileSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  let created = false;
+  let handle;
+  try {
+    handle = await fs.open(file, 'wx', DESCRIPTION_MATERIAL_FILE_MODE);
+  } catch (error) {
+    if (String(error?.code || '') !== 'EEXIST') throw error;
+    // Idempotent: an already existing file is never overwritten. Verify its
+    // content hash and permissions instead.
+    const existing = await fs.readFile(file);
+    const existingSha = crypto.createHash('sha256').update(existing).digest('hex');
+    if (existingSha !== fileSha256) {
+      throw new Error('description material file already exists with different content; refusing to overwrite');
+    }
+    await fs.chmod(file, DESCRIPTION_MATERIAL_FILE_MODE);
+    await assertPrivateMaterialMode(file, DESCRIPTION_MATERIAL_FILE_MODE, {label: 'description material file'});
+  }
+  if (handle) {
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    created = true;
+  }
+  await verifyDescriptionMaterialFileNotLink(dir, file);
+  await assertPrivateMaterialMode(file, DESCRIPTION_MATERIAL_FILE_MODE, {label: 'description material file'});
+  return {
+    schemaVersion: 1,
+    relativePath: `${DESCRIPTION_MATERIAL_STATE_DIR}/${fileName}`,
+    fileSha256,
+    payloadHash,
+    storedAt: new Date().toISOString(),
+    created,
+  };
+}
+
+async function readStoredUpdateDescriptionPayload(task) {
+  const ref = task?.descriptionUpdatePayloadRef;
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref) || !ref.relativePath) return null;
+  const resolved = resolveStoredDescriptionPayloadPath(ref.relativePath);
+  if (!resolved) return null;
+  let bytes;
+  try { bytes = await fs.readFile(resolved); } catch { return null; }
+  // Read side is fail-closed too: on POSIX the material file must not be
+  // group/other readable or writable, otherwise it is treated as unusable.
+  if (process.platform !== 'win32') {
+    const stat = await fs.stat(resolved).catch(() => null);
+    if (!stat || (stat.mode & 0o077) !== 0) return null;
+  }
+  const real = await fs.realpath(resolved).catch(() => null);
+  if (!real || !samePath(real, resolved)) return null;
+  const actualSha = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (actualSha !== String(ref.fileSha256 || '').toLowerCase()) return null;
+  let payload = null;
+  try { payload = JSON.parse(bytes.toString('utf8')); } catch { return null; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (sha256StableJson(payload) !== String(ref.payloadHash || '')) return null;
+  return payload;
+}
+
+/**
+ * Re-reads the fresh task store and reports whether ANY task (not just the
+ * current one) references the exact material ref (relativePath + fileSha256 +
+ * payloadHash). A concurrent successful bind of the same task+payload must
+ * prevent the failed creator from deleting the shared file.
+ */
+async function materialRefReferencedByAnyTask(args, ref) {
+  if (!ref || typeof ref !== 'object') return false;
+  const store = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+  return (Array.isArray(store.tasks) ? store.tasks : []).some(task => {
+    const candidate = task?.descriptionUpdatePayloadRef;
+    return Boolean(
+      candidate
+      && typeof candidate === 'object'
+      && String(candidate.relativePath || '') === String(ref.relativePath || '')
+      && String(candidate.fileSha256 || '') === String(ref.fileSha256 || '')
+      && String(candidate.payloadHash || '') === String(ref.payloadHash || '')
+    );
+  });
+}
+
+/**
+ * A failed binding request never deletes material online. Reference-check then
+ * delete has an unavoidable cross-process TOCTOU window: another Portal may
+ * commit the same task+payload after the check but before rm. Retain the
+ * permission-restricted, content-addressed orphan and audit it for a later
+ * offline, globally locked garbage collector instead.
+ */
+async function retainOrphanMaterialFile(args, storedPayload) {
+  if (!storedPayload || storedPayload.created !== true) {
+    return {removed: false, reason: 'not_created_this_attempt'};
+  }
+  const orphanPath = resolveStoredDescriptionPayloadPath(String(storedPayload.relativePath || ''));
+  if (!orphanPath) return {removed: false, reason: 'path_rejected'};
+  const referenced = await materialRefReferencedByAnyTask(args, storedPayload);
+  return {
+    removed: false,
+    reason: referenced ? 'referenced_by_task' : 'retained_for_offline_gc',
+  };
+}
 
 function decodeReviewedDescriptionSourceFile(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -6436,6 +6791,247 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
       preflightInvalidated: true,
       imageBindingFingerprintUnchanged: true,
     },
+  };
+}
+
+async function bindUpdateDescriptionMaterialToTask(task, targetStore, material, spuName, sourceTaskId, actor, req, {
+  sourceByteLength,
+  baseTaskRevision,
+  bindingRequestKey,
+  sectionUsed,
+} = {}) {
+  if (!task || typeof task !== 'object') throw new Error('Task not found');
+  if (taskRequiresOwnerLifecycleResolve(task)) {
+    const error = new Error('该任务已进入提交后待回读/人工处理状态，不能绑定描述素材');
+    error.status = 409;
+    throw error;
+  }
+  const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
+  if (intents.length !== 1 || intents[0] !== 'update_description') {
+    const error = new Error('历史描述回填绑定只支持单独 update_description 任务，不能混入其他动作');
+    error.status = 409;
+    throw error;
+  }
+  if (['done', 'archived'].includes(String(task?.status || ''))) {
+    const error = new Error(`任务状态 ${task.status} 已终结，不能绑定描述素材`);
+    error.status = 409;
+    throw error;
+  }
+  const priorWriteEvidence = descriptionBindingWriteEvidence(task);
+  if (!priorWriteEvidence.ok) {
+    const error = new Error(`任务已有真实写入/提交不确定性证据，禁止绑定描述或重置执行状态：${priorWriteEvidence.reasons.join(', ')}`);
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE';
+    throw error;
+  }
+  const writeStores = taskWriteStores(task);
+  if (writeStores.length !== 1 || writeStores[0] !== targetStore) {
+    const error = new Error(`目标店铺 ${targetStore} 不是该任务的唯一写入店（当前 ${writeStores.join('/') || '(empty)'}）`);
+    error.status = 409;
+    throw error;
+  }
+  const denied = requireWriteStores(actor, [targetStore]);
+  if (denied) {
+    const error = new Error(denied.error || '当前账号没有目标店铺写权限');
+    error.status = 403;
+    error.response = denied;
+    throw error;
+  }
+  const taskSpu = String(task?.parameters?.spuName || task?.planning?.parameters?.spuName || '').trim();
+  const refs = asArray(task?.targets?.productRefs).map(value => String(value || '').trim()).filter(Boolean);
+  if (!taskSpu
+    || refs.length !== 1
+    || String(refs[0]).toLowerCase() !== taskSpu.toLowerCase()
+    || String(taskSpu).toLowerCase() !== String(spuName || '').toLowerCase()) {
+    const error = new Error('update_description 任务必须精确锁定单 SPU（parameters.spuName 与唯一 productRef 一致且与请求一致）');
+    error.status = 409;
+    throw error;
+  }
+  if (!Number.isSafeInteger(Number(baseTaskRevision)) || Number(baseTaskRevision) <= 0) {
+    const error = new Error('描述绑定缺少正整数 baseTaskRevision，不能执行 CAS');
+    error.status = 409;
+    throw error;
+  }
+  if (!Number.isSafeInteger(Number(sourceByteLength)) || Number(sourceByteLength) <= 0) {
+    const error = new Error('描述绑定缺少审核 HTML 字节长度证明');
+    error.status = 400;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const summary = describeDescriptionMaterial(material);
+  const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
+    ? DESCRIPTION_SOURCE_PROOF_S9
+    : DESCRIPTION_SOURCE_PROOF;
+  const payload = buildUpdateDescriptionPayload(material, spuName);
+  const newPayloadHash = sha256StableJson(payload);
+  const storedPayload = await writeStoredUpdateDescriptionPayload(task.id, payload);
+  const descriptionUpdatePayloadRef = {
+    schemaVersion: 1,
+    relativePath: storedPayload.relativePath,
+    fileSha256: storedPayload.fileSha256,
+    payloadHash: storedPayload.payloadHash,
+    storedAt: storedPayload.storedAt,
+  };
+  const resetNote = '审核资料三语核心卖点描述已绑定（历史 update_description，ar/en 各5行，zh-cn 仅材料审计）；旧预演/提交锁全部作废，必须重新 dry-run 后才能提交。';
+  const nextTask = {
+    ...task,
+    descriptionUpdatePayloadRef,
+    descriptionSourceTaskEvidence: {
+      schemaVersion: 1,
+      sourceTaskId: String(sourceTaskId || ''),
+      sourceTaskKind: 'copy_product_draft',
+      boundAt: now,
+    },
+    preflight: {
+      ok: false,
+      blockers: ['审核资料三语核心卖点描述已绑定到该 update_description 任务，需要基于新 payload 重新预演。'],
+      warnings: [],
+    },
+    lifecycle: {
+      lifecycleStatus: 'needs_repreflight',
+      status: 'needs_repreflight',
+      locked: false,
+      terminal: false,
+      needsManualResolve: false,
+    },
+    descriptionMaterialBinding: {
+      schemaVersion: 1,
+      kind: 'update_description',
+      sourceApproved: true,
+      authority: 'human_reviewed_source',
+      sourceProof,
+      targetStore,
+      targetSpu: String(spuName || '').trim(),
+      boundAt: now,
+      boundByUser: actorUser(actor, req),
+      baseTaskRevision: Number(baseTaskRevision),
+      bindingRequestKey,
+      sourceLabel: material.sourceLabel,
+      sourceByteLength: Number(sourceByteLength),
+      sourceFileSha256: material.sourceFileSha256,
+      contentSha256: summary.contentSha256,
+      publishLanguages: [...DESCRIPTION_PUBLISH_LANGUAGES],
+      lineCounts: summary.lineCounts,
+      hashes: summary.hashes,
+      newPayloadHash,
+      payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+    },
+    execution: {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      state: 'needs_repreflight',
+      canAutoSubmit: false,
+      canSilentWrite: false,
+      autoConfirmed: false,
+      confirmTextPresent: false,
+      executeAllowed: false,
+      requestedRealSubmit: false,
+      issuedExecuteToExecutor: false,
+      sheinWriteAttempted: false,
+      actualWriteSubmitted: false,
+      realSubmitBoundary: '描述绑定已作废旧预演与提交锁；必须重新 dry-run 锁定新 payload hash 后才能执行。',
+      openApiProductExecutors: [],
+      linkMaintenanceExecutors: [],
+      linkMaintenancePrechecks: [],
+      hlOpenApiExecutor: null,
+      writeClaim: null,
+      preflight: {
+        ok: false,
+        blockers: ['审核资料三语核心卖点描述已绑定到该 update_description 任务，需要基于新 payload 重新预演。'],
+        warnings: [],
+      },
+      writeAudit: {
+        ...(task.execution?.writeAudit && typeof task.execution.writeAudit === 'object' ? task.execution.writeAudit : {}),
+        requestedMode: 'dry-run',
+        submitted: false,
+        actualWriteSubmitted: false,
+        sheinWriteAttempted: false,
+        issuedExecuteToExecutor: false,
+        executeAllowed: false,
+        requestedRealSubmit: false,
+        invalidatedByDescriptionBindingAt: now,
+        invalidatedByDescriptionBinding: true,
+      },
+    },
+    note: String(task?.note || '').trim()
+      ? `${String(task.note).trim()}；${resetNote}`
+      : resetNote,
+    updatedAt: now,
+  };
+  nextTask.history = appendTaskHistory(nextTask, 'approved_update_description_material_bound', actor, req, {
+    targetStore,
+    sourceTaskId: String(sourceTaskId || ''),
+    targetSpu: String(spuName || '').trim(),
+    sourceLabel: material.sourceLabel,
+    sourceFileSha256: material.sourceFileSha256,
+    contentSha256: summary.contentSha256,
+    publishLanguages: summary.publishLanguages,
+    lineCounts: summary.lineCounts,
+    hashes: summary.hashes,
+    newPayloadHash,
+    payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+    sourceProof,
+    sourceByteLength: Number(sourceByteLength),
+    baseTaskRevision: Number(baseTaskRevision),
+    bindingRequestKey,
+    preflightReset: true,
+    lifecycleReset: true,
+    writeAuditReset: true,
+    oldPayloadHashInvalidated: true,
+  });
+  const bindingGate = validateUpdateDescriptionBindingLock(nextTask, payload);
+  if (!bindingGate.ok) {
+    const error = new Error(`描述绑定生成结果未通过最终锁校验：${bindingGate.blockers.join('；')}`);
+    error.status = 409;
+    error.code = 'DESCRIPTION_BINDING_LOCK_INVALID';
+    throw error;
+  }
+  return {
+    task: nextTask,
+    storedPayload,
+    binding: {
+      targetStore,
+      targetSpu: String(spuName || '').trim(),
+      sourceTaskId: String(sourceTaskId || ''),
+      payloadSource: 'server_verified_material',
+      sourceLabel: material.sourceLabel,
+      sourceFileSha256: material.sourceFileSha256,
+      contentSha256: summary.contentSha256,
+      publishLanguages: [...summary.publishLanguages],
+      lineCounts: {...summary.lineCounts},
+      hashes: {...summary.hashes},
+      newPayloadHash,
+      payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+      sourceProof,
+      sourceByteLength: Number(sourceByteLength),
+      baseTaskRevision: Number(baseTaskRevision),
+      bindingRequestKey,
+      preflightInvalidated: true,
+    },
+  };
+}
+
+function projectUpdateDescriptionBindingCommit(task, {idempotentReplay = false} = {}) {
+  const binding = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
+    ? task.descriptionMaterialBinding
+    : {};
+  return {
+    targetStore: String(binding.targetStore || ''),
+    targetSpu: String(binding.targetSpu || ''),
+    sourceTaskId: String(task?.descriptionSourceTaskEvidence?.sourceTaskId || ''),
+    sourceLabel: String(binding.sourceLabel || ''),
+    sourceFileSha256: String(binding.sourceFileSha256 || ''),
+    sourceByteLength: Number(binding.sourceByteLength || 0),
+    sourceProof: String(binding.sourceProof || ''),
+    contentSha256: String(binding.contentSha256 || ''),
+    publishLanguages: asArray(binding.publishLanguages).map(String),
+    lineCounts: binding.lineCounts && typeof binding.lineCounts === 'object' ? {...binding.lineCounts} : {},
+    hashes: binding.hashes && typeof binding.hashes === 'object' ? {...binding.hashes} : {},
+    newPayloadHash: String(binding.newPayloadHash || ''),
+    payloadHashAlgorithm: String(binding.payloadHashAlgorithm || ''),
+    baseTaskRevision: Number(binding.baseTaskRevision || 0),
+    bindingRequestKey: String(binding.bindingRequestKey || ''),
+    preflightInvalidated: true,
+    idempotentReplay,
   };
 }
 
@@ -6859,9 +7455,14 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     '--task-id', String(task.id || ''),
     '--store', targetStore,
     '--dir', args.dir || path.join(ROOT, 'outputs', 'bi-portal'),
+    '--out-dir', process.env.SHEIN_LINK_OPS_MAINTENANCE_OUT_DIR || path.join(ROOT, 'logs', 'link-ops-maintenance-openapi-executor'),
     mode === 'execute' ? '--execute' : '--dry-run',
   ];
   if (mode === 'execute') childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
+  if (mode === 'execute' && intents.includes('update_description')) {
+    const claimNonce = String(executionContext?.writeClaim?.nonce || '');
+    if (claimNonce) childArgs.push('--claim-nonce', claimNonce);
+  }
   let result;
   try {
     if (mode === 'execute' && typeof body.beforeStoreWrite === 'function') {
@@ -6918,6 +7519,67 @@ async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
     out.push(await runOpenApiMaintenanceExecutorForStore(task, args, body, store, body.executionContext || {}));
   }
   return out;
+}
+
+/**
+ * Final persistence for an execute run that created a durable write-claim.
+ * This path is strictly single-task CAS and never uses a whole-store replace:
+ * the fresh record is re-read, must still carry the same claimId/nonce at the
+ * claimed revision, and the execution result is merged onto that fresh record
+ * (so concurrent manual fields survive). Any mismatch throws a 409 and the
+ * persisted claim keeps the task locked until manual resolution.
+ */
+async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeClaim, actorUser = '', now = ''}) {
+  if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+    throw Object.assign(new Error('claim 结果持久化需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用'), {
+      status: 503,
+      code: 'DESCRIPTION_WRITE_CLAIM_GATEWAY_UNAVAILABLE',
+    });
+  }
+  const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+  let fresh;
+  try {
+    fresh = findLinkOpsTaskOrThrow(current, String(taskId || '')).task;
+  } catch (error) {
+    throw Object.assign(new Error(`执行后无法重读任务：${error?.message || error}`), {status: 409, code: 'LINK_OPS_REVISION_CONFLICT'});
+  }
+  const freshClaim = fresh?.execution?.writeClaim && typeof fresh.execution.writeClaim === 'object'
+    ? fresh.execution.writeClaim
+    : null;
+  if (!freshClaim
+    || String(freshClaim.claimId || '') !== String(writeClaim?.claimId || '')
+    || String(freshClaim.nonce || '') !== String(writeClaim?.nonce || '')) {
+    throw Object.assign(new Error('执行期间任务的写 claim 已被替换或清除；拒绝整库覆盖，任务保持 claim 锁定，必须人工核销。'), {
+      status: 409,
+      code: 'DESCRIPTION_WRITE_CLAIM_MISSING',
+    });
+  }
+  const freshRevision = Number(fresh.repositoryRevision || 0);
+  const claimedRevision = Number(writeClaim?.revision || 0);
+  if (!freshRevision || !claimedRevision || freshRevision !== claimedRevision) {
+    throw Object.assign(new Error(`执行期间任务 revision 已变化（claim=${claimedRevision || '(missing)'} 当前=${freshRevision || '(unknown)'}），疑似并发人工修改；本次结果不覆盖，任务保持 claim 锁定，必须人工核销。`), {
+      status: 409,
+      code: 'LINK_OPS_REVISION_CONFLICT',
+    });
+  }
+  const merged = {
+    ...fresh,
+    status: next.status,
+    progress: next.progress,
+    note: next.note,
+    execution: {
+      ...(fresh.execution && typeof fresh.execution === 'object' ? fresh.execution : {}),
+      ...next.execution,
+    },
+    lifecycle: next.lifecycle,
+    executionHistory: next.executionHistory,
+    history: next.history,
+    updatedAt: now || next.updatedAt || new Date().toISOString(),
+  };
+  return args.linkOpsStoreGateway.updateTaskRecord(String(taskId), merged, {
+    expectedRevision: freshRevision,
+    actorUser: String(actorUser || ''),
+  });
 }
 
 async function startControlledLinkOpsExecution(task, actor, req, args, body = {}) {
@@ -6978,7 +7640,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     writeStores.map(store => biOpsWriteWhitelistAllowedForActor(actor, {operation, storeKey: store}))
   );
   const autoConfirmed = originalStatus === 'draft';
-  const runnableTask = autoConfirmed
+  let runnableTask = autoConfirmed
     ? {
       ...task,
       status: 'confirmed',
@@ -7044,7 +7706,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       }
     }
     if (hasMaintenanceIntent) {
-      if (task?.execution?.state !== 'link_maintenance_preflight_ready' || task?.execution?.preflight?.ok !== true) {
+      const maintenancePreflightReady = task?.execution?.state === 'link_maintenance_preflight_ready'
+        || (intents.includes('update_description') && task?.execution?.state === 'update_description_already_matched');
+      if (!maintenancePreflightReady || task?.execution?.preflight?.ok !== true) {
         preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 维护系统检查证据。');
       }
       for (const store of writeStores) {
@@ -7075,7 +7739,10 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       && preflight.blockers.length === 0
       && (
         (hasProductPublishIntent && task?.execution?.state === 'openapi_product_preflight_ready' && task?.execution?.preflight?.ok === true)
-        || (hasMaintenanceIntent && task?.execution?.state === 'link_maintenance_preflight_ready' && task?.execution?.preflight?.ok === true)
+        || (hasMaintenanceIntent && (
+          task?.execution?.state === 'link_maintenance_preflight_ready'
+          || (intents.includes('update_description') && task?.execution?.state === 'update_description_already_matched')
+        ) && task?.execution?.preflight?.ok === true)
       );
   }
   const executionContext = {
@@ -7092,7 +7759,10 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     realSubmitWhitelistChecks,
     parentIssuedAt: now,
   };
-  const runExecutors = async allowExecute => {
+  let executeWriteClaim = null;
+  let executeWriteClaimState = '';
+  let executeWriteClaimRevision = 0;
+  const runExecutors = async (allowExecute, writeClaim = null) => {
     const product = await runOpenApiProductExecutors(runnableTask, args, {
       ...body,
       actorForWriteGate: actor,
@@ -7113,7 +7783,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       confirm: allowExecute && hasMaintenanceIntent ? confirmText : '',
       confirmText: allowExecute && hasMaintenanceIntent ? confirmText : '',
       beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
-      executionContext,
+      executionContext: writeClaim ? {...executionContext, writeClaim} : executionContext,
     });
     return {product, maintenance};
   };
@@ -7167,7 +7837,25 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       // webhook may have closed a store gate during preparation.
       const webhookGate = await evaluateWebhookWriteGates();
       if (!webhookGate.ok) return {guard, webhookGate, executions: null};
-      return {guard, webhookGate, executions: await runExecutors(true)};
+      if (maintenanceIntents.includes('update_description') && writeStores.length === 1) {
+        const expectedPayloadHash = payloadHashForMaintenanceFromTaskExecution(runnableTask, writeStores[0], 'update_description');
+        const claimResult = await claimUpdateDescriptionWriteAttempt(runnableTask, args, {
+          actor,
+          req,
+          storeKey: writeStores[0],
+          expectedPayloadHash,
+          now,
+        });
+        if (!claimResult.ok) {
+          preflight.blockers.push(claimResult.error);
+          return {guard, webhookGate, executions: null, writeClaim: null};
+        }
+        executeWriteClaim = claimResult.claim;
+        executeWriteClaimState = 'claimed';
+        executeWriteClaimRevision = Number(claimResult.revision || 0);
+        runnableTask = claimResult.task;
+      }
+      return {guard, webhookGate, executions: await runExecutors(true, executeWriteClaim), writeClaim: executeWriteClaim};
     });
     if (!guarded.guard.ok) {
       preflight.blockers.push('负责人规则在执行准备期间发生变化或尚未完成 GitHub 校验；本次未向 SHEIN 发出真实写请求，请重新系统检查和确认。');
@@ -7185,6 +7873,20 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       openApiProductExecutors = dryRun.product;
       openApiMaintenanceExecutors = dryRun.maintenance;
     }
+    if (guarded.writeClaim && guarded.executions) {
+      const claimStore = String(guarded.writeClaim.storeKey || '').trim().toUpperCase();
+      const relevant = (openApiMaintenanceExecutors || []).find(run => (
+        String(run?.storeKey || '').trim().toUpperCase() === claimStore
+      )) || (openApiMaintenanceExecutors || [])[0];
+      const result = relevant?.result || {};
+      if (result?.adapterEvidence?.realSubmit === true) {
+        executeWriteClaimState = result?.readback?.ok === true ? 'completed' : 'unconfirmed';
+      } else if (result?.adapterEvidence?.writeAttempted === true || String(result?.state || '') === 'suspicious_write_attempted' || relevant?.suspiciousWriteAttempted === true) {
+        executeWriteClaimState = 'unconfirmed';
+      } else {
+        executeWriteClaimState = 'released';
+      }
+    }
   } else {
     const dryRun = await runExecutors(false);
     openApiProductExecutors = dryRun.product;
@@ -7195,7 +7897,10 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const executorResults = executorRuns.map(x => x.result).filter(Boolean);
   const issuedExecuteToExecutor = executorRuns.some(x => String(x?.mode || '') === 'execute');
   const sheinWriteAttempted = executorResults.some(x => Boolean(x?.publishResult || x?.adapterEvidence?.writeAttempted));
-  const suspiciousWriteAttempted = executorResults.some(x => Boolean(x?.suspiciousWriteAttempted) || String(x?.state || '') === 'suspicious_write_attempted');
+  const suspiciousWriteAttempted = executorResults.some(x => Boolean(x?.suspiciousWriteAttempted)
+    || Boolean(x?.submittedPossibly)
+    || String(x?.state || '') === 'suspicious_write_attempted'
+    || String(x?.state || '') === 'update_description_submitted_unconfirmed');
   const combinedBlockers = uniqueMessages([
     ...preflight.blockers,
     ...executorResults.flatMap(x => asArray(x?.blockers)),
@@ -7211,6 +7916,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const submitted = executorResults.some(x => x?.state === 'submitted');
   const pendingListingCorrectionRecovery = executorResults.some(x => x?.state === 'pending_listing_image_correction_recovery_required');
   const publishPreValidFailed = executorResults.some(x => x?.state === 'publish_pre_valid_failed' || x?.publishResult?.info?.success === false);
+  const descriptionAlreadyMatched = executorResults.some(x => x?.state === 'update_description_already_matched' || x?.alreadyMatched === true);
   const executorState = submitted
     ? 'submitted'
     : suspiciousWriteAttempted
@@ -7219,6 +7925,8 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         ? 'pending_listing_image_correction_recovery_required'
       : publishPreValidFailed
         ? 'publish_pre_valid_failed'
+    : descriptionAlreadyMatched
+      ? 'update_description_already_matched'
     : hasOpenApiProductExecutor
       ? (ok ? 'openapi_product_preflight_ready' : 'blocked')
       : hasOpenApiMaintenanceExecutor
@@ -7230,6 +7938,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     executorState,
     submitted,
     suspiciousWriteAttempted,
+    descriptionAlreadyMatched,
     ok,
     executorResults,
     originalStatus,
@@ -7286,6 +7995,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       publishResult: executorResult.publishResult || null,
       readbackFingerprint: executorResult.readbackFingerprint || null,
       readback: executorResult.readback || null,
+      descriptionLifecycle: executorResult.descriptionLifecycle || null,
       safety: executorResult.safety || null,
       index,
     };
@@ -7305,6 +8015,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       publishResult: executorResult.publishResult || null,
       readbackFingerprint: executorResult.readbackFingerprint || null,
       readback: executorResult.readback || null,
+      descriptionLifecycle: executorResult.descriptionLifecycle || null,
       safety: executorResult.safety || null,
       index,
     };
@@ -7331,6 +8042,11 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       mode: hasOpenApiProductExecutor ? 'openapi_product_executor' : (hasOpenApiMaintenanceExecutor ? 'openapi_maintenance_executor' : 'controlled_prefill'),
       enabled: true,
       runId,
+      writeClaim: executeWriteClaim
+        ? {...executeWriteClaim, state: executeWriteClaimState || 'claimed'}
+        : (runnableTask?.execution?.writeClaim && typeof runnableTask.execution.writeClaim === 'object'
+          ? runnableTask.execution.writeClaim
+          : null),
       state: executorState,
       canAutoSubmit: false,
       canSilentWrite: false,
@@ -7495,7 +8211,18 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       };
     }),
   });
-  return next;
+  return {
+    task: next,
+    writeClaim: executeWriteClaim
+      ? {
+          claimId: String(executeWriteClaim.claimId || ''),
+          nonce: String(executeWriteClaim.nonce || ''),
+          revision: executeWriteClaimRevision,
+          storeKey: String(executeWriteClaim.storeKey || '').trim().toUpperCase(),
+          state: executeWriteClaimState || 'claimed',
+        }
+      : null,
+  };
 }
 
 function runChildProcess(command, args, options = {}) {
@@ -12029,6 +12756,313 @@ async function main() {
           linkOpsExecutionLocks.delete(lockId);
         }
       }
+      if (url.pathname === '/api/link-ops-prepare-update-description') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const actorGate = requireConcreteOperatorActor(actor);
+        if (actorGate) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-update-description-denied', actor, ...requestMeta(req), denied: actorGate});
+          return sendJson(res, 403, actorGate);
+        }
+        let body;
+        try {
+          body = await readBodyJson(req, 2 * 1024 * 1024);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        const taskRef = String(body.taskId || body.id || '').trim();
+        if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+        const targetStore = String(body.store || body.storeKey || '').trim().toUpperCase();
+        if (!targetStore) return sendJson(res, 400, {ok: false, error: 'Missing target store'});
+        if (body.sourceApproved !== true) {
+          return sendJson(res, 400, {ok: false, error: '必须明确 sourceApproved=true 才能绑定人工审核三语核心卖点描述素材'});
+        }
+        const allowedBodyKeys = ['expectedRevision', 'materialJson', 'section', 'sourceApproved', 'sourceFile', 'store', 'taskId'];
+        const unknownBodyKeys = Object.keys(body || {}).filter(key => !allowedBodyKeys.includes(key));
+        if (unknownBodyKeys.length) {
+          return sendJson(res, 400, {ok: false, error: `描述绑定请求包含不允许字段：${unknownBodyKeys.join('/')}`});
+        }
+        let material;
+        let reviewedSource;
+        let verified;
+        try {
+          reviewedSource = decodeReviewedDescriptionSourceFile(body.sourceFile);
+          verified = verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
+            material: body.materialJson || null,
+            sourceFileBasename: reviewedSource.name,
+            sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
+            section: String(body.section || 'auto').trim().toLowerCase(),
+          });
+          material = validateDescriptionMaterialJson(verified.material);
+        } catch (error) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: error?.message || String(error),
+            code: error?.code || 'DESCRIPTION_SOURCE_VERIFICATION_FAILED',
+          });
+        }
+        const materialSummary = describeDescriptionMaterial(material);
+        const expectedRevision = Number.isFinite(Number(body.expectedRevision)) && Number(body.expectedRevision) > 0
+          ? Math.trunc(Number(body.expectedRevision))
+          : null;
+        if (!expectedRevision) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: '描述绑定必须携带当前正整数 expectedRevision；请先精确读取任务后再绑定',
+            code: 'LINK_OPS_REVISION_REQUIRED',
+          });
+        }
+        let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+        let found;
+        try {
+          found = findLinkOpsTaskOrThrow(current, taskRef);
+        } catch (error) {
+          const message = error?.message || String(error);
+          return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+        }
+        const access = authorizeLinkOpsRecord(actor, found.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+        if (!access.ok) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-update-description-denied', actor, ...requestMeta(req), task: {id: found.task.id}, denied: access.denied});
+          return sendJson(res, 403, access.denied);
+        }
+        const task = access.record;
+        const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
+        if (intents.length !== 1 || intents[0] !== 'update_description') {
+          return sendJson(res, 409, {ok: false, error: '历史描述回填绑定只支持单独 update_description 任务', code: 'DESCRIPTION_UPDATE_INTENT_INVALID'});
+        }
+        if (['done', 'archived'].includes(String(task?.status || ''))) {
+          return sendJson(res, 409, {ok: false, error: `任务状态 ${task.status} 已终结，不能绑定描述素材`});
+        }
+        const writeStores = taskWriteStores(task);
+        if (writeStores.length !== 1 || writeStores[0] !== targetStore) {
+          return sendJson(res, 409, {ok: false, error: `目标店铺 ${targetStore} 不是该任务的唯一写入店（当前 ${writeStores.join('/') || '(empty)'}）`});
+        }
+        const spuName = String(task?.parameters?.spuName || task?.planning?.parameters?.spuName || '').trim();
+        const refs = asArray(task?.targets?.productRefs).map(value => String(value || '').trim()).filter(Boolean);
+        if (!spuName || refs.length !== 1 || String(refs[0]).toLowerCase() !== spuName.toLowerCase()) {
+          return sendJson(res, 409, {ok: false, error: 'update_description 任务必须精确锁定单 SPU（parameters.spuName 与唯一 productRef 一致）'});
+        }
+        const sourceTaskId = String(task?.parameters?.sourceTaskId || task?.planning?.parameters?.sourceTaskId || '').trim();
+        if (!sourceTaskId || sourceTaskId === taskRef) {
+          return sendJson(res, 409, {ok: false, error: 'update_description 绑定必须携带 parameters.sourceTaskId（历史发布任务仅作来源证据，不会被修改）'});
+        }
+        let sourceTask = null;
+        try {
+          sourceTask = findLinkOpsTaskOrThrow(current, sourceTaskId).task;
+        } catch {
+          return sendJson(res, 404, {ok: false, error: `来源任务 ${sourceTaskId} 不存在`});
+        }
+        const sourceIntents = asArray(sourceTask?.intents).map(value => String(value || '').trim()).filter(Boolean);
+        if (!sourceIntents.includes('copy_product_draft')) {
+          return sendJson(res, 409, {ok: false, error: '来源任务必须是历史 copy_product_draft 发布任务（仅作证据）'});
+        }
+        if (!taskWriteStores(sourceTask).includes(targetStore)) {
+          return sendJson(res, 409, {ok: false, error: `来源任务写入店必须包含目标店 ${targetStore}`});
+        }
+        const sourcePayloadSpu = String(
+          sourceTask?.openapiPublishPayload?.spuName
+          || sourceTask?.openapiPublishPayload?.spu_name
+          || '',
+        ).trim();
+        if (sourcePayloadSpu && String(sourcePayloadSpu).toLowerCase() !== spuName.toLowerCase()) {
+          return sendJson(res, 409, {ok: false, error: `来源任务 payload SPU(${sourcePayloadSpu}) 与目标 SPU(${spuName}) 不一致`});
+        }
+        const currentRevision = Number(task.repositoryRevision || 0);
+        const bindingRequestKey = descriptionBindingRequestKey({
+          taskId: taskRef,
+          targetStore,
+          baseTaskRevision: expectedRevision,
+          contentSha256: materialSummary.contentSha256,
+        });
+        if (!currentRevision || currentRevision !== expectedRevision) {
+          const existingBinding = task?.descriptionMaterialBinding;
+          const existingStoredPayload = await readStoredUpdateDescriptionPayload(task);
+          const existingGate = validateUpdateDescriptionBindingLock(task, existingStoredPayload);
+          const idempotentReplay = existingBinding?.bindingRequestKey === bindingRequestKey
+            && existingBinding?.sourceFileSha256 === materialSummary.sourceFileSha256
+            && existingBinding?.contentSha256 === materialSummary.contentSha256
+            && existingGate.ok;
+          if (idempotentReplay) {
+            let auditPending = false;
+            try {
+              await appendDescriptionBindingAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-update-description-idempotent-replay',
+                actor,
+                ...requestMeta(req),
+                task: {id: task.id, revision: currentRevision},
+                binding: projectUpdateDescriptionBindingCommit(task, {idempotentReplay: true}),
+              });
+            } catch {
+              auditPending = true;
+            }
+            return sendJson(res, 200, {
+              ok: !auditPending,
+              bindingCommitted: true,
+              repositoryEventCommitted: true,
+              readbackVerified: true,
+              auditPending,
+              stage: auditPending ? 'binding_committed_audit_pending' : 'binding_committed_verified',
+              task: projectLinkOpsTaskForClient(task),
+              binding: projectUpdateDescriptionBindingCommit(task, {idempotentReplay: true}),
+            });
+          }
+          try {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-update-description-revision-conflict', actor, ...requestMeta(req), task: {id: found.task.id, revision: currentRevision, expectedRevision}});
+          } catch {}
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务 revision 已变化：期望 ${expectedRevision}，当前 ${currentRevision || '(unknown)'}；请重新读取任务后重试`,
+            code: 'LINK_OPS_REVISION_CONFLICT',
+            retryable: true,
+          });
+        }
+        const historicalAuditEvidence = await descriptionBindingHistoricalAuditEvidence(args.auditFile, taskRef);
+        if (historicalAuditEvidence.unavailable) {
+          return sendJson(res, 503, {
+            ok: false,
+            error: '任务历史审计当前不可读，无法证明从未尝试生产写；描述绑定已按失败关闭',
+            code: 'DESCRIPTION_BINDING_AUDIT_UNAVAILABLE',
+          });
+        }
+        if (!historicalAuditEvidence.ok) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务历史审计已有生产写入/提交不确定性证据，禁止绑定描述：${historicalAuditEvidence.reasons.join(', ')}`,
+            code: 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE',
+          });
+        }
+        const lockId = String(task.id || taskRef);
+        if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
+        linkOpsExecutionLocks.add(lockId);
+        let bound = null;
+        try {
+          bound = await bindUpdateDescriptionMaterialToTask(task, targetStore, material, spuName, sourceTaskId, actor, req, {
+            sourceByteLength: reviewedSource.bytes.length,
+            baseTaskRevision: currentRevision,
+            bindingRequestKey,
+            sectionUsed: verified.sectionUsed,
+          });
+          if (String(process.env.SHEIN_LINK_OPS_TEST_FAIL_BIND_CAS_AFTER_MATERIAL || '') === '1') {
+            const error = new Error('simulated CAS failure after material write (test hook)');
+            error.status = 409;
+            error.code = 'LINK_OPS_REVISION_CONFLICT';
+            throw error;
+          }
+          if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+            const error = new Error('描述绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用');
+            error.status = 503;
+            error.code = 'DESCRIPTION_BINDING_GATEWAY_UNAVAILABLE';
+            throw error;
+          }
+          const persisted = await args.linkOpsStoreGateway.updateTaskRecord(taskRef, bound.task, {
+            expectedRevision: currentRevision,
+            actorUser: actorUser(actor, req),
+          });
+          let readbackTask = persisted;
+          let readbackVerified = false;
+          try {
+            const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
+            const verifyStoredPayload = await readStoredUpdateDescriptionPayload(verifyFound.task);
+            const verifyGate = validateUpdateDescriptionBindingLock(verifyFound.task, verifyStoredPayload);
+            if (verifyFound.task?.descriptionMaterialBinding?.bindingRequestKey === bindingRequestKey
+              && Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)
+              && verifyGate.ok) {
+              readbackTask = verifyFound.task;
+              readbackVerified = true;
+            }
+          } catch {}
+          let auditPending = false;
+          try {
+            await appendDescriptionBindingAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-update-description-bound',
+              actor,
+              ...requestMeta(req),
+              task: {id: persisted.id, revision: persisted.repositoryRevision, stores: taskTargetStores(persisted), writeStores: taskWriteStores(persisted)},
+              binding: projectUpdateDescriptionBindingCommit(persisted),
+            });
+          } catch {
+            auditPending = true;
+          }
+          return sendJson(res, 200, {
+            ok: readbackVerified && !auditPending,
+            bindingCommitted: true,
+            repositoryEventCommitted: true,
+            readbackVerified,
+            auditPending,
+            stage: !readbackVerified
+              ? 'binding_committed_readback_unverified'
+              : auditPending
+                ? 'binding_committed_audit_pending'
+                : 'binding_committed_verified',
+            task: projectLinkOpsTaskForClient(readbackTask),
+            binding: projectUpdateDescriptionBindingCommit(readbackTask),
+          });
+        } catch (error) {
+          // CAS failure (or a pre-CAS failure after material file creation)
+          // leaves the task record untouched. Deterministic-interleave test
+          // hook: pause between the CAS failure and the cleanup so a second
+          // portal can successfully bind the same task+payload first, proving
+          // the cleanup re-reads references instead of deleting a shared file.
+          const cleanupMarker = String(process.env.SHEIN_LINK_OPS_TEST_ORPHAN_CLEANUP_MARKER || '').trim();
+          if (cleanupMarker && bound?.storedPayload?.created === true) {
+            try {
+              await fs.writeFile(`${cleanupMarker}.ready`, `${new Date().toISOString()}\n`, 'utf8');
+              for (let i = 0; i < 200; i += 1) {
+                try { await fs.access(`${cleanupMarker}.go`); break; } catch {}
+                await new Promise(resolve => setTimeout(resolve, 50));
+              }
+            } catch {}
+          }
+          let cleanupResult = {removed: false, reason: 'not_attempted'};
+          try {
+            cleanupResult = await retainOrphanMaterialFile(args, bound?.storedPayload || null);
+          } catch (cleanupError) {
+            cleanupResult = {removed: false, reason: 'cleanup_failed', error: String(cleanupError?.message || cleanupError).slice(0, 300)};
+          }
+          try {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-update-description-orphan-cleanup',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              cleanup: cleanupResult,
+            });
+          } catch {}
+          const mapped = linkOpsRepositoryHttpDetails(error);
+          if (mapped) {
+            try {
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-update-description-failed',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef},
+                error: String(error?.message || error).slice(0, 500),
+                code: error?.code || mapped.body?.code || '',
+              });
+            } catch {}
+            return sendJson(res, mapped.status, mapped.body);
+          }
+          try {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-update-description-failed',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              error: String(error?.message || error).slice(0, 500),
+              code: error?.code || '',
+            });
+          } catch {}
+          return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error), code: error?.code || ''});
+        } finally {
+          linkOpsExecutionLocks.delete(lockId);
+        }
+      }
       if (url.pathname === '/api/link-ops-assets') {
         if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
         if (req.method === 'POST') {
@@ -12219,11 +13253,26 @@ ${uploadCheckAnswer}` : `
           }
           linkOpsExecutionLocks.add(id);
           try {
-            const updated = await startControlledLinkOpsExecution(access.record, actor, req, args, body);
-            const tasks = current.tasks.slice();
-            tasks[idx] = updated;
-            const next = {version: 1, updatedAt: new Date().toISOString(), tasks};
-            await writeLinkOpsTaskStore(args, next);
+            const {task: updated, writeClaim: executionWriteClaim} = await startControlledLinkOpsExecution(access.record, actor, req, args, body);
+            let storeForResponse;
+            if (executionWriteClaim) {
+              // Claim path: single-task CAS only. Never a whole-store replace.
+              const persisted = await persistClaimedLinkOpsExecutionResult(args, {
+                taskId: id,
+                next: updated,
+                writeClaim: executionWriteClaim,
+                actorUser: actorUser(actor, req),
+                now: new Date().toISOString(),
+              });
+              updated.task = persisted;
+              updated.execution = persisted.execution;
+              storeForResponse = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            } else {
+              const tasks = current.tasks.slice();
+              tasks[idx] = updated;
+              storeForResponse = {version: 1, updatedAt: new Date().toISOString(), tasks};
+              await writeLinkOpsTaskStore(args, storeForResponse);
+            }
             await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
               type: 'link-ops-execute',
@@ -12247,7 +13296,7 @@ ${uploadCheckAnswer}` : `
             });
             return sendJson(res, 200, {
               ok: true,
-              data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
+              data: projectLinkOpsTaskStoreForActor(storeForResponse, actor, {limit: 500}),
               task: projectLinkOpsTaskForClient(updated),
               execution: projectLinkOpsExecutionForClient(updated.execution),
             });
@@ -12991,6 +14040,7 @@ ${uploadCheckAnswer}` : `
       if (storageFailure) {
         return sendJson(res, storageFailure.status, storageFailure.body);
       }
+      console.error(`portal handleRequest error: ${err?.stack || err}`);
       if (String(req.url || '').startsWith('/api/')) {
         return sendJson(res, 500, {ok: false, error: 'Server error'});
       }

@@ -122,6 +122,27 @@ not blindly rebound.
 It never rewrites, translates or auto-maps descriptions. A copy_product_draft
 final publish payload without bound ar/en 5-line descriptions is a blocker.
 
+For a **historical** published product whose description must be backfilled
+from the same reviewed 审核资料 (legacy unique `section#s9` with exactly three
+code blocks, or new `section#s09`; `--section auto|s09|s9`), create an
+independent maintenance task, never touching the old publish task:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" update-description --source-task-id <historical-publish-task-id> --store <target-store> --spu <SPU> [--skc <SKC>] --source-file '<reviewed-html-file>' [--section auto|s09|s9] [--material-json <optional-material.json>]
+```
+
+The command creates a standalone `update_description` task (single store, one
+SPU), binds the server-verified material to it (the description body is never
+persisted in the task record; only a controlled runtime material pointer plus
+hashes), then dry-runs the minimal partialEdit body
+(`spu_name` + `multi_language_desc_list` ar/en 5 lines). Real execute requires
+the durable server write-claim, live spu-info identity/current-description-hash
+gates, `query-document-state` (no audit in progress) and
+`check-edit-permission` (editable=true); success requires `code=0` AND
+`info.success=true` AND a non-empty `info.version`; readback must match the
+spu-info description hashes byte-for-byte, otherwise the task stays
+`submitted_readback_pending` / needs manual resolve and must not be retried.
+
 Before asking for final confirmation, verify the returned evidence includes:
 
 - the same task ID;

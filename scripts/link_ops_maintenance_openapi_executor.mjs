@@ -32,6 +32,15 @@ import {
   storeIdentityMatchesMerchantOnly,
   validateStoreIdentity,
 } from '../lib/shein_store_identity.mjs';
+import {
+  validateUpdateDescriptionBindingLock,
+  validateUpdateDescriptionPayloadShape,
+  evaluateUpdateDescriptionReadback,
+  classifyUpdateDescriptionLifecycle,
+  extractSpuInfoIdentity,
+  sha256Utf8,
+  DESCRIPTION_PUBLISH_LANGUAGES,
+} from '../lib/link_ops_product_descriptions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -66,6 +75,10 @@ const ACTIONS = {
     endpoint: '/open-api/goods/product/partialEdit',
     readbackKind: 'product',
   },
+  update_description: {
+    endpoint: '/open-api/goods/product/partialEdit',
+    readbackKind: 'description',
+  },
   update_images: {
     endpoint: '/open-api/goods/product/partialEdit',
     readbackKind: 'product',
@@ -87,7 +100,7 @@ const CERTIFICATE_ALLOWED_ENDPOINTS = new Set([
 const MAINTENANCE_INTENTS = new Set(Object.keys(ACTIONS));
 
 function parseArgs(argv) {
-  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', dir: '', productCacheDir: process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR || path.join(ROOT, 'outputs', 'shein_openapi_products'), quiet: false};
+  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', claimNonce: '', dir: '', productCacheDir: process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR || path.join(ROOT, 'outputs', 'shein_openapi_products'), quiet: false};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--config') args.config = path.resolve(argv[++i]);
@@ -102,6 +115,7 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.mode = 'dry-run';
     else if (a === '--execute') args.mode = 'execute';
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
+    else if (a === '--claim-nonce') args.claimNonce = String(argv[++i] || '').trim();
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Usage:\n  node scripts/link_ops_maintenance_openapi_executor.mjs --task-id <id> --store DX --dry-run\n  node scripts/link_ops_maintenance_openapi_executor.mjs --task-json task.json --store DX --execute --confirm ${SUBMIT_CONFIRM_TEXT}\n\nLocal boundary:\n  do not run real execute from the local Windows/Codex machine; use the cloud BI executor instead.`);
@@ -655,6 +669,363 @@ async function queryPendingCorrectionDocumentState(client, correction, calls, {l
   if(!response.ok||String(response.data?.code)!=='0') return {ok:false,documentState:null,reason:safeString(response.data?.msg||response.data?.code||'query-document-state failed',300)};
   return extractExactDocumentState(response.data,correction.identity,correction.documentVersion);
 }
+// ---------------------------------------------------------------------------
+// update_description (historical backfill) helpers: minimal partialEdit body,
+// live pre-execution gates (spu-info identity + current description hash,
+// query-document-state, check-edit-permission) and spu-info readback.
+// ---------------------------------------------------------------------------
+
+function spuInfoLiveDescriptionRows(info) {
+  const rows = [];
+  const q = [info];
+  const seen = new Set();
+  while (q.length && rows.length < 200) {
+    const cur = q.shift();
+    if (!cur || typeof cur !== 'object' || seen.has(cur)) continue;
+    seen.add(cur);
+    if (Array.isArray(cur)) { q.push(...cur); continue; }
+    if (Array.isArray(cur.productMultiDescList)) {
+      for (const row of cur.productMultiDescList) {
+        const language = String(row?.language || '').toLowerCase();
+        const text = String(row?.productDesc ?? row?.name ?? '');
+        if (language) rows.push({language, text});
+      }
+    }
+    q.push(...Object.values(cur));
+  }
+  return rows;
+}
+
+function descriptionHashesFromRows(rows) {
+  const hashes = {};
+  for (const row of rows) hashes[row.language] = sha256Utf8(row.text);
+  return hashes;
+}
+
+// The description body never lives in the task record. It is read per-run
+// from the portal-controlled runtime material file (relative pointer + file
+// hash + payload hash) and stays in process memory only.
+async function loadDescriptionUpdatePayload(task) {
+  const ref = task?.descriptionUpdatePayloadRef;
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref) || !ref.relativePath) return null;
+  const rootPrefix = path.resolve(ROOT);
+  const raw = String(ref.relativePath || '');
+  if (!raw || raw.includes('..') || raw.startsWith('/') || raw.startsWith('\\')) return null;
+  const resolved = path.resolve(rootPrefix, raw);
+  if (resolved !== rootPrefix && !resolved.startsWith(rootPrefix + path.sep)) return null;
+  if (!resolved.endsWith('.json')) return null;
+  let bytes;
+  try { bytes = await fs.readFile(resolved); } catch { return null; }
+  // Read side fail-closed: on POSIX the material file must not be
+  // group/other readable or writable.
+  if (process.platform !== 'win32') {
+    const stat = await fs.stat(resolved).catch(() => null);
+    if (!stat || (stat.mode & 0o077) !== 0) return null;
+  }
+  const real = await fs.realpath(resolved).catch(() => null);
+  if (!real || real.toLowerCase() !== resolved.toLowerCase()) return null;
+  const actualSha = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (actualSha !== String(ref.fileSha256 || '').toLowerCase()) return null;
+  let payload = null;
+  try { payload = JSON.parse(bytes.toString('utf8')); } catch { return null; }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (sha256Stable(payload) !== String(ref.payloadHash || '')) return null;
+  return payload;
+}
+
+// Persistence projection: the description body text never leaves process
+// memory. Anything persisted (executor output file, portal task record,
+// history/audit) only carries hashes/counts for update_description payloads.
+function projectUpdateDescriptionBodyForPersistence(body) {
+  const rows = asArray(body?.multi_language_desc_list);
+  const lineCounts = {};
+  const hashes = {};
+  for (const row of rows) {
+    const language = String(row?.language || '').toLowerCase();
+    const name = String(row?.name || '');
+    if (!language) continue;
+    lineCounts[language] = name === '' ? 0 : name.split('\n').length;
+    hashes[language] = sha256Utf8(name);
+  }
+  return {
+    sanitized: 'hash-count-only',
+    bodyHash: sha256Stable(body),
+    spuName: String(body?.spu_name || ''),
+    descriptionCount: rows.length,
+    descriptionLanguages: rows.map(row => String(row?.language || '')).filter(Boolean),
+    descriptionLineCounts: lineCounts,
+    descriptionHashes: hashes,
+  };
+}
+
+function projectSubmitPlanForPersistence(submitPlan) {
+  return {
+    ...submitPlan,
+    payloads: (Array.isArray(submitPlan?.payloads) ? submitPlan.payloads : []).map(p => ({
+      ...p,
+      body: p?.operation === 'update_description' ? projectUpdateDescriptionBodyForPersistence(p.body) : p.body,
+    })),
+  };
+}
+
+async function buildUpdateDescriptionPayloadPlan({task, matches, blockers, warnings}) {
+  const spus = unique(matches.map(match => String(match?.spu || '').trim().toLowerCase()).filter(Boolean));
+  if (spus.length !== 1) {
+    blockers.push(`update_description 必须精确单 SPU（当前解析到 ${spus.length} 个：${spus.join('/') || '(empty)'}）`);
+    return null;
+  }
+  const payload = await loadDescriptionUpdatePayload(task);
+  if (!payload) {
+    blockers.push('update_description 任务缺少受控物化的描述材料文件（descriptionUpdatePayloadRef 缺失/哈希不符/路径非法）；必须先通过受控绑定完成审核 HTML 逐字核验。');
+    return null;
+  }
+  const shape = validateUpdateDescriptionPayloadShape(payload);
+  if (!shape.ok) {
+    blockers.push(...shape.blockers);
+    return null;
+  }
+  if (String(payload.spu_name || '').trim().toLowerCase() !== spus[0]) {
+    blockers.push(`update_description payload.spu_name(${payload.spu_name}) 与解析 SPU(${spus[0]}) 不一致`);
+    return null;
+  }
+  const bindingGate = validateUpdateDescriptionBindingLock(task, payload);
+  if (!bindingGate.ok) {
+    blockers.push(...bindingGate.blockers);
+    return null;
+  }
+  const targetLinks = matches.filter(match => String(match?.spu || '').trim().toLowerCase() === spus[0]);
+  warnings.push('update_description 将只提交最小 partialEdit body：spu_name + multi_language_desc_list(ar/en 各5行)；禁止任何 title/image/attribute 字段混入。');
+  return {body: payload, targetLinks};
+}
+
+async function runUpdateDescriptionLivePreflight(client, task, matches, calls, blockers) {
+  const spus = unique(matches.map(match => String(match?.spu || '').trim().toLowerCase()).filter(Boolean));
+  if (spus.length !== 1) {
+    blockers.push(`update_description 写前门禁需要唯一 SPU（当前 ${spus.length} 个）`);
+    return null;
+  }
+  const spu = spus[0];
+  let spuInfo = null;
+  try {
+    const response = await client.request('/open-api/goods/spu-info', {method: 'POST', body: {spuName: spu, languageList: ['en', 'ar']}, headers: {language: 'en'}});
+    calls.push(compactCallResult('spu-info-description-preflight', '/open-api/goods/spu-info', 'POST', response));
+    if (String(response.data?.code) === '0' && response.data?.info && typeof response.data.info === 'object') {
+      spuInfo = response.data.info;
+    } else {
+      blockers.push(`update_description spu-info 探针失败：${safeString(response.data?.msg || response.data?.code || '未知错误')}`);
+    }
+  } catch (error) {
+    blockers.push(`update_description spu-info 探针异常：${safeString(error?.message || error, 240)}`);
+  }
+  const identity = spuInfo ? extractSpuInfoIdentity(spuInfo) : {spuName: '', skcNames: []};
+  if (spuInfo && identity.spuName && String(identity.spuName).trim().toLowerCase() !== spu) {
+    blockers.push(`update_description 身份门禁失败：spu-info 返回 ${identity.spuName}，期望 ${spu}`);
+  } else if (spuInfo && !identity.spuName) {
+    blockers.push(`update_description 身份门禁失败：spu-info 未返回可核验 SPU 身份（期望 ${spu}）`);
+  }
+  const currentHashes = spuInfo ? descriptionHashesFromRows(spuInfoLiveDescriptionRows(spuInfo)) : {};
+  let documentState = null;
+  try {
+    const response = await client.request('/open-api/goods/query-document-state', {method: 'POST', body: {spuList: [{spuName: spu}]}, headers: {language: 'zh-cn'}});
+    calls.push(compactCallResult('query-document-state-preflight', '/open-api/goods/query-document-state', 'POST', response));
+    if (String(response.data?.code) === '0') {
+      const rows = Array.isArray(response.data?.info?.data) ? response.data.info.data : [];
+      const row = rows.find(item => String(item?.spuName || '').trim().toLowerCase() === spu);
+      if (!row) {
+        blockers.push('update_description 审核公文门禁失败：query-document-state 未返回该 SPU 记录，无法确认无审核公文');
+      } else {
+        const states = (Array.isArray(row.skcList) ? row.skcList : []).map(item => Number(item?.documentState ?? -99));
+        const inAudit = states.filter(state => state === 1 || state === 5);
+        if (inAudit.length) {
+          blockers.push(`update_description 审核公文门禁失败：SPU 存在审核中/申诉中 SKC（documentState=${inAudit.join(',')}），禁止编辑`);
+        }
+        documentState = states.length ? [...new Set(states)].join(',') : 'none';
+      }
+    } else {
+      blockers.push(`update_description 审核公文门禁失败：${safeString(response.data?.msg || response.data?.code || '未知错误')}`);
+    }
+  } catch (error) {
+    blockers.push(`update_description 审核公文门禁异常：${safeString(error?.message || error, 240)}`);
+  }
+  let editable = null;
+  let editReason = '';
+  try {
+    const response = await client.request('/open-api/goods/product/check-edit-permission', {method: 'POST', body: {spuName: spu}, headers: {language: 'zh-cn'}});
+    calls.push(compactCallResult('check-edit-permission-preflight', '/open-api/goods/product/check-edit-permission', 'POST', response));
+    if (String(response.data?.code) === '0' && typeof response.data?.info === 'object') {
+      editable = response.data.info.editable === true;
+      editReason = safeString(response.data.info.reason || '', 300);
+      if (!editable) blockers.push(`update_description 编辑权限门禁失败：editable=false${editReason ? `（${editReason}）` : ''}`);
+    } else {
+      blockers.push(`update_description 编辑权限门禁失败：${safeString(response.data?.msg || response.data?.code || '未知错误')}`);
+    }
+  } catch (error) {
+    blockers.push(`update_description 编辑权限门禁异常：${safeString(error?.message || error, 240)}`);
+  }
+  return {
+    ok: blockers.length === 0,
+    spu,
+    spuInfoIdentity: identity.spuName,
+    currentDescriptionHashes: currentHashes,
+    documentState,
+    editable,
+    editReason,
+  };
+}
+
+function descriptionPreflightFromTaskExecution(task, storeKey) {
+  const target = String(storeKey || '').trim().toUpperCase();
+  const runs = asArray(task?.execution?.linkMaintenanceExecutors);
+  const candidates = runs.filter(run => {
+    const runStore = String(run?.storeKey || '').trim().toUpperCase();
+    return runStore === target || (runs.length === 1 && runStore);
+  });
+  for (const run of candidates) {
+    const preflight = run?.adapterEvidence?.descriptionPreflight
+      || run?.result?.adapterEvidence?.descriptionPreflight
+      || null;
+    if (preflight && typeof preflight === 'object') return preflight;
+  }
+  return null;
+}
+
+function parseDocumentStateSet(row) {
+  const states = (Array.isArray(row?.skcList) ? row.skcList : [])
+    .map(item => Number(item?.documentState ?? -99))
+    .filter(value => Number.isInteger(value) && value >= 0);
+  return states.length ? [...new Set(states)].sort().join(',') : '';
+}
+
+async function queryDocumentStateForSpu(client, spu, calls, label) {
+  const response = await client.request('/open-api/goods/query-document-state', {
+    method: 'POST',
+    body: {spuList: [{spuName: spu}]},
+    headers: {language: 'zh-cn'},
+  });
+  calls.push(compactCallResult(label, '/open-api/goods/query-document-state', 'POST', response));
+  if (String(response.data?.code) !== '0') {
+    return {ok: false, reason: safeString(response.data?.msg || response.data?.code || 'query-document-state failed', 300), row: null};
+  }
+  const rows = Array.isArray(response.data?.info?.data) ? response.data.info.data : [];
+  const row = rows.find(item => String(item?.spuName || '').trim().toLowerCase() === String(spu || '').trim().toLowerCase());
+  if (!row) return {ok: false, reason: 'query-document-state 未返回该 SPU 记录', row: null};
+  return {ok: true, row, stateSet: parseDocumentStateSet(row)};
+}
+
+/**
+ * Causality-gated readback for update_description. A hash match on spu-info
+ * alone never proves submission: matched requires (1) the exact partialEdit
+ * response version carried into the readback evidence, (2) the live spu-info
+ * ar/en description hashes byte-equal to the binding, and (3) a
+ * query-document-state read for exactly that spu showing an audit record or a
+ * status transition vs the pre-write baseline. Any unverifiable piece keeps
+ * the task pending/manual resolve.
+ */
+async function readbackUpdateDescription(client, task, matches, calls, beforePreflight = null, submittedVersion = '') {
+  const spus = unique(matches.map(match => String(match?.spu || '').trim().toLowerCase()).filter(Boolean));
+  if (spus.length !== 1) {
+    return {ok: false, status: 'update_description_readback_spu_not_unique', matchedRows: [], calls};
+  }
+  const spu = spus[0];
+  const version = String(submittedVersion || '').trim();
+  if (!version) {
+    return {
+      ok: false,
+      status: 'description_readback_version_unverified',
+      needsManualResolve: true,
+      blockers: ['回读缺少 partialEdit 返回的 info.version，无法建立版本因果，不能判定提交成功'],
+      matchedRows: [],
+      calls,
+    };
+  }
+  let info = null;
+  try {
+    const response = await client.request('/open-api/goods/spu-info', {method: 'POST', body: {spuName: spu, languageList: ['en', 'ar']}, headers: {language: 'en'}});
+    calls.push(compactCallResult('spu-info-description-readback', '/open-api/goods/spu-info', 'POST', response));
+    if (String(response.data?.code) === '0' && response.data?.info && typeof response.data.info === 'object') info = response.data.info;
+  } catch (error) {
+    calls.push({name: 'spu-info-description-readback', path: '/open-api/goods/spu-info', method: 'POST', httpStatus: null, code: null, msg: safeString(error?.message || error, 300), traceId: null});
+  }
+  if (!info) return {ok: false, status: 'update_description_readback_unverifiable', matchedRows: [], calls};
+  const gate = evaluateUpdateDescriptionReadback(task?.descriptionMaterialBinding || null, info, {expectedSpuName: spu});
+  const binding = task?.descriptionMaterialBinding || null;
+  let documentStateEvidence = null;
+  try {
+    const after = await queryDocumentStateForSpu(client, spu, calls, 'query-document-state-readback');
+    const beforeSet = String(beforePreflight?.documentState || '').trim();
+    if (!after.ok) {
+      documentStateEvidence = {ok: false, reason: after.reason, beforeStateSet: beforeSet, afterStateSet: ''};
+    } else {
+      const inAudit = (Array.isArray(after.row.skcList) ? after.row.skcList : [])
+        .map(item => Number(item?.documentState ?? -99))
+        .filter(value => value === 1 || value === 5);
+      const transitionObserved = Boolean(
+        (after.stateSet && after.stateSet !== beforeSet)
+        || inAudit.length > 0
+      );
+      const rowVersions = [
+        String(after.row?.version || ''),
+        ...(Array.isArray(after.row?.skcList) ? after.row.skcList : []).map(skc => String(skc?.version || '')),
+      ].map(value => value.trim()).filter(Boolean);
+      // Causality requires a provable submitted version: if the audit record
+      // exposes versions, at least one must equal the partialEdit-returned
+      // version. If NO version field is returned at all, the state change
+      // cannot be attributed to this submission, so the task must stay
+      // pending/manual resolve instead of matching.
+      const versionMatched = rowVersions.length === 0 ? false : rowVersions.some(value => value === version);
+      documentStateEvidence = {
+        ok: transitionObserved && versionMatched === true,
+        reason: !transitionObserved
+          ? `query-document-state 未观察到审核记录/状态转换（before=${beforeSet || '(none)'} after=${after.stateSet || '(none)'}）`
+          : (versionMatched === false
+            ? (rowVersions.length === 0
+              ? 'query-document-state 未返回任何 version 字段，无法建立与 partialEdit 返回版本的因果证据；不能把状态变化归因本次提交，必须等待后续精确核销机制'
+              : `query-document-state 返回的版本（${rowVersions.join('/')}）与 partialEdit 返回版本（${version}）不一致`)
+            : ''),
+        beforeStateSet: beforeSet,
+        afterStateSet: after.stateSet,
+        inAudit: inAudit.length > 0,
+        versionMatched,
+      };
+    }
+  } catch (error) {
+    documentStateEvidence = {ok: false, reason: safeString(error?.message || error, 300), beforeStateSet: String(beforePreflight?.documentState || ''), afterStateSet: ''};
+  }
+  const versionCausal = Boolean(version);
+  const fingerprint = {
+    submittedVersion: version,
+    versionCausal,
+    documentStateBefore: beforePreflight?.documentState || null,
+    documentStateAfter: documentStateEvidence?.afterStateSet || null,
+    documentStateTransitionVerified: Boolean(documentStateEvidence?.ok),
+    beforeHashes: beforePreflight?.currentDescriptionHashes || null,
+    expectedAfterHashes: {
+      ar: String(binding?.hashes?.ar || ''),
+      en: String(binding?.hashes?.en || ''),
+    },
+    afterHashes: descriptionHashesFromRows(spuInfoLiveDescriptionRows(info)),
+  };
+  const blockers = [...(gate.blockers || [])];
+  if (!documentStateEvidence?.ok) blockers.push(documentStateEvidence?.reason || '审核记录/状态转换无法核验');
+  const matched = Boolean(gate.ok && versionCausal && documentStateEvidence?.ok);
+  return {
+    ok: matched,
+    status: matched
+      ? 'description_readback_matched'
+      : (!versionCausal
+        ? 'description_readback_version_unverified'
+        : (!gate.ok
+          ? gate.status
+          : 'description_readback_document_state_unverified')),
+    needsManualResolve: !matched,
+    summary: gate.summary || null,
+    blockers,
+    fingerprint,
+    documentStateEvidence,
+    matchedRows: matched ? matches.slice(0, 20) : [],
+    calls,
+  };
+}
 async function waitForPendingCorrectionState(client, correction, expectedState, calls){
   const attempts=Math.max(1,Math.min(8,Number(process.env.SHEIN_PENDING_IMAGE_CORRECTION_STATE_ATTEMPTS||4)));
   const delayMs=Math.max(0,Math.min(5000,Number(process.env.SHEIN_PENDING_IMAGE_CORRECTION_STATE_DELAY_MS||750)));
@@ -670,7 +1041,7 @@ function correctionResponseSucceeded(response){
   if(!response?.ok||String(response.data?.code)!=='0') return false;
   return !(response.data?.info&&typeof response.data.info==='object'&&response.data.info.success===false);
 }
-function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[],spuInfoMap=new Map(),inventoryWarehouseCode='' }){
+async function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEditPayloads=[],certificatePayloads=[],spuInfoMap=new Map(),inventoryWarehouseCode='' }){
   const command=String(task?.command||task?.text||''); const parameters=structuredTaskParameters(task); const out=[];
   const firstPartialEditIntent = intents.find(intent => intent === 'update_title' || intent === 'update_images') || '';
   for(const intent of intents){
@@ -699,6 +1070,9 @@ function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,imageEdi
       const productPriceList=matches.flatMap(m=>m.skuCodes.map(sku=>({productCode:sku,currencyCode:siteInfo.currency||'SAR',shopPrice:Number(price.toFixed(2)),specialPrice:Number(price.toFixed(2)),site:siteInfo.site,riseReason:'4'})));
       if(!productPriceList.length) blockers.push('改商品售价任务未解析到 SKU code，无法构建售价 payload。');
       out.push({operation:intent, endpoint, body:{productPriceList}, targetLinks:matches});
+    } else if(intent==='update_description'){
+      const plan=await buildUpdateDescriptionPayloadPlan({task,matches,blockers,warnings});
+      if(plan) out.push({operation:intent, endpoint, body:plan.body, targetLinks:plan.targetLinks});
     } else if(intent==='update_title' || intent==='update_images'){
       if (intent !== firstPartialEditIntent) continue;
       const hasTitle=intents.includes('update_title');
@@ -811,11 +1185,12 @@ async function readbackStock(client, matches, calls, expectedInventory){
   const ok=missingSkuCodes.length===0&&mismatchedSkuCodes.length===0;
   return {ok,status:ok?'matched_stock_query_exact':'stock_query_readback_mismatch',skuCodes:skuCodes.slice(0,100),missingSkuCodes,mismatchedSkuCodes,expectedInventory:Number.isFinite(expectedInventory)?expectedInventory:null,matchedRows:ok?matches.slice(0,20):[],calls};
 }
-async function readbackForIntents(client, intents, matches, calls, expectedInventory){
+async function readbackForIntents(client, intents, matches, calls, expectedInventory, task, descriptionBeforePreflight = null, submittedDescriptionVersion = ''){
   const groups=[];
   if(intents.includes('update_inventory')) groups.push(await readbackStock(client,matches,calls,expectedInventory));
-  const productReadbackIntents=intents.filter(x=>!['update_inventory','certificate_review'].includes(x));
+  const productReadbackIntents=intents.filter(x=>!['update_inventory','certificate_review','update_description'].includes(x));
   if(productReadbackIntents.length) groups.push(await readbackProduct(client,matches,calls));
+  if(intents.includes('update_description')) groups.push(await readbackUpdateDescription(client,task,matches,calls,descriptionBeforePreflight,submittedDescriptionVersion));
   if(intents.includes('certificate_review')) groups.push({ok:false,status:'certificate_submitted_manual_review_required',matchedRows:[],calls,warnings:['证书/资质提交后需人工确认平台审核状态，不能自动判成功。']});
   if(!groups.length) return {ok:false,status:'not_run',matchedRows:[],calls};
   const ok=groups.every(g=>g.ok);
@@ -825,6 +1200,9 @@ async function readbackForIntents(client, intents, matches, calls, expectedInven
 async function main(){
   const args=parseArgs(process.argv.slice(2)); const startedAt=new Date().toISOString(); const runId=`lmo_${nowId()}_${crypto.randomBytes(4).toString('hex')}`; const {task, executionContext}=await loadTask(args); const store=args.store||taskStores(task)[0]; if(!store) throw new Error('Missing --store / task store'); const intents=taskIntents(task); const blockers=[]; const warnings=[]; const calls=[];
   if(!intents.length) blockers.push('任务不包含维护写动作。');
+  if(intents.includes('update_description')&&(intents.length!==1||intents[0]!=='update_description')){
+    blockers.push('历史描述回填任务必须单独 update_description，不能混入其他维护动作。');
+  }
   const {config, client, store: configuredStore}=await loadClient({...args, store});
   const testWebhookGuard=createLoopbackTestWebhookWriteGuard({
     baseUrl:config.apiBaseUrls?.prodSemiManaged||SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
@@ -863,14 +1241,29 @@ async function main(){
   const productLoad=await loadProductRows(store,args); if(productLoad.error) warnings.push(`OpenAPI 商品缓存不可读，将只用链接快照：${productLoad.error}`);
   const jsonAssets=await loadJsonAssetPayloads(task);
   const taskWithJsonAssets={...task,_jsonAssets:jsonAssets};
-  const snapshotResolved=resolveTargets({task, store, linkRows:linkLoad.rows||[], productRows:productLoad.rows||[]});
-  const boundResolved=intents.includes('update_images')
-    ? resolveApprovedImageBindingIdentity(task,store,snapshotResolved.missing,warnings)
-    : {matches:[],unresolved:snapshotResolved.missing};
-  const liveResolved=await resolveMissingExactSkcsFromOpenApi(client,store,boundResolved.unresolved,calls,warnings);
-  const mergedMatches=[]; const mergedKeys=new Set();
-  for(const match of [...snapshotResolved.matches,...boundResolved.matches,...liveResolved.matches]){ const key=`${match.storeKey}|${normalizeSheinSkc(match.skc)||compactRef(match.skc)}|${compactRef(match.spu)}`; if(mergedKeys.has(key)) continue; mergedKeys.add(key); mergedMatches.push(match); }
-  const resolved={refs:snapshotResolved.refs,matches:mergedMatches,missing:liveResolved.unresolved};
+  const explicitSpu=intents.includes('update_description')?String(structuredTaskParameters(task).spuName||'').trim():'';
+  let resolved;
+  if(explicitSpu&&/^[A-Za-z][A-Za-z0-9_-]{3,}$/.test(explicitSpu)){
+    resolved={
+      refs:[explicitSpu],
+      matches:[{
+        ref:explicitSpu,storeKey:store,skc:'',spu:explicitSpu.toLowerCase(),standardGoodsSn:'',
+        isOnShelf:null,skuCodes:[],supplierCode:'',costSar:null,sheinUsableInventory:0,
+        productRowFound:false,resolvedFrom:'task_explicit_spu_identity',
+      }],
+      missing:[],
+    };
+    warnings.push(`update_description 使用任务参数锁定的显式 SPU 身份 ${explicitSpu}；不依赖旧链接快照解析。`);
+  } else {
+    const snapshotResolved=resolveTargets({task, store, linkRows:linkLoad.rows||[], productRows:productLoad.rows||[]});
+    const boundResolved=intents.includes('update_images')
+      ? resolveApprovedImageBindingIdentity(task,store,snapshotResolved.missing,warnings)
+      : {matches:[],unresolved:snapshotResolved.missing};
+    const liveResolved=await resolveMissingExactSkcsFromOpenApi(client,store,boundResolved.unresolved,calls,warnings);
+    const mergedMatches=[]; const mergedKeys=new Set();
+    for(const match of [...snapshotResolved.matches,...boundResolved.matches,...liveResolved.matches]){ const key=`${match.storeKey}|${normalizeSheinSkc(match.skc)||compactRef(match.skc)}|${compactRef(match.spu)}`; if(mergedKeys.has(key)) continue; mergedKeys.add(key); mergedMatches.push(match); }
+    resolved={refs:snapshotResolved.refs,matches:mergedMatches,missing:liveResolved.unresolved};
+  }
   if(resolved.missing.length) blockers.push(`未定位到目标货号/SKC：${resolved.missing.join('、')}`);
   if(!resolved.matches.length) blockers.push('没有可执行目标链接。');
   const correctionValidation=intents.includes('update_images')
@@ -901,19 +1294,67 @@ async function main(){
       ...(correctionStateBefore===1?[{operation:'pending_new_listing_revoke',endpoint:'/open-api/goods/revoke-product',body:{spuName:correction.identity.spuName},targetLinks:resolved.matches}]:[]),
       {operation:'pending_new_listing_republish',endpoint:'/open-api/goods/product/publishOrEdit',body:correction.republishPayload,targetLinks:resolved.matches},
     ]
-    :buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads,spuInfoMap,inventoryWarehouseCode});
-  const submitPlan={
+    :await buildPayloads({task:taskWithJsonAssets,intents,matches:resolved.matches,siteInfo,blockers,warnings,imageEditPayloads,certificatePayloads,spuInfoMap,inventoryWarehouseCode});
+  let descriptionPreflight=null;
+  const descriptionUpdatePayloadPlan=payloads.find(p=>p.operation==='update_description')||null;
+  if(intents.includes('update_description')){
+    descriptionPreflight=await runUpdateDescriptionLivePreflight(client,task,resolved.matches,calls,blockers);
+  }
+  const descriptionAlreadyMatched = intents.includes('update_description')
+    && descriptionPreflight
+    && DESCRIPTION_PUBLISH_LANGUAGES.every(language => {
+      const expected = String(task?.descriptionMaterialBinding?.hashes?.[language] || '').toLowerCase();
+      const live = String(descriptionPreflight.currentDescriptionHashes?.[language] || '').toLowerCase();
+      return Boolean(expected) && live === expected;
+    });
+  if (descriptionAlreadyMatched) {
+    warnings.push('live 商品描述已与审核资料目标逐字一致（already_matched）：无需写入，不能用作提交证明。');
+  }
+  const descriptionSummary=descriptionUpdatePayloadPlan
+    ? {spuName:String(descriptionUpdatePayloadPlan.body?.spu_name||''),payloadHash:sha256Stable(descriptionUpdatePayloadPlan.body),descriptionCount:asArray(descriptionUpdatePayloadPlan.body?.multi_language_desc_list).length}
+    : null;
+  const submitPlanFull={
     storeKey:store,
     intents,
     ...(correction?{pendingNewListingImageCorrection:{correctionFingerprint:correction.correctionFingerprint,sourceTaskId:correction.sourceTaskId,documentVersion:correction.documentVersion,documentStateBefore:correctionStateBefore}}:{}),
     payloads:payloads.map(p=>({operation:p.operation,endpoint:p.endpoint,body:p.body,targetSkcs:p.targetLinks.map(x=>x.skc).filter(Boolean)})),
   };
-  const payloadHash=payloads.some(p=>Object.keys(p.body||{}).length)?sha256Stable(submitPlan):'';
+  // Persisted submitPlan never contains description body text (hash/count only
+  // for update_description); the full body lives only in process memory and is
+  // used solely to compute the locked payload hash and the guarded write call.
+  const submitPlan=projectSubmitPlanForPersistence(submitPlanFull);
+  const payloadHash=payloads.some(p=>Object.keys(p.body||{}).length)?sha256Stable(submitPlanFull):'';
   if(args.mode==='execute'){
     const expected=safeString(executionContext?.expectedPayloadHash||executionContext?.request?.expectedPayloadHash||executionContext?.request?.payloadHash||'',120);
     if(args.confirm!==SUBMIT_CONFIRM_TEXT) blockers.push(`真实提交必须显式传入 --confirm ${SUBMIT_CONFIRM_TEXT}`);
     if(!expected) blockers.push('真实提交缺少 dry-run 锁定的 payload hash。');
     else if(!payloadHash||payloadHash!==expected) blockers.push(`真实提交 payload hash 与 dry-run 锁定值不一致：expected=${expected||'missing'} actual=${payloadHash||'missing'}`);
+    if(intents.includes('update_description')){
+      const claim=executionContext?.writeClaim||null;
+      const claimNonce=String(args.claimNonce||'');
+      const claimOk=Boolean(claim&&claimNonce
+        &&String(claim?.nonce||'')===claimNonce
+        &&String(claim?.taskId||'')===String(task?.id||'')
+        &&String(claim?.expectedPayloadHash||'')===payloadHash
+        &&asArray(claim?.operations||claim?.intents||[]).includes('update_description'));
+      if(!claimOk){
+        blockers.push('update_description 真实提交缺少服务端持久化 write-claim（nonce/taskId/expectedPayloadHash/operation 必须一致），禁止直接调用 partialEdit。');
+      }
+    }
+    if(intents.includes('update_description')){
+      const baseline=descriptionPreflightFromTaskExecution(task,store);
+      if(!baseline?.currentDescriptionHashes){
+        blockers.push('update_description 执行前缺少 dry-run 基线描述 hash，禁止提交。');
+      }else if(descriptionPreflight){
+        for(const language of ['ar','en']){
+          const live=String(descriptionPreflight.currentDescriptionHashes?.[language]||'');
+          const expected=String(baseline.currentDescriptionHashes?.[language]||'');
+          if(expected&&live&&live!==expected){
+            blockers.push(`update_description 执行前 live ${language} 描述已漂移（dry-run=${expected} live=${live}），禁止提交。`);
+          }
+        }
+      }
+    }
   }
   const taskParameters=structuredTaskParameters(task);
   const hasExpectedCurrentInventory=taskParameters.expectedCurrentInventory!==undefined
@@ -938,21 +1379,55 @@ async function main(){
   }
   let submitResults=[]; let actualWriteSubmitted=false; let writeAttempted=false; let recoveryRequired=false; let correctionReadback=null; let correctionPublishResult=null;
   if(args.mode==='execute' && blockers.length===0){
-    for(const p of payloads){
-      const guardedWrite=await runSheinWebhookExternalWriteGuarded({
-        writeStores:[store],
-        guard:testWebhookGuard||undefined,
-        write:()=>client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}),
-      });
-      if(!guardedWrite.ok){
-        blockers.push(...(guardedWrite.gate?.blockers||['平台动态安全闸门阻止真实提交。']));
-        break;
-      }
-      writeAttempted=true;
-      const response=guardedWrite.value;
-      const compact=compactCallResult(p.operation,p.endpoint,'POST',response);
-      calls.push(compact);
-      submitResults.push({...compact, operation:p.operation});
+    if (intents.includes('update_description') && descriptionAlreadyMatched) {
+      // No-op: live content already equals the target; skipping the write
+      // entirely. already_matched must never be presented as submission
+      // evidence.
+      writeAttempted=false;
+    } else {
+      for(const p of payloads){
+        const guardedWrite=await runSheinWebhookExternalWriteGuarded({
+          writeStores:[store],
+          guard:testWebhookGuard||undefined,
+          write:()=>client.request(p.endpoint,{method:'POST',body:p.body,headers:{language:'en'}}),
+        });
+        if(!guardedWrite.ok){
+          blockers.push(...(guardedWrite.gate?.blockers||['平台动态安全闸门阻止真实提交。']));
+          break;
+        }
+        writeAttempted=true;
+        const response=guardedWrite.value;
+        const compact=compactCallResult(p.operation,p.endpoint,'POST',response);
+        calls.push(compact);
+        submitResults.push({...compact, operation:p.operation});
+        if(p.operation==='update_description'){
+          const codeOk=String(response.data?.code)==='0';
+          const successExplicit=response.data?.info?.success===true;
+          const version=safeString(response.data?.info?.version||'',160);
+          if(!codeOk){
+            blockers.push(`${p.operation} 返回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`);
+          }else if(!successExplicit){
+            // success===false is a definitive platform rejection; success
+            // missing/undefined is ambiguous. Neither may produce
+            // actualWriteSubmitted or reach readback.
+            submitResults[submitResults.length-1].successNotExplicit=String(response.data?.info?.success);
+            if(response.data?.info?.success===false){
+              blockers.push(`${p.operation} 平台校验失败：${safeString(
+                asArray(response.data?.info?.pre_valid_result).flatMap(row=>asArray(row?.messages)).map(v=>safeString(v,300)).join('；') || 'info.success=false 但无详细错误',
+                500,
+              )}`);
+            }else{
+              submitResults[submitResults.length-1].submittedUnconfirmed=true;
+              recoveryRequired=true;
+              blockers.push(`${p.operation} 成功判定必须 code=0 且 info.success=true；当前 info.success=${String(response.data?.info?.success)}；写请求已发出但成功未确认，任务保持 submitted_unconfirmed，禁止重试，必须人工核销。`);
+            }
+          }else if(!version){
+            submitResults[submitResults.length-1].submittedUnconfirmed=true;
+            blockers.push(`${p.operation} 平台返回成功但缺少 info.version，无法确认提交完成；任务保持 submitted_unconfirmed，必须人工核销，禁止重试。`);
+            recoveryRequired=true;
+          }
+          continue;
+        }
       if(correction&&p.operation==='pending_new_listing_revoke'){
         if(!correctionResponseSucceeded(response)){
           blockers.push(`待审核新品撤回失败：${safeString(response.data?.msg||response.data?.code||'未知错误')}`);
@@ -991,19 +1466,76 @@ async function main(){
         const errs=(response.data?.info?.pre_valid_result||[]).map(v=>`[${v.form||v.module||''}] ${(v.messages||[]).join('; ')}`).join(' | ');
         blockers.push(`${p.operation} 校验失败：${errs||'info.success=false 但无详细错误'}`);
       }
+      }
+      if(!correction){
+        if(intents.includes('update_description')){
+          // Strict: only the update_description operation itself may produce
+          // actualWriteSubmitted, and only with code=0 AND info.success===true
+          // AND a non-empty info.version. Missing success or version can never
+          // reach readback/matched.
+          actualWriteSubmitted=submitResults.some(r=>
+            r.operation==='update_description'
+            && String(r.code)==='0'
+            && r.infoSuccess===true
+            && Boolean(String(r.infoVersion||'').trim())
+          );
+        }else{
+          actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0' && r.infoSuccess!==false);
+        }
+      }
+      if(actualWriteSubmitted&&intents.includes('update_description')&&submitResults.some(r=>r.operation==='update_description'&&r.submittedUnconfirmed===true)){
+        actualWriteSubmitted=false;
+        writeAttempted=true;
+        recoveryRequired=true;
+      }
     }
-    if(!correction) actualWriteSubmitted=submitResults.some(r=>String(r.code)==='0' && r.infoSuccess!==false);
   }
   const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
   const expectedInventory=intents.includes('update_inventory')?numberForTask('update_inventory',task,String(task?.command||task?.text||'')):null;
+  const submittedDescriptionVersion = String(
+    submitResults.find(r=>r.operation==='update_description')?.infoVersion || ''
+  ).trim();
   if(actualWriteSubmitted){
     readback=correction
       ?{ok:Boolean(correctionReadback?.ok&&correctionReadback?.documentState===1),status:correctionReadback?.ok&&correctionReadback?.documentState===1?'matched_pending_document_state':'pending_document_state_readback_failed',matchedRows:correctionReadback?.ok?[correction.identity]:[],calls:readbackCalls,evidence:correctionReadback}
-      :await readbackForIntents(client,intents,resolved.matches,readbackCalls,expectedInventory);
+      :await readbackForIntents(client,intents,resolved.matches,readbackCalls,expectedInventory,task,descriptionPreflight,submittedDescriptionVersion);
   }
-  const state=args.mode==='execute' ? (actualWriteSubmitted?'submitted':(recoveryRequired?'pending_listing_image_correction_recovery_required':'blocked')) : (blockers.length?'blocked':'ready_for_submit');
-  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted,writeAttempted,recoveryRequired,correctionStateBefore,correctionReadback,correctionFingerprint:correction?.correctionFingerprint||'',sourceTaskId:correction?.sourceTaskId||'',protectedFieldsHash:correction?.protectedFieldsHash||'',phaseResults:submitResults,canSilentWrite:false,matchedLinksCount:resolved.matches.length,matchedLinks:resolved.matches.slice(0,80),linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'',productCacheFile:productLoad.file?rel(productLoad.file):'',siteInfo,imagePayloadInspection,inventoryPreflight,calls}, publishResult: correction ? correctionPublishResult : (actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null), readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false,executeRequiresConfirm:SUBMIT_CONFIRM_TEXT,dryRunDoesNotCallBusinessWrite:args.mode!=='execute',inventoryPreflightRequired:hasExpectedCurrentInventory,pendingListingCorrection:correction?{sourceTaskRequired:true,exactIdentityRequired:true,approvedBindingRequired:true,phasedRevokeAndRepublish:true,protectedFieldsUntouched:true}:null,note:'维护写真实提交必须由账号权限、动作总闸门、payload hash 和确认文本共同放行；待审核新品纠图还必须撤回成功并精确回读 state=4 后，才可用原完整 payload 重提。'}};
+  const state=args.mode==='execute'
+    ? (actualWriteSubmitted
+        ? 'submitted'
+        : (descriptionAlreadyMatched
+            ? 'update_description_already_matched'
+            : (recoveryRequired
+                ? (intents.includes('update_description') ? 'update_description_submitted_unconfirmed' : 'pending_listing_image_correction_recovery_required')
+                : 'blocked')))
+    : (blockers.length
+        ? 'blocked'
+        : (descriptionAlreadyMatched ? 'update_description_already_matched' : 'ready_for_submit'));
+  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, alreadyMatched:descriptionAlreadyMatched, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted,writeAttempted,recoveryRequired,correctionStateBefore,correctionReadback,correctionFingerprint:correction?.correctionFingerprint||'',sourceTaskId:correction?.sourceTaskId||'',protectedFieldsHash:correction?.protectedFieldsHash||'',phaseResults:submitResults,canSilentWrite:false,matchedLinksCount:resolved.matches.length,matchedLinks:resolved.matches.slice(0,80),linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'',productCacheFile:productLoad.file?rel(productLoad.file):'',siteInfo,imagePayloadInspection,inventoryPreflight,calls}, publishResult: correction ? correctionPublishResult : (actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null), readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false,executeRequiresConfirm:SUBMIT_CONFIRM_TEXT,dryRunDoesNotCallBusinessWrite:args.mode!=='execute',inventoryPreflightRequired:hasExpectedCurrentInventory,pendingListingCorrection:correction?{sourceTaskRequired:true,exactIdentityRequired:true,approvedBindingRequired:true,phasedRevokeAndRepublish:true,protectedFieldsUntouched:true}:null,note:'维护写真实提交必须由账号权限、动作总闸门、payload hash 和确认文本共同放行；待审核新品纠图还必须撤回成功并精确回读 state=4 后，才可用原完整 payload 重提。'}};
   if(actualWriteSubmitted && !readback.ok){ output.ok=false; output.state='submitted'; output.blockers=[]; output.warnings.push('写接口返回成功但强回读未确认，任务必须锁定等待人工核销。'); }
+  if(descriptionPreflight){ output.adapterEvidence.descriptionPreflight=descriptionPreflight; }
+  if(descriptionSummary){ output.payload.summary.descriptionUpdate=descriptionSummary; }
+  if(actualWriteSubmitted&&intents.includes('update_description')){
+    const descriptionLifecycle=classifyUpdateDescriptionLifecycle({executeOk:true,readback});
+    output.descriptionLifecycle=descriptionLifecycle;
+    // Top-level state stays 'submitted' so the portal lifecycle classifier can
+    // decide matched/pending from the readback outcome; the detailed
+    // descriptionLifecycle is carried alongside for audit and manual resolve.
+    if(descriptionLifecycle.needsManualResolve){
+      output.warnings.push('描述回读未精确匹配：任务保持 submitted_readback_pending，必须人工核销，禁止重复提交。');
+    }
+  }
+  if(descriptionAlreadyMatched){
+    output.descriptionLifecycle={lifecycleStatus:'description_already_matched',status:'description_already_matched',needsManualResolve:false,alreadyMatched:true};
+  }
+  if(intents.includes('update_description')&&args.mode==='execute'&&writeAttempted&&!actualWriteSubmitted&&recoveryRequired){
+    output.ok=false;
+    output.state='update_description_submitted_unconfirmed';
+    output.descriptionLifecycle={lifecycleStatus:'submitted_readback_pending',status:'submitted_readback_pending',needsManualResolve:true};
+    output.adapterEvidence.submittedPossibly=true;
+    output.submittedPossibly=true;
+    output.warnings.push('partialEdit 已发出但成功未确认（info.version 缺失）：任务保持 submitted_unconfirmed，禁止重复提交，必须人工核销。');
+  }
   const outPath=path.join(args.outDir,`${runId}.local.json`); await writeJson(outPath,output); output.savedTo=rel(outPath); if(!args.quiet) console.log(JSON.stringify(output,null,2));
 }
 
