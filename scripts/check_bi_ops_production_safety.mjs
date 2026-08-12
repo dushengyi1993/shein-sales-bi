@@ -28,6 +28,7 @@ const ALLOWED_REAL_SUBMIT_OPERATIONS = new Set([
   'activate_link',
   'retire_link',
   'update_title',
+  'update_description',
   'update_images',
   'update_inventory',
   'update_supply_price',

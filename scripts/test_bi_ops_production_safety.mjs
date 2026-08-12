@@ -122,7 +122,7 @@ async function main() {
         safeWriteOperations: {
           enabled: true,
           requireDryRun: true,
-          allowedOperations: ['activate_link', 'retire_link', 'update_inventory'],
+          allowedOperations: ['activate_link', 'retire_link', 'update_inventory', 'update_description'],
           allowedStores: ['HL'],
         },
       },
@@ -133,11 +133,11 @@ async function main() {
           enabled: true,
           realSubmit: true,
           stores: ['HL'],
-          operations: ['activate_link', 'retire_link', 'update_inventory'],
+          operations: ['activate_link', 'retire_link', 'update_inventory', 'update_description'],
           allowedUsers: ['owner_smoke'],
         }],
       },
-      args: ['--expect', 'pilot', '--require-store', 'HL', '--require-operation', 'activate_link', '--require-operation', 'retire_link', '--require-operation', 'update_inventory', '--require-user', 'owner_smoke'],
+      args: ['--expect', 'pilot', '--require-store', 'HL', '--require-operation', 'activate_link', '--require-operation', 'retire_link', '--require-operation', 'update_inventory', '--require-operation', 'update_description', '--require-user', 'owner_smoke'],
     });
     assert.equal(maintenancePilot.json.ok, true);
     assert.equal(maintenancePilot.json.state, 'pilot_ready');
