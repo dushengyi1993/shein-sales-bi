@@ -87,7 +87,6 @@ const productListFor = rows => rows.map(item => ({
 }));
 
 const productsDir = path.join(tmp, 'products');
-const bootstrapLockFile = path.join(tmp, 'bootstrap-locks.json');
 const storesFile = path.join(tmp, 'stores.json');
 const biFile = path.join(tmp, 'inventoryTrend.json');
 const linksFile = path.join(tmp, 'linksData.json');
@@ -149,7 +148,6 @@ async function buildPlan(name, {requiredDetailTargets = ''} = {}) {
     '--products-dir', productsDir,
     '--bi-data', biFile,
     '--links-data', linksFile,
-    '--bootstrap-lock-file', bootstrapLockFile,
     '--operation-mode', 'et_low_inventory_safety',
     '--out', out,
     ...(requiredDetailTargets ? ['--required-detail-targets', requiredDetailTargets] : []),
