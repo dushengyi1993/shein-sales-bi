@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   allocateLowEtInventory,
+  assertCurrentInventoryListingIdentity,
   assertDailyInventoryExecutionAuthorization,
   canonicalInventoryKey,
   classifyEtInventoryAlert,
@@ -36,6 +37,24 @@ const policy = {
 };
 
 assert.equal(canonicalInventoryKey('SK-04031胶囊咖啡机'), 'SK04031');
+assert.deepEqual(assertCurrentInventoryListingIdentity({
+  expectedMatchKey: 'SK-04031',
+  expectedSkuCode: 'sku-1',
+  liveSupplierCode: 'SK04031胶囊咖啡机',
+  liveSkuCodes: ['sku-1'],
+}), {matchKey: 'SK04031', skuCode: 'sku-1'});
+assert.throws(() => assertCurrentInventoryListingIdentity({
+  expectedMatchKey: 'SK04031',
+  expectedSkuCode: 'sku-1',
+  liveSupplierCode: 'SK04031胶囊咖啡机',
+  liveSkuCodes: ['sku-1', 'sku-2'],
+}), /cardinality changed/);
+assert.throws(() => assertCurrentInventoryListingIdentity({
+  expectedMatchKey: 'SK04031',
+  expectedSkuCode: 'sku-1',
+  liveSupplierCode: 'SK09999其他产品',
+  liveSkuCodes: ['sku-1'],
+}), /canonical identity changed/);
 assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已下架', is_out_shelf: true}, '3').code, '4');
 assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已售罄', is_sold_out: true}, '1').code, '3');
 assert.deepEqual(resolveInventoryShelfStatus({shelf_status_name: '已上架', is_on_shelf: true}, '4').code, '1');
@@ -175,11 +194,12 @@ assert.match(dailyCoordinator, /SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="\$\{RUN_DAT
 assert.match(dailyCoordinator, /cloud_daily_inventory_replenishment_guard\.sh/);
 assert.match(executorScript, /Always publish the complete terminal envelope\.\s*await writeResultFile\(results\);/);
 assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);
-assert.match(executorScript, /canonicalInventoryKey\(liveSupplierCode\) !== expectedMatchKey/);
+assert.match(executorScript, /assertCurrentInventoryListingIdentity/);
+assert.match(executorScript, /linksData canonical identity changed or is unavailable/);
 assert.doesNotMatch(executorScript, /bootstrap/i);
 assert.match(builderScript, /target_inventory_already_satisfied/);
 assert.doesNotMatch(builderScript, /bootstrap/i);
 assert.match(etSafetyGuard, /--execution-mode automatic/);
 assert.match(etSafetyGuard, /--confirm-hash "\$HASH"/);
 assert.match(etSafetyService, /SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard/);
-console.log(JSON.stringify({ok: true, checks: 64}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 68}, null, 2));

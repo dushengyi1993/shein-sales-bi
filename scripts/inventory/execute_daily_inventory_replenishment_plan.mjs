@@ -4,6 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
   assertDailyInventoryExecutionAuthorization,
+  assertCurrentInventoryListingIdentity,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
   resolveInventoryShelfStatus,
@@ -163,13 +164,15 @@ async function assertStillListed(client, row) {
   const liveShelfStatus = String(shelf?.shelfStatus ?? '');
   const eligibleStatuses = new Set((policy.eligibleShelfStatusCodes || ['1']).map(String));
   if (!eligibleStatuses.has(liveShelfStatus)) throw new Error(`${row.skc} shelf status is no longer eligible: ${liveShelfStatus}`);
-  const liveSkuCodes = new Set(asArray(skc.skuInfoList).map(item => String(item?.skuCode || '')).filter(Boolean));
-  if (!liveSkuCodes.has(row.skuCode)) throw new Error(`${row.skc} SKU mapping changed`);
+  const liveSkuCodes = asArray(skc.skuInfoList).map(item => String(item?.skuCode || '')).filter(Boolean);
   const expectedMatchKey = canonicalInventoryKey(row.matchKey || row.canonical || row.supplierCode);
   const liveSupplierCode = String(skc?.supplierCode || response.data?.info?.supplierCode || '').trim();
-  if (!expectedMatchKey || canonicalInventoryKey(liveSupplierCode) !== expectedMatchKey) {
-    throw new Error(`${row.skc} canonical identity changed or is unavailable`);
-  }
+  assertCurrentInventoryListingIdentity({
+    expectedMatchKey,
+    expectedSkuCode: row.skuCode,
+    liveSupplierCode,
+    liveSkuCodes,
+  });
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -305,6 +308,16 @@ for (const row of rows) {
     }
     const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
     if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
+    const metricsMatchKey = canonicalInventoryKey(
+      metrics.standard_goods_sn
+      ?? metrics.standardGoodsSn
+      ?? metrics.raw_goods_sn
+      ?? metrics.rawGoodsSn,
+    );
+    const expectedMatchKey = canonicalInventoryKey(row.matchKey || row.canonical || row.supplierCode);
+    if (!metricsMatchKey || metricsMatchKey !== expectedMatchKey) {
+      throw new Error('linksData canonical identity changed or is unavailable');
+    }
     const currentShelfStatus = resolveInventoryShelfStatus(metrics, row.openApiShelfStatusCode || row.shelfStatusCode);
     if (currentShelfStatus.code !== String(row.shelfStatusCode || '')) {
       throw new Error(`Four-state shelf status changed after plan: ${row.shelfStatusName || row.shelfStatusCode} -> ${currentShelfStatus.name}`);

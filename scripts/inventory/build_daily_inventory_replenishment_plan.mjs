@@ -217,6 +217,15 @@ for (const context of rowContexts) {
 const evaluatedRows = [];
 for (const context of rowContexts) {
   const {row, metrics, matchKey, productMatchKey, shelfStatus} = context;
+  const metricsMatchKey = canonicalInventoryKey(
+    metrics?.standard_goods_sn
+    ?? metrics?.standardGoodsSn
+    ?? metrics?.raw_goods_sn
+    ?? metrics?.rawGoodsSn,
+  );
+  if (!productMatchKey || !metricsMatchKey || productMatchKey !== metricsMatchKey) {
+    blockers.push(`OpenAPI/linksData canonical evidence conflicts: store=${row.storeKey} skc=${row.skc}`);
+  }
   const et = etByKey.get(matchKey);
   const otherSellingStores = [...(sellingStoresByMatchKey.get(matchKey) || [])]
     .filter(storeKey => storeKey && storeKey !== row.storeKey)

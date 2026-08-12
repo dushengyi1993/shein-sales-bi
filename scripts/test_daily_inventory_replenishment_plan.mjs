@@ -188,4 +188,31 @@ assert.deepEqual(plan.crossStoreSoldOutFindings.map(row => row.skc), ['skc-cross
 assert.deepEqual(plan.actionable.filter(row => row.matchKey === 'ALLSOLD1').map(row => [row.storeKey, row.targetUsableInventory]), [['A', 100], ['B', 10]]);
 assert.equal(plan.ignored.some(row => row.matchKey === 'ALLSOLD1'), false);
 assert.match(plan.payloadHash, /^[a-f0-9]{64}$/);
-console.log(JSON.stringify({ok: true, checks: 34}, null, 2));
+
+const conflictingLinksFile = path.join(tmp, 'linksData-conflict.json');
+const conflictingLinks = JSON.parse(await fs.readFile(path.join(tmp, 'linksData.json'), 'utf8'));
+conflictingLinks.data.storeLinks.find(row => row.skc === 'skc-all-sold-a').standard_goods_sn = 'WRONG-999产品';
+await fs.writeFile(conflictingLinksFile, JSON.stringify(conflictingLinks));
+const conflictOut = path.join(tmp, 'plan-conflict.json');
+process.argv = [
+  process.execPath,
+  path.join(ROOT, 'scripts', 'inventory', 'build_daily_inventory_replenishment_plan.mjs'),
+  '--date', date,
+  '--policy', path.join(ROOT, 'config', 'inventory_replenishment_policy.json'),
+  '--stores', path.join(tmp, 'stores.json'),
+  '--products-dir', productsDir,
+  '--bi-data', path.join(tmp, 'inventoryTrend.json'),
+  '--links-data', conflictingLinksFile,
+  '--out', conflictOut,
+];
+try {
+  await import(`./inventory/build_daily_inventory_replenishment_plan.mjs?conflict=${Date.now()}`);
+} catch (error) {
+  assert.equal(error?.code, 2);
+} finally {
+  process.argv = originalArgv;
+}
+const conflictPlan = JSON.parse(await fs.readFile(conflictOut, 'utf8'));
+assert.equal(conflictPlan.executable, false);
+assert.match(conflictPlan.blockers.join('\n'), /OpenAPI\/linksData canonical evidence conflicts: store=A skc=skc-all-sold-a/);
+console.log(JSON.stringify({ok: true, checks: 36}, null, 2));
