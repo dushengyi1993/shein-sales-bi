@@ -100,6 +100,8 @@ assert.match(guard, /lastProcessedBatchId[\s\S]*jq -e '\.result != null'/,
   'same-batch idempotent success requires a terminal result artifact');
 assert.match(guard, /retry incomplete batch=\$BATCH_ID/,
   'a same-batch plan_blocked state must re-enter evidence refresh instead of returning false success');
+assert.match(guard, /SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1 \\\n+\s*bash "\$ROOT\/scripts\/cloud_openapi_product_reconciliation\.sh"/,
+  'the guard must launch reconciliation through bash because the tracked wrapper is intentionally not executable');
 assert.match(guard, /if \(\( BLOCKED > 0 \)\); then exit 1; fi\s*$/,
   'a completed run with zero row-level blockers falls through to exit 0 (pure no-action is healthy)');
 assert.match(guard, /exit 75/,
@@ -113,4 +115,4 @@ assert.match(recheck, /no active ET 1-10 watchlist; skip ET HTTP refresh/,
 assert.match(recheck, /skip ET HTTP refresh[\s\S]*exit 0/,
   'a recheck with no active watchlist exits 0 and is healthy');
 
-console.log(JSON.stringify({ok: true, checks: 38}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 39}, null, 2));
