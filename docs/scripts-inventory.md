@@ -611,7 +611,7 @@
 
   - `report_lark_base_cleanup_candidates.mjs`
 
-  - `build_link_retire_candidates_from_csv.mjs`：低曝光零销量下架候选只读报告。输入已带创建时间、首次上架时间、近 7 天曝光/销量和新品标签的 CSV，输出待确认 CSV/Markdown/JSON；不会调用 SHEIN，也不会下架。固定安全规则是：已上架、近 7 天曝光 `c7EpsUv <= 300`、近 7 天销量 `0`、平台新品标签为空，且首次上架已满 15 天。首次上架 15 天内不管是否有新品标签都排除；缺 `first_shelf_time` 的行只能进待确认/不执行。
+  - `build_link_retire_candidates_from_csv.mjs`：低曝光零销量下架候选只读报告。输入可直接使用受管 CLI `query --sections linksData --out query.json` 的 `data.storeLinks/data.links`，也兼容 enriched CSV，避免对话中人工搬运和重写中间表；输出待确认 CSV/Markdown/JSON，不调用 SHEIN、不下架。固定安全规则不变：已上架、近 7 天曝光 `c7EpsUv <= 300`、近 7 天销量 `0`、平台新品标签为空，且首次上架已满 15 天。首次上架 15 天内一律排除；缺 `first_shelf_time` 的行只能进待确认/不执行。
 
   - `execute_retire_candidates_openapi.mjs`：云端专用的已确认下架候选执行器。本机只能 dry-run；真实执行必须在 `shein-bi-tencent` 用 `SHEIN_BI_CLOUD_EXECUTION=1`、dry-run `payloadHash` 和确认文本运行。执行顺序是先 `retire_link` 下架，再 best-effort 改 `（废）标准货号`；改货号失败不阻断下架，最终汇总分为“已下架+货号已改/进入审核”“已下架+货号未改”“下架失败”。
   - `repair_retire_supplier_code_openapi.mjs`：已下架但货号未改成`（废）...`的修复专用执行器。只调 `partialEdit`，绝不调 shelf 接口；本机只能 dry-run，真实执行必须在云端。模板属性、危险品分类或其它必要事实缺失时整条失败关闭；执行中不再临时猜测/补写 supplier code normalization。

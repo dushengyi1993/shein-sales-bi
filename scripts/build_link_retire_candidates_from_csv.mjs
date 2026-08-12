@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Build a read-only low-exposure / zero-sales retire candidate report from an
- * enriched link CSV. This never calls SHEIN OpenAPI and never executes
+ * enriched link CSV or managed-query JSON. This never calls SHEIN OpenAPI and never executes
  * off-shelf writes; it only prepares a human-confirmation table.
  */
 import fs from 'node:fs/promises';
@@ -25,11 +25,11 @@ function parseArgs(argv) {
     else if (a === '--performance-date' || a === '--perf-date') args.performanceDate = String(argv[++i] || '').trim();
     else if (a === '--prefix') args.prefix = String(argv[++i] || '').trim() || args.prefix;
   }
-  if (!args.input) throw new Error('build_link_retire_candidates_from_csv requires --input <enriched candidate csv>');
+  if (!args.input) throw new Error('build_link_retire_candidates_from_csv requires --input <enriched candidate csv or query json>');
   return args;
 }
 
-function parseCsv(text) {
+export function parseCsv(text) {
   const rows = [];
   let row = [];
   let cell = '';
@@ -72,6 +72,70 @@ function parseCsv(text) {
     .map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ''])));
 }
 
+export function parseRetireCandidateInput(text, file = '') {
+  const source = String(text || '').replace(/^\uFEFF/, '').trim();
+  const jsonLike = /\.json$/iu.test(String(file || '')) || source.startsWith('{') || source.startsWith('[');
+  if (!jsonLike) return {format: 'csv', rows: parseCsv(source)};
+  let parsed;
+  try { parsed = JSON.parse(source); }
+  catch (error) { throw new Error(`invalid retire candidate JSON: ${error.message}`); }
+  const candidates = [
+    parsed?.data?.storeLinks,
+    parsed?.data?.links,
+    parsed?.storeLinks,
+    parsed?.links,
+    parsed?.rows,
+    parsed,
+  ];
+  const rows = candidates.find(Array.isArray);
+  if (!rows) throw new Error('retire candidate JSON has no supported rows array (data.storeLinks/data.links/storeLinks/links/rows)');
+  if (!rows.every(row => row && typeof row === 'object' && !Array.isArray(row))) {
+    throw new Error('retire candidate JSON rows must be objects');
+  }
+  return {format: 'json', rows};
+}
+
+/**
+ * Map managed-query JSON rows (data.storeLinks / data.links) onto the enriched
+ * CSV column names the policy and the delisting executor read. This is a
+ * display/evidence mapping only: it never invents recovery history, and the
+ * new-goods-tag gate stays fail-closed unless the row carries an explicit tag
+ * field or the server's own `retire_candidate` flag (which already verified
+ * raw newGoodsTag is empty).
+ */
+export function normalizeQueryRetireRows(rows) {
+  const aliases = [
+    ['store', 'store', 'store_key', 'storeKey'],
+    ['spu', 'spu'],
+    ['current_status', 'current_status', 'shelf_status_name', 'shelfStatusName'],
+    ['c7_exposure', 'c7_exposure', 'c7EpsUv', 'c7_eps_uv', 'eps_uv'],
+    ['c7_sale_cnt', 'c7_sale_cnt', 'c7SaleCnt'],
+    ['new_tag_value', 'new_tag_value', 'new_goods_tag', 'newGoodsTag', 'performance_new_goods_tag'],
+    ['first_shelf_time', 'first_shelf_time', 'firstShelfTime'],
+    ['link_created_time', 'link_created_time', 'created_time', 'createdTime'],
+    ['standard_goods_sn', 'standard_goods_sn', 'standardGoodsSn'],
+    ['skc', 'skc'],
+  ];
+  return rows.map(row => {
+    const normalized = {...row};
+    for (const [target, ...sources] of aliases) {
+      if (normalized[target] !== undefined && String(normalized[target]).trim() !== '') continue;
+      for (const source of sources) {
+        const value = normalized[source];
+        if (value !== undefined && value !== null && String(value).trim() !== '') {
+          normalized[target] = value;
+          break;
+        }
+      }
+    }
+    if (!normalized.new_tag_value && normalized.retire_candidate === true) {
+      normalized.new_goods_tag = '';
+      normalized.new_tag_value = '';
+    }
+    return normalized;
+  });
+}
+
 function csvEscape(value) {
   const s = String(value ?? '');
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -94,6 +158,7 @@ function inferPerformanceDate(args, rows) {
     || rows.find(r => r.perf_date)?.perf_date
     || rows.find(r => r.performanceDate)?.performanceDate
     || rows.find(r => r.date)?.date
+    || rows.find(r => r.link_date)?.link_date
     || '';
 }
 
@@ -132,7 +197,8 @@ function withVerdict(row, performanceDate) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const rows = parseCsv(await fs.readFile(args.input, 'utf8'));
+  const input = parseRetireCandidateInput(await fs.readFile(args.input, 'utf8'), args.input);
+  const rows = input.format === 'json' ? normalizeQueryRetireRows(input.rows) : input.rows;
   const performanceDate = inferPerformanceDate(args, rows);
   if (!performanceDate) throw new Error('missing performance date; pass --performance-date YYYY-MM-DD or include perf_date/date column');
   const evaluated = rows.map(row => withVerdict(row, performanceDate));
@@ -159,6 +225,13 @@ async function main() {
     generatedAt: new Date(Date.now() + 8 * 3600_000).toISOString().replace('Z', '+08:00'),
     reportVersion: 'v6-first-shelf-and-recovery-15d',
     input: args.input,
+    inputFormat: input.format,
+    ...(input.format === 'json' ? {
+      evidenceScope: {
+        newGoodsTag: 'explicit row tag fields, or server-verified empty when row.retire_candidate === true',
+        recoveryEvidence: 'linksData rows do not carry recovery history; rows without inventory_recovery_date/relisted_at/last_shelf_time/recovery_evidence_complete stay 待确认 and never become candidates',
+      },
+    } : {}),
     performanceDate,
     criteria: {
       currentStatus: 'current on-shelf links only',

@@ -98,6 +98,17 @@ try {
   const skill = await fs.readFile(path.join(codexHome, 'skills', 'shein-bi-ops', 'SKILL.md'), 'utf8');
   check('Codex skill installed', skill, text => text.includes('已审可用') && text.includes('prepare-publish'));
 
+  const freshCachedCheck = await checkAndInstallPartnerCliUpdate({
+    baseUrl: `http://127.0.0.1:${port}`,
+    cookie: 'bi_session=test',
+    currentVersion: release.manifest.version,
+    installRoot,
+    codexHome,
+    maxAgeMs: 5 * 60_000,
+  });
+  check('fresh update check uses local TTL cache', freshCachedCheck.source, 'fresh-check-cache');
+  check('fresh update check makes no manifest request', manifestCalls, 1);
+
   const currentCheck = await checkAndInstallPartnerCliUpdate({
     baseUrl: `http://127.0.0.1:${port}`,
     cookie: 'bi_session=test',

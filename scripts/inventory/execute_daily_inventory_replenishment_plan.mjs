@@ -263,6 +263,18 @@ const writeResultFile = async currentResults => {
   await fs.writeFile(`${args.out}.tmp`, `${JSON.stringify(envelope, null, 2)}\n`, 'utf8');
   await fs.rename(`${args.out}.tmp`, args.out);
 };
+const journalFile = `${args.out}.journal.ndjson`;
+await fs.mkdir(path.dirname(args.out), {recursive: true});
+await fs.writeFile(journalFile, '', {encoding: 'utf8', mode: 0o600});
+const recordResult = async row => {
+  results.push(row);
+  await fs.appendFile(journalFile, `${JSON.stringify({
+    sequence: results.length,
+    planHash: plan.payloadHash,
+    recordedAt: new Date().toISOString(),
+    row,
+  })}\n`, {encoding: 'utf8', mode: 0o600});
+};
 const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
   String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
   row,
@@ -359,7 +371,7 @@ for (const row of rows) {
       }
     }
     if (!args.execute) {
-      results.push({...result, state: 'dry_run_ready', etSellableInventory: etQty});
+      await recordResult({...result, state: 'dry_run_ready', etSellableInventory: etQty});
       continue;
     }
     let client = clients.get(row.storeKey);
@@ -373,23 +385,23 @@ for (const row of rows) {
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
       if (before.totalUsableInventory === approvedTarget) {
-        results.push({...result, state: 'skipped_target_already_matched', before});
+        await recordResult({...result, state: 'skipped_target_already_matched', before});
         continue;
       }
       if (plan?.executionConstraints?.decreaseOnly === true && before.totalUsableInventory < approvedTarget) {
-        results.push({...result, state: 'skipped_safety_no_increase', before});
+        await recordResult({...result, state: 'skipped_safety_no_increase', before});
         continue;
       }
       if (row.ruleClass === 'recent_sale_scarcity') {
         const refillBelow = Number(policy?.recentSaleScarcity?.refillWhenBelow ?? 5);
         const capAbove = Number(policy?.recentSaleScarcity?.capWhenAbove ?? 10);
         if (before.totalUsableInventory >= refillBelow && before.totalUsableInventory <= capAbove) {
-          results.push({...result, state: 'skipped_within_scarcity_band', before});
+          await recordResult({...result, state: 'skipped_within_scarcity_band', before});
           continue;
         }
       } else if (row.ruleClass === 'legacy_virtual_inventory_top_up') {
         if (before.totalUsableInventory > Number(policy.triggerUsableInventoryAtOrBelow || 20)) {
-          results.push({...result, state: 'skipped_recovered', before});
+          await recordResult({...result, state: 'skipped_recovered', before});
           continue;
         }
       }
@@ -428,20 +440,19 @@ for (const row of rows) {
           throw new Error(`inventory write failed: ${response.data?.code} ${response.data?.msg || ''}`);
         }
         for (let readbackAttempt = 1; readbackAttempt <= 10; readbackAttempt += 1) {
-          await sleep(3000);
+          if (readbackAttempt > 1) await sleep(Math.min(3000, 500 * (2 ** (readbackAttempt - 2))));
           after = await readStock(client, row.skuCode);
           if (after.totalUsableInventory === approvedTarget) break;
         }
       }
       if (after.totalUsableInventory !== approvedTarget) throw new Error(`readback usable inventory ${after.totalUsableInventory} does not match target ${approvedTarget}`);
-      results.push({...result, state: 'updated_readback_matched', before, after, writes});
+      await recordResult({...result, state: 'updated_readback_matched', before, after, writes});
     } finally {
       await release();
     }
   } catch (error) {
-    results.push({...result, state: 'blocked', error: error.message});
+    await recordResult({...result, state: 'blocked', error: error.message});
   }
-  await writeResultFile(results);
 }
 const counts = {
   total: results.length,
@@ -450,8 +461,14 @@ const counts = {
   skipped: results.filter(row => row.state.startsWith('skipped_')).length,
   blocked: results.filter(row => row.state === 'blocked').length,
 };
-// A trailing run of `continue`-based safe skips does not pass through the
-// per-row checkpoint below. Always publish the complete terminal envelope.
+// Per-row progress is append-only in the journal. Publish the complete JSON
+// envelope exactly once so result-file IO stays O(N), not O(N²).
 await writeResultFile(results);
-console.log(JSON.stringify({ok: counts.blocked === 0, planHash: plan.payloadHash, out: path.relative(ROOT, args.out).replaceAll(path.sep, '/'), counts}, null, 2));
+console.log(JSON.stringify({
+  ok: counts.blocked === 0,
+  planHash: plan.payloadHash,
+  out: path.relative(ROOT, args.out).replaceAll(path.sep, '/'),
+  journal: path.relative(ROOT, journalFile).replaceAll(path.sep, '/'),
+  counts,
+}, null, 2));
 if (counts.blocked) process.exitCode = 1;

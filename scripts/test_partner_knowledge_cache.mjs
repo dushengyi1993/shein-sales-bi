@@ -113,6 +113,16 @@ const baseUrl = `http://127.0.0.1:${server.address().port}`;
 try {
   const first = await ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, strict: true});
   if (!first.updated || !first.current) throw new Error('first partner knowledge update failed');
+  const freshCached = await ensurePartnerKnowledgeCurrent({
+    baseUrl,
+    cookie: 'bi_session=test',
+    cacheDir: temp,
+    strict: true,
+    maxAgeMs: 5 * 60_000,
+  });
+  if (freshCached.source !== 'fresh-check-cache' || manifestHits !== 1 || bundleHits !== 1) {
+    throw new Error('fresh partner knowledge TTL did not avoid network and lock work');
+  }
   const second = await ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, strict: true});
   if (second.updated || second.source !== 'cache-304' || bundleHits !== 1) throw new Error('ETag no-op did not reuse the atomic cache');
 

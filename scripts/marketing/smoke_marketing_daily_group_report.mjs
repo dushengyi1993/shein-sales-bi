@@ -6,6 +6,7 @@ import {
   buildMarketingDailyFinalMarkdown,
   buildMarketingDailyGroupSummary,
   countOutstandingGuardRepairs,
+  larkSendAccepted,
 } from './send_marketing_daily_group_report.mjs';
 import {resolveEffectiveCloudBiSsh} from './build_marketing_daily_guard_report.mjs';
 
@@ -185,6 +186,27 @@ assert.equal(
   1,
   'daily delivery must have exactly one file-send path',
 );
+
+// lark-cli send acceptance: process success is not enough; the response must
+// carry ok=true AND a message_id (tolerating bounded nesting).
+assert.deepEqual(larkSendAccepted(JSON.stringify({ok: true, message_id: 'om_top'})), {ok: true});
+assert.deepEqual(larkSendAccepted(JSON.stringify({ok: true, data: {message_id: 'om_nested'}})), {ok: true});
+assert.deepEqual(larkSendAccepted(JSON.stringify({ok: true, result: {message: {message_id: 'om_deep'}}})), {ok: true});
+assert.deepEqual(larkSendAccepted(JSON.stringify({ok: false, message_id: 'om_x'})), {ok: false, reason: 'response_ok_not_true'});
+assert.deepEqual(larkSendAccepted(JSON.stringify({ok: true})), {ok: false, reason: 'message_id_missing'});
+assert.deepEqual(larkSendAccepted(JSON.stringify({ok: true, data: {}})), {ok: false, reason: 'message_id_missing'});
+assert.deepEqual(larkSendAccepted(JSON.stringify({ok: 'true', message_id: 'om_x'})), {ok: false, reason: 'response_ok_not_true'});
+assert.deepEqual(larkSendAccepted('not json at all'), {ok: false, reason: 'non_json_response'});
+assert.deepEqual(larkSendAccepted(''), {ok: false, reason: 'non_json_response'});
+assert.equal(Object.keys(larkSendAccepted(JSON.stringify({ok: true, message_id: 'om_top'}))).includes('message_id'), false, 'acceptance result must never carry message_id');
+
+// State and console must not record/output message_id or recipient IDs.
+assert.doesNotMatch(senderSource, /message_id\s*:/, 'state and log JSON must never persist message_id as a key');
+for (const line of senderSource.split(/\r?\n/)) {
+  if (!line.includes('console.log')) continue;
+  assert.doesNotMatch(line, /message_id|cliArgs/, `console output must not expose message_id or recipient ids`);
+}
+
 const workerSource = await fs.readFile(
   new URL('../cloud_marketing_repair_worker.sh', import.meta.url),
   'utf8',
