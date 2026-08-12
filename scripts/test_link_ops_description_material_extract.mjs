@@ -175,9 +175,9 @@ throws('unlabeled codes rejected (no fuzzy guess)', () => extractTrilingualCoreS
 
 // --- legacy s9: direct pre dir plus Unicode script evidence is deterministic ---
 const legacyDirected = `<!doctype html><html><body><section id="s9">
-<pre class="copybox copytext" dir="ltr">${code(enLines)}</pre>
-<pre class="copybox copytext right" dir="rtl">${code(arLines)}</pre>
-<pre class="copybox copytext" dir="ltr">${code(zhLines)}</pre>
+<h3>English</h3><pre class="copybox copytext" dir="ltr">${code(enLines)}</pre>
+<h3>Arabic</h3><pre class="copybox copytext right" dir="rtl">${code(arLines)}</pre>
+<h3>Chinese</h3><pre class="copybox copytext" dir="ltr">${code(zhLines)}</pre>
 </section></body></html>`;
 const legacyDirectedRows = extractTrilingualCoreSellingPointsAuto(legacyDirected);
 check('legacy directed s9 selected', legacyDirectedRows.sectionUsed, 's9');
@@ -189,6 +189,35 @@ throws('legacy rtl without Arabic script rejected', () => extractTrilingualCoreS
 ), /DESCRIPTION_HTML_EXTRACT_INVALID/);
 throws('legacy ltr Arabic conflict rejected', () => extractTrilingualCoreSellingPointsAuto(
   legacyDirected.replace(`dir="rtl">${code(arLines)}`, `dir="ltr">${code(arLines)}`),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+const frenchLines = ['Point français un', 'Point français deux', 'Point français trois', 'Point français quatre', 'Point français cinq'];
+throws('legacy unlabeled LTR French is not guessed as English', () => extractTrilingualCoreSellingPointsAuto(
+  legacyDirected.replace('<h3>English</h3>', '').replace(code(enLines), code(frenchLines)),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+const numericLines = ['1000', '2000', '3000', '4000', '5000'];
+throws('legacy unlabeled LTR numeric text is not guessed as English', () => extractTrilingualCoreSellingPointsAuto(
+  legacyDirected.replace('<h3>English</h3>', '').replace(code(enLines), code(numericLines)),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+
+// Real SK-5110 section#s9 shape: a language-leading note immediately precedes
+// each copy-wrap/pre/code block. Text is shortened, while tag/class adjacency
+// remains byte-for-byte representative of the reviewed file.
+const legacy5110NoteShape = `<!doctype html><html><body><section id="s9"><h2>9. 三语核心卖点</h2>
+<div class="note">英文卖点评分：97/100。5条按用户决策顺序排列。</div><div class="copy-wrap"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext" dir="ltr">${code(enLines)}</pre></div>
+<div class="note">阿文卖点评分：98/100。用词贴近沙特用户。</div><div class="copy-wrap right"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext right" dir="rtl">${code(arLines)}</pre></div>
+<div class="note">中文仅用于内部核对，逐行对应英文和阿文。</div><div class="copy-wrap"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext" dir="ltr">${code(zhLines)}</pre></div>
+</section></body></html>`;
+const legacy5110Rows = extractTrilingualCoreSellingPointsAuto(legacy5110NoteShape);
+check('legacy 5110 nearest-note shape selects s9', legacy5110Rows.sectionUsed, 's9');
+check('legacy 5110 nearest-note maps all languages', Object.keys(legacy5110Rows.extracted).sort().join(','), 'ar,en,zh-cn');
+throws('legacy note separated by semantic text is not adjacent', () => extractTrilingualCoreSellingPointsAuto(
+  legacy5110NoteShape.replace('</div><div class="copy-wrap">', '</div><p>unrelated</p><div class="copy-wrap">'),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy note language token must be line-leading', () => extractTrilingualCoreSellingPointsAuto(
+  legacy5110NoteShape.replace('英文卖点评分', '评分：英文卖点'),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy note and heading conflict is rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacy5110NoteShape.replace('<div class="note">英文卖点评分', '<h3>阿文</h3><div class="note">英文卖点评分'),
 ), /DESCRIPTION_HTML_EXTRACT_INVALID/);
 
 const failed = checks.filter(row => !row.pass);

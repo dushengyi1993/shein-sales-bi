@@ -102,15 +102,16 @@ Never upload images separately and then create a new shortened task. Keep one ta
 Pass `--title-ar` / `--title-en` and `--category-id` when those exact values are known. This command verifies local dimensions, uploads selected files, binds returned URLs and explicit fields to the **same task**, then reruns preflight. It does not perform final publish.
 
 For a copy_product_draft task whose reviewed 审核资料 contains a 三语核心卖点
-section (HTML with a unique `section#s09`), bind the verbatim ar/en 5-line
+section (HTML with a unique new `section#s09`, or deterministic legacy
+`section#s9`), bind the verbatim ar/en 5-line
 descriptions to the **same task** instead of inventing or mapping text:
 
 ```powershell
-& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-descriptions --task-id <task-id> --store <target-store> --source-file '<reviewed-html-file>' [--material-json <optional-material.json>]
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-descriptions --task-id <task-id> --store <target-store> --source-file '<reviewed-html-file>' [--section auto|s09|s9] [--material-json <optional-material.json>]
 ```
 
 The command extracts EN/AR code lines and the Chinese displaybox lines from the
-unique `section#s09`, computes the source-file SHA256 from the actual bytes,
+unique `section#s09` or deterministically labeled/directed legacy `section#s9`, computes the source-file SHA256 from the actual bytes,
 uploads those actual HTML bytes to the controlled endpoint, and requires the
 server to independently recompute the file SHA and re-extract every line
 byte-for-byte. It binds fixed ar/en 5-line descriptions (zh-cn stays

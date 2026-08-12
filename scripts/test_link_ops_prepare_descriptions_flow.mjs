@@ -35,6 +35,7 @@ import {
   buildDescriptionPayloadRows,
   describeDescriptionMaterial,
   sha256Utf8,
+  validateDescriptionBindingLock,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
@@ -77,6 +78,17 @@ const alternateMaterial = verifyDescriptionMaterialAgainstHtml(alternateHtmlMate
   sourceFileSha256: '',
 }).material;
 const alternateMaterialSummary = describeDescriptionMaterial(alternateMaterial);
+const legacyHtmlMaterial = `<!doctype html><html><body>
+<section id="s9">
+  <div class="note">英文卖点评分：97/100。5条按用户决策顺序排列。</div>
+  <div class="copy-wrap"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext" dir="ltr"><code>${enLines.join('\n')}</code></pre></div>
+  <div class="note">阿文卖点评分：98/100。用词贴近沙特用户。</div>
+  <div class="copy-wrap right"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext right" dir="rtl"><code>${arLines.join('\n')}</code></pre></div>
+  <div class="note">中文仅用于内部核对，逐行对应英文和阿文。</div>
+  <div class="copy-wrap"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext" dir="ltr"><code>${zhLines.join('\n')}</code></pre></div>
+</section>
+</body></html>`;
+const legacySourceBytes = Buffer.from(legacyHtmlMaterial, 'utf8');
 
 function publishPayloadFor(supplierCode) {
   return {
@@ -510,6 +522,7 @@ async function bindDescriptions(cookie, taskId, {
   sourceFileName = 'SK-11004-review.html',
   expectedRevision = null,
   includeSourceFile = true,
+  section = 'auto',
 } = {}) {
   const task = await rawTaskById(taskId);
   const revision = expectedRevision ?? Number(task?.repositoryRevision || 0);
@@ -521,6 +534,7 @@ async function bindDescriptions(cookie, taskId, {
       store: 'NM',
       sourceApproved: true,
       materialJson,
+      section,
       ...(includeSourceFile ? {sourceFile: {name: sourceFileName, dataBase64: Buffer.from(sourceFileBytes).toString('base64')}} : {}),
       expectedRevision: revision,
     },
@@ -964,6 +978,45 @@ try {
     && !text.includes(zhLines[0])
     && !text.includes(cliSourceFile)
   ));
+
+  const cliLegacySourceFile = path.join(tmpRoot, 'SK-5110-cli-legacy-source.html');
+  await fs.writeFile(cliLegacySourceFile, legacySourceBytes);
+  const legacyTaskId = await createTask(cookie, 'DESC-CLI-LEGACY-S9');
+  await attachPayload(legacyTaskId, publishPayloadFor('DESC-CLI-LEGACY-S9'));
+  const cliLegacyPrepare = await runCli([
+    'prepare-descriptions',
+    '--task-id', legacyTaskId,
+    '--store', 'NM',
+    '--source-file', cliLegacySourceFile,
+    '--section', 'auto',
+  ]);
+  check('managed CLI legacy s9 prepare exits zero', cliLegacyPrepare.code, 0);
+  check('managed CLI legacy s9 description hash lock', cliLegacyPrepare.json?.dryRun?.descriptionBindingLocked, true);
+  check('managed CLI legacy s9 records exact source proof', cliLegacyPrepare.json?.bound?.sourceProof, 'server_verified_html_section_s9');
+  const legacyBoundTask = await rawTaskById(legacyTaskId);
+  check('legacy s9 persisted exact source proof', legacyBoundTask?.descriptionMaterialBinding?.sourceProof, 'server_verified_html_section_s9');
+  const forgedLegacyProof = JSON.parse(JSON.stringify(legacyBoundTask));
+  forgedLegacyProof.descriptionMaterialBinding.sourceProof = 'server_verified_html_section_s09';
+  const forgedProofGate = validateDescriptionBindingLock(forgedLegacyProof, forgedLegacyProof.openapiPublishPayload);
+  check('legacy s9 source proof flip breaks immutable binding identity', forgedProofGate.ok, false);
+  const legacyReplay = await runCli([
+    'prepare-descriptions',
+    '--task-id', legacyTaskId,
+    '--store', 'NM',
+    '--source-file', cliLegacySourceFile,
+    '--section', 'auto',
+  ]);
+  check('managed CLI legacy s9 idempotent replay exits zero', legacyReplay.code, 0);
+  check('managed CLI legacy s9 replay keeps source proof', legacyReplay.json?.bound?.sourceProof, 'server_verified_html_section_s9');
+
+  const invalidSection = await runCli([
+    'prepare-descriptions',
+    '--task-id', legacyTaskId,
+    '--store', 'NM',
+    '--source-file', cliLegacySourceFile,
+    '--section', 'typo',
+  ]);
+  check('managed CLI invalid section exits nonzero', invalidSection.code, code => code !== 0);
   const missingSourcePath = path.join(tmpRoot, 'private-materials', 'missing-reviewed-source.html');
   const cliMissingSource = await runCli([
     'prepare-descriptions',

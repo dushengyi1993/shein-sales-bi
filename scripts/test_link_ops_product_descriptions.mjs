@@ -18,6 +18,7 @@ import {
   verifyDescriptionMaterialSourceFile,
   DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
   DESCRIPTION_SOURCE_PROOF,
+  DESCRIPTION_SOURCE_PROOF_S9,
   DESCRIPTION_NAME_MAX_CHARS,
 } from '../lib/link_ops_product_descriptions.mjs';
 
@@ -227,6 +228,7 @@ const binding = {
     targetStore: 'NM',
     baseTaskRevision,
     contentSha256: summary.contentSha256,
+    sourceProof: DESCRIPTION_SOURCE_PROOF,
   }),
   sourceLabel: 'SK-11004-review.html',
   sourceByteLength: 1234,
@@ -240,6 +242,28 @@ const binding = {
   imageBindingFingerprint: 'f'.repeat(64),
 };
 check('binding lock ok when hashes and exact metadata match', validateDescriptionBindingLock({...bindingTask, descriptionMaterialBinding: binding}, payloadWithDesc).ok, true);
+check('binding lock rejects source proof flip without matching identity', validateDescriptionBindingLock({
+  ...bindingTask,
+  descriptionMaterialBinding: {...binding, sourceProof: DESCRIPTION_SOURCE_PROOF_S9},
+}, payloadWithDesc).ok, false);
+const legacyS09BindingRequestKey = descriptionBindingRequestKey({
+  taskId: bindingTask.id,
+  targetStore: 'NM',
+  baseTaskRevision,
+  contentSha256: summary.contentSha256,
+});
+check('binding lock keeps pre-upgrade s09 identity compatible', validateDescriptionBindingLock({
+  ...bindingTask,
+  descriptionMaterialBinding: {...binding, bindingRequestKey: legacyS09BindingRequestKey},
+}, payloadWithDesc).ok, true);
+check('binding lock never accepts pre-upgrade key for s9 proof', validateDescriptionBindingLock({
+  ...bindingTask,
+  descriptionMaterialBinding: {
+    ...binding,
+    sourceProof: DESCRIPTION_SOURCE_PROOF_S9,
+    bindingRequestKey: legacyS09BindingRequestKey,
+  },
+}, payloadWithDesc).ok, false);
 const driftedPayload = {
   multi_language_desc_list: [
     {language: 'ar', name: arLines.join('\n')},

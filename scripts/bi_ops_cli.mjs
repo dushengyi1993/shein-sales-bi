@@ -296,7 +296,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
-  node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--material-json <可选：待核验material.json>] [--expected-revision <n>]
+  node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <query.json|enriched.csv> --performance-date 2026-07-04 [--out <dir>]
@@ -1147,6 +1147,10 @@ async function runPrepareDescriptions(args) {
   if (!args.sourceFile) throw new Error('prepare-descriptions requires --source-file <实际审核资料HTML>');
   const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
   if (!store) throw new Error('prepare-descriptions requires --store <target store>');
+  const section = String(args.section || 'auto').trim().toLowerCase();
+  if (!['s09', 's9', 'auto'].includes(section)) {
+    throw new Error(`prepare-descriptions --section 必须是 auto/s09/s9（当前 ${section || '(empty)'}）`);
+  }
   let sourceBytes;
   try {
     sourceBytes = await fs.readFile(args.sourceFile);
@@ -1162,9 +1166,13 @@ async function runPrepareDescriptions(args) {
     material: providedMaterial,
     sourceFileBasename: path.basename(args.sourceFile),
     sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
+    section,
   });
   const material = validateDescriptionMaterialJson(verified.material);
   const summary = describeDescriptionMaterial(material);
+  const sourceProof = verified.sectionUsed === 's9'
+    ? 'server_verified_html_section_s9'
+    : 'server_verified_html_section_s09';
   const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
   const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
   if (!currentTask) throw new Error('当前账号无法精确读取目标 task，描述未绑定');
@@ -1182,6 +1190,16 @@ async function runPrepareDescriptions(args) {
         targetStore: store,
         baseTaskRevision: existingBaseRevision,
         contentSha256: summary.contentSha256,
+        sourceProof,
+      })
+    : '';
+  const existingLegacyS09BindingRequestKey = sourceProof === 'server_verified_html_section_s09'
+    && Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
+    ? descriptionBindingRequestKey({
+        taskId: args.taskId,
+        targetStore: store,
+        baseTaskRevision: existingBaseRevision,
+        contentSha256: summary.contentSha256,
       })
     : '';
   const exactExistingBinding = Boolean(
@@ -1189,7 +1207,9 @@ async function runPrepareDescriptions(args) {
     && String(existingBinding.targetStore || '').toUpperCase() === store.toUpperCase()
     && String(existingBinding.sourceFileSha256 || '').toLowerCase() === summary.sourceFileSha256
     && String(existingBinding.contentSha256 || '').toLowerCase() === summary.contentSha256
-    && String(existingBinding.bindingRequestKey || '').toLowerCase() === existingBindingRequestKey,
+    && String(existingBinding.sourceProof || '') === sourceProof
+    && [existingBindingRequestKey, existingLegacyS09BindingRequestKey].filter(Boolean)
+      .includes(String(existingBinding.bindingRequestKey || '').toLowerCase()),
   );
   const explicitExpectedRevision = Number.isFinite(args.expectedRevision) && args.expectedRevision > 0
     ? Math.trunc(args.expectedRevision)
@@ -1215,6 +1235,7 @@ async function runPrepareDescriptions(args) {
       dataBase64: sourceBytes.toString('base64'),
     },
     expectedRevision: requestRevision,
+    section,
   };
   let bindJson;
   try {
