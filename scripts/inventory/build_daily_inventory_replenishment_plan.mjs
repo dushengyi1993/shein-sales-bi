@@ -223,9 +223,8 @@ for (const context of rowContexts) {
     ?? metrics?.raw_goods_sn
     ?? metrics?.rawGoodsSn,
   );
-  if (!productMatchKey || !metricsMatchKey || productMatchKey !== metricsMatchKey) {
-    blockers.push(`OpenAPI/linksData canonical evidence conflicts: store=${row.storeKey} skc=${row.skc}`);
-  }
+  const canonicalEvidenceConflict = Boolean(metrics)
+    && (!productMatchKey || !metricsMatchKey || productMatchKey !== metricsMatchKey);
   const et = etByKey.get(matchKey);
   const otherSellingStores = [...(sellingStoresByMatchKey.get(matchKey) || [])]
     .filter(storeKey => storeKey && storeKey !== row.storeKey)
@@ -242,7 +241,7 @@ for (const context of rowContexts) {
       ? et?.et_box_snapshot_date
       : et?.et_store_snapshot_date,
   );
-  const decision = decideDailyInventoryReplenishment({
+  const policyDecision = decideDailyInventoryReplenishment({
     shelfStatusCode: shelfStatus.code,
     sameStoreOnShelfLinkExists: sameStoreOnShelfSkcs.length > 0,
     skuCount: Array.isArray(row.skuCodes) ? row.skuCodes.length : 0,
@@ -252,6 +251,9 @@ for (const context of rowContexts) {
     c7SaleCount: metrics?.c7_sale_cnt,
     policy,
   });
+  const decision = canonicalEvidenceConflict
+    ? {action: 'block', reason: 'openapi_linksdata_canonical_evidence_conflict'}
+    : policyDecision;
   const base = {
     storeKey: row.storeKey,
     spu: row.spu,

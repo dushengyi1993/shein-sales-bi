@@ -37,6 +37,9 @@ const policy = {
 };
 
 assert.equal(canonicalInventoryKey('SK-04031胶囊咖啡机'), 'SK04031');
+assert.equal(canonicalInventoryKey('（全）SK-7028绞肉机'), 'SK7028');
+assert.equal(canonicalInventoryKey('(全)KJ-102三明治机'), 'KJ102');
+assert.equal(canonicalInventoryKey('无刷冲击双电螺丝刀全能套装'), '');
 assert.deepEqual(assertCurrentInventoryListingIdentity({
   expectedMatchKey: 'SK-04031',
   expectedSkuCode: 'sku-1',
@@ -202,4 +205,4 @@ assert.doesNotMatch(builderScript, /bootstrap/i);
 assert.match(etSafetyGuard, /--execution-mode automatic/);
 assert.match(etSafetyGuard, /--confirm-hash "\$HASH"/);
 assert.match(etSafetyService, /SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard/);
-console.log(JSON.stringify({ok: true, checks: 68}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 71}, null, 2));
