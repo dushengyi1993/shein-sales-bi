@@ -93,6 +93,7 @@ const tests = [
   'scripts/test_link_ops_description_material_extract.mjs',
   'scripts/test_link_ops_extract_sk11004.mjs',
   'scripts/test_link_ops_prepare_descriptions_flow.mjs',
+  'scripts/test_link_ops_update_description_flow.mjs',
   'scripts/test_link_ops_executor_copy_batch_features.mjs',
   'scripts/test_link_ops_image_role_planner.mjs',
   'scripts/test_link_retire_candidate_policy.mjs',
@@ -188,7 +189,8 @@ for (const file of tests) {
   // The isolated matrix has taken 132-175 seconds on the production-sized
   // cloud host, so retain bounded headroom without widening the default budget.
   // Keep the default fail-fast budget for every other deterministic test.
-  const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
+  const timeout = (file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
+    || file === 'scripts/test_link_ops_update_description_flow.mjs')
     ? 240_000
     : 30_000;
   const result = spawnSync(process.execPath, [file], {

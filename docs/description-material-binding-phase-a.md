@@ -1,8 +1,8 @@
 # 审核资料三语核心卖点描述绑定（Phase A）
 
-Phase A 只做“当前待发布 copy_product_draft 任务的审核资料描述绑定 + 新发品强制描述门”。
-历史存量链接的 `update_description`/partialEdit 写链路（dry-run 形状、live spu-info 锁、
-check-edit-permission/query-document-state 解析、execute 回读分类）属于 Phase B，本分支未实现。
+Phase A 先实现“当前待发布 copy_product_draft 任务的审核资料描述绑定 + 新发品强制描述门”。
+同一后继分支现已补齐 Phase B 历史存量链接的 `update_description`/partialEdit 写链路；
+具体安全契约、测试与剩余边界见后文“Phase B”章节。
 
 ## 契约（锁定事实）
 
@@ -135,12 +135,78 @@ check-edit-permission/query-document-state 解析、execute 回读分类）属�
 
 ## 未完成（Phase B / 剩余 blocker）
 
-- 历史存量 `update_description` 结构化操作（intent/CLI operate/safeWriteOperations/
-  capabilities/model policy/readiness/maintenance executor）、partialEdit 最小 body、
-  check-edit-permission 与 query-document-state 的保守解析、execute 前 live 门禁重跑、
-  submitted_readback_pending/needs_manual_resolve 分类。
+- 历史存量 `update_description` 回填主链路已在 Phase B 实现（见下），剩余 blocker 仅：
+  `extract-description-material` 独立命令（卖点章节的其他历史结构：selling-card、
+  copy-panel 等）未实现；DOCX/历史格式留后续。
+
+## Phase B：历史商品 update_description（2026.08.12 分支）
+
+契约（锁定事实）：
+
+- 描述只来自服务端独立核验的实际审核 HTML：支持新版唯一 `section#s09` 与旧版唯一
+  `section#s9`（旧版确定性识别 s9 内恰好 3 个 code 区，按相邻标题/相邻标签/方向顺序声明
+  唯一映射 en/ar/zh-cn，三语各恰 5 行，任一歧义整体拒绝；`verifyDescriptionMaterialAgainstHtml`
+  新增 `section: s09|s9|auto`，auto 要求两版只存在其一）。
+- 历史任务 intent 必须单独 `update_description`（创建端点拒绝混入其他结构化动作），
+  精确单店单 SPU/SKC；旧发布任务只作来源证据（`parameters.sourceTaskId` 校验存在、
+  intents 含 copy_product_draft、写入店一致、payload SPU 一致），绝不修改旧任务。
+- partialEdit body 最小：`spu_name` + `multi_language_desc_list`（ar/en 各 5 行，
+  `{language,name}`）；任何 title/image/attribute/描述别名字段混入即 blocker。
+- 描述正文不持久化进任务记录：绑定端点把 payload 写入受控运行时材料文件
+  `state/description-material/<taskId>-<payloadHash>.json`（0600），任务只存
+  `descriptionUpdatePayloadRef`（relative pointer + fileSha256 + payloadHash）；
+  executor 每轮临时读取进内存，输出/日志/审计只含 hash/count。
+- 绑定 CAS 失败不在在线请求链路删除材料文件：跨进程“查无引用→删除”存在不可消除的
+  TOCTOU 窗口，故私有、内容寻址的孤儿文件保留并审计，待后续全局锁定的离线 GC 处理。
+- 执行前门禁（dry-run 记录基线，execute 重跑）：live spu-info 身份与当前描述 hash
+  （漂移即停）、query-document-state（SKC documentState=1 待审核/5 申诉中即停）、
+  check-edit-permission（官方 schema 3001380 请求 `{spuName}`、响应
+  `info.editable/reason`，editable=false 即停）。
+- 防重复写：execute 前服务端经单任务原子 CAS 持久化 write-claim
+  （`execution.writeClaim`，含 nonce/taskId/expectedPayloadHash/operations），
+  executor 必须校验 claim nonce 一致才允许 partialEdit；claimed/unconfirmed 状态
+  阻止后续 execute，直到人工核销；完成后按回读结果标记 completed/unconfirmed/released。
+- 成功判定：partialEdit 必须 `code=0` 且 `info.success===true` 且 `info.version` 非空；
+  version 缺失 → `update_description_submitted_unconfirmed`（人工核销，禁止重试）。
+- 回读：spu-info 身份 + ar/en 描述 hash 与绑定逐字一致 → submitted_readback_matched；
+  缺失/重复/漂移/身份不符 → submitted_readback_failed / pending，needsManualResolve，
+  绝不冒充 matched。
+
+文件：
+
+- `lib/link_ops_description_material_extract.mjs`：旧版 s9 提取（3 code 唯一映射 +
+  方向声明 + 标签规则，任一歧义拒绝）与 section 选项。
+- `lib/link_ops_product_descriptions.mjs`：`buildUpdateDescriptionPayload`、
+  `validateUpdateDescriptionPayloadShape`、`validateUpdateDescriptionBindingLock`
+  （update_description exact-key 绑定锁）、`evaluateUpdateDescriptionReadback`、
+  `classifyUpdateDescriptionLifecycle`、`extractSpuInfoIdentity`。
+- `scripts/link_ops_maintenance_openapi_executor.mjs`：update_description intent，
+  live 门禁重跑、write-claim 校验、严格成功判定、spu-info 描述 hash 回读、
+  前后保护指纹（before/after hashes）、持久化脱敏（submitPlan body → hash/count）。
+- `scripts/serve_bi_portal.mjs`：意图注册（LINK_MAINTENANCE_INTENTS /
+  LINK_OPS_ACTION_CAPABILITY_DEFS / LINK_OPS_MAINTENANCE_OFFICIAL_CANDIDATES /
+  inferLinkOpsIntent / 结构化参数 sourceTaskId/spuName/skcName）、
+  `/api/link-ops-prepare-update-description` 绑定端点（s09/s9 服务端逐字核验 +
+  来源任务证据 + 材料文件 + CAS + 审计）、execute write-claim。
+- `scripts/bi_ops_cli.mjs`：`update-description` 组合命令（建独立任务 → 绑定 →
+  dry-run，终端只输出 hashes/counts/sectionUsed/sourceTaskId）。
+- `scripts/check_bi_ops_maintenance_readiness.mjs`：update_description 契约
+  （partialEdit docId 3001810 + spu-info 强回读字段）。
+- `lib/bi_ops_intent_planner.mjs`：BI_OPS_SUPPORTED_INTENTS 增加 update_description。
+
+测试：
+
+- `scripts/test_link_ops_description_material_extract.mjs`：新增旧版 s9 用例（3 code
+  唯一性、方向/标签/冲突/重复/歧义/行数/双版本并存拒绝）。
+- `scripts/test_link_ops_product_descriptions.mjs`：新增 update_description 契约用例
+  （minimal body、binding lock、live 回读、生命周期分类）。
+- `scripts/test_link_ops_update_description_flow.mjs`（131 项）：门户 + 假 OpenAPI 集成——
+  s9/s09 绑定、旧任务业务内容不变、minimal payload、任务记录/executor 输出/审计无描述
+  正文、dry-run 锁 hash + live 基线、无 claim 直接 execute 被拒、claim 防重、
+  审核中/不可编辑/漂移停止、code=0+success+version 严格判定、回读 exact/mismatch、
+  version 缺失 unconfirmed、CLI 组合命令 hash-only 输出；已注册 deterministic runner。
 - `extract-description-material` 独立命令（卖点章节的其他历史结构：selling-card、
-  copy-panel 等）未实现；DOCX/历史格式留 Phase B。
+  copy-panel 等）未实现；DOCX/其他历史格式留后续阶段。
 - SK-11004 实际 HTML 已完成只读验收：源文件 SHA256 为
   `08fc51ba7cc5b5133b45304d85891aaaf4f6d9f20102718f38118e0ecb032f2d`，英文/阿文/中文
   均恰好 5 行，三组逐字 SHA 与锁定值一致；验收输出只有 basename、行数和 SHA，不含正文。

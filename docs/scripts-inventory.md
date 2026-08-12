@@ -698,6 +698,29 @@
 
 
 
+## 审核资料三语描述（Phase A 绑定 / Phase B 历史回填）
+
+- `scripts/bi_ops_cli.mjs`：受管 CLI 入口；`prepare-descriptions`（copy_product_draft
+  描述绑定）与 `update-description`（历史 update_description：建独立任务 → 服务端核验
+  HTML 绑定 → dry-run，终端只输出 hashes/counts/sectionUsed/sourceTaskId）。边界：
+  描述正文绝不写入 CLI 输出/任务记录；真实提交仍需确认文本、write-claim、服务端动作
+  总闸门与账号店铺写权限。
+- `scripts/link_ops_maintenance_openapi_executor.mjs`：维护写执行器，新增
+  `update_description` intent：live spu-info 身份/当前描述 hash、
+  query-document-state、check-edit-permission 门禁重跑，write-claim nonce 校验，
+  `code=0 && info.success===true && info.version` 严格成功判定，spu-info 描述 hash
+  强回读（matched / pending / unconfirmed），持久化输出脱敏（body → hash/count）。
+  边界：真实 partialEdit 只允许在云端受控运行时执行；本地/测试只走假 OpenAPI。
+- `scripts/serve_bi_portal.mjs`：`/api/link-ops-prepare-update-description` 绑定端点
+  （s09/s9 服务端逐字核验、来源任务证据校验、材料文件落盘 + 任务只存 ref/hash、
+  单任务 CAS、审计），execute 前 write-claim 持久化。边界：旧发布任务只作来源证据，
+  绝不修改；任务记录/审计永不落描述正文。
+- `scripts/check_bi_ops_maintenance_readiness.mjs`：维护写 readiness 契约表新增
+  `update_description`（partialEdit docId 3001810，requiredReadbackFields
+  productMultiDescList/spuName）。
+- `scripts/test_link_ops_update_description_flow.mjs`：Phase B 集成专项（131 项，
+  门户 + 假 OpenAPI + CLI），已注册 deterministic runner。
+
 - `scripts/product-image-suite/generate_prompt_suite.mjs`
 
   - 用途：读取产品事实 JSON，按店铺/货号批量生成 13 张电商产品套图提示词。
