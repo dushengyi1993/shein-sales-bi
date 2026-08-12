@@ -214,6 +214,9 @@ try {
   process.argv = originalArgv;
 }
 const conflictPlan = JSON.parse(await fs.readFile(conflictOut, 'utf8'));
-assert.equal(conflictPlan.executable, false);
-assert.match(conflictPlan.blockers.join('\n'), /OpenAPI\/linksData canonical evidence conflicts: store=A skc=skc-all-sold-a/);
-console.log(JSON.stringify({ok: true, checks: 36}, null, 2));
+assert.equal(conflictPlan.executable, true);
+assert.equal(conflictPlan.blockers.length, 0);
+assert.equal(conflictPlan.actionable.some(row => row.skc === 'skc-all-sold-a'), false);
+assert.equal(conflictPlan.linkAlerts.find(row => row.skc === 'skc-all-sold-a')?.decision, 'openapi_linksdata_canonical_evidence_conflict');
+assert.equal(conflictPlan.actionable.some(row => row.skc === 'skc-all-sold-b'), true);
+console.log(JSON.stringify({ok: true, checks: 39}, null, 2));
