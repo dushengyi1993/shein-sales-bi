@@ -102,7 +102,7 @@ if (( BUILD_STATUS == 2 )) && jq -e '
     SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS=0 \
     SHEIN_OPENAPI_PRODUCT_RECONCILE_DETAIL_PRIORITY_FILE="$DETAIL_TARGETS" \
     SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1 \
-      "$ROOT/scripts/cloud_openapi_product_reconciliation.sh" || DETAIL_STATUS=$?
+      bash "$ROOT/scripts/cloud_openapi_product_reconciliation.sh" || DETAIL_STATUS=$?
     if (( DETAIL_STATUS == 0 )); then
       BUILD_STATUS=0
       node scripts/inventory/build_daily_inventory_replenishment_plan.mjs \
