@@ -210,6 +210,7 @@ try {
 } catch (error) {
   assert.equal(error?.code, 2);
 } finally {
+  process.exitCode = 0;
   process.argv = originalArgv;
 }
 const conflictPlan = JSON.parse(await fs.readFile(conflictOut, 'utf8'));
