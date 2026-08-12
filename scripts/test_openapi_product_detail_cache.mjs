@@ -43,7 +43,7 @@ assert.equal(fallbacks.find(row => row.spuName === 'B').detailFetchedAt, '2026-0
 const fetchSource = fs.readFileSync(new URL('./fetch_shein_openapi_products.mjs', import.meta.url), 'utf8');
 assert.match(fetchSource, /detailRetryAttempts/);
 assert.match(fetchSource, /detailRetryBaseDelayMs/);
-assert.match(fetchSource, /isRetryableDetailFailure/);
+assert.match(fetchSource, /isRetryableOpenapiFailure/);
 assert.match(fetchSource, /code === '832213'/);
 assert.match(fetchSource, /await sleep\(args\.detailRetryBaseDelayMs/);
 
