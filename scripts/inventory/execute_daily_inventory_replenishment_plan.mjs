@@ -227,6 +227,7 @@ const expectedHash = stableInventoryHash({
   policyVersion: plan.policyVersion,
   actionable: plan.actionable,
   lowEtAllocations: plan.lowEtAllocations,
+  ...(plan.detailRefreshTargets ? {detailRefreshTargets: plan.detailRefreshTargets} : {}),
   ...(plan.bootstrapGroups ? {bootstrapGroups: plan.bootstrapGroups} : {}),
   ...(plan.bootstrapLockRegistry?.hash ? {bootstrapRegistryHash: plan.bootstrapLockRegistry.hash} : {}),
   sourceEvidence: asArray(plan.sourceEvidence).map(({ageHours: _ageHours, ...evidence}) => evidence),

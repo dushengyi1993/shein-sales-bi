@@ -242,6 +242,8 @@ const biSectionRefreshFailures = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
 let biSectionFastBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
+const INVENTORY_COST_SNAPSHOT_RETRY_RE = /(?:inventory-cost source changed after snapshot|stale inventory-cost rebuild refused)/i;
+const INVENTORY_COST_REFRESH_MAX_ATTEMPTS = Math.max(1, Math.min(5, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_MAX_ATTEMPTS || 3)));
 const BI_FAST_BACKGROUND_SECTIONS = new Set(['homeRankings', 'homeProfit']);
 const BI_INLINE_FAST_SECTIONS = new Set(['liveSalesToday', 'productState', 'inventoryStock']);
 const BI_OWNER_VISIBLE_PRIORITY_SECTIONS = new Set([
@@ -255,7 +257,7 @@ const BI_OWNER_VISIBLE_PRIORITY_SECTIONS = new Set([
 const BI_EXTERNAL_SECTION_QUEUE_ENABLED = process.platform !== 'win32'
   && !['0', 'false', 'no', 'off'].includes(String(process.env.SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED || '1').trim().toLowerCase());
 const biExternalSectionQueuePending = new Set();
-const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter', 'waybills'];
+const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
   generatedAt: '',
@@ -8253,22 +8255,37 @@ async function refreshInventoryCostLedger(args) {
     throw new Error('inventory cost ledger refresh is disabled; cannot safely rebuild stale profit marts');
   }
   const timeoutMs = Math.max(60_000, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_TIMEOUT_MS || 900_000));
-  const run = await runChildProcess('bash', [
-    path.join(ROOT, 'scripts', 'refresh_inventory_cost_ledger.sh'),
-  ], {
-    cwd: ROOT,
-    timeoutMs,
-    env: {
-      SHEIN_BI_DB_CONTAINER: args.container,
-      SHEIN_BI_DB_DATABASE: args.database,
-      SHEIN_BI_DB_USER: args.user,
-    },
-  });
-  if (!run.ok) {
-    const tail = String(run.stderr || run.stdout || '').slice(-4000);
-    throw new Error(`inventory cost ledger refresh failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
+  const runs = [];
+  for (let attempt = 1; attempt <= INVENTORY_COST_REFRESH_MAX_ATTEMPTS; attempt += 1) {
+    const run = await runChildProcess('bash', [
+      path.join(ROOT, 'scripts', 'refresh_inventory_cost_ledger.sh'),
+    ], {
+      cwd: ROOT,
+      timeoutMs,
+      env: {
+        SHEIN_BI_DB_CONTAINER: args.container,
+        SHEIN_BI_DB_DATABASE: args.database,
+        SHEIN_BI_DB_USER: args.user,
+      },
+    });
+    runs.push(run);
+    if (run.ok) {
+      return {
+        ...run,
+        stdout: `${runs.slice(0, -1).map((item, index) => `[inventory-cost retry ${index + 1}] ${item.stderr || item.stdout || ''}`).join('\n')}\n${run.stdout || ''}`.trim(),
+      };
+    }
+    const detail = String(run.stderr || run.stdout || '');
+    if (run.timedOut || !INVENTORY_COST_SNAPSHOT_RETRY_RE.test(detail) || attempt >= INVENTORY_COST_REFRESH_MAX_ATTEMPTS) {
+      const tail = detail.slice(-4000);
+      throw new Error(`inventory cost ledger refresh failed: attempt=${attempt}/${INVENTORY_COST_REFRESH_MAX_ATTEMPTS} code=${run.code} timedOut=${run.timedOut} ${tail}`);
+    }
+    // The source guard intentionally rejects a snapshot when orders arrive
+    // during the build. Retry from a new database snapshot under the same
+    // outer freshness single-flight; never publish the rejected ledger.
+    await new Promise(resolve => setTimeout(resolve, Math.min(5_000, attempt * 1_000)));
   }
-  return run;
+  throw new Error('inventory cost ledger refresh exhausted without a result');
 }
 
 async function readProfitMartCacheFreshness(args) {
@@ -8612,6 +8629,26 @@ async function loadBiSection(args, root, section, options = {}) {
   if (!force && allowGenerate) {
     const failure = biSectionRefreshFailures.get(biSectionRefreshFailureKey(root, section));
     if (failure) {
+      const existingCurrent = await readBiSectionCache(root, section, meta.generatedAt).catch(() => null);
+      if (existingCurrent) {
+        // A failed forced refresh does not invalidate an already published,
+        // current-generation artifact. Keep it available while retrying in
+        // the managed queue instead of turning a healthy homepage table red.
+        const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
+          force: true,
+          refreshToken: `automatic-retry:${failure.at}`,
+          hostLockedWorker: options.hostLockedWorker === true,
+        });
+        options = {
+          ...options,
+          extraFields: {
+            ...(options.extraFields || {}),
+            refreshScheduled,
+            refreshRetryPending: true,
+          },
+        };
+        clearBiSectionRefreshFailure(root, section);
+      } else {
       const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, section, meta.generatedAt, {
         force: true,
         refreshToken: `automatic-retry:${failure.at}`,
@@ -8624,6 +8661,7 @@ async function loadBiSection(args, root, section, options = {}) {
           refreshScheduled,
         },
       };
+      }
     }
   }
   if (force && options.asyncRefresh) {

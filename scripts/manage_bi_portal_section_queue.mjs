@@ -15,7 +15,7 @@ function usage(message = '') {
   if (message) console.error(message);
   console.error(`Usage:
   manage_bi_portal_section_queue.mjs enqueue --sections CSV [--priority N] [--reason TEXT] [--file PATH]
-  manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--file PATH]
+  manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID [--file PATH]
   manage_bi_portal_section_queue.mjs fail --section NAME --lease-id ID [--error TEXT] [--backoff-seconds N] [--file PATH]
   manage_bi_portal_section_queue.mjs status [--file PATH]`);
@@ -42,6 +42,7 @@ function parseArgs(argv) {
     section: '',
     leaseId: undefined,
     leaseSeconds: 2_700,
+    excludeSections: [],
     error: '',
     backoffSeconds: DEFAULT_FAIL_BACKOFF_SECONDS,
   };
@@ -60,6 +61,9 @@ function parseArgs(argv) {
     else if (token === '--section') options.section = normalizeSection(next());
     else if (token === '--lease-id') options.leaseId = next();
     else if (token === '--lease-seconds') options.leaseSeconds = Number(next());
+    else if (token === '--exclude-sections') {
+      options.excludeSections.push(...next().split(',').map(normalizeSection));
+    }
     else if (token === '--error') options.error = next();
     else if (token === '--backoff-seconds') options.backoffSeconds = Number(next());
     else throw new TypeError(`QUEUE_ARGUMENT_UNKNOWN_${token}`);
@@ -116,6 +120,8 @@ function normalizeQueue(queue) {
     }
     entry.nextAttemptAt = typeof entry.nextAttemptAt === 'string' ? entry.nextAttemptAt : '';
     entry.rerun = Boolean(entry.rerun);
+    const rerunPriority = Number(entry.rerunPriority ?? NaN);
+    entry.rerunPriority = Number.isSafeInteger(rerunPriority) && rerunPriority >= 0 ? rerunPriority : null;
     entry.dependencyYield = Boolean(entry.dependencyYield);
     const priority = Number(entry.priority ?? 50);
     entry.priority = Number.isSafeInteger(priority) && priority >= 0 ? priority : 50;
@@ -196,6 +202,7 @@ export function enqueueSections(queue, {
         requestRevision: 1,
         claimedRevision: 0,
         rerun: false,
+        rerunPriority: null,
         dependencyYield: false,
         status: 'pending',
         requestedAt: nowIso,
@@ -224,7 +231,12 @@ export function enqueueSections(queue, {
       // A re-enqueue while a lease is still running must not delete or split
       // the entry: keep the worker on the old revision, mark the rerun, and
       // let complete/fail reconcile the revision before the entry is free.
-      if (entry.status === 'running') entry.rerun = true;
+      if (entry.status === 'running') {
+        entry.rerun = true;
+        entry.rerunPriority = entry.rerunPriority == null
+          ? priority
+          : Math.min(Number(entry.rerunPriority), priority);
+      }
       if (entry.status !== 'running') entry.status = 'pending';
     }
     if (reason && !entry.reasons.includes(reason)) entry.reasons.push(reason.slice(0, 300));
@@ -236,6 +248,7 @@ export function claimNext(queue, {
   leaseSeconds = 2_700,
   now = new Date(),
   leaseId = crypto.randomUUID(),
+  excludeSections = [],
 } = {}) {
   const nowMillis = now.getTime();
   recoverExpired(queue, nowMillis);
@@ -250,6 +263,7 @@ export function claimNext(queue, {
     profitEntry && (profitEntry.status === 'running' || profitEntry.dependencyYield !== true)
   );
   const profitBlocksHomeProfit = Boolean(profitEntry);
+  const excluded = new Set((excludeSections || []).map(normalizeSection));
   // A steady stream of priority-10 accounting work used to keep priority-50
   // daily/page caches pending forever.  Age lowers the effective priority by
   // one point every two minutes, but never ahead of an explicit priority-0
@@ -274,6 +288,10 @@ export function claimNext(queue, {
   const pending = queue.entries
     .filter(entry => {
       if (entry.status !== 'pending') return false;
+      // One bounded worker slot should make progress across distinct sections.
+      // Re-claiming the same hot section twice in one run lets continuous
+      // orders consume every slot and starves daily rankings/traffic forever.
+      if (excluded.has(entry.section)) return false;
       if (entry.section === 'homeRankings' && profitBlocksHomeRankings) return false;
       if (entry.section === 'homeProfit' && profitBlocksHomeProfit) return false;
       const nextAttemptAt = Date.parse(entry.nextAttemptAt || '');
@@ -317,6 +335,8 @@ export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) 
     entry.leaseExpiresAt = '';
     entry.nextAttemptAt = '';
     entry.dependencyYield = entry.section === 'profit';
+    if (Number.isSafeInteger(Number(entry.rerunPriority))) entry.priority = Number(entry.rerunPriority);
+    entry.rerunPriority = null;
     queue.nextSequence = Math.max(Number(queue.nextSequence || 0), ...queue.entries.map(item => Number(item.sequence || 0))) + 1;
     entry.sequence = queue.nextSequence;
     entry.lastError = `complete superseded by requestRevision=${Number(entry.requestRevision)}`;
@@ -354,6 +374,8 @@ export function failClaim(queue, {
     : new Date(now.getTime() + delaySeconds * 1_000).toISOString();
   entry.dependencyYield = false;
   if (newerRevisionPending) {
+    if (Number.isSafeInteger(Number(entry.rerunPriority))) entry.priority = Number(entry.rerunPriority);
+    entry.rerunPriority = null;
     queue.nextSequence = Math.max(Number(queue.nextSequence || 0), ...queue.entries.map(item => Number(item.sequence || 0))) + 1;
     entry.sequence = queue.nextSequence;
   }

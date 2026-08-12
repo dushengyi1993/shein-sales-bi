@@ -309,6 +309,8 @@ const at = offsetMs => new Date(start.getTime() + offsetMs);
     'superseded canonical work must yield round-robin instead of livelocking on profit');
   assert.equal(queue.entries.find(entry => entry.section === 'homeProfit').status, 'pending',
     'homeProfit remains fail-closed until one profit revision completes quietly');
+  assert.equal(queue.entries.find(entry => entry.section === 'profit').priority, 5,
+    'a coalesced rerun keeps only the priority of requests that actually arrived during its lease');
 }
 
 // ---- A superseded failure is not a completed accounting snapshot. It must
@@ -323,6 +325,20 @@ const at = offsetMs => new Date(start.getTime() + offsetMs);
     'a failed profit lease must never advertise a successful dependency snapshot');
   assert.equal(claimNext(queue, {leaseSeconds: 60, leaseId: 'failed-profit-retry', now: at(2_500)}).section, 'profit',
     'profit must retry before either homepage dependent after a superseded failure');
+}
+
+// A one-time operator force request must not poison a continuously coalesced
+// entry at priority 0 forever. Once that lease is superseded, only the newer
+// request priority carries into the rerun.
+{
+  const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['orders'], priority: 0, now: at(0)});
+  claimNext(queue, {leaseSeconds: 60, leaseId: 'forced-once', now: at(1_000)});
+  enqueueSections(queue, {sections: ['orders'], priority: 10, now: at(1_500)});
+  completeClaim(queue, {section: 'orders', leaseId: 'forced-once', now: at(2_000)});
+  const pending = queue.entries.find(entry => entry.section === 'orders');
+  assert.equal(pending.priority, 10, 'superseded rerun priority must reset to the newer request priority');
+  assert.equal(pending.rerunPriority, null);
 }
 
 // ---- Starvation, effective-priority tie, and forced priority-0 semantics.
@@ -356,6 +372,20 @@ const at = offsetMs => new Date(start.getTime() + offsetMs);
     now: at(10 * 60 * 60_000 + 1_000),
   });
   assert.equal(forcedClaim.section, 'ownerForced', 'explicit owner refresh must remain ahead of aged background work');
+
+  const distinctSlotQueue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(distinctSlotQueue, {sections: ['orders', 'profit', 'rankings'], priority: 0, now: at(0)});
+  const firstDistinct = claimNext(distinctSlotQueue, {leaseId: 'slot-orders', now: at(1_000)});
+  assert.equal(firstDistinct.section, 'orders');
+  enqueueSections(distinctSlotQueue, {sections: ['orders'], priority: 0, now: at(1_500)});
+  completeClaim(distinctSlotQueue, {section: 'orders', leaseId: 'slot-orders', now: at(2_000)});
+  const secondDistinct = claimNext(distinctSlotQueue, {
+    leaseId: 'slot-profit',
+    now: at(2_500),
+    excludeSections: ['orders'],
+  });
+  assert.equal(secondDistinct.section, 'profit',
+    'one bounded worker run must not consume two slots on the same hot section');
 }
 
 // ---- Lease mismatch and section-name validation stay fail-closed.
@@ -403,6 +433,9 @@ try {
   const failedEntry = JSON.parse(fail.stdout).entries[0];
   assert.equal(failedEntry.status, 'pending');
   assert.ok(Date.parse(failedEntry.nextAttemptAt) > Date.now(), 'CLI fail must persist a future nextAttemptAt');
+
+  const excludedClaim = run('claim', '--lease-seconds', '60', '--exclude-sections', 'orders');
+  assert.equal(excludedClaim.status, 75, 'CLI exclusions must prevent a same-run re-claim');
 
   const emptyClaim = run('claim', '--lease-seconds', '60');
   assert.equal(emptyClaim.status, 75, 'a backed-off queue must report no claimable entry');

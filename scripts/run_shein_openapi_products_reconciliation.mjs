@@ -63,6 +63,8 @@ function parseArgs(argv) {
     maxDetails: 0,
     skipDetails: false,
     skipStock: false,
+    detailPriorityFile: '',
+    priorityDetailsOnly: false,
     latestOut: '',
     distro: 'Ubuntu-24.04',
     container: 'shein-warehouse-db',
@@ -81,6 +83,8 @@ function parseArgs(argv) {
     else if (a === '--max-details') args.maxDetails = Number(argv[++i]);
     else if (a === '--skip-details') args.skipDetails = true;
     else if (a === '--skip-stock') args.skipStock = true;
+    else if (a === '--detail-priority-file') args.detailPriorityFile = path.resolve(argv[++i] || '');
+    else if (a === '--priority-details-only') args.priorityDetailsOnly = true;
     else if (a === '--latest-out') args.latestOut = path.resolve(argv[++i]);
     else if (a === '--distro') args.distro = String(argv[++i] || '').trim() || args.distro;
     else if (a === '--container') args.container = String(argv[++i] || '').trim() || args.container;
@@ -104,6 +108,8 @@ sanitized summary. Secrets are never printed.`);
   args.fetchTimeoutMs = Math.max(60_000, Number.isFinite(args.fetchTimeoutMs) ? Math.trunc(args.fetchTimeoutMs) : 20 * 60_000);
   args.loadTimeoutMs = Math.max(60_000, Number.isFinite(args.loadTimeoutMs) ? Math.trunc(args.loadTimeoutMs) : 10 * 60_000);
   args.maxDetails = Math.max(0, Number.isFinite(args.maxDetails) ? Math.trunc(args.maxDetails) : 0);
+  if (args.priorityDetailsOnly && !args.detailPriorityFile) throw new Error('--priority-details-only requires --detail-priority-file');
+  if (args.priorityDetailsOnly && args.maxDetails < 1) throw new Error('--priority-details-only requires a positive --max-details budget');
   return args;
 }
 
@@ -398,6 +404,8 @@ async function runOneStore(storeKey, args) {
   if (args.maxDetails > 0) fetchArgs.push('--max-details', String(args.maxDetails));
   if (args.skipDetails) fetchArgs.push('--skip-details');
   if (args.skipStock) fetchArgs.push('--skip-stock');
+  if (args.detailPriorityFile) fetchArgs.push('--detail-priority-file', args.detailPriorityFile);
+  if (args.priorityDetailsOnly) fetchArgs.push('--priority-details-only');
   const fetchStep = await runNodeStep('fetch', 'fetch_shein_openapi_products.mjs', fetchArgs, {timeoutMs: args.fetchTimeoutMs});
   if (!fetchStep.ok) return {storeKey, status: 'fetch_failed', ok: false, fetchStep, loadStep: null};
   const loadStep = await runNodeStep('load', 'load_shein_openapi_products_warehouse.mjs', [
@@ -609,6 +617,7 @@ export async function main(argv = process.argv.slice(2)) {
     concurrency: args.concurrency,
     maxDetails: args.maxDetails,
     detailValidationMode: args.skipDetails ? 'stock_only' : args.maxDetails > 0 ? 'bounded' : 'full',
+    priorityDetailsOnly: args.priorityDetailsOnly,
     requestedStores: requested,
     authorizedStores: authorized,
     reportScope: {

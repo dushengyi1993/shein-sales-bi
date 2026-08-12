@@ -20,5 +20,13 @@ assert.match(source, /inventory cost ledger remains incomplete after refresh/,
   'a failed ledger coverage recheck must preserve the prior complete section cache rather than publish a profit-only result');
 assert.match(source, /biSectionRefreshFailures/,
   'section refresh failures must be retained as visible stale-cache metadata');
+assert.match(source, /INVENTORY_COST_SNAPSHOT_RETRY_RE[\s\S]*INVENTORY_COST_REFRESH_MAX_ATTEMPTS/,
+  'snapshot conflicts must have a small bounded retry policy');
+assert.match(source, /for \(let attempt = 1; attempt <= INVENTORY_COST_REFRESH_MAX_ATTEMPTS; attempt \+= 1\)[\s\S]*INVENTORY_COST_SNAPSHOT_RETRY_RE\.test\(detail\)/,
+  'only the expected concurrent-source snapshot conflict may retry');
+assert.match(source, /existingCurrent[\s\S]*refreshRetryPending: true[\s\S]*clearBiSectionRefreshFailure/,
+  'a failed refresh must not poison an already published current-generation cache');
+assert.doesNotMatch(source, /DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = \[[^\]]*waybills/,
+  'non-critical waybills must not keep the core warmup watcher in a one-minute error loop');
 
 console.log('profit_refresh_pipeline_contract: cost ledger precedes profit refresh and stale-cache failures remain observable');

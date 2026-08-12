@@ -141,6 +141,7 @@ const tests = [
   'scripts/test_inventory_bootstrap_lock_registry.mjs',
   'scripts/test_daily_inventory_replenishment_plan.mjs',
   'scripts/test_et_low_inventory_safety_guard.mjs',
+  'scripts/test_et_low_inventory_detail_evidence.mjs',
   'scripts/test_inventory_cost_ledger.mjs',
   'scripts/test_shein_finance_check_orders.mjs',
   'scripts/test_storage_fee_bill_canonicalization.mjs',

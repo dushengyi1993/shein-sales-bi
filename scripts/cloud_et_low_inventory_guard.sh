@@ -29,11 +29,16 @@ if [[ -z "$BATCH_ID" || "$TARGET_DATE" != "$DATE" || "$MANIFEST_OK" != "true" ]]
   echo "[et_low_inventory_guard] ET manifest is not a completed current-day batch batch=$BATCH_ID targetDate=$TARGET_DATE" >&2
   exit 75
 fi
-if [[ -s "$STATE" ]] && [[ "$(jq -r '.lastProcessedBatchId // empty' "$STATE")" == "$BATCH_ID" ]]; then
+if [[ -s "$STATE" ]] \
+  && [[ "$(jq -r '.lastProcessedBatchId // empty' "$STATE")" == "$BATCH_ID" ]] \
+  && jq -e '.result != null' "$STATE" >/dev/null; then
   # Older releases treated low-ET canonicals that still need future observation
   # as a technical execution failure. A completed batch with no row-level
   # blocker is healthy; keep the watchlist active without failing systemd.
-  if jq -e '(.counts.blocked // 0) == 0 and .ok != true' "$STATE" >/dev/null; then
+  # Only a genuinely completed run (result present) may be normalized: a
+  # plan_blocked state also writes lastProcessedBatchId but has result null and
+  # no counts, so it must keep failing closed instead of being masked as ok.
+  if jq -e '(.result != null) and (.counts.blocked // 0) == 0 and .ok != true' "$STATE" >/dev/null; then
     tmp="$STATE.$$.tmp"
     jq '
       .ok = true
@@ -45,11 +50,16 @@ if [[ -s "$STATE" ]] && [[ "$(jq -r '.lastProcessedBatchId // empty' "$STATE")" 
   jq '{ok:true,state:"batch_already_processed",lastProcessedBatchId,active,planHash,result}' "$STATE"
   exit 0
 fi
+if [[ -s "$STATE" ]] && [[ "$(jq -r '.lastProcessedBatchId // empty' "$STATE")" == "$BATCH_ID" ]]; then
+  echo "[et_low_inventory_guard] retry incomplete batch=$BATCH_ID previousState=$(jq -r '.businessState // "plan_blocked"' "$STATE")"
+fi
 
 SAFE_BATCH_ID="$(printf '%s' "$BATCH_ID" | tr -c 'A-Za-z0-9._-' '_')"
 SOURCE_PLAN="$RUNTIME_ROOT/source-plans/et-low-inventory-source-$SAFE_BATCH_ID.json"
 PLAN="$RUNTIME_ROOT/plans/et-low-inventory-$SAFE_BATCH_ID.json"
 RESULT="$RUNTIME_ROOT/results/et-low-inventory-$SAFE_BATCH_ID.json"
+DETAIL_TARGETS="$RUNTIME_ROOT/source-plans/et-low-inventory-detail-targets-$SAFE_BATCH_ID.json"
+DETAIL_BUDGET="${SHEIN_BI_ET_LOW_INVENTORY_DETAIL_BUDGET:-32}"
 
 BUILD_STATUS=0
 node scripts/inventory/build_daily_inventory_replenishment_plan.mjs \
@@ -61,6 +71,50 @@ if [[ ! -s "$SOURCE_PLAN" ]]; then
   echo "[et_low_inventory_guard] source planner did not produce a plan status=$BUILD_STATUS" >&2
   if (( BUILD_STATUS != 0 )); then exit "$BUILD_STATUS"; fi
   exit 1
+fi
+
+# The safety planner may use cached canonical identity only to discover a
+# conservative low-ET candidate set. Before any action is executable, fetch
+# current OpenAPI detail for exactly those SPUs, then rebuild the source plan.
+# Non-candidates never consume the shared detail budget.
+if (( BUILD_STATUS == 2 )) && jq -e '
+  ((.detailRefreshTargets // []) | length) > 0
+  and ((.blockers // []) | length) > 0
+  and all(.blockers[]; startswith("low-ET OpenAPI product canonical evidence"))
+' "$SOURCE_PLAN" >/dev/null; then
+  jq -n \
+    --argjson rows "$(jq '.detailRefreshTargets' "$SOURCE_PLAN")" '
+      {schemaVersion:"et-low-inventory-detail-targets/v1", stores:
+        (reduce $rows[] as $row ({};
+          .[$row.storeKey] = (((.[$row.storeKey] // []) + [$row.spu]) | unique)
+        ))}
+    ' >"$DETAIL_TARGETS.tmp"
+  mv "$DETAIL_TARGETS.tmp" "$DETAIL_TARGETS"
+  TARGET_STORES="$(jq -r '.stores | keys | join(",")' "$DETAIL_TARGETS")"
+  MAX_TARGETS="$(jq '[.stores[] | length] | max // 0' "$DETAIL_TARGETS")"
+  if [[ ! "$DETAIL_BUDGET" =~ ^[0-9]+$ ]] || (( DETAIL_BUDGET < 1 || MAX_TARGETS > DETAIL_BUDGET )); then
+    echo "[et_low_inventory_guard] targeted detail budget exceeded maxTargets=$MAX_TARGETS budget=$DETAIL_BUDGET" >&2
+  else
+    echo "[et_low_inventory_guard] refresh current detail stores=$TARGET_STORES maxTargets=$MAX_TARGETS budget=$DETAIL_BUDGET"
+    DETAIL_STATUS=0
+    SHEIN_OPENAPI_PRODUCT_RECONCILE_STORES="$TARGET_STORES" \
+    SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="$DETAIL_BUDGET" \
+    SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS=0 \
+    SHEIN_OPENAPI_PRODUCT_RECONCILE_DETAIL_PRIORITY_FILE="$DETAIL_TARGETS" \
+    SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1 \
+      "$ROOT/scripts/cloud_openapi_product_reconciliation.sh" || DETAIL_STATUS=$?
+    if (( DETAIL_STATUS == 0 )); then
+      BUILD_STATUS=0
+      node scripts/inventory/build_daily_inventory_replenishment_plan.mjs \
+        --date "$DATE" \
+        --operation-mode et_low_inventory_safety \
+        --required-detail-targets "$DETAIL_TARGETS" \
+        --bootstrap-lock-file "$BOOTSTRAP_LOCK_FILE" \
+        --out "$SOURCE_PLAN" || BUILD_STATUS=$?
+    else
+      echo "[et_low_inventory_guard] targeted current-detail refresh failed status=$DETAIL_STATUS" >&2
+    fi
+  fi
 fi
 
 FILTER_STATUS=0
