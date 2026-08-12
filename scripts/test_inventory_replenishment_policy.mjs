@@ -41,19 +41,19 @@ assert.equal(canonicalInventoryKey('（全）SK-7028绞肉机'), 'SK7028');
 assert.equal(canonicalInventoryKey('(全)KJ-102三明治机'), 'KJ102');
 assert.equal(canonicalInventoryKey('无刷冲击双电螺丝刀全能套装'), '');
 assert.deepEqual(assertCurrentInventoryListingIdentity({
-  expectedMatchKey: 'SK-04031',
+  expectedMatchKey: 'SK-04031胶囊咖啡机',
   expectedSkuCode: 'sku-1',
   liveSupplierCode: 'SK04031胶囊咖啡机',
   liveSkuCodes: ['sku-1'],
-}), {matchKey: 'SK04031', skuCode: 'sku-1'});
+}), {matchKey: 'SK-04031胶囊咖啡机', skuCode: 'sku-1'});
 assert.throws(() => assertCurrentInventoryListingIdentity({
-  expectedMatchKey: 'SK04031',
+  expectedMatchKey: 'SK-04031胶囊咖啡机',
   expectedSkuCode: 'sku-1',
   liveSupplierCode: 'SK04031胶囊咖啡机',
   liveSkuCodes: ['sku-1', 'sku-2'],
 }), /cardinality changed/);
 assert.throws(() => assertCurrentInventoryListingIdentity({
-  expectedMatchKey: 'SK04031',
+  expectedMatchKey: 'SK-04031胶囊咖啡机',
   expectedSkuCode: 'sku-1',
   liveSupplierCode: 'SK09999其他产品',
   liveSkuCodes: ['sku-1'],

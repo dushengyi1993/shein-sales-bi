@@ -339,7 +339,7 @@ function normalizeProductRows({storeKey, productRows, detailResults, detailFallb
 async function fetchProductList(client, args) {
   const rows = [];
   for (let pageNum = 1; pageNum <= args.maxPages; pageNum += 1) {
-    const response = await client.request('/open-api/openapi-business-backend/product/query', {
+    const response = await client.requestReadOnly('/open-api/openapi-business-backend/product/query', {
       body: {pageNum, pageSize: args.pageSize},
     });
     if (String(response.data?.code) !== '0') {

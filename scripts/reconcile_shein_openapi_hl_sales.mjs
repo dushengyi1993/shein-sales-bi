@@ -138,7 +138,7 @@ async function fetchOrderListForDate(client, date) {
   const all = [];
   let total = null;
   for (let page = 1; page < 400; page++) {
-    const response = await client.request('/open-api/order/order-list', {
+    const response = await client.requestReadOnly('/open-api/order/order-list', {
       body: {
         queryType: 1,
         startTime: `${date} 00:00:00`,
