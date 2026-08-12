@@ -7,6 +7,7 @@ import {
   assertCurrentInventoryListingIdentity,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
+  resolveInventoryIdentityKey,
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
@@ -165,10 +166,9 @@ async function assertStillListed(client, row) {
   const eligibleStatuses = new Set((policy.eligibleShelfStatusCodes || ['1']).map(String));
   if (!eligibleStatuses.has(liveShelfStatus)) throw new Error(`${row.skc} shelf status is no longer eligible: ${liveShelfStatus}`);
   const liveSkuCodes = asArray(skc.skuInfoList).map(item => String(item?.skuCode || '')).filter(Boolean);
-  const expectedMatchKey = canonicalInventoryKey(row.matchKey || row.canonical || row.supplierCode);
   const liveSupplierCode = String(skc?.supplierCode || response.data?.info?.supplierCode || '').trim();
   assertCurrentInventoryListingIdentity({
-    expectedMatchKey,
+    expectedMatchKey: row.canonical || row.supplierCode,
     expectedSkuCode: row.skuCode,
     liveSupplierCode,
     liveSkuCodes,
@@ -320,14 +320,14 @@ for (const row of rows) {
     }
     const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
     if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
-    const metricsMatchKey = canonicalInventoryKey(
+    const metricsIdentityKey = resolveInventoryIdentityKey(
       metrics.standard_goods_sn
       ?? metrics.standardGoodsSn
       ?? metrics.raw_goods_sn
       ?? metrics.rawGoodsSn,
     );
-    const expectedMatchKey = canonicalInventoryKey(row.matchKey || row.canonical || row.supplierCode);
-    if (!metricsMatchKey || metricsMatchKey !== expectedMatchKey) {
+    const expectedIdentityKey = resolveInventoryIdentityKey(row.canonical || row.supplierCode);
+    if (!metricsIdentityKey || !expectedIdentityKey || metricsIdentityKey !== expectedIdentityKey) {
       throw new Error('linksData canonical identity changed or is unavailable');
     }
     const currentShelfStatus = resolveInventoryShelfStatus(metrics, row.openApiShelfStatusCode || row.shelfStatusCode);

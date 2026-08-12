@@ -242,7 +242,7 @@ async function resolveEtInventory(canonical, biPortalData, maxBiAgeHours) {
 
 async function findProduct(client, targetSkc) {
   for (let pageNum = 1; pageNum <= 100; pageNum += 1) {
-    const response = await client.request('/open-api/openapi-business-backend/product/query', {
+    const response = await client.requestReadOnly('/open-api/openapi-business-backend/product/query', {
       method: 'POST',
       body: {pageNum, pageSize: 100},
       headers: {language: 'en'},

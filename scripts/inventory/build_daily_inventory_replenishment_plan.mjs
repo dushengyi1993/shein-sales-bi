@@ -7,6 +7,7 @@ import {
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   decideDailyInventoryReplenishment,
+  resolveInventoryIdentityKey,
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
@@ -171,11 +172,12 @@ const lowEtAllocations = [];
 const rowContexts = linkRows.map(row => {
   const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
   const productMatchKey = canonicalInventoryKey(row.supplierCode);
-  const metricsMatchKey = canonicalInventoryKey(
-    metrics?.standard_goods_sn
+  const rawMetricsKey = metrics?.standard_goods_sn
     ?? metrics?.standardGoodsSn
     ?? metrics?.raw_goods_sn
-    ?? metrics?.rawGoodsSn,
+    ?? metrics?.rawGoodsSn;
+  const metricsMatchKey = canonicalInventoryKey(
+    rawMetricsKey,
   );
   const matchKey = args.operationMode === 'et_low_inventory_safety'
     ? (metricsMatchKey || productMatchKey)
@@ -185,6 +187,8 @@ const rowContexts = linkRows.map(row => {
     metrics,
     matchKey,
     productMatchKey,
+    resolvedProductKey: resolveInventoryIdentityKey(row.supplierCode),
+    resolvedMetricsKey: metrics ? resolveInventoryIdentityKey(rawMetricsKey) : '',
     shelfStatus: resolveInventoryShelfStatus(metrics, row.shelfStatusCode),
   };
 });
@@ -216,15 +220,9 @@ for (const context of rowContexts) {
 }
 const evaluatedRows = [];
 for (const context of rowContexts) {
-  const {row, metrics, matchKey, productMatchKey, shelfStatus} = context;
-  const metricsMatchKey = canonicalInventoryKey(
-    metrics?.standard_goods_sn
-    ?? metrics?.standardGoodsSn
-    ?? metrics?.raw_goods_sn
-    ?? metrics?.rawGoodsSn,
-  );
+  const {row, metrics, matchKey, productMatchKey, resolvedProductKey, resolvedMetricsKey, shelfStatus} = context;
   const canonicalEvidenceConflict = Boolean(metrics)
-    && (!productMatchKey || !metricsMatchKey || productMatchKey !== metricsMatchKey);
+    && (!resolvedProductKey || !resolvedMetricsKey || resolvedProductKey !== resolvedMetricsKey);
   const et = etByKey.get(matchKey);
   const otherSellingStores = [...(sellingStoresByMatchKey.get(matchKey) || [])]
     .filter(storeKey => storeKey && storeKey !== row.storeKey)
@@ -284,7 +282,7 @@ for (const context of rowContexts) {
     productName: metrics?.product_display_name || metrics?.product_name_cn || '',
     decision: decision.reason,
   };
-  evaluatedRows.push({row, et, metrics, decision, base, inventoryRelevant, productMatchKey});
+  evaluatedRows.push({row, et, metrics, decision, base, inventoryRelevant, productMatchKey, resolvedProductKey, resolvedMetricsKey});
 }
 
 const lowEtGroups = new Map();
@@ -317,7 +315,7 @@ if (args.operationMode === 'et_low_inventory_safety') {
       if (item.row?.sourceCompleteness?.hasCurrentDetail !== true) {
         blockers.push(`low-ET OpenAPI product canonical evidence is not from current detail: ${identity}`);
       }
-      if (item.productMatchKey !== item.base.matchKey) {
+      if (item.metrics && item.resolvedMetricsKey && item.resolvedProductKey !== item.resolvedMetricsKey) {
         blockers.push(`low-ET OpenAPI product canonical evidence does not match current BI link: ${identity}`);
       }
     }

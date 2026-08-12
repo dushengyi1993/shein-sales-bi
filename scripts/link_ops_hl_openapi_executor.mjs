@@ -2921,7 +2921,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
     let scannedRows = 0;
     let lastRowsCount = 0;
     for (let pageNum = 1; pageNum <= maxPages; pageNum += 1) {
-      const response = await client.request('/open-api/openapi-business-backend/product/query', {
+      const response = await client.requestReadOnly('/open-api/openapi-business-backend/product/query', {
         method: 'POST',
         body: {pageNum, pageSize},
         headers: {language: 'en'},
