@@ -34,7 +34,7 @@ import {
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
 import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
-import {isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
+import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -1841,7 +1841,11 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
   try {
     const queryResult = await runBiQueryWithWait(
       ({signal}) => request(args, `/api/bi/query-data?${query.toString()}`, {signal}),
-      {waitSeconds: args.waitSecondsProvided ? args.waitSeconds : 30},
+      {
+        waitSeconds: args.waitSecondsProvided ? args.waitSeconds : 90,
+        requestTimeoutMs: biQueryRequestTimeoutMs(args.sections),
+        retryRequestTimeout: true,
+      },
     );
     ({json} = queryResult.value);
     queryAttempts = queryResult.attempts;
