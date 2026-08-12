@@ -8,6 +8,7 @@
 import crypto from 'node:crypto';
 import {
   extractTrilingualCoreSellingPoints,
+  extractTrilingualCoreSellingPointsAuto,
   verifyDescriptionMaterialAgainstHtml,
 } from '../lib/link_ops_description_material_extract.mjs';
 
@@ -171,6 +172,24 @@ const unlabeledHtml = validHtml({
 }).replace(`<h3>英文</h3>${code(enLines)}`, `<h3>Language</h3>${code(enLines)}`)
   .replace(`<h3>阿文</h3>${code(arLines)}`, `<h3>Language</h3>${code(arLines)}`);
 throws('unlabeled codes rejected (no fuzzy guess)', () => extractTrilingualCoreSellingPoints(unlabeledHtml), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+
+// --- legacy s9: direct pre dir plus Unicode script evidence is deterministic ---
+const legacyDirected = `<!doctype html><html><body><section id="s9">
+<pre class="copybox copytext" dir="ltr">${code(enLines)}</pre>
+<pre class="copybox copytext right" dir="rtl">${code(arLines)}</pre>
+<pre class="copybox copytext" dir="ltr">${code(zhLines)}</pre>
+</section></body></html>`;
+const legacyDirectedRows = extractTrilingualCoreSellingPointsAuto(legacyDirected);
+check('legacy directed s9 selected', legacyDirectedRows.sectionUsed, 's9');
+check('legacy directed en exact', JSON.stringify(legacyDirectedRows.extracted.en.lines), JSON.stringify(enLines));
+check('legacy directed ar exact', JSON.stringify(legacyDirectedRows.extracted.ar.lines), JSON.stringify(arLines));
+check('legacy directed zh exact', JSON.stringify(legacyDirectedRows.extracted['zh-cn'].lines), JSON.stringify(zhLines));
+throws('legacy rtl without Arabic script rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyDirected.replace(`dir="rtl">${code(arLines)}`, `dir="rtl">${code(enLines)}`),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy ltr Arabic conflict rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyDirected.replace(`dir="rtl">${code(arLines)}`, `dir="ltr">${code(arLines)}`),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
 
 const failed = checks.filter(row => !row.pass);
 for (const row of failed) console.error(`FAIL ${row.label}\n  expected: ${row.expected}\n  actual:   ${row.actual}`);
