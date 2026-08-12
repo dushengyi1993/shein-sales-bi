@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 
-import {isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
+import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
+
+assert.equal(biQueryRequestTimeoutMs(['linksData'], {}), 60_000);
+assert.equal(biQueryRequestTimeoutMs(['orders'], {}), 30_000);
+assert.equal(biQueryRequestTimeoutMs(['linksData'], {SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS: '45000'}), 45_000);
 
 assert.equal(isIncompleteBiQueryError({status: 503}), false);
 assert.equal(isIncompleteBiQueryError({response: {code: 'BI_QUERY_DATA_INCOMPLETE'}}), true);
@@ -45,6 +49,23 @@ await assert.rejects(
   error => error.queryAttempts === 2 && error.queryWaitedMs === 1_000,
 );
 
+let timeoutRetryAttempts = 0;
+const timeoutThenSuccess = await runBiQueryWithWait(({signal}) => new Promise((resolve, reject) => {
+  timeoutRetryAttempts += 1;
+  if (timeoutRetryAttempts === 1) {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), {name: 'AbortError'})), {once: true});
+    return;
+  }
+  resolve({ok: true});
+}), {
+  waitSeconds: 1,
+  requestTimeoutMs: 25,
+  intervalMs: 10,
+  retryRequestTimeout: true,
+});
+assert.deepEqual(timeoutThenSuccess.value, {ok: true});
+assert.equal(timeoutThenSuccess.attempts, 2);
+
 let nonRetryAttempts = 0;
 await assert.rejects(
   () => runBiQueryWithWait(async () => {
@@ -77,4 +98,4 @@ await assert.rejects(
   error => error.code === 'BI_QUERY_REQUEST_TIMEOUT' && error.queryAttempts === 1,
 );
 
-console.log(JSON.stringify({ok: true, checks: ['bounded_retry', 'deadline_abort', 'non_target_503', 'non_retryable_error']}, null, 2));
+console.log(JSON.stringify({ok: true, checks: ['bounded_retry', 'deadline_abort', 'timeout_retry', 'section_timeout_budget', 'non_target_503', 'non_retryable_error']}, null, 2));
