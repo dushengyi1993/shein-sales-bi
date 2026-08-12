@@ -54,6 +54,7 @@ queue_command() {
 
 echo "[portal-section-worker] start maxSections=$MAX_SECTIONS"
 FAILED_SECTIONS=()
+CLAIMED_SECTIONS=()
 for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   NOW_EPOCH="$(date +%s)"
   CURRENT_HOUR="$(date +%Y-%m-%dT%H)"
@@ -64,7 +65,11 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     break
   fi
   set +e
-  CLAIM="$(queue_command claim --lease-seconds "$LEASE_SECONDS")"
+  CLAIM_ARGS=(claim --lease-seconds "$LEASE_SECONDS")
+  if [[ "${#CLAIMED_SECTIONS[@]}" -gt 0 ]]; then
+    CLAIM_ARGS+=(--exclude-sections "$(IFS=,; echo "${CLAIMED_SECTIONS[*]}")")
+  fi
+  CLAIM="$(queue_command "${CLAIM_ARGS[@]}")"
   CLAIM_STATUS=$?
   set -e
   if [[ "$CLAIM_STATUS" -eq 75 ]]; then
@@ -78,6 +83,7 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     echo "[portal-section-worker] invalid claim: $CLAIM" >&2
     exit 1
   }
+  CLAIMED_SECTIONS+=("$SECTION")
   echo "[portal-section-worker] section=$SECTION attempt=$index"
   CURL_TIMEOUT="$SECTION_TIMEOUT"
   if (( CURL_TIMEOUT > REMAINING_SEC - 5 )); then CURL_TIMEOUT=$((REMAINING_SEC - 5)); fi
@@ -121,7 +127,11 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     TERMINAL_STATUS=$?
     set -e
     if [[ "$TERMINAL_STATUS" -eq 0 ]]; then
-      queue_command complete --section "$SECTION" --lease-id "$LEASE_ID" >/dev/null
+      COMPLETE_REPORT="$(queue_command complete --section "$SECTION" --lease-id "$LEASE_ID")"
+      COMPLETED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.completed===true))' "$COMPLETE_REPORT")"
+      if [[ "$COMPLETED" != "true" ]]; then
+        echo "[portal-section-worker] section=$SECTION superseded; newer revision remains pending"
+      fi
       echo "[portal-section-worker] section=$SECTION done"
     else
       queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
@@ -133,6 +143,10 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   rm -f "$HEADERS_FILE"
 done
 if [[ "${#FAILED_SECTIONS[@]}" -gt 0 ]]; then
+  # A terminal artifact from before this lease does not prove the requested
+  # revision refreshed. The distinct-section claim rule prevents a later slot
+  # from re-claiming the same section, so any recorded lease failure remains a
+  # real service failure and stays visible to the watchdog.
   echo "[portal-section-worker] failed sections=$(IFS=,; echo "${FAILED_SECTIONS[*]}")" >&2
   exit 1
 fi

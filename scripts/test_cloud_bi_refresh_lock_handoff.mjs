@@ -89,6 +89,16 @@ assert.match(
   'a stale/failed 2xx must fail the lease instead of completing the queue entry',
 );
 assert.match(
+  queueWorkerSource,
+  /CLAIMED_SECTIONS=\(\)[\s\S]*--exclude-sections[\s\S]*CLAIMED_SECTIONS\+=\("\$SECTION"\)/,
+  'one queue service run must spend its bounded slots on distinct sections',
+);
+assert.match(
+  queueWorkerSource,
+  /if \[\[ "\$\{#FAILED_SECTIONS\[@\]\}" -gt 0 \]\]; then[\s\S]*failed sections=[\s\S]*exit 1/,
+  'a failed lease must keep systemd failed until a later successful lease completes the requested revision',
+);
+assert.match(
   prewarmSource,
   /X-BI-Section-\(Stale\|Refresh-Failed\):\[\[:space:\]\]\*true[\s\S]*FAILED_SECTIONS\+\=/,
   'prewarm must record a stale or failed-refresh 2xx as a section failure',

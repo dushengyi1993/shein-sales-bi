@@ -181,8 +181,10 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     'worker must verify the terminal artifact before completing');
   assert.match(worker, /TERMINAL_STATUS" -eq 0[\s\S]*queue_command complete --section "\$SECTION" --lease-id "\$LEASE_ID"/,
     'worker may only complete after a passing terminal readback');
-  assert.match(worker, /FAILED_SECTIONS=\(\)[\s\S]*FAILED_SECTIONS\+=\("\$SECTION:\$[A-Z_]+"\)[\s\S]*exit 1/,
-    'worker must leave the systemd run failed when any claimed section did not reach a terminal artifact');
+  assert.match(worker, /CLAIMED_SECTIONS=\(\)[\s\S]*--exclude-sections[\s\S]*CLAIMED_SECTIONS\+=\("\$SECTION"\)/,
+    'one worker run must claim distinct sections so a hot entry cannot consume every bounded slot');
+  assert.match(worker, /if \[\[ "\$\{#FAILED_SECTIONS\[@\]\}" -gt 0 \]\]; then[\s\S]*failed sections=[\s\S]*exit 1/,
+    'any failed lease must remain alert-worthy; an older terminal artifact cannot prove the requested revision recovered');
   assert.match(worker, /trap '\[\[ -n "\$\{HEADERS_FILE:-\}" \]\] && rm -f "\$HEADERS_FILE"' EXIT/,
     'worker must trap-clean the temp header file');
   assert.match(worker, /SHEIN_BI_PORTAL_ROOT:-/);

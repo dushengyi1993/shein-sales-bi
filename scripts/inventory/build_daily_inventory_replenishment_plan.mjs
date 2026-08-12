@@ -26,6 +26,7 @@ function parseArgs(argv) {
     biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
     linksData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
     operationMode: 'daily',
+    requiredDetailTargets: '',
     bootstrapLockFile: process.env.SHEIN_BI_INVENTORY_BOOTSTRAP_LOCK_FILE
       || path.join(ROOT, 'state', 'inventory', 'all-store-sold-out-bootstrap-locks.json'),
     out: '',
@@ -39,6 +40,7 @@ function parseArgs(argv) {
     else if (a === '--bi-data') args.biData = path.resolve(argv[++i] || '');
     else if (a === '--links-data') args.linksData = path.resolve(argv[++i] || '');
     else if (a === '--operation-mode') args.operationMode = String(argv[++i] || '');
+    else if (a === '--required-detail-targets') args.requiredDetailTargets = path.resolve(argv[++i] || '');
     else if (a === '--bootstrap-lock-file') args.bootstrapLockFile = path.resolve(argv[++i] || '');
     else if (a === '--out') args.out = path.resolve(argv[++i] || '');
     else throw new Error(`Unknown argument: ${a}`);
@@ -67,6 +69,9 @@ const [policy, storeConfig, biDocument, linksDocument, bootstrapLockState] = awa
   readJson(args.linksData),
   readInventoryBootstrapLockRegistry(args.bootstrapLockFile),
 ]);
+const requiredDetailTargets = args.requiredDetailTargets
+  ? await readJson(args.requiredDetailTargets)
+  : null;
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
 const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
 const stores = enabledStoreKeys(storeConfig);
@@ -126,27 +131,52 @@ for (const store of stores) {
       blockers.push(`${store} OpenAPI product snapshot is stale`);
     }
     if (Number(doc?.summary?.stockFailedChunkCount || 0) > 0) blockers.push(`${store} OpenAPI stock snapshot has failed chunks`);
-    if (Number(doc?.summary?.detailMissingAfterFallbackCount || 0) > 0) {
+    if (args.operationMode === 'daily' && Number(doc?.summary?.detailMissingAfterFallbackCount || 0) > 0) {
       blockers.push(`${store} OpenAPI product detail evidence is incomplete`);
     }
     if (!Array.isArray(doc.productList)) {
       blockers.push(`${store} OpenAPI product catalog evidence is unavailable`);
     } else {
       const catalog = normalizeOpenApiProductCatalog(doc.normalizedRows || []);
-      if (catalog.length !== (doc.normalizedRows || []).length) {
+      if (args.operationMode === 'daily' && catalog.length !== (doc.normalizedRows || []).length) {
         blockers.push(`${store} OpenAPI product catalog supplier identity is incomplete`);
       }
       storeCatalogs[store] = {rowCount: catalog.length, hash: stableInventoryHash(catalog)};
     }
     for (const row of doc.normalizedRows || []) {
-      if (!String(row?.supplierCode || '').trim()) blockers.push(`${store} OpenAPI product canonical evidence is incomplete`);
-      if (row?.sourceCompleteness?.hasCurrentDetail !== true) {
+      if (args.operationMode === 'daily' && !String(row?.supplierCode || '').trim()) blockers.push(`${store} OpenAPI product canonical evidence is incomplete`);
+      if (args.operationMode === 'daily' && row?.sourceCompleteness?.hasCurrentDetail !== true) {
         blockers.push(`${store} OpenAPI product canonical evidence is not from current detail`);
       }
       linkRows.push(row);
     }
   } catch (error) {
     blockers.push(`${store} OpenAPI product snapshot unavailable: ${error.message}`);
+  }
+}
+if (requiredDetailTargets) {
+  if (requiredDetailTargets.schemaVersion !== 'et-low-inventory-detail-targets/v1'
+    || !requiredDetailTargets.stores
+    || typeof requiredDetailTargets.stores !== 'object') {
+    blockers.push('low-ET current-detail target manifest is invalid');
+  } else {
+    const rowsByStoreSpu = new Map(linkRows.map(row => [
+      `${String(row.storeKey || '').toUpperCase()}::${String(row.spu || '')}`,
+      row,
+    ]));
+    for (const [storeKey, spus] of Object.entries(requiredDetailTargets.stores)) {
+      if (!Array.isArray(spus)) {
+        blockers.push(`low-ET current-detail target manifest is invalid for store=${storeKey}`);
+        continue;
+      }
+      for (const spu of spus) {
+        const identity = `store=${String(storeKey).toUpperCase()} spu=${String(spu || '')}`;
+        const row = rowsByStoreSpu.get(`${String(storeKey).toUpperCase()}::${String(spu || '')}`);
+        if (!row || row?.sourceCompleteness?.hasCurrentDetail !== true) {
+          blockers.push(`low-ET current-detail target is unavailable after refresh: ${identity}`);
+        }
+      }
+    }
   }
 }
 
@@ -156,12 +186,22 @@ const ignored = [];
 const lowEtAllocations = [];
 const bootstrapGroups = [];
 const rowContexts = linkRows.map(row => {
-  const matchKey = canonicalInventoryKey(row.supplierCode);
   const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
+  const productMatchKey = canonicalInventoryKey(row.supplierCode);
+  const metricsMatchKey = canonicalInventoryKey(
+    metrics?.standard_goods_sn
+    ?? metrics?.standardGoodsSn
+    ?? metrics?.raw_goods_sn
+    ?? metrics?.rawGoodsSn,
+  );
+  const matchKey = args.operationMode === 'et_low_inventory_safety'
+    ? (metricsMatchKey || productMatchKey)
+    : productMatchKey;
   return {
     row,
     metrics,
     matchKey,
+    productMatchKey,
     shelfStatus: resolveInventoryShelfStatus(metrics, row.shelfStatusCode),
   };
 });
@@ -409,7 +449,7 @@ for (const [matchKey, group] of contextsByMatchKey) {
 
 const evaluatedRows = [];
 for (const context of rowContexts) {
-  const {row, metrics, matchKey, shelfStatus} = context;
+  const {row, metrics, matchKey, productMatchKey, shelfStatus} = context;
   const et = etByKey.get(matchKey);
   const otherSellingStores = [...(sellingStoresByMatchKey.get(matchKey) || [])]
     .filter(storeKey => storeKey && storeKey !== row.storeKey)
@@ -473,7 +513,7 @@ for (const context of rowContexts) {
     bootstrapRegistryHash: bootstrapLockState.hash,
     decision: decision.reason,
   };
-  evaluatedRows.push({row, et, metrics, decision, base, inventoryRelevant});
+  evaluatedRows.push({row, et, metrics, decision, base, inventoryRelevant, productMatchKey});
 }
 
 const lowEtGroups = new Map();
@@ -487,6 +527,31 @@ for (const item of evaluatedRows) {
 
 const handledLowEtKeys = new Set();
 const blockedLowEtKeys = new Set();
+const detailRefreshTargets = [...lowEtGroups.values()]
+  .flatMap(group => group.map(item => ({
+    storeKey: String(item.base.storeKey || '').toUpperCase(),
+    spu: String(item.base.spu || ''),
+    skc: String(item.base.skc || ''),
+    matchKey: String(item.base.matchKey || ''),
+  })))
+  .filter(row => row.storeKey && row.spu)
+  .sort((a, b) => a.storeKey.localeCompare(b.storeKey) || a.spu.localeCompare(b.spu) || a.skc.localeCompare(b.skc));
+if (args.operationMode === 'et_low_inventory_safety') {
+  for (const group of lowEtGroups.values()) {
+    for (const item of group) {
+      const identity = `store=${item.base.storeKey} spu=${item.base.spu} skc=${item.base.skc}`;
+      if (!String(item.row?.supplierCode || '').trim()) {
+        blockers.push(`low-ET OpenAPI product canonical evidence is incomplete: ${identity}`);
+      }
+      if (item.row?.sourceCompleteness?.hasCurrentDetail !== true) {
+        blockers.push(`low-ET OpenAPI product canonical evidence is not from current detail: ${identity}`);
+      }
+      if (item.productMatchKey !== item.base.matchKey) {
+        blockers.push(`low-ET OpenAPI product canonical evidence does not match current BI link: ${identity}`);
+      }
+    }
+  }
+}
 for (const [matchKey, group] of lowEtGroups) {
   handledLowEtKeys.add(matchKey);
   const blockingRows = group.filter(item => item.decision.action !== 'allocate');
@@ -644,6 +709,7 @@ const payload = {
   linkAlerts,
   ignored,
   lowEtAllocations,
+  detailRefreshTargets,
   bootstrapLockRegistry: {
     schemaVersion: bootstrapLockState.registry.schemaVersion,
     exists: bootstrapLockState.exists,
@@ -659,6 +725,7 @@ const payloadHash = stableInventoryHash({
   policyVersion: payload.policyVersion,
   actionable,
   lowEtAllocations,
+  detailRefreshTargets,
   bootstrapGroups,
   bootstrapRegistryHash: bootstrapLockState.hash,
   sourceEvidence: sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence),

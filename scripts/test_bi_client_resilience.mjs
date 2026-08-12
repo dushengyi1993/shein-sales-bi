@@ -131,6 +131,10 @@ const makeDateRuntime = (data, state, DateCtor=Date) => Function('D', 'S', 'Date
 assert.doesNotMatch(source.match(/async function revalidateCore\(\)[^\n]*/)?.[0] || '', /load\('orders'/,
   'the missed-SSE fallback must not rebuild the large historical orders section');
 assert.match(source, /function scheduleSectionRecheck\(n\)/, 'stale sections schedule an automatic recheck');
+assert.match(source, /function scheduleSectionErrorRecovery\(n\)[\s\S]*SECTION_ERROR_RECOVERY_MS/,
+  'an exhausted browser error must keep a bounded low-frequency recovery probe');
+assert.match(source, /if\(prev\.status==='error'&&!force&&!recheck\)\{scheduleSectionErrorRecovery\(n\);return false\}/,
+  'render-time ensure must re-arm recovery instead of permanently pinning a section error');
 assert.match(source, /load\(n,true,false,true\)/, 'section rechecks bypass browser state without forcing duplicate generation');
 assert.match(source, /if\(needsRecheck\)scheduleSectionRecheck\(n\)/, 'stale or background-refresh responses are polled until current');
 assert.match(source, /完成后页面会自动更新/, 'operator copy promises only the implemented automatic update');

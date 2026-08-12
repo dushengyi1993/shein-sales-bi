@@ -33,6 +33,8 @@ function parseArgs(argv) {
     stockChunkSize: 50,
     skipDetails: false,
     skipStock: false,
+    detailPriorityFile: '',
+    priorityDetailsOnly: false,
     keepSnapshots: Number(process.env.SHEIN_OPENAPI_PRODUCT_KEEP_SNAPSHOTS || 2),
   };
   const rest = [];
@@ -50,6 +52,8 @@ function parseArgs(argv) {
     else if (a === '--keep-snapshots') args.keepSnapshots = Number(argv[++i]);
     else if (a === '--skip-details') args.skipDetails = true;
     else if (a === '--skip-stock') args.skipStock = true;
+    else if (a === '--detail-priority-file') args.detailPriorityFile = path.resolve(argv[++i]);
+    else if (a === '--priority-details-only') args.priorityDetailsOnly = true;
     else if (a === '--help' || a === '-h') {
       console.log(`Usage:
   node scripts/fetch_shein_openapi_products.mjs HL
@@ -72,11 +76,25 @@ Use --max-details 0 for all listed SPUs; --skip-details for list-only smoke test
   args.detailRetryBaseDelayMs = Math.max(250, Math.min(10_000, Number.isFinite(args.detailRetryBaseDelayMs) ? Math.trunc(args.detailRetryBaseDelayMs) : 1200));
   args.stockChunkSize = Math.max(1, Math.min(100, Number.isFinite(args.stockChunkSize) ? Math.trunc(args.stockChunkSize) : 50));
   args.keepSnapshots = Math.max(0, Math.min(30, Number.isFinite(args.keepSnapshots) ? Math.trunc(args.keepSnapshots) : 2));
+  if (args.priorityDetailsOnly && !args.detailPriorityFile) {
+    throw new Error('--priority-details-only requires --detail-priority-file');
+  }
+  if (args.priorityDetailsOnly && args.maxDetails < 1) {
+    throw new Error('--priority-details-only requires a positive --max-details budget');
+  }
   return args;
 }
 
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, 'utf8'));
+}
+
+async function readDetailPrioritySpus(file, storeKey) {
+  if (!file) return [];
+  const payload = await readJson(file);
+  const values = payload?.stores?.[storeKey] ?? payload?.[storeKey] ?? [];
+  if (!Array.isArray(values)) throw new Error(`Detail priority file has no array for ${storeKey}`);
+  return unique(values);
 }
 
 async function writeJson(file, data) {
@@ -430,13 +448,20 @@ const priorDetailFallbacks = collectOpenapiProductDetailFallbacks({
 });
 const priorDetailSpus = new Set(priorDetailFallbacks.map(row => compact(row.spuName)));
 const uncachedDetailSpus = spuNames.filter(spu => !priorDetailSpus.has(spu));
-const selectedDetailSpus = args.skipDetails ? [] : selectOpenapiProductDetailSpus({
-  spuNames,
-  budget: args.maxDetails,
-  priorPayload,
-  prioritySpus: uncachedDetailSpus,
-  dateKey: fetchedAt,
-});
+const configuredPrioritySpus = await readDetailPrioritySpus(args.detailPriorityFile, args.store);
+const allowedSpus = new Set(spuNames);
+const availablePrioritySpus = configuredPrioritySpus.filter(spu => allowedSpus.has(spu));
+const selectedDetailSpus = args.skipDetails
+  ? []
+  : args.priorityDetailsOnly
+    ? availablePrioritySpus.slice(0, args.maxDetails)
+    : selectOpenapiProductDetailSpus({
+      spuNames,
+      budget: args.maxDetails,
+      priorPayload,
+      prioritySpus: [...configuredPrioritySpus, ...uncachedDetailSpus],
+      dateKey: fetchedAt,
+    });
 const detailResults = await fetchDetails(client, selectedDetailSpus, args);
 const detailFallbackResults = collectOpenapiProductDetailFallbacks({
   priorPayloads,
@@ -470,6 +495,7 @@ const payload = {
     maxDetails: args.maxDetails,
     detailsSkipped: args.skipDetails,
     stockSkipped: args.skipStock,
+    priorityDetailsOnly: args.priorityDetailsOnly,
   },
   summary: {
     productListRows: productRows.length,
@@ -478,6 +504,9 @@ const payload = {
     distinctSkuCount: skuCodes.length,
     detailRequestedSpuCount: selectedDetailSpus.length,
     detailPrioritySpuCount: Math.min(selectedDetailSpus.length, uncachedDetailSpus.length),
+    detailConfiguredPrioritySpuCount: configuredPrioritySpus.length,
+    detailAvailablePrioritySpuCount: availablePrioritySpus.length,
+    detailUnavailablePrioritySpuCount: Math.max(0, configuredPrioritySpus.length - availablePrioritySpus.length),
     detailDeferredSpuCount: Math.max(0, spuNames.length - selectedDetailSpus.length),
     detailOkSpuCount: detailResults.filter(r => r.ok).length,
     detailFailedSpuCount: detailFailures.length,
