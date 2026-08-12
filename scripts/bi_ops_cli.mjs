@@ -146,8 +146,11 @@ function parseArgs(argv) {
     else if (a === '--source-store' || a === '--source-stores' || a === '--read-store' || a === '--read-stores') args.sourceStores.push(...splitList(argv[++i]));
     else if (a === '--target-store' || a === '--target-stores' || a === '--write-store' || a === '--write-stores') args.writeStores.push(...splitList(argv[++i]));
     else if (a === '--product' || a === '--products' || a === '--ref') args.products.push(...splitList(argv[++i]));
-    else if (a === '--spu' || a === '--spu-name') args.spuList.push(...splitList(argv[++i]));
-    else if (a === '--skc' || a === '--skc-name') args.skcList.push(...splitList(argv[++i]));
+    // SHEIN-generated SPU/SKC codes are case-sensitive in partialEdit. Keep
+    // the exact platform spelling; stores and ordinary product refs may still
+    // use the normalized splitList path.
+    else if (a === '--spu' || a === '--spu-name') args.spuList.push(...splitListPreserveCase(argv[++i]));
+    else if (a === '--skc' || a === '--skc-name') args.skcList.push(...splitListPreserveCase(argv[++i]));
     else if (a === '--sku-code') args.skuCodeList.push(...splitListPreserveCase(argv[++i]));
     else if (a === '--supplier-sku') args.supplierSkuList.push(...splitListPreserveCase(argv[++i]));
     else if (a === '--operation' || a === '--action' || a === '--intent') args.operation = normalizeOperationName(argv[++i]);
