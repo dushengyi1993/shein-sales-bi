@@ -110,6 +110,7 @@ import {
 } from '../lib/bi_ops_intent_planner.mjs';
 import {warehousePgConfigFromEnv} from '../lib/warehouse_pg.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
+import {overlayCurrentProductReconciliationAudit} from '../lib/bi_live_core_health.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {Client: PgClient} = pg;
@@ -257,6 +258,7 @@ const BI_OWNER_VISIBLE_PRIORITY_SECTIONS = new Set([
 const BI_EXTERNAL_SECTION_QUEUE_ENABLED = process.platform !== 'win32'
   && !['0', 'false', 'no', 'off'].includes(String(process.env.SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED || '1').trim().toLowerCase());
 const biExternalSectionQueuePending = new Set();
+const biAccountingCatchupTargets = new Map();
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
 const biPortalCoreWarmupState = {
@@ -912,6 +914,7 @@ function openApiEvidenceTimestampFresh(generatedAtMs, maxAgeMs, nowMs = Date.now
 
 function openApiReconciliationReadEvidenceOk(kind, result, row) {
   if (!result?.ok || !row || typeof row !== 'object') return false;
+  if (kind === 'product' && Number.isFinite(Number(row?.counts?.apiCurrentRows))) return true;
   const fields = kind === 'sales'
     ? ['apiSalesSar', 'api_sales_sar', 'apiOnlyOrderCount', 'api_only_order_count', 'browserOnlyOrderCount', 'browser_only_order_count']
     : kind === 'return'
@@ -1020,14 +1023,18 @@ function loadOpenApiProductReconciliationSummarySync() {
     for (const result of Array.isArray(summary?.results) ? summary.results : []) {
       const key = String(result?.storeKey || '').trim().toUpperCase();
       if (!key) continue;
-      const row = Array.isArray(result?.load?.reconciliation) ? result.load.reconciliation[0] : result?.reconciliation || null;
+      const row = result?.semanticReconciliation
+        || (Array.isArray(result?.load?.reconciliation) ? result.load.reconciliation[0] : null)
+        || result?.reconciliation
+        || null;
       const readEvidenceOk = openApiReconciliationReadEvidenceOk('product', result, row);
+      const semanticCounts = row?.counts || {};
       byStore.set(key, {
         status: result?.status || row?.status || '',
         ok: readEvidenceOk,
         readEvidenceOk,
         generatedAt: summary?.generatedAt || row?.generated_at || row?.generatedAt || '',
-        apiLinkCount: row?.api_link_count ?? row?.apiLinkCount ?? null,
+        apiLinkCount: row?.api_link_count ?? row?.apiLinkCount ?? semanticCounts.apiCurrentRows ?? null,
         apiOnShelfCount: row?.api_on_shelf_count ?? row?.apiOnShelfCount ?? null,
         browserLinkCount: row?.browser_link_count ?? row?.browserLinkCount ?? null,
         browserOnShelfCount: row?.browser_on_shelf_count ?? row?.browserOnShelfCount ?? null,
@@ -1036,8 +1043,8 @@ function loadOpenApiProductReconciliationSummarySync() {
         browserOnlySkcCount: row?.browser_only_skc_count ?? row?.browserOnlySkcCount ?? null,
         statusMismatchCount: row?.status_mismatch_count ?? row?.statusMismatchCount ?? null,
         exactStatusMismatchCount: row?.exact_status_mismatch_count ?? row?.exactStatusMismatchCount ?? null,
-        detailMissingCount: row?.detail_missing_count ?? row?.detailMissingCount ?? null,
-        stockMissingCount: row?.stock_missing_count ?? row?.stockMissingCount ?? null,
+        detailMissingCount: row?.detail_missing_count ?? row?.detailMissingCount ?? semanticCounts.detailMissing ?? null,
+        stockMissingCount: row?.stock_missing_count ?? row?.stockMissingCount ?? semanticCounts.stockMissing ?? null,
         warnings: row?.warnings || '',
       });
     }
@@ -7889,6 +7896,46 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
   return {queued: true, sections: groups.flatMap(group => group.sections)};
 }
 
+async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt = '') {
+  const targetAt = String(
+    accountingState?.freshness?.accountingInputUpdatedAt
+    || accountingState?.freshness?.orderFactUpdatedAt
+    || accountingState?.freshness?.factUpdatedAt
+    || accountingState?.minimumPublishedAt
+    || '',
+  );
+  const key = `${generatedAt || ''}|${targetAt}`;
+  if (biAccountingCatchupTargets.has(key)) {
+    await biAccountingCatchupTargets.get(key);
+    return false;
+  }
+  const pending = persistHostLockedBiSectionPlan(liveAccountingQueuePlan({kind: 'order'}), generatedAt, {
+    reason: `homepage-accounting-stale-${generatedAt || 'current'}`,
+  });
+  biAccountingCatchupTargets.set(key, pending);
+  try {
+    await pending;
+  } catch (error) {
+    biAccountingCatchupTargets.delete(key);
+    throw error;
+  }
+  while (biAccountingCatchupTargets.size > 128) {
+    biAccountingCatchupTargets.delete(biAccountingCatchupTargets.keys().next().value);
+  }
+  return true;
+}
+
+export function usableHomepageAccountingFallback(section, existing, generatedAt) {
+  if (!existing || String(existing.generatedAt || '') !== String(generatedAt || '')) return false;
+  if (section === 'homeRankings') return Boolean(existing?.data?.rankings && typeof existing.data.rankings === 'object');
+  const summary = existing?.data?.homeProfitSummary;
+  return section === 'homeProfit'
+    && Boolean(summary)
+    && String(summary.sourceGeneratedAt || '') === String(generatedAt || '')
+    && summary.staleSource !== true
+    && Array.isArray(summary.dailyScopes);
+}
+
 function sectionRequiresHostLockedWorker(section, options = {}) {
   return BI_EXTERNAL_SECTION_QUEUE_ENABLED
     && !BI_INLINE_FAST_SECTIONS.has(section)
@@ -8592,9 +8639,7 @@ async function loadBiSection(args, root, section, options = {}) {
       && source >= minimum;
     if (!sourceCurrent) {
       try {
-        await persistHostLockedBiSectionPlan(liveAccountingQueuePlan({kind: 'order'}), meta.generatedAt, {
-          reason: `homepage-accounting-stale-${meta.generatedAt || 'current'}`,
-        });
+        await persistHomepageAccountingCatchupOnce(accountingState, meta.generatedAt);
       } catch (error) {
         recordBiSectionRefreshFailure(root, section, error);
         return {
@@ -8610,20 +8655,40 @@ async function loadBiSection(args, root, section, options = {}) {
           },
         };
       }
-      return {
-        status: force ? 503 : 202,
-        payload: {
-          ok: !force,
-          section,
-          generatedAt: meta.generatedAt,
-          pendingSection: true,
-          cacheHit: false,
-          refreshScheduled: true,
-          queuedForHostLockedWorker: true,
-          accountingPending: true,
-          error: 'homepage accounting is catching up to newer order facts',
-        },
-      };
+      if (!force && usableHomepageAccountingFallback(section, existing, meta.generatedAt)) {
+        options = {
+          ...options,
+          extraFields: {
+            ...(options.extraFields || {}),
+            refreshScheduled: true,
+            refreshRetryPending: true,
+            queuedForHostLockedWorker: true,
+            accountingPending: true,
+            accountingTargetAt: String(
+              accountingState?.freshness?.accountingInputUpdatedAt
+              || accountingState?.freshness?.orderFactUpdatedAt
+              || accountingState?.freshness?.factUpdatedAt
+              || '',
+            ),
+            accountingPublishedAt: String(accountingState.minimumPublishedAt || ''),
+          },
+        };
+      } else {
+        return {
+          status: force ? 503 : 202,
+          payload: {
+            ok: !force,
+            section,
+            generatedAt: meta.generatedAt,
+            pendingSection: true,
+            cacheHit: false,
+            refreshScheduled: true,
+            queuedForHostLockedWorker: true,
+            accountingPending: true,
+            error: 'homepage accounting is catching up to newer order facts',
+          },
+        };
+      }
     }
   }
   if (!force && allowGenerate) {
@@ -12966,6 +13031,23 @@ ${uploadCheckAnswer}` : `
           biPortalCoreWarmupState.lastError = err?.message || String(err || 'schedule failed');
           logBiPortalCoreWarmup('schedule-failed', {reason: 'index', error: biPortalCoreWarmupState.lastError.slice(0, 500)});
         });
+      }
+      if (req.method === 'GET' && url.pathname === '/data.json') {
+        let core;
+        try {
+          core = JSON.parse(await fs.readFile(path.join(root, 'data.json'), 'utf8'));
+          if (!core || typeof core !== 'object' || !String(core.generatedAt || core?.__sections?.generatedAt || '')) {
+            throw new Error('core generation is missing');
+          }
+        } catch {
+          return sendJson(res, 503, {ok: false, error: 'BI 页面底稿暂时不可用'}, {'Cache-Control': 'no-store'});
+        }
+        const current = overlayCurrentProductReconciliationAudit(
+          core,
+          loadOpenApiProductReconciliationSummarySync(),
+          {expectedStores: DEFAULT_SHEIN_STORE_KEYS},
+        );
+        return sendLargeJson(req, res, 200, current, {'Cache-Control': 'private, no-cache, must-revalidate'});
       }
       let file = safePath(root, req.url || '/');
       if (!file) return send(res, 403, 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});

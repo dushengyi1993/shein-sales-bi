@@ -183,6 +183,10 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     'worker may only complete after a passing terminal readback');
   assert.match(worker, /CLAIMED_SECTIONS=\(\)[\s\S]*--exclude-sections[\s\S]*CLAIMED_SECTIONS\+=\("\$SECTION"\)/,
     'one worker run must claim distinct sections so a hot entry cannot consume every bounded slot');
+  assert.match(worker, /PROFIT_MIN_RUNTIME_SEC[\s\S]*REMAINING_SEC < PROFIT_MIN_RUNTIME_SEC[\s\S]*EXCLUDED_SECTIONS\+=\(profit\)/,
+    'a short queue slot must not claim the profit section that cannot finish before its deadline');
+  assert.match(worker, /HEAVY_SECTION_DEFERRED[\s\S]*queue_command status[\s\S]*PENDING_COUNT > 0[\s\S]*exit 75/,
+    'a short slot that leaves heavy work pending must report a defer, never a false empty success');
   assert.match(worker, /if \[\[ "\$\{#FAILED_SECTIONS\[@\]\}" -gt 0 \]\]; then[\s\S]*failed sections=[\s\S]*exit 1/,
     'any failed lease must remain alert-worthy; an older terminal artifact cannot prove the requested revision recovered');
   assert.match(worker, /trap '\[\[ -n "\$\{HEADERS_FILE:-\}" \]\] && rm -f "\$HEADERS_FILE"' EXIT/,
