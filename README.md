@@ -121,6 +121,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 营销活动报名价格规则 | `docs/marketing-campaign-signup-pricing-rules.md` |
 | 营销折扣自动化路线图 | `docs/marketing-automation-roadmap.md` |
 | 每日营销巡检交接与执行规则 | `docs/marketing-daily-inspection-handoff.md` |
+| 待议价每日快路径与审核批处理 | `docs/pending-discuss-batch.md` |
 | 源码、发布与云端版本治理 | `docs/release-and-deployment-version-policy.md` |
 | scripts 脚本清单与废弃边界 | `docs/scripts-inventory.md` |
 | 负责人经验单向同步 | `docs/owner-knowledge-sync.md` |

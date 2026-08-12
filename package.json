@@ -18,6 +18,7 @@
     "partner-cli:package": "powershell -ExecutionPolicy Bypass -File scripts/build_partner_bi_ops_cli_package.ps1",
     "ops:runtime-snapshot": "node scripts/capture_ops_runtime_snapshot.mjs",
     "ops:inspect-run": "node scripts/inspect_ops_run.mjs",
+    "pending-discuss:daily": "node scripts/pending_discuss_daily.mjs daily",
     "build:portal-shell": "node scripts/generate_bi_portal_shell.mjs",
     "test:deterministic": "npm run build:portal-shell && node scripts/run_deterministic_tests.mjs",
     "test": "npm run check:generated && npm run check:source && npm run test:deterministic"

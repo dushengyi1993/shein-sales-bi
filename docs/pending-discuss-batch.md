@@ -10,7 +10,8 @@
 
 | 命令 | 允许时刻 | 前置条件 | 产出 |
 | --- | --- | --- | --- |
-| `scan` | 每日唯一允许模式 | 无写授权要求，只读 | 脱敏 manifest |
+| `daily` | 每日 heartbeat 正常入口 | 无写授权要求，只读 | scan + hash 自校验 + 人话报告 + 可选群回执 |
+| `scan` | 调试或人工只读扫描 | 无写授权要求，只读 | 脱敏 manifest |
 | `preflight` | 当前任务用户明确授权后 | fresh scan + decisions 文件 | 逐项 exact hashes + `batchHash`（默认约 15 分钟有效） |
 | `execute` | 用户确认且环境门打开 | preflight 产物、`batchHash` 一致 | 逐项写 + terminal 回读 + 全店 final scan |
 
@@ -25,6 +26,19 @@ node scripts/pending_discuss_batch.mjs scan \
 - 只取 `discussStatus=1`；完整分页，不允许截断或部分页当作完成。
 - manifest 脱敏：不含凭据、会话材料、敏感回执；只含脱敏后的 item/store 摘要与覆盖统计。
 - 退出码：`0` = 覆盖完整且全部校验通过；非 `0` = fail closed（任一店查询失败、身份不符、分页不完整或数据缺失都不得当作 0 条或成功）。
+
+### daily（每日 heartbeat 快路径）
+
+```bash
+node scripts/pending_discuss_daily.mjs daily \
+  --out-dir /srv/shein-bi/runtime/pending-discuss/<YYYY-MM-DD>/<RUN_ID>-daily \
+  --send
+```
+
+- 只调用一次既有 `runPendingDiscussScan`，不做二次查询；持久化 `scan.json` 后先重算 `scanHash`，再生成 `report.txt`。
+- `--send` 只接受 `config/lark_report.json` 的团队 `recipientChatId` 和生产 bot，不回退个人；幂等键包含业务日期且不超过 50 字符。
+- 只有 `lark-cli` 退出 0、JSON `ok=true` 且存在非空 `message_id`，`delivery.json` 才为 `status=ok`；产物和终端紧凑输出均不保留群或消息 ID。
+- scan 失败、覆盖不足、分页/身份/hash 异常时不生成 0 条报告，也不发送。正常 0 条无需再启动额外字段探索或批量归并流程。
 
 ### preflight（仅当前任务用户明确授权后）
 
