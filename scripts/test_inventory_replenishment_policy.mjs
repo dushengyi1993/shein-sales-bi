@@ -7,11 +7,8 @@ import {
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   computeInventoryOverwriteQuantity,
-  compareAllStoreSoldOutBootstrapCandidates,
   decideDailyInventoryReplenishment,
-  normalizeOpenApiProductCatalog,
   resolveInventoryShelfStatus,
-  selectAllStoreSoldOutBootstrapSeed,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
 import {selectVirtualInventoryWarehouseCode} from '../lib/shein_inventory_warehouse.mjs';
@@ -26,13 +23,6 @@ const policy = {
   eligibleShelfStatusCodes: ['1', '3'],
   soldOutShelfStatusCode: '3',
   ignoreSoldOutWhenSameStoreHasOnShelfCanonical: true,
-  soldOutRequiresOtherStoreOnShelfWithStock: true,
-  allStoreSoldOutBootstrap: {
-    enabled: true,
-    targetUsableInventory: 10,
-    maxSeedsPerCanonical: 1,
-    excludeSeedFromCrossStoreSellingEvidence: true,
-  },
   requireExactlyOneSku: true,
   requireCurrentDayEtSnapshot: true,
   etAlerts: {criticalDaysOfSupply: 7, warningDaysOfSupply: 14, lowQuantity: 10, replenishmentDaysOfSupply: 120},
@@ -77,41 +67,14 @@ assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '1', skuCount: 2, platformUsableInventory: 1, etSellableInventory: 500, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sku_count_not_one');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '4', skuCount: 1, platformUsableInventory: 1, etSellableInventory: 500, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'shelf_status_not_eligible');
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: true, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).targetUsableInventory, 40);
-assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sold_out_without_other_store_selling');
+assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}), {
+  action: 'set_exact',
+  reason: 'platform_low_top_up_to_et_sellable',
+  targetUsableInventory: 40,
+  etSellableInventory: 40,
+});
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', sameStoreOnShelfLinkExists: true, otherStoreOnShelfWithStock: true, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sold_out_has_same_store_on_shelf_link');
 assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 1, policy}).targetUsableInventory, 10);
-assert.deepEqual(decideDailyInventoryReplenishment({
-  shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1,
-  platformUsableInventory: 0, etSellableInventory: 120, etSnapshotCurrentDay: true,
-  c7SaleCount: 0, allStoreSoldOutBootstrapSeed: true, policy,
-}), {
-  action: 'set_exact',
-  reason: 'all_store_sold_out_bootstrap_seed',
-  targetUsableInventory: 10,
-  etSellableInventory: 120,
-});
-const bootstrapSelection = selectAllStoreSoldOutBootstrapSeed([
-  {storeKey: 'B', skc: 'b-low', c7Exposure: 20, c7GoodsVisitors: 5, c7SaleCount: 0},
-  {storeKey: 'A', skc: 'a-best', c7Exposure: 100, c7GoodsVisitors: 10, c7SaleCount: 0},
-  {storeKey: 'A', skc: 'a-duplicate', c7Exposure: 50, c7GoodsVisitors: 9, c7SaleCount: 0},
-], policy);
-assert.equal(bootstrapSelection.seed.skc, 'a-best');
-assert.deepEqual(bootstrapSelection.storeCandidates.map(row => row.skc), ['a-best', 'b-low']);
-assert.deepEqual(bootstrapSelection.duplicates.map(row => row.skc), ['a-duplicate']);
-assert.throws(() => selectAllStoreSoldOutBootstrapSeed([
-  {storeKey: 'A', skc: 'missing-exposure', c7Exposure: null, c7GoodsVisitors: 1, c7SaleCount: 0},
-], policy), /missing bootstrap ranking evidence/);
-assert.ok(compareAllStoreSoldOutBootstrapCandidates(
-  {storeKey: 'A', skc: '1', c7Exposure: 2, c7GoodsVisitors: 0, c7SaleCount: 0},
-  {storeKey: 'B', skc: '2', c7Exposure: 1, c7GoodsVisitors: 100, c7SaleCount: 100},
-) < 0);
-assert.deepEqual(normalizeOpenApiProductCatalog([
-  {spuName: 'b', skcName: '2', supplierCode: 'B-2', skuCodeList: ['z', 'a', 'a']},
-  {spuName: 'a', skcList: [{skcName: '1', supplierCode: 'A-1', skuList: [{skuCode: 'x'}]}]},
-]), [
-  {spuName: 'a', skcName: '1', supplierCode: 'A-1', skuCodeList: ['x']},
-  {spuName: 'b', skcName: '2', supplierCode: 'B-2', skuCodeList: ['a', 'z']},
-]);
 assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1}), 102);
 assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 100, totalUsableInventory: 100, totalLockedQuantity: 0}), 10);
 assert.equal(computeInventoryOverwriteQuantity(0, {totalInventoryQuantity: 12, totalUsableInventory: 10, totalLockedQuantity: 2}), 2);
@@ -184,7 +147,7 @@ const dailyCoordinator = fs.readFileSync(new URL('./cloud_morning_chain.sh', imp
 const etSafetyGuard = fs.readFileSync(new URL('./cloud_et_low_inventory_guard.sh', import.meta.url), 'utf8');
 const etSafetyService = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-guard.service', import.meta.url), 'utf8');
 const executorScript = fs.readFileSync(new URL('./inventory/execute_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
-const inventoryRules = fs.readFileSync(new URL('../docs/inventory-replenishment-patrol-rules.md', import.meta.url), 'utf8');
+const builderScript = fs.readFileSync(new URL('./inventory/build_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
 assert.equal(livePolicy.execution.mode, 'automatic');
 assert.equal(livePolicy.execution.perRunUserConfirmationRequired, false);
 assert.equal(livePolicy.execution.automaticExecution.enabled, true);
@@ -198,7 +161,6 @@ assert.match(guardScript, /refresh 19-store read-only OpenAPI product\/stock sna
 assert.match(guardScript, /build_plan \|\| PLAN_STATUS=\$\?/);
 assert.match(guardScript, /--execution-mode automatic/);
 assert.match(guardScript, /--confirm-hash "\$HASH"/);
-assert.match(guardScript, /--bootstrap-lock-file "\$BOOTSTRAP_LOCK_FILE"/);
 assert.match(guardScript, /state:"already_completed"/);
 assert.match(guardScript, /automatic inventory executor did not produce a complete result[\s\S]*exit 1/);
 assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=${livePolicy.execution.automaticExecution.allowedContext}`));
@@ -213,20 +175,11 @@ assert.match(dailyCoordinator, /SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="\$\{RUN_DAT
 assert.match(dailyCoordinator, /cloud_daily_inventory_replenishment_guard\.sh/);
 assert.match(executorScript, /Always publish the complete terminal envelope\.\s*await writeResultFile\(results\);/);
 assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);
-const bootstrapPendingIndex = executorScript.indexOf('reserveInventoryBootstrapLock(args.bootstrapLockFile');
-const inventoryWriteIndex = executorScript.indexOf("'/open-api/stock/change-inventory/v2'");
-assert.ok(bootstrapPendingIndex >= 0 && bootstrapPendingIndex < inventoryWriteIndex, 'bootstrap pending lock must precede inventory write');
-assert.match(executorScript, /Bootstrap group gained usable inventory/);
-assert.match(executorScript, /Bootstrap store product catalog changed after plan/);
-assert.match(executorScript, /Bootstrap group canonical changed or is unavailable/);
-assert.match(executorScript, /canonicalInventoryKey\(liveListing\.liveSupplierCode\) !== bootstrapMatchKey/);
-assert.match(executorScript, /daily-inventory-bootstrap-/);
-assert.match(executorScript, /activateInventoryBootstrapLock/);
-assert.match(executorScript, /executionBootstrapRegistryHash = reservation\.hash/);
-assert.match(executorScript, /executionBootstrapRegistryHash = activation\.hash/);
-assert.match(inventoryRules, /回滚前必须先停止并禁用每日库存守卫和 ET 低库存守卫/);
+assert.match(executorScript, /canonicalInventoryKey\(liveSupplierCode\) !== expectedMatchKey/);
+assert.doesNotMatch(executorScript, /bootstrap/i);
+assert.match(builderScript, /target_inventory_already_satisfied/);
+assert.doesNotMatch(builderScript, /bootstrap/i);
 assert.match(etSafetyGuard, /--execution-mode automatic/);
 assert.match(etSafetyGuard, /--confirm-hash "\$HASH"/);
-assert.match(etSafetyGuard, /--bootstrap-lock-file "\$BOOTSTRAP_LOCK_FILE"/);
 assert.match(etSafetyService, /SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard/);
-console.log(JSON.stringify({ok: true, checks: 79}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 64}, null, 2));
