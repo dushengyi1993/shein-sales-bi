@@ -684,6 +684,7 @@ try {
   check('execute write claim nonce persisted', String(execRaw.execution?.writeClaim?.nonce || '').length, 32);
   check('execute partialEdit called once', partialEditBodies.length, 1);
   check('execute partialEdit body minimal', Object.keys(partialEditBodies[0] || {}).sort().join(','), 'multi_language_desc_list,spu_name');
+  check('execute preserves exact lowercase platform SPU', partialEditBodies[0]?.spu_name, SPU);
   check('execute readback matched status', String(execRun.readback?.status || ''), 'description_readback_matched');
   const readbackFingerprint = execRun.readback?.groups?.[0]?.fingerprint || {};
   check('readback before/after fingerprint hashes', String(readbackFingerprint.beforeHashes?.en || '').length === 64 && String(readbackFingerprint.afterHashes?.en || '').length === 64, true);
