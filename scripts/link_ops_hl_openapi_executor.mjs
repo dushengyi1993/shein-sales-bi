@@ -1071,6 +1071,60 @@ function mergePayloadNames(payload, names) {
   return {payload: next, applied: [...new Set(applied)]};
 }
 
+// Exact-case SKC -> SPU resolution for bound-payload copies: when the exact
+// source lock has sourceStore+sourceSkc but no snapshot-derived spuName, the
+// source store searchProduct must resolve EXACTLY ONE case-sensitive SPU.
+// Zero/multiple results or a failed query block; case variants never match.
+async function resolveSourceSpuByExactSkc(client, sourceStore, sourceSkc) {
+  let response = null;
+  try {
+    response = await client.request('/open-api/goods/searchProduct', {
+      method: 'POST',
+      body: {pageNum: 1, pageSize: 10, skcNameList: [sourceSkc], languageList: ['en', 'ar']},
+      headers: {language: 'en'},
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'query_failed',
+      error: safeString(err?.message || err, 300),
+      call: {
+        name: `source-search-product-${sourceSkc}`,
+        path: '/open-api/goods/searchProduct',
+        method: 'POST',
+        httpStatus: null,
+        code: null,
+        msg: safeString(err?.message || err, 300),
+        traceId: null,
+      },
+    };
+  }
+  const call = compactCallResult(`source-search-product-${sourceSkc}`, '/open-api/goods/searchProduct', 'POST', response);
+  if (!response.ok || String(response.data?.code) !== '0') {
+    return {
+      ok: false,
+      reason: 'query_failed',
+      error: `code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`,
+      call,
+    };
+  }
+  const spus = [];
+  for (const product of openApiSearchProductRows(response.data)) {
+    const skcNames = [
+      ...asArray(product?.skcList || product?.skc_list || product?.skcInfoList || product?.skc_info_list)
+        .map(row => safeString(row?.skcName || row?.skc_name || '', 160)),
+      safeString(product?.skcName || product?.skc_name || '', 160),
+    ].filter(Boolean);
+    if (!skcNames.some(name => name === sourceSkc)) continue; // case-sensitive exact match
+    const spuName = safeString(product?.spuName || product?.spu_name || '', 120);
+    if (spuName) spus.push(spuName);
+  }
+  const unique = [...new Set(spus)];
+  if (!unique.length) return {ok: false, reason: 'not_found', call};
+  if (unique.length > 1) return {ok: false, reason: 'ambiguous', call, spus: unique};
+  return {ok: true, spuName: unique[0], call};
+}
+
 async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadFound) {
   const exactSourceLock = payloadFound?.exactSourceLock === true;
   const sourceStore = normalizeStoreKey(
@@ -1092,7 +1146,8 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
     || '',
     160
   );
-  if (!sourceStore || !spuName) {
+  const existingLanguages = payloadNameLanguages(payload);
+  if (!sourceStore || (!spuName && !exactSourceLock)) {
     return {
       payload,
       applied: [],
@@ -1100,9 +1155,9 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       blockers: exactSourceLock ? ['精确源链接缺少可用于 live spu-info 的源店或 SPU，无法核验。'] : [],
       evidence: {status: 'skipped_missing_source_store_or_spu', sourceStore, sourceSkc, spuName},
       call: null,
+      calls: [],
     };
   }
-  const existingLanguages = payloadNameLanguages(payload);
   if (!exactSourceLock && existingLanguages.has('en') && existingLanguages.has('ar')) {
     return {
       payload,
@@ -1111,6 +1166,7 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       blockers: [],
       evidence: {status: 'skipped_payload_already_has_en_ar', sourceStore, sourceSkc, spuName},
       call: null,
+      calls: [],
     };
   }
   const source = openApiClientForStore(config, sourceStore);
@@ -1122,13 +1178,37 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       blockers: exactSourceLock ? [`精确源链接 ${sourceStore}/${sourceSkc} 缺少源店 OpenAPI 只读凭据，无法 live 核验。`] : [],
       evidence: {status: 'skipped_missing_source_openapi_credentials', sourceStore, sourceSkc, spuName},
       call: null,
+      calls: [],
     };
+  }
+  let resolvedSpuName = spuName;
+  const calls = [];
+  if (!spuName && exactSourceLock) {
+    const resolved = await resolveSourceSpuByExactSkc(source.client, sourceStore, sourceSkc);
+    calls.push(resolved.call);
+    if (!resolved.ok) {
+      const reasonText = resolved.reason === 'ambiguous'
+        ? `同源店 SKC ${sourceSkc} 在 searchProduct 命中多个 SPU（${(resolved.spus || []).join('、')}），无法确证`
+        : resolved.reason === 'not_found'
+          ? `源店 ${sourceStore} searchProduct 未找到大小写精确匹配的 SKC ${sourceSkc}`
+          : `源店 SKC 解析查询失败：${resolved.error || '未知错误'}`;
+      return {
+        payload,
+        applied: [],
+        warnings: [],
+        blockers: [`精确源链接 ${sourceStore}/${sourceSkc} ${reasonText}，无法 live 核验。`],
+        evidence: {status: `source_spu_resolve_${resolved.reason}`, sourceStore, sourceSkc, error: resolved.error || '', spus: resolved.spus || []},
+        call: resolved.call,
+        calls,
+      };
+    }
+    resolvedSpuName = resolved.spuName;
   }
   let response = null;
   try {
     response = await source.client.request('/open-api/goods/spu-info', {
       method: 'POST',
-      body: {spuName, languageList: ['en', 'ar']},
+      body: {spuName: resolvedSpuName, languageList: ['en', 'ar']},
       headers: {language: 'en'},
     });
   } catch (err) {
@@ -1139,14 +1219,17 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       blockers: exactSourceLock ? [`精确源链接 ${sourceStore}/${sourceSkc} live 详情读取失败：${safeString(err?.message || err, 300)}`] : [],
       evidence: {status: 'query_failed', sourceStore, sourceSkc, spuName, error: safeString(err?.message || err, 300)},
       call: null,
+      calls,
     };
   }
   const call = compactCallResult('source-spu-info-live', '/open-api/goods/spu-info', 'POST', response);
+  calls.push(call);
   const evidence = {
     status: response.ok && String(response.data?.code) === '0' ? 'ok' : 'not_ok',
     sourceStore,
     sourceSkc,
-    spuName,
+    spuName: resolvedSpuName,
+    spuResolvedBySearch: Boolean(!spuName && exactSourceLock),
     httpStatus: response.status,
     code: response.data?.code ?? null,
     msg: response.data?.msg ?? null,
@@ -1159,6 +1242,7 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       blockers: exactSourceLock ? [`精确源链接 ${sourceStore}/${sourceSkc} live 详情返回失败：code=${safeString(response.data?.code || '', 80)}`] : [],
       evidence,
       call,
+      calls,
     };
   }
   const liveSkcMatched = liveSourceSkcMatches(response.data?.info || {}, sourceSkc);
@@ -1171,6 +1255,7 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       blockers: [`精确源链接 live 详情与锁定 SKC 不一致：${sourceStore}/${sourceSkc}。`],
       evidence: {...evidence, status: 'source_skc_mismatch'},
       call,
+      calls,
     };
   }
   const names = namesFromOpenApiSpuInfo(response.data?.info || {}, sourceSkc);
@@ -1184,6 +1269,7 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       blockers: [],
       evidence: {...evidence, status: 'ok_no_new_names'},
       call,
+      calls,
     };
   }
   return {
@@ -1193,6 +1279,7 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
     blockers: [],
     evidence,
     call,
+    calls,
   };
 }
 
@@ -3503,7 +3590,8 @@ async function main() {
     const applied = applySafeDefaults(payloadFound.payload, {sites, brands, task, executionContext: effectiveExecutionContext});
     const manualApplied = applyManualAttributeOverrides(applied.payload, task, effectiveExecutionContext);
     const liveSourceNames = await enrichPayloadNamesFromLiveSourceOpenApi(config, manualApplied.payload, payloadFound);
-    if (liveSourceNames.call) calls.push(liveSourceNames.call);
+    if (liveSourceNames.calls?.length) calls.push(...liveSourceNames.calls);
+    else if (liveSourceNames.call) calls.push(liveSourceNames.call);
     const publishStandardApplied = await applyPublishFillInStandardRules(client, liveSourceNames.payload);
     if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
     const sourcePayloadSupplierCodes = publishTargetSupplierCodes(publishStandardApplied.payload);
@@ -3795,6 +3883,7 @@ export const __testHooks = {
   applyAttributeTemplateRules,
   inspectTargetDuplicateProducts,
   resolveLockedSourceScope,
+  resolveSourceSpuByExactSkc,
   applyRandomSupplyPrice,
   applyExplicitPublishPreparationOverrides,
   applyTargetStandardGoodsSn,

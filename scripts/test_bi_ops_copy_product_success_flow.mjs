@@ -503,6 +503,21 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     }, 200);
   }
   if (pathname === '/open-api/goods/searchProduct') {
+    // Exact source SKC -> SPU resolution for bound-payload copies: the source
+    // store searchProduct must resolve exactly one case-sensitive SPU.
+    if (asArray(body.json?.skcNameList).includes('sv-smoke-copy-product')) {
+      return sendJson(res, {
+        code: '0',
+        msg: 'OK',
+        info: {
+          list: [{
+            spuName: 'v-smoke-copy-product',
+            skcList: [{skcName: 'sv-smoke-copy-product'}],
+          }],
+          count: 1,
+        },
+      });
+    }
     if (SEARCH_PRODUCT_READBACK && publishAttemptCount > 0 && !WEAK_READBACK_ONLY) {
       const skcNames = asArray(body.json?.skcNameList).map(String);
       const spuNames = asArray(body.json?.spuNameList).map(String);
@@ -752,7 +767,7 @@ try {
     // (sourceStore + sourceSkc) even when the payload comes from a bound asset.
     await updateRawTaskById(taskId, task => ({
       ...task,
-      targets: {...task.targets, sourceStores: ['DL'], sourceSkc: 'sv25082902871830770'},
+      targets: {...task.targets, sourceStores: ['DL'], sourceSkc: 'sv-smoke-copy-product'},
     }));
   } else {
     created = await req('/api/link-ops-tasks', {
@@ -764,7 +779,7 @@ try {
         targets: {
           stores: ['HL'],
           sourceStores: ['DL'],
-          sourceSkc: 'sv25082902871830770',
+          sourceSkc: 'sv-smoke-copy-product',
           productRefs: productCase.productRefs,
           standardGoodsSn: taskStandardGoodsSn,
         },
@@ -1079,6 +1094,9 @@ try {
       check('chat locked lifecycle no extra publish', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, publishCountBeforeLockedRetry);
     }
   } else if (!PREVALID_FAIL) {
+    check('executor projection keeps exact source store', execEvidence?.sourceStore || '', 'DL');
+    check('executor projection keeps exact source skc', execEvidence?.sourceSkc || '', 'sv-smoke-copy-product');
+    check('source resolve audited searchProduct and live spu-info', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct').length >= 1 && fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/spu-info').length >= 1, true);
     check('no blockers after matched readback', Number(writeAudit?.blockerCount || 0), 0);
     check('task auto done after strong readback', executedTask?.status || '', 'done');
     check('lifecycle matched strong readback', lifecycle?.status || lifecycle?.lifecycleStatus || '', 'submitted_readback_matched');

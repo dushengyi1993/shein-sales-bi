@@ -594,6 +594,34 @@ check('template conflict evidence is unit_value_id_conflict', voltageConflict.ev
 check('template conflict records the conflicting template id', voltageConflict.evidence.inputVoltageProvenance?.templateVacValueId, 999999);
 check('template conflict never fills 1002322', Boolean(conflictRow), false);
 
+// --- exact source SKC -> SPU resolution for bound-payload copies ---
+function skcSearchClient(rows, {fail = false} = {}) {
+  return {
+    calls: [],
+    async request(pathname, opts) {
+      this.calls.push({pathname, body: opts?.body});
+      if (fail) throw new Error('search exploded');
+      return {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: rows}}};
+    },
+  };
+}
+const skcRow = spu => ({spuName: spu, skcList: [{skcName: 'sv25082902871830770'}]});
+const skcUnique = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([skcRow('v25082902871830770')]), 'DL', 'sv25082902871830770');
+check('exact SKC search resolves the unique SPU', skcUnique.ok && skcUnique.spuName, 'v25082902871830770');
+check('exact SKC search audit records searchProduct', skcUnique.call?.path, '/open-api/goods/searchProduct');
+const skcCaseMismatch = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([skcRow('v25082902871830770')]), 'DL', 'SV25082902871830770');
+check('case-variant SKC never matches', skcCaseMismatch.ok, false);
+check('case-variant SKC is not_found', skcCaseMismatch.reason, 'not_found');
+const skcZero = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([]), 'DL', 'sv25082902871830770');
+check('zero search results block', skcZero.ok, false);
+check('zero search results reason', skcZero.reason, 'not_found');
+const skcAmbiguous = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([skcRow('v-a'), skcRow('v-b')]), 'DL', 'sv25082902871830770');
+check('multiple SPUs block as ambiguous', skcAmbiguous.ok, false);
+check('multiple SPUs reason', skcAmbiguous.reason, 'ambiguous');
+const skcFailed = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([], {fail: true}), 'DL', 'sv25082902871830770');
+check('search failure blocks', skcFailed.ok, false);
+check('search failure reason', skcFailed.reason, 'query_failed');
+
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
 if (!ok) process.exit(1);
