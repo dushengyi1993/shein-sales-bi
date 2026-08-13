@@ -326,6 +326,274 @@ const verifiedWithdrawn = await __testHooks.inspectTargetDuplicateProducts(
 check('live state 4 withdrawn override allows one replacement', verifiedWithdrawn.blockers.length, 0);
 check('live state 4 withdrawn override is audited', verifiedWithdrawn.evidence.rejectedReplacementOverride.liveValidation.status, 'verified_terminal_withdrawn');
 
+// --- 03012 readback identity binding: pending review must never fall back to an
+// old same-goods-number link, and supplier-code-only matches are demoted when the
+// publishOrEdit-returned new identity is known. ---
+function readbackClient({spuInfoResult, searchResult, productQueryResult}) {
+  const calls = [];
+  return {
+    calls,
+    async request(pathname, opts) {
+      calls.push({pathname, body: opts?.body});
+      if (pathname === '/open-api/goods/spu-info') return spuInfoResult;
+      if (pathname === '/open-api/goods/searchProduct') return searchResult;
+      if (pathname === '/open-api/openapi-business-backend/product/query') return productQueryResult;
+      throw new Error(`unexpected path ${pathname}`);
+    },
+    async requestReadOnly(pathname, opts) {
+      return this.request(pathname, opts);
+    },
+  };
+}
+const newIdentityFingerprint = {
+  targetStore: 'HL',
+  taskId: '03012',
+  taskProductRefs: [],
+  publishSpuNames: ['v2608132357607966'],
+  publishSkcNames: ['sv260813235760796666648'],
+  publishSkuCodes: ['SPMP260813353184931'],
+  targetSupplierCodes: ['HL-03012-SN'],
+  targetSupplierSkus: ['HL-03012-SKU1'],
+  targetPlatformSkuCodes: [],
+  targetPlatformSkcNames: [],
+};
+const oldLinkRow = {spuName: 'v2602011917311806', skcName: 'sv-old', supplierCode: 'HL-03012-SN', skuCodeList: ['HL-03012-SKU1']};
+const newLinkRow = {spuName: 'v2608132357607966', skcName: 'sv260813235760796666648', supplierCode: 'HL-03012-SN', skuCodeList: ['SPMP260813353184931']};
+const demotedOld = __testHooks.matchProductReadbackRows([oldLinkRow], newIdentityFingerprint);
+check('old same-goods link is not reliable readback when new identity is known', demotedOld.strong.length, 0);
+check('old same-goods link demotion is explicit', demotedOld.weak[0]?.weakMatchReasons.some(reason => reason.startsWith('sameGoodsNumberOldLinkWithoutPublishIdentity:')), true);
+const matchedNewLink = __testHooks.matchProductReadbackRows([newLinkRow], newIdentityFingerprint);
+check('new identity row stays a strong readback', matchedNewLink.strong.length, 1);
+const legacyFingerprint = {...newIdentityFingerprint, publishSpuNames: [], publishSkcNames: [], publishSkuCodes: []};
+const legacyMatchedOld = __testHooks.matchProductReadbackRows([oldLinkRow], legacyFingerprint);
+check('supplier-code match stays strong without publish identity (legacy semantics)', legacyMatchedOld.strong.length, 1);
+
+const pendingSpuInfoResult = {ok: true, status: 200, data: {code: '0003', msg: 'audit pending', info: null}};
+const pendingSearchResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: [oldLinkRow]}}};
+const pendingProductQueryResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: []}}};
+const pendingReadbackClient = readbackClient({spuInfoResult: pendingSpuInfoResult, searchResult: pendingSearchResult, productQueryResult: pendingProductQueryResult});
+const pendingReadback = await __testHooks.readbackPublishedProduct(pendingReadbackClient, newIdentityFingerprint, {enabled: true, task: null});
+check('pending-review spu-info is an explicit unverifiable state', pendingReadback.status, 'new_identity_pending_review_unverifiable');
+check('pending-review readback is not ok but not a mismatch failure', pendingReadback.ok, false);
+check('pending-review readback marks pendingReview', pendingReadback.pendingReview, true);
+check('pending-review readback still runs searchProduct strong fallbacks', pendingReadbackClient.calls.some(call => call.pathname === '/open-api/goods/searchProduct'), true);
+check('pending-review readback keeps old-link rows as weak only', pendingReadback.weakMatchedRows.some(row => row.weakMatchReasons.some(reason => reason.startsWith('sameGoodsNumberOldLinkWithoutPublishIdentity:'))), true);
+check('pending-review readback never binds the old link', pendingReadback.matchedRows.length, 0);
+
+const matchedSpuInfoResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: newLinkRow}};
+const matchedReadbackClient = readbackClient({spuInfoResult: matchedSpuInfoResult, searchResult: pendingSearchResult});
+const matchedReadback = await __testHooks.readbackPublishedProduct(matchedReadbackClient, newIdentityFingerprint, {enabled: true, task: null});
+check('available new-identity spu-info still strong-matches', matchedReadback.status, 'matched_publish_spu_in_spu_info');
+check('available new-identity spu-info readback is ok', matchedReadback.ok, true);
+
+// --- 15032/794 input voltage provenance: when the official target template does
+// not return Input voltage(1002322), fill ONLY from same-goods-number OpenAPI
+// links with provenance; missing/ambiguous/different-goods-number keep blocker. ---
+const voltageTemplateResponse = {
+  code: '0',
+  msg: 'OK',
+  info: {
+    data: [{
+      product_type_id: 9851,
+      attribute_infos: [
+        {
+          attribute_id: 147,
+          attribute_name: 'Power Supply',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [
+            {attribute_value_id: 1047, attribute_value: 'Wall Plug'},
+            {attribute_value_id: 1007239, attribute_value: 'Power Adapter'},
+          ],
+        },
+        {
+          attribute_id: 1001466,
+          attribute_name: 'Plug(Voltage)',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 2,
+          attribute_value_info_list: [
+            {attribute_value_id: 2535083, attribute_value: 'UK Plug(220-240V)'},
+          ],
+        },
+      ],
+    }],
+  },
+};
+function provenanceClient({searchRows, spuInfoBySpu, templateResponse = voltageTemplateResponse}) {
+  const calls = {searchProduct: 0, spuInfo: 0};
+  return {
+    calls,
+    async request(pathname, opts) {
+      if (pathname === '/open-api/goods/query-attribute-template') return {ok: true, status: 200, data: templateResponse};
+      if (pathname === '/open-api/goods/searchProduct') {
+        calls.searchProduct += 1;
+        calls.lastSearchBody = opts?.body;
+        return {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: searchRows}}};
+      }
+      if (pathname === '/open-api/goods/spu-info') {
+        calls.spuInfo += 1;
+        const spuName = opts?.body?.spuName;
+        return {ok: true, status: 200, data: {code: '0', msg: 'OK', info: spuInfoBySpu[spuName] || null}};
+      }
+      throw new Error(`unexpected path ${pathname}`);
+    },
+  };
+}
+const wallPlugPayload = {
+  product_type_id: 9851,
+  product_attribute_list: [
+    {attribute_id: 147, attribute_value_id: 1047, attribute_name: 'Power Supply'},
+    {attribute_id: 1001466, attribute_value: '220-240V', attribute_name: 'Plug Voltage'},
+  ],
+  skc_list: [{supplier_code: 'HL-03012-SN', sale_name: 'Wall Plug'}],
+};
+const exactSourceContext = {
+  copyProductDraft: true,
+  exactSourceLock: true,
+  sourceStore: 'DL',
+  sourceSkc: 'sv-dl-source',
+  standardGoodsSn: 'HL-03012-SN',
+  sourcePayloadSupplierCodes: ['HL-03012-SN'],
+};
+// Locked owner authorization: the locked copy payload itself (exact DL
+// sourceSkc) already carries official Plug(Voltage)=220-240V, so the
+// deterministic range inference fills 1002322 without any live lookup.
+const voltageLockedPayloadClient = provenanceClient({searchRows: [], spuInfoBySpu: {}});
+const voltageApplied = await __testHooks.applyAttributeTemplateRules(
+  voltageLockedPayloadClient,
+  clone(wallPlugPayload),
+  exactSourceContext,
+);
+const voltageRow = voltageApplied.payload.product_attribute_list.find(row => Number(row.attribute_id) === 1002322);
+check('locked payload Plug(Voltage) fills 1002322 value id', voltageRow?.attribute_value_id, 301114341);
+check('locked payload Plug(Voltage) keeps extra value', voltageRow?.attribute_extra_value, '220-240');
+check('locked payload provenance has no blockers', voltageApplied.blockers.length, 0);
+check('locked payload provenance is audited', voltageApplied.applied.some(item => item.startsWith('attribute_provenance:1002322.from_locked_source_payload.1001466')), true);
+check('locked payload provenance marks official catalog mapping', voltageApplied.applied.some(item => item === 'official_catalog_mapping:1002322.vac_value_id=301114341'), true);
+check('locked payload provenance evidence is ok', voltageApplied.evidence.inputVoltageProvenance?.status, 'ok');
+check('locked payload provenance source is locked_source_payload', voltageApplied.evidence.inputVoltageProvenance?.source, 'locked_source_payload');
+check('locked payload provenance records source store', voltageApplied.evidence.inputVoltageProvenance?.sourceStore, 'DL');
+check('locked payload provenance records source skc', voltageApplied.evidence.inputVoltageProvenance?.sourceSkc, 'sv-dl-source');
+check('locked payload provenance records standard goods number', voltageApplied.evidence.inputVoltageProvenance?.standardGoodsNumber, 'HL-03012-SN');
+check('locked payload provenance never queries the target store', voltageLockedPayloadClient.calls.searchProduct, 0);
+const voltageRepeated = await __testHooks.applyAttributeTemplateRules(voltageLockedPayloadClient, clone(wallPlugPayload), exactSourceContext);
+check('locked payload provenance is deterministic for payload hash', __testHooks.sha256Stable(voltageRepeated.payload), __testHooks.sha256Stable(voltageApplied.payload));
+check('payload hash covers the provenance-filled attribute', __testHooks.sha256Stable(voltageApplied.payload) !== __testHooks.sha256Stable(clone(wallPlugPayload)), true);
+
+// Guard failures all keep the blocker and never touch the payload.
+const guardEmptyBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {},
+);
+check('empty source context blocks input voltage provenance', guardEmptyBlocked.blockers.some(text => /必须人工补充 Input voltage/.test(text)), true);
+check('empty source context does not fill payload', guardEmptyBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
+const guardNonCopyBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {...exactSourceContext, copyProductDraft: false},
+);
+check('non-copy intent blocks input voltage provenance', guardNonCopyBlocked.blockers.some(text => /不是精确的 copy_product_draft/.test(text)), true);
+check('non-copy intent does not fill payload', guardNonCopyBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
+const guardImpreciseBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {...exactSourceContext, exactSourceLock: false},
+);
+check('imprecise source blocks input voltage provenance', guardImpreciseBlocked.blockers.some(text => /来源不是本次 findOrBuild 的精确 source lock/.test(text)), true);
+
+const guardMismatchBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {...exactSourceContext, sourcePayloadSupplierCodes: ['OTHER-GOODS-A']},
+);
+check('source payload goods A with task goods B blocks provenance', guardMismatchBlocked.blockers.some(text => /与任务目标标准货号/.test(text)), true);
+check('goods-number mismatch does not fill payload', guardMismatchBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
+const guardPunctuationMismatchBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {...exactSourceContext, sourcePayloadSupplierCodes: ['HL03012SN']},
+);
+check('HL03012SN vs HL-03012-SN strict identity blocks provenance', guardPunctuationMismatchBlocked.blockers.some(text => /与任务目标标准货号/.test(text)), true);
+check('strict identity mismatch does not fill payload', guardPunctuationMismatchBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
+const guardMissingIntentBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {...exactSourceContext, copyProductDraft: undefined},
+);
+check('missing copy intent blocks the provenance path', guardMissingIntentBlocked.blockers.some(text => /必须人工补充 Input voltage/.test(text)), true);
+check('missing copy intent does not fill payload', guardMissingIntentBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
+const guardUnresolvableBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  {
+    ...wallPlugPayload,
+    product_attribute_list: [
+      {attribute_id: 147, attribute_value_id: 1047, attribute_name: 'Power Supply'},
+      {attribute_id: 1001466, attribute_value_id: 999999, attribute_name: 'Plug Voltage'},
+    ],
+  },
+  exactSourceContext,
+);
+check('unresolvable locked payload keeps blocker', guardUnresolvableBlocked.blockers.some(text => /无法推导电压范围/.test(text)), true);
+check('unresolvable locked payload does not fill', guardUnresolvableBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+check('unresolvable provenance evidence is unresolvable', guardUnresolvableBlocked.evidence.inputVoltageProvenance?.status, 'unresolvable');
+
+// Scope hash v2: the same body with a different locked source store/sourceSkc
+// or target goods number must produce a different execution lock hash.
+const scopeDl = {payload: clone(wallPlugPayload), sourceStore: 'DL', sourceSkc: 'A', standardGoodsSn: 'HL-03012-SN'};
+const scopeMz = {payload: clone(wallPlugPayload), sourceStore: 'MZ', sourceSkc: 'B', standardGoodsSn: 'HL-03012-SN'};
+check('scope hash differs when source store/skc drift', __testHooks.sha256Stable(scopeDl) !== __testHooks.sha256Stable(scopeMz), true);
+const scopeOtherGoods = {payload: clone(wallPlugPayload), sourceStore: 'DL', sourceSkc: 'A', standardGoodsSn: 'HL-OTHER-SN'};
+check('scope hash differs when target goods number drifts', __testHooks.sha256Stable(scopeDl) !== __testHooks.sha256Stable(scopeOtherGoods), true);
+check('scope hash is stable for identical scope', __testHooks.sha256Stable(scopeDl), __testHooks.sha256Stable({...scopeDl}));
+
+const voltageConflictTemplateResponse = {
+  code: '0',
+  msg: 'OK',
+  info: {
+    data: [{
+      product_type_id: 9851,
+      attribute_infos: [
+        {
+          attribute_id: 147,
+          attribute_name: 'Power Supply',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [
+            {attribute_value_id: 1047, attribute_value: 'Wall Plug'},
+            {attribute_value_id: 1007239, attribute_value: 'Power Adapter'},
+          ],
+        },
+        {
+          attribute_id: 1002322,
+          attribute_name: 'Input voltage',
+          attribute_mode: 4,
+          attribute_type: 4,
+          attribute_status: 2,
+          attribute_value_info_list: [
+            {attribute_value_id: 999999, attribute_value: 'Vac 50–60Hz'},
+          ],
+        },
+      ],
+    }],
+  },
+};
+const voltageConflictClient = provenanceClient({searchRows: [], spuInfoBySpu: {}, templateResponse: voltageConflictTemplateResponse});
+const voltageConflict = await __testHooks.applyAttributeTemplateRules(voltageConflictClient, clone(wallPlugPayload), exactSourceContext);
+const conflictRow = voltageConflict.payload.product_attribute_list.find(row => Number(row.attribute_id) === 1002322);
+check('template Vac unit id conflict blocks instead of adopting 999999', voltageConflict.blockers.some(text => /冲突/.test(text)), true);
+check('template conflict evidence is unit_value_id_conflict', voltageConflict.evidence.inputVoltageProvenance?.status, 'unit_value_id_conflict');
+check('template conflict records the conflicting template id', voltageConflict.evidence.inputVoltageProvenance?.templateVacValueId, 999999);
+check('template conflict never fills 1002322', Boolean(conflictRow), false);
+
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
 if (!ok) process.exit(1);

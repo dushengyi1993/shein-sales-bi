@@ -3741,6 +3741,7 @@ function projectLinkOpsProductExecutorForClient(executor) {
     readback: readback ? {
       ok: Boolean(readback.ok),
       status: sanitizeLinkOpsClientText(readback.status || '', 120),
+      pendingReview: Boolean(readback.pendingReview),
       descriptionReadback: descriptionReadback ? {
         ok: Boolean(descriptionReadback.ok),
         status: sanitizeLinkOpsClientText(descriptionReadback.status || '', 120),
@@ -5784,6 +5785,7 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         readback: result.readback ? {
           ok: Boolean(result.readback.ok),
           status: result.readback.status || '',
+          pendingReview: Boolean(result.readback.pendingReview),
           scannedRows: result.readback.scannedRows ?? null,
           matchedCount: Array.isArray(result.readback.matchedRows) ? result.readback.matchedRows.length : 0,
           weakMatchedCount: Array.isArray(result.readback.weakMatchedRows) ? result.readback.weakMatchedRows.length : 0,
@@ -5947,17 +5949,17 @@ function classifyLinkOpsLifecycle({
       return {
         version: 1,
         fromStatus: originalStatus,
-        toStatus: 'submitted_but_readback_pending',
+        toStatus: 'needs_manual_resolve',
         status: 'submitted_but_readback_pending',
         lifecycleStatus: 'submitted_but_readback_pending',
         terminal: false,
         locked: true,
-        needsManualResolve: false,
+        needsManualResolve: true,
         requestedMode,
         executorState,
         submitted: true,
         readbacks,
-        note: 'SHEIN 写接口已返回成功，但还没有完成可靠回读；任务保持锁定，禁止重复提交。',
+        note: 'SHEIN 写接口已返回成功，但新身份仍待审核（spu-info 暂不可用），无法终验也不能重复提交；须由 owner 后续人工核销。',
       };
     }
     return {
@@ -7168,8 +7170,8 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
     throw error;
   }
   const capturedHash = sha256StableJson(payload);
-  const executorHash = String(captured?.result?.payload?.payloadHash || '');
-  if (executorHash && capturedHash !== executorHash) {
+  const expectedBodyHash = resolveDescriptionBindingExpectedBodyHash(captured?.result?.payload || {});
+  if (!expectedBodyHash || capturedHash !== expectedBodyHash) {
     const error = new Error('物化 payload hash 与受控 executor dry-run capture 不一致');
     error.status = 409;
     error.code = 'DESCRIPTION_BINDING_PAYLOAD_MATERIALIZATION_HASH_MISMATCH';
@@ -7203,6 +7205,22 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
     warningCount: asArray(captured?.result?.warnings).length,
   });
   return {task: nextTask, materialized: true};
+}
+
+// Description binding materializes against the executor's BODY hash, never the
+// v2 execution-lock scope hash (payload + source identity). Legacy v1 captures
+// carried the body hash in payloadHash; that stays compatible only when the
+// declared algorithm is still the v1 body-hash algorithm. Anything else with a
+// missing bodyHash fails closed.
+function resolveDescriptionBindingExpectedBodyHash(executorPayload = {}) {
+  const bodyHash = String(executorPayload?.bodyHash || '');
+  if (/^[a-f0-9]{64}$/i.test(bodyHash)) return bodyHash;
+  const algorithm = String(executorPayload?.payloadHashAlgorithm || '');
+  if (algorithm === DESCRIPTION_PAYLOAD_HASH_ALGORITHM) {
+    const legacyHash = String(executorPayload?.payloadHash || '');
+    return /^[a-f0-9]{64}$/i.test(legacyHash) ? legacyHash : '';
+  }
+  return '';
 }
 
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
@@ -14389,3 +14407,8 @@ if (IS_DIRECT_RUN) {
     process.exit(1);
   });
 }
+
+export const __testHooks = {
+  resolveDescriptionBindingExpectedBodyHash,
+  sha256StableJson,
+};
