@@ -64,6 +64,7 @@ try {
   const fakeSlackToken = ['xoxb', '123456789012', 'abcdefghijklmnopqrstuvwxyz'].join('-');
   const fakeOpaqueHexSecret = ['0123456789abcdef', 'fedcba9876543210'].join('');
   const firstBundle = activeBundle([{
+    ruleKey: 'openapi.product-stock-evidence-boundary',
     text: `以后所有真实提交必须先预检、明确确认并强回读，token=should-not-leak，${fakeGithubToken}、${fakeSlackToken}、${fakeOpaqueHexSecret} 也不能泄露`,
     sourceKind: 'owner_manual',
     sourceId: 'private-session-path',
