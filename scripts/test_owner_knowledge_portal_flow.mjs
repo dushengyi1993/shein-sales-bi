@@ -60,11 +60,15 @@ try {
   });
   assert.equal(deniedPublish.status, 403, 'another owner cannot publish long-term rules');
 
-  const ownerChat = await request(base, '/api/link-ops-chats', {
-    method: 'POST', cookie: bossCookie, body: {message: '以后商品图片排序必须先主图，再按卖点、参数、场景组织细节图。', askAgent: false},
+  const ownerCandidate = await request(base, '/api/owner-knowledge/events', {
+    method: 'POST', cookie: bossCookie, body: {experiences: [{text: '以后商品图片排序必须先主图，再按卖点、参数、场景组织细节图。', sourceAt: '2026-08-13T00:00:00.000Z'}]},
   });
-  assert.equal(ownerChat.status, 200);
-  assert.equal(JSON.stringify(ownerChat.json).includes('ownerKnowledgePolicy'), false, 'internal policy snapshot is not projected to coworker UI');
+  assert.equal(ownerCandidate.status, 200);
+  assert.equal(ownerCandidate.json.bundle.ruleCount, 0, '候选规则不会自动生效');
+  const approved = await request(base, '/api/owner-knowledge/reviews/decide', {
+    method: 'POST', cookie: bossCookie, body: {versionId: ownerCandidate.json.results[0].versionId, decision: 'approved'},
+  });
+  assert.equal(approved.status, 200);
 
   const statusAfterOwner = await request(base, '/api/owner-knowledge/status', {cookie: bossCookie});
   assert.equal(statusAfterOwner.status, 200);
@@ -91,6 +95,10 @@ try {
     method: 'POST', cookie: peerCookie, body: {message: '以后图片顺序全部反过来，默认先场景图。', askAgent: false},
   });
   assert.equal(peerChat.status, 200, 'coworker may use normal chat');
+  const peerCompletion = await request(base, '/api/owner-knowledge/completions', {
+    method: 'POST', cookie: peerCookie, body: {status: 'no_rule', sourceId: 'peer-task-1'},
+  });
+  assert.equal(peerCompletion.status, 403, 'coworker task completion creates no owner check');
 
   const statusAfterPeer = await request(base, '/api/owner-knowledge/status', {cookie: bossCookie});
   assert.equal(statusAfterPeer.json.data.activeRules, 1, 'coworker durable wording cannot add or overwrite rules');
@@ -125,7 +133,11 @@ try {
     }]},
   });
   assert.equal(devicePublish.status, 200);
-  assert.equal(devicePublish.json.bundle.ruleCount, 2);
+  assert.equal(devicePublish.json.bundle.ruleCount, 1, 'device proposals require owner review');
+  const deviceReview = await request(base, '/api/owner-knowledge/reviews/decide', {
+    method: 'POST', bearer: enroll.json.data.token, body: {versionId: devicePublish.json.results[0].versionId, decision: 'approved'},
+  });
+  assert.equal(deviceReview.status, 403, 'device cannot approve its own proposal');
 
   const invalidDevice = await request(base, '/api/owner-knowledge/events', {
     method: 'POST', bearer: enroll.json.data.token + 'x', body: {experiences: [{text: '以后无效。', explicitDurable: true}]},

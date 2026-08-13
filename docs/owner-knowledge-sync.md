@@ -2,7 +2,7 @@
 
 ## 目标
 
-本机 Codex Desktop、Codex CLI 与负责人本人 BI 会话中的可复用经验，自动进入 BI 的长期规则层，并把脱敏后的 active 规则发布到 GitHub `owner-knowledge` 分支形成可回滚版本；其他 BI 账号只能在业务流程中消费这些规则，其会话内容不会反向生成、修改或覆盖负责人规则。
+本机 Codex Desktop、Codex CLI 与负责人本人 BI 任务在结束时生成一张规则检查单；只有负责人显式审核通过的候选才进入长期规则层，并把脱敏后的 active 规则发布到 GitHub `owner-knowledge` 分支形成可回滚版本。其他 BI 账号只消费规则，其任务结束不会生成检查单、候选、覆盖记录或任何负责人知识数据。
 
 这不是多账号共享聊天记忆，也不依赖云端 Codex 自己“记住”。规则由 BI 服务端存储、筛选并注入模型与受控任务；云端模型只是消费者。
 
@@ -16,18 +16,19 @@
 
 ## 经验分层
 
-- 负责人明确说出的长期要求，例如“以后、默认、后续每次、不要再、以某项为准”，校验后进入 active。
-- 故障结论、模型总结和可能可复用但未被负责人明确设为长期规则的内容进入 candidate，不影响同事任务。
-- 本机采集器只读取当前项目的已整理 memory note，以及当前项目 Codex session 中的用户消息和最终结论；不会上传 reasoning、tool output、整段原始会话或其他项目。
+- 任务结束检查只允许输出 `no_rule`、`candidate` 或 `review_required`；模型无权直接激活规则。
+- 负责人明确说出的长期要求也先进入 candidate，必须由负责人本人登录 BI 审核通过后才进入 active。
+- 旧会话扫描、关键词耐久判断和 BI 单条聊天消息采集均已废弃；不会再扫描 session、archived session 或 memory note。
 - Bearer、password、token、Cookie、Authorization、API key、private key、Slack 风格 token 和无标签高熵疑似凭证在本机发送前脱敏；服务端和 GitHub bundle 校验再做一次相同防线。
 - 一个 `ruleKey` 同时只保留一个 active 版本；负责人新规则通过 current pointer 覆盖旧版本，历史 version/event 保留审计。
 
 ## 运行链路
 
-1. `scripts/owner_knowledge_sync.mjs` 登录后常驻，使用 Windows 文件事件监听 Codex session 与 memory note；变化稳定 15 秒后增量采集，不再每 60 秒扫描。session 规则使用 JSONL 事件自身 timestamp，不使用可被复制/追加改写的文件 mtime；未来或非法 timestamp 会被服务端钳制并隔离为 candidate，不能覆盖 active。
-2. 进程启动时立即对账，并保留每 60 分钟一次低频 reconciliation，弥补 Windows watcher、休眠恢复或目录 rename 的漏事件。
-3. 采集结果通过设备 Bearer token 发送到 `POST /api/owner-knowledge/events`；只有所有批次成功后才推进本机 offset。
-4. `lib/owner_knowledge_service.mjs` 使用 Link Ops repository 的 revision、payload hash、idempotency 和 event 存储；负责人 BI 会话则在本人消息落库时同步提炼，非负责人跳过。
+1. Codex 的任务结束通知调用 `scripts/owner_knowledge_turn_ended.mjs`；仅目标项目且仅负责人本机任务进入脱敏的本地待处理目录。
+2. 后台分析继承当前全局模型设置，输出结构化检查单；失败或不确定时写 `review_required`，不静默跳过。
+3. 隐藏运行的 `scripts/owner_knowledge_sync.mjs upload` 只上传已经生成的检查单；离线时保留，恢复后按任务和回合标识幂等重传。
+4. BI 负责人任务进入 done/archived 时生成检查单；同事身份在入口处直接跳过，零记录。
+5. `lib/owner_knowledge_service.mjs` 使用 revision、payload hash、idempotency 和 event 存储；采集入口强制 candidate，负责人审核才更新 current pointer。
 5. active bundle 先做服务端二次脱敏、禁止字段检查和 fingerprint 校验，再由 `lib/owner_knowledge_distribution.mjs` 写入专用 Git 仓库并推送 GitHub `owner-knowledge` 分支。GitHub 只保存规则包，不保存原始会话、来源路径、设备、账号或 token。
 6. 服务端先把远端已回读的 commit 保存为 pending；GitHub Actions 再从该 commit 校验 immutable bundle、fingerprint 和 SHA-256，成功后用专用短权限令牌调用激活端点。只有 commit、fingerprint、bundle hash 与当前 active 规则全部一致，pending 才能成为 current distribution。
 7. 云端保存已通过 GitHub CI 的 distribution snapshot；每轮网页问答与任务创建按店铺、动作、商品和关键词选择相关 active 规则。
@@ -38,16 +39,14 @@
 ## 本机命令
 
 ```powershell
-npm run owner-knowledge:scan
-npm run owner-knowledge:sync
+npm run owner-knowledge:upload
 npm run owner-knowledge:status
 ```
 
 默认本机文件：
 
 - 凭证：`%USERPROFILE%\.codex\owner-knowledge\device.json`
-- 增量状态：`%USERPROFILE%\.codex\owner-knowledge\sync-state.json`
-- 运行日志：`%USERPROFILE%\.codex\owner-knowledge\sync.log`
+- 检查单目录：`%USERPROFILE%\.codex\owner-knowledge\completion-spool`
 - 服务地址：`https://sa.dushengyi.cc`
 
 凭证不得提交 Git、复制到聊天或放入项目目录。
@@ -71,7 +70,7 @@ node scripts/owner_knowledge_admin.mjs issue-device \
 powershell -ExecutionPolicy Bypass -File scripts/install_owner_knowledge_sync_task.ps1
 ```
 
-默认事件去抖 15 秒、低频对账 60 分钟。需要临时调整时使用 `-DebounceSeconds` 与 `-ReconcileMinutes`；不要把 reconciliation 恢复成 60 秒轮询。
+默认每 30 秒尝试上传待发送检查单；任务全程通过 `wscript.exe` 隐藏运行。
 
 卸载：
 
@@ -82,8 +81,8 @@ powershell -ExecutionPolicy Bypass -File scripts/install_owner_knowledge_sync_ta
 ## 运行检查与故障处理
 
 ```powershell
-Get-ScheduledTask -TaskName SHEIN-Owner-Knowledge-Sync
-Get-ScheduledTaskInfo -TaskName SHEIN-Owner-Knowledge-Sync
+Get-ScheduledTask -TaskName SHEIN-Owner-Knowledge-Completion-Uploader
+Get-ScheduledTaskInfo -TaskName SHEIN-Owner-Knowledge-Completion-Uploader
 npm run owner-knowledge:status
 ```
 
@@ -97,7 +96,11 @@ npm run owner-knowledge:status
 
 ## API
 
-- `POST /api/owner-knowledge/events`：负责人 BI 会话或已登记设备发布经验。
+- `POST /api/owner-knowledge/completions`：负责人本机或 BI 任务提交结束检查单。
+- `GET /api/owner-knowledge/reviews`：负责人查看候选。
+- `POST /api/owner-knowledge/reviews/decide`：负责人批准或拒绝候选。
+- `POST /api/owner-knowledge/rules/deprecate`：负责人废止当前规则；历史版本保留。
+- `POST /api/owner-knowledge/events`：兼容入口，只能新增 candidate，不能直接 active。
 - `GET /api/owner-knowledge/manifest`：所有已登录 BI 账号可读取脱敏规则版本、GitHub source commit、CLI 最低版本和 ETag；不返回规则来源或设备信息。
 - `GET /api/owner-knowledge/bundle`：所有已登录 BI 账号可读取与 manifest 精确对应的脱敏 active bundle，供 CLI 原子缓存。
 - `GET /api/owner-knowledge/status`：仅负责人/设备查看内部状态。

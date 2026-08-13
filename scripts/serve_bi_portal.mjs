@@ -103,8 +103,6 @@ import {
 } from '../lib/link_ops_duplicate_publish_override.mjs';
 import {
   actorCanPublishOwnerKnowledge,
-  isOwnerKnowledgeCandidateText,
-  isOwnerKnowledgeDurableText,
 } from '../lib/owner_knowledge_policy.mjs';
 import {
   BI_OPS_ACTION_INTENTS,
@@ -2519,24 +2517,9 @@ async function bindOwnerKnowledgeToTask(task, args, message = '') {
 }
 
 async function captureOwnerKnowledgeFromBiMessage({actor, userMessage, session, args, req}) {
-  const service = args?.ownerKnowledgeService;
-  if (!service || !actorCanPublishOwnerKnowledge(actor, service.authorityId)) return {captured: false, reason: 'not_publisher'};
-  if (!isOwnerKnowledgeCandidateText(userMessage)) return {captured: false, reason: 'not_reusable_experience'};
-  const latestUser = [...asArray(session?.messages)].reverse().find(message => message?.role === 'user');
-  const durable = isOwnerKnowledgeDurableText(userMessage);
-  const withConsistencyLock = args?.withOwnerKnowledgeConsistencyLock || (work => work());
-  const result = await withConsistencyLock(() => {
-    args?.bumpOwnerKnowledgeGeneration?.();
-    return service.ingest([{
-        text: String(userMessage || '').slice(0, 4_000),
-        sourceKind: 'owner_bi_message',
-        sourceId: `${session?.id || 'session'}:${latestUser?.id || 'message'}`,
-        sourceAt: latestUser?.at || new Date().toISOString(),
-        explicitDurable: durable,
-        activation: durable ? 'active' : 'candidate',
-      }], {actor, actorUser: actorUser(actor, req)});
-  });
-  return {captured: true, durable, result};
+  // Retired: individual chat messages are not task-completion evidence and
+  // keyword matching must never create owner rules.
+  return {captured: false, reason: 'message_scanner_retired'};
 }
 
 async function appendAudit(file, entry) {
@@ -11900,6 +11883,63 @@ async function main() {
           return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_PUBLISH_FAILED'});
         }
       }
+      if (url.pathname === '/api/owner-knowledge/completions') {
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        if (!actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) return sendJson(res, 403, {ok: false, error: '只有负责人的任务会生成规则检查单'});
+        const body = await readBodyJson(req, 2 * 1024 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+        try {
+          const result = await args.withOwnerKnowledgeConsistencyLock(async () => ownerKnowledgeService.createCompletion(body, {
+            actor,
+            actorUser: actorUser(actor, req),
+            sourceKind: knowledgeDeviceActor ? 'owner_codex_turn_completion' : 'owner_bi_task_completion',
+            deviceId: actor?.knowledgeDeviceId || '',
+          }));
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'owner-knowledge-completion-check-created', actor, ...requestMeta(req), checkId: result.check?.checkId, status: result.check?.status});
+          return sendJson(res, result.replayed ? 200 : 201, result, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_COMPLETION_FAILED'});
+        }
+      }
+      if (url.pathname === '/api/owner-knowledge/reviews') {
+        if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        try {
+          const data = await ownerKnowledgeService.listReviews({actor, status: String(url.searchParams.get('status') || 'pending'), limit: Number(url.searchParams.get('limit') || 500)});
+          return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_REVIEW_LIST_FAILED'});
+        }
+      }
+      if (url.pathname === '/api/owner-knowledge/reviews/decide') {
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const body = await readBodyJson(req, 128 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+        try {
+          const result = await args.withOwnerKnowledgeConsistencyLock(async () => {
+            args.bumpOwnerKnowledgeGeneration();
+            return ownerKnowledgeService.decideRule(body, {actor, actorUser: actorUser(actor, req)});
+          });
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'owner-knowledge-rule-reviewed', actor, ...requestMeta(req), versionId: body.versionId, decision: body.decision});
+          return sendJson(res, 200, result, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_REVIEW_FAILED'});
+        }
+      }
+      if (url.pathname === '/api/owner-knowledge/rules/deprecate') {
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const body = await readBodyJson(req, 128 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error});
+        try {
+          const result = await args.withOwnerKnowledgeConsistencyLock(async () => {
+            args.bumpOwnerKnowledgeGeneration();
+            return ownerKnowledgeService.deprecateRule(body, {actor, actorUser: actorUser(actor, req)});
+          });
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'owner-knowledge-rule-deprecated', actor, ...requestMeta(req), ruleKey: body.ruleKey});
+          return sendJson(res, 200, result, {'Cache-Control': 'no-store'});
+        } catch (error) {
+          return sendJson(res, Number(error?.status || 400), {ok: false, error: error?.message || String(error), code: error?.code || 'OWNER_KNOWLEDGE_DEPRECATE_FAILED'});
+        }
+      }
       if (url.pathname === '/api/owner-knowledge/status') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         if (!actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) return sendJson(res, 403, {ok: false, error: '负责人权限 required'});
@@ -12440,6 +12480,20 @@ async function main() {
               ownershipMigrated: access.ownershipMigrated,
             },
           });
+          if (!['done', 'archived'].includes(String(access.record.status || ''))
+              && ['done', 'archived'].includes(String(updated.status || ''))
+              && actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) {
+            await args.withOwnerKnowledgeConsistencyLock(async () => {
+              const completion = await ownerKnowledgeService.createCompletion({
+                checkId: `bi-task:${updated.id}:${updated.updatedAt}`,
+                status: 'review_required',
+                reason: '负责人 BI 任务已结束；请结合任务结论、附件和执行记录判断是否存在需要沉淀的长期规则。',
+                sourceId: String(updated.id || ''),
+                sourceAt: String(updated.updatedAt || new Date().toISOString()),
+              }, {actor, actorUser: actorUser(actor, req), sourceKind: 'owner_bi_task_completion'});
+              await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'owner-knowledge-completion-check-created', actor, ...requestMeta(req), checkId: completion.check?.checkId, taskId: updated.id});
+            });
+          }
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),

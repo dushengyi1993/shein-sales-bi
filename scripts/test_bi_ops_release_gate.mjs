@@ -194,6 +194,7 @@ const BI_OPS_V2_JS_FILES = [
   'scripts/test_owner_knowledge_service.mjs',
   'scripts/test_owner_knowledge_local_collector.mjs',
   'scripts/test_owner_knowledge_event_watch.mjs',
+  'scripts/test_owner_knowledge_turn_ended.mjs',
   'scripts/test_owner_knowledge_distribution.mjs',
   'scripts/test_partner_knowledge_cache.mjs',
   'scripts/test_partner_cli_package.mjs',
@@ -353,10 +354,10 @@ async function checkBiOpsV2DeploymentBoundary() {
       && /handle\.utimes/.test(ticketLock)
       && /removeDeadStaleTicket/.test(ticketLock),
     partnerCliVersionBoundary: /SHEIN_BI_OPS_CLI_MIN_VERSION=2026\.07\.12\.1/.test(portalUnit),
-    eventDrivenOwnerSync: /fsSync\.watch\(/.test(ownerSync)
-      && /debounceSeconds:\s*15/.test(ownerSync)
-      && /reconcileSeconds:\s*60\s*\*\s*60/.test(ownerSync)
-      && /ReconcileMinutes\s*=\s*60/.test(ownerInstaller),
+    eventDrivenOwnerSync: /completion-spool/.test(ownerSync)
+      && /\/api\/owner-knowledge\/completions/.test(ownerSync)
+      && /SHEIN-Owner-Knowledge-Completion-Uploader/.test(ownerInstaller)
+      && /Unregister-ScheduledTask -TaskName \$LegacyTaskName/.test(ownerInstaller),
     larkPausedInRunbook: /shein-bi-lark-sales-qa\.service[^\r\n]*disabled\s*\+\s*inactive/i.test(systemdReadme),
     larkPausedInRelease: /shein-bi-lark-sales-qa\.service[^\r\n]*disabled\s*\+\s*inactive/i.test(releaseDoc),
     noActiveLarkStartCommand: !activeLarkCommand.test(systemdReadme) && !activeLarkCommand.test(releaseDoc),

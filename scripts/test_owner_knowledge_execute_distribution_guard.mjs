@@ -44,7 +44,7 @@ try {
   assert.equal(login.status, 200);
   const cookie = String(login.headers.get('set-cookie') || '').split(';')[0];
   const create = await request(base, '/api/link-ops-tasks', {cookie, body: {command: '把 DL 的 PA4-6L 下架', targets: {stores: ['DL'], productRefs: ['PA4-6L']}}});
-  assert.equal(create.status, 200);
+  assert.equal(create.status, 200, `${create.text}\n${stderr}`);
   const taskId = create.json.task.id;
   const execute = await request(base, '/api/link-ops-execute', {
     cookie,
