@@ -1895,10 +1895,17 @@ function spuInfoAttributeRows(info, standardGoodsNumber, wantedAttributeIds) {
   if (!info || typeof info !== 'object') return out;
   const wantedCode = compactRef(standardGoodsNumber);
   const infoCode = compactRef(info?.supplierCode || info?.supplier_code || '');
+  const skcRows = asArray(info?.skcInfoList || info?.skc_info_list || info?.skcList || info?.skc_list);
+  const skcCodes = skcRows
+    .map(skc => compactRef(skc?.supplierCode || skc?.supplier_code || ''))
+    .filter(Boolean);
+  // Fail closed: a spu-info source is usable ONLY when its supplier code is
+  // present and exactly matches the locked standard goods number. Missing or
+  // foreign codes are rejected instead of trusting the search row.
+  if (!wantedCode || !((infoCode && infoCode === wantedCode) || skcCodes.includes(wantedCode))) return out;
   const productRows = infoCode && wantedCode && infoCode !== wantedCode
     ? []
     : asArray(info?.productAttributeInfoList || info?.product_attribute_info_list);
-  const skcRows = asArray(info?.skcInfoList || info?.skc_info_list || info?.skcList || info?.skc_list);
   const rows = [
     ...productRows,
     ...skcRows.flatMap(skc => {
@@ -1957,7 +1964,7 @@ function extractVoltageSourceAttributeRowsFromSpuInfo(info, standardGoodsNumber)
   ]));
 }
 
-async function applySameGoodsNumberInputVoltageProvenance(client, payload, list, templateById = new Map()) {
+async function applySameGoodsNumberInputVoltageProvenance(client, payload, list, templateById = new Map(), sourceContext = {}) {
   const standardGoodsNumbers = [...new Set(publishTargetSupplierCodes(payload).map(code => safeString(code, 160).trim()).filter(Boolean))];
   if (standardGoodsNumbers.length !== 1) {
     return {
@@ -1995,11 +2002,9 @@ async function applySameGoodsNumberInputVoltageProvenance(client, payload, list,
   for (const product of openApiSearchProductRows(response.data)) {
     const spuName = safeString(product?.spuName || product?.spu_name || '', 120);
     if (!spuName) continue;
-    const skcs = asArray(product?.skcList || product?.skc_list || product?.skcInfoList || product?.skc_info_list);
-    const productCode = compactRef(product?.supplierCode || product?.supplier_code || '');
-    const sameCode = skcs.some(skc => compactRef(skc?.supplierCode || skc?.supplier_code || '') === compactRef(standardGoodsNumber))
-      || (productCode && productCode === compactRef(standardGoodsNumber));
-    if (!sameCode) continue; // different goods number: never a provenance source
+    // The search row itself is not trusted for identity: every candidate must
+    // pass the exact supplier-code match inside its own spu-info before any
+    // attribute is accepted as provenance.
     sameGoodsNumberSpuNames.push(spuName);
   }
   const candidates = [];
@@ -2086,6 +2091,8 @@ async function applySameGoodsNumberInputVoltageProvenance(client, payload, list,
     evidence: {
       status: 'ok',
       standardGoodsNumber,
+      sourceStore: safeString(sourceContext?.sourceStore || '', 80),
+      sourceSkc: safeString(sourceContext?.sourceSkc || '', 160),
       sameGoodsNumberSpuNames,
       candidateCount: candidates.length,
       appliedFrom: chosen,
@@ -2170,7 +2177,7 @@ function summarizeProductAttributes(productAttributeList, templateById) {
   }).filter(row => row.attributeId);
 }
 
-async function applyAttributeTemplateRules(client, payload) {
+async function applyAttributeTemplateRules(client, payload, sourceContext = {}) {
   const productTypeId = payloadProductTypeId(payload);
   if (!productTypeId) return {payload, applied: [], warnings: [], blockers: [], evidence: {status: 'skipped_missing_product_type_id'}, call: null};
   let response = null;
@@ -2219,15 +2226,55 @@ async function applyAttributeTemplateRules(client, payload) {
   const warnings = [];
   const powerSupplyInputVoltage = ensurePowerSupplyInputVoltage(next, list, byId);
   if (powerSupplyInputVoltage.inputVoltageRequired && !listHasFilledInputVoltage(list)) {
-    // Locked owner authorization: when Input voltage(1002322) is required but the
-    // official target template path cannot fill it, extract a provable value ONLY
-    // from other OpenAPI links sharing the same standard goods number. Missing or
-    // ambiguous provenance keeps the blocker; the applied value is covered by the
-    // payload hash lock because it lands in the payload before hashing.
-    const provenance = await applySameGoodsNumberInputVoltageProvenance(client, next, list, byId);
-    applied.push(...provenance.applied);
-    blockers.push(...provenance.blockers);
-    evidence.inputVoltageProvenance = provenance.evidence;
+    // Locked owner authorization (priority 1): the copy payload itself is the
+    // strongest same-goods-number provenance - it comes from the exact locked
+    // sourceSkc and already carries official Plug(Voltage)/Voltage attributes.
+    // Reuse the deterministic range inference and fill 1002322 with the
+    // controlled official catalog unit value id 301114341.
+    const payloadInferred = inferInputVoltageFromPayload(next, byId);
+    const inputVoltageTemplate = byId.get(INPUT_VOLTAGE_ATTRIBUTE_ID);
+    const templateVacValueId = inputVoltageTemplate ? chooseInputVoltageAcUnitValueId(inputVoltageTemplate) : null;
+    if (payloadInferred?.attribute_extra_value && (!templateVacValueId || templateVacValueId === INPUT_VOLTAGE_AC_VALUE_ID)) {
+      list.push({
+        attribute_id: INPUT_VOLTAGE_ATTRIBUTE_ID,
+        attribute_value_id: INPUT_VOLTAGE_AC_VALUE_ID,
+        attribute_extra_value: payloadInferred.attribute_extra_value,
+      });
+      applied.push(
+        `attribute_provenance:${INPUT_VOLTAGE_ATTRIBUTE_ID}.from_locked_source_payload.${payloadInferred.source_attribute_id}.${payloadInferred.source_value_id || ''}=${payloadInferred.attribute_extra_value}`,
+        `official_catalog_mapping:${INPUT_VOLTAGE_ATTRIBUTE_ID}.vac_value_id=${INPUT_VOLTAGE_AC_VALUE_ID}`,
+      );
+      evidence.inputVoltageProvenance = {
+        status: 'ok',
+        source: 'locked_source_payload',
+        sourceStore: safeString(sourceContext?.sourceStore || '', 80),
+        sourceSkc: safeString(sourceContext?.sourceSkc || '', 160),
+        sourceAttributeId: payloadInferred.source_attribute_id || null,
+        sourceValueId: payloadInferred.source_value_id || null,
+        sourceValue: safeString(payloadInferred.source_value, 160),
+        unitValueIdSource: 'official_catalog_mapping',
+        officialCatalogMapping: {attributeId: INPUT_VOLTAGE_ATTRIBUTE_ID, valueId: INPUT_VOLTAGE_AC_VALUE_ID, label: INPUT_VOLTAGE_AC_UNIT_LABEL},
+      };
+    } else if (payloadInferred?.attribute_extra_value && templateVacValueId) {
+      blockers.push(`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；payload 推导出的受控目录单位值 ID(${INPUT_VOLTAGE_AC_VALUE_ID}) 与官方模板返回的 Vac 单位值 ID(${templateVacValueId}) 冲突，无法确证，必须人工补充。`);
+      evidence.inputVoltageProvenance = {
+        status: 'unit_value_id_conflict',
+        source: 'locked_source_payload',
+        templateVacValueId,
+        officialCatalogMapping: {attributeId: INPUT_VOLTAGE_ATTRIBUTE_ID, valueId: INPUT_VOLTAGE_AC_VALUE_ID, label: INPUT_VOLTAGE_AC_UNIT_LABEL},
+      };
+    } else {
+      // Priority 2: the locked payload cannot prove the range, so look up other
+      // links of the same standard goods number on the target store. Only
+      // spu-info sources whose supplier code is present and exactly matches are
+      // accepted; missing/ambiguous/foreign/unresolvable sources keep the
+      // blocker. The applied value lands in the payload before hashing, so the
+      // existing payload hash lock covers it.
+      const provenance = await applySameGoodsNumberInputVoltageProvenance(client, next, list, byId, sourceContext);
+      applied.push(...provenance.applied);
+      blockers.push(...provenance.blockers);
+      evidence.inputVoltageProvenance = provenance.evidence;
+    }
   } else {
     applied.push(...powerSupplyInputVoltage.applied);
     blockers.push(...powerSupplyInputVoltage.blockers);
@@ -3534,7 +3581,21 @@ async function main() {
     if (liveSourceNames.call) calls.push(liveSourceNames.call);
     const publishStandardApplied = await applyPublishFillInStandardRules(client, liveSourceNames.payload);
     if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
-    const templateApplied = await applyAttributeTemplateRules(client, publishStandardApplied.payload);
+    const templateApplied = await applyAttributeTemplateRules(client, publishStandardApplied.payload, {
+      sourceStore: normalizeStoreKey(
+        payloadFound?.inferred?.sourceStore
+        || payloadFound?.generatedDraft?.sourceStore
+        || payloadFound?.canonicalDraft?.source?.storeKey
+        || '',
+      ),
+      sourceSkc: safeString(
+        payloadFound?.inferred?.sourceSkc
+        || payloadFound?.generatedDraft?.sourceSkc
+        || payloadFound?.canonicalDraft?.openApiDetail?.skcName
+        || '',
+        160,
+      ),
+    });
     if (templateApplied.call) calls.push(templateApplied.call);
     const preserveExplicitSupplierSku = task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link';
     const standardGoodsSnApplied = applyTargetStandardGoodsSn(
