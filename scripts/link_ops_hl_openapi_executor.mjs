@@ -782,11 +782,16 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
   const copyProductDraft = asArray(intents).includes('copy_product_draft');
   // The exact task source lock is authoritative and computed from the task
   // itself: single-valued targets.sourceStores plus a non-empty
-  // targets.sourceSkc. Multiple/absent stores resolve to no lock (fail closed).
-  const exactSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
-  const exactSourceStore = exactSourceStores.length === 1 ? exactSourceStores[0] : '';
-  const exactSourceSkc = safeString(task?.targets?.sourceSkc || '', 160);
-  const taskExact = exactSourceStore && exactSourceSkc ? {sourceStore: exactSourceStore, sourceSkc: exactSourceSkc} : null;
+  // targets.sourceSkc. A copy task that declares NO source at all is allowed
+  // through the legacy/approved-asset flow (source may stay empty and the
+  // scope-v2 hash stays stable). Partial declarations, multi-valued stores and
+  // exact-vs-inferred conflicts fail closed.
+  const declaredSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
+  const declaredSourceSkc = safeString(task?.targets?.sourceSkc || '', 160);
+  const hasAnySourceDeclaration = declaredSourceStores.length > 0 || Boolean(declaredSourceSkc);
+  const taskExact = declaredSourceStores.length === 1 && declaredSourceSkc
+    ? {sourceStore: declaredSourceStores[0], sourceSkc: declaredSourceSkc}
+    : null;
   const inferred = payloadFound?.inferred && typeof payloadFound.inferred === 'object' ? payloadFound.inferred : {};
   const inferredStore = normalizeStoreKey(
     inferred?.sourceStore
@@ -802,16 +807,17 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
     160,
   );
   const blockers = [];
-  if (copyProductDraft) {
-    if (!taskExact) {
-      blockers.push('copy_product_draft 任务缺少精确唯一的 task.targets sourceStore+sourceSkc；禁止空来源发布，需人工补充精确源链接。');
-    } else {
-      if (inferredStore && inferredStore !== taskExact.sourceStore) {
-        blockers.push(`copy_product_draft 任务精确源店 ${taskExact.sourceStore} 与推断来源 ${inferredStore} 冲突，禁止发布。`);
-      }
-      if (inferredSkc && inferredSkc !== taskExact.sourceSkc) {
-        blockers.push(`copy_product_draft 任务精确源 SKC ${taskExact.sourceSkc} 与推断来源 ${inferredSkc} 冲突，禁止发布。`);
-      }
+  if (copyProductDraft && hasAnySourceDeclaration && !taskExact) {
+    blockers.push(declaredSourceStores.length > 1
+      ? `copy_product_draft 任务声明的 sourceStores 不唯一（${declaredSourceStores.join('、')}），禁止发布，需人工修正精确源链接。`
+      : `copy_product_draft 任务只声明了部分精确源链接（sourceStores=${declaredSourceStores.join('、') || '空'} sourceSkc=${declaredSourceSkc || '空'}），禁止发布，需人工补充完整。`);
+  }
+  if (copyProductDraft && taskExact) {
+    if (inferredStore && inferredStore !== taskExact.sourceStore) {
+      blockers.push(`copy_product_draft 任务精确源店 ${taskExact.sourceStore} 与推断来源 ${inferredStore} 冲突，禁止发布。`);
+    }
+    if (inferredSkc && inferredSkc !== taskExact.sourceSkc) {
+      blockers.push(`copy_product_draft 任务精确源 SKC ${taskExact.sourceSkc} 与推断来源 ${inferredSkc} 冲突，禁止发布。`);
     }
   }
   return {
