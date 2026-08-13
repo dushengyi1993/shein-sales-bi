@@ -462,6 +462,8 @@ function compactRef(value) {
 
 function explicitSkcRefs(task) {
   const text = [
+    task?.targets?.sourceSkc,
+    task?.targets?.source_skc,
     task?.sourceSkc,
     task?.source_skc,
     task?.skc,
@@ -653,6 +655,9 @@ async function findPublishPayload(task) {
 }
 
 async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
+  const exactSourceStore = normalizeStoreKey(asArray(task?.targets?.sourceStores)[0] || '');
+  const exactSourceSkc = safeString(task?.targets?.sourceSkc || '', 120);
+  const hasExactSourceLock = Boolean(exactSourceStore && exactSourceSkc);
   const existing = await findPublishPayload(task);
   if (existing?.payload) {
     // A server-bound task keeps the reviewed payload at the task root. Retain
@@ -661,7 +666,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
     // still knows the exact source store and SPU. Never replace or merge the
     // bound payload with a snapshot payload here.
     const inferred = inferSourceProductFromTask(task, {targetStore});
-    if (!inferred.sourceStore || !inferred.sourceSkc) return {...existing, inferred};
+    if (!inferred.sourceStore || !inferred.sourceSkc) return {...existing, inferred, exactSourceLock: hasExactSourceLock};
     try {
       const generated = await buildProductDraftFromSnapshots({
         sourceStore: inferred.sourceStore,
@@ -672,11 +677,14 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
       return {
         ...existing,
         inferred,
+        exactSourceLock: hasExactSourceLock,
         generatedDraft: summarizeDraftForExecutor(generated),
         canonicalDraft: generated.canonicalDraft,
       };
     } catch {
-      return {...existing, inferred};
+      return hasExactSourceLock
+        ? {...existing, payload: null, inferred, exactSourceLock: true, generationError: `精确源链接 ${exactSourceStore}/${exactSourceSkc} 无法从当前详情快照还原，拒绝沿用已绑定 payload。`}
+        : {...existing, inferred, exactSourceLock: false};
     }
   }
   if (taskHasUnboundImageAssets(task)) {
@@ -689,7 +697,9 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
   }
   const inferred = inferSourceProductFromTask(task, {targetStore});
   const biCandidates = await inferSourceCandidatesFromBi(task, {targetStore});
-  const candidates = uniqueSourceCandidates([preferredSource, inferred, ...biCandidates]);
+  const candidates = hasExactSourceLock
+    ? uniqueSourceCandidates([{sourceStore: exactSourceStore, sourceSkc: exactSourceSkc, source: 'task_exact_source_lock'}])
+    : uniqueSourceCandidates([preferredSource, inferred, ...biCandidates]);
   if (!candidates.length) {
     return {
       source: 'missing',
@@ -717,6 +727,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
         mappingBlockers: generated.blockers,
         mappingWarnings: generated.warnings,
         inferred: candidate,
+        exactSourceLock: hasExactSourceLock,
         attemptedCandidates: candidates.map(x => ({
           sourceStore: x.sourceStore,
           sourceSkc: x.sourceSkc,
@@ -927,12 +938,14 @@ function openApiSpuInfoSkcList(info) {
 }
 
 function openApiSpuInfoSkcName(row) {
-  return safeString(row?.skcName || row?.skc_name || row?.skc || row?.supplierCode || row?.supplier_code, 160);
+  return safeString(row?.skcName || row?.skc_name || row?.skc, 160);
 }
 
 function namesFromOpenApiSpuInfo(info, sourceSkc = '') {
   const skcRows = openApiSpuInfoSkcList(info);
-  const matchedSkc = skcRows.find(row => openApiSpuInfoSkcName(row) === sourceSkc) || skcRows[0] || null;
+  const matchedSkc = sourceSkc
+    ? skcRows.find(row => openApiSpuInfoSkcName(row) === sourceSkc) || null
+    : skcRows[0] || null;
   const rows = [
     ...asArray(matchedSkc?.productMultiNameList || matchedSkc?.product_multi_name_list),
     ...asArray(info?.productMultiNameList || info?.product_multi_name_list),
@@ -945,6 +958,15 @@ function namesFromOpenApiSpuInfo(info, sourceSkc = '') {
     byLanguage.set(language, {language, name});
   }
   return [...byLanguage.values()];
+}
+
+function liveSourceSkcMatches(info, sourceSkc = '') {
+  return openApiSpuInfoSkcList(info).some(row => {
+    const names = [row?.skcName, row?.skc_name, row?.skc]
+      .map(value => safeString(value, 160))
+      .filter(Boolean);
+    return names.includes(sourceSkc);
+  });
 }
 
 function mergePayloadNames(payload, names) {
@@ -980,6 +1002,7 @@ function mergePayloadNames(payload, names) {
 }
 
 async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadFound) {
+  const exactSourceLock = payloadFound?.exactSourceLock === true;
   const sourceStore = normalizeStoreKey(
     payloadFound?.inferred?.sourceStore
     || payloadFound?.generatedDraft?.sourceStore
@@ -1004,16 +1027,18 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       payload,
       applied: [],
       warnings: [],
+      blockers: exactSourceLock ? ['精确源链接缺少可用于 live spu-info 的源店或 SPU，无法核验。'] : [],
       evidence: {status: 'skipped_missing_source_store_or_spu', sourceStore, sourceSkc, spuName},
       call: null,
     };
   }
   const existingLanguages = payloadNameLanguages(payload);
-  if (existingLanguages.has('en') && existingLanguages.has('ar')) {
+  if (!exactSourceLock && existingLanguages.has('en') && existingLanguages.has('ar')) {
     return {
       payload,
       applied: [],
       warnings: [],
+      blockers: [],
       evidence: {status: 'skipped_payload_already_has_en_ar', sourceStore, sourceSkc, spuName},
       call: null,
     };
@@ -1023,7 +1048,8 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
     return {
       payload,
       applied: [],
-      warnings: [`源店 ${sourceStore} 未配置可用 OpenAPI 只读凭据，无法现场补源链接多语言标题。`],
+      warnings: exactSourceLock ? [] : [`源店 ${sourceStore} 未配置可用 OpenAPI 只读凭据，无法现场补源链接多语言标题。`],
+      blockers: exactSourceLock ? [`精确源链接 ${sourceStore}/${sourceSkc} 缺少源店 OpenAPI 只读凭据，无法 live 核验。`] : [],
       evidence: {status: 'skipped_missing_source_openapi_credentials', sourceStore, sourceSkc, spuName},
       call: null,
     };
@@ -1039,7 +1065,8 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
     return {
       payload,
       applied: [],
-      warnings: [`现场读取源链接多语言标题失败：${sourceStore}/${spuName} ${safeString(err?.message || err, 300)}`],
+      warnings: exactSourceLock ? [] : [`现场读取源链接多语言标题失败：${sourceStore}/${spuName} ${safeString(err?.message || err, 300)}`],
+      blockers: exactSourceLock ? [`精确源链接 ${sourceStore}/${sourceSkc} live 详情读取失败：${safeString(err?.message || err, 300)}`] : [],
       evidence: {status: 'query_failed', sourceStore, sourceSkc, spuName, error: safeString(err?.message || err, 300)},
       call: null,
     };
@@ -1058,8 +1085,21 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
     return {
       payload,
       applied: [],
-      warnings: [`现场读取源链接多语言标题失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`],
+      warnings: exactSourceLock ? [] : [`现场读取源链接多语言标题失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`],
+      blockers: exactSourceLock ? [`精确源链接 ${sourceStore}/${sourceSkc} live 详情返回失败：code=${safeString(response.data?.code || '', 80)}`] : [],
       evidence,
+      call,
+    };
+  }
+  const liveSkcMatched = liveSourceSkcMatches(response.data?.info || {}, sourceSkc);
+  evidence.sourceSkcMatched = liveSkcMatched;
+  if (exactSourceLock && !liveSkcMatched) {
+    return {
+      payload,
+      applied: [],
+      warnings: [],
+      blockers: [`精确源链接 live 详情与锁定 SKC 不一致：${sourceStore}/${sourceSkc}。`],
+      evidence: {...evidence, status: 'source_skc_mismatch'},
       call,
     };
   }
@@ -1071,6 +1111,7 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
       payload,
       applied: [],
       warnings: [],
+      blockers: [],
       evidence: {...evidence, status: 'ok_no_new_names'},
       call,
     };
@@ -1079,6 +1120,7 @@ async function enrichPayloadNamesFromLiveSourceOpenApi(config, payload, payloadF
     payload: merged.payload,
     applied: merged.applied,
     warnings: [],
+    blockers: [],
     evidence,
     call,
   };
@@ -3048,8 +3090,8 @@ function extractReadbackFingerprint({payload, payloadFound, targetStore, task, p
     targetStore,
     taskId: task?.id || '',
     taskProductRefs: taskProductRefs(task),
-    inferredSourceStore: normalizeStoreKey(inferred.sourceStore || generatedDraft.sourceStore || task?.sourceStore || ''),
-    inferredSourceSkc: safeString(inferred.sourceSkc || generatedDraft.sourceSkc || task?.sourceSkc || task?.skc || '', 120),
+    inferredSourceStore: normalizeStoreKey(inferred.sourceStore || generatedDraft.sourceStore || task?.targets?.sourceStores?.[0] || task?.sourceStore || ''),
+    inferredSourceSkc: safeString(inferred.sourceSkc || generatedDraft.sourceSkc || task?.targets?.sourceSkc || task?.sourceSkc || task?.skc || '', 120),
     categoryId: payload?.category_id ?? payload?.categoryId ?? null,
     productTypeId: payload?.product_type_id ?? payload?.productTypeId ?? null,
     publishSpuNames,
@@ -3275,6 +3317,7 @@ async function main() {
     evidence.approvedImageOrderLocked = approvedImageOrderLocked;
     evidence.targetDuplicateCheck = targetDuplicateCheck.evidence;
     appendUnique(warnings, liveSourceNames.warnings);
+    appendUnique(blockers, liveSourceNames.blockers);
     appendUnique(warnings, publishStandardApplied.warnings);
     appendUnique(blockers, publishStandardApplied.blockers);
     appendUnique(warnings, templateApplied.warnings);

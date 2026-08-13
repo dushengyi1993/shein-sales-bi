@@ -60,6 +60,7 @@ function parseArgs(argv) {
     askAgent: true,
     stores: [],
     sourceStores: [],
+    sourceSkcs: [],
     writeStores: [],
     products: [],
     spuList: [],
@@ -145,6 +146,7 @@ function parseArgs(argv) {
     else if (a === '--no-agent') args.askAgent = false;
     else if (a === '--store' || a === '--stores') args.stores.push(...splitList(argv[++i]));
     else if (a === '--source-store' || a === '--source-stores' || a === '--read-store' || a === '--read-stores') args.sourceStores.push(...splitList(argv[++i]));
+    else if (a === '--source-skc') args.sourceSkcs.push(...splitListPreserveCase(argv[++i]));
     else if (a === '--target-store' || a === '--target-stores' || a === '--write-store' || a === '--write-stores') args.writeStores.push(...splitList(argv[++i]));
     else if (a === '--product' || a === '--products' || a === '--ref') args.products.push(...splitList(argv[++i]));
     // SHEIN-generated SPU/SKC codes are case-sensitive in partialEdit. Keep
@@ -326,6 +328,8 @@ Usage:
   node scripts/bi_ops_cli.mjs tasks
   node scripts/bi_ops_cli.mjs create --text "把 520a 在 DL 生成下架预检" --stores DL --products 520a
   node scripts/bi_ops_cli.mjs create --text "复制 CX 的 SM-961 到 HL" --source-stores CX --target-stores HL --products SM-961
+  node scripts/bi_ops_cli.mjs create --text "复制 CX 的 SM-961 到 HL" --source-store CX --source-skc sb12345678 --target-store HL --product SM-961
+  node scripts/bi_ops_cli.mjs lock-source --task-id <id> --source-store CX --source-skc sb12345678
   node scripts/bi_ops_cli.mjs authorize-duplicate-publish --task-id <id> --store NM --skc sv123 --note "保留旧链接并额外新增" --confirm ${ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT}
   node scripts/bi_ops_cli.mjs preflight --task-id <id>
   node scripts/bi_ops_cli.mjs execute --task-id <id> --confirm ${SUBMIT_CONFIRM_TEXT}
@@ -341,6 +345,7 @@ Options:
   --session-file   默认 ${DEFAULT_SESSION_FILE}
   --knowledge-cache-dir  默认 ${DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR}
   --source-stores  跨店复制时只读来源店铺
+  --source-skc     跨店复制时精确锁定一个区分大小写的源 SKC；必须同时且只提供一个 --source-store
   --target-stores  跨店复制时真实写入目标店铺；不填则沿用 --stores
   --chat-session   chat/tasks 用；继续指定的自动运营会话
   --profile        Owner 可选 fast / balanced / deep / owner；服务端仍会按风险升级且不会因此绕过权限
@@ -547,6 +552,7 @@ async function request(args, pathname, {method = 'GET', body, auth = true, allow
 const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'doctor', 'me', 'capabilities', 'query', 'ask', 'chats', 'jobs', 'job', 'wait-job', 'wait_job',
   'chat', 'tasks', 'create', 'operate', 'preflight', 'execute', 'resolve', 'audit',
+  'lock-source', 'lock_source',
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
   'prepare-publish', 'prepare_publish',
   'prepare-descriptions', 'prepare_descriptions',
@@ -697,9 +703,55 @@ function taskTargets(args) {
   const targets = {};
   if (args.stores.length) targets.stores = [...new Set(args.stores)];
   if (args.sourceStores.length) targets.sourceStores = [...new Set(args.sourceStores)];
+  if (args.sourceSkcs.length) {
+    const sourceSkcs = [...new Set(args.sourceSkcs)];
+    if (sourceSkcs.length !== 1) throw new Error('--source-skc requires exactly one case-sensitive SKC');
+    if ([...new Set(args.sourceStores)].length !== 1) throw new Error('--source-skc requires exactly one --source-store');
+    targets.sourceSkc = sourceSkcs[0];
+  }
   if (args.writeStores.length) targets.writeStores = [...new Set(args.writeStores)];
   if (args.products.length) targets.productRefs = [...new Set(args.products)];
   return targets;
+}
+
+async function runLockSource(args) {
+  if (!args.taskId) throw new Error('lock-source requires --task-id <id>');
+  const sourceStores = [...new Set((args.sourceStores || []).map(x => String(x || '').trim().toUpperCase()).filter(Boolean))];
+  const sourceSkcs = [...new Set((args.sourceSkcs || []).map(x => String(x || '').trim()).filter(Boolean))];
+  if (sourceStores.length !== 1) throw new Error('lock-source requires exactly one --source-store');
+  if (sourceSkcs.length !== 1) throw new Error('lock-source requires exactly one case-sensitive --source-skc');
+  const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
+  const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
+  if (!currentTask) throw new Error('当前账号无法精确读取目标 task，源链接未锁定');
+  const liveRevision = Number(currentTask.repositoryRevision || 0);
+  if (!Number.isSafeInteger(liveRevision) || liveRevision <= 0) throw new Error('目标 task 未返回可用于 CAS 的正整数 repositoryRevision，源链接未锁定');
+  const {json} = await request(args, '/api/link-ops-tasks', {
+    method: 'PATCH',
+    body: {
+      id: args.taskId,
+      event: 'lock_source_skc_cli',
+      sourceStore: sourceStores[0],
+      sourceSkc: sourceSkcs[0],
+      expectedRevision: liveRevision,
+    },
+  });
+  const locked = json?.task?.targets || {};
+  if (locked.sourceSkc !== sourceSkcs[0] || (locked.sourceStores || []).length !== 1 || locked.sourceStores[0] !== sourceStores[0]) {
+    throw new Error('云端未精确回读 sourceStore/sourceSkc 锁，已停止');
+  }
+  const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
+    method: 'POST',
+    body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_lock_source'},
+  });
+  print({
+    ok: true,
+    aiInvoked: false,
+    taskId: args.taskId,
+    lockedSource: {sourceStore: sourceStores[0], sourceSkc: sourceSkcs[0]},
+    task: preflightJson.task || json.task,
+    execution: preflightJson.execution,
+    safety: {realPublishOccurred: false, nextStep: '核对精确源链接证据与新 payloadHash；用户确认前不得 execute。'},
+  });
 }
 
 function taskParameters(args) {
@@ -2090,6 +2142,10 @@ async function main() {
   }
   if (args.command === 'prepare-publish' || args.command === 'prepare_publish') {
     await runPreparePublish(args);
+    return;
+  }
+  if (args.command === 'lock-source' || args.command === 'lock_source') {
+    await runLockSource(args);
     return;
   }
   if (args.command === 'prepare-descriptions' || args.command === 'prepare_descriptions') {

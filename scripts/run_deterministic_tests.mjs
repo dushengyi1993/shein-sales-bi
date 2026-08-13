@@ -97,6 +97,7 @@ const tests = [
   'scripts/test_link_ops_prepare_descriptions_flow.mjs',
   'scripts/test_link_ops_update_description_flow.mjs',
   'scripts/test_link_ops_executor_copy_batch_features.mjs',
+  'scripts/test_link_ops_executor_live_source_titles.mjs',
   'scripts/test_link_ops_image_role_planner.mjs',
   'scripts/test_link_retire_candidate_policy.mjs',
   'scripts/test_link_retire_candidates_from_csv.mjs',

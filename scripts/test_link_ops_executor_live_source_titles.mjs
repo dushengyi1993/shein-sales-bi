@@ -321,6 +321,7 @@ try {
         stores: ['HL'],
         writeStores: ['HL'],
         sourceStores: [SOURCE_STORE],
+        sourceSkc: SOURCE_SKC,
         productRefs: [SOURCE_SKC],
       },
     }],
@@ -346,6 +347,7 @@ try {
   });
   check('publish endpoint not called in dry-run', fakeCalls.some(call => call.path === '/open-api/goods/product/publishOrEdit'), false);
   check('source live evidence ok', output?.evidence?.sourceLiveSpuInfo?.status || '', 'ok');
+  check('exact source lock live SKC matched', output?.evidence?.sourceLiveSpuInfo?.sourceSkcMatched, true);
   check('source live evidence includes ar', output?.evidence?.sourceLiveSpuInfo?.languages || [], value => asArray(value).includes('ar'));
   check('safeDefaults records ar source merge', output?.payload?.safeDefaults || [], value => asArray(value).some(item => String(item).includes('multi_language_name_list.ar.from_source_spu_info')));
   check('payload has two language titles after enrichment', Number(output?.payload?.summary?.nameCount || 0), 2);

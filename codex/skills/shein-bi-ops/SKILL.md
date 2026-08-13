@@ -66,6 +66,14 @@ Examples:
 
 Supported structured operations are `copy_product_draft`, `activate_link`, `retire_link`, `update_inventory`, `update_supply_price`, `update_product_price`, `update_title`, `update_images`, and `certificate_review`.
 
+For `copy_product_draft`, pass one exact source pair whenever the SKC is known:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" operate --operation copy_product_draft --source-store DL --source-skc sb260205233136765657878 --target-store HL --product SK-15032 --text '<the user request verbatim>'
+```
+
+`--source-skc` is case-sensitive, accepts exactly one value, and requires exactly one `--source-store`. The server persists it as `targets.sourceSkc`; preflight uses only that pair and fails closed when live source detail does not match. `lock-source --task-id <id> --source-store <store> --source-skc <SKC>` may CAS-lock an existing draft only before any image, description, or publish payload has been bound; it invalidates the old preflight and reruns dry-run without publishing.
+
 - `operate` creates the structured task and performs the first preflight. It returns `aiInvoked=false` and never performs the final SHEIN write.
 - The server authorizes business writes from the logged-in BI account's `writeStores`. Store scope cannot be expanded by CLI arguments.
 - `safeWriteOperations` remains the platform capability switch. Dry-run/preflight, payload lock, explicit user confirmation, Webhook gate, idempotency, audit and post-write readback remain mandatory.

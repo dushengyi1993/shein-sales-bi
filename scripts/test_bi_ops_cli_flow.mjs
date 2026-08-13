@@ -429,12 +429,40 @@ try {
     '--operation', 'copy_product_draft',
     '--text', '复制 CX 的 SM-961 到 DX',
     '--source-stores', 'CX',
+    '--source-skc', 'sb260619161490554120094',
     '--target-stores', 'DX',
     '--products', 'SM-961',
   ]);
   expectCliOk('operator copy CX to DX', operatorCopyAllowed);
   result.summary.operatorCopyTaskId = operatorCopyAllowed.json?.task?.id || '';
   check('operator copy task id present', Boolean(result.summary.operatorCopyTaskId), true);
+  check('operator copy preserves exact source SKC', operatorCopyAllowed.json?.task?.targets?.sourceSkc, 'sb260619161490554120094');
+
+
+  const operatorLockSource = await runCli([
+    '--session-file', operatorSessionFile,
+    'lock-source',
+    '--task-id', result.summary.operatorCopyTaskId,
+    '--source-store', 'CX',
+    '--source-skc', 'sb260619161490554120094',
+  ]);
+  expectCliOk('operator exact source lock', operatorLockSource);
+  check('operator exact source lock readback store', operatorLockSource.json?.lockedSource?.sourceStore, 'CX');
+  check('operator exact source lock readback SKC', operatorLockSource.json?.lockedSource?.sourceSkc, 'sb260619161490554120094');
+  check('operator exact source lock performs no real publish', operatorLockSource.json?.safety?.realPublishOccurred, false);
+
+  const operatorAmbiguousSource = await runCli([
+    '--session-file', operatorSessionFile,
+    'create',
+    '--operation', 'copy_product_draft',
+    '--text', 'ambiguous source must stop locally',
+    '--source-stores', 'CX,LQ',
+    '--source-skc', 'sb260619161490554120094',
+    '--target-stores', 'DX',
+    '--products', 'SM-961',
+  ]);
+  check('ambiguous source store/SKC pair exits nonzero', operatorAmbiguousSource.code, code => code !== 0);
+  check('ambiguous source store/SKC pair is rejected before create', operatorAmbiguousSource.stderr, text => /exactly one --source-store/.test(text));
 
   const operatorChat = await runCli([
     '--session-file', operatorSessionFile,
