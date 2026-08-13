@@ -7168,8 +7168,8 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
     throw error;
   }
   const capturedHash = sha256StableJson(payload);
-  const executorHash = String(captured?.result?.payload?.payloadHash || '');
-  if (executorHash && capturedHash !== executorHash) {
+  const expectedBodyHash = resolveDescriptionBindingExpectedBodyHash(captured?.result?.payload || {});
+  if (!expectedBodyHash || capturedHash !== expectedBodyHash) {
     const error = new Error('物化 payload hash 与受控 executor dry-run capture 不一致');
     error.status = 409;
     error.code = 'DESCRIPTION_BINDING_PAYLOAD_MATERIALIZATION_HASH_MISMATCH';
@@ -7203,6 +7203,22 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
     warningCount: asArray(captured?.result?.warnings).length,
   });
   return {task: nextTask, materialized: true};
+}
+
+// Description binding materializes against the executor's BODY hash, never the
+// v2 execution-lock scope hash (payload + source identity). Legacy v1 captures
+// carried the body hash in payloadHash; that stays compatible only when the
+// declared algorithm is still the v1 body-hash algorithm. Anything else with a
+// missing bodyHash fails closed.
+function resolveDescriptionBindingExpectedBodyHash(executorPayload = {}) {
+  const bodyHash = String(executorPayload?.bodyHash || '');
+  if (/^[a-f0-9]{64}$/i.test(bodyHash)) return bodyHash;
+  const algorithm = String(executorPayload?.payloadHashAlgorithm || '');
+  if (algorithm === DESCRIPTION_PAYLOAD_HASH_ALGORITHM) {
+    const legacyHash = String(executorPayload?.payloadHash || '');
+    return /^[a-f0-9]{64}$/i.test(legacyHash) ? legacyHash : '';
+  }
+  return '';
 }
 
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
@@ -14389,3 +14405,8 @@ if (IS_DIRECT_RUN) {
     process.exit(1);
   });
 }
+
+export const __testHooks = {
+  resolveDescriptionBindingExpectedBodyHash,
+  sha256StableJson,
+};
