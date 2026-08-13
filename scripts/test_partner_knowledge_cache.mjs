@@ -29,7 +29,7 @@ let activeRequests = 0;
 let maxActiveRequests = 0;
 
 function makePublished(texts) {
-  const rules = texts.map(text => normalizeOwnerKnowledgeExperience({text, explicitDurable: true, activation: 'active'}));
+  const rules = texts.map(text => ({...normalizeOwnerKnowledgeExperience({text, explicitDurable: true}), activation: 'active'}));
   const fingerprint = ownerKnowledgeBundleFingerprint(rules);
   return buildOwnerKnowledgeDistribution({authorityId: 'dushengyi', fingerprint, globalFingerprint: fingerprint, rules});
 }
