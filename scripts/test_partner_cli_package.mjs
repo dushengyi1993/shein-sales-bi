@@ -79,6 +79,11 @@ if (!cliText.includes("--sku-code') args.skuCodeList.push(...splitListPreserveCa
   || !cliText.includes("--supplier-sku') args.supplierSkuList.push(...splitListPreserveCase")) {
   throw new Error('partner CLI must preserve case-sensitive SKU and supplier SKU values');
 }
+const ownerKnowledgeDistributionText = await fs.readFile(path.join(ROOT, 'lib/owner_knowledge_distribution.mjs'), 'utf8');
+if (!ownerKnowledgeDistributionText.includes('safeStructuralToken')
+  || !/\.\(\?:ruleKey\|risk\|activation\)\$/.test(ownerKnowledgeDistributionText)) {
+  throw new Error('partner package must ship the owner-knowledge ruleKey structural-token guard');
+}
 for (const requiredModule of [
   'lib/link_ops_product_descriptions.mjs',
   'lib/link_ops_description_material_extract.mjs',
