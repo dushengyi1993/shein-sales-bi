@@ -24,8 +24,9 @@ try {
     sourceKind: 'owner_bi_message',
     sourceId: 'message-1',
   }], {actor: publisher});
-  assert.equal(first.results[0].activation, 'active');
-  assert.equal(first.bundle.ruleCount, 1);
+  assert.equal(first.results[0].activation, 'candidate');
+  assert.equal(first.bundle.ruleCount, 0);
+  await service.decideRule({versionId: first.results[0].versionId, decision: 'approved'}, {actor: publisher});
 
   const firstBundle = await service.getActiveBundle({question: '图片怎么排序'}, {all: true});
   assert.equal(firstBundle.rules.length, 1);
@@ -43,6 +44,7 @@ try {
     sourceKind: 'owner_bi_message',
     sourceId: 'message-2',
   }], {actor: publisher});
+  await service.decideRule({versionId: superseded.results[0].versionId, decision: 'approved'}, {actor: publisher});
   assert.equal(superseded.bundle.ruleCount, 1, 'same rule key is superseded, not duplicated');
   const latest = await service.getActiveBundle({}, {all: true});
   assert.equal(latest.rules.length, 1);
@@ -55,7 +57,8 @@ try {
     sourceId: 'old-replayed-session',
     sourceAt: '2020-01-01T00:00:00.000Z',
   }], {actor: publisher});
-  assert.equal(staleReplay.results[0].ignoredStale, true, 'older replay cannot replace the current owner rule');
+  const staleDecision = await service.decideRule({versionId: staleReplay.results[0].versionId, decision: 'approved'}, {actor: publisher});
+  assert.equal(staleDecision.publication.ignoredStale, true, 'older replay cannot replace the current owner rule');
   const afterStaleReplay = await service.getActiveBundle({}, {all: true});
   assert.equal(afterStaleReplay.fingerprint, latest.fingerprint);
   assert.match(afterStaleReplay.rules[0].text, /场景、卖点、参数/);
@@ -90,7 +93,9 @@ try {
     sourceKind: 'owner_local_sync',
     sourceId: 'local-session-1',
   }], {actor: deviceActor, deviceId: 'office-pc'});
-  assert.equal(deviceResult.results[0].activation, 'active');
+  assert.equal(deviceResult.results[0].activation, 'candidate');
+  await assert.rejects(() => service.decideRule({versionId: deviceResult.results[0].versionId, decision: 'approved'}, {actor: deviceActor}), error => error?.code === 'OWNER_KNOWLEDGE_REVIEW_FORBIDDEN');
+  await service.decideRule({versionId: deviceResult.results[0].versionId, decision: 'approved'}, {actor: publisher});
 
   const status = await service.status();
   assert.equal(status.activeRules, 2);
@@ -101,6 +106,24 @@ try {
   assert.equal(status.distribution.current, true);
   assert.equal(status.distribution.source, 'runtime');
   assert.equal(status.distribution.fingerprint, status.fingerprint);
+
+  const reconcileRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'owner-knowledge-reconcile-'));
+  const reconcileRepository = createLinkOpsJsonRepository({rootDir: reconcileRoot});
+  const reconcileService = createOwnerKnowledgeService({repository: reconcileRepository, authorityId: 'dushengyi'});
+  const polluted = await reconcileService.ingest([{text: '请立即停止测试并汇报当前 diff。', ruleKey: 'advisory.polluted', sourceAt: '2026-08-01T00:00:00.000Z'}], {actor: publisher});
+  await reconcileService.decideRule({versionId: polluted.results[0].versionId, decision: 'approved'}, {actor: publisher});
+  const reconciled = await reconcileService.reconcileRules({
+    reason: 'test cleanup',
+    deprecateVersionIds: [polluted.results[0].versionId],
+    approve: [{ruleKey: 'governance.owner-knowledge.owner-only', text: '只有负责人本人的任务可以生成并确认规则；同事任务不得生成任何负责人规则记录。', sourceAt: '2026-08-13T00:00:00.000Z'}],
+    candidates: [{ruleKey: 'listing.publish.immutable-manifest', text: '上新应使用不可变确认清单。', sourceAt: '2026-08-12T00:00:00.000Z'}],
+  }, {actor: publisher});
+  assert.equal(reconciled.deprecated.length, 1);
+  assert.equal(reconciled.approved.length, 1);
+  assert.equal(reconciled.candidates.length, 1);
+  assert.equal(reconciled.bundle.ruleCount, 1);
+  await assert.rejects(() => reconcileService.reconcileRules({deprecateVersionIds: ['missing']}, {actor: publisher}), error => error?.code === 'OWNER_KNOWLEDGE_RECONCILE_STALE');
+  await fs.rm(reconcileRoot, {recursive: true, force: true});
 
   const githubRepository = createLinkOpsJsonRepository({rootDir: path.join(rootDir, 'github-distribution')});
   let published = null;
@@ -130,8 +153,9 @@ try {
     sourceAt: '2026-07-12T00:00:00.000Z',
     explicitDurable: true,
   }], {actor: publisher});
-  assert.equal(githubFirst.distribution.current, false, 'GitHub publication is pending until CI activation');
-  assert.equal(githubFirst.distribution.pending, true);
+  const githubFirstReviewed = await githubService.decideRule({versionId: githubFirst.results[0].versionId, decision: 'approved'}, {actor: publisher});
+  assert.equal(githubFirstReviewed.distribution.current, false, 'GitHub publication is pending until CI activation');
+  assert.equal(githubFirstReviewed.distribution.pending, true);
   const firstPublication = structuredClone(published);
   const activated = await githubService.activatePendingDistribution({
     sourceCommit: firstPublication.sourceCommit,
@@ -152,7 +176,8 @@ try {
     sourceAt: '2026-07-12T01:00:00.000Z',
     explicitDurable: true,
   }], {actor: publisher});
-  assert.equal(githubSecond.distribution.current, false, 'new active rule makes the prior GitHub distribution stale');
+  const githubSecondReviewed = await githubService.decideRule({versionId: githubSecond.results[0].versionId, decision: 'approved'}, {actor: publisher});
+  assert.equal(githubSecondReviewed.distribution.current, false, 'new active rule makes the prior GitHub distribution stale');
   await assert.rejects(
     () => githubService.activatePendingDistribution({
       sourceCommit: firstPublication.sourceCommit,

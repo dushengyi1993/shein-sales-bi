@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
@@ -19,6 +20,7 @@ function parseArgs(argv) {
     gitRemote: process.env.SHEIN_OWNER_KNOWLEDGE_GIT_REMOTE || 'origin',
     gitLockFile: process.env.SHEIN_OWNER_KNOWLEDGE_GIT_LOCK_FILE || '',
     force: false,
+    planFile: '',
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -31,6 +33,7 @@ function parseArgs(argv) {
     else if (arg === '--git-remote') args.gitRemote = argv[++index];
     else if (arg === '--git-lock-file') args.gitLockFile = path.resolve(argv[++index]);
     else if (arg === '--force') args.force = true;
+    else if (arg === '--plan') args.planFile = path.resolve(argv[++index]);
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return args;
@@ -59,6 +62,11 @@ try {
     const distribution = await service.ensureDistribution({actorUser: args.publisherUser || 'owner-knowledge-admin', force: args.force});
     console.log(JSON.stringify({ok: Boolean(distribution.ready && distribution.current), distribution}));
     if (!distribution.ready || !distribution.current) process.exitCode = 1;
+  } else if (args.command === 'reconcile') {
+    if (!args.publisherUser || !args.planFile) throw new Error('reconcile requires --publisher-user and --plan');
+    const plan = JSON.parse(await fs.readFile(args.planFile, 'utf8'));
+    const actor = {username: args.publisherUser, displayName: args.publisherUser, role: 'owner', knowledgePublisher: true};
+    console.log(JSON.stringify(await service.reconcileRules(plan, {actor, actorUser: args.publisherUser})));
   } else {
     throw new Error(`Unknown command: ${args.command}`);
   }

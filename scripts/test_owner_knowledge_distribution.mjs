@@ -29,7 +29,7 @@ function run(command, args, cwd = temp) {
 }
 
 function activeBundle(experiences) {
-  const rules = experiences.map(input => normalizeOwnerKnowledgeExperience(input, {actorUser: 'owner'}));
+  const rules = experiences.map(input => ({...normalizeOwnerKnowledgeExperience(input, {actorUser: 'owner'}), activation: 'active'}));
   const fingerprint = ownerKnowledgeBundleFingerprint(rules);
   return {authorityId: 'dushengyi', fingerprint, globalFingerprint: fingerprint, rules, allRuleCount: rules.length};
 }

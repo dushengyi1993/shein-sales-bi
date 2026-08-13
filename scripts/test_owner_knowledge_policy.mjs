@@ -21,7 +21,7 @@ const oneWay = normalizeOwnerKnowledgeExperience({
   sourceKind: 'owner_codex_session',
   actorUser: '杜圣宜',
 });
-assert.equal(oneWay.activation, 'active');
+assert.equal(oneWay.activation, 'candidate');
 assert.equal(oneWay.ruleKey, 'authority.owner-one-way-knowledge');
 assert.equal(oneWay.tags.includes('identity'), true);
 
@@ -30,7 +30,7 @@ const image = normalizeOwnerKnowledgeExperience({
   sourceKind: 'owner_memory',
   explicitDurable: true,
 });
-assert.equal(image.activation, 'active');
+assert.equal(image.activation, 'candidate');
 assert.equal(image.ruleKey, 'images.role-ordering');
 
 const inferred = normalizeOwnerKnowledgeExperience({
@@ -77,13 +77,15 @@ assert.deepEqual(injectedMachinePolicy.machinePolicy, {
   controlledWrite: {requireDryRun: true, requireHumanConfirmation: true, requireAudit: true, requireReadback: true, allowSilentWrite: false},
 }, 'client-supplied machinePolicy is ignored in favor of the server-derived schema');
 
-const selected = selectRelevantOwnerKnowledgeRules([oneWay, image], {
+const activeOneWay = {...oneWay, activation: 'active'};
+const activeImage = {...image, activation: 'active'};
+const selected = selectRelevantOwnerKnowledgeRules([activeOneWay, activeImage], {
   question: '请帮我给商品图片排序并换主图',
 }, {limit: 1});
 assert.equal(selected.length, 1);
 assert.equal(selected[0].ruleKey, 'images.role-ordering');
 assert.match(formatOwnerKnowledgeRulesForPrompt(selected), /卖点、参数和场景/);
-assert.match(ownerKnowledgeBundleFingerprint([oneWay, image]), /^[a-f0-9]{64}$/);
+assert.match(ownerKnowledgeBundleFingerprint([activeOneWay, activeImage]), /^[a-f0-9]{64}$/);
 
 assert.equal(actorCanPublishOwnerKnowledge({role: 'owner'}, 'dushengyi'), false, 'owner role alone is not authority');
 assert.equal(actorCanPublishOwnerKnowledge({role: 'owner', knowledgePublisher: true}, 'dushengyi'), true);

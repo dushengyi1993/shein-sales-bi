@@ -10,8 +10,7 @@
   "scripts": {
     "check:generated": "node scripts/generate_product_match_key_schema.mjs --check",
     "check:source": "node scripts/check_source_integrity.mjs",
-    "owner-knowledge:scan": "node scripts/owner_knowledge_sync.mjs scan",
-    "owner-knowledge:sync": "node scripts/owner_knowledge_sync.mjs sync",
+    "owner-knowledge:upload": "node scripts/owner_knowledge_sync.mjs upload --once",
     "owner-knowledge:status": "node scripts/owner_knowledge_sync.mjs status",
     "owner-knowledge:validate-distribution": "node scripts/validate_owner_knowledge_distribution.mjs",
     "partner-cli:version": "node scripts/bi_ops_cli.mjs version",

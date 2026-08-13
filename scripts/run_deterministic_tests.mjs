@@ -84,6 +84,7 @@ const tests = [
   'scripts/test_owner_knowledge_service.mjs',
   'scripts/test_owner_knowledge_local_collector.mjs',
   'scripts/test_owner_knowledge_event_watch.mjs',
+  'scripts/test_owner_knowledge_turn_ended.mjs',
   'scripts/test_owner_knowledge_distribution.mjs',
   'scripts/test_partner_knowledge_cache.mjs',
   'scripts/test_partner_cli_package.mjs',
