@@ -64,6 +64,7 @@ try {
   const fakeSlackToken = ['xoxb', '123456789012', 'abcdefghijklmnopqrstuvwxyz'].join('-');
   const fakeOpaqueHexSecret = ['0123456789abcdef', 'fedcba9876543210'].join('');
   const firstBundle = activeBundle([{
+    ruleKey: 'openapi.product-stock-evidence-boundary',
     text: `以后所有真实提交必须先预检、明确确认并强回读，token=should-not-leak，${fakeGithubToken}、${fakeSlackToken}、${fakeOpaqueHexSecret} 也不能泄露`,
     sourceKind: 'owner_manual',
     sourceId: 'private-session-path',
@@ -71,7 +72,6 @@ try {
     activation: 'active',
     machinePolicy: {apiKey: 'shortsecret123', credentials: {pin: 837261}},
   }]);
-  firstBundle.rules[0].ruleKey = 'openapi.product-stock-evidence-boundary';
   const firstAttempts = await Promise.all([publisher.publish(firstBundle), publisher.publish(firstBundle)]);
   if (firstAttempts.filter(result => result.changed).length !== 1) throw new Error('stale publisher lock recovery did not serialize two contenders');
   const first = firstAttempts.find(result => result.changed);
