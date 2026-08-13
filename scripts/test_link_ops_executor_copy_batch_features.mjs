@@ -326,6 +326,256 @@ const verifiedWithdrawn = await __testHooks.inspectTargetDuplicateProducts(
 check('live state 4 withdrawn override allows one replacement', verifiedWithdrawn.blockers.length, 0);
 check('live state 4 withdrawn override is audited', verifiedWithdrawn.evidence.rejectedReplacementOverride.liveValidation.status, 'verified_terminal_withdrawn');
 
+// --- 03012 readback identity binding: pending review must never fall back to an
+// old same-goods-number link, and supplier-code-only matches are demoted when the
+// publishOrEdit-returned new identity is known. ---
+function readbackClient({spuInfoResult, searchResult}) {
+  const calls = [];
+  return {
+    calls,
+    async request(pathname, opts) {
+      calls.push({pathname, body: opts?.body});
+      if (pathname === '/open-api/goods/spu-info') return spuInfoResult;
+      if (pathname === '/open-api/goods/searchProduct') return searchResult;
+      throw new Error(`unexpected path ${pathname}`);
+    },
+  };
+}
+const newIdentityFingerprint = {
+  targetStore: 'HL',
+  taskId: '03012',
+  taskProductRefs: [],
+  publishSpuNames: ['v2608132357607966'],
+  publishSkcNames: ['sv260813235760796666648'],
+  publishSkuCodes: ['SPMP260813353184931'],
+  targetSupplierCodes: ['HL-03012-SN'],
+  targetSupplierSkus: ['HL-03012-SKU1'],
+  targetPlatformSkuCodes: [],
+  targetPlatformSkcNames: [],
+};
+const oldLinkRow = {spuName: 'v2602011917311806', skcName: 'sv-old', supplierCode: 'HL-03012-SN', skuCodeList: ['HL-03012-SKU1']};
+const newLinkRow = {spuName: 'v2608132357607966', skcName: 'sv260813235760796666648', supplierCode: 'HL-03012-SN', skuCodeList: ['SPMP260813353184931']};
+const demotedOld = __testHooks.matchProductReadbackRows([oldLinkRow], newIdentityFingerprint);
+check('old same-goods link is not reliable readback when new identity is known', demotedOld.strong.length, 0);
+check('old same-goods link demotion is explicit', demotedOld.weak[0]?.weakMatchReasons.some(reason => reason.startsWith('sameGoodsNumberOldLinkWithoutPublishIdentity:')), true);
+const matchedNewLink = __testHooks.matchProductReadbackRows([newLinkRow], newIdentityFingerprint);
+check('new identity row stays a strong readback', matchedNewLink.strong.length, 1);
+const legacyFingerprint = {...newIdentityFingerprint, publishSpuNames: [], publishSkcNames: [], publishSkuCodes: []};
+const legacyMatchedOld = __testHooks.matchProductReadbackRows([oldLinkRow], legacyFingerprint);
+check('supplier-code match stays strong without publish identity (legacy semantics)', legacyMatchedOld.strong.length, 1);
+
+const pendingSpuInfoResult = {ok: true, status: 200, data: {code: '0003', msg: 'audit pending', info: null}};
+const pendingSearchResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: [oldLinkRow]}}};
+const pendingReadbackClient = readbackClient({spuInfoResult: pendingSpuInfoResult, searchResult: pendingSearchResult});
+const pendingReadback = await __testHooks.readbackPublishedProduct(pendingReadbackClient, newIdentityFingerprint, {enabled: true, task: null});
+check('pending-review spu-info is an explicit unverifiable state', pendingReadback.status, 'new_identity_pending_review_unverifiable');
+check('pending-review readback is not ok but not a mismatch failure', pendingReadback.ok, false);
+check('pending-review readback marks pendingReview', pendingReadback.pendingReview, true);
+check('pending-review readback never queries searchProduct fallback', pendingReadbackClient.calls.some(call => call.pathname === '/open-api/goods/searchProduct'), false);
+check('pending-review readback never binds the old link', pendingReadback.matchedRows.length, 0);
+
+const matchedSpuInfoResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: newLinkRow}};
+const matchedReadbackClient = readbackClient({spuInfoResult: matchedSpuInfoResult, searchResult: pendingSearchResult});
+const matchedReadback = await __testHooks.readbackPublishedProduct(matchedReadbackClient, newIdentityFingerprint, {enabled: true, task: null});
+check('available new-identity spu-info still strong-matches', matchedReadback.status, 'matched_publish_spu_in_spu_info');
+check('available new-identity spu-info readback is ok', matchedReadback.ok, true);
+
+// --- 15032/794 input voltage provenance: when the official target template does
+// not return Input voltage(1002322), fill ONLY from same-goods-number OpenAPI
+// links with provenance; missing/ambiguous/different-goods-number keep blocker. ---
+const voltageTemplateResponse = {
+  code: '0',
+  msg: 'OK',
+  info: {
+    data: [{
+      product_type_id: 9851,
+      attribute_infos: [
+        {
+          attribute_id: 147,
+          attribute_name: 'Power Supply',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [
+            {attribute_value_id: 1047, attribute_value: 'Wall Plug'},
+            {attribute_value_id: 1007239, attribute_value: 'Power Adapter'},
+          ],
+        },
+        {
+          attribute_id: 1001466,
+          attribute_name: 'Plug(Voltage)',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 2,
+          attribute_value_info_list: [
+            {attribute_value_id: 2535083, attribute_value: 'UK Plug(220-240V)'},
+          ],
+        },
+      ],
+    }],
+  },
+};
+function provenanceClient({searchRows, spuInfoBySpu, templateResponse = voltageTemplateResponse}) {
+  const calls = {searchProduct: 0, spuInfo: 0};
+  return {
+    calls,
+    async request(pathname, opts) {
+      if (pathname === '/open-api/goods/query-attribute-template') return {ok: true, status: 200, data: templateResponse};
+      if (pathname === '/open-api/goods/searchProduct') {
+        calls.searchProduct += 1;
+        calls.lastSearchBody = opts?.body;
+        return {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: searchRows}}};
+      }
+      if (pathname === '/open-api/goods/spu-info') {
+        calls.spuInfo += 1;
+        const spuName = opts?.body?.spuName;
+        return {ok: true, status: 200, data: {code: '0', msg: 'OK', info: spuInfoBySpu[spuName] || null}};
+      }
+      throw new Error(`unexpected path ${pathname}`);
+    },
+  };
+}
+const wallPlugPayload = {
+  product_type_id: 9851,
+  product_attribute_list: [
+    {attribute_id: 147, attribute_value_id: 1047, attribute_name: 'Power Supply'},
+    {attribute_id: 1001466, attribute_value: '220-240V', attribute_name: 'Plug Voltage'},
+  ],
+  skc_list: [{supplier_code: 'HL-03012-SN', sale_name: 'Wall Plug'}],
+};
+const sameGoodsOldLinkInfo = {
+  spuName: 'v2602011917311806',
+  skcName: 'sv2602011917311806a',
+  productAttributeInfoList: [
+    {attribute_id: 1002322, attribute_value_id: 301114341, attribute_extra_value: '220-240'},
+  ],
+};
+const voltageSuccessClient = provenanceClient({
+  searchRows: [{spuName: 'v2602011917311806', skcList: [{skcName: 'sv2602011917311806a', supplierCode: 'HL-03012-SN'}]}],
+  spuInfoBySpu: {'v2602011917311806': sameGoodsOldLinkInfo},
+});
+const voltageApplied = await __testHooks.applyAttributeTemplateRules(voltageSuccessClient, clone(wallPlugPayload));
+const voltageRow = voltageApplied.payload.product_attribute_list.find(row => Number(row.attribute_id) === 1002322);
+check('same-goods-number input voltage provenance fills 1002322 value id', voltageRow?.attribute_value_id, 301114341);
+check('same-goods-number input voltage provenance keeps extra value', voltageRow?.attribute_extra_value, '220-240');
+check('same-goods-number input voltage provenance has no blockers', voltageApplied.blockers.length, 0);
+check('same-goods-number provenance is audited', voltageApplied.applied.some(item => item.startsWith('attribute_provenance:1002322.from_same_goods_number_HL-03012-SN')), true);
+check('same-goods-number provenance evidence is ok', voltageApplied.evidence.inputVoltageProvenance?.status, 'ok');
+check('provenance records the source link', voltageApplied.evidence.inputVoltageProvenance?.appliedFrom?.spuName, 'v2602011917311806');
+check('direct 1002322 provenance uses live value id', voltageApplied.evidence.inputVoltageProvenance?.unitValueIdSource, 'live_provenance');
+check('same-goods-number search caps page size at 10', voltageSuccessClient.calls.lastSearchBody?.pageSize, 10);
+const voltageRepeated = await __testHooks.applyAttributeTemplateRules(voltageSuccessClient, clone(wallPlugPayload));
+check('input voltage provenance is deterministic for payload hash', __testHooks.sha256Stable(voltageRepeated.payload), __testHooks.sha256Stable(voltageApplied.payload));
+check('payload hash covers the provenance-filled attribute', __testHooks.sha256Stable(voltageApplied.payload) !== __testHooks.sha256Stable(clone(wallPlugPayload)), true);
+
+const voltageSourceLinkInfo = {
+  spuName: 'v2602011917311806',
+  skcName: 'sv2602011917311806a',
+  productAttributeInfoList: [
+    {
+      attribute_id: 1001466,
+      attribute_value_id: 2535083,
+      attributeValueMultiList: [{language: 'en', attributeValueName: 'UK Plug(220-240V)'}],
+    },
+  ],
+};
+const voltageInferredClient = provenanceClient({
+  searchRows: [{spuName: 'v2602011917311806', skcList: [{skcName: 'sv2602011917311806a', supplierCode: 'HL-03012-SN'}]}],
+  spuInfoBySpu: {'v2602011917311806': voltageSourceLinkInfo},
+});
+const voltageInferred = await __testHooks.applyAttributeTemplateRules(voltageInferredClient, clone(wallPlugPayload));
+const inferredRow = voltageInferred.payload.product_attribute_list.find(row => Number(row.attribute_id) === 1002322);
+check('Plug(Voltage) provenance infers 1002322 range', inferredRow?.attribute_extra_value, '220-240');
+check('Plug(Voltage) provenance reuses controlled Vac unit value id', inferredRow?.attribute_value_id, 301114341);
+check('Plug(Voltage) provenance has no blockers', voltageInferred.blockers.length, 0);
+check('official catalog mapping is audited', voltageInferred.applied.some(item => item === 'official_catalog_mapping:1002322.vac_value_id=301114341'), true);
+check('official catalog mapping is marked in evidence', voltageInferred.evidence.inputVoltageProvenance?.unitValueIdSource, 'official_catalog_mapping');
+check('official catalog mapping records the controlled value id', voltageInferred.evidence.inputVoltageProvenance?.officialCatalogMapping?.valueId, 301114341);
+check('provenance evidence keeps the source attribute', voltageInferred.evidence.inputVoltageProvenance?.appliedFrom?.sourceAttributeId, 1001466);
+
+const voltageAmbiguousClient = provenanceClient({
+  searchRows: [
+    {spuName: 'v2602011917311806', skcList: [{skcName: 'sv-a', supplierCode: 'HL-03012-SN'}]},
+    {spuName: 'v2602011917311807', skcList: [{skcName: 'sv-b', supplierCode: 'HL-03012-SN'}]},
+  ],
+  spuInfoBySpu: {
+    'v2602011917311806': {spuName: 'v2602011917311806', productAttributeInfoList: [{attribute_id: 1001466, attribute_value_id: 2535083, attributeValueMultiList: [{language: 'en', attributeValueName: 'UK Plug(220-240V)'}]}]},
+    'v2602011917311807': {spuName: 'v2602011917311807', productAttributeInfoList: [{attribute_id: 1001466, attribute_value_id: 2535084, attributeValueMultiList: [{language: 'en', attributeValueName: 'US Plug(100-240V)'}]}]},
+  },
+});
+const voltageAmbiguous = await __testHooks.applyAttributeTemplateRules(voltageAmbiguousClient, clone(wallPlugPayload));
+check('conflicting same-goods voltage sources keep blocker', voltageAmbiguous.blockers.some(text => /多个不同的 Input voltage/.test(text)), true);
+check('ambiguous provenance does not fill payload', voltageAmbiguous.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+check('ambiguous provenance evidence is ambiguous', voltageAmbiguous.evidence.inputVoltageProvenance?.status, 'ambiguous');
+
+const voltageMissingClient = provenanceClient({
+  searchRows: [{spuName: 'v2602011917311806', skcList: [{skcName: 'sv-a', supplierCode: 'HL-03012-SN'}]}],
+  spuInfoBySpu: {'v2602011917311806': {spuName: 'v2602011917311806', productAttributeInfoList: [{attribute_id: 147, attribute_value_id: 1047}]}},
+});
+const voltageMissing = await __testHooks.applyAttributeTemplateRules(voltageMissingClient, clone(wallPlugPayload));
+check('missing same-goods voltage source keeps blocker', voltageMissing.blockers.some(text => /保持阻断/.test(text)), true);
+check('missing provenance does not fill payload', voltageMissing.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+check('missing provenance evidence is missing', voltageMissing.evidence.inputVoltageProvenance?.status, 'missing');
+
+const voltageForeignClient = provenanceClient({
+  searchRows: [{spuName: 'v-other-goods', skcList: [{skcName: 'sv-other', supplierCode: 'OTHER-GOODS-SN'}]}],
+  spuInfoBySpu: {},
+});
+const voltageForeign = await __testHooks.applyAttributeTemplateRules(voltageForeignClient, clone(wallPlugPayload));
+check('different-goods-number source is never consulted', voltageForeignClient.calls.spuInfo, 0);
+check('different-goods-number source keeps blocker', voltageForeign.blockers.some(text => /保持阻断/.test(text)), true);
+check('different-goods-number evidence is missing', voltageForeign.evidence.inputVoltageProvenance?.status, 'missing');
+
+const voltageConflictTemplateResponse = {
+  code: '0',
+  msg: 'OK',
+  info: {
+    data: [{
+      product_type_id: 9851,
+      attribute_infos: [
+        {
+          attribute_id: 147,
+          attribute_name: 'Power Supply',
+          attribute_mode: 1,
+          attribute_type: 4,
+          attribute_status: 3,
+          attribute_value_info_list: [
+            {attribute_value_id: 1047, attribute_value: 'Wall Plug'},
+            {attribute_value_id: 1007239, attribute_value: 'Power Adapter'},
+          ],
+        },
+        {
+          attribute_id: 1002322,
+          attribute_name: 'Input voltage',
+          attribute_mode: 4,
+          attribute_type: 4,
+          attribute_status: 2,
+          attribute_value_info_list: [
+            {attribute_value_id: 999999, attribute_value: 'Vac 50–60Hz'},
+          ],
+        },
+      ],
+    }],
+  },
+};
+const wallPlugValueIdOnlyPayload = {
+  product_type_id: 9851,
+  product_attribute_list: [
+    {attribute_id: 147, attribute_value_id: 1047, attribute_name: 'Power Supply'},
+    {attribute_id: 1001466, attribute_value_id: 2535083, attribute_name: 'Plug Voltage'},
+  ],
+  skc_list: [{supplier_code: 'HL-03012-SN', sale_name: 'Wall Plug'}],
+};
+const voltageConflictClient = provenanceClient({
+  searchRows: [{spuName: 'v2602011917311806', skcList: [{skcName: 'sv2602011917311806a', supplierCode: 'HL-03012-SN'}]}],
+  spuInfoBySpu: {'v2602011917311806': voltageSourceLinkInfo},
+  templateResponse: voltageConflictTemplateResponse,
+});
+const voltageConflict = await __testHooks.applyAttributeTemplateRules(voltageConflictClient, clone(wallPlugValueIdOnlyPayload));
+check('official catalog mapping conflict with template keeps blocker', voltageConflict.blockers.some(text => /冲突/.test(text)), true);
+check('conflict evidence is unit_value_id_conflict', voltageConflict.evidence.inputVoltageProvenance?.status, 'unit_value_id_conflict');
+check('conflict does not fill payload', voltageConflict.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
 if (!ok) process.exit(1);

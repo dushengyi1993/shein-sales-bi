@@ -38,6 +38,7 @@ import {
   createLoopbackTestWebhookWriteGuard,
   runSheinWebhookExternalWriteGuarded,
 } from '../lib/shein_webhook_external_write_guard.mjs';
+import {INPUT_VOLTAGE_AC_VALUE_ID} from '../lib/retire_supplier_code_repair_payload.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -1824,28 +1825,28 @@ function ensurePowerSupplyInputVoltage(payload, productAttributeList, templateBy
   const blockers = [];
   const powerSupply = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === POWER_SUPPLY_ATTRIBUTE_ID);
   const powerSupplyValueId = normalizeAttributeId(powerSupply?.attribute_value_id ?? powerSupply?.attributeValueId);
-  if (!POWER_SUPPLY_INPUT_VOLTAGE_VALUE_IDS.has(powerSupplyValueId)) return {applied, blockers};
+  if (!POWER_SUPPLY_INPUT_VOLTAGE_VALUE_IDS.has(powerSupplyValueId)) return {applied, blockers, inputVoltageRequired: false};
   const powerSupplyTemplate = templateById.get(POWER_SUPPLY_ATTRIBUTE_ID);
   const powerSupplyLabel = templateAttributeValueLabel(powerSupplyTemplate, powerSupplyValueId) || String(powerSupplyValueId);
   let inputVoltage = productAttributeList.find(row => normalizeAttributeId(row.attribute_id ?? row.attributeId) === INPUT_VOLTAGE_ATTRIBUTE_ID);
   const existingExtra = safeString(inputVoltage?.attribute_extra_value ?? inputVoltage?.attributeExtraValue ?? '', 120);
   const existingValueId = normalizeAttributeId(inputVoltage?.attribute_value_id ?? inputVoltage?.attributeValueId);
-  if (inputVoltage && existingExtra && existingValueId) return {applied, blockers};
+  if (inputVoltage && existingExtra && existingValueId) return {applied, blockers, inputVoltageRequired: true};
 
   const template = templateById.get(INPUT_VOLTAGE_ATTRIBUTE_ID);
   if (!template) {
     blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但官方属性模板未返回该属性，不能自动补齐。`);
-    return {applied, blockers};
+    return {applied, blockers, inputVoltageRequired: true};
   }
   const inferred = inferInputVoltageFromPayload(payload, templateById);
   if (!inferred?.attribute_extra_value) {
     blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但无法从 Plug(Voltage)/Voltage 属性推导电压范围；请补充 Input voltage。`);
-    return {applied, blockers};
+    return {applied, blockers, inputVoltageRequired: true};
   }
   const unitValueId = existingValueId || chooseInputVoltageAcUnitValueId(template);
   if (!unitValueId) {
     blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，已推导 ${inferred.attribute_extra_value}，但无法从官方属性模板匹配 Vac 单位值 ID。`);
-    return {applied, blockers};
+    return {applied, blockers, inputVoltageRequired: true};
   }
 
   if (!inputVoltage) {
@@ -1860,7 +1861,7 @@ function ensurePowerSupplyInputVoltage(payload, productAttributeList, templateBy
   delete inputVoltage.attribute_value;
   delete inputVoltage.attributeValue;
   applied.push(`attribute_template:${INPUT_VOLTAGE_ATTRIBUTE_ID}.required_by_power_supply_${powerSupplyValueId}=${inferred.attribute_extra_value}`);
-  return {applied, blockers};
+  return {applied, blockers, inputVoltageRequired: true};
 }
 
 function payloadAttributeHasValue(row) {
@@ -1875,6 +1876,226 @@ function payloadAttributeHasValue(row) {
     500,
   );
   return Boolean(valueId || extraValue);
+}
+
+function listHasFilledInputVoltage(list) {
+  return list.some(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === INPUT_VOLTAGE_ATTRIBUTE_ID && payloadAttributeHasValue(row));
+}
+
+/**
+ * Owner-authorized fail-closed provenance lookup: when Input voltage(1002322)
+ * is required by the target template path but cannot be filled authoritatively,
+ * the ONLY permitted source is the same standard goods number on other OpenAPI
+ * links. The extracted attribute/value pair must carry provenance (source SPU,
+ * SKC, value id and extra value). No text guessing and no hardcoded values:
+ * missing, ambiguous or different-goods-number sources keep the blocker.
+ */
+function spuInfoAttributeRows(info, standardGoodsNumber, wantedAttributeIds) {
+  const out = [];
+  if (!info || typeof info !== 'object') return out;
+  const wantedCode = compactRef(standardGoodsNumber);
+  const infoCode = compactRef(info?.supplierCode || info?.supplier_code || '');
+  const productRows = infoCode && wantedCode && infoCode !== wantedCode
+    ? []
+    : asArray(info?.productAttributeInfoList || info?.product_attribute_info_list);
+  const skcRows = asArray(info?.skcInfoList || info?.skc_info_list || info?.skcList || info?.skc_list);
+  const rows = [
+    ...productRows,
+    ...skcRows.flatMap(skc => {
+      const skcCode = compactRef(skc?.supplierCode || skc?.supplier_code || '');
+      if (skcCode && wantedCode && skcCode !== wantedCode) return [];
+      return asArray(skc?.attributeInfoList || skc?.attribute_info_list || skc?.saleAttributeList || skc?.sale_attribute_list);
+    }),
+  ];
+  for (const row of rows) {
+    const attributeId = normalizeAttributeId(row?.attribute_id ?? row?.attributeId);
+    if (!attributeId || (wantedAttributeIds && !wantedAttributeIds.has(attributeId))) continue;
+    const multiName = asArray(row?.attributeValueMultiList || row?.attribute_value_multi_list)
+      .find(item => /^en$/i.test(String(item?.language || item?.lang || '')));
+    out.push({
+      attribute_id: attributeId,
+      attribute_value_id: normalizeAttributeId(row?.attribute_value_id ?? row?.attributeValueId),
+      attribute_extra_value: safeString(row?.attribute_extra_value ?? row?.attributeExtraValue ?? '', 160),
+      attribute_value: safeString(
+        row?.attribute_value
+        ?? row?.attributeValue
+        ?? row?.attribute_value_name
+        ?? row?.attributeValueName
+        ?? multiName?.attributeValueName
+        ?? multiName?.attribute_value_name
+        ?? '',
+        160,
+      ),
+      source: row,
+    });
+  }
+  return out;
+}
+
+function extractInputVoltageCandidatesFromSpuInfo(info, standardGoodsNumber) {
+  const candidates = [];
+  for (const row of spuInfoAttributeRows(info, standardGoodsNumber, new Set([INPUT_VOLTAGE_ATTRIBUTE_ID]))) {
+    const valueId = row.attribute_value_id;
+    const extraValue = row.attribute_extra_value;
+    if (!valueId && !extraValue) continue;
+    candidates.push({
+      valueId,
+      extraValue,
+      spuName: safeString(info?.spuName || info?.spu_name || '', 120),
+      skcName: safeString(info?.skcName || info?.skc_name || '', 120),
+    });
+  }
+  return candidates;
+}
+
+function extractVoltageSourceAttributeRowsFromSpuInfo(info, standardGoodsNumber) {
+  return spuInfoAttributeRows(info, standardGoodsNumber, new Set([
+    PLUG_VOLTAGE_ATTRIBUTE_ID,
+    RATED_VOLTAGE_ATTRIBUTE_ID,
+    VOLTAGE_ATTRIBUTE_ID,
+    VOLTAGE_VALUE_ATTRIBUTE_ID,
+  ]));
+}
+
+async function applySameGoodsNumberInputVoltageProvenance(client, payload, list, templateById = new Map()) {
+  const standardGoodsNumbers = [...new Set(publishTargetSupplierCodes(payload).map(code => safeString(code, 160).trim()).filter(Boolean))];
+  if (standardGoodsNumbers.length !== 1) {
+    return {
+      applied: [],
+      blockers: [`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但发布 payload 的标准货号不唯一（${standardGoodsNumbers.join('、') || '缺失'}），无法确证同货号来源，必须人工补充 Input voltage。`],
+      evidence: {status: 'skipped_ambiguous_standard_goods_number', standardGoodsNumbers},
+    };
+  }
+  const standardGoodsNumber = standardGoodsNumbers[0];
+  const calls = [];
+  let response = null;
+  try {
+    response = await client.request('/open-api/goods/searchProduct', {
+      method: 'POST',
+      body: {pageNum: 1, pageSize: 10, skcSupplierCodeList: [standardGoodsNumber], languageList: ['en', 'ar']},
+      headers: {language: 'en'},
+    });
+  } catch (err) {
+    calls.push({name: 'same-goods-number-searchProduct', path: '/open-api/goods/searchProduct', method: 'POST', httpStatus: null, code: null, msg: safeString(err?.message || err, 300), traceId: null});
+    return {
+      applied: [],
+      blockers: [`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；同货号 ${standardGoodsNumber} 其他链接查询失败，无法确证 Input voltage，必须人工补充。`],
+      evidence: {status: 'query_failed', standardGoodsNumber, error: safeString(err?.message || err, 300), calls},
+    };
+  }
+  calls.push(compactCallResult('same-goods-number-searchProduct', '/open-api/goods/searchProduct', 'POST', response));
+  if (!response.ok || String(response.data?.code) !== '0') {
+    return {
+      applied: [],
+      blockers: [`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；同货号 ${standardGoodsNumber} 其他链接查询失败（code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}），无法确证 Input voltage，必须人工补充。`],
+      evidence: {status: 'query_not_ok', standardGoodsNumber, httpStatus: response.status, code: response.data?.code ?? null, msg: response.data?.msg ?? null, calls},
+    };
+  }
+  const sameGoodsNumberSpuNames = [];
+  for (const product of openApiSearchProductRows(response.data)) {
+    const spuName = safeString(product?.spuName || product?.spu_name || '', 120);
+    if (!spuName) continue;
+    const skcs = asArray(product?.skcList || product?.skc_list || product?.skcInfoList || product?.skc_info_list);
+    const productCode = compactRef(product?.supplierCode || product?.supplier_code || '');
+    const sameCode = skcs.some(skc => compactRef(skc?.supplierCode || skc?.supplier_code || '') === compactRef(standardGoodsNumber))
+      || (productCode && productCode === compactRef(standardGoodsNumber));
+    if (!sameCode) continue; // different goods number: never a provenance source
+    sameGoodsNumberSpuNames.push(spuName);
+  }
+  const candidates = [];
+  for (const spuName of [...new Set(sameGoodsNumberSpuNames)].slice(0, 10)) {
+    let detailResponse = null;
+    try {
+      detailResponse = await client.request('/open-api/goods/spu-info', {
+        method: 'POST',
+        body: {spuName, languageList: ['en', 'ar']},
+        headers: {language: 'en'},
+      });
+    } catch (err) {
+      calls.push({name: `same-goods-number-spu-info-${spuName}`, path: '/open-api/goods/spu-info', method: 'POST', httpStatus: null, code: null, msg: safeString(err?.message || err, 300), traceId: null});
+      continue;
+    }
+    calls.push(compactCallResult(`same-goods-number-spu-info-${spuName}`, '/open-api/goods/spu-info', 'POST', detailResponse));
+    if (!detailResponse.ok || String(detailResponse.data?.code) !== '0' || !detailResponse.data?.info || typeof detailResponse.data.info !== 'object') continue;
+    const info = detailResponse.data.info;
+    for (const candidate of extractInputVoltageCandidatesFromSpuInfo(info, standardGoodsNumber)) {
+      candidates.push({...candidate, kind: 'direct'});
+    }
+    // Contract (owner-authorized): provenance may also come from official
+    // Plug(Voltage)/Voltage attributes of the same-goods-number link, parsed with
+    // the existing deterministic range inference. The 1002322 unit value id is
+    // never invented: it reuses the controlled catalog mapping 301114341.
+    const voltageSourceRows = extractVoltageSourceAttributeRowsFromSpuInfo(info, standardGoodsNumber);
+    if (voltageSourceRows.length) {
+      const inferred = inferInputVoltageFromPayload({product_attribute_list: voltageSourceRows}, templateById);
+      if (inferred?.attribute_extra_value) {
+        candidates.push({
+          kind: 'inferred',
+          valueId: INPUT_VOLTAGE_AC_VALUE_ID,
+          extraValue: inferred.attribute_extra_value,
+          spuName: safeString(info?.spuName || info?.spu_name || '', 120),
+          skcName: safeString(info?.skcName || info?.skc_name || '', 120),
+          sourceAttributeId: inferred.source_attribute_id,
+          sourceValueId: inferred.source_value_id,
+          sourceValue: inferred.source_value,
+        });
+      }
+    }
+  }
+  const template = templateById.get(INPUT_VOLTAGE_ATTRIBUTE_ID);
+  const templateVacValueId = template ? chooseInputVoltageAcUnitValueId(template) : null;
+  const inferredCandidate = candidates.find(candidate => candidate.kind === 'inferred');
+  if (inferredCandidate && templateVacValueId && templateVacValueId !== INPUT_VOLTAGE_AC_VALUE_ID) {
+    return {
+      applied: [],
+      blockers: [`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；同货号推导出的受控目录单位值 ID(${INPUT_VOLTAGE_AC_VALUE_ID}) 与官方模板返回的 Vac 单位值 ID(${templateVacValueId}) 冲突，无法确证，必须人工补充。`],
+      evidence: {status: 'unit_value_id_conflict', standardGoodsNumber, templateVacValueId, officialCatalogMapping: {attributeId: INPUT_VOLTAGE_ATTRIBUTE_ID, valueId: INPUT_VOLTAGE_AC_VALUE_ID, label: INPUT_VOLTAGE_AC_UNIT_LABEL}, candidates, calls},
+    };
+  }
+  const distinctCandidates = [...new Map(
+    candidates.map(candidate => [`${candidate.valueId || ''}|${candidate.extraValue || ''}`, candidate]),
+  ).values()];
+  if (!distinctCandidates.length) {
+    return {
+      applied: [],
+      blockers: [`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；官方模板未返回且同货号 ${standardGoodsNumber} 其他链接也未提供可确证的 Input voltage，保持阻断，必须人工补充。`],
+      evidence: {status: 'missing', standardGoodsNumber, sameGoodsNumberSpuNames, candidates, calls},
+    };
+  }
+  if (distinctCandidates.length > 1) {
+    return {
+      applied: [],
+      blockers: [`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；同货号 ${standardGoodsNumber} 其他链接返回多个不同的 Input voltage 值（${distinctCandidates.map(c => `${c.valueId || ''}/${c.extraValue || ''}`).join('、')}），无法确证，必须人工补充。`],
+      evidence: {status: 'ambiguous', standardGoodsNumber, sameGoodsNumberSpuNames, candidates: distinctCandidates, calls},
+    };
+  }
+  const chosen = distinctCandidates[0];
+  const row = {attribute_id: INPUT_VOLTAGE_ATTRIBUTE_ID};
+  if (chosen.valueId) row.attribute_value_id = chosen.valueId;
+  if (chosen.extraValue) row.attribute_extra_value = chosen.extraValue;
+  list.push(row);
+  const applied = [
+    `attribute_provenance:${INPUT_VOLTAGE_ATTRIBUTE_ID}.from_same_goods_number_${standardGoodsNumber}.spu_${chosen.spuName || 'unknown'}.skc_${chosen.skcName || 'unknown'}=${chosen.valueId || ''}/${chosen.extraValue || ''}`,
+    ...(chosen.kind === 'inferred'
+      ? [`official_catalog_mapping:${INPUT_VOLTAGE_ATTRIBUTE_ID}.vac_value_id=${INPUT_VOLTAGE_AC_VALUE_ID}`]
+      : []),
+  ];
+  return {
+    applied,
+    blockers: [],
+    evidence: {
+      status: 'ok',
+      standardGoodsNumber,
+      sameGoodsNumberSpuNames,
+      candidateCount: candidates.length,
+      appliedFrom: chosen,
+      unitValueIdSource: chosen.kind === 'inferred' ? 'official_catalog_mapping' : 'live_provenance',
+      officialCatalogMapping: chosen.kind === 'inferred'
+        ? {attributeId: INPUT_VOLTAGE_ATTRIBUTE_ID, valueId: INPUT_VOLTAGE_AC_VALUE_ID, label: INPUT_VOLTAGE_AC_UNIT_LABEL}
+        : null,
+      calls,
+    },
+  };
 }
 
 function chooseNonDangerousGoodsValueId(templateRow) {
@@ -1997,8 +2218,20 @@ async function applyAttributeTemplateRules(client, payload) {
   const blockers = [];
   const warnings = [];
   const powerSupplyInputVoltage = ensurePowerSupplyInputVoltage(next, list, byId);
-  applied.push(...powerSupplyInputVoltage.applied);
-  blockers.push(...powerSupplyInputVoltage.blockers);
+  if (powerSupplyInputVoltage.inputVoltageRequired && !listHasFilledInputVoltage(list)) {
+    // Locked owner authorization: when Input voltage(1002322) is required but the
+    // official target template path cannot fill it, extract a provable value ONLY
+    // from other OpenAPI links sharing the same standard goods number. Missing or
+    // ambiguous provenance keeps the blocker; the applied value is covered by the
+    // payload hash lock because it lands in the payload before hashing.
+    const provenance = await applySameGoodsNumberInputVoltageProvenance(client, next, list, byId);
+    applied.push(...provenance.applied);
+    blockers.push(...provenance.blockers);
+    evidence.inputVoltageProvenance = provenance.evidence;
+  } else {
+    applied.push(...powerSupplyInputVoltage.applied);
+    blockers.push(...powerSupplyInputVoltage.blockers);
+  }
   const hazardousMaterialsClassification = ensureHazardousMaterialsClassification(list, byId);
   applied.push(...hazardousMaterialsClassification.applied);
   blockers.push(...hazardousMaterialsClassification.blockers);
@@ -2677,6 +2910,7 @@ function matchProductReadbackRows(rows, fingerprint) {
   const publishSkuCodes = asArray(fingerprint?.publishSkuCodes).map(compactRef).filter(Boolean);
   const productRefs = asArray(fingerprint?.taskProductRefs).map(compactRef).filter(Boolean);
   const sourceSkc = compactRef(fingerprint?.inferredSourceSkc || '');
+  const hasPublishIdentity = publishSpuNames.length > 0 || publishSkcNames.length > 0 || publishSkuCodes.length > 0;
   const matches = [];
   const weakMatches = [];
   for (const row of rows) {
@@ -2708,6 +2942,18 @@ function matchProductReadbackRows(rows, fingerprint) {
       if (ref && hay.includes(ref)) weakReasons.push(`productRef:${ref}`);
     }
     if (sourceSkc && hay.includes(sourceSkc)) weakReasons.push(`sourceSkc:${sourceSkc}`);
+    // When publishOrEdit already returned the new SPU/SKC/SKU identity, a row
+    // matched only by the shared standard goods number or supplier SKU can be an
+    // OLD link of the same goods number and must never act as the new-link
+    // readback. Demote such rows to weak evidence with an explicit reason.
+    if (hasPublishIdentity && !strongReasons.some(reason => /^publish(?:SpuName|SkcName|SkuCode):/.test(reason))) {
+      for (const reason of strongReasons) {
+        if (/^supplier(?:Sku|Code):/.test(reason)) {
+          weakReasons.push(reason.replace(/^supplier(Sku|Code):/, 'sameGoodsNumberOldLinkWithoutPublishIdentity:'));
+        }
+      }
+      strongReasons.length = 0;
+    }
     if (!strongReasons.length && !weakReasons.length) continue;
     const compact = {
       ...compactProductReadbackRow(row),
@@ -2842,6 +3088,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
     };
   }
   try {
+    let newIdentityInfoAvailable = false;
     for (const spuName of publishSpuNames.slice(0, 5)) {
       const response = await client.request('/open-api/goods/spu-info', {
         method: 'POST',
@@ -2852,6 +3099,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
       if (!response.ok || String(response.data?.code) !== '0') continue;
       const info = response.data?.info && typeof response.data.info === 'object' ? response.data.info : null;
       if (!info) continue;
+      newIdentityInfoAvailable = true;
       const matched = matchProductReadbackRows([info], fingerprint);
       if (matched.strong.length) {
         // Phase A live description gate: identity strongly matched, but the
@@ -2889,6 +3137,21 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
           note: '已用 publishOrEdit 返回的 SPU 编号调用官方 spu-info，并强匹配到平台返回的新 SPU/SKC/SKU；该证据可证明 SHEIN 已接收并生成商品记录，后续仍需结合审核状态判断是否已上架。',
         };
       }
+    }
+    if (publishSpuNames.length && !newIdentityInfoAvailable) {
+      return {
+        ok: false,
+        status: 'new_identity_pending_review_unverifiable',
+        startedAt,
+        endedAt: new Date().toISOString(),
+        plan,
+        calls,
+        scannedRows: 0,
+        matchedRows: [],
+        weakMatchedRows: [],
+        pendingReview: true,
+        note: 'publishOrEdit 已返回新 SPU 身份，但官方 spu-info 暂不可用（可能仍待审核）。本次回读绑定新身份，绝不用同货号旧链接充当回读；任务保持待审核/人工核销，等待官方 spu-info 可用后重试回读。',
+      };
     }
     const allWeakMatches = [];
     const searchProductAttempts = [
@@ -3529,6 +3792,8 @@ export const __testHooks = {
   applySafeDefaults,
   applyManualAttributeOverrides,
   applyAttributeTemplateRules,
+  applySameGoodsNumberInputVoltageProvenance,
+  extractInputVoltageCandidatesFromSpuInfo,
   inspectTargetDuplicateProducts,
   applyRandomSupplyPrice,
   applyExplicitPublishPreparationOverrides,
@@ -3541,4 +3806,7 @@ export const __testHooks = {
   normalizePublishImageType,
   publishResultSucceeded,
   sanitizePublishPlatformText,
+  matchProductReadbackRows,
+  readbackPublishedProduct,
+  sha256Stable,
 };

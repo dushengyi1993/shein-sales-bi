@@ -62,7 +62,7 @@
 - Power Supply(147) = Wall Plug(1047) → Input voltage(1002322) 和 Input current(1002323) 必填。
 - `partialEdit` 全量校验时会检查这些关联必填属性。
 - 需要在 `product_attribute_list` 中同时传入缺失的必填属性。
-- 对新上 `publishOrEdit`，执行器会先查官方 `query-attribute-template`，再从已有 `Plug(Voltage)` / `Voltage` 属性推导 `Input voltage`。例如 `UK Plug(220-240V)` 可补为 `attribute_id=1002322`、`attribute_value_id=301114341`（`Vac 50–60Hz`）、`attribute_extra_value=220-240`。如果模板或已有属性不足以推导，必须阻断并要求补资料，不能硬编码猜值。
+- 对新上 `publishOrEdit`，执行器会先查官方 `query-attribute-template`，再从已有 `Plug(Voltage)` / `Voltage` 属性推导 `Input voltage`。例如 `UK Plug(220-240V)` 可补为 `attribute_id=1002322`、`attribute_value_id=301114341`（`Vac 50–60Hz`）、`attribute_extra_value=220-240`。如果模板或已有属性不足以推导，执行器按负责人授权执行同货号 provenance 补值：仅从相同标准货号的其他 OpenAPI 链接（`searchProduct` → `spu-info`，单页最多 10 条）提取 `1002322` 直接值，或用现有确定性范围解析从官方 `Plug(Voltage)`/`Voltage` 属性推导范围；`1002322` 单位值 ID 复用受控目录映射 `301114341`（evidence 标注 `official_catalog_mapping`，与当前模板 Vac 单位值 ID 冲突则阻断）。所有同货号候选归一后唯一一致才填入（来源 SPU/SKC、value id、extra value 写入审计与证据并进入 payload hash）；来源缺失、范围歧义、货号不一致或无法解析一律保持阻断，不能硬编码猜值或按文字猜测。
 
 属性查询方式：
 - `query-attribute-template`（需要 `product_type_id_list`，从 `spu-info` 获取 `productTypeId`）
