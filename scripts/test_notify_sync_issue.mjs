@@ -62,4 +62,49 @@ assert.match(coverageText, /部分店铺的数据还没有收齐/);
 assert.match(coverageText, /2026-07-24 缺 LQ,QY/);
 assert.doesNotMatch(coverageText, /处理原则：|commitMatch|dirty=/);
 
+const serviceText = buildSyncIssueMessage({
+  isCloudWatchdog: true,
+  message: '服务异常：shein-bi-et-low-inventory-recheck.service state=failed result=exit-code exit=2 code=1',
+  now,
+});
+assert.match(serviceText, /低库存自动复查连续运行失败/);
+assert.match(serviceText, /系统已经完成自动重试确认/);
+assert.doesNotMatch(serviceText, /shein bi et low inventory recheck运行失败/);
+
+const recoveryText = buildSyncIssueMessage({
+  isCloudWatchdogRecovery: true,
+  message: '服务异常：shein-bi-cloud-openapi-stock-refresh.service state=failed result=exit-code exit=1 code=1',
+  logFile: '/srv/shein-bi/logs/cloud-watchdog/watchdog-recovery.json',
+  now,
+});
+assert.match(recoveryText, /^✅ BI 已自动恢复/m);
+assert.match(recoveryText, /商品库存同步已经恢复运行/);
+assert.match(recoveryText, /无需人工处理/);
+assert.doesNotMatch(recoveryText, /连续运行失败|需要维护/);
+
+const profitText = buildSyncIssueMessage({
+  isCloudWatchdog: true,
+  message: '日更补采异常：date=2026-08-12 status=warning message=profit mart refresh failed status=3 log=/srv/x.log',
+  now,
+});
+assert.match(profitText, /利润数据更新遇到数据库并发冲突/);
+assert.match(profitText, /不会把缺失利润显示成 0/);
+
+const runtimeText = buildSyncIssueMessage({
+  isCloudWatchdog: true,
+  message: 'BI 实时更新通道未连接：enabled=true connected=false',
+  now,
+});
+assert.match(runtimeText, /实时更新连接已中断/);
+assert.match(runtimeText, /现有数据仍可查看/);
+assert.doesNotMatch(runtimeText, /enabled=true|connected=false/);
+
+const auditText = buildSyncIssueMessage({
+  isCloudWatchdog: true,
+  message: '订单闭环 DB 审计失败：psql exit=1',
+  now,
+});
+assert.match(auditText, /订单数据完整性检查没有完成/);
+assert.doesNotMatch(auditText, /psql|exit=1/);
+
 console.log('notify_sync_issue: webhook, marketing, sync and watchdog alerts use business-language copy');

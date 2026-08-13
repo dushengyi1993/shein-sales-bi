@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
-import crypto from 'node:crypto';
 import {
   assessDailyLinkBusinessRecovery,
   assessDailyMarketingGuardHealth,
@@ -11,6 +10,7 @@ import {
   assessDailyMarketingScanRecovery,
   assessDailyOpenapiSalesRecovery,
   assessDailyOpenapiProductRecovery,
+  assessDailyProfitSectionRecovery,
   assessSystemdOneshotResult,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
@@ -28,6 +28,14 @@ import {
   CLOUD_TIMER_UNITS,
 } from '../lib/cloud_runtime_inventory.mjs';
 import {collectSystemdUnitSnapshot} from '../lib/systemd_unit_snapshot.mjs';
+import {
+  applyWatchdogAlertState,
+  markWatchdogDispatchAttempt,
+  markWatchdogDispatchSent,
+  migrateLegacyWatchdogState,
+  pendingWatchdogDispatches,
+  prepareWatchdogDispatches,
+} from '../lib/cloud_watchdog_alert_state.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_STATE_DIR = path.join(ROOT, 'state', 'cloud_ops_watchdog');
@@ -163,6 +171,24 @@ async function readJsonIfExists(file) {
   } catch (err) {
     if (err?.code === 'ENOENT') return null;
     return {error: String(err?.message || err)};
+  }
+}
+
+async function writeJsonAtomic(file, value) {
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  await fs.rename(tmp, file);
+}
+
+async function readLatestWatchdogReport(logDir) {
+  try {
+    const names = (await fs.readdir(logDir))
+      .filter(name => /^watchdog-\d{14}\.json$/.test(name))
+      .sort()
+      .reverse();
+    return names.length ? await readJsonIfExists(path.join(logDir, names[0])) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -414,25 +440,25 @@ SELECT json_build_object(
   return {state, db};
 }
 
-function makeIssueKey(issues) {
-  return crypto.createHash('sha1').update(JSON.stringify(issues)).digest('hex').slice(0, 24);
-}
-
-async function notify(args, message, logFile) {
-  return await run(process.execPath, [
+async function notify(args, message, logFile, {kind = 'cloud-watchdog', idempotencyKey = ''} = {}) {
+  const argv = [
     'scripts/notify_sync_issue.mjs',
-    '--kind', 'cloud-watchdog',
+    '--kind', kind,
     '--mode', 'watchdog',
     '--message', message,
     '--log-file', logFile,
     '--force',
-  ]);
+  ];
+  if (idempotencyKey) argv.push('--idempotency-key', idempotencyKey);
+  return await run(process.execPath, argv);
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  await fs.mkdir(args.stateDir, {recursive: true});
-  await fs.mkdir(args.logDir, {recursive: true});
+  if (!args.dryRun) {
+    await fs.mkdir(args.stateDir, {recursive: true});
+    await fs.mkdir(args.logDir, {recursive: true});
+  }
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
   const logFile = path.join(args.logDir, `watchdog-${stamp}.json`);
 
@@ -659,7 +685,11 @@ async function main() {
           reason: `openapi_product_${productReconciliationHealth.reason}`,
           evidence: {type: 'daily_openapi_product_recovery_blocked_by_actionable_warning'},
         };
-    dailyRefreshRecovery = linkRecovery.recovered
+    const profitSection = await readJsonIfExists(path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'profit.json'));
+    const profitRecovery = assessDailyProfitSectionRecovery({dailyRefresh, profitSection});
+    dailyRefreshRecovery = profitRecovery.recovered
+      ? profitRecovery
+      : linkRecovery.recovered
       ? linkRecovery
       : openapiSalesRecovery.recovered
         ? openapiSalesRecovery
@@ -678,6 +708,7 @@ async function main() {
                 combinedLinkOpenapiSales: combinedLinkOpenapiRecovery.reason,
                 marketingScan: marketingRecovery.reason,
                 openapiProduct: productRecovery.reason,
+                profitSection: profitRecovery.reason,
               },
             };
     if (dailyRefreshRecovery.recovered) {
@@ -783,6 +814,40 @@ async function main() {
   }
   const notificationSelection = prepareWatchdogNotificationIssues({issues, limit: 12});
 
+  const alertStateFile = path.join(args.stateDir, 'alert-state.json');
+  const previousWatchdogReport = await readLatestWatchdogReport(args.logDir);
+  let alertState = await readJsonIfExists(alertStateFile);
+  let alertStateMigration = null;
+  if (!alertState || alertState.error || alertState.schemaVersion !== 'cloud-watchdog-alert-state/v1') {
+    const legacyStateFile = path.join(args.stateDir, 'last-issue-key.txt');
+    let legacyKey = '';
+    try { legacyKey = (await fs.readFile(legacyStateFile, 'utf8')).trim(); } catch {}
+    alertState = migrateLegacyWatchdogState({
+      legacyKey,
+      previousIssues: Array.isArray(previousWatchdogReport?.issues) ? previousWatchdogReport.issues : [],
+    });
+    alertStateMigration = {
+      legacyKeyPresent: Boolean(legacyKey),
+      previousIssueCount: Array.isArray(previousWatchdogReport?.issues) ? previousWatchdogReport.issues.length : 0,
+      migratedEpisodeCount: Object.keys(alertState.episodes || {}).length,
+    };
+  }
+  const alertTransition = applyWatchdogAlertState({
+    previousState: alertState,
+    issues,
+    force: args.force && !(alertStateMigration?.migratedEpisodeCount > 0 && issues.length === 0),
+  });
+  alertState = prepareWatchdogDispatches(alertTransition.nextState);
+  const dispatches = pendingWatchdogDispatches(alertState);
+  const alertStateSummary = {
+    schemaVersion: alertState.schemaVersion,
+    episodeCount: Object.keys(alertState.episodes || {}).length,
+    pendingIssueCount: alertTransition.pendingIssues.length,
+    activeIssueCount: alertTransition.activeIssues.length,
+    pendingDispatchCount: dispatches.length,
+    migration: alertStateMigration,
+  };
+
   const report = {
     ok: issues.length === 0,
     generatedAt: new Date().toISOString(),
@@ -798,6 +863,14 @@ async function main() {
     productReconciliationHealth,
     issueCollapse,
     notificationSelection,
+    alertStateSummary,
+    pendingIssues: alertTransition.pendingIssues,
+    alertNotifications: dispatches.filter(row => row.kind === 'alert').map(row => ({
+      id: row.id, kind: row.kind, intentCount: row.intentIds.length, createdAt: row.createdAt, status: row.status,
+    })),
+    recoveryNotifications: dispatches.filter(row => row.kind === 'recovery').map(row => ({
+      id: row.id, kind: row.kind, intentCount: row.intentIds.length, createdAt: row.createdAt, status: row.status,
+    })),
     marketingGuardState,
     marketingGuardLastOkState,
     marketingGuardService,
@@ -815,24 +888,39 @@ async function main() {
     timers,
     runtimeProbe: {systemctlCommandCount: systemdSnapshot.commandCount, requestedUnitCount: systemdSnapshot.requested.length},
   };
-  await fs.writeFile(logFile, JSON.stringify(report, null, 2), 'utf8');
+  if (!args.dryRun) await fs.writeFile(logFile, JSON.stringify(report, null, 2), 'utf8');
 
-  const issueKey = makeIssueKey(issues);
-  const stateFile = path.join(args.stateDir, 'last-issue-key.txt');
-  let previous = '';
-  try { previous = (await fs.readFile(stateFile, 'utf8')).trim(); } catch {}
-  let notified = false;
-  let notifyResult = null;
-  if (!args.dryRun && issues.length && (args.force || issueKey !== previous)) {
-    const text = notificationSelection.issues.join('\n');
-    notifyResult = await notify(args, text, logFile);
-    notified = notifyResult.ok;
-    if (notifyResult.ok) await fs.writeFile(stateFile, issueKey, 'utf8');
-  } else if (!args.dryRun && !issues.length) {
-    await fs.writeFile(stateFile, 'OK', 'utf8');
+  const notificationOutcomes = [];
+  if (!args.dryRun) {
+    await writeJsonAtomic(alertStateFile, alertState);
+    for (const dispatch of dispatches) {
+      const raws = dispatch.intentIds.map(id => alertState.outbox?.[id]?.raw).filter(Boolean);
+      const selected = prepareWatchdogNotificationIssues({issues: raws, limit: 12});
+      const result = await notify(args, selected.issues.join('\n'), logFile, {
+        kind: dispatch.kind === 'recovery' ? 'cloud-watchdog-recovery' : 'cloud-watchdog',
+        idempotencyKey: dispatch.idempotencyKey,
+      });
+      if (result.ok) alertState = markWatchdogDispatchSent(alertState, dispatch.id);
+      else alertState = markWatchdogDispatchAttempt(alertState, dispatch.id);
+      await writeJsonAtomic(alertStateFile, alertState);
+      notificationOutcomes.push({
+        dispatchId: dispatch.id,
+        kind: dispatch.kind,
+        ok: result.ok,
+        code: result.code,
+      });
+    }
+    // The legacy file is retained only as a readable compatibility marker.
+    await fs.writeFile(path.join(args.stateDir, 'last-issue-key.txt'), issues.length ? 'STATE_V1' : 'OK', 'utf8');
   }
-
-  console.log(JSON.stringify({...report, logFile, notified, notifyCode: notifyResult?.code ?? null}, null, 2));
+  const finalReport = {
+    ...report,
+    notificationOutcomes,
+    notified: notificationOutcomes.some(row => row.ok),
+    notifyCode: notificationOutcomes.find(row => !row.ok)?.code ?? (notificationOutcomes.length ? 0 : null),
+  };
+  if (!args.dryRun) await fs.writeFile(logFile, JSON.stringify(finalReport, null, 2), 'utf8');
+  console.log(JSON.stringify({...finalReport, logFile}, null, 2));
   if (issues.length) process.exitCode = args.dryRun ? 0 : 1;
 }
 
