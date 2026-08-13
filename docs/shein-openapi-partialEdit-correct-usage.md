@@ -62,10 +62,10 @@
 - Power Supply(147) = Wall Plug(1047) → Input voltage(1002322) 和 Input current(1002323) 必填。
 - `partialEdit` 全量校验时会检查这些关联必填属性。
 - 需要在 `product_attribute_list` 中同时传入缺失的必填属性。
-- 对新上 `publishOrEdit`，执行器会先查官方 `query-attribute-template`，再从已有 `Plug(Voltage)` / `Voltage` 属性推导 `Input voltage`。例如 `UK Plug(220-240V)` 可补为 `attribute_id=1002322`、`attribute_value_id=301114341`（`Vac 50–60Hz`）、`attribute_extra_value=220-240`。`1002322` 单位值 ID 复用受控目录映射 `301114341`（evidence 标注 `official_catalog_mapping`，与当前模板 Vac 单位值 ID 冲突则阻断）。当模板/已有属性不足以推导时，按负责人授权执行同货号 provenance 补值，优先级固定：
-  1. 锁定 copy payload 本身（来自精确 sourceSkc，已含官方 `Plug(Voltage)`/`Voltage` 属性）用现有确定性范围解析推导，evidence 记录 locked source store/sourceSkc 与来源属性 id/value id/value；无需再查目标店。
-  2. 当前 payload 无法推导时，才查目标店同货号其他链接（`searchProduct` 单页最多 10 条 → `spu-info`）；`spu-info` 的 supplierCode 必须存在且精确匹配锁定货号，缺失或不匹配一律拒绝，不信任 search 行自带的 supplierCode。
-  所有同货号候选归一后唯一一致才填入（来源 SPU/SKC、value id、extra value 写入审计与证据并进入 payload hash）；来源缺失、范围歧义、货号不一致或无法解析一律保持阻断，不能硬编码猜值或按文字猜测。
+- 对新上 `publishOrEdit`，执行器会先查官方 `query-attribute-template`，再从已有 `Plug(Voltage)` / `Voltage` 属性推导 `Input voltage`。例如 `UK Plug(220-240V)` 可补为 `attribute_id=1002322`、`attribute_value_id=301114341`（`Vac 50–60Hz`）、`attribute_extra_value=220-240`。`1002322` 单位值 ID 复用受控目录映射 `INPUT_VOLTAGE_AC_VALUE_ID=301114341`（evidence 标注 `official_catalog_mapping`；若官方模板返回 1002322，模板 Vac 单位值 ID 为权威，绝不注入受控映射）。
+- 模板缺失且 Power Supply=Wall Plug/Power Adapter 要求 `1002322` 时，仅当任务为精确 `copy_product_draft`、来源是本次 findOrBuild 的精确 source lock（sourceStore+sourceSkc 均存在且 exactSourceLock）、且锁定目标标准货号与源 payload 的 supplier identity 完全一致时，才允许从锁定源 payload 的官方 `Plug(Voltage)`/`Voltage` 属性用现有确定性范围解析推导并补 `1002322`；evidence 记录 locked source store/sourceSkc/标准货号与来源属性 id/value id/value。不再有任何目标店 live 同货号兜底查询。
+- 缺 intent、缺 source、来源不精确、标准货号缺失/不唯一/不一致、无法推导电压范围，一律保持阻断（必须人工补充），不能硬编码猜值或按文字猜测。
+- 执行锁 hash 为 scope v2（`sha256-stable-json-scope-v2`）：真实 `expectedPayloadHash` 覆盖 final publish payload + sourceStore + sourceSkc + 目标标准货号；body hash 单独保留（`bodyHash`，`sha256-stable-json-v1` 语义）供描述绑定与审计。preflight/execute 复用同一 exact productDraftLock，任何来源漂移都会导致 hash 漂移并阻断真实提交。
 
 属性查询方式：
 - `query-attribute-template`（需要 `product_type_id_list`，从 `spu-info` 获取 `productTypeId`）
