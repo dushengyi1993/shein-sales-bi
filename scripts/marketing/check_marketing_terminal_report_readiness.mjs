@@ -30,6 +30,32 @@ function addRows(target, rows) {
   }
 }
 
+// Real-time qualification re-check may safely skip a planned high-click row
+// once it no longer qualifies (already ordered, below click-rate threshold, or
+// delisted). The batch records that terminal skip as `no_longer_qualifies` with
+// `ok=true`; the manual terminal-state copy uses the compatible name
+// `blocked_no_longer_qualifies`. Only an explicit success with one of these
+// exact statuses counts as accounted; anything else stays unhandled.
+const SAFE_TERMINAL_SKIP_STATUSES = new Set([
+  'no_longer_qualifies',
+  'blocked_no_longer_qualifies',
+]);
+
+function isSafeTerminalSkip(row) {
+  return row?.ok === true
+    && SAFE_TERMINAL_SKIP_STATUSES.has(String(row?.status || ''));
+}
+
+function safeTerminalSkippedKeys(result) {
+  const keys = new Set();
+  for (const row of result?.results || []) {
+    if (!isSafeTerminalSkip(row)) continue;
+    const key = keyOf(row);
+    if (key) keys.add(key);
+  }
+  return keys;
+}
+
 function fallbackBlockedKeys(result) {
   const keys = new Set();
   for (const row of result?.results || []) {
@@ -57,10 +83,23 @@ async function driftBlockedKeys(result, root) {
 function directBlockedKeys(result) {
   const keys = new Set();
   for (const row of result?.results || []) {
-    if (!String(row?.status || '').includes('blocked')) continue;
+    const status = String(row?.status || '');
+    if (!status.includes('blocked')) continue;
+    // Safe qualification-skip statuses are high-click-specific. Never let the
+    // compatible `blocked_` prefix enter the generic blocker path; the
+    // high-click path adds it back only when `ok === true`.
+    if (SAFE_TERMINAL_SKIP_STATUSES.has(status)) continue;
     const key = keyOf(row);
     if (key) keys.add(key);
   }
+  return keys;
+}
+
+// Rows that are either genuinely blocked or safely skipped after real-time
+// qualification re-check are terminal evidence for the high-click stage.
+function highClickTerminalKeys(result) {
+  const keys = directBlockedKeys(result);
+  for (const key of safeTerminalSkippedKeys(result)) keys.add(key);
   return keys;
 }
 
@@ -98,7 +137,7 @@ export async function assessTerminalReportReadiness({
 } = {}) {
   const planned = plannedKeys({guard, highClickPlan, manualPlan, driftPlan, fallbackPlan});
   const accounted = {
-    highClickSpecial: directBlockedKeys(highClickResult),
+    highClickSpecial: highClickTerminalKeys(highClickResult),
     manualSpecialRestore: directBlockedKeys(manualResult),
     driftRepair: await driftBlockedKeys(driftResult, root),
     fallbackRepair: fallbackBlockedKeys(fallbackResult),
