@@ -1838,12 +1838,20 @@ function ensurePowerSupplyInputVoltage(payload, productAttributeList, templateBy
     blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但官方属性模板未返回该属性，不能自动补齐。`);
     return {applied, blockers, inputVoltageRequired: true};
   }
+  // P1 contract: when the official template returns a Vac unit value id that
+  // differs from the controlled catalog mapping 301114341, the conflicting
+  // template id must never be adopted. Block with unit_value_id_conflict.
+  const templateVacValueId = chooseInputVoltageAcUnitValueId(template);
+  if (templateVacValueId && templateVacValueId !== INPUT_VOLTAGE_AC_VALUE_ID) {
+    blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；官方模板返回的 Vac 单位值 ID(${templateVacValueId}) 与受控目录映射(${INPUT_VOLTAGE_AC_VALUE_ID}) 冲突，不能采用模板值，必须人工补充。`);
+    return {applied, blockers, inputVoltageRequired: true, unitValueIdConflict: templateVacValueId};
+  }
   const inferred = inferInputVoltageFromPayload(payload, templateById);
   if (!inferred?.attribute_extra_value) {
     blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，但无法从 Plug(Voltage)/Voltage 属性推导电压范围；请补充 Input voltage。`);
     return {applied, blockers, inputVoltageRequired: true};
   }
-  const unitValueId = existingValueId || chooseInputVoltageAcUnitValueId(template);
+  const unitValueId = existingValueId || templateVacValueId;
   if (!unitValueId) {
     blockers.push(`Power Supply=${powerSupplyLabel} 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填，已推导 ${inferred.attribute_extra_value}，但无法从官方属性模板匹配 Vac 单位值 ID。`);
     return {applied, blockers, inputVoltageRequired: true};
@@ -2024,8 +2032,9 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
     const lockedSourceStore = safeString(sourceContext?.sourceStore || '', 80);
     const lockedSourceSkc = safeString(sourceContext?.sourceSkc || '', 160);
     const lockedStandardGoodsSn = safeString(sourceContext?.standardGoodsSn || '', 160);
-    const sourcePayloadCodes = [...new Set(asArray(sourceContext?.sourcePayloadSupplierCodes).map(compactRef).filter(Boolean))];
-    const payloadCodes = [...new Set(publishTargetSupplierCodes(next).map(compactRef).filter(Boolean))];
+    const lockedStandardGoodsSnNormalized = normalizeSupplierIdentity(lockedStandardGoodsSn);
+    const sourcePayloadCodes = [...new Set(asArray(sourceContext?.sourcePayloadSupplierCodes).map(normalizeSupplierIdentity).filter(Boolean))];
+    const payloadCodes = [...new Set(publishTargetSupplierCodes(next).map(normalizeSupplierIdentity).filter(Boolean))];
     const provenanceAllowed = sourceContext?.copyProductDraft === true
       && sourceContext?.exactSourceLock === true
       && Boolean(lockedSourceStore)
@@ -2033,16 +2042,24 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
       && Boolean(lockedStandardGoodsSn)
       && sourcePayloadCodes.length === 1
       && payloadCodes.length === 1
-      && sourcePayloadCodes[0] === compactRef(lockedStandardGoodsSn)
-      && payloadCodes[0] === compactRef(lockedStandardGoodsSn);
-    if (!provenanceAllowed) {
+      && sourcePayloadCodes[0] === lockedStandardGoodsSnNormalized
+      && payloadCodes[0] === lockedStandardGoodsSnNormalized;
+    if (powerSupplyInputVoltage.unitValueIdConflict) {
+      blockers.push(...powerSupplyInputVoltage.blockers);
+      evidence.inputVoltageProvenance = {
+        status: 'unit_value_id_conflict',
+        source: 'locked_source_payload',
+        templateVacValueId: powerSupplyInputVoltage.unitValueIdConflict,
+        officialCatalogMapping: {attributeId: INPUT_VOLTAGE_ATTRIBUTE_ID, valueId: INPUT_VOLTAGE_AC_VALUE_ID, label: INPUT_VOLTAGE_AC_UNIT_LABEL},
+      };
+    } else if (!provenanceAllowed) {
       const reason = sourceContext?.copyProductDraft !== true
         ? '任务不是精确的 copy_product_draft 发布'
         : sourceContext?.exactSourceLock !== true || !lockedSourceStore || !lockedSourceSkc
           ? '来源不是本次 findOrBuild 的精确 source lock（缺 sourceStore/sourceSkc 或来源不精确）'
           : !lockedStandardGoodsSn || sourcePayloadCodes.length !== 1 || payloadCodes.length !== 1
             ? `标准货号缺失或不唯一（source=${sourcePayloadCodes.join('、') || '空'} payload=${payloadCodes.join('、') || '空'}）`
-            : `源 payload 标准货号（${sourcePayloadCodes[0]}）与任务目标标准货号（${lockedStandardGoodsSn}）不一致`;
+            : `源 payload 标准货号（${sourcePayloadCodes[0]}）与任务目标标准货号（${lockedStandardGoodsSnNormalized}）不一致`;
       blockers.push(`Power Supply 触发 Input voltage(${INPUT_VOLTAGE_ATTRIBUTE_ID}) 必填；${reason}，禁止从源 payload 推导补值，必须人工补充 Input voltage。`);
       evidence.inputVoltageProvenance = {
         status: 'blocked',
@@ -2529,6 +2546,13 @@ function publishTargetSupplierCodes(payload) {
   return [...new Set(asArray(payload?.skc_list || payload?.skcList)
     .map(row => safeString(row?.supplier_code ?? row?.supplierCode ?? '', 160))
     .filter(Boolean))];
+}
+
+// Strict supplier identity normalization for provenance guards: only trim and
+// Unicode NFKC are allowed. Hyphens, brackets and punctuation are significant -
+// "HL03012SN" and "HL-03012-SN" are different identities and must never match.
+function normalizeSupplierIdentity(value) {
+  return String(value || '').trim().normalize('NFKC');
 }
 
 function existingTargetSkcRows(data, supplierCodes) {

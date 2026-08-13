@@ -514,6 +514,22 @@ const guardMismatchBlocked = await __testHooks.applyAttributeTemplateRules(
 check('source payload goods A with task goods B blocks provenance', guardMismatchBlocked.blockers.some(text => /与任务目标标准货号/.test(text)), true);
 check('goods-number mismatch does not fill payload', guardMismatchBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
 
+const guardPunctuationMismatchBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {...exactSourceContext, sourcePayloadSupplierCodes: ['HL03012SN']},
+);
+check('HL03012SN vs HL-03012-SN strict identity blocks provenance', guardPunctuationMismatchBlocked.blockers.some(text => /与任务目标标准货号/.test(text)), true);
+check('strict identity mismatch does not fill payload', guardPunctuationMismatchBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
+const guardMissingIntentBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  clone(wallPlugPayload),
+  {...exactSourceContext, copyProductDraft: undefined},
+);
+check('missing copy intent blocks the provenance path', guardMissingIntentBlocked.blockers.some(text => /必须人工补充 Input voltage/.test(text)), true);
+check('missing copy intent does not fill payload', guardMissingIntentBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
 const guardUnresolvableBlocked = await __testHooks.applyAttributeTemplateRules(
   provenanceClient({searchRows: [], spuInfoBySpu: {}}),
   {
@@ -573,10 +589,10 @@ const voltageConflictTemplateResponse = {
 const voltageConflictClient = provenanceClient({searchRows: [], spuInfoBySpu: {}, templateResponse: voltageConflictTemplateResponse});
 const voltageConflict = await __testHooks.applyAttributeTemplateRules(voltageConflictClient, clone(wallPlugPayload), exactSourceContext);
 const conflictRow = voltageConflict.payload.product_attribute_list.find(row => Number(row.attribute_id) === 1002322);
-check('template Vac unit id stays authoritative over controlled mapping', conflictRow?.attribute_value_id, 999999);
-check('template path never injects controlled 301114341', conflictRow?.attribute_value_id !== 301114341, true);
-check('no official catalog mapping marker when template disagrees', voltageConflict.applied.some(item => item === 'official_catalog_mapping:1002322.vac_value_id=301114341'), false);
-check('template-authoritative fill has no blockers', voltageConflict.blockers.length, 0);
+check('template Vac unit id conflict blocks instead of adopting 999999', voltageConflict.blockers.some(text => /冲突/.test(text)), true);
+check('template conflict evidence is unit_value_id_conflict', voltageConflict.evidence.inputVoltageProvenance?.status, 'unit_value_id_conflict');
+check('template conflict records the conflicting template id', voltageConflict.evidence.inputVoltageProvenance?.templateVacValueId, 999999);
+check('template conflict never fills 1002322', Boolean(conflictRow), false);
 
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
