@@ -99,7 +99,7 @@ try {
 
   const status = await service.status();
   assert.equal(status.activeRules, 2);
-  assert.equal(status.candidates, 2);
+  assert.equal(status.candidates, 0, 'legacy message candidates stay in audit history but not the new review queue');
   assert.equal(status.activeDevices, 1);
   assert.match(status.fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(status.distribution.ready, true);
