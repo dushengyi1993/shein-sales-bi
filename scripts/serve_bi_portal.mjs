@@ -3025,6 +3025,11 @@ function normalizeLinkOpsTargetSet(targets = {}) {
       ? targets.productRefs.split(/[,\s，、]+/)
       : [];
   const standardGoodsSn = normalizeStandardGoodsSnDisplayRef(targets?.standardGoodsSn || targets?.standard_goods_sn);
+  const rawSourceSkc = String(targets?.sourceSkc || targets?.source_skc || '').trim().slice(0, 120);
+  // Legacy task stores may contain free-form source metadata. Preserve read
+  // compatibility by activating an exact source lock only for valid SHEIN SKC
+  // syntax; new structured requests are rejected explicitly below.
+  const sourceSkc = /^s[avb]\d{8,}$/.test(rawSourceSkc) ? rawSourceSkc : '';
   const productRefs = standardGoodsSn
     ? [standardGoodsSn, ...rawProductRefs.filter(ref => String(ref || '').normalize('NFKC').replace(/\s+/g, '').trim() !== standardGoodsSn)]
     : rawProductRefs;
@@ -3046,6 +3051,7 @@ function normalizeLinkOpsTargetSet(targets = {}) {
     sourceScope: ['all_stores', 'target_stores'].includes(String(targets?.sourceScope || targets?.source_scope || '').trim())
       ? String(targets.sourceScope || targets.source_scope).trim()
       : '',
+    sourceSkc,
     productRefs: clean(productRefs, 48),
     standardGoodsSn,
     attributeOverrides,
@@ -3059,6 +3065,7 @@ function mergeLinkOpsTargets(...items) {
     sourceStores: normalized.flatMap(x => x.sourceStores),
     writeStores: normalized.flatMap(x => x.writeStores),
     sourceScope: normalized.find(x => x.sourceScope)?.sourceScope || '',
+    sourceSkc: normalized.find(x => x.sourceSkc)?.sourceSkc || '',
     productRefs: normalized.flatMap(x => x.productRefs),
     standardGoodsSn: normalized.find(x => x.standardGoodsSn)?.standardGoodsSn || '',
     attributeOverrides: normalized.flatMap(x => x.attributeOverrides),
@@ -3474,10 +3481,17 @@ function buildLinkOpsTaskFromCommand(body, actor, req) {
     command,
   );
   const structuredParameters = normalizeStructuredLinkOpsParameters(body.parameters);
+  const requestedSourceSkc = String(body?.targets?.sourceSkc || body?.targets?.source_skc || '').trim();
+  if (requestedSourceSkc && !/^s[avb]\d{8,}$/.test(requestedSourceSkc)) {
+    throw new Error('Invalid sourceSkc: expected one exact case-sensitive SHEIN SKC');
+  }
   const targets = normalizeTargetsForIntents(intents, mergeLinkOpsTargets(
     body.targets && typeof body.targets === 'object' ? body.targets : {},
     structuredIntents.length ? {} : inferLinkOpsTargets(command)
   ));
+  if (targets.sourceSkc && targets.sourceStores.length !== 1) {
+    throw new Error('sourceSkc requires exactly one sourceStore');
+  }
   if (structuredParameters.standardGoodsSn && !targets.productRefs.includes(structuredParameters.standardGoodsSn)) {
     targets.productRefs = [...targets.productRefs, structuredParameters.standardGoodsSn].slice(0, 24);
   }
@@ -3849,6 +3863,7 @@ function projectLinkOpsTargetsForClient(targets, intents = []) {
     stores: normalizeConcreteStoreKeys(normalized.stores),
     writeStores: normalizeConcreteStoreKeys(normalized.writeStores),
     sourceStores: normalizeConcreteStoreKeys(normalized.sourceStores),
+    sourceSkc: sanitizeLinkOpsClientText(normalized.sourceSkc || '', 120),
     productRefs: productRefs.slice(0, 12),
     sourceScope: sanitizeLinkOpsClientText(normalized.sourceScope || '', 80),
     attributeOverrides: asArray(normalized.attributeOverrides).map(item => ({
@@ -4338,6 +4353,54 @@ function patchLinkOpsTask(task, body, actor, req) {
     updatedAt: new Date().toISOString(),
   };
   const event = String(body.event || body.action || 'update').slice(0, 80);
+  if (body.sourceSkc !== undefined || body.sourceStore !== undefined) {
+    if (event !== 'lock_source_skc_cli') throw new Error('sourceStore/sourceSkc can only be changed by lock_source_skc_cli');
+    if (taskRequiresOwnerLifecycleResolve(task)) throw new Error('提交后待回读/人工处理任务不能修改源链接锁。');
+    const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
+    if (intents.length !== 1 || intents[0] !== 'copy_product_draft') throw new Error('精确源链接锁只适用于单一 copy_product_draft 任务。');
+    if (['done', 'archived'].includes(String(task?.status || ''))) throw new Error(`任务状态 ${task.status} 已终结，不能修改源链接锁。`);
+    if (task?.execution?.writeClaim) throw new Error('任务已有活动 write claim，不能修改源链接锁。');
+    if (task?.descriptionMaterialBinding) throw new Error('任务已绑定审核描述；必须在描述绑定前锁定精确源链接，禁止事后改变来源。');
+    const hasExistingPayloadCarrier = Boolean(
+      task?.openapiPublishPayload
+      || task?.sheinOpenapiPublishPayload
+      || task?.publishPayload
+      || task?.publishOrEditPayload
+      || task?.publishAssetBinding
+      || asArray(task?.assets).some(asset => asset?.sourceApproved === true && /json/i.test(String(asset?.mime || asset?.originalName || asset?.storedName || '')))
+    );
+    if (hasExistingPayloadCarrier) throw new Error('任务已绑定/物化发布 payload；必须在图片、JSON payload 和发布字段绑定前锁定精确源链接，禁止事后改变来源。');
+    const expectedRevision = Number(body.expectedRevision || 0);
+    const currentRevision = Number(task.repositoryRevision || 0);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0 || expectedRevision !== currentRevision) {
+      throw new Error(`源链接锁 CAS 失败：期望 revision ${expectedRevision || '(empty)'}，当前 ${currentRevision || '(empty)'}`);
+    }
+    const sourceStore = String(body.sourceStore || '').trim().toUpperCase();
+    const sourceSkc = String(body.sourceSkc || '').trim();
+    if (!/^[A-Z0-9]{2,4}$/.test(sourceStore)) throw new Error('源链接锁必须提供一个有效 sourceStore。');
+    if (!/^s[avb]\d{8,}$/.test(sourceSkc)) throw new Error('源链接锁必须提供一个精确且区分大小写的 SHEIN sourceSkc。');
+    const denied = requireReadStores(actor, [sourceStore]);
+    if (denied) throw new Error(denied.error || '当前账号没有来源店铺读权限');
+    const currentTargets = normalizeTargetsForIntents(task?.intents || [], task?.targets || {});
+    if (currentTargets.sourceSkc && currentTargets.sourceSkc !== sourceSkc) {
+      throw new Error(`任务已锁定其他 sourceSkc ${currentTargets.sourceSkc}，禁止漂移覆盖。`);
+    }
+    if (currentTargets.sourceStores.length === 1 && currentTargets.sourceStores[0] !== sourceStore) {
+      throw new Error(`任务已锁定其他 sourceStore ${currentTargets.sourceStores[0]}，禁止漂移覆盖。`);
+    }
+    next.targets = normalizeTargetsForIntents(task?.intents || [], {
+      ...currentTargets,
+      sourceStores: [sourceStore],
+      sourceSkc,
+    });
+    next.preflight = {ok: false, blockers: ['精确源店/SKC 已锁定，需要重新预检。'], warnings: []};
+    next.execution = {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      state: 'needs_repreflight',
+      openApiProductExecutors: [],
+      preflight: next.preflight,
+    };
+  }
   if (body.status !== undefined) {
     const status = String(body.status || '').trim();
     if (!LINK_OPS_ALLOWED_STATUSES.has(status)) throw new Error(`Invalid status: ${status}`);
@@ -12421,6 +12484,30 @@ async function main() {
             });
             const deniedStatus = /只有全店管理账号|权限|denied|forbidden|unauthorized/i.test(error) ? 403 : 400;
             return sendJson(res, deniedStatus, {ok: false, error});
+          }
+          if (String(body.event || body.action || '') === 'lock_source_skc_cli') {
+            if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+              return sendJson(res, 503, {ok: false, error: '源链接锁需要支持单任务原子 CAS 的存储网关', code: 'LINK_OPS_GATEWAY_UNAVAILABLE'});
+            }
+            let persisted;
+            try {
+              persisted = await args.linkOpsStoreGateway.updateTaskRecord(id, updated, {
+                expectedRevision: Number(body.expectedRevision || 0),
+                actorUser: actorUser(actor, req),
+              });
+            } catch (error) {
+              const mapped = linkOpsRepositoryHttpDetails(error);
+              if (mapped) return sendJson(res, mapped.status, mapped.body);
+              throw error;
+            }
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-task-update',
+              actor,
+              ...requestMeta(req),
+              task: {id, event: 'lock_source_skc_cli', status: persisted.status, progress: normalizeProgress(persisted.progress, 0)},
+            });
+            return sendJson(res, 200, {ok: true, task: projectLinkOpsTaskForClient(persisted)});
           }
           const tasks = current.tasks.slice();
           tasks[idx] = updated;
