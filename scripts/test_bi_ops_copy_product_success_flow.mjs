@@ -748,6 +748,12 @@ try {
     check('chat session id present', Boolean(chatSessionId), true);
     check('chat created copy intent', created.json?.autoTask?.intents || [], xs => asArray(xs).includes('copy_product_draft'));
     check('chat created target HL only', created.json?.autoTask?.targets?.writeStores || created.json?.autoTask?.targets?.stores || [], xs => asArray(xs).length === 1 && String(xs[0]).toUpperCase() === 'HL');
+    // The production copy contract requires an exact unique task source lock
+    // (sourceStore + sourceSkc) even when the payload comes from a bound asset.
+    await updateRawTaskById(taskId, task => ({
+      ...task,
+      targets: {...task.targets, sourceStores: ['DL'], sourceSkc: 'sv25082902871830770'},
+    }));
   } else {
     created = await req('/api/link-ops-tasks', {
       method: 'POST',
@@ -757,6 +763,8 @@ try {
         command: productCase.command,
         targets: {
           stores: ['HL'],
+          sourceStores: ['DL'],
+          sourceSkc: 'sv25082902871830770',
           productRefs: productCase.productRefs,
           standardGoodsSn: taskStandardGoodsSn,
         },

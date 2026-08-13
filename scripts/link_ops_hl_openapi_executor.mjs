@@ -656,9 +656,11 @@ async function findPublishPayload(task) {
 }
 
 async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
-  const exactSourceStore = normalizeStoreKey(asArray(task?.targets?.sourceStores)[0] || '');
+  const exactSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
+  const exactSourceStore = exactSourceStores.length === 1 ? exactSourceStores[0] : '';
   const exactSourceSkc = safeString(task?.targets?.sourceSkc || '', 120);
   const hasExactSourceLock = Boolean(exactSourceStore && exactSourceSkc);
+  const taskExactSource = hasExactSourceLock ? {sourceStore: exactSourceStore, sourceSkc: exactSourceSkc} : null;
   const existing = await findPublishPayload(task);
   if (existing?.payload) {
     // A server-bound task keeps the reviewed payload at the task root. Retain
@@ -667,7 +669,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
     // still knows the exact source store and SPU. Never replace or merge the
     // bound payload with a snapshot payload here.
     const inferred = inferSourceProductFromTask(task, {targetStore});
-    if (!inferred.sourceStore || !inferred.sourceSkc) return {...existing, inferred, exactSourceLock: hasExactSourceLock};
+    if (!inferred.sourceStore || !inferred.sourceSkc) return {...existing, inferred, exactSourceLock: hasExactSourceLock, taskExactSource};
     try {
       const generated = await buildProductDraftFromSnapshots({
         sourceStore: inferred.sourceStore,
@@ -679,13 +681,22 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
         ...existing,
         inferred,
         exactSourceLock: hasExactSourceLock,
+        taskExactSource,
         generatedDraft: summarizeDraftForExecutor(generated),
         canonicalDraft: generated.canonicalDraft,
       };
-    } catch {
-      return hasExactSourceLock
-        ? {...existing, payload: null, inferred, exactSourceLock: true, generationError: `精确源链接 ${exactSourceStore}/${exactSourceSkc} 无法从当前详情快照还原，拒绝沿用已绑定 payload。`}
-        : {...existing, inferred, exactSourceLock: false};
+    } catch (err) {
+      // The bound payload (root openapiPublishPayload or approved asset) stays
+      // authoritative; snapshot hydration is read-only metadata enrichment.
+      // The exact task source lock is preserved and enforced separately by the
+      // source scope resolution and the scope-v2 execution hash.
+      return {
+        ...existing,
+        inferred,
+        exactSourceLock: hasExactSourceLock,
+        taskExactSource,
+        sourceMetadataWarning: `精确源链接 ${exactSourceStore}/${exactSourceSkc} 无法从当前详情快照还原只读元数据：${safeString(err?.message || err, 300)}`,
+      };
     }
   }
   if (taskHasUnboundImageAssets(task)) {
@@ -693,6 +704,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
       source: 'unbound_image_assets',
       payload: null,
       inferred: inferSourceProductFromTask(task, {targetStore}),
+      taskExactSource,
       generationError: '任务已经上传本地图片，但这些图片尚未转换并绑定到发布 payload；已拒绝静默回退到源链接图片。请先使用同一任务的图片准备/绑定流程。',
     };
   }
@@ -706,6 +718,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
       source: 'missing',
       payload: null,
       inferred,
+      taskExactSource,
       generationError: inferred.sourceStore
         ? '未能从任务中识别源 SKC。'
         : '未能从任务中识别源店和源 SKC。',
@@ -729,6 +742,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
         mappingWarnings: generated.warnings,
         inferred: candidate,
         exactSourceLock: hasExactSourceLock,
+        taskExactSource,
         attemptedCandidates: candidates.map(x => ({
           sourceStore: x.sourceStore,
           sourceSkc: x.sourceSkc,
@@ -745,6 +759,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
     source: 'webapi_snapshot_error',
     payload: null,
     inferred,
+    taskExactSource,
     attemptedCandidates: candidates.map(x => ({
       sourceStore: x.sourceStore,
       sourceSkc: x.sourceSkc,
@@ -753,6 +768,60 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
       metrics: x.metrics || null,
     })),
     generationError: errors.slice(0, 8).join('；') || '未能从候选源链接生成发布 payload。',
+  };
+}
+
+// Source scope resolution contract: every copy_product_draft with an exact
+// unique task source lock (targets.sourceStores single value + sourceSkc) MUST
+// resolve and preserve that lock, even when the payload comes from a root
+// openapiPublishPayload or an approved asset. The resolved store/skc feed the
+// scope-v2 execution hash, the provenance guard and the executor projection.
+// Missing/multi-valued locks or a conflict between the exact lock and the
+// inferred source fail closed with a blocker instead of an empty source.
+function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore = ''}) {
+  const copyProductDraft = asArray(intents).includes('copy_product_draft');
+  // The exact task source lock is authoritative and computed from the task
+  // itself: single-valued targets.sourceStores plus a non-empty
+  // targets.sourceSkc. Multiple/absent stores resolve to no lock (fail closed).
+  const exactSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
+  const exactSourceStore = exactSourceStores.length === 1 ? exactSourceStores[0] : '';
+  const exactSourceSkc = safeString(task?.targets?.sourceSkc || '', 160);
+  const taskExact = exactSourceStore && exactSourceSkc ? {sourceStore: exactSourceStore, sourceSkc: exactSourceSkc} : null;
+  const inferred = payloadFound?.inferred && typeof payloadFound.inferred === 'object' ? payloadFound.inferred : {};
+  const inferredStore = normalizeStoreKey(
+    inferred?.sourceStore
+    || payloadFound?.generatedDraft?.sourceStore
+    || payloadFound?.canonicalDraft?.source?.storeKey
+    || '',
+  );
+  const inferredSkc = safeString(
+    inferred?.sourceSkc
+    || payloadFound?.generatedDraft?.sourceSkc
+    || payloadFound?.canonicalDraft?.openApiDetail?.skcName
+    || '',
+    160,
+  );
+  const blockers = [];
+  if (copyProductDraft) {
+    if (!taskExact) {
+      blockers.push('copy_product_draft 任务缺少精确唯一的 task.targets sourceStore+sourceSkc；禁止空来源发布，需人工补充精确源链接。');
+    } else {
+      if (inferredStore && inferredStore !== taskExact.sourceStore) {
+        blockers.push(`copy_product_draft 任务精确源店 ${taskExact.sourceStore} 与推断来源 ${inferredStore} 冲突，禁止发布。`);
+      }
+      if (inferredSkc && inferredSkc !== taskExact.sourceSkc) {
+        blockers.push(`copy_product_draft 任务精确源 SKC ${taskExact.sourceSkc} 与推断来源 ${inferredSkc} 冲突，禁止发布。`);
+      }
+    }
+  }
+  return {
+    copyProductDraft,
+    taskExact,
+    inferredStore,
+    inferredSkc,
+    sourceStore: taskExact ? taskExact.sourceStore : inferredStore,
+    sourceSkc: taskExact ? taskExact.sourceSkc : inferredSkc,
+    blockers,
   };
 }
 
@@ -3419,6 +3488,9 @@ async function main() {
     targetStore,
     preferredSource: productDraftLock,
   });
+  const lockedSourceScope = resolveLockedSourceScope({payloadFound, task, intents, targetStore});
+  appendUnique(blockers, lockedSourceScope.blockers);
+  if (payloadFound?.sourceMetadataWarning) appendUnique(warnings, payloadFound.sourceMetadataWarning);
   let payloadSummary = null;
   let safeDefaults = [];
   let manualAttributeOverrides = [];
@@ -3449,19 +3521,8 @@ async function main() {
     const templateApplied = await applyAttributeTemplateRules(client, standardGoodsSnApplied.payload, {
       copyProductDraft: intents.includes('copy_product_draft'),
       exactSourceLock: payloadFound?.exactSourceLock === true,
-      sourceStore: normalizeStoreKey(
-        payloadFound?.inferred?.sourceStore
-        || payloadFound?.generatedDraft?.sourceStore
-        || payloadFound?.canonicalDraft?.source?.storeKey
-        || '',
-      ),
-      sourceSkc: safeString(
-        payloadFound?.inferred?.sourceSkc
-        || payloadFound?.generatedDraft?.sourceSkc
-        || payloadFound?.canonicalDraft?.openApiDetail?.skcName
-        || '',
-        160,
-      ),
+      sourceStore: lockedSourceScope.sourceStore,
+      sourceSkc: lockedSourceScope.sourceSkc,
       standardGoodsSn: safeString(taskStandardGoodsSnValue, 160),
       sourcePayloadSupplierCodes,
     });
@@ -3521,20 +3582,8 @@ async function main() {
     // audit; the two are never mixed.
     const executionScope = {
       payload: publishPayload,
-      sourceStore: safeString(
-        payloadFound?.inferred?.sourceStore
-        || payloadFound?.generatedDraft?.sourceStore
-        || payloadFound?.canonicalDraft?.source?.storeKey
-        || '',
-        80,
-      ),
-      sourceSkc: safeString(
-        payloadFound?.inferred?.sourceSkc
-        || payloadFound?.generatedDraft?.sourceSkc
-        || payloadFound?.canonicalDraft?.openApiDetail?.skcName
-        || '',
-        160,
-      ),
+      sourceStore: safeString(lockedSourceScope.sourceStore, 80),
+      sourceSkc: safeString(lockedSourceScope.sourceSkc, 160),
       standardGoodsSn: safeString(taskStandardGoodsSn(task, effectiveExecutionContext), 160),
     };
     bodyHash = sha256Stable(publishPayload);
@@ -3641,6 +3690,8 @@ async function main() {
     startedAt,
     endedAt: new Date().toISOString(),
     storeKey: targetStore,
+    sourceStore: lockedSourceScope.sourceStore,
+    sourceSkc: lockedSourceScope.sourceSkc,
     sourceTaskFile: rel(source),
     task: {
       id: task?.id || '',
@@ -3743,6 +3794,7 @@ export const __testHooks = {
   applyManualAttributeOverrides,
   applyAttributeTemplateRules,
   inspectTargetDuplicateProducts,
+  resolveLockedSourceScope,
   applyRandomSupplyPrice,
   applyExplicitPublishPreparationOverrides,
   applyTargetStandardGoodsSn,
