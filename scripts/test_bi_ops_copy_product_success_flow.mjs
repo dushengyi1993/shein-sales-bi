@@ -1042,13 +1042,14 @@ try {
     check('weak-only writeAudit lifecycle locked', Boolean(writeAudit?.lifecycleLocked), true);
     check('weak-only writeAudit requires manual resolve', Boolean(writeAudit?.requiresManualResolve), true);
     check('weak-only task needs manual resolve', executedTask?.status || '', 'needs_manual_resolve');
-    check('weak-only lifecycle failed not matched', lifecycle?.status || lifecycle?.lifecycleStatus || '', 'submitted_readback_failed');
+    check('weak-only lifecycle keeps pending-review semantics', lifecycle?.status || lifecycle?.lifecycleStatus || '', 'submitted_but_readback_pending');
+    check('weak-only lifecycle transitions to manual resolve', lifecycle?.toStatus || '', 'needs_manual_resolve');
     check('weak-only lifecycle locked', Boolean(lifecycle?.locked), true);
     check('weak-only manual resolve required', Boolean(lifecycle?.needsManualResolve), true);
     check('weak-only executor readback not ok', Boolean(execEvidence?.readback?.ok), false);
-    check('weak-only readback status', execEvidence?.readback?.status || '', 'weak_match_only');
+    check('weak-only readback is pending review, not failed', execEvidence?.readback?.status || '', 'new_identity_pending_review_unverifiable');
+    check('weak-only readback marks pending review', Boolean(execEvidence?.readback?.pendingReview), true);
     check('weak-only no strong matches', Number(execEvidence?.readback?.matchedCount || 0), 0);
-    check('weak-only has weak matches', Number(execEvidence?.readback?.weakMatchedCount || 0), n => n >= 1);
     if (CHAT_NATURAL) {
       check('chat weak-readback answer says submitted but manual resolve', chatAnswer, text => /已返回创建成功|已返回提交成功/.test(String(text || '')) && /人工确认|人工核销|回读没有|自动回读/.test(String(text || '')) && /不会重复提交|避免重复/.test(String(text || '')));
       check('chat weak-readback answer includes returned ids', chatAnswer, text => /sv-smoke-copy-product/.test(String(text || '')) && /trace-copy-success-smoke/.test(String(text || '')));
@@ -1066,6 +1067,7 @@ try {
       check('chat locked lifecycle retry status', lockedRetry.status, 200);
       check('chat locked lifecycle answer refuses duplicate submit', lockedRetryAnswer, text => /已经提交过|不会重新|人工确认|核销/.test(String(text || '')));
       check('chat locked lifecycle task remains manual resolve', lockedRetryRawTask?.status || '', 'needs_manual_resolve');
+      check('chat locked lifecycle keeps pending-readback lifecycle', lockedRetryRawTask?.lifecycle?.lifecycleStatus || '', 'submitted_but_readback_pending');
       check('chat locked lifecycle no extra publish', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, publishCountBeforeLockedRetry);
     }
   } else if (!PREVALID_FAIL) {

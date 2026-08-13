@@ -3741,6 +3741,7 @@ function projectLinkOpsProductExecutorForClient(executor) {
     readback: readback ? {
       ok: Boolean(readback.ok),
       status: sanitizeLinkOpsClientText(readback.status || '', 120),
+      pendingReview: Boolean(readback.pendingReview),
       descriptionReadback: descriptionReadback ? {
         ok: Boolean(descriptionReadback.ok),
         status: sanitizeLinkOpsClientText(descriptionReadback.status || '', 120),
@@ -5784,6 +5785,7 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         readback: result.readback ? {
           ok: Boolean(result.readback.ok),
           status: result.readback.status || '',
+          pendingReview: Boolean(result.readback.pendingReview),
           scannedRows: result.readback.scannedRows ?? null,
           matchedCount: Array.isArray(result.readback.matchedRows) ? result.readback.matchedRows.length : 0,
           weakMatchedCount: Array.isArray(result.readback.weakMatchedRows) ? result.readback.weakMatchedRows.length : 0,
@@ -5947,17 +5949,17 @@ function classifyLinkOpsLifecycle({
       return {
         version: 1,
         fromStatus: originalStatus,
-        toStatus: 'submitted_but_readback_pending',
+        toStatus: 'needs_manual_resolve',
         status: 'submitted_but_readback_pending',
         lifecycleStatus: 'submitted_but_readback_pending',
         terminal: false,
         locked: true,
-        needsManualResolve: false,
+        needsManualResolve: true,
         requestedMode,
         executorState,
         submitted: true,
         readbacks,
-        note: 'SHEIN 写接口已返回成功，但还没有完成可靠回读；任务保持锁定，禁止重复提交。',
+        note: 'SHEIN 写接口已返回成功，但新身份仍待审核（spu-info 暂不可用），无法终验也不能重复提交；须由 owner 后续人工核销。',
       };
     }
     return {
