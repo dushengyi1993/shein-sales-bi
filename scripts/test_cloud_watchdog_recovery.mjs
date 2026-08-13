@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
+  assessDailyProfitSectionRecovery,
   assessDailyLinkBusinessRecovery,
   assessDailyMarketingGuardHealth,
   assessDailyMarketingRepairHealth,
@@ -18,6 +19,23 @@ import {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nowMs = Date.parse('2026-07-11T12:30:00+08:00');
 const stores = ['DL', 'DX', 'QY'];
+
+const profitWarning = {date: '2026-08-12', generatedAt: '2026-08-13T08:46:32+08:00', message: 'profit mart refresh failed status=3'};
+assert.equal(assessDailyProfitSectionRecovery({
+  dailyRefresh: profitWarning,
+  profitSection: {ok: true, section: 'profit', cachedAt: '2026-08-13T10:53:10+08:00'},
+  nowMs: Date.parse('2026-08-13T11:50:00+08:00'),
+}).recovered, true);
+assert.equal(assessDailyProfitSectionRecovery({
+  dailyRefresh: profitWarning,
+  profitSection: {ok: true, section: 'profit', cachedAt: '2026-08-13T08:40:00+08:00'},
+  nowMs: Date.parse('2026-08-13T11:50:00+08:00'),
+}).reason, 'profit_section_not_newer_than_warning');
+assert.equal(assessDailyProfitSectionRecovery({
+  dailyRefresh: profitWarning,
+  profitSection: {ok: false, section: 'profit', cachedAt: '2026-08-13T10:53:10+08:00'},
+  nowMs: Date.parse('2026-08-13T11:50:00+08:00'),
+}).reason, 'profit_section_not_complete');
 
 const expectedConditionSkip = assessSystemdOneshotResult({
   ActiveState: 'inactive',

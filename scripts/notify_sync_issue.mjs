@@ -80,6 +80,14 @@ function humanServiceName(unit) {
     'shein-bi-webhook.service': 'SHEIN 实时消息接收服务',
     'shein-bi-cloud-session-manager.service': '店铺登录状态维护服务',
     'shein-bi-lark-sales-qa.service': '飞书问数服务',
+    'shein-bi-et-low-inventory-guard.service': '低库存安全检查',
+    'shein-bi-et-low-inventory-recheck.service': '低库存自动复查',
+    'shein-bi-cloud-openapi-stock-refresh.service': '商品库存同步',
+    'shein-bi-cloud-today-sales-reconcile.service': '当天销售核对',
+    'shein-bi-cloud-daily-refresh.service': '每日经营数据更新',
+    'shein-bi-cloud-portal-section-queue.service': 'BI 页面缓存更新',
+    'shein-bi-profit-refresh.service': '利润数据更新',
+    'shein-bi-cloud-watchdog.service': 'BI 自动体检',
   };
   return names[unit] || unit.replace(/^shein-bi-cloud-/, '').replace(/\.service$/, '').replace(/-/g, ' ');
 }
@@ -105,7 +113,7 @@ function humanizeWatchdogIssue(issue) {
   if (match) {
     return {
       type: 'service',
-      text: `${humanServiceName(match[1])}运行失败，依赖它的自动任务可能暂时不能更新。系统会继续保留已经成功的数据，需要维护人员检查并恢复该服务。`,
+      text: `${humanServiceName(match[1])}连续运行失败，相关数据可能暂时还是上一次成功结果。系统会保留旧数据并继续自动重试；如果仍无法恢复，再由维护人员处理。`,
       detail: `${match[1]}：state=${match[2]} result=${match[3]} exit=${match[4]} code=${match[5]}`,
     };
   }
@@ -124,6 +132,15 @@ function humanizeWatchdogIssue(issue) {
     return {
       type: 'coverage',
       text: `部分店铺的数据还没有收齐：${match[1].replace(/覆盖不足：?/g, '').replace(/；/g, '；')}。已收齐的店铺仍可正常查看，缺失部分会继续补采。`,
+      detail: '',
+    };
+  }
+
+  match = text.match(/^日更补采异常：date=([^\s]+)\s+status=([^\s]+)\s+message=profit mart refresh failed(?:\s+status=\S+)?(?:\s+log=.*)?$/i);
+  if (match) {
+    return {
+      type: 'profit',
+      text: `${match[1]} 的利润数据更新遇到数据库并发冲突。页面继续使用上一次完整利润数据，系统会自动重试，不会把缺失利润显示成 0。`,
       detail: '',
     };
   }
@@ -155,6 +172,46 @@ function humanizeWatchdogIssue(issue) {
     };
   }
 
+  if (/^BI 数据文件不可读：/.test(text)) {
+    return {
+      type: 'portal',
+      text: 'BI 页面暂时读不到完整数据文件。为避免把缺失数据误显示为 0，受影响的页面会保留上一次完整结果；系统正在自动恢复。',
+      detail: '',
+    };
+  }
+
+  if (/^BI 实时运行状态不可读：/.test(text)) {
+    return {
+      type: 'portal',
+      text: 'BI 页面服务仍在运行，但实时更新状态暂时无法确认。页面可能不会立刻刷新，系统正在自动重新连接。',
+      detail: '',
+    };
+  }
+
+  if (/^BI 实时更新通道未连接：/.test(text)) {
+    return {
+      type: 'portal',
+      text: 'BI 的实时更新连接已中断。现有数据仍可查看，但新数据可能延迟出现；系统正在自动重新连接。',
+      detail: '',
+    };
+  }
+
+  if (/^订单闭环 DB 审计失败：/.test(text)) {
+    return {
+      type: 'orders',
+      text: '订单数据完整性检查没有完成。系统不会把未确认的数据当作完整结果，并会继续自动复查。',
+      detail: '',
+    };
+  }
+
+  if (/^systemd 批量快照不完整：/.test(text)) {
+    return {
+      type: 'runtime',
+      text: '服务器自动体检没有读全运行状态，目前无法确认所有任务是否正常。系统会自动重试；在确认前不会把未知状态当作正常。',
+      detail: '',
+    };
+  }
+
   if (/过期|覆盖不足|部分失败|补采异常/.test(text)) {
     return {
       type: 'coverage',
@@ -181,6 +238,8 @@ function buildWatchdogMessage({message, logFile, now}) {
   const lines = [headline, ''];
   if (sourceOnly) {
     lines.push('数据抓取没有失败，BI 当前仍可使用。');
+  } else {
+    lines.push('系统已经完成自动重试确认；以下问题仍未恢复。');
   }
   for (const item of human) lines.push(human.length > 1 ? `- ${item.text}` : item.text);
   const details = human.map(item => item.detail).filter(Boolean);
@@ -192,10 +251,30 @@ function buildWatchdogMessage({message, logFile, now}) {
   return lines.join('\n');
 }
 
+function recoveryText(item) {
+  if (item.type === 'service') return item.text.replace(/连续运行失败.*$/u, '已经恢复运行，后续自动任务会按原计划继续。');
+  if (item.type === 'profit') return '利润数据已经重新生成，页面已恢复使用最新完整结果。';
+  if (item.type === 'coverage') return '缺失的数据已经补齐，对应页面与指标已恢复更新。';
+  if (item.type === 'timer') return '自动排班已经恢复运行。';
+  return `${item.text.replace(/[。；]+$/u, '')} 已恢复。`;
+}
+
+function buildWatchdogRecoveryMessage({message, logFile, now}) {
+  const issues = String(message || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const human = issues.map(humanizeWatchdogIssue);
+  const lines = ['✅ BI 已自动恢复', '', '此前已提醒的问题现在已经恢复：'];
+  for (const item of human) lines.push(`- ${recoveryText(item)}`);
+  lines.push('', '系统会继续按原计划更新数据，无需人工处理。');
+  if (logFile) lines.push(`恢复依据：${logFile}`);
+  lines.push('', `恢复时间：${bjDateTime(now)}`);
+  return lines.join('\n');
+}
+
 export function buildSyncIssueMessage({
   isWebhook = false,
   isMarketing = false,
   isCloudWatchdog = false,
+  isCloudWatchdogRecovery = false,
   title,
   failed = [],
   loginRequired = [],
@@ -220,6 +299,9 @@ export function buildSyncIssueMessage({
       '',
       `提醒时间：${bjDateTime(now)}`,
     ].join('\n');
+  }
+  if (isCloudWatchdogRecovery) {
+    return buildWatchdogRecoveryMessage({message, logFile, now});
   }
   if (isCloudWatchdog) {
     return buildWatchdogMessage({message, logFile, now});
@@ -256,6 +338,7 @@ async function main() {
   const isWebhook = kind === 'webhook';
   const isMarketing = kind === 'marketing';
   const isCloudWatchdog = kind === 'cloud-watchdog';
+  const isCloudWatchdogRecovery = kind === 'cloud-watchdog-recovery';
   const title = args.title || (isWebhook
     ? `SHEIN 平台高优先级动态：${modeLabel}`
     : isMarketing
@@ -265,6 +348,7 @@ async function main() {
     isWebhook,
     isMarketing,
     isCloudWatchdog,
+    isCloudWatchdogRecovery,
     title,
     failed,
     loginRequired,
