@@ -71,6 +71,7 @@ try {
     activation: 'active',
     machinePolicy: {apiKey: 'shortsecret123', credentials: {pin: 837261}},
   }]);
+  firstBundle.rules[0].ruleKey = 'openapi.product-stock-evidence-boundary';
   const firstAttempts = await Promise.all([publisher.publish(firstBundle), publisher.publish(firstBundle)]);
   if (firstAttempts.filter(result => result.changed).length !== 1) throw new Error('stale publisher lock recovery did not serialize two contenders');
   const first = firstAttempts.find(result => result.changed);
