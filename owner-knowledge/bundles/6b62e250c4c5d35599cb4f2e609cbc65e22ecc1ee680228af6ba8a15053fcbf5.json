@@ -1,0 +1,1691 @@
+{
+  "authorityId": "dushengyi",
+  "fingerprint": "6b62e250c4c5d35599cb4f2e609cbc65e22ecc1ee680228af6ba8a15053fcbf5",
+  "publishedAt": "2026-08-13T09:55:29.072Z",
+  "ruleCount": 87,
+  "rules": [
+    {
+      "activation": "active",
+      "contentHash": "1183bace19b1ad3a18eb7ab51b6cbaac924e88212e0504ed7e70316640d12e04",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-16T06:29:44.293Z",
+      "risk": "low",
+      "ruleKey": "advisory.11ec56984ad6e093",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "没看懂你是怎么解决的。以后这个问题不会再犯了?",
+      "version": 1,
+      "versionId": "okr_5a6a5a4b0f89c589e40e_1183bace19b1ad3a18eb"
+    },
+    {
+      "activation": "active",
+      "contentHash": "87ec42551b64b37372df98807caf8a035a4938cc9bd052625e9eec8ad631bf25",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T04:09:45.798Z",
+      "risk": "low",
+      "ruleKey": "advisory.218b523b693c51de",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "请停止继续扩展,立即运行/报告限定专项测试与 git diff --check;若已通过则返回交付,若失败给精确错误。不要再改范围外文件。",
+      "version": 1,
+      "versionId": "okr_6b0bd926dce5c087d193_87ec42551b64b37372df"
+    },
+    {
+      "activation": "active",
+      "contentHash": "03d7d5f6d9436f2416478b90833dc1e3cb225fbcfd79b7c0b1bee7412050104f",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T08:31:21.643Z",
+      "risk": "low",
+      "ruleKey": "advisory.2682d36e0db5be5e",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "已接近/超过15分钟预算。立即停止你启动的门禁进程树并收口:报告已通过到哪一项、当前挂在哪个子测试、git diff-check、是否改文件。不要再运行命令。",
+      "version": 1,
+      "versionId": "okr_22b1fd2fcc0dd78d9b91_03d7d5f6d9436f241647"
+    },
+    {
+      "activation": "active",
+      "contentHash": "8d1a647534705e40551e8fa67ca7746dda1dab436a621b3d13ba3928f89c0dbc",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-13T07:26:20.810Z",
+      "risk": "low",
+      "ruleKey": "advisory.2fabe4c6bc50f691",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "你为什么要改我给新会话设的默认模型和思考深度呢?",
+      "version": 1,
+      "versionId": "okr_da640cf3751f0e2a1bbb_8d1a647534705e40551e"
+    },
+    {
+      "activation": "active",
+      "contentHash": "83b1f918761fed02330804e5ec04a3083a506e472c43211f2f0a6f599b3da123",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T04:05:56.601Z",
+      "risk": "low",
+      "ruleKey": "advisory.36ee10f9d814942c",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "你已长时间无文件变更。请立即在 2 分钟内说明 blocker;若无 blocker,开始 apply_patch 并先落 extractor + executor + 专项测试最小闭环。不要再只读分析。",
+      "version": 1,
+      "versionId": "okr_9803ce87df14f79bd41f_83b1f918761fed023308"
+    },
+    {
+      "activation": "active",
+      "contentHash": "53b3c49e3bf7da08ff983ef7ceefb0af0a8cebaea486cdc910763f2652e2270d",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T17:02:26.218Z",
+      "risk": "low",
+      "ruleKey": "advisory.407507592376cbdb",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "已按要求增加独立 dependencyYield:仅 superseded completeClaim(profit) 设置 true;claim清零;任何 failClaim 都清零。barrier只看dependencyYield,不再看rerun。新增 superseded失败测试,下一claim必须仍为profit。请最终PASS/BLOCK。",
+      "version": 1,
+      "versionId": "okr_23679d9438f825ef1152_53b3c49e3bf7da08ff98"
+    },
+    {
+      "activation": "active",
+      "contentHash": "26f9e49c51f514c495af9115aa0537fa37cf8a666ccb14d4222b04df868afdec",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T06:02:22.699Z",
+      "risk": "low",
+      "ruleKey": "advisory.511c716eb865b868",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "两项已修:Windows override 现在同时要求 NODE_ENV=test;在线 CAS 失败不再 rm,改 retain + audit/offline GC,消除 TOCTOU;文档矛盾已修。专项 148/148。请只读快速复核这两点,返回最终 PASS/FAIL,勿改勿跑长套件。",
+      "version": 1,
+      "versionId": "okr_5a59163f8971611b046f_26f9e49c51f514c495af"
+    },
+    {
+      "activation": "active",
+      "contentHash": "0de8d184e0d2bed9f4248c7cb529b3229ed05eb8da255cda4a33676571e8e2ef",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T15:10:23.239Z",
+      "risk": "low",
+      "ruleKey": "advisory.5a4e3e243576c7b4",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "立即停止分析并在本条回复二选一:A) 报告精确 blocker;B) 先用 apply_patch 完成 policy+lock registry+两测试的最小可运行切片并报告 diff。不要再无输出等待。",
+      "version": 1,
+      "versionId": "okr_f19a97aa141028029028_0de8d184e0d2bed9f424"
+    },
+    {
+      "activation": "active",
+      "contentHash": "8898f23ff689808c6e9b5e054b8d3ebe363722c4255c75d5b58467b3c4ef229c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T04:45:54.644Z",
+      "risk": "low",
+      "ruleKey": "advisory.6e918a674022fce8",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "请现在收口,优先输出 release gate 和高/中风险 findings,不再继续低价值探索。",
+      "version": 1,
+      "versionId": "okr_f765c2a357ec58ea0f49_8898f23ff689808c6e9b"
+    },
+    {
+      "activation": "active",
+      "contentHash": "f98120f97487a693c576a81d005f22d0523024255b1cd0e157310fca8ba9c26b",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-12T14:30:28.775Z",
+      "risk": "low",
+      "ruleKey": "advisory.7e95c33ab1bb541b",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "原因是什么?明明昨天说了新规则,也核查了,今天也巡检了,为什么还会漏?有没有其他的漏的?怎么确保以后不会漏?解决好。",
+      "version": 1,
+      "versionId": "okr_8b96ce9ad309e9cffe4d_f98120f97487a693c576"
+    },
+    {
+      "activation": "active",
+      "contentHash": "1cc9dce27aa34df1ecdf298e9f7fec0fcb653f8649c21b84c18a44130d2e6d32",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T13:15:29.404Z",
+      "risk": "high",
+      "ruleKey": "advisory.94c532c043e7625b",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "补充:第一版脱敏时漏掉 [REDACTED OPAQUE TOKEN] 与 dryRun.results.state。请改读同目录 sanitized-plan-dry-run-v2.json,并以 v2 为唯一计划证据完成原验收;不要再使用第一版做动作分类。其它约束不变。",
+      "version": 1,
+      "versionId": "okr_fd25433f2a32faed722a_1cc9dce27aa34df1ecdf"
+    },
+    {
+      "activation": "active",
+      "contentHash": "05584a2f001af5c52564317521f74efb2de610ae4a859f4c1ac37f8ec3b710aa",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T04:21:52.200Z",
+      "risk": "low",
+      "ruleKey": "advisory.a9f31d11536eb7e0",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "现在请收口:优先补专项测试、运行相关测试并返回;不要再扩大实现面。缺 capability/model policy/docs/package 可在核心测试后补最小项。",
+      "version": 1,
+      "versionId": "okr_02eb77c30215b7dc1e77_05584a2f001af5c52564"
+    },
+    {
+      "activation": "active",
+      "contentHash": "c181bcdcc47721e823907b845ff7df54b742d0fc5b4c807e1e5e2241ec67aaac",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T10:19:18.887Z",
+      "risk": "low",
+      "ruleKey": "advisory.aef58bca4fb25a1d",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "停止当前长耗时步骤。现在请立即完成/保存已有有界修改,最多只跑专项静态测试,然后回报修改文件和结果;若尚未修改,明确说明阻塞。不要再跑全量 npm test。",
+      "version": 1,
+      "versionId": "okr_6a80e6b16abef93d1ac2_c181bcdcc47721e82390"
+    },
+    {
+      "activation": "active",
+      "contentHash": "48adacff81ad50ed9381eb30294dced03c52be9949388c84c32a94b6d721a306",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T12:43:00.006Z",
+      "risk": "low",
+      "ruleKey": "advisory.b5d8500889fa1096",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "整个项目的优化也做吧,还需要做方案吗?还是直接做就行。全局角色配置已经调整了,以最新的为准。",
+      "version": 1,
+      "versionId": "okr_e45df9e392bdb1bea8d2_48adacff81ad50ed9381"
+    },
+    {
+      "activation": "active",
+      "contentHash": "1cc577828dca0d4ada12e457538f7b9f7f900d47cd18f1e58eb9d8ad1556f2b0",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T04:33:52.462Z",
+      "risk": "low",
+      "ruleKey": "advisory.b6021899b51a0081",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "89/89 已通过。请立即收口:补最小 capability/model policy/package/skill/docs 和 deterministic 注册(若尚缺),跑相关测试与 node --check,返回改动文件和测试。不要再扩展。",
+      "version": 1,
+      "versionId": "okr_e9d0f27077d7a56dafb8_1cc577828dca0d4ada12"
+    },
+    {
+      "activation": "active",
+      "contentHash": "b1fd3edc432ca0c6e16441a464951d1a7c0cdc60260c5fcd8505ac175b6271ca",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T08:13:59.486Z",
+      "risk": "low",
+      "ruleKey": "advisory.d2c8fcfff99aee71",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "当前已超过约15分钟。立即停止任何重复/挂起门禁,检查并报告:你实际修改了哪些文件、当前 git diff/status、已完成测试、尚未完成测试及精确原因。不要再启动长测试;先收口返回。",
+      "version": 1,
+      "versionId": "okr_7dfffed0b689808283d3_b1fd3edc432ca0c6e164"
+    },
+    {
+      "activation": "active",
+      "contentHash": "552c2a90beec4ab1e285b1f0b9e5ff9110bc5e69de669b7e5eecf2d57e451ad1",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T05:49:13.626Z",
+      "risk": "low",
+      "ruleKey": "advisory.d3ca152a825e6c81",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "你当前已把 fetch 脚本改到任务工作树,但对应测试尚未出现,且主检出同一文件也被修改。请现在只在任务工作树补齐直接测试并运行;不要再碰主检出,也不要清理/回退任何文件。完成后立刻报告。",
+      "version": 1,
+      "versionId": "okr_80f0054976f9fc5c0e47_552c2a90beec4ab1e285"
+    },
+    {
+      "activation": "active",
+      "contentHash": "baf97ca3ad114fa4d06fe0c76244b719cd1ad63b6c54b110786bc7b84437ce24",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T17:00:38.231Z",
+      "risk": "low",
+      "ruleKey": "advisory.data_truth.b523ba865fbb",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "data_truth"
+      ],
+      "text": "已处理剩余活锁:canonical三段同priority5;profit被supersede完成/失败时移动到队尾;barrier在profit第一次/运行/失败backoff时仍阻止homeRankings,但profit已有成功superseded快照(rerun=true,pending)时允许homeRankings先运行;homeProfit始终等profit条目完全完成。新增连续3个lease每轮都注入新订单的反例,claims严格为profit,homeRankings,profit,不再只追profit。请只复审该阻塞并给最终PASS/BLOCK。",
+      "version": 1,
+      "versionId": "okr_1e5439c5d959b7b4aaf9_baf97ca3ad114fa4d06f"
+    },
+    {
+      "activation": "active",
+      "contentHash": "d48449ed16ccd36307429291d7b02db455b99bbcd71918732be337ef5476f1ff",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-22T15:28:36.083Z",
+      "risk": "low",
+      "ruleKey": "advisory.data_truth.c0dc075e01f0",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "data_truth"
+      ],
+      "text": "这说明云端长期是“在老 commit 上手动改/运行”,不是正常部署。这个教训也要写进去,以后不论是你还是其他agent接手,都得规范化。",
+      "version": 1,
+      "versionId": "okr_61c9cce6cd274f3eff3c_d48449ed16ccd3630742"
+    },
+    {
+      "activation": "active",
+      "contentHash": "b24bfdb4fd45dc6eb4a198218ad815cee59aaa09a9a17896884aa08e758cf9e8",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T14:10:06.314Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.aabd238a2ab3",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution",
+        "data_truth"
+      ],
+      "text": "只读审查 E:\\Codex WorkSpace\\Shein销售统计-description-backfill 当前唯一 diff:scripts/run_deterministic_tests.mjs 将 [REDACTED OPAQUE TOKEN].mjs timeout 从 120000 调为 180000,默认其余测试仍 30000。证据:该测试已在云端 2026.08.11.10 隔离临时 worktree、release-validation 共享锁域、所有 [REDACTED OPAQUE TOKEN] 关闭后,以 240s 外层上限自然完成 126/126,耗时 131851ms,残留 Portal 0;原 120s 运行精确 timeout 124/120075ms。目标是判断 180s 是否合理、是否应更低/高、是否需额外契约。约束:只读,不运行生产/网络/部署,不改文件,不看敏感数据。交付:P0-P2、GO/NO-GO、最强反例与最便宜验证。",
+      "version": 1,
+      "versionId": "okr_4a0f00d13c0d06bd7d0f_b24bfdb4fd45dc6eb4a1"
+    },
+    {
+      "activation": "active",
+      "contentHash": "6ae32d0563dcc65cde4af1c3128df5be92cf8df379227da7b32b4d16b2deff9c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-10T16:11:09.731Z",
+      "risk": "medium",
+      "ruleKey": "advisory.data_truth.execution.f83dd8fef68c",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution",
+        "data_truth"
+      ],
+      "text": "只读 explorer 合同。目标:定位 SHEIN BI 首页在 Asia/Shanghai 已跨到 2026-08-11 后仍把“今天/当前日期”显示为 2026-08-10 的完整代码路径,给出文件+行号、确定根因、最小安全修复/无需代码修复的判别检查。已锁定约束:仓库 E:\\Codex WorkSpace\\Shein销售统计;生产事实仍由主任务查云端;当前 release db2e723,core generatedAt 2026-08-10T19:09:04+08,00:03 已刷新 homeRankings,用户页面恢复数据但日期仍 10 日。非目标:不得 SSH、不得浏览器/CDP、不得运行生产/抓数/队列、不得编辑任何文件、不得 Git 操作。读范围:scripts/bi_app/client.js、scripts/generate_bi_portal*.mjs、scripts/serve_bi_portal.mjs、相关日期/午夜/section/timer测试与 docs/infra systemd。验收:明确 (1) 默认日期取值来源;(2) 何时会切换到 11 日;(3) 无订单时是否应显示 11 日而不伪造0;(4) 最便宜判别命令/测试;(5) 若是缺陷,建议最小文件/测试范围。停止条件:证据不足时报告精确缺口,禁止猜测。",
+      "version": 1,
+      "versionId": "okr_b284c94d4d0e086c307b_6ae32d0563dcc65cde4a"
+    },
+    {
+      "activation": "active",
+      "contentHash": "69fd0bd2133d2a5c480c37090f3dfa4995b441360d0aea661fcfe117b76a0c82",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-14T08:46:58.313Z",
+      "risk": "medium",
+      "ruleKey": "advisory.data_truth.execution.identity.058df54a035d",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "execution",
+        "data_truth"
+      ],
+      "text": "升级已停止,未执行安装。\n\n- 安装版本:仍为 2026.07.12.1\n- managed:未验收\n- 云端最新版:无法读取\n- 负责人规则:未进行新版验收\n- Skill:未安装/未验证\n- 是否需要重新登录:未触碰现有登录状态\n\n原因:指定 GitHub Release 页面及资产均返回 404,本机也没有同名安装包,无法完成 SHA256 安全校验,因此未解压、未安装,也未执行任何 SHEIN 写入。\n\n请将安装包放到“下载”目录,或提供当前账号可访问的官方 Release。安装成功后需要新开一个 Codex 对话,新 Skill 才会完整生效。",
+      "version": 1,
+      "versionId": "okr_634fc5573123cf29db1e_69fd0bd2133d2a5c480c"
+    },
+    {
+      "activation": "active",
+      "contentHash": "cfbc9b668549055433cd848565b832a410867256932fd6e6fa67927f691a1ad8",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T12:44:11.489Z",
+      "risk": "medium",
+      "ruleKey": "advisory.data_truth.execution.identity.images.b20657f267bb",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "images",
+        "execution",
+        "data_truth"
+      ],
+      "text": "目标:对 E:\\Codex WorkSpace\\Shein销售统计 做一次有边界的只读 P0 工作流审计,产出可直接实施的文件/符号清单,重点是降低主 GPT 重复读证据和重复 SSH/CLI 的消耗。\n约束与事实源:只读当前 main;以代码、package scripts、docs、测试为准;继承当前全局角色配置,不设置任何模型/推理/provider覆盖。不得访问或输出凭据、不得访问生产、不得修改文件。\n非目标:不设计大规模重构;不讨论 UI;不改 automation prompt/排班;不执行 SHEIN 业务;不做泛泛建议。\n读取范围:package.json、scripts/、lib/、docs/ 中与巡检/health/runtime snapshot/evidence manifest/CLI query/exit code相关文件。写范围:无。\n交付:1) 当前重复/不一致的 5-10 个具体点,带文件与行号;2) 最小 P0 改动建议,限定为统一结果 envelope/exit semantics、run manifest/provenance、单次 runtime snapshot 三类中的必要项;3) 建议测试入口;4) 明确哪些建议不应本轮做。\n验收:每个结论有精确文件和符号/行号,按节省 GPT 证据读取量优先级排序。\n停止条件:若主分支不干净、文件冲突或需要生产访问,立即停止并报告具体 blocker。",
+      "version": 1,
+      "versionId": "okr_4d1b128ca1e222188c8f_cfbc9b668549055433cd"
+    },
+    {
+      "activation": "active",
+      "contentHash": "cd041f0fce9c4575cb93a4b8f693358b347c6f89ea74fe11582213351c61e70c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T09:55:29.072Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.images.e1e544c7acd1",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "images",
+        "publish",
+        "product_identity",
+        "price",
+        "marketing",
+        "execution",
+        "data_truth"
+      ],
+      "text": "你是 ops_worker。cwd=E:\\Codex WorkSpace\\Shein销售统计。先完整阅读 C:\\Users\\dushengyi\\.codex\\skills\\shein-bi-ops\\SKILL.md 和项目 AGENTS.md。只用 managed launcher C:\\Users\\dushengyi\\.shein-bi\\cli\\shein-bi-ops.cmd。禁止 chat/ask/browser,禁止 execute 和 SHEIN_OPENAPI_SUBMIT,禁止营销/优惠券/Git/源码改动。\n\n目标(更小阶段):针对 HL 店以下 4 个明确商品,逐条调用结构化 operate(copy_product_draft) 建立任务并获取首轮 preflight;随后仅在参数均可从任务/live source/审核资料确定时,按同一 task 做 prepare-publish + prepare-descriptions,得到最终 dry-run payloadHash。若首轮 preflight 就缺必填值或身份冲突,立即报告该项 blocker,不猜测。每完成/阻断一项就记录结果再做下一项。\n\n不可变商品:\n1 HL / SK-15032 热风梳(用户已明确纠正);imageDir=Z:\\产品梳理汇总-2026\\3、个护电器\\3、美发护理电器\\1.热风梳\\15032热风梳\\SK-15032-热风梳新图(龚天浩)已审\\MZ-XC-森林自然;source HTML 在 Z:\\产品资料包20251211\\SOKONY\\SK-15032热风梳\\15032 热风梳标题和卖点 下匹配“【最新】SK-15032_1000W五合一热风梳_SHEIN沙特站_V3全套资料_样式A确认版_20260807*.html”。\n2 HL / SK-JFB-675B(用户称 675 卷发棒);imageDir=Z:\\产品梳理汇总-2026\\3、个护电器\\3、美发护理电器\\3.卷发钳和卷发棒\\SK-JFB-794卷发钳与卷发棒(吴薇)-已审\\HL-XL-08-日系微卷;source HTML=Z:\\产品资料包20251211\\SOKONY\\SK-675热风梳(仓库英规)\\675卷发棒标题和卖点\\【最新】SK-JFB-675B_25mm负离子卷发棒_SHEIN沙特站_V3全套资料_敏感词修正版_20260618.html。注意图片父目录名含 SK-JFB-794,必须检查图片实际内容/审核事实是否确为 675;不能默认视为同货号,冲突即阻断。\n3 HL / SD-175 榨汁机;imageDir=Z:\\产品资料包20251211\\SOKONY\\SD-175榨汁机\\175榨汁机2025年制图\\优雅性感家居风;用户指定标题“175离心式榨汁机 全套最终定稿”,但 prepare-descriptions 必须是可解析 HTML。先定位同目录实际文件和最新审核 HTML;不得擅自用更新 V4 替换用户指定文档,若指定 docx 无 s09/s9 或无法确定 HTML 对应关系,报告 blocker。\n4 HL / SK-03012 榨汁机;imageDir=Z:\\产品资料包20251211\\SOKONY\\SK-03012榨汁机\\新图(杨欢)\\温暖拿铁风;source HTML 在标题目录匹配“【最新】SK-03012榨汁机_SHEIN沙特站_V3全套资料_确认版_20260630*.html”。\n\n受控步骤:\n- 对每项 operate --operation copy_product_draft --store HL --product <精确货号> --text <用户该项原始请求含路径>。\n- 检查 HL defaultTitleGroup=title1、当前 live source identity、同店同货号/历史 Seller SKU、category、supply price、inventory、plug/current 等预检。\n- 不得猜 [REDACTED OPAQUE TOKEN] SKU;只有 CLI/task/live source 可确定才传 prepare-publish。\n- 图片目录已由用户明确指定,可传 --approved-assets;备用文件夹排除。\n- prepare-publish 后在同一 task prepare-descriptions,从唯一 s09/s9 原样绑定。\n- 每次记录 [REDACTED OPAQUE TOKEN] files [REDACTED OPAQUE TOKEN] section+source SHA/payloadHash。\n- 若 task 创建本身失败,保留原始脱敏错误。\n- 最后明确 execute 调用数=0,最终 SHEIN 业务写入=0。不得声称发布成功。\n\n读写范围:仅这4项受控云任务、上传/preflight证据;不得覆盖本地文件。CLI 输出如需落盘只放新建 [REDACTED OPAQUE TOKEN]<guid>/。\n停止:登录/权限不可用、身份漂移、关键参数无法确定、CLI 要求 execute,一律停止对应项并报告。",
+      "version": 1,
+      "versionId": "okr_b1304bb480e65fbed797_cd041f0fce9c4575cb93"
+    },
+    {
+      "activation": "active",
+      "contentHash": "ff11661dc5ce41c89a372f6433f9eb3496cd19a5a82cbfb74818d3c83428b251",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-10T12:45:57.837Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.inventory.459ab3d1772b",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "inventory",
+        "execution",
+        "data_truth"
+      ],
+      "text": "你是 OpenCode DeepSeek worker,负责一个有界本地修复。工作树:E:\\Codex WorkSpace\\Shein销售统计-worktrees\\et-http-text-retry-20260810。不得设置 [REDACTED OPAQUE TOKEN] 覆盖。你不是代码库中唯一工作者,不得还原他人改动。\n\n目标与交付:\n- 修复生产证据已确认的问题:EtHttpClient.fetchText 对 ET HTML 明细接口瞬时 HTTP 500 不重试,导致整个 cloud-et-forwarder 批次失败。\n- 增加确定性回归测试,证明瞬时 5xx 可恢复、永久客户端错误不盲重试。\n- 直接编辑工作树文件并列出改动、测试结果。\n\n已锁定事实与设计边界:\n- 失败栈位于 scripts/fetch_et_forwarder.mjs:654-660,URL [REDACTED OPAQUE TOKEN] 返回 status=500;fetchJson 已有 bounded retry,fetchText 没有。\n- 只允许对可重试条件做有界重试:TimeoutError、[REDACTED OPAQUE TOKEN] failed 类传输错误、408、429、>=500。\n- 4xx(除408/429)立即失败;最后一次仍失败时保留原始 ET HTTP text fetch failed 错误。\n- 优先复用 SHEIN_ET_HTTP_READ_ATTEMPTS(默认3,安全边界1..5)与现有短退避模式;不增加无限循环,不吞错误,不写凭据。\n- 保持 HTML 到纯文本的现有归一化行为和 public API 不变。\n\n非目标/主任务保留:\n- 不修改 cloud_et_forwarder_sync.sh、systemd、队列、低库存门禁或其他业务逻辑。\n- 不运行真实 ET、浏览器、网络或生产服务;不部署、不提交、不暂存、不建分支。\n- Git [REDACTED OPAQUE TOKEN] 和终验由主任务负责。\n\n独占写范围:\n- scripts/fetch_et_forwarder.mjs\n- scripts/test_et_http_transport.mjs\n不得修改其他文件。\n\n验收:\n1) 测试 HTTP server 增加一个 HTML 明细端点:前两次 500、第三次 200;fetchText 返回规范化文本且调用次数=3。\n2) 增加一个 404 端点或等价断言,证明非重试 4xx 只调用一次并抛出 status=404。\n3) node --check scripts/fetch_et_forwarder.mjs 通过。\n4) node scripts/test_et_http_transport.mjs 通过。\n5) git diff --check 通过;返回精确 diff 摘要。\n\n停止条件:\n- 若必须修改第三个文件、改变对外行为、接触真实认证/网络或测试无法确定性复现,停止并报告 blocker,不扩大范围。",
+      "version": 1,
+      "versionId": "okr_d8135404b7d1944467b5_ff11661dc5ce41c89a37"
+    },
+    {
+      "activation": "active",
+      "contentHash": "6a5731fa1e8c172b23da4579befd5b370b195fa55cce5624d7bff6e52dd5ddfc",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T04:17:25.001Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.inventory.58b546fe9e04",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "price",
+        "inventory",
+        "marketing",
+        "execution",
+        "ui",
+        "data_truth"
+      ],
+      "text": "在独立 worktree E:\\Codex WorkSpace\\Shein销售统计-watchdog-ux(branch [REDACTED OPAQUE TOKEN],基于 origin/main 02104ea)实现 BI watchdog 告警 UX 状态机。已锁定事实/设计:\n1) 现状 cloud_ops_watchdog 用完整 issues 数组 SHA1 单值去重,首错即报,issues 清零只写 OK,无恢复通知;任何 exit/count/log 变化导致整组重发。\n2) 用户要求:普通可自动恢复故障先等自动重试;持续失败才报;已报问题恢复后发一次恢复;人话;关键故障不延迟。\n3) 云端今天 profit 日更 08:16 refresh_profit_marts.sql serialization conflict,daily-refresh-last warning;但 [REDACTED OPAQUE TOKEN].json ok=true cachedAt=2026-08-13T02:53:10.635Z(10:53 CST)晚于 warning generatedAt=08:46 CST,应被 watchdog 识别为恢复。不要访问云端,使用代码/fixture。\n\n目标交付:\nA. 新增 [REDACTED OPAQUE TOKEN].mjs 纯函数状态机。每个稳定 issue family 独立 episode;排除 [REDACTED OPAQUE TOKEN] path 等易变字段导致重复。商品 OpenAPI 对账按一个 family 聚合;服务按 unit;daily refresh 按 date+stage;覆盖按 family;未知需稳定 hash normalized text。输出 current grouped records、state、toAlert、toRecover、outbox/notification intents。\nB. 状态 v1 JSON `[REDACTED OPAQUE TOKEN].json`,原子 tmp+rename。保留 legacy last-issue-key.txt 兼容迁移:首次新状态时读取上一份 watchdog JSON,若其 issues hash匹配 legacy key,将这些 episode 标成已经 alerted;这样当前已恢复的 profit 可发恢复通知。状态损坏 fail-open:关键立即报,普通重新等待。\nC. 策略:critical 首轮立即(Portal/Webhook常驻异常、源码commit/missing、BI数据不可读/实时通道断开、DB audit、根盘>=93、systemd snapshot不完整等);normal/high 按连续 watchdog 轮次。stock refresh/today sales等高频 oneshot至少2轮;ET low inventory guard/recheck至少4轮(覆盖下一真实自动重试);product reconciliation至少2轮;daily refresh/profit至少3轮;其他普通2轮。持续告警首报后不要每小时重复,至少12轮才提醒一次(可按 severity区别但不得轰炸)。\nD. 使用 durable outbox/显式稳定 idempotency key,避免 send 成功与state写入间崩溃重复。流程应先原子保存 transitions/outbox,再发送,成功后原子标记;失败保留待下轮。若未alert的pending问题消失,不发恢复。若 alerted 后消失,恢复一次。dry-run不写state/不通知。\nE. notify_sync_issue.mjs 新增 cloud-watchdog-recovery 分支、显式 idempotency key沿用;服务名补足中文:低库存自动复查/低库存安全检查/商品库存同步/当天销售核对/每日经营数据更新/BI页面缓存更新/利润数据更新/BI自检等。告警文案说明系统已保留上次成功数据且会继续自动重试;恢复文案 `✅ BI 已自动恢复`,列出人话项、恢复时间,不再说需要维护。补订单/磁盘/实时/营销等主要人话化,但控制改动。\nF. cloud_ops_watchdog 集成,不改变收集器/现有 recovery assessor/issue collapse/exit code(有 raw issue 仍 exit1)/timer。报告里增加 alertStateSummary, pendingIssues, alertNotifications, recoveryNotifications, notification outcomes。\nG. profit recovery:新增严格纯函数 assessor(可放 cloud_watchdog_recovery)仅当 daily warning明确 profit mart failed,profit section ok=true、section=profit、cachedAt有效且晚于 warning generatedAt,才 suppress daily issue并写 recoveries evidence;stale/invalid/future过大不算。\nH. 测试:新增 [REDACTED OPAQUE TOKEN].mjs,覆盖稳定key、不同服务隔离、critical immediate、stock first pending then recovery no notification、ET 4轮、daily3轮、alert then recovery once、pending消失静默、部分恢复、reminder节奏、state损坏、legacy migration、outbox stable idempotency/cancel stale recovery;扩展 test_notify_sync_issue 人话/恢复;扩展 recovery 测 profit strict gates。注册 run_deterministic_tests。运行专项、npm test,必要 release gate。\n约束:不得访问云端/真实OpenAPI/飞书,不得Git stage/commit/push,不得改timer,不得触碰主目录/其他worktree/用户营销文件,不得输出凭据。尽量最小 coherent change。所有文件写入仅限该worktree。发现需求需要主动触发业务任务或修改生产状态时停止报告。",
+      "version": 1,
+      "versionId": "okr_b668f75f49b96c122c61_6a5731fa1e8c172b23da"
+    },
+    {
+      "activation": "active",
+      "contentHash": "0c00736ee72500a2d95ac50f720a5d942202fcedec72d203fbbcb89d70ba05b6",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-10T08:33:37.482Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.inventory.7a71576bd850",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "inventory",
+        "execution",
+        "data_truth"
+      ],
+      "text": "角色:explorer,只读本地证据核验。\n\n1. 目标与交付:核验 2026-08-10 库存 heartbeat 的云端来源与终态证据,提交一份精确的来源/覆盖/readback 核验摘要,指出最强反例或异常。\n2. 已定约束与事实源:只允许读取 E:\\Codex WorkSpace\\Shein销售统计\\outputs\\[REDACTED OPAQUE TOKEN]\\evidence\\[REDACTED OPAQUE TOKEN] 下 runtime-snapshot.json、markers/*.json、[REDACTED OPAQUE TOKEN].json、low-et-state-latest.json,以及仓库规则文档。生产事实以这些已由主任务确定性采集的云端证据为准。\n3. 非目标:不得联网、不得 SSH、不得访问生产、不得调用浏览器/BI ask/chat/其它 LLM、不得发送消息、不得改库存/代码/排班;不负责 plan/result 行分类和最终结论。\n4. 读写范围:只读上述文件;不得创建、修改或删除任何文件。\n5. 验收标准:逐项报告 morning service/timer 状态、5 个必需 marker、19 店 OpenAPI 文件/成功/失败 chunk/时间范围、PostgreSQL 四域可用性、当前 action readback 行数及不一致行,低 ET latest 状态。所有数字附字段来源;不输出凭据、recipient 或敏感响应。\n6. 停止条件:文件缺失、JSON 无法解析或证据冲突时立即停止该项并给出精确文件/字段 blocker,不得猜测。",
+      "version": 1,
+      "versionId": "okr_6bed880ccbe2b6b66df3_0c00736ee72500a2d95a"
+    },
+    {
+      "activation": "active",
+      "contentHash": "9b0fb1b3e053b38c791ee38b0340b6f1db9af95278a0ade78bcf9eda7f53be6a",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T08:23:38.209Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.inventory.f1aaf08be7f4",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "inventory",
+        "execution",
+        "data_truth"
+      ],
+      "text": "角色:worker。执行 2026-08-11 SHEIN 库存 heartbeat 的确定性只读采集;你拥有本轮唯一采集写域。\n\n1. 目标与交付\n- 串行采集云端 systemd/timer、5 个必需 pipeline marker、PostgreSQL ET/links/performance/latest ET batch、当天 plan/result、19 店 OpenAPI 快照与 reconciliation、正式 policy/rules、低 ET latest 状态。\n- 落盘到唯一目录:E:\\Codex WorkSpace\\Shein销售统计\\outputs\\[REDACTED OPAQUE TOKEN]\\evidence\\[REDACTED OPAQUE TOKEN]\n- 若运行已落定,生成与前一日同 schema 的 runtime-snapshot.json、plan.json、result.json、policy.json、rules.md、inventoryTrend.json、linksData.json、[REDACTED OPAQUE TOKEN].json、low-et-*.json、markers/*.json、audit-summary.json,并返回精简收集摘要。历史 2026-08-10 只可借鉴采集结构,禁止复用业务数据。\n- 可只读参考 E:\\Codex WorkSpace\\Shein销售统计\\outputs\\[REDACTED OPAQUE TOKEN]\\evidence\\[REDACTED OPAQUE TOKEN] 的文件布局,以及 C:\\Users\\dushengyi\\.codex\\memories\\rollout_summaries\\[REDACTED OPAQUE TOKEN].md 的边界;不得复制其中业务值。\n- 写不含敏感值的 collection-manifest.json,记录业务日、捕获时间、文件名/大小/SHA-256、只读命令类别和是否等待。\n\n2. 已锁定约束与事实源\n- 业务日 2026-08-11,时区 Asia/Shanghai。\n- 唯一 coordinator:[REDACTED OPAQUE TOKEN].timer/service;库存 guard 由同 run 内调用,不得手动启动。\n- 必查 marker:daily-operating-refresh、morning-links-ready、morning-supplements、stock-refresh、daily-inventory-guard。\n- 计划/结果:[REDACTED OPAQUE TOKEN] 当天同名文件。\n- 云端根:/opt/shein-bi/app;19 店集合以云端启用 stores 配置为准。\n- 正式 policyVersion 预期 2026-08-07.1,但必须以云端 policy 精确回读。\n- 必须完整读取并遵守 C:\\Users\\dushengyi\\.codex\\skills\\shein-bi-ops\\SKILL.md 与 C:\\Users\\dushengyi\\.codex\\skills\\web-access\\SKILL.md;本任务明确禁止浏览器,因此不得启动 CDP/check-deps/浏览器。联网仅允许 BatchMode SSH/SCP 的只读路径。\n\n3. 非目标与保留给主任务\n- 禁止库存修改、--execute、任何写端点、启动/重启 systemd、手动启动 guard/coordinator、BI ask/chat、飞书问数、浏览器、通知、部署、代码/排班修改。\n- 不生成 Excel、不发送群消息、不作最终业务结论。\n- 不读取、复制或输出原始凭据、EnvironmentFile、token/cookie、recipientChatId 或敏感响应字段。\n- 主任务保留 19 店/总行数/hash/跨店结论终验和报告。\n\n4. 读写范围\n- 云端只读:上述系统状态、marker、数据库只读 SQL、运行产物、OpenAPI 已刷新快照。\n- 本地唯一可写:上述 evidence 目录。不得修改仓库源码、配置、旧 outputs 或其它共享文件。\n- 所有 SSH 复杂命令使用 base64 远端脚本,避免嵌套引用;不得创建远端文件。\n\n5. 验收标准\n- 采集命令串行执行;先捕获 service/timer/marker 与文件存在性。\n- 若 morning run ActiveState 非 inactive 或当天 plan/result/必需 marker 尚未落定,最多等待 45 分钟,按有界间隔只读复查;不得把缺失解释成 0/成功。达到终态后再复制完整证据。\n- audit-summary 检查日期、64 位 hash及复算、policy、source 21 项/19 店、plan/result 行集合、execute=true、automatic/授权上下文、逐条结果回读、当前 action snapshot、低 ET 分配完整性、重复键与来源新鲜度。任何异常保持 false/列明,不要修复。\n- 返回:是否等待、service/marker 状态、plan/result 是否存在、19 店覆盖、主要文件路径;不返回原始业务大表或敏感响应。\n\n6. 停止与升级\n- SSH/SQL/JSON 解析失败、源文件缺失超过等待上限、运行状态冲突、检测到任何需写生产的情况,立即 fail closed;保留已采集证据并报告精确 blocker。\n- 若当前 Git/云端 release 与 hash 模块不一致,audit-summary 标记 source parity false,不自行切换分支或修复。",
+      "version": 1,
+      "versionId": "okr_e536aba74605a20bbfd4_9b0fb1b3e053b38c791e"
+    },
+    {
+      "activation": "active",
+      "contentHash": "fcede2f63588f9dc0ebe1e26299b6d1405ef3c84a9957fa4cdd30741f8e6d439",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T05:39:32.779Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.marketing.cfc548b3490a",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "marketing",
+        "execution",
+        "data_truth"
+      ],
+      "text": "你是 worker,负责修复营销终态 readiness 对高点击实时复核安全跳过的漏记账。工作目录 E:\\Codex WorkSpace\\Shein销售统计。\n\n目标与交付:\n1. 修改 [REDACTED OPAQUE TOKEN].mjs,使高点击结果中明确成功且属于安全终态的 no_longer_qualifies(兼容本轮人工终态副本 blocked_no_longer_qualifies)被计入 accounted,不再被视为 unhandled。\n2. 新增或更新专门 smoke test,至少覆盖:\n - no_longer_qualifies + ok=true 被计入终态;\n - blocked_no_longer_qualifies + ok=true 被计入终态;\n - failed、ok=false、未知 status 不能被误计入;\n - 原有 blocked 行仍保持行为。\n3. 运行相关测试并报告证据。\n\n约束:\n- source of truth 是 readiness 脚本与高点击 batch 输出状态;不要改生产产物、队列、云端、浏览器、营销状态。\n- 不修改用户已有的三个未提交文件:\n [REDACTED OPAQUE TOKEN].mjs\n [REDACTED OPAQUE TOKEN].mjs\n [REDACTED OPAQUE TOKEN].mjs\n- 写域仅限 [REDACTED OPAQUE TOKEN].mjs 及一个相关 smoke test 文件(优先复用已有测试;若新增,命名 [REDACTED OPAQUE TOKEN].mjs)。\n- 不改公共业务规则,不把普通成功执行当 blocked;只修“实时资格复核后安全跳过”的终态记账。\n- 不做 git commit/push/release/deploy。\n\n验收:\n- 给出改动文件、关键逻辑、运行命令和通过输出。\n- 遇到状态字段不清晰或测试架构阻断,停止并给具体证据,不要扩大修改范围。",
+      "version": 1,
+      "versionId": "okr_9a5b4584f8754569ab62_fcede2f63588f9dc0ebe"
+    },
+    {
+      "activation": "active",
+      "contentHash": "aac04a28562efc2ee623cfdbc303cb57f64113a512ceffbdd237936398a28ae0",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T02:58:14.485Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.product_identity.5b68169f974d",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "product_identity",
+        "execution",
+        "data_truth"
+      ],
+      "text": "你是 complex-worker,负责有界本地实现;只在独立工作树 E:\\Codex WorkSpace\\Shein销售统计-profit-cache 写代码。目标:永久修复两个问题:(1) 首页选择货号时不再向浏览器下载完整 profit section;(2) homeProfit/队列不能把旧源或生成失败的 stale 200 当成功。请直接实现并运行专项测试。\n\n已锁定设计与约束:\nA. 新增请求态 productProfit section/分支,不改 DB schema、不授新权限、不写生产、不写运行缓存文件、不进预热/外部 section 队列。它只从“当前 core generatedAt 完全一致”的现有 profit cache 派生;缺当前 profit 时只排入 profit(合并队列)并返回 pending/非成功,不得读取 anyGeneratedAt。q 必填、trim、最长64,服务端过滤后只返回匹配货号的 dailyStoreProducts 及 [REDACTED OPAQUE TOKEN];不得返回 [REDACTED OPAQUE TOKEN] 大数组。为避免每个按键重复解析 98MB,服务端使用至多当前一代的内存索引,解析后仅保留按标准货号分组的 dailyStoreProducts和小型搜索文本,不保留完整 profit 对象;代次改变即替换。新 endpoint 必须按 actor.readStores 再过滤,不扩大现有读权限。\nB. 客户端 S.q 非空时请求 productProfit,不再请求 profit;无 q 时 profit 趋势继续用 homeProfit,也不下载 profit。[REDACTED OPAQUE TOKEN] 等同步。productProfit 请求必须把 q 带到 URL。关键:P/SS 要按 q 隔离,旧 q 的晚到响应不得 merge 或覆盖新 q;输入变更可并发但只能当前 q 落地。保留客户端 F() 二次筛选。\nC. [REDACTED OPAQUE TOKEN] 只读当前代 profit;删除 anyGeneratedAt fallback。旧源 homeProfit 绝不能 200;无当前 profit 时返回 202 pending(普通请求)或 503(host-locked/force),并确保 profit 以高优先级合并入队。当前 profit 存在时再派生。\nD. cloud_bi_refresh.sh 入队顺序将 profit 放到 homeProfit 前。[REDACTED OPAQUE TOKEN].sh 和 prewarm_bi_portal_sections.sh 必须把 X-BI-Section-Stale:true 或 X-BI-Section-Refresh-Failed:true 的 2xx 当失败;homeProfit 还要有服务端 fail-closed保证。不得创建 timer/队列实例。\nE. 保持 Windows/Linux兼容;使用 apply_patch;不改 generated outputs。不得 Git staging/commit/push/PR、不得联网、不得生产访问、不得浏览器。\n\n写范围:scripts/serve_bi_portal.mjs、scripts/bi_app/client.js、scripts/cloud_bi_refresh.sh、[REDACTED OPAQUE TOKEN].sh、[REDACTED OPAQUE TOKEN].sh,以及相关 scripts/test_*.mjs;如确有必要可新增一个纯测试文件,但不要改其他源码。\n验收证据:\n1) node --check 两个 JS;\n2) test_bi_client_resilience.mjs、[REDACTED OPAQUE TOKEN].mjs、test_bi_section_cache.mjs、test_bi_live_events_bridge.mjs、[REDACTED OPAQUE TOKEN].mjs,以及你新增/改动的测试全通过;\n3) 静态证明 homeNeeds 不再有 q->profit,productProfit 响应不含大数组;\n4) git diff --check 和列出改动文件。\n非目标仍由主任务负责:线上恢复、业务数值、Git/release/deploy/最终生产回读。\n停止/升级:若现有服务器函数不可测试导出或读权限无法在分支内安全过滤,先给出精确 blocker,不要扩大 DB 权限/改认证模型。",
+      "version": 1,
+      "versionId": "okr_00748d62bd15e99941e9_aac04a28562efc2ee623"
+    },
+    {
+      "activation": "active",
+      "contentHash": "e3ef2ff2bbb997e92761375677745e065019d80562bb8c218ef4d023f40527dd",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T13:12:27.276Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.publish.a8fcf63d86d8",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "publish",
+        "execution",
+        "data_truth"
+      ],
+      "text": "角色:explorer,只读。\n目标:在 E:\\Codex WorkSpace\\Shein销售统计-description-backfill 中分析 release 2026.08.11.6 云端 npm test 的三项失败,给出最小、安全、证据化的修复/验收建议:\n(1) [REDACTED OPAQUE TOKEN].mjs 在真实 /opt/shein-bi/app 路径触发 [REDACTED OPAQUE TOKEN],期望 exit 2 实际 4;\n(2) [REDACTED OPAQUE TOKEN].mjs 被 run_deterministic_tests 120s 杀死;\n(3) [REDACTED OPAQUE TOKEN].mjs 被默认 30s 杀死。\n约束:只读,不修改文件,不运行生产/网络/浏览器/部署/消息/排班,不读取或输出凭据、Cookie、Profile 或敏感响应;不建议绕过/弱化生产写门;不设置模型/provider覆盖。源事实仅来自仓库代码和已给定失败现象。\n非目标:不做 NM 生产发布,不处理历史回填,不提交 Git。\n交付:列出相关文件和行号/符号;判断哪些是真缺陷、哪些是环境型测试问题;推荐最小补丁范围及验证命令;明确停止门。若无法确认,报告精确缺口。",
+      "version": 1,
+      "versionId": "okr_54a73139b6729ebdff5a_e3ef2ff2bbb997e92761"
+    },
+    {
+      "activation": "active",
+      "contentHash": "0b8d44a0c735c2426218a9b1b9255ab417ecef55dbddb9093b5361e6af0739ab",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-16T09:02:10.768Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.publish.bb26ab12b9b2",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "publish",
+        "execution",
+        "data_truth"
+      ],
+      "text": "工作区 E:\\Codex WorkSpace\\Shein销售统计。你负责本次 neat-freak 文档整理,直接编辑当前工作区,写入范围仅限:docs/README.md(新建文档索引)、docs/bi-system-architecture.md、docs/implementation-roadmap.md、infra/systemd/README.md、docs/cloud-bi-operations.md、docs/bi-system-operations.md、docs/runtime-architecture.md、[REDACTED OPAQUE TOKEN].md、[REDACTED OPAQUE TOKEN].md(新建)、[REDACTED OPAQUE TOKEN].md、[REDACTED OPAQUE TOKEN].md、[REDACTED OPAQUE TOKEN].md、docs/release-checklist.md(新建)。不要改 README.md、代码或其他文件。你不是唯一在仓库工作的代理,不要回滚/覆盖别人已有改动;基于当前 dirty tree 做最小、可审计整理。要求:1) 删除 pricing-rules 唯一 NUL 字节;2) 调度事实以 [REDACTED OPAQUE TOKEN].timer 为准(每小时但排除03:00/08:00),systemd README 只讲 unit 参数,cloud-bi-operations 讲生产 runbook,其他文档改成指针;implementation-roadmap 明确标为历史路线图,不再宣称当前调度;3) systemd/cloud docs 中 2026-07-09 开始的“一周双跑”改成绝对日期并明确截至 2026-07-16 仍待负责人基于对账 artifact 决策,不能擅自宣称切换;主 README.md 由我处理;4) 将 [REDACTED OPAQUE TOKEN] 第10-12节的 2026-07-13/15/16 运行日志迁到新 archive,长期 runbook 保留可复用入口,明确 skill=执行指令、pricing-rules=业务政策、handoff=运维入口并互链;5) 修正 marketing roadmap 章节顺序/重复编号,product image methodology 重复章节编号;6) docs/README.md 分类当前架构、运维runbook、业务规则、参考、历史/发布/归档,并链接现有文档;7) release-checklist.md 建立统一发布清单(dirty inventory、tests、secrets、docs links、Git tag/release/target SHA、CI、云端真实 warning 不得抹除)。编辑完运行相对链接检查和 NUL 检查,报告变更文件与验证结果。",
+      "version": 1,
+      "versionId": "okr_4340cc478feb2e3cb66f_0b8d44a0c735c2426218"
+    },
+    {
+      "activation": "active",
+      "contentHash": "8d74512097f658c3b3bf5902206c58ad3de50ae26053169b09c3401ba6b4e1e8",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T11:43:52.449Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.identity.stores.0c6f74b06709",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "stores",
+        "execution",
+        "data_truth"
+      ],
+      "text": "在工作树 E:\\Codex WorkSpace\\Shein销售统计-pending-discuss-batch 做待议价批处理的文档/测试接线,直接编辑且只拥有以下文件:\n- 新增 docs/pending-discuss-batch.md\n- 修改 scripts/run_deterministic_tests.mjs\n- 修改 [REDACTED OPAQUE TOKEN].mjs\n不要修改任何其它文件,不要等核心代理完成,不要运行生产/网络/SHEIN,不要 Git commit/push。\n\n已定接口:\n- [REDACTED OPAQUE TOKEN].mjs 三命令 scan/preflight/execute\n- scan 为每日唯一允许模式:全 enabled 店、严格身份、status=1、完整分页、脱敏 manifest\n- preflight 仅当前任务用户明确授权后,fresh scan,decisions 文件 expand 成 exact item/store hashes + batchHash,默认约15分钟有效\n- execute 需要 [REDACTED OPAQUE TOKEN]、[REDACTED OPAQUE TOKEN]、batchHash、逐项 live 校验、单次写、terminal 回读、全店 final scan;真实执行仅 shein-bi-tencent 主代理;不发群、不调度\n- automation prompt 本次不改\n- 测试文件 [REDACTED OPAQUE TOKEN].mjs\n\n任务:\n1) 写紧凑 runbook,含命令示例但不要真实 ID/凭据;明确 artifacts、退出/失败边界、rollback 只回滚代码不撤销业务写。\n2) 把 test_pending_discuss_batch.mjs 加入 run_deterministic_tests.mjs 一次。\n3) 在 test_bi_ops_release_gate.mjs 的 CHECK_FILES、DIFF_CHECK_FILES 中加入 lib/script/test/doc(JS 只进 node --check;doc 只进 diff/required path),并加入一次独立 pending discuss smoke。避免重复条目。\n4) 运行 git diff --check;可在核心文件出现后运行 node --check,但不要等待也不要改核心。\n验收:列出精确变更和命令结果。停止:若必须改其它文件,报告不动。",
+      "version": 1,
+      "versionId": "okr_a515fb4d119d850c9fd4_8d74512097f658c3b3bf"
+    },
+    {
+      "activation": "active",
+      "contentHash": "1adff26e09ac45a9d6f7b412cf050b512eac696d99df2c121dcc60ec8143eaf5",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-21T06:22:10.875Z",
+      "risk": "medium",
+      "ruleKey": "advisory.data_truth.execution.identity.stores.2557a19e03e7",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "stores",
+        "execution",
+        "data_truth"
+      ],
+      "text": "我的合伙人刚用cli失败,看看怎么回事。\n\n帮我抓取点击率4%以上,近7天曝光量3000以上,且近7天销量为0的链接\n\n13:57\n\n已处理 3m 35s\n\n暂时未能抓到可靠名单,我没有编造结果。\n系统检查通过:19 个店铺均可只读,CLI 与负责人规则正常。\n查询范围:全部店铺;口径为点击率 ≥ 4%、近7天曝光量 ≥ 3000、近7天销量 = 0。\n阻塞原因:云端 chat 将经营数据查询误判为“索取敏感凭据”;ask 又错误路由成“今日销售额”查询。\n工作区内也没有可供离线筛选的 V3/经营报表。\n全程未创建任务、未修改或提交任何链接。\n需要负责人修复云端查询路由,或提供最新的链接级经营报表后才能继续筛选。",
+      "version": 1,
+      "versionId": "okr_8b8a3da440db59afc785_1adff26e09ac45a9d6f7"
+    },
+    {
+      "activation": "active",
+      "contentHash": "542eade5ff3555f66f3cece332c437fc97871c4569c0d4f322b9f2894623d1e5",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T12:12:39.711Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.images.price.5057093af382",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "images",
+        "publish",
+        "price",
+        "execution",
+        "data_truth"
+      ],
+      "text": "工作区 E:\\Codex WorkSpace\\Shein销售统计。目标:只读核验用户给出的两组 SK-15032 素材,并交付结构化摘要。约束与事实源:仅本地 Z 盘文件、config/store_style_profiles.json;不得调用 BI ask/chat、不得创建任务、不得上传图片、不得生产写、不得修改任何文件。工作范围:1) 列出图片目录 Z:\\产品梳理汇总-2026\\3、个护电器\\3、美发护理电器\\1.热风梳\\15032热风梳\\SK-15032-热风梳新图(龚天浩)已审\\MZ-XC-森林自然 和 ...\\NM-TS-黑色奢华 的文件、尺寸、方图是否存在及客观格式问题;2) 列出 Z:\\产品资料包20251211\\SOKONY\\SK-15032热风梳\\15032 热风梳标题和卖点 的实际文件,特别核对用户路径中写作 SK-5110 的文件名是否只是误命名、文件正文产品究竟是 15032 还是 5110;3) 从审核 HTML 中确定性摘录 title1/title2/title3 的英/阿标题和 s09/s9 三语核心卖点位置,不自行生成或改写;4) 核对 MZ/NM 在 config/store_style_profiles.json 的默认标题组。非目标:不决定价格、类目、源商品,不做云端查询,不执行提交。验收:给出精确绝对路径、文件名、尺寸、标题组和值、材料 section 与冲突结论;任何不确定都明确报告并停止,不输出敏感信息。",
+      "version": 1,
+      "versionId": "okr_fb1d26cea11a3d44b98d_542eade5ff3555f66f3c"
+    },
+    {
+      "activation": "active",
+      "contentHash": "518853c76228e40ff6e87c3def68e0c0d8abebc18dce72a76a9642f1d695fa10",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T14:47:47.876Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.images.price.85b362e3ed5f",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "images",
+        "price",
+        "stores",
+        "execution",
+        "data_truth"
+      ],
+      "text": "直接在工作树 E:\\Codex WorkSpace\\Shein销售统计-home-ranking-compare 实现,不要长时间分析。目标:1) 去掉 RMB 重复涨跌徽标;2) 首页四个排行榜增加前期比较。用户已明确批准。\n\n写域仅:\n- scripts/bi_app/client.js\n- scripts/bi_app/styles.css\n- [REDACTED OPAQUE TOKEN].mjs(可扩展)\n- 如更清晰可新增一个专项 test 并注册 scripts/run_deterministic_tests.mjs\n禁止 Git/云端/浏览器/生成物/其它文件。\n\n锁定语义:\nA. 六卡中 SAR/RMB 同源固定汇率的格子:SAR 保留前期金额+涨跌徽标;RMB 保留当前和前期人民币金额,但不显示重复涨跌徽标。成交额四行和利润三行全部一致。不要影响非金额率类的百分点比较。可为 periodCompareLine/Cell 增加 showDelta:false。\nB. 首页四个排行榜(店铺净成交额、店铺净销量、产品净成交额、产品净销量):\n- 前期=当前选择区间之前紧邻的等天数区间,使用现有 periodComparisonContext 和显式 range 聚合,不改变 S。\n- 当前名次/值为主,条形长度仍只按当前值。\n- 每项新增:前期 #名次 · 前期值;名次 badge(↑N位/↓N位/持平/新上榜);数值涨跌 badge。\n- 前期数据源不可用或没有可证明的 period 事实时显示 前期 —,绝不能判为新上榜或0。\n- 前期可用且该 key 不存在才显示 新上榜。\n- 当前榜单不展示“前期有、本期无”的退出项。\n- 排名按现有稳定排序;同值不做共享名次,沿用数组顺序,避免改变当前排行。\n- 仅改首页四榜,不改评价、退货等其它 homeRankList 调用的行为。通过 opt 开关接入。\n- header 显示本期/前期实际日期。\nC. CSS 390/820/1180 不横溢,rank 行保持可点击和清晰。\nD. 当前数值、当前排序、现有 meta、点击筛选行为不得回归。\n\n建议:\n- 抽 [REDACTED OPAQUE TOKEN],让现有 current wrappers与 previous range共用;不得用临时修改 S。\n- homeRankList 增加 opt.previousItems / opt.previousAvailable / opt.previousValueFormatter。\n- 测试:RMB hideDelta、当前/S不变、前期日期、名次升降/持平/新上榜/不可用、当前 bar 不受前期值影响、四榜接入、其它调用不默认接入、响应式。\n\n先落盘,再运行 node [REDACTED OPAQUE TOKEN].mjs 和 node --check。完成后列出变更和结果;有 blocker 立即报告。",
+      "version": 1,
+      "versionId": "okr_52a0e0ab31f6ee7e83f8_518853c76228e40ff6e8"
+    },
+    {
+      "activation": "active",
+      "contentHash": "4ffddcf6557f189585160ccf4fe9828c7d3de6345f973f0ea5655ed9fc04517a",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T12:09:32.949Z",
+      "risk": "medium",
+      "ruleKey": "advisory.data_truth.execution.images.publish.99bf44767e67",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "images",
+        "publish",
+        "execution",
+        "data_truth"
+      ],
+      "text": "目标与交付:只读核对 E:\\Codex WorkSpace\\Shein销售统计 当前半托首页“上方几个表格”的真实结构,以及 E:\\Codex WorkSpace\\Shein全托自动运营系统 首页中“前期对比”的现有做法。输出:1) 半托首页上方表格/卡片的准确名称、排列、字段和相关文件/符号/行号;2) 全托对比控件/列的准确布局和相关文件/符号/行号;3) 在不改变半托现有页面风格与结构的前提下,最小化视觉改造建议,尤其如何容纳 19 店/多行数据。\n约束与事实源:仅以当前两个本地仓库源码、生成模板和可用设计文档为准;先完整读取两个范围适用的 AGENTS.md;不得把旧效果图当现状。用户明确要求本轮只出效果图。\n非目标与主任务保留:不要使用浏览器、不要生成图片、不要修改代码、不要运行生成器/测试、不要执行 Git 写入、发布或生产操作;真实页面截图与最终方案由主任务负责。\n读写范围:只读两个仓库;写范围为空。\n验收证据:每个结论必须给绝对文件路径、符号和紧凑行号证据;明确哪些是现状,哪些是建议。\n停止门:若全托或半托源码不在所述目录、AGENTS 另有更严格边界或无法定位首页,立即报告精确阻断,不猜测、不扩大范围。",
+      "version": 1,
+      "versionId": "okr_6851171aa7907ed2954c_4ffddcf6557f18958516"
+    },
+    {
+      "activation": "active",
+      "contentHash": "43f4d69e7e57484a3b3b4298468fe2334c6a79229cc1e87a048b1c587805eac5",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-18T08:53:56.997Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.inventory.marketing.655e97749a9b",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "product_identity",
+        "price",
+        "inventory",
+        "marketing",
+        "stores",
+        "execution",
+        "data_truth"
+      ],
+      "text": "工作区 E:\\Codex WorkSpace\\Shein销售统计。你负责本次业务逻辑修复的文档收口,写入范围仅限:docs/bi-portal-ui-current.md、docs/bi-system-operations.md、docs/bi-warehouse-model.md、[REDACTED OPAQUE TOKEN].md、docs/scripts-inventory.md,并新增 [REDACTED OPAQUE TOKEN].md。不要修改任何代码、配置、systemd 或其他文件。你不是独自在仓库工作,不要还原他人改动。请先读取当前工作树真实实现,再更新过时口径:1) 已落定利润与未落定售后风险分开;2) 退货费财务核对单实际值优先,缺失才按退货包裹13.88估算;3) 期初只取生效日前一日ET结存,移动加权平均成本,会计期间冻结;4) ET运营可售默认09,SK-03038例外09+01,全仓物理量单列,未匹配/过期为unknown不可当0或成本表推算;5) 仓储费按货号证据→货号×店铺销量→CENTRAL_POOL逐层分摊并对账;6) 浏览器任务租约、每小时清理、营销10:30/13:30/16:30三次重试、最终成功回读才算完成、standing policy但保留[REDACTED OPAQUE TOKEN];7) 解释2026-07-16/17抓数根因和修复(fssync缺失、并行DDL deadlock/skip-ensure)。清除相反旧说法,但历史审计文档不要改。完成后列出修改文件和关键点。",
+      "version": 1,
+      "versionId": "okr_c94d89cd2dccd2db68d1_43f4d69e7e57484a3b3b"
+    },
+    {
+      "activation": "active",
+      "contentHash": "abfa6750d35b23486f069376ea7098562d433bea713b8b07a6a45b6906ded79c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T05:38:01.484Z",
+      "risk": "medium",
+      "ruleKey": "advisory.data_truth.execution.marketing.2bed9cef0eb8",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "marketing",
+        "execution",
+        "data_truth"
+      ],
+      "text": "按你刚才明确的剩余7步立即继续并完成,不再做宽泛探索。补充严格要求:spu-info 必须使用 SheinOpenApiClient.requestReadOnly(),只对策略+营销通过项调用;任何调用路径若没有这个符号即停止。业务分组只在 final live pass 后按 c30_sale_cnt==0 / >0。完成后返回汇总和 artifact 清单,不披露私有明细。",
+      "version": 1,
+      "versionId": "okr_6b6cc139df8a32205193_abfa6750d35b23486f06"
+    },
+    {
+      "activation": "active",
+      "contentHash": "8adb8e4d11e2872854a92847bc8e2a4e43741623bde6995dcc4a8639fe9df166",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-10T08:48:30.971Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.marketing.price.1d9536aa89fb",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "marketing",
+        "execution",
+        "data_truth"
+      ],
+      "text": "角色:explorer,只读代码定位。\n目标与交付:在 E:\\Codex WorkSpace\\Shein销售统计 中确认用户“SK-03038 制冰机、SM-505A/TXSM-505A 缝纫机下次普通营销活动在当前基础上整体再降 2.5 个点”应如何持久化;解释项目内“点”应是利润率百分点、价格百分比还是活动折扣百分点,并给出最小安全变更入口、精确文件/符号/测试。\n既定约束与事实源:以全局/项目 AGENTS、[REDACTED OPAQUE TOKEN].md、[REDACTED OPAQUE TOKEN].json 和当前代码为准;现有固定价规则为 SK-03038=330、SM-505A/TXSM-505A=110。\n非目标:不改文件,不跑浏览器/联网/云端采集,不触碰生产、队列、Git、排班,不决定生产执行价。\n读范围:仅仓库代码/配置/测试。\n验收:(1) 2.5 点语义直接证据;(2) 长期规则消费链(文件+行号/符号);(3) 最小改动方案及对下次普通活动/当前限时折扣的边界;(4) 应跑测试。\n停止/升级:无法唯一判定就列互斥解释与最便宜判别检查,不猜。",
+      "version": 1,
+      "versionId": "okr_bbac5306bd3b33efe844_8adb8e4d11e2872854a9"
+    },
+    {
+      "activation": "active",
+      "contentHash": "cac331c251f5e56e7196198d04c5eb41751f3ae73a615dab8b1e417ec05019b5",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-10T08:43:45.671Z",
+      "risk": "high",
+      "ruleKey": "advisory.data_truth.execution.marketing.price.5ed8422253ce",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "marketing",
+        "execution",
+        "data_truth"
+      ],
+      "text": "角色:explorer,只读代码定位。\n目标与交付:在 E:\\Codex WorkSpace\\Shein销售统计 中确认用户“SK-03038 制冰机、SM-505A/TXSM-505A 缝纫机下次普通营销活动在当前基础上整体再降 2.5 个点”应如何持久化;解释项目内“点”应是利润率百分点还是价格折扣百分点,并给出最小安全变更入口、精确文件/符号/测试。\n既定约束与事实源:以 C:\\Users\\dushengyi\\.codex\\AGENTS.md、项目 AGENTS.md、[REDACTED OPAQUE TOKEN].md、[REDACTED OPAQUE TOKEN].json 和当前代码为准;固定价规则目前含 SK-03038=330、SM-505A=110。不得改变已结算的定价语义。\n非目标:不改任何文件,不跑浏览器/联网/云端采集,不触碰生产、队列、Git、排班;不替主任务决定最终执行价。\n读范围:仅仓库代码/配置/测试;可读全部相关文件。\n验收:给出 (1) 2.5 点语义的直接证据;(2) 现有长期规则的消费链,含文件与行号/符号;(3) 最小改动方案及会影响下次普通活动和限时折扣的边界;(4) 应跑的现有/新增测试。所有结论可追溯。\n停止/升级:若存在两套互斥实现且无法从代码/文档判定,明确列出差异与最便宜的判别检查,不自行猜测。",
+      "version": 1,
+      "versionId": "okr_90750b566c084f8d0658_cac331c251f5e56e7196"
+    },
+    {
+      "activation": "active",
+      "contentHash": "0658828f31870e720b9602006fdd8d9df043e970af9a44fe912774a664a37898",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-19T09:16:40.392Z",
+      "risk": "high",
+      "ruleKey": "advisory.dc03f8841e276dfe",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "官方协议已核实,请立即按以下精确公式实现并补测试,不要再猜:\n1) headers: x-lt-openKeyId, x-lt-eventCode, x-lt-appid, x-lt-timestamp, x-lt-signature。\n2) openKey = x-lt-appid 存在时取它,否则取 x-lt-openKeyId;requestPath 必须是原始 callback URI path(不含 query,官方也禁止 callback URL 带 query)。\n3) signature 前5字符是 randomKey;signString = apiKey + \"&\" + timestamp + \"&\" + requestPath;secretKey = appSecret + randomKey;HMAC-SHA256 得到 lowercase hex 字符串;对这个 hex UTF-8 字节做 Base64;expected = randomKey + base64Value;constant-time compare。\n4) eventData = Base64 AES/CBC/PKCS5Padding ciphertext;key = Arrays.copyOf(appSecret UTF-8 bytes,16) 的语义(截断或零填充);IV = \"space-station-default-iv\" UTF-8 前16字节。\n5) 官方示例主要是 multipart/form-data 字段 eventData,但文档有 Content-Type 表述冲突;请支持 multipart 为主,并兼容 application/json、[REDACTED OPAQUE TOKEN]。严格 body size。\n6) 超过1.5秒平台会判超时,因此 receiver 必须只做验签/解密/最小校验/持久入库,成功后快速2xx;业务处理异步。\n保持你既有文件所有权,完成后说明测试和变更。",
+      "version": 1,
+      "versionId": "okr_cc7c4012a49d06fcbfdf_0658828f31870e720b96"
+    },
+    {
+      "activation": "active",
+      "contentHash": "fbf12a7bc1896634704b94a986d9be2b346ee8676ad5298d0979b206dfa08415",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T05:40:38.259Z",
+      "risk": "low",
+      "ruleKey": "advisory.e000c80385be36df",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "立即停止所有正在运行的测试和修改,给当前状态后结束。我们发现并行跑同一专项共享工作树运行态会互扰,且测试 FATAL 后仍 exit 0。不要再运行命令;我将独占修复/验证。",
+      "version": 1,
+      "versionId": "okr_6a8692133bed6534a9b2_fbf12a7bc1896634704b"
+    },
+    {
+      "activation": "active",
+      "contentHash": "73c14e7392023fabeb1d8a13affbb0332470432776b30ed0c122e78750fa737b",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T12:14:06.906Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.23bec1e1637e",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "主任务刚补了一项 fail-closed 修复:scripts/serve_bi_portal.mjs 的 historical audit 扫描已移除固定 last-10k 截断,并在 integration test 末尾加入“写证据后跟 10001 条无关审计仍阻断绑定”的反例。终审请以当前最新 diff 为准并检查该修复。",
+      "version": 1,
+      "versionId": "okr_e27cc2976ee45b56bebc_73c14e7392023fabeb1d"
+    },
+    {
+      "activation": "active",
+      "contentHash": "f6a440d9fa8295fe0715b7732b37b2a272a2148ea1f3bbce14ee5a94dd023966",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T10:35:46.055Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.6258f8c5606e",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "再补充一个不执行的 runner 交付:在同一唯一写域内新增 run_locked_plan.mjs,沿用昨日 execute_inventory_repairs.mjs 的安全链路并适配本轮 manifest.entries。必须逐店串行:browser lease -> launch_store_browser --headless -> [REDACTED OPAQUE TOKEN] --no-launch --keep-open -> apply dry-run -> [REDACTED OPAQUE TOKEN] -> [REDACTED OPAQUE TOKEN] -> [REDACTED OPAQUE TOKEN] dry-run ->(只有 --execute 才)[REDACTED OPAQUE TOKEN] 包裹 replace --execute 和 enrollment readback -> finally cleanup/release。支持 [REDACTED OPAQUE TOKEN];校验 manifest SHA 和每个 rescue SHA;默认使用本轮目录的 [REDACTED OPAQUE TOKEN].execution.json;绝不自行运行 runner。",
+      "version": 1,
+      "versionId": "okr_fa5a23141d64549c0a4a_f6a440d9fa8295fe0715"
+    },
+    {
+      "activation": "active",
+      "contentHash": "7003d4c568ae1271b88a6cba06267d8abe95a4d0b343323301b2651ed5771e91",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T10:29:44.567Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.6fc01412cbb5",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "我按实际 SK-11004 HTML 再跑 extractor,当前仍失败:`en=1 ar=0`。实际 h3 标签是“阿文”,AR_LABEL_RE 只含阿拉伯/العربية/Arabic/AR,需精确纳入“阿文”(并维持最近 h3 唯一标签)。请以实际文件跑到已知三 hash 全匹配为准再报完成。",
+      "version": 1,
+      "versionId": "okr_7812a827086e063bf2db_7003d4c568ae1271b88a"
+    },
+    {
+      "activation": "active",
+      "contentHash": "1b543c7be14784bc6cd6359a00dfd7d35de809149b6b6fbd16216ba2d389e37b",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T10:23:47.774Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.81140df6880f",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "目标:只读审计当前 Codex 全局子代理配置是否会导致 GPT 主任务过度消耗与流程变慢,给出不超过 8 条证据化结论。\n范围:C:\\Users\\dushengyi\\.codex\\config.toml、C:\\Users\\dushengyi\\.codex\\AGENTS.md、C:\\Users\\dushengyi\\.codex\\agents\\global-*.toml。可读取本任务 rollout JSONL 中的安全元数据,但不得输出用户业务数据、凭据或完整 prompt。\n已锁定关注点:root/reviewer 的模型与 reasoning;默认委派语义;并发/深度;是否对小型串行任务不利。只读,不修改任何文件或配置。\n非目标:不要提出业务操作、不要联网、不要运行 SHEIN 接口、不要评价 DeepSeek token 成本。\n验收:列出具体文件/行号,区分直接原因、间接放大器和无关项;给出最小化配置建议,但不执行。\n停止条件:如文件缺失或内容冲突,报告精确 blocker。",
+      "version": 1,
+      "versionId": "okr_06935cf0dffda165c72f_1b543c7be14784bc6cd6"
+    },
+    {
+      "activation": "active",
+      "contentHash": "4357c22d22024954a344ac6a02816e92c4cef32d94d69615bafd9df95acb7258",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-26T03:55:00.000Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.b8cf0ef375f1",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "真实 SHEIN 写操作仍必须走 dry-run、人工确认、审计回读和按动作 payload 适配器,不能静默执行。",
+      "version": 1,
+      "versionId": "okr_1f1b7ffe12af0a645ce9_4357c22d22024954a344"
+    },
+    {
+      "activation": "active",
+      "contentHash": "d3ea165c599aab093203c8aca7ebd2bade63abea67696e2c7f6ffc3b5389ea3f",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T15:02:40.730Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.cd05f1e42f6f",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "立即暂停当前实现,不要继续编辑或测试。architect 已发现无持久锁会在下一轮扩散。请只报告目前已修改文件和 diff 概要;不要回滚、不要提交、不要再改。",
+      "version": 1,
+      "versionId": "okr_1aae42430232ab3db58d_d3ea165c599aab093203"
+    },
+    {
+      "activation": "active",
+      "contentHash": "a109d1537da2aed07fd5a2d4f24eb985d7c8432d26e2743f3bb49140e92b8d6b",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T09:45:29.113Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.e6b20d13fb0f",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "主任务已核实 V3 文档明确“英文和阿文可复制,中文仅供核对”;SK-13015 19 个历史成功新发 payload 也均仅 ar,en 各5行。请把用户要求解释为内容源锁,不默认要求 zh-cn 写平台:实现应锁定三语原文与各自SHA,payload默认仅 AR/EN,ZH作为审计参考;仍需报告官方 schema 对字段/语言的证据与这个选择的依据。",
+      "version": 1,
+      "versionId": "okr_ca53c7851cc1254e025e_a109d1537da2aed07fd5"
+    },
+    {
+      "activation": "active",
+      "contentHash": "7c8d490f9aa9be832da57a5c59d69dba9eb43a18fb9d3693f3e8c27d6f200cf9",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-12T05:31:20.839Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.ee319e38a750",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "立即停止当前工作并返回终态:列出已成功步骤、失败命令/错误、已写文件和未完成项。不要再执行任何命令或重试。",
+      "version": 1,
+      "versionId": "okr_8ea715e31a9e47182f7f_7c8d490f9aa9be832da5"
+    },
+    {
+      "activation": "active",
+      "contentHash": "091d4cd0cb26132947619bc17c45badaaff12e354a7a95f0f84b610fffbb9585",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-10T12:53:30.345Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.fe7c3f04df23",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "复审结论为 PASS_WITH_FIX。请在原独占两文件范围内完成最后修正,不做 Git 操作:\n1) fetchText 的 attempts 解析改为有限整数规范化:未设置、空串、NaN、Infinity 回退默认3;有效值 Math.trunc 后钳制1..5。\n2) 让现有两次500后成功测试显式把 SHEIN_ET_HTTP_READ_ATTEMPTS 设为无效字符串,证明回退默认3;测试后恢复原环境。\n3) 增加恒定500端点,临时 attempts=2,断言 reject、httpStatus=500、调用次数恰2,证明耗尽有界;随后恢复环境。\n4) 继续保持404单次、HTML归一化断言。\n5) 重跑 node --check 两文件、专项测试、git diff --check;返回结果。不要修改 fetchJson/postJson/browser 路径。",
+      "version": 1,
+      "versionId": "okr_c86a87037c44d022c04c_091d4cd0cb2613294761"
+    },
+    {
+      "activation": "active",
+      "contentHash": "a9166fdf409cbd2d27b259660a01755b3875b5ca196521508122639ff4fc2ff6",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-12T14:02:50.960Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.identity.marketing.b46cae0f73b2",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "marketing",
+        "execution"
+      ],
+      "text": "工作区 E:\\Codex WorkSpace\\Shein销售统计。你负责且只允许修改:[REDACTED OPAQUE TOKEN].mjs、[REDACTED OPAQUE TOKEN].ps1,并新增 [REDACTED OPAQUE TOKEN].mjs。不要修改其他文件,不要暂存/提交,不要碰当前存在的营销改动。目标:把现有每60秒轮询 watch 改为 Windows 事件驱动 fs.watch(session/memory note 变化触发),默认 debounce 15秒;启动时立即 reconcile;再保留默认60分钟低频兜底;兼容 --interval-seconds 但改作废弃的 reconcile alias;新增 --debounce-seconds、--reconcile-seconds、--log-file;状态只在 syncOnce 成功后推进,日志不得含 token。计划任务安装参数改成 DebounceSeconds=15、ReconcileMinutes=60,登录后常驻;保证 PowerShell 5 ASCII 安装脚本;测试用临时目录+fake API证明启动同步、事件触发去抖、短时间不轮询、无事件不重复POST、退出干净。自行运行定向测试。你不是独自在代码库,不得回退他人改动。最终列出改动与测试结果。",
+      "version": 1,
+      "versionId": "okr_b8cdbe9ab8ad719b0d1e_a9166fdf409cbd2d27b2"
+    },
+    {
+      "activation": "active",
+      "contentHash": "d643fc7b923ffc17479a7fe84c2ddac35f13e3bfa27bd01cbe806687b22e302c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-18T07:34:36.406Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.identity.marketing.stores.f0b2370671c7",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "marketing",
+        "stores",
+        "execution"
+      ],
+      "text": "仓库:E:\\Codex WorkSpace\\Shein销售统计。你负责“浏览器租约 + 安全孤儿清理 + 可恢复营销 guard”实现。当前仓库有用户原有未提交营销改动,你不是唯一工作者,绝不能回退或覆盖他人编辑,尤其 [REDACTED OPAQUE TOKEN].mjs 与 [REDACTED OPAQUE TOKEN].sh 已有重要脏改动,必须在其上增量改。\n\n写入范围仅限:\n- 新增 lib/browser_task_lease.mjs(或等价单一租约模块)\n- [REDACTED OPAQUE TOKEN].mjs\n- [REDACTED OPAQUE TOKEN].sh\n- [REDACTED OPAQUE TOKEN].{service,timer}\n- [REDACTED OPAQUE TOKEN].service\n- 新增对应 test/smoke 文件(不要改 package.json)\n- 必要的 [REDACTED OPAQUE TOKEN].md 小节(该文件也已脏,增量保留)\n\n要求:每任务/店铺原子 lease JSON;cleanup 默认只杀无有效 lease 孤儿,有效 lease/PID protected;TTL/owner死亡/陈旧回收;guard [REDACTED OPAQUE TOKEN]不可变报告,重跑跳过已回读成功阶段;service timeout合理、timer降频;新增 deterministic tests。尽量不大改现有营销业务逻辑。直接编辑,运行相关测试,不部署/提交/推送,最终列路径与结果。",
+      "version": 1,
+      "versionId": "okr_628aa55fae4e44d4e498_d643fc7b923ffc17479a"
+    },
+    {
+      "activation": "active",
+      "contentHash": "78e4e780402d8013a0d09b6620e55bce1bdcda7366010e2d446dddbb6062fb3c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-19T09:12:17.602Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.identity.publish.ui.2452a85d7579",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "publish",
+        "execution",
+        "ui"
+      ],
+      "text": "工作区 E:\\Codex WorkSpace\\Shein销售统计。你负责 SHEIN Webhook 纯逻辑核心,写入范围严格限定为新文件:\n- lib/shein_webhook_receiver.mjs\n- [REDACTED OPAQUE TOKEN].mjs\n不要修改任何现有文件。你不是独自在仓库中工作,不要回退他人改动。\n\n请基于仓库 [REDACTED OPAQUE TOKEN].md、lib/shein_openapi_client.mjs 和官方当前契约,实现无网络、可单测的纯函数:\n- normalizeWebhookHeaders(headers)\n- extractWebhookEventData({contentType, rawBody, boundary}):严格大小与 multipart/form-data、application/json、urlencoded兼容,只提取eventData\n- verifyWebhookSignature({headers,eventData,appSecretKey,nowMs,maxSkewMs}):常量时间比较、时间窗、返回结构化结果;若官方签名拼接规则在现有证据不足,做可注入 canonical/signatureStrategy,默认策略必须有明确测试和 fail-closed,不能猜后静默接受\n- decryptWebhookEventData(eventData, appSecretKey)\n- [REDACTED OPAQUE TOKEN]({eventCode,eventPath,payload,storeKey,receivedAt}):覆盖商品接收/普通+全渠道审核/上下架/删除审核、订单、退货、授权、额度、合规\n- [REDACTED OPAQUE TOKEN](...)\n- classifyWebhookSeverity(...):只有授权异常、审核失败、意外下架/删除、必要合规失效、额度归零是P0;订单/正常事件不发飞书\n- 导出支持的事件目录与安全投影函数(前端不泄露原始payload)\n\n测试必须覆盖合法/非法签名、过期、未知格式、AES、重复键稳定性、所有前三批事件分类、敏感字段不外泄。完成后汇报接口设计和测试,不提交、不推送。",
+      "version": 1,
+      "versionId": "okr_75648fb7641c04371de0_78e4e780402d8013a0d0"
+    },
+    {
+      "activation": "active",
+      "contentHash": "5526b3bd11830addb3cdc7108a4f8e2d44b94c9f45e6009717c33cd74a8f1584",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-26T03:55:00.000Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.inventory.f479a6d27b4c",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "inventory",
+        "execution"
+      ],
+      "text": "OpenAPI `stock-query` 是 SHEIN 虚拟库存证据,不能替代 ET 实际库存。",
+      "version": 1,
+      "versionId": "okr_2becbe3f926efd522d37_5526b3bd11830addb3cd"
+    },
+    {
+      "activation": "active",
+      "contentHash": "69245faaf968bcb469b566f6ae197b862fedefa0c8b0cb9048b738ef4d2a3250",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-26T06:40:00.000Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.inventory.publish.bbba4baccfd9",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "inventory",
+        "execution"
+      ],
+      "text": "但 OpenAPI 商品状态只能稳定支持“是否已上架”二值对账,不能替代浏览器源四档 `待上架/已上架/已售罄/已下架`。OpenAPI 库存也是 SHEIN 虚拟库存证据,不能替代 ET 实际库存。",
+      "version": 1,
+      "versionId": "okr_0fc19ebf440072646330_69245faaf968bcb469b5"
+    },
+    {
+      "activation": "active",
+      "contentHash": "f1257218702db9c1ba93115bf94071ed1745bfa97f3e4549e54dd950f292baff",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-23T13:50:00.000Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.marketing.price.0e8ac882571e",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "marketing",
+        "execution"
+      ],
+      "text": "用户还明确:活动填报价里的固定整数价可以做几毛钱小数微调,例如 `160` 可填成 `159.57` 或 `160.28`,但不得越过平台价格上限、目标价底线、利润/成本安全线。预填/提交前必须检查目标执行文件中没有整数价",
+      "version": 1,
+      "versionId": "okr_44c1428cab4174a0e105_f1257218702db9c1ba93"
+    },
+    {
+      "activation": "active",
+      "contentHash": "d0513587144b78154fe0195cfee46eaeccf282b3809bc7664a1c5f93f738d287",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-23T13:35:43.821Z",
+      "risk": "high",
+      "ruleKey": "advisory.execution.marketing.price.bc30bad71942",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "marketing",
+        "execution"
+      ],
+      "text": "后续每次生成/填报普通营销活动方案,都必须以上一次已经确认并执行的“最终版方案”为基准继承价格、利润率、曝光 Top5、归并和用户备注",
+      "version": 1,
+      "versionId": "okr_5440185982d9865214f5_d0513587144b78154fe0"
+    },
+    {
+      "activation": "active",
+      "contentHash": "123b539e78ec5ab4bcf5a726be572ab1e35c5048bc47fea1d74bdd2aeec33322",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-23T13:35:43.821Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.marketing.price.e5de2f852a57",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "marketing",
+        "execution"
+      ],
+      "text": "微调必须在平台最低降幅上限、目标价/利润安全线和普通活动不依赖优惠券保底的新规则内执行",
+      "version": 1,
+      "versionId": "okr_cf8f7d79d0e301aa5bb1_123b539e78ec5ab4bcf5"
+    },
+    {
+      "activation": "active",
+      "contentHash": "5a08296de7b70644df5e3624301e937402f0b359f65ec36eb6dbca4ae72cd788",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-23T13:50:00.000Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.marketing.price.product_identity.b798066e609c",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "product_identity",
+        "price",
+        "marketing",
+        "execution"
+      ],
+      "text": "用户明确纠正:后续每次填报普通营销活动,都必须以上一次用户确认并真实执行/等待执行的最终版 `selection-plan + price-overrides` 作为基准,继承用户备注、固定价、特殊利润率、低价例外、货号归并和小数微调",
+      "version": 1,
+      "versionId": "okr_b1ad29803979c9b62f2f_5a08296de7b70644df5e"
+    },
+    {
+      "activation": "active",
+      "contentHash": "4b1218e8b629b4612466c63327445fc63d3f5e75d67c3e6e30ccc8b7c397bdf8",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T10:04:32.766Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.publish.4c31dba90906",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "execution"
+      ],
+      "text": "请立即收敛为 Phase A 并开始编辑,不再继续广泛分析:只实现当前待发布 task 的审核资料描述绑定和新发品强制描述门。\nPhase A 写范围:新增纯函数材料模块+专项测试;managed CLI `prepare-descriptions`; server 专用同-task CAS endpoint;copy_product_draft payload 描述验证/summary/readback fingerprint;必要的直接测试。固定 payload ar/en,各5行;zh-cn仅材料审计。不得自动映射源 productMultiDescList。\n暂不实现历史 `update_description`、partialEdit、readback/document state;在最终把它列为 Phase B 未完成。优先给出可测试的安全子集,开始写文件。仍不得生产/commit/deploy。",
+      "version": 1,
+      "versionId": "okr_e1a1cca210a211732345_4b1218e8b629b4612466"
+    },
+    {
+      "activation": "active",
+      "contentHash": "083cda048b36c8d6ebef7355498bc87bad4b2799dcc32c5c5c29999a7260678c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-26T03:55:00.000Z",
+      "risk": "high",
+      "ruleKey": "advisory.f3c7a00668f52e93",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "敏感字段扫描不得出现 `[REDACTED OPAQUE TOKEN]`。",
+      "version": 1,
+      "versionId": "okr_b125e9c5388abc5f3502_083cda048b36c8d6ebef"
+    },
+    {
+      "activation": "active",
+      "contentHash": "342a197c9aa4f6d4fec4e1ff9649d2d518408c6160a5e8e00d1a3fbd249d69ea",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T05:37:19.524Z",
+      "risk": "low",
+      "ruleKey": "advisory.identity.1fedfeb677eb",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity"
+      ],
+      "text": "你目前超过预期且尚未落正式结果。请立即停止继续探索,保留已完成只读探针证据,30秒内汇报:已验证的来源时间/覆盖、具体阻塞点、是否可以继续构建119条完整采集器;不要再运行命令。",
+      "version": 1,
+      "versionId": "okr_73df467991d44833c7fe_342a197c9aa4f6d4fec4"
+    },
+    {
+      "activation": "active",
+      "contentHash": "b056216fac803c533f9355f02eb619329dd103490e989590438f96964d34738d",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T03:08:51.239Z",
+      "risk": "low",
+      "ruleKey": "advisory.identity.64ab436b7f94",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity"
+      ],
+      "text": "进度纠偏:工作树 10 分钟仍无任何 diff。请立即开始 apply_patch 实现已锁定方案,不再扩展分析;先完成 server/client/homeProfit fail-closed,再 worker/header与测试。若路径/权限阻塞,立即返回精确错误。不要改 main,不要 Git 操作。",
+      "version": 1,
+      "versionId": "okr_9d57c299b7de879d21b3_b056216fac803c533f93"
+    },
+    {
+      "activation": "active",
+      "contentHash": "36a9db6798055a2fca911d162c067c15d39990199bca6aa361505c563ec21801",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-12T08:30:22.147Z",
+      "risk": "low",
+      "ruleKey": "advisory.identity.9b38a2347364",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity"
+      ],
+      "text": "实施吧。但同事看到所谓当前使用负责人规则包 v2026...这种似乎没有什么意义。",
+      "version": 1,
+      "versionId": "okr_5ed529ee0fcb8623d808_36a9db6798055a2fca91"
+    },
+    {
+      "activation": "active",
+      "contentHash": "6918b3575ef55a09146076797fe861dc332f8fc968c92687128cab30a00c46d6",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T04:00:44.994Z",
+      "risk": "low",
+      "ruleKey": "advisory.identity.9dd89dc3e504",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity"
+      ],
+      "text": "补充同写域要求:prewarm_bi_portal_sections.sh 默认 SECTIONS 目前在 profit 前先跑一次 homeProfit,并会在新 fail-closed 下永久留下 FAILED_SECTIONS;请改为只在 profit 后跑一次 homeProfit,并更新注释/测试。同步关键模式锁冲突应 exit 75,普通异步可保留 skip 0。",
+      "version": 1,
+      "versionId": "okr_1f2e44effd1fa087bcc5_6918b3575ef55a091460"
+    },
+    {
+      "activation": "active",
+      "contentHash": "3c0df1ea7096c5575c608f5fb2d4314b646e350674488f805f047cfffd7d5b18",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-16T03:30:45.998Z",
+      "risk": "high",
+      "ruleKey": "advisory.identity.inventory.marketing.price.3af4e7ab5460",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "publish",
+        "price",
+        "inventory",
+        "marketing"
+      ],
+      "text": "LQ SK-5110 重新上架兜底仍阻断:平台可报库存5、要求10;ET当日实盘234。普通兜底没有虚增库存授权,因此未改库存。给你授权,以后都加上库存完成兜底。\n\nXL 新建限时折扣 80790590 / 107.76 SAR。这个以后列详细点,我要知道是什么品什么SKC",
+      "version": 1,
+      "versionId": "okr_f929116f9b4b9f990ef3_3c0df1ea7096c5575c60"
+    },
+    {
+      "activation": "active",
+      "contentHash": "48202a443c1a4f1a7056556c862c933e7e26f89edb00b3259c5257656b08c6c8",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-19T04:36:21.993Z",
+      "risk": "high",
+      "ruleKey": "advisory.identity.publish.1b50f5d55177",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "publish"
+      ],
+      "text": "修正错误告警语义:当前 on_error 一律说 previous profit caches retained,但若失败发生在 refresh/audit/prewarm 后,新缓存可能已发布。请维护 PHASE([REDACTED OPAQUE TOKEN])并在告警中报告 phase;只在 refresh 之前承诺旧缓存保留,之后改成“raw/cache may have advanced, inspect audit”。测试覆盖不误报。",
+      "version": 1,
+      "versionId": "okr_ede57649a2a695180a15_48202a443c1a4f1a7056"
+    },
+    {
+      "activation": "active",
+      "contentHash": "581daca7f248b34d8f8b057000544f80792b57549842c0fc0434b07997e522f7",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-24T05:04:18.644Z",
+      "risk": "low",
+      "ruleKey": "advisory.images.stores.4b76f6749f19",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "images",
+        "stores"
+      ],
+      "text": "DL、QY,简约、现代、都市、白灰\n\nYJ、JY,意式\n\nDX、XL,浅色奢华、金色\n\nHL、LQ,奶油ins风\n\nTZZ,家居性感风\n\nZL、CX,法式,法式复古\n\nTS、QH,海洋系、度假风、蓝色系\n\nMZ、XC,森系、自然系\n\nFY、JSH, 沙漠风、岩土风、沙特传统\n\nNM、TZ,深色奢华系,黑金\n\n店铺匹配的图片风格规则,更新一下。以最新为准。",
+      "version": 1,
+      "versionId": "okr_b4b429555219d1300682_581daca7f248b34d8f8b"
+    },
+    {
+      "activation": "active",
+      "contentHash": "2a963689b1ba43b543b20efb1e8e44e32946bb80ade58e101d24e024c566ad6f",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-12T10:23:46.302Z",
+      "risk": "high",
+      "ruleKey": "advisory.inventory.marketing.price.product_identity.f0e591ddf492",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "product_identity",
+        "price",
+        "inventory",
+        "marketing"
+      ],
+      "text": "先把SK-5110电磁炉按你的建议上架,并报完限时折扣兜底(活动库存都选10。这条写进规则,以后兜底的限时折扣活动库存默认选10,活动生效时间为一周,除非我另行要求)。同时上架后把这个品的货号改对,改成标准货号。",
+      "version": 1,
+      "versionId": "okr_11ed5e1c6cc2b9ef4753_2a963689b1ba43b543b2"
+    },
+    {
+      "activation": "active",
+      "contentHash": "ccac4cf0f68f895682d9ff44b9a868b365f9d5c9e94bee68dba336347366e3cc",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-20T15:58:00.000Z",
+      "risk": "high",
+      "ruleKey": "advisory.inventory.product_identity.577370746ad7",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "product_identity",
+        "inventory"
+      ],
+      "text": "不要再把 `ET发货单累计 < ET库存 + 历史销量` 写成“发货单缺采”,也不要用 `ET库存+历史销量` 反推供给下限。只能标为 `ET库存/销量匹配待核`,用于排查货号归并、销量或库存匹配问题。",
+      "version": 1,
+      "versionId": "okr_b30e7c067f5be1a074c6_ccac4cf0f68f895682d9"
+    },
+    {
+      "activation": "active",
+      "contentHash": "1cc13796fd3ecf19a0082ccc704d4a2846611175a24f5ad77ab256158d8bbd8e",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-23T13:50:00.000Z",
+      "risk": "medium",
+      "ruleKey": "advisory.price.publish.9d5ae7575076",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "price"
+      ],
+      "text": "不能从旧草稿、默认利润率或重新扫描后的默认策略从头重算。",
+      "version": 1,
+      "versionId": "okr_60ea8311c1cab1af6f78_1cc13796fd3ecf19a008"
+    },
+    {
+      "activation": "active",
+      "contentHash": "972fec862934729624bd79e14196829d40de5c3470d5b6f69cceed1cc1bfd6f7",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T08:12:34.609Z",
+      "risk": "low",
+      "ruleKey": "advisory.price.stores.7b20a65aa611",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "stores"
+      ],
+      "text": "计算一下7月份每个员工的业绩提成,每个人的业绩提成是他所管店铺当月利润的2%。利润以最新的**RTV入仓测算**利润为准,给我一个表格。",
+      "version": 1,
+      "versionId": "okr_cf1dbead195b87ae0565_972fec862934729624bd"
+    },
+    {
+      "activation": "active",
+      "contentHash": "6d210567335b1904c6aeb95985ea90ac57eb3a141fbffffc6eb7cc2c4070117a",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-19T04:37:07.638Z",
+      "risk": "low",
+      "ruleKey": "advisory.product_identity.0f1fbabf9632",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "product_identity"
+      ],
+      "text": "再考虑 replacement detail 的边界:不能简单永远丢 superseded 明细。若 paid canonical 单本身有 ExportStoreFee 明细,优先且只用 paid 明细;但若 paid 单没有明细而 pending 被替换单有,应把一个最优 superseded source 作为该 canonical 单的货号证据,否则会无谓退回 CENTRAL_POOL。建议 canonical_detail_source 每个 canonical bill 只选一个 source bill:canonical 自身有明细优先,否则按 source_income_bill_ids 顺序选首个有明细;绝不同时用两份。coverage/audit 同样按这个选择。加 fixture 测“paid无明细、pending有明细可继承但不重复”。",
+      "version": 1,
+      "versionId": "okr_c64f1a54ec253b880938_6d210567335b1904c6ae"
+    },
+    {
+      "activation": "active",
+      "contentHash": "45d4d058964e0e638cf5f1d738ff5862c5c43243cc040672b8b814c65a83164a",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-19T04:28:12.967Z",
+      "risk": "low",
+      "ruleKey": "advisory.product_identity.65adb84e494f",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "product_identity"
+      ],
+      "text": "补充一个关键边界:product detail 层也要按 canonical 账单过滤/归属,不能让 superseded 等待支付单的明细与已支付单明细重复进入货号分布。若 canonical 当日有多个都已支付的真实账单,则保留各自明细并合并到当日总额。coverage/audit 应以 canonical bill/day 为准。",
+      "version": 1,
+      "versionId": "okr_b9af23c9f962b934cf54_45d4d058964e0e638cf5"
+    },
+    {
+      "activation": "active",
+      "contentHash": "973e9b1caaae5d39419fb02ef67f92da8c55ab2a59cc43e45ef27850732fb6f7",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-26T03:55:00.000Z",
+      "risk": "medium",
+      "ruleKey": "advisory.publish.02a7cbc74d2c",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish"
+      ],
+      "text": "不要再按旧记忆把 OpenAPI 描述成 HL-only、待审核或默认关闭。旧 `[REDACTED OPAQUE TOKEN].sh` / Windows `scheduled_openapi_hl_*` 只作历史诊断入口。",
+      "version": 1,
+      "versionId": "okr_417e24896a18de43c272_973e9b1caaae5d39419f"
+    },
+    {
+      "activation": "active",
+      "contentHash": "d4986e4bd817ebaa5172aee9b7e2f223efede3ee13b190a47f0540d861fab53a",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-26T03:55:00.000Z",
+      "risk": "medium",
+      "ruleKey": "advisory.publish.11d4a2ba61a7",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish"
+      ],
+      "text": "商品/链接 OpenAPI 只能稳定对账“是否已上架”二值,不能替代浏览器源四档状态",
+      "version": 1,
+      "versionId": "okr_876e86d7561e689e6c1c_d4986e4bd817ebaa5172"
+    },
+    {
+      "activation": "active",
+      "contentHash": "3b058e00696a7ec8417f695c841c9689e685d4a2c73d7497f4066bd547558266",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-23T13:35:43.821Z",
+      "risk": "medium",
+      "ruleKey": "advisory.publish.2360cef77236",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish"
+      ],
+      "text": "不得重新从默认策略或新扫描草稿直接起算。",
+      "version": 1,
+      "versionId": "okr_21737870807c1ff4471a_3b058e00696a7ec8417f"
+    },
+    {
+      "activation": "active",
+      "contentHash": "5dd577ffc73eb0d8428658a1c938f8e930e34a3c862337ec75d8f4e73d567c24",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-16T09:47:06.615Z",
+      "risk": "low",
+      "ruleKey": "advisory.stores.80202260f2be",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "stores"
+      ],
+      "text": "新增一个规则,以后上链接,默认标题匹配店铺的规格是:\n\nJSH用标题一\nDL、TZZ、CX用标题一\nHL、TS、TZ用标题一\nDX、LQ、XC用标题二\nMZ、NM、YJ用标题二\nJY、QY、XL标题三\nFY、QH、ZL用标题三",
+      "version": 1,
+      "versionId": "okr_02d58c5187df1c130039_5dd577ffc73eb0d84286"
+    },
+    {
+      "activation": "active",
+      "contentHash": "a5fb872a799a3374df029a8cf5ccbf3455f871be294119954d8dcb611ba6da3b",
+      "explicitDurable": true,
+      "machinePolicy": {
+        "knowledgeAuthority": {
+          "allowReverseOverwrite": false,
+          "coworkerPersistence": "task_or_session_only",
+          "publisher": "owner_only"
+        }
+      },
+      "publishedAt": "2026-07-12T08:30:22.147Z",
+      "risk": "low",
+      "ruleKey": "authority.owner-one-way-knowledge",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "images",
+        "ui"
+      ],
+      "text": "1、图片只是举例。我指的是所有经验。\n2、路径应该我的本机以及cli我的账号,以及我的BI账号沉淀下来的经验,需要同步到网页。而同事们操作的,就不能同步了。也就是说,我的经验一定会同步给他们,而他们的不能反向覆盖我的。\n3、因为我会更习惯用codex本地来干活,而同事们大概率会使用网页端。如何保证规则传递链路的自动和顺畅。",
+      "version": 1,
+      "versionId": "okr_c8773de02286b34b13cd_a5fb872a799a3374df02"
+    },
+    {
+      "activation": "active",
+      "contentHash": "0c741a55763ab85f137dd082bff2b754031d26a2bc63be591f1a5ba98a26a570",
+      "explicitDurable": true,
+      "machinePolicy": {
+        "controlledWrite": {
+          "allowSilentWrite": false,
+          "requireAudit": true,
+          "requireDryRun": true,
+          "requireHumanConfirmation": true,
+          "requireReadback": true
+        }
+      },
+      "publishedAt": "2026-08-12T07:56:48.954Z",
+      "risk": "high",
+      "ruleKey": "execution.controlled-write-boundary",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "inventory",
+        "marketing",
+        "stores",
+        "execution",
+        "data_truth"
+      ],
+      "text": "你接管 E:\\Codex WorkSpace\\Shein销售统计-workflow-v3 当前全部未提交改动的实际实现所有权。背景:用户明确要求实际代码工作由 DeepSeek 完成,GPT 主任务只规划/调度/审查。当前 worktree 有一批尚未提交的工作流性能改动,其中部分由主任务直接写入,不能原样视为已验收;请你独立审计、按目标重写/修正/撤销,并完成测试。\n\n锁定目标:\n1) CLI 普通连续命令减少重复 partner CLI update + owner knowledge 网络/锁检查,可用约5分钟 TTL;但 execute、显式 [REDACTED OPAQUE TOKEN] 必须强制实时检查,登录/会话安全不降级。\n2) BI query 结果改为紧凑 JSON 落盘,manifest 仍必须对实际落盘文件独立算 SHA256 并可 verify;不得复用旧业务查询结果。\n3) 库存执行器避免每行重写完整结果,改为 append-only journal + 终态完整结果一次原子写;首次 readback 立即查,后续有界退避;hash、授权、串行写、逐条回读不变。\n4) 淘汰候选器直接接受受管 CLI query JSON(data.storeLinks/data.links)并兼容 CSV;真实下架执行器完全不改,不扩大同SPU多SKC等执行范围。\n5) 营销群发送只有 lark 进程成功、JSON ok=true 且存在 message_id 才写 sent 状态;不得输出/持久化 message_id 或收件ID。\n6) partner CLI package version 目标 2026.08.12.5,文档只更新实际入口。\n\n明确非目标/禁止:不改自动化、systemd、调度;不运行云端、浏览器、OpenAPI、消息或生产写;不实现旧 query 复用、不收窄19店刷新、不删除最终全店回读;不改真实业务授权范围。写域:当前 worktree 全部未提交文件,你是唯一实现 owner。主任务不再编辑。\n\n验收:审查当前 diff的每处语义和安全性;运行相关定向测试、npm test或 test_bi_ops_release_gate(先生成 portal shell),git diff --check;如门禁失败给精确原因并修复范围内问题。最终报告实际保留/重写/撤销内容、测试和任何剩余风险。",
+      "version": 1,
+      "versionId": "okr_2c4a07ad3290e56adeff_0c741a55763ab85f137d"
+    },
+    {
+      "activation": "active",
+      "contentHash": "02d5b2001646d184d29c36bd1b1d4d3af2a37b7a0a2864f8e24012fd85c555d0",
+      "explicitDurable": true,
+      "machinePolicy": {
+        "imageWorkflow": {
+          "mode": "upload_suggest_adjust_controlled_submit",
+          "requirePreview": true,
+          "requireUrlConversion": true
+        }
+      },
+      "publishedAt": "2026-08-12T07:44:26.168Z",
+      "risk": "medium",
+      "ruleKey": "images.role-ordering",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "images",
+        "execution"
+      ],
+      "text": "角色:batch-analyst,只读本地素材核验。目标:核验六条请求对应的三个资料源(SK-11004、SK-270、SK-5110)和指定四个图片目录是否存在,枚举实际 HTML/资料文件、唯一三语核心卖点 section(s09优先)、图片数量/尺寸/格式/方图与主图候选;同时读取 config/store_style_profiles.json,给出 HL/TS/JY/NM/YJ 默认标题组。读域仅 Z: 指定目录和仓库配置。非目标:不改文件,不上传,不创建任务,不执行 CLI 业务,不开浏览器,不输出文档全文或敏感内容。验收:逐商品/逐店给出精确路径、文件SHA256、素材客观阻塞项;若用户路径中【字符或句点有误,自动定位最接近的唯一实际文件并说明。",
+      "version": 1,
+      "versionId": "okr_f993f4fa0a15323f3710_02d5b2001646d184d29c"
+    },
+    {
+      "activation": "active",
+      "contentHash": "be7c565de3816aff40434cb59d1485461e431e49fdf5457d2ec0c51e7eff3215",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-10T16:36:34.622Z",
+      "risk": "high",
+      "ruleKey": "marketing.new-listing-treatment",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "marketing"
+      ],
+      "text": "请立即停止继续扩大搜索范围,用当前已取得的证据收口并返回:两条 SKC 的历史价格、Top5/新品待遇字段、人工活动时间线,以及明确未找到项;只需绝对路径和 JSON key/行号。不要再扫描大型目录。",
+      "version": 1,
+      "versionId": "okr_dbb441132e5b39e7688e_be7c565de3816aff4043"
+    },
+    {
+      "activation": "active",
+      "contentHash": "13b85fad21142da74f469c28dc86b45da31267d7be7c43ddb7ba22e23e6b1353",
+      "explicitDurable": true,
+      "machinePolicy": {
+        "productIdentity": {
+          "productModel": "pure_model_only",
+          "supplierCode": "model_plus_product_name"
+        }
+      },
+      "publishedAt": "2026-08-11T04:10:38.183Z",
+      "risk": "high",
+      "ruleKey": "publish.product-identity-fields",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "images",
+        "publish",
+        "product_identity",
+        "price",
+        "inventory",
+        "execution"
+      ],
+      "text": "为 NM / SK-11004 单链接上新制定只读安全执行契约。\n\n目标:基于 E:\\Codex WorkSpace\\Shein销售统计 当前 AGENTS.md、shein-bi-ops 规则、[REDACTED OPAQUE TOKEN].md、[REDACTED OPAQUE TOKEN].md 和 CLI 源码,给主代理一份最小状态机与停止门:从实时来源核验、结构化 operate、同任务 prepare-publish、重复链接处理、payload hash 锁、用户确认、串行 execute 到终态 OpenAPI/readback。明确 title2、标准货号/纯型号、库存100和供货价默认策略如何保留为结构化事实。\n\n固定约束:只读;不联网、不调用受管 CLI、不创建任务、不改文件、不运行发布/预检/执行、不打开浏览器、不发消息。不得设置模型/思考/provider 覆盖。\n\n非目标:不决定具体源链接、价格、标题文本或图片清单;这些由证据工作流和主代理决定。主代理保留授权、创建任务、任何生产写和最终验收。\n\n读写范围:只读上述仓库文件;写域为空。\n\n验收:输出顺序化状态机、每步进入条件/证据、漂移与重复链接分支、用户最终确认必须覆盖的字段,以及最强的三个反例/失败模式。附文件/行号。\n\n停止:若文档冲突,列出冲突并按 AGENTS/skill 更严格边界优先,不自行裁决扩大权限。",
+      "version": 1,
+      "versionId": "okr_34a3622c47eef622a7fc_13b85fad21142da74f46"
+    },
+    {
+      "activation": "active",
+      "contentHash": "f6b7efa589893e0b20308022a85bca546f18e933628820b2bd11a5aa43759b2b",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T11:36:57.247Z",
+      "risk": "high",
+      "ruleKey": "stores.openapi-capability",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "images",
+        "price",
+        "stores",
+        "execution",
+        "data_truth"
+      ],
+      "text": "在工作树 E:\\Codex WorkSpace\\Shein销售统计-pending-discuss-batch 实现“待议价专用确定性批处理 V1”。直接编辑指定文件,不要只给建议。\n\n目标与交付:\n- 新增 lib/pending_discuss_batch.mjs\n- 新增 [REDACTED OPAQUE TOKEN].mjs\n- 新增 [REDACTED OPAQUE TOKEN].mjs\n- 新增 docs/pending-discuss-batch.md\n- 修改 scripts/run_deterministic_tests.mjs,把新测试纳入 suite\n- 修改 [REDACTED OPAQUE TOKEN].mjs,把新 lib/script/test/doc 纳入 tracked/source/diff gate,并独立运行 smoke\n如确有必要可修改 package.json 仅增加便捷命令,但不要改 bi_ops_cli.mjs、automation、systemd/cron、配置凭据、OpenAPI catalog 生成产物或其他业务模块。\n\n已定接口和不变量:\n1) CLI 三模式:\n- scan --out-dir <全新独占目录> [--config ... --stores-config ... --store-truth ...]\n- preflight --decisions <JSON> --out-dir <全新独占目录> [同上]\n- execute --preflight <preflight.json> --batch-hash <hash> --confirm [REDACTED OPAQUE TOKEN] --out-dir <全新独占目录> [同上 --lock-path ...]\n2) scan 以 config/stores.json 全部 enabled 店铺为期望覆盖;OpenAPI 配置必须有同店 enabled !== false 且含 openKeyId/secretKey。按 storeKey 串行,先严格实时身份校验,再调用 [REDACTED OPAQUE TOKEN],固定 discussStatus=1,pageSize=200,完整分页。读操作只对网络异常、429、5xx/504 或明确限流/暂时错误做有界重试;绝不把失败记成 0。兼容 info.data/info.records/info.list。检测 storeKey::discussSn 重复键及重复页。真实 Windows OpenAPI 继续由现有 SheinOpenApiClient 边界拦截。\n3) scan 输出仅白名单业务字段:storeKey、discussSn/status/type、supplierCode、canonicalGoodsSn、skcName/spuName、productTitle、[REDACTED OPAQUE TOKEN]、每 SKU 的 [REDACTED OPAQUE TOKEN] 及最新 history 摘要。禁止图片 URL、文件对象、响应原文、[REDACTED OPAQUE TOKEN]。使用 normalizeGoodsSnDetailed 归并,(全) 前缀须正确归一化。输出 coverage([REDACTED OPAQUE TOKEN])、rowCount、duplicateKeys、按 canonical 汇总。0 条可 ok;任何店失败/缺凭据/身份失败/重复键则 ok=false,preflight 不得继续。\n4) preflight 必须执行 fresh scan。decisions schema 至少支持 {\"schemaVersion\":1,\"businessDate\":\"YYYY-MM-DD\",\"decisions\":[{\"canonicalGoodsSn\":\"...\",\"action\":\"accept|reject\"}]}。只允许 accept/reject;每条规则至少匹配 1 个当前 status=1 行;同一 canonical 不得冲突。匹配“当前全部行”,未匹配的其它待议价仅报告不执行。业务日用 Asia/Shanghai,传入日期必须等于当前业务日。\n5) 为每个目标生成白名单锁定对象和 itemHash,至少绑定 storeKey、discussSn、status=1、canonical/raw supplierCode、skcName、平台建议价结构、action、准确写 payload。accept 映射 discussAuditType=\"1\",reject 映射 \"2\",写体固定 {\"confirmInfos\":[{\"discussAuditType\":\"...\",\"discussSn\":\"...\"}]}。按店分组生成逐店 payloadHash;batchHash 绑定所有逐店 hash、businessDate、scan hash、decisions hash、相关源码/schema/alias/catalog/truth 文件 hash。预检默认短时有效(例如 15 分钟),文档写清楚。hash 必须基于键排序 canonical JSON,不受对象插入顺序影响。\n6) execute fail closed:\n- 必须环境 [REDACTED OPAQUE TOKEN]、固定 confirm 文本、batchHash 精确匹配、预检未过期/业务日仍相同、源码/schema/alias/catalog/truth hashes 未漂移。\n- 用 [REDACTED OPAQUE TOKEN].mjs 获取单一跨进程锁(默认 POSIX [REDACTED OPAQUE TOKEN].lock,测试可 --lock-path)。\n- 全程按 storeKey、discussSn 稳定顺序逐项串行。\n- 每项写前立刻严格身份校验并 fresh 查询 status=1 找 exact discussSn,重新计算锁字段/itemHash;对象缺失、status/canonical/价格/身份/hash 任一漂移立即停止,后续不得写。\n- 每项最多一次 process-discuss 写;网络异常/超时/非零响应/成功计数不明确都视为结果不确定或失败,绝不重试写并立即停止后续。只有 HTTP ok、code=\"0\"、successCount=1、failCount=0 才进入回读。\n- 写后只读轮询目标 terminal:accept=3,reject=4;验证 exact discussSn。accept 还须从 latestCostPrice 或最新 costPriceHistories 证明各 SKU 已等于锁定的平台建议价及币种;未能证明不得标完成。超时则 submitted_readback_pending 并停止。\n- 无论成功或中途停止,尽力做最终全 enabled 店 status=1 scan;最终报告区分 [REDACTED OPAQUE TOKEN]。不因缺失报告 0。\n7) 产物目录必须预先不存在或为空;所有 JSON 使用 atomic_file_publish,0600。至少落 scan.json/preflight.json 或 execution.json/final-scan.json,以及 manifest.json(列 artifact sha256;stdout 只给紧凑、脱敏摘要和文件路径)。不得输出凭据。每次运行产物 hash 可完整复核。\n8) 不发群、不接受/拒绝真实议价、不创建任务/队列/调度器;测试只能 fake HTTP localhost。无生产写或网络。\n9) 测试矩阵至少覆盖:0 条;分页;429/504 读重试;(全) normalization;重复键;缺店/身份漂移;decisions 未匹配/冲突;逐店 hash/batch hash;过期/源码漂移;accept status3+价格证明;reject status4;延迟 terminal;write 返回成功但 terminal 未证;写失败/不确定后停止后续且写不重试;产物 hash 完整且无 dummy credentials 泄漏。尽量让单测试在 30 秒内。\n10) 代码保持 Node ESM,无新 npm 依赖;复用 SheinOpenApiClient、shein_store_identity、cross_process_ticket_lock、atomic_file_publish、product_sku_normalizer。所有失败输出精确 blocker code/message。\n11) 文档明确:正常每日 heartbeat 只允许 scan;preflight/execute 仅用户在当前任务明确授权后;automation prompt 本次未改变;execute 只应由 sh",
+      "version": 1,
+      "versionId": "okr_9b50755d41daac3fd4ae_f6b7efa589893e0b2030"
+    },
+    {
+      "activation": "active",
+      "contentHash": "c47c95f8760189e78a9dc2627bc753857815fbfd93de57c25c474f938acf4a10",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T09:54:12.837Z",
+      "risk": "high",
+      "ruleKey": "ui.readability-and-layout",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "product_identity",
+        "price",
+        "stores",
+        "execution",
+        "ui"
+      ],
+      "text": "角色:explorer,只读。目标:在 E:\\Codex WorkSpace\\Shein销售统计 中定位“流量数据页 > 店铺 × 标准货号 × SKC 明细”从数据库/仓库生成到前端渲染的完整链路,并确认 SKC 首次上架时间的权威字段及其语义。交付:精确文件、符号、行号;当前输出 schema;最小修改点;相关现有测试;说明首次上架时间是当前链接事实还是日期对齐历史事实。约束:生产事实以 PostgreSQL/现有确定性脚本为准;只读,不改文件、不运行抓数、不访问浏览器、不做生产写、不部署、不做 Git 操作;不读取或输出凭据。非目标:不实施修改、不判断指定 SV 的价格。验收:证据足以让主任务独立实现,包含至少一条数据源字段和一条 UI 渲染路径。若字段/路径不明确,列出已查位置与精确阻塞。",
+      "version": 1,
+      "versionId": "okr_c36569770ae47466bdad_c47c95f8760189e78a9d"
+    }
+  ],
+  "schemaVersion": 1
+}
