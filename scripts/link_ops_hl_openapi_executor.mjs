@@ -3135,7 +3135,6 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
     };
   }
   try {
-    let newIdentityInfoAvailable = false;
     for (const spuName of publishSpuNames.slice(0, 5)) {
       const response = await client.request('/open-api/goods/spu-info', {
         method: 'POST',
@@ -3146,7 +3145,6 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
       if (!response.ok || String(response.data?.code) !== '0') continue;
       const info = response.data?.info && typeof response.data.info === 'object' ? response.data.info : null;
       if (!info) continue;
-      newIdentityInfoAvailable = true;
       const matched = matchProductReadbackRows([info], fingerprint);
       if (matched.strong.length) {
         // Phase A live description gate: identity strongly matched, but the
@@ -3184,21 +3182,6 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
           note: '已用 publishOrEdit 返回的 SPU 编号调用官方 spu-info，并强匹配到平台返回的新 SPU/SKC/SKU；该证据可证明 SHEIN 已接收并生成商品记录，后续仍需结合审核状态判断是否已上架。',
         };
       }
-    }
-    if (publishSpuNames.length && !newIdentityInfoAvailable) {
-      return {
-        ok: false,
-        status: 'new_identity_pending_review_unverifiable',
-        startedAt,
-        endedAt: new Date().toISOString(),
-        plan,
-        calls,
-        scannedRows: 0,
-        matchedRows: [],
-        weakMatchedRows: [],
-        pendingReview: true,
-        note: 'publishOrEdit 已返回新 SPU 身份，但官方 spu-info 暂不可用（可能仍待审核）。本次回读绑定新身份，绝不用同货号旧链接充当回读；任务保持待审核/人工核销，等待官方 spu-info 可用后重试回读。',
-      };
     }
     const allWeakMatches = [];
     const searchProductAttempts = [
@@ -3330,6 +3313,28 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
         };
       }
       if (!rows.length || rows.length < pageSize) break;
+    }
+    // Contract: with a publishOrEdit-returned new identity, the readback must
+    // keep trying strong searchProduct/product-query fallbacks (old
+    // same-goods-number rows are already demoted to weak). Only when every
+    // fallback yields no publish-identity strong match - weak old-link rows or
+    // zero results - is the state explicitly pending review / unverifiable,
+    // never an old-link match and never a plain failure.
+    if (publishSpuNames.length || publishSkcNames.length || publishSkuCodes.length) {
+      return {
+        ok: false,
+        status: 'new_identity_pending_review_unverifiable',
+        startedAt,
+        endedAt: new Date().toISOString(),
+        plan,
+        calls,
+        scannedRows,
+        lastRowsCount,
+        matchedRows: [],
+        weakMatchedRows: allWeakMatches.slice(0, 20),
+        pendingReview: true,
+        note: 'publishOrEdit 已返回新 SPU/SKC/SKU 身份，但官方 spu-info、searchProduct 与商品列表强身份回读均未命中（可能仍待审核）。本次回读绑定新身份，同货号旧链接只能作为弱证据，不能充当新链接回读；任务保持待审核/人工核销，等待官方数据可用后重试回读。',
+      };
     }
     return {
       ok: false,

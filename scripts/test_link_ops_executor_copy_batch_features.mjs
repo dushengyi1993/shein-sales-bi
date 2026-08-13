@@ -329,7 +329,7 @@ check('live state 4 withdrawn override is audited', verifiedWithdrawn.evidence.r
 // --- 03012 readback identity binding: pending review must never fall back to an
 // old same-goods-number link, and supplier-code-only matches are demoted when the
 // publishOrEdit-returned new identity is known. ---
-function readbackClient({spuInfoResult, searchResult}) {
+function readbackClient({spuInfoResult, searchResult, productQueryResult}) {
   const calls = [];
   return {
     calls,
@@ -337,7 +337,11 @@ function readbackClient({spuInfoResult, searchResult}) {
       calls.push({pathname, body: opts?.body});
       if (pathname === '/open-api/goods/spu-info') return spuInfoResult;
       if (pathname === '/open-api/goods/searchProduct') return searchResult;
+      if (pathname === '/open-api/openapi-business-backend/product/query') return productQueryResult;
       throw new Error(`unexpected path ${pathname}`);
+    },
+    async requestReadOnly(pathname, opts) {
+      return this.request(pathname, opts);
     },
   };
 }
@@ -366,12 +370,14 @@ check('supplier-code match stays strong without publish identity (legacy semanti
 
 const pendingSpuInfoResult = {ok: true, status: 200, data: {code: '0003', msg: 'audit pending', info: null}};
 const pendingSearchResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: [oldLinkRow]}}};
-const pendingReadbackClient = readbackClient({spuInfoResult: pendingSpuInfoResult, searchResult: pendingSearchResult});
+const pendingProductQueryResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: []}}};
+const pendingReadbackClient = readbackClient({spuInfoResult: pendingSpuInfoResult, searchResult: pendingSearchResult, productQueryResult: pendingProductQueryResult});
 const pendingReadback = await __testHooks.readbackPublishedProduct(pendingReadbackClient, newIdentityFingerprint, {enabled: true, task: null});
 check('pending-review spu-info is an explicit unverifiable state', pendingReadback.status, 'new_identity_pending_review_unverifiable');
 check('pending-review readback is not ok but not a mismatch failure', pendingReadback.ok, false);
 check('pending-review readback marks pendingReview', pendingReadback.pendingReview, true);
-check('pending-review readback never queries searchProduct fallback', pendingReadbackClient.calls.some(call => call.pathname === '/open-api/goods/searchProduct'), false);
+check('pending-review readback still runs searchProduct strong fallbacks', pendingReadbackClient.calls.some(call => call.pathname === '/open-api/goods/searchProduct'), true);
+check('pending-review readback keeps old-link rows as weak only', pendingReadback.weakMatchedRows.some(row => row.weakMatchReasons.some(reason => reason.startsWith('sameGoodsNumberOldLinkWithoutPublishIdentity:'))), true);
 check('pending-review readback never binds the old link', pendingReadback.matchedRows.length, 0);
 
 const matchedSpuInfoResult = {ok: true, status: 200, data: {code: '0', msg: 'OK', info: newLinkRow}};
