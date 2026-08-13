@@ -137,6 +137,11 @@ const productCase = GENERIC_PRODUCT ? {
 const taskStandardGoodsSn = productCase.productRefs[0];
 const targetSupplierCode = productCase.targetSupplierCode;
 const targetSupplierSku = productCase.targetSupplierSku;
+// Valid isSheinSkc source identity used ONLY for the task exact source lock and
+// the source-store searchProduct/spu-info fixture. The NEW SKC returned by the
+// publish endpoint stays 'sv-smoke-copy-product' and is used by the readback
+// tests; the two identities must never be mixed.
+const SOURCE_SKC = 'sv25082902871830770';
 const publishTraceId = 'trace-copy-success-smoke';
 const descriptionLines = {
   ar: ['نقطة مراجعة أولى', 'نقطة مراجعة ثانية', 'نقطة مراجعة ثالثة', 'نقطة مراجعة رابعة', 'نقطة مراجعة خامسة'],
@@ -470,8 +475,8 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     const requestedSpu = String(body.json?.spuName || '').trim();
     const searchProductAlreadyCalled = fakeOpenApiCalls.some(call => call.path === '/open-api/goods/searchProduct');
     if (requestedSpu === 'v-smoke-copy-product'
-      && !WEAK_READBACK_ONLY
-      && (!SEARCH_PRODUCT_READBACK || searchProductAlreadyCalled)) {
+      && (publishAttemptCount === 0
+        || (!WEAK_READBACK_ONLY && (!SEARCH_PRODUCT_READBACK || searchProductAlreadyCalled)))) {
       return sendJson(res, {
         code: '0',
         msg: 'OK',
@@ -482,7 +487,7 @@ const fakeOpenApi = http.createServer(async (req, res) => {
             {language: 'en', productDesc: descriptionLines.en.join('\n')},
           ],
           skcInfoList: [{
-            skcName: 'sv-smoke-copy-product',
+            skcName: SOURCE_SKC,
             supplierCode: targetSupplierCode,
             skuInfoList: [{
               skuCode: 'sku-smoke-copy-product',
@@ -503,6 +508,21 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     }, 200);
   }
   if (pathname === '/open-api/goods/searchProduct') {
+    // Exact source SKC -> SPU resolution for bound-payload copies: the source
+    // store searchProduct must resolve exactly one case-sensitive SPU.
+    if (asArray(body.json?.skcNameList).includes(SOURCE_SKC)) {
+      return sendJson(res, {
+        code: '0',
+        msg: 'OK',
+        info: {
+          list: [{
+            spuName: 'v-smoke-copy-product',
+            skcList: [{skcName: SOURCE_SKC}],
+          }],
+          count: 1,
+        },
+      });
+    }
     if (SEARCH_PRODUCT_READBACK && publishAttemptCount > 0 && !WEAK_READBACK_ONLY) {
       const skcNames = asArray(body.json?.skcNameList).map(String);
       const spuNames = asArray(body.json?.spuNameList).map(String);
@@ -600,6 +620,15 @@ const openapiConfigFile = await writeJson('openapi.json', {
     enabled: true,
     openKeyId: 'dummy-open-key-hl',
     secretKey: 'dummy-secret-hl',
+    authorizedAt: '2026-06-27T00:00:00.000+08:00',
+  }, {
+    // Read-only source-store credential for the exact source lock live
+    // verification (searchProduct + spu-info against the same fake server).
+    storeKey: 'DL',
+    shopName: 'Copy Success DL Source',
+    enabled: true,
+    openKeyId: 'dummy-open-key-dl',
+    secretKey: 'dummy-secret-dl',
     authorizedAt: '2026-06-27T00:00:00.000+08:00',
   }],
   safeWriteOperations: {
@@ -748,6 +777,12 @@ try {
     check('chat session id present', Boolean(chatSessionId), true);
     check('chat created copy intent', created.json?.autoTask?.intents || [], xs => asArray(xs).includes('copy_product_draft'));
     check('chat created target HL only', created.json?.autoTask?.targets?.writeStores || created.json?.autoTask?.targets?.stores || [], xs => asArray(xs).length === 1 && String(xs[0]).toUpperCase() === 'HL');
+    // The production copy contract requires an exact unique task source lock
+    // (sourceStore + sourceSkc) even when the payload comes from a bound asset.
+    await updateRawTaskById(taskId, task => ({
+      ...task,
+      targets: {...task.targets, sourceStores: ['DL'], sourceSkc: SOURCE_SKC},
+    }));
   } else {
     created = await req('/api/link-ops-tasks', {
       method: 'POST',
@@ -757,6 +792,8 @@ try {
         command: productCase.command,
         targets: {
           stores: ['HL'],
+          sourceStores: ['DL'],
+          sourceSkc: SOURCE_SKC,
           productRefs: productCase.productRefs,
           standardGoodsSn: taskStandardGoodsSn,
         },
@@ -1071,6 +1108,9 @@ try {
       check('chat locked lifecycle no extra publish', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, publishCountBeforeLockedRetry);
     }
   } else if (!PREVALID_FAIL) {
+    check('executor projection keeps exact source store', execEvidence?.sourceStore || '', 'DL');
+    check('executor projection keeps exact source skc', execEvidence?.sourceSkc || '', SOURCE_SKC);
+    check('source resolve audited searchProduct and live spu-info', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct').length >= 1 && fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/spu-info').length >= 1, true);
     check('no blockers after matched readback', Number(writeAudit?.blockerCount || 0), 0);
     check('task auto done after strong readback', executedTask?.status || '', 'done');
     check('lifecycle matched strong readback', lifecycle?.status || lifecycle?.lifecycleStatus || '', 'submitted_readback_matched');

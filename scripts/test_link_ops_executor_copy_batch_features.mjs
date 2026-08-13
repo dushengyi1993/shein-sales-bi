@@ -594,6 +594,51 @@ check('template conflict evidence is unit_value_id_conflict', voltageConflict.ev
 check('template conflict records the conflicting template id', voltageConflict.evidence.inputVoltageProvenance?.templateVacValueId, 999999);
 check('template conflict never fills 1002322', Boolean(conflictRow), false);
 
+// --- exact source SKC -> SPU resolution for bound-payload copies ---
+function skcSearchClient(rows, {fail = false} = {}) {
+  return {
+    calls: [],
+    async request(pathname, opts) {
+      this.calls.push({pathname, body: opts?.body});
+      if (fail) throw new Error('search exploded');
+      return {ok: true, status: 200, data: {code: '0', msg: 'OK', info: {data: rows}}};
+    },
+  };
+}
+const skcRow = spu => ({spuName: spu, skcList: [{skcName: 'sv25082902871830770'}]});
+const skcUnique = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([skcRow('v25082902871830770')]), 'DL', 'sv25082902871830770');
+check('exact SKC search resolves the unique SPU', skcUnique.ok && skcUnique.spuName, 'v25082902871830770');
+check('exact SKC search audit records searchProduct', skcUnique.call?.path, '/open-api/goods/searchProduct');
+const skcCaseMismatch = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([skcRow('v25082902871830770')]), 'DL', 'SV25082902871830770');
+check('case-variant SKC never matches', skcCaseMismatch.ok, false);
+check('case-variant SKC is not_found', skcCaseMismatch.reason, 'not_found');
+const skcZero = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([]), 'DL', 'sv25082902871830770');
+check('zero search results block', skcZero.ok, false);
+check('zero search results reason', skcZero.reason, 'not_found');
+const skcAmbiguous = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([skcRow('v-a'), skcRow('v-b')]), 'DL', 'sv25082902871830770');
+check('multiple SPUs block as ambiguous', skcAmbiguous.ok, false);
+check('multiple SPUs reason', skcAmbiguous.reason, 'ambiguous');
+const skcFailed = await __testHooks.resolveSourceSpuByExactSkc(skcSearchClient([], {fail: true}), 'DL', 'sv25082902871830770');
+check('search failure blocks', skcFailed.ok, false);
+check('search failure reason', skcFailed.reason, 'query_failed');
+
+// --- source scope boundary: no declaration is allowed, partial/multi/conflict blocks ---
+const scopeNoSource = __testHooks.resolveLockedSourceScope({payloadFound: {}, task: {targets: {}}, intents: ['copy_product_draft']});
+check('copy without any declared source is not globally blocked', scopeNoSource.blockers.length, 0);
+check('copy without declared source keeps empty stable scope', scopeNoSource.sourceStore, '');
+const scopePartialStore = __testHooks.resolveLockedSourceScope({payloadFound: {}, task: {targets: {sourceStores: ['DL']}}, intents: ['copy_product_draft']});
+check('store-only partial declaration blocks', scopePartialStore.blockers.length, 1);
+const scopePartialSkc = __testHooks.resolveLockedSourceScope({payloadFound: {}, task: {targets: {sourceSkc: 'sv25082902871830770'}}, intents: ['copy_product_draft']});
+check('skc-only partial declaration blocks', scopePartialSkc.blockers.length, 1);
+const scopeMulti = __testHooks.resolveLockedSourceScope({payloadFound: {}, task: {targets: {sourceStores: ['DL', 'MZ'], sourceSkc: 'sv25082902871830770'}}, intents: ['copy_product_draft']});
+check('multi-valued sourceStores block', scopeMulti.blockers.length, 1);
+const scopeConflict = __testHooks.resolveLockedSourceScope({payloadFound: {inferred: {sourceStore: 'MZ', sourceSkc: 'sv-mz'}}, task: {targets: {sourceStores: ['DL'], sourceSkc: 'sv25082902871830770'}}, intents: ['copy_product_draft']});
+check('exact source conflict with inferred blocks', scopeConflict.blockers.length, 2);
+const scopeExact175 = __testHooks.resolveLockedSourceScope({payloadFound: {}, task: {targets: {sourceStores: ['DL'], sourceSkc: 'sv25082902871830770'}}, intents: ['copy_product_draft']});
+check('exact source keeps DL/sourceSkc', scopeExact175.sourceStore, 'DL');
+check('exact source keeps the skc', scopeExact175.sourceSkc, 'sv25082902871830770');
+check('exact source has no blockers', scopeExact175.blockers.length, 0);
+
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
 if (!ok) process.exit(1);
