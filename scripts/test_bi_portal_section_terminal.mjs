@@ -37,19 +37,19 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-current-'));
   try {
     makePortal(dir, {section: 'orders', extra: {data: {rows: []}}});
-    const result = validateTerminalArtifact({root: dir, section: 'orders'});
+    const result = await validateTerminalArtifact({root: dir, section: 'orders'});
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.coreGeneratedAt, generatedAt);
     assert.equal(result.sectionGeneratedAt, generatedAt);
 
     makePortal(dir, {section: 'profit', extra: {data: {profit: {dailyStoreProducts: []}}}});
-    assert.equal(validateTerminalArtifact({root: dir, section: 'profit'}).ok, true, 'profit with dailyStoreProducts must be terminal');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'profit'})).ok, true, 'profit with dailyStoreProducts must be terminal');
 
     makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], source: 'profit_section_cache', sourceGeneratedAt: generatedAt, staleSource: false}}},
     });
-    assert.equal(validateTerminalArtifact({root: dir, section: 'homeProfit'}).ok, true, 'fresh homeProfit must be terminal');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).ok, true, 'fresh homeProfit must be terminal');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -60,7 +60,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-stale-'));
   try {
     makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T08:36:30.27274+08:00'});
-    const result = validateTerminalArtifact({root: dir, section: 'orders'});
+    const result = await validateTerminalArtifact({root: dir, section: 'orders'});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'section_generated_at_mismatch');
   } finally {
@@ -76,22 +76,22 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: '2026-08-10T19:09:04.52205+08:00', staleSource: false}}},
     });
-    assert.equal(validateTerminalArtifact({root: dir, section: 'homeProfit'}).reason, 'home_profit_source_mismatch');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_source_mismatch');
 
     makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: true}}},
     });
-    assert.equal(validateTerminalArtifact({root: dir, section: 'homeProfit'}).reason, 'home_profit_stale_source');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_stale_source');
 
     makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {sourceGeneratedAt: generatedAt, staleSource: false}}},
     });
-    assert.equal(validateTerminalArtifact({root: dir, section: 'homeProfit'}).reason, 'home_profit_daily_scopes_missing');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_daily_scopes_missing');
 
     makePortal(dir, {section: 'homeProfit', extra: {data: {other: true}}});
-    assert.equal(validateTerminalArtifact({root: dir, section: 'homeProfit'}).reason, 'home_profit_summary_missing');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_summary_missing');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -103,7 +103,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-profit-'));
   try {
     makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: []}}}});
-    const result = validateTerminalArtifact({root: dir, section: 'profit'});
+    const result = await validateTerminalArtifact({root: dir, section: 'profit'});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'profit_daily_store_products_missing');
 
@@ -117,7 +117,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
       net_revenue_sar: index,
     }));
     makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: rows, dailyStoreProducts: []}}}});
-    const reordered = validateTerminalArtifact({root: dir, section: 'profit'});
+    const reordered = await validateTerminalArtifact({root: dir, section: 'profit'});
     assert.equal(reordered.ok, true, 'large reordered profit must validate via streaming key scan');
     assert.ok(reordered.profitScanBytes > 1024 * 1024,
       'fixture must place dailyStoreProducts beyond both the metadata head and the first scan chunk');
@@ -132,12 +132,17 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   try {
     fs.mkdirSync(path.join(dir, 'sections'), {recursive: true});
     fs.writeFileSync(path.join(dir, 'data.json'), JSON.stringify({__sections: {mode: 'api'}}));
-    assert.equal(validateTerminalArtifact({root: dir, section: 'orders'}).reason, 'core_generated_at_missing');
-    assert.equal(validateTerminalArtifact({root: path.join(dir, 'nope'), section: 'orders'}).reason, 'core_file_missing');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'orders'})).reason, 'core_generated_at_missing');
+    assert.equal((await validateTerminalArtifact({root: path.join(dir, 'nope'), section: 'orders'})).reason, 'core_file_missing');
 
     fs.writeFileSync(path.join(dir, 'data.json'), JSON.stringify({generatedAt}));
-    assert.equal(validateTerminalArtifact({root: dir, section: 'orders'}).reason, 'section_file_missing');
-    assert.equal(validateTerminalArtifact({root: dir, section: '../escape'}).reason, 'section_invalid');
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'orders'})).reason, 'section_file_missing');
+    assert.equal((await validateTerminalArtifact({root: dir, section: '../escape'})).reason, 'section_invalid');
+
+    makePortal(dir, {core: false, section: 'orders'});
+    fs.writeFileSync(path.join(dir, 'data.json'), `{"generatedAt":"${generatedAt}","corrupt":truX}`);
+    assert.equal((await validateTerminalArtifact({root: dir, section: 'orders'})).reason, 'core_file_missing',
+      'a structurally invalid unrequested core field must fail closed');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -161,6 +166,41 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     const usageRun = spawnSync(process.execPath, [script, '--root', dir], {encoding: 'utf8'});
     assert.equal(usageRun.status, 2, 'missing --section must be a usage error');
   } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+}
+
+// ---- A production-sized legacy core must stay bounded even when generatedAt
+// is near the tail. The old readFileSync + JSON.parse path exhausted a small
+// V8 heap before terminal readback could inspect the section artifact.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-large-core-'));
+  const coreFile = path.join(dir, 'data.json');
+  const oneMiB = Buffer.alloc(1024 * 1024, 0x78);
+  let handle;
+  try {
+    fs.mkdirSync(path.join(dir, 'sections'), {recursive: true});
+    handle = fs.openSync(coreFile, 'w');
+    fs.writeSync(handle, '{"filler":"');
+    for (let index = 0; index < 48; index += 1) fs.writeSync(handle, oneMiB);
+    fs.writeSync(handle, `","generatedAt":"${generatedAt}","__sections":{"mode":"api","generatedAt":"${generatedAt}"}}`);
+    fs.closeSync(handle);
+    handle = undefined;
+    makePortal(dir, {core: false, section: 'orders'});
+
+    const script = path.join(root, 'scripts', 'check_bi_portal_section_terminal.mjs');
+    const boundedRun = spawnSync(process.execPath, [
+      '--max-old-space-size=32',
+      script,
+      '--root', dir,
+      '--section', 'orders',
+    ], {encoding: 'utf8', timeout: 60_000});
+    assert.equal(boundedRun.status, 0, boundedRun.stderr || boundedRun.error?.message);
+    assert.equal(JSON.parse(boundedRun.stdout).coreGeneratedAt, generatedAt);
+    assert.ok(fs.statSync(coreFile).size > 48 * 1024 * 1024,
+      'fixture must be much larger than the constrained V8 heap');
+  } finally {
+    if (handle !== undefined) fs.closeSync(handle);
     fs.rmSync(dir, {recursive: true, force: true});
   }
 }

@@ -144,6 +144,22 @@ try {
     scanText('{"generatedAt":"2026-08-14', {generatedAt: 1024}),
     error => error instanceof BoundedTopLevelJsonError && error.code === 'TRUNCATED_JSON',
   );
+  for (const invalid of [
+    '{"generatedAt":"2026-08-14T00:00:00.000Z","corrupt":truX}',
+    '{"generatedAt":"2026-08-14T00:00:00.000Z","nested":{"bad":[1,]}}',
+    '{"generatedAt":"2026-08-14T00:00:00.000Z","bad":"\\q"}',
+    '{"generatedAt":"2026-08-14T00:00:00.000Z","number":01}',
+  ]) {
+    await assert.rejects(
+      scanText(invalid, {generatedAt: 1024}),
+      error => error instanceof BoundedTopLevelJsonError && error.code === 'INVALID_JSON_SYNTAX',
+    );
+  }
+  const scalarScan = await scanText(
+    '{"generatedAt":"2026-08-14T00:00:00.000Z","values":[true,false,null,-12.5e+3]}',
+    {generatedAt: 1024},
+  );
+  assert.equal(scalarScan.fields.generatedAt.value, '2026-08-14T00:00:00.000Z');
 
   __testHooks.resetBiPortalCoreEnvelopeCache();
   const cacheRoot = path.join(temp, 'cache');
@@ -182,7 +198,7 @@ try {
   });
   assert.equal(child.status, 0, `bounded scanner must survive a 12MiB core under a 16MiB old-space cap: ${child.stderr}`);
 
-  console.log(JSON.stringify({ok: true, tests: 22}));
+  console.log(JSON.stringify({ok: true, tests: 27}));
 } finally {
   await fs.rm(temp, {recursive: true, force: true});
 }
