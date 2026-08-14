@@ -5725,6 +5725,20 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value];
 }
 
+// 只保留 sourceDetailLock 的 5 个非敏感字段；这是 writeAudit.executorEvidence
+// 和 history openApiProductExecutors 紧凑投影唯一允许保存的锁形状，供
+// resolvePreflightProductLock 从历史恢复预检锁。
+function compactSourceDetailLock(lock) {
+  if (!lock || typeof lock !== 'object' || Array.isArray(lock)) return null;
+  return {
+    source: sanitizeLinkOpsClientText(String(lock.source || ''), 120),
+    matchedSpuName: sanitizeLinkOpsClientText(String(lock.matchedSpuName || ''), 160),
+    matchedSkcName: sanitizeLinkOpsClientText(String(lock.matchedSkcName || ''), 160),
+    detailFetchedAt: sanitizeLinkOpsClientText(String(lock.detailFetchedAt || ''), 80),
+    detailContentSha256: /^[a-f0-9]{64}$/.test(String(lock.detailContentSha256 || '')) ? String(lock.detailContentSha256) : '',
+  };
+}
+
 function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requestedMode, finalState, submitted, executorRuns = [], blockers = [], warnings = [], confirmTextPresent = false, executeAllowed = false, lifecycleTransition = null, realSubmitWhitelistChecks = []}) {
   const issuedExecuteToExecutor = executorRuns.some(executorRun => String(executorRun?.mode || '') === 'execute');
   const sheinWriteAttempted = executorRuns.some(executorRun => Boolean(executorRun?.result?.publishResult || executorRun?.result?.adapterEvidence?.writeAttempted));
@@ -5776,6 +5790,9 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         payloadFound: Boolean(result.payload?.found),
         payloadHash: result.payload?.payloadHash || '',
         payloadHashAlgorithm: result.payload?.payloadHashAlgorithm || '',
+        payload: {
+          sourceDetailLock: compactSourceDetailLock(result.payload?.sourceDetailLock),
+        },
         payloadSummary: result.payload?.summary || null,
         sourceStore: String(result.sourceStore || '').toUpperCase(),
         sourceSkc: sanitizeLinkOpsClientText(result.sourceSkc || '', 120),
@@ -8249,6 +8266,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         savedTo: executorResult.savedTo || '',
         payloadFound: Boolean(executorResult.payload?.found),
         payloadHash: executorResult.payload?.payloadHash || '',
+        payload: {
+          sourceDetailLock: compactSourceDetailLock(executorResult.payload?.sourceDetailLock),
+        },
         payloadSummary: executorResult.payload?.summary || null,
         canPublishProduct: executorResult.openapi?.canPublishProduct ?? null,
         publishResult: executorResult.publishResult ? {
