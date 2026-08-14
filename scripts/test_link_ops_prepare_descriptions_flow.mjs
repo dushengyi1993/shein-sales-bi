@@ -45,6 +45,121 @@ const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-prepare-descriptions-'));
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
+const SOURCE_STORE = 'NM';
+const SOURCE_SPU = 'v-desc-bind';
+const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+const DESC_SUPPLIER_CODES = [
+  'DESC-CONCURRENT',
+  'DESC-MATCH',
+  'DESC-NO-SUCCESS',
+  'DESC-DRIFT',
+  'DESC-FALLBACK',
+  'DESC-SEARCH-EXACT',
+  'DESC-SEARCH-DRIFT',
+  'DESC-PRODUCT-EXACT',
+  'DESC-PRODUCT-DRIFT',
+  'DESC-HISTORY-PAYLOAD',
+  'DESC-UNAPPROVED-ASSET',
+  'DESC-TAMPERED-ASSET',
+  'DESC-NESTED-DEBUG-ASSET',
+  'DESC-PRIOR-WRITE',
+  'DESC-SUBMITTED-STATE',
+  'DESC-HISTORY-WRITE',
+  'DESC-AUDIT-HISTORY',
+  'DESC-CLI',
+  'DESC-CLI-LEGACY-S9',
+  'DESC-CLI-AUDIT-PENDING',
+  'DESC-AUDIT-FAILURE',
+  'DESC-DEEP-AUDIT-WRITE',
+  'DESC-TOP-LEVEL-AUDIT-WRITE',
+  'DESC-MALFORMED-AUDIT',
+];
+const SOURCE_LOCKED_CODES = new Set([
+  'DESC-MATCH',
+  'DESC-NO-SUCCESS',
+  'DESC-DRIFT',
+  'DESC-FALLBACK',
+  'DESC-SEARCH-EXACT',
+  'DESC-SEARCH-DRIFT',
+  'DESC-PRODUCT-EXACT',
+  'DESC-PRODUCT-DRIFT',
+  'DESC-CLI',
+  'DESC-CLI-LEGACY-S9',
+  'DESC-CLI-AUDIT-PENDING',
+]);
+const sourceSkcFor = code => `sv20990101${String(DESC_SUPPLIER_CODES.indexOf(code)).padStart(6, '0')}`;
+const descSourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', SOURCE_STORE);
+const descSourceOpenApiDir = path.join(ROOT, 'outputs', 'shein_openapi_products', SOURCE_STORE);
+async function writeDescSourceFixtures() {
+  await fs.mkdir(descSourceLinkDir, {recursive: true});
+  await fs.mkdir(descSourceOpenApiDir, {recursive: true});
+  const skcList = DESC_SUPPLIER_CODES.map(sourceSkcFor);
+  const sourceNames = [
+    {language: 'en', productName: 'Desc bind source product'},
+    {language: 'ar', productName: 'منتج مصدر ربط الوصف'},
+  ];
+  await fs.writeFile(path.join(descSourceLinkDir, '2099-01-01.json'), `${JSON.stringify({
+    linkRows: skcList.map(skc => ({
+      storeKey: SOURCE_STORE,
+      skc,
+      spu: SOURCE_SPU,
+      standardGoodsSn: 'SM-11004',
+      productNameCn: 'SM-11004',
+      rawGoodsSn: 'RAW-SM-11004',
+    })),
+    inventoryRows: [],
+    performanceRows: [],
+  }, null, 2)}\n`, 'utf8');
+  await fs.writeFile(path.join(descSourceOpenApiDir, 'latest.json'), `${JSON.stringify({
+    schemaVersion: 'shein-openapi-product-basics/v1',
+    storeKey: SOURCE_STORE,
+    fetchedAt: SOURCE_DETAIL_AT,
+    normalizedRows: skcList.map(skc => ({spu: SOURCE_SPU, skc})),
+    detailResults: [{
+      ok: true,
+      detailFetchedAt: SOURCE_DETAIL_AT,
+      info: {
+        spuName: SOURCE_SPU,
+        categoryId: 123456,
+        productTypeId: 789,
+        brandCode: 'BRAND_SMOKE',
+        productMultiNameList: sourceNames,
+        productAttributeInfoList: [{attributeId: 1000546, attributeValueId: 0, attributeValue: 'SM-11004'}],
+        skcInfoList: skcList.map(skc => ({
+          skcName: skc,
+          supplierCode: `SRC-${skc}`,
+          productMultiNameList: sourceNames,
+          skcImageInfoList: [
+            {imageUrl: 'https://example.invalid/desc-main.jpg', imageType: 'MAIN'},
+            {imageUrl: 'https://example.invalid/desc-detail.jpg', imageType: 'DETAIL'},
+            {imageUrl: 'https://example.invalid/desc-square.jpg', imageType: 'SQUARE'},
+          ],
+          saleAttributeList: [{attributeId: 301, attributeValueId: 401}],
+          skuInfoList: [{
+            skuCode: `SKU-${skc}`,
+            supplierSku: '',
+            length: '31.10',
+            width: '29.50',
+            height: '14.70',
+            weight: 2500,
+            sellerSkuWeight: {length: '31.10', width: '29.50', height: '14.70', weight: 2500},
+            mallState: 1,
+            saleAttributeList: [{attributeId: 301, attributeValueId: 401}],
+            costInfoList: [
+              {currency: 'CNY', costPrice: 205.21},
+              {currency: 'SAR', costPrice: 124.44},
+            ],
+          }],
+        })),
+      },
+    }],
+    detailFallbackResults: [],
+  }, null, 2)}\n`, 'utf8');
+}
+async function removeDescSourceFixtures() {
+  await fs.rm(descSourceLinkDir, {recursive: true, force: true});
+  await fs.rm(descSourceOpenApiDir, {recursive: true, force: true});
+}
 
 const enLines = ['EN selling point one', 'EN selling point two', 'EN selling point three', 'EN selling point four', 'EN selling point five'];
 const arLines = ['سطر أول', 'سطر ثانٍ', 'سطر ثالث', 'سطر رابع', 'سطر خامس'];
@@ -305,6 +420,27 @@ const fakeOpenApi = http.createServer(async (req, res) => {
   }
   if (pathname === '/open-api/goods/spu-info') {
     const spuName = String(body.json?.spuName || '');
+    if (spuName === SOURCE_SPU && !publishedIdentities.has(spuName)) {
+      return sendJson(res, {
+        code: '0',
+        msg: 'OK',
+        info: {
+          spuName: SOURCE_SPU,
+          productMultiNameList: [
+            {language: 'en', productName: 'Desc bind source product'},
+            {language: 'ar', productName: 'منتج مصدر ربط الوصف'},
+          ],
+          skcInfoList: DESC_SUPPLIER_CODES.map(code => ({
+            skcName: sourceSkcFor(code),
+            productMultiNameList: [
+              {language: 'en', productName: 'Desc bind source product'},
+              {language: 'ar', productName: 'منتج مصدر ربط الوصف'},
+            ],
+            skuInfoList: [{skuCode: `SKU-${sourceSkcFor(code)}`, supplierSku: ''}],
+          })),
+        },
+      });
+    }
     const identity = publishedIdentities.get(spuName);
     const searchSeen = fakeOpenApiCalls.some(call => call.path === '/open-api/goods/searchProduct'
       && asArray(call.body?.spuNameList).map(String).includes(spuName));
@@ -390,6 +526,7 @@ const readProbeSummaryFile = await writeJson('read-probes.latest.json', {
   counts: {total: 1, readProbeOk: 1, pending: 0, failed: 0},
   results: [{storeKey: 'NM', ok: true, status: 'read_probe_ok'}],
 });
+await writeDescSourceFixtures();
 const htpasswdFile = path.join(tmpRoot, 'empty.htpasswd');
 await fs.writeFile(htpasswdFile, '', 'utf8');
 const stateFile = path.join(tmpRoot, 'action_state.json');
@@ -569,7 +706,14 @@ async function createTask(cookie, supplierCode) {
       command: `复制上品/补链接 SM-11004 到 NM（描述绑定验收 ${supplierCode}）`,
       source: 'codex_desktop_cli_structured',
       intents: ['copy_product_draft'],
-      targets: {stores: ['NM'], writeStores: ['NM'], productRefs: [supplierCode]},
+      targets: {
+        stores: ['NM'],
+        writeStores: ['NM'],
+        ...(SOURCE_LOCKED_CODES.has(supplierCode)
+          ? {sourceStores: [SOURCE_STORE], sourceSkc: sourceSkcFor(supplierCode)}
+          : {}),
+        productRefs: [supplierCode],
+      },
     },
   });
   if (r.status !== 200) throw new Error(`create task failed: ${r.status} ${r.text}`);
@@ -1156,6 +1300,7 @@ try {
   for (const [label, operation] of [
     ['stop isolated description portal', () => stopChild(portal, 'isolated description portal')],
     ['close fake OpenAPI server', () => closeServer(fakeOpenApi, 'fake OpenAPI server')],
+    ['remove description source detail fixtures', () => removeDescSourceFixtures()],
     ['remove isolated description files', async () => {
       await sleep(250);
       if (cleanupOnExit) await fs.rm(tmpRoot, {recursive: true, force: true});

@@ -684,6 +684,10 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
         taskExactSource,
         generatedDraft: summarizeDraftForExecutor(generated),
         canonicalDraft: generated.canonicalDraft,
+        mappingBlockers: generated.blockers,
+        mappingWarnings: generated.warnings,
+        structuredMappingBlockers: generated.mappingBlockers,
+        sourceDetailLock: generated.sourceDetailLock,
       };
     } catch (err) {
       // The bound payload (root openapiPublishPayload or approved asset) stays
@@ -740,6 +744,8 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
         canonicalDraft: generated.canonicalDraft,
         mappingBlockers: generated.blockers,
         mappingWarnings: generated.warnings,
+        structuredMappingBlockers: generated.mappingBlockers,
+        sourceDetailLock: generated.sourceDetailLock,
         inferred: candidate,
         exactSourceLock: hasExactSourceLock,
         taskExactSource,
@@ -829,6 +835,87 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
     sourceSkc: taskExact ? taskExact.sourceSkc : inferredSkc,
     blockers,
   };
+}
+
+const SOURCE_DETAIL_LOCK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function sourceDetailLockBlocker(code, message) {
+  return {code, message: safeString(message, 1000)};
+}
+
+// 写前详情锁门：把本次 hydration 得到的当前 sourceDetailLock 与预检锁定的锁
+// 逐项比对。过期、未来/非法时间、身份漂移、内容 hash 漂移或缺锁都必须阻断，
+// sheinWriteAttempted 保持 false。
+// - required=true（copy_product_draft）：dry-run 和 execute 都必须有当前详情锁，
+//   bound payload hydration 失败/无锁是结构化 blocker，不能仅 warning 后继续。
+// - requireExpectedLock=true（copy_product_draft 的 execute）：预检锁必须带
+//   sourceDetailLock；旧版只有 payload hash 的预检强制重新 dry-run。
+// - 其它流程（维护执行等）无预检锁时沿用既有 scope-v2 hash 覆盖，不额外阻断。
+function validateSourceDetailLockForWrite({
+  currentLock = null,
+  expectedLock = null,
+  sourceStore = '',
+  sourceSkc = '',
+  now = new Date(),
+  required = false,
+  requireExpectedLock = false,
+} = {}) {
+  const checkedMs = now instanceof Date && Number.isFinite(now.getTime()) ? now.getTime() : Date.now();
+  const checkedAt = new Date(checkedMs).toISOString();
+  const expected = expectedLock && typeof expectedLock === 'object' && !Array.isArray(expectedLock) ? expectedLock : null;
+  const current = currentLock && typeof currentLock === 'object' && !Array.isArray(currentLock) ? currentLock : null;
+  const blockers = [];
+  if (requireExpectedLock && !expected) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING', '执行要求预检锁定 sourceDetailLock，但当前预检产物只有旧版 payload hash、没有详情锁；必须重新 dry-run 生成并锁定源详情锁后再执行。'));
+  }
+  if (!expected && !required) {
+    return {
+      ok: true,
+      gateActive: false,
+      blockers: [],
+      checkedAt,
+      note: '没有预检详情锁且当前流程不强制详情锁；沿用既有流程，scope-v2 hash 仍覆盖本次执行范围。',
+    };
+  }
+  if (!current) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_MISSING', expected
+      ? `写前详情锁缺失：预检已锁定源详情 ${safeString(sourceStore, 80)}/${safeString(sourceSkc, 160)}，执行时无法重新生成当前详情锁，禁止写入。`
+      : `写前详情锁缺失：copy_product_draft 要求绑定源详情 ${safeString(sourceStore, 80)}/${safeString(sourceSkc, 160)}，本次 hydration 未能生成详情锁，禁止写入。`));
+    return {ok: false, gateActive: true, blockers, checkedAt};
+  }
+  const expectedSpu = safeString(expected?.matchedSpuName, 160);
+  const expectedSkc = safeString(expected?.matchedSkcName, 160);
+  const currentSpu = safeString(current.matchedSpuName, 160);
+  const currentSkc = safeString(current.matchedSkcName, 160);
+  if (safeString(sourceSkc, 160) && currentSkc && currentSkc !== safeString(sourceSkc, 160)) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁 SKC 漂移：任务锁定源 ${safeString(sourceStore, 80)}/${safeString(sourceSkc, 160)}，当前详情实际 SKC=${currentSkc}，禁止写入。`));
+  }
+  if (expectedSkc && currentSkc && currentSkc !== expectedSkc) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁 SKC 漂移：预检锁定 SKC=${expectedSkc}，当前详情实际 SKC=${currentSkc}，禁止写入。`));
+  }
+  if (expectedSpu && currentSpu && currentSpu !== expectedSpu) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁 SPU 漂移：预检锁定 SPU=${expectedSpu}，当前详情实际 SPU=${currentSpu}，禁止写入。`));
+  }
+  const fetchedText = safeString(current.detailFetchedAt, 80);
+  const fetchedMs = Date.parse(fetchedText);
+  if (!fetchedText || !Number.isFinite(fetchedMs)) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_TIMESTAMP_INVALID', `写前详情锁缺少合法行级 detailFetchedAt（当前=${fetchedText || '空'}），禁止写入。`));
+  } else {
+    if (fetchedMs > checkedMs) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_FUTURE', `写前详情锁 detailFetchedAt=${fetchedText} 晚于执行时间，判定为未来时间，禁止写入。`));
+    }
+    if (checkedMs - fetchedMs > SOURCE_DETAIL_LOCK_MAX_AGE_MS) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_EXPIRED', `写前详情锁 detailFetchedAt=${fetchedText} 已超过 24 小时，禁止写入。`));
+    }
+  }
+  if (expected) {
+    const expectedHash = safeString(expected.detailContentSha256, 120).toLowerCase();
+    const currentHash = safeString(current.detailContentSha256, 120).toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expectedHash) || !/^[a-f0-9]{64}$/.test(currentHash) || expectedHash !== currentHash) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_CONTENT_DRIFT', `写前详情内容 hash 漂移：预检锁定 ${expectedHash || '空'}，当前详情 ${currentHash || '空'}，禁止写入。`));
+    }
+  }
+  return {ok: blockers.length === 0, gateActive: true, blockers, checkedAt};
 }
 
 function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
@@ -1337,6 +1424,11 @@ function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
   const generated = payload.generatedDraft && typeof payload.generatedDraft === 'object'
     ? payload.generatedDraft
     : {};
+  const sourceDetailLock = (payload.sourceDetailLock && typeof payload.sourceDetailLock === 'object' && !Array.isArray(payload.sourceDetailLock))
+    ? payload.sourceDetailLock
+    : (generated.sourceDetailLock && typeof generated.sourceDetailLock === 'object' && !Array.isArray(generated.sourceDetailLock))
+      ? generated.sourceDetailLock
+      : null;
   const sourceStore = normalizeStoreKey(
     inferred.sourceStore
     || generated.sourceStore
@@ -1366,6 +1458,7 @@ function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
     standardGoodsSn: safeString(inferred.standardGoodsSn || fallback.standardGoodsSn || '', 240),
     hopeOnSaleDate: safeString(summary.hopeOnSaleDate || summary.hope_on_sale_date || fallback.hopeOnSaleDate || '', 80),
     payloadHash,
+    sourceDetailLock,
     lockedAt: safeString(fallback.lockedAt || result.endedAt || result.startedAt || '', 80),
     runId: safeString(result.runId || fallback.runId || '', 120),
     source: 'preflight_product_lock',
@@ -3581,6 +3674,11 @@ async function main() {
     targetStore,
     preferredSource: productDraftLock,
   });
+  const currentSourceDetailLock = payloadFound?.sourceDetailLock
+    && typeof payloadFound.sourceDetailLock === 'object'
+    && !Array.isArray(payloadFound.sourceDetailLock)
+    ? payloadFound.sourceDetailLock
+    : null;
   const lockedSourceScope = resolveLockedSourceScope({payloadFound, task, intents, targetStore});
   appendUnique(blockers, lockedSourceScope.blockers);
   if (payloadFound?.sourceMetadataWarning) appendUnique(warnings, payloadFound.sourceMetadataWarning);
@@ -3592,6 +3690,7 @@ async function main() {
   let payloadHash = '';
   let bodyHash = '';
   if (payloadFound?.payload) {
+    appendUnique(blockers, payloadFound.mappingBlockers);
     appendUnique(warnings, payloadFound.mappingWarnings);
     const applied = applySafeDefaults(payloadFound.payload, {sites, brands, task, executionContext: effectiveExecutionContext});
     const manualApplied = applyManualAttributeOverrides(applied.payload, task, effectiveExecutionContext);
@@ -3679,6 +3778,7 @@ async function main() {
       sourceStore: safeString(lockedSourceScope.sourceStore, 80),
       sourceSkc: safeString(lockedSourceScope.sourceSkc, 160),
       standardGoodsSn: safeString(taskStandardGoodsSn(task, effectiveExecutionContext), 160),
+      sourceDetailLock: currentSourceDetailLock,
     };
     bodyHash = sha256Stable(publishPayload);
     payloadHash = sha256Stable(executionScope);
@@ -3715,6 +3815,22 @@ async function main() {
       blockers.push(`真实提交 payload hash 与 dry-run 锁定值不一致：expected=${expectedHash || 'missing'} actual=${payloadHash || 'missing'}`);
     }
   }
+
+  // 详情锁门在 dry-run 和 execute 都运行：copy_product_draft 两个阶段都必须
+  // 持有本次 hydration 生成的当前详情锁；execute 还要求预检锁带
+  // sourceDetailLock，旧版只有 hash 的预检会被要求重新 dry-run。
+  const copyProductDraft = intents.includes('copy_product_draft');
+  const sourceDetailLockGate = validateSourceDetailLockForWrite({
+    currentLock: currentSourceDetailLock,
+    expectedLock: productDraftLock?.sourceDetailLock || null,
+    sourceStore: lockedSourceScope.sourceStore,
+    sourceSkc: lockedSourceScope.sourceSkc,
+    now: new Date(),
+    required: copyProductDraft,
+    requireExpectedLock: copyProductDraft && args.mode === 'execute',
+  });
+  evidence.sourceDetailLockGate = sourceDetailLockGate;
+  appendUnique(blockers, asArray(sourceDetailLockGate.blockers).map(row => safeString(row?.message, 1000)));
 
   const readyForSubmit = blockers.length === 0 && Boolean(publishPayload);
   let publishResult = null;
@@ -3843,6 +3959,8 @@ async function main() {
       generatedDraft: payloadFound?.generatedDraft || null,
       generationError: payloadFound?.generationError || null,
       inferredSource: payloadFound?.inferred || null,
+      sourceDetailLock: currentSourceDetailLock,
+      mappingBlockers: payloadFound?.structuredMappingBlockers || [],
       preflightLock: productDraftLock ? {
         reused: true,
         sourceStore: productDraftLock.sourceStore,
@@ -3904,4 +4022,5 @@ export const __testHooks = {
   matchProductReadbackRows,
   readbackPublishedProduct,
   sha256Stable,
+  validateSourceDetailLockForWrite,
 };

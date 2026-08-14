@@ -54,6 +54,7 @@ const CHECK_FILES = [
   'scripts/test_link_ops_product_model_identity_boundary.mjs',
   'scripts/test_link_ops_product_draft_openapi_detail.mjs',
   'scripts/test_link_ops_executor_live_source_titles.mjs',
+  'scripts/test_link_ops_executor_source_detail_lock.mjs',
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
@@ -128,6 +129,7 @@ const DIFF_CHECK_FILES = [
   'scripts/test_link_ops_product_model_identity_boundary.mjs',
   'scripts/test_link_ops_product_draft_openapi_detail.mjs',
   'scripts/test_link_ops_executor_live_source_titles.mjs',
+  'scripts/test_link_ops_executor_source_detail_lock.mjs',
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
   'scripts/test_bi_ops_write_whitelist_scope.mjs',
   'scripts/check_bi_ops_production_safety.mjs',
@@ -396,6 +398,7 @@ async function main() {
   results.push({name: 'preflight product source/date lock smoke', ...(await run(process.execPath, ['scripts/test_link_ops_preflight_product_lock.mjs']))});
   results.push({name: 'OpenAPI product-detail payload mapper smoke', ...(await run(process.execPath, ['scripts/test_link_ops_product_draft_openapi_detail.mjs']))});
   results.push({name: 'OpenAPI live source title enrichment smoke', ...(await run(process.execPath, ['scripts/test_link_ops_executor_live_source_titles.mjs']))});
+  results.push({name: 'OpenAPI executor source-detail lock write-gate smoke', ...(await run(process.execPath, ['scripts/test_link_ops_executor_source_detail_lock.mjs']))});
   results.push({name: 'link retire candidate 15-day guard smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidate_policy.mjs']))});
   results.push({name: 'link retire candidate CSV report smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidates_from_csv.mjs']))});
   results.push({name: 'retire supplier-code repair payload smoke', ...(await run(process.execPath, ['scripts/test_retire_supplier_code_repair_payload.mjs']))});

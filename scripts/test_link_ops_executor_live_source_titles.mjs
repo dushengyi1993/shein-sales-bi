@@ -32,6 +32,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE_STORE = 'Z9T';
 const SOURCE_SKC = 'sv99999999999999';
 const SOURCE_SPU = 'LIVE-SOURCE-SPU-001';
+const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const EN_TITLE = 'Live source English title';
 const AR_TITLE = 'عنوان عربي من رابط المصدر';
 const DESCRIPTION_SOURCE_BYTES = Buffer.from('reviewed live-source-title smoke fixture', 'utf8');
@@ -242,7 +243,7 @@ try {
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: SOURCE_STORE,
     normalizedRows: [{spu: SOURCE_SPU, skc: SOURCE_SKC}],
-    detailResults: [{ok: true, info: sourceSpuInfo({includeArabic: false})}],
+    detailResults: [{ok: true, detailFetchedAt: SOURCE_DETAIL_AT, info: sourceSpuInfo({includeArabic: false})}],
   });
 
   const descriptionMaterial = {

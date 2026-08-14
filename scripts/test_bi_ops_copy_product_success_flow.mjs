@@ -142,6 +142,79 @@ const targetSupplierSku = productCase.targetSupplierSku;
 // publish endpoint stays 'sv-smoke-copy-product' and is used by the readback
 // tests; the two identities must never be mixed.
 const SOURCE_SKC = 'sv25082902871830770';
+const SOURCE_SPU = 'v-smoke-copy-product';
+const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+const sourceLinkFixtureDir = path.join(ROOT, 'outputs', 'shein_links', 'DL');
+const sourceOpenApiFixtureDir = path.join(ROOT, 'outputs', 'shein_openapi_products', 'DL');
+async function writeSourceDetailFixtures() {
+  await fs.mkdir(sourceLinkFixtureDir, {recursive: true});
+  await fs.mkdir(sourceOpenApiFixtureDir, {recursive: true});
+  await fs.writeFile(path.join(sourceLinkFixtureDir, '2099-01-01.json'), `${JSON.stringify({
+    linkRows: [{
+      storeKey: 'DL',
+      skc: SOURCE_SKC,
+      spu: SOURCE_SPU,
+      standardGoodsSn: 'SM-505A',
+      productNameCn: 'Copy success source SM-505A',
+      rawGoodsSn: 'SOURCE-RAW-COPY-SUCCESS',
+    }],
+    inventoryRows: [],
+    performanceRows: [],
+  }, null, 2)}\n`, 'utf8');
+  await fs.writeFile(path.join(sourceOpenApiFixtureDir, 'latest.json'), `${JSON.stringify({
+    schemaVersion: 'shein-openapi-product-basics/v1',
+    storeKey: 'DL',
+    fetchedAt: SOURCE_DETAIL_AT,
+    normalizedRows: [{spu: SOURCE_SPU, skc: SOURCE_SKC}],
+    detailResults: [{
+      ok: true,
+      detailFetchedAt: SOURCE_DETAIL_AT,
+      info: {
+        spuName: SOURCE_SPU,
+        categoryId: 123456,
+        productTypeId: 789,
+        brandCode: 'BRAND_SMOKE',
+        productMultiNameList: [
+          {language: 'en', productName: 'Copy success source product'},
+          {language: 'ar', productName: 'منتج مصدر النسخ'},
+        ],
+        productAttributeInfoList: [
+          {attributeId: 1000546, attributeValueId: 0, attributeValue: 'TXSM-505A'},
+        ],
+        skcInfoList: [{
+          skcName: SOURCE_SKC,
+          supplierCode: 'SRC-COPY-SUCCESS-CODE',
+          skcImageInfoList: [
+            {imageUrl: 'https://example.invalid/copy-main.jpg', imageType: 'MAIN'},
+            {imageUrl: 'https://example.invalid/copy-detail.jpg', imageType: 'DETAIL'},
+            {imageUrl: 'https://example.invalid/copy-square.jpg', imageType: 'SQUARE'},
+          ],
+          saleAttributeList: [{attributeId: 301, attributeValueId: 401}],
+          skuInfoList: [{
+            skuCode: 'SKU-SRC-COPY-SUCCESS',
+            supplierSku: '',
+            length: '31.10',
+            width: '29.50',
+            height: '14.70',
+            weight: 2500,
+            sellerSkuWeight: {length: '31.10', width: '29.50', height: '14.70', weight: 2500},
+            mallState: 1,
+            saleAttributeList: [{attributeId: 301, attributeValueId: 401}],
+            costInfoList: [
+              {currency: 'CNY', costPrice: 205.21},
+              {currency: 'SAR', costPrice: 124.44},
+            ],
+          }],
+        }],
+      },
+    }],
+    detailFallbackResults: [],
+  }, null, 2)}\n`, 'utf8');
+}
+async function removeSourceDetailFixtures() {
+  await fs.rm(sourceLinkFixtureDir, {recursive: true, force: true});
+  await fs.rm(sourceOpenApiFixtureDir, {recursive: true, force: true});
+}
 const publishTraceId = 'trace-copy-success-smoke';
 const descriptionLines = {
   ar: ['نقطة مراجعة أولى', 'نقطة مراجعة ثانية', 'نقطة مراجعة ثالثة', 'نقطة مراجعة رابعة', 'نقطة مراجعة خامسة'],
@@ -656,6 +729,7 @@ const readProbeSummaryFile = await writeJson('read-probes.latest.json', {
   counts: {total: 1, readProbeOk: 1, pending: 0, failed: 0},
   results: [{storeKey: 'HL', ok: true, status: 'read_probe_ok'}],
 });
+await writeSourceDetailFixtures();
 const htpasswdFile = path.join(tmpRoot, 'empty.htpasswd');
 await fs.writeFile(htpasswdFile, '', 'utf8');
 const stateFile = path.join(tmpRoot, 'action_state.json');
@@ -1044,6 +1118,14 @@ try {
     blockerCount: Number(writeAudit?.blockerCount || 0),
   };
   result.summary.execEvidence = execEvidence;
+  const evidenceSourceDetailLock = execEvidence?.payload?.sourceDetailLock || null;
+  check('writeAudit executorEvidence preserves sourceDetailLock', Boolean(evidenceSourceDetailLock), true);
+  check('writeAudit sourceDetailLock has exactly five fields', Object.keys(evidenceSourceDetailLock || {}).sort().join(','), ['detailContentSha256', 'detailFetchedAt', 'matchedSkcName', 'matchedSpuName', 'source'].sort().join(','));
+  check('writeAudit sourceDetailLock source', evidenceSourceDetailLock?.source || '', 'openapi_product_detail_snapshot');
+  check('writeAudit sourceDetailLock matched SPU', evidenceSourceDetailLock?.matchedSpuName || '', SOURCE_SPU);
+  check('writeAudit sourceDetailLock matched SKC', evidenceSourceDetailLock?.matchedSkcName || '', SOURCE_SKC);
+  check('writeAudit sourceDetailLock detailFetchedAt', evidenceSourceDetailLock?.detailFetchedAt || '', SOURCE_DETAIL_AT);
+  check('writeAudit sourceDetailLock content hash', evidenceSourceDetailLock?.detailContentSha256 || '', value => /^[a-f0-9]{64}$/.test(String(value)));
   check('execute status', executed.status, 200);
   if (CHAT_NATURAL) {
     check('chat natural execute answers in conversation', chatAnswer, text => /收到，我按你这句|SHEIN 已返回|没有创建成功|需要补充|已完成/.test(String(text)));
@@ -1237,6 +1319,15 @@ try {
   const auditText = fssync.existsSync(auditFile) ? await fs.readFile(auditFile, 'utf8') : '';
   result.summary.taskCount = Array.isArray(tasks.tasks) ? tasks.tasks.length : 0;
   result.summary.auditLines = auditText.trim() ? auditText.trim().split(/\r?\n/).length : 0;
+  const storedTask = asArray(tasks.tasks).find(task => String(task?.id || '') === String(taskId)) || null;
+  const preflightReadyHistory = asArray(storedTask?.history).filter(row => String(row?.event || '') === 'openapi_product_preflight_ready');
+  const historyEvidenceLock = asArray(preflightReadyHistory.at(-1)?.writeAudit?.executorEvidence)
+    .find(row => String(row?.storeKey || '').trim().toUpperCase() === 'HL')?.payload?.sourceDetailLock || null;
+  const historyExecutorLock = asArray(preflightReadyHistory.at(-1)?.openApiProductExecutors)[0]?.payload?.sourceDetailLock || null;
+  check('history writeAudit executorEvidence preserves sourceDetailLock', Boolean(historyEvidenceLock), true);
+  check('history openApiProductExecutors preserves sourceDetailLock', Boolean(historyExecutorLock), true);
+  check('history openApiProductExecutors lock matches writeAudit lock', historyExecutorLock?.detailContentSha256 || '', historyEvidenceLock?.detailContentSha256 || '');
+  check('history lock matches writeAudit executor lock', historyEvidenceLock?.detailContentSha256 || '', evidenceSourceDetailLock?.detailContentSha256 || '');
   if (PREVALID_FAIL) {
     check('pre-valid audit redacts echoed description text', auditText, text => (
       !text.includes(descriptionLines.en[0]) && !text.includes(descriptionLines.ar[0])
@@ -1250,6 +1341,7 @@ try {
   portal.kill();
   await new Promise(resolve => fakeOpenApi.close(resolve));
   await sleep(300);
+  await removeSourceDetailFixtures().catch(() => {});
 }
 
 console.log(JSON.stringify(result, null, 2));

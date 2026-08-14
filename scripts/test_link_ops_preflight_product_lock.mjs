@@ -8,6 +8,13 @@ const {applySafeDefaults, resolvePreflightProductLock} = __testHooks;
 
 const expectedHash = '2a08ba28b1819d9b4610fa1bbf5cb73e2a350944999a29f8c61c82b8935889dc';
 const driftedHash = '2c31240bdd232598403e744f637318534c07beed54efb5bc147892bcc231e1f9';
+const historySourceDetailLock = {
+  source: 'openapi_product_detail_snapshot',
+  matchedSpuName: 'v-smoke-copy-product',
+  matchedSkcName: 'sv25082869650540305',
+  detailFetchedAt: '2026-07-11T09:00:00.000Z',
+  detailContentSha256: 'a'.repeat(64),
+};
 
 const task = {
   id: 'lot_preflight_lock_smoke',
@@ -35,6 +42,9 @@ const task = {
         state: 'ready_for_submit',
         payloadHash: expectedHash,
         payloadSummary: {hopeOnSaleDate: '2036-07-11 10:00:00'},
+        payload: {
+          sourceDetailLock: historySourceDetailLock,
+        },
         readbackFingerprint: {
           inferredSourceStore: 'QY',
           inferredSourceSkc: 'sv25082869650540305',
@@ -50,7 +60,19 @@ assert.equal(lock.sourceStore, 'QY');
 assert.equal(lock.sourceSkc, 'sv25082869650540305');
 assert.equal(lock.hopeOnSaleDate, '2036-07-11 10:00:00');
 assert.equal(lock.payloadHash, expectedHash);
+assert.deepEqual(lock.sourceDetailLock, historySourceDetailLock);
 assert.equal(resolvePreflightProductLock(task, 'TZ', {expectedPayloadHash: 'f'.repeat(64)}), null);
+
+// Legacy cross-version history shape: a preflight that only locked the payload
+// hash (no sourceDetailLock) is still recoverable as a lock, but with a null
+// sourceDetailLock. The executor write gate then blocks it with
+// SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING and forces a fresh dry-run.
+const legacyTask = JSON.parse(JSON.stringify(task));
+delete legacyTask.history[0].writeAudit.executorEvidence[0].payload;
+const legacyLock = resolvePreflightProductLock(legacyTask, 'TZ', {expectedPayloadHash: expectedHash});
+assert.ok(legacyLock, 'legacy hash-only preflight lock should still be recoverable');
+assert.equal(legacyLock.payloadHash, expectedHash);
+assert.equal(legacyLock.sourceDetailLock, null);
 
 const payload = {
   source_system: 'OpenAPI',
