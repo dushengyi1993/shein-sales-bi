@@ -1,0 +1,488 @@
+{
+  "authorityId": "dushengyi",
+  "fingerprint": "19e767f5d66d6faef40b7cc8507bae262ba8d0d931996624b149897bb13ce1ae",
+  "publishedAt": "2026-08-14T11:41:10.803Z",
+  "ruleCount": 25,
+  "rules": [
+    {
+      "activation": "active",
+      "contentHash": "d48449ed16ccd36307429291d7b02db455b99bbcd71918732be337ef5476f1ff",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-22T15:28:36.083Z",
+      "risk": "low",
+      "ruleKey": "advisory.data_truth.c0dc075e01f0",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "data_truth"
+      ],
+      "text": "这说明云端长期是“在老 commit 上手动改/运行”,不是正常部署。这个教训也要写进去,以后不论是你还是其他agent接手,都得规范化。",
+      "version": 1,
+      "versionId": "okr_61c9cce6cd274f3eff3c_d48449ed16ccd3630742"
+    },
+    {
+      "activation": "active",
+      "contentHash": "0658828f31870e720b9602006fdd8d9df043e970af9a44fe912774a664a37898",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-19T09:16:40.392Z",
+      "risk": "high",
+      "ruleKey": "advisory.dc03f8841e276dfe",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "官方协议已核实,请立即按以下精确公式实现并补测试,不要再猜:\n1) headers: x-lt-openKeyId, x-lt-eventCode, x-lt-appid, x-lt-timestamp, x-lt-signature。\n2) openKey = x-lt-appid 存在时取它,否则取 x-lt-openKeyId;requestPath 必须是原始 callback URI path(不含 query,官方也禁止 callback URL 带 query)。\n3) signature 前5字符是 randomKey;signString = apiKey + \"&\" + timestamp + \"&\" + requestPath;secretKey = appSecret + randomKey;HMAC-SHA256 得到 lowercase hex 字符串;对这个 hex UTF-8 字节做 Base64;expected = randomKey + base64Value;constant-time compare。\n4) eventData = Base64 AES/CBC/PKCS5Padding ciphertext;key = Arrays.copyOf(appSecret UTF-8 bytes,16) 的语义(截断或零填充);IV = \"space-station-default-iv\" UTF-8 前16字节。\n5) 官方示例主要是 multipart/form-data 字段 eventData,但文档有 Content-Type 表述冲突;请支持 multipart 为主,并兼容 application/json、[REDACTED OPAQUE TOKEN]。严格 body size。\n6) 超过1.5秒平台会判超时,因此 receiver 必须只做验签/解密/最小校验/持久入库,成功后快速2xx;业务处理异步。\n保持你既有文件所有权,完成后说明测试和变更。",
+      "version": 1,
+      "versionId": "okr_cc7c4012a49d06fcbfdf_0658828f31870e720b96"
+    },
+    {
+      "activation": "active",
+      "contentHash": "4357c22d22024954a344ac6a02816e92c4cef32d94d69615bafd9df95acb7258",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-26T03:55:00.000Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.b8cf0ef375f1",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "真实 SHEIN 写操作仍必须走 dry-run、人工确认、审计回读和按动作 payload 适配器,不能静默执行。",
+      "version": 1,
+      "versionId": "okr_1f1b7ffe12af0a645ce9_4357c22d22024954a344"
+    },
+    {
+      "activation": "active",
+      "contentHash": "a109d1537da2aed07fd5a2d4f24eb985d7c8432d26e2743f3bb49140e92b8d6b",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-11T09:45:29.113Z",
+      "risk": "medium",
+      "ruleKey": "advisory.execution.e6b20d13fb0f",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "主任务已核实 V3 文档明确“英文和阿文可复制,中文仅供核对”;SK-13015 19 个历史成功新发 payload 也均仅 ar,en 各5行。请把用户要求解释为内容源锁,不默认要求 zh-cn 写平台:实现应锁定三语原文与各自SHA,payload默认仅 AR/EN,ZH作为审计参考;仍需报告官方 schema 对字段/语言的证据与这个选择的依据。",
+      "version": 1,
+      "versionId": "okr_ca53c7851cc1254e025e_a109d1537da2aed07fd5"
+    },
+    {
+      "activation": "active",
+      "contentHash": "df1f9b780e12db9774d8872db6e836cc3b798cc179b64a23277b1479da2680e8",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T10:56:00.000Z",
+      "risk": "high",
+      "ruleKey": "advisory.f3c7a00668f52e93",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "敏感字段扫描不得包含任何应用密钥、开放平台密钥标识、临时令牌、访问或刷新令牌、会话凭证及鉴权头内容;只保留字段类别的脱敏描述。",
+      "version": 1,
+      "versionId": "okr_b125e9c5388abc5f3502_df1f9b780e12db9774d8"
+    },
+    {
+      "activation": "active",
+      "contentHash": "581daca7f248b34d8f8b057000544f80792b57549842c0fc0434b07997e522f7",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-24T05:04:18.644Z",
+      "risk": "low",
+      "ruleKey": "advisory.images.stores.4b76f6749f19",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "images",
+        "stores"
+      ],
+      "text": "DL、QY,简约、现代、都市、白灰\n\nYJ、JY,意式\n\nDX、XL,浅色奢华、金色\n\nHL、LQ,奶油ins风\n\nTZZ,家居性感风\n\nZL、CX,法式,法式复古\n\nTS、QH,海洋系、度假风、蓝色系\n\nMZ、XC,森系、自然系\n\nFY、JSH, 沙漠风、岩土风、沙特传统\n\nNM、TZ,深色奢华系,黑金\n\n店铺匹配的图片风格规则,更新一下。以最新为准。",
+      "version": 1,
+      "versionId": "okr_b4b429555219d1300682_581daca7f248b34d8f8b"
+    },
+    {
+      "activation": "active",
+      "contentHash": "ccac4cf0f68f895682d9ff44b9a868b365f9d5c9e94bee68dba336347366e3cc",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-20T15:58:00.000Z",
+      "risk": "high",
+      "ruleKey": "advisory.inventory.product_identity.577370746ad7",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "product_identity",
+        "inventory"
+      ],
+      "text": "不要再把 `ET发货单累计 < ET库存 + 历史销量` 写成“发货单缺采”,也不要用 `ET库存+历史销量` 反推供给下限。只能标为 `ET库存/销量匹配待核`,用于排查货号归并、销量或库存匹配问题。",
+      "version": 1,
+      "versionId": "okr_b30e7c067f5be1a074c6_ccac4cf0f68f895682d9"
+    },
+    {
+      "activation": "active",
+      "contentHash": "162a7bf80f6bc4c45a8783fbcf785db97f480e29df92657d5400cd064ef6ed34",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T10:56:00.000Z",
+      "risk": "medium",
+      "ruleKey": "advisory.publish.02a7cbc74d2c",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "stores",
+        "data_truth"
+      ],
+      "text": "不要再按旧记忆把OpenAPI描述成仅单店可用、待审核或默认关闭。旧的单店对账脚本与Windows单店定时入口只作历史诊断,不得替代当前19店正式能力与云端权威状态。",
+      "version": 1,
+      "versionId": "okr_417e24896a18de43c272_162a7bf80f6bc4c45a87"
+    },
+    {
+      "activation": "active",
+      "contentHash": "5dd577ffc73eb0d8428658a1c938f8e930e34a3c862337ec75d8f4e73d567c24",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-16T09:47:06.615Z",
+      "risk": "low",
+      "ruleKey": "advisory.stores.80202260f2be",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "stores"
+      ],
+      "text": "新增一个规则,以后上链接,默认标题匹配店铺的规格是:\n\nJSH用标题一\nDL、TZZ、CX用标题一\nHL、TS、TZ用标题一\nDX、LQ、XC用标题二\nMZ、NM、YJ用标题二\nJY、QY、XL标题三\nFY、QH、ZL用标题三",
+      "version": 1,
+      "versionId": "okr_02d58c5187df1c130039_5dd577ffc73eb0d84286"
+    },
+    {
+      "activation": "active",
+      "contentHash": "0ef63adb75fec5b2589df444cf029b648e1b5d997d565c809c84b7807b09b200",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-30T12:42:00.000Z",
+      "risk": "medium",
+      "ruleKey": "execution.remote-script-transport",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "Windows到远端Linux执行复杂脚本时,不要在PowerShell命令行里直接嵌套大段Bash并叠加多层引号;应把脚本内容作为独立临时.sh文件安全传输后执行,或使用经过校验的here-string/base64脚本传输方式。必须避免凭证进入命令行或日志,并在执行后核对退出码和目标端结果。",
+      "version": 1,
+      "versionId": "okr_29933bba0374c9ef454a_0ef63adb75fec5b2589d"
+    },
+    {
+      "activation": "active",
+      "contentHash": "79637d43c5e7e60e822d330b384e046d85c84c307e057a59a708c9debd1f98bf",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-07-26T12:38:24.533Z",
+      "risk": "high",
+      "ruleKey": "finance.profit-cost-accounting",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "data_truth",
+        "product_identity",
+        "stores"
+      ],
+      "text": "利润与成本统一按当前会计事实层计算:利润率=(营收-总成本)/营收;成本只使用在订单发生时已有且数量、采购和头程证据完整的批次,缺头程运费的批次不得作为精确成本;退货费优先使用财务核对单实际值,缺失时才按每个退货包裹13.88 SAR估算;仓储费按货号证据、货号×店铺销量、中央池逐层守恒分摊,不沿用早期按DSY/LGM成交额简单分摊的旧口径。",
+      "version": 1,
+      "versionId": "okr_f7da6b5d86a86ff6a20c_79637d43c5e7e60e822d"
+    },
+    {
+      "activation": "active",
+      "contentHash": "cc2da58a5dc14d759541d706e46599c29dae39a8bade88c94aad4847c2e15978",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-06-07T11:39:52.401Z",
+      "risk": "low",
+      "ruleKey": "finance.sales-time-fx",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "data_truth",
+        "price",
+        "identity",
+        "stores"
+      ],
+      "text": "销售统计以订单创建时间作为归属时间;项目固定经营换算口径为1 SAR=1.8 RMB,除非负责人明确更新该会计换算常量。分组小计与全店总额必须来自同一订单事实层并可相互加总校验,不得使用抓取时间或页面更新时间替代订单创建时间。",
+      "version": 1,
+      "versionId": "okr_56e8b2ed207b6ad7d29a_cc2da58a5dc14d759541"
+    },
+    {
+      "activation": "active",
+      "contentHash": "08d96c0268dcc8b3adcb2e6075504c7edcbd316fc5c41e2bbfc526bd28312a5a",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T12:20:17.687Z",
+      "risk": "low",
+      "ruleKey": "governance.owner-knowledge.owner-only",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity"
+      ],
+      "text": "只有负责人本人在本机 Codex、CLI 或本人 BI 任务结束时生成规则检查单并确认规则;其他人的任务不生成检查单、候选、覆盖记录或任何负责人规则数据。",
+      "version": 1,
+      "versionId": "okr_817d57f5f6a756072e2d_08d96c0268dcc8b3adcb"
+    },
+    {
+      "activation": "active",
+      "contentHash": "43e7846b6dfb88934661dc6948dd125542c2fee1221726277cfec7b36dc66464",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-05-07T05:15:22.109Z",
+      "risk": "high",
+      "ruleKey": "inventory.et-docs",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "inventory",
+        "data_truth",
+        "price"
+      ],
+      "text": "ET货代仓与单据口径:ETRUH09是日常运营散件可售仓,ETRUH06是报废仓,ETRUH03_RTV是退货/转运仓,ETRUH04是破损待处理仓,ETRUH01是整箱仓;SK-03038等一件一箱例外可按已确认规则使用01仓。发货申请单表示国内到海外的批次与在途事实,出库单表示发给买家的出库事实,RTV表示退回仓库事实,损溢单表示头程、清关等环节破损或丢失。库存、成本和利润必须按这些事实语义使用,不得混为同一类库存或单据。",
+      "version": 1,
+      "versionId": "okr_bdad4261bf9d7d66c970_43e7846b6dfb88934661"
+    },
+    {
+      "activation": "active",
+      "contentHash": "c97eb37f8fd3fea44ad0ae8cbff0a6fce65ea2bfe97ea55b56cb71a75ec10cdc",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.523Z",
+      "risk": "medium",
+      "ruleKey": "listing.publish.duplicate-link-fail-closed",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "publish",
+        "execution"
+      ],
+      "text": "上新提交前必须检查同店同货、历史Seller SKU和已有有效链接;冲突时阻断或进入负责人明确批准的重复分支,不得静默创建第二条。",
+      "version": 1,
+      "versionId": "okr_dd7e7da05eb09e62ff65_c97eb37f8fd3fea44ad0"
+    },
+    {
+      "activation": "active",
+      "contentHash": "c50d9167a1904a4977a1f27d4b903bbf3054644a99865a274f78a830d69f6241",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.490Z",
+      "risk": "high",
+      "ruleKey": "listing.publish.immutable-manifest",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "images",
+        "publish",
+        "attributes",
+        "price",
+        "inventory",
+        "stores",
+        "execution"
+      ],
+      "text": "上新前应锁定源店铺、源链接、源SKC、目标店铺、类目、官方属性、图片及角色、描述、标题组、商品身份、价格、库存、重复链接判断、同一任务ID、完整提交哈希与授权;材料变更后旧预检失效,提交后必须逐字段终态回读。",
+      "version": 1,
+      "versionId": "okr_258001b6a743a7857415_c50d9167a1904a4977a1"
+    },
+    {
+      "activation": "active",
+      "contentHash": "36faa5866e365056a1b9e1b4f6a2edc8d80f1fb9b503cb971f4df4df75d8d071",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.558Z",
+      "risk": "medium",
+      "ruleKey": "marketing.latest-final-plan-baseline",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "marketing",
+        "execution"
+      ],
+      "text": "后续营销方案必须继承上一期最后确认且实际执行或等待执行的最终方案,不得从旧默认、旧草稿或重新扫描后的默认策略重新起算。",
+      "version": 1,
+      "versionId": "okr_ba4f48e37fb4642937e2_36faa5866e365056a1b9"
+    },
+    {
+      "activation": "active",
+      "contentHash": "cb19f7432d18b2dce51ced095c854dd2dc8b4725904c1e20e3ff47083a817065",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.590Z",
+      "risk": "medium",
+      "ruleKey": "marketing.limited-discount-duration-by-scenario",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "publish",
+        "price",
+        "marketing"
+      ],
+      "text": "限时折扣周期必须按场景区分:新品、重上架和高点击等短期场景使用当前 7 天规则;全部在售链接的持续兜底使用当前 30 天规则;负责人特批按明确截止时间。",
+      "version": 1,
+      "versionId": "okr_bc455a296d282b088352_cb19f7432d18b2dce51c"
+    },
+    {
+      "activation": "active",
+      "contentHash": "ffbe1ad72b63a9fe8de0379e490f03c7a9414e24bba3cb7b95954df4c713fc92",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.548Z",
+      "risk": "high",
+      "ruleKey": "marketing.price-decimal-safety",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "price",
+        "marketing"
+      ],
+      "text": "营销价格可在平台允许、目标价和利润安全边界内做小数微调,但不得机械取整或突破价格与成本门槛。",
+      "version": 1,
+      "versionId": "okr_2860cc8b548af0341c53_ffbe1ad72b63a9fe8de0"
+    },
+    {
+      "activation": "active",
+      "contentHash": "22cc802b6a4c212976fd1f545da003bc318164c39d49b2179b2785e7960e669d",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.580Z",
+      "risk": "medium",
+      "ruleKey": "marketing.price-stack-current",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "identity",
+        "price",
+        "marketing"
+      ],
+      "text": "营销长期顺序是普通活动最高优先且必须覆盖符合条件对象,限时折扣是所有符合条件在售链接的强制兜底层,优惠券仅限负责人批准的小范围实验并在冲突时让位。",
+      "version": 1,
+      "versionId": "okr_36310124dbd709d0358a_22cc802b6a4c212976fd"
+    },
+    {
+      "activation": "active",
+      "contentHash": "c5813efbf653e427b0d0206e135c29f2ae31b8d90c113ad23704b376b90aaa9c",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.536Z",
+      "risk": "high",
+      "ruleKey": "openapi.product-stock-evidence-boundary",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "publish",
+        "inventory"
+      ],
+      "text": "OpenAPI 商品接口只能证明是否已上架的二值状态,不能替代链接生命周期四态;OpenAPI 库存是平台虚拟可售证据,不能替代 ET 实际库存。",
+      "version": 1,
+      "versionId": "okr_72759d245a67fc1adc60_c5813efbf653e427b0d0"
+    },
+    {
+      "activation": "active",
+      "contentHash": "039a9bedbd8e3e0c660991655910950ac7b4649537c9af6eff137430b500e939",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:34:47.512Z",
+      "risk": "low",
+      "ruleKey": "openapi.readonly-retry-boundary",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [],
+      "text": "只有显式只读请求在未收到响应的瞬态传输故障时允许有限重试;通用请求和写请求不得自动重试。",
+      "version": 1,
+      "versionId": "okr_330d61b5f61be3b6e5f7_039a9bedbd8e3e0c6609"
+    },
+    {
+      "activation": "active",
+      "contentHash": "c4e6e101682e0e8dc76a5b1f9c2a868dfcba544b2a7d7238ccefd12b5b0ab1e1",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-13T12:20:17.703Z",
+      "risk": "medium",
+      "ruleKey": "patrol.delivery.codex-lark-conclusion-attachments",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "execution"
+      ],
+      "text": "四类每日巡检只有在当前 Codex 任务与飞书群都基于同一终态证据提交结论和附件,并验证飞书消息及附件回执后才算完成;任一渠道缺结论或附件都不得报完成。",
+      "version": 1,
+      "versionId": "okr_3b846df39a3d3b01d03b_c4e6e101682e0e8dc76a"
+    },
+    {
+      "activation": "active",
+      "contentHash": "65aa1309a7defdcb708872c85a6d46cfdb2349f7ecb795509a6e5517ac08fc8b",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-08-14T11:41:10.803Z",
+      "risk": "high",
+      "ruleKey": "returns.lifecycle-accounting-current",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "durable",
+        "price"
+      ],
+      "text": "只有已同意退款、明确派件失败或其他已落定履约反转才冲减净销量和已落定利润;未结售后只列风险,不提前改写真实利润。RTV 实际入仓可另列可二售测算,不回写为已实现利润。",
+      "version": 1,
+      "versionId": "okr_0a3dc2fb0741b1917fcd_65aa1309a7defdcb7088"
+    },
+    {
+      "activation": "active",
+      "contentHash": "efcf020127372b163cf667c60dd1d8ab4016ce496d665e7f280a87a132a0bb65",
+      "explicitDurable": true,
+      "machinePolicy": null,
+      "publishedAt": "2026-05-18T09:54:54.125Z",
+      "risk": "low",
+      "ruleKey": "stores.dsy-lgm-membership-history",
+      "scope": [
+        "project:shein-sales-bi"
+      ],
+      "tags": [
+        "stores",
+        "data_truth",
+        "price"
+      ],
+      "text": "店铺历史分组现行规则:TS和MZ从开店以来始终属于DSY组。2026-03-01之前属于LGM、之后属于DSY的旧规则已废止,任何历史回算、利润分组和报表都不得恢复旧分组。",
+      "version": 1,
+      "versionId": "okr_16dbf518a0db3aa01a80_efcf020127372b163cf6"
+    }
+  ],
+  "schemaVersion": 1
+}
