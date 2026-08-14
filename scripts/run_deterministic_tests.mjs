@@ -69,6 +69,7 @@ const tests = [
   'scripts/test_bi_portal_section_queue.mjs',
   'scripts/test_bi_portal_section_terminal.mjs',
   'scripts/test_bi_live_page_recovery.mjs',
+  'scripts/test_bounded_top_level_json.mjs',
   'scripts/test_atomic_file_publish.mjs',
   'scripts/test_ops_run_bundle.mjs',
   'scripts/test_bi_profit_mart_freshness.mjs',

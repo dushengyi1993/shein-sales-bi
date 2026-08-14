@@ -15,11 +15,13 @@ import fssync from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
+import {Readable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import {gzipSync} from 'node:zlib';
+import {createGzip, gzipSync} from 'node:zlib';
 import pg from 'pg';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
@@ -112,6 +114,10 @@ import {
 import {warehousePgConfigFromEnv} from '../lib/warehouse_pg.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
 import {overlayCurrentProductReconciliationAudit} from '../lib/bi_live_core_health.mjs';
+import {
+  scanBoundedTopLevelJson,
+  streamFileHandleWithReplacement,
+} from '../lib/bounded_top_level_json.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {Client: PgClient} = pg;
@@ -8373,11 +8379,100 @@ function psqlSpawnCommand(args, extraFlags = '') {
   };
 }
 
+const BI_PORTAL_CORE_FIELD_LIMITS = Object.freeze({
+  generatedAt: 4 * 1024,
+  __sections: 1024 * 1024,
+  audit: 4 * 1024 * 1024,
+});
+let biPortalCoreEnvelopeCache = null;
+
+function biPortalCoreFileIdentity(stat) {
+  return [stat?.dev, stat?.ino, stat?.size, stat?.mtimeMs, stat?.ctimeMs].map(value => String(value ?? '')).join(':');
+}
+
+async function readBiPortalCoreEnvelope(root, options = {}) {
+  const file = path.join(root, 'data.json');
+  const handle = options.handle || await fs.open(file, 'r');
+  const closeHandle = !options.handle;
+  try {
+    const stat = options.stat || await handle.stat();
+    const identity = biPortalCoreFileIdentity(stat);
+    if (biPortalCoreEnvelopeCache?.file === file && biPortalCoreEnvelopeCache.identity === identity) {
+      if (options.requireGeneratedAt !== false && biPortalCoreEnvelopeCache.generatedAtValid !== true) {
+        const error = new Error('BI core generatedAt is missing or invalid');
+        error.code = 'BI_CORE_GENERATION_MISSING';
+        throw error;
+      }
+      return {...biPortalCoreEnvelopeCache, handle, stat};
+    }
+    const scan = await scanBoundedTopLevelJson(
+      handle.createReadStream({start: 0, autoClose: false}),
+      BI_PORTAL_CORE_FIELD_LIMITS,
+    );
+    const generatedAt = String(scan.fields.generatedAt?.value || scan.fields.__sections?.value?.generatedAt || '');
+    const generatedAtValid = Boolean(generatedAt) && Number.isFinite(Date.parse(generatedAt));
+    const sections = scan.fields.__sections?.value;
+    if (sections !== undefined && (!sections || typeof sections !== 'object' || Array.isArray(sections))) {
+      const error = new Error('BI core __sections must be an object');
+      error.code = 'BI_CORE_SECTIONS_INVALID';
+      throw error;
+    }
+    const audit = scan.fields.audit?.value;
+    if (audit !== undefined && audit !== null && (typeof audit !== 'object' || Array.isArray(audit))) {
+      const error = new Error('BI core audit must be an object or null');
+      error.code = 'BI_CORE_AUDIT_INVALID';
+      throw error;
+    }
+    const envelope = {
+      file,
+      identity,
+      generatedAt,
+      generatedAtValid,
+      mode: String(sections?.mode || 'legacy'),
+      audit: audit ?? null,
+      auditRange: scan.fields.audit
+        ? {start: scan.fields.audit.start, end: scan.fields.audit.end}
+        : null,
+      byteLength: scan.byteLength,
+    };
+    biPortalCoreEnvelopeCache = envelope;
+    if (options.requireGeneratedAt !== false && !generatedAtValid) {
+      const error = new Error('BI core generatedAt is missing or invalid');
+      error.code = 'BI_CORE_GENERATION_MISSING';
+      throw error;
+    }
+    return {...envelope, handle, stat};
+  } finally {
+    if (closeHandle) await handle.close().catch(() => {});
+  }
+}
+
 async function readBiPortalCoreMeta(root) {
-  const data = await readJsonFile(path.join(root, 'data.json'), {});
+  try {
+    const envelope = await readBiPortalCoreEnvelope(root, {requireGeneratedAt: false});
+    return {generatedAt: envelope.generatedAt, mode: envelope.mode};
+  } catch {
+    // Preserve the section loader's historical missing-core contract: callers
+    // decide whether an empty generation is a 202/503 condition. The public
+    // /data.json route still calls readBiPortalCoreEnvelope directly and fails
+    // closed with its explicit 503 response.
+    return {generatedAt: '', mode: 'legacy'};
+  }
+}
+
+function buildBiPortalCoreStreamPlan(envelope, evidence, options = {}) {
+  const core = {generatedAt: envelope.generatedAt, audit: envelope.audit};
+  const current = overlayCurrentProductReconciliationAudit(core, evidence, options);
+  if (current === core) return {replacement: null, audit: core.audit, overlayApplied: false};
+  if (!envelope.auditRange) {
+    const error = new Error('BI core audit field is missing; live reconciliation overlay cannot be applied safely');
+    error.code = 'BI_CORE_AUDIT_MISSING';
+    throw error;
+  }
   return {
-    generatedAt: data?.generatedAt || data?.__sections?.generatedAt || '',
-    mode: data?.__sections?.mode || 'legacy',
+    replacement: {...envelope.auditRange, value: JSON.stringify(current.audit)},
+    audit: current.audit,
+    overlayApplied: true,
   };
 }
 
@@ -10522,6 +10617,29 @@ function sendLargeJson(req, res, status, value, headers = {}) {
     'Content-Length': String(body.length),
     ...headers,
   });
+}
+
+async function sendBoundedCoreJson(req, res, handle, stat, replacement = null, headers = {}) {
+  const replacementValue = replacement
+    ? (Buffer.isBuffer(replacement.value) ? replacement.value : Buffer.from(String(replacement.value), 'utf8'))
+    : null;
+  const gzip = acceptsGzip(req.headers['accept-encoding']);
+  const contentLength = replacementValue
+    ? Number(stat.size) - (Number(replacement.end) - Number(replacement.start)) + replacementValue.length
+    : Number(stat.size);
+  writeResponseHead(res, 200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    ...(gzip ? {'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding'} : {'Content-Length': String(contentLength)}),
+    ...headers,
+  });
+  const source = Readable.from(streamFileHandleWithReplacement(handle, stat, replacement
+    ? {...replacement, value: replacementValue}
+    : null));
+  if (gzip) {
+    await pipeline(source, createGzip({level: 6}), res);
+  } else {
+    await pipeline(source, res);
+  }
 }
 
 function agentErrorHttpDetails(error) {
@@ -14276,21 +14394,30 @@ ${uploadCheckAnswer}` : `
         });
       }
       if (req.method === 'GET' && url.pathname === '/data.json') {
-        let core;
+        let handle;
         try {
-          core = JSON.parse(await fs.readFile(path.join(root, 'data.json'), 'utf8'));
-          if (!core || typeof core !== 'object' || !String(core.generatedAt || core?.__sections?.generatedAt || '')) {
-            throw new Error('core generation is missing');
+          const file = path.join(root, 'data.json');
+          handle = await fs.open(file, 'r');
+          const stat = await handle.stat();
+          const envelope = await readBiPortalCoreEnvelope(root, {handle, stat});
+          const plan = buildBiPortalCoreStreamPlan(
+            envelope,
+            loadOpenApiProductReconciliationSummarySync(),
+            {expectedStores: DEFAULT_SHEIN_STORE_KEYS},
+          );
+          await sendBoundedCoreJson(req, res, handle, stat, plan.replacement, {
+            'Cache-Control': 'private, no-cache, must-revalidate',
+          });
+          return;
+        } catch (error) {
+          if (res.headersSent) {
+            if (!res.destroyed) res.destroy(error);
+            return;
           }
-        } catch {
           return sendJson(res, 503, {ok: false, error: 'BI 页面底稿暂时不可用'}, {'Cache-Control': 'no-store'});
+        } finally {
+          await handle?.close().catch(() => {});
         }
-        const current = overlayCurrentProductReconciliationAudit(
-          core,
-          loadOpenApiProductReconciliationSummarySync(),
-          {expectedStores: DEFAULT_SHEIN_STORE_KEYS},
-        );
-        return sendLargeJson(req, res, 200, current, {'Cache-Control': 'private, no-cache, must-revalidate'});
       }
       let file = safePath(root, req.url || '/');
       if (!file) return send(res, 403, 'Forbidden', {'Content-Type': 'text/plain; charset=utf-8'});
@@ -14415,6 +14542,13 @@ if (IS_DIRECT_RUN) {
 }
 
 export const __testHooks = {
+  biPortalCoreFileIdentity,
+  buildBiPortalCoreStreamPlan,
+  readBiPortalCoreEnvelope,
+  resetBiPortalCoreEnvelopeCache() {
+    biPortalCoreEnvelopeCache = null;
+  },
   resolveDescriptionBindingExpectedBodyHash,
+  sendBoundedCoreJson,
   sha256StableJson,
 };

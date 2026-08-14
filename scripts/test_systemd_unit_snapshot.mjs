@@ -14,6 +14,7 @@ StateChangeTimestamp=
 ActiveEnterTimestamp=
 ExecMainStartTimestamp=
 ExecMainExitTimestamp=
+NRestarts=0
 
 Id=shein-bi-webhook.service
 LoadState=loaded
@@ -26,6 +27,7 @@ StateChangeTimestamp=
 ActiveEnterTimestamp=
 ExecMainStartTimestamp=
 ExecMainExitTimestamp=
+NRestarts=2
 
 Id=not-found.service
 LoadState=not-found
@@ -38,6 +40,7 @@ StateChangeTimestamp=
 ActiveEnterTimestamp=
 ExecMainStartTimestamp=
 ExecMainExitTimestamp=
+NRestarts=0
 
 Id=shein-bi-daily.timer
 LoadState=loaded
@@ -52,7 +55,9 @@ const parsed = parseSystemdShowMany(fixture, [
   'shein-bi-portal.service', 'shein-bi-webhook.service', 'missing.service',
 ], {code: 1, stderr: 'one unit missing'});
 assert.equal(parsed['shein-bi-portal.service'].ActiveState, 'active');
+assert.equal(parsed['shein-bi-portal.service'].NRestarts, '0');
 assert.equal(parsed['shein-bi-webhook.service'].Result, 'exit-code');
+assert.equal(parsed['shein-bi-webhook.service'].NRestarts, '2');
 assert.equal(parsed['missing.service'].LoadState, 'unknown');
 assert.equal(parsed['not-found.service'].LoadState, 'not-found');
 assert.equal(parsed['not-found.service'].complete, true);
@@ -73,7 +78,7 @@ assert.equal(incomplete['partial.service'].complete, false);
 assert.ok(incomplete['partial.service'].missingProperties.includes('ActiveState'));
 
 const aliasMismatch = parseSystemdShowMany(
-  'Id=canonical.service\nLoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainCode=0\nExecMainStatus=0\nStateChangeTimestamp=\nActiveEnterTimestamp=\nExecMainStartTimestamp=\nExecMainExitTimestamp=\n',
+  'Id=canonical.service\nLoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainCode=0\nExecMainStatus=0\nStateChangeTimestamp=\nActiveEnterTimestamp=\nExecMainStartTimestamp=\nExecMainExitTimestamp=\nNRestarts=0\n',
   ['alias.service'],
   {code: 0},
 );
