@@ -123,15 +123,21 @@ for (const store of stores) {
       blockers.push(`${store} OpenAPI product snapshot is stale`);
     }
     if (Number(doc?.summary?.stockFailedChunkCount || 0) > 0) blockers.push(`${store} OpenAPI stock snapshot has failed chunks`);
-    if (args.operationMode === 'daily' && Number(doc?.summary?.detailMissingAfterFallbackCount || 0) > 0) {
+    // The first daily build may discover candidates from list + stock +
+    // cached detail. It must never label a prior_cache row as current, and the
+    // blanket per-row current-detail gate moves below until inventory
+    // relevance is known, so cached rows outside the inventory-relevant set
+    // cannot block the whole 19-store plan. The second daily build
+    // (--required-detail-targets) re-applies the current-detail gate only to
+    // the manifest targets while keeping the full-row supplierCode check.
+    if (args.operationMode === 'daily'
+      && !requiredDetailTargets
+      && Number(doc?.summary?.detailMissingAfterFallbackCount || 0) > 0) {
       blockers.push(`${store} OpenAPI product detail evidence is incomplete`);
     }
     for (const row of doc.normalizedRows || []) {
       if (args.operationMode === 'daily' && !String(row?.supplierCode || '').trim()) {
         blockers.push(`${store} OpenAPI product canonical evidence is incomplete`);
-      }
-      if (args.operationMode === 'daily' && row?.sourceCompleteness?.hasCurrentDetail !== true) {
-        blockers.push(`${store} OpenAPI product canonical evidence is not from current detail`);
       }
       linkRows.push(row);
     }
@@ -140,25 +146,75 @@ for (const store of stores) {
   }
 }
 if (requiredDetailTargets) {
-  if (requiredDetailTargets.schemaVersion !== 'et-low-inventory-detail-targets/v1'
-    || !requiredDetailTargets.stores
-    || typeof requiredDetailTargets.stores !== 'object') {
-    blockers.push('low-ET current-detail target manifest is invalid');
-  } else {
-    const rowsByStoreSpu = new Map(linkRows.map(row => [
-      `${String(row.storeKey || '').toUpperCase()}::${String(row.spu || '')}`,
-      row,
-    ]));
-    for (const [storeKey, spus] of Object.entries(requiredDetailTargets.stores)) {
-      if (!Array.isArray(spus)) {
-        blockers.push(`low-ET current-detail target manifest is invalid for store=${storeKey}`);
-        continue;
+  if (args.operationMode === 'et_low_inventory_safety') {
+    if (requiredDetailTargets.schemaVersion !== 'et-low-inventory-detail-targets/v1'
+      || !requiredDetailTargets.stores
+      || typeof requiredDetailTargets.stores !== 'object') {
+      blockers.push('low-ET current-detail target manifest is invalid');
+    } else {
+      const rowsByStoreSpu = new Map(linkRows.map(row => [
+        `${String(row.storeKey || '').toUpperCase()}::${String(row.spu || '')}`,
+        row,
+      ]));
+      for (const [storeKey, spus] of Object.entries(requiredDetailTargets.stores)) {
+        if (!Array.isArray(spus)) {
+          blockers.push(`low-ET current-detail target manifest is invalid for store=${storeKey}`);
+          continue;
+        }
+        for (const spu of spus) {
+          const identity = `store=${String(storeKey).toUpperCase()} spu=${String(spu || '')}`;
+          const row = rowsByStoreSpu.get(`${String(storeKey).toUpperCase()}::${String(spu || '')}`);
+          if (!row || row?.sourceCompleteness?.hasCurrentDetail !== true) {
+            blockers.push(`low-ET current-detail target is unavailable after refresh: ${identity}`);
+          }
+        }
       }
-      for (const spu of spus) {
-        const identity = `store=${String(storeKey).toUpperCase()} spu=${String(spu || '')}`;
-        const row = rowsByStoreSpu.get(`${String(storeKey).toUpperCase()}::${String(spu || '')}`);
-        if (!row || row?.sourceCompleteness?.hasCurrentDetail !== true) {
-          blockers.push(`low-ET current-detail target is unavailable after refresh: ${identity}`);
+    }
+  } else if (args.operationMode === 'daily') {
+    if (requiredDetailTargets.schemaVersion !== 'daily-inventory-detail-targets/v1'
+      || !requiredDetailTargets.stores
+      || typeof requiredDetailTargets.stores !== 'object'
+      || !Object.keys(requiredDetailTargets.stores).length) {
+      blockers.push('daily current-detail target manifest is invalid');
+    } else if (String(requiredDetailTargets.date || '') !== args.date) {
+      blockers.push(`daily current-detail target manifest date does not match plan date: ${String(requiredDetailTargets.date || '')}`);
+    } else {
+      const budgetPerStore = Number(requiredDetailTargets.budgetPerStore);
+      if (!Number.isInteger(budgetPerStore) || budgetPerStore < 1) {
+        blockers.push('daily current-detail target manifest has no valid per-store budget');
+      } else {
+        const rowsByStoreSpu = new Map(linkRows.map(row => [
+          `${String(row.storeKey || '').toUpperCase()}::${String(row.spu || '').trim()}`,
+          row,
+        ]));
+        for (const [storeKey, spus] of Object.entries(requiredDetailTargets.stores)) {
+          if (!Array.isArray(spus)) {
+            blockers.push(`daily current-detail target manifest is invalid for store=${storeKey}`);
+            continue;
+          }
+          const uniqueSpus = [...new Set(spus.map(value => String(value || '').trim()).filter(Boolean))];
+          if (!uniqueSpus.length || uniqueSpus.length !== spus.length) {
+            blockers.push(`daily current-detail target manifest has empty or duplicate SPUs for store=${storeKey}`);
+            continue;
+          }
+          if (uniqueSpus.length > budgetPerStore) {
+            blockers.push(`daily current-detail target manifest exceeds per-store budget: store=${String(storeKey).toUpperCase()} count=${uniqueSpus.length} budget=${budgetPerStore}`);
+            continue;
+          }
+          for (const spu of uniqueSpus) {
+            const identity = `store=${String(storeKey).toUpperCase()} spu=${spu}`;
+            const row = rowsByStoreSpu.get(`${String(storeKey).toUpperCase()}::${spu}`);
+            if (!row) {
+              blockers.push(`daily current-detail target is missing from refreshed snapshot: ${identity}`);
+              continue;
+            }
+            if (row?.sourceCompleteness?.hasCurrentDetail !== true) {
+              blockers.push(`daily current-detail target is not from current detail after refresh: ${identity}`);
+            }
+            if (!String(row?.supplierCode || '').trim()) {
+              blockers.push(`daily current-detail target has incomplete canonical evidence after refresh: ${identity}`);
+            }
+          }
         }
       }
     }
@@ -285,6 +341,22 @@ for (const context of rowContexts) {
   evaluatedRows.push({row, et, metrics, decision, base, inventoryRelevant, productMatchKey, resolvedProductKey, resolvedMetricsKey});
 }
 
+// First daily build evidence gate: every inventory-relevant SPU (on-shelf, or
+// sold out with no other on-shelf same-store link for the canonical) must
+// carry current-run detail before the plan may execute, because cached detail
+// cannot prove the canonical mapping is still current. Cached rows outside
+// the inventory-relevant set stay out of this gate; the guard refreshes
+// exactly the emitted detailRefreshTargets and rebuilds with
+// --required-detail-targets. Current-detail fail-closed is never deleted.
+if (args.operationMode === 'daily' && !requiredDetailTargets) {
+  for (const item of evaluatedRows) {
+    if (!item.inventoryRelevant) continue;
+    if (item.row?.sourceCompleteness?.hasCurrentDetail !== true) {
+      blockers.push(`${item.base.storeKey} OpenAPI product canonical evidence is not from current detail: store=${item.base.storeKey} spu=${item.base.spu} skc=${item.base.skc}`);
+    }
+  }
+}
+
 const lowEtGroups = new Map();
 for (const item of evaluatedRows) {
   const threshold = Number(policy.lowEtAllocationAtOrBelow ?? 10);
@@ -296,7 +368,7 @@ for (const item of evaluatedRows) {
 
 const handledLowEtKeys = new Set();
 const blockedLowEtKeys = new Set();
-const detailRefreshTargets = [...lowEtGroups.values()]
+const lowEtDetailRefreshTargets = [...lowEtGroups.values()]
   .flatMap(group => group.map(item => ({
     storeKey: String(item.base.storeKey || '').toUpperCase(),
     spu: String(item.base.spu || ''),
@@ -305,6 +377,58 @@ const detailRefreshTargets = [...lowEtGroups.values()]
   })))
   .filter(row => row.storeKey && row.spu)
   .sort((a, b) => a.storeKey.localeCompare(b.storeKey) || a.spu.localeCompare(b.spu) || a.skc.localeCompare(b.skc));
+// Daily mode targets every inventory-relevant SPU, deduplicated per
+// store+SPU, so stale canonical mapping changes cannot silently drop actions;
+// et mode keeps the conservative low-ET candidate set.
+const dailyDetailRefreshTargets = [];
+if (args.operationMode === 'daily') {
+  const targetByStoreSpu = new Map();
+  for (const item of evaluatedRows) {
+    if (!item.inventoryRelevant) continue;
+    const storeKey = String(item.base.storeKey || '').toUpperCase();
+    const spu = String(item.base.spu || '').trim();
+    if (!storeKey || !spu) continue;
+    const key = `${storeKey}::${spu}`;
+    const candidate = {
+      storeKey,
+      spu,
+      skc: String(item.base.skc || ''),
+      matchKey: String(item.base.matchKey || ''),
+    };
+    const existing = targetByStoreSpu.get(key);
+    if (!existing || candidate.skc.localeCompare(existing.skc) < 0) targetByStoreSpu.set(key, candidate);
+  }
+  dailyDetailRefreshTargets.push(...targetByStoreSpu.values());
+  dailyDetailRefreshTargets.sort((a, b) => a.storeKey.localeCompare(b.storeKey) || a.spu.localeCompare(b.spu));
+}
+const detailRefreshTargets = args.operationMode === 'daily'
+  ? dailyDetailRefreshTargets
+  : lowEtDetailRefreshTargets;
+// Second daily build coverage gate: validating the manifest's own targets is
+// not enough. The refreshed snapshot may surface new inventory-relevant
+// store+SPU rows after the first build emitted targets (or drop old ones), so
+// every re-computed dailyDetailRefreshTargets entry must also be covered by
+// the manifest. An uncovered target fails closed with an explicit blocker;
+// the guard treats this as terminal (not a recoverable refresh condition).
+if (args.operationMode === 'daily'
+  && requiredDetailTargets
+  && requiredDetailTargets.stores
+  && typeof requiredDetailTargets.stores === 'object') {
+  const coveredTargets = new Set();
+  for (const [storeKey, spus] of Object.entries(requiredDetailTargets.stores)) {
+    if (!Array.isArray(spus)) continue;
+    for (const spu of spus) {
+      const store = String(storeKey || '').toUpperCase();
+      const value = String(spu || '').trim();
+      if (store && value) coveredTargets.add(`${store}::${value}`);
+    }
+  }
+  for (const target of dailyDetailRefreshTargets) {
+    if (!coveredTargets.has(`${target.storeKey}::${target.spu}`)) {
+      blockers.push(`daily current-detail target set is not fully covered by manifest: store=${target.storeKey} spu=${target.spu}`);
+    }
+  }
+}
 if (args.operationMode === 'et_low_inventory_safety') {
   for (const group of lowEtGroups.values()) {
     for (const item of group) {
@@ -497,6 +621,8 @@ const report = {
     lowEtCandidateCanonicalCount: lowEtGroups.size,
     lowEtAllocatedCanonicalCount: new Set(lowEtAllocations.map(row => row.matchKey)).size,
     lowEtBlockedCanonicalCount: blockedLowEtKeys.size,
+    detailRefreshTargetCount: detailRefreshTargets.length,
+    detailRefreshTargetStores: new Set(detailRefreshTargets.map(row => row.storeKey)).size,
     crossStoreSoldOutFindings: crossStoreSoldOutFindings.length,
     crossStoreSoldOutActionable: crossStoreSoldOutFindings.filter(row => actionable.some(action => action.storeKey === row.storeKey && action.skc === row.skc)).length,
     crossStoreSoldOutAlerts: crossStoreSoldOutFindings.filter(row => linkAlerts.some(alert => alert.storeKey === row.storeKey && alert.skc === row.skc)).length,

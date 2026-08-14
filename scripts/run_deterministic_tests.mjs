@@ -146,6 +146,8 @@ const tests = [
   'scripts/test_inventory_identity_alias_guard.mjs',
   'scripts/test_inventory_planner_alias_identity.mjs',
   'scripts/test_daily_inventory_replenishment_plan.mjs',
+  'scripts/test_daily_inventory_current_detail_targeting.mjs',
+  'scripts/test_daily_inventory_guard_targeted_detail.mjs',
   'scripts/test_et_low_inventory_safety_guard.mjs',
   'scripts/test_et_low_inventory_detail_evidence.mjs',
   'scripts/test_inventory_cost_ledger.mjs',
