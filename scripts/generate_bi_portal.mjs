@@ -11,6 +11,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {writeFileAtomic} from '../lib/atomic_file_publish.mjs';
+import {resolveBiPortalDataMode} from '../lib/bi_portal_data_mode.mjs';
 import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
 import {getAliasConfig} from '../lib/product_sku_normalizer.mjs';
 import {mergeRankedMarketingPriceLead} from '../lib/marketing_price_lead_merge.mjs';
@@ -66,6 +67,7 @@ async function writeFileWithRetry(file, data, encoding = 'utf8', attempts = 8) {
 }
 
 function parseArgs(argv) {
+  const envDataMode = String(process.env.SHEIN_BI_PORTAL_DATA_MODE || '').trim();
   const args = {
     distro: 'Ubuntu-24.04',
     container: 'shein-warehouse-db',
@@ -73,7 +75,8 @@ function parseArgs(argv) {
     user: 'shein',
     outDir: path.join(ROOT, 'outputs', 'bi-portal'),
     metabaseUrl: '',
-    dataMode: process.env.SHEIN_BI_PORTAL_DATA_MODE || 'legacy',
+    dataMode: '',
+    cliDataMode: '',
     section: '',
     sqlOnly: false,
     jsonOnly: false,
@@ -90,7 +93,7 @@ function parseArgs(argv) {
     else if (a === '--user') args.user = argv[++i];
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
     else if (a === '--metabase-url') args.metabaseUrl = argv[++i];
-    else if (a === '--data-mode') args.dataMode = argv[++i];
+    else if (a === '--data-mode') args.cliDataMode = argv[++i];
     else if (a === '--section') args.section = argv[++i];
     else if (a === '--sql-only') args.sqlOnly = true;
     else if (a === '--json-only') args.jsonOnly = true;
@@ -99,8 +102,14 @@ function parseArgs(argv) {
     else if (a === '--html-only-from-data') args.htmlOnlyFromData = path.resolve(argv[++i]);
     else if (a === '--html-file') args.htmlFile = path.resolve(argv[++i]);
   }
-  args.dataMode = String(args.dataMode || 'legacy').trim().toLowerCase();
-  if (!['legacy', 'api'].includes(args.dataMode)) throw new Error(`Invalid --data-mode: ${args.dataMode}`);
+  const resolvedDataMode = resolveBiPortalDataMode({
+    cliMode: args.cliDataMode,
+    envMode: envDataMode,
+    root: ROOT,
+    outDir: args.outDir,
+  });
+  args.dataMode = resolvedDataMode.mode;
+  args.dataModeSource = resolvedDataMode.source;
   args.section = String(args.section || '').trim();
   args.homeVariant = String(args.homeVariant || '').trim().toLowerCase();
   if (args.homeVariant === 'legacy') args.homeVariant = 'classic';

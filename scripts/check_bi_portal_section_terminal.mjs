@@ -9,16 +9,22 @@
 // response, a stale/failed-refresh header, or a non-terminal artifact is
 // never success.
 //
-// Large sections (profit is ~98MB) are never fully parsed. Metadata comes from
-// a bounded head read; the required dailyStoreProducts array key is located by
-// a constant-memory streaming scan because production serializers may place it
+// Large sections (profit is ~98MB) are never fully parsed. The BI core
+// (data.json, 210MB+ on production) is also never fully parsed: generatedAt
+// and __sections are captured with the constant-memory bounded top-level JSON
+// scanner under explicit byte limits, so this check cannot OOM on a legacy
+// core the way JSON.parse of the whole file did. Section metadata comes from a
+// bounded head read; the required dailyStoreProducts array key is located by a
+// constant-memory streaming scan because production serializers may place it
 // after other profit keys. homeProfit is small and derived, so its structure is
 // validated by parsing the whole file. Section data is never printed: the
 // report contains only metadata and a reason code.
 
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {scanBoundedTopLevelJson} from '../lib/bounded_top_level_json.mjs';
 
 const SECTION_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,79}$/;
 const DEFAULT_HEAD_BYTES = 64 * 1024;
@@ -27,6 +33,10 @@ const MAX_HEAD_BYTES = 1024 * 1024;
 const HOME_PROFIT_MAX_SIZE = 64 * 1024 * 1024;
 const STREAM_SCAN_CHUNK_BYTES = 1024 * 1024;
 const STREAM_SCAN_CARRY_CHARS = 256;
+const CORE_FIELD_LIMITS = Object.freeze({
+  generatedAt: 4 * 1024,
+  __sections: 1024 * 1024,
+});
 
 function usage(message = '') {
   if (message) console.error(message);
@@ -103,19 +113,39 @@ function scanForJsonArrayKey(file, key) {
   }
 }
 
-export function validateTerminalArtifact({root, section, headBytes = DEFAULT_HEAD_BYTES} = {}) {
+// Read only generatedAt/__sections from the BI core under explicit byte
+// limits. The scanner walks the whole document without retaining it, so this
+// stays constant-memory even for a 210MB legacy core. Any structural anomaly
+// (truncation, duplicate keys, oversized metadata, non-object root) throws
+// and is reported by the caller as the existing core_file_missing reason.
+async function readCoreGeneratedAt(coreFile) {
+  const handle = await fsPromises.open(coreFile, 'r');
+  try {
+    const stat = await handle.stat();
+    if (Number(stat?.size || 0) <= 0) throw new Error('BI core file is empty');
+    const scan = await scanBoundedTopLevelJson(
+      handle.createReadStream({start: 0, autoClose: false}),
+      CORE_FIELD_LIMITS,
+    );
+    const sections = scan.fields.__sections?.value;
+    return String(scan.fields.generatedAt?.value || sections?.generatedAt || '').trim();
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function validateTerminalArtifact({root, section, headBytes = DEFAULT_HEAD_BYTES} = {}) {
   const normalizedSection = String(section || '').trim();
   if (!SECTION_PATTERN.test(normalizedSection)) {
     return {ok: false, reason: 'section_invalid', section: normalizedSection};
   }
   const coreFile = path.join(root, 'data.json');
-  let core;
+  let coreGeneratedAt = '';
   try {
-    core = JSON.parse(fs.readFileSync(coreFile, 'utf8'));
+    coreGeneratedAt = await readCoreGeneratedAt(coreFile);
   } catch {
     return {ok: false, reason: 'core_file_missing', section: normalizedSection};
   }
-  const coreGeneratedAt = String(core?.generatedAt || core?.__sections?.generatedAt || '').trim();
   if (!coreGeneratedAt) {
     return {ok: false, reason: 'core_generated_at_missing', section: normalizedSection};
   }
@@ -209,7 +239,7 @@ export function validateTerminalArtifact({root, section, headBytes = DEFAULT_HEA
   };
 }
 
-export function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2)) {
   let options;
   try {
     options = parseArgs(argv);
@@ -217,11 +247,11 @@ export function main(argv = process.argv.slice(2)) {
     console.error(JSON.stringify({ok: false, errorCode: String(error?.message || 'QUEUE_ARGUMENT_INVALID')}));
     return usage();
   }
-  const result = validateTerminalArtifact(options);
+  const result = await validateTerminalArtifact(options);
   console.log(JSON.stringify(result));
   return result.ok ? 0 : 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }

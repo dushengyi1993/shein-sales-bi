@@ -68,6 +68,7 @@ const tests = [
   'scripts/test_bi_section_cache.mjs',
   'scripts/test_bi_portal_section_queue.mjs',
   'scripts/test_bi_portal_section_terminal.mjs',
+  'scripts/test_bi_portal_data_mode.mjs',
   'scripts/test_bi_live_page_recovery.mjs',
   'scripts/test_bounded_top_level_json.mjs',
   'scripts/test_atomic_file_publish.mjs',
