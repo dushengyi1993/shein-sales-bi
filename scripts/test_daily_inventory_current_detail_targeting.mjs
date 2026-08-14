@@ -147,12 +147,12 @@ async function buildPlan(name, {requiredDetailTargets = ''} = {}) {
 }
 
 const manifestFile = path.join(tmp, 'required-detail-targets.json');
-const writeManifest = (stores, {schemaVersion = 'daily-inventory-detail-targets/v1', manifestDate = date} = {}) =>
+const writeManifest = (stores, {schemaVersion = 'daily-inventory-detail-targets/v1', manifestDate = date, budgetPerStore = 64} = {}) =>
   fs.writeFile(manifestFile, JSON.stringify({
     schemaVersion,
     date: manifestDate,
     generatedAt: now,
-    budgetPerStore: 64,
+    budgetPerStore,
     stores,
   }));
 
@@ -246,8 +246,8 @@ assert.ok(cachedRequiredTarget.blockers.includes(
   'daily current-detail target is not from current detail after refresh: store=A spu=spu-rel-cached',
 ));
 
-// 6. Required target without supplierCode blocks (manifest-level and the kept
-// global daily supplierCode completeness check both fire).
+// 6. Required target without supplierCode blocks at the manifest boundary,
+// without adding a catalog-wide canonical blocker.
 await writeSnapshot('A', ['r1', 'r2', 'r3', 'r4', 'r5', 'r7'], {r2: 'current'});
 await writeSnapshot('B', ['r6']);
 await writeManifest({
@@ -256,12 +256,62 @@ await writeManifest({
 });
 const missingSupplierCodeTarget = await buildPlan('missing-supplier-code-target', {requiredDetailTargets: manifestFile});
 assert.equal(missingSupplierCodeTarget.executable, false);
-assert.equal(missingSupplierCodeTarget.blockers.length, 2);
+assert.equal(missingSupplierCodeTarget.blockers.length, 1);
 assert.ok(missingSupplierCodeTarget.blockers.includes(
   'daily current-detail target has incomplete canonical evidence after refresh: store=A spu=spu-nocode',
 ));
-assert.ok(missingSupplierCodeTarget.blockers.includes('A OpenAPI product canonical evidence is incomplete'),
-  'the global daily supplierCode completeness check must stay in place');
+
+// 6b. The first build also fails closed when an inventory-relevant row lacks
+// canonical identity, even though no manifest exists yet.
+const missingSupplierCodeFirstBuild = await buildPlan('missing-supplier-code-first-build');
+assert.equal(missingSupplierCodeFirstBuild.executable, false);
+assert.equal(missingSupplierCodeFirstBuild.blockers.length, 1);
+assert.ok(missingSupplierCodeFirstBuild.blockers.includes(
+  'A OpenAPI product canonical evidence is incomplete: store=A spu=spu-nocode skc=skc-nocode',
+));
+
+// 6c. Every row under a manifest store+SPU target must have current canonical
+// evidence. Map insertion order must not allow a valid sibling SKC to hide a
+// missing supplierCode.
+for (const missingKey of ['r4', 'r5']) {
+  await fs.writeFile(path.join(productsDir, 'A', 'latest.json'), JSON.stringify({
+    fetchedAt: now,
+    summary: {stockFailedChunkCount: 0, detailMissingAfterFallbackCount: 0},
+    normalizedRows: ['r1', 'r2', 'r3', 'r4', 'r5'].map(key => {
+      const value = row(rows[key], key === 'r2' ? 'current' : undefined);
+      if (key === missingKey) value.supplierCode = '';
+      return value;
+    }),
+  }));
+  await writeSnapshot('B', ['r6']);
+  await writeManifest({
+    A: ['spu-rel-cached', 'spu-rel-current', 'spu-rel-dup'],
+    B: ['spu-b-current'],
+  });
+  const mixedCanonicalTarget = await buildPlan(`mixed-canonical-target-${missingKey}`, {requiredDetailTargets: manifestFile});
+  assert.equal(mixedCanonicalTarget.executable, false);
+  assert.ok(mixedCanonicalTarget.blockers.includes(
+    'daily current-detail target has incomplete canonical evidence after refresh: store=A spu=spu-rel-dup',
+  ));
+}
+
+// 6d. Store keys are normalized before deduplication and budget checks, so
+// case-split entries cannot evade a per-store target budget.
+await writeSnapshot('A', ['r1', 'r2', 'r3', 'r4', 'r5'], {r2: 'current'});
+await writeSnapshot('B', ['r6']);
+await writeManifest({
+  A: ['spu-rel-current'],
+  a: ['spu-rel-dup'],
+  B: ['spu-b-current'],
+}, {budgetPerStore: 1});
+const caseSplitBudgetBlocked = await buildPlan('case-split-budget-blocked', {requiredDetailTargets: manifestFile});
+assert.equal(caseSplitBudgetBlocked.executable, false);
+assert.ok(caseSplitBudgetBlocked.blockers.includes(
+  'daily current-detail target manifest has duplicate normalized store key: store=A',
+));
+assert.ok(caseSplitBudgetBlocked.blockers.includes(
+  'daily current-detail target manifest exceeds per-store budget: store=A count=2 budget=1',
+));
 
 // 7. Daily mode rejects the ET manifest schema: schemas are not interchangeable.
 await writeSnapshot('A', ['r1', 'r2', 'r3', 'r4', 'r5'], {r2: 'current'});
@@ -321,6 +371,48 @@ const uncoveredNonRelevant = await buildPlan('uncovered-nonrelevant', {requiredD
 assert.equal(uncoveredNonRelevant.executable, true);
 assert.equal(uncoveredNonRelevant.blockers.length, 0);
 
+// 10b. Snapshot-wide missing-detail summary and missing supplierCode on a
+// non-relevant row remain provenance but do not block a targeted second build.
+await fs.writeFile(path.join(productsDir, 'A', 'latest.json'), JSON.stringify({
+  fetchedAt: now,
+  summary: {stockFailedChunkCount: 0, detailMissingAfterFallbackCount: 37},
+  normalizedRows: ['r1', 'r2', 'r3', 'r4', 'r5', 'r9'].map(key => {
+    const value = row(rows[key], key === 'r2' ? 'current' : undefined);
+    if (key === 'r9') value.supplierCode = '';
+    return value;
+  }),
+}));
+await writeSnapshot('B', ['r6']);
+await writeManifest({
+  A: ['spu-rel-cached', 'spu-rel-current', 'spu-rel-dup'],
+  B: ['spu-b-current'],
+});
+const nonRelevantEvidenceGapsPass = await buildPlan('nonrelevant-evidence-gaps-pass', {requiredDetailTargets: manifestFile});
+assert.equal(nonRelevantEvidenceGapsPass.executable, true);
+assert.equal(nonRelevantEvidenceGapsPass.blockers.length, 0);
+assert.equal(nonRelevantEvidenceGapsPass.sourceEvidence.find(source => source.store === 'A')?.detailMissingAfterFallbackCount, 37);
+
+// 10c. Stock-source failures remain a full-snapshot fail-closed gate.
+await fs.writeFile(path.join(productsDir, 'A', 'latest.json'), JSON.stringify({
+  fetchedAt: now,
+  summary: {stockFailedChunkCount: 1, detailMissingAfterFallbackCount: 0},
+  normalizedRows: ['r1', 'r2', 'r3', 'r4', 'r5'].map(key => row(rows[key], key === 'r2' ? 'current' : undefined)),
+}));
+const stockFailureBlocked = await buildPlan('stock-failure-blocked', {requiredDetailTargets: manifestFile});
+assert.equal(stockFailureBlocked.executable, false);
+assert.ok(stockFailureBlocked.blockers.includes('A OpenAPI stock snapshot has failed chunks'));
+
+// 10d. Missing stock failure-count evidence is unavailable, not zero.
+await fs.writeFile(path.join(productsDir, 'A', 'latest.json'), JSON.stringify({
+  fetchedAt: now,
+  summary: {detailMissingAfterFallbackCount: 0},
+  normalizedRows: ['r1', 'r2', 'r3', 'r4', 'r5'].map(key => row(rows[key], key === 'r2' ? 'current' : undefined)),
+}));
+const stockEvidenceMissing = await buildPlan('stock-evidence-missing', {requiredDetailTargets: manifestFile});
+assert.equal(stockEvidenceMissing.executable, false);
+assert.ok(stockEvidenceMissing.blockers.includes('A OpenAPI stock snapshot evidence is incomplete'));
+assert.equal(stockEvidenceMissing.sourceEvidence.find(source => source.store === 'A')?.stockFailedChunkCount, null);
+
 // 11. Source contract: targets stay in the payload hash, both manifest schemas
 // are wired, and the current-detail gate applies only to inventory-relevant
 // rows after evaluatedRows is known; the second build must enforce full
@@ -340,4 +432,4 @@ assert.match(plannerSource, /if \(!item\.inventoryRelevant\) continue;[\s\S]*?ha
 assert.match(plannerSource, /not fully covered by manifest/,
   'the second daily build must fail closed when re-computed targets are not fully covered by the manifest');
 
-console.log(JSON.stringify({ok: true, checks: 49}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 76}, null, 2));
