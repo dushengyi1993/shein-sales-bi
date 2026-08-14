@@ -1203,6 +1203,12 @@ async function runPrepareDescriptions(args) {
   if (!['s09', 's9', 'auto'].includes(section)) {
     throw new Error(`prepare-descriptions --section 必须是 auto/s09/s9（当前 ${section || '(empty)'}）`);
   }
+  const expectedRevisionProvided = args.expectedRevision !== null;
+  if (expectedRevisionProvided
+    && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision <= 0)) {
+    throw new Error('prepare-descriptions --expected-revision 必须是正安全整数，描述未绑定');
+  }
+  const explicitExpectedRevision = expectedRevisionProvided ? args.expectedRevision : null;
   let sourceBytes;
   try {
     sourceBytes = await fs.readFile(args.sourceFile);
@@ -1235,7 +1241,37 @@ async function runPrepareDescriptions(args) {
   const existingBinding = currentTask?.descriptionMaterialBinding && typeof currentTask.descriptionMaterialBinding === 'object'
     ? currentTask.descriptionMaterialBinding
     : null;
-  const existingBaseRevision = Number(existingBinding?.baseTaskRevision || 0);
+  // Strict description-binding lock validation. The server projection is
+  // trusted only when it is exactly {baseTaskRevision,currentRevision,ok,stale}
+  // with boolean ok/stale satisfying stale === !ok, positive safe-integer
+  // revisions, base equal to the existing binding's baseTaskRevision and
+  // current equal to the live repositoryRevision. Any missing or extra field,
+  // type error, contradiction, or revision mismatch makes the lock UNKNOWN:
+  // the CLI never guesses freshness and never replays an old base.
+  const existingBaseRevision = existingBinding
+    && Number.isSafeInteger(existingBinding.baseTaskRevision) && existingBinding.baseTaskRevision > 0
+    ? existingBinding.baseTaskRevision
+    : 0;
+  const existingBindingLock = currentTask?.descriptionBindingLock && typeof currentTask.descriptionBindingLock === 'object'
+    ? currentTask.descriptionBindingLock
+    : null;
+  const existingBindingLockKnown = Boolean(
+    existingBindingLock
+    && !Array.isArray(existingBindingLock)
+    && Object.keys(existingBindingLock).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+    && typeof existingBindingLock.ok === 'boolean'
+    && typeof existingBindingLock.stale === 'boolean'
+    && existingBindingLock.stale === !existingBindingLock.ok
+    && typeof existingBindingLock.baseTaskRevision === 'number'
+    && Number.isSafeInteger(existingBindingLock.baseTaskRevision)
+    && existingBindingLock.baseTaskRevision > 0
+    && existingBindingLock.baseTaskRevision === existingBaseRevision
+    && typeof existingBindingLock.currentRevision === 'number'
+    && Number.isSafeInteger(existingBindingLock.currentRevision)
+    && existingBindingLock.currentRevision > 0
+    && existingBindingLock.currentRevision === liveRevision,
+  );
+  const existingBindingStale = existingBindingLockKnown && existingBindingLock.stale === true;
   const existingBindingRequestKey = Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
     ? descriptionBindingRequestKey({
         taskId: args.taskId,
@@ -1263,18 +1299,23 @@ async function runPrepareDescriptions(args) {
     && [existingBindingRequestKey, existingLegacyS09BindingRequestKey].filter(Boolean)
       .includes(String(existingBinding.bindingRequestKey || '').toLowerCase()),
   );
-  const explicitExpectedRevision = Number.isFinite(args.expectedRevision) && args.expectedRevision > 0
-    ? Math.trunc(args.expectedRevision)
-    : null;
+  // Replaying an existing binding identity is only safe when the server
+  // proves the binding still locks the current payload. A stale lock rebinds
+  // at the live revision; a missing lock state fails closed instead of
+  // guessing, unless the operator explicitly pinned a revision.
+  const idempotentReplay = exactExistingBinding && existingBindingLockKnown && !existingBindingStale;
   if (explicitExpectedRevision
     && explicitExpectedRevision !== liveRevision
-    && !(exactExistingBinding && explicitExpectedRevision === existingBaseRevision)) {
+    && !(idempotentReplay && explicitExpectedRevision === existingBaseRevision)) {
     throw new Error(`目标 task revision 已变化：命令期望 ${explicitExpectedRevision}，实时读取为 ${liveRevision}；描述未绑定`);
+  }
+  if (exactExistingBinding && !existingBindingLockKnown && !explicitExpectedRevision) {
+    throw new Error(`目标 task 已存在同源审核描述绑定，但云端描述绑定锁未知或不符合严格规范（必须恰为 baseTaskRevision/currentRevision/ok/stale，ok/stale 为互反 boolean，且 base/current 分别为绑定基线与实时 revision），无法区分幂等重放与过期重绑；请显式传 --expected-revision ${liveRevision} 后重试（描述未绑定）`);
   }
   // When the previous request committed the binding but failed only while
   // appending external audit, replay the original request identity. Sending
   // the new task revision would create a new request key and bind twice.
-  const requestRevision = exactExistingBinding
+  const requestRevision = idempotentReplay
     ? existingBaseRevision
     : (explicitExpectedRevision || liveRevision);
   const bindBody = {

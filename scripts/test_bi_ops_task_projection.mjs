@@ -12,6 +12,13 @@ import net from 'node:net';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {
+  DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+  DESCRIPTION_SOURCE_PROOF,
+  descriptionBindingRequestKey,
+  sha256StableJson,
+  sha256Utf8,
+} from '../lib/link_ops_product_descriptions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
@@ -72,6 +79,86 @@ function assertNoRawTaskLeak(label, json) {
   check(`${label} old cross-entry wording stripped`, raw, x => !/飞书|只读建议|回到 BI|dry-run|dry_run|payload hash|store identity mismatch|account_and_merchant_mismatch|查看审计|HL 仓库列表/.test(x));
   return raw;
 }
+
+// A self-consistent descriptionMaterialBinding plus matching publish payload
+// (fresh from publish-assets) and the replaced payload that publish-assets
+// leaves behind. The server projection must report the first as a valid lock
+// and the second as a stale lock after a legal publish-assets mutation.
+const lockOkLines = {
+  ar: ['عربي سطر واحد', 'عربي سطر اثنان', 'عربي سطر ثلاثة', 'عربي سطر أربعة', 'عربي سطر خمسة'],
+  en: ['Lock ok line one', 'Lock ok line two', 'Lock ok line three', 'Lock ok line four', 'Lock ok line five'],
+  'zh-cn': ['锁定有效一', '锁定有效二', '锁定有效三', '锁定有效四', '锁定有效五'],
+};
+const staleLines = {
+  ar: ['عربي جديد واحد', 'عربي جديد اثنان', 'عربي جديد ثلاثة', 'عربي جديد أربعة', 'عربي جديد خمسة'],
+  en: ['Replaced line one', 'Replaced line two', 'Replaced line three', 'Replaced line four', 'Replaced line five'],
+  'zh-cn': ['替换一', '替换二', '替换三', '替换四', '替换五'],
+};
+function descriptionRows(lines) {
+  return Object.entries(lines)
+    .filter(([language]) => language === 'ar' || language === 'en')
+    .map(([language, rows]) => ({language, name: rows.join('\n')}));
+}
+function buildLockedDescriptionBinding({taskId, targetStore, baseTaskRevision, lines, payload, imageBindingFingerprint = ''}) {
+  const hashes = Object.fromEntries(Object.entries(lines).map(([language, rows]) => [language, sha256Utf8(rows.join('\n'))]));
+  const sourceFileSha256 = 'a'.repeat(64);
+  const contentSha256 = sha256Utf8([sourceFileSha256, hashes.ar, hashes.en, hashes['zh-cn']].join('\n'));
+  return {
+    schemaVersion: 1,
+    kind: 'copy_product_draft',
+    sourceApproved: true,
+    authority: 'human_reviewed_source',
+    sourceProof: DESCRIPTION_SOURCE_PROOF,
+    payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+    sourceLabel: 'reviewed-publish.html',
+    sourceFileSha256,
+    sourceByteLength: 1234,
+    baseTaskRevision,
+    boundAt: '2026-08-14T00:00:00.000Z',
+    boundByUser: 'owner_projection',
+    targetStore,
+    publishLanguages: ['ar', 'en'],
+    lineCounts: {ar: 5, en: 5, 'zh-cn': 5},
+    hashes,
+    newPayloadHash: sha256StableJson(payload),
+    contentSha256,
+    bindingRequestKey: descriptionBindingRequestKey({
+      taskId,
+      targetStore,
+      baseTaskRevision,
+      contentSha256,
+      sourceProof: DESCRIPTION_SOURCE_PROOF,
+    }),
+    imageBindingFingerprint,
+  };
+}
+const lockOkPayload = {
+  category_id: 123456,
+  product_type_id: 789,
+  skc_list: [{supplier_code: 'SM-505A', sku_list: [{cost_info: {currency: 'SAR', cost_price: '88.00'}, stock_info_list: [{inventory_num: 50}]}]}],
+  multi_language_desc_list: descriptionRows(lockOkLines),
+};
+const stalePayload = {
+  category_id: 123456,
+  product_type_id: 789,
+  skc_list: [{supplier_code: 'SM-505A', sku_list: [{cost_info: {currency: 'SAR', cost_price: '88.00'}, stock_info_list: [{inventory_num: 50}]}]}],
+  multi_language_desc_list: descriptionRows(staleLines),
+};
+const lockOkBinding = buildLockedDescriptionBinding({
+  taskId: 'lot_projection_lock_ok_0003',
+  targetStore: 'DL',
+  baseTaskRevision: 9,
+  lines: lockOkLines,
+  payload: lockOkPayload,
+});
+const staleAfterPublishAssetsBinding = buildLockedDescriptionBinding({
+  taskId: 'lot_projection_pubassets_stale_0004',
+  targetStore: 'DL',
+  baseTaskRevision: 8,
+  lines: lockOkLines,
+  payload: lockOkPayload,
+  imageBindingFingerprint: 'a'.repeat(64),
+});
 
 let portal = null;
 let fakeOpenApi = null;
@@ -153,6 +240,7 @@ try {
       },
       lifecycle: {lifecycleStatus: 'link_maintenance_preflight_ready'},
       descriptionMaterialBinding: {
+        kind: 'copy_product_draft',
         targetStore: 'DX',
         sourceLabel: 'reviewed-source.html',
         sourceFileSha256: '1'.repeat(64),
@@ -206,6 +294,46 @@ try {
         }],
       },
       lifecycle: {lifecycleStatus: 'openapi_product_preflight_ready'},
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }, {
+      id: 'lot_projection_lock_ok_0003',
+      title: 'DL 锁定有效描述绑定投影',
+      status: 'waiting_review',
+      progress: 10,
+      requestedBy: 'Owner Projection',
+      requestedByUser: 'owner_projection',
+      intents: ['copy_product_draft'],
+      targets: {stores: ['DL'], writeStores: ['DL'], sourceStores: ['QY'], productRefs: ['SM-505A']},
+      openapiPublishPayload: lockOkPayload,
+      descriptionMaterialBinding: lockOkBinding,
+      repositoryRevision: 11,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }, {
+      id: 'lot_projection_pubassets_stale_0004',
+      title: 'DL publish-assets 后旧描述锁投影过期',
+      status: 'waiting_review',
+      progress: 10,
+      requestedBy: 'Owner Projection',
+      requestedByUser: 'owner_projection',
+      intents: ['copy_product_draft'],
+      targets: {stores: ['DL'], writeStores: ['DL'], sourceStores: ['QY'], productRefs: ['SM-505A']},
+      openapiPublishPayload: stalePayload,
+      publishAssetBinding: {
+        schemaVersion: 1,
+        kind: 'copy_product_draft',
+        sourceApproved: true,
+        authority: 'human_reviewed_source',
+        targetStore: 'DL',
+        boundAt: '2026-08-14T01:00:00.000Z',
+        boundByUser: 'owner_projection',
+        bindingFingerprint: 'b'.repeat(64),
+        imageCount: 5,
+        images: [],
+      },
+      descriptionMaterialBinding: staleAfterPublishAssetsBinding,
+      repositoryRevision: 13,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }],
@@ -359,8 +487,43 @@ try {
     && value?.contentSha256 === '2'.repeat(64)
     && !Object.prototype.hasOwnProperty.call(value, 'boundByUser')
   ));
+  check('description binding lock projection is compact and stale for a bound task', task.descriptionBindingLock, value => (
+    value
+    && value.ok === false
+    && value.stale === true
+    && value.baseTaskRevision === 7
+    && value.currentRevision === task.repositoryRevision
+    && Object.keys(value).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+    && !Object.prototype.hasOwnProperty.call(value, 'newPayloadHash')
+    && !Object.prototype.hasOwnProperty.call(value, 'hashes')
+    && !Object.prototype.hasOwnProperty.call(value, 'descriptionMaterialBinding')
+  ));
   assertNoRawTaskLeak('GET /api/link-ops-tasks', tasks.json);
   const copyTask = tasks.json?.data?.tasks?.find(row => row?.id === 'lot_projection_copy_0002') || {};
+  check('unbound task carries no description binding lock', copyTask.descriptionBindingLock, null);
+  const lockOkTask = tasks.json?.data?.tasks?.find(row => row?.id === 'lot_projection_lock_ok_0003') || {};
+  check('current description binding lock projection is ok', lockOkTask.descriptionBindingLock, value => (
+    value
+    && value.ok === true
+    && value.stale === false
+    && value.baseTaskRevision === 9
+    && value.currentRevision === 11
+    && Object.keys(value).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+    && !Object.prototype.hasOwnProperty.call(value, 'newPayloadHash')
+    && !Object.prototype.hasOwnProperty.call(value, 'hashes')
+    && !Object.prototype.hasOwnProperty.call(value, 'descriptionMaterialBinding')
+  ));
+  const staleAfterPublishAssetsTask = tasks.json?.data?.tasks?.find(row => row?.id === 'lot_projection_pubassets_stale_0004') || {};
+  check('post publish-assets description binding lock projection is stale', staleAfterPublishAssetsTask.descriptionBindingLock, value => (
+    value
+    && value.ok === false
+    && value.stale === true
+    && value.baseTaskRevision === 8
+    && value.currentRevision === 13
+    && Object.keys(value).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+    && !Object.prototype.hasOwnProperty.call(value, 'newPayloadHash')
+    && !Object.prototype.hasOwnProperty.call(value, 'hashes')
+  ));
   check('old copy task target normalized to write store only', copyTask.targets?.stores || [], xs => Array.isArray(xs) && xs.length === 1 && xs.includes('DL'));
   check('old copy task keeps source store only as source', copyTask.targets?.sourceStores || [], xs => Array.isArray(xs) && xs.length === 1 && xs.includes('QY'));
   check('old copy task hides source SKC from target product refs when product ref exists', copyTask.targets?.productRefs || [], xs => Array.isArray(xs) && xs.includes('505') && xs.includes('SM-505A') && !xs.includes('sv25082869650540305'));
