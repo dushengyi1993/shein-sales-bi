@@ -107,6 +107,7 @@ async function main() {
       releaseCommitMatches: snapshot.releaseSource.commitMatches,
       trackedDirtyCount: snapshot.releaseSource.dirtyCount,
       requiredServicesInactive: snapshot.runtimeProbe.inactiveAlwaysRunning.length,
+      requiredServicesRestarted: snapshot.runtimeProbe.restartedAlwaysRunning.length,
       timersInactive: snapshot.runtimeProbe.inactiveTimers.length,
       portalHealthy: snapshot.health.portal.ok,
       webhookHealthy: snapshot.health.webhook.ok,
