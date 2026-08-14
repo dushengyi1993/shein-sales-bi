@@ -115,6 +115,10 @@ function groupKey(row) {
   ].join('::');
 }
 
+function exactStageKey(storeKey, skc) {
+  return `${String(storeKey || '').trim().toUpperCase()}::${String(skc || '').trim()}`;
+}
+
 function normalizeRow(row, activityStock) {
   const finalTargetPrice = num(row.finalTargetPrice);
   const limitedDiscountPrice = finalTargetPrice;
@@ -155,8 +159,27 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
     .filter(row => num(row.finalTargetPrice) !== null)
     .filter(row => num(row.limitedDiscountPrice) !== null)
     .filter(row => num(row.limitedDiscountPrice) < num(row.finalTargetPrice) - 0.01);
+  const highClickSpecialStageKeys = new Set((guard.highClickLowConversionSpecial?.rows || [])
+    .map(row => exactStageKey(row?.storeKey || row?.store_key, row?.skc || row?.SKC))
+    .filter(key => key !== '::'));
+  const handledByHighClickSpecialStageRows = [];
+  const ordinaryCandidateRows = [];
+  for (const row of candidateRows) {
+    if (highClickSpecialStageKeys.has(exactStageKey(row.storeKey, row.skc))) {
+      handledByHighClickSpecialStageRows.push({
+        storeKey: row.storeKey,
+        skc: row.skc,
+        canonical: row.canonical || '',
+        limitedDiscountPrice: num(row.limitedDiscountPrice),
+        finalTargetPrice: num(row.finalTargetPrice),
+        reason: 'handled_by_high_click_special_stage',
+      });
+      continue;
+    }
+    ordinaryCandidateRows.push(row);
+  }
   const manualIndex = options.manualIndex || buildManualLimitedDiscountIndex(options.manualRegistry || {entries: []}, options.now || new Date());
-  const partitioned = partitionRowsByManualLimitedDiscount(candidateRows, manualIndex, options.now || new Date());
+  const partitioned = partitionRowsByManualLimitedDiscount(ordinaryCandidateRows, manualIndex, options.now || new Date());
   const rows = partitioned.ordinaryRows;
   const limitedRows = [];
   const lowEtBlockedRows = [];
@@ -217,9 +240,10 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
     sourceGuard: options.guardPath || '',
     sourceLiveScan: guard.limitedDiscountTargetPriceDrift?.source || '',
     sourcePriceOverrides: guard.limitedDiscountTargetPriceDrift?.planSourcePath || '',
-    rule: '修正 live 限时折扣价低于当前窗口 finalTargetPrice 的行；单一目标活动可用 apply_hl_limited_discount_rescue dry-run/execute，混合活动由脚本 fail-closed 后再 split-preserve。',
+    rule: '修正 live 限时折扣价低于当前窗口 finalTargetPrice 的行；同一 storeKey+SKC 命中高点击专属折扣时由高点击阶段优先并排除；单一目标活动可用 apply_hl_limited_discount_rescue dry-run/execute，混合活动由脚本 fail-closed 后再 split-preserve。',
     totals: {
       belowTarget: candidateRows.length,
+      handledByHighClickSpecialStage: handledByHighClickSpecialStageRows.length,
       ordinaryBelowTarget: rows.length,
       protectedManualSpecial: partitioned.protectedRows.length,
       lowEtBlocked: lowEtBlockedRows.length,
@@ -228,6 +252,8 @@ export function buildLimitedDiscountDriftRescuePlan(guard, options = {}) {
       stores: Object.keys(byStore).length,
     },
     byStore,
+    handledByHighClickSpecialStageKeys: [...highClickSpecialStageKeys].sort(),
+    handledByHighClickSpecialStageRows,
     protectedManualSpecialRows: partitioned.protectedRows.map(({row, entry}) => ({
       storeKey: entry.storeKey,
       skc: entry.skc,
@@ -350,10 +376,16 @@ async function main() {
     `# ${plan.reportDate || ''} 限时折扣目标价漂移修正计划`,
     '',
     `- belowTarget: ${plan.totals.belowTarget}`,
+    `- handledByHighClickSpecialStage: ${plan.totals.handledByHighClickSpecialStage}`,
     `- selected: ${plan.totals.selected}`,
     `- groups: ${plan.totals.groups}`,
     `- stores: ${plan.totals.stores}`,
     '',
+    ...(plan.handledByHighClickSpecialStageRows.length ? [
+      '## 高点击专属折扣优先排除',
+      ...plan.handledByHighClickSpecialStageRows.map(row => `- ${exactStageKey(row.storeKey, row.skc)} ${row.reason}`),
+      '',
+    ] : []),
     '## rescue files',
     ...plan.rescueFiles.map(file => `- ${file.storeKey} ${file.sourceLimitedDiscountName}: ${file.count} 行，${file.path}`),
     '',

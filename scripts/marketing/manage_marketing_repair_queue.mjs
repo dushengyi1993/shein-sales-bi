@@ -36,6 +36,10 @@ function hashJson(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+function exactStageKey(storeKey, skc) {
+  return `${String(storeKey || '').trim().toUpperCase()}::${String(skc || '').trim()}`;
+}
+
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, 'utf8'));
 }
@@ -77,7 +81,7 @@ async function buildQueue(args) {
 
   const manualRows = Number(guard?.manualSpecialLimitedDiscount?.actionCount || 0);
   const highClickRows = Number(guard?.highClickLowConversionSpecial?.actionCount || 0);
-  const driftRows = Number((guard?.limitedDiscountTargetPriceDrift?.belowRows || []).length);
+  const rawDriftRows = Number((guard?.limitedDiscountTargetPriceDrift?.belowRows || []).length);
   const guardHash = await sha256File(guardPath);
   const highClick = await loadExactHighClickSpecialPlan({
     root: ROOT,
@@ -88,6 +92,16 @@ async function buildQueue(args) {
   if (highClick.entries.length !== highClickRows) {
     throw new Error(`High-click queue row mismatch: guard=${highClickRows} plan=${highClick.entries.length}`);
   }
+  const highClickKeys = new Set(highClick.entries.map(entry => entry.key));
+  const driftGuardRows = Array.isArray(guard?.limitedDiscountTargetPriceDrift?.belowRows)
+    ? guard.limitedDiscountTargetPriceDrift.belowRows
+    : [];
+  const driftKeysHandledByHighClickSpecial = driftGuardRows
+    .map(row => exactStageKey(row?.storeKey || row?.store_key, row?.skc))
+    .filter(key => key !== '::' && highClickKeys.has(key));
+  const driftKeysHandledByHighClickSpecialUnique = [...new Set(driftKeysHandledByHighClickSpecial)].sort();
+  const driftRowsHandledByHighClickSpecial = driftKeysHandledByHighClickSpecialUnique.length;
+  const executableDriftRows = rawDriftRows - driftKeysHandledByHighClickSpecial.length;
 
   let manual = null;
   if (manualRows > 0) {
@@ -98,20 +112,43 @@ async function buildQueue(args) {
   }
 
   let drift = null;
-  if (driftRows > 0) {
+  if (rawDriftRows > 0) {
     drift = await loadExactDriftRepairManifest({root: ROOT, planDir: driftPlanDir, guardPath, date});
     const manifestRows = drift.entries.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
-    if (manifestRows !== driftRows) throw new Error(`Drift queue row mismatch: guard=${driftRows} manifest=${manifestRows}`);
+    if (manifestRows !== executableDriftRows) {
+      throw new Error(
+        `Drift queue row mismatch: guardBelowRows=${rawDriftRows} `
+        + `handledByHighClickSpecial=${driftKeysHandledByHighClickSpecial.length} `
+        + `expectedExecutable=${executableDriftRows} manifest=${manifestRows}`,
+      );
+    }
+    const expectedExecutableDriftKeys = new Set(driftGuardRows
+      .map(row => exactStageKey(row?.storeKey || row?.store_key, row?.skc))
+      .filter(key => key !== '::' && !highClickKeys.has(key)));
+    const manifestDriftKeys = new Set((drift.entries || []).flatMap(entry => entry.rescue.rows || [])
+      .map(row => exactStageKey(row?.storeKey, row?.skc)));
+    const unexpectedManifestKeys = [...manifestDriftKeys]
+      .filter(key => !expectedExecutableDriftKeys.has(key))
+      .sort();
+    const missingManifestKeys = [...expectedExecutableDriftKeys]
+      .filter(key => !manifestDriftKeys.has(key))
+      .sort();
+    if (unexpectedManifestKeys.length || missingManifestKeys.length) {
+      throw new Error(
+        `Drift queue key mismatch (not explained by high-click stage): `
+        + `unexpected=${unexpectedManifestKeys.join(',') || '(none)'} `
+        + `missing=${missingManifestKeys.join(',') || '(none)'}`,
+      );
+    }
   }
 
   const fallback = await loadExactFallbackRepairPlan({root: ROOT, planPath: fallbackPlanPath, guardPath, date});
   const fallbackRows = fallback.entries.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
   const driftKeys = new Set((drift?.entries || []).flatMap(entry => entry.rescue.rows || [])
-    .map(row => `${String(row?.storeKey || '').trim().toUpperCase()}::${String(row?.skc || '').trim()}`));
+    .map(row => exactStageKey(row?.storeKey, row?.skc)));
   const fallbackKeys = new Set(fallback.entries.flatMap(entry => entry.rescue.rows || [])
-    .map(row => `${String(row?.storeKey || '').trim().toUpperCase()}::${String(row?.skc || '').trim()}`));
+    .map(row => exactStageKey(row?.storeKey, row?.skc)));
   const manualKeys = new Set((manual?.entries || []).map(entry => `${entry.storeKey}::${entry.skc}`));
-  const highClickKeys = new Set(highClick.entries.map(entry => entry.key));
   const allKeys = [...highClickKeys, ...manualKeys, ...driftKeys, ...fallbackKeys];
   const countsByKey = allKeys.reduce((acc, key) => acc.set(key, (acc.get(key) || 0) + 1), new Map());
   const overlappingWorkKeys = [...countsByKey.entries()].filter(([, count]) => count > 1).map(([key]) => key).sort();
@@ -142,13 +179,13 @@ async function buildQueue(args) {
       updatedAt: now,
     },
     driftRepair: {
-      status: driftRows > 0 ? 'pending' : 'not_required',
-      rows: driftRows,
+      status: executableDriftRows > 0 ? 'pending' : 'not_required',
+      rows: executableDriftRows,
       groups: drift?.entries.length || 0,
       planPath: drift?.manifestRelativePath || '',
       inputFingerprint: drift
-        ? hashJson({guardHash, workFingerprint: drift.workFingerprint})
-        : hashJson({guardHash, stage: 'driftRepair', driftRows: 0}),
+        ? hashJson({guardHash, workFingerprint: drift.workFingerprint, executableDriftRows})
+        : hashJson({guardHash, stage: 'driftRepair', executableDriftRows: 0}),
       workFingerprint: drift?.workFingerprint || '',
       updatedAt: now,
     },
@@ -166,7 +203,7 @@ async function buildQueue(args) {
     name,
     preserveStage(existing?.stages?.[name], stage),
   ]));
-  const totalRows = highClickRows + manualRows + driftRows + fallbackRows;
+  const totalRows = highClickRows + manualRows + executableDriftRows + fallbackRows;
   const totalGroups = stageDefinitions.highClickSpecial.groups + stageDefinitions.manualSpecialRestore.groups + stageDefinitions.driftRepair.groups + stageDefinitions.fallbackRepair.groups;
   const queue = {
     schemaVersion: 1,
@@ -187,12 +224,19 @@ async function buildQueue(args) {
       highClickGroups: stageDefinitions.highClickSpecial.groups,
       manualRows,
       manualGroups: stageDefinitions.manualSpecialRestore.groups,
-      driftRows,
+      driftRows: executableDriftRows,
       driftGroups: stageDefinitions.driftRepair.groups,
+      driftRawRows: rawDriftRows,
+      driftRowsHandledByHighClickSpecial,
+      driftKeysHandledByHighClickSpecial: driftKeysHandledByHighClickSpecialUnique,
       fallbackRows,
       fallbackGroups: stageDefinitions.fallbackRepair.groups,
     },
-    deduplication: {key: 'storeKey+skc', overlappingWorkKeys: 0},
+    deduplication: {
+      key: 'storeKey+skc',
+      overlappingWorkKeys: 0,
+      highClickPriorityExcludedDriftKeys: driftKeysHandledByHighClickSpecialUnique,
+    },
     stages,
   };
   await writeJsonAtomic(queuePath, queue);
