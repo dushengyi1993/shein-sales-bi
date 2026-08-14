@@ -8141,6 +8141,11 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           : ok
             ? '受控执行器已完成前置检查；当前停在执行准备/预填阶段，不会静默提交 SHEIN。'
             : `执行器阻断：${combinedBlockers.join('；')}`,
+    preflight: {
+      ok,
+      blockers: combinedBlockers,
+      warnings: combinedWarnings,
+    },
     execution: {
       ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
       mode: hasOpenApiProductExecutor ? 'openapi_product_executor' : (hasOpenApiMaintenanceExecutor ? 'openapi_maintenance_executor' : 'controlled_prefill'),

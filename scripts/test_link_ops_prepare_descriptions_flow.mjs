@@ -13,6 +13,9 @@
  *     revision -> HTTP 409; gateway updateTaskRecord itself throws
  *     LinkOpsRevisionConflictError on a mismatched revision);
  *   - the task only becomes ready again after a fresh dry-run;
+ *   - a fresh dry-run converges the top-level task preflight with the
+ *     execution preflight in the same persisted record (ready and blocked
+ *     cases), so the binding invalidation never outlives the new dry-run;
  *   - execute requires code=0 AND explicit info.success===true; a response
  *     without an explicit success flag is not treated as success;
  *   - live spu-info description readback must match the binding hashes
@@ -73,6 +76,7 @@ const DESC_SUPPLIER_CODES = [
   'DESC-DEEP-AUDIT-WRITE',
   'DESC-TOP-LEVEL-AUDIT-WRITE',
   'DESC-MALFORMED-AUDIT',
+  'DESC-POST-BIND-BLOCKED',
 ];
 const SOURCE_LOCKED_CODES = new Set([
   'DESC-MATCH',
@@ -86,6 +90,7 @@ const SOURCE_LOCKED_CODES = new Set([
   'DESC-CLI',
   'DESC-CLI-LEGACY-S9',
   'DESC-CLI-AUDIT-PENDING',
+  'DESC-POST-BIND-BLOCKED',
 ]);
 const sourceSkcFor = code => `sv20990101${String(DESC_SUPPLIER_CODES.indexOf(code)).padStart(6, '0')}`;
 const descSourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', SOURCE_STORE);
@@ -855,6 +860,49 @@ try {
   check('dry-run binding lock enabled', executorSummary.descriptionBindingLocked, true);
   const newDryRunHash = postRun.payload?.payloadHash || '';
   check('dry-run locks new payload hash', newDryRunHash.length, 64);
+  // The fresh dry-run must converge top-level preflight with execution
+  // preflight in the same persisted record, not keep the binding invalidation.
+  const rawAfterFreshDryRun = await rawTaskById(taskId1);
+  check('post-bind dry-run top-level preflight ok', rawAfterFreshDryRun.preflight?.ok, true);
+  check('post-bind dry-run top-level blockers empty', asArray(rawAfterFreshDryRun.preflight?.blockers).length, 0);
+  check('post-bind dry-run top-level ok matches execution', rawAfterFreshDryRun.preflight?.ok, rawAfterFreshDryRun.execution?.preflight?.ok);
+  check('post-bind dry-run top-level blockers equal execution blockers', JSON.stringify(asArray(rawAfterFreshDryRun.preflight?.blockers).sort()), JSON.stringify(asArray(rawAfterFreshDryRun.execution?.preflight?.blockers).sort()));
+  check('post-bind dry-run top-level warnings equal execution warnings', JSON.stringify(asArray(rawAfterFreshDryRun.preflight?.warnings).sort()), JSON.stringify(asArray(rawAfterFreshDryRun.execution?.preflight?.warnings).sort()));
+  check('post-bind dry-run drops stale binding invalidation', JSON.stringify(asArray(rawAfterFreshDryRun.preflight?.blockers)), text => !text.includes('需要基于新 payload 重新预演'));
+  check('post-bind dry-run projected preflight ok', postBind.json?.task?.preflight?.ok, true);
+  check('post-bind dry-run projected preflight equals execution', JSON.stringify(postBind.json?.task?.preflight || null), JSON.stringify(postBind.json?.task?.execution?.preflight || null));
+
+  // Blocked case: tampering only the bound ar description bytes must block
+  // the next fresh dry-run, and the persisted top-level preflight must again
+  // converge exactly with the execution preflight blockers.
+  const blockedTaskId = await createTask(cookie, 'DESC-POST-BIND-BLOCKED');
+  await attachPayload(blockedTaskId, publishPayloadFor('DESC-POST-BIND-BLOCKED'));
+  const blockedBind = await bindDescriptions(cookie, blockedTaskId);
+  check('blocked-case bind status 200', blockedBind.status, 200);
+  const blockedRawAfterBind = await rawTaskById(blockedTaskId);
+  check('blocked-case bind invalidates top-level preflight', blockedRawAfterBind.preflight?.ok, false);
+  check('blocked-case bind invalidates execution preflight', blockedRawAfterBind.execution?.preflight?.ok, false);
+  check('blocked-case bind resets execution state', blockedRawAfterBind.execution?.state, 'needs_repreflight');
+  await updateRawTaskById(blockedTaskId, task => {
+    const payload = JSON.parse(JSON.stringify(task.openapiPublishPayload));
+    payload.multi_language_desc_list = asArray(payload.multi_language_desc_list).map(row => (
+      row?.language === 'ar'
+        ? {...row, name: [...arLines.slice(0, 4), 'سطر عربي معدل لاختبار تغيير الربط'].join('\n')}
+        : row
+    ));
+    return {...task, openapiPublishPayload: payload};
+  });
+  const blockedDryRun = await req('/api/link-ops-execute', {method: 'POST', cookie, body: {id: blockedTaskId, mode: 'dry-run', source: 'test'}});
+  check('tampered post-bind dry-run responds ok', blockedDryRun.status, 200);
+  const blockedRaw = await rawTaskById(blockedTaskId);
+  check('tampered post-bind dry-run stays blocked', blockedRaw.execution?.state, 'blocked');
+  check('tampered post-bind top-level preflight ok false', blockedRaw.preflight?.ok, false);
+  check('tampered post-bind top-level ok matches execution', blockedRaw.preflight?.ok, blockedRaw.execution?.preflight?.ok);
+  check('tampered post-bind top-level blockers equal execution blockers', JSON.stringify(asArray(blockedRaw.preflight?.blockers).sort()), JSON.stringify(asArray(blockedRaw.execution?.preflight?.blockers).sort()));
+  check('tampered post-bind top-level warnings equal execution warnings', JSON.stringify(asArray(blockedRaw.preflight?.warnings).sort()), JSON.stringify(asArray(blockedRaw.execution?.preflight?.warnings).sort()));
+  check('tampered post-bind drops stale binding invalidation', JSON.stringify(asArray(blockedRaw.preflight?.blockers)), text => !text.includes('需要基于新 payload 重新预演'));
+  check('tampered post-bind carries description lock blocker', JSON.stringify(asArray(blockedRaw.preflight?.blockers)), text => text.includes('hash 与审核资料绑定不一致'));
+  check('tampered post-bind projected preflight equals execution', JSON.stringify(blockedDryRun.json?.task?.preflight || null), JSON.stringify(blockedDryRun.json?.task?.execution?.preflight || null));
 
   // execute success requires code=0 AND explicit info.success===true
   const execute = await req('/api/link-ops-execute', {
