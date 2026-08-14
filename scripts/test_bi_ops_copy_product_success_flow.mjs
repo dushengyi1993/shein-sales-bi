@@ -58,6 +58,46 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function canonicalImageFields(images) {
+  return asArray(images).map(row => ({
+    name: String(row?.name || '').normalize('NFKC').trim(),
+    role: String(row?.role || '').normalize('NFKC').trim(),
+    imageType: Number(row?.imageType ?? row?.image_type ?? 0),
+    imageUrl: String(row?.imageUrl || row?.image_url || '').trim(),
+    sha256: String(row?.sha256 || '').trim().toLowerCase(),
+  }));
+}
+
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+}
+
+function expectedPersistedPublishAssetBindingResponse(task) {
+  const binding = task?.publishAssetBinding && typeof task.publishAssetBinding === 'object'
+    ? task.publishAssetBinding
+    : {};
+  const evidence = binding.evidence && typeof binding.evidence === 'object' && !Array.isArray(binding.evidence)
+    ? JSON.parse(JSON.stringify(binding.evidence))
+    : {};
+  const publishPreparation = binding.publishPreparation && typeof binding.publishPreparation === 'object' && !Array.isArray(binding.publishPreparation)
+    ? JSON.parse(JSON.stringify(binding.publishPreparation))
+    : null;
+  const images = canonicalImageFields(binding.images);
+  return {
+    ...evidence,
+    targetStore: String(binding.targetStore || '').trim().toUpperCase(),
+    bindingFingerprint: String(binding.bindingFingerprint || ''),
+    sourceApproved: binding.sourceApproved === true,
+    imageCount: images.length,
+    boundImageCount: images.length,
+    boundNames: images.map(row => row.name),
+    publishPreparation,
+    preflightInvalidated: evidence.preflightInvalidated === true,
+  };
+}
+
 function b64Json(value) {
   return Buffer.from(JSON.stringify(value, null, 2), 'utf8').toString('base64');
 }
@@ -774,8 +814,8 @@ portal.stdout.on('data', d => { portalStdout += d.toString(); });
 portal.stderr.on('data', d => { portalStderr += d.toString(); });
 
 const base = `http://127.0.0.1:${portalPort}`;
-async function req(pathname, {method = 'GET', cookie = '', body = undefined} = {}) {
-  const res = await fetch(`${base}${pathname}`, {
+async function reqAt(baseUrl, pathname, {method = 'GET', cookie = '', body = undefined, signal = undefined} = {}) {
+  const res = await fetch(`${baseUrl}${pathname}`, {
     method,
     headers: {
       ...(body !== undefined ? {'Content-Type': 'application/json'} : {}),
@@ -783,11 +823,79 @@ async function req(pathname, {method = 'GET', cookie = '', body = undefined} = {
     },
     body: body === undefined ? undefined : JSON.stringify(body),
     redirect: 'manual',
+    signal,
   });
   const text = await res.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch {}
   return {status: res.status, headers: res.headers, text, json};
+}
+const req = (pathname, options = {}) => reqAt(base, pathname, options);
+
+function portalSpawnArgs(port) {
+  return [
+    'scripts/serve_bi_portal.mjs',
+    '--host', '127.0.0.1',
+    '--port', String(port),
+    '--auth-file', authFile,
+    '--access-roles-file', accessRolesFile,
+    '--htpasswd-file', htpasswdFile,
+    '--session-secret-file', sessionSecretFile,
+    '--state-file', stateFile,
+    '--link-ops-task-file', taskFile,
+    '--link-ops-chat-file', chatFile,
+    '--manual-login-state-file', manualLoginStateFile,
+    '--audit-file', auditFile,
+  ];
+}
+
+function portalSpawnEnv(extra = {}) {
+  return {
+    ...process.env,
+    NODE_ENV: 'test',
+    SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
+    SHEIN_BI_CORE_WARMUP_DISABLED: '1',
+    SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
+    SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
+    SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
+    SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS: '5000',
+    SHEIN_LINK_OPS_READBACK_MAX_PAGES: '1',
+    ...extra,
+  };
+}
+
+const auxiliaryPortals = [];
+async function startAuxiliaryPortal(extraEnv = {}) {
+  const port = await getFreePort();
+  const proc = spawn(process.execPath, portalSpawnArgs(port), {
+    cwd: ROOT,
+    env: portalSpawnEnv(extraEnv),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  auxiliaryPortals.push(proc);
+  let stdout = '';
+  let stderr = '';
+  proc.stdout.on('data', d => { stdout += d.toString(); });
+  proc.stderr.on('data', d => { stderr += d.toString(); });
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (proc.exitCode !== null) throw new Error(`aux portal exited code=${proc.exitCode}\nstdout=${stdout}\nstderr=${stderr}`);
+    try {
+      const ready = await fetch(`${baseUrl}/login`, {redirect: 'manual'});
+      if (ready.status >= 200 && ready.status < 500) break;
+    } catch {}
+    await sleep(200);
+  }
+  const loginResult = await reqAt(baseUrl, '/api/login', {
+    method: 'POST',
+    body: {username: 'owner_copy_success', password: 'owner-pass'},
+  });
+  const cookie = (loginResult.headers.get('set-cookie') || '').match(/bi_session=[^;]+/)?.[0] || '';
+  if (loginResult.status !== 200 || !cookie) {
+    throw new Error(`aux portal login failed status=${loginResult.status} body=${loginResult.text}\nstdout=${stdout}\nstderr=${stderr}`);
+  }
+  return {proc, baseUrl, cookie, logs: () => ({stdout, stderr})};
 }
 
 async function waitReady() {
@@ -818,6 +926,347 @@ function check(label, actual, expected) {
   return pass;
 }
 
+/**
+ * Publish-assets single-task CAS scenario against the real HTTP endpoints.
+ *
+ * All writes here go through POST /api/link-ops-publish-assets and
+ * /api/link-ops-prepare-descriptions on serve_bi_portal.mjs instances that
+ * share the same JSON repository file (two independent gateways, one
+ * repository). A dedicated pause portal waits at the CAS gate after preparing
+ * the publish-assets binding, so the competing description binding commits
+ * first at the same base revision and the paused request must observe a
+ * repository-level 409 instead of silently overwriting.
+ */
+let casPortalProc = null;
+async function runPublishAssetsCasScenario({cookie}) {
+  const checkAt = (label, actual, expected) => check(`publish-assets CAS: ${label}`, actual, expected);
+
+  const casCreate = await req('/api/link-ops-tasks', {
+    method: 'POST',
+    cookie,
+    body: {
+      source: 'publish_assets_cas_smoke',
+      command: `CAS 冒烟：${productCase.command}`,
+      targets: {
+        stores: ['HL'],
+        sourceStores: ['DL'],
+        sourceSkc: SOURCE_SKC,
+        productRefs: productCase.productRefs,
+        standardGoodsSn: taskStandardGoodsSn,
+      },
+    },
+  });
+  const casTaskId = extractTaskId(casCreate.json);
+  checkAt('race task create status', casCreate.status, 200);
+  checkAt('race task id present', Boolean(casTaskId), true);
+  const casUpload = await req('/api/link-ops-assets', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId: casTaskId,
+      files: [{
+        name: 'publish-payload.json',
+        type: 'application/json',
+        sourceApproved: true,
+        approvalKind: 'human_reviewed_publish_payload',
+        dataBase64: b64Json({publishPayload}),
+      }],
+    },
+  });
+  checkAt('race task payload upload status', casUpload.status, 200);
+  const casRevision = Number((await rawTaskById(casTaskId))?.repositoryRevision || 0);
+  checkAt('race task has repository revision', casRevision > 0, true);
+
+  const casPortalPort = await getFreePort();
+  const casMarker = path.join(tmpRoot, 'publish-assets-cas-ready');
+  casPortalProc = spawn(process.execPath, portalSpawnArgs(casPortalPort), {
+    cwd: ROOT,
+    env: portalSpawnEnv({SHEIN_LINK_OPS_TEST_PUBLISH_ASSETS_CAS_READY_MARKER: casMarker}),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  auxiliaryPortals.push(casPortalProc);
+  let casPortalStdout = '';
+  let casPortalStderr = '';
+  casPortalProc.stdout.on('data', d => { casPortalStdout += d.toString(); });
+  casPortalProc.stderr.on('data', d => { casPortalStderr += d.toString(); });
+  const casBaseUrl = `http://127.0.0.1:${casPortalPort}`;
+  const casDeadline = Date.now() + 15000;
+  let casPortalReady = false;
+  while (Date.now() < casDeadline) {
+    if (casPortalProc.exitCode !== null) throw new Error(`CAS portal exited code=${casPortalProc.exitCode}\nstdout=${casPortalStdout}\nstderr=${casPortalStderr}`);
+    try {
+      const r = await fetch(`${casBaseUrl}/login`, {redirect: 'manual'});
+      if (r.status >= 200 && r.status < 500) { casPortalReady = true; break; }
+    } catch {}
+    await sleep(200);
+  }
+  checkAt('pause portal ready', casPortalReady, true);
+  const casLogin = await reqAt(casBaseUrl, '/api/login', {method: 'POST', body: {username: 'owner_copy_success', password: 'owner-pass'}});
+  const casCookie = (casLogin.headers.get('set-cookie') || '').match(/bi_session=[^;]+/)?.[0] || '';
+  checkAt('pause portal login status', casLogin.status, 200);
+  checkAt('pause portal cookie present', Boolean(casCookie), true);
+
+  const casPublishBody = {
+    taskId: casTaskId,
+    store: 'HL',
+    sourceApproved: true,
+    publishPreparation: {
+      standardGoodsSn: taskStandardGoodsSn,
+      supplyPrice: 210,
+      inventory: 100,
+      titleAr: productCase.arName,
+      titleEn: productCase.englishName,
+    },
+    bindings: [
+      {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1},
+      {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2},
+      {name: '11-approved-15-speed.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/15-speed.png', width: 900, height: 1200, order: 3},
+      {name: '12-approved-45db.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/45db.png', width: 900, height: 1200, order: 4},
+      {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 5},
+    ],
+  };
+  const pausedPublish = reqAt(casBaseUrl, '/api/link-ops-publish-assets', {
+    method: 'POST',
+    cookie: casCookie,
+    body: casPublishBody,
+  });
+  let pausedAtGate = false;
+  for (let i = 0; i < 400; i += 1) {
+    try { await fs.access(`${casMarker}.ready`); pausedAtGate = true; break; } catch {}
+    await sleep(50);
+  }
+  checkAt('publish-assets paused at CAS gate', pausedAtGate, true);
+  // Competing description binding against the SAME base revision, issued on
+  // the main portal process (different per-process execution lock), sharing
+  // the same JSON repository file.
+  const casDescBind = await req('/api/link-ops-prepare-descriptions', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId: casTaskId,
+      store: 'HL',
+      sourceApproved: true,
+      materialJson: descriptionMaterial,
+      sourceFile: {name: 'cas-reviewed.html', dataBase64: descriptionSourceBytes.toString('base64')},
+      expectedRevision: casRevision,
+    },
+  });
+  await fs.writeFile(`${casMarker}.go`, `${new Date().toISOString()}\n`, 'utf8');
+  const casPublishResult = await pausedPublish;
+  checkAt('competing description binding succeeds', casDescBind.status, 200);
+  checkAt('competing description binding read back', casDescBind.json?.bindingCommitted === true && casDescBind.json?.readbackVerified === true, true);
+  checkAt('paused publish-assets loses with 409', casPublishResult.status, 409);
+  checkAt('publish-assets 409 stable code', casPublishResult.json?.code || '', 'LINK_OPS_REVISION_CONFLICT');
+  checkAt('publish-assets 409 retryable', casPublishResult.json?.retryable, true);
+  let casRaw = await rawTaskById(casTaskId);
+  checkAt('winner description binding persisted', casRaw?.descriptionMaterialBinding?.bindingRequestKey || '', casDescBind.json?.binding?.bindingRequestKey || '');
+  checkAt('loser publish-assets persisted nothing', casRaw?.publishAssetBinding || null, null);
+  const raceRevision = Number(casRaw?.repositoryRevision || 0);
+  checkAt('winner binding bumped exactly one revision', raceRevision, Number(casRevision) + 1);
+
+  // Fresh retry on the main portal: success CAS with strict readback.
+  const casRetry = await req('/api/link-ops-publish-assets', {method: 'POST', cookie, body: casPublishBody});
+  casRaw = await rawTaskById(casTaskId);
+  checkAt('fresh publish-assets retry succeeds', casRetry.status, 200);
+  checkAt('fresh publish-assets readback verified', casRetry.json?.readbackVerified, true);
+  checkAt('fresh publish-assets persisted revision equals readback', casRetry.json?.persistedRevision || 0, Number(casRaw?.repositoryRevision || 0));
+  checkAt('fresh publish-assets response task revision equals readback', casRetry.json?.task?.repositoryRevision || 0, Number(casRaw?.repositoryRevision || 0));
+  checkAt('fresh publish-assets fingerprint persisted', casRaw?.publishAssetBinding?.bindingFingerprint || '', casRetry.json?.binding?.bindingFingerprint || '');
+  checkAt('fresh publish-assets keeps unique write store', casRaw?.targets?.writeStores || [], xs => asArray(xs).length === 1 && String(xs[0]).toUpperCase() === 'HL');
+  checkAt('fresh publish-assets locks standardGoodsSn', casRaw?.targets?.standardGoodsSn || '', taskStandardGoodsSn);
+  checkAt('fresh publish-assets locks supplyPrice', casRaw?.targets?.supplyPrice, 210);
+  checkAt('fresh publish-assets locks inventory', casRaw?.targets?.inventory, 100);
+  checkAt('fresh publish-assets payload supplier_code', casRaw?.openapiPublishPayload?.skc_list?.[0]?.supplier_code || '', taskStandardGoodsSn);
+  checkAt('fresh publish-assets payload cost_price', casRaw?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.cost_info?.cost_price || '', '210.00');
+  checkAt('fresh publish-assets payload inventory applied', asArray(casRaw?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.stock_info_list), rows => asArray(rows).some(row => Number(row?.stock ?? row?.inventory_num) === 100));
+  checkAt('fresh publish-assets keeps existing description binding', Boolean(casRaw?.descriptionMaterialBinding), true);
+
+  // Old descriptionBindingLock projection must turn stale after publish-assets.
+  const casTasks = await req('/api/link-ops-tasks?limit=50', {cookie});
+  const casTaskProjection = (casTasks.json?.data?.tasks || []).find(row => row?.id === casTaskId) || {};
+  checkAt('GET tasks status', casTasks.status, 200);
+  checkAt('description binding lock stale after publish-assets', casTaskProjection.descriptionBindingLock, value => (
+    value
+    && value.ok === false
+    && value.stale === true
+    && value.baseTaskRevision === casRevision
+    && value.currentRevision === Number(casRaw?.repositoryRevision || 0)
+    && Object.keys(value).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+  ));
+
+  // Old-revision description binding after publish-assets: 409, and the
+  // winner publish-assets binding is not overwritten.
+  const staleDescBind = await req('/api/link-ops-prepare-descriptions', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId: casTaskId,
+      store: 'HL',
+      sourceApproved: true,
+      materialJson: descriptionMaterial,
+      sourceFile: {name: 'cas-reviewed-old.html', dataBase64: descriptionSourceBytes.toString('base64')},
+      expectedRevision: raceRevision,
+    },
+  });
+  const casRawAfterStale = await rawTaskById(casTaskId);
+  checkAt('old-revision description binding rejected with 409', staleDescBind.status, 409);
+  checkAt('old-revision rejection stable code', staleDescBind.json?.code || '', 'LINK_OPS_REVISION_CONFLICT');
+  checkAt('old-revision attempt keeps publish-assets fingerprint', casRawAfterStale?.publishAssetBinding?.bindingFingerprint || '', casRaw?.publishAssetBinding?.bindingFingerprint || '');
+  checkAt('old-revision attempt does not bump revision', Number(casRawAfterStale?.repositoryRevision || 0), Number(casRaw?.repositoryRevision || 0));
+
+  // Pure success CAS on a fresh task: publish-assets is the first mutation.
+  const casOkCreate = await req('/api/link-ops-tasks', {
+    method: 'POST',
+    cookie,
+    body: {
+      source: 'publish_assets_cas_ok_smoke',
+      command: `CAS 成功路径冒烟：${productCase.command}`,
+      targets: {
+        stores: ['HL'],
+        sourceStores: ['DL'],
+        sourceSkc: SOURCE_SKC,
+        productRefs: productCase.productRefs,
+        standardGoodsSn: taskStandardGoodsSn,
+      },
+    },
+  });
+  const casOkId = extractTaskId(casOkCreate.json);
+  checkAt('success task create status', casOkCreate.status, 200);
+  checkAt('success task id present', Boolean(casOkId), true);
+  const casOkUpload = await req('/api/link-ops-assets', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId: casOkId,
+      files: [{
+        name: 'publish-payload.json',
+        type: 'application/json',
+        sourceApproved: true,
+        approvalKind: 'human_reviewed_publish_payload',
+        dataBase64: b64Json({publishPayload}),
+      }],
+    },
+  });
+  checkAt('success task payload upload status', casOkUpload.status, 200);
+  const casOk = await req('/api/link-ops-publish-assets', {method: 'POST', cookie, body: {...casPublishBody, taskId: casOkId}});
+  const casOkRaw = await rawTaskById(casOkId);
+  checkAt('success CAS status', casOk.status, 200);
+  checkAt('success CAS readback verified', casOk.json?.readbackVerified, true);
+  checkAt('success CAS persisted revision equals readback', casOk.json?.persistedRevision || 0, Number(casOkRaw?.repositoryRevision || 0));
+  checkAt('success CAS fingerprint persisted', casOkRaw?.publishAssetBinding?.bindingFingerprint || '', casOk.json?.binding?.bindingFingerprint || '');
+  checkAt('success CAS keeps unique write store', casOkRaw?.targets?.writeStores || [], xs => asArray(xs).length === 1 && String(xs[0]).toUpperCase() === 'HL');
+  checkAt('success CAS locks standardGoodsSn', casOkRaw?.targets?.standardGoodsSn || '', taskStandardGoodsSn);
+  checkAt('success CAS locks supplyPrice', casOkRaw?.targets?.supplyPrice, 210);
+  checkAt('success CAS locks inventory', casOkRaw?.targets?.inventory, 100);
+  checkAt('success CAS payload supplier_code', casOkRaw?.openapiPublishPayload?.skc_list?.[0]?.supplier_code || '', taskStandardGoodsSn);
+  checkAt('success CAS payload cost_price', casOkRaw?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.cost_info?.cost_price || '', '210.00');
+  const casOkExpectedBindingResponse = expectedPersistedPublishAssetBindingResponse(casOkRaw);
+  const casOkPersistedNames = asArray(casOkRaw?.publishAssetBinding?.images).map(row => String(row?.name || ''));
+  checkAt('success response imageCount comes from persisted binding', casOk.json?.binding?.imageCount, casOkRaw?.publishAssetBinding?.imageCount);
+  checkAt('success response boundImageCount comes from persisted binding', casOk.json?.binding?.boundImageCount, casOkRaw?.publishAssetBinding?.imageCount);
+  checkAt('success response boundNames come from persisted binding', casOk.json?.binding?.boundNames || [], names => JSON.stringify(names) === JSON.stringify(casOkPersistedNames));
+  const successAuditEntries = (await fs.readFile(auditFile, 'utf8'))
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map(line => JSON.parse(line));
+  const casOkSuccessAudit = successAuditEntries.filter(entry => entry?.type === 'link-ops-publish-assets-bound' && entry?.task?.id === casOkId).at(-1) || {};
+  checkAt('success audit imageCount comes from persisted binding', casOkSuccessAudit?.binding?.imageCount, casOkRaw?.publishAssetBinding?.imageCount);
+  checkAt('success audit boundNames come from persisted binding', casOkSuccessAudit?.binding?.boundNames || [], names => JSON.stringify(names) === JSON.stringify(casOkPersistedNames));
+  checkAt('success response every binding business field equals fresh persisted record', stableJson(casOk.json?.binding || {}), stableJson(casOkExpectedBindingResponse));
+  checkAt('success audit every binding business field equals fresh persisted record', stableJson(casOkSuccessAudit?.binding || {}), stableJson(casOkExpectedBindingResponse));
+  const casOkTasks = await req('/api/link-ops-tasks?limit=50', {cookie});
+  const casOkProjection = (casOkTasks.json?.data?.tasks || []).find(row => row?.id === casOkId) || {};
+  checkAt('success CAS task has no description binding lock', casOkProjection.descriptionBindingLock, null);
+
+  // The deterministic CAS marker is test-only. A real production-mode portal
+  // receives the same marker environment variable but must neither create the
+  // .ready file nor pause. No production safety bypass is enabled here.
+  const productionMarker = path.join(tmpRoot, 'publish-assets-production-marker');
+  await fs.rm(`${productionMarker}.ready`, {force: true});
+  await fs.rm(`${productionMarker}.go`, {force: true});
+  const productionPortal = await startAuxiliaryPortal({
+    NODE_ENV: 'production',
+    SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '',
+    SHEIN_LINK_OPS_TEST_PUBLISH_ASSETS_CAS_READY_MARKER: productionMarker,
+  });
+  const productionStartedAt = Date.now();
+  const productionPublish = await reqAt(productionPortal.baseUrl, '/api/link-ops-publish-assets', {
+    method: 'POST',
+    cookie: productionPortal.cookie,
+    body: {...casPublishBody, taskId: casOkId},
+    signal: AbortSignal.timeout(7000),
+  });
+  checkAt('production portal with marker does not pause', productionPublish.status, 200);
+  checkAt('production portal with marker completes promptly', Date.now() - productionStartedAt < 7000, true);
+  checkAt('production portal with marker does not create ready file', fssync.existsSync(`${productionMarker}.ready`), false);
+
+  // One test portal injects six deterministic fresh-read mutations after each
+  // real CAS commit. Every request still reaches the production endpoint and
+  // must return the stable READBACK_DRIFT code. The repository record itself
+  // remains the actual committed task; only the verifier input is mutated.
+  const driftModes = [
+    'missing_image',
+    'image_count',
+    'image_name',
+    'image_url',
+    'image_sha256',
+    'evidence_missing',
+    'evidence_change',
+    'publish_preparation_missing',
+    'publish_preparation_change',
+    'payload_hash',
+  ];
+  const driftPortal = await startAuxiliaryPortal({
+    NODE_ENV: 'test',
+    SHEIN_LINK_OPS_TEST_PUBLISH_ASSETS_READBACK_DRIFT_SEQUENCE: driftModes.join(','),
+  });
+  for (const mode of driftModes) {
+    const driftResponse = await reqAt(driftPortal.baseUrl, '/api/link-ops-publish-assets', {
+      method: 'POST',
+      cookie: driftPortal.cookie,
+      body: {...casPublishBody, taskId: casOkId},
+    });
+    checkAt(`${mode} readback drift status`, driftResponse.status, 409);
+    checkAt(`${mode} readback drift stable code`, driftResponse.json?.code || '', 'LINK_OPS_PUBLISH_ASSETS_READBACK_DRIFT');
+    checkAt(`${mode} readback drift reports durable bind`, driftResponse.json?.bound, true);
+    checkAt(`${mode} readback drift carries evidence`, driftResponse.json?.drift || [], rows => asArray(rows).length > 0);
+  }
+  const casOkAfterDrift = await rawTaskById(casOkId);
+  checkAt('readback drift injection does not alter persisted image array', canonicalImageFields(casOkAfterDrift?.publishAssetBinding?.images), rows => JSON.stringify(rows) === JSON.stringify(canonicalImageFields(casOkRaw?.publishAssetBinding?.images)));
+
+  // The same production verifier also locks update_images imageEditPayload.
+  const {__testHooks: publishAssetsHooks} = await import('./serve_bi_portal.mjs');
+  const updateImagesTask = {
+    id: 'lot_publish_assets_update_images_helper',
+    repositoryRevision: 2,
+    intents: ['update_images'],
+    targets: {stores: ['HL'], writeStores: ['HL']},
+    imageEditPayload: {
+      spu_name: 'b2608062023343035',
+      skc_list: [{skc_name: 'sb260806202334303501938', image_info: {image_info_list: [{image_type: 1, image_sort: 1, image_url: 'https://img.shein.com/approved/main.png'}]}}],
+    },
+    publishAssetBinding: {
+      kind: 'update_images',
+      targetStore: 'HL',
+      imageCount: 1,
+      images: [{name: 'main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', sha256: 'a'.repeat(64)}],
+    },
+  };
+  updateImagesTask.publishAssetBinding.bindingFingerprint = publishAssetsHooks.canonicalPublishAssetBindingFingerprint(updateImagesTask);
+  const updateImagesPrepared = {
+    task: JSON.parse(JSON.stringify(updateImagesTask)),
+    binding: {targetStore: 'HL', bindingFingerprint: updateImagesTask.publishAssetBinding.bindingFingerprint},
+  };
+  const updateImagesFresh = JSON.parse(JSON.stringify(updateImagesTask));
+  updateImagesFresh.imageEditPayload.skc_list[0].image_info.image_info_list[0].image_url = 'https://img.shein.com/approved/drift.png';
+  const updateImagesPayloadDrift = publishAssetsHooks.verifyPersistedPublishAssetBindingReadback(updateImagesFresh, updateImagesPrepared);
+  checkAt('update_images payload hash drift fails verifier', updateImagesPayloadDrift.ok, false);
+  checkAt('update_images payload hash drift evidence', updateImagesPayloadDrift.drift || [], rows => asArray(rows).some(row => String(row).includes('imageEditPayload canonical hash')));
+
+  return {casTaskId, casOkId};
+}
+
 try {
   if (PREVALID_RETRY && !CHAT_NATURAL) {
     throw new Error('--prevalid-retry is only meaningful with --chat-natural');
@@ -825,6 +1274,7 @@ try {
   await waitReady();
   const cookie = await login('owner_copy_success', 'owner-pass');
   const operatorCookie = await login('operator_copy_success', 'operator-pass');
+  await runPublishAssetsCasScenario({cookie});
 
   const caps = await req('/api/openapi-capabilities', {cookie});
   const hlRow = asArray(caps.json?.rows).find(row => row.storeKey === 'HL');
@@ -1000,6 +1450,15 @@ try {
     check('approved update_images binding locks exact SB target', maintenanceRawTask?.imageEditPayload?.skc_list?.[0]?.skc_name, 'sb260806202334303501938');
     check('approved update_images binding does not create publish payload', 'openapiPublishPayload' in (maintenanceRawTask || {}), false);
     check('approved update_images binding touches no title or stock', JSON.stringify(maintenanceRawTask?.imageEditPayload || {}), text => !/multi_language_name_list|stock_info|cost_info|shopPrice|specialPrice/.test(text));
+    const maintenanceExpectedBindingResponse = expectedPersistedPublishAssetBindingResponse(maintenanceRawTask);
+    check('approved update_images response every binding business field equals fresh persisted record', stableJson(maintenanceBinding.json?.binding || {}), stableJson(maintenanceExpectedBindingResponse));
+    const maintenanceAuditEntries = (await fs.readFile(auditFile, 'utf8'))
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    const maintenanceSuccessAudit = maintenanceAuditEntries.filter(entry => entry?.type === 'link-ops-publish-assets-bound' && entry?.task?.id === maintenanceTaskId).at(-1) || {};
+    check('approved update_images audit every binding business field equals fresh persisted record', stableJson(maintenanceSuccessAudit?.binding || {}), stableJson(maintenanceExpectedBindingResponse));
     const reusedCorrection = await req('/api/link-ops-publish-assets', {
       method: 'POST',
       cookie,
@@ -1009,6 +1468,7 @@ try {
     check('existing approved binding can prepare correction without reupload', reusedCorrection.status, 200);
     check('reused correction keeps same approved image count', maintenanceRawTask?.publishAssetBinding?.imageCount, 4);
     check('reused correction keeps source task', maintenanceRawTask?.pendingNewListingImageCorrection?.sourceTaskId, correctionSourceTaskId);
+    check('reused correction response every binding business field equals fresh persisted record', stableJson(reusedCorrection.json?.binding || {}), stableJson(expectedPersistedPublishAssetBindingResponse(maintenanceRawTask)));
     const maintenanceDryRun = await req('/api/link-ops-execute', {
       method: 'POST',
       cookie,
@@ -1026,7 +1486,32 @@ try {
   // Descriptions are the final reviewed-material mutation: bind after any
   // approved image/publish preparation so the strict bound payload hash also
   // locks the current image structure.
-  const descriptionBindBaseTask = await rawTaskById(taskId);
+  const fractionalRevisionBaseTask = await rawTaskById(taskId);
+  const fractionalRevisionBind = await req('/api/link-ops-prepare-descriptions', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId,
+      store: 'HL',
+      sourceApproved: true,
+      materialJson: {schemaVersion: 'deliberately-invalid'},
+      sourceFile: {
+        name: '',
+        dataBase64: '%%%deliberately-invalid-base64%%%',
+      },
+      expectedRevision: Number(fractionalRevisionBaseTask?.repositoryRevision || 0) + 0.5,
+    },
+  });
+  const fractionalRevisionAfterTask = await rawTaskById(taskId);
+  check('fractional expectedRevision rejected', fractionalRevisionBind.status, 400);
+  check('fractional expectedRevision stable code', fractionalRevisionBind.json?.code || '', 'LINK_OPS_REVISION_INVALID');
+  check('fractional expectedRevision does not bump revision', Number(fractionalRevisionAfterTask?.repositoryRevision || 0), Number(fractionalRevisionBaseTask?.repositoryRevision || 0));
+  check('fractional expectedRevision does not bind description', fractionalRevisionAfterTask?.descriptionMaterialBinding || null, fractionalRevisionBaseTask?.descriptionMaterialBinding || null);
+  check('fractional expectedRevision does not alter publish binding', JSON.stringify(fractionalRevisionAfterTask?.publishAssetBinding || null), JSON.stringify(fractionalRevisionBaseTask?.publishAssetBinding || null));
+  check('fractional expectedRevision with invalid source does not alter materialized publish payload', stableJson(fractionalRevisionAfterTask?.openapiPublishPayload || null), stableJson(fractionalRevisionBaseTask?.openapiPublishPayload || null));
+  check('fractional expectedRevision with invalid source does not create material artifact metadata', stableJson(fractionalRevisionAfterTask?.descriptionPayloadMaterialization || null), stableJson(fractionalRevisionBaseTask?.descriptionPayloadMaterialization || null));
+  check('fractional expectedRevision with invalid source does not append task history', asArray(fractionalRevisionAfterTask?.history).length, asArray(fractionalRevisionBaseTask?.history).length);
+  const descriptionBindBaseTask = fractionalRevisionAfterTask;
   const descriptionBind = await req('/api/link-ops-prepare-descriptions', {
     method: 'POST',
     cookie,
@@ -1333,12 +1818,15 @@ try {
       !text.includes(descriptionLines.en[0]) && !text.includes(descriptionLines.ar[0])
     ));
   }
-  check('task count', result.summary.taskCount, ASSET_BINDING ? 3 : 1);
+  check('task count', result.summary.taskCount, (ASSET_BINDING ? 3 : 1) + 2);
   check('audit lines >= expected', result.summary.auditLines, n => n >= (WEAK_READBACK_ONLY ? 8 : 5));
 
   result.ok = result.checks.every(x => x.pass);
 } finally {
   portal.kill();
+  for (const auxPortal of auxiliaryPortals) {
+    if (auxPortal?.exitCode === null) auxPortal.kill();
+  }
   await new Promise(resolve => fakeOpenApi.close(resolve));
   await sleep(300);
   await removeSourceDetailFixtures().catch(() => {});

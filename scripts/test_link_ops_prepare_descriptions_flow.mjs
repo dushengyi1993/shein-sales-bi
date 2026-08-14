@@ -77,6 +77,10 @@ const DESC_SUPPLIER_CODES = [
   'DESC-TOP-LEVEL-AUDIT-WRITE',
   'DESC-MALFORMED-AUDIT',
   'DESC-POST-BIND-BLOCKED',
+  'DESC-REBIND',
+  'DESC-REBIND-LOCKED',
+  'DESC-LOCK-MATRIX',
+  'DESC-EXPECTED-REVISION',
 ];
 const SOURCE_LOCKED_CODES = new Set([
   'DESC-MATCH',
@@ -91,6 +95,10 @@ const SOURCE_LOCKED_CODES = new Set([
   'DESC-CLI-LEGACY-S9',
   'DESC-CLI-AUDIT-PENDING',
   'DESC-POST-BIND-BLOCKED',
+  'DESC-REBIND',
+  'DESC-REBIND-LOCKED',
+  'DESC-LOCK-MATRIX',
+  'DESC-EXPECTED-REVISION',
 ]);
 const sourceSkcFor = code => `sv20990101${String(DESC_SUPPLIER_CODES.indexOf(code)).padStart(6, '0')}`;
 const descSourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', SOURCE_STORE);
@@ -590,6 +598,70 @@ portal.stdout.on('data', d => { portalStdout += d.toString(); });
 portal.stderr.on('data', d => { portalStderr += d.toString(); });
 const base = `http://127.0.0.1:${portalPort}`;
 
+// Rewrite proxy between the managed CLI and the portal. The portal always
+// projects a canonical descriptionBindingLock; the proxy lets the tests inject
+// malformed lock variants into the task-list response the CLI actually reads,
+// while forwarding every other request untouched.
+const lockInjection = {mode: 'passthrough', lock: null};
+const lockProxyPort = await getFreePort();
+const lockProxyBase = `http://127.0.0.1:${lockProxyPort}`;
+const lockProxy = http.createServer((proxyReq, proxyRes) => {
+  const chunks = [];
+  proxyReq.on('data', chunk => chunks.push(chunk));
+  proxyReq.on('end', async () => {
+    const body = Buffer.concat(chunks);
+    const outgoingHeaders = {...proxyReq.headers};
+    delete outgoingHeaders.host;
+    delete outgoingHeaders.connection;
+    delete outgoingHeaders['content-length'];
+    delete outgoingHeaders['transfer-encoding'];
+    delete outgoingHeaders['content-encoding'];
+    let forwarded;
+    try {
+      forwarded = await fetch(`${base}${proxyReq.url}`, {
+        method: proxyReq.method,
+        headers: outgoingHeaders,
+        body: body.length ? body : undefined,
+        redirect: 'manual',
+      });
+    } catch (error) {
+      proxyRes.writeHead(502, {'Content-Type': 'text/plain'});
+      proxyRes.end(`lock proxy upstream error: ${String(error?.message || error)}`);
+      return;
+    }
+    const raw = Buffer.from(await forwarded.arrayBuffer());
+    let rewritten = null;
+    if (forwarded.status === 200 && proxyReq.method === 'GET'
+      && String(proxyReq.url || '').startsWith('/api/link-ops-tasks')
+      && lockInjection.mode !== 'passthrough') {
+      try {
+        const payload = JSON.parse(raw.toString('utf8'));
+        for (const task of asArray(payload?.data?.tasks)) {
+          const binding = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
+            ? task.descriptionMaterialBinding
+            : null;
+          if (!binding) continue;
+          const baseRev = Number(binding.baseTaskRevision || 0);
+          const liveRev = Number(task?.repositoryRevision || 0);
+          const lock = typeof lockInjection.lock === 'function'
+            ? lockInjection.lock({base: baseRev, live: liveRev, binding, task})
+            : lockInjection.lock;
+          if (lock === null) delete task.descriptionBindingLock;
+          else task.descriptionBindingLock = lock;
+        }
+        rewritten = Buffer.from(JSON.stringify(payload));
+      } catch {}
+    }
+    const responseHeaders = {...forwarded.headers};
+    delete responseHeaders['content-encoding'];
+    delete responseHeaders['transfer-encoding'];
+    delete responseHeaders['content-length'];
+    delete responseHeaders.connection;
+    proxyRes.writeHead(forwarded.status, responseHeaders);
+    proxyRes.end(rewritten || raw);
+  });
+});
+
 async function req(pathname, {method = 'GET', cookie = '', body = undefined} = {}) {
   const res = await fetch(`${base}${pathname}`, {
     method,
@@ -604,11 +676,11 @@ async function req(pathname, {method = 'GET', cookie = '', body = undefined} = {
   try { json = text ? JSON.parse(text) : null; } catch {}
   return {status: res.status, headers: res.headers, text, json};
 }
-async function runCli(cliArgs) {
+async function runCli(cliArgs, {baseUrl = base} = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       'scripts/bi_ops_cli.mjs',
-      '--base-url', base,
+      '--base-url', baseUrl,
       '--session-file', path.join(tmpRoot, 'cli-session.json'),
       '--knowledge-cache-dir', path.join(tmpRoot, 'knowledge-cache'),
       ...cliArgs,
@@ -1171,6 +1243,50 @@ try {
     && !text.includes(cliSourceFile)
   ));
 
+  // --expected-revision is optional, but once supplied it must be a positive
+  // Number.isSafeInteger. Exercise values exactly as parseArgs can produce
+  // them through Number(argv[++i]); every invalid form must fail before any
+  // binding or dry-run write. The fractional regression is pinned at live=42
+  // so 42.9 cannot be silently truncated into a valid CAS at revision 42.
+  const expectedRevisionTaskId = await createTask(cookie, 'DESC-EXPECTED-REVISION');
+  await attachPayload(expectedRevisionTaskId, publishPayloadFor('DESC-EXPECTED-REVISION'));
+  await updateRawTaskById(expectedRevisionTaskId, task => ({
+    ...task,
+    repositoryRevision: 42,
+  }));
+  const invalidExpectedRevisionCases = [
+    ['fractional-42.9-at-live-42', '42.9'],
+    ['zero', '0'],
+    ['negative', '-1'],
+    ['above-max-safe-integer', String(Number.MAX_SAFE_INTEGER + 1)],
+    ['nan-token', 'NaN'],
+  ];
+  for (const [label, value] of invalidExpectedRevisionCases) {
+    const attempt = await runCli([
+      'prepare-descriptions',
+      '--task-id', expectedRevisionTaskId,
+      '--store', 'NM',
+      '--source-file', cliSourceFile,
+      '--expected-revision', value,
+    ]);
+    check(`expected revision ${label} is rejected`, attempt.code, code => code !== 0);
+    check(`expected revision ${label} reports positive safe integer`, attempt.stderr, text => text.includes('正安全整数'));
+    const after = await rawTaskById(expectedRevisionTaskId);
+    check(`expected revision ${label} performs no binding write`, Boolean(after?.descriptionMaterialBinding), false);
+    check(`expected revision ${label} performs no revision write`, Number(after?.repositoryRevision || 0), 42);
+    check(`expected revision ${label} appends no binding event`, asArray(after?.history)
+      .filter(entry => entry?.event === 'approved_description_material_bound').length, 0);
+  }
+  const omittedExpectedRevision = await runCli([
+    'prepare-descriptions',
+    '--task-id', expectedRevisionTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ]);
+  check('omitted expected revision remains allowed', omittedExpectedRevision.code, 0);
+  check('omitted expected revision binds at live revision 42', Number((await rawTaskById(expectedRevisionTaskId))
+    ?.descriptionMaterialBinding?.baseTaskRevision || 0), 42);
+
   const cliLegacySourceFile = path.join(tmpRoot, 'SK-5110-cli-legacy-source.html');
   await fs.writeFile(cliLegacySourceFile, legacySourceBytes);
   const legacyTaskId = await createTask(cookie, 'DESC-CLI-LEGACY-S9');
@@ -1297,6 +1413,376 @@ try {
   check('re-bind with identical material is idempotent', identicalReplay.status, 200);
   check('identical re-bind reports idempotent replay', identicalReplay.json?.binding?.idempotentReplay, true);
 
+  // --- stale description binding after a legal prepare-publish mutation ---
+  // A legal payload/price + approved-image mutation leaves the description
+  // binding stale (same reviewed HTML/material identity, new payload hash and
+  // image fingerprint, bumped repository revision). The CLI must never replay
+  // the stale baseTaskRevision: the server projection exposes the lock state
+  // and the CLI rebinds at the live revision, recomputing the binding
+  // identity. A submitted/locked task rejects any rebind.
+  // Revision accounting of a real prepare-descriptions CLI run: the CAS bind
+  // write advances +1 and the mandatory fresh dry-run write advances +1, so
+  // the task lands at base + 2; an idempotent retry only advances its own
+  // dry-run write (+1) because the bind is replayed without a new CAS write.
+  const rebindTaskId = await createTask(cookie, 'DESC-REBIND');
+  await attachPayload(rebindTaskId, publishPayloadFor('DESC-REBIND'));
+  const rebindPreBindRevision = Number((await rawTaskById(rebindTaskId))?.repositoryRevision || 0);
+  const rebindInitial = await runCli([
+    'prepare-descriptions',
+    '--task-id', rebindTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ]);
+  check('rebind flow initial CLI bind exits zero', rebindInitial.code, 0);
+  check('rebind flow initial CLI bind locks descriptions', rebindInitial.json?.dryRun?.descriptionBindingLocked, true);
+  const rebindRawInitial = await rawTaskById(rebindTaskId);
+  const rebindBaseRevision = Number(rebindRawInitial?.descriptionMaterialBinding?.baseTaskRevision || 0);
+  const rebindInitialRevision = Number(rebindRawInitial?.repositoryRevision || 0);
+  const rebindInitialRequestKey = String(rebindRawInitial?.descriptionMaterialBinding?.bindingRequestKey || '');
+  const rebindInitialBoundAt = String(rebindRawInitial?.descriptionMaterialBinding?.boundAt || '');
+  check('rebind flow initial binding base revision is positive', rebindBaseRevision, value => Number(value) > 0);
+  check('rebind flow initial binding locks the pre-bind revision', rebindBaseRevision, rebindPreBindRevision);
+  check('rebind flow initial CLI run advances bind + dry-run writes', rebindInitialRevision, rebindPreBindRevision + 2);
+  const rebindProjected = async () => (await req('/api/link-ops-tasks?limit=500', {cookie})).json?.data?.tasks
+    ?.find(task => String(task?.id || '') === rebindTaskId) || {};
+  const rebindLockInitial = await rebindProjected();
+  check('rebind flow projection exposes compact lock after bind', rebindLockInitial.descriptionBindingLock, lock => (
+    lock
+    && Object.keys(lock).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+    && lock.baseTaskRevision === rebindBaseRevision
+    && lock.currentRevision === rebindInitialRevision
+    && !Object.prototype.hasOwnProperty.call(lock, 'newPayloadHash')
+    && !Object.prototype.hasOwnProperty.call(lock, 'hashes')
+    && !Object.prototype.hasOwnProperty.call(lock, 'descriptionMaterialBinding')
+  ));
+  check('rebind flow projection lock is current after bind', rebindLockInitial.descriptionBindingLock?.ok, true);
+  check('rebind flow projection lock is not stale after bind', rebindLockInitial.descriptionBindingLock?.stale, false);
+  const rebindBindHistoryCount = async taskId => asArray((await rawTaskById(taskId))?.history)
+    .filter(entry => entry?.event === 'approved_description_material_bound').length;
+  check('rebind flow initial bind records one binding event', await rebindBindHistoryCount(rebindTaskId), 1);
+
+  // Legal prepare-publish mutation: price + approved image fingerprint change
+  // and a repository revision bump. The reviewed description HTML is reused
+  // verbatim, so the old binding's material identity still matches exactly.
+  const rebindMutatedRevision = rebindInitialRevision + 7;
+  const rebindMutatedPayload = JSON.parse(JSON.stringify(rebindRawInitial.openapiPublishPayload));
+  rebindMutatedPayload.skc_list[0].sku_list[0].cost_info.cost_price = '129.00';
+  rebindMutatedPayload.skc_list[0].image_info.image_info_list[0].image_url = 'https://img.shein.com/main-rebind-v2.jpg';
+  const rebindNewFingerprint = crypto.createHash('sha256').update(`rebind-approved-images-${rebindTaskId}`).digest('hex');
+  await updateRawTaskById(rebindTaskId, task => ({
+    ...task,
+    repositoryRevision: rebindMutatedRevision,
+    openapiPublishPayload: rebindMutatedPayload,
+    publishAssetBinding: {
+      ...(task.publishAssetBinding && typeof task.publishAssetBinding === 'object' ? task.publishAssetBinding : {}),
+      bindingFingerprint: rebindNewFingerprint,
+      boundAt: new Date().toISOString(),
+    },
+  }));
+  check('rebind flow mutation keeps old material identity', (await rawTaskById(rebindTaskId))?.descriptionMaterialBinding?.bindingRequestKey, rebindInitialRequestKey);
+  const rebindLockStale = await rebindProjected();
+  check('rebind flow projection reports stale lock after mutation', rebindLockStale.descriptionBindingLock?.ok, false);
+  check('rebind flow projection reports stale flag after mutation', rebindLockStale.descriptionBindingLock?.stale, true);
+  check('rebind flow projection keeps original base revision when stale', rebindLockStale.descriptionBindingLock?.baseTaskRevision, rebindBaseRevision);
+  check('rebind flow projection reports live revision when stale', rebindLockStale.descriptionBindingLock?.currentRevision, rebindMutatedRevision);
+
+  // Replaying the stale base revision is exactly the old CLI bug: the server
+  // CAS must reject it with 409 because the lock is no longer current.
+  const rebindStaleHttp = await bindDescriptions(cookie, rebindTaskId, {expectedRevision: rebindBaseRevision});
+  check('rebind flow stale expected revision -> 409', rebindStaleHttp.status, 409);
+  check('rebind flow stale expected revision code', rebindStaleHttp.json?.code, 'LINK_OPS_REVISION_CONFLICT');
+  check('rebind flow stale replay leaves binding untouched', (await rawTaskById(rebindTaskId))?.descriptionMaterialBinding?.baseTaskRevision, rebindBaseRevision);
+
+  // The CLI must refuse an explicit stale revision instead of silently
+  // reusing it, and then must rebind at the live revision.
+  const rebindStaleCli = await runCli([
+    'prepare-descriptions',
+    '--task-id', rebindTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+    '--expected-revision', String(rebindBaseRevision),
+  ]);
+  check('rebind flow CLI rejects explicit stale revision', rebindStaleCli.code, code => code !== 0);
+  check('rebind flow CLI stale error names the live revision', rebindStaleCli.stderr, text => text.includes(String(rebindMutatedRevision)));
+
+  const rebindAtLive = await runCli([
+    'prepare-descriptions',
+    '--task-id', rebindTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ]);
+  check('rebind flow CLI rebind at live revision exits zero', rebindAtLive.code, 0);
+  check('rebind flow CLI rebind locks descriptions again', rebindAtLive.json?.dryRun?.descriptionBindingLocked, true);
+  const rebindRawRebound = await rawTaskById(rebindTaskId);
+  check('rebind flow recomputes baseTaskRevision', rebindRawRebound?.descriptionMaterialBinding?.baseTaskRevision, rebindMutatedRevision);
+  check('rebind flow recomputes binding request key', rebindRawRebound?.descriptionMaterialBinding?.bindingRequestKey, value => (
+    /^[a-f0-9]{64}$/.test(String(value)) && String(value) !== rebindInitialRequestKey
+  ));
+  check('rebind flow advances bind + dry-run writes from mutated revision', Number(rebindRawRebound?.repositoryRevision || 0), rebindMutatedRevision + 2);
+  check('rebind flow recomputes image binding fingerprint', rebindRawRebound?.descriptionMaterialBinding?.imageBindingFingerprint, rebindNewFingerprint);
+  check('rebind flow recomputes new payload hash for mutated payload', rebindRawRebound?.descriptionMaterialBinding?.newPayloadHash, linkOpsPayloadHash(rebindRawRebound?.openapiPublishPayload));
+  check('rebind flow keeps identical description hashes', rebindRawRebound?.descriptionMaterialBinding?.hashes?.en, materialSummary.hashes.en);
+  check('rebind flow records fresh boundAt', rebindRawRebound?.descriptionMaterialBinding?.boundAt, value => String(value) !== rebindInitialBoundAt);
+  check('rebind flow rebind records a second binding event', await rebindBindHistoryCount(rebindTaskId), 2);
+  check('rebind flow projection lock current again', (await rebindProjected()).descriptionBindingLock?.ok, true);
+
+  // Identical current retry stays idempotent: same identity, same current
+  // lock, no second binding write (only the retry's dry-run advances one
+  // revision).
+  const rebindIdempotent = await runCli([
+    'prepare-descriptions',
+    '--task-id', rebindTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ]);
+  check('rebind flow identical current retry exits zero', rebindIdempotent.code, 0);
+  const rebindRawIdempotent = await rawTaskById(rebindTaskId);
+  check('rebind flow identical retry keeps binding request key', rebindRawIdempotent?.descriptionMaterialBinding?.bindingRequestKey, rebindRawRebound?.descriptionMaterialBinding?.bindingRequestKey);
+  check('rebind flow identical retry keeps boundAt', rebindRawIdempotent?.descriptionMaterialBinding?.boundAt, rebindRawRebound?.descriptionMaterialBinding?.boundAt);
+  check('rebind flow identical retry only advances its dry-run write', Number(rebindRawIdempotent?.repositoryRevision || 0), Number(rebindRawRebound?.repositoryRevision || 0) + 1);
+  check('rebind flow identical retry appends no binding event', await rebindBindHistoryCount(rebindTaskId), 2);
+
+  // A submitted/locked task rejects any rebind and keeps its binding identity.
+  const rebindLockedTaskId = await createTask(cookie, 'DESC-REBIND-LOCKED');
+  await attachPayload(rebindLockedTaskId, publishPayloadFor('DESC-REBIND-LOCKED'));
+  const rebindLockedPreBindRevision = Number((await rawTaskById(rebindLockedTaskId))?.repositoryRevision || 0);
+  const rebindLockedInitial = await runCli([
+    'prepare-descriptions',
+    '--task-id', rebindLockedTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ]);
+  check('rebind flow locked task initial bind exits zero', rebindLockedInitial.code, 0);
+  const rebindLockedRaw = await rawTaskById(rebindLockedTaskId);
+  const rebindLockedRequestKey = String(rebindLockedRaw?.descriptionMaterialBinding?.bindingRequestKey || '');
+  check('rebind flow locked task initial binding locks the pre-bind revision', Number(rebindLockedRaw?.descriptionMaterialBinding?.baseTaskRevision || 0), rebindLockedPreBindRevision);
+  await updateRawTaskById(rebindLockedTaskId, task => ({
+    ...task,
+    status: 'waiting_review',
+    lifecycle: {
+      lifecycleStatus: 'submitted_readback_failed',
+      status: 'submitted_readback_failed',
+      locked: true,
+      terminal: false,
+      needsManualResolve: true,
+    },
+    execution: {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      state: 'submitted_readback_failed',
+      actualWriteSubmitted: false,
+      writeAudit: {
+        ...(task.execution?.writeAudit && typeof task.execution.writeAudit === 'object' ? task.execution.writeAudit : {}),
+        actualWriteSubmitted: false,
+      },
+    },
+  }));
+  // A real rebind attempt (with a fresh payload mutation) must be rejected by
+  // the bind endpoint's lifecycle gate, never silently rewriting the binding
+  // of a submitted/locked task.
+  const rebindLockedMutatedRevision = Number(rebindLockedRaw?.repositoryRevision || 0) + 3;
+  const rebindLockedMutatedPayload = JSON.parse(JSON.stringify(rebindLockedRaw.openapiPublishPayload));
+  rebindLockedMutatedPayload.skc_list[0].sku_list[0].cost_info.cost_price = '139.00';
+  await updateRawTaskById(rebindLockedTaskId, task => ({
+    ...task,
+    repositoryRevision: rebindLockedMutatedRevision,
+    openapiPublishPayload: rebindLockedMutatedPayload,
+    publishAssetBinding: {
+      ...(task.publishAssetBinding && typeof task.publishAssetBinding === 'object' ? task.publishAssetBinding : {}),
+      bindingFingerprint: crypto.createHash('sha256').update(`rebind-locked-images-${rebindLockedTaskId}`).digest('hex'),
+    },
+  }));
+  const rebindLockedHttp = await bindDescriptions(cookie, rebindLockedTaskId, {expectedRevision: rebindLockedMutatedRevision});
+  check('rebind flow submitted/locked task bind -> 409', rebindLockedHttp.status, 409);
+  check('rebind flow locked task keeps binding identity after 409', (await rawTaskById(rebindLockedTaskId))?.descriptionMaterialBinding?.bindingRequestKey, rebindLockedRequestKey);
+  const rebindLockedCli = await runCli([
+    'prepare-descriptions',
+    '--task-id', rebindLockedTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ]);
+  check('rebind flow submitted/locked task rejects rebind', rebindLockedCli.code, code => code !== 0);
+  check('rebind flow locked task keeps binding identity', (await rawTaskById(rebindLockedTaskId))?.descriptionMaterialBinding?.bindingRequestKey, rebindLockedRequestKey);
+  check('rebind flow locked task keeps binding base revision', (await rawTaskById(rebindLockedTaskId))?.descriptionMaterialBinding?.baseTaskRevision, rebindLockedRaw?.descriptionMaterialBinding?.baseTaskRevision);
+
+  // --- strict CLI lock validation: malformed server lock matrix ---
+  // The managed CLI must treat descriptionBindingLock as KNOWN only when it is
+  // exactly {baseTaskRevision,currentRevision,ok,stale} with boolean ok/stale
+  // satisfying stale === !ok, positive safe-integer revisions, base equal to
+  // the existing binding's baseTaskRevision and current equal to the live
+  // repositoryRevision. The rewrite proxy injects malformed lock variants into
+  // the task-list projection the CLI reads, so every deviation is UNKNOWN:
+  // never idempotent, fail-closed without an explicit live revision, and
+  // CAS-rebound only at an explicitly pinned live revision (never the old
+  // base).
+  const matrixTaskId = await createTask(cookie, 'DESC-LOCK-MATRIX');
+  await attachPayload(matrixTaskId, publishPayloadFor('DESC-LOCK-MATRIX'));
+  const matrixPreBindRevision = Number((await rawTaskById(matrixTaskId))?.repositoryRevision || 0);
+  await new Promise(resolve => lockProxy.listen(lockProxyPort, '127.0.0.1', resolve));
+  lockInjection.mode = 'passthrough';
+  const matrixInitial = await runCli([
+    'prepare-descriptions',
+    '--task-id', matrixTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ], {baseUrl: lockProxyBase});
+  check('lock matrix initial CLI bind exits zero', matrixInitial.code, 0);
+  check('lock matrix initial CLI bind locks descriptions', matrixInitial.json?.dryRun?.descriptionBindingLocked, true);
+  const matrixRawInitial = await rawTaskById(matrixTaskId);
+  const matrixBase = Number(matrixRawInitial?.descriptionMaterialBinding?.baseTaskRevision || 0);
+  const matrixRequestKey = String(matrixRawInitial?.descriptionMaterialBinding?.bindingRequestKey || '');
+  const matrixBoundAt = String(matrixRawInitial?.descriptionMaterialBinding?.boundAt || '');
+  const matrixLiveRevision = Number(matrixRawInitial?.repositoryRevision || 0);
+  check('lock matrix initial binding locks the pre-bind revision', matrixBase, matrixPreBindRevision);
+  check('lock matrix initial run advances bind + dry-run writes', matrixLiveRevision, matrixPreBindRevision + 2);
+  const matrixProjected = async () => (await req('/api/link-ops-tasks?limit=500', {cookie})).json?.data?.tasks
+    ?.find(task => String(task?.id || '') === matrixTaskId) || {};
+  const matrixLockInitial = await matrixProjected();
+  check('lock matrix real projection current after bind', matrixLockInitial.descriptionBindingLock?.ok, true);
+  check('lock matrix real projection base matches binding', matrixLockInitial.descriptionBindingLock?.baseTaskRevision, matrixBase);
+  check('lock matrix real projection current matches live', matrixLockInitial.descriptionBindingLock?.currentRevision, matrixLiveRevision);
+  const matrixSnapshot = async () => {
+    const raw = await rawTaskById(matrixTaskId);
+    return {
+      base: Number(raw?.descriptionMaterialBinding?.baseTaskRevision || 0),
+      key: String(raw?.descriptionMaterialBinding?.bindingRequestKey || ''),
+      boundAt: String(raw?.descriptionMaterialBinding?.boundAt || ''),
+      revision: Number(raw?.repositoryRevision || 0),
+      bindEvents: asArray(raw?.history).filter(entry => entry?.event === 'approved_description_material_bound').length,
+    };
+  };
+  const matrixInject = lock => {
+    lockInjection.mode = 'inject';
+    lockInjection.lock = lock;
+  };
+  const malformedLockVariants = [
+    ['missing-ok', ({base, live}) => ({stale: false, baseTaskRevision: base, currentRevision: live})],
+    ['missing-stale', ({base, live}) => ({ok: true, baseTaskRevision: base, currentRevision: live})],
+    ['missing-revisions', ({base, live}) => ({ok: true, stale: false})],
+    ['only-ok', () => ({ok: true})],
+    ['contradiction-both-true', ({base, live}) => ({ok: true, stale: true, baseTaskRevision: base, currentRevision: live})],
+    ['contradiction-both-false', ({base, live}) => ({ok: false, stale: false, baseTaskRevision: base, currentRevision: live})],
+    ['ok-not-boolean', ({base, live}) => ({ok: 'true', stale: false, baseTaskRevision: base, currentRevision: live})],
+    ['stale-not-boolean', ({base, live}) => ({ok: true, stale: 0, baseTaskRevision: base, currentRevision: live})],
+    ['base-string', ({base, live}) => ({ok: true, stale: false, baseTaskRevision: String(base), currentRevision: live})],
+    ['current-string', ({base, live}) => ({ok: true, stale: false, baseTaskRevision: base, currentRevision: String(live)})],
+    ['base-float', ({base, live}) => ({ok: true, stale: false, baseTaskRevision: base + 0.5, currentRevision: live})],
+    ['extra-key', ({base, live}) => ({ok: true, stale: false, baseTaskRevision: base, currentRevision: live, extra: 1})],
+    ['base-mismatch', ({base, live}) => ({ok: true, stale: false, baseTaskRevision: base + 1, currentRevision: live})],
+    ['current-mismatch', ({base, live}) => ({ok: true, stale: false, baseTaskRevision: base, currentRevision: live - 1})],
+    ['lock-array', ({base, live}) => [{ok: true, stale: false, baseTaskRevision: base, currentRevision: live}]],
+    ['lock-null', () => null],
+  ];
+  const matrixBeforeMalformed = await matrixSnapshot();
+  for (const [variant, makeLock] of malformedLockVariants) {
+    matrixInject(makeLock);
+    const attempt = await runCli([
+      'prepare-descriptions',
+      '--task-id', matrixTaskId,
+      '--store', 'NM',
+      '--source-file', cliSourceFile,
+    ], {baseUrl: lockProxyBase});
+    check(`lock matrix ${variant} fails closed without explicit revision`, attempt.code, code => code !== 0);
+    check(`lock matrix ${variant} names unknown lock in error`, attempt.stderr, text => text.includes('无法区分幂等重放与过期重绑'));
+    const after = await matrixSnapshot();
+    check(`lock matrix ${variant} keeps binding request key`, after.key, matrixBeforeMalformed.key);
+    check(`lock matrix ${variant} keeps binding base revision`, after.base, matrixBeforeMalformed.base);
+    check(`lock matrix ${variant} keeps boundAt`, after.boundAt, matrixBeforeMalformed.boundAt);
+    check(`lock matrix ${variant} makes no write`, after.revision, matrixBeforeMalformed.revision);
+    check(`lock matrix ${variant} appends no binding event`, after.bindEvents, matrixBeforeMalformed.bindEvents);
+  }
+
+  // The named regression: a bare {ok:true} must never replay the old base.
+  // With an explicit LIVE revision the CLI CAS-rebinds at live over a really
+  // stale task state; with the OLD base pinned it is rejected as a revision
+  // change before any write and must not touch the binding.
+  const matrixStaleBase = matrixBeforeMalformed.base;
+  const matrixStaleMutatedRevision = matrixBeforeMalformed.revision + 7;
+  const matrixStalePayload = JSON.parse(JSON.stringify((await rawTaskById(matrixTaskId)).openapiPublishPayload));
+  matrixStalePayload.skc_list[0].sku_list[0].cost_info.cost_price = '159.00';
+  matrixStalePayload.skc_list[0].image_info.image_info_list[0].image_url = 'https://img.shein.com/main-lock-matrix-v2.jpg';
+  await updateRawTaskById(matrixTaskId, task => ({
+    ...task,
+    repositoryRevision: matrixStaleMutatedRevision,
+    openapiPublishPayload: matrixStalePayload,
+    publishAssetBinding: {
+      ...(task.publishAssetBinding && typeof task.publishAssetBinding === 'object' ? task.publishAssetBinding : {}),
+      bindingFingerprint: crypto.createHash('sha256').update(`lock-matrix-images-${matrixTaskId}`).digest('hex'),
+    },
+  }));
+  matrixInject(() => ({ok: true}));
+  const matrixExplicitLive = await runCli([
+    'prepare-descriptions',
+    '--task-id', matrixTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+    '--expected-revision', String(matrixStaleMutatedRevision),
+  ], {baseUrl: lockProxyBase});
+  check('lock matrix {ok:true} with explicit live revision rebinds at live', matrixExplicitLive.code, 0);
+  check('lock matrix {ok:true} explicit rebind locks descriptions', matrixExplicitLive.json?.dryRun?.descriptionBindingLocked, true);
+  const matrixAfterExplicitLive = await rawTaskById(matrixTaskId);
+  const matrixReboundBase = Number(matrixAfterExplicitLive?.descriptionMaterialBinding?.baseTaskRevision || 0);
+  const matrixReboundKey = String(matrixAfterExplicitLive?.descriptionMaterialBinding?.bindingRequestKey || '');
+  const matrixReboundRevision = Number(matrixAfterExplicitLive?.repositoryRevision || 0);
+  check('lock matrix {ok:true} explicit rebind recomputes base at live', matrixReboundBase, matrixStaleMutatedRevision);
+  check('lock matrix {ok:true} explicit rebind creates a fresh request key', matrixReboundKey, value => (
+    /^[a-f0-9]{64}$/.test(String(value)) && String(value) !== matrixBeforeMalformed.key
+  ));
+  check('lock matrix {ok:true} explicit rebind advances bind + dry-run writes', matrixReboundRevision, matrixStaleMutatedRevision + 2);
+  matrixInject(() => ({ok: true}));
+  const matrixExplicitOldBase = await runCli([
+    'prepare-descriptions',
+    '--task-id', matrixTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+    '--expected-revision', String(matrixStaleBase),
+  ], {baseUrl: lockProxyBase});
+  check('lock matrix {ok:true} refuses old base pin', matrixExplicitOldBase.code, code => code !== 0);
+  check('lock matrix {ok:true} old-base error names live revision', matrixExplicitOldBase.stderr, text => text.includes(String(matrixReboundRevision)));
+  const matrixAfterOldBase = await matrixSnapshot();
+  check('lock matrix {ok:true} old-base refusal keeps new base', matrixAfterOldBase.base, matrixReboundBase);
+  check('lock matrix {ok:true} old-base refusal keeps request key', matrixAfterOldBase.key, matrixReboundKey);
+  check('lock matrix {ok:true} old-base refusal makes no write', matrixAfterOldBase.revision, matrixReboundRevision);
+
+  // Valid lock controls through the same harness: a fully current lock stays
+  // idempotent and a well-formed stale lock (over a really stale task state)
+  // rebinds at the live revision.
+  matrixInject(({base, live}) => ({ok: true, stale: false, baseTaskRevision: base, currentRevision: live}));
+  const matrixCurrentControl = await runCli([
+    'prepare-descriptions',
+    '--task-id', matrixTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ], {baseUrl: lockProxyBase});
+  check('lock matrix valid current lock replays idempotently', matrixCurrentControl.code, 0);
+  const matrixAfterCurrentControl = await rawTaskById(matrixTaskId);
+  check('lock matrix valid current replay keeps request key', String(matrixAfterCurrentControl?.descriptionMaterialBinding?.bindingRequestKey || ''), matrixReboundKey);
+  check('lock matrix valid current replay only advances its dry-run write', Number(matrixAfterCurrentControl?.repositoryRevision || 0), matrixReboundRevision + 1);
+  const matrixCurrentLive = Number(matrixAfterCurrentControl?.repositoryRevision || 0);
+  const matrixStaleControlMutatedRevision = matrixCurrentLive + 5;
+  const matrixStaleControlPayload = JSON.parse(JSON.stringify(matrixAfterCurrentControl.openapiPublishPayload));
+  matrixStaleControlPayload.skc_list[0].sku_list[0].cost_info.cost_price = '169.00';
+  await updateRawTaskById(matrixTaskId, task => ({
+    ...task,
+    repositoryRevision: matrixStaleControlMutatedRevision,
+    openapiPublishPayload: matrixStaleControlPayload,
+    publishAssetBinding: {
+      ...(task.publishAssetBinding && typeof task.publishAssetBinding === 'object' ? task.publishAssetBinding : {}),
+      bindingFingerprint: crypto.createHash('sha256').update(`lock-matrix-stale-images-${matrixTaskId}`).digest('hex'),
+    },
+  }));
+  matrixInject(({base, live}) => ({ok: false, stale: true, baseTaskRevision: base, currentRevision: live}));
+  const matrixStaleControl = await runCli([
+    'prepare-descriptions',
+    '--task-id', matrixTaskId,
+    '--store', 'NM',
+    '--source-file', cliSourceFile,
+  ], {baseUrl: lockProxyBase});
+  check('lock matrix valid stale lock rebinds at live', matrixStaleControl.code, 0);
+  const matrixAfterStaleControl = await rawTaskById(matrixTaskId);
+  check('lock matrix valid stale rebind recomputes base at live', Number(matrixAfterStaleControl?.descriptionMaterialBinding?.baseTaskRevision || 0), matrixStaleControlMutatedRevision);
+  check('lock matrix valid stale rebind advances bind + dry-run writes', Number(matrixAfterStaleControl?.repositoryRevision || 0), matrixStaleControlMutatedRevision + 2);
+  lockInjection.mode = 'passthrough';
+
   // Historical production evidence must not age out behind a fixed audit-tail
   // window. Place the write before more than 10k unrelated entries and prove
   // description binding still fails closed.
@@ -1347,6 +1833,7 @@ try {
   const cleanupErrors = [];
   for (const [label, operation] of [
     ['stop isolated description portal', () => stopChild(portal, 'isolated description portal')],
+    ['close lock rewrite proxy', () => closeServer(lockProxy, 'lock rewrite proxy')],
     ['close fake OpenAPI server', () => closeServer(fakeOpenApi, 'fake OpenAPI server')],
     ['remove description source detail fixtures', () => removeDescSourceFixtures()],
     ['remove isolated description files', async () => {

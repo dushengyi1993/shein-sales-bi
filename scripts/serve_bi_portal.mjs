@@ -3962,6 +3962,30 @@ function projectLinkOpsPlanningForClient(planning) {
   };
 }
 
+/**
+ * Client-visible description binding lock state. Lets the managed CLI
+ * distinguish an identical idempotent replay from a stale binding that must
+ * be re-bound at the live revision after a legal publish payload/image
+ * mutation. Computed only for copy_product_draft bindings and only when the
+ * task actually carries a descriptionMaterialBinding; the result is booleans
+ * and revisions, never payload bytes or description text.
+ */
+function describeDescriptionBindingLockForClient(task) {
+  const binding = task?.descriptionMaterialBinding;
+  if (!binding || typeof binding !== 'object' || Array.isArray(binding) || String(binding.kind || '') !== 'copy_product_draft') {
+    return null;
+  }
+  const gate = validateDescriptionBindingLock(task, task?.openapiPublishPayload);
+  return {
+    ok: gate.ok === true,
+    stale: gate.ok !== true,
+    baseTaskRevision: Number(binding.baseTaskRevision || 0),
+    currentRevision: Number.isSafeInteger(Number(task?.repositoryRevision)) && Number(task.repositoryRevision) > 0
+      ? Number(task.repositoryRevision)
+      : 0,
+  };
+}
+
 function projectLinkOpsTaskForClient(task) {
   const execution = projectLinkOpsExecutionForClient(task?.execution);
   const preflight = projectLinkOpsPreflightForClient(task?.preflight) || execution?.preflight || null;
@@ -3992,6 +4016,7 @@ function projectLinkOpsTaskForClient(task) {
         ? projectUpdateDescriptionBindingCommit(task)
         : projectDescriptionBindingCommit(task))
       : null,
+    descriptionBindingLock: describeDescriptionBindingLockForClient(task),
     assets: asArray(task?.assets).map(projectLinkOpsAssetForClient).slice(0, 30),
   };
 }
@@ -7248,6 +7273,233 @@ function resolveDescriptionBindingExpectedBodyHash(executorPayload = {}) {
   return '';
 }
 
+function canonicalPublishAssetBindingImages(images) {
+  return asArray(images).map(row => ({
+    name: String(row?.name || '').normalize('NFKC').trim(),
+    role: String(row?.role || '').normalize('NFKC').trim(),
+    imageType: Number(row?.imageType ?? row?.image_type ?? 0),
+    imageUrl: String(row?.imageUrl || row?.image_url || '').trim(),
+    sha256: String(row?.sha256 || '').trim().toLowerCase(),
+  }));
+}
+
+function publishAssetBindingKind(task, binding = task?.publishAssetBinding) {
+  if (String(binding?.kind || '') === 'update_images') return 'update_images';
+  const intents = asArray(task?.intents).map(value => String(value || '').trim());
+  return intents.includes('update_images') && !intents.includes('copy_product_draft')
+    ? 'update_images'
+    : 'copy_product_draft';
+}
+
+function updateImagesBindingIdentityFromPayload(payload) {
+  const skc = asArray(payload?.skc_list || payload?.skcList)[0] || {};
+  return {
+    spuName: String(payload?.spu_name || payload?.spuName || '').trim(),
+    skcName: String(skc?.skc_name || skc?.skcName || '').trim(),
+    skuCodes: asArray(skc?.sku_list || skc?.skuList)
+      .map(row => String(row?.sku_code || row?.skuCode || '').trim())
+      .filter(Boolean),
+  };
+}
+
+/**
+ * One canonical binding-fingerprint algorithm used at preparation and fresh
+ * readback. Only the reviewed image identity fields enter the image portion;
+ * copy bindings additionally lock normalized publish preparation, while
+ * update_images bindings lock the exact SPU/SKC/SKU identity derived from the
+ * maintenance payload.
+ */
+function canonicalPublishAssetBindingFingerprint(task, {
+  binding = task?.publishAssetBinding,
+  images = binding?.images,
+  targetStore = binding?.targetStore,
+  publishPreparation = task?.publishPreparation || task?.targets?.publishPreparation || {},
+  identity = null,
+} = {}) {
+  const kind = publishAssetBindingKind(task, binding);
+  const canonical = {
+    targetStore: String(targetStore || '').trim().toUpperCase(),
+    bindings: canonicalPublishAssetBindingImages(images),
+    ...(kind === 'update_images'
+      ? {identity: identity || binding?.evidence?.identity || updateImagesBindingIdentityFromPayload(task?.imageEditPayload)}
+      : {publishPreparation: normalizePublishPreparationOverrides(publishPreparation)}),
+  };
+  return sha256StableJson(canonical);
+}
+
+function projectPersistedPublishAssetBindingForResponse(task) {
+  const binding = task?.publishAssetBinding && typeof task.publishAssetBinding === 'object' && !Array.isArray(task.publishAssetBinding)
+    ? task.publishAssetBinding
+    : {};
+  const evidence = binding.evidence && typeof binding.evidence === 'object' && !Array.isArray(binding.evidence)
+    ? JSON.parse(JSON.stringify(binding.evidence))
+    : {};
+  const publishPreparation = binding.publishPreparation && typeof binding.publishPreparation === 'object' && !Array.isArray(binding.publishPreparation)
+    ? JSON.parse(JSON.stringify(binding.publishPreparation))
+    : null;
+  const images = canonicalPublishAssetBindingImages(binding.images);
+  return {
+    ...evidence,
+    targetStore: String(binding.targetStore || '').trim().toUpperCase(),
+    bindingFingerprint: String(binding.bindingFingerprint || ''),
+    sourceApproved: binding.sourceApproved === true,
+    imageCount: images.length,
+    boundImageCount: images.length,
+    boundNames: images.map(row => row.name),
+    publishPreparation,
+    preflightInvalidated: evidence.preflightInvalidated === true,
+  };
+}
+
+let publishAssetsReadbackDriftTestIndex = 0;
+function injectPublishAssetsReadbackDriftForTest(task) {
+  if (process.env.NODE_ENV !== 'test') return task;
+  const sequence = String(process.env.SHEIN_LINK_OPS_TEST_PUBLISH_ASSETS_READBACK_DRIFT_SEQUENCE || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+  if (!sequence.length) return task;
+  const mode = sequence[publishAssetsReadbackDriftTestIndex++] || '';
+  if (!mode) return task;
+  const drifted = JSON.parse(JSON.stringify(task || {}));
+  const binding = drifted.publishAssetBinding && typeof drifted.publishAssetBinding === 'object'
+    ? drifted.publishAssetBinding
+    : null;
+  if (!binding) return drifted;
+  const images = asArray(binding.images);
+  if (mode === 'missing_image') binding.images = images.slice(0, -1);
+  if (mode === 'image_count') binding.imageCount = Number(binding.imageCount || 0) + 1;
+  if (mode === 'image_name' && images[0]) images[0].name = `${String(images[0].name || '')}-drift`;
+  if (mode === 'image_url' && images[0]) images[0].imageUrl = 'https://img.shein.com/test/readback-drift.png';
+  if (mode === 'image_sha256' && images[0]) images[0].sha256 = 'f'.repeat(64);
+  if (mode === 'evidence_missing') delete binding.evidence;
+  if (mode === 'evidence_change') binding.evidence = {...(binding.evidence || {}), mainImage: 'readback-drift-main.png'};
+  if (mode === 'publish_preparation_missing') delete binding.publishPreparation;
+  if (mode === 'publish_preparation_change') binding.publishPreparation = {...(binding.publishPreparation || {}), supplyPrice: 999999};
+  if (mode === 'payload_hash') {
+    const payloadKey = publishAssetBindingKind(drifted, binding) === 'update_images'
+      ? 'imageEditPayload'
+      : 'openapiPublishPayload';
+    drifted[payloadKey] = {...(drifted[payloadKey] || {}), __testReadbackDrift: true};
+  }
+  return drifted;
+}
+
+/**
+ * Strict fresh-read verification for a committed publish-assets binding.
+ * Compares only the persisted task fields the operation owns: repository
+ * revision, binding fingerprint, the unique write store, and the explicit
+ * standardGoodsSn/supplyPrice/inventory both on the task targets and inside
+ * the persisted publish payload (the exact bytes prepared for binding). Any
+ * mismatch is drift: the binding may already be durable, so the caller must
+ * fail closed and never report success.
+ */
+function verifyPersistedPublishAssetBindingReadback(freshTask, prepared) {
+  const drift = [];
+  const preparedTask = prepared?.task && typeof prepared.task === 'object' ? prepared.task : {};
+  const preparedBinding = prepared?.binding && typeof prepared.binding === 'object' ? prepared.binding : {};
+  const preparedPreparation = preparedBinding.publishPreparation && typeof preparedBinding.publishPreparation === 'object'
+    ? preparedBinding.publishPreparation
+    : {};
+  const freshBinding = freshTask?.publishAssetBinding && typeof freshTask.publishAssetBinding === 'object'
+    ? freshTask.publishAssetBinding
+    : null;
+  const preparedStoredBinding = preparedTask?.publishAssetBinding && typeof preparedTask.publishAssetBinding === 'object'
+    ? preparedTask.publishAssetBinding
+    : null;
+  const freshEvidence = freshBinding?.evidence && typeof freshBinding.evidence === 'object' && !Array.isArray(freshBinding.evidence)
+    ? freshBinding.evidence
+    : null;
+  const preparedEvidence = preparedStoredBinding?.evidence && typeof preparedStoredBinding.evidence === 'object' && !Array.isArray(preparedStoredBinding.evidence)
+    ? preparedStoredBinding.evidence
+    : null;
+  if (!freshEvidence || !preparedEvidence || sha256StableJson(freshEvidence) !== sha256StableJson(preparedEvidence)) {
+    drift.push('publishAssetBinding.evidence canonical hash differs from prepared binding');
+  }
+  const freshPublishPreparation = freshBinding?.publishPreparation && typeof freshBinding.publishPreparation === 'object' && !Array.isArray(freshBinding.publishPreparation)
+    ? freshBinding.publishPreparation
+    : null;
+  const preparedPublishPreparation = preparedStoredBinding?.publishPreparation && typeof preparedStoredBinding.publishPreparation === 'object' && !Array.isArray(preparedStoredBinding.publishPreparation)
+    ? preparedStoredBinding.publishPreparation
+    : null;
+  if (Boolean(freshPublishPreparation) !== Boolean(preparedPublishPreparation)
+    || (freshPublishPreparation && sha256StableJson(freshPublishPreparation) !== sha256StableJson(preparedPublishPreparation))) {
+    drift.push('publishAssetBinding.publishPreparation canonical hash differs from prepared binding');
+  }
+  const freshImages = canonicalPublishAssetBindingImages(freshBinding?.images);
+  const preparedImages = canonicalPublishAssetBindingImages(preparedStoredBinding?.images);
+  const freshImageCount = Number(freshBinding?.imageCount);
+  const preparedImageCount = Number(preparedStoredBinding?.imageCount);
+  if (!Number.isSafeInteger(freshImageCount)
+    || freshImageCount < 1
+    || freshImageCount !== preparedImageCount
+    || freshImageCount !== freshImages.length) {
+    drift.push(`imageCount persisted=${freshBinding?.imageCount ?? '(missing)'} images=${freshImages.length} expected=${preparedStoredBinding?.imageCount ?? '(missing)'}`);
+  }
+  if (JSON.stringify(freshImages) !== JSON.stringify(preparedImages)) {
+    drift.push('publishAssetBinding.images canonical fields differ from prepared binding');
+  }
+  const preparedFingerprint = String(preparedStoredBinding?.bindingFingerprint || preparedBinding.bindingFingerprint || '');
+  const freshFingerprint = String(freshBinding?.bindingFingerprint || '');
+  const recomputedFreshFingerprint = freshBinding
+    ? canonicalPublishAssetBindingFingerprint(freshTask, {binding: freshBinding, images: freshBinding.images})
+    : '';
+  if (!freshFingerprint
+    || freshFingerprint !== preparedFingerprint
+    || freshFingerprint !== recomputedFreshFingerprint
+    || String(preparedBinding.bindingFingerprint || '') !== preparedFingerprint) {
+    drift.push(`bindingFingerprint persisted=${freshFingerprint || '(missing)'} recomputed=${recomputedFreshFingerprint || '(missing)'} expected=${preparedFingerprint || '(missing)'}`);
+  }
+  const freshWriteStores = taskWriteStores(freshTask);
+  const preparedWriteStores = taskWriteStores(preparedTask);
+  if (freshWriteStores.length !== 1
+    || JSON.stringify(freshWriteStores) !== JSON.stringify(preparedWriteStores)
+    || freshWriteStores[0] !== String(preparedBinding.targetStore || '').toUpperCase()) {
+    drift.push(`writeStores persisted=${freshWriteStores.join('/') || '(empty)'} expected=${preparedWriteStores.join('/') || '(empty)'} target=${preparedBinding.targetStore || '(missing)'}`);
+  }
+  const scalar = value => (value === undefined || value === null ? null : value);
+  const preparedSn = scalar(preparedTask?.targets?.standardGoodsSn);
+  const freshSn = scalar(freshTask?.targets?.standardGoodsSn);
+  const preparedPayloadSn = scalar(preparedTask?.openapiPublishPayload?.skc_list?.[0]?.supplier_code);
+  const freshPayloadSn = scalar(freshTask?.openapiPublishPayload?.skc_list?.[0]?.supplier_code);
+  if (freshSn !== preparedSn || (preparedSn && freshPayloadSn !== preparedPayloadSn)) {
+    drift.push(`standardGoodsSn targets persisted=${freshSn} expected=${preparedSn} payload persisted=${freshPayloadSn} expected=${preparedPayloadSn}`);
+  }
+  const preparedPrice = scalar(preparedTask?.targets?.supplyPrice);
+  const freshPrice = scalar(freshTask?.targets?.supplyPrice);
+  const preparedPayloadPrice = scalar(preparedTask?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.cost_info?.cost_price);
+  const freshPayloadPrice = scalar(freshTask?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.cost_info?.cost_price);
+  if (freshPrice !== preparedPrice || (preparedPrice !== null && freshPayloadPrice !== preparedPayloadPrice)) {
+    drift.push(`supplyPrice targets persisted=${freshPrice} expected=${preparedPrice} payload persisted=${freshPayloadPrice} expected=${preparedPayloadPrice}`);
+  }
+  const preparedInventory = scalar(preparedTask?.targets?.inventory);
+  const freshInventory = scalar(freshTask?.targets?.inventory);
+  const preparedPayloadInventory = scalar(preparedTask?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.stock_info_list?.[0]?.inventory_num);
+  const freshPayloadInventory = scalar(freshTask?.openapiPublishPayload?.skc_list?.[0]?.sku_list?.[0]?.stock_info_list?.[0]?.inventory_num);
+  if (freshInventory !== preparedInventory || (preparedInventory !== null && freshPayloadInventory !== preparedPayloadInventory)) {
+    drift.push(`inventory targets persisted=${freshInventory} expected=${preparedInventory} payload persisted=${freshPayloadInventory} expected=${preparedPayloadInventory}`);
+  }
+  if (preparedPreparation.standardGoodsSn && freshSn !== scalar(preparedPreparation.standardGoodsSn)) {
+    drift.push(`standardGoodsSn binding-evidence persisted=${freshSn} expected=${preparedPreparation.standardGoodsSn}`);
+  }
+  if (preparedPreparation.supplyPrice !== null && preparedPreparation.supplyPrice !== undefined && freshPrice !== scalar(preparedPreparation.supplyPrice)) {
+    drift.push(`supplyPrice binding-evidence persisted=${freshPrice} expected=${preparedPreparation.supplyPrice}`);
+  }
+  if (preparedPreparation.inventory !== null && preparedPreparation.inventory !== undefined && freshInventory !== scalar(preparedPreparation.inventory)) {
+    drift.push(`inventory binding-evidence persisted=${freshInventory} expected=${preparedPreparation.inventory}`);
+  }
+  const bindingKind = publishAssetBindingKind(preparedTask, preparedStoredBinding);
+  const payloadKey = bindingKind === 'update_images' ? 'imageEditPayload' : 'openapiPublishPayload';
+  const freshPayload = freshTask?.[payloadKey];
+  const preparedPayload = preparedTask?.[payloadKey];
+  if (!freshPayload || typeof freshPayload !== 'object' || Array.isArray(freshPayload)
+    || !preparedPayload || typeof preparedPayload !== 'object' || Array.isArray(preparedPayload)
+    || sha256StableJson(freshPayload) !== sha256StableJson(preparedPayload)) {
+    drift.push(`${payloadKey} canonical hash differs from prepared payload`);
+  }
+  return {ok: drift.length === 0, drift};
+}
+
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
   if (!task || typeof task !== 'object') throw new Error('Task not found');
   if (taskRequiresOwnerLifecycleResolve(task)) {
@@ -7283,11 +7535,15 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     const identity = resolveApprovedMaintenanceImageIdentity(task, body, taskRows, {actor, targetStore});
     const bound = applyApprovedImageBindingsToMaintenancePayload(identity, bindings, {sourceApproved: true});
     const now = new Date().toISOString();
-    const bindingFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    const bindingFingerprint = canonicalPublishAssetBindingFingerprint({
+      ...task,
+      imageEditPayload: bound.payload,
+    }, {
+      binding: {kind: 'update_images', targetStore},
+      images: bound.bindings,
       targetStore,
       identity: bound.identity,
-      bindings: bound.bindings.map(row => ({name: row.name, role: row.role, imageType: row.imageType, imageUrl: row.imageUrl, sha256: row.sha256})),
-    })).digest('hex');
+    });
     const sourceVersions = [...new Set(asArray(identity._sourceVersions).map(value => String(value || '').trim()).filter(Boolean))];
     const pendingNewListingImageCorrection = identity._sourceTask
       ? buildPendingListingImageCorrection({
@@ -7326,10 +7582,12 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
         })),
         evidence: {
           ...bound.evidence,
+          identity: bound.identity,
           identitySource: identity.source,
           sourceTaskId: identity.sourceTaskId || '',
           pendingNewListingImageCorrection: Boolean(pendingNewListingImageCorrection),
           correctionFingerprint: pendingNewListingImageCorrection?.correctionFingerprint || '',
+          preflightInvalidated: true,
         },
       },
       execution: {
@@ -7419,11 +7677,12 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   const explicit = applyExplicitPublishPreparationOverrides(captured.capturedPublishPayload, publishPreparation);
   const bound = applyApprovedImageBindingsToPublishPayload(explicit.payload, bindings, {sourceApproved: true});
   const now = new Date().toISOString();
-  const bindingFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+  const bindingFingerprint = canonicalPublishAssetBindingFingerprint(taskForCapture, {
+    binding: {targetStore},
+    images: bound.bindings,
     targetStore,
-    bindings: bound.bindings.map(row => ({name: row.name, role: row.role, imageType: row.imageType, imageUrl: row.imageUrl, sha256: row.sha256})),
     publishPreparation,
-  })).digest('hex');
+  });
   const nextTask = {
     ...taskForCapture,
     openapiPublishPayload: bound.payload,
@@ -7446,7 +7705,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
         height: row.height,
         sha256: row.sha256,
       })),
-      evidence: bound.evidence,
+      evidence: {...bound.evidence, preflightInvalidated: true},
       publishPreparation: explicit.evidence,
     },
     execution: {
@@ -12850,6 +13109,19 @@ async function main() {
         }
         const taskRef = String(body.taskId || body.id || '').trim();
         if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+        // Stable gateway requirement: publish-assets only ever persists through
+        // single-task atomic CAS (updateTaskRecord). A gateway without that
+        // primitive fails closed with a stable 503 code instead of falling back
+        // to a whole-store replace that could silently absorb concurrent
+        // same-task mutations.
+        if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-publish-assets-gateway-unavailable', actor, ...requestMeta(req), task: {id: taskRef}});
+          return sendJson(res, 503, {
+            ok: false,
+            error: '发布素材绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway.updateTaskRecord；当前存储网关不可用，禁止整库替换提交',
+            code: 'LINK_OPS_PUBLISH_ASSETS_GATEWAY_UNAVAILABLE',
+          });
+        }
         let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
         let found;
         try {
@@ -12868,30 +13140,123 @@ async function main() {
         linkOpsExecutionLocks.add(lockId);
         try {
           const prepared = await prepareApprovedPublishAssetsForTask(access.record, args, body, actor, req, current.tasks);
-          const tasks = current.tasks.slice();
-          tasks[found.idx] = prepared.task;
-          current = {version: 1, updatedAt: new Date().toISOString(), tasks};
-          await writeLinkOpsTaskStore(args, current);
+          const expectedRevision = Number(access.record?.repositoryRevision || 0);
+          if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
+            const error = new Error('该任务缺少 repositoryRevision，无法执行单任务 CAS 发布素材绑定；请重新读取任务后重试');
+            error.status = 409;
+            error.response = {ok: false, error: error.message, code: 'LINK_OPS_REVISION_REQUIRED', retryable: true};
+            throw error;
+          }
+          // Deterministic-interleave test hook: a portal started with
+          // SHEIN_LINK_OPS_TEST_PUBLISH_ASSETS_CAS_READY_MARKER pauses here
+          // (after the prepared binding and the expected-revision read, before
+          // the atomic CAS write) until the test creates the matching .go file.
+          // A second portal sharing the same repository can then commit the
+          // competing binding first, so the CAS conflict is observed at the
+          // repository layer instead of the per-process execution lock.
+          const casReadyMarker = process.env.NODE_ENV === 'test'
+            ? String(process.env.SHEIN_LINK_OPS_TEST_PUBLISH_ASSETS_CAS_READY_MARKER || '').trim()
+            : '';
+          if (casReadyMarker) {
+            try {
+              await fs.mkdir(path.dirname(casReadyMarker), {recursive: true});
+              await fs.writeFile(`${casReadyMarker}.ready`, `${new Date().toISOString()}\n`, 'utf8');
+              for (let i = 0; i < 400; i += 1) {
+                try { await fs.access(`${casReadyMarker}.go`); break; } catch {}
+                await new Promise(resolve => setTimeout(resolve, 50));
+              }
+            } catch {}
+          }
+          // Atomic single-task CAS: the repository enforces the revision
+          // predicate inside its transaction/file lock, so a concurrent
+          // description binding (or any other same-task mutation) between the
+          // read above and this write surfaces as a 409 instead of being
+          // silently absorbed. writeLinkOpsTaskStore/replaceTaskStore are
+          // deliberately never used on this path.
+          const persisted = await args.linkOpsStoreGateway.updateTaskRecord(taskRef, prepared.task, {
+            expectedRevision,
+            actorUser: actorUser(actor, req),
+          });
+          // Fresh readback with strict drift verification. Audit and response
+          // must describe the persisted record, never the pre-write snapshot;
+          // any drift fails closed instead of reporting success.
+          let readbackTask = persisted;
+          let readbackVerified = false;
+          try {
+            const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
+            if (Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)) {
+              const verifyTask = injectPublishAssetsReadbackDriftForTest(verifyFound.task);
+              const driftCheck = verifyPersistedPublishAssetBindingReadback(verifyTask, prepared);
+              if (driftCheck.ok) {
+                readbackTask = verifyFound.task;
+                readbackVerified = true;
+              } else {
+                await appendAudit(args.auditFile, {
+                  at: new Date().toISOString(),
+                  type: 'link-ops-publish-assets-readback-drift',
+                  actor,
+                  ...requestMeta(req),
+                  task: {id: taskRef, revision: Number(persisted?.repositoryRevision || 0)},
+                  binding: {targetStore: prepared.binding.targetStore, bindingFingerprint: prepared.binding.bindingFingerprint},
+                  drift: driftCheck.drift,
+                });
+                return sendJson(res, 409, {
+                  ok: false,
+                  error: `发布素材绑定已持久化但回读核对漂移，禁止伪报成功：${driftCheck.drift.join('；')}`,
+                  code: 'LINK_OPS_PUBLISH_ASSETS_READBACK_DRIFT',
+                  bound: true,
+                  drift: driftCheck.drift,
+                });
+              }
+            }
+          } catch {}
+          if (!readbackVerified) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-publish-assets-readback-unverified',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef, revision: Number(persisted?.repositoryRevision || 0)},
+              binding: {targetStore: prepared.binding.targetStore, bindingFingerprint: prepared.binding.bindingFingerprint},
+            });
+            return sendJson(res, 409, {
+              ok: false,
+              error: '发布素材绑定已持久化但无法完成严格回读核对，禁止伪报成功',
+              code: 'LINK_OPS_PUBLISH_ASSETS_READBACK_UNVERIFIED',
+              bound: true,
+            });
+          }
+          const persistedBindingResponse = projectPersistedPublishAssetBindingForResponse(readbackTask);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-publish-assets-bound',
             actor,
             ...requestMeta(req),
-            task: {id: prepared.task.id, stores: taskTargetStores(prepared.task), writeStores: taskWriteStores(prepared.task)},
-            binding: {
-              targetStore: prepared.binding.targetStore,
-              bindingFingerprint: prepared.binding.bindingFingerprint,
-              imageCount: prepared.binding.boundImageCount,
-              boundNames: prepared.binding.boundNames,
-              publishPreparation: prepared.binding.publishPreparation,
-            },
+            task: {id: readbackTask.id, revision: Number(persisted?.repositoryRevision || 0), stores: taskTargetStores(readbackTask), writeStores: taskWriteStores(readbackTask)},
+            binding: persistedBindingResponse,
           });
           return sendJson(res, 200, {
             ok: true,
-            task: projectLinkOpsTaskForClient(prepared.task),
-            binding: prepared.binding,
+            readbackVerified: true,
+            persistedRevision: Number(persisted?.repositoryRevision || 0),
+            task: projectLinkOpsTaskForClient(readbackTask),
+            binding: persistedBindingResponse,
           });
         } catch (error) {
+          const mapped = linkOpsRepositoryHttpDetails(error);
+          if (mapped) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-publish-assets-conflict',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              code: mapped.body?.code || '',
+              error: String(error?.message || error).slice(0, 500),
+            });
+            return sendJson(res, mapped.status, mapped.body);
+          }
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-publish-assets-failed',
@@ -12931,6 +13296,19 @@ async function main() {
         if (unknownBodyKeys.length) {
           return sendJson(res, 400, {ok: false, error: `描述绑定请求包含不允许字段：${unknownBodyKeys.join('/')}`});
         }
+        const expectedRevision = Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
+          ? body.expectedRevision
+          : null;
+        if (!expectedRevision) {
+          const expectedRevisionMissing = body.expectedRevision === undefined || body.expectedRevision === null || body.expectedRevision === '';
+          return sendJson(res, 400, {
+            ok: false,
+            error: expectedRevisionMissing
+              ? '描述绑定必须携带当前正整数 expectedRevision；请先精确读取任务后再绑定'
+              : '描述绑定 expectedRevision 必须是原始 JSON number 类型的正 safe integer；禁止字符串、分数、截断或越界值',
+            code: expectedRevisionMissing ? 'LINK_OPS_REVISION_REQUIRED' : 'LINK_OPS_REVISION_INVALID',
+          });
+        }
         let material;
         let reviewedSource;
         const section = String(body.section || 'auto').trim().toLowerCase();
@@ -12960,16 +13338,6 @@ async function main() {
           });
         }
         const materialSummary = describeDescriptionMaterial(material);
-        const expectedRevision = Number.isFinite(Number(body.expectedRevision)) && Number(body.expectedRevision) > 0
-          ? Math.trunc(Number(body.expectedRevision))
-          : null;
-        if (!expectedRevision) {
-          return sendJson(res, 400, {
-            ok: false,
-            error: '描述绑定必须携带当前正整数 expectedRevision；请先精确读取任务后再绑定',
-            code: 'LINK_OPS_REVISION_REQUIRED',
-          });
-        }
         let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
         let found;
         try {
@@ -14569,6 +14937,8 @@ if (IS_DIRECT_RUN) {
 export const __testHooks = {
   biPortalCoreFileIdentity,
   buildBiPortalCoreStreamPlan,
+  canonicalPublishAssetBindingFingerprint,
+  canonicalPublishAssetBindingImages,
   readBiPortalCoreEnvelope,
   resetBiPortalCoreEnvelopeCache() {
     biPortalCoreEnvelopeCache = null;
@@ -14576,4 +14946,5 @@ export const __testHooks = {
   resolveDescriptionBindingExpectedBodyHash,
   sendBoundedCoreJson,
   sha256StableJson,
+  verifyPersistedPublishAssetBindingReadback,
 };
