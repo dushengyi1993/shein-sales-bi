@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const fixtureRoot = path.join(root, 'tmp', `marketing-repair-queue-smoke-${process.pid}`);
+const overlapRoot = path.join(root, 'tmp', `marketing-repair-queue-overlap-smoke-${process.pid}`);
 const date = '2026-07-18';
 
 function rel(file) {
@@ -111,7 +112,21 @@ try {
   const buildArgs = ['build', '--date', date, '--guard', guardPath, '--high-click-plan', highClickPlanPath, '--drift-plan-dir', driftDir, '--fallback-plan', fallbackPlanPath, '--queue', queuePath];
   run(...buildArgs);
   let queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
-  assert.deepEqual(queue.counts, {totalRows: 3, totalGroups: 3, highClickRows: 1, highClickGroups: 1, manualRows: 0, manualGroups: 0, driftRows: 1, driftGroups: 1, fallbackRows: 1, fallbackGroups: 1});
+  assert.deepEqual(queue.counts, {
+    totalRows: 3,
+    totalGroups: 3,
+    highClickRows: 1,
+    highClickGroups: 1,
+    manualRows: 0,
+    manualGroups: 0,
+    driftRows: 1,
+    driftGroups: 1,
+    driftRawRows: 1,
+    driftRowsHandledByHighClickSpecial: 0,
+    driftKeysHandledByHighClickSpecial: [],
+    fallbackRows: 1,
+    fallbackGroups: 1,
+  });
   assert.equal(queue.status, 'pending');
 
   run('update-stage', '--queue', queuePath, '--stage', 'highClickSpecial', '--status', 'completed', '--readback-ok', 'true');
@@ -141,7 +156,99 @@ try {
   const overlap = runFailure(...buildArgs);
   assert.match(`${overlap.stdout}\n${overlap.stderr}`, /Repair stages overlap/);
 
-  console.log(JSON.stringify({ok: true, exactCounts: true, preservesMatchingProgress: true, invalidatesChangedGuard: true, rejectsCrossStageOverlap: true}));
+  const overlapDate = '2026-07-19';
+  const overlapGuardPath = path.join(overlapRoot, `marketing-daily-guard-${overlapDate}.json`);
+  const overlapDriftDir = path.join(overlapRoot, `target-price-drift-${overlapDate}`);
+  const overlapHighClickPlanPath = path.join(overlapRoot, `high-click-low-conversion-special-plan-${overlapDate}.json`);
+  const overlapFallbackPlanPath = path.join(overlapRoot, `new-listing-7d-limited-discount-plan-${overlapDate}.json`);
+  const overlapQueuePath = path.join(overlapRoot, `marketing-repair-${overlapDate}.json`);
+  await fs.mkdir(overlapDriftDir, {recursive: true});
+  const overlapLiveScan = rel(path.join(overlapRoot, `live-${overlapDate}.json`));
+  const overlapPriceOverrides = rel(path.join(overlapRoot, 'price-overrides.json'));
+  const overlapGuard = {
+    reportDate: overlapDate,
+    highClickLowConversionSpecial: {
+      actionCount: 1,
+      rows: [{storeKey: 'DL', skc: 'sv-overlap'}],
+    },
+    limitedDiscountTargetPriceDrift: {
+      source: overlapLiveScan,
+      belowRows: [
+        {storeKey: 'DL', skc: 'sv-overlap'},
+        {storeKey: 'DL', skc: 'sv-overlap'},
+      ],
+    },
+    manualSpecialLimitedDiscount: {actionCount: 0},
+    targetPlanSelection: {priceOverrides: overlapPriceOverrides},
+  };
+  const overlapGuardText = `${JSON.stringify(overlapGuard)}\n`;
+  await fs.writeFile(overlapGuardPath, overlapGuardText);
+  await fs.writeFile(overlapHighClickPlanPath, `${JSON.stringify({
+    reportDate: overlapDate,
+    sourceGuard: rel(overlapGuardPath),
+    sourceGuardHash: crypto.createHash('sha256').update(overlapGuardText).digest('hex'),
+    actionCount: 1,
+    rows: [{
+      storeKey: 'DL',
+      skc: 'sv-overlap',
+      canonical: 'SK-OVL',
+      specialPrice: 88.88,
+      activityStock: 10,
+      validFrom: `${overlapDate} 12:00:00`,
+      validTo: '2026-07-26 23:59:59',
+    }],
+  })}\n`);
+  const overlapSourceGuard = rel(overlapGuardPath);
+  await fs.writeFile(path.join(overlapDriftDir, `limited-discount-target-drift-rescue-plan-${overlapDate}.json`), `${JSON.stringify({
+    reportDate: overlapDate,
+    sourceGuard: overlapSourceGuard,
+    rescueFiles: [],
+  })}\n`);
+  await fs.writeFile(overlapFallbackPlanPath, `${JSON.stringify({
+    reportDate: overlapDate,
+    sourceGuard: overlapSourceGuard,
+    sourceCurrentMarketingLiveScan: overlapLiveScan,
+    sourcePriceOverrides: overlapPriceOverrides,
+    rescueFiles: [],
+  })}\n`);
+  const overlapBuildArgs = ['build', '--date', overlapDate, '--guard', overlapGuardPath, '--high-click-plan', overlapHighClickPlanPath, '--drift-plan-dir', overlapDriftDir, '--fallback-plan', overlapFallbackPlanPath, '--queue', overlapQueuePath];
+  run(...overlapBuildArgs);
+  const overlapQueue = JSON.parse(await fs.readFile(overlapQueuePath, 'utf8'));
+  assert.equal(overlapQueue.counts.driftRows, 0);
+  assert.equal(overlapQueue.counts.driftRawRows, 2);
+  assert.equal(overlapQueue.counts.driftRowsHandledByHighClickSpecial, 1);
+  assert.deepEqual(overlapQueue.counts.driftKeysHandledByHighClickSpecial, ['DL::sv-overlap']);
+  assert.deepEqual(overlapQueue.deduplication.highClickPriorityExcludedDriftKeys, ['DL::sv-overlap']);
+  assert.equal(overlapQueue.stages.driftRepair.status, 'not_required');
+  assert.equal(overlapQueue.stages.driftRepair.rows, 0);
+  assert.equal(overlapQueue.stages.highClickSpecial.status, 'pending');
+  assert.equal(overlapQueue.counts.totalRows, 1);
+
+  const staleRescueName = `limited-drift-rescue-DL-stale-ffffffff-${overlapDate}.json`;
+  await fs.writeFile(path.join(overlapDriftDir, staleRescueName), `${JSON.stringify({
+    storeKey: 'DL',
+    purpose: `limited_discount_target_price_drift_rescue_${overlapDate}`,
+    sourceGuard: overlapSourceGuard,
+    rows: [{storeKey: 'DL', skc: 'sv-overlap'}],
+  })}\n`);
+  await fs.writeFile(path.join(overlapDriftDir, `limited-discount-target-drift-rescue-plan-${overlapDate}.json`), `${JSON.stringify({
+    reportDate: overlapDate,
+    sourceGuard: overlapSourceGuard,
+    rescueFiles: [{storeKey: 'DL', path: rel(path.join(overlapDriftDir, staleRescueName)), count: 1}],
+  })}\n`);
+  const staleOverlapFailure = runFailure(...overlapBuildArgs);
+  assert.match(`${staleOverlapFailure.stdout}\n${staleOverlapFailure.stderr}`, /Drift queue row mismatch/);
+
+  console.log(JSON.stringify({
+    ok: true,
+    exactCounts: true,
+    preservesMatchingProgress: true,
+    invalidatesChangedGuard: true,
+    rejectsCrossStageOverlap: true,
+    explainsHighClickDriftOverlap: true,
+    rejectsStaleUnexplainedDriftManifest: true,
+  }));
 } finally {
   await fs.rm(fixtureRoot, {recursive: true, force: true});
+  await fs.rm(overlapRoot, {recursive: true, force: true});
 }
