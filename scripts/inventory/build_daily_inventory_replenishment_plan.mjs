@@ -111,40 +111,34 @@ for (const store of stores) {
   try {
     const doc = await readJson(file);
     const sourceAge = ageHours(doc.fetchedAt);
+    const stockFailedChunkCount = doc?.summary?.stockFailedChunkCount;
+    const hasValidStockFailureEvidence = Number.isInteger(stockFailedChunkCount) && stockFailedChunkCount >= 0;
     sourceEvidence.push({
       store,
       file: `outputs/shein_openapi_products/${store}/latest.json`,
       fetchedAt: doc.fetchedAt || '',
       ageHours: Number(sourceAge.toFixed(4)),
-      stockFailedChunkCount: Number(doc?.summary?.stockFailedChunkCount || 0),
+      stockFailedChunkCount: hasValidStockFailureEvidence ? stockFailedChunkCount : null,
       detailMissingAfterFallbackCount: Number(doc?.summary?.detailMissingAfterFallbackCount || 0),
     });
     if (!Number.isFinite(sourceAge) || sourceAge < -0.25 || sourceAge > Number(policy.maxOpenApiSnapshotAgeHours || 2)) {
       blockers.push(`${store} OpenAPI product snapshot is stale`);
     }
-    if (Number(doc?.summary?.stockFailedChunkCount || 0) > 0) blockers.push(`${store} OpenAPI stock snapshot has failed chunks`);
-    // The first daily build may discover candidates from list + stock +
-    // cached detail. It must never label a prior_cache row as current, and the
-    // blanket per-row current-detail gate moves below until inventory
-    // relevance is known, so cached rows outside the inventory-relevant set
-    // cannot block the whole 19-store plan. The second daily build
-    // (--required-detail-targets) re-applies the current-detail gate only to
-    // the manifest targets while keeping the full-row supplierCode check.
-    if (args.operationMode === 'daily'
-      && !requiredDetailTargets
-      && Number(doc?.summary?.detailMissingAfterFallbackCount || 0) > 0) {
-      blockers.push(`${store} OpenAPI product detail evidence is incomplete`);
-    }
+    if (!hasValidStockFailureEvidence) blockers.push(`${store} OpenAPI stock snapshot evidence is incomplete`);
+    else if (stockFailedChunkCount > 0) blockers.push(`${store} OpenAPI stock snapshot has failed chunks`);
+    // Daily inventory decisions use list + stock to determine relevance, then
+    // require current detail and canonical identity only for that recomputed
+    // inventory-relevant store+SPU set. The snapshot-wide missing-detail count
+    // remains provenance, but non-relevant catalog rows must not block the
+    // targeted refresh contract.
     for (const row of doc.normalizedRows || []) {
-      if (args.operationMode === 'daily' && !String(row?.supplierCode || '').trim()) {
-        blockers.push(`${store} OpenAPI product canonical evidence is incomplete`);
-      }
       linkRows.push(row);
     }
   } catch (error) {
     blockers.push(`${store} OpenAPI product snapshot unavailable: ${error.message}`);
   }
 }
+const dailyRequiredTargetsByStore = new Map();
 if (requiredDetailTargets) {
   if (args.operationMode === 'et_low_inventory_safety') {
     if (requiredDetailTargets.schemaVersion !== 'et-low-inventory-detail-targets/v1'
@@ -183,35 +177,51 @@ if (requiredDetailTargets) {
       if (!Number.isInteger(budgetPerStore) || budgetPerStore < 1) {
         blockers.push('daily current-detail target manifest has no valid per-store budget');
       } else {
-        const rowsByStoreSpu = new Map(linkRows.map(row => [
-          `${String(row.storeKey || '').toUpperCase()}::${String(row.spu || '').trim()}`,
-          row,
-        ]));
+        const rowsByStoreSpu = new Map();
+        for (const row of linkRows) {
+          const key = `${String(row.storeKey || '').toUpperCase()}::${String(row.spu || '').trim()}`;
+          if (!rowsByStoreSpu.has(key)) rowsByStoreSpu.set(key, []);
+          rowsByStoreSpu.get(key).push(row);
+        }
+        const seenNormalizedStores = new Set();
         for (const [storeKey, spus] of Object.entries(requiredDetailTargets.stores)) {
+          const normalizedStore = String(storeKey || '').toUpperCase();
           if (!Array.isArray(spus)) {
             blockers.push(`daily current-detail target manifest is invalid for store=${storeKey}`);
             continue;
           }
-          const uniqueSpus = [...new Set(spus.map(value => String(value || '').trim()).filter(Boolean))];
-          if (!uniqueSpus.length || uniqueSpus.length !== spus.length) {
+          if (!normalizedStore) {
+            blockers.push('daily current-detail target manifest has an empty store key');
+            continue;
+          }
+          if (seenNormalizedStores.has(normalizedStore)) {
+            blockers.push(`daily current-detail target manifest has duplicate normalized store key: store=${normalizedStore}`);
+          }
+          seenNormalizedStores.add(normalizedStore);
+          if (!dailyRequiredTargetsByStore.has(normalizedStore)) dailyRequiredTargetsByStore.set(normalizedStore, []);
+          dailyRequiredTargetsByStore.get(normalizedStore).push(...spus.map(value => String(value || '').trim()));
+        }
+        for (const [storeKey, normalizedSpus] of dailyRequiredTargetsByStore) {
+          const uniqueSpus = [...new Set(normalizedSpus.filter(Boolean))];
+          if (!uniqueSpus.length || uniqueSpus.length !== normalizedSpus.length) {
             blockers.push(`daily current-detail target manifest has empty or duplicate SPUs for store=${storeKey}`);
             continue;
           }
           if (uniqueSpus.length > budgetPerStore) {
-            blockers.push(`daily current-detail target manifest exceeds per-store budget: store=${String(storeKey).toUpperCase()} count=${uniqueSpus.length} budget=${budgetPerStore}`);
+            blockers.push(`daily current-detail target manifest exceeds per-store budget: store=${storeKey} count=${uniqueSpus.length} budget=${budgetPerStore}`);
             continue;
           }
           for (const spu of uniqueSpus) {
-            const identity = `store=${String(storeKey).toUpperCase()} spu=${spu}`;
-            const row = rowsByStoreSpu.get(`${String(storeKey).toUpperCase()}::${spu}`);
-            if (!row) {
+            const identity = `store=${storeKey} spu=${spu}`;
+            const rows = rowsByStoreSpu.get(`${storeKey}::${spu}`) || [];
+            if (!rows.length) {
               blockers.push(`daily current-detail target is missing from refreshed snapshot: ${identity}`);
               continue;
             }
-            if (row?.sourceCompleteness?.hasCurrentDetail !== true) {
+            if (!rows.every(row => row?.sourceCompleteness?.hasCurrentDetail === true)) {
               blockers.push(`daily current-detail target is not from current detail after refresh: ${identity}`);
             }
-            if (!String(row?.supplierCode || '').trim()) {
+            if (!rows.every(row => String(row?.supplierCode || '').trim())) {
               blockers.push(`daily current-detail target has incomplete canonical evidence after refresh: ${identity}`);
             }
           }
@@ -351,6 +361,9 @@ for (const context of rowContexts) {
 if (args.operationMode === 'daily' && !requiredDetailTargets) {
   for (const item of evaluatedRows) {
     if (!item.inventoryRelevant) continue;
+    if (!String(item.row?.supplierCode || '').trim()) {
+      blockers.push(`${item.base.storeKey} OpenAPI product canonical evidence is incomplete: store=${item.base.storeKey} spu=${item.base.spu} skc=${item.base.skc}`);
+    }
     if (item.row?.sourceCompleteness?.hasCurrentDetail !== true) {
       blockers.push(`${item.base.storeKey} OpenAPI product canonical evidence is not from current detail: store=${item.base.storeKey} spu=${item.base.spu} skc=${item.base.skc}`);
     }
@@ -412,15 +425,12 @@ const detailRefreshTargets = args.operationMode === 'daily'
 // the guard treats this as terminal (not a recoverable refresh condition).
 if (args.operationMode === 'daily'
   && requiredDetailTargets
-  && requiredDetailTargets.stores
-  && typeof requiredDetailTargets.stores === 'object') {
+  && dailyRequiredTargetsByStore.size) {
   const coveredTargets = new Set();
-  for (const [storeKey, spus] of Object.entries(requiredDetailTargets.stores)) {
-    if (!Array.isArray(spus)) continue;
+  for (const [storeKey, spus] of dailyRequiredTargetsByStore) {
     for (const spu of spus) {
-      const store = String(storeKey || '').toUpperCase();
       const value = String(spu || '').trim();
-      if (store && value) coveredTargets.add(`${store}::${value}`);
+      if (storeKey && value) coveredTargets.add(`${storeKey}::${value}`);
     }
   }
   for (const target of dailyDetailRefreshTargets) {
