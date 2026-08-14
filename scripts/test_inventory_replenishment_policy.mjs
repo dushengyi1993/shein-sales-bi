@@ -179,7 +179,10 @@ assert.equal(livePolicy.execution.automaticExecution.authorizationByContext.clou
 assert.match(guardScript, /flock -n 9/);
 assert.match(guardScript, /ensure_links_data_fresh/);
 assert.match(guardScript, /api\/bi\/section\/linksData\?refresh=1/);
-assert.match(guardScript, /refresh 19-store read-only OpenAPI product\/stock snapshots/);
+assert.match(guardScript, /refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=/);
+assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$DETAIL_TARGET_BUDGET_PER_STORE"/);
+assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1/);
+assert.doesNotMatch(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_CONCURRENCY=2 bash scripts\/cloud_openapi_product_reconciliation\.sh/, 'the guard must never run the old bare full-catalog reconciliation');
 assert.match(guardScript, /build_plan \|\| PLAN_STATUS=\$\?/);
 assert.match(guardScript, /--execution-mode automatic/);
 assert.match(guardScript, /--confirm-hash "\$HASH"/);
