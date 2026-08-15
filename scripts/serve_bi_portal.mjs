@@ -100,6 +100,27 @@ import {
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {
+  PRODUCT_ATTRIBUTE_BINDING_AUTHORITY,
+  PRODUCT_ATTRIBUTE_BINDING_KIND,
+  PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+  PRODUCT_ATTRIBUTE_PAYLOAD_HASH_ALGORITHM,
+  bindProductAttributeToPayload,
+  buildProductAliasContext,
+  evaluateDonorProductAttributeEvidence,
+  isWhitelistedProductAttribute,
+  normalizeProductAttributeId,
+  payloadHasDualProductAttributeLists,
+  payloadWhitelistedProductAttributeRows,
+  productAttributeAreaFingerprint,
+  productAttributeBindingRequestKey,
+  productAttributeTargetStandardGoodsSn,
+  productModelFromPayload,
+  productAttributeRowsForId,
+  projectProductAttributeBindingCommit,
+  validateProductAttributeBindingLock,
+  whitelistedProductAttributeName,
+} from '../lib/link_ops_product_attribute_binding.mjs';
+import {
   ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT,
   normalizeAdditionalDuplicatePublishOverrideInput,
 } from '../lib/link_ops_duplicate_publish_override.mjs';
@@ -123,6 +144,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const {Client: PgClient} = pg;
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
 const SHEIN_OPENAPI_LOCAL_CONFIG_FILE = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
+const PRODUCT_ALIASES_FILE = process.env.SHEIN_PRODUCT_ALIASES_FILE || path.join(ROOT, 'config', 'product_aliases.json');
+const PRODUCT_CATALOG_FILE = process.env.SHEIN_PRODUCT_CATALOG_FILE || path.join(ROOT, 'config', 'product_catalog.json');
 const BI_OPS_WRITE_WHITELIST_FILE = process.env.SHEIN_BI_OPS_WRITE_WHITELIST_FILE || path.join(ROOT, 'config', 'bi_ops_write_whitelist.local.json');
 const DEFAULT_BI_SESSION_TTL_DAYS = 90;
 const DEFAULT_BI_PARTNER_CLI_SESSION_TTL_DAYS = 365;
@@ -3758,6 +3781,7 @@ function projectLinkOpsProductExecutorForClient(executor) {
               .map(([key, value]) => [String(key).toLowerCase(), safeSha256(value)]))
           : {},
         descriptionBindingLocked: Boolean(summary.descriptionBindingLocked),
+        productAttributeCount: Number(summary.attributeCount ?? 0) || 0,
       },
     },
     readback: readback ? {
@@ -4033,6 +4057,10 @@ function projectLinkOpsTaskForClient(task) {
         : projectDescriptionBindingCommit(task))
       : null,
     descriptionBindingLock: describeDescriptionBindingLockForClient(task),
+    productAttributeBinding: task?.productAttributeBinding && typeof task.productAttributeBinding === 'object'
+      ? projectProductAttributeBindingCommit(task)
+      : null,
+    productAttributeBindingLock: describeProductAttributeBindingLockForClient(task),
     assets: asArray(task?.assets).map(projectLinkOpsAssetForClient).slice(0, 30),
   };
 }
@@ -7610,6 +7638,534 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
   };
 }
 
+/**
+ * Client projection of the persisted product attribute binding lock. Mirrors
+ * the description lock shape so the CLI applies the same strict
+ * {baseTaskRevision,currentRevision,ok,stale} validation.
+ */
+function describeProductAttributeBindingLockForClient(task) {
+  const binding = task?.productAttributeBinding && typeof task.productAttributeBinding === 'object'
+    ? task.productAttributeBinding
+    : null;
+  if (!binding || Array.isArray(binding) || String(binding.kind || '') !== PRODUCT_ATTRIBUTE_BINDING_KIND) {
+    return null;
+  }
+  const gate = validateProductAttributeBindingLock(task, task?.openapiPublishPayload);
+  return {
+    ok: gate.ok === true,
+    stale: gate.ok !== true,
+    baseTaskRevision: Number(binding.baseTaskRevision || 0),
+    currentRevision: Number.isSafeInteger(Number(task?.repositoryRevision)) && Number(task.repositoryRevision) > 0
+      ? Number(task.repositoryRevision)
+      : 0,
+  };
+}
+
+/**
+ * Strict explicit alias registry context: config/product_aliases.json exact
+ * alias/canonical entries plus config/product_catalog.json standards, with
+ * file-level sha256 fingerprints. Used both at bind time (provenance) and at
+ * dry-run/execute time (tamper detection).
+ */
+function loadProductAliasContextSync() {
+  try {
+    const aliasBytes = fssync.readFileSync(PRODUCT_ALIASES_FILE);
+    const catalogBytes = fssync.readFileSync(PRODUCT_CATALOG_FILE);
+    return buildProductAliasContext({
+      aliasRegistryJson: JSON.parse(aliasBytes.toString('utf8')),
+      catalogJson: JSON.parse(catalogBytes.toString('utf8')),
+      aliasRegistryFingerprint: crypto.createHash('sha256').update(aliasBytes).digest('hex'),
+      catalogFingerprint: crypto.createHash('sha256').update(catalogBytes).digest('hex'),
+      aliasRegistrySource: 'config/product_aliases.json',
+      catalogSource: 'config/product_catalog.json',
+    });
+  } catch (error) {
+    return {available: false, error: String(error?.message || error).slice(0, 300)};
+  }
+}
+
+/**
+ * Execution gate for the actual copy_product_draft dry-run AND execute path.
+ * Whenever a productAttributeBinding exists OR the payload carries a
+ * whitelisted (donor-bound) attribute row, the persisted lock must be valid
+ * and the alias/catalog registry fingerprints must match the live config;
+ * otherwise both dry-run and execute are blocked. Unbound whitelisted rows
+ * are treated as tampering and fail closed.
+ */
+function productAttributeExecutionGate(task) {
+  const payload = task?.openapiPublishPayload;
+  const binding = task?.productAttributeBinding && typeof task.productAttributeBinding === 'object'
+    ? task.productAttributeBinding
+    : null;
+  const whitelistedRows = payloadWhitelistedProductAttributeRows(payload);
+  if (!binding && !whitelistedRows.length) {
+    return {ok: true, active: false, blockers: []};
+  }
+  const blockers = [];
+  if (!binding) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_UNBOUND_ROWS',
+      message: 'payload 含受控白名单商品属性行但缺少 productAttributeBinding，来源不明，禁止系统检查/执行',
+    });
+    return {ok: false, active: true, blockers};
+  }
+  const lock = validateProductAttributeBindingLock(task, payload);
+  blockers.push(...lock.blockers);
+  const aliasContext = loadProductAliasContextSync();
+  if (!aliasContext.available) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ALIAS_REGISTRY_UNAVAILABLE',
+      message: `货号别名注册表/商品目录当前不可读：${aliasContext.error || '未知原因'}`,
+    });
+  } else if (String(aliasContext.aliasRegistryFingerprint || '').toLowerCase() !== String(binding.aliasRegistryFingerprint || '').toLowerCase()
+    || String(aliasContext.catalogFingerprint || '').toLowerCase() !== String(binding.catalogFingerprint || '').toLowerCase()) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ALIAS_REGISTRY_DRIFT',
+      message: '货号别名注册表/商品目录指纹与属性绑定证据不一致，禁止系统检查/执行',
+    });
+  }
+  return {ok: blockers.length === 0, active: true, blockers};
+}
+
+/**
+ * Live donor verification for the whitelisted product attribute repair.
+ *
+ * Server-side, independent of the client request body beyond
+ * donorStore/donorSkc/attributeId:
+ *   1. donor store OpenAPI account identity is verified against the
+ *      authoritative store identity mapping (skipped identity evidence is
+ *      NOT verification and fails closed);
+ *   2. the case-sensitive donor SKC must resolve to exactly one SPU through
+ *      the donor store searchProduct;
+ *   3. live spu-info must contain the exact-case donor SKC with the same
+ *      supplierCode and the same standard-goods-number product identity;
+ *   4. the whitelisted attribute must appear exactly once with a positive
+ *      attribute_value_id.
+ *
+ * Only reduced evidence (hashes and call codes) leaves this function; raw
+ * account identity and credentials never enter the returned record.
+ */
+async function verifyDonorProductAttributeLive({
+  donorStore,
+  donorSkc,
+  attributeId,
+  aliasContext,
+  taskRawCode,
+  taskModelValue,
+  verifiedAt = new Date().toISOString(),
+} = {}) {
+  const storeKey = String(donorStore || '').trim().toUpperCase();
+  const skc = String(donorSkc || '').trim();
+  const id = normalizeProductAttributeId(attributeId);
+  let {store, client} = {};
+  try {
+    ({store, client} = openApiClientForConfiguredStore(storeKey));
+  } catch (error) {
+    return {
+      ok: false,
+      blockers: [{code: 'DONOR_STORE_OPENAPI_UNAVAILABLE', message: String(error?.message || error).slice(0, 300)}],
+      evidence: null,
+    };
+  }
+  let identityResult;
+  try {
+    identityResult = await verifyOpenApiStoreIdentityForUtility(client, storeKey, store);
+  } catch (error) {
+    return {
+      ok: false,
+      blockers: [{code: 'DONOR_STORE_IDENTITY_UNVERIFIED', message: `donor 店铺身份核验失败：${String(error?.message || error).slice(0, 300)}`}],
+      evidence: null,
+    };
+  }
+  const identityVerified = Boolean(identityResult?.ok && !identityResult?.skipped);
+  const identityEvidence = {
+    ok: identityVerified,
+    evidenceSha256: '',
+  };
+  if (identityVerified) {
+    const check = identityResult.identity && typeof identityResult.identity === 'object'
+      ? identityResult.identity
+      : {};
+    identityEvidence.evidenceSha256 = sha256StableJson({
+      storeKey,
+      accountOk: check.accountOk === true,
+      merchantOk: check.merchantOk === true,
+      accountCandidates: asArray(check.accountCandidates),
+      merchantCandidates: asArray(check.merchantCandidates),
+    });
+  }
+  const searchResponse = await client.request('/open-api/goods/searchProduct', {
+    method: 'POST',
+    body: {pageNum: 1, pageSize: 10, skcNameList: [skc], languageList: ['en', 'ar']},
+    headers: {language: 'en'},
+  });
+  const searchEnvelope = searchResponse?.data && typeof searchResponse.data === 'object'
+    ? searchResponse.data
+    : {};
+  let spuInfoEnvelope = {};
+  if (searchResponse?.ok === true && String(searchEnvelope?.code ?? '') === '0') {
+    const pre = evaluateDonorProductAttributeEvidence({
+      donorStore: storeKey,
+      donorSkc: skc,
+      attributeId: id,
+      aliasContext,
+      taskRawCode,
+      taskModelValue,
+      identity: identityEvidence,
+      searchEnvelope,
+      spuInfoEnvelope: null,
+      verifiedAt,
+    });
+    const donorSpu = String(pre?.donorSpu || '');
+    const searchResolved = pre?.blockers?.length === 0
+      || (pre?.blockers?.length === 1 && pre.blockers[0]?.code === 'DONOR_SPU_INFO_QUERY_FAILED' && donorSpu);
+    if (searchResolved && donorSpu) {
+      const spuInfoResponse = await client.request('/open-api/goods/spu-info', {
+        method: 'POST',
+        body: {spuName: donorSpu, languageList: ['en', 'ar']},
+        headers: {language: 'en'},
+      });
+      spuInfoEnvelope = spuInfoResponse?.data && typeof spuInfoResponse.data === 'object'
+        ? spuInfoResponse.data
+        : {};
+    }
+  }
+  return evaluateDonorProductAttributeEvidence({
+    donorStore: storeKey,
+    donorSkc: skc,
+    attributeId: id,
+    aliasContext,
+    taskRawCode,
+    taskModelValue,
+    identity: identityEvidence,
+    searchEnvelope,
+    spuInfoEnvelope,
+    verifiedAt,
+  });
+}
+
+/**
+ * Binds the independently verified whitelisted product attribute to the same
+ * unsubmitted copy_product_draft task. Exactly one attribute row is appended
+ * to product_attribute_list; every other payload field (titles, price,
+ * inventory, images, descriptions) stays byte-identical, proven by the
+ * attribute-area fingerprint. The old execution/preflight/payload hash is
+ * invalidated and the task returns to needs_repreflight. Never publishes.
+ */
+function bindApprovedProductAttributeToTask(task, targetStore, {
+  attributeId,
+  attributeValueId,
+  donorEvidence,
+}, actor, req, {
+  baseTaskRevision,
+  bindingRequestKey,
+} = {}) {
+  if (!task || typeof task !== 'object') throw new Error('Task not found');
+  if (taskRequiresOwnerLifecycleResolve(task)) {
+    const error = new Error('该任务已进入提交后待回读/人工处理状态，不能绑定商品属性');
+    error.status = 409;
+    throw error;
+  }
+  const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
+  if (!intents.includes('copy_product_draft')) {
+    const error = new Error('商品属性修复只支持 copy_product_draft 任务');
+    error.status = 409;
+    throw error;
+  }
+  const maintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent));
+  if (maintenanceIntents.length) {
+    const error = new Error(`商品属性修复任务不能混入其他维护写动作：${maintenanceIntents.join(', ')}`);
+    error.status = 409;
+    throw error;
+  }
+  if (['done', 'archived'].includes(String(task?.status || ''))) {
+    const error = new Error(`任务状态 ${task.status} 已终结，不能绑定商品属性`);
+    error.status = 409;
+    throw error;
+  }
+  const priorWriteEvidence = descriptionBindingPriorWriteEvidence(task);
+  if (!priorWriteEvidence.ok) {
+    const error = new Error(`任务已有真实写入/提交不确定性证据，禁止绑定商品属性或重置执行状态：${priorWriteEvidence.reasons.join(', ')}`);
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_BINDING_PRIOR_WRITE_EVIDENCE';
+    throw error;
+  }
+  const writeStores = taskWriteStores(task);
+  if (writeStores.length !== 1 || writeStores[0] !== targetStore) {
+    const error = new Error(`目标店铺 ${targetStore} 不是该任务的唯一写入店（当前 ${writeStores.join('/') || '(empty)'}）`);
+    error.status = 409;
+    throw error;
+  }
+  const denied = requireWriteStores(actor, [targetStore]);
+  if (denied) {
+    const error = new Error(denied.error || '当前账号没有目标店铺写权限');
+    error.status = 403;
+    error.response = denied;
+    throw error;
+  }
+  if (!Number.isSafeInteger(Number(baseTaskRevision)) || Number(baseTaskRevision) <= 0) {
+    const error = new Error('商品属性绑定缺少正整数 baseTaskRevision，不能执行 CAS');
+    error.status = 409;
+    throw error;
+  }
+  const id = normalizeProductAttributeId(attributeId);
+  if (id === null || !isWhitelistedProductAttribute(id)) {
+    const error = new Error('商品属性绑定只允许受控白名单属性（仅 1002328）');
+    error.status = 400;
+    error.code = 'PRODUCT_ATTRIBUTE_NOT_WHITELISTED';
+    throw error;
+  }
+  const valueId = normalizeProductAttributeId(attributeValueId);
+  if (valueId === null) {
+    const error = new Error('商品属性绑定缺少正整数 attributeValueId');
+    error.status = 400;
+    error.code = 'PRODUCT_ATTRIBUTE_VALUE_INVALID';
+    throw error;
+  }
+  if (!donorEvidence || donorEvidence.ok !== true || !donorEvidence.evidence) {
+    const error = new Error('商品属性绑定缺少通过独立核验的 donor 证据');
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_INVALID';
+    throw error;
+  }
+  const evidence = donorEvidence.evidence;
+  if (normalizeProductAttributeId(evidence.attributeId) !== id
+    || normalizeProductAttributeId(evidence.attributeValueId) !== valueId) {
+    const error = new Error('donor 证据属性/值与绑定请求不一致');
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_MISMATCH';
+    throw error;
+  }
+  const originalPayload = task.openapiPublishPayload;
+  if (!originalPayload || typeof originalPayload !== 'object' || Array.isArray(originalPayload)) {
+    const error = new Error('任务没有可绑定商品属性的 openapiPublishPayload');
+    error.status = 409;
+    throw error;
+  }
+  if (payloadHasDualProductAttributeLists(originalPayload)) {
+    const error = new Error('任务 payload 同时含 product_attribute_list 与 productAttributeList，拒绝绑定（不得静默删除任一列表）');
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DUAL_LIST_PRESENT';
+    throw error;
+  }
+  if (!Array.isArray(originalPayload?.product_attribute_list ?? originalPayload?.productAttributeList)) {
+    const error = new Error('任务 payload 缺 product_attribute_list，无法受控追加白名单属性');
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_LIST_MISSING';
+    throw error;
+  }
+  const targetSn = productAttributeTargetStandardGoodsSn(originalPayload);
+  if (!targetSn.ok) {
+    const error = new Error(targetSn.blockers.map(row => row.message).join('；'));
+    error.status = 409;
+    error.code = targetSn.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_TARGET_IDENTITY_INVALID';
+    throw error;
+  }
+  const taskRawCode = targetSn.standardGoodsSn;
+  if (taskRawCode !== String(evidence.rawTaskCode || '')) {
+    const error = new Error(`donor 证据任务原始货号(${evidence.rawTaskCode}) 与任务 payload 标准货号(${taskRawCode}) 不一致`);
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_MISMATCH';
+    throw error;
+  }
+  if (!String(evidence.canonicalCode || '')) {
+    const error = new Error('donor 证据缺少 canonical 身份');
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_INVALID';
+    throw error;
+  }
+  const taskModel = productModelFromPayload(originalPayload);
+  if (!taskModel.ok) {
+    const error = new Error(taskModel.blockers.map(row => row.message).join('；'));
+    error.status = 409;
+    error.code = taskModel.blockers[0]?.code || 'PAYLOAD_PRODUCT_MODEL_INVALID';
+    throw error;
+  }
+  if (taskModel.value !== String(evidence.taskModelValue || '')) {
+    const error = new Error(`donor 证据 Product Model(${evidence.taskModelValue}) 与任务 payload(${taskModel.value}) 不一致`);
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_MISMATCH';
+    throw error;
+  }
+  const existingRows = productAttributeRowsForId(originalPayload, id);
+  if (existingRows.length) {
+    const error = new Error(`目标 payload 已存在属性 ${id}（${existingRows.length} 行），本命令只修复缺失属性，请人工核销`);
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_ALREADY_PRESENT';
+    throw error;
+  }
+  const areaBefore = productAttributeAreaFingerprint(originalPayload);
+  const bound = bindProductAttributeToPayload(originalPayload, {attributeId: id, attributeValueId: valueId});
+  const areaAfter = productAttributeAreaFingerprint(bound.payload);
+  if (areaAfter !== areaBefore) {
+    const error = new Error('商品属性绑定不得改动发布 payload 的除属性列表外的任何字段');
+    error.status = 409;
+    throw error;
+  }
+  const newPayloadHash = sha256StableJson(bound.payload);
+  if (newPayloadHash !== linkOpsPayloadHash(bound.payload)) {
+    throw new Error('商品属性绑定 payload hash 算法与 link-ops canonical hash 不一致');
+  }
+  const imageBindingFingerprint = String(task?.publishAssetBinding?.bindingFingerprint || '');
+  const existingDescription = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
+    ? task.descriptionMaterialBinding
+    : null;
+  const descriptionContentSha256 = String(existingDescription?.contentSha256 || '');
+  const descriptionHashes = existingDescription?.hashes && typeof existingDescription.hashes === 'object'
+    ? {
+        ar: String(existingDescription.hashes.ar || ''),
+        en: String(existingDescription.hashes.en || ''),
+        'zh-cn': String(existingDescription.hashes['zh-cn'] || ''),
+      }
+    : {ar: '', en: '', 'zh-cn': ''};
+  const oldPayloadHash = linkOpsPayloadHash(originalPayload);
+  const now = new Date().toISOString();
+  const resetNote = `缺失白名单商品属性已绑定（attribute ${id}，值来自同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc}，服务端独立核验 canonical=${evidence.canonicalCode}）；旧预演/提交锁全部作废，描述绑定保持原样并留待 prepare-descriptions 用原始审核 HTML 在同一任务重新绑定，之后重新预演通过才可提交。`;
+  const nextTask = {
+    ...task,
+    openapiPublishPayload: bound.payload,
+    preflight: {
+      ok: false,
+      blockers: ['缺失白名单商品属性已绑定到同一 copy_product_draft 任务，需要基于新 payload 重新预演。'],
+      warnings: [],
+    },
+    lifecycle: {
+      lifecycleStatus: 'needs_repreflight',
+      status: 'needs_repreflight',
+      locked: false,
+      terminal: false,
+      needsManualResolve: false,
+    },
+    productAttributeBinding: {
+      schemaVersion: PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+      kind: PRODUCT_ATTRIBUTE_BINDING_KIND,
+      authority: PRODUCT_ATTRIBUTE_BINDING_AUTHORITY,
+      targetStore,
+      attributeId: id,
+      attributeName: whitelistedProductAttributeName(id),
+      attributeValueId: valueId,
+      boundAt: now,
+      boundByUser: actorUser(actor, req),
+      baseTaskRevision: Number(baseTaskRevision),
+      bindingRequestKey,
+      donor: {
+        storeKey: String(evidence.donorStore || ''),
+        skc: String(evidence.donorSkc || ''),
+        spu: String(evidence.donorSpu || ''),
+        rawCode: String(evidence.rawDonorCode || ''),
+      },
+      taskRawCode,
+      canonicalCode: String(evidence.canonicalCode || ''),
+      taskModelValue: taskModel.value,
+      donorModelValue: String(evidence.donorModelValue || ''),
+      verifiedAt: String(evidence.verifiedAt || ''),
+      identityOk: evidence.identityOk === true,
+      identityEvidenceSha256: String(evidence.identityEvidenceSha256 || ''),
+      evidenceSha256: String(evidence.evidenceSha256 || ''),
+      aliasRegistryFingerprint: String(evidence.aliasRegistryFingerprint || ''),
+      aliasRegistrySource: String(evidence.aliasRegistrySource || ''),
+      catalogFingerprint: String(evidence.catalogFingerprint || ''),
+      catalogSource: String(evidence.catalogSource || ''),
+      calls: {
+        searchProduct: {code: String(evidence.calls?.searchProduct?.code || '')},
+        spuInfo: {code: String(evidence.calls?.spuInfo?.code || '')},
+      },
+      oldPayloadHash,
+      newPayloadHash,
+      payloadHashAlgorithm: PRODUCT_ATTRIBUTE_PAYLOAD_HASH_ALGORITHM,
+      imageBindingFingerprint,
+      descriptionContentSha256,
+      descriptionHashes,
+    },
+    execution: {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      state: 'needs_repreflight',
+      canAutoSubmit: false,
+      canSilentWrite: false,
+      autoConfirmed: false,
+      confirmTextPresent: false,
+      executeAllowed: false,
+      requestedRealSubmit: false,
+      issuedExecuteToExecutor: false,
+      sheinWriteAttempted: false,
+      actualWriteSubmitted: false,
+      realSubmitBoundary: '商品属性绑定已作废旧预演与提交锁；必须重新 dry-run 锁定新 payload hash 后才能执行。',
+      openApiProductExecutors: [],
+      linkMaintenanceExecutors: [],
+      linkMaintenancePrechecks: [],
+      hlOpenApiExecutor: null,
+      preflight: {
+        ok: false,
+        blockers: ['缺失白名单商品属性已绑定到同一 copy_product_draft 任务，需要基于新 payload 重新预演。'],
+        warnings: [],
+      },
+      writeAudit: {
+        ...(task.execution?.writeAudit && typeof task.execution.writeAudit === 'object' ? task.execution.writeAudit : {}),
+        requestedMode: 'dry-run',
+        submitted: false,
+        actualWriteSubmitted: false,
+        sheinWriteAttempted: false,
+        issuedExecuteToExecutor: false,
+        executeAllowed: false,
+        requestedRealSubmit: false,
+        invalidatedByProductAttributeBindingAt: now,
+        invalidatedByProductAttributeBinding: true,
+      },
+    },
+    note: String(task?.note || '').trim()
+      ? `${String(task.note).trim()}；${resetNote}`
+      : resetNote,
+    updatedAt: now,
+  };
+  nextTask.history = appendTaskHistory(nextTask, 'product_attribute_bound', actor, req, {
+    targetStore,
+    attributeId: id,
+    attributeName: whitelistedProductAttributeName(id),
+    attributeValueId: valueId,
+    donor: {
+      storeKey: String(evidence.donorStore || ''),
+      skc: String(evidence.donorSkc || ''),
+      spu: String(evidence.donorSpu || ''),
+      rawCode: String(evidence.rawDonorCode || ''),
+    },
+    taskRawCode,
+    canonicalCode: String(evidence.canonicalCode || ''),
+    taskModelValue: taskModel.value,
+    verifiedAt: String(evidence.verifiedAt || ''),
+    identityOk: evidence.identityOk === true,
+    evidenceSha256: String(evidence.evidenceSha256 || ''),
+    aliasRegistryFingerprint: String(evidence.aliasRegistryFingerprint || ''),
+    catalogFingerprint: String(evidence.catalogFingerprint || ''),
+    oldPayloadHash,
+    newPayloadHash,
+    payloadHashAlgorithm: PRODUCT_ATTRIBUTE_PAYLOAD_HASH_ALGORITHM,
+    baseTaskRevision: Number(baseTaskRevision),
+    bindingRequestKey,
+    imageBindingFingerprint,
+    descriptionContentSha256,
+    descriptionHashes,
+    preflightReset: true,
+    lifecycleReset: true,
+    writeAuditReset: true,
+    oldPayloadHashInvalidated: true,
+  });
+  const bindingGate = validateProductAttributeBindingLock(nextTask, bound.payload);
+  if (!bindingGate.ok) {
+    const error = new Error(`商品属性绑定生成结果未通过最终锁校验：${bindingGate.blockers.map(row => row.message).join('；')}`);
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_BINDING_LOCK_INVALID';
+    throw error;
+  }
+  return {
+    task: nextTask,
+    binding: {
+      ...projectProductAttributeBindingCommit(nextTask),
+      payloadSource: 'task',
+      preflightInvalidated: true,
+    },
+  };
+}
+
 async function bindUpdateDescriptionMaterialToTask(task, targetStore, material, spuName, sourceTaskId, actor, req, {
   sourceByteLength,
   baseTaskRevision,
@@ -8829,17 +9385,44 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   let executeWriteClaimState = '';
   let executeWriteClaimRevision = 0;
   const runExecutors = async (allowExecute, writeClaim = null) => {
-    const product = await runOpenApiProductExecutors(runnableTask, args, {
-      ...body,
-      actorForWriteGate: actor,
-      mode: allowExecute && hasProductPublishIntent ? 'execute' : 'dry-run',
-      executionMode: allowExecute && hasProductPublishIntent ? 'execute' : 'dry-run',
-      execute: allowExecute && hasProductPublishIntent,
-      confirm: allowExecute && hasProductPublishIntent ? confirmText : '',
-      confirmText: allowExecute && hasProductPublishIntent ? confirmText : '',
-      beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
-      executionContext,
-    });
+    // Whitelisted product attribute execution gate: whenever a donor-bound
+    // attribute exists (productAttributeBinding or a whitelisted row), the
+    // persisted lock and the live alias/catalog registry fingerprints must be
+    // valid for BOTH dry-run and execute. Unbound whitelisted rows are
+    // tampering and fail closed.
+    let product;
+    if (hasProductPublishIntent) {
+      const attributeGate = productAttributeExecutionGate(runnableTask);
+      if (attributeGate.ok) {
+        product = await runOpenApiProductExecutors(runnableTask, args, {
+          ...body,
+          actorForWriteGate: actor,
+          mode: allowExecute ? 'execute' : 'dry-run',
+          executionMode: allowExecute ? 'execute' : 'dry-run',
+          execute: allowExecute,
+          confirm: allowExecute ? confirmText : '',
+          confirmText: allowExecute ? confirmText : '',
+          beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
+          executionContext,
+        });
+      } else {
+        product = openApiProductExecutorTargetStores(runnableTask).map(storeKey => (
+          blockedStoreExecutorResult(storeKey, attributeGate.blockers.map(blocker => blocker.message))
+        ));
+      }
+    } else {
+      product = await runOpenApiProductExecutors(runnableTask, args, {
+        ...body,
+        actorForWriteGate: actor,
+        mode: allowExecute ? 'execute' : 'dry-run',
+        executionMode: allowExecute ? 'execute' : 'dry-run',
+        execute: allowExecute,
+        confirm: allowExecute ? confirmText : '',
+        confirmText: allowExecute ? confirmText : '',
+        beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
+        executionContext,
+      });
+    }
     const maintenance = await runOpenApiMaintenanceExecutors(runnableTask, args, {
       ...body,
       actorForWriteGate: actor,
@@ -14245,6 +14828,367 @@ async function main() {
             await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
               type: 'link-ops-prepare-descriptions-failed',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              error: String(error?.message || error).slice(0, 500),
+              code: error?.code || '',
+            });
+          } catch {}
+          return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error), code: error?.code || ''});
+        } finally {
+          linkOpsExecutionLocks.delete(lockId);
+        }
+      }
+      if (url.pathname === '/api/link-ops-prepare-product-attribute') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const actorGate = requireConcreteOperatorActor(actor);
+        if (actorGate) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-product-attribute-denied', actor, ...requestMeta(req), denied: actorGate});
+          return sendJson(res, 403, actorGate);
+        }
+        let body;
+        try {
+          body = await readBodyJson(req, 2 * 1024 * 1024);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        const taskRef = String(body.taskId || body.id || '').trim();
+        if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+        const targetStore = String(body.store || body.storeKey || '').trim().toUpperCase();
+        if (!targetStore) return sendJson(res, 400, {ok: false, error: 'Missing target store'});
+        const allowedBodyKeys = ['taskId', 'store', 'donorStore', 'donorSkc', 'attributeId', 'expectedRevision'];
+        const unknownBodyKeys = Object.keys(body || {}).filter(key => !allowedBodyKeys.includes(key));
+        if (unknownBodyKeys.length) {
+          return sendJson(res, 400, {ok: false, error: `商品属性绑定请求包含不允许字段：${unknownBodyKeys.join('/')}`});
+        }
+        const attributeId = typeof body.attributeId === 'number'
+          && Number.isSafeInteger(body.attributeId)
+          && body.attributeId > 0
+          ? body.attributeId
+          : null;
+        if (attributeId === null) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'attributeId 必须是原始 JSON number 类型的正 safe integer；禁止字符串、分数、截断或越界值',
+            code: 'PRODUCT_ATTRIBUTE_VALUE_INVALID',
+          });
+        }
+        if (!isWhitelistedProductAttribute(attributeId)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `商品属性 ${attributeId} 不在受控白名单（仅 1002328），禁止绑定`,
+            code: 'PRODUCT_ATTRIBUTE_NOT_WHITELISTED',
+          });
+        }
+        const donorStore = String(body.donorStore || '').trim().toUpperCase();
+        if (!SHEIN_STORE_KEYS.has(donorStore)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `donor 店铺 ${donorStore || '(empty)'} 不是有效店铺代码`,
+            code: 'DONOR_STORE_INVALID',
+          });
+        }
+        const donorSkc = String(body.donorSkc || '').trim();
+        if (!donorSkc || donorSkc.length > 160 || !/^s[abv]\d{8,}$/i.test(donorSkc)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'donorSkc 必须是一个区分大小写的 SHEIN SKC（s[abv] + 8 位以上数字）',
+            code: 'DONOR_SKC_INVALID',
+          });
+        }
+        const expectedRevision = Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
+          ? body.expectedRevision
+          : null;
+        if (!expectedRevision) {
+          const revisionMissing = body.expectedRevision === undefined || body.expectedRevision === null || body.expectedRevision === '';
+          return sendJson(res, 400, {
+            ok: false,
+            error: revisionMissing
+              ? '商品属性绑定必须携带当前正整数 expectedRevision；请先精确读取任务后再绑定'
+              : '商品属性绑定 expectedRevision 必须是原始 JSON number 类型的正 safe integer；禁止字符串、分数、截断或越界值',
+            code: revisionMissing ? 'LINK_OPS_REVISION_REQUIRED' : 'LINK_OPS_REVISION_INVALID',
+          });
+        }
+        let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+        let found;
+        try {
+          found = findLinkOpsTaskOrThrow(current, taskRef);
+        } catch (error) {
+          const message = error?.message || String(error);
+          return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+        }
+        const access = authorizeLinkOpsRecord(actor, found.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+        if (!access.ok) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-product-attribute-denied', actor, ...requestMeta(req), task: {id: found.task.id}, denied: access.denied});
+          return sendJson(res, 403, access.denied);
+        }
+        const task = access.record;
+        const currentRevision = Number(task.repositoryRevision || 0);
+        const lockId = String(task.id || taskRef);
+        // Idempotent replay: a persisted valid binding that still locks the
+        // current payload (attribute exactly once, payload hash, image and
+        // description fingerprints unchanged) is replayed without a new live
+        // verification or write when the incoming donor/attribute identity
+        // matches.
+        const existingBinding = task?.productAttributeBinding && typeof task.productAttributeBinding === 'object'
+          ? task.productAttributeBinding
+          : {};
+        const existingDonor = existingBinding.donor && typeof existingBinding.donor === 'object'
+          ? existingBinding.donor
+          : {};
+        const existingLock = validateProductAttributeBindingLock(task, task?.openapiPublishPayload);
+        const existingIdentityMatches = String(existingBinding.targetStore || '').toUpperCase() === targetStore
+          && normalizeProductAttributeId(existingBinding.attributeId) === attributeId
+          && String(existingDonor.storeKey || '').toUpperCase() === donorStore
+          && String(existingDonor.skc || '') === donorSkc
+          && existingLock.ok;
+        if (currentRevision && currentRevision !== expectedRevision && !existingIdentityMatches) {
+          try {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-product-attribute-revision-conflict', actor, ...requestMeta(req), task: {id: found.task.id, revision: currentRevision, expectedRevision}});
+          } catch {}
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务 revision 已变化：期望 ${expectedRevision}，当前 ${currentRevision || '(unknown)'}；请重新读取任务后重试`,
+            code: 'LINK_OPS_REVISION_CONFLICT',
+            retryable: true,
+          });
+        }
+        if (currentRevision && currentRevision !== expectedRevision && existingIdentityMatches) {
+          let auditPending = false;
+          try {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-product-attribute-idempotent-replay',
+              actor,
+              ...requestMeta(req),
+              task: {id: task.id, revision: currentRevision},
+              binding: projectProductAttributeBindingCommit(task, {idempotentReplay: true}),
+            });
+          } catch {
+            auditPending = true;
+          }
+          return sendJson(res, 200, {
+            ok: !auditPending,
+            bindingCommitted: true,
+            repositoryEventCommitted: true,
+            readbackVerified: true,
+            auditPending,
+            stage: auditPending ? 'binding_committed_audit_pending' : 'binding_committed_verified',
+            task: projectLinkOpsTaskForClient(task),
+            binding: projectProductAttributeBindingCommit(task, {idempotentReplay: true}),
+          });
+        }
+        const legacyRecovery = await prepareLegacyPreValidRecoveryEvidence(task);
+        const bindingTask = legacyRecovery.task;
+        const historicalAuditEvidence = await descriptionBindingHistoricalAuditEvidence(
+          args.auditFile,
+          taskRef,
+          legacyRecovery.proofs,
+        );
+        if (historicalAuditEvidence.unavailable) {
+          return sendJson(res, 503, {
+            ok: false,
+            error: '任务历史审计当前不可读，无法证明从未尝试生产写；商品属性绑定已按失败关闭',
+            code: 'PRODUCT_ATTRIBUTE_BINDING_AUDIT_UNAVAILABLE',
+          });
+        }
+        if (!historicalAuditEvidence.ok) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务历史审计已有生产写入/提交不确定性证据，禁止绑定商品属性：${historicalAuditEvidence.reasons.join(', ')}`,
+            code: 'PRODUCT_ATTRIBUTE_BINDING_PRIOR_WRITE_EVIDENCE',
+          });
+        }
+        const currentWriteGate = descriptionBindingPriorWriteEvidence(bindingTask);
+        if (!currentWriteGate.ok) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务仍有未被同 run 执行器证据证明的生产写入/不确定性，禁止绑定商品属性：${currentWriteGate.reasons.join(', ')}`,
+            code: 'PRODUCT_ATTRIBUTE_BINDING_PRIOR_WRITE_EVIDENCE',
+            artifactErrors: legacyRecovery.errors.slice(0, 5),
+          });
+        }
+        if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
+        linkOpsExecutionLocks.add(lockId);
+        try {
+          const payload = bindingTask.openapiPublishPayload;
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '任务没有可绑定商品属性的 openapiPublishPayload',
+              code: 'PRODUCT_ATTRIBUTE_PAYLOAD_MISSING',
+            });
+          }
+          if (payloadHasDualProductAttributeLists(payload)) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '任务 payload 同时含 product_attribute_list 与 productAttributeList，拒绝绑定（不得静默删除任一列表）',
+              code: 'PRODUCT_ATTRIBUTE_DUAL_LIST_PRESENT',
+            });
+          }
+          if (!Array.isArray(payload?.product_attribute_list ?? payload?.productAttributeList)) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '任务 payload 缺 product_attribute_list，无法受控追加白名单属性',
+              code: 'PRODUCT_ATTRIBUTE_LIST_MISSING',
+            });
+          }
+          const targetSn = productAttributeTargetStandardGoodsSn(payload);
+          if (!targetSn.ok) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: targetSn.blockers.map(row => row.message).join('；'),
+              code: targetSn.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_TARGET_IDENTITY_INVALID',
+            });
+          }
+          const taskModel = productModelFromPayload(payload);
+          if (!taskModel.ok) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: taskModel.blockers.map(row => row.message).join('；'),
+              code: taskModel.blockers[0]?.code || 'PAYLOAD_PRODUCT_MODEL_INVALID',
+            });
+          }
+          const aliasContext = loadProductAliasContextSync();
+          if (!aliasContext.available) {
+            return sendJson(res, 503, {
+              ok: false,
+              error: `货号别名注册表/商品目录当前不可读：${aliasContext.error || '未知原因'}`,
+              code: 'PRODUCT_ALIAS_REGISTRY_UNAVAILABLE',
+            });
+          }
+          const verifiedAt = new Date().toISOString();
+          const donorVerification = await verifyDonorProductAttributeLive({
+            donorStore,
+            donorSkc,
+            attributeId,
+            aliasContext,
+            taskRawCode: targetSn.standardGoodsSn,
+            taskModelValue: taskModel.value,
+            verifiedAt,
+          });
+          if (!donorVerification.ok) {
+            const first = donorVerification.blockers[0] || {};
+            try {
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-product-attribute-donor-rejected',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef},
+                donor: {storeKey: donorStore, skc: donorSkc},
+                attributeId,
+                code: first.code || '',
+                error: first.message || '',
+                blockerCount: donorVerification.blockers.length,
+              });
+            } catch {}
+            return sendJson(res, 409, {
+              ok: false,
+              error: `donor 链接独立核验失败：${first.message || '未知原因'}`,
+              code: first.code || 'DONOR_VERIFICATION_FAILED',
+              blockers: donorVerification.blockers.map(row => ({code: row.code, message: row.message})).slice(0, 12),
+              safety: {realPublishOccurred: false, dryRunAttempted: false},
+            });
+          }
+          const evidence = donorVerification.evidence;
+          const attributeValueId = donorVerification.attributeValueId;
+          const bindingRequestKey = productAttributeBindingRequestKey({
+            taskId: taskRef,
+            targetStore,
+            baseTaskRevision: currentRevision,
+            attributeId,
+            attributeValueId,
+            donorStore,
+            donorSkc,
+            donorSpu: donorVerification.donorSpu,
+            evidenceSha256: evidence.evidenceSha256,
+          });
+          const bound = bindApprovedProductAttributeToTask(bindingTask, targetStore, {
+            attributeId,
+            attributeValueId,
+            donorEvidence: donorVerification,
+          }, actor, req, {
+            baseTaskRevision: currentRevision,
+            bindingRequestKey,
+          });
+          if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+            const error = new Error('商品属性绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用');
+            error.status = 503;
+            error.code = 'PRODUCT_ATTRIBUTE_BINDING_GATEWAY_UNAVAILABLE';
+            throw error;
+          }
+          const persisted = await args.linkOpsStoreGateway.updateTaskRecord(taskRef, bound.task, {
+            expectedRevision: currentRevision,
+            actorUser: actorUser(actor, req),
+          });
+          let readbackTask = persisted;
+          let readbackVerified = false;
+          try {
+            const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
+            const verifyGate = validateProductAttributeBindingLock(verifyFound.task, verifyFound.task?.openapiPublishPayload);
+            if (verifyFound.task?.productAttributeBinding?.bindingRequestKey === bindingRequestKey
+              && Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)
+              && verifyGate.ok) {
+              readbackTask = verifyFound.task;
+              readbackVerified = true;
+            }
+          } catch {}
+          let auditPending = false;
+          try {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-product-attribute-bound',
+              actor,
+              ...requestMeta(req),
+              task: {id: persisted.id, revision: persisted.repositoryRevision, stores: taskTargetStores(persisted), writeStores: taskWriteStores(persisted)},
+              binding: projectProductAttributeBindingCommit(persisted),
+            });
+          } catch {
+            auditPending = true;
+          }
+          return sendJson(res, 200, {
+            ok: readbackVerified && !auditPending,
+            bindingCommitted: true,
+            repositoryEventCommitted: true,
+            readbackVerified,
+            auditPending,
+            stage: !readbackVerified
+              ? 'binding_committed_readback_unverified'
+              : auditPending
+                ? 'binding_committed_audit_pending'
+                : 'binding_committed_needs_description_rebind',
+            task: projectLinkOpsTaskForClient(readbackTask),
+            binding: projectProductAttributeBindingCommit(readbackTask),
+            nextStep: {
+              command: 'prepare-descriptions',
+              note: '商品属性已绑定同一任务；旧描述绑定保持原样但已按设计失效，请用原始审核 HTML 在同一任务重新绑定描述（新 binding/revision 会自动锚定属性增强后的 payload），之后重新预演通过才可提交。',
+              realPublish: false,
+            },
+          });
+        } catch (error) {
+          const mapped = linkOpsRepositoryHttpDetails(error);
+          if (mapped) {
+            try {
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-product-attribute-failed',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef},
+                error: String(error?.message || error).slice(0, 500),
+                code: error?.code || mapped.body?.code || '',
+              });
+            } catch {}
+            return sendJson(res, mapped.status, mapped.body);
+          }
+          try {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-product-attribute-failed',
               actor,
               ...requestMeta(req),
               task: {id: taskRef},

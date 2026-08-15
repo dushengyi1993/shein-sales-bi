@@ -220,6 +220,55 @@ throws('legacy note and heading conflict is rejected', () => extractTrilingualCo
   legacy5110NoteShape.replace('<div class="note">英文卖点评分', '<h3>阿文</h3><div class="note">英文卖点评分'),
 ), /DESCRIPTION_HTML_EXTRACT_INVALID/);
 
+// --- legacy s9 fully unlabeled (SK-794 shape): three <pre dir> blocks with
+// no explicit language labels; only unique direction+script classification is
+// accepted ---
+const legacyUnlabeledShape = `<!doctype html><html><body><section id="s9"><h2>9. 三语核心卖点</h2>
+<div class="copy-wrap"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext" dir="ltr">${code(enLines)}</pre></div>
+<div class="copy-wrap right"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext right" dir="rtl">${code(arLines)}</pre></div>
+<div class="copy-wrap"><div class="copybar"><button class="copy-btn" type="button">一键复制</button></div><pre class="copybox copytext" dir="ltr">${code(zhLines)}</pre></div>
+</section></body></html>`;
+const legacyUnlabeledRows = extractTrilingualCoreSellingPointsAuto(legacyUnlabeledShape);
+check('legacy unlabeled direction+script selects s9', legacyUnlabeledRows.sectionUsed, 's9');
+check('legacy unlabeled en exact', JSON.stringify(legacyUnlabeledRows.extracted.en.lines), JSON.stringify(enLines));
+check('legacy unlabeled ar exact', JSON.stringify(legacyUnlabeledRows.extracted.ar.lines), JSON.stringify(arLines));
+check('legacy unlabeled zh exact', JSON.stringify(legacyUnlabeledRows.extracted['zh-cn'].lines), JSON.stringify(zhLines));
+const legacyUnlabeledBytes = Buffer.from(legacyUnlabeledShape, 'utf8');
+const legacyUnlabeledSha = crypto.createHash('sha256').update(legacyUnlabeledBytes).digest('hex');
+const legacyUnlabeledVerified = verifyDescriptionMaterialAgainstHtml(legacyUnlabeledShape, legacyUnlabeledBytes, {
+  sourceFileBasename: 'SK-794-review.html',
+  sourceFileSha256: legacyUnlabeledSha,
+  section: 'auto',
+});
+check('legacy unlabeled verify path material rows exact', JSON.stringify(legacyUnlabeledVerified.material.rows.en.lines), JSON.stringify(enLines));
+throws('legacy unlabeled missing pre dir rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyUnlabeledShape.replace(`dir="ltr">${code(zhLines)}`, `>${code(zhLines)}`),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy unlabeled duplicate Latin classification rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyUnlabeledShape.replace(code(zhLines), code(enLines)),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy unlabeled numeric LTR block rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyUnlabeledShape.replace(code(enLines), code(numericLines)),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy unlabeled rtl without Arabic script rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyUnlabeledShape.replace(`dir="rtl">${code(arLines)}`, `dir="rtl">${code(enLines)}`),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy unlabeled mixed Arabic+Han block rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyUnlabeledShape.replace(code(arLines), code([...arLines.slice(0, 4), '中文混入'])),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+throws('legacy unlabeled 4-line block rejected', () => extractTrilingualCoreSellingPointsAuto(
+  legacyUnlabeledShape.replace(code(zhLines), code(zhLines.slice(0, 4))),
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+// Explicit labels keep strict precedence over script classification: the
+// same three-block structure with only two labels stays rejected, never
+// script-guessed.
+const legacyPartiallyLabeled = legacyUnlabeledShape
+  .replace('<pre class="copybox copytext right" dir="rtl">', '<h3>阿拉伯</h3><pre class="copybox copytext right" dir="rtl">')
+  .replace(`<pre class="copybox copytext" dir="ltr">${code(zhLines)}`, `<h3>中文</h3><pre class="copybox copytext" dir="ltr">${code(zhLines)}`);
+throws('legacy partial labels keep strict rejection', () => extractTrilingualCoreSellingPointsAuto(
+  legacyPartiallyLabeled,
+), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+
 const failed = checks.filter(row => !row.pass);
 for (const row of failed) console.error(`FAIL ${row.label}\n  expected: ${row.expected}\n  actual:   ${row.actual}`);
 console.log(`link_ops_description_material_extract: ${checks.length - failed.length}/${checks.length} passed`);
