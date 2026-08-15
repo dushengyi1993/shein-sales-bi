@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'daily-inventory-plan-'));
@@ -177,6 +178,9 @@ assert.equal(plan.counts.crossStoreSoldOutActionable, 1);
 assert.equal(plan.counts.outShelfLinksExcluded, 1);
 assert.equal(plan.counts.waitShelfLinksExcluded, 1);
 assert.equal(plan.counts.soldOutLinksIgnoredSameStoreOnShelf, 1);
+assert.equal(plan.counts.etTotalRows, 9);
+assert.equal(plan.counts.etMatchedCurrentDayRows, 9);
+assert.equal(plan.sourceEvidence.find(row => row.store === 'ET')?.matchedCurrentDayEtRows, 9);
 assert.deepEqual(plan.lowEtAllocations.map(row => row.targetUsableInventory), [2, 2, 2, 1, 1, 0]);
 assert.equal(plan.actionable.find(row => row.skc === 'skc-scarce')?.targetUsableInventory, 10);
 assert.equal(plan.ignored.find(row => row.skc === 'skc-stable')?.decision, 'recent_sale_scarcity_inventory_within_band');
@@ -219,4 +223,145 @@ assert.equal(conflictPlan.blockers.length, 0);
 assert.equal(conflictPlan.actionable.some(row => row.skc === 'skc-all-sold-a'), false);
 assert.equal(conflictPlan.linkAlerts.find(row => row.skc === 'skc-all-sold-a')?.decision, 'openapi_linksdata_canonical_evidence_conflict');
 assert.equal(conflictPlan.actionable.some(row => row.skc === 'skc-all-sold-b'), true);
-console.log(JSON.stringify({ok: true, checks: 39}, null, 2));
+
+const yesterday = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(Date.now() - 86400000));
+const builderPath = path.join(ROOT, 'scripts', 'inventory', 'build_daily_inventory_replenishment_plan.mjs');
+const policyPath = path.join(ROOT, 'config', 'inventory_replenishment_policy.json');
+const storesPath = path.join(tmp, 'stores.json');
+const linksPath = path.join(tmp, 'linksData.json');
+
+// Global current-day ET gate: a fresh cachedAt with an all-old ET business
+// day must block the whole plan (executable=false) instead of publishing an
+// empty executable plan.
+const oldBiFile = path.join(tmp, 'inventoryTrend-old.json');
+const oldBi = JSON.parse(await fs.readFile(path.join(tmp, 'inventoryTrend.json'), 'utf8'));
+oldBi.data.inventoryDepletion.products = oldBi.data.inventoryDepletion.products
+  .map(row => ({...row, et_store_snapshot_date: yesterday}));
+await fs.writeFile(oldBiFile, JSON.stringify(oldBi));
+const oldOut = path.join(tmp, 'plan-old.json');
+process.argv = [
+  process.execPath, builderPath,
+  '--date', date, '--policy', policyPath, '--stores', storesPath,
+  '--products-dir', productsDir, '--bi-data', oldBiFile, '--links-data', linksPath,
+  '--out', oldOut,
+];
+try {
+  await import(`./inventory/build_daily_inventory_replenishment_plan.mjs?old=${Date.now()}`);
+} finally {
+  process.exitCode = 0;
+  process.argv = originalArgv;
+}
+const oldPlan = JSON.parse(await fs.readFile(oldOut, 'utf8'));
+assert.equal(oldPlan.executable, false);
+assert.ok(oldPlan.blockers.some(row => row.startsWith('BI/ET projection has no matched current-day operational rows')));
+assert.equal(oldPlan.counts.etMatchedCurrentDayRows, 0);
+assert.equal(oldPlan.counts.etTotalRows, 9);
+assert.equal(oldPlan.actionable.length, 0);
+assert.ok(oldPlan.linkAlerts.some(row => row.decision === 'et_snapshot_not_current_day'));
+assert.equal(oldPlan.sourceEvidence.find(row => row.store === 'ET')?.matchedCurrentDayEtRows, 0);
+
+// Mixed old/new stays per-row: one current-day matched row suppresses the
+// global blocker, current-day rows still produce safe actions, and old rows
+// keep their per-row blocks.
+const mixedBiFile = path.join(tmp, 'inventoryTrend-mixed.json');
+const mixedBi = JSON.parse(await fs.readFile(path.join(tmp, 'inventoryTrend.json'), 'utf8'));
+mixedBi.data.inventoryDepletion.products = mixedBi.data.inventoryDepletion.products
+  .map(row => row.match_key === 'LOW1' ? row : {...row, et_store_snapshot_date: yesterday});
+await fs.writeFile(mixedBiFile, JSON.stringify(mixedBi));
+const mixedOut = path.join(tmp, 'plan-mixed.json');
+process.argv = [
+  process.execPath, builderPath,
+  '--date', date, '--policy', policyPath, '--stores', storesPath,
+  '--products-dir', productsDir, '--bi-data', mixedBiFile, '--links-data', linksPath,
+  '--out', mixedOut,
+];
+try {
+  await import(`./inventory/build_daily_inventory_replenishment_plan.mjs?mixed=${Date.now()}`);
+} finally {
+  process.exitCode = 0;
+  process.argv = originalArgv;
+}
+const mixedPlan = JSON.parse(await fs.readFile(mixedOut, 'utf8'));
+assert.equal(mixedPlan.executable, true);
+assert.equal(mixedPlan.counts.etMatchedCurrentDayRows, 1);
+assert.ok(!mixedPlan.blockers.some(row => row.startsWith('BI/ET projection has no matched current-day operational rows')));
+assert.ok(mixedPlan.actionable.length > 0);
+assert.ok(mixedPlan.linkAlerts.some(row => row.decision === 'et_snapshot_not_current_day'));
+assert.equal(mixedPlan.counts.lowEtAllocationRows, 6);
+
+// Executor hard ceiling behavior: 1001 actionable rows with --max-rows 1000
+// must fail before any write (no result file, no journal) instead of slicing.
+const executorPolicyVersion = JSON.parse(await fs.readFile(policyPath, 'utf8')).policyVersion;
+const executorActions = Array.from({length: 1001}, (_, index) => ({
+  storeKey: 'A',
+  spu: `spu-ceiling-${index}`,
+  skc: `skc-ceiling-${index}`,
+  skuCode: `sku-ceiling-${index}`,
+  supplierCode: `SUP-${index}产品`,
+  canonical: `SUP-${index}产品`,
+  matchKey: `SUP${index}`,
+  platformUsableInventory: 5,
+  targetUsableInventory: 10,
+  inventoryAction: 'increase',
+  replenishmentQuantity: 5,
+  reductionQuantity: 0,
+  ruleClass: 'legacy_virtual_inventory_top_up',
+}));
+const executorPlanFile = path.join(tmp, 'executor-plan.json');
+const executorPlan = {
+  schemaVersion: 'daily-inventory-replenishment-plan/v1',
+  date,
+  policyVersion: executorPolicyVersion,
+  generatedAt: now,
+  sourceEvidence: [],
+  blockers: [],
+  executable: true,
+  actionable: executorActions,
+  linkAlerts: [],
+  ignored: [],
+  lowEtAllocations: [],
+  detailRefreshTargets: [],
+  crossStoreSoldOutFindings: [],
+  etAlerts: [],
+  counts: {actionable: executorActions.length},
+};
+executorPlan.payloadHash = stableInventoryHash({
+  schemaVersion: executorPlan.schemaVersion,
+  date: executorPlan.date,
+  policyVersion: executorPlan.policyVersion,
+  actionable: executorPlan.actionable,
+  lowEtAllocations: executorPlan.lowEtAllocations,
+  detailRefreshTargets: executorPlan.detailRefreshTargets,
+  sourceEvidence: [],
+});
+await fs.writeFile(executorPlanFile, JSON.stringify(executorPlan));
+await fs.writeFile(path.join(tmp, 'executor-bi.json'), JSON.stringify({cachedAt: now, data: {}}));
+await fs.writeFile(path.join(tmp, 'executor-links.json'), JSON.stringify({cachedAt: now, data: {}}));
+await fs.writeFile(path.join(tmp, 'executor-config.json'), JSON.stringify({}));
+const executorOut = path.join(tmp, 'executor-result.json');
+process.argv = [
+  process.execPath,
+  path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'),
+  '--plan', executorPlanFile,
+  '--config', path.join(tmp, 'executor-config.json'),
+  '--bi-data', path.join(tmp, 'executor-bi.json'),
+  '--links-data', path.join(tmp, 'executor-links.json'),
+  '--out', executorOut,
+  '--dry-run',
+  '--max-rows', '1000',
+];
+let executorError = null;
+try {
+  await import(`./inventory/execute_daily_inventory_replenishment_plan.mjs?ceiling=${Date.now()}`);
+} catch (error) {
+  executorError = error;
+} finally {
+  process.exitCode = 0;
+  process.argv = originalArgv;
+}
+assert.ok(executorError, 'the executor must fail when actionable rows exceed --max-rows');
+assert.match(String(executorError?.message || ''), /exceed the per-run row ceiling/);
+await assert.rejects(fs.access(executorOut), 'no result file may be written for a ceiling failure');
+await assert.rejects(fs.access(`${executorOut}.journal.ndjson`), 'no journal may be written for a ceiling failure');
+
+console.log(JSON.stringify({ok: true, checks: 59}, null, 2));

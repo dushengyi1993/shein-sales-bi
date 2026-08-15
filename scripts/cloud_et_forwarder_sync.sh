@@ -20,7 +20,8 @@ ET_CHROME_PROFILE_NAME="persistent-et-forwarder-profile"
 ET_CHROME_TMP_DIR="${SHEIN_ET_CHROME_TMP_DIR:-/tmp/shein-bi-et-forwarder-chrome-tmp}"
 ET_CLEANUP_LEGACY_CHROME_TMP="${SHEIN_ET_CLEANUP_LEGACY_CHROME_TMP:-1}"
 ET_TRANSPORT="${SHEIN_ET_TRANSPORT:-http}"
-ET_HTTP_SESSION_FILE="${SHEIN_ET_HTTP_SESSION_FILE:-$ROOT/state/et_forwarder_http_session.local.json}"
+ET_RUNTIME_ROOT="${SHEIN_ET_RUNTIME_ROOT:-/srv/shein-bi/runtime/et-forwarder}"
+ET_HTTP_SESSION_FILE="${SHEIN_ET_HTTP_SESSION_FILE:-$ET_RUNTIME_ROOT/session/et_forwarder_http_session.local.json}"
 
 resolve_date() {
   local target="$1"

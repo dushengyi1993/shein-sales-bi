@@ -211,6 +211,8 @@ assert.match(etForwarderSync, /SHEIN_ET_SYNC_PREWARM_SECTION_TIMEOUT_SECONDS:-45
   'synchronous ET projections must stay inside the checkpoint deadline');
 assert.match(etForwarderSync, /--sections "\$PORTAL_REFRESH_SECTIONS"/,
   'every ET-dependent section must be handed to the bounded queue after warehouse commit');
+assert.match(etForwarderSync, /PORTAL_REFRESH_SECTIONS="\$\{SHEIN_ET_REFRESH_SECTIONS:-orders,waybills,afterSales,inventoryTrend\}"/,
+  'inventoryTrend stays in the async section queue and is never part of the synchronous checkpoint');
 assert.match(linkBusinessSync, /write_chunk_result "warning"/,
   'fetch-only chunks must preserve partial progress as warning evidence instead of aborting at the first store');
 assert.match(read('scripts/cloud_link_business_store_fetch.sh'), /--fast-start/);

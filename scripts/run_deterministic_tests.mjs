@@ -159,6 +159,7 @@ const tests = [
   'scripts/test_storage_fee_bill_canonicalization.mjs',
   'scripts/test_et_storage_fee_sync_contract.mjs',
   'scripts/test_et_http_transport.mjs',
+  'scripts/test_et_forwarder_runtime_contract.mjs',
   'scripts/test_read_transport_policy.mjs',
   'scripts/test_warehouse_business_logic_contract.mjs',
   'scripts/test_order_status_effective_evidence_contract.mjs',

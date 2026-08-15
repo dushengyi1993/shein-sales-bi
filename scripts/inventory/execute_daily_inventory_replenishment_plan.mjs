@@ -228,7 +228,14 @@ for (const evidence of asArray(plan.sourceEvidence).filter(row => currentSourceT
     throw new Error(`Plan source changed after hash generation: ${evidence.store}`);
   }
 }
-const rows = asArray(plan.actionable).slice(0, args.maxRows);
+// Hard per-run row ceiling: the plan must never be partially executed.
+// Fail before the row loop, before any OpenAPI call and before the journal
+// is created, so a plan larger than --max-rows produces zero writes.
+const planActionableRows = asArray(plan.actionable);
+if (planActionableRows.length > args.maxRows) {
+  throw new Error(`Plan actionable rows ${planActionableRows.length} exceed the per-run row ceiling ${args.maxRows}; refusing partial execution before any write`);
+}
+const rows = planActionableRows;
 if (plan?.executionConstraints?.decreaseOnly === true && rows.some(row => (
   Number(row.targetUsableInventory) >= Number(row.platformUsableInventory)
 ))) {

@@ -1,5 +1,31 @@
 # SHEIN BI cloud systemd units
 
+## ET forwarder persistent runtime
+
+The ET OCR Python runtime and HTTP session live under
+`/srv/shein-bi/runtime/et-forwarder`, never inside `/opt/shein-bi/app`.
+During a release deployment, install the hash-locked wheel set explicitly
+before installing or starting the tracked ET units:
+
+```bash
+sudo -n env SHEIN_ET_RUNTIME_ROOT=/srv/shein-bi/runtime/et-forwarder \
+  bash /opt/shein-bi/app/scripts/ensure_et_forwarder_runtime.sh --install
+sudo -n install -m 0644 /opt/shein-bi/app/infra/systemd/shein-bi-cloud-et-forwarder.service /etc/systemd/system/
+sudo -n install -m 0644 /opt/shein-bi/app/infra/systemd/shein-bi-et-low-inventory-recheck.service /etc/systemd/system/
+sudo -n systemctl daemon-reload
+```
+
+`ExecStartPre` is verify-only and never accesses PyPI. A missing or mismatched
+runtime fails the unit closed with an instruction to run the explicit install.
+The installer retains old versioned venvs and atomically switches `current`.
+
+Rollback to a release that still points at checkout-local `.venv-et` is not a
+blind unit rollback: first stop the ET and inventory units, retain the `/srv`
+runtime and session, then either keep these tracked unit files or provide
+explicit compatibility paths. Resume ET only after the OCR import probe and a
+read-only ET login/sync probe pass; resume inventory only after a fresh
+`inventoryTrend` business-date check.
+
 本文件只维护 unit/timer 的部署参数与安全护栏；生产排班、人工补跑和验收见 [../../docs/cloud-bi-operations.md](../../docs/cloud-bi-operations.md)。调度事实以各 `.timer` 的 `OnCalendar` 为准。
 
 ## 当前启用集与条件启用集（2026-08-07）
