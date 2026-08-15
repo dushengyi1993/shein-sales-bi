@@ -37,6 +37,106 @@ const spacedPayload = {multi_language_desc_list: [{language: 'en', name: `${spac
 const sanitizedSpacedEcho = __testHooks.sanitizePublishPlatformText(spacedLine.replace(/\s+/g, ' '), spacedPayload, 300);
 check('whitespace-variant description echo is hash-only', sanitizedSpacedEcho, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes('Reviewed point'));
 
+// --- 6863 pre-validation diagnostics: redaction is fragment-driven, so
+// ordinary platform pre-valid messages stay visible while any exact,
+// substring, or whitespace-variant echo of reviewed description text is
+// still hash-only before truncation. ---
+const descPayload = {multi_language_desc_list: [
+  {language: 'en', name: 'Reviewed EN five lines\nsecond line\nthird line\nfourth line\nfifth line'},
+  {language: 'ar', name: 'وصف عربي مراجعة\nسطر ثاني\nسطر ثالث\nسطر رابع\nسطر خامس'},
+]};
+const ordinaryPreValidMessage = 'sku_code 不能为空：请填写库存 sku_code 后再提交';
+check('non-allowlisted platform free text is hash-only when descriptions exist', __testHooks.sanitizePublishPlatformText(ordinaryPreValidMessage, descPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('non-allowlisted field label is hash-only when descriptions exist', __testHooks.sanitizePublishPlatformText('sku_info_list', descPayload, 80), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+const safeInputCurrentDiagnostic = 'Because Power Supply(147) selected Wall Plug(1047), Input current(1002323) is required';
+check('allowlisted input-current diagnostic stays visible', __testHooks.sanitizePublishPlatformText(safeInputCurrentDiagnostic, descPayload, 300), safeInputCurrentDiagnostic);
+const longOrdinaryDiagnostic = `base_info 缺少必填字段：${'sku_code '.repeat(60)}请补充后再提交`;
+check('long non-allowlisted diagnostic is hash-only', __testHooks.sanitizePublishPlatformText(longOrdinaryDiagnostic, descPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('exact multi-line description echo is hash-only', __testHooks.sanitizePublishPlatformText(descPayload.multi_language_desc_list[0].name, descPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('embedded exact description line echo is hash-only', __testHooks.sanitizePublishPlatformText('field error: second line', descPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes('second line'));
+const longSingleLine = `Reviewed long single-line point ${'y'.repeat(360)}`;
+const truncatedEchoPayload = {multi_language_desc_list: [
+  {language: 'en', name: `${longSingleLine}\nsecond line\nthird line\nfourth line\nfifth line`},
+]};
+const platformCutEcho = __testHooks.sanitizePublishPlatformText(`desc error: ${longSingleLine.slice(0, 180)}`, truncatedEchoPayload, 300);
+check('platform-truncated long description echo is hash-only before truncation', platformCutEcho, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes(longSingleLine.slice(0, 80)));
+const spacedLongLine = `Reviewed  double-spaced  long  point ${'z'.repeat(360)}`;
+const spacedLongPayload = {multi_language_desc_list: [
+  {language: 'en', name: `${spacedLongLine}\nsecond line\nthird line\nfourth line\nfifth line`},
+]};
+const wrappedCollapsedEcho = __testHooks.sanitizePublishPlatformText(spacedLongLine.replace(/\s+/g, ' ').slice(0, 160), spacedLongPayload, 300);
+check('whitespace-collapsed truncated long echo is hash-only', wrappedCollapsedEcho, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes('Reviewed double-spaced long point'));
+
+// --- 6863 redaction boundaries: complete short reviewed lines (1-3 chars)
+// and partial echoes below the long-window threshold still redact, while a
+// one-character token inside an unrelated larger diagnostic stays visible. ---
+const shortLinesPayload = {multi_language_desc_list: [{language: 'en', name: 'x\nab\nabc\ndefghij\nklmnopqr'}]};
+check('one-char reviewed line exact echo is hash-only', __testHooks.sanitizePublishPlatformText('x', shortLinesPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('two-char reviewed line echo is hash-only', __testHooks.sanitizePublishPlatformText('value ab value', shortLinesPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('three-char reviewed line echo is hash-only', __testHooks.sanitizePublishPlatformText('prefix abc suffix', shortLinesPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes('abc'));
+check('one-char reviewed line as standalone token is hash-only', __testHooks.sanitizePublishPlatformText('please enter x value', shortLinesPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('one-char token inside non-allowlisted free text remains hash-only', __testHooks.sanitizePublishPlatformText('max value required', shortLinesPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('unrelated non-allowlisted diagnostic remains hash-only', __testHooks.sanitizePublishPlatformText('sku_code 不能为空：请填写库存 sku_code 后再提交', shortLinesPayload, 300), value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+const partialLine = `Reviewed partial echo line ${'q'.repeat(200)}`;
+const partialPayload = {multi_language_desc_list: [{language: 'en', name: `${partialLine}\nsecond\nthird\nfourth\nfifth`}]};
+const prefix63Echo = __testHooks.sanitizePublishPlatformText(`err: ${partialLine.slice(0, 63)}`, partialPayload, 300);
+check('63-char prefix partial echo is hash-only', prefix63Echo, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes(partialLine.slice(0, 32)));
+const prefix31Echo = __testHooks.sanitizePublishPlatformText(`err: ${partialLine.slice(0, 31)}`, partialPayload, 300);
+check('31-char prefix partial echo is hash-only', prefix31Echo, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes(partialLine.slice(0, 16)));
+const middle63Echo = __testHooks.sanitizePublishPlatformText(`err: ${partialLine.slice(40, 103)}`, partialPayload, 300);
+check('63-char middle partial echo is hash-only', middle63Echo, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+const suffix63Echo = __testHooks.sanitizePublishPlatformText(`err: ${partialLine.slice(-63)}`, partialPayload, 300);
+check('63-char suffix partial echo is hash-only', suffix63Echo, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+const spacedPartialLine = `Reviewed  partial  echo  line ${'w'.repeat(180)}`;
+const spacedPartialPayload = {multi_language_desc_list: [{language: 'en', name: `${spacedPartialLine}\nsecond\nthird\nfourth\nfifth`}]};
+const spacedPartial63 = __testHooks.sanitizePublishPlatformText(spacedPartialLine.replace(/\s+/g, ' ').slice(0, 63), spacedPartialPayload, 300);
+check('63-char whitespace-collapsed partial echo is hash-only', spacedPartial63, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes('Reviewed partial echo line'));
+
+// --- 6863 tri-state publish success: compact storage keeps missing success
+// as undefined; only explicit false may prove publish_pre_valid_failed. ---
+const triStateMissing = __testHooks.compactPublishResultForStorage({code: '0', msg: 'OK', info: {}}, {});
+check('compact storage keeps missing success as undefined', triStateMissing?.info?.success, undefined);
+const triStateFalse = __testHooks.compactPublishResultForStorage({code: '0', msg: 'OK', info: {success: false}}, {});
+check('compact storage keeps explicit success=false', triStateFalse?.info?.success, false);
+const triStateTrue = __testHooks.compactPublishResultForStorage({code: '0', msg: 'OK', info: {success: true}}, {});
+check('compact storage keeps explicit success=true', triStateTrue?.info?.success, true);
+for (const [label, value] of [['null', null], ['zero', 0], ['string-false', 'false']]) {
+  const compact = __testHooks.compactPublishResultForStorage({code: '0', msg: 'OK', info: {success: value}}, {});
+  check(`compact storage keeps ${label} success unknown`, compact?.info?.success, undefined);
+}
+const inheritedInfo = Object.create({success: false});
+const inheritedCompact = __testHooks.compactPublishResultForStorage({code: '0', msg: 'OK', info: inheritedInfo}, {});
+check('compact storage rejects inherited success=false', inheritedCompact?.info?.success, undefined);
+
+// Compact storage and blocker construction route every platform echo through
+// the sanitizer: no reviewed fragment can survive into stored or blocker text.
+const preValidInfo = {
+  success: false,
+  pre_valid_result: [
+    {module: 'attribute', form_name: '商品属性', messages: [safeInputCurrentDiagnostic]},
+    {module: 'desc', form_name: 'description', messages: [`description invalid: ${longSingleLine.slice(0, 150)}`, 'second line']},
+  ],
+};
+const preValidMessages = __testHooks.publishPreValidMessages(preValidInfo, truncatedEchoPayload);
+check('pre-valid diagnostics keep allowlisted structured field message visible', preValidMessages.some(text => text.includes(safeInputCurrentDiagnostic)), true);
+check('pre-valid diagnostics redact truncated description echoes', preValidMessages.some(text => /平台回显内容已脱敏/.test(text)), true);
+check('pre-valid diagnostics redact exact line echoes', preValidMessages.some(text => /平台回显内容已脱敏/.test(text) && !text.includes('second line')), true);
+check('pre-valid diagnostics never leak reviewed fragments', preValidMessages.every(text => !text.includes(longSingleLine.slice(0, 60)) && !text.includes('second line') && !text.includes('Reviewed EN five lines')), true);
+const storedResult = __testHooks.compactPublishResultForStorage({
+  httpStatus: 200,
+  code: '0',
+  msg: `description invalid: ${longSingleLine.slice(0, 150)}`,
+  traceId: 't-6863',
+  info: preValidInfo,
+}, truncatedEchoPayload);
+const storedJson = JSON.stringify(storedResult);
+check('compact storage redacts description echoes in msg', /平台回显内容已脱敏/.test(storedResult.msg), true);
+check('compact storage redacts description echoes in pre-valid rows', storedResult.info.pre_valid_result.some(row => row.messages.some(text => /平台回显内容已脱敏/.test(text))), true);
+check('compact storage keeps allowlisted structured pre-valid message', storedResult.info.pre_valid_result.some(row => row.messages.includes(safeInputCurrentDiagnostic)), true);
+check('compact storage never leaks reviewed fragments', !storedJson.includes(longSingleLine.slice(0, 60)) && !storedJson.includes('second line') && !storedJson.includes('Reviewed EN five lines'), true);
+const blockerText = `publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；')}`;
+check('blocker construction never leaks reviewed fragments', !blockerText.includes(longSingleLine.slice(0, 60)) && !blockerText.includes('second line') && !blockerText.includes('Reviewed EN five lines'), true);
+
 const basePayload = {
   product_attribute_list: [
     {attribute_id: 147, attribute_value_id: 1047, attribute_name: 'Power Supply'},

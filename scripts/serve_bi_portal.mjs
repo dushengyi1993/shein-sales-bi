@@ -3677,6 +3677,11 @@ function projectLinkOpsPreflightForClient(preflight) {
   };
 }
 
+function strictOwnBooleanField(object, key) {
+  if (!object || typeof object !== 'object' || Array.isArray(object) || !Object.hasOwn(object, key)) return undefined;
+  return object[key] === true ? true : (object[key] === false ? false : undefined);
+}
+
 function projectLinkOpsPublishResultForClient(publishResult) {
   if (!publishResult || typeof publishResult !== 'object') return null;
   const info = publishResult.info && typeof publishResult.info === 'object' ? publishResult.info : {};
@@ -3693,10 +3698,21 @@ function projectLinkOpsPublishResultForClient(publishResult) {
     code: publishResult.code == null ? '' : String(publishResult.code),
     msg: sanitizeLinkOpsClientText(publishResult.msg || '', 240),
     info: {
-      success: info.success === true,
+      success: strictOwnBooleanField(info, 'success'),
       pre_valid_result: preValid,
     },
   };
+}
+
+/**
+ * Tri-state projection of the platform success flag for durable audit
+ * records: undefined when info.success was absent (unknown outcome), false/
+ * true only when the platform explicitly returned them. hasInfo alone is not
+ * proof; only explicitSuccess===false proves publish_pre_valid_failed.
+ */
+function projectPublishResultExplicitSuccess(publishResult) {
+  const info = publishResult?.info && typeof publishResult.info === 'object' ? publishResult.info : null;
+  return strictOwnBooleanField(info, 'success');
 }
 
 function projectLinkOpsProductExecutorForClient(executor) {
@@ -4873,7 +4889,7 @@ function executionPreValidMessagesFromRun(run) {
       if (text) out.push(`${label}：${text}`);
     }
   }
-  if (!out.length && run?.publishResult?.info?.success === false) {
+  if (!out.length && strictOwnBooleanField(run?.publishResult?.info, 'success') === false) {
     out.push('平台返回未通过，但没有给出具体字段明细。');
   }
   return [...new Set(out)];
@@ -4929,13 +4945,14 @@ function cleanHumanBlockerList(values) {
   return uniqueMessages(cleaned);
 }
 
-function linkOpsHumanStatus(task) {
+function linkOpsHumanStatus(task, {publishPreValidFailed = false} = {}) {
   const status = String(task?.status || '');
   const state = String(task?.execution?.state || task?.lifecycle?.lifecycleStatus || '');
   if (status === 'done') return '完成';
   if (status === 'submitted_but_readback_pending' || state === 'submitted') return '已提交，正在确认结果';
   if (status === 'needs_manual_resolve' || /readback_failed|suspicious/.test(state)) return '已提交，但需要人工确认结果';
-  if (state === 'publish_pre_valid_failed') return 'SHEIN 预校验未通过，正在重新检查资料';
+  if (publishPreValidFailed) return 'SHEIN 预校验未通过，正在重新检查资料';
+  if (state === 'publish_pre_valid_failed') return '平台结果待核验，正在检查回执';
   if (state === 'openapi_product_preflight_ready' || state === 'link_maintenance_preflight_ready') return '资料已通过，等你一句话确认执行';
   if (state === 'blocked') return '卡住了，需要补充';
   if (status === 'waiting_review') return '等你确认执行';
@@ -4947,8 +4964,34 @@ function linkOpsPublishResultSucceeded(result = {}) {
   if (!result || typeof result !== 'object') return false;
   if (String(result.code ?? '') !== '0') return false;
   const info = result.info && typeof result.info === 'object' ? result.info : null;
-  if (info && info.success === false) return false;
-  return Boolean(info?.success === true || info?.spu_name || asArray(info?.skc_list).length || result.submitted === true);
+  return strictOwnBooleanField(info, 'success') === true;
+}
+
+function linkOpsExecutorExplicitPreValidFailure(executor = {}) {
+  const result = executor?.publishResult && typeof executor.publishResult === 'object'
+    ? executor.publishResult
+    : null;
+  const info = result?.info && typeof result.info === 'object' ? result.info : null;
+  return String(executor?.state || '') === 'publish_pre_valid_failed'
+    && String(result?.code ?? '') === '0'
+    && strictOwnBooleanField(info, 'success') === false;
+}
+
+function linkOpsProductExecutorSubmitted(executor = {}) {
+  return String(executor?.state || '') === 'submitted'
+    && linkOpsPublishResultSucceeded(executor?.publishResult);
+}
+
+function linkOpsMaintenanceExecutorSubmitted(executor = {}) {
+  const adapterEvidence = executor?.adapterEvidence && typeof executor.adapterEvidence === 'object'
+    ? executor.adapterEvidence
+    : null;
+  return String(executor?.state || '') === 'submitted'
+    && String(executor?.adapterKind || '') === 'link_maintenance_openapi_executor'
+    && strictOwnBooleanField(adapterEvidence, 'realSubmit') === true
+    && strictOwnBooleanField(adapterEvidence, 'writeAttempted') === true
+    && strictOwnBooleanField(adapterEvidence, 'recoveryRequired') === false
+    && String(executor?.publishResult?.code ?? '') === '0';
 }
 
 function linkOpsPublishResultSummaryFromExecutors(execs = []) {
@@ -5119,19 +5162,10 @@ function buildChatExecutionAnswer(task, {userMessage = ''} = {}) {
     || execs.some(x => x?.readback && x.readback.ok === false && /not_found|weak|failed/i.test(String(x.readback.status || '')));
   const publishSummary = linkOpsPublishResultSummaryFromExecutors(execs);
   const publishSummaryLines = formatLinkOpsPublishResultSummary(publishSummary);
-  const publishPreValidFailed = !submitted && hasProductPublishIntent && (
-    state === 'publish_pre_valid_failed'
-    || execs.some(x => String(x?.state || '') === 'publish_pre_valid_failed')
-    || execs.some(x => {
-      const result = x?.publishResult && typeof x.publishResult === 'object' ? x.publishResult : null;
-      const info = result?.info && typeof result.info === 'object' ? result.info : null;
-      return result
-        && String(result.code ?? '') === '0'
-        && Boolean(info)
-        && (info.success === false || asArray(info.pre_valid_result).length > 0);
-    })
-  );
-  const status = linkOpsHumanStatus(task);
+  const publishPreValidFailed = !submitted
+    && hasProductPublishIntent
+    && execs.some(linkOpsExecutorExplicitPreValidFailure);
+  const status = linkOpsHumanStatus(task, {publishPreValidFailed});
   const lines = [];
   lines.push(`收到，我按你这句“${compactChatLine(userMessage, 80)}”继续处理。`);
   lines.push(`当前状态：${status}。`);
@@ -5855,6 +5889,7 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
           msg: result.publishResult.msg,
           traceId: result.publishResult.traceId,
           hasInfo: result.publishResult.info !== undefined && result.publishResult.info !== null,
+          explicitSuccess: projectPublishResultExplicitSuccess(result.publishResult),
         } : null,
         openapiCalls: Array.isArray(result.openapi?.calls)
           ? result.openapi.calls.map(call => ({
@@ -6602,7 +6637,667 @@ function descriptionBindingWriteEvidence(task) {
   return {ok: reasons.length === 0, reasons};
 }
 
-async function descriptionBindingHistoricalAuditEvidence(file, taskId) {
+/**
+ * Narrow, fail-closed recovery exception for description rebinding.
+ *
+ * A task whose ONLY production-write history is one explicit platform
+ * pre-validation rejection may CAS-rebind reviewed descriptions on the SAME
+ * copy_product_draft task: the platform explicitly refused (publishOrEdit
+ * returned info.success=false), no SHEIN write was submitted, no publish
+ * identity exists, and nothing is locked or pending manual resolution.
+ *
+ * Each execute/write attempt (executor run, identified by runId/childRunId
+ * across its full and projected representations) must prove itself:
+ *
+ *   - the attempt must pair its OWN explicit rejection - its full
+ *     publishResult.info must carry own-property success===false, or its
+ *     projected audit publishResult must carry explicitSuccess===false
+ *     (hasInfo alone or a lifecycle marker is never proof);
+ *   - the attempt must carry no publish identifiers (SPU/SKC/SKU/taskNo/
+ *     version or readback fingerprint ids), no matched/pending readback, and
+ *     no positive submission flag;
+ *   - timeout/timed_out/uncertain_write/error/failed/unknown attempts are
+ *     blocked unless the SAME run pairs its own explicit false and no ids.
+ *
+ * One rejected run never lends proof to another write attempt: every run with
+ * write signals needs its own explicit false result. Non-run aggregate write
+ * flags (execution/writeAudit/history issuedExecuteToExecutor,
+ * sheinWriteAttempted, publishOrEditCall) must be attributable to at least
+ * one proven run and every write-signal run they cover. Any submitted,
+ * timeout, uncertain, missing-result, or identifier-bearing history stays
+ * blocked, and lock/manual-resolve evidence anywhere fails closed.
+ */
+function descriptionBindingExplicitPreValidRejectionEvidence(value) {
+  const BLOCKED_ATTEMPT_STATES = new Set([
+    'timeout',
+    'timed_out',
+    'uncertain_write',
+    'error',
+    'failed',
+    'unknown',
+  ]);
+  const SUBMITTED_OR_UNCERTAIN_STATES = new Set([
+    'submitted',
+    'submitted_but_readback_pending',
+    'submitted_readback_failed',
+    'submitted_readback_matched',
+    'suspicious_write_attempted',
+    'needs_manual_resolve',
+  ]);
+  const POSITIVE_SUBMISSION_FLAGS = ['actualWriteSubmitted', 'submitted', 'submittedPossibly', 'suspiciousWriteAttempted'];
+  const reasons = [];
+  const proof = [];
+  let globalPositiveSeen = false;
+  let globalReadbackSeen = false;
+  let lockedOrManualSeen = false;
+  let attributionFailed = false;
+  const groups = new Map();
+  const keyByRecord = new WeakMap();
+  let anonymousCount = 0;
+  const flaggedNodes = [];
+
+  const inspectReadback = (readback, label) => {
+    if (!readback || typeof readback !== 'object') return;
+    const status = String(readback.status || readback.readbackStatus || '');
+    // 'planned_not_run' and the derived 'submitted_pending_product_readback'
+    // hint are NOT readback outcomes: a code=0 rejection still carries them.
+    const matched = Boolean(readback.ok) && /matched/i.test(status) && Number(readback.matchedCount || 0) > 0;
+    const inFlight = /^(?:submitted|running|planned|pending)$/i.test(status)
+      || /pending_review|pending_readback/i.test(status);
+    if (matched || inFlight) {
+      globalReadbackSeen = true;
+      reasons.push(`${label}.${status || '?'}`);
+    }
+  };
+
+  const groupKeyOf = (record, label) => {
+    const id = String(record?.runId || record?.childRunId || '').trim();
+    if (id) return `run:${id}`;
+    let key = keyByRecord.get(record);
+    if (!key) {
+      anonymousCount += 1;
+      key = `anon:${label}:${anonymousCount}`;
+      keyByRecord.set(record, key);
+    }
+    return key;
+  };
+
+  const hasWriteSignal = node => {
+    if (!node || typeof node !== 'object') return false;
+    if (node.publishResult && typeof node.publishResult === 'object') return true;
+    if (node.sheinWriteAttempted === true || node.issuedExecuteToExecutor === true) return true;
+    if (String(node.mode || '').trim() === 'execute') return true;
+    const state = String(node.state || node.finalState || '').trim();
+    if (state === 'publish_pre_valid_failed' || BLOCKED_ATTEMPT_STATES.has(state) || SUBMITTED_OR_UNCERTAIN_STATES.has(state)) return true;
+    const calls = Array.isArray(node.openapiCalls) ? node.openapiCalls : asArray(node.openapi?.calls);
+    return calls.some(call => String(call?.name || '').toLowerCase() === 'publishoredit'
+      || String(call?.path || '').includes('/goods/product/publishOrEdit'));
+  };
+
+  const hasPublishOrEditCall = node => {
+    if (!node || typeof node !== 'object') return false;
+    return asArray(node.openapiCalls).some(call => String(call?.name || '').toLowerCase() === 'publishoredit'
+      || String(call?.path || '').includes('/goods/product/publishOrEdit'));
+  };
+
+  const registerAttempt = (record, label) => {
+    const key = groupKeyOf(record, label);
+    let attempt = groups.get(key);
+    if (!attempt) {
+      attempt = {
+        key,
+        labels: [],
+        explicitFalse: false,
+        positive: false,
+        ids: false,
+        readback: false,
+        writeSignals: false,
+        publishResultCount: 0,
+        explicitFalseResultCount: 0,
+        unknownPublishResultCount: 0,
+        legacyProofTupleMismatch: false,
+        modes: new Set(),
+        states: new Set(),
+        codes: new Set(),
+        unkeyed: !String(record?.runId || record?.childRunId || '').trim(),
+      };
+      groups.set(key, attempt);
+    }
+    attempt.labels.push(label);
+    for (const field of POSITIVE_SUBMISSION_FLAGS) {
+      if (record[field] === true) attempt.positive = true;
+    }
+    const mode = String(record.mode || record.requestedMode || '').trim();
+    if (mode) attempt.modes.add(mode);
+    const state = String(record.state || record.finalState || '').trim();
+    if (state) attempt.states.add(state);
+    if (SUBMITTED_OR_UNCERTAIN_STATES.has(state)) attempt.positive = true;
+    const publishResult = record.publishResult && typeof record.publishResult === 'object' ? record.publishResult : null;
+    if (publishResult) {
+      attempt.publishResultCount += 1;
+      if (publishResult.code != null) attempt.codes.add(String(publishResult.code));
+      const info = publishResult.info && typeof publishResult.info === 'object'
+        ? publishResult.info
+        : null;
+      if (info) {
+        const explicit = strictOwnBooleanField(info, 'success');
+        if (explicit === false) {
+          attempt.explicitFalse = true;
+          attempt.explicitFalseResultCount += 1;
+        } else if (explicit === true) {
+          attempt.positive = true;
+        } else {
+          attempt.unknownPublishResultCount += 1;
+        }
+        for (const field of ['taskNo', 'task_no', 'spu_name', 'spuName', 'version']) {
+          if (String(info[field] || '').trim()) attempt.ids = true;
+        }
+        const skcRows = Array.isArray(info.skc_list) ? info.skc_list : (Array.isArray(info.skcList) ? info.skcList : []);
+        if (skcRows.length) attempt.ids = true;
+      } else if (strictOwnBooleanField(publishResult, 'explicitSuccess') === false) {
+        attempt.explicitFalse = true;
+        attempt.explicitFalseResultCount += 1;
+      } else if (strictOwnBooleanField(publishResult, 'explicitSuccess') === true) {
+        attempt.positive = true;
+      } else {
+        // Full compact results always carry info; projected results carry
+        // explicitSuccess. A publishResult with neither is a legacy projection
+        // (hasInfo only) or a malformed/missing result: explicit uncertainty.
+        attempt.unknownPublishResultCount += 1;
+      }
+    } else {
+      // Every representation of a write attempt must carry its own result.
+      // A sibling representation for the same run may not lend proof to this
+      // result-less projection. Dry-run-only groups remain neutral because
+      // attempt.writeSignals stays false for the entire group.
+      attempt.unknownPublishResultCount += 1;
+    }
+    if (record[LEGACY_PREVALID_PROOF_MISMATCH] === true) attempt.legacyProofTupleMismatch = true;
+    if (record.readbackFingerprint && typeof record.readbackFingerprint === 'object') {
+      for (const field of ['publishSpuNames', 'publishSkcNames', 'publishSkuCodes']) {
+        if (Array.isArray(record.readbackFingerprint[field]) && record.readbackFingerprint[field].length) attempt.ids = true;
+      }
+    }
+    if (record.readback && typeof record.readback === 'object') {
+      const status = String(record.readback.status || record.readback.readbackStatus || '');
+      const matched = Boolean(record.readback.ok) && /matched/i.test(status) && Number(record.readback.matchedCount || 0) > 0;
+      const inFlight = /^(?:submitted|running|planned|pending)$/i.test(status)
+        || /pending_review|pending_readback/i.test(status);
+      if (matched || inFlight) attempt.readback = true;
+    }
+    if (hasWriteSignal(record)) attempt.writeSignals = true;
+  };
+
+  const collectRuns = (node, out) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return out;
+    for (const entry of asArray(node.openApiProductExecutors)) out.push(entry);
+    if (node.hlOpenApiExecutor && typeof node.hlOpenApiExecutor === 'object' && !Array.isArray(node.hlOpenApiExecutor)) out.push(node.hlOpenApiExecutor);
+    for (const entry of asArray(node.executorEvidence)) out.push(entry);
+    for (const entry of asArray(node.executorRuns)) out.push(entry);
+    for (const key of ['writeAudit', 'execution', 'result']) {
+      if (node[key] && typeof node[key] === 'object' && !Array.isArray(node[key])) collectRuns(node[key], out);
+    }
+    for (const entry of asArray(node.executionHistory)) {
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) collectRuns(entry, out);
+    }
+    for (const entry of asArray(node.history)) {
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) collectRuns(entry, out);
+    }
+    return out;
+  };
+
+  const walk = (node, label, isRun, depth = 0) => {
+    if (depth > 12 || !node || typeof node !== 'object' || Array.isArray(node)) return;
+    if (isRun) {
+      registerAttempt(node, label);
+      return;
+    }
+    for (const field of POSITIVE_SUBMISSION_FLAGS) {
+      if (node[field] === true) {
+        globalPositiveSeen = true;
+        reasons.push(`${label}.${field}`);
+      }
+    }
+    for (const field of ['state', 'status', 'finalState', 'lifecycleStatus']) {
+      const state = String(node[field] || '').trim();
+      if (SUBMITTED_OR_UNCERTAIN_STATES.has(state)) {
+        globalPositiveSeen = true;
+        reasons.push(`${label}.${field}=${state}`);
+      }
+    }
+    if (node.lifecycle && typeof node.lifecycle === 'object') {
+      if (node.lifecycle.locked === true || node.lifecycle.needsManualResolve === true || node.lifecycle.manualResolution) {
+        lockedOrManualSeen = true;
+        reasons.push(`${label}.lifecycle.locked_or_resolved`);
+      }
+    }
+    for (const [index, row] of asArray(node.readbacks).entries()) inspectReadback(row, `${label}.readbacks[${index}]`);
+    if (node.issuedExecuteToExecutor === true || node.sheinWriteAttempted === true || hasPublishOrEditCall(node)) {
+      flaggedNodes.push({node, label});
+    }
+    for (const [index, entry] of asArray(node.openApiProductExecutors).entries()) walk(entry, `${label}.openApiProductExecutors[${index}]`, true, depth + 1);
+    if (node.hlOpenApiExecutor && typeof node.hlOpenApiExecutor === 'object' && !Array.isArray(node.hlOpenApiExecutor)) {
+      walk(node.hlOpenApiExecutor, `${label}.hlOpenApiExecutor`, true, depth + 1);
+    }
+    for (const [index, entry] of asArray(node.executorEvidence).entries()) walk(entry, `${label}.executorEvidence[${index}]`, true, depth + 1);
+    for (const [index, entry] of asArray(node.executorRuns).entries()) walk(entry, `${label}.executorRuns[${index}]`, true, depth + 1);
+    for (const [index, entry] of asArray(node.executionHistory).entries()) walk(entry, `${label}.executionHistory[${index}]`, false, depth + 1);
+    for (const [index, entry] of asArray(node.history).entries()) walk(entry, `${label}.history[${index}]`, false, depth + 1);
+    for (const key of ['writeAudit', 'execution', 'lifecycle', 'lifecycleTransition', 'result']) {
+      if (node[key] && typeof node[key] === 'object' && !Array.isArray(node[key])) {
+        walk(node[key], `${label}.${key}`, false, depth + 1);
+      }
+    }
+  };
+
+  walk(value, 'task', false);
+
+  // A value with no run records, no aggregate write flags, and no positive/
+  // readback/lock evidence is a marker-only snapshot (e.g. chat system-check
+  // audit entries that capture task.state). It is neutral: state markers
+  // alone never prove a rejection, but they are also not write evidence, so
+  // such an entry cannot block a rejection that is proven by the task record.
+  if (!groups.size && !flaggedNodes.length && !globalPositiveSeen && !globalReadbackSeen && !lockedOrManualSeen) {
+    return {ok: true, proof: [], neutral: true};
+  }
+
+  let provenCount = 0;
+  for (const attempt of groups.values()) {
+    if (attempt.positive) {
+      globalPositiveSeen = true;
+      reasons.push(`attempt(${attempt.labels[0]}).positive_submission`);
+    }
+    if (attempt.ids) {
+      globalPositiveSeen = true;
+      reasons.push(`attempt(${attempt.labels[0]}).identifiers`);
+    }
+    if (attempt.readback) {
+      globalReadbackSeen = true;
+      reasons.push(`attempt(${attempt.labels[0]}).readback`);
+    }
+    if (!attempt.writeSignals) continue;
+    const modes = [...attempt.modes];
+    const states = [...attempt.states];
+    const codes = [...attempt.codes];
+    const invalidMode = !modes.includes('execute') || modes.some(mode => mode !== 'execute');
+    const invalidState = !states.includes('publish_pre_valid_failed')
+      || states.some(state => state !== 'publish_pre_valid_failed');
+    const invalidCode = !codes.includes('0') || codes.some(code => code !== '0');
+    const everyResultExplicitFalse = attempt.publishResultCount > 0
+      && attempt.publishResultCount === attempt.explicitFalseResultCount
+      && attempt.unknownPublishResultCount === 0;
+    if (attempt.unkeyed) reasons.push(`attempt(${attempt.labels[0]}).missing_run_identity`);
+    if (invalidMode) reasons.push(`attempt(${attempt.labels[0]}).mode_not_exact_execute`);
+    if (invalidState) reasons.push(`attempt(${attempt.labels[0]}).state_not_exact_prevalid_rejected`);
+    if (invalidCode) reasons.push(`attempt(${attempt.labels[0]}).code_not_exact_zero`);
+    if (!everyResultExplicitFalse) reasons.push(`attempt(${attempt.labels[0]}).write_without_own_explicit_false`);
+    if (attempt.legacyProofTupleMismatch) reasons.push(`attempt(${attempt.labels[0]}).legacy_artifact_tuple_mismatch`);
+    if (
+      !attempt.positive
+      && !attempt.ids
+      && !attempt.readback
+      && !invalidMode
+      && !invalidState
+      && !invalidCode
+      && everyResultExplicitFalse
+      && !attempt.legacyProofTupleMismatch
+      && !attempt.unkeyed
+    ) {
+      provenCount += 1;
+      proof.push(`attempt(${attempt.labels[0]}).explicit_success_false`);
+    }
+  }
+
+  const groupProven = run => {
+    const attempt = groups.get(groupKeyOf(run, ''));
+    if (!attempt || !attempt.writeSignals || attempt.positive || attempt.ids || attempt.readback || attempt.unkeyed) return false;
+    const modes = [...attempt.modes];
+    const states = [...attempt.states];
+    const codes = [...attempt.codes];
+    return attempt.publishResultCount > 0
+      && attempt.publishResultCount === attempt.explicitFalseResultCount
+      && attempt.unknownPublishResultCount === 0
+      && !attempt.legacyProofTupleMismatch
+      && modes.includes('execute')
+      && modes.every(mode => mode === 'execute')
+      && states.includes('publish_pre_valid_failed')
+      && states.every(state => state === 'publish_pre_valid_failed')
+      && codes.includes('0')
+      && codes.every(code => code === '0');
+  };
+
+  for (const {node, label} of flaggedNodes) {
+    const runs = collectRuns(node, []);
+    if (!runs.length) {
+      attributionFailed = true;
+      reasons.push(`${label}.write_flags_without_runs`);
+      continue;
+    }
+    let anyProven = false;
+    let allAttributable = true;
+    for (const run of runs) {
+      const groupedAttempt = groups.get(groupKeyOf(run, label));
+      if (!hasWriteSignal(run) && !groupedAttempt?.writeSignals) continue;
+      if (!groupProven(run)) {
+        allAttributable = false;
+        reasons.push(`${label}.unattributed_write_run(${groupKeyOf(run, label)})`);
+      } else {
+        anyProven = true;
+      }
+    }
+    if (!anyProven) {
+      attributionFailed = true;
+      reasons.push(`${label}.write_flags_unproven`);
+    }
+  }
+
+  const ok = provenCount > 0
+    && !globalPositiveSeen
+    && !globalReadbackSeen
+    && !lockedOrManualSeen
+    && !attributionFailed
+    && reasons.length === 0;
+  return ok
+    ? {ok: true, proof: [...new Set(proof)]}
+    : {ok: false, reasons: [...new Set(reasons)]};
+}
+
+function legacyPreValidArtifactCandidates(value) {
+  const found = new Map();
+  const walk = (node, depth = 0) => {
+    if (depth > 14 || !node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry, depth + 1);
+      return;
+    }
+    const runId = String(node.childRunId || node.runId || '').trim();
+    const savedTo = String(node.savedTo || '').trim();
+    if (runId && savedTo) {
+      const current = found.get(runId) || {};
+      const nextFields = {
+        savedTo,
+        storeKey: String(node.storeKey || '').trim().toUpperCase(),
+        mode: String(node.mode || '').trim(),
+        state: String(node.state || '').trim(),
+        payloadHash: String(node.payloadHash || node?.payload?.payloadHash || '').trim().toLowerCase(),
+        code: String(node?.publishResult?.code ?? '').trim(),
+        traceId: String(node?.publishResult?.traceId || '').trim(),
+      };
+      const conflict = Boolean(current.conflict) || Object.entries(nextFields).some(([key, fieldValue]) => (
+        Boolean(fieldValue) && Boolean(current[key]) && String(current[key]) !== String(fieldValue)
+      ));
+      found.set(runId, {
+        ...current,
+        runId,
+        conflict,
+        ...Object.fromEntries(Object.entries(nextFields).map(([key, fieldValue]) => [key, fieldValue || current[key] || ''])),
+      });
+    }
+    for (const entry of Object.values(node)) walk(entry, depth + 1);
+  };
+  walk(value);
+  return [...found.values()];
+}
+
+function pathInside(parent, candidate) {
+  const relative = path.relative(parent, candidate);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+async function verifyLegacyPreValidArtifact(candidate) {
+  if (candidate?.conflict) throw new Error('legacy executor artifact references conflict for the same run');
+  const allowedRoot = path.resolve(ROOT, 'logs', 'link-ops-openapi-executor');
+  const requested = path.resolve(ROOT, String(candidate?.savedTo || ''));
+  if (!pathInside(allowedRoot, requested) || path.dirname(requested) !== allowedRoot) {
+    throw new Error('legacy executor artifact path is outside the controlled directory');
+  }
+  const allowedReal = await fs.realpath(allowedRoot);
+  const real = await fs.realpath(requested);
+  if (!pathInside(allowedReal, real)) throw new Error('legacy executor artifact realpath escapes the controlled directory');
+  const noFollow = Number(fssync.constants.O_NOFOLLOW || 0);
+  const handle = await fs.open(requested, fssync.constants.O_RDONLY | noFollow);
+  let stat;
+  let bytes;
+  let openedReal = real;
+  try {
+    stat = await handle.stat();
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 2 * 1024 * 1024) {
+      throw new Error('legacy executor artifact is not a bounded regular file');
+    }
+    if (process.platform !== 'win32' && (stat.mode & 0o022) !== 0) throw new Error('legacy executor artifact is group/world writable');
+    if (process.platform !== 'win32' && typeof process.getuid === 'function' && Number(stat.uid) !== Number(process.getuid())) {
+      throw new Error('legacy executor artifact owner does not match the service user');
+    }
+    if (process.platform !== 'win32') {
+      // Re-resolve the already opened file descriptor. This closes the gap
+      // where a parent directory is swapped after the pathname realpath check
+      // but before open(); O_NOFOLLOW alone protects only the final component.
+      openedReal = await fs.realpath(`/proc/self/fd/${handle.fd}`);
+      if (!pathInside(allowedReal, openedReal) || path.dirname(openedReal) !== allowedReal || openedReal !== real) {
+        throw new Error('opened legacy executor artifact escapes or changed within the controlled directory');
+      }
+      const openedPathStat = await fs.stat(openedReal);
+      if (Number(openedPathStat.dev) !== Number(stat.dev) || Number(openedPathStat.ino) !== Number(stat.ino)) {
+        throw new Error('opened legacy executor artifact inode changed during verification');
+      }
+    }
+    bytes = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  let artifact;
+  try { artifact = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('legacy executor artifact is malformed JSON'); }
+  const info = artifact?.publishResult?.info && typeof artifact.publishResult.info === 'object'
+    ? artifact.publishResult.info
+    : null;
+  const identifiers = [info?.taskNo, info?.task_no, info?.spu_name, info?.spuName, info?.version]
+    .map(item => String(item || '').trim())
+    .filter(Boolean);
+  const skcs = asArray(info?.skc_list || info?.skcList);
+  const readbackStatus = String(artifact?.readback?.status || '').trim();
+  const readbackMatched = artifact?.readback?.ok === true
+    || Number(artifact?.readback?.matchedCount || 0) > 0
+    || /matched|pending|submitted|running/i.test(readbackStatus);
+  const readbackFingerprintIdentities = [
+    ...asArray(artifact?.readbackFingerprint?.publishSpuNames),
+    ...asArray(artifact?.readbackFingerprint?.publishSkcNames),
+    ...asArray(artifact?.readbackFingerprint?.publishSkuCodes),
+  ].filter(item => String(item || '').trim());
+  const readbackRows = [
+    ...asArray(artifact?.readback?.matchedRows),
+    ...asArray(artifact?.readback?.weakMatchedRows),
+  ];
+  const readbackHasActualResults = readbackFingerprintIdentities.length > 0
+    || readbackRows.length > 0
+    || asArray(artifact?.readback?.calls).length > 0
+    || Number(artifact?.readback?.matchedCount || 0) > 0
+    || Number(artifact?.readback?.weakMatchedCount || 0) > 0
+    || (artifact?.readback?.scannedRows != null && Number(artifact.readback.scannedRows) !== 0);
+  const contradictoryPositiveEvidence = (() => {
+    const positiveKeys = new Set([
+      'actualWriteSubmitted',
+      'submitted',
+      'submittedPossibly',
+      'suspiciousWriteAttempted',
+      'requiresManualResolve',
+      'needsManualResolve',
+      'lifecycleLocked',
+      'pendingReview',
+    ]);
+    const positiveStates = new Set([
+      'submitted',
+      'submitted_but_readback_pending',
+      'submitted_readback_failed',
+      'submitted_readback_matched',
+      'suspicious_write_attempted',
+      'needs_manual_resolve',
+    ]);
+    let contradiction = false;
+    const walk = (node, label = '', depth = 0) => {
+      if (contradiction || depth > 14 || !node || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        for (const entry of node) walk(entry, label, depth + 1);
+        return;
+      }
+      for (const [key, entry] of Object.entries(node)) {
+        const nextLabel = label ? `${label}.${key}` : key;
+        if (positiveKeys.has(key) && entry === true) contradiction = true;
+        if (key === 'manualResolution' && Boolean(entry)) contradiction = true;
+        if (key === 'locked' && /(?:^|\.)lifecycle(?:\.|$)/.test(label) && entry === true) contradiction = true;
+        if (['state', 'status', 'finalState', 'lifecycleStatus'].includes(key)
+          && positiveStates.has(String(entry || '').trim())) contradiction = true;
+        walk(entry, nextLabel, depth + 1);
+      }
+    };
+    walk(artifact);
+    return contradiction;
+  })();
+  const checks = [
+    String(artifact?.runId || '') === String(candidate.runId || ''),
+    String(artifact?.storeKey || '').toUpperCase() === String(candidate.storeKey || '').toUpperCase(),
+    String(artifact?.mode || '') === 'execute' && String(candidate.mode || '') === 'execute',
+    String(artifact?.state || '') === 'publish_pre_valid_failed' && String(candidate.state || '') === 'publish_pre_valid_failed',
+    String(artifact?.payload?.payloadHash || '').toLowerCase() === String(candidate.payloadHash || '').toLowerCase(),
+    /^[a-f0-9]{64}$/.test(String(candidate.payloadHash || '')),
+    String(artifact?.publishResult?.code ?? '') === '0' && String(candidate.code || '') === '0',
+    String(artifact?.publishResult?.traceId || '') === String(candidate.traceId || '') && Boolean(candidate.traceId),
+    strictOwnBooleanField(info, 'success') === false,
+    identifiers.length === 0 && skcs.length === 0,
+    readbackStatus === 'planned_not_run'
+      && strictOwnBooleanField(artifact?.readback, 'pendingReview') === false
+      && !readbackMatched
+      && !readbackHasActualResults,
+    !contradictoryPositiveEvidence,
+  ];
+  if (checks.some(check => !check)) throw new Error(`legacy executor artifact does not exactly prove rejected run ${candidate.runId}`);
+  return {
+    runId: candidate.runId,
+    storeKey: candidate.storeKey,
+    payloadHash: candidate.payloadHash,
+    traceId: candidate.traceId,
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    realpath: openedReal,
+  };
+}
+
+function legacyPreValidProjectionTuple(node) {
+  return {
+    runId: String(node?.childRunId || node?.runId || '').trim(),
+    storeKey: String(node?.storeKey || '').trim().toUpperCase(),
+    mode: String(node?.mode || '').trim(),
+    state: String(node?.state || node?.finalState || '').trim(),
+    payloadHash: String(node?.payloadHash || node?.payload?.payloadHash || '').trim().toLowerCase(),
+    code: String(node?.publishResult?.code ?? node?.publishCode ?? '').trim(),
+    traceId: String(node?.publishResult?.traceId || node?.publishTraceId || '').trim(),
+  };
+}
+
+function legacyPreValidProjectionMatchesProof(node, proof) {
+  const tuple = legacyPreValidProjectionTuple(node);
+  return Boolean(tuple.runId && tuple.storeKey && tuple.mode && tuple.state && tuple.payloadHash && tuple.code && tuple.traceId)
+    && tuple.runId === String(proof?.runId || '')
+    && tuple.storeKey === String(proof?.storeKey || '').toUpperCase()
+    && tuple.mode === 'execute'
+    && tuple.state === 'publish_pre_valid_failed'
+    && tuple.payloadHash === String(proof?.payloadHash || '').toLowerCase()
+    && tuple.code === '0'
+    && tuple.traceId === String(proof?.traceId || '');
+}
+
+const LEGACY_PREVALID_PROOF_MISMATCH = Symbol('legacyPreValidProofTupleMismatch');
+
+function hydrateLegacyPreValidProofs(value, proofs) {
+  const copy = structuredClone(value);
+  const byRun = new Map(asArray(proofs).map(proof => [String(proof.runId || ''), proof]));
+  const walk = (node, depth = 0) => {
+    if (depth > 14 || !node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry, depth + 1);
+      return;
+    }
+    const runId = String(node.childRunId || node.runId || '').trim();
+    const proof = byRun.get(runId);
+    if (proof && legacyPreValidProjectionMatchesProof(node, proof)) {
+      if (node.publishResult && typeof node.publishResult === 'object') {
+        if (strictOwnBooleanField(node.publishResult, 'explicitSuccess') === undefined
+          && strictOwnBooleanField(node.publishResult.info, 'success') === undefined) {
+          node.publishResult.explicitSuccess = false;
+        }
+      } else if (String(node.publishCode ?? '') === '0') {
+        node.publishResult = {code: '0', explicitSuccess: false};
+      }
+    } else if (proof) {
+      Object.defineProperty(node, LEGACY_PREVALID_PROOF_MISMATCH, {
+        value: true,
+        enumerable: false,
+        configurable: false,
+      });
+    }
+    for (const entry of Object.values(node)) walk(entry, depth + 1);
+  };
+  walk(copy);
+  return copy;
+}
+
+async function prepareLegacyPreValidRecoveryEvidence(task) {
+  const proofs = [];
+  const errors = [];
+  for (const candidate of legacyPreValidArtifactCandidates(task)) {
+    if (candidate.mode !== 'execute' || candidate.state !== 'publish_pre_valid_failed') continue;
+    try {
+      proofs.push(await verifyLegacyPreValidArtifact(candidate));
+    } catch (error) {
+      errors.push(`${candidate.runId}:${error?.message || error}`);
+    }
+  }
+  let hydratedTask = proofs.length ? hydrateLegacyPreValidProofs(task, proofs) : task;
+  if (proofs.length) {
+    hydratedTask = {
+      ...hydratedTask,
+      history: [
+        ...asArray(hydratedTask?.history),
+        {
+          at: new Date().toISOString(),
+          event: 'legacy_prevalid_executor_artifact_verified',
+          proofs: proofs.map(proof => ({
+            runId: proof.runId,
+            storeKey: proof.storeKey,
+            payloadHash: proof.payloadHash,
+            traceId: proof.traceId,
+            artifactSha256: proof.sha256,
+          })),
+        },
+      ],
+    };
+  }
+  return {
+    task: hydratedTask,
+    proofs,
+    errors,
+  };
+}
+
+/**
+ * Combined prior-write gate: strict by default; only an explicit platform
+ * pre-validation rejection (proved by descriptionBindingExplicitPreValid
+ * RejectionEvidence) relaxes it, and the caller records the exception.
+ */
+function descriptionBindingPriorWriteEvidence(task) {
+  const evidence = descriptionBindingWriteEvidence(task);
+  if (evidence.ok) return {ok: true, reasons: [], explicitPreValidRejection: false, proof: []};
+  const rejection = descriptionBindingExplicitPreValidRejectionEvidence(task);
+  if (rejection.ok) {
+    return {
+      ok: true,
+      reasons: evidence.reasons,
+      explicitPreValidRejection: true,
+      proof: rejection.proof,
+    };
+  }
+  return {ok: false, reasons: evidence.reasons, explicitPreValidRejection: false, proof: []};
+}
+
+async function descriptionBindingHistoricalAuditEvidence(file, taskId, legacyProofs = []) {
   let text;
   try {
     text = await fs.readFile(file, 'utf8');
@@ -6638,8 +7333,14 @@ async function descriptionBindingHistoricalAuditEvidence(file, taskId) {
       || '',
     );
     if (!id || entryTaskId !== id) continue;
-    for (const [label, value] of [['entry', entry], ['task', entry?.task || {}]]) {
+    const hydratedEntry = legacyProofs.length ? hydrateLegacyPreValidProofs(entry, legacyProofs) : entry;
+    for (const [label, value] of [['entry', hydratedEntry], ['task', hydratedEntry?.task || {}]]) {
       const evidence = descriptionBindingWriteEvidence(value);
+      // Narrow exception: an audit entry whose write evidence is fully
+      // explained by one explicit platform pre-validation rejection is not
+      // uncertainty. All submitted/timeout/uncertain/identifier-bearing
+      // entries still add reasons and block.
+      if (!evidence.ok && descriptionBindingExplicitPreValidRejectionEvidence(value).ok) continue;
       for (const reason of evidence.reasons) {
         const tagged = `audit.${label}.${reason}`;
         if (!reasons.includes(tagged)) reasons.push(tagged);
@@ -6705,7 +7406,7 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
     error.status = 409;
     throw error;
   }
-  const priorWriteEvidence = descriptionBindingWriteEvidence(task);
+  const priorWriteEvidence = descriptionBindingPriorWriteEvidence(task);
   if (!priorWriteEvidence.ok) {
     const error = new Error(`任务已有真实写入/提交不确定性证据，禁止绑定描述或重置执行状态：${priorWriteEvidence.reasons.join(', ')}`);
     error.status = 409;
@@ -6775,7 +7476,10 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
   if (newPayloadHash !== linkOpsPayloadHash(boundPayload)) {
     throw new Error('描述绑定 payload hash 算法与 link-ops canonical hash 不一致');
   }
-  const resetNote = '审核资料三语核心卖点描述已绑定（ar/en 各5行，zh-cn 仅材料审计）；旧预演/提交锁全部作废，必须重新预演后才能提交。';
+  const preValidRejectionNote = priorWriteEvidence.explicitPreValidRejection
+    ? '（安全恢复例外：历史仅显式平台预校验拒绝 publish_pre_valid_failed 且 actualWriteSubmitted=false，平台未返回 SPU/SKC/SKU/taskNo/version，无回读/锁定；仅允许同任务描述重绑）'
+    : '';
+  const resetNote = `审核资料三语核心卖点描述已绑定（ar/en 各5行，zh-cn 仅材料审计）；旧预演/提交锁全部作废，必须重新预演后才能提交。${preValidRejectionNote}`;
   const nextTask = {
     ...task,
     openapiPublishPayload: boundPayload,
@@ -6872,6 +7576,9 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
     lifecycleReset: true,
     writeAuditReset: true,
     oldPayloadHashInvalidated: true,
+    ...(priorWriteEvidence.explicitPreValidRejection
+      ? {preValidRejectionException: true, preValidRejectionProof: priorWriteEvidence.proof}
+      : {}),
   });
   const bindingGate = validateDescriptionBindingLock(nextTask, boundPayload);
   if (!bindingGate.ok) {
@@ -7172,7 +7879,7 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
   if (task?.openapiPublishPayload && typeof task.openapiPublishPayload === 'object' && !Array.isArray(task.openapiPublishPayload)) {
     return {task, materialized: false};
   }
-  const priorWriteEvidence = descriptionBindingWriteEvidence(task);
+  const priorWriteEvidence = descriptionBindingPriorWriteEvidence(task);
   if (!priorWriteEvidence.ok) {
     const error = new Error(`任务已有真实写入/提交不确定性证据，禁止物化发布 payload：${priorWriteEvidence.reasons.join(', ')}`);
     error.status = 409;
@@ -8272,9 +8979,10 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const runId = `lor_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`;
   const hasOpenApiProductExecutor = openApiProductExecutors.length > 0;
   const hasOpenApiMaintenanceExecutor = openApiMaintenanceExecutors.length > 0;
-  const submitted = executorResults.some(x => x?.state === 'submitted');
+  const submitted = openApiProductExecutors.some(executorRun => linkOpsProductExecutorSubmitted(executorRun?.result))
+    || openApiMaintenanceExecutors.some(executorRun => linkOpsMaintenanceExecutorSubmitted(executorRun?.result));
   const pendingListingCorrectionRecovery = executorResults.some(x => x?.state === 'pending_listing_image_correction_recovery_required');
-  const publishPreValidFailed = executorResults.some(x => x?.state === 'publish_pre_valid_failed' || x?.publishResult?.info?.success === false);
+  const publishPreValidFailed = executorResults.some(linkOpsExecutorExplicitPreValidFailure);
   const descriptionAlreadyMatched = executorResults.some(x => x?.state === 'update_description_already_matched' || x?.alreadyMatched === true);
   const executorState = submitted
     ? 'submitted'
@@ -8428,6 +9136,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       linkMaintenanceExecutors: openApiMaintenanceExecutors.map(mapMaintenanceExecutor),
       linkMaintenancePrechecks: openApiMaintenanceExecutors.map(mapMaintenanceExecutor),
       hlOpenApiExecutor: executorResults.length === 1 ? {
+        storeKey: executorResults[0].storeKey || executorRuns[0]?.storeKey || '',
         ok: Boolean(executorResults[0].ok),
         mode: executorRuns[0]?.mode || '',
         state: executorResults[0].state || '',
@@ -8504,6 +9213,11 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           payloadHash: result.payload?.payloadHash || '',
           publishCode: result.publishResult?.code ?? null,
           publishTraceId: result.publishResult?.traceId || '',
+          publishResult: result.publishResult ? {
+            code: String(result.publishResult.code ?? ''),
+            traceId: result.publishResult.traceId || '',
+            explicitSuccess: strictOwnBooleanField(result.publishResult?.info, 'success'),
+          } : null,
           readbackStatus: result.readback?.status || '',
           readbackOk: Boolean(result.readback?.ok),
         };
@@ -8531,6 +9245,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       const executorResult = executorRun.result || {};
       return {
         storeKey: executorResult.storeKey || '',
+        mode: executorRun?.mode || '',
         state: executorResult.state || '',
         runId: executorResult.runId || '',
         savedTo: executorResult.savedTo || '',
@@ -8546,6 +9261,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           code: executorResult.publishResult.code,
           msg: executorResult.publishResult.msg,
           traceId: executorResult.publishResult.traceId,
+          explicitSuccess: projectPublishResultExplicitSuccess(executorResult.publishResult),
         } : null,
       };
     }),
@@ -13414,7 +14130,13 @@ async function main() {
             retryable: true,
           });
         }
-        const historicalAuditEvidence = await descriptionBindingHistoricalAuditEvidence(args.auditFile, taskRef);
+        const legacyRecovery = await prepareLegacyPreValidRecoveryEvidence(task);
+        const bindingTask = legacyRecovery.task;
+        const historicalAuditEvidence = await descriptionBindingHistoricalAuditEvidence(
+          args.auditFile,
+          taskRef,
+          legacyRecovery.proofs,
+        );
         if (historicalAuditEvidence.unavailable) {
           return sendJson(res, 503, {
             ok: false,
@@ -13429,11 +14151,20 @@ async function main() {
             code: 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE',
           });
         }
+        const currentWriteGate = descriptionBindingPriorWriteEvidence(bindingTask);
+        if (!currentWriteGate.ok) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: `任务仍有未被同 run 执行器证据证明的生产写入/不确定性，禁止绑定描述：${currentWriteGate.reasons.join(', ')}`,
+            code: 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE',
+            artifactErrors: legacyRecovery.errors.slice(0, 5),
+          });
+        }
         const lockId = String(access.record.id || taskRef);
         if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
         linkOpsExecutionLocks.add(lockId);
         try {
-          const materialized = await materializeDescriptionBindingPayloadIfNeeded(task, args, targetStore, actor, req);
+          const materialized = await materializeDescriptionBindingPayloadIfNeeded(bindingTask, args, targetStore, actor, req);
           const bound = bindApprovedDescriptionMaterialToTask(materialized.task, targetStore, material, actor, req, {
             sourceByteLength: reviewedSource.bytes.length,
             baseTaskRevision: currentRevision,
@@ -14947,4 +15678,13 @@ export const __testHooks = {
   sendBoundedCoreJson,
   sha256StableJson,
   verifyPersistedPublishAssetBindingReadback,
+  descriptionBindingExplicitPreValidRejectionEvidence,
+  strictOwnBooleanField,
+  linkOpsPublishResultSucceeded,
+  linkOpsExecutorExplicitPreValidFailure,
+  linkOpsProductExecutorSubmitted,
+  linkOpsMaintenanceExecutorSubmitted,
+  legacyPreValidArtifactCandidates,
+  verifyLegacyPreValidArtifact,
+  hydrateLegacyPreValidProofs,
 };

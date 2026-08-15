@@ -26,7 +26,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEEP_TEMP = process.argv.includes('--keep-temp');
 const WEAK_READBACK_ONLY = process.argv.includes('--weak-readback');
 const PREVALID_FAIL = process.argv.includes('--prevalid-fail');
-const PREVALID_RETRY = process.argv.includes('--prevalid-retry');
+const MISSING_SUCCESS = process.argv.includes('--missing-success');
+const PREVALID_RETRY_REBIND = process.argv.includes('--prevalid-retry-rebind');
+const PREVALID_RETRY = process.argv.includes('--prevalid-retry') || PREVALID_RETRY_REBIND;
 const GENERIC_PRODUCT = process.argv.includes('--generic-product');
 const CHAT_NATURAL = process.argv.includes('--chat-natural');
 const SEARCH_PRODUCT_READBACK = process.argv.includes('--search-product-readback');
@@ -267,6 +269,29 @@ const descriptionLines = {
   ],
   'zh-cn': ['审核卖点一', '审核卖点二', '审核卖点三', '审核卖点四', '审核卖点五'],
 };
+// Material update used by --prevalid-retry-rebind: same five-line shape, new
+// English line one. The fake readback serves these lines after the rebind so
+// the retry's description readback matches the newly bound material.
+const reboundDescriptionLines = {
+  ...descriptionLines,
+  en: [`Reviewed rebound long point ${'r'.repeat(360)}`, ...descriptionLines.en.slice(1)],
+};
+const reboundSourceHtml = `<!doctype html><html><body><section id="s09">
+<article class="card"><h3>英文</h3><code>${reboundDescriptionLines.en.join('\n')}</code></article>
+<article class="card"><h3>阿文</h3><code>${reboundDescriptionLines.ar.join('\n')}</code></article>
+<div class="displaybox">${reboundDescriptionLines['zh-cn'].map(line => `<div>${line}</div>`).join('')}</div>
+</section></body></html>`;
+const reboundSourceBytes = Buffer.from(reboundSourceHtml, 'utf8');
+const reboundMaterial = {
+  schemaVersion: 1,
+  sourceLabel: 'copy-success-rebound.html',
+  sourceFileSha256: sha256Utf8(reboundSourceBytes),
+  rows: Object.fromEntries(Object.entries(reboundDescriptionLines).map(([language, lines]) => [language, {
+    language,
+    lines,
+    sha256: sha256Utf8(lines.join('\n')),
+  }])),
+};
 const descriptionSourceHtml = `<!doctype html><html><body><section id="s09">
 <article class="card"><h3>英文</h3><code>${descriptionLines.en.join('\n')}</code></article>
 <article class="card"><h3>阿文</h3><code>${descriptionLines.ar.join('\n')}</code></article>
@@ -442,6 +467,16 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     if (Number(strongPayload?.skc_list?.[0]?.shelf_way) !== 2 || !strongPayload?.skc_list?.[0]?.hope_on_sale_date) {
       return sendJson(res, {code: '400', msg: 'new link must be scheduled ten years later at skc level', traceId: publishTraceId}, 200);
     }
+    if (MISSING_SUCCESS) {
+      // code=0 with an info object that carries NO explicit success flag:
+      // uncertainty, never an explicit pre-validation rejection.
+      return sendJson(res, {
+        code: '0',
+        msg: 'OK',
+        traceId: publishTraceId,
+        info: {},
+      });
+    }
     if (PREVALID_FAIL || (PREVALID_RETRY && publishAttemptCount === 1)) {
       return sendJson(res, {
         code: '0',
@@ -596,8 +631,8 @@ const fakeOpenApi = http.createServer(async (req, res) => {
         info: {
           spuName: 'v-smoke-copy-product',
           productMultiDescList: [
-            {language: 'ar', productDesc: descriptionLines.ar.join('\n')},
-            {language: 'en', productDesc: descriptionLines.en.join('\n')},
+            {language: 'ar', productDesc: (PREVALID_RETRY_REBIND ? reboundDescriptionLines : descriptionLines).ar.join('\n')},
+            {language: 'en', productDesc: (PREVALID_RETRY_REBIND ? reboundDescriptionLines : descriptionLines).en.join('\n')},
           ],
           skcInfoList: [{
             skcName: SOURCE_SKC,
@@ -919,7 +954,7 @@ async function login(username, password) {
   return cookie;
 }
 
-const result = {ok: false, scenario: `${CHAT_NATURAL ? 'chat-natural-' : ''}${GENERIC_PRODUCT ? 'generic-product-' : ''}${WEAK_READBACK_ONLY ? 'weak-readback-only' : PREVALID_FAIL ? 'prevalid-fail' : PREVALID_RETRY ? 'prevalid-retry' : 'strong-readback-success'}`, tmpRoot, fakeOpenApiPort, portalPort, summary: {}, checks: []};
+const result = {ok: false, scenario: `${CHAT_NATURAL ? 'chat-natural-' : ''}${GENERIC_PRODUCT ? 'generic-product-' : ''}${WEAK_READBACK_ONLY ? 'weak-readback-only' : MISSING_SUCCESS ? 'missing-success' : PREVALID_FAIL ? 'prevalid-fail' : PREVALID_RETRY_REBIND ? 'prevalid-retry-rebind' : PREVALID_RETRY ? 'prevalid-retry' : 'strong-readback-success'}`, tmpRoot, fakeOpenApiPort, portalPort, summary: {}, checks: []};
 function check(label, actual, expected) {
   const pass = typeof expected === 'function' ? expected(actual) : actual === expected;
   result.checks.push({label, actual, expected: typeof expected === 'function' ? expected.name || 'predicate' : expected, pass});
@@ -1546,6 +1581,7 @@ try {
   check('dry-run locks payload hash', Boolean(dryRunPayloadHash), true);
   check('dry-run does not publish', Boolean((dryRun?.json?.execution?.writeAudit || dryRunRawTask?.execution?.writeAudit)?.sheinWriteAttempted), false);
 
+  let rebindDryRunPayloadHash = '';
   let executed = CHAT_NATURAL
     ? await req('/api/link-ops-chats', {
       method: 'POST',
@@ -1569,11 +1605,56 @@ try {
     check('prevalid-retry first confirm does not close task', firstRetryRawTask?.status || '', 'waiting_review');
     check('prevalid-retry answer does not make operator guess platform fields', firstRetryAnswer, text => !/你也可以.*补|直接在聊天里补/i.test(String(text || '')));
     check('prevalid-retry answer explains automatic recheck before retry', firstRetryAnswer, text => /自动重新整理并检查|资料检查通过前不会再次提交/.test(String(text || '')));
-    check('prevalid-retry answer keeps platform free text hash-only', firstRetryAnswer, text => (
+    check('prevalid-retry answer redacts description echoes and keeps ordinary diagnostics', firstRetryAnswer, text => (
       /平台回显内容已脱敏/.test(String(text || ''))
-      && !/商品标题不能为空/.test(String(text || ''))
       && !String(text || '').includes(descriptionLines.en[0].slice(0, 80))
+      && !String(text || '').includes(descriptionLines.en[1].replace(/\s+/g, ' '))
+      && !String(text || '').includes(descriptionLines.en[2])
+      && /商品标题不能为空/.test(String(text || ''))
+      && /产品型号，为必填项/.test(String(text || ''))
     ));
+    if (PREVALID_RETRY_REBIND) {
+      // Production recovery: after the explicit platform pre-validation
+      // rejection (info.success=false, actualWriteSubmitted=false, no
+      // identifiers), prepare-descriptions must be allowed to CAS-rebind the
+      // SAME task once the material is updated. Before the fix this returned
+      // 409 DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE.
+      const rebindBaseTask = await rawTaskById(taskId);
+      await fs.writeFile(path.join(tmpRoot, 'rebind-time-task.json'), JSON.stringify(rebindBaseTask, null, 2), 'utf8');
+      const rebind = await req('/api/link-ops-prepare-descriptions', {
+        method: 'POST',
+        cookie,
+        body: {
+          taskId,
+          store: 'HL',
+          sourceApproved: true,
+          materialJson: reboundMaterial,
+          sourceFile: {name: 'copy-success-rebound.html', dataBase64: reboundSourceBytes.toString('base64')},
+          expectedRevision: Number(rebindBaseTask?.repositoryRevision || 0),
+        },
+      });
+      result.summary.rebindStatus = rebind.status;
+      result.summary.rebindError = rebind.json?.error || '';
+      result.summary.rebindCode = rebind.json?.code || '';
+      check('prevalid-rejected task permits same-task description rebind', rebind.status, 200);
+      check('prevalid-rejected task rebind commits binding', rebind.json?.bindingCommitted, true);
+      check('prevalid-rejected task rebind binds the new source label', rebind.json?.binding?.sourceLabel || '', 'copy-success-rebound.html');
+      const rebindAfterRaw = await rawTaskById(taskId);
+      check('prevalid-rejected task rebind resets lifecycle to needs_repreflight', rebindAfterRaw?.lifecycle?.lifecycleStatus || '', 'needs_repreflight');
+      check('prevalid-rejected task rebind records the safe-recovery exception', String(rebindAfterRaw?.note || ''), text => /安全恢复例外/.test(String(text || '')) && /actualWriteSubmitted=false/.test(String(text || '')));
+      check('prevalid-rejected task rebind clears executor write flags', rebindAfterRaw?.execution?.actualWriteSubmitted === false && rebindAfterRaw?.execution?.sheinWriteAttempted === false && rebindAfterRaw?.execution?.issuedExecuteToExecutor === false, true);
+      // A fresh dry-run must lock the rebound payload hash before the retry.
+      const rebindDryRun = await req('/api/link-ops-execute', {
+        method: 'POST',
+        cookie,
+        body: {id: taskId, mode: 'dry-run', source: 'copy_success_smoke_rebind'},
+      });
+      const rebindDryRunRawTask = await rawTaskById(taskId);
+      const rebindDryRunEvidence = executorEvidenceFromAudit(rebindDryRunRawTask?.execution?.writeAudit || rebindDryRun.json?.execution?.writeAudit || rebindDryRun.json?.task?.execution?.writeAudit, 'HL');
+      rebindDryRunPayloadHash = rebindDryRunEvidence?.payloadHash || rebindDryRunRawTask?.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash || rebindDryRun.json?.task?.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash || '';
+      check('prevalid-rejected task fresh dry-run locks the rebound payload hash', Boolean(rebindDryRunPayloadHash), true);
+      check('prevalid-rejected task rebound payload hash differs from original', rebindDryRunPayloadHash !== dryRunPayloadHash, true);
+    }
     executed = await req('/api/link-ops-chats', {
       method: 'POST',
       cookie,
@@ -1639,6 +1720,31 @@ try {
       && !text.includes(descriptionLines.ar[0])
       && text.includes('平台回显内容已脱敏')
     ));
+  } else if (MISSING_SUCCESS) {
+    check('missing-success actual write not submitted', Boolean(writeAudit?.actualWriteSubmitted), false);
+    check('missing-success lifecycle is not publish_pre_valid_failed', lifecycle?.status || lifecycle?.lifecycleStatus || '', status => String(status || '') !== 'publish_pre_valid_failed');
+    check('missing-success final state is blocked', writeAudit?.finalState || '', 'blocked');
+    check('missing-success task remains reviewable', executedTask?.status || '', 'waiting_review');
+    check('missing-success blocker recorded', Number(writeAudit?.blockerCount || 0), n => n >= 1);
+    // code0/info{} is uncertainty, not rejection proof: the same-task
+    // description rebind must stay blocked even though nothing was submitted.
+    const missingSuccessBase = await rawTaskById(taskId);
+    const missingSuccessBind = await req('/api/link-ops-prepare-descriptions', {
+      method: 'POST',
+      cookie,
+      body: {
+        taskId,
+        store: 'HL',
+        sourceApproved: true,
+        materialJson: descriptionMaterial,
+        sourceFile: {name: 'copy-success-reviewed.html', dataBase64: descriptionSourceBytes.toString('base64')},
+        expectedRevision: Number(missingSuccessBase?.repositoryRevision || 0),
+      },
+    });
+    result.summary.missingSuccessBindStatus = missingSuccessBind.status;
+    result.summary.missingSuccessBindCode = missingSuccessBind.json?.code || '';
+    check('missing-success task still blocks description rebind', missingSuccessBind.status, 409);
+    check('missing-success rebind code is prior-write-evidence', missingSuccessBind.json?.code || '', 'DESCRIPTION_BINDING_PRIOR_WRITE_EVIDENCE');
   } else {
     check('execute actual write submitted flag', Boolean(writeAudit?.actualWriteSubmitted), true);
   }
@@ -1674,7 +1780,7 @@ try {
       check('chat locked lifecycle keeps pending-readback lifecycle', lockedRetryRawTask?.lifecycle?.lifecycleStatus || '', 'submitted_but_readback_pending');
       check('chat locked lifecycle no extra publish', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, publishCountBeforeLockedRetry);
     }
-  } else if (!PREVALID_FAIL) {
+  } else if (!PREVALID_FAIL && !MISSING_SUCCESS) {
     check('executor projection keeps exact source store', execEvidence?.sourceStore || '', 'DL');
     check('executor projection keeps exact source skc', execEvidence?.sourceSkc || '', SOURCE_SKC);
     check('source resolve audited searchProduct and live spu-info', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct').length >= 1 && fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/spu-info').length >= 1, true);
@@ -1688,12 +1794,12 @@ try {
     check('executor readback matched count', Number(execEvidence?.readback?.matchedCount || 0), 1);
     check('executor readback weak matched count', Number(execEvidence?.readback?.weakMatchedCount || 0), 0);
   }
-  check('execute reused dry-run payload hash', execEvidence?.payloadHash || '', dryRunPayloadHash);
+  check('execute reused dry-run payload hash', execEvidence?.payloadHash || '', PREVALID_RETRY_REBIND ? rebindDryRunPayloadHash : dryRunPayloadHash);
   check('publish trace id retained', execEvidence?.publishResult?.traceId || '', publishTraceId);
 
   result.summary.fakeOpenApiCallPaths = fakeOpenApiCalls.map(call => call.path);
   check('fake publish endpoint called expected times', fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, PREVALID_RETRY ? 2 : 1);
-  check('fake readback endpoint called', fakeOpenApiCalls.some(call => call.publishAttemptCount > 0 && (call.path === '/open-api/openapi-business-backend/product/query' || call.path === '/open-api/goods/spu-info' || call.path === '/open-api/goods/searchProduct')), PREVALID_FAIL ? false : true);
+  check('fake readback endpoint called', fakeOpenApiCalls.some(call => call.publishAttemptCount > 0 && (call.path === '/open-api/openapi-business-backend/product/query' || call.path === '/open-api/goods/spu-info' || call.path === '/open-api/goods/searchProduct')), (PREVALID_FAIL || MISSING_SUCCESS) ? false : true);
   if (!PREVALID_FAIL && !WEAK_READBACK_ONLY) {
     check('fake publish-spu readback called first', fakeOpenApiCalls.some(call => call.path === '/open-api/goods/spu-info' && call.body?.spuName === 'v-smoke-copy-product'), true);
     if (SEARCH_PRODUCT_READBACK) {
