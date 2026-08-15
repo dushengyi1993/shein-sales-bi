@@ -340,9 +340,9 @@ elif [[ "$REFRESH_DETAIL_TARGETS_ON_BLOCKED" == "1" ]] \
     ((.detailRefreshTargets // []) | length) > 0
     and ((.blockers // []) | length) > 0
     and all(.blockers[];
-      test(" OpenAPI product detail evidence is incomplete$")
-      or test(" OpenAPI product canonical evidence is incomplete$")
-      or test(" OpenAPI product canonical evidence is not from current detail"))
+      test(" OpenAPI product detail evidence is incomplete($|:)")
+      or test(" OpenAPI product canonical evidence is incomplete($|:)")
+      or test(" OpenAPI product canonical evidence is not from current detail($|:)"))
   ' "$PLAN" >/dev/null; then
   REFRESH_REASON="current_detail_blocked"
 fi
