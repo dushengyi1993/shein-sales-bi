@@ -33,8 +33,13 @@ import {
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {
+  PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT,
+  PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
+  PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+  PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1,
   normalizeProductAttributeId,
   productAttributeBindingRequestKey,
+  productAttributeBindingRequestKeyV2,
 } from '../lib/link_ops_product_attribute_binding.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
 import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsJsonArtifactAtomic, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
@@ -107,6 +112,7 @@ function parseArgs(argv) {
     donorStore: '',
     donorSkc: '',
     attributeId: null,
+    adoptExisting: false,
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
     format: '',
@@ -203,6 +209,7 @@ function parseArgs(argv) {
     else if (a === '--donor-store') args.donorStore = String(argv[++i] || '').trim();
     else if (a === '--donor-skc') args.donorSkc = String(argv[++i] || '').trim();
     else if (a === '--attribute-id') args.attributeId = Number(argv[++i]);
+    else if (a === '--adopt-existing') args.adoptExisting = true;
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
@@ -310,6 +317,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
+  node scripts/bi_ops_cli.mjs prepare-product-attribute --adopt-existing --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <query.json|enriched.csv> --performance-date 2026-07-04 [--out <dir>]
@@ -376,6 +384,8 @@ Options:
   --donor-store / --donor-skc / --attribute-id
                    prepare-product-attribute 用；同标准货号 donor 链接的店铺、区分大小写的唯一 SKC，
                    与要修复的白名单属性 ID（仅 1002328 Hazardous materials classification）
+  --adopt-existing  prepare-product-attribute 用；显式 adopt 既有 1002328 行（值必须与 live donor 完全一致），
+                   payload 不做任何修改；不加本开关时默认 append_missing（只修缺失属性）
   --source-task-id    prepare-publish 的 update_images 模式；从指定已提交发布任务的 publishResult/readbackFingerprint 精确继承 SPU/SKC/SKU
                       prepare-pending-image-correction 会复用任务中现有已审图片绑定，不重复上传图片
   --standard-goods-sn / --supply-price / --inventory
@@ -409,6 +419,8 @@ Safety:
     属性恰好一次后绑定到同一任务；图片/描述/标题/价格/库存保持字节不变，旧预演锁作废且描述锁按设计保持失效；
     成功后返回 committed-needs-rebind，必须用原始审核 HTML 在同一任务 prepare-descriptions 重绑描述并重新预演，
     不新建任务、不重传图片、绝不发布。
+  - prepare-product-attribute --adopt-existing 为既有一行 1002328 现场核验并绑定来源证据：payload 完全不变
+    （old=new hash），描述/图片绑定保持有效无需重绑；若描述/图片绑定缺失或失效、值不一致、重复/缺失行，一律拒绝且零写入。
   - retire-candidates 只生成下架候选明细，不执行下架；固定排除有新品标签、首次上架 15 天内或缺首次上架时间的链接，并要求人工确认。
   - 本机不处于受控云端执行边界，不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
   - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
@@ -1512,6 +1524,7 @@ async function runPrepareProductAttribute(args) {
   if (attributeId === null || attributeId !== 1002328) {
     throw new Error('prepare-product-attribute --attribute-id 只允许受控白名单 1002328（Hazardous materials classification）');
   }
+  const bindingMode = args.adoptExisting ? PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT : PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND;
   const expectedRevisionProvided = args.expectedRevision !== null;
   if (expectedRevisionProvided
     && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision <= 0)) {
@@ -1558,18 +1571,37 @@ async function runPrepareProductAttribute(args) {
     && existingBindingLock.currentRevision === liveRevision,
   );
   const existingBindingStale = existingBindingLockKnown && existingBindingLock.stale === true;
+  const existingSchemaVersion = Number(existingBinding?.schemaVersion || 0);
   const existingRequestKey = Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
-    ? productAttributeBindingRequestKey({
-        taskId: args.taskId,
-        targetStore: store,
-        baseTaskRevision: existingBaseRevision,
-        attributeId,
-        attributeValueId: normalizeProductAttributeId(existingBinding?.attributeValueId) || 0,
-        donorStore,
-        donorSkc,
-        donorSpu: String(existingBinding?.donorSpu || ''),
-        evidenceSha256: String(existingBinding?.evidenceSha256 || ''),
-      })
+    ? (existingSchemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION
+        ? productAttributeBindingRequestKeyV2({
+            schemaVersion: PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+            bindingMode: String(existingBinding?.bindingMode || ''),
+            taskId: args.taskId,
+            targetStore: store,
+            baseTaskRevision: existingBaseRevision,
+            attributeId,
+            attributeValueId: normalizeProductAttributeId(existingBinding?.attributeValueId) || 0,
+            donorStore,
+            donorSkc,
+            donorSpu: String(existingBinding?.donorSpu || ''),
+            evidenceSha256: String(existingBinding?.evidenceSha256 || ''),
+            oldPayloadHash: String(existingBinding?.oldPayloadHash || ''),
+            newPayloadHash: String(existingBinding?.newPayloadHash || ''),
+          })
+        : existingSchemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1
+          ? productAttributeBindingRequestKey({
+              taskId: args.taskId,
+              targetStore: store,
+              baseTaskRevision: existingBaseRevision,
+              attributeId,
+              attributeValueId: normalizeProductAttributeId(existingBinding?.attributeValueId) || 0,
+              donorStore,
+              donorSkc,
+              donorSpu: String(existingBinding?.donorSpu || ''),
+              evidenceSha256: String(existingBinding?.evidenceSha256 || ''),
+            })
+          : '')
     : '';
   const exactExistingBinding = Boolean(
     existingBinding
@@ -1577,6 +1609,10 @@ async function runPrepareProductAttribute(args) {
     && normalizeProductAttributeId(existingBinding.attributeId) === attributeId
     && String(existingBinding.donorStore || '').toUpperCase() === donorStore
     && String(existingBinding.donorSkc || '') === donorSkc
+    && String(existingBinding.bindingMode || PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND) === bindingMode
+    && (existingSchemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION
+      || (existingSchemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1
+        && bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND))
     && existingRequestKey
     && String(existingBinding.bindingRequestKey || '').toLowerCase() === existingRequestKey.toLowerCase(),
   );
@@ -1605,6 +1641,7 @@ async function runPrepareProductAttribute(args) {
     donorStore,
     donorSkc,
     attributeId,
+    bindingMode,
     expectedRevision: requestRevision,
   };
   let bindJson;
@@ -1626,7 +1663,7 @@ async function runPrepareProductAttribute(args) {
       code: error?.code || error?.response?.code || null,
       status: error?.status || null,
       error: String(error?.message || '商品属性绑定失败').slice(0, 500),
-      requested: {attributeId, donorStore, donorSkc},
+      requested: {attributeId, donorStore, donorSkc, bindingMode},
       safety: {realPublishOccurred: false, dryRunAttempted: false},
     });
     process.exitCode = 1;
@@ -1647,7 +1684,7 @@ async function runPrepareProductAttribute(args) {
       auditPending: bindJson.auditPending === true,
       code: String(bindJson.code || ''),
       error: String(bindJson.error || '').slice(0, 500),
-      requested: {attributeId, donorStore, donorSkc},
+      requested: {attributeId, donorStore, donorSkc, bindingMode},
       bound: {
         attributeId: binding.attributeId ?? null,
         attributeValueId: binding.attributeValueId ?? null,
@@ -1771,6 +1808,7 @@ async function runPrepareProductAttribute(args) {
     command: 'prepare-product-attribute',
     taskId: args.taskId,
     store,
+    bindingMode,
     stage: committedStage,
     bindingCommitted: bindJson.bindingCommitted === true,
     readbackVerified: bindJson.readbackVerified === true,

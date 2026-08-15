@@ -41,10 +41,17 @@ import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {
+  PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT,
+  PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
+  PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+  PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1,
+  adoptablePayloadAttributeRow,
   bindProductAttributeToPayload,
   buildProductAliasContext,
   evaluateDonorProductAttributeEvidence,
   productAttributeAreaFingerprint,
+  productAttributeBindingRequestKey,
+  productAttributeBindingRequestKeyV2,
   productAttributeTargetStandardGoodsSn,
   validateProductAttributeBindingLock,
 } from '../lib/link_ops_product_attribute_binding.mjs';
@@ -53,6 +60,7 @@ import {
   sha256StableJson,
   sha256Utf8,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
@@ -229,6 +237,9 @@ const donorAttributeRows = () => {
   const identity = {attributeId: 1000546, attributeValueId: 0, attributeValue: modelValue};
   const hazard = () => {
     if (donorModes.attribute === 'missing') return [];
+    if (donorModes.attribute === 'adoptvalue') {
+      return [{attributeId: ATTRIBUTE_ID, attributeValueId: 888888, attributeValue: 'Hazardous other value'}];
+    }
     if (donorModes.attribute === 'duplicate') {
       return [
         {attributeId: ATTRIBUTE_ID, attributeValueId: DONOR_VALUE_ID, attributeValue: 'Not hazardous'},
@@ -429,6 +440,7 @@ const stateFile = path.join(tmpRoot, 'action_state.json');
 const taskFile = path.join(tmpRoot, 'tasks.json');
 const chatFile = path.join(tmpRoot, 'chats.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
+const attributeAuditFailMarker = path.join(tmpRoot, 'fail-attribute-audit.marker');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 const portalDir = path.join(tmpRoot, 'portal');
@@ -470,6 +482,7 @@ const portal = spawn(process.execPath, [
     SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
     SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS: '15000',
     SHEIN_LINK_OPS_READBACK_MAX_PAGES: '1',
+    SHEIN_BI_TEST_ATTRIBUTE_AUDIT_FAIL_FILE: attributeAuditFailMarker,
     SHEIN_PRODUCT_ALIASES_FILE: aliasFile,
     SHEIN_PRODUCT_CATALOG_FILE: catalogFile,
   },
@@ -624,7 +637,7 @@ function publishPayloadFor() {
   };
 }
 
-function descriptionBindingFor(taskId, payload, baseTaskRevision = 1) {
+function descriptionBindingFor(taskId, payload, baseTaskRevision = 1, imageBindingFingerprint = IMAGE_FINGERPRINT) {
   const sourceProof = 'server_verified_html_section_s09';
   return {
     schemaVersion: 1,
@@ -656,8 +669,39 @@ function descriptionBindingFor(taskId, payload, baseTaskRevision = 1) {
     },
     newPayloadHash: sha256StableJson(payload),
     payloadHashAlgorithm: 'sha256-stable-json-v1',
-    imageBindingFingerprint: IMAGE_FINGERPRINT,
+    imageBindingFingerprint,
   };
+}
+
+function validPublishAssetBindingFixture(task) {
+  const images = [
+    {name: 'attr-main.jpg', role: 'main', imageType: 1, imageUrl: 'https://img.shein.com/main.jpg', width: 1000, height: 1000, sha256: crypto.createHash('sha256').update('attr-main-image').digest('hex')},
+    {name: 'attr-square.jpg', role: 'square', imageType: 5, imageUrl: 'https://img.shein.com/square.jpg', width: 800, height: 800, sha256: crypto.createHash('sha256').update('attr-square-image').digest('hex')},
+  ];
+  const binding = {
+    schemaVersion: 1,
+    sourceApproved: true,
+    authority: 'human_reviewed_source',
+    targetStore: TARGET_STORE,
+    boundAt: '2026-08-15T00:00:00.000Z',
+    boundByUser: 'owner_attr_bind',
+    imageCount: images.length,
+    images,
+    evidence: {payloadSource: 'task', preflightInvalidated: true},
+    publishPreparation: {
+      standardGoodsSn: STANDARD_GOODS_SN,
+      supplyPrice: null,
+      inventory: null,
+      categoryId: null,
+      titles: {},
+      attributeOverrides: [],
+    },
+  };
+  binding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {
+    binding,
+    images: binding.images,
+  });
+  return binding;
 }
 
 async function attachFullPayload(taskId, {skipDescription = false} = {}) {
@@ -682,6 +726,7 @@ async function bindProductAttribute(cookie, taskId, {
   donorStore = DONOR_STORE,
   donorSkc = DONOR_SKC,
   attributeId = ATTRIBUTE_ID,
+  bindingMode = null,
   expectedRevision = null,
   extraBody = {},
 } = {}) {
@@ -696,9 +741,35 @@ async function bindProductAttribute(cookie, taskId, {
       donorStore,
       donorSkc,
       attributeId,
+      ...(bindingMode === null ? {} : {bindingMode}),
       expectedRevision: revision,
       ...extraBody,
     },
+  });
+}
+
+async function attachFullPayloadWithRow(taskId, {valueId = DONOR_VALUE_ID, skipDescription = false} = {}) {
+  const payload = publishPayloadFor();
+  payload.product_attribute_list = [
+    ...payload.product_attribute_list,
+    {attribute_id: ATTRIBUTE_ID, attribute_value_id: valueId},
+  ];
+  await updateRawTaskById(taskId, task => {
+    const assetBinding = validPublishAssetBindingFixture(task);
+    return {
+      ...task,
+      note: `${TARGET_STORE} 待 adopt 既有白名单商品属性`,
+      openapiPublishPayload: JSON.parse(JSON.stringify(payload)),
+      publishAssetBinding: assetBinding,
+      ...(skipDescription ? {} : {
+        descriptionMaterialBinding: descriptionBindingFor(
+          taskId,
+          payload,
+          Number(task?.repositoryRevision || 1),
+          String(assetBinding.bindingFingerprint || ''),
+        ),
+      }),
+    };
   });
 }
 
@@ -862,6 +933,28 @@ try {
   check('success lock pins old payload hash', /^[a-f0-9]{64}$/.test(String(successRaw?.productAttributeBinding?.oldPayloadHash || '')), true);
   check('success lock pins alias fingerprint', String(successRaw?.productAttributeBinding?.aliasRegistryFingerprint || ''), aliasRegistryFingerprint);
   check('success lock pins catalog fingerprint', String(successRaw?.productAttributeBinding?.catalogFingerprint || ''), catalogFingerprint);
+  check('success append schema v2', Number(successRaw?.productAttributeBinding?.schemaVersion || 0), PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION);
+  check('success append bindingMode', String(successRaw?.productAttributeBinding?.bindingMode || ''), PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND);
+  check('success append old!=new hash invariant', (() => {
+    const binding = successRaw?.productAttributeBinding || {};
+    return /^[a-f0-9]{64}$/.test(String(binding.oldPayloadHash || ''))
+      && String(binding.oldPayloadHash) !== String(binding.newPayloadHash || '');
+  })(), true);
+  check('success append v2 request key', String(successRaw?.productAttributeBinding?.bindingRequestKey || ''), productAttributeBindingRequestKeyV2({
+    schemaVersion: PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+    bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
+    taskId: successTaskId,
+    targetStore: TARGET_STORE,
+    baseTaskRevision: Number(successRaw?.productAttributeBinding?.baseTaskRevision || 0),
+    attributeId: ATTRIBUTE_ID,
+    attributeValueId: DONOR_VALUE_ID,
+    donorStore: DONOR_STORE,
+    donorSkc: DONOR_SKC,
+    donorSpu: DONOR_SPU,
+    evidenceSha256: String(successRaw?.productAttributeBinding?.evidenceSha256 || ''),
+    oldPayloadHash: String(successRaw?.productAttributeBinding?.oldPayloadHash || ''),
+    newPayloadHash: String(successRaw?.productAttributeBinding?.newPayloadHash || ''),
+  }));
   check('success preflight invalidated', String(successRaw?.execution?.state || ''), 'needs_repreflight');
   check('success actualWriteSubmitted false', Boolean(successRaw?.execution?.actualWriteSubmitted), false);
   check('success writeAudit reset', Boolean(successRaw?.execution?.writeAudit?.invalidatedByProductAttributeBinding), true);
@@ -881,6 +974,198 @@ try {
     .some(row => /newPayloadHash 与任务当前 openapiPublishPayload 不一致|hash 与审核资料绑定不一致/.test(String(row))), true);
   check('step-1 dry-run carries no attribute gate blocker', asArray(step1DryRun.json?.execution?.preflight?.blockers)
     .some(row => /PRODUCT_ATTRIBUTE/.test(String(row))), false);
+
+  // --- HTTP adopt_existing success path ---
+  const adoptTaskId = await createTask(cookie, 'ATTR-ADOPT-HTTP');
+  await attachFullPayloadWithRow(adoptTaskId);
+  const adoptBeforeRaw = await rawTaskById(adoptTaskId);
+  const adoptBeforeRevision = Number(adoptBeforeRaw?.repositoryRevision || 0);
+  const adoptBeforePayload = JSON.stringify(adoptBeforeRaw.openapiPublishPayload);
+  const adoptBeforeDescription = JSON.stringify(adoptBeforeRaw.descriptionMaterialBinding);
+  const adoptBeforeAssets = JSON.stringify(adoptBeforeRaw.publishAssetBinding);
+  const adoptBeforeHash = sha256StableJson(adoptBeforeRaw.openapiPublishPayload);
+  const adoptHttp = await bindProductAttribute(cookie, adoptTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  check('adopt http status', adoptHttp.status, 200);
+  check('adopt http stage verified', String(adoptHttp.json?.stage || ''), 'binding_committed_verified');
+  check('adopt http next command preflight', String(adoptHttp.json?.nextStep?.command || ''), 'preflight');
+  check('adopt http next realPublish false', adoptHttp.json?.nextStep?.realPublish, false);
+  check('adopt http bindingMode', String(adoptHttp.json?.binding?.bindingMode || ''), PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT);
+  check('adopt http schema v2', Number(adoptHttp.json?.binding?.schemaVersion || 0), PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION);
+  check('adopt http bound value', adoptHttp.json?.binding?.attributeValueId, DONOR_VALUE_ID);
+  check('adopt http old==new hash', (() => {
+    const binding = adoptHttp.json?.binding || {};
+    return binding.oldPayloadHash === adoptBeforeHash
+      && binding.newPayloadHash === adoptBeforeHash
+      && binding.oldPayloadHash === binding.newPayloadHash;
+  })(), true);
+  const adoptRaw = await rawTaskById(adoptTaskId);
+  check('adopt revision advanced exactly once', Number(adoptRaw?.repositoryRevision || 0), adoptBeforeRevision + 1);
+  check('adopt payload deep-equal unchanged', JSON.stringify(adoptRaw.openapiPublishPayload), adoptBeforePayload);
+  check('adopt description binding byte-for-byte unchanged', JSON.stringify(adoptRaw.descriptionMaterialBinding), adoptBeforeDescription);
+  check('adopt asset binding byte-for-byte unchanged', JSON.stringify(adoptRaw.publishAssetBinding), adoptBeforeAssets);
+  check('adopt persisted lock ok', validateProductAttributeBindingLock(adoptRaw, adoptRaw.openapiPublishPayload).ok, true);
+  check('adopt history event once', asArray(adoptRaw?.history).filter(entry => entry?.event === 'product_attribute_adopted').length, 1);
+  check('adopt history keeps bound-event semantics', asArray(adoptRaw?.history).filter(entry => entry?.event === 'product_attribute_bound').length, 0);
+  check('adopt actualWriteSubmitted false', Boolean(adoptRaw?.execution?.actualWriteSubmitted), false);
+  check('adopt preflight invalidated', String(adoptRaw?.execution?.state || ''), 'needs_repreflight');
+  const adoptDryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: adoptTaskId, mode: 'dry-run', source: 'test'},
+  });
+  check('adopt dry-run ready without rebind', String(adoptDryRun.json?.execution?.state || ''), 'openapi_product_preflight_ready');
+  check('adopt dry-run no blockers', asArray(adoptDryRun.json?.execution?.preflight?.blockers).length, 0);
+  check('adopt dry-run attribute count', Number(adoptDryRun.json?.execution?.openApiProductExecutors?.[0]?.payload?.summary?.productAttributeCount || 0), 3);
+  check('adopt never publishes', publishAttemptCount, 0);
+
+  // Adopt negative paths: all zero-write.
+  const adoptNegatives = [
+    ['ATTR-ADOPT-VALUE-MISMATCH', {search: 'exact', attribute: 'adoptvalue', identity: 'ok'}, 'PRODUCT_ATTRIBUTE_ADOPT_VALUE_MISMATCH'],
+    ['ATTR-ADOPT-ROW-MISSING', {search: 'exact', attribute: 'present', identity: 'ok'}, 'PRODUCT_ATTRIBUTE_ADOPT_ROW_MISSING'],
+  ];
+  for (const [code, modes, expectedCode] of adoptNegatives) {
+    donorModes.search = modes.search;
+    donorModes.attribute = modes.attribute;
+    donorModes.identity = modes.identity;
+    const taskId = await createTask(cookie, code);
+    if (code === 'ATTR-ADOPT-ROW-MISSING') await attachFullPayload(taskId);
+    else await attachFullPayloadWithRow(taskId);
+    const revisionBefore = Number((await rawTaskById(taskId))?.repositoryRevision || 0);
+    const res = await bindProductAttribute(cookie, taskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+    check(`${code} rejected`, res.status, 409);
+    check(`${code} code`, String(res.json?.code || ''), expectedCode);
+    check(`${code} no binding persisted`, Boolean((await rawTaskById(taskId))?.productAttributeBinding), false);
+    check(`${code} no revision write`, Number((await rawTaskById(taskId))?.repositoryRevision || 0), revisionBefore);
+    check(`${code} never publishes`, publishAttemptCount, 0);
+  }
+  donorModes.search = 'exact';
+  donorModes.attribute = 'present';
+  donorModes.identity = 'ok';
+
+  // Duplicate same/different rows and illegal value: zero write.
+  for (const [code, rows, expectedCode] of [
+    ['ATTR-ADOPT-DUP-SAME', [{attribute_id: ATTRIBUTE_ID, attribute_value_id: DONOR_VALUE_ID}, {attribute_id: ATTRIBUTE_ID, attribute_value_id: DONOR_VALUE_ID}], 'PRODUCT_ATTRIBUTE_ADOPT_ROW_DUPLICATE'],
+    ['ATTR-ADOPT-DUP-DIFF', [{attribute_id: ATTRIBUTE_ID, attribute_value_id: DONOR_VALUE_ID}, {attribute_id: ATTRIBUTE_ID, attribute_value_id: 555555}], 'PRODUCT_ATTRIBUTE_ADOPT_ROW_DUPLICATE'],
+    ['ATTR-ADOPT-ILLEGAL-VALUE', [{attribute_id: ATTRIBUTE_ID, attribute_value_id: 0}], 'PRODUCT_ATTRIBUTE_ADOPT_VALUE_INVALID'],
+  ]) {
+    const taskId = await createTask(cookie, code);
+    await attachFullPayload(taskId);
+    await updateRawTaskById(taskId, task => {
+      const payload = JSON.parse(JSON.stringify(task.openapiPublishPayload));
+      payload.product_attribute_list.push(...rows);
+      return {...task, openapiPublishPayload: payload};
+    });
+    const revisionBefore = Number((await rawTaskById(taskId))?.repositoryRevision || 0);
+    const res = await bindProductAttribute(cookie, taskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+    check(`${code} rejected`, res.status, 409);
+    check(`${code} code`, String(res.json?.code || ''), expectedCode);
+    check(`${code} no revision write`, Number((await rawTaskById(taskId))?.repositoryRevision || 0), revisionBefore);
+    check(`${code} never publishes`, publishAttemptCount, 0);
+  }
+
+  // Adopt requires valid description and image bindings (fail before write).
+  const adoptNoDescTaskId = await createTask(cookie, 'ATTR-ADOPT-NO-DESCRIPTION');
+  await attachFullPayloadWithRow(adoptNoDescTaskId, {skipDescription: true});
+  const adoptNoDescRevision = Number((await rawTaskById(adoptNoDescTaskId))?.repositoryRevision || 0);
+  const adoptNoDescRes = await bindProductAttribute(cookie, adoptNoDescTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  check('adopt missing description rejected', adoptNoDescRes.status, 409);
+  check('adopt missing description code', String(adoptNoDescRes.json?.code || ''), 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID');
+  check('adopt missing description no write', Number((await rawTaskById(adoptNoDescTaskId))?.repositoryRevision || 0), adoptNoDescRevision);
+
+  const adoptNoImageTaskId = await createTask(cookie, 'ATTR-ADOPT-NO-IMAGE');
+  await attachFullPayloadWithRow(adoptNoImageTaskId);
+  await updateRawTaskById(adoptNoImageTaskId, task => {
+    const next = {...task};
+    delete next.publishAssetBinding;
+    return next;
+  });
+  const adoptNoImageRevision = Number((await rawTaskById(adoptNoImageTaskId))?.repositoryRevision || 0);
+  const adoptNoImageRes = await bindProductAttribute(cookie, adoptNoImageTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  check('adopt missing image binding rejected', adoptNoImageRes.status, 409);
+  check('adopt missing image binding code', String(adoptNoImageRes.json?.code || ''), 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID');
+  check('adopt missing image binding no write', Number((await rawTaskById(adoptNoImageTaskId))?.repositoryRevision || 0), adoptNoImageRevision);
+
+  // Image-binding tamper variants: every one keeps the old fingerprint and
+  // must be rejected by the canonical validator, zero write.
+  const imageTamperCases = [
+    ['ATTR-ADOPT-IMG-REMOVED', binding => { binding.images = binding.images.slice(0, 1); }],
+    ['ATTR-ADOPT-IMG-DELETED', binding => { delete binding.images; }],
+    ['ATTR-ADOPT-IMG-SHA-DRIFT', binding => { binding.images[0].sha256 = 'f'.repeat(64); }],
+    ['ATTR-ADOPT-IMG-SHA-INVALID', binding => { binding.images[0].sha256 = 'not-a-sha256'; }],
+    ['ATTR-ADOPT-IMG-AUTHORITY', binding => { binding.authority = 'unknown_authority'; }],
+    ['ATTR-ADOPT-IMG-UNAPPROVED', binding => { binding.sourceApproved = false; }],
+    ['ATTR-ADOPT-IMG-EMPTY', binding => { binding.images = []; binding.imageCount = 0; }],
+  ];
+  for (const [code, mutate] of imageTamperCases) {
+    const taskId = await createTask(cookie, code);
+    await attachFullPayloadWithRow(taskId);
+    const revisionBefore = Number((await rawTaskById(taskId))?.repositoryRevision || 0);
+    await updateRawTaskById(taskId, task => {
+      const binding = JSON.parse(JSON.stringify(task.publishAssetBinding));
+      mutate(binding);
+      return {...task, publishAssetBinding: binding};
+    });
+    const res = await bindProductAttribute(cookie, taskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+    check(`${code} rejected`, res.status, 409);
+    check(`${code} code`, String(res.json?.code || ''), 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID');
+    check(`${code} no binding persisted`, Boolean((await rawTaskById(taskId))?.productAttributeBinding), false);
+    check(`${code} no revision write`, Number((await rawTaskById(taskId))?.repositoryRevision || 0), revisionBefore);
+    check(`${code} never publishes`, publishAttemptCount, 0);
+  }
+
+  // Downgrade attack: a valid v2 adopt binding mutated to v1 (bindingMode
+  // removed, old v1 request key recomputed) must fail the lock (adopt is
+  // old==new), block the real dry-run gate, and reject a default append
+  // replay instead of silently defaulting to append.
+  const downgradeTaskId = await createTask(cookie, 'ATTR-DOWNGRADE-ADOPT');
+  await attachFullPayloadWithRow(downgradeTaskId);
+  const downgradeAdopt = await bindProductAttribute(cookie, downgradeTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  check('downgrade fixture adopt 200', downgradeAdopt.status, 200);
+  const downgradePreRaw = await rawTaskById(downgradeTaskId);
+  const downgradeBaseRevision = Number(downgradePreRaw?.productAttributeBinding?.baseTaskRevision || 0);
+  await updateRawTaskById(downgradeTaskId, task => {
+    const binding = JSON.parse(JSON.stringify(task.productAttributeBinding));
+    binding.schemaVersion = PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1;
+    delete binding.bindingMode;
+    binding.bindingRequestKey = productAttributeBindingRequestKey({
+      taskId: task.id,
+      targetStore: binding.targetStore,
+      baseTaskRevision: Number(binding.baseTaskRevision || 0),
+      attributeId: binding.attributeId,
+      attributeValueId: binding.attributeValueId,
+      donorStore: binding.donor?.storeKey || '',
+      donorSkc: binding.donor?.skc || '',
+      donorSpu: binding.donor?.spu || '',
+      evidenceSha256: String(binding.evidenceSha256 || ''),
+    });
+    return {...task, productAttributeBinding: binding};
+  });
+  const downgradeRaw = await rawTaskById(downgradeTaskId);
+  const downgradeLock = validateProductAttributeBindingLock(downgradeRaw, downgradeRaw.openapiPublishPayload);
+  check('downgraded v2-adopt lock rejected', downgradeLock.ok, false);
+  check('downgrade names v1 hash invariant', downgradeLock.blockers.map(blocker => blocker.code)
+    .includes('PRODUCT_ATTRIBUTE_BINDING_V1_HASH_INVARIANT'), true);
+  const downgradeDryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: downgradeTaskId, mode: 'dry-run', source: 'test'},
+  });
+  check('downgraded binding dry-run blocked', String(downgradeDryRun.json?.execution?.state || ''), 'blocked');
+  check('downgraded dry-run names v1 invariant', asArray(downgradeDryRun.json?.execution?.preflight?.blockers)
+    .some(row => /oldPayloadHash 必须 != newPayloadHash/.test(String(row))), true);
+  const downgradeReplay = await bindProductAttribute(cookie, downgradeTaskId, {expectedRevision: downgradeBaseRevision});
+  check('downgraded default append replay rejected', downgradeReplay.status, 409);
+  check('downgraded default append replay code', String(downgradeReplay.json?.code || ''), 'PRODUCT_ATTRIBUTE_EXISTING_BINDING_CONFLICT');
+  check('downgrade never publishes', publishAttemptCount, 0);
+
+  // Default append against an already-present row stays zero-write.
+  const defaultAppendRowTaskId = await createTask(cookie, 'ATTR-DEFAULT-APPEND-ROW');
+  await attachFullPayloadWithRow(defaultAppendRowTaskId);
+  const defaultAppendRevision = Number((await rawTaskById(defaultAppendRowTaskId))?.repositoryRevision || 0);
+  const defaultAppendRes = await bindProductAttribute(cookie, defaultAppendRowTaskId);
+  check('default append with existing row 409', defaultAppendRes.status, 409);
+  check('default append with existing row code', String(defaultAppendRes.json?.code || ''), 'PRODUCT_ATTRIBUTE_ALREADY_PRESENT');
+  check('default append with existing row no write', Number((await rawTaskById(defaultAppendRowTaskId))?.repositoryRevision || 0), defaultAppendRevision);
 
   // --- negative paths: every one must fail closed without a task write ---
   const negativeCases = [
@@ -1062,6 +1347,73 @@ try {
   check('step-2 dry-run description locked', cliStep2.json?.dryRun?.descriptionBindingLocked, true);
   check('step-2 never publishes', publishAttemptCount, 0);
 
+  // --- managed CLI adopt_existing end-to-end ---
+  const cliAdoptTaskId = await createTask(cookie, 'ATTR-ADOPT-CLI');
+  await attachFullPayloadWithRow(cliAdoptTaskId);
+  const cliAdoptBefore = await rawTaskById(cliAdoptTaskId);
+  const cliAdoptBeforePayload = JSON.stringify(cliAdoptBefore.openapiPublishPayload);
+  const cliAdoptBeforeDescription = JSON.stringify(cliAdoptBefore.descriptionMaterialBinding);
+  const cliAdoptRun = await runCli([
+    'prepare-product-attribute',
+    '--adopt-existing',
+    '--task-id', cliAdoptTaskId,
+    '--store', TARGET_STORE,
+    '--donor-store', DONOR_STORE,
+    '--donor-skc', DONOR_SKC,
+    '--attribute-id', String(ATTRIBUTE_ID),
+  ]);
+  check('cli adopt exits zero', cliAdoptRun.code, 0);
+  check('cli adopt ok', cliAdoptRun.json?.ok, true);
+  check('cli adopt mode', String(cliAdoptRun.json?.bindingMode || ''), PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT);
+  check('cli adopt stage verified', String(cliAdoptRun.json?.stage || ''), 'binding_committed_verified');
+  check('cli adopt dry-run ready without rebind', String(cliAdoptRun.json?.dryRun?.state || ''), 'openapi_product_preflight_ready');
+  check('cli adopt binding locked', cliAdoptRun.json?.dryRun?.bindingLocked, true);
+  check('cli adopt no ready claim override', cliAdoptRun.json?.safety?.realPublishOccurred, false);
+  const cliAdoptRaw = await rawTaskById(cliAdoptTaskId);
+  check('cli adopt payload unchanged', JSON.stringify(cliAdoptRaw.openapiPublishPayload), cliAdoptBeforePayload);
+  check('cli adopt description unchanged', JSON.stringify(cliAdoptRaw.descriptionMaterialBinding), cliAdoptBeforeDescription);
+  check('cli adopt old==new hash', (() => {
+    const binding = cliAdoptRaw?.productAttributeBinding || {};
+    return binding.oldPayloadHash === binding.newPayloadHash
+      && binding.newPayloadHash === sha256StableJson(cliAdoptRaw.openapiPublishPayload);
+  })(), true);
+  check('cli adopt actualWriteSubmitted false', Boolean(cliAdoptRaw?.execution?.actualWriteSubmitted), false);
+  check('cli adopt never publishes', publishAttemptCount, 0);
+  const cliAdoptKey = String(cliAdoptRaw?.productAttributeBinding?.bindingRequestKey || '');
+  const cliAdoptEvents = asArray(cliAdoptRaw?.history).filter(entry => entry?.event === 'product_attribute_adopted').length;
+  check('cli adopt single adopted event', cliAdoptEvents, 1);
+  const cliAdoptReplay = await runCli([
+    'prepare-product-attribute',
+    '--adopt-existing',
+    '--task-id', cliAdoptTaskId,
+    '--store', TARGET_STORE,
+    '--donor-store', DONOR_STORE,
+    '--donor-skc', DONOR_SKC,
+    '--attribute-id', String(ATTRIBUTE_ID),
+  ]);
+  check('cli adopt replay exits zero', cliAdoptReplay.code, 0);
+  check('cli adopt replay ok', cliAdoptReplay.json?.ok, true);
+  const cliAdoptReplayRaw = await rawTaskById(cliAdoptTaskId);
+  check('cli adopt replay keeps binding key', String(cliAdoptReplayRaw?.productAttributeBinding?.bindingRequestKey || ''), cliAdoptKey);
+  check('cli adopt replay no new event', asArray(cliAdoptReplayRaw?.history).filter(entry => entry?.event === 'product_attribute_adopted').length, cliAdoptEvents);
+
+  // CLI default append against an already-present row must fail without
+  // touching the server task.
+  const cliAppendRowTaskId = await createTask(cookie, 'ATTR-CLI-APPEND-ROW');
+  await attachFullPayloadWithRow(cliAppendRowTaskId);
+  const cliAppendRowRevision = Number((await rawTaskById(cliAppendRowTaskId))?.repositoryRevision || 0);
+  const cliAppendRowRun = await runCli([
+    'prepare-product-attribute',
+    '--task-id', cliAppendRowTaskId,
+    '--store', TARGET_STORE,
+    '--donor-store', DONOR_STORE,
+    '--donor-skc', DONOR_SKC,
+    '--attribute-id', String(ATTRIBUTE_ID),
+  ]);
+  check('cli default append with row fails', cliAppendRowRun.code, code => code !== 0);
+  check('cli default append with row code', cliAppendRowRun.stdout, text => text.includes('PRODUCT_ATTRIBUTE_ALREADY_PRESENT'));
+  check('cli default append with row no write', Number((await rawTaskById(cliAppendRowTaskId))?.repositoryRevision || 0), cliAppendRowRevision);
+
   // --- execution gate: tampering must block dry-run ---
   const tamperRaw = await rawTaskById(cliTaskId);
   const tamperBaseRevision = Number(tamperRaw?.repositoryRevision || 0);
@@ -1186,6 +1538,113 @@ try {
     .includes('PRODUCT_ATTRIBUTE_BINDING_DONOR_MODEL_INVALID'), true);
   await restoreTamper();
 
+  // v1 append regression: a schema-v1 binding (old request-key algorithm,
+  // no bindingMode field) remains valid and the gate/dry-run keep working.
+  const v1BaseRaw = await rawTaskById(cliTaskId);
+  await updateRawTaskById(cliTaskId, task => {
+    const binding = JSON.parse(JSON.stringify(task.productAttributeBinding));
+    binding.schemaVersion = PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1;
+    delete binding.bindingMode;
+    binding.bindingRequestKey = productAttributeBindingRequestKey({
+      taskId: task.id,
+      targetStore: binding.targetStore,
+      baseTaskRevision: Number(binding.baseTaskRevision || 0),
+      attributeId: binding.attributeId,
+      attributeValueId: binding.attributeValueId,
+      donorStore: binding.donor?.storeKey || '',
+      donorSkc: binding.donor?.skc || '',
+      donorSpu: binding.donor?.spu || '',
+      evidenceSha256: String(binding.evidenceSha256 || ''),
+    });
+    return {...task, repositoryRevision: tamperBaseRevision + 6, productAttributeBinding: binding};
+  });
+  const v1Raw = await rawTaskById(cliTaskId);
+  check('v1 append binding lock ok', validateProductAttributeBindingLock(v1Raw, v1Raw.openapiPublishPayload).ok, true);
+  const v1DryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: cliTaskId, mode: 'dry-run', source: 'test'},
+  });
+  check('v1 append binding dry-run ready', String(v1DryRun.json?.execution?.state || ''), 'openapi_product_preflight_ready');
+  await restoreTamper();
+
+  // Binding deletion still blocks (PRODUCT_ATTRIBUTE_UNBOUND_ROWS) and
+  // re-adoption requires full fresh donor verification plus a new CAS.
+  const recoverTaskId = await createTask(cookie, 'ATTR-ADOPT-RECOVER');
+  await attachFullPayloadWithRow(recoverTaskId);
+  const recoverAdopt = await bindProductAttribute(cookie, recoverTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  check('recover initial adopt 200', recoverAdopt.status, 200);
+  const recoverKey = String((await rawTaskById(recoverTaskId))?.productAttributeBinding?.bindingRequestKey || '');
+  const donorSearchCallsBefore = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct'
+    && String(call.body?.skcNameList || '').includes(DONOR_SKC)).length;
+  const deletedRevision = Number((await rawTaskById(recoverTaskId))?.repositoryRevision || 0);
+  await updateRawTaskById(recoverTaskId, task => {
+    const next = {...task, repositoryRevision: deletedRevision + 1};
+    delete next.productAttributeBinding;
+    return next;
+  });
+  const deletedDryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: recoverTaskId, mode: 'dry-run', source: 'test'},
+  });
+  check('deleted binding dry-run blocked unbound rows', String(deletedDryRun.json?.execution?.state || ''), 'blocked');
+  check('deleted binding names unbound rows', asArray(deletedDryRun.json?.execution?.preflight?.blockers)
+    .some(row => /缺少 productAttributeBinding/.test(String(row))), true);
+  const preReAdoptRevision = Number((await rawTaskById(recoverTaskId))?.repositoryRevision || 0);
+  const reAdopt = await bindProductAttribute(cookie, recoverTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  check('re-adopt after deletion 200', reAdopt.status, 200);
+  const reAdoptRaw = await rawTaskById(recoverTaskId);
+  check('re-adopt creates fresh binding key', String(reAdoptRaw?.productAttributeBinding?.bindingRequestKey || ''), key => /^[a-f0-9]{64}$/.test(String(key)) && key !== recoverKey);
+  check('re-adopt advances CAS revision once', Number(reAdoptRaw?.repositoryRevision || 0), preReAdoptRevision + 1);
+  const donorSearchCallsAfter = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct'
+    && String(call.body?.skcNameList || '').includes(DONOR_SKC)).length;
+  check('re-adopt performed fresh live donor verification', donorSearchCallsAfter, donorSearchCallsBefore + 1);
+  check('re-adopt lock ok', validateProductAttributeBindingLock(reAdoptRaw, reAdoptRaw.openapiPublishPayload).ok, true);
+  check('re-adopt never publishes', publishAttemptCount, 0);
+
+  // CAS/idempotent race: two identical adopt requests at the same revision
+  // produce exactly one committed adoption (one CAS write, one idempotent
+  // replay, single history event).
+  const raceTaskId = await createTask(cookie, 'ATTR-ADOPT-RACE');
+  await attachFullPayloadWithRow(raceTaskId);
+  const raceRevision = Number((await rawTaskById(raceTaskId))?.repositoryRevision || 0);
+  const [raceA, raceB] = await Promise.all([
+    bindProductAttribute(cookie, raceTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT, expectedRevision: raceRevision}),
+    bindProductAttribute(cookie, raceTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT, expectedRevision: raceRevision}),
+  ]);
+  check('adopt race at least one commit', [raceA.status, raceB.status].some(status => status === 200), true);
+  check('adopt race loser settles as replay or CAS conflict', [raceA.status, raceB.status].every(status => status === 200 || status === 409), true);
+  const raceRaw = await rawTaskById(raceTaskId);
+  check('adopt race advances revision exactly once', Number(raceRaw?.repositoryRevision || 0), raceRevision + 1);
+  check('adopt race single adopted event', asArray(raceRaw?.history).filter(entry => entry?.event === 'product_attribute_adopted').length, 1);
+  check('adopt race lock ok', validateProductAttributeBindingLock(raceRaw, raceRaw.openapiPublishPayload).ok, true);
+  check('adopt race never publishes', publishAttemptCount, 0);
+
+  // Audit pending semantics: when the audit append fails, the binding is
+  // committed but the response is binding_committed_audit_pending; a replay
+  // completes the audit without a second binding event.
+  const auditTaskId = await createTask(cookie, 'ATTR-ADOPT-AUDIT-PENDING');
+  await attachFullPayloadWithRow(auditTaskId);
+  await fs.writeFile(attributeAuditFailMarker, 'fail', 'utf8');
+  const auditPendingAdopt = await bindProductAttribute(cookie, auditTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  await fs.rm(attributeAuditFailMarker, {force: true});
+  check('audit pending adopt 200', auditPendingAdopt.status, 200);
+  check('audit pending adopt committed', auditPendingAdopt.json?.bindingCommitted, true);
+  check('audit pending adopt readback', auditPendingAdopt.json?.readbackVerified, true);
+  check('audit pending adopt flag', auditPendingAdopt.json?.auditPending, true);
+  check('audit pending adopt stage', String(auditPendingAdopt.json?.stage || ''), 'binding_committed_audit_pending');
+  check('audit pending adopt ok false', auditPendingAdopt.json?.ok, false);
+  const auditBaseRevision = Number((await rawTaskById(auditTaskId))?.productAttributeBinding?.baseTaskRevision || 0);
+  const auditReplay = await bindProductAttribute(cookie, auditTaskId, {
+    bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT,
+    expectedRevision: auditBaseRevision,
+  });
+  check('audit replay completes', auditReplay.json?.ok, true);
+  check('audit replay stage verified', String(auditReplay.json?.stage || ''), 'binding_committed_verified');
+  check('audit replay single adopted event', asArray((await rawTaskById(auditTaskId))?.history).filter(entry => entry?.event === 'product_attribute_adopted').length, 1);
+  check('audit pending never publishes', publishAttemptCount, 0);
+
   // Idempotent replay of step 1 after the registry was restored.
   const cliReplay = await runCli([
     'prepare-product-attribute',
@@ -1227,7 +1686,7 @@ try {
     '--attribute-id', String(ATTRIBUTE_ID),
   ]);
   check('cli drifted payload run fails closed', cliDriftRun.code, code => code !== 0);
-  check('cli drifted payload reports already-present conflict', cliDriftRun.stdout, text => text.includes('PRODUCT_ATTRIBUTE_ALREADY_PRESENT'));
+  check('cli drifted payload reports existing-binding conflict', cliDriftRun.stdout, text => text.includes('PRODUCT_ATTRIBUTE_EXISTING_BINDING_CONFLICT'));
   const cliDriftRaw = await rawTaskById(cliTaskId);
   check('cli drifted payload keeps binding key', String(cliDriftRaw?.productAttributeBinding?.bindingRequestKey || ''), cliBindingKey);
   check('cli drifted payload no new binding event', asArray(cliDriftRaw?.history).filter(entry => entry?.event === 'product_attribute_bound').length, cliBindEvents);

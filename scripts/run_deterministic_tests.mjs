@@ -200,22 +200,20 @@ const tests = [
 const failures = [];
 for (const file of tests) {
   const startedAt = Date.now();
-  // This integration test intentionally starts an isolated portal plus fake
-  // OpenAPI and exercises the complete bind/dry-run/execute/readback matrix.
-  // The isolated matrix has taken 132-175 seconds on the production-sized
-  // cloud host, so retain bounded headroom without widening the default budget.
-  // Keep the default fail-fast budget for every other deterministic test.
+  // These integration tests intentionally start an isolated portal plus a
+  // fake OpenAPI server and exercise the complete bind/dry-run/execute/
+  // readback matrix. The description/update matrices have taken 132-175
+  // seconds on the production-sized cloud host. The attribute flow now
+  // measures ~182s locally after the adopt-existing plus image-binding
+  // tamper matrices, so it gets its own bounded 360s tier (~2x measured
+  // headroom) for the slower GitHub runner; the two heavier matrices keep
+  // 240s and every other deterministic test keeps the default 30s fail-fast
+  // budget.
   const timeout = (file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     || file === 'scripts/test_link_ops_update_description_flow.mjs')
     ? 240_000
     : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
-      // The attribute repair flow also starts an isolated portal plus a fake
-      // OpenAPI server (donor identity/searchProduct/spu-info plus the full
-      // two-step bind/rebind/dry-run matrix). It finishes in ~19.5s locally
-      // but exceeded the 30s fail-fast budget on the slower GitHub runner
-      // (SIGTERM at 30038ms), so give it a bounded 90s budget only for this
-      // test; every other deterministic test keeps the default budget.
-      ? 90_000
+      ? 360_000
       : 30_000;
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),
