@@ -53,6 +53,7 @@ import {
   productAttributeBindingRequestKey,
   productAttributeBindingRequestKeyV2,
   productAttributeTargetStandardGoodsSn,
+  resolveExplicitProductAlias,
   validateProductAttributeBindingLock,
 } from '../lib/link_ops_product_attribute_binding.mjs';
 import {
@@ -822,6 +823,26 @@ try {
     aliasRegistrySource: 'config/product_aliases.json',
     catalogSource: 'config/product_catalog.json',
   });
+  // Focused exact-alias compatibility: the three user-confirmed codes must
+  // resolve; near-miss and unregistered forms must never become exact
+  // aliases (no prefix inference, no fuzzy matching).
+  const unitAliasChecks = [
+    ['SK-7025A', 'SK-7025A绞肉机'],
+    ['SK-JFB-794', 'SK-JFB-794卷发钳和卷发棒'],
+    ['SK-15032', 'SK-15032热风梳'],
+    ['SK-15032热风梳', 'SK-15032热风梳'],
+  ];
+  for (const [raw, expectedCanonical] of unitAliasChecks) {
+    const resolved = resolveExplicitProductAlias(unitAliasContext, raw);
+    check(`unit: exact alias ${raw} resolves`, resolved.ok, true);
+    check(`unit: exact alias ${raw} canonical`, resolved.canonical, expectedCanonical);
+  }
+  for (const raw of ['SK-7025A绞', 'SK-JFB-794卷', 'SK-15032热', 'SK-15032X', 'SK7025A', 'SK-JFB794']) {
+    const resolved = resolveExplicitProductAlias(unitAliasContext, raw);
+    check(`unit: near-miss ${raw} is not an exact alias`, resolved.ok, false);
+    check(`unit: near-miss ${raw} code`, resolved.blockers.map(blocker => blocker.code)
+      .includes('PRODUCT_ALIAS_NOT_FOUND'), true);
+  }
   const unitEvidence = evaluateDonorProductAttributeEvidence({
     donorStore: DONOR_STORE,
     donorSkc: DONOR_SKC,
