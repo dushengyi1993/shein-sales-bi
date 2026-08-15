@@ -10,6 +10,7 @@ const hook = await fs.readFile(path.join(root, '.githooks', 'pre-push'), 'utf8')
 const installer = await fs.readFile(path.join(scriptDir, 'install_local_repo_hygiene.ps1'), 'utf8');
 const cleanup = await fs.readFile(path.join(scriptDir, 'cleanup_local_workspace_hygiene.ps1'), 'utf8');
 const taskInstaller = await fs.readFile(path.join(scriptDir, 'install_local_workspace_hygiene_task.ps1'), 'utf8');
+const ciWorkflow = await fs.readFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'utf8');
 
 assert.match(hook, /refs\/heads\/main/);
 assert.match(hook, /SHEIN_BI_ALLOW_MAIN_PUSH/);
@@ -33,5 +34,6 @@ assert.match(cleanup, /Write-AtomicJsonReport/);
 assert.match(cleanup, /errorType/);
 assert.match(cleanup, /Console\]::OutputEncoding/);
 assert.match(cleanup, /\$OutputEncoding\s*=\s*\$Utf8NoBom/);
+assert.match(ciWorkflow, /deterministic-tests:[\s\S]*?timeout-minutes:\s*30\b/);
 
 console.log(JSON.stringify({ok: true}));
