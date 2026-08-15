@@ -176,24 +176,25 @@ if (bash.status === 0) {
   const legacyPath = `${root}/legacy-session.json`;
   const oldVersion = `${root}/old-version`;
   const fakePython = `${root}/fake-python`;
+  const fakePythonSource = `#!/usr/bin/env bash
+if [[ "\${1:-}" == "-c" ]]; then
+  printf "%s\\n" "CPython|3.12|x86_64|Linux|glibc|2.39"
+  exit 0
+fi
+if [[ "\${1:-}" == "-m" && "\${2:-}" == "pip" && "\${3:-}" == "download" ]]; then exit 0; fi
+if [[ "\${1:-}" == "-m" && "\${2:-}" == "venv" ]]; then
+  target="\${3:-}"; mkdir -p "$target/bin"; cp "$0" "$target/bin/python"; chmod +x "$target/bin/python"; exit 0
+fi
+if [[ "\${1:-}" == "-" ]]; then exit 0; fi
+exit 0
+`;
+  const fakePythonBase64 = Buffer.from(fakePythonSource, 'utf8').toString('base64');
   const setup = [
     `rm -rf -- ${root}`,
     `mkdir -p ${root}/session ${oldVersion}/bin`,
     `printf '%s\\n' 'ddddocr==1.6.1 --hash=sha256:c7c70f4ae2d0335440ae8b272eea48c9f6888ecef46785fe2311f0c97a133935' > ${lockPath}`,
     `printf '%s\\n' '{"session":"redacted-test-value"}' > ${legacyPath}`,
-    `cat > ${fakePython} <<'FAKE'`,
-    '#!/usr/bin/env bash',
-    'if [[ "\\${1:-}" == "-c" ]]; then',
-    '  printf "%s\\n" "CPython|3.12|x86_64|Linux|glibc|2.39"',
-    '  exit 0',
-    'fi',
-    'if [[ "\\${1:-}" == "-m" && "\\${2:-}" == "pip" && "\\${3:-}" == "download" ]]; then exit 0; fi',
-    'if [[ "\\${1:-}" == "-m" && "\\${2:-}" == "venv" ]]; then',
-    '  target="\\${3:-}"; mkdir -p "\\$target/bin"; cp "\\$0" "\\$target/bin/python"; chmod +x "\\$target/bin/python"; exit 0',
-    'fi',
-    'if [[ "\\${1:-}" == "-" ]]; then exit 0; fi',
-    'exit 0',
-    'FAKE',
+    `printf '%s' '${fakePythonBase64}' | base64 -d > ${fakePython}`,
     `chmod +x ${fakePython}`,
     `cp ${fakePython} ${oldVersion}/bin/python`,
     `ln -s ${oldVersion} ${root}/current`,
