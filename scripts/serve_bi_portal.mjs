@@ -102,8 +102,13 @@ import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_
 import {
   PRODUCT_ATTRIBUTE_BINDING_AUTHORITY,
   PRODUCT_ATTRIBUTE_BINDING_KIND,
+  PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT,
+  PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
+  PRODUCT_ATTRIBUTE_BINDING_MODES,
   PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+  PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1,
   PRODUCT_ATTRIBUTE_PAYLOAD_HASH_ALGORITHM,
+  adoptablePayloadAttributeRow,
   bindProductAttributeToPayload,
   buildProductAliasContext,
   evaluateDonorProductAttributeEvidence,
@@ -113,6 +118,7 @@ import {
   payloadWhitelistedProductAttributeRows,
   productAttributeAreaFingerprint,
   productAttributeBindingRequestKey,
+  productAttributeBindingRequestKeyV2,
   productAttributeTargetStandardGoodsSn,
   productModelFromPayload,
   productAttributeRowsForId,
@@ -2561,6 +2567,16 @@ async function appendDescriptionBindingAudit(file, entry) {
   if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
     const error = new Error('injected description binding audit failure');
     error.code = 'DESCRIPTION_AUDIT_INJECTED_FAILURE';
+    throw error;
+  }
+  return appendAudit(file, entry);
+}
+
+async function appendProductAttributeAudit(file, entry) {
+  const failureMarker = String(process.env.SHEIN_BI_TEST_ATTRIBUTE_AUDIT_FAIL_FILE || '');
+  if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+    const error = new Error('injected product attribute binding audit failure');
+    error.code = 'PRODUCT_ATTRIBUTE_AUDIT_INJECTED_FAILURE';
     throw error;
   }
   return appendAudit(file, entry);
@@ -7728,6 +7744,74 @@ function productAttributeExecutionGate(task) {
 }
 
 /**
+ * adopt_existing image-binding gate. The persisted publishAssetBinding must
+ * be a real, canonical, approved copy_product_draft binding: its fingerprint
+ * is recomputed from the canonical image fields (never trusted), every image
+ * carries a valid sha256, imageCount equals the image set, and the approved
+ * authority/source invariants hold.
+ */
+function validateExistingPublishAssetBindingForAdopt(task) {
+  const blockers = [];
+  const binding = task?.publishAssetBinding && typeof task.publishAssetBinding === 'object' && !Array.isArray(task.publishAssetBinding)
+    ? task.publishAssetBinding
+    : null;
+  if (!binding) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: 'adopt_existing 要求当前 publishAssetBinding（审核图片绑定）存在',
+    });
+    return {ok: false, blockers};
+  }
+  if (publishAssetBindingKind(task, binding) !== 'copy_product_draft') {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: 'adopt_existing 要求 copy_product_draft 类型的审核图片绑定',
+    });
+  }
+  if (binding.sourceApproved !== true) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: 'adopt_existing 要求审核图片绑定 sourceApproved=true',
+    });
+  }
+  if (String(binding.authority || '') !== 'human_reviewed_source') {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: 'adopt_existing 要求审核图片绑定 authority=human_reviewed_source',
+    });
+  }
+  const images = canonicalPublishAssetBindingImages(binding.images);
+  if (!images.length) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: 'adopt_existing 要求审核图片绑定至少 1 张图片',
+    });
+  }
+  if (images.some(row => !/^[a-f0-9]{64}$/.test(String(row.sha256 || '')))) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: 'adopt_existing 要求每张审核图片都有有效 sha256',
+    });
+  }
+  const imageCount = Number(binding.imageCount);
+  if (!Number.isSafeInteger(imageCount) || imageCount < 1 || imageCount !== images.length) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: `adopt_existing 要求 imageCount 等于图片集合大小（imageCount=${binding.imageCount ?? '(missing)'} images=${images.length}）`,
+    });
+  }
+  const storedFingerprint = String(binding.bindingFingerprint || '');
+  const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {binding, images: binding.images});
+  if (!storedFingerprint || storedFingerprint !== recomputedFingerprint) {
+    blockers.push({
+      code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+      message: `adopt_existing 要求 bindingFingerprint 与规范算法重算值一致（stored=${storedFingerprint || '(missing)'} recomputed=${recomputedFingerprint || '(missing)'}）`,
+    });
+  }
+  return {ok: blockers.length === 0, blockers};
+}
+
+/**
  * Live donor verification for the whitelisted product attribute repair.
  *
  * Server-side, independent of the client request body beyond
@@ -7855,10 +7939,13 @@ async function verifyDonorProductAttributeLive({
 function bindApprovedProductAttributeToTask(task, targetStore, {
   attributeId,
   attributeValueId,
+  bindingMode = PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
   donorEvidence,
 }, actor, req, {
   baseTaskRevision,
   bindingRequestKey,
+  oldPayloadHash: expectedOldPayloadHash,
+  newPayloadHash: expectedNewPayloadHash,
 } = {}) {
   if (!task || typeof task !== 'object') throw new Error('Task not found');
   if (taskRequiresOwnerLifecycleResolve(task)) {
@@ -7987,24 +8074,88 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_MISMATCH';
     throw error;
   }
+  const isAdopt = bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT;
+  if (!isAdopt && bindingMode !== PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND) {
+    const error = new Error('商品属性绑定 bindingMode 必须是 append_missing/adopt_existing');
+    error.status = 400;
+    error.code = 'PRODUCT_ATTRIBUTE_BINDING_MODE_INVALID';
+    throw error;
+  }
   const existingRows = productAttributeRowsForId(originalPayload, id);
-  if (existingRows.length) {
+  if (!isAdopt && existingRows.length) {
     const error = new Error(`目标 payload 已存在属性 ${id}（${existingRows.length} 行），本命令只修复缺失属性，请人工核销`);
     error.status = 409;
     error.code = 'PRODUCT_ATTRIBUTE_ALREADY_PRESENT';
     throw error;
   }
-  const areaBefore = productAttributeAreaFingerprint(originalPayload);
-  const bound = bindProductAttributeToPayload(originalPayload, {attributeId: id, attributeValueId: valueId});
-  const areaAfter = productAttributeAreaFingerprint(bound.payload);
-  if (areaAfter !== areaBefore) {
-    const error = new Error('商品属性绑定不得改动发布 payload 的除属性列表外的任何字段');
+  if (isAdopt) {
+    const adoptGate = adoptablePayloadAttributeRow(originalPayload, id);
+    if (!adoptGate.ok) {
+      const error = new Error(adoptGate.blockers.map(row => row.message).join('；'));
+      error.status = 409;
+      error.code = adoptGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_ADOPT_ROW_INVALID';
+      throw error;
+    }
+    if (adoptGate.valueId !== valueId) {
+      const error = new Error(`adopt_existing 要求 payload 已有属性 ${id} 的值(${adoptGate.valueId}) 与 live donor 值(${valueId}) 完全一致`);
+      error.status = 409;
+      error.code = 'PRODUCT_ATTRIBUTE_ADOPT_VALUE_MISMATCH';
+      throw error;
+    }
+    // Adopt must never touch the payload; both description and image
+    // bindings must be present and currently valid before adoption.
+    const adoptImageGate = validateExistingPublishAssetBindingForAdopt(task);
+    if (!adoptImageGate.ok) {
+      const error = new Error(adoptImageGate.blockers[0]?.message || 'adopt_existing 要求当前审核图片绑定有效');
+      error.status = 409;
+      error.code = adoptImageGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID';
+      throw error;
+    }
+    if (!task?.descriptionMaterialBinding || !validateDescriptionBindingLock(task, originalPayload).ok) {
+      const error = new Error('adopt_existing 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效（无需重绑）；先修复描述绑定');
+      error.status = 409;
+      error.code = 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID';
+      throw error;
+    }
+  }
+  let boundPayload;
+  if (isAdopt) {
+    // Deep-prove payload unchanged: no append/replace/reorder/canonicalize.
+    // The task keeps the exact same payload object (JSON deep-equal).
+    boundPayload = originalPayload;
+  } else {
+    const areaBefore = productAttributeAreaFingerprint(originalPayload);
+    const bound = bindProductAttributeToPayload(originalPayload, {attributeId: id, attributeValueId: valueId});
+    const areaAfter = productAttributeAreaFingerprint(bound.payload);
+    if (areaAfter !== areaBefore) {
+      const error = new Error('商品属性绑定不得改动发布 payload 的除属性列表外的任何字段');
+      error.status = 409;
+      throw error;
+    }
+    boundPayload = bound.payload;
+  }
+  const newPayloadHash = sha256StableJson(boundPayload);
+  if (newPayloadHash !== linkOpsPayloadHash(boundPayload)) {
+    throw new Error('商品属性绑定 payload hash 算法与 link-ops canonical hash 不一致');
+  }
+  const oldPayloadHash = linkOpsPayloadHash(originalPayload);
+  if (expectedOldPayloadHash && expectedOldPayloadHash !== oldPayloadHash) {
+    const error = new Error('商品属性绑定 oldPayloadHash 与请求不一致');
     error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_MISMATCH';
     throw error;
   }
-  const newPayloadHash = sha256StableJson(bound.payload);
-  if (newPayloadHash !== linkOpsPayloadHash(bound.payload)) {
-    throw new Error('商品属性绑定 payload hash 算法与 link-ops canonical hash 不一致');
+  if (expectedNewPayloadHash && expectedNewPayloadHash !== newPayloadHash) {
+    const error = new Error('商品属性绑定 newPayloadHash 与请求不一致');
+    error.status = 409;
+    error.code = 'PRODUCT_ATTRIBUTE_DONOR_EVIDENCE_MISMATCH';
+    throw error;
+  }
+  if (isAdopt && oldPayloadHash !== newPayloadHash) {
+    throw new Error('adopt_existing 不得改变 payload（oldPayloadHash !== newPayloadHash）');
+  }
+  if (!isAdopt && oldPayloadHash === newPayloadHash) {
+    throw new Error('append_missing 必须改变 payload（oldPayloadHash === newPayloadHash）');
   }
   const imageBindingFingerprint = String(task?.publishAssetBinding?.bindingFingerprint || '');
   const existingDescription = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
@@ -8018,12 +8169,13 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
         'zh-cn': String(existingDescription.hashes['zh-cn'] || ''),
       }
     : {ar: '', en: '', 'zh-cn': ''};
-  const oldPayloadHash = linkOpsPayloadHash(originalPayload);
   const now = new Date().toISOString();
-  const resetNote = `缺失白名单商品属性已绑定（attribute ${id}，值来自同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc}，服务端独立核验 canonical=${evidence.canonicalCode}）；旧预演/提交锁全部作废，描述绑定保持原样并留待 prepare-descriptions 用原始审核 HTML 在同一任务重新绑定，之后重新预演通过才可提交。`;
+  const resetNote = isAdopt
+    ? `既有白名单商品属性已 adopt（attribute ${id}=${valueId}，值经同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc} 现场核验，canonical=${evidence.canonicalCode}）；payload 未做任何修改（old=new=${oldPayloadHash.slice(0, 12)}…），描述/图片绑定保持原样无需重绑，旧预演锁已作废，重新预演通过即可提交。`
+    : `缺失白名单商品属性已绑定（attribute ${id}，值来自同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc}，服务端独立核验 canonical=${evidence.canonicalCode}）；旧预演/提交锁全部作废，描述绑定保持原样并留待 prepare-descriptions 用原始审核 HTML 在同一任务重新绑定，之后重新预演通过才可提交。`;
   const nextTask = {
     ...task,
-    openapiPublishPayload: bound.payload,
+    openapiPublishPayload: boundPayload,
     preflight: {
       ok: false,
       blockers: ['缺失白名单商品属性已绑定到同一 copy_product_draft 任务，需要基于新 payload 重新预演。'],
@@ -8038,6 +8190,7 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     },
     productAttributeBinding: {
       schemaVersion: PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+      bindingMode,
       kind: PRODUCT_ATTRIBUTE_BINDING_KIND,
       authority: PRODUCT_ATTRIBUTE_BINDING_AUTHORITY,
       targetStore,
@@ -8117,7 +8270,8 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       : resetNote,
     updatedAt: now,
   };
-  nextTask.history = appendTaskHistory(nextTask, 'product_attribute_bound', actor, req, {
+  nextTask.history = appendTaskHistory(nextTask, isAdopt ? 'product_attribute_adopted' : 'product_attribute_bound', actor, req, {
+    bindingMode,
     targetStore,
     attributeId: id,
     attributeName: whitelistedProductAttributeName(id),
@@ -8149,7 +8303,7 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     writeAuditReset: true,
     oldPayloadHashInvalidated: true,
   });
-  const bindingGate = validateProductAttributeBindingLock(nextTask, bound.payload);
+  const bindingGate = validateProductAttributeBindingLock(nextTask, boundPayload);
   if (!bindingGate.ok) {
     const error = new Error(`商品属性绑定生成结果未通过最终锁校验：${bindingGate.blockers.map(row => row.message).join('；')}`);
     error.status = 409;
@@ -14858,7 +15012,7 @@ async function main() {
         if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
         const targetStore = String(body.store || body.storeKey || '').trim().toUpperCase();
         if (!targetStore) return sendJson(res, 400, {ok: false, error: 'Missing target store'});
-        const allowedBodyKeys = ['taskId', 'store', 'donorStore', 'donorSkc', 'attributeId', 'expectedRevision'];
+        const allowedBodyKeys = ['taskId', 'store', 'donorStore', 'donorSkc', 'attributeId', 'bindingMode', 'expectedRevision'];
         const unknownBodyKeys = Object.keys(body || {}).filter(key => !allowedBodyKeys.includes(key));
         if (unknownBodyKeys.length) {
           return sendJson(res, 400, {ok: false, error: `商品属性绑定请求包含不允许字段：${unknownBodyKeys.join('/')}`});
@@ -14898,6 +15052,17 @@ async function main() {
             code: 'DONOR_SKC_INVALID',
           });
         }
+        const bindingMode = body.bindingMode === undefined || body.bindingMode === null || body.bindingMode === ''
+          ? PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND
+          : String(body.bindingMode);
+        if (!PRODUCT_ATTRIBUTE_BINDING_MODES.includes(bindingMode)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'bindingMode 必须是 append_missing（默认）或 adopt_existing',
+            code: 'PRODUCT_ATTRIBUTE_BINDING_MODE_INVALID',
+          });
+        }
+        const isAdopt = bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT;
         const expectedRevision = Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
           ? body.expectedRevision
           : null;
@@ -14931,7 +15096,9 @@ async function main() {
         // current payload (attribute exactly once, payload hash, image and
         // description fingerprints unchanged) is replayed without a new live
         // verification or write when the incoming donor/attribute identity
-        // matches.
+        // matches. A different/invalid binding is never overwritten; deletion
+        // (binding removed) falls through to full fresh verification + CAS.
+        const hasExistingBinding = Boolean(task?.productAttributeBinding && typeof task.productAttributeBinding === 'object');
         const existingBinding = task?.productAttributeBinding && typeof task.productAttributeBinding === 'object'
           ? task.productAttributeBinding
           : {};
@@ -14939,11 +15106,33 @@ async function main() {
           ? existingBinding.donor
           : {};
         const existingLock = validateProductAttributeBindingLock(task, task?.openapiPublishPayload);
+        const existingGate = productAttributeExecutionGate(task);
         const existingIdentityMatches = String(existingBinding.targetStore || '').toUpperCase() === targetStore
           && normalizeProductAttributeId(existingBinding.attributeId) === attributeId
           && String(existingDonor.storeKey || '').toUpperCase() === donorStore
           && String(existingDonor.skc || '') === donorSkc
-          && existingLock.ok;
+          && String(existingBinding.bindingMode || PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND) === bindingMode
+          && (Number(existingBinding.schemaVersion) === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION
+            || (Number(existingBinding.schemaVersion) === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1
+              && bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND))
+          && existingLock.ok
+          && existingGate.ok;
+        if (hasExistingBinding && !existingIdentityMatches) {
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-prepare-product-attribute-existing-binding-conflict',
+            actor,
+            ...requestMeta(req),
+            task: {id: task.id, revision: currentRevision},
+            code: 'PRODUCT_ATTRIBUTE_EXISTING_BINDING_CONFLICT',
+          }).catch(() => {});
+          return sendJson(res, 409, {
+            ok: false,
+            error: '任务已有不同的或失效的商品属性绑定（不同 donor/mode/schema 或锁定校验失败），禁止覆盖；请人工核销或先删除绑定后重新现场核验',
+            code: 'PRODUCT_ATTRIBUTE_EXISTING_BINDING_CONFLICT',
+            retryable: false,
+          });
+        }
         if (currentRevision && currentRevision !== expectedRevision && !existingIdentityMatches) {
           try {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-product-attribute-revision-conflict', actor, ...requestMeta(req), task: {id: found.task.id, revision: currentRevision, expectedRevision}});
@@ -15059,6 +15248,34 @@ async function main() {
               code: 'PRODUCT_ALIAS_REGISTRY_UNAVAILABLE',
             });
           }
+          if (isAdopt) {
+            const adoptGate = adoptablePayloadAttributeRow(payload, attributeId);
+            if (!adoptGate.ok) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: adoptGate.blockers.map(row => row.message).join('；'),
+                code: adoptGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_ADOPT_ROW_INVALID',
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            const adoptImageGate = validateExistingPublishAssetBindingForAdopt(bindingTask);
+            if (!adoptImageGate.ok) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: adoptImageGate.blockers[0]?.message || 'adopt_existing 要求当前审核图片绑定有效',
+                code: adoptImageGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            if (!bindingTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(bindingTask, payload).ok) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: 'adopt_existing 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效（无需重绑）；先修复描述绑定',
+                code: 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID',
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+          }
           const verifiedAt = new Date().toISOString();
           const donorVerification = await verifyDonorProductAttributeLive({
             donorStore,
@@ -15095,7 +15312,32 @@ async function main() {
           }
           const evidence = donorVerification.evidence;
           const attributeValueId = donorVerification.attributeValueId;
-          const bindingRequestKey = productAttributeBindingRequestKey({
+          if (isAdopt) {
+            const adoptRow = adoptablePayloadAttributeRow(payload, attributeId);
+            if (adoptRow.valueId !== attributeValueId) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: `adopt_existing 要求 payload 已有属性 ${attributeId} 的值(${adoptRow.valueId}) 与 live donor 值(${attributeValueId}) 完全一致`,
+                code: 'PRODUCT_ATTRIBUTE_ADOPT_VALUE_MISMATCH',
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+          }
+          let oldPayloadHash = '';
+          let newPayloadHash = '';
+          if (isAdopt) {
+            oldPayloadHash = linkOpsPayloadHash(payload);
+            newPayloadHash = oldPayloadHash;
+          } else {
+            oldPayloadHash = linkOpsPayloadHash(payload);
+            newPayloadHash = sha256StableJson(bindProductAttributeToPayload(payload, {
+              attributeId,
+              attributeValueId,
+            }).payload);
+          }
+          const bindingRequestKey = productAttributeBindingRequestKeyV2({
+            schemaVersion: PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+            bindingMode,
             taskId: taskRef,
             targetStore,
             baseTaskRevision: currentRevision,
@@ -15105,14 +15347,19 @@ async function main() {
             donorSkc,
             donorSpu: donorVerification.donorSpu,
             evidenceSha256: evidence.evidenceSha256,
+            oldPayloadHash,
+            newPayloadHash,
           });
           const bound = bindApprovedProductAttributeToTask(bindingTask, targetStore, {
             attributeId,
             attributeValueId,
+            bindingMode,
             donorEvidence: donorVerification,
           }, actor, req, {
             baseTaskRevision: currentRevision,
             bindingRequestKey,
+            oldPayloadHash,
+            newPayloadHash,
           });
           if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
             const error = new Error('商品属性绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用');
@@ -15139,9 +15386,11 @@ async function main() {
           } catch {}
           let auditPending = false;
           try {
-            await appendAudit(args.auditFile, {
+            await appendProductAttributeAudit(args.auditFile, {
               at: new Date().toISOString(),
-              type: 'link-ops-prepare-product-attribute-bound',
+              type: isAdopt
+                ? 'link-ops-prepare-product-attribute-adopted'
+                : 'link-ops-prepare-product-attribute-bound',
               actor,
               ...requestMeta(req),
               task: {id: persisted.id, revision: persisted.repositoryRevision, stores: taskTargetStores(persisted), writeStores: taskWriteStores(persisted)},
@@ -15160,14 +15409,22 @@ async function main() {
               ? 'binding_committed_readback_unverified'
               : auditPending
                 ? 'binding_committed_audit_pending'
-                : 'binding_committed_needs_description_rebind',
+                : isAdopt
+                  ? 'binding_committed_verified'
+                  : 'binding_committed_needs_description_rebind',
             task: projectLinkOpsTaskForClient(readbackTask),
             binding: projectProductAttributeBindingCommit(readbackTask),
-            nextStep: {
-              command: 'prepare-descriptions',
-              note: '商品属性已绑定同一任务；旧描述绑定保持原样但已按设计失效，请用原始审核 HTML 在同一任务重新绑定描述（新 binding/revision 会自动锚定属性增强后的 payload），之后重新预演通过才可提交。',
-              realPublish: false,
-            },
+            nextStep: isAdopt
+              ? {
+                  command: 'preflight',
+                  note: '既有属性已 adopt 并锁定来源证据，payload/描述/图片绑定均未变更；重新预演通过后按既有流程确认提交。',
+                  realPublish: false,
+                }
+              : {
+                  command: 'prepare-descriptions',
+                  note: '商品属性已绑定同一任务；旧描述绑定保持原样但已按设计失效，请用原始审核 HTML 在同一任务重新绑定描述（新 binding/revision 会自动锚定属性增强后的 payload），之后重新预演通过才可提交。',
+                  realPublish: false,
+                },
           });
         } catch (error) {
           const mapped = linkOpsRepositoryHttpDetails(error);
