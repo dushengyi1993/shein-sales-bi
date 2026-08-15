@@ -16,10 +16,11 @@ Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_ET_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-et-forwarder.lock
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
-Environment=SHEIN_PYTHON=/opt/shein-bi/app/.venv-et/bin/python
+Environment=SHEIN_PYTHON=/srv/shein-bi/runtime/et-forwarder/current/bin/python
+Environment=SHEIN_ET_RUNTIME_ROOT=/srv/shein-bi/runtime/et-forwarder
 Environment=SHEIN_ET_LOG_DIR=/srv/shein-bi/logs/cloud-et-forwarder
 Environment=SHEIN_ET_TRANSPORT=http
-Environment=SHEIN_ET_HTTP_SESSION_FILE=/opt/shein-bi/app/state/et_forwarder_http_session.local.json
+Environment=SHEIN_ET_HTTP_SESSION_FILE=/srv/shein-bi/runtime/et-forwarder/session/et_forwarder_http_session.local.json
 Environment=SHEIN_ET_REFRESH_PORTAL_MODE=sections
 Environment=SHEIN_ET_REFRESH_SECTIONS=orders,waybills,afterSales,inventoryTrend
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC=120
@@ -35,5 +36,6 @@ MemoryHigh=800M
 MemoryMax=1200M
 OOMPolicy=stop
 KillMode=control-group
+ExecStartPre=+/usr/bin/env bash /opt/shein-bi/app/scripts/ensure_et_forwarder_runtime.sh
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain et-forwarder --class materializer --lock-wait-sec 120 --deadline-minute 29 --defer-state /srv/shein-bi/runtime/host-scheduler/et-forwarder.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage et-forwarder --message "ET warehouse sync completed" -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_et_forwarder_sync.sh today
 SuccessExitStatus=75

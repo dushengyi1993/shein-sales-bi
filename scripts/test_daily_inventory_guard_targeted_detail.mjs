@@ -12,8 +12,8 @@
  *    runtime root, deduplicated per store+SPU, validated nonempty with
  *    max per-store <= default budget 64;
  * 2. calls cloud_openapi_product_reconciliation.sh with STORES (full 19-store
- *    set), MAX_DETAILS=budget, SKIP_DETAILS=0, DETAIL_PRIORITY_FILE and
- *    PRIORITY_DETAILS_ONLY=1;
+ *    set), MAX_DETAILS=exact maxTargets (bounded by the 64 ceiling check),
+ *    SKIP_DETAILS=0, DETAIL_PRIORITY_FILE and PRIORITY_DETAILS_ONLY=1;
  * 3. rebuilds the same-day plan with --required-detail-targets;
  * 4. fails closed (plan_blocked, exit 2, no execute) on refresh failure,
  *    empty targets or budget overrun.
@@ -131,7 +131,7 @@ match('refresh passes the full 19-store STORES set',
   'list + stock must refresh every plan store, not a narrowed subset');
 match('refresh passes STORES into the reconciliation env',
   guard,
-  /SHEIN_OPENAPI_PRODUCT_RECONCILE_STORES="\$RECONCILE_STORES" \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_CONCURRENCY=2 \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$DETAIL_TARGET_BUDGET_PER_STORE" \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS=0 \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_DETAIL_PRIORITY_FILE="\$DETAIL_TARGETS" \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1 \\\n\s*bash scripts\/cloud_openapi_product_reconciliation\.sh/,
+  /SHEIN_OPENAPI_PRODUCT_RECONCILE_STORES="\$RECONCILE_STORES" \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_CONCURRENCY=2 \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$max_targets" \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS=0 \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_DETAIL_PRIORITY_FILE="\$DETAIL_TARGETS" \\\n\s*SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1 \\\n\s*bash scripts\/cloud_openapi_product_reconciliation\.sh/,
   'the targeted refresh must launch reconciliation with the exact bounded env');
 match('refresh runs reconciliation through bash',
   guard,
@@ -145,6 +145,138 @@ noMatch('no bare full-scan reconciliation invocation remains',
   guard,
   /SHEIN_OPENAPI_PRODUCT_RECONCILE_CONCURRENCY=2 bash scripts\/cloud_openapi_product_reconciliation\.sh/,
   'the old branch ran reconciliation without the bounded env');
+
+// ---------------------------------------------------------------------------
+// Pre-plan inventoryTrend freshness: the ET forwarder sync-refreshes only
+// orders/waybills/afterSales and queues inventoryTrend asynchronously, so the
+// guard bounded-refreshes inventoryTrend itself before the first plan build.
+// The write interface is called at most once per run and is never retried.
+// ---------------------------------------------------------------------------
+match('inventoryTrend file default is the planner input',
+  guard,
+  /INVENTORY_TREND_FILE="\$\{SHEIN_BI_INVENTORY_TREND_FILE:-\$ROOT\/outputs\/bi-portal\/sections\/inventoryTrend\.json\}"/,
+  'the guard refreshes the exact file the planner consumes');
+match('inventoryTrend max age default mirrors linksData',
+  guard,
+  /INVENTORY_TREND_MAX_AGE_SECONDS="\$\{SHEIN_BI_INVENTORY_TREND_MAX_AGE_SECONDS:-1800\}"/,
+  'the freshness gate defaults to the same 1800s as linksData');
+match('inventoryTrend refresh timeout mirrors linksData',
+  guard,
+  /INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS="\$\{SHEIN_BI_INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS:-1200\}"/,
+  'the bounded refresh defaults to the same 1200s timeout as linksData');
+match('inventoryTrend age reads cachedAt/generatedAt like linksData',
+  guard,
+  /jq -r '\.cachedAt \/\/ \.generatedAt \/\/ empty' "\$INVENTORY_TREND_FILE"/,
+  'freshness derives from the published cache timestamp');
+match('inventoryTrend refresh is host-locked and section-scoped',
+  guard,
+  /curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \\\n\s*-H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \\\n\s*"\$PORTAL_URL\/api\/bi\/section\/inventoryTrend\?refresh=1" >\/dev\/null/,
+  'the sync refresh must reuse the host-locked worker header on the section endpoint');
+match('fresh inventoryTrend skips duplicate refresh',
+  guard,
+  /inventoryTrend fresh ageSeconds=\$age; skip duplicate refresh/,
+  'an already-fresh section must not be re-refreshed');
+match('failed inventoryTrend refresh stays a failure',
+  guard,
+  /inventoryTrend refresh did not publish a fresh cache ageSeconds=\$\{age:-unknown\}[\s\S]*return 1/,
+  'a refresh that does not publish a fresh cache must return failure');
+check('exactly one inventoryTrend refresh call per run (no write-interface retry)', () => {
+  assert.equal((guard.match(/inventoryTrend\?refresh=1/g) || []).length, 1,
+    'the inventoryTrend write interface must never be retried inside the guard run');
+});
+check('inventoryTrend refresh runs before the first plan build', () => {
+  const refreshAt = guard.indexOf('ensure_inventory_trend_fresh 1\n');
+  const firstBuildAt = guard.indexOf('build_plan || PLAN_STATUS=$?');
+  assert.ok(refreshAt >= 0 && firstBuildAt >= 0 && refreshAt < firstBuildAt,
+    'the plan must be built after the refresh so only detail blockers remain');
+});
+match('inventoryTrend refresh is always forced once per daily run',
+  guard,
+  /^ensure_inventory_trend_fresh 1$/m,
+  'a fresh cachedAt can still hide an old ET business day, so the daily refresh must bypass the age skip');
+noMatch('inventoryTrend refresh failure is never swallowed',
+  guard,
+  /ensure_inventory_trend_fresh 1 \|\| true/,
+  'a failed refresh must abort the guard, not fall through to a stale plan');
+match('inventoryTrend HTTP failure blocks the guard',
+  guard,
+  /if ! curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS"[\s\S]*inventoryTrend HTTP refresh failed; blocking the daily inventory guard[\s\S]*return 1/,
+  'a non-success HTTP refresh must stop the guard before any plan build or write');
+check('request start is recorded before the refresh request', () => {
+  const requestStartAt = guard.indexOf('request_start_epoch="$(date +%s)"');
+  const refreshAt = guard.indexOf('inventoryTrend?refresh=1');
+  assert.ok(requestStartAt >= 0 && refreshAt >= 0 && requestStartAt < refreshAt,
+    'cachedAt advancement must be measured against a timestamp taken before the HTTP call');
+});
+match('cachedAt that did not advance past request start blocks the guard',
+  guard,
+  /\(\( published_epoch <= request_start_epoch \)\)[\s\S]*cachedAt did not advance past request start[\s\S]*return 1/,
+  'a refresh that re-serves the old cache must stop the guard');
+match('matched current-day row count uses the planner row rule',
+  guard,
+  /select\(\(\( \.inventory_match_status \/\/ ""\) == "matched"\)\)[\s\S]*contains\("01_full_carton_exception"\)[\s\S]*et_box_snapshot_date[\s\S]*et_store_snapshot_date[\s\S]*\.\[0:10\]/,
+  'the guard must count matched rows with the same per-row warehouse-position date rule as the planner');
+match('zero matched current-day rows blocks the guard',
+  guard,
+  /\(\( matched_current_day <= 0 \)\)[\s\S]*inventoryTrend has no matched current-day operational rows[\s\S]*return 1/,
+  'an artifact without any matched current-day ET row must stop the guard');
+check('stale ET projection never selects a targeted refresh reason', () => {
+  const reasonStart = guard.indexOf('REFRESH_REASON=""');
+  const reasonEnd = guard.indexOf('if [[ -n "$REFRESH_REASON" ]]; then', reasonStart);
+  assert.ok(reasonStart >= 0 && reasonEnd > reasonStart, 'the refresh-decision block must exist');
+  const decision = guard.slice(reasonStart, reasonEnd);
+  assert.doesNotMatch(decision, /BI\/ET projection is stale/,
+    'a failed inventoryTrend refresh keeps the ET blocker outside every refresh branch, so the run stays blocked');
+});
+check('current-detail predicate covers only the three detail-evidence blockers', () => {
+  const start = guard.indexOf('all(.blockers[];');
+  const end = guard.indexOf('"$PLAN" >/dev/null; then', start);
+  assert.ok(start >= 0 && end > start, 'the predicate block must exist');
+  const predicate = guard.slice(start, end);
+  assert.match(predicate, /test\(" OpenAPI product detail evidence is incomplete\$"\)/);
+  assert.match(predicate, /test\(" OpenAPI product canonical evidence is incomplete\$"\)/);
+  assert.match(predicate, /test\(" OpenAPI product canonical evidence is not from current detail"\)/);
+  assert.doesNotMatch(predicate, /BI\/ET projection is stale/,
+    'a refreshed plan with only detail blockers must satisfy all() and trigger the targeted refresh');
+  assert.doesNotMatch(predicate, /BI links data is stale/,
+    'stale linksData must never be silently absorbed by the targeted refresh');
+});
+
+// ---------------------------------------------------------------------------
+// Per-run row ceiling: the guard refuses to invoke the executor when the
+// plan already exceeds MAX_ROWS, and the executor refuses to slice. TOTAL >
+// MAX_ROWS exits 2 before the executor launch, so no partial write can occur.
+// ---------------------------------------------------------------------------
+match('per-run row ceiling default is 1000',
+  guard,
+  /MAX_ROWS="\$\{SHEIN_BI_INVENTORY_MAX_ROWS:-1000\}"/,
+  'the guard and executor must share the same default ceiling');
+match('row ceiling validated as positive integer',
+  guard,
+  /\[\[ ! "\$MAX_ROWS" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/,
+  'an invalid ceiling must be rejected before any plan build');
+match('invalid row ceiling fails closed with exit 64',
+  guard,
+  /invalid SHEIN_BI_INVENTORY_MAX_ROWS=[\s\S]*exit 64/,
+  'a malformed ceiling must abort the guard');
+match('row ceiling overrun fails closed with exit 2',
+  guard,
+  /\(\( TOTAL > MAX_ROWS \)\)[\s\S]*refusing executor to avoid partial writes[\s\S]*exit 2/,
+  'an over-ceiling plan must block without launching the executor');
+check('row ceiling gate sits before the executor invocation', () => {
+  const gateAt = guard.indexOf('TOTAL > MAX_ROWS');
+  const executorAt = guard.indexOf('node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs');
+  assert.ok(gateAt >= 0 && executorAt >= 0 && gateAt < executorAt,
+    'the guard must exit 2 before the executor can be launched');
+});
+match('executor receives the validated row ceiling',
+  guard,
+  /--max-rows "\$MAX_ROWS" \\/,
+  'the same MAX_ROWS value must reach the executor');
+noMatch('no hardcoded executor row limit remains',
+  guard,
+  /--max-rows 1000/,
+  'the guard and executor ceilings must stay wired to the shared variable');
 
 {
   const guardStores = guard.match(/RECONCILE_STORES="\$\{SHEIN_BI_INVENTORY_RECONCILE_STORES:-([^}]+)\}"/)?.[1] ?? '';
@@ -208,6 +340,30 @@ match('reconciliation is gated by the single-run reason',
   guard,
   /if \[\[ -n "\$REFRESH_REASON" \]\]; then[\s\S]*refresh_targeted_openapi_sources \|\| REFRESH_STATUS=\$\?/,
   'the only call site sits inside the merged decision gate');
+
+// ---------------------------------------------------------------------------
+// MAX_DETAILS is the exact manifest maxPerStore (already validated <= 64):
+// maxTargets=59 reconciles with MAX_DETAILS=59, maxTargets>64 fails closed
+// before any reconciliation env is built.
+// ---------------------------------------------------------------------------
+match('reconciliation MAX_DETAILS is the exact validated maxTargets',
+  guard,
+  /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$max_targets" \\/,
+  'the reconciliation pays for the real target count, not the ceiling');
+check('per-store ceiling stays 64 and gates before reconciliation', () => {
+  const budgetDefault = guard.match(/DETAIL_TARGET_BUDGET_PER_STORE="\$\{SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE:-(\d+)\}"/)?.[1];
+  assert.equal(budgetDefault, '64', 'the per-store ceiling remains 64');
+  const budgetCheckAt = guard.indexOf('max_targets > DETAIL_TARGET_BUDGET_PER_STORE');
+  const reconcileAt = guard.indexOf('SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="$max_targets"');
+  assert.ok(budgetCheckAt >= 0 && reconcileAt >= 0 && budgetCheckAt < reconcileAt,
+    'over-budget manifests must fail closed before any reconciliation env is built');
+});
+check('maxTargets=59 passes and maxTargets>64 fails closed', () => {
+  assert.equal(59 > 64, false, 'the measured 2026-08-15 maxPerStore=59 must pass the 64 ceiling');
+  assert.equal(65 > 64, true, 'any store over the 64 ceiling must hit the overrun branch');
+  assert.match(guard, /\(\( max_targets > DETAIL_TARGET_BUDGET_PER_STORE \)\)[\s\S]*return 2/,
+    'the over-ceiling branch must fail closed with return 2');
+});
 
 // ---------------------------------------------------------------------------
 // Second build: rebuild the same-day plan with --required-detail-targets

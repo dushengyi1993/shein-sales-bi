@@ -7,16 +7,32 @@ PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 LINKS_DATA_FILE="${SHEIN_BI_LINKS_DATA_FILE:-$ROOT/outputs/bi-portal/sections/linksData.json}"
 LINKS_MAX_AGE_SECONDS="${SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS:-1800}"
 LINKS_REFRESH_TIMEOUT_SECONDS="${SHEIN_BI_INVENTORY_LINKS_REFRESH_TIMEOUT_SECONDS:-1200}"
+# The ET forwarder sync-refreshes only orders/waybills/afterSales and enqueues
+# inventoryTrend asynchronously, so the guard performs exactly one bounded
+# synchronous inventoryTrend refresh before the first plan build, always
+# forced (force=1) because a freshly published cache can still carry an old
+# ET business day. The refresh must succeed over HTTP, must publish a cachedAt
+# strictly later than the request start, and must contain at least one matched
+# current-day ET operational row; any failure aborts the guard (fail closed,
+# no inventory write, no swallowed error) and the write interface is never
+# retried.
+INVENTORY_TREND_FILE="${SHEIN_BI_INVENTORY_TREND_FILE:-$ROOT/outputs/bi-portal/sections/inventoryTrend.json}"
+INVENTORY_TREND_MAX_AGE_SECONDS="${SHEIN_BI_INVENTORY_TREND_MAX_AGE_SECONDS:-1800}"
+INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS="${SHEIN_BI_INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS:-1200}"
 REFRESH_OPENAPI_ON_STALE="${SHEIN_BI_INVENTORY_REFRESH_OPENAPI_ON_STALE:-1}"
 REQUIRE_PIPELINE_MARKERS="${SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS:-0}"
 STOCK_NOT_BEFORE="${SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE:-${DATE}T15:11:00+08:00}"
 # The daily plan emits detailRefreshTargets for every inventory-relevant SPU
-# (measured ~31 per store / ~362 total on 2026-08-14). Refreshing those SPUs
+# (measured maxPerStore=59 on FY for 2026-08-15). Refreshing those SPUs
 # with current detail must stay bounded per store: the guard never runs a
 # blind full-catalog detail scan (no zero-MAX_DETAILS full scan), and
 # over-budget manifests fail closed instead of refreshing a partial target set.
 DETAIL_TARGET_BUDGET_PER_STORE="${SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE:-64}"
 REFRESH_DETAIL_TARGETS_ON_BLOCKED="${SHEIN_BI_INVENTORY_REFRESH_DETAIL_TARGETS_ON_BLOCKED:-1}"
+# The executor refuses to slice the actionable set, so the guard applies the
+# same per-run row ceiling before invoking it: TOTAL > MAX_ROWS exits 2 with
+# no executor call and no inventory write. Both gates must stay in sync.
+MAX_ROWS="${SHEIN_BI_INVENTORY_MAX_ROWS:-1000}"
 # The targeted refresh must cover list + stock for every plan store, so STORES
 # stays on the same full 19-store set the reconciliation script defaults to
 # (test_daily_inventory_guard_targeted_detail.mjs asserts both constants stay
@@ -30,6 +46,10 @@ DETAIL_TARGETS="$DETAIL_TARGETS_DIR/daily-inventory-detail-targets-$DATE.json"
 LOCK="$ROOT/state/locks/daily-inventory-replenishment.lock"
 if [[ ! "$DETAIL_TARGET_BUDGET_PER_STORE" =~ ^[1-9][0-9]*$ ]]; then
   echo "[daily_inventory_guard] invalid SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE=$DETAIL_TARGET_BUDGET_PER_STORE" >&2
+  exit 64
+fi
+if [[ ! "$MAX_ROWS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[daily_inventory_guard] invalid SHEIN_BI_INVENTORY_MAX_ROWS=$MAX_ROWS" >&2
   exit 64
 fi
 mkdir -p "$(dirname "$PLAN")" "$(dirname "$RESULT")" "$DETAIL_TARGETS_DIR"
@@ -91,6 +111,96 @@ ensure_links_data_fresh() {
     return 1
   fi
   echo "[daily_inventory_guard] linksData refresh complete ageSeconds=$age"
+}
+
+inventory_trend_age_seconds() {
+  local cached_at cached_epoch now_epoch
+  [[ -s "$INVENTORY_TREND_FILE" ]] || return 1
+  cached_at="$(jq -r '.cachedAt // .generatedAt // empty' "$INVENTORY_TREND_FILE")"
+  [[ -n "$cached_at" ]] || return 1
+  cached_epoch="$(date -d "$cached_at" +%s 2>/dev/null)" || return 1
+  now_epoch="$(date +%s)"
+  (( now_epoch >= cached_epoch )) || return 1
+  printf '%s\n' "$((now_epoch - cached_epoch))"
+}
+
+inventory_trend_published_epoch_seconds() {
+  local cached_at cached_epoch
+  [[ -s "$INVENTORY_TREND_FILE" ]] || return 1
+  cached_at="$(jq -r '.cachedAt // .generatedAt // empty' "$INVENTORY_TREND_FILE")"
+  [[ -n "$cached_at" ]] || return 1
+  cached_epoch="$(date -d "$cached_at" +%s 2>/dev/null)" || return 1
+  printf '%s\n' "$cached_epoch"
+}
+
+# Mirror the planner's current-day gate on the refreshed artifact: count
+# inventoryDepletion.products rows whose inventory_match_status is "matched"
+# and whose per-row warehouse-position operational date equals today's
+# business date. Same row rule as the planner: full-carton policy rows use
+# et_box_snapshot_date, all others use et_store_snapshot_date.
+inventory_trend_matched_current_day_rows() {
+  local rows
+  rows="$(jq -r --arg date "$DATE" '
+    . as $doc
+    | (if ($doc.data | type) == "object" then $doc.data else $doc end)
+    | ((.inventoryDepletion // {}) | (.products // []))
+    | [ .[]
+      | select((( .inventory_match_status // "") == "matched"))
+      | (if ((.et_operational_stock_policy // "") | tostring | contains("01_full_carton_exception"))
+         then (.et_box_snapshot_date // "")
+         else (.et_store_snapshot_date // "")
+         end)
+      | if type == "string" then .[0:10] else "" end
+      | select(. == $date)
+      ]
+    | length
+  ' "$INVENTORY_TREND_FILE")" || return 1
+  [[ "$rows" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$rows"
+}
+
+# Bounded synchronous inventoryTrend refresh, symmetric with linksData, plus
+# three hard post-conditions: HTTP success, cachedAt strictly advanced past
+# the request start, and at least one matched current-day ET operational row.
+# This write interface is called at most once per run and is never retried.
+ensure_inventory_trend_fresh() {
+  local force="${1:-0}"
+  local age request_start_epoch published_epoch matched_current_day
+  age="$(inventory_trend_age_seconds 2>/dev/null || true)"
+  if [[ "$force" != "1" && "$age" =~ ^[0-9]+$ ]] && (( age <= INVENTORY_TREND_MAX_AGE_SECONDS )); then
+    echo "[daily_inventory_guard] inventoryTrend fresh ageSeconds=$age; skip duplicate refresh"
+    return 0
+  fi
+  request_start_epoch="$(date +%s)"
+  echo "[daily_inventory_guard] refresh inventoryTrend synchronously force=$force previousAgeSeconds=${age:-unknown}"
+  if ! curl -fsS --max-time "$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \
+    -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
+    "$PORTAL_URL/api/bi/section/inventoryTrend?refresh=1" >/dev/null; then
+    echo "[daily_inventory_guard] inventoryTrend HTTP refresh failed; blocking the daily inventory guard" >&2
+    return 1
+  fi
+  age="$(inventory_trend_age_seconds 2>/dev/null || true)"
+  if [[ ! "$age" =~ ^[0-9]+$ ]] || (( age > INVENTORY_TREND_MAX_AGE_SECONDS )); then
+    echo "[daily_inventory_guard] inventoryTrend refresh did not publish a fresh cache ageSeconds=${age:-unknown}" >&2
+    return 1
+  fi
+  published_epoch="$(inventory_trend_published_epoch_seconds)" || {
+    echo "[daily_inventory_guard] inventoryTrend published timestamp is unreadable after refresh" >&2
+    return 1
+  }
+  if (( published_epoch <= request_start_epoch )); then
+    echo "[daily_inventory_guard] inventoryTrend cachedAt did not advance past request start publishedEpoch=$published_epoch requestStartEpoch=$request_start_epoch; blocking" >&2
+    return 1
+  fi
+  matched_current_day="$(inventory_trend_matched_current_day_rows)" || {
+    echo "[daily_inventory_guard] inventoryTrend matched current-day row count is unreadable after refresh" >&2
+    return 1
+  }
+  if [[ ! "$matched_current_day" =~ ^[0-9]+$ ]] || (( matched_current_day <= 0 )); then
+    echo "[daily_inventory_guard] inventoryTrend has no matched current-day operational rows date=$DATE matched=${matched_current_day:-unknown}; blocking" >&2
+    return 1
+  fi
+  echo "[daily_inventory_guard] inventoryTrend refresh complete ageSeconds=$age cachedAtAdvanced=1 matchedCurrentDayRows=$matched_current_day"
 }
 
 build_plan() {
@@ -158,9 +268,12 @@ refresh_targeted_openapi_sources() {
   fi
   echo "[daily_inventory_guard] targeted OpenAPI refresh manifest=$DETAIL_TARGETS maxTargets=$max_targets budget=$DETAIL_TARGET_BUDGET_PER_STORE"
   set +e
+  # MAX_DETAILS is the manifest's exact maxPerStore (already validated <=
+  # budget), so the reconciliation only pays for the real target count while
+  # the budget check above still fails closed for any store over the ceiling.
   SHEIN_OPENAPI_PRODUCT_RECONCILE_STORES="$RECONCILE_STORES" \
   SHEIN_OPENAPI_PRODUCT_RECONCILE_CONCURRENCY=2 \
-  SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="$DETAIL_TARGET_BUDGET_PER_STORE" \
+  SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="$max_targets" \
   SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_DETAILS=0 \
   SHEIN_OPENAPI_PRODUCT_RECONCILE_DETAIL_PRIORITY_FILE="$DETAIL_TARGETS" \
   SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1 \
@@ -175,10 +288,17 @@ plan_blocked_with_budget_failure() {
     | jq '. + {blockers: (.blockers + ["daily current-detail target manifest exceeds per-store budget"])}'
 }
 
-# The morning chain refreshes the warehouse first. Rebuild the exact section
-# consumed by the inventory planner before hashing; never depend on a detached
-# prewarm process surviving a oneshot systemd unit.
+# The morning chain refreshes the warehouse first. The ET forwarder only
+# sync-refreshes orders/waybills/afterSales and queues inventoryTrend
+# asynchronously, so both sections consumed by the inventory planner are
+# refreshed here before hashing; never depend on a detached prewarm process
+# surviving a oneshot systemd unit. inventoryTrend is always force-refreshed
+# once per daily run (a fresh cachedAt can still hide an old ET business day);
+# HTTP failure, a cachedAt that did not advance, or zero matched current-day
+# ET rows aborts the guard before the plan build. The error is not swallowed
+# and the write interface is never retried.
 ensure_links_data_fresh || true
+ensure_inventory_trend_fresh 1
 PLAN_STATUS=0
 build_plan || PLAN_STATUS=$?
 
@@ -256,6 +376,16 @@ if [[ "$EXECUTABLE" != "true" ]]; then
   fi
   exit 2
 fi
+# Double-gated row ceiling: the executor refuses to slice, and this guard
+# refuses to invoke it when the plan already exceeds the ceiling. This check
+# sits before the already-completed shortcut and before the executor, so a
+# growing actionable set can never produce a partial inventory write.
+if (( TOTAL > MAX_ROWS )); then
+  echo "[daily_inventory_guard] daily inventory plan exceeds per-run row ceiling total=$TOTAL maxRows=$MAX_ROWS; refusing executor to avoid partial writes" >&2
+  jq '{ok:false,state:"plan_blocked",date,payloadHash,blockers}' "$PLAN" \
+    | jq '. + {blockers: (.blockers + ["daily inventory plan exceeds per-run row ceiling"])}'
+  exit 2
+fi
 if [[ -f "$RESULT" ]] && jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   .planHash == $hash
   and .execute == true
@@ -277,7 +407,7 @@ node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
   --execute \
   --execution-mode automatic \
   --confirm-hash "$HASH" \
-  --max-rows 1000 \
+  --max-rows "$MAX_ROWS" \
   --out "$RESULT"
 EXECUTOR_STATUS=$?
 set -e

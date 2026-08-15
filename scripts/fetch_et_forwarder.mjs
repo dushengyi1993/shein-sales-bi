@@ -18,6 +18,7 @@ import {
 } from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const ET_RUNTIME_ROOT = process.env.SHEIN_ET_RUNTIME_ROOT || '/srv/shein-bi/runtime/et-forwarder';
 
 function parseArgs(argv) {
   const args = {
@@ -45,7 +46,7 @@ function parseArgs(argv) {
     autoLogin: true,
     visible: false,
     statePath: path.join(ROOT, 'state', 'et_forwarder_sync_state.json'),
-    sessionPath: path.join(ROOT, 'state', 'et_forwarder_http_session.local.json'),
+    sessionPath: path.resolve(process.env.SHEIN_ET_HTTP_SESSION_FILE || path.join(ET_RUNTIME_ROOT, 'session', 'et_forwarder_http_session.local.json')),
     transport: 'http',
     endpoints: '',
     includeFinance: false,
@@ -160,8 +161,9 @@ function sleep(ms) {
 }
 
 function pythonCandidates() {
+  const explicitPython = String(process.env.SHEIN_PYTHON || '').trim();
+  if (explicitPython) return [explicitPython];
   return [
-    process.env.SHEIN_PYTHON,
     ...(process.platform === 'win32'
       ? [
         'C:\\Users\\dushengyi\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe',
@@ -169,7 +171,7 @@ function pythonCandidates() {
         'py',
       ]
       : [
-        path.join(ROOT, '.venv-et', 'bin', 'python'),
+        path.join(ET_RUNTIME_ROOT, 'current', 'bin', 'python'),
         'python3',
         'python',
       ]),

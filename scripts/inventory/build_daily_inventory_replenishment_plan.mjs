@@ -98,6 +98,26 @@ if (!Number.isFinite(linksAge) || linksAge < -0.25 || linksAge > maximumLinksAge
 
 const etRows = Array.isArray(bi?.inventoryDepletion?.products) ? bi.inventoryDepletion.products : [];
 const etByKey = new Map(etRows.map(row => [String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(), row]));
+const etMatchedCurrentDayRows = etRows.filter(row => {
+  if (String(row?.inventory_match_status || '') !== 'matched') return false;
+  const rowOperationalDate = dateText(
+    String(row?.et_operational_stock_policy || '').includes('01_full_carton_exception')
+      ? row?.et_box_snapshot_date
+      : row?.et_store_snapshot_date,
+  );
+  return rowOperationalDate === args.date;
+}).length;
+// Global current-day ET source gate: a freshly published cache can still
+// carry an old ET business day. When the policy requires a current-day ET
+// snapshot, zero matched current-day operational rows (or an empty ET
+// projection) must block the whole plan instead of silently producing an
+// empty executable plan. Mixed old/new stays per-row: safe current-day rows
+// execute and old rows keep their per-row blockers.
+if (policy.requireCurrentDayEtSnapshot === true && etMatchedCurrentDayRows === 0) {
+  blockers.push(`BI/ET projection has no matched current-day operational rows: matched=${etMatchedCurrentDayRows} total=${etRows.length}`);
+}
+const etEvidence = sourceEvidence.find(item => item.store === 'ET');
+if (etEvidence) Object.assign(etEvidence, {totalEtRows: etRows.length, matchedCurrentDayEtRows: etMatchedCurrentDayRows});
 const linkMetricRows = Array.isArray(links?.storeLinks)
   ? links.storeLinks
   : Array.isArray(links?.links) ? links.links : [];
@@ -647,6 +667,8 @@ const report = {
     etManualAllocation: etAlerts.filter(row => row.manualAllocationNeeded).length,
     etUnknown: etAlerts.filter(row => row.severity === 'unknown').length,
     etAlertsExcludedNoRelevantLinks,
+    etTotalRows: etRows.length,
+    etMatchedCurrentDayRows,
   },
 };
 await fs.mkdir(path.dirname(args.out), {recursive: true});

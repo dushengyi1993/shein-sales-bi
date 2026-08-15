@@ -180,8 +180,14 @@ assert.match(guardScript, /flock -n 9/);
 assert.match(guardScript, /ensure_links_data_fresh/);
 assert.match(guardScript, /api\/bi\/section\/linksData\?refresh=1/);
 assert.match(guardScript, /refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=/);
-assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$DETAIL_TARGET_BUDGET_PER_STORE"/);
+assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$max_targets"/);
 assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1/);
+assert.match(guardScript, /^ensure_inventory_trend_fresh 1$/m);
+assert.doesNotMatch(guardScript, /ensure_inventory_trend_fresh 1 \|\| true/,
+  'an inventoryTrend refresh failure must abort the guard instead of being swallowed');
+assert.match(guardScript, /--max-rows "\$MAX_ROWS" \\/);
+assert.match(guardScript, /\(\( TOTAL > MAX_ROWS \)\)/);
+assert.match(guardScript, /daily inventory plan exceeds per-run row ceiling total=\$TOTAL maxRows=\$MAX_ROWS/);
 assert.doesNotMatch(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_CONCURRENCY=2 bash scripts\/cloud_openapi_product_reconciliation\.sh/, 'the guard must never run the old bare full-catalog reconciliation');
 assert.match(guardScript, /build_plan \|\| PLAN_STATUS=\$\?/);
 assert.match(guardScript, /--execution-mode automatic/);
@@ -205,8 +211,12 @@ assert.match(executorScript, /\.journal\.ndjson/, 'inventory executor preserves 
 assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);
 assert.match(executorScript, /assertCurrentInventoryListingIdentity/);
 assert.match(executorScript, /linksData canonical identity changed or is unavailable/);
+assert.doesNotMatch(executorScript, /\.slice\(0, args\.maxRows\)/, 'the executor must never silently slice the actionable set');
+assert.match(executorScript, /planActionableRows\.length > args\.maxRows/, 'the executor must fail before any write when the plan exceeds the row ceiling');
 assert.doesNotMatch(executorScript, /bootstrap/i);
 assert.match(builderScript, /target_inventory_already_satisfied/);
+assert.match(builderScript, /requireCurrentDayEtSnapshot === true/);
+assert.match(builderScript, /BI\/ET projection has no matched current-day operational rows/);
 assert.doesNotMatch(builderScript, /bootstrap/i);
 assert.match(etSafetyGuard, /--execution-mode automatic/);
 assert.match(etSafetyGuard, /--confirm-hash "\$HASH"/);
