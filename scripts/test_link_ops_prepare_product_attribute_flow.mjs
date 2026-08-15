@@ -52,6 +52,7 @@ import {
   productAttributeAreaFingerprint,
   productAttributeBindingRequestKey,
   productAttributeBindingRequestKeyV2,
+  productAttributeRefreshEventKey,
   productAttributeTargetStandardGoodsSn,
   resolveExplicitProductAlias,
   validateProductAttributeBindingLock,
@@ -233,6 +234,7 @@ const donorSupplierCode = () => {
   if (donorModes.search === 'other-product') return OTHER_PRODUCT_CODE;
   return DONOR_FULL_CODE;
 };
+const donorResolvedSpu = () => donorModes.search === 'spu-remap' ? 'v-remapped-spu' : DONOR_SPU;
 const donorAttributeRows = () => {
   const modelValue = donorModes.attribute === 'identitymissing' ? 'OTHER-MODEL' : STANDARD_GOODS_SN;
   const identity = {attributeId: 1000546, attributeValueId: 0, attributeValue: modelValue};
@@ -331,7 +333,7 @@ const fakeOpenApi = http.createServer(async (req, res) => {
       return sendJson(res, {
         code: '0',
         msg: 'OK',
-        info: {data: [{spuName: DONOR_SPU, skcList: [{skcName, supplierCode: donorSupplierCode(), skuList: []}]}]},
+        info: {data: [{spuName: donorResolvedSpu(), skcList: [{skcName, supplierCode: donorSupplierCode(), skuList: []}]}]},
       });
     }
     return sendJson(res, {code: '0', msg: 'OK', info: null});
@@ -353,12 +355,12 @@ const fakeOpenApi = http.createServer(async (req, res) => {
         },
       });
     }
-    if (spuName === DONOR_SPU && donorModes.search !== 'notfound') {
+    if ((spuName === DONOR_SPU || spuName === 'v-remapped-spu') && donorModes.search !== 'notfound') {
       return sendJson(res, {
         code: '0',
         msg: 'OK',
         info: {
-          spuName: DONOR_SPU,
+          spuName,
           productMultiNameList: [{language: 'en', productName: 'SK-13015 donor product'}],
           productAttributeInfoList: donorAttributeRows(),
           skcInfoList: [{skcName: DONOR_SKC, supplierCode: donorSupplierCode(), skuInfoList: [{skuCode: 'SKU-DONOR-1', supplierSku: ''}]}],
@@ -384,6 +386,27 @@ const aliasBytes = await fs.readFile(aliasFile);
 const catalogBytes = await fs.readFile(catalogFile);
 const aliasRegistryFingerprint = crypto.createHash('sha256').update(aliasBytes).digest('hex');
 const catalogFingerprint = crypto.createHash('sha256').update(catalogBytes).digest('hex');
+const aliasBaselineText = aliasBytes.toString('utf8');
+const catalogBaselineText = catalogBytes.toString('utf8');
+async function driftAliasRegistry() {
+  const registry = JSON.parse(await fs.readFile(aliasFile, 'utf8'));
+  registry.aliases.push({canonical: 'SK-13015杆式吸尘器', aliases: ['SK-13015刷新漂移别名']});
+  await fs.writeFile(aliasFile, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
+}
+async function driftCatalogRegistry() {
+  const catalog = JSON.parse(await fs.readFile(catalogFile, 'utf8'));
+  catalog.standards.push('SK-13015刷新漂移标准');
+  await fs.writeFile(catalogFile, `${JSON.stringify(catalog, null, 2)}\n`, 'utf8');
+}
+async function removeCanonicalFromCatalog() {
+  const catalog = JSON.parse(await fs.readFile(catalogFile, 'utf8'));
+  catalog.standards = catalog.standards.filter(value => value !== DONOR_FULL_CODE);
+  await fs.writeFile(catalogFile, `${JSON.stringify(catalog, null, 2)}\n`, 'utf8');
+}
+async function restoreAliasCatalogFiles() {
+  await fs.writeFile(aliasFile, aliasBaselineText, 'utf8');
+  await fs.writeFile(catalogFile, catalogBaselineText, 'utf8');
+}
 
 // --- portal config ---
 const authFile = await writeJson('auth.json', {
@@ -751,10 +774,12 @@ async function bindProductAttribute(cookie, taskId, {
 
 async function attachFullPayloadWithRow(taskId, {valueId = DONOR_VALUE_ID, skipDescription = false} = {}) {
   const payload = publishPayloadFor();
-  payload.product_attribute_list = [
-    ...payload.product_attribute_list,
-    {attribute_id: ATTRIBUTE_ID, attribute_value_id: valueId},
-  ];
+  if (valueId !== null) {
+    payload.product_attribute_list = [
+      ...payload.product_attribute_list,
+      {attribute_id: ATTRIBUTE_ID, attribute_value_id: valueId},
+    ];
+  }
   await updateRawTaskById(taskId, task => {
     const assetBinding = validPublishAssetBindingFixture(task);
     return {
@@ -772,6 +797,70 @@ async function attachFullPayloadWithRow(taskId, {valueId = DONOR_VALUE_ID, skipD
       }),
     };
   });
+}
+
+async function refreshBinding(cookie, taskId, {
+  expectedRevision = null,
+  expectedBindingRequestKey = '',
+  extraBody = {},
+} = {}) {
+  const task = await rawTaskById(taskId);
+  const revision = expectedRevision ?? Number(task?.repositoryRevision || 0);
+  const bindingKey = expectedBindingRequestKey || String(task?.productAttributeBinding?.bindingRequestKey || '');
+  return req('/api/link-ops-prepare-product-attribute', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId,
+      store: TARGET_STORE,
+      bindingMode: 'refresh_binding',
+      expectedRevision: revision,
+      expectedBindingRequestKey: bindingKey,
+      ...extraBody,
+    },
+  });
+}
+
+async function downgradeBindingToV1(taskId) {
+  await updateRawTaskById(taskId, task => {
+    const binding = JSON.parse(JSON.stringify(task.productAttributeBinding));
+    binding.schemaVersion = PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1;
+    delete binding.bindingMode;
+    const v1Key = productAttributeBindingRequestKey({
+      taskId: task.id,
+      targetStore: binding.targetStore,
+      baseTaskRevision: Number(binding.baseTaskRevision || 0),
+      attributeId: binding.attributeId,
+      attributeValueId: binding.attributeValueId,
+      donorStore: binding.donor?.storeKey || '',
+      donorSkc: binding.donor?.skc || '',
+      donorSpu: binding.donor?.spu || '',
+      evidenceSha256: String(binding.evidenceSha256 || ''),
+    });
+    binding.bindingRequestKey = v1Key;
+    // A genuine v1 record's immutable original bound event also carries the
+    // v1 request key; rewrite the matching event so the v1 history gate can
+    // verify field-for-field equality.
+    const history = asArray(task.history).map(entry => (
+      entry?.event === 'product_attribute_bound'
+        ? {...entry, bindingRequestKey: v1Key}
+        : entry
+    ));
+    return {...task, productAttributeBinding: binding, history};
+  });
+}
+
+async function currentAliasFingerprints() {
+  const aliasBytesNow = await fs.readFile(aliasFile);
+  const catalogBytesNow = await fs.readFile(catalogFile);
+  return {
+    alias: crypto.createHash('sha256').update(aliasBytesNow).digest('hex'),
+    catalog: crypto.createHash('sha256').update(catalogBytesNow).digest('hex'),
+  };
+}
+
+async function restoreTaskSnapshot(taskId, snapshot) {
+  await updateRawTaskById(taskId, () => JSON.parse(JSON.stringify(snapshot)));
 }
 
 async function stopChild(child, label, {graceMs = 5_000, killMs = 2_000} = {}) {
@@ -1434,6 +1523,555 @@ try {
   check('cli default append with row fails', cliAppendRowRun.code, code => code !== 0);
   check('cli default append with row code', cliAppendRowRun.stdout, text => text.includes('PRODUCT_ATTRIBUTE_ALREADY_PRESENT'));
   check('cli default append with row no write', Number((await rawTaskById(cliAppendRowTaskId))?.repositoryRevision || 0), cliAppendRowRevision);
+
+  // --- evidence refresh ---
+  // v2 append refresh happy path (post step-2 description rebind).
+  const refreshAppendTaskId = await createTask(cookie, 'ATTR-REFRESH-APPEND-V2');
+  await attachFullPayloadWithRow(refreshAppendTaskId, {valueId: null});
+  check('refresh-append initial append 200', (await bindProductAttribute(cookie, refreshAppendTaskId)).status, 200);
+  const refreshAppendStep2 = await runCli([
+    'prepare-descriptions',
+    '--task-id', refreshAppendTaskId,
+    '--store', TARGET_STORE,
+    '--source-file', descSourceFile,
+  ]);
+  check('refresh-append step2 rebind exits zero', refreshAppendStep2.code, 0);
+  const refreshAppendPre = await rawTaskById(refreshAppendTaskId);
+  const refreshAppendSnap = {
+    payload: JSON.stringify(refreshAppendPre.openapiPublishPayload),
+    description: JSON.stringify(refreshAppendPre.descriptionMaterialBinding),
+    assets: JSON.stringify(refreshAppendPre.publishAssetBinding),
+    schemaVersion: Number(refreshAppendPre.productAttributeBinding.schemaVersion),
+    bindingMode: String(refreshAppendPre.productAttributeBinding.bindingMode),
+    oldHash: String(refreshAppendPre.productAttributeBinding.oldPayloadHash),
+    newHash: String(refreshAppendPre.productAttributeBinding.newPayloadHash),
+    donor: JSON.stringify(refreshAppendPre.productAttributeBinding.donor),
+    canonical: String(refreshAppendPre.productAttributeBinding.canonicalCode),
+    evidence: String(refreshAppendPre.productAttributeBinding.evidenceSha256),
+    key: String(refreshAppendPre.productAttributeBinding.bindingRequestKey),
+    attributeValueId: Number(refreshAppendPre.productAttributeBinding.attributeValueId),
+    revision: Number(refreshAppendPre.repositoryRevision),
+  };
+  await driftAliasRegistry();
+  const refreshAppendDriftDryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: refreshAppendTaskId, mode: 'dry-run', source: 'test'},
+  });
+  check('refresh-append drift dry-run blocked', String(refreshAppendDriftDryRun.json?.execution?.state || ''), 'blocked');
+  check('refresh-append drift names registry drift', asArray(refreshAppendDriftDryRun.json?.execution?.preflight?.blockers)
+    .some(row => /别名注册表\/商品目录指纹/.test(String(row))), true);
+  // The drift dry-run itself persists execution and advances the repository
+  // revision; refresh must CAS exactly +1 from THAT current revision.
+  refreshAppendSnap.revision = Number((await rawTaskById(refreshAppendTaskId))?.repositoryRevision || 0);
+  const refreshAppendFingerprints = await currentAliasFingerprints();
+  const refreshAppendSearchBefore = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct'
+    && String(call.body?.skcNameList || '').includes(DONOR_SKC)).length;
+  const refreshAppendRes = await refreshBinding(cookie, refreshAppendTaskId);
+  check('refresh-append 200', refreshAppendRes.status, 200);
+  check('refresh-append stage needs dry run', String(refreshAppendRes.json?.stage || ''), 'binding_refreshed_needs_dry_run');
+  check('refresh-append next command preflight', String(refreshAppendRes.json?.nextStep?.command || ''), 'preflight');
+  check('refresh-append eventKey sha256', /^[a-f0-9]{64}$/.test(String(refreshAppendRes.json?.eventKey || '')), true);
+  const refreshAppendRaw = await rawTaskById(refreshAppendTaskId);
+  const refreshAppendBinding = refreshAppendRaw.productAttributeBinding;
+  check('refresh-append payload deep-equal', JSON.stringify(refreshAppendRaw.openapiPublishPayload), refreshAppendSnap.payload);
+  check('refresh-append description deep-equal', JSON.stringify(refreshAppendRaw.descriptionMaterialBinding), refreshAppendSnap.description);
+  check('refresh-append assets deep-equal', JSON.stringify(refreshAppendRaw.publishAssetBinding), refreshAppendSnap.assets);
+  check('refresh-append schema preserved', Number(refreshAppendBinding.schemaVersion), refreshAppendSnap.schemaVersion);
+  check('refresh-append mode preserved', String(refreshAppendBinding.bindingMode), refreshAppendSnap.bindingMode);
+  check('refresh-append old hash preserved', String(refreshAppendBinding.oldPayloadHash), refreshAppendSnap.oldHash);
+  check('refresh-append new hash preserved', String(refreshAppendBinding.newPayloadHash), refreshAppendSnap.newHash);
+  check('refresh-append donor preserved', JSON.stringify(refreshAppendBinding.donor), refreshAppendSnap.donor);
+  check('refresh-append canonical preserved', String(refreshAppendBinding.canonicalCode), refreshAppendSnap.canonical);
+  check('refresh-append attr value preserved', Number(refreshAppendBinding.attributeValueId), refreshAppendSnap.attributeValueId);
+  check('refresh-append evidence re-signed', String(refreshAppendBinding.evidenceSha256), value => value !== refreshAppendSnap.evidence && /^[a-f0-9]{64}$/.test(String(value)));
+  check('refresh-append request key changed', String(refreshAppendBinding.bindingRequestKey), value => value !== refreshAppendSnap.key && /^[a-f0-9]{64}$/.test(String(value)));
+  check('refresh-append alias fingerprint current', String(refreshAppendBinding.aliasRegistryFingerprint), refreshAppendFingerprints.alias);
+  check('refresh-append catalog fingerprint current', String(refreshAppendBinding.catalogFingerprint), refreshAppendFingerprints.catalog);
+  check('refresh-append revision +1', Number(refreshAppendRaw.repositoryRevision), refreshAppendSnap.revision + 1);
+  check('refresh-append lock ok', validateProductAttributeBindingLock(refreshAppendRaw, refreshAppendRaw.openapiPublishPayload).ok, true);
+  const refreshAppendSearchAfter = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct'
+    && String(call.body?.skcNameList || '').includes(DONOR_SKC)).length;
+  check('refresh-append performed fresh donor verify', refreshAppendSearchAfter, refreshAppendSearchBefore + 1);
+  const refreshAppendDryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: refreshAppendTaskId, mode: 'dry-run', source: 'test'},
+  });
+  check('refresh-append dry-run ready after refresh', String(refreshAppendDryRun.json?.execution?.state || ''), 'openapi_product_preflight_ready');
+  const refreshAppendPostReadyRevision = Number((await rawTaskById(refreshAppendTaskId))?.repositoryRevision || 0);
+  check('refresh-append history event once', asArray(refreshAppendRaw?.history).filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, 1);
+  check('refresh-append never publishes', publishAttemptCount, 0);
+  const refreshAppendAlready = await refreshBinding(cookie, refreshAppendTaskId);
+  check('refresh-append already_current 200', refreshAppendAlready.status, 200);
+  check('refresh-append already_current stage', String(refreshAppendAlready.json?.stage || ''), 'already_current');
+  check('refresh-append already_current zero CAS', Number((await rawTaskById(refreshAppendTaskId))?.repositoryRevision || 0), refreshAppendPostReadyRevision);
+  check('refresh-append already_current no new event', asArray((await rawTaskById(refreshAppendTaskId))?.history).filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, 1);
+  await restoreAliasCatalogFiles();
+
+  // v2 adopt refresh happy path.
+  const refreshAdoptTaskId = await createTask(cookie, 'ATTR-REFRESH-ADOPT-V2');
+  await attachFullPayloadWithRow(refreshAdoptTaskId);
+  check('refresh-adopt initial adopt 200', (await bindProductAttribute(cookie, refreshAdoptTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT})).status, 200);
+  const refreshAdoptPre = await rawTaskById(refreshAdoptTaskId);
+  const refreshAdoptSnap = {
+    payload: JSON.stringify(refreshAdoptPre.openapiPublishPayload),
+    description: JSON.stringify(refreshAdoptPre.descriptionMaterialBinding),
+    assets: JSON.stringify(refreshAdoptPre.publishAssetBinding),
+    oldHash: String(refreshAdoptPre.productAttributeBinding.oldPayloadHash),
+    newHash: String(refreshAdoptPre.productAttributeBinding.newPayloadHash),
+    mode: String(refreshAdoptPre.productAttributeBinding.bindingMode),
+    revision: Number(refreshAdoptPre.repositoryRevision),
+  };
+  await driftAliasRegistry();
+  const refreshAdoptRes = await refreshBinding(cookie, refreshAdoptTaskId);
+  check('refresh-adopt 200', refreshAdoptRes.status, 200);
+  const refreshAdoptRaw = await rawTaskById(refreshAdoptTaskId);
+  check('refresh-adopt payload deep-equal', JSON.stringify(refreshAdoptRaw.openapiPublishPayload), refreshAdoptSnap.payload);
+  check('refresh-adopt description deep-equal', JSON.stringify(refreshAdoptRaw.descriptionMaterialBinding), refreshAdoptSnap.description);
+  check('refresh-adopt assets deep-equal', JSON.stringify(refreshAdoptRaw.publishAssetBinding), refreshAdoptSnap.assets);
+  check('refresh-adopt mode preserved', String(refreshAdoptRaw.productAttributeBinding.bindingMode), refreshAdoptSnap.mode);
+  check('refresh-adopt old==new preserved', String(refreshAdoptRaw.productAttributeBinding.oldPayloadHash), refreshAdoptSnap.oldHash);
+  check('refresh-adopt new hash preserved', String(refreshAdoptRaw.productAttributeBinding.newPayloadHash), refreshAdoptSnap.newHash);
+  check('refresh-adopt old==new invariant', String(refreshAdoptRaw.productAttributeBinding.oldPayloadHash), String(refreshAdoptRaw.productAttributeBinding.newPayloadHash));
+  check('refresh-adopt revision +1', Number(refreshAdoptRaw.repositoryRevision), refreshAdoptSnap.revision + 1);
+  check('refresh-adopt lock ok', validateProductAttributeBindingLock(refreshAdoptRaw, refreshAdoptRaw.openapiPublishPayload).ok, true);
+  await restoreAliasCatalogFiles();
+
+  // Catalog-only, both-drift and catalog-removal variants on one adopt task.
+  const refreshDriftsTaskId = await createTask(cookie, 'ATTR-REFRESH-DRIFTS');
+  await attachFullPayloadWithRow(refreshDriftsTaskId);
+  check('refresh-drifts initial adopt 200', (await bindProductAttribute(cookie, refreshDriftsTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT})).status, 200);
+  await driftCatalogRegistry();
+  const catalogOnlyRefresh = await refreshBinding(cookie, refreshDriftsTaskId);
+  check('catalog-only drift refresh 200', catalogOnlyRefresh.status, 200);
+  check('catalog-only drift refresh stage', String(catalogOnlyRefresh.json?.stage || ''), 'binding_refreshed_needs_dry_run');
+  await driftAliasRegistry();
+  const bothDriftRefresh = await refreshBinding(cookie, refreshDriftsTaskId);
+  check('both drift refresh 200', bothDriftRefresh.status, 200);
+  check('both drift refresh stage', String(bothDriftRefresh.json?.stage || ''), 'binding_refreshed_needs_dry_run');
+  // With the drifted files still in place the gate is current: a third
+  // refresh call must be already_current with zero CAS/history/audit/donor.
+  const driftsCurrentRevision = Number((await rawTaskById(refreshDriftsTaskId))?.repositoryRevision || 0);
+  const driftsRefreshEvents = asArray((await rawTaskById(refreshDriftsTaskId))?.history)
+    .filter(entry => entry?.event === 'product_attribute_binding_refreshed').length;
+  const driftsSearchBefore = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct'
+    && String(call.body?.skcNameList || '').includes(DONOR_SKC)).length;
+  const driftsAuditBefore = (await fs.readFile(auditFile, 'utf8').catch(() => ''))
+    .split('\n')
+    .filter(line => line.includes('link-ops-prepare-product-attribute-refreshed'))
+    .length;
+  const driftsAlreadyCurrent = await refreshBinding(cookie, refreshDriftsTaskId);
+  check('multi-refresh already_current 200', driftsAlreadyCurrent.status, 200);
+  check('multi-refresh already_current stage', String(driftsAlreadyCurrent.json?.stage || ''), 'already_current');
+  check('multi-refresh already_current zero CAS', Number((await rawTaskById(refreshDriftsTaskId))?.repositoryRevision || 0), driftsCurrentRevision);
+  check('multi-refresh already_current zero history', asArray((await rawTaskById(refreshDriftsTaskId))?.history)
+    .filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, driftsRefreshEvents);
+  const driftsSearchAfter = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/searchProduct'
+    && String(call.body?.skcNameList || '').includes(DONOR_SKC)).length;
+  check('multi-refresh already_current zero donor', driftsSearchAfter, driftsSearchBefore);
+  const driftsAuditAfter = (await fs.readFile(auditFile, 'utf8').catch(() => ''))
+    .split('\n')
+    .filter(line => line.includes('link-ops-prepare-product-attribute-refreshed'))
+    .length;
+  check('multi-refresh already_current zero audit', driftsAuditAfter, driftsAuditBefore);
+  await restoreAliasCatalogFiles();
+  const preRemovalRevision = Number((await rawTaskById(refreshDriftsTaskId))?.repositoryRevision || 0);
+  await removeCanonicalFromCatalog();
+  const catalogRemovalRefresh = await refreshBinding(cookie, refreshDriftsTaskId);
+  check('catalog removal refresh rejected', catalogRemovalRefresh.status, 409);
+  check('catalog removal refresh donor-rejected code', String(catalogRemovalRefresh.json?.code || ''), 'TASK_SUPPLIER_CODE_ALIAS_UNRESOLVED');
+  check('catalog removal refresh zero write', Number((await rawTaskById(refreshDriftsTaskId))?.repositoryRevision || 0), preRemovalRevision);
+  await restoreAliasCatalogFiles();
+
+  // v1 append refresh happy path (genuine v1 history passes).
+  const refreshV1TaskId = await createTask(cookie, 'ATTR-REFRESH-V1');
+  await attachFullPayloadWithRow(refreshV1TaskId, {valueId: null});
+  check('refresh-v1 initial append 200', (await bindProductAttribute(cookie, refreshV1TaskId)).status, 200);
+  const refreshV1Step2 = await runCli([
+    'prepare-descriptions',
+    '--task-id', refreshV1TaskId,
+    '--store', TARGET_STORE,
+    '--source-file', descSourceFile,
+  ]);
+  check('refresh-v1 step2 rebind exits zero', refreshV1Step2.code, 0);
+  await downgradeBindingToV1(refreshV1TaskId);
+  const refreshV1Pre = await rawTaskById(refreshV1TaskId);
+  const refreshV1Snap = {
+    payload: JSON.stringify(refreshV1Pre.openapiPublishPayload),
+    oldHash: String(refreshV1Pre.productAttributeBinding.oldPayloadHash),
+    newHash: String(refreshV1Pre.productAttributeBinding.newPayloadHash),
+    revision: Number(refreshV1Pre.repositoryRevision),
+  };
+  await driftAliasRegistry();
+  const refreshV1Res = await refreshBinding(cookie, refreshV1TaskId);
+  check('refresh-v1 200', refreshV1Res.status, 200);
+  check('refresh-v1 stage', String(refreshV1Res.json?.stage || ''), 'binding_refreshed_needs_dry_run');
+  const refreshV1Raw = await rawTaskById(refreshV1TaskId);
+  const refreshV1Binding = refreshV1Raw.productAttributeBinding;
+  check('refresh-v1 payload deep-equal', JSON.stringify(refreshV1Raw.openapiPublishPayload), refreshV1Snap.payload);
+  check('refresh-v1 schema stays 1', Number(refreshV1Binding.schemaVersion), PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1);
+  check('refresh-v1 bindingMode absent', Object.prototype.hasOwnProperty.call(refreshV1Binding, 'bindingMode'), false);
+  check('refresh-v1 old hash preserved', String(refreshV1Binding.oldPayloadHash), refreshV1Snap.oldHash);
+  check('refresh-v1 new hash preserved', String(refreshV1Binding.newPayloadHash), refreshV1Snap.newHash);
+  check('refresh-v1 old!=new preserved', String(refreshV1Binding.oldPayloadHash), value => value !== String(refreshV1Binding.newPayloadHash));
+  check('refresh-v1 uses v1 request key', String(refreshV1Binding.bindingRequestKey), productAttributeBindingRequestKey({
+    taskId: refreshV1TaskId,
+    targetStore: TARGET_STORE,
+    baseTaskRevision: Number(refreshV1Binding.baseTaskRevision || 0),
+    attributeId: Number(refreshV1Binding.attributeId),
+    attributeValueId: Number(refreshV1Binding.attributeValueId),
+    donorStore: String(refreshV1Binding.donor?.storeKey || ''),
+    donorSkc: String(refreshV1Binding.donor?.skc || ''),
+    donorSpu: String(refreshV1Binding.donor?.spu || ''),
+    evidenceSha256: String(refreshV1Binding.evidenceSha256 || ''),
+  }));
+  check('refresh-v1 revision +1', Number(refreshV1Raw.repositoryRevision), refreshV1Snap.revision + 1);
+  check('refresh-v1 lock ok', validateProductAttributeBindingLock(refreshV1Raw, refreshV1Raw.openapiPublishPayload).ok, true);
+  await restoreAliasCatalogFiles();
+
+  // Coordinated image-binding swap on v1: swap the canonical asset binding
+  // and synchronize both the description and attribute image fingerprints,
+  // but leave the original immutable product_attribute_bound history
+  // untouched. Refresh must reject on v1 history with zero write/publish.
+  const swapTaskId = await createTask(cookie, 'ATTR-REFRESH-V1-IMAGE-SWAP');
+  await attachFullPayloadWithRow(swapTaskId, {valueId: null});
+  await bindProductAttribute(cookie, swapTaskId);
+  await runCli(['prepare-descriptions', '--task-id', swapTaskId, '--store', TARGET_STORE, '--source-file', descSourceFile]);
+  await downgradeBindingToV1(swapTaskId);
+  const swapPreRevision = Number((await rawTaskById(swapTaskId))?.repositoryRevision || 0);
+  await updateRawTaskById(swapTaskId, task => {
+    const assetBinding = validPublishAssetBindingFixture(task);
+    const images = assetBinding.images.map((row, index) => ({
+      ...row,
+      name: `swapped-${row.name}`,
+      sha256: crypto.createHash('sha256').update(`swapped-image-${index}`).digest('hex'),
+    }));
+    assetBinding.images = images;
+    assetBinding.imageCount = images.length;
+    assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {
+      binding: assetBinding,
+      images: assetBinding.images,
+    });
+    const attrBinding = JSON.parse(JSON.stringify(task.productAttributeBinding));
+    attrBinding.imageBindingFingerprint = assetBinding.bindingFingerprint;
+    const description = JSON.parse(JSON.stringify(task.descriptionMaterialBinding));
+    description.imageBindingFingerprint = assetBinding.bindingFingerprint;
+    return {
+      ...task,
+      publishAssetBinding: assetBinding,
+      productAttributeBinding: attrBinding,
+      descriptionMaterialBinding: description,
+    };
+  });
+  await driftAliasRegistry();
+  const swapRefresh = await refreshBinding(cookie, swapTaskId);
+  check('v1 image swap refresh rejected', swapRefresh.status, 409);
+  check('v1 image swap refresh code', String(swapRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_V1_HISTORY_INVALID');
+  check('v1 image swap zero write', Number((await rawTaskById(swapTaskId))?.repositoryRevision || 0), swapPreRevision);
+  check('v1 image swap zero publish', publishAttemptCount, 0);
+  await restoreAliasCatalogFiles();
+
+  // v1 history negatives: missing/conflicting history blocks with zero write.
+  for (const [code, mutateHistory] of [
+    ['ATTR-REFRESH-V1-HISTORY-MISSING', history => history.filter(entry => entry?.event !== 'product_attribute_bound')],
+    ['ATTR-REFRESH-V1-HISTORY-CONFLICT', history => history.map(entry => (
+      entry?.event === 'product_attribute_bound'
+        ? {...entry, evidenceSha256: 'f'.repeat(64)}
+        : entry
+    ))],
+  ]) {
+    const taskId = await createTask(cookie, code);
+    await attachFullPayloadWithRow(taskId, {valueId: null});
+    await bindProductAttribute(cookie, taskId);
+    await runCli(['prepare-descriptions', '--task-id', taskId, '--store', TARGET_STORE, '--source-file', descSourceFile]);
+    await downgradeBindingToV1(taskId);
+    await updateRawTaskById(taskId, task => ({...task, history: mutateHistory(asArray(task.history))}));
+    const revisionBefore = Number((await rawTaskById(taskId))?.repositoryRevision || 0);
+    await driftAliasRegistry();
+    const res = await refreshBinding(cookie, taskId);
+    check(`${code} refresh rejected`, res.status, 409);
+    check(`${code} code`, String(res.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_V1_HISTORY_INVALID');
+    check(`${code} zero write`, Number((await rawTaskById(taskId))?.repositoryRevision || 0), revisionBefore);
+    check(`${code} never publishes`, publishAttemptCount, 0);
+    await restoreAliasCatalogFiles();
+  }
+
+  // Exact blocker set + drift/tamper negatives (zero write).
+  const refreshNegativesTaskId = await createTask(cookie, 'ATTR-REFRESH-NEGATIVES');
+  await attachFullPayloadWithRow(refreshNegativesTaskId);
+  await bindProductAttribute(cookie, refreshNegativesTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  const refreshNegativesSnapshot = JSON.parse(JSON.stringify(await rawTaskById(refreshNegativesTaskId)));
+  const negativesBaseRevision = Number(refreshNegativesSnapshot?.repositoryRevision || 0);
+  // payload row tamper -> lock invalid (zero write)
+  await updateRawTaskById(refreshNegativesTaskId, task => {
+    const payload = JSON.parse(JSON.stringify(task.openapiPublishPayload));
+    for (const row of payload.product_attribute_list) {
+      if (Number(row?.attribute_id) === ATTRIBUTE_ID) row.attribute_value_id = 777777;
+    }
+    return {...task, openapiPublishPayload: payload};
+  });
+  const tamperedLockRefresh = await refreshBinding(cookie, refreshNegativesTaskId);
+  check('refresh payload tamper rejected', tamperedLockRefresh.status, 409);
+  check('refresh payload tamper code', String(tamperedLockRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_PAYLOAD_HASH_MISMATCH');
+  await restoreTaskSnapshot(refreshNegativesTaskId, refreshNegativesSnapshot);
+  // image binding tamper
+  await updateRawTaskById(refreshNegativesTaskId, task => {
+    const binding = JSON.parse(JSON.stringify(task.publishAssetBinding));
+    binding.images[0].sha256 = 'f'.repeat(64);
+    return {...task, publishAssetBinding: binding};
+  });
+  const tamperedImageRefresh = await refreshBinding(cookie, refreshNegativesTaskId);
+  check('refresh image tamper rejected', tamperedImageRefresh.status, 409);
+  check('refresh image tamper code', String(tamperedImageRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_IMAGE_BINDING_INVALID');
+  await restoreTaskSnapshot(refreshNegativesTaskId, refreshNegativesSnapshot);
+  // description tamper
+  await updateRawTaskById(refreshNegativesTaskId, task => {
+    const description = JSON.parse(JSON.stringify(task.descriptionMaterialBinding));
+    description.hashes.en = 'f'.repeat(64);
+    return {...task, descriptionMaterialBinding: description};
+  });
+  const tamperedDescRefresh = await refreshBinding(cookie, refreshNegativesTaskId);
+  check('refresh description tamper rejected', tamperedDescRefresh.status, 409);
+  check('refresh description tamper code', String(tamperedDescRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_DESCRIPTION_INVALID');
+  await restoreTaskSnapshot(refreshNegativesTaskId, refreshNegativesSnapshot);
+  // write evidence
+  await updateRawTaskById(refreshNegativesTaskId, task => ({
+    ...task,
+    execution: {
+      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+      writeAudit: {
+        ...(task.execution?.writeAudit && typeof task.execution.writeAudit === 'object' ? task.execution.writeAudit : {}),
+        actualWriteSubmitted: true,
+      },
+    },
+  }));
+  const writeEvidenceRefresh = await refreshBinding(cookie, refreshNegativesTaskId);
+  check('refresh write evidence rejected', writeEvidenceRefresh.status, 409);
+  check('refresh write evidence code', String(writeEvidenceRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_BINDING_PRIOR_WRITE_EVIDENCE');
+  await restoreTaskSnapshot(refreshNegativesTaskId, refreshNegativesSnapshot);
+  // registry unavailable -> unsupported blocker set
+  await fs.rename(aliasFile, `${aliasFile}.unavailable`);
+  const unavailableRefresh = await refreshBinding(cookie, refreshNegativesTaskId);
+  await fs.rename(`${aliasFile}.unavailable`, aliasFile);
+  check('refresh registry unavailable rejected', unavailableRefresh.status, 409);
+  check('refresh registry unavailable code', String(unavailableRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_GATE_BLOCKERS_UNSUPPORTED');
+  // wrong expected key with drift active
+  await driftAliasRegistry();
+  const wrongKeyRefresh = await refreshBinding(cookie, refreshNegativesTaskId, {expectedBindingRequestKey: 'f'.repeat(64)});
+  check('refresh wrong key rejected', wrongKeyRefresh.status, 409);
+  check('refresh wrong key code', String(wrongKeyRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_KEY_MISMATCH');
+  // stale revision
+  const staleRevisionRefresh = await refreshBinding(cookie, refreshNegativesTaskId, {expectedRevision: negativesBaseRevision + 100});
+  check('refresh stale revision rejected', staleRevisionRefresh.status, 409);
+  check('refresh stale revision code', String(staleRevisionRefresh.json?.code || ''), 'LINK_OPS_REVISION_CONFLICT');
+  await restoreAliasCatalogFiles();
+  check('refresh negatives zero write overall', Number((await rawTaskById(refreshNegativesTaskId))?.repositoryRevision || 0), negativesBaseRevision);
+  check('refresh negatives never publish', publishAttemptCount, 0);
+
+  // Donor mismatch during refresh (live ok but resolved SPU differs) and
+  // alias failures during refresh.
+  const donorMismatchTaskId = await createTask(cookie, 'ATTR-REFRESH-DONOR-MISMATCH');
+  await attachFullPayloadWithRow(donorMismatchTaskId);
+  await bindProductAttribute(cookie, donorMismatchTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  const donorMismatchRevision = Number((await rawTaskById(donorMismatchTaskId))?.repositoryRevision || 0);
+  await driftAliasRegistry();
+  donorModes.search = 'spu-remap';
+  const spuRemapRefresh = await refreshBinding(cookie, donorMismatchTaskId);
+  check('refresh spu remap rejected', spuRemapRefresh.status, 409);
+  check('refresh spu remap code', String(spuRemapRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_DONOR_MISMATCH');
+  donorModes.search = 'alias-unregistered';
+  const aliasFailRefresh = await refreshBinding(cookie, donorMismatchTaskId);
+  check('refresh alias unregistered rejected', aliasFailRefresh.status, 409);
+  check('refresh alias unregistered code', String(aliasFailRefresh.json?.code || ''), 'DONOR_ALIAS_NOT_FOUND');
+  donorModes.search = 'exact';
+  await restoreAliasCatalogFiles();
+  check('refresh donor negatives zero write', Number((await rawTaskById(donorMismatchTaskId))?.repositoryRevision || 0), donorMismatchRevision);
+
+  // Binding missing / forbidden fields / CAS race / audit pending / CLI.
+  const refreshMissingTaskId = await createTask(cookie, 'ATTR-REFRESH-MISSING');
+  await attachFullPayloadWithRow(refreshMissingTaskId);
+  const missingRefresh = await refreshBinding(cookie, refreshMissingTaskId);
+  check('refresh binding missing rejected', missingRefresh.status, 409);
+  check('refresh binding missing code', String(missingRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_BINDING_MISSING');
+  const forbiddenFieldsRefresh = await refreshBinding(cookie, refreshMissingTaskId, {extraBody: {donorSkc: DONOR_SKC}});
+  check('refresh forbidden donorSkc rejected', forbiddenFieldsRefresh.status, 400);
+  check('refresh forbidden donorSkc code', String(forbiddenFieldsRefresh.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_FORBIDDEN_FIELDS');
+
+  const raceRefreshTaskId = await createTask(cookie, 'ATTR-REFRESH-RACE');
+  await attachFullPayloadWithRow(raceRefreshTaskId);
+  await bindProductAttribute(cookie, raceRefreshTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  const raceRefreshRevision = Number((await rawTaskById(raceRefreshTaskId))?.repositoryRevision || 0);
+  await driftAliasRegistry();
+  const [raceRefreshA, raceRefreshB] = await Promise.all([
+    refreshBinding(cookie, raceRefreshTaskId, {expectedRevision: raceRefreshRevision}),
+    refreshBinding(cookie, raceRefreshTaskId, {expectedRevision: raceRefreshRevision}),
+  ]);
+  check('refresh race one commit', [raceRefreshA.status, raceRefreshB.status].filter(status => status === 200).length, statusCount => statusCount >= 1);
+  check('refresh race loser settles as replay or CAS conflict', [raceRefreshA.status, raceRefreshB.status].every(status => status === 200 || status === 409), true);
+  const raceRefreshRaw = await rawTaskById(raceRefreshTaskId);
+  check('refresh race revision +1', Number(raceRefreshRaw.repositoryRevision), raceRefreshRevision + 1);
+  check('refresh race single refreshed event', asArray(raceRefreshRaw.history).filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, 1);
+  await restoreAliasCatalogFiles();
+
+  const auditRefreshTaskId = await createTask(cookie, 'ATTR-REFRESH-AUDIT-PENDING');
+  await attachFullPayloadWithRow(auditRefreshTaskId);
+  await bindProductAttribute(cookie, auditRefreshTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  const auditRefreshPre = await rawTaskById(auditRefreshTaskId);
+  const auditRefreshRevision = Number(auditRefreshPre?.repositoryRevision || 0);
+  const auditRefreshKey = String(auditRefreshPre?.productAttributeBinding?.bindingRequestKey || '');
+  await driftAliasRegistry();
+  await fs.writeFile(attributeAuditFailMarker, 'fail', 'utf8');
+  const auditPendingRefresh = await refreshBinding(cookie, auditRefreshTaskId);
+  await fs.rm(attributeAuditFailMarker, {force: true});
+  check('refresh audit pending 200', auditPendingRefresh.status, 200);
+  check('refresh audit pending committed', auditPendingRefresh.json?.bindingCommitted, true);
+  check('refresh audit pending flag', auditPendingRefresh.json?.auditPending, true);
+  check('refresh audit pending stage', String(auditPendingRefresh.json?.stage || ''), 'binding_committed_audit_pending');
+  check('refresh audit pending ok false', auditPendingRefresh.json?.ok, false);
+  const auditPendingEventKey = String(auditPendingRefresh.json?.eventKey || '');
+  const auditRetry = await refreshBinding(cookie, auditRefreshTaskId, {
+    expectedRevision: auditRefreshRevision,
+    expectedBindingRequestKey: auditRefreshKey,
+  });
+  check('refresh audit retry ok', auditRetry.json?.ok, true);
+  check('refresh audit retry same event key', String(auditRetry.json?.eventKey || ''), auditPendingEventKey);
+  check('refresh audit retry zero CAS', Number((await rawTaskById(auditRefreshTaskId))?.repositoryRevision || 0), auditRefreshRevision + 1);
+  check('refresh audit retry single refreshed event', asArray((await rawTaskById(auditRefreshTaskId))?.history).filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, 1);
+  const refreshedAuditLines = (await fs.readFile(auditFile, 'utf8').catch(() => ''))
+    .split('\n')
+    .filter(line => line.includes('link-ops-prepare-product-attribute-refreshed') && line.includes(auditPendingEventKey))
+    .length;
+  check('refresh audit retry appends audit exactly once', refreshedAuditLines, 1);
+  await restoreAliasCatalogFiles();
+
+  // Second-refresh audit failure lifecycle: the first refresh is durable;
+  // a second refresh (new drift) commits with auditPending, and its retry
+  // uses the current event key with zero repeated CAS/history, exactly one
+  // audit append, and the earlier refresh history retained.
+  const secondAuditTaskId = await createTask(cookie, 'ATTR-REFRESH-SECOND-AUDIT');
+  await attachFullPayloadWithRow(secondAuditTaskId);
+  await bindProductAttribute(cookie, secondAuditTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  await driftAliasRegistry();
+  const secondAuditFirst = await refreshBinding(cookie, secondAuditTaskId);
+  check('second-audit first refresh 200', secondAuditFirst.status, 200);
+  const secondAuditFirstKey = String(secondAuditFirst.json?.binding?.bindingRequestKey || '');
+  const secondAuditFirstEventKey = String(secondAuditFirst.json?.eventKey || '');
+  const secondAuditPreSecond = await rawTaskById(secondAuditTaskId);
+  const secondAuditPreSecondRevision = Number(secondAuditPreSecond?.repositoryRevision || 0);
+  await driftCatalogRegistry();
+  await fs.writeFile(attributeAuditFailMarker, 'fail', 'utf8');
+  const secondAuditCommit = await refreshBinding(cookie, secondAuditTaskId);
+  await fs.rm(attributeAuditFailMarker, {force: true});
+  check('second-audit commit 200', secondAuditCommit.status, 200);
+  check('second-audit commit auditPending', secondAuditCommit.json?.auditPending, true);
+  check('second-audit commit ok false', secondAuditCommit.json?.ok, false);
+  const secondAuditEventKey = String(secondAuditCommit.json?.eventKey || '');
+  check('second-audit event key changed', secondAuditEventKey, value => value !== secondAuditFirstEventKey && /^[a-f0-9]{64}$/.test(String(value)));
+  const secondAuditRetry = await refreshBinding(cookie, secondAuditTaskId, {
+    expectedRevision: secondAuditPreSecondRevision,
+    expectedBindingRequestKey: secondAuditFirstKey,
+  });
+  check('second-audit retry ok', secondAuditRetry.json?.ok, true);
+  check('second-audit retry current event key', String(secondAuditRetry.json?.eventKey || ''), secondAuditEventKey);
+  check('second-audit retry zero CAS', Number((await rawTaskById(secondAuditTaskId))?.repositoryRevision || 0), secondAuditPreSecondRevision + 1);
+  check('second-audit retry keeps earlier history', asArray((await rawTaskById(secondAuditTaskId))?.history)
+    .filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, 2);
+  const secondAuditLines = (await fs.readFile(auditFile, 'utf8').catch(() => ''))
+    .split('\n')
+    .filter(line => line.includes('link-ops-prepare-product-attribute-refreshed') && line.includes(secondAuditEventKey))
+    .length;
+  check('second-audit retry appends exactly one audit', secondAuditLines, 1);
+  const secondAuditFirstLines = (await fs.readFile(auditFile, 'utf8').catch(() => ''))
+    .split('\n')
+    .filter(line => line.includes('link-ops-prepare-product-attribute-refreshed') && line.includes(secondAuditFirstEventKey))
+    .length;
+  check('second-audit earlier audit retained', secondAuditFirstLines, 1);
+  await restoreAliasCatalogFiles();
+
+  // Forged refresh event on an already-current never-refreshed task must
+  // fail closed with zero audit/CAS/history writes; the event key is always
+  // recomputed and the missing immutable history event cannot be forged.
+  const forgeTaskId = await createTask(cookie, 'ATTR-REFRESH-FORGED-EVENT');
+  await attachFullPayloadWithRow(forgeTaskId);
+  await bindProductAttribute(cookie, forgeTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  const forgeRaw = await rawTaskById(forgeTaskId);
+  const forgeCurrentKey = String(forgeRaw.productAttributeBinding.bindingRequestKey || '');
+  const forgeRevision = Number(forgeRaw.repositoryRevision || 0);
+  const forgedPreviousKey = 'f'.repeat(64);
+  const forgedEventKey = productAttributeRefreshEventKey({
+    taskId: forgeTaskId,
+    previousBindingRequestKey: forgedPreviousKey,
+    newBindingRequestKey: forgeCurrentKey,
+  });
+  await updateRawTaskById(forgeTaskId, task => ({
+    ...task,
+    productAttributeRefreshEvent: {
+      eventKey: forgedEventKey,
+      previousBindingRequestKey: forgedPreviousKey,
+      newBindingRequestKey: forgeCurrentKey,
+      previousRepositoryRevision: forgeRevision - 1,
+      previousBaseTaskRevision: Number(task.productAttributeBinding.baseTaskRevision || 0),
+      previousEvidenceSha256: String(task.productAttributeBinding.evidenceSha256 || ''),
+      refreshedAt: new Date().toISOString(),
+    },
+  }));
+  const forgeAuditLinesBefore = (await fs.readFile(auditFile, 'utf8').catch(() => ''))
+    .split('\n')
+    .filter(line => line.includes('link-ops-prepare-product-attribute-refreshed'))
+    .length;
+  const forgeRetry = await refreshBinding(cookie, forgeTaskId, {
+    expectedRevision: forgeRevision - 1,
+    expectedBindingRequestKey: forgedPreviousKey,
+  });
+  check('forged refresh event rejected', forgeRetry.status, 409);
+  check('forged refresh event code', String(forgeRetry.json?.code || ''), 'PRODUCT_ATTRIBUTE_REFRESH_KEY_MISMATCH');
+  check('forged refresh event zero CAS', Number((await rawTaskById(forgeTaskId))?.repositoryRevision || 0), forgeRevision);
+  check('forged refresh event zero history', asArray((await rawTaskById(forgeTaskId))?.history).filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, 0);
+  const forgeAuditLinesAfter = (await fs.readFile(auditFile, 'utf8').catch(() => ''))
+    .split('\n')
+    .filter(line => line.includes('link-ops-prepare-product-attribute-refreshed'))
+    .length;
+  check('forged refresh event zero audit', forgeAuditLinesAfter, forgeAuditLinesBefore);
+  check('forged refresh event never publishes', publishAttemptCount, 0);
+
+  // CLI refresh end-to-end + forbidden combinations.
+  const cliRefreshTaskId = await createTask(cookie, 'ATTR-REFRESH-CLI');
+  await attachFullPayloadWithRow(cliRefreshTaskId);
+  await bindProductAttribute(cookie, cliRefreshTaskId, {bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT});
+  const cliRefreshBefore = await rawTaskById(cliRefreshTaskId);
+  const cliRefreshPayloadBefore = JSON.stringify(cliRefreshBefore.openapiPublishPayload);
+  await driftAliasRegistry();
+  const cliRefreshRun = await runCli([
+    'prepare-product-attribute',
+    '--refresh-binding',
+    '--task-id', cliRefreshTaskId,
+    '--store', TARGET_STORE,
+  ]);
+  check('cli refresh exits zero', cliRefreshRun.code, 0);
+  check('cli refresh ok', cliRefreshRun.json?.ok, true);
+  check('cli refresh stage', String(cliRefreshRun.json?.stage || ''), 'binding_refreshed_needs_dry_run');
+  check('cli refresh mode', String(cliRefreshRun.json?.bindingMode || ''), 'refresh_binding');
+  check('cli refresh no ready claim', cliRefreshRun.json?.safety?.dryRunReadyClaimed, false);
+  check('cli refresh payload not mutated', JSON.stringify((await rawTaskById(cliRefreshTaskId)).openapiPublishPayload), cliRefreshPayloadBefore);
+  check('cli refresh never publishes', publishAttemptCount, 0);
+  await restoreAliasCatalogFiles();
+  const cliRefreshForbidden1 = await runCli([
+    'prepare-product-attribute',
+    '--refresh-binding',
+    '--task-id', cliRefreshTaskId,
+    '--store', TARGET_STORE,
+    '--donor-skc', DONOR_SKC,
+  ]);
+  check('cli refresh forbids donor-skc', cliRefreshForbidden1.code, code => code !== 0);
+  const cliRefreshForbidden2 = await runCli([
+    'prepare-product-attribute',
+    '--refresh-binding',
+    '--adopt-existing',
+    '--task-id', cliRefreshTaskId,
+    '--store', TARGET_STORE,
+  ]);
+  check('cli refresh forbids adopt-existing', cliRefreshForbidden2.code, code => code !== 0);
 
   // --- execution gate: tampering must block dry-run ---
   const tamperRaw = await rawTaskById(cliTaskId);

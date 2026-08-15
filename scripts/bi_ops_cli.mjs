@@ -35,6 +35,7 @@ import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_
 import {
   PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT,
   PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
+  PRODUCT_ATTRIBUTE_REQUEST_MODE_REFRESH,
   PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
   PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1,
   normalizeProductAttributeId,
@@ -113,6 +114,8 @@ function parseArgs(argv) {
     donorSkc: '',
     attributeId: null,
     adoptExisting: false,
+    refreshBinding: false,
+    expectedBindingRequestKey: '',
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
     format: '',
@@ -210,6 +213,8 @@ function parseArgs(argv) {
     else if (a === '--donor-skc') args.donorSkc = String(argv[++i] || '').trim();
     else if (a === '--attribute-id') args.attributeId = Number(argv[++i]);
     else if (a === '--adopt-existing') args.adoptExisting = true;
+    else if (a === '--refresh-binding') args.refreshBinding = true;
+    else if (a === '--expected-binding-request-key') args.expectedBindingRequestKey = String(argv[++i] || '').trim();
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
@@ -318,6 +323,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --adopt-existing --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
+  node scripts/bi_ops_cli.mjs prepare-product-attribute --refresh-binding --task-id <copy_product_draft任务id> --store FY [--expected-revision <n>] [--expected-binding-request-key <64位sha256>]
   node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <query.json|enriched.csv> --performance-date 2026-07-04 [--out <dir>]
@@ -386,6 +392,8 @@ Options:
                    与要修复的白名单属性 ID（仅 1002328 Hazardous materials classification）
   --adopt-existing  prepare-product-attribute 用；显式 adopt 既有 1002328 行（值必须与 live donor 完全一致），
                    payload 不做任何修改；不加本开关时默认 append_missing（只修缺失属性）
+  --refresh-binding prepare-product-attribute 用；对既有绑定重签来源证据（现场重新核验同一 donor），
+                    payload/描述/图片/模式/哈希全部保持不变；禁止与 donor/attribute/adopt 参数组合
   --source-task-id    prepare-publish 的 update_images 模式；从指定已提交发布任务的 publishResult/readbackFingerprint 精确继承 SPU/SKC/SKU
                       prepare-pending-image-correction 会复用任务中现有已审图片绑定，不重复上传图片
   --standard-goods-sn / --supply-price / --inventory
@@ -421,6 +429,8 @@ Safety:
     不新建任务、不重传图片、绝不发布。
   - prepare-product-attribute --adopt-existing 为既有一行 1002328 现场核验并绑定来源证据：payload 完全不变
     （old=new hash），描述/图片绑定保持有效无需重绑；若描述/图片绑定缺失或失效、值不一致、重复/缺失行，一律拒绝且零写入。
+  - prepare-product-attribute --refresh-binding 仅在执行门唯一阻断为 PRODUCT_ATTRIBUTE_ALIAS_REGISTRY_DRIFT 时重签
+    同一 donor 证据；刷新不修改 payload/描述/图片，不预演、不发布，返回 needs-dry-run；未漂移时返回 already_current。
   - retire-candidates 只生成下架候选明细，不执行下架；固定排除有新品标签、首次上架 15 天内或缺首次上架时间的链接，并要求人工确认。
   - 本机不处于受控云端执行边界，不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
   - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
@@ -1501,6 +1511,111 @@ async function runPrepareDescriptions(args) {
   if (!output.ok) process.exitCode = 1;
 }
 
+async function runRefreshProductAttributeBinding(args, store) {
+  if (args.donorStore || args.donorSkc || args.attributeId !== null || args.adoptExisting) {
+    throw new Error('prepare-product-attribute --refresh-binding 禁止携带 --donor-store/--donor-skc/--attribute-id/--adopt-existing；donor/属性/模式完全来自持久化绑定');
+  }
+  const explicitKey = String(args.expectedBindingRequestKey || '').trim().toLowerCase();
+  if (explicitKey && !/^[a-f0-9]{64}$/.test(explicitKey)) {
+    throw new Error('prepare-product-attribute --expected-binding-request-key 必须是 64 位 sha256');
+  }
+  const expectedRevisionProvided = args.expectedRevision !== null;
+  if (expectedRevisionProvided
+    && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision <= 0)) {
+    throw new Error('prepare-product-attribute --expected-revision 必须是正安全整数，刷新未执行');
+  }
+  const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
+  const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
+  if (!currentTask) throw new Error('当前账号无法精确读取目标 task，刷新未执行');
+  const liveRevision = Number(currentTask.repositoryRevision || 0);
+  if (!Number.isSafeInteger(liveRevision) || liveRevision <= 0) {
+    throw new Error('目标 task 未返回可用于 CAS 的正整数 repositoryRevision，刷新未执行');
+  }
+  const binding = currentTask?.productAttributeBinding && typeof currentTask.productAttributeBinding === 'object'
+    ? currentTask.productAttributeBinding
+    : null;
+  if (!binding) throw new Error('目标 task 没有 productAttributeBinding，刷新未执行');
+  const expectedBindingRequestKey = explicitKey || String(binding.bindingRequestKey || '');
+  if (!/^[a-f0-9]{64}$/.test(expectedBindingRequestKey)) {
+    throw new Error('目标 task 的绑定缺少可用 bindingRequestKey，刷新未执行');
+  }
+  const refreshBody = {
+    taskId: args.taskId,
+    store,
+    bindingMode: PRODUCT_ATTRIBUTE_REQUEST_MODE_REFRESH,
+    expectedRevision: expectedRevisionProvided ? args.expectedRevision : liveRevision,
+    expectedBindingRequestKey,
+  };
+  let bindJson;
+  try {
+    ({json: bindJson} = await request(args, '/api/link-ops-prepare-product-attribute', {
+      method: 'POST',
+      body: refreshBody,
+      allowJsonFailure: true,
+    }));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'prepare-product-attribute',
+      taskId: args.taskId,
+      store,
+      bindingMode: PRODUCT_ATTRIBUTE_REQUEST_MODE_REFRESH,
+      stage: 'binding_not_committed',
+      bindingCommitted: false,
+      code: error?.code || error?.response?.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '商品属性绑定证据刷新失败').slice(0, 500),
+      safety: {realPublishOccurred: false, dryRunReadyClaimed: false, payloadMutated: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const outBinding = bindJson.binding || {};
+  const output = {
+    ok: bindJson.bindingCommitted === true
+      && bindJson.readbackVerified === true
+      && bindJson.auditPending !== true
+      && bindJson.ok === true,
+    aiInvoked: false,
+    command: 'prepare-product-attribute',
+    taskId: args.taskId,
+    store,
+    bindingMode: PRODUCT_ATTRIBUTE_REQUEST_MODE_REFRESH,
+    stage: String(bindJson.stage || 'binding_state_uncertain'),
+    bindingCommitted: bindJson.bindingCommitted === true,
+    repositoryEventCommitted: bindJson.repositoryEventCommitted === true,
+    readbackVerified: bindJson.readbackVerified === true,
+    auditPending: bindJson.auditPending === true,
+    code: String(bindJson.code || ''),
+    error: String(bindJson.error || '').slice(0, 500),
+    eventKey: String(bindJson.eventKey || ''),
+    binding: {
+      schemaVersion: outBinding.schemaVersion ?? null,
+      bindingMode: String(outBinding.bindingMode || ''),
+      attributeId: outBinding.attributeId ?? null,
+      attributeValueId: outBinding.attributeValueId ?? null,
+      donorStore: String(outBinding.donorStore || ''),
+      donorSkc: String(outBinding.donorSkc || ''),
+      donorSpu: String(outBinding.donorSpu || ''),
+      canonicalCode: String(outBinding.canonicalCode || ''),
+      evidenceSha256: String(outBinding.evidenceSha256 || ''),
+      oldPayloadHash: String(outBinding.oldPayloadHash || ''),
+      newPayloadHash: String(outBinding.newPayloadHash || ''),
+      bindingRequestKey: String(outBinding.bindingRequestKey || ''),
+    },
+    nextStep: bindJson.nextStep || {command: 'preflight', note: '刷新后重新预演。', realPublish: false},
+    safety: {
+      realPublishOccurred: false,
+      dryRunReadyClaimed: false,
+      payloadMutated: false,
+      nextStep: '刷新本身不预演、不发布；请另行执行 preflight。',
+    },
+  };
+  print(output);
+  if (!output.ok) process.exitCode = 1;
+}
+
 async function runPrepareProductAttribute(args) {
   if (!args.taskId) throw new Error('prepare-product-attribute requires --task-id <id>');
   const storeCandidates = [...new Set(
@@ -1512,6 +1627,10 @@ async function runPrepareProductAttribute(args) {
     throw new Error(`prepare-product-attribute 必须精确单个 --store（多个/零个均拒绝）；当前解析到 ${storeCandidates.length} 个店铺：${storeCandidates.join('/') || '(empty)'}`);
   }
   const store = storeCandidates[0];
+  if (args.refreshBinding) {
+    await runRefreshProductAttributeBinding(args, store);
+    return;
+  }
   const donorStore = String(args.donorStore || '').trim().toUpperCase();
   if (!donorStore || !/^[A-Z0-9]{2,4}$/.test(donorStore)) {
     throw new Error('prepare-product-attribute requires --donor-store <同货号 donor 店铺代码>');

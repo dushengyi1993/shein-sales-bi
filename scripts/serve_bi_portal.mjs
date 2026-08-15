@@ -105,6 +105,7 @@ import {
   PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT,
   PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
   PRODUCT_ATTRIBUTE_BINDING_MODES,
+  PRODUCT_ATTRIBUTE_REQUEST_MODE_REFRESH,
   PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
   PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1,
   PRODUCT_ATTRIBUTE_PAYLOAD_HASH_ALGORITHM,
@@ -119,11 +120,14 @@ import {
   productAttributeAreaFingerprint,
   productAttributeBindingRequestKey,
   productAttributeBindingRequestKeyV2,
+  productAttributeRefreshEventKey,
   productAttributeTargetStandardGoodsSn,
   productModelFromPayload,
   productAttributeRowsForId,
   projectProductAttributeBindingCommit,
   validateProductAttributeBindingLock,
+  validateProductAttributeRefreshEvent,
+  validateV1ProductAttributeHistory,
   whitelistedProductAttributeName,
 } from '../lib/link_ops_product_attribute_binding.mjs';
 import {
@@ -15012,10 +15016,514 @@ async function main() {
         if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
         const targetStore = String(body.store || body.storeKey || '').trim().toUpperCase();
         if (!targetStore) return sendJson(res, 400, {ok: false, error: 'Missing target store'});
-        const allowedBodyKeys = ['taskId', 'store', 'donorStore', 'donorSkc', 'attributeId', 'bindingMode', 'expectedRevision'];
+        const allowedBodyKeys = ['taskId', 'store', 'donorStore', 'donorSkc', 'attributeId', 'bindingMode', 'expectedBindingRequestKey', 'expectedRevision'];
         const unknownBodyKeys = Object.keys(body || {}).filter(key => !allowedBodyKeys.includes(key));
         if (unknownBodyKeys.length) {
           return sendJson(res, 400, {ok: false, error: `商品属性绑定请求包含不允许字段：${unknownBodyKeys.join('/')}`});
+        }
+        const bindingMode = body.bindingMode === undefined || body.bindingMode === null || body.bindingMode === ''
+          ? PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND
+          : String(body.bindingMode);
+        if (bindingMode !== PRODUCT_ATTRIBUTE_REQUEST_MODE_REFRESH && !PRODUCT_ATTRIBUTE_BINDING_MODES.includes(bindingMode)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'bindingMode 必须是 append_missing（默认）、adopt_existing 或 refresh_binding',
+            code: 'PRODUCT_ATTRIBUTE_BINDING_MODE_INVALID',
+          });
+        }
+        const expectedRevision = Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
+          ? body.expectedRevision
+          : null;
+        if (!expectedRevision) {
+          const revisionMissing = body.expectedRevision === undefined || body.expectedRevision === null || body.expectedRevision === '';
+          return sendJson(res, 400, {
+            ok: false,
+            error: revisionMissing
+              ? '商品属性绑定必须携带当前正整数 expectedRevision；请先精确读取任务后再绑定'
+              : '商品属性绑定 expectedRevision 必须是原始 JSON number 类型的正 safe integer；禁止字符串、分数、截断或越界值',
+            code: revisionMissing ? 'LINK_OPS_REVISION_REQUIRED' : 'LINK_OPS_REVISION_INVALID',
+          });
+        }
+        if (bindingMode === PRODUCT_ATTRIBUTE_REQUEST_MODE_REFRESH) {
+          if (body.donorStore !== undefined || body.donorSkc !== undefined || body.attributeId !== undefined) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'refresh_binding 禁止携带 donorStore/donorSkc/attributeId；donor 与属性完全来自持久化绑定',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_FORBIDDEN_FIELDS',
+            });
+          }
+          let refreshStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+          let refreshFound;
+          try {
+            refreshFound = findLinkOpsTaskOrThrow(refreshStore, taskRef);
+          } catch (error) {
+            const message = error?.message || String(error);
+            return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+          }
+          const refreshAccess = authorizeLinkOpsRecord(actor, refreshFound.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+          if (!refreshAccess.ok) {
+            await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-prepare-product-attribute-denied', actor, ...requestMeta(req), task: {id: refreshFound.task.id}, denied: refreshAccess.denied});
+            return sendJson(res, 403, refreshAccess.denied);
+          }
+          const refreshTask = refreshAccess.record;
+          const refreshBinding = refreshTask?.productAttributeBinding && typeof refreshTask.productAttributeBinding === 'object'
+            ? refreshTask.productAttributeBinding
+            : null;
+          if (!refreshBinding) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'refresh_binding 要求任务已存在 productAttributeBinding',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_BINDING_MISSING',
+            });
+          }
+          const expectedBindingRequestKey = String(body.expectedBindingRequestKey || '').trim().toLowerCase();
+          if (!/^[a-f0-9]{64}$/.test(expectedBindingRequestKey)) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'refresh_binding 必须携带 expectedBindingRequestKey（64 位 sha256）',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_KEY_INVALID',
+            });
+          }
+          if (taskRequiresOwnerLifecycleResolve(refreshTask)) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '该任务已进入提交后待回读/人工处理状态，禁止刷新商品属性绑定证据',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_LIFECYCLE_LOCKED',
+            });
+          }
+          const refreshIntents = asArray(refreshTask?.intents).map(value => String(value || '').trim()).filter(Boolean);
+          if (!refreshIntents.includes('copy_product_draft')
+            || refreshIntents.some(intent => LINK_MAINTENANCE_INTENTS.has(intent))) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'refresh_binding 只支持未混入维护动作的 copy_product_draft 任务',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_INTENTS_INVALID',
+            });
+          }
+          const refreshWriteStores = taskWriteStores(refreshTask);
+          if (refreshWriteStores.length !== 1 || refreshWriteStores[0] !== targetStore) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: `目标店铺 ${targetStore} 不是该任务的唯一写入店（当前 ${refreshWriteStores.join('/') || '(empty)'}）`,
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_STORE_INVALID',
+            });
+          }
+          const refreshPriorWrite = descriptionBindingPriorWriteEvidence(refreshTask);
+          if (!refreshPriorWrite.ok) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: `任务已有真实写入/提交不确定性证据，禁止刷新绑定证据：${refreshPriorWrite.reasons.join(', ')}`,
+              code: 'PRODUCT_ATTRIBUTE_BINDING_PRIOR_WRITE_EVIDENCE',
+            });
+          }
+          const refreshPayload = refreshTask.openapiPublishPayload;
+          if (sha256StableJson(refreshPayload) !== String(refreshBinding.newPayloadHash || '').toLowerCase()) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'refresh_binding 要求当前 payload hash 等于 binding.newPayloadHash',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_PAYLOAD_HASH_MISMATCH',
+            });
+          }
+          if (!refreshTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(refreshTask, refreshPayload).ok) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'refresh_binding 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_DESCRIPTION_INVALID',
+            });
+          }
+          const refreshImageGate = validateExistingPublishAssetBindingForAdopt(refreshTask);
+          if (!refreshImageGate.ok) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: refreshImageGate.blockers[0]?.message || 'refresh_binding 要求当前审核图片绑定有效',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_IMAGE_BINDING_INVALID',
+            });
+          }
+          const refreshLock = validateProductAttributeBindingLock(refreshTask, refreshPayload);
+          if (!refreshLock.ok) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: `现有绑定锁定校验未通过，禁止刷新：${refreshLock.blockers.map(blocker => blocker.message).join('；')}`,
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_BINDING_LOCK_INVALID',
+              blockers: refreshLock.blockers.map(blocker => blocker.code).slice(0, 12),
+            });
+          }
+          const refreshSchemaVersion = Number(refreshBinding.schemaVersion);
+          if (refreshSchemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1) {
+            const v1HistoryGate = validateV1ProductAttributeHistory(refreshTask, refreshBinding);
+            if (!v1HistoryGate.ok) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: v1HistoryGate.blockers[0]?.message || 'v1 历史证据不足，禁止刷新',
+                code: v1HistoryGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_REFRESH_V1_HISTORY_INVALID',
+              });
+            }
+          }
+          const refreshGate = productAttributeExecutionGate(refreshTask);
+          if (!refreshGate.active) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'refresh_binding 要求执行门当前处于 active 状态',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_GATE_INACTIVE',
+            });
+          }
+          const gateCodes = [...new Set(refreshGate.blockers.map(blocker => blocker.code))];
+          const currentBindingKey = String(refreshBinding.bindingRequestKey || '').toLowerCase();
+          if (refreshGate.ok) {
+            if (currentBindingKey !== expectedBindingRequestKey) {
+              const refreshEvent = refreshTask?.productAttributeRefreshEvent && typeof refreshTask.productAttributeRefreshEvent === 'object'
+                ? refreshTask.productAttributeRefreshEvent
+                : null;
+              if (refreshEvent
+                && String(refreshEvent.previousBindingRequestKey || '').toLowerCase() === expectedBindingRequestKey
+                && Number(refreshEvent.previousRepositoryRevision || 0) === expectedRevision
+                && (() => {
+                  const validated = validateProductAttributeRefreshEvent(refreshTask);
+                  return validated.ok;
+                })()) {
+                // Audit-pending retry identity: the binding was already
+                // refreshed; append the audit with the same event key and do
+                // no repeated CAS/history write.
+                const validatedEvent = validateProductAttributeRefreshEvent(refreshTask);
+                await appendProductAttributeAudit(args.auditFile, {
+                  at: new Date().toISOString(),
+                  type: 'link-ops-prepare-product-attribute-refreshed',
+                  actor,
+                  ...requestMeta(req),
+                  task: {id: taskRef, revision: Number(refreshTask.repositoryRevision || 0)},
+                  eventKey: validatedEvent.recomputedEventKey,
+                  binding: projectProductAttributeBindingCommit(refreshTask),
+                });
+                return sendJson(res, 200, {
+                  ok: true,
+                  bindingCommitted: true,
+                  repositoryEventCommitted: true,
+                  readbackVerified: true,
+                  auditPending: false,
+                  stage: 'binding_refreshed_needs_dry_run',
+                  eventKey: validatedEvent.recomputedEventKey,
+                  task: projectLinkOpsTaskForClient(refreshTask),
+                  binding: projectProductAttributeBindingCommit(refreshTask),
+                  nextStep: {command: 'preflight', note: '绑定证据已刷新，重新预演通过后按既有流程确认提交。', realPublish: false},
+                });
+              }
+              return sendJson(res, 409, {
+                ok: false,
+                error: 'expectedBindingRequestKey 与当前绑定不一致',
+                code: 'PRODUCT_ATTRIBUTE_REFRESH_KEY_MISMATCH',
+              });
+            }
+            if (refreshTask?.productAttributeRefreshEvent) {
+              // Any persisted refresh event on an already-current task must
+              // itself be fully valid; a forged/incomplete event fails
+              // closed with zero writes.
+              const eventValidation = validateProductAttributeRefreshEvent(refreshTask, {requireFreshRevision: false});
+              if (!eventValidation.ok) {
+                return sendJson(res, 409, {
+                  ok: false,
+                  error: '任务存在无效的 refresh 事件证据，拒绝处理',
+                  code: 'PRODUCT_ATTRIBUTE_REFRESH_KEY_MISMATCH',
+                  blockers: eventValidation.blockers.map(blocker => blocker.code).slice(0, 8),
+                });
+              }
+            }
+            if (Number(refreshTask.repositoryRevision || 0) !== expectedRevision) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: `任务 revision 已变化：期望 ${expectedRevision}，当前 ${Number(refreshTask.repositoryRevision || 0)}`,
+                code: 'LINK_OPS_REVISION_CONFLICT',
+                retryable: true,
+              });
+            }
+            return sendJson(res, 200, {
+              ok: true,
+              bindingCommitted: true,
+              repositoryEventCommitted: true,
+              readbackVerified: true,
+              auditPending: false,
+              stage: 'already_current',
+              task: projectLinkOpsTaskForClient(refreshTask),
+              binding: projectProductAttributeBindingCommit(refreshTask),
+              nextStep: {command: 'preflight', note: '执行门已通过，无需刷新证据；重新预演按既有流程进行。', realPublish: false},
+            });
+          }
+          const unsupportedCodes = gateCodes.filter(code => code !== 'PRODUCT_ATTRIBUTE_ALIAS_REGISTRY_DRIFT');
+          if (!gateCodes.length || gateCodes.length !== 1 || unsupportedCodes.length) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: `refresh_binding 仅支持唯一 PRODUCT_ATTRIBUTE_ALIAS_REGISTRY_DRIFT 阻断（当前 ${gateCodes.join('/') || '(empty)'}）`,
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_GATE_BLOCKERS_UNSUPPORTED',
+              blockers: gateCodes,
+            });
+          }
+          if (Number(refreshTask.repositoryRevision || 0) !== expectedRevision) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: `任务 revision 已变化：期望 ${expectedRevision}，当前 ${Number(refreshTask.repositoryRevision || 0)}`,
+              code: 'LINK_OPS_REVISION_CONFLICT',
+              retryable: true,
+            });
+          }
+          if (currentBindingKey !== expectedBindingRequestKey) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'expectedBindingRequestKey 与当前绑定不一致',
+              code: 'PRODUCT_ATTRIBUTE_REFRESH_KEY_MISMATCH',
+            });
+          }
+          const refreshLockId = String(refreshTask.id || taskRef);
+          if (linkOpsExecutionLocks.has(refreshLockId)) {
+            return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
+          }
+          linkOpsExecutionLocks.add(refreshLockId);
+          try {
+            const aliasContext = loadProductAliasContextSync();
+            if (!aliasContext.available) {
+              return sendJson(res, 503, {
+                ok: false,
+                error: `货号别名注册表/商品目录当前不可读：${aliasContext.error || '未知原因'}`,
+                code: 'PRODUCT_ALIAS_REGISTRY_UNAVAILABLE',
+              });
+            }
+            const verifiedAt = new Date().toISOString();
+            const donorVerification = await verifyDonorProductAttributeLive({
+              donorStore: String(refreshBinding.donor?.storeKey || ''),
+              donorSkc: String(refreshBinding.donor?.skc || ''),
+              attributeId: normalizeProductAttributeId(refreshBinding.attributeId),
+              aliasContext,
+              taskRawCode: String(refreshBinding.taskRawCode || ''),
+              taskModelValue: String(refreshBinding.taskModelValue || ''),
+              verifiedAt,
+            });
+            if (!donorVerification.ok) {
+              const first = donorVerification.blockers[0] || {};
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-product-attribute-refresh-donor-rejected',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef},
+                donor: {storeKey: String(refreshBinding.donor?.storeKey || ''), skc: String(refreshBinding.donor?.skc || '')},
+                attributeId: normalizeProductAttributeId(refreshBinding.attributeId),
+                code: first.code || '',
+                error: first.message || '',
+              }).catch(() => {});
+              return sendJson(res, 409, {
+                ok: false,
+                error: `refresh 现场 donor 核验失败：${first.message || '未知原因'}`,
+                code: first.code || 'DONOR_VERIFICATION_FAILED',
+                blockers: donorVerification.blockers.map(row => ({code: row.code, message: row.message})).slice(0, 12),
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            const evidence = donorVerification.evidence;
+            const donorMismatches = [];
+            if (String(donorVerification.donorSpu || '') !== String(refreshBinding.donor?.spu || '')) donorMismatches.push('donorSpu');
+            if (String(evidence.rawDonorCode || '') !== String(refreshBinding.donor?.rawCode || '')) donorMismatches.push('rawDonorCode');
+            if (String(evidence.canonicalCode || '') !== String(refreshBinding.canonicalCode || '')) donorMismatches.push('canonicalCode');
+            if (normalizeProductAttributeId(evidence.attributeId) !== normalizeProductAttributeId(refreshBinding.attributeId)
+              || normalizeProductAttributeId(evidence.attributeValueId) !== normalizeProductAttributeId(refreshBinding.attributeValueId)) donorMismatches.push('attributeIdOrValue');
+            if (String(evidence.rawTaskCode || '') !== String(refreshBinding.taskRawCode || '')) donorMismatches.push('taskRawCode');
+            if (String(evidence.taskModelValue || '') !== String(refreshBinding.taskModelValue || '')
+              || String(evidence.donorModelValue || '') !== String(refreshBinding.donorModelValue || '')) donorMismatches.push('productModel');
+            if (donorMismatches.length) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: `refresh 现场 donor 证据与现有绑定不一致：${donorMismatches.join('/')}`,
+                code: 'PRODUCT_ATTRIBUTE_REFRESH_DONOR_MISMATCH',
+                mismatches: donorMismatches,
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            const rowGate = adoptablePayloadAttributeRow(refreshPayload, normalizeProductAttributeId(refreshBinding.attributeId));
+            if (!rowGate.ok || rowGate.valueId !== normalizeProductAttributeId(refreshBinding.attributeValueId)) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: 'refresh_binding 要求当前 payload 恰好一行目标属性且值等于绑定值',
+                code: 'PRODUCT_ATTRIBUTE_REFRESH_PAYLOAD_ROW_MISMATCH',
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            const refreshedBinding = JSON.parse(JSON.stringify(refreshBinding));
+            const previousBindingRequestKey = String(refreshedBinding.bindingRequestKey || '').toLowerCase();
+            refreshedBinding.verifiedAt = verifiedAt;
+            refreshedBinding.identityOk = true;
+            refreshedBinding.identityEvidenceSha256 = String(evidence.identityEvidenceSha256 || '');
+            refreshedBinding.evidenceSha256 = String(evidence.evidenceSha256 || '');
+            refreshedBinding.aliasRegistryFingerprint = String(evidence.aliasRegistryFingerprint || '');
+            refreshedBinding.aliasRegistrySource = String(evidence.aliasRegistrySource || '');
+            refreshedBinding.catalogFingerprint = String(evidence.catalogFingerprint || '');
+            refreshedBinding.catalogSource = String(evidence.catalogSource || '');
+            refreshedBinding.calls = {
+              searchProduct: {code: String(evidence.calls?.searchProduct?.code || '')},
+              spuInfo: {code: String(evidence.calls?.spuInfo?.code || '')},
+            };
+            refreshedBinding.baseTaskRevision = Number(refreshTask.repositoryRevision || 0);
+            refreshedBinding.boundAt = verifiedAt;
+            refreshedBinding.boundByUser = actorUser(actor, req);
+            const newBindingRequestKey = refreshSchemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION
+              ? productAttributeBindingRequestKeyV2({
+                  schemaVersion: PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+                  bindingMode: String(refreshedBinding.bindingMode || ''),
+                  taskId: taskRef,
+                  targetStore,
+                  baseTaskRevision: Number(refreshedBinding.baseTaskRevision || 0),
+                  attributeId: normalizeProductAttributeId(refreshedBinding.attributeId),
+                  attributeValueId: normalizeProductAttributeId(refreshedBinding.attributeValueId),
+                  donorStore: String(refreshedBinding.donor?.storeKey || ''),
+                  donorSkc: String(refreshedBinding.donor?.skc || ''),
+                  donorSpu: String(refreshedBinding.donor?.spu || ''),
+                  evidenceSha256: String(refreshedBinding.evidenceSha256 || ''),
+                  oldPayloadHash: String(refreshedBinding.oldPayloadHash || ''),
+                  newPayloadHash: String(refreshedBinding.newPayloadHash || ''),
+                })
+              : productAttributeBindingRequestKey({
+                  taskId: taskRef,
+                  targetStore,
+                  baseTaskRevision: Number(refreshedBinding.baseTaskRevision || 0),
+                  attributeId: normalizeProductAttributeId(refreshedBinding.attributeId),
+                  attributeValueId: normalizeProductAttributeId(refreshedBinding.attributeValueId),
+                  donorStore: String(refreshedBinding.donor?.storeKey || ''),
+                  donorSkc: String(refreshedBinding.donor?.skc || ''),
+                  donorSpu: String(refreshedBinding.donor?.spu || ''),
+                  evidenceSha256: String(refreshedBinding.evidenceSha256 || ''),
+                });
+            refreshedBinding.bindingRequestKey = newBindingRequestKey;
+            const refreshEventKey = productAttributeRefreshEventKey({
+              taskId: taskRef,
+              previousBindingRequestKey,
+              newBindingRequestKey,
+            });
+            const now = new Date().toISOString();
+            const refreshedTask = {
+              ...refreshTask,
+              productAttributeBinding: refreshedBinding,
+              productAttributeRefreshEvent: {
+                eventKey: refreshEventKey,
+                previousBindingRequestKey,
+                newBindingRequestKey,
+                previousRepositoryRevision: Number(refreshTask.repositoryRevision || 0),
+                previousBaseTaskRevision: Number(refreshBinding.baseTaskRevision || 0),
+                previousEvidenceSha256: String(refreshBinding.evidenceSha256 || ''),
+                refreshedAt: now,
+              },
+              updatedAt: now,
+            };
+            refreshedTask.history = appendTaskHistory(refreshedTask, 'product_attribute_binding_refreshed', actor, req, {
+              eventKey: refreshEventKey,
+              previousBindingRequestKey,
+              newBindingRequestKey,
+              previousRepositoryRevision: Number(refreshTask.repositoryRevision || 0),
+              currentRepositoryRevision: Number(refreshTask.repositoryRevision || 0) + 1,
+              bindingMode: String(refreshedBinding.bindingMode || PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND),
+              schemaVersion: refreshSchemaVersion,
+              attributeId: normalizeProductAttributeId(refreshedBinding.attributeId),
+              attributeValueId: normalizeProductAttributeId(refreshedBinding.attributeValueId),
+              donor: {
+                storeKey: String(refreshedBinding.donor?.storeKey || ''),
+                skc: String(refreshedBinding.donor?.skc || ''),
+                spu: String(refreshedBinding.donor?.spu || ''),
+                rawCode: String(refreshedBinding.donor?.rawCode || ''),
+              },
+              canonicalCode: String(refreshedBinding.canonicalCode || ''),
+              evidenceSha256: String(refreshedBinding.evidenceSha256 || ''),
+              aliasRegistryFingerprint: String(refreshedBinding.aliasRegistryFingerprint || ''),
+              catalogFingerprint: String(refreshedBinding.catalogFingerprint || ''),
+              oldPayloadHash: String(refreshedBinding.oldPayloadHash || ''),
+              newPayloadHash: String(refreshedBinding.newPayloadHash || ''),
+              baseTaskRevision: Number(refreshedBinding.baseTaskRevision || 0),
+            });
+            const refreshGateAfter = validateProductAttributeBindingLock(refreshedTask, refreshPayload);
+            if (!refreshGateAfter.ok) {
+              const error = new Error(`刷新生成结果未通过锁校验：${refreshGateAfter.blockers.map(blocker => blocker.message).join('；')}`);
+              error.status = 409;
+              error.code = 'PRODUCT_ATTRIBUTE_REFRESH_LOCK_INVALID';
+              throw error;
+            }
+            if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+              const error = new Error('refresh_binding 需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用');
+              error.status = 503;
+              error.code = 'PRODUCT_ATTRIBUTE_BINDING_GATEWAY_UNAVAILABLE';
+              throw error;
+            }
+            const persisted = await args.linkOpsStoreGateway.updateTaskRecord(taskRef, refreshedTask, {
+              expectedRevision: expectedRevision,
+              actorUser: actorUser(actor, req),
+            });
+            let readbackTask = persisted;
+            let readbackVerified = false;
+            try {
+              const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
+              const verifyLock = validateProductAttributeBindingLock(verifyFound.task, verifyFound.task?.openapiPublishPayload);
+              const verifyGate = productAttributeExecutionGate(verifyFound.task);
+              const verifyEvent = validateProductAttributeRefreshEvent(verifyFound.task, {requireFreshRevision: true});
+              if (verifyFound.task?.productAttributeBinding?.bindingRequestKey === newBindingRequestKey
+                && Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)
+                && verifyLock.ok
+                && verifyGate.ok
+                && verifyEvent.ok) {
+                readbackTask = verifyFound.task;
+                readbackVerified = true;
+              }
+            } catch {}
+            let auditPending = false;
+            try {
+              await appendProductAttributeAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-product-attribute-refreshed',
+                actor,
+                ...requestMeta(req),
+                task: {id: persisted.id, revision: persisted.repositoryRevision},
+                eventKey: refreshEventKey,
+                binding: projectProductAttributeBindingCommit(persisted),
+              });
+            } catch {
+              auditPending = true;
+            }
+            return sendJson(res, 200, {
+              ok: readbackVerified && !auditPending,
+              bindingCommitted: true,
+              repositoryEventCommitted: true,
+              readbackVerified,
+              auditPending,
+              stage: !readbackVerified
+                ? 'binding_committed_readback_unverified'
+                : auditPending
+                  ? 'binding_committed_audit_pending'
+                  : 'binding_refreshed_needs_dry_run',
+              eventKey: refreshEventKey,
+              task: projectLinkOpsTaskForClient(readbackTask),
+              binding: projectProductAttributeBindingCommit(readbackTask),
+              nextStep: {command: 'preflight', note: '绑定证据已刷新，重新预演通过后按既有流程确认提交。', realPublish: false},
+            });
+          } catch (error) {
+            const mapped = linkOpsRepositoryHttpDetails(error);
+            if (mapped) {
+              await appendAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-prepare-product-attribute-refresh-failed',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef},
+                error: String(error?.message || error).slice(0, 500),
+                code: error?.code || mapped.body?.code || '',
+              }).catch(() => {});
+              return sendJson(res, mapped.status, mapped.body);
+            }
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-prepare-product-attribute-refresh-failed',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              error: String(error?.message || error).slice(0, 500),
+              code: error?.code || '',
+            }).catch(() => {});
+            return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error), code: error?.code || ''});
+          } finally {
+            linkOpsExecutionLocks.delete(refreshLockId);
+          }
         }
         const attributeId = typeof body.attributeId === 'number'
           && Number.isSafeInteger(body.attributeId)
@@ -15052,30 +15560,7 @@ async function main() {
             code: 'DONOR_SKC_INVALID',
           });
         }
-        const bindingMode = body.bindingMode === undefined || body.bindingMode === null || body.bindingMode === ''
-          ? PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND
-          : String(body.bindingMode);
-        if (!PRODUCT_ATTRIBUTE_BINDING_MODES.includes(bindingMode)) {
-          return sendJson(res, 400, {
-            ok: false,
-            error: 'bindingMode 必须是 append_missing（默认）或 adopt_existing',
-            code: 'PRODUCT_ATTRIBUTE_BINDING_MODE_INVALID',
-          });
-        }
         const isAdopt = bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT;
-        const expectedRevision = Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
-          ? body.expectedRevision
-          : null;
-        if (!expectedRevision) {
-          const revisionMissing = body.expectedRevision === undefined || body.expectedRevision === null || body.expectedRevision === '';
-          return sendJson(res, 400, {
-            ok: false,
-            error: revisionMissing
-              ? '商品属性绑定必须携带当前正整数 expectedRevision；请先精确读取任务后再绑定'
-              : '商品属性绑定 expectedRevision 必须是原始 JSON number 类型的正 safe integer；禁止字符串、分数、截断或越界值',
-            code: revisionMissing ? 'LINK_OPS_REVISION_REQUIRED' : 'LINK_OPS_REVISION_INVALID',
-          });
-        }
         let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
         let found;
         try {
