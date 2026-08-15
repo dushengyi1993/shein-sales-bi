@@ -32,6 +32,10 @@ import {
   validateDescriptionMaterialJson,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
+import {
+  normalizeProductAttributeId,
+  productAttributeBindingRequestKey,
+} from '../lib/link_ops_product_attribute_binding.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
 import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsJsonArtifactAtomic, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
 import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
@@ -100,6 +104,9 @@ function parseArgs(argv) {
     materialJsonFile: '',
     sourceFile: '',
     expectedRevision: null,
+    donorStore: '',
+    donorSkc: '',
+    attributeId: null,
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
     format: '',
@@ -193,6 +200,9 @@ function parseArgs(argv) {
     else if (a === '--source-file') args.sourceFile = path.resolve(String(argv[++i] || '').trim());
     else if (a === '--section') args.section = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--expected-revision') args.expectedRevision = Number(argv[++i]);
+    else if (a === '--donor-store') args.donorStore = String(argv[++i] || '').trim();
+    else if (a === '--donor-skc') args.donorSkc = String(argv[++i] || '').trim();
+    else if (a === '--attribute-id') args.attributeId = Number(argv[++i]);
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
@@ -299,6 +309,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
+  node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <query.json|enriched.csv> --performance-date 2026-07-04 [--out <dir>]
@@ -362,6 +373,9 @@ Options:
   --source-file     prepare-descriptions 必填；实际审核资料 HTML（唯一 section#s09），工具从文件字节计算 SHA 并逐字提取三语各5行
   --material-json   prepare-descriptions 可选；提供时逐字核验其 ar/en/zh-cn 行与实际 section#s09 一致，任一字节不同即拒绝
   --expected-revision prepare-descriptions 用；任务当前 repository revision，可选项，绑定前做 CAS 校验
+  --donor-store / --donor-skc / --attribute-id
+                   prepare-product-attribute 用；同标准货号 donor 链接的店铺、区分大小写的唯一 SKC，
+                   与要修复的白名单属性 ID（仅 1002328 Hazardous materials classification）
   --source-task-id    prepare-publish 的 update_images 模式；从指定已提交发布任务的 publishResult/readbackFingerprint 精确继承 SPU/SKC/SKU
                       prepare-pending-image-correction 会复用任务中现有已审图片绑定，不重复上传图片
   --standard-goods-sn / --supply-price / --inventory
@@ -390,6 +404,11 @@ Safety:
   - prepare-descriptions 用确定性 extractor 从实际 HTML 唯一 section#s09 逐字提取“三语核心卖点”（英文/阿文 code、中文 displaybox，
     各恰好5行），以文件字节计算 sourceFileSha256 并逐字核验；绑定为固定 ar/en 各5行（zh-cn 仅材料审计SHA），
     绑定后旧预演锁作废并重新预演；不会生成/翻译/改写描述，不会自动映射源 OpenAPI 商品描述，也不会重传图片。
+  - prepare-product-attribute 只修复缺失的白名单商品属性（仅 1002328）；值只能来自同货号官方 live donor 链接（严格别名/canonical），
+    服务端独立核验 donor 店铺身份、区分大小写 SKC 唯一 searchProduct、live spu-info 同 supplierCode/商品身份、
+    属性恰好一次后绑定到同一任务；图片/描述/标题/价格/库存保持字节不变，旧预演锁作废且描述锁按设计保持失效；
+    成功后返回 committed-needs-rebind，必须用原始审核 HTML 在同一任务 prepare-descriptions 重绑描述并重新预演，
+    不新建任务、不重传图片、绝不发布。
   - retire-candidates 只生成下架候选明细，不执行下架；固定排除有新品标签、首次上架 15 天内或缺首次上架时间的链接，并要求人工确认。
   - 本机不处于受控云端执行边界，不能直连真实 SHEIN OpenAPI；bi_ops_cli 的真实 OpenAPI 调用必须走云端 BI 服务。
   - upload-pic / transform-pic 的 execute 委托云端 /api/openapi-image-asset/*；本地只做文件封装和权限会话传递。
@@ -556,6 +575,7 @@ const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'upload-pic', 'upload_pic', 'transform-pic', 'transform_pic',
   'prepare-publish', 'prepare_publish',
   'prepare-descriptions', 'prepare_descriptions',
+  'prepare-product-attribute', 'prepare_product_attribute',
   'update-description', 'update_description',
   'prepare-pending-image-correction', 'prepare_pending_image_correction',
 ]);
@@ -1346,7 +1366,7 @@ async function runPrepareDescriptions(args) {
       store,
       stage: 'binding_not_committed',
       bindingCommitted: false,
-      code: error?.code || null,
+      code: error?.code || error?.response?.code || null,
       status: error?.status || null,
       error: String(error?.message || '描述绑定失败').slice(0, 500),
       material: {
@@ -1465,6 +1485,318 @@ async function runPrepareDescriptions(args) {
     taskId: args.taskId,
     store,
   });
+  print(output);
+  if (!output.ok) process.exitCode = 1;
+}
+
+async function runPrepareProductAttribute(args) {
+  if (!args.taskId) throw new Error('prepare-product-attribute requires --task-id <id>');
+  const storeCandidates = [...new Set(
+    [...(args.writeStores || []), ...(args.stores || [])]
+      .map(value => String(value || '').trim().toUpperCase())
+      .filter(Boolean)
+  )];
+  if (storeCandidates.length !== 1) {
+    throw new Error(`prepare-product-attribute 必须精确单个 --store（多个/零个均拒绝）；当前解析到 ${storeCandidates.length} 个店铺：${storeCandidates.join('/') || '(empty)'}`);
+  }
+  const store = storeCandidates[0];
+  const donorStore = String(args.donorStore || '').trim().toUpperCase();
+  if (!donorStore || !/^[A-Z0-9]{2,4}$/.test(donorStore)) {
+    throw new Error('prepare-product-attribute requires --donor-store <同货号 donor 店铺代码>');
+  }
+  const donorSkc = String(args.donorSkc || '').trim();
+  if (!donorSkc || donorSkc.length > 160 || !/^s[abv]\d{8,}$/i.test(donorSkc)) {
+    throw new Error('prepare-product-attribute --donor-skc 必须是区分大小写的 SHEIN SKC（s[abv] + 8 位以上数字）');
+  }
+  const attributeId = normalizeProductAttributeId(args.attributeId);
+  if (attributeId === null || attributeId !== 1002328) {
+    throw new Error('prepare-product-attribute --attribute-id 只允许受控白名单 1002328（Hazardous materials classification）');
+  }
+  const expectedRevisionProvided = args.expectedRevision !== null;
+  if (expectedRevisionProvided
+    && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision <= 0)) {
+    throw new Error('prepare-product-attribute --expected-revision 必须是正安全整数，属性未绑定');
+  }
+  const explicitExpectedRevision = expectedRevisionProvided ? args.expectedRevision : null;
+  const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
+  const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
+  if (!currentTask) throw new Error('当前账号无法精确读取目标 task，属性未绑定');
+  const liveRevision = Number(currentTask.repositoryRevision || 0);
+  if (!Number.isSafeInteger(liveRevision) || liveRevision <= 0) {
+    throw new Error('目标 task 未返回可用于 CAS 的正整数 repositoryRevision，属性未绑定');
+  }
+  // Strict attribute-binding lock validation. The server projection is
+  // trusted only when it is exactly {baseTaskRevision,currentRevision,ok,stale}
+  // with boolean ok/stale satisfying stale === !ok, positive safe-integer
+  // revisions, base equal to the existing binding's baseTaskRevision and
+  // current equal to the live repositoryRevision. Any deviation is UNKNOWN:
+  // the CLI never guesses freshness and never replays an old base.
+  const existingBinding = currentTask?.productAttributeBinding && typeof currentTask.productAttributeBinding === 'object'
+    ? currentTask.productAttributeBinding
+    : null;
+  const existingBaseRevision = existingBinding
+    && Number.isSafeInteger(existingBinding.baseTaskRevision) && existingBinding.baseTaskRevision > 0
+    ? existingBinding.baseTaskRevision
+    : 0;
+  const existingBindingLock = currentTask?.productAttributeBindingLock && typeof currentTask.productAttributeBindingLock === 'object'
+    ? currentTask.productAttributeBindingLock
+    : null;
+  const existingBindingLockKnown = Boolean(
+    existingBindingLock
+    && !Array.isArray(existingBindingLock)
+    && Object.keys(existingBindingLock).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+    && typeof existingBindingLock.ok === 'boolean'
+    && typeof existingBindingLock.stale === 'boolean'
+    && existingBindingLock.stale === !existingBindingLock.ok
+    && typeof existingBindingLock.baseTaskRevision === 'number'
+    && Number.isSafeInteger(existingBindingLock.baseTaskRevision)
+    && existingBindingLock.baseTaskRevision > 0
+    && existingBindingLock.baseTaskRevision === existingBaseRevision
+    && typeof existingBindingLock.currentRevision === 'number'
+    && Number.isSafeInteger(existingBindingLock.currentRevision)
+    && existingBindingLock.currentRevision > 0
+    && existingBindingLock.currentRevision === liveRevision,
+  );
+  const existingBindingStale = existingBindingLockKnown && existingBindingLock.stale === true;
+  const existingRequestKey = Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
+    ? productAttributeBindingRequestKey({
+        taskId: args.taskId,
+        targetStore: store,
+        baseTaskRevision: existingBaseRevision,
+        attributeId,
+        attributeValueId: normalizeProductAttributeId(existingBinding?.attributeValueId) || 0,
+        donorStore,
+        donorSkc,
+        donorSpu: String(existingBinding?.donorSpu || ''),
+        evidenceSha256: String(existingBinding?.evidenceSha256 || ''),
+      })
+    : '';
+  const exactExistingBinding = Boolean(
+    existingBinding
+    && String(existingBinding.targetStore || '').toUpperCase() === store.toUpperCase()
+    && normalizeProductAttributeId(existingBinding.attributeId) === attributeId
+    && String(existingBinding.donorStore || '').toUpperCase() === donorStore
+    && String(existingBinding.donorSkc || '') === donorSkc
+    && existingRequestKey
+    && String(existingBinding.bindingRequestKey || '').toLowerCase() === existingRequestKey.toLowerCase(),
+  );
+  // Replaying an existing binding identity is only safe when the server
+  // proves the binding still locks the current payload. A stale lock rebinds
+  // at the live revision; a missing lock state fails closed instead of
+  // guessing, unless the operator explicitly pinned a revision.
+  const idempotentReplay = exactExistingBinding && existingBindingLockKnown && !existingBindingStale;
+  if (explicitExpectedRevision
+    && explicitExpectedRevision !== liveRevision
+    && !(idempotentReplay && explicitExpectedRevision === existingBaseRevision)) {
+    throw new Error(`目标 task revision 已变化：命令期望 ${explicitExpectedRevision}，实时读取为 ${liveRevision}；属性未绑定`);
+  }
+  if (exactExistingBinding && !existingBindingLockKnown && !explicitExpectedRevision) {
+    throw new Error(`目标 task 已存在同源商品属性绑定，但云端属性绑定锁未知或不符合严格规范（必须恰为 baseTaskRevision/currentRevision/ok/stale，ok/stale 为互反 boolean，且 base/current 分别为绑定基线与实时 revision），无法区分幂等重放与过期重绑；请显式传 --expected-revision ${liveRevision} 后重试（属性未绑定）`);
+  }
+  // When the previous request committed the binding but failed only while
+  // appending external audit, replay the original request identity. Sending
+  // the new task revision would create a new request key and bind twice.
+  const requestRevision = idempotentReplay
+    ? existingBaseRevision
+    : (explicitExpectedRevision || liveRevision);
+  const bindBody = {
+    taskId: args.taskId,
+    store,
+    donorStore,
+    donorSkc,
+    attributeId,
+    expectedRevision: requestRevision,
+  };
+  let bindJson;
+  try {
+    ({json: bindJson} = await request(args, '/api/link-ops-prepare-product-attribute', {
+      method: 'POST',
+      body: bindBody,
+      allowJsonFailure: true,
+    }));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'prepare-product-attribute',
+      taskId: args.taskId,
+      store,
+      stage: 'binding_not_committed',
+      bindingCommitted: false,
+      code: error?.code || error?.response?.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '商品属性绑定失败').slice(0, 500),
+      requested: {attributeId, donorStore, donorSkc},
+      safety: {realPublishOccurred: false, dryRunAttempted: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const binding = bindJson.binding || {};
+  if (bindJson.bindingCommitted !== true || bindJson.readbackVerified !== true || bindJson.auditPending === true || bindJson.ok !== true) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'prepare-product-attribute',
+      taskId: args.taskId,
+      store,
+      stage: String(bindJson.stage || 'binding_state_uncertain'),
+      bindingCommitted: bindJson.bindingCommitted === true,
+      repositoryEventCommitted: bindJson.repositoryEventCommitted === true,
+      readbackVerified: bindJson.readbackVerified === true,
+      auditPending: bindJson.auditPending === true,
+      code: String(bindJson.code || ''),
+      error: String(bindJson.error || '').slice(0, 500),
+      requested: {attributeId, donorStore, donorSkc},
+      bound: {
+        attributeId: binding.attributeId ?? null,
+        attributeValueId: binding.attributeValueId ?? null,
+        donorStore: String(binding.donorStore || ''),
+        donorSkc: String(binding.donorSkc || ''),
+        donorSpu: String(binding.donorSpu || ''),
+        canonicalCode: String(binding.canonicalCode || ''),
+        newPayloadHash: String(binding.newPayloadHash || ''),
+        bindingRequestKey: String(binding.bindingRequestKey || ''),
+      },
+      safety: {realPublishOccurred: false, dryRunAttempted: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  if (String(bindJson?.task?.id || '') !== args.taskId) {
+    throw new Error('云端没有确认商品属性绑定仍是同一 task，已停止重新预演');
+  }
+  if (String(binding.targetStore || '').toUpperCase() !== store.toUpperCase()) {
+    throw new Error('云端商品属性绑定目标店铺与请求不一致，已停止重新预演');
+  }
+  if (normalizeProductAttributeId(binding.attributeId) !== attributeId) {
+    throw new Error('云端商品属性绑定 attributeId 与请求不一致，已停止重新预演');
+  }
+  const boundValueId = normalizeProductAttributeId(binding.attributeValueId);
+  if (boundValueId === null) {
+    throw new Error('云端商品属性绑定缺少正整数 attributeValueId，已停止重新预演');
+  }
+  if (String(binding.donorStore || '').toUpperCase() !== donorStore
+    || String(binding.donorSkc || '') !== donorSkc) {
+    throw new Error('云端商品属性绑定 donor 身份与请求不一致，已停止重新预演');
+  }
+  let preflightJson;
+  try {
+    ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
+      method: 'POST',
+      body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_product_attribute'},
+    }));
+  } catch (error) {
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'prepare-product-attribute',
+      taskId: args.taskId,
+      store,
+      stage: 'binding_committed_dry_run_failed',
+      bindingCommitted: true,
+      readbackVerified: true,
+      auditPending: false,
+      code: error?.code || error?.response?.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '重新预演失败').slice(0, 500),
+      bound: {
+        attributeId,
+        attributeValueId: boundValueId,
+        donorStore,
+        donorSkc,
+        newPayloadHash: String(binding.newPayloadHash || ''),
+        bindingRequestKey: String(binding.bindingRequestKey || ''),
+      },
+      safety: {realPublishOccurred: false, retryBinding: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+  const execution = preflightJson.execution || {};
+  const productExecutor = execution.openApiProductExecutors?.[0] || execution.hlOpenApiExecutor || {};
+  // Re-read the task after dry-run: the binding lock must still be KNOWN,
+  // current and ok against the persisted payload, proving the bound attribute
+  // row is the one that was just preflighted (the dry-run itself never
+  // rewrites openapiPublishPayload).
+  let lockKnownAfterDryRun = false;
+  let lockStaleAfterDryRun = true;
+  try {
+    const {json: taskListAfterJson} = await request(args, '/api/link-ops-tasks?limit=500');
+    const taskAfter = (taskListAfterJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
+    const lockAfter = taskAfter?.productAttributeBindingLock && typeof taskAfter.productAttributeBindingLock === 'object'
+      ? taskAfter.productAttributeBindingLock
+      : null;
+    const liveAfter = Number(taskAfter?.repositoryRevision || 0);
+    const baseAfter = Number(taskAfter?.productAttributeBinding?.baseTaskRevision || 0);
+    lockKnownAfterDryRun = Boolean(
+      lockAfter
+      && !Array.isArray(lockAfter)
+      && Object.keys(lockAfter).sort().join(',') === 'baseTaskRevision,currentRevision,ok,stale'
+      && typeof lockAfter.ok === 'boolean'
+      && typeof lockAfter.stale === 'boolean'
+      && lockAfter.stale === !lockAfter.ok
+      && Number.isSafeInteger(lockAfter.baseTaskRevision)
+      && lockAfter.baseTaskRevision > 0
+      && lockAfter.baseTaskRevision === baseAfter
+      && Number.isSafeInteger(lockAfter.currentRevision)
+      && lockAfter.currentRevision > 0
+      && lockAfter.currentRevision === liveAfter,
+    );
+    lockStaleAfterDryRun = !(lockKnownAfterDryRun && lockAfter?.ok === true);
+  } catch {}
+  const dryRun = {
+    state: String(execution.state || ''),
+    ok: execution.preflight?.ok === true,
+    blockerCount: Array.isArray(execution.preflight?.blockers) ? execution.preflight.blockers.length : 0,
+    payloadHash: String(productExecutor.payload?.payloadHash || ''),
+    productAttributeCount: Number(productExecutor.payload?.summary?.productAttributeCount || 0) || 0,
+    bindingLocked: lockKnownAfterDryRun && !lockStaleAfterDryRun,
+  };
+  const committedStage = String(bindJson.stage || 'binding_committed_needs_description_rebind');
+  const bindingVerified = Boolean(
+    bindJson.bindingCommitted === true
+    && bindJson.readbackVerified === true
+    && bindJson.auditPending !== true
+    && bindJson.ok === true,
+  );
+  const output = {
+    // Step 1 is complete when the binding itself is committed, independently
+    // read back and audited. The dry-run is intentionally NOT ready yet: the
+    // description lock is stale by design and the next step is a
+    // prepare-descriptions rebind of the same material. After that, normal
+    // preflight becomes the authority again.
+    ok: bindingVerified && dryRun.bindingLocked,
+    aiInvoked: false,
+    command: 'prepare-product-attribute',
+    taskId: args.taskId,
+    store,
+    stage: committedStage,
+    bindingCommitted: bindJson.bindingCommitted === true,
+    readbackVerified: bindJson.readbackVerified === true,
+    auditPending: bindJson.auditPending === true,
+    binding: {
+      ...binding,
+      sameTask: true,
+      payloadSource: String(binding.payloadSource || 'task'),
+      attributeValueId: boundValueId,
+      canonicalCode: String(binding.canonicalCode || ''),
+      rawTaskCode: String(binding.rawTaskCode || ''),
+      rawDonorCode: String(binding.rawDonorCode || ''),
+    },
+    dryRun,
+    nextStep: bindJson.nextStep || {
+      command: 'prepare-descriptions',
+      note: '请用原始审核 HTML 在同一任务重新绑定描述，然后重新预演。',
+      realPublish: false,
+    },
+    safety: {
+      sameTask: true,
+      realPublishOccurred: false,
+      dryRunReadyClaimed: false,
+      nextStep: '同一任务 prepare-descriptions 重绑原始审核 HTML；之后重新预演通过、用户确认后才可 execute。',
+    },
+  };
   print(output);
   if (!output.ok) process.exitCode = 1;
 }
@@ -2191,6 +2523,10 @@ async function main() {
   }
   if (args.command === 'prepare-descriptions' || args.command === 'prepare_descriptions') {
     await runPrepareDescriptions(args);
+    return;
+  }
+  if (args.command === 'prepare-product-attribute' || args.command === 'prepare_product_attribute') {
+    await runPrepareProductAttribute(args);
     return;
   }
   if (args.command === 'update-description' || args.command === 'update_description') {
