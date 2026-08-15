@@ -42,6 +42,7 @@ import {
 } from '../lib/link_ops_product_descriptions.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
+import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
@@ -264,6 +265,11 @@ function check(label, actual, expected) {
   const pass = typeof expected === 'function' ? expected(actual) : actual === expected;
   checks.push({label, actual, expected: typeof expected === 'function' ? (expected.name || 'predicate') : expected, pass});
   return pass;
+}
+async function checkRejects(label, fn) {
+  let rejected = false;
+  try { await fn(); } catch { rejected = true; }
+  return check(label, rejected, true);
 }
 function asArray(value) { return Array.isArray(value) ? value : []; }
 
@@ -1216,6 +1222,281 @@ try {
   const auditHistoryBind = await bindDescriptions(cookie, auditHistoryTaskId);
   check('append-only historical audit write evidence blocks binding', auditHistoryBind.status, 409);
   check('audit-history blocked task receives no description binding', Boolean((await rawTaskById(auditHistoryTaskId))?.descriptionMaterialBinding), false);
+
+  // --- 6863 pre-validation rejection predicate: direct fail-closed unit
+  // checks against the portal test hook (fast; the end-to-end rebind matrix
+  // runs in test_bi_ops_copy_product_success_flow.mjs --prevalid-retry-rebind
+  // and keeps this harness test inside the deterministic per-test timeout).
+  // Every execute/write attempt must prove its OWN explicit success=false. ---
+  const rejectedRun = (overrides = {}) => ({
+    storeKey: 'NM',
+    mode: 'execute',
+    state: 'publish_pre_valid_failed',
+    ok: false,
+    runId: 'lho-prevalid-unit',
+    submittedPossibly: false,
+    suspiciousWriteAttempted: false,
+    readback: {ok: false, status: 'planned_not_run', pendingReview: false, matchedCount: 0},
+    publishResult: {
+      httpStatus: 200,
+      code: '0',
+      msg: 'OK',
+      traceId: 'trace-prevalid-unit',
+      info: {success: false, taskNo: '', spu_name: '', version: '', skc_list: []},
+    },
+    openapiCalls: [{name: 'publishOrEdit', path: '/open-api/goods/product/publishOrEdit'}],
+    ...overrides,
+  });
+  const projectRunForAudit = run => ({
+    ...run,
+    runId: undefined,
+    childRunId: run.runId,
+    publishResult: run.publishResult ? {
+      httpStatus: run.publishResult.httpStatus,
+      code: run.publishResult.code,
+      msg: run.publishResult.msg,
+      traceId: run.publishResult.traceId,
+      hasInfo: run.publishResult.info !== undefined && run.publishResult.info !== null,
+      explicitSuccess: run.publishResult.info && typeof run.publishResult.info === 'object' && Object.hasOwn(run.publishResult.info, 'success')
+        ? (run.publishResult.info.success === true ? true : run.publishResult.info.success === false ? false : undefined)
+        : undefined,
+    } : null,
+  });
+  const predicateTask = (runs = [rejectedRun()], extra = {}) => ({
+    id: 'unit-prevalid-task',
+    status: 'waiting_review',
+    intents: ['copy_product_draft'],
+    lifecycle: {
+      lifecycleStatus: 'publish_pre_valid_failed',
+      status: 'publish_pre_valid_failed',
+      locked: false,
+      terminal: false,
+      needsManualResolve: false,
+      submitted: false,
+      submittedPossibly: false,
+    },
+    execution: {
+      state: runs[0]?.state || 'publish_pre_valid_failed',
+      actualWriteSubmitted: false,
+      issuedExecuteToExecutor: true,
+      sheinWriteAttempted: true,
+      openApiProductExecutors: runs.map(run => ({...run})),
+      writeAudit: {
+        finalState: runs[0]?.state || 'publish_pre_valid_failed',
+        submitted: false,
+        actualWriteSubmitted: false,
+        issuedExecuteToExecutor: true,
+        sheinWriteAttempted: true,
+        submittedPossibly: false,
+        suspiciousWriteAttempted: false,
+        executorEvidence: runs.map(projectRunForAudit),
+      },
+    },
+    executionHistory: runs.map(run => ({
+      event: 'controlled_execution_run',
+      finalState: run.state,
+      lifecycleStatus: run.state,
+      submitted: false,
+      actualWriteSubmitted: false,
+      issuedExecuteToExecutor: true,
+      sheinWriteAttempted: true,
+      lifecycleLocked: false,
+      needsManualResolve: false,
+      executorRuns: [{
+        storeKey: run.storeKey,
+        mode: run.mode,
+        state: run.state,
+        ok: run.ok,
+        runId: run.runId,
+        publishCode: String(run.publishResult?.code ?? ''),
+        publishTraceId: run.publishResult?.traceId || '',
+        publishResult: run.publishResult ? {
+          code: String(run.publishResult.code ?? ''),
+          explicitSuccess: run.publishResult.info && Object.hasOwn(run.publishResult.info, 'success')
+            ? (run.publishResult.info.success === true ? true : run.publishResult.info.success === false ? false : undefined)
+            : undefined,
+        } : null,
+        readbackStatus: run.readback?.status || '',
+        readbackOk: Boolean(run.readback?.ok),
+      }],
+    })),
+    ...extra,
+  });
+  check('unit: portal strict boolean accepts own false', portalHooks.strictOwnBooleanField({success: false}, 'success'), false);
+  for (const [label, value] of [['null', null], ['zero', 0], ['string', 'false']]) {
+    check(`unit: portal strict boolean keeps ${label} unknown`, portalHooks.strictOwnBooleanField({success: value}, 'success'), undefined);
+  }
+  check('unit: portal strict boolean rejects inherited false', portalHooks.strictOwnBooleanField(Object.create({success: false}), 'success'), undefined);
+  check('unit: portal publish success requires own exact true', portalHooks.linkOpsPublishResultSucceeded({code: '0', info: {success: true}}), true);
+  check('unit: portal publish identifiers cannot replace missing success', portalHooks.linkOpsPublishResultSucceeded({code: '0', submitted: true, info: {spu_name: 'v1', skc_list: [{skc_name: 's1'}]}}), false);
+  check('unit: portal publish string success is unknown', portalHooks.linkOpsPublishResultSucceeded({code: '0', info: {success: 'true', spu_name: 'v1'}}), false);
+  check('unit: portal publish inherited success is unknown', portalHooks.linkOpsPublishResultSucceeded({code: '0', info: Object.create({success: true})}), false);
+  check('unit: portal prevalid marker alone is not rejection proof', portalHooks.linkOpsExecutorExplicitPreValidFailure({state: 'publish_pre_valid_failed', publishResult: {code: '0', info: {}}}), false);
+  check('unit: portal prevalid rejection requires own exact false', portalHooks.linkOpsExecutorExplicitPreValidFailure({state: 'publish_pre_valid_failed', publishResult: {code: '0', info: {success: false}}}), true);
+  check('unit: portal prevalid string false is unknown', portalHooks.linkOpsExecutorExplicitPreValidFailure({state: 'publish_pre_valid_failed', publishResult: {code: '0', info: {success: 'false'}}}), false);
+  check('unit: product submitted requires strict publish success', portalHooks.linkOpsProductExecutorSubmitted({state: 'submitted', publishResult: {code: '0', info: {success: true}}}), true);
+  check('unit: product submitted state cannot replace missing success', portalHooks.linkOpsProductExecutorSubmitted({state: 'submitted', publishResult: {code: '0', info: {}}}), false);
+  check('unit: maintenance submitted requires strict adapter evidence', portalHooks.linkOpsMaintenanceExecutorSubmitted({state: 'submitted', adapterKind: 'link_maintenance_openapi_executor', adapterEvidence: {realSubmit: true, writeAttempted: true, recoveryRequired: false}, publishResult: {code: '0'}}), true);
+  check('unit: maintenance submitted state alone is insufficient', portalHooks.linkOpsMaintenanceExecutorSubmitted({state: 'submitted', publishResult: {code: '0'}}), false);
+  check('unit: explicit pre-valid rejection task passes the predicate', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask()).ok, true);
+  check('unit: explicitSuccess=false audit projection also passes', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun()], {})).ok, true);
+  check('unit: code0/info{} is never explicit rejection even with pre-valid markers', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun({publishResult: {httpStatus: 200, code: '0', msg: 'OK', info: {}}})])).ok, false);
+  const submittedRun = rejectedRun({runId: 'lho-submitted-unit', state: 'submitted', publishResult: {httpStatus: 200, code: '0', msg: 'OK', traceId: 't', info: {success: true, taskNo: 'PUB-1', spu_name: 'v1', version: '', skc_list: []}}});
+  check('unit: mixed rejected-then-submitted history blocks', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun(), submittedRun])).ok, false);
+  check('unit: mixed submitted-then-rejected history blocks', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([submittedRun, rejectedRun()])).ok, false);
+  const timeoutRun = rejectedRun({runId: 'lho-timeout-unit', state: 'timed_out', publishResult: null});
+  check('unit: separate timeout attempt blocks even with one rejection', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun(), timeoutRun])).ok, false);
+  const uncertainRun = rejectedRun({runId: 'lho-uncertain-unit', state: 'uncertain_write', publishResult: null});
+  check('unit: separate uncertain_write attempt blocks', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun(), uncertainRun])).ok, false);
+  const identifierRun = rejectedRun({runId: 'lho-ident-unit', publishResult: {httpStatus: 200, code: '0', msg: 'OK', traceId: 't', info: {success: false, taskNo: 'PUB-IDENT-001', spu_name: '', version: '', skc_list: []}}});
+  check('unit: identifier-bearing explicit-false run still blocks', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([identifierRun])).ok, false);
+  const successTrueRun = rejectedRun({runId: 'lho-true-unit', publishResult: {httpStatus: 200, code: '0', msg: 'OK', traceId: 't', info: {success: true}}});
+  check('unit: info.success=true submission response blocks', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([successTrueRun])).ok, false);
+  const legacyProjectionRun = rejectedRun({runId: 'lho-legacy-unit', publishResult: {httpStatus: 200, code: '0', msg: 'OK', traceId: 't', hasInfo: true}});
+  check('unit: legacy hasInfo-only projection blocks (no explicit false)', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([legacyProjectionRun])).ok, false);
+  const missingResultRun = rejectedRun({runId: 'lho-missing-unit', state: 'blocked', publishResult: undefined, openapiCalls: undefined});
+  check('unit: missing publish result blocks', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([missingResultRun])).ok, false);
+  const errorRun = rejectedRun({runId: 'lho-error-unit', state: 'error', publishResult: null});
+  check('unit: error attempt without explicit false blocks', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun(), errorRun])).ok, false);
+  const timeoutFalseRun = rejectedRun({runId: 'lho-timeout-false-unit', state: 'timed_out'});
+  check('unit: timeout attempt blocks even with explicit false', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([timeoutFalseRun])).ok, false);
+  const unknownFalseRun = rejectedRun({runId: 'lho-unknown-false-unit', state: 'unknown'});
+  check('unit: unknown state blocks even with explicit false', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([unknownFalseRun])).ok, false);
+  const unkeyedRun = rejectedRun({runId: ''});
+  check('unit: unkeyed write attempt cannot borrow proof across representations', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([unkeyedRun])).ok, false);
+  const sameRunLegacySibling = predicateTask([rejectedRun()]);
+  sameRunLegacySibling.execution.writeAudit.executorEvidence.push({
+    runId: 'lho-prevalid-unit',
+    mode: 'execute',
+    state: 'publish_pre_valid_failed',
+    publishResult: {code: '0', hasInfo: true},
+  });
+  check('unit: same-run legacy projection cannot borrow strict false sibling proof', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(sameRunLegacySibling).ok, false);
+  const sameRunTruncatedSibling = predicateTask([rejectedRun()]);
+  sameRunTruncatedSibling.execution.writeAudit.executorEvidence.push({
+    runId: 'lho-prevalid-unit',
+    publishCode: '0',
+    publishTraceId: 'trace-prevalid-unit',
+  });
+  const truncatedSiblingEvidence = portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(sameRunTruncatedSibling);
+  check('unit: same-run result-less truncated array member cannot borrow sibling proof', truncatedSiblingEvidence.ok, false);
+  check('unit: truncated same-run member is counted as unknown result', truncatedSiblingEvidence.reasons, rows => rows.some(row => row.includes('write_without_own_explicit_false')));
+
+  const artifactDir = path.join(ROOT, 'logs', 'link-ops-openapi-executor');
+  const artifactRunId = `lho-artifact-unit-${process.pid}`;
+  const artifactFile = path.join(artifactDir, `${artifactRunId}.local.json`);
+  const artifactPayloadHash = 'a'.repeat(64);
+  const artifactTraceId = 'trace-artifact-unit';
+  const artifactBody = {
+    runId: artifactRunId,
+    mode: 'execute',
+    state: 'publish_pre_valid_failed',
+    storeKey: 'NM',
+    payload: {payloadHash: artifactPayloadHash},
+    publishResult: {
+      code: '0',
+      traceId: artifactTraceId,
+      info: {success: false, taskNo: '', spu_name: '', version: '', skc_list: []},
+    },
+    readbackFingerprint: {publishSpuNames: [], publishSkcNames: [], publishSkuCodes: []},
+    readback: {ok: false, status: 'planned_not_run', pendingReview: false, scannedRows: null, matchedCount: 0, weakMatchedCount: 0, matchedRows: [], weakMatchedRows: [], calls: []},
+  };
+  await fs.mkdir(artifactDir, {recursive: true});
+  await fs.writeFile(artifactFile, `${JSON.stringify(artifactBody)}\n`, {encoding: 'utf8', mode: 0o600});
+  try {
+    const candidate = {
+      runId: artifactRunId,
+      savedTo: path.relative(ROOT, artifactFile),
+      storeKey: 'NM',
+      mode: 'execute',
+      state: 'publish_pre_valid_failed',
+      payloadHash: artifactPayloadHash,
+      code: '0',
+      traceId: artifactTraceId,
+    };
+    const artifactProof = await portalHooks.verifyLegacyPreValidArtifact(candidate);
+    check('unit: exact controlled legacy artifact verifies', artifactProof.runId, artifactRunId);
+    await checkRejects('unit: artifact payload drift blocks', () => portalHooks.verifyLegacyPreValidArtifact({...candidate, payloadHash: 'b'.repeat(64)}));
+    await checkRejects('unit: artifact trace drift blocks', () => portalHooks.verifyLegacyPreValidArtifact({...candidate, traceId: 'wrong-trace'}));
+    await checkRejects('unit: artifact store drift blocks', () => portalHooks.verifyLegacyPreValidArtifact({...candidate, storeKey: 'FY'}));
+    await checkRejects('unit: artifact run drift blocks', () => portalHooks.verifyLegacyPreValidArtifact({...candidate, runId: 'lho-wrong-run'}));
+    await checkRejects('unit: artifact state drift blocks', () => portalHooks.verifyLegacyPreValidArtifact({...candidate, state: 'blocked'}));
+    await checkRejects('unit: artifact traversal blocks', () => portalHooks.verifyLegacyPreValidArtifact({...candidate, savedTo: '../outside.json'}));
+    await fs.writeFile(artifactFile, `${JSON.stringify({...artifactBody, submittedPossibly: true})}\n`, {encoding: 'utf8', mode: 0o600});
+    await checkRejects('unit: artifact positive submission contradiction blocks', () => portalHooks.verifyLegacyPreValidArtifact(candidate));
+    await fs.writeFile(artifactFile, `${JSON.stringify({...artifactBody, lifecycle: {locked: true}})}\n`, {encoding: 'utf8', mode: 0o600});
+    await checkRejects('unit: artifact lifecycle lock contradiction blocks', () => portalHooks.verifyLegacyPreValidArtifact(candidate));
+    await fs.writeFile(artifactFile, `${JSON.stringify({...artifactBody, readbackFingerprint: {publishSpuNames: ['v-created-1'], publishSkcNames: [], publishSkuCodes: []}})}\n`, {encoding: 'utf8', mode: 0o600});
+    await checkRejects('unit: artifact readback fingerprint identity blocks', () => portalHooks.verifyLegacyPreValidArtifact(candidate));
+    await fs.writeFile(artifactFile, `${JSON.stringify({...artifactBody, readback: {...artifactBody.readback, matchedRows: [{spuName: 'v-created-1'}]}})}\n`, {encoding: 'utf8', mode: 0o600});
+    await checkRejects('unit: artifact matched row identity blocks', () => portalHooks.verifyLegacyPreValidArtifact(candidate));
+    const missingPendingReview = structuredClone(artifactBody);
+    delete missingPendingReview.readback.pendingReview;
+    await fs.writeFile(artifactFile, `${JSON.stringify(missingPendingReview)}\n`, {encoding: 'utf8', mode: 0o600});
+    await checkRejects('unit: artifact missing own pendingReview false blocks', () => portalHooks.verifyLegacyPreValidArtifact(candidate));
+    await fs.writeFile(artifactFile, `${JSON.stringify(artifactBody)}\n`, {encoding: 'utf8', mode: 0o600});
+    const legacyTask = predicateTask([rejectedRun({runId: artifactRunId})]);
+    const addExactArtifactTuple = (node, depth = 0) => {
+      if (depth > 14 || !node || typeof node !== 'object') return;
+      if (Array.isArray(node)) {
+        for (const entry of node) addExactArtifactTuple(entry, depth + 1);
+        return;
+      }
+      if (String(node.childRunId || node.runId || '') === artifactRunId) {
+        node.storeKey = 'NM';
+        node.mode = 'execute';
+        node.state = 'publish_pre_valid_failed';
+        node.payloadHash = artifactPayloadHash;
+        node.publishCode = '0';
+        node.publishTraceId = artifactTraceId;
+        if (node.publishResult && typeof node.publishResult === 'object') {
+          node.publishResult.code = '0';
+          node.publishResult.traceId = artifactTraceId;
+        }
+      }
+      for (const entry of Object.values(node)) addExactArtifactTuple(entry, depth + 1);
+    };
+    addExactArtifactTuple(legacyTask);
+    for (const run of legacyTask.execution.writeAudit.executorEvidence) {
+      run.publishResult = {code: '0', hasInfo: true};
+      run.publishResult.traceId = artifactTraceId;
+    }
+    const hydratedLegacy = portalHooks.hydrateLegacyPreValidProofs(legacyTask, [artifactProof]);
+    check('unit: exact artifact hydrates only matching legacy attempt', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(hydratedLegacy).ok, true);
+    const wrongStoreLegacy = structuredClone(legacyTask);
+    wrongStoreLegacy.execution.writeAudit.executorEvidence[0].storeKey = 'FY';
+    check('unit: same-run wrong-store projection cannot borrow artifact proof', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(portalHooks.hydrateLegacyPreValidProofs(wrongStoreLegacy, [artifactProof])).ok, false);
+    const wrongHashLegacy = structuredClone(legacyTask);
+    wrongHashLegacy.execution.writeAudit.executorEvidence[0].payloadHash = 'b'.repeat(64);
+    check('unit: same-run wrong-hash projection cannot borrow artifact proof', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(portalHooks.hydrateLegacyPreValidProofs(wrongHashLegacy, [artifactProof])).ok, false);
+    const missingTupleLegacy = structuredClone(legacyTask);
+    delete missingTupleLegacy.execution.writeAudit.executorEvidence[0].payloadHash;
+    check('unit: same-run incomplete projection cannot borrow artifact proof', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(portalHooks.hydrateLegacyPreValidProofs(missingTupleLegacy, [artifactProof])).ok, false);
+    const resultlessTupleLegacy = structuredClone(legacyTask);
+    delete resultlessTupleLegacy.execution.writeAudit.executorEvidence[0].payloadHash;
+    delete resultlessTupleLegacy.execution.writeAudit.executorEvidence[0].publishResult;
+    const resultlessTupleEvidence = portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(portalHooks.hydrateLegacyPreValidProofs(resultlessTupleLegacy, [artifactProof]));
+    check('unit: same-run result-less incomplete projection cannot borrow artifact proof', resultlessTupleEvidence.ok, false);
+    check('unit: result-less artifact tuple mismatch is explicit', resultlessTupleEvidence.reasons, rows => rows.some(row => row.includes('legacy_artifact_tuple_mismatch')));
+    const auditWithoutSavedTo = {
+      task: {id: 'unit-prevalid-task'},
+      execution: {executorEvidence: [{
+        childRunId: artifactRunId,
+        storeKey: 'FY',
+        mode: 'execute',
+        state: 'publish_pre_valid_failed',
+        payloadHash: 'b'.repeat(64),
+        publishResult: {code: '0', traceId: 'wrong-trace', hasInfo: true},
+      }]},
+    };
+    const hydratedAuditWithoutSavedTo = portalHooks.hydrateLegacyPreValidProofs(auditWithoutSavedTo, [artifactProof]);
+    check('unit: audit entry without savedTo and mismatched tuple remains unknown', hydratedAuditWithoutSavedTo.execution.executorEvidence[0].publishResult.explicitSuccess, undefined);
+    const mismatchedAuditEvidence = portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(hydratedAuditWithoutSavedTo);
+    check('unit: audit entry without savedTo and mismatched tuple blocks', mismatchedAuditEvidence.ok, false);
+    check('unit: audit mismatch exposes explicit tuple reason', mismatchedAuditEvidence.reasons, rows => rows.some(row => row.includes('legacy_artifact_tuple_mismatch')));
+  } finally {
+    await fs.rm(artifactFile, {force: true});
+  }
 
   // Managed CLI source-only path: actual HTML bytes -> same task bind -> fresh
   // dry-run, with hash-only stdout and a nonzero exit on any incomplete lock.

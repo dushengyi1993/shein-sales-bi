@@ -2679,8 +2679,13 @@ function validatePublishPayload(payload) {
   return {ok: blockers.length === 0, blockers, warnings};
 }
 
+function strictOwnBoolean(object, key) {
+  if (!object || typeof object !== 'object' || Array.isArray(object) || !Object.hasOwn(object, key)) return undefined;
+  return object[key] === true ? true : (object[key] === false ? false : undefined);
+}
+
 function publishInfoHasExplicitSuccess(info) {
-  return Boolean(info && typeof info === 'object' && !Array.isArray(info) && Object.hasOwn(info, 'success'));
+  return strictOwnBoolean(info, 'success') !== undefined;
 }
 
 function publishResultSucceeded(result) {
@@ -2688,7 +2693,7 @@ function publishResultSucceeded(result) {
   // Phase A contract: publishOrEdit success requires code=0 AND explicit
   // info.success===true. A code=0 response without an explicit success flag is
   // not proof of acceptance and must never be treated as success.
-  return publishInfoHasExplicitSuccess(result.info) && result.info.success === true;
+  return strictOwnBoolean(result.info, 'success') === true;
 }
 
 function descriptionSensitiveFragments(payload) {
@@ -2697,19 +2702,117 @@ function descriptionSensitiveFragments(payload) {
     const name = typeof row?.name === 'string' ? row.name : '';
     if (name) fragments.push(name);
     for (const line of name.split('\n')) {
-      if (line.length >= 4) fragments.push(line);
+      if (line) fragments.push(line);
     }
   }
   return [...new Set(fragments)];
 }
 
+/**
+ * Whitespace normalization used ONLY for echo containment matching, never for
+ * output. Collapses CR/LF/tabs/multi-space runs so a platform echo that wraps,
+ * breaks, or flattens a reviewed fragment still matches it.
+ */
+function normalizeMatchWhitespace(text) {
+  return String(text).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Longest reviewed-text window that still triggers redaction when echoed
+ * partially. A platform that truncates a long single-line description (or
+ * wraps an error around a cut echo) no longer contains the full reviewed
+ * fragment; 32+ contiguous reviewed characters in platform text is a
+ * defensible echo signal (covers 63-char partial echoes) while staying far
+ * below ordinary diagnostics.
+ */
+const LONG_REVIEWED_ECHO_WINDOW = 32;
+
+/**
+ * A one-character reviewed line must appear as a standalone token (bounded by
+ * non-letter/non-digit characters or the string edges) to count as an echo.
+ * This keeps unrelated larger diagnostics visible even when they happen to
+ * contain the same single character, while exact short-line echoes still
+ * redact (hash-only is the safe fallback for those unavoidable matches).
+ */
+const MATCH_TOKEN_BOUNDARY_RE = /[\p{L}\p{N}]/u;
+
+function shortFragmentTokenMatch(raw, frag) {
+  let index = -1;
+  while ((index = raw.indexOf(frag, index + 1)) !== -1) {
+    const before = index === 0 ? '' : raw[index - 1];
+    const after = index + frag.length >= raw.length ? '' : raw[index + frag.length];
+    if (!MATCH_TOKEN_BOUNDARY_RE.test(before) && !MATCH_TOKEN_BOUNDARY_RE.test(after)) return true;
+  }
+  return false;
+}
+
+function publishTextEchoesFragment(raw, normalizedRaw, fragment) {
+  const frag = String(fragment ?? '');
+  if (!frag) return false;
+  // One-character reviewed lines: standalone-token containment only, so an
+  // unrelated diagnostic is not redacted merely for containing the character.
+  if (frag.length === 1) {
+    return shortFragmentTokenMatch(raw, frag) || shortFragmentTokenMatch(normalizedRaw, frag);
+  }
+  // Exact containment: whole or embedded echo of the reviewed text.
+  if (raw.includes(frag)) return true;
+  const normalizedFragment = normalizeMatchWhitespace(frag);
+  // Whitespace-normalized containment: line-wrap / multi-space / newline
+  // collapse variants of a reviewed fragment still count as an echo. Very
+  // short (2-3 char) reviewed lines keep plain containment: matching the
+  // exact short string is safer than leaking it.
+  if (normalizedFragment.length >= 2 && normalizedRaw.includes(normalizedFragment)) return true;
+  // Partial echo: a platform-truncated long echo never contains the full
+  // fragment. Redact whenever a long contiguous window of reviewed text
+  // survives, so a long prefix cannot leak through max truncation.
+  if (
+    normalizedFragment.length >= LONG_REVIEWED_ECHO_WINDOW
+    && normalizedRaw.length >= LONG_REVIEWED_ECHO_WINDOW
+  ) {
+    const lastWindowStart = normalizedFragment.length - LONG_REVIEWED_ECHO_WINDOW;
+    for (let i = 0; i <= lastWindowStart; i += 1) {
+      if (normalizedRaw.includes(normalizedFragment.slice(i, i + LONG_REVIEWED_ECHO_WINDOW))) return true;
+    }
+  }
+  return false;
+}
+
+function publishTextContainsReviewedFragment(raw, fragments) {
+  if (!fragments.length || !raw) return false;
+  const normalizedRaw = normalizeMatchWhitespace(raw);
+  return fragments.some(fragment => publishTextEchoesFragment(raw, normalizedRaw, fragment));
+}
+
+// Platform free text is untrusted and may echo reviewed descriptions.  When
+// descriptions are present, only these closed, structure-only diagnostics may
+// remain readable; everything else is hash-only.  The allowlist deliberately
+// contains no arbitrary field/value capture.
+const SAFE_PUBLISH_VALIDATION_PATTERNS = [
+  /^(?:商品属性|商品标题|基础信息|平台预校验)$/u,
+  /^商品标题不能为空[。.]?$/u,
+  /^Because Power Supply\(\d+\) selected (?:Wall Plug|Power Adapter)\(\d+\), Input (?:current|voltage)\(\d+\) is required\.?$/u,
+  /^(?:产品型号|输入电流|输入电压|危险品分类)(?:\(\d+\))?[，,]\s*为必填项[。.]?$/u,
+  /^(?:Hazardous materials classification|Input current|Input voltage)(?:\(\d+\))?\s*[:：]\s*The template attribute under type is required\.?$/u,
+];
+
+function safeStructuredPublishDiagnostic(raw) {
+  const normalized = normalizeMatchWhitespace(raw);
+  return SAFE_PUBLISH_VALIDATION_PATTERNS.some(pattern => pattern.test(normalized));
+}
+
 function sanitizePublishPlatformText(value, payload, max = 300) {
   const raw = String(value ?? '');
   if (!raw.trim()) return '';
-  // Redact before normalization/truncation. Otherwise a >max single-line
-  // description or whitespace-variant echo can leak a long prefix while no
-  // longer matching the exact reviewed fragment.
-  if (descriptionSensitiveFragments(payload).length) {
+  // Redact BEFORE normalization/truncation: an exact or echoed reviewed
+  // description fragment must never survive max-truncation as a long prefix.
+  // Non-sensitive platform diagnostics stay visible, so ordinary pre-valid
+  // field/message failures remain debuggable even when the payload carries
+  // reviewed descriptions.
+  const fragments = descriptionSensitiveFragments(payload);
+  if (fragments.length && (
+    publishTextContainsReviewedFragment(raw, fragments)
+    || !safeStructuredPublishDiagnostic(raw)
+  )) {
     return `[平台回显内容已脱敏 sha256=${crypto.createHash('sha256').update(raw, 'utf8').digest('hex')}]`;
   }
   return safeString(raw, max);
@@ -2754,7 +2857,11 @@ function compactPublishResultForStorage(result, payload) {
     msg: sanitizePublishPlatformText(result.msg || '', payload, 300),
     traceId: safeString(result.traceId || '', 180) || null,
     info: {
-      success: info.success === true,
+      // Tri-state: undefined when the platform response omitted info.success
+      // (unknown outcome), false/true only when it explicitly returned them.
+      // Only an explicit success=false may prove publish_pre_valid_failed;
+      // code=0 with missing info.success is uncertainty, never a rejection.
+      success: strictOwnBoolean(info, 'success'),
       taskNo: safeString(info.taskNo || info.task_no || '', 180),
       spu_name: safeString(info.spu_name || info.spuName || '', 120),
       version: safeString(info.version || '', 180),
@@ -2762,6 +2869,11 @@ function compactPublishResultForStorage(result, payload) {
       pre_valid_result: preValidResult,
     },
   };
+}
+
+function publishInfoExplicitlyFalse(result) {
+  const info = result?.info && typeof result.info === 'object' ? result.info : null;
+  return strictOwnBoolean(info, 'success') === false;
 }
 
 function extractPayloadSummary(payload) {
@@ -3867,14 +3979,21 @@ async function main() {
       });
       if (String(publishResult.code ?? '') !== '0') {
         blockers.push(`publishOrEdit 返回失败：${sanitizePublishPlatformText(publishResult.msg || publishResult.code || '未知错误', publishPayload, 300)}`);
-      } else if (!publishResultSucceeded(publishResult)) {
+      } else if (publishResultSucceeded(publishResult)) {
+        // Explicit info.success=true: the write was accepted; readback follows.
+      } else if (publishInfoExplicitlyFalse(publishResult)) {
         const preValidMessages = publishPreValidMessages(publishResult.info, publishPayload);
         blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || sanitizePublishPlatformText(publishResult.msg || '未知原因', publishPayload, 300)}`);
+      } else {
+        blockers.push('publishOrEdit 返回 code=0 但未显式 info.success；无法确认平台是否已接收写请求，禁止重试，需人工核销。');
       }
     }
   }
   const publishSucceeded = publishResultSucceeded(publishResult);
-  const publishPreValidFailed = Boolean(publishResult && String(publishResult.code ?? '') === '0' && !publishSucceeded);
+  // Only an original info object with explicit success=false may produce
+  // publish_pre_valid_failed; code=0 with missing/unknown success is
+  // uncertainty and stays blocked.
+  const publishPreValidFailed = Boolean(publishResult && String(publishResult.code ?? '') === '0' && publishInfoExplicitlyFalse(publishResult));
   const readbackFingerprint = extractReadbackFingerprint({
     payload: publishPayload,
     payloadFound,
@@ -4018,7 +4137,10 @@ export const __testHooks = {
   ensurePublishImageSortGlobalUnique,
   normalizePublishImageType,
   publishResultSucceeded,
+  strictOwnBoolean,
   sanitizePublishPlatformText,
+  publishPreValidMessages,
+  compactPublishResultForStorage,
   matchProductReadbackRows,
   readbackPublishedProduct,
   sha256Stable,
