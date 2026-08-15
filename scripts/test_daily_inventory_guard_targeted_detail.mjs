@@ -233,13 +233,49 @@ check('current-detail predicate covers only the three detail-evidence blockers',
   const end = guard.indexOf('"$PLAN" >/dev/null; then', start);
   assert.ok(start >= 0 && end > start, 'the predicate block must exist');
   const predicate = guard.slice(start, end);
-  assert.match(predicate, /test\(" OpenAPI product detail evidence is incomplete\$"\)/);
-  assert.match(predicate, /test\(" OpenAPI product canonical evidence is incomplete\$"\)/);
-  assert.match(predicate, /test\(" OpenAPI product canonical evidence is not from current detail"\)/);
+  assert.match(predicate, /test\(" OpenAPI product detail evidence is incomplete\(\$\|:\)"\)/);
+  assert.match(predicate, /test\(" OpenAPI product canonical evidence is incomplete\(\$\|:\)"\)/);
+  assert.match(predicate, /test\(" OpenAPI product canonical evidence is not from current detail\(\$\|:\)"\)/);
   assert.doesNotMatch(predicate, /BI\/ET projection is stale/,
     'a refreshed plan with only detail blockers must satisfy all() and trigger the targeted refresh');
   assert.doesNotMatch(predicate, /BI links data is stale/,
     'stale linksData must never be silently absorbed by the targeted refresh');
+});
+check('769 not-current-detail plus 7 canonical-incomplete blockers are recoverable together', () => {
+  const recoverable = blocker => (
+    / OpenAPI product detail evidence is incomplete(?:$|:)/.test(blocker)
+    || / OpenAPI product canonical evidence is incomplete(?:$|:)/.test(blocker)
+    || / OpenAPI product canonical evidence is not from current detail(?:$|:)/.test(blocker)
+  );
+  const blockers = [
+    ...Array.from({length: 769}, (_, index) => `DL OpenAPI product canonical evidence is not from current detail: store=DL spu=spu-${index} skc=skc-${index}`),
+    ...Array.from({length: 7}, (_, index) => `DL OpenAPI product canonical evidence is incomplete: store=DL spu=canonical-${index} skc=canonical-${index}`),
+  ];
+  assert.equal(blockers.length, 776);
+  assert.equal(blockers.every(recoverable), true,
+    'the exact production-shaped 769+7 blocker mix must satisfy the all() recovery gate');
+  assert.equal(recoverable('DL OpenAPI product detail evidence is incomplete'), true);
+  assert.equal(recoverable('DL OpenAPI product detail evidence is incomplete: store=DL spu=1 skc=1'), true);
+  assert.equal(recoverable('DL OpenAPI product canonical evidence is incomplete'), true);
+  assert.equal(recoverable('DL OpenAPI product canonical evidence is incomplete: store=DL spu=1 skc=1'), true);
+});
+check('any non-allowlisted blocker keeps the targeted refresh gate closed', () => {
+  const recoverable = blocker => (
+    / OpenAPI product detail evidence is incomplete(?:$|:)/.test(blocker)
+    || / OpenAPI product canonical evidence is incomplete(?:$|:)/.test(blocker)
+    || / OpenAPI product canonical evidence is not from current detail(?:$|:)/.test(blocker)
+  );
+  const allowed = ['DL OpenAPI product canonical evidence is incomplete: store=DL spu=1 skc=1'];
+  for (const blocker of [
+    'DL OpenAPI product exposure evidence is incomplete: store=DL spu=1',
+    'DL OpenAPI product has multiple SKUs: store=DL spu=1',
+    'daily current-detail target set is not fully covered by manifest: store=DL spu=1',
+    'BI/ET projection is stale: generatedAt=old ageHours=20',
+    'BI links data is stale: generatedAt=old ageHours=20',
+    'DL OpenAPI product canonical evidence is incomplete but exposure is missing',
+  ]) {
+    assert.equal([...allowed, blocker].every(recoverable), false, `must remain blocked: ${blocker}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -310,15 +346,15 @@ match('stale-refresh gate is enabled by default',
   'the OpenAPI stale refresh must default on');
 match('current-detail evidence blocker pattern',
   guard,
-  /test\(" OpenAPI product detail evidence is incomplete\$"\)/,
+  /test\(" OpenAPI product detail evidence is incomplete\(\$\|:\)"\)/,
   'missing current detail blocks and is recoverable');
 match('canonical-evidence blocker pattern',
   guard,
-  /test\(" OpenAPI product canonical evidence is incomplete\$"\)/,
+  /test\(" OpenAPI product canonical evidence is incomplete\(\$\|:\)"\)/,
   'canonical evidence gaps are recoverable through targeted detail');
 match('current-detail provenance blocker pattern',
   guard,
-  /test\(" OpenAPI product canonical evidence is not from current detail"\)/,
+  /test\(" OpenAPI product canonical evidence is not from current detail\(\$\|:\)"\)/,
   'cached (non-current) detail is recoverable only through targeted refresh');
 match('current-detail gate requires emitted targets',
   guard,
