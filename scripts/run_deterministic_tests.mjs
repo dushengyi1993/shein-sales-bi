@@ -208,7 +208,15 @@ for (const file of tests) {
   const timeout = (file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     || file === 'scripts/test_link_ops_update_description_flow.mjs')
     ? 240_000
-    : 30_000;
+    : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
+      // The attribute repair flow also starts an isolated portal plus a fake
+      // OpenAPI server (donor identity/searchProduct/spu-info plus the full
+      // two-step bind/rebind/dry-run matrix). It finishes in ~19.5s locally
+      // but exceeded the 30s fail-fast budget on the slower GitHub runner
+      // (SIGTERM at 30038ms), so give it a bounded 90s budget only for this
+      // test; every other deterministic test keeps the default budget.
+      ? 90_000
+      : 30_000;
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),
     encoding: 'utf8',
