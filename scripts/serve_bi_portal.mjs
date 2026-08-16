@@ -5852,6 +5852,34 @@ function compactSourceDetailLock(lock) {
   };
 }
 
+function projectProductExecutorHistoryEvidence(executorRun = {}) {
+  const executorResult = executorRun.result || {};
+  return {
+    storeKey: executorResult.storeKey || '',
+    mode: executorRun?.mode || '',
+    state: executorResult.state || '',
+    runId: executorResult.runId || '',
+    savedTo: executorResult.savedTo || '',
+    payloadFound: Boolean(executorResult.payload?.found),
+    payloadHash: executorResult.payload?.payloadHash || '',
+    payloadHashAlgorithm: executorResult.payload?.payloadHashAlgorithm || '',
+    sourceStore: String(executorResult.sourceStore || '').toUpperCase(),
+    sourceSkc: sanitizeLinkOpsClientText(executorResult.sourceSkc || '', 120),
+    payload: {
+      sourceDetailLock: compactSourceDetailLock(executorResult.payload?.sourceDetailLock),
+    },
+    payloadSummary: executorResult.payload?.summary || null,
+    canPublishProduct: executorResult.openapi?.canPublishProduct ?? null,
+    publishResult: executorResult.publishResult ? {
+      httpStatus: executorResult.publishResult.httpStatus,
+      code: executorResult.publishResult.code,
+      msg: executorResult.publishResult.msg,
+      traceId: executorResult.publishResult.traceId,
+      explicitSuccess: projectPublishResultExplicitSuccess(executorResult.publishResult),
+    } : null,
+  };
+}
+
 function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requestedMode, finalState, submitted, executorRuns = [], blockers = [], warnings = [], confirmTextPresent = false, executeAllowed = false, lifecycleTransition = null, realSubmitWhitelistChecks = []}) {
   const issuedExecuteToExecutor = executorRuns.some(executorRun => String(executorRun?.mode || '') === 'execute');
   const sheinWriteAttempted = executorRuns.some(executorRun => Boolean(executorRun?.result?.publishResult || executorRun?.result?.adapterEvidence?.writeAttempted));
@@ -6164,15 +6192,19 @@ function blockedStoreExecutorResult(storeKey, blockers = []) {
   };
 }
 
+const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v3';
+
 function payloadHashForStoreFromTaskExecution(task, storeKey = '') {
   const target = String(storeKey || '').trim().toUpperCase();
   const runs = Array.isArray(task?.execution?.openApiProductExecutors)
     ? task.execution.openApiProductExecutors
     : [];
-  const match = runs.find(run => String(run?.storeKey || '').trim().toUpperCase() === target)
-    || (runs.length === 1 ? runs[0] : null);
-  const hash = String(match?.payload?.payloadHash || '').trim();
-  return hash || '';
+  const match = runs.find(run => typeof run?.storeKey === 'string' && run.storeKey === target) || null;
+  const algorithm = match?.payload?.payloadHashAlgorithm;
+  if (typeof algorithm !== 'string' || algorithm !== PRODUCT_EXECUTION_HASH_ALGORITHM) return '';
+  const hash = match?.payload?.payloadHash;
+  if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) return '';
+  return hash;
 }
 
 function payloadHashForMaintenanceFromTaskExecution(task, storeKey = '', operation = '') {
@@ -8679,7 +8711,7 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
 }
 
 // Description binding materializes against the executor's BODY hash, never the
-// v2 execution-lock scope hash (payload + source identity). Legacy v1 captures
+// v3 execution-lock scope hash (payload + source identity/content). Legacy v1 captures
 // carried the body hash in payloadHash; that stays compatible only when the
 // declared algorithm is still the v1 body-hash algorithm. Anything else with a
 // missing bodyHash fails closed.
@@ -9952,6 +9984,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           ok: Boolean(result.ok),
           runId: result.runId || '',
           payloadHash: result.payload?.payloadHash || '',
+          payloadHashAlgorithm: result.payload?.payloadHashAlgorithm || '',
           publishCode: result.publishResult?.code ?? null,
           publishTraceId: result.publishResult?.traceId || '',
           publishResult: result.publishResult ? {
@@ -9982,30 +10015,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     originalStatus,
     blockers: combinedBlockers,
     warnings: combinedWarnings,
-    openApiProductExecutors: openApiProductExecutors.map(executorRun => {
-      const executorResult = executorRun.result || {};
-      return {
-        storeKey: executorResult.storeKey || '',
-        mode: executorRun?.mode || '',
-        state: executorResult.state || '',
-        runId: executorResult.runId || '',
-        savedTo: executorResult.savedTo || '',
-        payloadFound: Boolean(executorResult.payload?.found),
-        payloadHash: executorResult.payload?.payloadHash || '',
-        payload: {
-          sourceDetailLock: compactSourceDetailLock(executorResult.payload?.sourceDetailLock),
-        },
-        payloadSummary: executorResult.payload?.summary || null,
-        canPublishProduct: executorResult.openapi?.canPublishProduct ?? null,
-        publishResult: executorResult.publishResult ? {
-          httpStatus: executorResult.publishResult.httpStatus,
-          code: executorResult.publishResult.code,
-          msg: executorResult.publishResult.msg,
-          traceId: executorResult.publishResult.traceId,
-          explicitSuccess: projectPublishResultExplicitSuccess(executorResult.publishResult),
-        } : null,
-      };
-    }),
+    openApiProductExecutors: openApiProductExecutors.map(projectProductExecutorHistoryEvidence),
     linkMaintenanceExecutors: openApiMaintenanceExecutors.map(executorRun => {
       const executorResult = executorRun.result || {};
       return {
@@ -17373,4 +17383,7 @@ export const __testHooks = {
   legacyPreValidArtifactCandidates,
   verifyLegacyPreValidArtifact,
   hydrateLegacyPreValidProofs,
+  payloadHashForStoreFromTaskExecution,
+  PRODUCT_EXECUTION_HASH_ALGORITHM,
+  projectProductExecutorHistoryEvidence,
 };
