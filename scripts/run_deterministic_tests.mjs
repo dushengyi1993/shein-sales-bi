@@ -218,12 +218,14 @@ for (const file of tests) {
   // source-detail-lock at 30042ms on the default 30s tier; attempt 2 passed it
   // in 26012ms, then killed the attribute flow at 720017ms on its old 720s
   // tier, both by timeout SIGTERM with no assertion failure. Local evidence is
-  // 24.7s for source-detail-lock and 709s for attribute flow. Their bounded
+  // 24.7s for source-detail-lock and 709s for attribute flow.
   // Attempt 3 then hit the description flow's former 240s bound at 240099ms
-  // and the attribute flow's 900s bound at 900128ms. Their bounded 300s and
-  // 1200s tiers keep measured CI headroom without disabling timeout. Update
-  // descriptions keeps 240s, morning reliability keeps 120s, and every other
-  // deterministic test keeps the default 30s budget.
+  // and the attribute flow's 900s bound at 900128ms.
+  // The latest complete product-attribute flow measured about 20 minutes
+  // (1,180,547ms) in the release gate. Its bounded 30-minute budget keeps
+  // deterministic headroom without disabling timeout. Update descriptions
+  // keeps 240s, morning reliability keeps 120s, and every other deterministic
+  // test keeps the default 30s budget.
   const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     ? 300_000
     : file === 'scripts/test_link_ops_update_description_flow.mjs'
@@ -231,7 +233,7 @@ for (const file of tests) {
     : file === 'scripts/test_link_ops_executor_source_detail_lock.mjs'
       ? 60_000
       : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
-        ? 1_200_000
+        ? 1_800_000
        : ['scripts/test_morning_chain_reliability.mjs',
          'scripts/test_morning_chain_wrapper_reliability.mjs',
          'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
