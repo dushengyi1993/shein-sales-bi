@@ -50,7 +50,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-prepare-descriptions-'));
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const SOURCE_STORE = 'NM';
-const SOURCE_SPU = 'v-desc-bind';
+const SOURCE_SPU = 'v20990101999999';
 const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const DESC_SUPPLIER_CODES = [
   'DESC-CONCURRENT',
@@ -792,6 +792,7 @@ async function createTask(cookie, supplierCode) {
       targets: {
         stores: ['NM'],
         writeStores: ['NM'],
+        standardGoodsSn: 'SM-11004',
         ...(SOURCE_LOCKED_CODES.has(supplierCode)
           ? {sourceStores: [SOURCE_STORE], sourceSkc: sourceSkcFor(supplierCode)}
           : {}),
@@ -800,7 +801,13 @@ async function createTask(cookie, supplierCode) {
     },
   });
   if (r.status !== 200) throw new Error(`create task failed: ${r.status} ${r.text}`);
-  return r.json?.task?.id || r.json?.data?.tasks?.[0]?.id || '';
+  const taskId = r.json?.task?.id || r.json?.data?.tasks?.[0]?.id || '';
+  await updateRawTaskById(taskId, task => ({
+    ...task,
+    standardGoodsSn: supplierCode,
+    targets: {...(task.targets || {}), standardGoodsSn: supplierCode, productRefs: [supplierCode]},
+  }));
+  return taskId;
 }
 
 let cleanupOnExit = false;

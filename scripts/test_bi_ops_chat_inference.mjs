@@ -396,7 +396,10 @@ try {
         {
           storeKey: 'DL',
           mode: 'dry-run',
-          payload: {payloadHash: `hash-${task.id || 'task'}`},
+          payload: {
+            payloadHash: 'a'.repeat(64),
+            payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+          },
         },
       ],
     },

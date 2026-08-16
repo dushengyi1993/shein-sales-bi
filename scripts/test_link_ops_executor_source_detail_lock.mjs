@@ -5,12 +5,12 @@
  * The bound/reviewed payload path must keep the mapper-hydrated
  * sourceDetailLock through preflight and execute:
  *
- * 1. fresh (23h) preflight locks the scope-v2 hash and the lock; a fresh
+ * 1. fresh (23h) preflight locks the scope-v3 hash and the lock; a fresh
  *    execute reusing the same preflight lock reaches publishOrEdit exactly once;
  * 2. 23h preflight -> 25h bound payload execute blocks before publishOrEdit
  *    with SOURCE_DETAIL_LOCK_EXPIRED (executor level: no publish call issued);
  * 3. same freshness but drifted detail content blocks with
- *    SOURCE_DETAIL_LOCK_CONTENT_DRIFT (scope-v2 hash also invalidates);
+ *    SOURCE_DETAIL_LOCK_CONTENT_DRIFT (scope-v3 hash also invalidates);
  * 4. drifted actual SKC in current detail produces the mapper identity
  *    conflict blocker in total blockers plus SOURCE_DETAIL_LOCK_MISSING, and
  *    no publish call is issued.
@@ -49,11 +49,13 @@ import {
 
 process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
 const {__testHooks: executorHooks} = await import('../scripts/link_ops_hl_openapi_executor.mjs');
+const {__testHooks: portalHooks} = await import('../scripts/serve_bi_portal.mjs');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE_STORE = 'LKD';
 const SOURCE_SKC = 'sv20990101000000009';
 const SOURCE_SPU = 'v209901010009';
+const STANDARD_GOODS_SN = 'LKD-505';
 const DATE = '2099-01-01';
 const EN_TITLE = 'Source detail lock smoke product';
 const AR_TITLE = 'منتج اختبار قفل التفاصيل';
@@ -73,6 +75,7 @@ const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-source-detail-lock
 const nowMs = Date.now();
 const FRESH_AT = new Date(nowMs - 23 * 60 * 60 * 1000).toISOString();
 const EXPIRED_AT = new Date(nowMs - 25 * 60 * 60 * 1000).toISOString();
+const FUTURE_AT = new Date(nowMs + 60 * 60 * 1000).toISOString();
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -409,7 +412,7 @@ try {
       storeKey: SOURCE_STORE,
       skc: SOURCE_SKC,
       spu: SOURCE_SPU,
-      standardGoodsSn: 'LKD-505',
+      standardGoodsSn: STANDARD_GOODS_SN,
       productNameCn: 'LKD锁测试',
       rawGoodsSn: 'SOURCE-RAW-LKD-505',
     }],
@@ -431,15 +434,156 @@ try {
   check('gate expired blocks', gate({currentLock: {...baseLock, detailFetchedAt: EXPIRED_AT}, expectedLock: baseLock}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_EXPIRED'));
   check('gate future blocks', gate({currentLock: {...baseLock, detailFetchedAt: new Date(Date.now() + 60_000).toISOString()}, expectedLock: baseLock}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_FUTURE'));
   check('gate invalid timestamp blocks', gate({currentLock: {...baseLock, detailFetchedAt: 'not-a-date'}, expectedLock: baseLock}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_TIMESTAMP_INVALID'));
+  check('gate array timestamp blocks', gate({currentLock: {...baseLock, detailFetchedAt: [FRESH_AT]}, expectedLock: baseLock}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_TIMESTAMP_INVALID'));
+  check('gate object timestamp blocks', gate({currentLock: {...baseLock, detailFetchedAt: {value: FRESH_AT}}, expectedLock: baseLock}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_TIMESTAMP_INVALID'));
+  check('gate future expected timestamp blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, detailFetchedAt: FUTURE_AT}, sourceStore: SOURCE_STORE, sourceSkc: SOURCE_SKC}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_FUTURE'));
+  check('gate expired expected timestamp blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, detailFetchedAt: EXPIRED_AT}, sourceStore: SOURCE_STORE, sourceSkc: SOURCE_SKC}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_EXPIRED'));
   check('gate content drift blocks', gate({currentLock: {...baseLock, detailContentSha256: 'f'.repeat(64)}, expectedLock: baseLock}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_CONTENT_DRIFT'));
   check('gate SKC drift blocks', gate({currentLock: {...baseLock, matchedSkcName: 'sv-drifted'}, expectedLock: baseLock, sourceSkc: SOURCE_SKC}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT'));
   check('gate fresh lock passes', gate({currentLock: baseLock, expectedLock: baseLock, sourceStore: SOURCE_STORE, sourceSkc: SOURCE_SKC}), value => value.ok === true && value.gateActive === true);
-  check('gate required without expected allows fresh current lock', gate({currentLock: baseLock, expectedLock: null, required: true, sourceStore: SOURCE_STORE, sourceSkc: SOURCE_SKC}), value => value.ok === true && value.gateActive === true && value.blockers.length === 0);
-  check('gate required without current lock blocks', gate({currentLock: null, expectedLock: null, required: true, sourceStore: SOURCE_STORE, sourceSkc: SOURCE_SKC}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_MISSING'));
-  check('gate requireExpectedLock without expected blocks', gate({currentLock: baseLock, expectedLock: null, required: true, requireExpectedLock: true}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
-  check('gate required expired without expected blocks', gate({currentLock: {...baseLock, detailFetchedAt: EXPIRED_AT}, expectedLock: null, required: true}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_EXPIRED'));
+  const requiredGateScope = {required: true, sourceStore: SOURCE_STORE, sourceSkc: SOURCE_SKC, standardGoodsSn: STANDARD_GOODS_SN};
+  check('gate required without expected allows fresh current lock', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope}), value => value.ok === true && value.gateActive === true && value.blockers.length === 0);
+  check('gate required without current lock blocks', gate({currentLock: null, expectedLock: null, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_MISSING'));
+  check('gate requireExpectedLock without expected blocks', gate({currentLock: baseLock, expectedLock: null, requireExpectedLock: true, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+  check('gate required expired without expected blocks', gate({currentLock: {...baseLock, detailFetchedAt: EXPIRED_AT}, expectedLock: null, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_EXPIRED'));
+  for (const [label, currentLock] of [
+    ['missing source', {...baseLock, source: ''}],
+    ['missing SPU', {...baseLock, matchedSpuName: ''}],
+    ['missing SKC', {...baseLock, matchedSkcName: ''}],
+    ['invalid content SHA', {...baseLock, detailContentSha256: 'not-sha256'}],
+  ]) {
+    check(`gate required ${label} blocks`, gate({currentLock, expectedLock: null, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  }
+  check('gate required missing sourceStore blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, sourceStore: ''}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required missing sourceSkc blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, sourceSkc: ''}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required missing standard goods number blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, standardGoodsSn: ''}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required malformed sourceStore blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, sourceStore: '???'}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required malformed sourceSkc blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, sourceSkc: 'not-a-skc'}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required malformed standard goods number blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, standardGoodsSn: '???'}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  for (const [label, standardGoodsSn] of [
+    ['array standard goods number', [STANDARD_GOODS_SN]],
+    ['object standard goods number', {value: STANDARD_GOODS_SN}],
+  ]) {
+    check(`gate required ${label} blocks`, gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, standardGoodsSn}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  }
+  for (const codePoint of [0x09, 0x0a, 0x0d]) {
+    const controlValue = `ABC${String.fromCharCode(codePoint)}DEF`;
+    check(`gate required standard goods control U+${codePoint.toString(16).padStart(4, '0')} blocks`, gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, standardGoodsSn: controlValue}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  }
+  check('gate required malformed source enum blocks', gate({currentLock: {...baseLock, source: 'evil_source'}, expectedLock: null, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required malformed SPU blocks', gate({currentLock: {...baseLock, matchedSpuName: 'not-spu'}, expectedLock: null, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required malformed lock SKC blocks', gate({currentLock: {...baseLock, matchedSkcName: 'not-a-skc'}, expectedLock: null, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required sourceStore trailing LF blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, sourceStore: `${SOURCE_STORE}\n`}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  check('gate required sourceSkc trailing LF blocks', gate({currentLock: baseLock, expectedLock: null, ...requiredGateScope, sourceSkc: `${SOURCE_SKC}\n`}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  for (const [label, currentLock] of [
+    ['source trailing LF', {...baseLock, source: `${baseLock.source}\n`}],
+    ['SPU trailing LF', {...baseLock, matchedSpuName: `${baseLock.matchedSpuName}\n`}],
+    ['SKC trailing LF', {...baseLock, matchedSkcName: `${baseLock.matchedSkcName}\n`}],
+    ['SHA trailing LF', {...baseLock, detailContentSha256: `${baseLock.detailContentSha256}\n`}],
+  ]) {
+    check(`gate required ${label} blocks`, gate({currentLock, expectedLock: null, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+    check(`gate expected ${label} blocks`, gate({currentLock: baseLock, expectedLock: currentLock, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_INVALID'));
+  }
+  check('gate invalid expected lock blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, source: ''}, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_INVALID'));
+  check('gate source type drift blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, source: 'different_source'}, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT'));
+  check('hash scope excludes observation timestamp', executorHooks.sourceDetailLockExecutionHashScope(baseLock), value => !Object.prototype.hasOwnProperty.call(value || {}, 'detailFetchedAt'));
+  check('hash scope preserves source identity and content', executorHooks.sourceDetailLockExecutionHashScope(baseLock), value => value?.source === baseLock.source
+    && value?.matchedSkcName === SOURCE_SKC
+    && value?.matchedSpuName === SOURCE_SPU
+    && value?.detailContentSha256 === baseLock.detailContentSha256);
+  const baseExecutionScope = executorHooks.buildProductExecutionHashScope({
+    payload: {category_id: 1},
+    targetStore: 'HL',
+    sourceStore: SOURCE_STORE,
+    sourceSkc: SOURCE_SKC,
+    standardGoodsSn: STANDARD_GOODS_SN,
+    sourceDetailLock: baseLock,
+  });
+  const baseExecutionHash = executorHooks.sha256Stable(baseExecutionScope);
+  check('scope-v3 schema is hash-domain separated', baseExecutionScope.schema, executorHooks.PRODUCT_EXECUTION_HASH_SCHEMA);
+  check('scope-v3 algorithm constant', executorHooks.PRODUCT_EXECUTION_HASH_ALGORITHM, 'sha256-stable-json-scope-v3');
+  const portalHashTask = algorithm => ({
+    execution: {
+      openApiProductExecutors: [{
+        storeKey: 'HL',
+        payload: {payloadHash: 'a'.repeat(64), payloadHashAlgorithm: algorithm},
+      }],
+    },
+  });
+  check('portal accepts current scope-v3 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v3'), 'HL'), 'a'.repeat(64));
+  check('portal rejects legacy scope-v2 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v2'), 'HL'), '');
+  check('portal rejects missing hash algorithm', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask(''), 'HL'), '');
+  const portalMissingStoreTask = portalHashTask('sha256-stable-json-scope-v3');
+  delete portalMissingStoreTask.execution.openApiProductExecutors[0].storeKey;
+  check('portal rejects unique executor row missing storeKey', portalHooks.payloadHashForStoreFromTaskExecution(portalMissingStoreTask, 'HL'), '');
+  for (const [label, mutate] of [
+    ['payload hash array', task => { task.execution.openApiProductExecutors[0].payload.payloadHash = ['a'.repeat(64)]; }],
+    ['payload hash object', task => { task.execution.openApiProductExecutors[0].payload.payloadHash = {value: 'a'.repeat(64)}; }],
+    ['payload hash algorithm array', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }],
+    ['payload hash algorithm object', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }],
+  ]) {
+    const pollutedTask = portalHashTask('sha256-stable-json-scope-v3');
+    mutate(pollutedTask);
+    check(`portal rejects ${label}`, portalHooks.payloadHashForStoreFromTaskExecution(pollutedTask, 'HL'), '');
+  }
+  const projectedHistoryEvidence = portalHooks.projectProductExecutorHistoryEvidence({
+    mode: 'dry-run',
+    result: {
+      storeKey: 'HL',
+      sourceStore: SOURCE_STORE,
+      sourceSkc: SOURCE_SKC,
+      payload: {
+        found: true,
+        payloadHash: 'a'.repeat(64),
+        payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+        sourceDetailLock: baseLock,
+      },
+    },
+  });
+  check('portal history projection preserves scope-v3 algorithm', projectedHistoryEvidence.payloadHashAlgorithm, 'sha256-stable-json-scope-v3');
+  check('portal history projection preserves exact source store', projectedHistoryEvidence.sourceStore, SOURCE_STORE);
+  check('portal history projection preserves exact source SKC', projectedHistoryEvidence.sourceSkc, SOURCE_SKC);
+  check('portal history projection preserves full source lock', projectedHistoryEvidence.payload?.sourceDetailLock, value => value?.detailFetchedAt === baseLock.detailFetchedAt
+    && value?.detailContentSha256 === baseLock.detailContentSha256
+    && Object.keys(value || {}).length === 5);
+  check('scope-v3 timestamp-only projection is stable', executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope({
+    ...baseExecutionScope,
+    sourceDetailLock: {...baseLock, detailFetchedAt: new Date().toISOString()},
+  })), baseExecutionHash);
+  const spaceStandardHash = executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope({...baseExecutionScope, standardGoodsSn: 'ABC DEF'}));
+  const controlStandardHash = executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope({...baseExecutionScope, standardGoodsSn: 'ABC\nDEF'}));
+  check('scope-v3 standard goods control cannot collide with space', controlStandardHash !== spaceStandardHash, true);
+  const stringStandardHash = executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope({...baseExecutionScope, standardGoodsSn: STANDARD_GOODS_SN}));
+  const arrayStandardHash = executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope({...baseExecutionScope, standardGoodsSn: [STANDARD_GOODS_SN]}));
+  const objectStandardHash = executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope({...baseExecutionScope, standardGoodsSn: {value: STANDARD_GOODS_SN}}));
+  check('scope-v3 array standard goods cannot collide with string', arrayStandardHash !== stringStandardHash, true);
+  check('scope-v3 object standard goods cannot collide with string', objectStandardHash !== stringStandardHash, true);
+  check('scope-v3 array and object standard goods cannot collide', arrayStandardHash !== objectStandardHash, true);
+  for (const [label, scope] of [
+    ['sourceStore control', {...baseExecutionScope, sourceStore: `${SOURCE_STORE}\n`}],
+    ['sourceSkc control', {...baseExecutionScope, sourceSkc: `${SOURCE_SKC}\n`}],
+    ['source type control', {...baseExecutionScope, sourceDetailLock: {...baseLock, source: `${baseLock.source}\n`}}],
+    ['source SPU control', {...baseExecutionScope, sourceDetailLock: {...baseLock, matchedSpuName: `${SOURCE_SPU}\n`}}],
+    ['source SKC control', {...baseExecutionScope, sourceDetailLock: {...baseLock, matchedSkcName: `${SOURCE_SKC}\n`}}],
+    ['source SHA control', {...baseExecutionScope, sourceDetailLock: {...baseLock, detailContentSha256: `${baseLock.detailContentSha256}\n`}}],
+  ]) {
+    check(`scope-v3 ${label} cannot collide`, executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope(scope)) !== baseExecutionHash, true);
+  }
+  for (const [label, scope] of [
+    ['body', {...baseExecutionScope, payload: {category_id: 2}}],
+    ['targetStore', {...baseExecutionScope, targetStore: 'QH'}],
+    ['sourceStore', {...baseExecutionScope, sourceStore: 'DIFFERENT'}],
+    ['sourceSkc', {...baseExecutionScope, sourceSkc: 'sv-different'}],
+    ['standardGoodsSn', {...baseExecutionScope, standardGoodsSn: 'DIFFERENT-GOODS'}],
+    ['source type', {...baseExecutionScope, sourceDetailLock: {...baseLock, source: 'different_source'}}],
+    ['source SPU', {...baseExecutionScope, sourceDetailLock: {...baseLock, matchedSpuName: 'v-different'}}],
+    ['source SKC', {...baseExecutionScope, sourceDetailLock: {...baseLock, matchedSkcName: 'sv-different'}}],
+    ['source content', {...baseExecutionScope, sourceDetailLock: {...baseLock, detailContentSha256: 'f'.repeat(64)}}],
+  ]) {
+    check(`scope-v3 ${label} drift changes hash`, executorHooks.sha256Stable(executorHooks.buildProductExecutionHashScope(scope)) !== baseExecutionHash, true);
+  }
 
-  // Preflight with a 23h-fresh detail locks scope-v2 + sourceDetailLock.
+  // Preflight with a 23h-fresh detail locks scope-v3 + sourceDetailLock.
   await writeDetail({detailFetchedAt: FRESH_AT});
   const preflight = await runExecutor({label: 'preflight', mode: 'dry-run'});
   const preflightOutput = preflight.output;
@@ -452,7 +596,8 @@ try {
   check('preflight parsed output', Boolean(preflightOutput), true);
   check('preflight ready for submit', preflightOutput?.state || '', 'ready_for_submit');
   check('preflight no blockers', preflightOutput?.blockers?.length || 0, 0);
-  check('preflight locks scope-v2 hash', preflightOutput?.payload?.payloadHash || '', value => /^[a-f0-9]{64}$/.test(String(value)));
+  check('preflight locks scope-v3 hash', preflightOutput?.payload?.payloadHash || '', value => /^[a-f0-9]{64}$/.test(String(value)));
+  check('preflight declares scope-v3 algorithm', preflightOutput?.payload?.payloadHashAlgorithm || '', 'sha256-stable-json-scope-v3');
   check('preflight payload carries sourceDetailLock', Boolean(preflightOutput?.payload?.sourceDetailLock), true);
   check('preflight lock matched SKC', preflightOutput?.payload?.sourceDetailLock?.matchedSkcName, SOURCE_SKC);
   check('preflight lock content hash is sha256', preflightOutput?.payload?.sourceDetailLock?.detailContentSha256 || '', value => /^[a-f0-9]{64}$/.test(String(value)));
@@ -478,14 +623,353 @@ try {
     };
     return task;
   };
+  const resolvedCurrentLock = executorHooks.resolvePreflightProductLock(executeTask(), 'HL', {
+    expectedPayloadHash: preflightOutput.payload.payloadHash,
+  });
+  check('current execution resolver restores v3 lock', resolvedCurrentLock, value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+    && value?.sourceDetailLock?.detailContentSha256 === preflightOutput.payload.sourceDetailLock.detailContentSha256);
+  check('resolver rejects array expectedPayloadHash', executorHooks.resolvePreflightProductLock(executeTask(), 'HL', {
+    expectedPayloadHash: [preflightOutput.payload.payloadHash],
+  }), null);
+  check('resolver rejects object expectedPayloadHash', executorHooks.resolvePreflightProductLock(executeTask(), 'HL', {
+    expectedPayloadHash: {value: preflightOutput.payload.payloadHash},
+  }), null);
+  const currentMissingStoreTask = JSON.parse(JSON.stringify(executeTask()));
+  delete currentMissingStoreTask.execution.openApiProductExecutors[0].storeKey;
+  delete currentMissingStoreTask.execution.openApiProductExecutors[0].result.storeKey;
+  check('current execution resolver rejects missing storeKey', executorHooks.resolvePreflightProductLock(currentMissingStoreTask, 'HL', {
+    expectedPayloadHash: preflightOutput.payload.payloadHash,
+  }), null);
+  const beforeCurrentMissingStore = publishAttemptCount;
+  const currentMissingStoreRun = await runExecutor({
+    label: 'execute-current-missing-store-key',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: currentMissingStoreTask,
+  });
+  check('current missing storeKey execute blocked', currentMissingStoreRun.output?.state || '', 'blocked');
+  check('current missing storeKey forces re-preflight', currentMissingStoreRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+  checkNoPublishEvidence('current missing storeKey', currentMissingStoreRun.output, beforeCurrentMissingStore);
+  for (const [label, mutate] of [
+    ['execution-state-array', task => { task.execution.state = ['preflight_ready']; }],
+    ['row-state-array', task => { task.execution.openApiProductExecutors[0].state = ['ready_for_submit']; }],
+    ['row-state-null-with-valid-result-fallback', task => { task.execution.openApiProductExecutors[0].state = null; task.execution.openApiProductExecutors[0].result.state = 'ready_for_submit'; }],
+  ]) {
+    const pollutedTask = JSON.parse(JSON.stringify(executeTask()));
+    mutate(pollutedTask);
+    check(`resolver rejects ${label}`, executorHooks.resolvePreflightProductLock(pollutedTask, 'HL', {
+      expectedPayloadHash: preflightOutput.payload.payloadHash,
+    }), null);
+    const beforeMalformedState = publishAttemptCount;
+    const malformedStateRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: pollutedTask,
+    });
+    check(`${label} execute blocked`, malformedStateRun.output?.state || '', 'blocked');
+    check(`${label} forces re-preflight`, malformedStateRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+    checkNoPublishEvidence(label, malformedStateRun.output, beforeMalformedState);
+  }
+  for (const [label, malformedStoreKey] of [
+    ['result-storeKey-array', []],
+    ['result-storeKey-null', null],
+    ['result-storeKey-false', false],
+  ]) {
+    const pollutedTask = JSON.parse(JSON.stringify(executeTask()));
+    pollutedTask.execution.openApiProductExecutors[0].storeKey = 'HL';
+    pollutedTask.execution.openApiProductExecutors[0].result.storeKey = malformedStoreKey;
+    check(`resolver rejects ${label} despite valid wrapper fallback`, executorHooks.resolvePreflightProductLock(pollutedTask, 'HL', {
+      expectedPayloadHash: preflightOutput.payload.payloadHash,
+    }), null);
+    const beforeMalformedResultStore = publishAttemptCount;
+    const malformedResultStoreRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: pollutedTask,
+    });
+    check(`${label} execute blocked`, malformedResultStoreRun.output?.state || '', 'blocked');
+    check(`${label} forces re-preflight`, malformedResultStoreRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+    checkNoPublishEvidence(label, malformedResultStoreRun.output, beforeMalformedResultStore);
+  }
+  for (const [label, malformedTopLock] of [
+    ['top-level-lock-array', []],
+    ['top-level-lock-null', null],
+  ]) {
+    const pollutedOutput = JSON.parse(JSON.stringify(preflightOutput));
+    pollutedOutput.payload.generatedDraft ||= {};
+    pollutedOutput.payload.generatedDraft.sourceDetailLock = JSON.parse(JSON.stringify(preflightOutput.payload.sourceDetailLock));
+    pollutedOutput.payload.sourceDetailLock = malformedTopLock;
+    const pollutedTask = baseTask();
+    pollutedTask.execution = {
+      state: 'preflight_ready',
+      preflight: {ok: true, blockers: [], warnings: []},
+      openApiProductExecutors: [{...executionRow, result: pollutedOutput}],
+    };
+    check(`resolver rejects ${label} despite valid generated fallback`, executorHooks.resolvePreflightProductLock(pollutedTask, 'HL', {
+      expectedPayloadHash: preflightOutput.payload.payloadHash,
+    }), null);
+    const beforeMalformedTopLock = publishAttemptCount;
+    const malformedTopLockRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: pollutedTask,
+    });
+    check(`${label} execute blocked`, malformedTopLockRun.output?.state || '', 'blocked');
+    check(`${label} forces re-preflight`, malformedTopLockRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+    checkNoPublishEvidence(label, malformedTopLockRun.output, beforeMalformedTopLock);
+  }
+  for (const [label, detailFetchedAt] of [
+    ['top-level-lock-future-timestamp', FUTURE_AT],
+    ['top-level-lock-expired-timestamp', EXPIRED_AT],
+  ]) {
+    const pollutedOutput = JSON.parse(JSON.stringify(preflightOutput));
+    pollutedOutput.payload.sourceDetailLock.detailFetchedAt = detailFetchedAt;
+    const pollutedTask = baseTask();
+    pollutedTask.execution = {
+      state: 'preflight_ready',
+      preflight: {ok: true, blockers: [], warnings: []},
+      openApiProductExecutors: [{...executionRow, result: pollutedOutput}],
+    };
+    check(`resolver rejects ${label}`, executorHooks.resolvePreflightProductLock(pollutedTask, 'HL', {
+      expectedPayloadHash: preflightOutput.payload.payloadHash,
+    }), null);
+    const beforeInvalidExpectedTimestamp = publishAttemptCount;
+    const invalidExpectedTimestampRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: pollutedTask,
+    });
+    check(`${label} execute blocked`, invalidExpectedTimestampRun.output?.state || '', 'blocked');
+    check(`${label} forces re-preflight`, invalidExpectedTimestampRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+    checkNoPublishEvidence(label, invalidExpectedTimestampRun.output, beforeInvalidExpectedTimestamp);
+  }
+  const historyRow = {
+    storeKey: 'HL',
+    state: 'ready_for_submit',
+    ok: true,
+    sourceStore: SOURCE_STORE,
+    sourceSkc: SOURCE_SKC,
+    payloadHash: preflightOutput.payload.payloadHash,
+    payloadHashAlgorithm: preflightOutput.payload.payloadHashAlgorithm,
+    payload: {sourceDetailLock: preflightOutput.payload.sourceDetailLock},
+  };
+  const historyWriteAuditTask = baseTask();
+  historyWriteAuditTask.history = [{
+    event: 'openapi_product_preflight_ready',
+    writeAudit: {executorEvidence: [historyRow]},
+  }];
+  check('history writeAudit resolver restores v3 lock', executorHooks.resolvePreflightProductLock(historyWriteAuditTask, 'HL', {
+    expectedPayloadHash: preflightOutput.payload.payloadHash,
+  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+    && value?.sourceStore === SOURCE_STORE
+    && value?.sourceSkc === SOURCE_SKC);
+  const historyExecutorTask = baseTask();
+  historyExecutorTask.history = [{
+    event: 'openapi_product_preflight_ready',
+    openApiProductExecutors: [historyRow],
+  }];
+  check('history executor resolver restores v3 lock', executorHooks.resolvePreflightProductLock(historyExecutorTask, 'HL', {
+    expectedPayloadHash: preflightOutput.payload.payloadHash,
+  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+    && value?.sourceStore === SOURCE_STORE
+    && value?.sourceSkc === SOURCE_SKC);
+  const historyEventArrayTask = JSON.parse(JSON.stringify(historyWriteAuditTask));
+  historyEventArrayTask.history[0].event = ['openapi_product_preflight_ready'];
+  check('history resolver rejects array event name', executorHooks.resolvePreflightProductLock(historyEventArrayTask, 'HL', {
+    expectedPayloadHash: preflightOutput.payload.payloadHash,
+  }), null);
+  const beforeHistoryEventArray = publishAttemptCount;
+  const historyEventArrayRun = await runExecutor({
+    label: 'execute-history-event-array',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: historyEventArrayTask,
+  });
+  check('history event array execute blocked', historyEventArrayRun.output?.state || '', 'blocked');
+  check('history event array forces re-preflight', historyEventArrayRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+  checkNoPublishEvidence('history event array', historyEventArrayRun.output, beforeHistoryEventArray);
+  const historyWriteAuditOkFalseTask = JSON.parse(JSON.stringify(historyWriteAuditTask));
+  historyWriteAuditOkFalseTask.history[0].writeAudit.executorEvidence[0].ok = false;
+  check('history writeAudit resolver rejects ok=false row', executorHooks.resolvePreflightProductLock(historyWriteAuditOkFalseTask, 'HL', {
+    expectedPayloadHash: preflightOutput.payload.payloadHash,
+  }), null);
+  const beforeHistoryOkFalse = publishAttemptCount;
+  const historyOkFalseRun = await runExecutor({
+    label: 'execute-history-write-audit-ok-false',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: historyWriteAuditOkFalseTask,
+  });
+  check('history writeAudit ok=false execute blocked', historyOkFalseRun.output?.state || '', 'blocked');
+  check('history writeAudit ok=false forces re-preflight', historyOkFalseRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+  checkNoPublishEvidence('history writeAudit ok=false', historyOkFalseRun.output, beforeHistoryOkFalse);
+  for (const [historyKind, taskFactory] of [
+    ['writeAudit', () => JSON.parse(JSON.stringify(historyWriteAuditTask))],
+    ['executor', () => JSON.parse(JSON.stringify(historyExecutorTask))],
+  ]) {
+    for (const tamper of [
+      {label: 'blocked row state', apply: row => { row.state = 'blocked'; }},
+      {label: 'error row state', apply: row => { row.state = 'error'; }},
+      {label: 'missing row state', apply: row => { delete row.state; }},
+      {label: 'array row state', apply: row => { row.state = ['ready_for_submit']; }},
+      {label: 'explicit result null', apply: row => { row.result = null; }},
+      {label: 'explicit result false', apply: row => { row.result = false; }},
+      {label: 'inferredSource null', apply: row => { row.payload.inferredSource = null; }},
+      {label: 'inferredSource false', apply: row => { row.payload.inferredSource = false; }},
+      {label: 'inferredSource array', apply: row => { row.payload.inferredSource = []; }},
+      {label: 'missing storeKey', apply: row => { delete row.storeKey; }},
+      {label: 'sourceStore trailing LF', apply: row => { row.sourceStore = `${row.sourceStore}\n`; }},
+      {label: 'sourceSkc trailing LF', apply: row => { row.sourceSkc = `${row.sourceSkc}\n`; }},
+      {label: 'sourceStore trailing space', apply: row => { row.sourceStore = `${row.sourceStore} `; }},
+      {label: 'sourceSkc trailing space', apply: row => { row.sourceSkc = `${row.sourceSkc} `; }},
+      {label: 'source lock SPU trailing space', apply: row => { row.payload.sourceDetailLock.matchedSpuName = `${row.payload.sourceDetailLock.matchedSpuName} `; }},
+      {label: 'sourceStore array', apply: row => { row.sourceStore = [SOURCE_STORE]; }},
+      {label: 'sourceStore object', apply: row => { row.sourceStore = {value: SOURCE_STORE}; }},
+      {label: 'sourceSkc array', apply: row => { row.sourceSkc = [SOURCE_SKC]; }},
+      {label: 'sourceSkc object', apply: row => { row.sourceSkc = {value: SOURCE_SKC}; }},
+      {label: 'source lock source array', apply: row => { row.payload.sourceDetailLock.source = [baseLock.source]; }},
+      {label: 'source lock SPU object', apply: row => { row.payload.sourceDetailLock.matchedSpuName = {value: SOURCE_SPU}; }},
+      {label: 'source lock SKC array', apply: row => { row.payload.sourceDetailLock.matchedSkcName = [SOURCE_SKC]; }},
+      {label: 'source lock SHA object', apply: row => { row.payload.sourceDetailLock.detailContentSha256 = {value: baseLock.detailContentSha256}; }},
+      {label: 'source lock future timestamp', apply: row => { row.payload.sourceDetailLock.detailFetchedAt = FUTURE_AT; }},
+      {label: 'source lock expired timestamp', apply: row => { row.payload.sourceDetailLock.detailFetchedAt = EXPIRED_AT; }},
+      {label: 'payloadHash array', apply: row => { row.payloadHash = [preflightOutput.payload.payloadHash]; }},
+      {label: 'payloadHash object', apply: row => { row.payloadHash = {value: preflightOutput.payload.payloadHash}; }},
+      {label: 'payloadHashAlgorithm array', apply: row => { row.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }},
+      {label: 'payloadHashAlgorithm object', apply: row => { row.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }},
+    ]) {
+      const tamperedTask = taskFactory();
+      const row = historyKind === 'writeAudit'
+        ? tamperedTask.history[0].writeAudit.executorEvidence[0]
+        : tamperedTask.history[0].openApiProductExecutors[0];
+      tamper.apply(row);
+      check(`${historyKind} history resolver rejects ${tamper.label}`, executorHooks.resolvePreflightProductLock(tamperedTask, 'HL', {
+        expectedPayloadHash: preflightOutput.payload.payloadHash,
+      }), null);
+      const beforeTamperedHistory = publishAttemptCount;
+      const tamperedHistoryRun = await runExecutor({
+        label: `execute-${historyKind}-${tamper.label}-history`,
+        mode: 'execute',
+        executionContext: executeContext,
+        task: tamperedTask,
+      });
+      check(`${historyKind} ${tamper.label} history execute blocked`, tamperedHistoryRun.output?.state || '', 'blocked');
+      check(`${historyKind} ${tamper.label} history forces re-preflight`, tamperedHistoryRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+      checkNoPublishEvidence(`${historyKind} ${tamper.label} history`, tamperedHistoryRun.output, beforeTamperedHistory);
+    }
+  }
+  for (const algorithm of ['sha256-stable-json-scope-v2', '']) {
+    const legacyOutput = JSON.parse(JSON.stringify(preflightOutput));
+    legacyOutput.payload.payloadHashAlgorithm = algorithm;
+    const legacyTask = baseTask();
+    legacyTask.execution = {
+      state: 'preflight_ready',
+      preflight: {ok: true, blockers: [], warnings: []},
+      openApiProductExecutors: [{...executionRow, result: legacyOutput}],
+    };
+    check(`resolver rejects ${algorithm || 'missing'} algorithm`, executorHooks.resolvePreflightProductLock(legacyTask, 'HL', {
+      expectedPayloadHash: preflightOutput.payload.payloadHash,
+    }), null);
+  }
+  for (const [label, mutate] of [
+    ['current payloadHash array', output => { output.payload.payloadHash = [preflightOutput.payload.payloadHash]; }],
+    ['current payloadHash object', output => { output.payload.payloadHash = {value: preflightOutput.payload.payloadHash}; }],
+    ['current payloadHashAlgorithm array', output => { output.payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }],
+    ['current payloadHashAlgorithm object', output => { output.payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }],
+  ]) {
+    const pollutedOutput = JSON.parse(JSON.stringify(preflightOutput));
+    mutate(pollutedOutput);
+    const pollutedTask = baseTask();
+    pollutedTask.execution = {
+      state: 'preflight_ready',
+      preflight: {ok: true, blockers: [], warnings: []},
+      openApiProductExecutors: [{...executionRow, result: pollutedOutput}],
+    };
+    check(`resolver rejects ${label}`, executorHooks.resolvePreflightProductLock(pollutedTask, 'HL', {
+      expectedPayloadHash: preflightOutput.payload.payloadHash,
+    }), null);
+    const beforePollutedCurrent = publishAttemptCount;
+    const pollutedCurrentRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: pollutedTask,
+    });
+    check(`${label} execute blocked`, pollutedCurrentRun.output?.state || '', 'blocked');
+    check(`${label} forces re-preflight`, pollutedCurrentRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+    checkNoPublishEvidence(label, pollutedCurrentRun.output, beforePollutedCurrent);
+  }
 
-  // Fresh execute: same fixture and preflight lock -> publishOrEdit once.
+  // A byte-identical source observed at a newer fresh timestamp must retain the
+  // same confirmation hash. Execute still compares the full persisted locks,
+  // including freshness and content, before publishOrEdit.
+  const refreshedAt = new Date().toISOString();
+  await writeDetail({detailFetchedAt: refreshedAt});
+  const timestampRefresh = await runExecutor({label: 'preflight-timestamp-refresh', mode: 'dry-run'});
+  check('timestamp-only refresh parsed output', Boolean(timestampRefresh.output), true);
+  check('timestamp-only refresh keeps scope-v3 hash', timestampRefresh.output?.payload?.payloadHash || '', preflightOutput.payload.payloadHash);
+  check('timestamp-only refresh updates full evidence timestamp', timestampRefresh.output?.payload?.sourceDetailLock?.detailFetchedAt || '', refreshedAt);
+  check('timestamp-only refresh keeps content hash', timestampRefresh.output?.payload?.sourceDetailLock?.detailContentSha256 || '', preflightOutput.payload.sourceDetailLock.detailContentSha256);
+  check('timestamp-only refresh does not publish', publishAttemptCount, 0);
+
+  // Fresh execute: same content/identity with a refreshed timestamp and the
+  // original preflight lock -> publishOrEdit once.
   const fresh = await runExecutor({label: 'execute-fresh', mode: 'execute', executionContext: executeContext, task: executeTask()});
   check('fresh execute parsed output', Boolean(fresh.output), true);
   check('fresh execute gate active and ok', fresh.output?.evidence?.sourceDetailLockGate, value => value?.gateActive === true && value?.ok === true);
   check('fresh execute reaches publishOrEdit once', publishAttemptCount, 1);
   check('fresh execute openapi calls include publishOrEdit once', (fresh.output?.openapi?.calls || []).filter(call => call?.path === '/open-api/goods/product/publishOrEdit').length, 1);
   check('fresh execute publishResult present', Boolean(fresh.output?.publishResult), true);
+  for (const [label, expectedPayloadHash] of [
+    ['array-expected-payload-hash', [preflightOutput.payload.payloadHash]],
+    ['object-expected-payload-hash', {value: preflightOutput.payload.payloadHash}],
+  ]) {
+    const beforeInvalidExpectedHash = publishAttemptCount;
+    const invalidExpectedHashRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: {...executeContext, expectedPayloadHash},
+      task: executeTask(),
+    });
+    check(`${label} execute blocked`, invalidExpectedHashRun.output?.state || '', 'blocked');
+    check(`${label} reports invalid type`, invalidExpectedHashRun.output?.blockers || [], rows => rows.some(row => /expectedPayloadHash 类型或格式无效/.test(String(row))));
+    checkNoPublishEvidence(label, invalidExpectedHashRun.output, beforeInvalidExpectedHash);
+  }
+  const beforeInvalidExpectedFallback = publishAttemptCount;
+  const invalidExpectedFallbackRun = await runExecutor({
+    label: 'execute-invalid-top-expected-with-valid-request-fallback',
+    mode: 'execute',
+    executionContext: {
+      ...executeContext,
+      expectedPayloadHash: [],
+      request: {expectedPayloadHash: preflightOutput.payload.payloadHash},
+    },
+    task: executeTask(),
+  });
+  check('invalid top expected hash does not use valid request fallback', invalidExpectedFallbackRun.output?.state || '', 'blocked');
+  check('invalid top expected hash reports invalid type', invalidExpectedFallbackRun.output?.blockers || [], rows => rows.some(row => /expectedPayloadHash 类型或格式无效/.test(String(row))));
+  checkNoPublishEvidence('invalid top expected hash fallback', invalidExpectedFallbackRun.output, beforeInvalidExpectedFallback);
+
+  for (const [label, detailFetchedAt] of [
+    ['array-current-detail-timestamp', [new Date().toISOString()]],
+    ['object-current-detail-timestamp', {value: new Date().toISOString()}],
+  ]) {
+    await writeDetail({detailFetchedAt});
+    const beforeInvalidTimestamp = publishAttemptCount;
+    const invalidTimestampRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: executeTask(),
+    });
+    check(`${label} execute blocked`, invalidTimestampRun.output?.state || '', 'blocked');
+    check(`${label} stable code`, invalidTimestampRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_TIMESTAMP_INVALID'));
+    checkNoPublishEvidence(label, invalidTimestampRun.output, beforeInvalidTimestamp);
+  }
   if (publishAttemptCount !== 1) {
     result.freshDebug = {
       state: fresh.output?.state || null,
@@ -507,7 +991,7 @@ try {
   check('expired gate blocked', expired.output?.evidence?.sourceDetailLockGate?.ok, false);
   check('expired gate code', expired.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_EXPIRED'));
   check('expired gate message in blockers', expired.output?.blockers || [], rows => rows.some(row => /已超过 24 小时/.test(String(row))));
-  check('expired scope-v2 hash invalidated', expired.output?.blockers || [], rows => rows.some(row => /payload hash 与 dry-run 锁定值不一致/.test(String(row))));
+  check('expired timestamp alone keeps scope-v3 hash', expired.output?.payload?.payloadHash || '', preflightOutput.payload.payloadHash);
   checkNoPublishEvidence('expired execute', expired.output, beforeExpired);
 
   // Content drift with fresh timestamp: content hash gate blocks.
@@ -545,9 +1029,121 @@ try {
   check('spu drift gate missing lock', spuDrift.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_MISSING'));
   checkNoPublishEvidence('spu drift execute', spuDrift.output, beforeSpuDrift);
 
+  // Old v2 or algorithm-less preflight evidence must never be consumed by the
+  // v3 executor, even when the 64-character hash text happens to match.
+  await writeDetail({detailFetchedAt: FRESH_AT});
+  for (const [label, algorithm] of [['v2', 'sha256-stable-json-scope-v2'], ['missing-algorithm', '']]) {
+    const legacyAlgorithmOutput = JSON.parse(JSON.stringify(preflightOutput));
+    legacyAlgorithmOutput.payload.payloadHashAlgorithm = algorithm;
+    const legacyAlgorithmTask = baseTask();
+    legacyAlgorithmTask.execution = {
+      state: 'preflight_ready',
+      preflight: {ok: true, blockers: [], warnings: []},
+      openApiProductExecutors: [{...executionRow, result: legacyAlgorithmOutput}],
+    };
+    const beforeLegacyAlgorithm = publishAttemptCount;
+    const legacyAlgorithmRun = await runExecutor({
+      label: `execute-${label}-preflight`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: legacyAlgorithmTask,
+    });
+    check(`${label} preflight state blocked`, legacyAlgorithmRun.output?.state || '', 'blocked');
+    check(`${label} preflight forces v3 re-preflight`, legacyAlgorithmRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+    checkNoPublishEvidence(`${label} preflight`, legacyAlgorithmRun.output, beforeLegacyAlgorithm);
+  }
+  const malformedLockOutput = JSON.parse(JSON.stringify(preflightOutput));
+  malformedLockOutput.payload.sourceDetailLock.source = 'evil_source';
+  if (malformedLockOutput.payload?.generatedDraft?.sourceDetailLock) {
+    malformedLockOutput.payload.generatedDraft.sourceDetailLock.source = 'evil_source';
+  }
+  const malformedLockTask = baseTask();
+  malformedLockTask.execution = {
+    state: 'preflight_ready',
+    preflight: {ok: true, blockers: [], warnings: []},
+    openApiProductExecutors: [{...executionRow, result: malformedLockOutput}],
+  };
+  const beforeMalformedLock = publishAttemptCount;
+  const malformedLockRun = await runExecutor({
+    label: 'execute-malformed-preflight-lock',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: malformedLockTask,
+  });
+  check('malformed preflight lock execute blocked', malformedLockRun.output?.state || '', 'blocked');
+  check('malformed preflight lock forces re-preflight', malformedLockRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+  checkNoPublishEvidence('malformed preflight lock', malformedLockRun.output, beforeMalformedLock);
+  const controlLockOutput = JSON.parse(JSON.stringify(preflightOutput));
+  controlLockOutput.payload.sourceDetailLock.source = `${controlLockOutput.payload.sourceDetailLock.source}\n`;
+  if (controlLockOutput.payload?.generatedDraft?.sourceDetailLock) {
+    controlLockOutput.payload.generatedDraft.sourceDetailLock.source = `${controlLockOutput.payload.generatedDraft.sourceDetailLock.source}\n`;
+  }
+  const controlLockTask = baseTask();
+  controlLockTask.execution = {
+    state: 'preflight_ready',
+    preflight: {ok: true, blockers: [], warnings: []},
+    openApiProductExecutors: [{...executionRow, result: controlLockOutput}],
+  };
+  const beforeControlLock = publishAttemptCount;
+  const controlLockRun = await runExecutor({
+    label: 'execute-control-preflight-lock',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: controlLockTask,
+  });
+  check('control preflight lock execute blocked', controlLockRun.output?.state || '', 'blocked');
+  check('control preflight lock forces re-preflight', controlLockRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
+  checkNoPublishEvidence('control preflight lock', controlLockRun.output, beforeControlLock);
+  const controlStandardTask = executeTask();
+  controlStandardTask.standardGoodsSn = 'ABC\nDEF';
+  const beforeControlStandard = publishAttemptCount;
+  const controlStandardRun = await runExecutor({
+    label: 'execute-control-standard-goods',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: controlStandardTask,
+  });
+  check('control standard goods execute blocked', controlStandardRun.output?.state || '', 'blocked');
+  check('control standard goods stable code', controlStandardRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+  checkNoPublishEvidence('control standard goods', controlStandardRun.output, beforeControlStandard);
+  for (const [label, standardGoodsSn] of [
+    ['array-standard-goods', [STANDARD_GOODS_SN]],
+    ['object-standard-goods', {value: STANDARD_GOODS_SN}],
+  ]) {
+    const invalidTask = executeTask();
+    invalidTask.standardGoodsSn = standardGoodsSn;
+    const beforeInvalidStandard = publishAttemptCount;
+    const invalidStandardRun = await runExecutor({
+      label: `execute-${label}`,
+      mode: 'execute',
+      executionContext: executeContext,
+      task: invalidTask,
+    });
+    check(`${label} execute blocked`, invalidStandardRun.output?.state || '', 'blocked');
+    check(`${label} stable code`, invalidStandardRun.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_SCOPE_INVALID'));
+    checkNoPublishEvidence(label, invalidStandardRun.output, beforeInvalidStandard);
+  }
+
+  for (const [label, mutate] of [
+    ['task sourceSkc array', task => { task.targets.sourceSkc = [SOURCE_SKC]; }],
+    ['task sourceSkc object', task => { task.targets.sourceSkc = {value: SOURCE_SKC}; }],
+    ['task sourceStores nested array', task => { task.targets.sourceStores = [[SOURCE_STORE]]; }],
+    ['task sourceStores object', task => { task.targets.sourceStores = {value: SOURCE_STORE}; }],
+  ]) {
+    const invalidTask = baseTask();
+    mutate(invalidTask);
+    const resolved = executorHooks.resolveLockedSourceScope({
+      payloadFound: {payload: boundPayload, inferred: {sourceStore: SOURCE_STORE, sourceSkc: SOURCE_SKC}},
+      task: invalidTask,
+      intents: invalidTask.intents,
+      targetStore: 'HL',
+    });
+    check(`${label} blocks exact source resolution`, resolved.blockers, rows => rows.some(row => /类型或格式无效/.test(String(row))));
+  }
+
   // Old-version preflight: hash-only lock without sourceDetailLock must force
   // re-preflight; execute is blocked before publishOrEdit even though the
-  // scope-v2 hash itself still matches.
+  // scope-v3 hash itself still matches.
   await writeDetail({detailFetchedAt: FRESH_AT});
   const oldPreflightOutput = JSON.parse(JSON.stringify(preflightOutput));
   delete oldPreflightOutput.payload.sourceDetailLock;

@@ -203,6 +203,27 @@ function firstNonEmpty(...values) {
   return '';
 }
 
+function firstOwnField(candidates = []) {
+  for (const [owner, key] of candidates) {
+    if (owner && typeof owner === 'object' && Object.prototype.hasOwnProperty.call(owner, key)) {
+      return {present: true, value: owner[key]};
+    }
+  }
+  return {present: false, value: ''};
+}
+
+function ownObjectField(owner, key) {
+  if (!owner || typeof owner !== 'object' || !Object.prototype.hasOwnProperty.call(owner, key)) {
+    return {present: false, valid: true, value: null};
+  }
+  const value = owner[key];
+  return {
+    present: true,
+    valid: Boolean(value && typeof value === 'object' && !Array.isArray(value)),
+    value,
+  };
+}
+
 function stableJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -225,7 +246,7 @@ function appendUnique(target, values) {
 }
 
 function taskStandardGoodsSn(task = null, executionContext = null) {
-  const explicit = safeString(firstNonEmpty(
+  const explicitRaw = firstNonEmpty(
     task?.standardGoodsSn,
     task?.standard_goods_sn,
     task?.targets?.standardGoodsSn,
@@ -236,7 +257,10 @@ function taskStandardGoodsSn(task = null, executionContext = null) {
     executionContext?.standard_goods_sn,
     executionContext?.targets?.standardGoodsSn,
     executionContext?.targets?.standard_goods_sn,
-  ), 240);
+  );
+  if (explicitRaw !== '' && typeof explicitRaw !== 'string') return '';
+  if (/[\u0000-\u001f\u007f]/u.test(String(explicitRaw ?? ''))) return '';
+  const explicit = safeString(explicitRaw, 240);
   if (explicit) return buildProductDisplayName(explicit);
   for (const ref of taskProductRefs(task)) {
     const text = safeString(ref, 240);
@@ -693,7 +717,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
       // The bound payload (root openapiPublishPayload or approved asset) stays
       // authoritative; snapshot hydration is read-only metadata enrichment.
       // The exact task source lock is preserved and enforced separately by the
-      // source scope resolution and the scope-v2 execution hash.
+      // source scope resolution and the scope-v3 execution hash.
       return {
         ...existing,
         inferred,
@@ -781,7 +805,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
 // unique task source lock (targets.sourceStores single value + sourceSkc) MUST
 // resolve and preserve that lock, even when the payload comes from a root
 // openapiPublishPayload or an approved asset. The resolved store/skc feed the
-// scope-v2 execution hash, the provenance guard and the executor projection.
+// scope-v3 execution hash, the provenance guard and the executor projection.
 // Missing/multi-valued locks or a conflict between the exact lock and the
 // inferred source fail closed with a blocker instead of an empty source.
 function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore = ''}) {
@@ -790,12 +814,19 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
   // itself: single-valued targets.sourceStores plus a non-empty
   // targets.sourceSkc. A copy task that declares NO source at all is allowed
   // through the legacy/approved-asset flow (source may stay empty and the
-  // scope-v2 hash stays stable). Partial declarations, multi-valued stores and
+  // scope-v3 hash stays stable). Partial declarations, multi-valued stores and
   // exact-vs-inferred conflicts fail closed.
-  const declaredSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
-  const declaredSourceSkc = safeString(task?.targets?.sourceSkc || '', 160);
-  const hasAnySourceDeclaration = declaredSourceStores.length > 0 || Boolean(declaredSourceSkc);
-  const taskExact = declaredSourceStores.length === 1 && declaredSourceSkc
+  const rawDeclaredSourceStores = asArray(task?.targets?.sourceStores);
+  const rawDeclaredSourceSkc = task?.targets?.sourceSkc;
+  const declaredSourceStoreInvalid = rawDeclaredSourceStores.some(value => !validSourceStoreKey(value));
+  const declaredSourceSkcPresent = rawDeclaredSourceSkc !== undefined && rawDeclaredSourceSkc !== null && rawDeclaredSourceSkc !== '';
+  const declaredSourceSkcInvalid = declaredSourceSkcPresent && !validSourceSkc(rawDeclaredSourceSkc);
+  const declaredSourceStores = declaredSourceStoreInvalid
+    ? []
+    : [...new Set(rawDeclaredSourceStores.map(value => String(value)).filter(Boolean))];
+  const declaredSourceSkc = declaredSourceSkcInvalid ? '' : (declaredSourceSkcPresent ? rawDeclaredSourceSkc : '');
+  const hasAnySourceDeclaration = rawDeclaredSourceStores.length > 0 || declaredSourceSkcPresent;
+  const taskExact = !declaredSourceStoreInvalid && !declaredSourceSkcInvalid && declaredSourceStores.length === 1 && declaredSourceSkc
     ? {sourceStore: declaredSourceStores[0], sourceSkc: declaredSourceSkc}
     : null;
   const inferred = payloadFound?.inferred && typeof payloadFound.inferred === 'object' ? payloadFound.inferred : {};
@@ -813,6 +844,9 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
     160,
   );
   const blockers = [];
+  if (copyProductDraft && (declaredSourceStoreInvalid || declaredSourceSkcInvalid)) {
+    blockers.push('copy_product_draft 任务的 sourceStores/sourceSkc 类型或格式无效，禁止发布，需重新创建精确字符串来源锁。');
+  }
   if (copyProductDraft && hasAnySourceDeclaration && !taskExact) {
     blockers.push(declaredSourceStores.length > 1
       ? `copy_product_draft 任务声明的 sourceStores 不唯一（${declaredSourceStores.join('、')}），禁止发布，需人工修正精确源链接。`
@@ -838,9 +872,121 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
 }
 
 const SOURCE_DETAIL_LOCK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v3';
+const PRODUCT_EXECUTION_HASH_SCHEMA = 'copy_product_draft_execution_scope/v3';
+const SOURCE_DETAIL_LOCK_SOURCES = new Set([
+  'openapi_product_detail_snapshot',
+  'openapi_product_detail_cached_fallback',
+]);
+
+function hasControlCharacters(value) {
+  return /[\u0000-\u001f\u007f]/u.test(String(value ?? ''));
+}
+
+function validSourceStoreKey(value) {
+  if (typeof value !== 'string') return false;
+  if (hasControlCharacters(value)) return false;
+  const raw = String(value ?? '');
+  return raw === normalizeStoreKey(raw) && /^[A-Z][A-Z0-9_-]{1,31}$/.test(raw);
+}
+
+function validSourceSkc(value) {
+  if (typeof value !== 'string') return false;
+  if (hasControlCharacters(value)) return false;
+  const raw = String(value ?? '');
+  return raw.length <= 160 && /^s[abv]\d{8,}$/i.test(raw);
+}
+
+function validSourceSpu(value) {
+  if (typeof value !== 'string') return false;
+  if (hasControlCharacters(value)) return false;
+  const raw = String(value ?? '');
+  return raw.length <= 160 && /^[abv]\d{8,}$/i.test(raw);
+}
+
+function validSourceDetailSource(value) {
+  if (typeof value !== 'string') return false;
+  if (hasControlCharacters(value)) return false;
+  return SOURCE_DETAIL_LOCK_SOURCES.has(String(value ?? ''));
+}
+
+function validLowerSha256(value) {
+  if (typeof value !== 'string') return false;
+  if (hasControlCharacters(value)) return false;
+  return /^[a-f0-9]{64}$/.test(String(value ?? ''));
+}
+
+function validRecoverableSourceDetailLock(lock, sourceSkc = '') {
+  if (!lock || typeof lock !== 'object' || Array.isArray(lock)) return false;
+  if (typeof lock.detailFetchedAt !== 'string') return false;
+  const fetchedAt = lock.detailFetchedAt;
+  const fetchedMs = Date.parse(fetchedAt);
+  const checkedMs = Date.now();
+  return validSourceDetailSource(lock.source)
+    && validSourceSpu(lock.matchedSpuName)
+    && validSourceSkc(lock.matchedSkcName)
+    && (!sourceSkc || String(lock.matchedSkcName) === String(sourceSkc))
+    && validLowerSha256(lock.detailContentSha256)
+    && !hasControlCharacters(fetchedAt)
+    && Number.isFinite(fetchedMs)
+    && fetchedMs <= checkedMs
+    && checkedMs - fetchedMs <= SOURCE_DETAIL_LOCK_MAX_AGE_MS;
+}
+
+function validStandardGoodsSn(value) {
+  if (typeof value !== 'string') return false;
+  const raw = String(value ?? '');
+  if (/[\u0000-\u001f\u007f]/u.test(raw)) return false;
+  if (raw !== raw.trim()) return false;
+  const text = safeString(raw, 160);
+  return Boolean(text && /[\p{L}\p{N}]/u.test(text));
+}
+
+function executionHashScalar(value, max = 160) {
+  if (typeof value === 'string') return value.slice(0, max);
+  return {invalidType: Array.isArray(value) ? 'array' : (value === null ? 'null' : typeof value)};
+}
 
 function sourceDetailLockBlocker(code, message) {
   return {code, message: safeString(message, 1000)};
+}
+
+// The execution-confirmation hash locks source identity and source content,
+// not the observation timestamp. detailFetchedAt remains part of the persisted
+// evidence and the 24-hour write gate below, but including it in the hash makes
+// an otherwise byte-identical source refresh invalidate approval forever.
+// Keep this projection explicit and fail-closed: malformed/missing values still
+// affect the hash and are rejected separately by validateSourceDetailLockForWrite.
+function sourceDetailLockExecutionHashScope(lock = null) {
+  if (!lock || typeof lock !== 'object' || Array.isArray(lock)) return null;
+  return {
+    source: executionHashScalar(lock.source, 160),
+    matchedSkcName: executionHashScalar(lock.matchedSkcName, 160),
+    matchedSpuName: executionHashScalar(lock.matchedSpuName, 160),
+    detailContentSha256: executionHashScalar(lock.detailContentSha256, 120),
+  };
+}
+
+function buildProductExecutionHashScope({
+  payload = null,
+  targetStore = '',
+  sourceStore = '',
+  sourceSkc = '',
+  standardGoodsSn = '',
+  sourceDetailLock = null,
+} = {}) {
+  return {
+    schema: PRODUCT_EXECUTION_HASH_SCHEMA,
+    payload,
+    targetStore: executionHashScalar(targetStore, 80),
+    sourceStore: executionHashScalar(sourceStore, 80),
+    sourceSkc: executionHashScalar(sourceSkc, 160),
+    // Preserve internal bytes in the hash domain. Validation rejects controls,
+    // but even an invalid raw caller cannot make "ABC\nDEF" collide with the
+    // valid canonical value "ABC DEF" before the gate blocks it.
+    standardGoodsSn: executionHashScalar(standardGoodsSn, 160),
+    sourceDetailLock: sourceDetailLockExecutionHashScope(sourceDetailLock),
+  };
 }
 
 // 写前详情锁门：把本次 hydration 得到的当前 sourceDetailLock 与预检锁定的锁
@@ -850,12 +996,13 @@ function sourceDetailLockBlocker(code, message) {
 //   bound payload hydration 失败/无锁是结构化 blocker，不能仅 warning 后继续。
 // - requireExpectedLock=true（copy_product_draft 的 execute）：预检锁必须带
 //   sourceDetailLock；旧版只有 payload hash 的预检强制重新 dry-run。
-// - 其它流程（维护执行等）无预检锁时沿用既有 scope-v2 hash 覆盖，不额外阻断。
+  // - 其它流程（维护执行等）无预检锁时沿用既有 scope-v3 hash 覆盖，不额外阻断。
 function validateSourceDetailLockForWrite({
   currentLock = null,
   expectedLock = null,
   sourceStore = '',
   sourceSkc = '',
+  standardGoodsSn = '',
   now = new Date(),
   required = false,
   requireExpectedLock = false,
@@ -874,7 +1021,7 @@ function validateSourceDetailLockForWrite({
       gateActive: false,
       blockers: [],
       checkedAt,
-      note: '没有预检详情锁且当前流程不强制详情锁；沿用既有流程，scope-v2 hash 仍覆盖本次执行范围。',
+      note: '没有预检详情锁且当前流程不强制详情锁；沿用既有流程，scope-v3 hash 仍覆盖本次执行范围。',
     };
   }
   if (!current) {
@@ -887,7 +1034,27 @@ function validateSourceDetailLockForWrite({
   const expectedSkc = safeString(expected?.matchedSkcName, 160);
   const currentSpu = safeString(current.matchedSpuName, 160);
   const currentSkc = safeString(current.matchedSkcName, 160);
-  if (safeString(sourceSkc, 160) && currentSkc && currentSkc !== safeString(sourceSkc, 160)) {
+  const currentSource = safeString(current.source, 160);
+  const currentContentHash = safeString(current.detailContentSha256, 120).toLowerCase();
+  const exactSourceStore = normalizeStoreKey(sourceStore);
+  const exactSourceSkc = safeString(sourceSkc, 160);
+  const exactStandardGoodsSn = safeString(standardGoodsSn, 160);
+  if ((required || expected) && !validSourceStoreKey(sourceStore)) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_SCOPE_INVALID', `写前详情锁 sourceStore 格式无效（当前=${exactSourceStore || '空'}），禁止写入。`));
+  }
+  if ((required || expected) && !validSourceSkc(sourceSkc)) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_SCOPE_INVALID', `写前详情锁 sourceSkc 格式无效（当前=${exactSourceSkc || '空'}），禁止写入。`));
+  }
+  if (required && !validStandardGoodsSn(standardGoodsSn)) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_SCOPE_INVALID', `copy_product_draft 写前详情锁目标标准货号无效（当前=${exactStandardGoodsSn || '空'}），禁止写入。`));
+  }
+  if ((required || expected) && (!validSourceDetailSource(current.source)
+    || !validSourceSpu(current.matchedSpuName)
+    || !validSourceSkc(current.matchedSkcName)
+    || !validLowerSha256(current.detailContentSha256))) {
+    blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_SCOPE_INVALID', '写前详情锁的 source 枚举、SPU、SKC 或 content SHA 格式无效，禁止写入。'));
+  }
+  if (exactSourceSkc && currentSkc !== exactSourceSkc) {
     blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁 SKC 漂移：任务锁定源 ${safeString(sourceStore, 80)}/${safeString(sourceSkc, 160)}，当前详情实际 SKC=${currentSkc}，禁止写入。`));
   }
   if (expectedSkc && currentSkc && currentSkc !== expectedSkc) {
@@ -896,9 +1063,9 @@ function validateSourceDetailLockForWrite({
   if (expectedSpu && currentSpu && currentSpu !== expectedSpu) {
     blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁 SPU 漂移：预检锁定 SPU=${expectedSpu}，当前详情实际 SPU=${currentSpu}，禁止写入。`));
   }
-  const fetchedText = safeString(current.detailFetchedAt, 80);
+  const fetchedText = typeof current.detailFetchedAt === 'string' ? current.detailFetchedAt : '';
   const fetchedMs = Date.parse(fetchedText);
-  if (!fetchedText || !Number.isFinite(fetchedMs)) {
+  if (!fetchedText || hasControlCharacters(fetchedText) || !Number.isFinite(fetchedMs)) {
     blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_TIMESTAMP_INVALID', `写前详情锁缺少合法行级 detailFetchedAt（当前=${fetchedText || '空'}），禁止写入。`));
   } else {
     if (fetchedMs > checkedMs) {
@@ -909,10 +1076,28 @@ function validateSourceDetailLockForWrite({
     }
   }
   if (expected) {
+    const expectedSource = safeString(expected.source, 160);
     const expectedHash = safeString(expected.detailContentSha256, 120).toLowerCase();
-    const currentHash = safeString(current.detailContentSha256, 120).toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(expectedHash) || !/^[a-f0-9]{64}$/.test(currentHash) || expectedHash !== currentHash) {
-      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_CONTENT_DRIFT', `写前详情内容 hash 漂移：预检锁定 ${expectedHash || '空'}，当前详情 ${currentHash || '空'}，禁止写入。`));
+    if (!validSourceDetailSource(expected.source)
+      || !validSourceSpu(expected.matchedSpuName)
+      || !validSourceSkc(expected.matchedSkcName)
+      || !validLowerSha256(expected.detailContentSha256)) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_PREFLIGHT_INVALID', '预检 sourceDetailLock 的 source 枚举、SPU、SKC 或 content SHA 格式无效，必须重新 dry-run。'));
+    }
+    const expectedFetchedText = typeof expected.detailFetchedAt === 'string' ? expected.detailFetchedAt : '';
+    const expectedFetchedMs = Date.parse(expectedFetchedText);
+    if (!expectedFetchedText || hasControlCharacters(expectedFetchedText) || !Number.isFinite(expectedFetchedMs)) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_PREFLIGHT_INVALID', '预检 sourceDetailLock 的 detailFetchedAt 类型或格式无效，必须重新 dry-run。'));
+    } else if (expectedFetchedMs > checkedMs) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_PREFLIGHT_FUTURE', `预检 sourceDetailLock 的 detailFetchedAt=${expectedFetchedText} 晚于执行时间，必须重新 dry-run。`));
+    } else if (checkedMs - expectedFetchedMs > SOURCE_DETAIL_LOCK_MAX_AGE_MS) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_PREFLIGHT_EXPIRED', `预检 sourceDetailLock 的 detailFetchedAt=${expectedFetchedText} 已超过 24 小时，必须重新 dry-run。`));
+    }
+    if (expectedSource && currentSource && expectedSource !== currentSource) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁来源类型漂移：预检锁定 ${expectedSource}，当前详情 ${currentSource}，禁止写入。`));
+    }
+    if (!/^[a-f0-9]{64}$/.test(expectedHash) || !/^[a-f0-9]{64}$/.test(currentContentHash) || expectedHash !== currentContentHash) {
+      blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_CONTENT_DRIFT', `写前详情内容 hash 漂移：预检锁定 ${expectedHash || '空'}，当前详情 ${currentContentHash || '空'}，禁止写入。`));
     }
   }
   return {ok: blockers.length === 0, gateActive: true, blockers, checkedAt};
@@ -1395,69 +1580,105 @@ function titleMaxLengthMap(info) {
 }
 
 function isSha256PayloadHash(value) {
-  return /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 }
 
 function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
-  const result = row?.result && typeof row.result === 'object' ? row.result : row;
+  const resultField = ownObjectField(row, 'result');
+  if (resultField.present && !resultField.valid) return null;
+  const result = resultField.present ? resultField.value : row;
   if (!result || typeof result !== 'object') return null;
-  const storeKey = normalizeStoreKey(result.storeKey || fallback.storeKey || targetStore);
-  if (targetStore && storeKey && storeKey !== normalizeStoreKey(targetStore)) return null;
-  const payload = result.payload && typeof result.payload === 'object' ? result.payload : {};
-  const summary = payload.summary && typeof payload.summary === 'object'
-    ? payload.summary
-    : result.payloadSummary && typeof result.payloadSummary === 'object'
-      ? result.payloadSummary
-      : fallback.payloadSummary && typeof fallback.payloadSummary === 'object'
-        ? fallback.payloadSummary
-        : {};
-  const fingerprint = result.readbackFingerprint && typeof result.readbackFingerprint === 'object'
-    ? result.readbackFingerprint
-    : fallback.readbackFingerprint && typeof fallback.readbackFingerprint === 'object'
-      ? fallback.readbackFingerprint
-      : {};
-  const inferred = payload.inferredSource && typeof payload.inferredSource === 'object'
-    ? payload.inferredSource
-    : payload.inferred && typeof payload.inferred === 'object'
-      ? payload.inferred
-      : {};
-  const generated = payload.generatedDraft && typeof payload.generatedDraft === 'object'
-    ? payload.generatedDraft
-    : {};
-  const sourceDetailLock = (payload.sourceDetailLock && typeof payload.sourceDetailLock === 'object' && !Array.isArray(payload.sourceDetailLock))
-    ? payload.sourceDetailLock
-    : (generated.sourceDetailLock && typeof generated.sourceDetailLock === 'object' && !Array.isArray(generated.sourceDetailLock))
-      ? generated.sourceDetailLock
-      : null;
-  const sourceStore = normalizeStoreKey(
-    inferred.sourceStore
-    || generated.sourceStore
-    || fingerprint.inferredSourceStore
-    || fallback.sourceStore
-  );
-  const sourceSkc = safeString(
-    inferred.sourceSkc
-    || generated.sourceSkc
-    || fingerprint.inferredSourceSkc
-    || fallback.sourceSkc
-    || '',
-    160,
-  );
-  const payloadHash = safeString(
-    payload.payloadHash
-    || result.payloadHash
-    || fallback.payloadHash
-    || '',
-    120,
-  );
-  if (!sourceStore || !sourceSkc || !isSha256PayloadHash(payloadHash)) return null;
+  const storeKeyField = firstOwnField([
+    [result, 'storeKey'],
+    [row, 'storeKey'],
+    [fallback, 'storeKey'],
+  ]);
+  if (!storeKeyField.present) return null;
+  const rawStoreKey = storeKeyField.value;
+  if (!validSourceStoreKey(rawStoreKey)) return null;
+  const storeKey = rawStoreKey;
+  if (targetStore && storeKey !== normalizeStoreKey(targetStore)) return null;
+  const payloadField = ownObjectField(result, 'payload');
+  if (payloadField.present && !payloadField.valid) return null;
+  const payload = payloadField.present ? payloadField.value : {};
+  const summaryField = firstOwnField([
+    [payload, 'summary'],
+    [result, 'payloadSummary'],
+    [fallback, 'payloadSummary'],
+  ]);
+  if (summaryField.present && (!summaryField.value || typeof summaryField.value !== 'object' || Array.isArray(summaryField.value))) return null;
+  const summary = summaryField.present ? summaryField.value : {};
+  const fingerprintField = firstOwnField([
+    [result, 'readbackFingerprint'],
+    [fallback, 'readbackFingerprint'],
+  ]);
+  if (fingerprintField.present && (!fingerprintField.value || typeof fingerprintField.value !== 'object' || Array.isArray(fingerprintField.value))) return null;
+  const fingerprint = fingerprintField.present ? fingerprintField.value : {};
+  const inferredSourceField = ownObjectField(payload, 'inferredSource');
+  if (inferredSourceField.present && !inferredSourceField.valid) return null;
+  const inferredAliasField = inferredSourceField.present ? {present: false, valid: true, value: null} : ownObjectField(payload, 'inferred');
+  if (inferredAliasField.present && !inferredAliasField.valid) return null;
+  const inferred = inferredSourceField.present ? inferredSourceField.value : (inferredAliasField.present ? inferredAliasField.value : {});
+  const generatedField = ownObjectField(payload, 'generatedDraft');
+  if (generatedField.present && !generatedField.valid) return null;
+  const generated = generatedField.present ? generatedField.value : {};
+  const hasTopLevelSourceDetailLock = Object.prototype.hasOwnProperty.call(payload, 'sourceDetailLock');
+  const hasGeneratedSourceDetailLock = Object.prototype.hasOwnProperty.call(generated, 'sourceDetailLock');
+  let sourceDetailLock = null;
+  if (hasTopLevelSourceDetailLock) {
+    if (!payload.sourceDetailLock || typeof payload.sourceDetailLock !== 'object' || Array.isArray(payload.sourceDetailLock)) return null;
+    sourceDetailLock = payload.sourceDetailLock;
+  } else if (hasGeneratedSourceDetailLock) {
+    if (!generated.sourceDetailLock || typeof generated.sourceDetailLock !== 'object' || Array.isArray(generated.sourceDetailLock)) return null;
+    sourceDetailLock = generated.sourceDetailLock;
+  }
+  let sourcePair = null;
+  for (const [owner, storeField, skcField] of [
+    [inferred, 'sourceStore', 'sourceSkc'],
+    [generated, 'sourceStore', 'sourceSkc'],
+    [fingerprint, 'inferredSourceStore', 'inferredSourceSkc'],
+    [result, 'sourceStore', 'sourceSkc'],
+    [fallback, 'sourceStore', 'sourceSkc'],
+  ]) {
+    const hasStore = owner && typeof owner === 'object' && Object.prototype.hasOwnProperty.call(owner, storeField);
+    const hasSkc = owner && typeof owner === 'object' && Object.prototype.hasOwnProperty.call(owner, skcField);
+    if (!hasStore && !hasSkc) continue;
+    if (!hasStore || !hasSkc) return null;
+    sourcePair = {sourceStore: owner[storeField], sourceSkc: owner[skcField]};
+    break;
+  }
+  if (!sourcePair) return null;
+  const rawSourceStore = sourcePair.sourceStore;
+  const rawSourceSkc = sourcePair.sourceSkc;
+  if (!validSourceStoreKey(rawSourceStore) || !validSourceSkc(rawSourceSkc)) return null;
+  const sourceStore = normalizeStoreKey(rawSourceStore);
+  const sourceSkc = safeString(rawSourceSkc, 160);
+  let hashPair = null;
+  for (const owner of [payload, result, fallback]) {
+    const hasHash = owner && typeof owner === 'object' && Object.prototype.hasOwnProperty.call(owner, 'payloadHash');
+    const hasAlgorithm = owner && typeof owner === 'object' && Object.prototype.hasOwnProperty.call(owner, 'payloadHashAlgorithm');
+    if (!hasHash && !hasAlgorithm) continue;
+    if (!hasHash || !hasAlgorithm) return null;
+    hashPair = {payloadHash: owner.payloadHash, payloadHashAlgorithm: owner.payloadHashAlgorithm};
+    break;
+  }
+  if (!hashPair) return null;
+  const rawPayloadHash = hashPair.payloadHash;
+  const rawPayloadHashAlgorithm = hashPair.payloadHashAlgorithm;
+  if (typeof rawPayloadHash !== 'string' || typeof rawPayloadHashAlgorithm !== 'string') return null;
+  const payloadHash = rawPayloadHash;
+  const payloadHashAlgorithm = rawPayloadHashAlgorithm;
+  if (!sourceStore || !sourceSkc || !isSha256PayloadHash(payloadHash)
+    || payloadHashAlgorithm !== PRODUCT_EXECUTION_HASH_ALGORITHM) return null;
+  if (!validRecoverableSourceDetailLock(sourceDetailLock, sourceSkc)) return null;
   return {
-    storeKey: storeKey || normalizeStoreKey(targetStore),
+    storeKey,
     sourceStore,
     sourceSkc,
     standardGoodsSn: safeString(inferred.standardGoodsSn || fallback.standardGoodsSn || '', 240),
     hopeOnSaleDate: safeString(summary.hopeOnSaleDate || summary.hope_on_sale_date || fallback.hopeOnSaleDate || '', 80),
     payloadHash,
+    payloadHashAlgorithm,
     sourceDetailLock,
     lockedAt: safeString(fallback.lockedAt || result.endedAt || result.startedAt || '', 80),
     runId: safeString(result.runId || fallback.runId || '', 120),
@@ -1467,26 +1688,62 @@ function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
 
 function resolvePreflightProductLock(task, targetStore = '', {expectedPayloadHash = ''} = {}) {
   const target = normalizeStoreKey(targetStore);
-  const expected = safeString(expectedPayloadHash, 120);
+  if (expectedPayloadHash !== '' && (typeof expectedPayloadHash !== 'string' || !isSha256PayloadHash(expectedPayloadHash))) return null;
+  const expected = expectedPayloadHash;
   const candidates = [];
-  const currentState = safeString(task?.execution?.state || '', 120);
-  const currentReady = task?.execution?.preflight?.ok === true
-    && /preflight_ready|ready_for_submit/i.test(currentState);
+  const executionField = ownObjectField(task, 'execution');
+  if (executionField.present && !executionField.valid) return null;
+  const execution = executionField.present ? executionField.value : {};
+  const currentStateField = firstOwnField([[execution, 'state']]);
+  if (currentStateField.present && typeof currentStateField.value !== 'string') return null;
+  const currentState = currentStateField.present ? currentStateField.value : '';
+  const preflightField = ownObjectField(execution, 'preflight');
+  if (preflightField.present && !preflightField.valid) return null;
+  const currentReady = preflightField.value?.ok === true
+    && (currentState === 'preflight_ready' || currentState === 'ready_for_submit');
   if (currentReady) {
-    for (const row of asArray(task?.execution?.openApiProductExecutors)) {
-      const state = safeString(row?.state || row?.result?.state || '', 120);
-      if (!/preflight_ready|ready_for_submit/i.test(state)) continue;
+    if (!Array.isArray(execution.openApiProductExecutors)) return null;
+    for (const row of execution.openApiProductExecutors) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+      const resultField = ownObjectField(row, 'result');
+      if (resultField.present && !resultField.valid) return null;
+      const rowStateField = firstOwnField([
+        [row, 'state'],
+        [resultField.present ? resultField.value : null, 'state'],
+      ]);
+      if (!rowStateField.present || typeof rowStateField.value !== 'string') return null;
+      const state = rowStateField.value;
+      if (state !== 'preflight_ready' && state !== 'ready_for_submit') continue;
       const lock = preflightProductLockFromRow(row, target);
       if (lock) candidates.push(lock);
     }
   }
-  for (const event of [...asArray(task?.history)].reverse()) {
-    if (String(event?.event || '') !== 'openapi_product_preflight_ready') continue;
+  const history = task && typeof task === 'object' && Object.prototype.hasOwnProperty.call(task, 'history')
+    ? task.history
+    : [];
+  if (!Array.isArray(history)) return null;
+  for (const event of [...history].reverse()) {
+    if (!event || typeof event !== 'object' || Array.isArray(event)) return null;
+    if (Object.prototype.hasOwnProperty.call(event, 'event') && typeof event.event !== 'string') return null;
+    if (event.event !== 'openapi_product_preflight_ready') continue;
+    const writeAuditField = ownObjectField(event, 'writeAudit');
+    if (writeAuditField.present && !writeAuditField.valid) return null;
+    const auditRows = writeAuditField.present && Object.prototype.hasOwnProperty.call(writeAuditField.value, 'executorEvidence')
+      ? writeAuditField.value.executorEvidence
+      : [];
+    const historyRows = Object.prototype.hasOwnProperty.call(event, 'openApiProductExecutors')
+      ? event.openApiProductExecutors
+      : [];
+    if (!Array.isArray(auditRows) || !Array.isArray(historyRows)) return null;
     const rows = [
-      ...asArray(event?.writeAudit?.executorEvidence),
-      ...asArray(event?.openApiProductExecutors),
+      ...auditRows.map(row => ({row, requireOk: true})),
+      ...historyRows.map(row => ({row, requireOk: false})),
     ];
-    for (const row of rows) {
+    for (const {row, requireOk} of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+      if (!Object.prototype.hasOwnProperty.call(row, 'state') || typeof row.state !== 'string') return null;
+      if (row.state !== 'preflight_ready' && row.state !== 'ready_for_submit') continue;
+      if (requireOk && row.ok !== true) continue;
       const lock = preflightProductLockFromRow(row, target, {
         lockedAt: event?.at || '',
         runId: event?.runId || '',
@@ -1496,7 +1753,7 @@ function resolvePreflightProductLock(task, targetStore = '', {expectedPayloadHas
   }
   const seen = new Set();
   for (const lock of candidates) {
-    const key = `${lock.storeKey}|${lock.sourceStore}|${lock.sourceSkc}|${lock.payloadHash}`;
+    const key = `${lock.storeKey}|${lock.sourceStore}|${lock.sourceSkc}|${lock.payloadHashAlgorithm}|${lock.payloadHash}`;
     if (seen.has(key)) continue;
     seen.add(key);
     if (expected && lock.payloadHash !== expected) continue;
@@ -3764,15 +4021,20 @@ async function main() {
     warnings.push(`仓库列表探针失败：${safeString(err?.message || err)}`);
   }
 
-  const expectedPayloadHash = args.mode === 'execute'
-    ? safeString(
-      executionContext?.expectedPayloadHash
-      || executionContext?.request?.expectedPayloadHash
-      || executionContext?.request?.payloadHash
-      || '',
-      120,
-    )
-    : '';
+  const expectedPayloadHashField = args.mode === 'execute'
+    ? firstOwnField([
+      [executionContext, 'expectedPayloadHash'],
+      [executionContext?.request, 'expectedPayloadHash'],
+      [executionContext?.request, 'payloadHash'],
+    ])
+    : {present: false, value: ''};
+  const rawExpectedPayloadHash = expectedPayloadHashField.present ? expectedPayloadHashField.value : '';
+  const expectedPayloadHashInputValid = args.mode !== 'execute'
+    || (typeof rawExpectedPayloadHash === 'string' && isSha256PayloadHash(rawExpectedPayloadHash));
+  const expectedPayloadHash = expectedPayloadHashInputValid ? rawExpectedPayloadHash : '';
+  if (args.mode === 'execute' && rawExpectedPayloadHash !== '' && !expectedPayloadHashInputValid) {
+    blockers.push('真实提交 expectedPayloadHash 类型或格式无效；必须使用 fresh dry-run 返回的原生小写 SHA-256 字符串。');
+  }
   const reusePreflightLock = args.mode === 'execute'
     || executionContext?.reusePreflightLock === true
     || executionContext?.request?.reusePreflightLock === true;
@@ -3879,19 +4141,23 @@ async function main() {
     appendUnique(blockers, targetDuplicateCheck.blockers);
     payloadValidation = validatePublishPayload(publishPayload);
     payloadSummary = extractPayloadSummary(publishPayload);
-    // Execution lock hash v2: the real expectedPayloadHash must cover the final
+    // Execution lock hash v3: the real expectedPayloadHash must cover the final
     // publish payload PLUS the locked source store/sourceSkc and the target
-    // standard goods number (stable JSON scope). Any source drift between
-    // preflight and execute therefore changes the hash and blocks the write.
-    // The raw body hash stays available separately for description binding and
-    // audit; the two are never mixed.
-    const executionScope = {
+    // standard goods number plus source identity/content (stable JSON scope).
+    // detailFetchedAt is deliberately excluded because it is freshness
+    // evidence, not source content; the separate write gate still validates its
+    // syntax, future skew and 24-hour TTL. Any identity/content drift between
+    // preflight and execute still changes the hash and blocks the write. The raw
+    // body hash stays available separately for description binding and audit;
+    // the two are never mixed.
+    const executionScope = buildProductExecutionHashScope({
       payload: publishPayload,
-      sourceStore: safeString(lockedSourceScope.sourceStore, 80),
-      sourceSkc: safeString(lockedSourceScope.sourceSkc, 160),
-      standardGoodsSn: safeString(taskStandardGoodsSn(task, effectiveExecutionContext), 160),
+      targetStore,
+      sourceStore: lockedSourceScope.sourceStore,
+      sourceSkc: lockedSourceScope.sourceSkc,
+      standardGoodsSn: taskStandardGoodsSn(task, effectiveExecutionContext),
       sourceDetailLock: currentSourceDetailLock,
-    };
+    });
     bodyHash = sha256Stable(publishPayload);
     payloadHash = sha256Stable(executionScope);
     appendUnique(warnings, payloadValidation.warnings);
@@ -3937,6 +4203,7 @@ async function main() {
     expectedLock: productDraftLock?.sourceDetailLock || null,
     sourceStore: lockedSourceScope.sourceStore,
     sourceSkc: lockedSourceScope.sourceSkc,
+    standardGoodsSn: taskStandardGoodsSn(task, effectiveExecutionContext),
     now: new Date(),
     required: copyProductDraft,
     requireExpectedLock: copyProductDraft && args.mode === 'execute',
@@ -4072,7 +4339,7 @@ async function main() {
       manualAttributeOverrides,
       payloadHash,
       bodyHash,
-      payloadHashAlgorithm: payloadHash ? 'sha256-stable-json-scope-v2' : '',
+      payloadHashAlgorithm: payloadHash ? PRODUCT_EXECUTION_HASH_ALGORITHM : '',
       summary: payloadSummary,
       validation: payloadValidation,
       generatedDraft: payloadFound?.generatedDraft || null,
@@ -4144,5 +4411,9 @@ export const __testHooks = {
   matchProductReadbackRows,
   readbackPublishedProduct,
   sha256Stable,
+  buildProductExecutionHashScope,
+  PRODUCT_EXECUTION_HASH_ALGORITHM,
+  PRODUCT_EXECUTION_HASH_SCHEMA,
+  sourceDetailLockExecutionHashScope,
   validateSourceDetailLockForWrite,
 };
