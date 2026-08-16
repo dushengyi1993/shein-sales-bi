@@ -343,8 +343,14 @@ const recordResult = async (row, logicalActionKey = '') => {
   });
   results.push(row);
 };
+// ET rows are bound by the alias-aware identity (resolveInventoryIdentityKey)
+// exactly like the planner: explicitly separate products (KJ-102S vs KJ-102)
+// must never share an ET row through a collapsed canonicalInventoryKey.
 const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
-  String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
+  String(
+    resolveInventoryIdentityKey(row.standard_goods_sn || row.match_key || '')
+    || canonicalInventoryKey(row.standard_goods_sn || row.match_key || ''),
+  ).toUpperCase(),
   row,
 ]));
 const linkMetricRows = Array.isArray(links?.storeLinks)
@@ -357,7 +363,12 @@ const linkMetricsByKey = new Map(linkMetricRows.map(row => [
 const onShelfSkcsByStoreMatchKey = new Map();
 for (const metrics of linkMetricRows) {
   if (resolveInventoryShelfStatus(metrics).code !== '1') continue;
-  const matchKey = canonicalInventoryKey(
+  const matchKey = resolveInventoryIdentityKey(
+    metrics.standard_goods_sn
+    ?? metrics.standardGoodsSn
+    ?? metrics.raw_goods_sn
+    ?? metrics.rawGoodsSn,
+  ) || canonicalInventoryKey(
     metrics.standard_goods_sn
     ?? metrics.standardGoodsSn
     ?? metrics.raw_goods_sn

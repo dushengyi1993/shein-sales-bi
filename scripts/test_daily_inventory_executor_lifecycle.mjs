@@ -25,7 +25,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 
 import {
-  canonicalInventoryKey,
+  resolveInventoryIdentityKey,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
 
@@ -36,7 +36,11 @@ const STORE_KEY = 'DL';
 const SKC = 'TEST-SKC-1';
 const SKU_CODE = 'TEST-SKU-1';
 const CANONICAL = 'TEST-CANON-1';
-const MATCH_KEY = canonicalInventoryKey(CANONICAL);
+// The executor's ET lookup and same-store grouping are bound by the
+// alias-resolved identity (resolveInventoryIdentityKey), exactly like the
+// planner output.  A compact canonicalInventoryKey form (CANON1) would miss
+// the ET row and fail the lifecycle scenarios at the ET evidence guard.
+const MATCH_KEY = resolveInventoryIdentityKey(CANONICAL);
 const LOCK_FILE = path.join(ROOT, 'state', 'locks', `daily-inventory-${STORE_KEY}-${SKC}.lock`);
 const AUTOMATION_CONTEXT = 'cloud_daily_inventory_replenishment_guard';
 const AUTOMATION_AUTHORIZATION = 'owner-automatic-inventory-20260803-v1';
