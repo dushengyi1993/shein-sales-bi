@@ -47,6 +47,7 @@ assert.match(slice, /^MemoryMax=3G$/m);
 assert.match(slice, /^TasksMax=512$/m);
 
 const hostWrapper = read('scripts/run_host_heavy_job.sh');
+const sessionManagerCoordinator = read('scripts/run_cloud_session_manager_job.sh');
 assert.ok(
   hostWrapper.indexOf('exec 9<>"$HOST_LOCK"') < hostWrapper.indexOf('exec 8<>"$PROJECT_LOCK"')
   && hostWrapper.indexOf('exec 8<>"$PROJECT_LOCK"') < hostWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"')
@@ -76,22 +77,42 @@ const heavyUnits = [
 for (const name of heavyUnits) {
   const content = unit(name);
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
-  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh|cloud_order_closure_coordinator\.sh/, name);
-  assert.match(content, /^SuccessExitStatus=75$/m, name);
+  assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh|run_cloud_session_manager_job\.sh|cloud_order_closure_coordinator\.sh/, name);
+  if (name === 'shein-bi-cloud-session-manager.service') {
+    assert.doesNotMatch(content, /^SuccessExitStatus=75$/m,
+      'session-manager coordinator must convert terminal deferral to a real failed unit result');
+  } else {
+    assert.match(content, /^SuccessExitStatus=75$/m, name);
+  }
 }
 
 const dailyCoordinatorUnit = unit('shein-bi-cloud-morning-chain.service');
 assert.match(dailyCoordinatorUnit, /^Slice=shein-host-heavy-bi\.slice$/m);
-assert.match(dailyCoordinatorUnit, /cloud_morning_chain\.sh all/);
+assert.match(dailyCoordinatorUnit, /run_cloud_morning_chain_job\.sh/,
+  'the morning-chain unit must start through the resume-aware wrapper');
+assert.match(dailyCoordinatorUnit, /^Restart=on-failure$/m,
+  'a failed/interrupted morning run must auto-restart the same service');
+assert.match(dailyCoordinatorUnit, /^RestartSec=60$/m,
+  'the restart must respect a reasonable backoff and never race the timer');
 assert.doesNotMatch(dailyCoordinatorUnit, /--deadline-at|run_host_browser_read_job\.sh/,
   'the coordinator must not hold a browser token or be cut into an arbitrary clock slot');
 
-const browserReadUnits = [
-  'shein-bi-cloud-session-manager.service',
-];
-for (const name of browserReadUnits) {
-  assert.match(unit(name), /run_host_browser_read_job\.sh/, name);
-}
+assert.match(unit('shein-bi-cloud-session-manager.service'), /run_cloud_session_manager_job\.sh/,
+  'session-manager service owns one bounded coordinator run');
+assert.match(unit('shein-bi-cloud-session-manager.service'), /SHEIN_BI_SESSION_MANAGER_RETRY_MAX=0/,
+  'the unit default retry-max must be unlimited (deadline is the only boundary)');
+assert.match(sessionManagerCoordinator, /run_host_browser_read_job\.sh/,
+  'the session-manager coordinator must reacquire the shared browser-read lane for each retry');
+assert.match(sessionManagerCoordinator, /LANE_DEADLINE_ARGS=\(--deadline-at "\$DEADLINE_AT"\)/,
+  'the normal 00:45 run keeps its wall-clock deadline');
+assert.match(sessionManagerCoordinator, /LANE_DEADLINE_ARGS=\(--deadline-epoch "\$DEADLINE_EPOCH"\)/,
+  'an explicit catch-up epoch must replace, not accompany, the stale wall-clock deadline');
+assert.match(sessionManagerCoordinator, /--check-only/,
+  'the coordinator must expose the strong-evidence helper for the morning gate');
+assert.match(sessionManagerCoordinator, /nightly_session_completed\(\)/,
+  'only the coordinator owns the strong 19/19 completion predicate');
+assert.match(sessionManagerCoordinator, /RETRY_MAX="\$\{SHEIN_BI_SESSION_MANAGER_RETRY_MAX:-0\}"/,
+  'the coordinator default retry-max must be unlimited');
 for (const name of [
   'shein-bi-cloud-rtv-verify.service',
   'shein-bi-cloud-et-forwarder.service',
@@ -112,9 +133,12 @@ for (const name of [
 }
 
 const browserReadWrapper = read('scripts/run_host_browser_read_job.sh');
-assert.match(browserReadWrapper, /flock -s -w "\$LOCK_WAIT_SEC" 9/);
-assert.match(browserReadWrapper, /flock -s -w "\$LOCK_WAIT_SEC" 8/,
+assert.match(browserReadWrapper, /flock -s -w "\$\(lock_wait_remaining\)" 9/,
+  'the host lock wait must be clamped to the remaining deadline');
+assert.match(browserReadWrapper, /flock -s -w "\$\(lock_wait_remaining\)" 8/,
   'read-only store workers may share the half-managed project lane while the two host browser slots enforce the machine cap');
+assert.match(browserReadWrapper, /flock -w "\$\(lock_wait_remaining\)" 7/,
+  'the domain lock wait must be clamped to the remaining deadline');
 assert.match(browserReadWrapper, /shein-browser-read-0\.lock/);
 assert.match(browserReadWrapper, /shein-browser-read-1\.lock/);
 assert.match(browserReadWrapper, /PRESSURE_CLASS=browser-secondary/);
@@ -136,6 +160,8 @@ for (const name of [
 }
 
 assert.deepEqual(calendars(unit('shein-bi-cloud-session-manager.timer')), ['*-*-* 00:45:00']);
+assert.match(unit('shein-bi-cloud-session-manager.timer'), /^Persistent=true$/m,
+  'the single daily session timer must catch up through the marker-idempotent coordinator');
 assert.deepEqual(calendars(unit('shein-bi-cloud-et-forwarder.timer')), [
   '*-*-* 01,04:12:00',
   '*-*-* 07,10,13,17,20,23:20:00',
@@ -148,6 +174,8 @@ assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), ['*-*-* 01:45:00']
 assert.deepEqual(calendars(unit('shein-bi-cloud-yesterday.timer')), ['*-*-* 02:45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-rtv-verify.timer')), ['*-*-* 04:50:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-chain.timer')), ['*-*-* 07:10:00']);
+assert.match(unit('shein-bi-cloud-morning-chain.timer'), /^Persistent=true$/m,
+  'the single 07:10 morning timer is the only daily business catch-up exception');
 assert.deepEqual(calendars(unit('shein-bi-cloud-openapi-stock-refresh.timer')), ['*-*-* *:12,45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-today-sales-reconcile.timer')), ['*-*-* *:00,15,30,45:00']);
 
@@ -159,6 +187,14 @@ assert.doesNotMatch(morning, /chunk-1\)|chunk-2\)|supplements\)/,
   'the production coordinator must not retain callable split-stage entry points');
 assert.match(morning, /morning-links-ready/);
 assert.match(morning, /resume-skip all-store fetch[\s\S]*build_morning_resume_evidence\.mjs/);
+
+const morningWrapper = read('scripts/run_cloud_morning_chain_job.sh');
+assert.match(morningWrapper, /cloud_morning_chain\.sh/, 'the wrapper must invoke the single daily chain');
+assert.match(morningWrapper, /active\.json/, 'the wrapper must persist the active run context');
+assert.match(morningWrapper, /SHEIN_BI_MORNING_RUN_DATE/, 'the wrapper must inject the immutable run date');
+assert.match(morningWrapper, /SHEIN_BI_MORNING_BUSINESS_DATE/, 'the wrapper must inject the immutable business date');
+assert.match(morningWrapper, /daily-operating-refresh\.json/, 'the wrapper must verify the exact completion marker');
+assert.match(morningWrapper, /exit 0/, 'a completed idempotent skip must exit 0 so Restart can never loop');
 assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize/);
 assert.match(morning, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1/,
   'the unified coordinator must not publish when any store or metric readiness gate is incomplete');

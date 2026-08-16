@@ -59,9 +59,14 @@ for (const [relativePath, variables] of unitLocks) {
 }
 
 const coordinatorUnit = read('infra/systemd/shein-bi-cloud-morning-chain.service');
-assert.match(coordinatorUnit, /cloud_morning_chain\.sh all/);
+assert.match(coordinatorUnit, /run_cloud_morning_chain_job\.sh --root \/opt\/shein-bi\/app/);
+assert.match(coordinatorUnit, /^Restart=on-failure$/m);
 assert.match(coordinatorUnit, /^Slice=shein-host-heavy-bi\.slice$/m);
 assert.doesNotMatch(coordinatorUnit, /\/tmp\/[^\s]*\.lock/);
+const coordinatorWrapper = read('scripts/run_cloud_morning_chain_job.sh');
+assert.match(coordinatorWrapper, /cloud_morning_chain\.sh/);
+assert.match(coordinatorWrapper, /SHEIN_BI_MORNING_RUN_DATE/);
+assert.match(coordinatorWrapper, /SHEIN_BI_MORNING_BUSINESS_DATE/);
 const coordinatorScript = read('scripts/cloud_morning_chain.sh');
 assert.match(coordinatorScript, /run_host_heavy_job\.sh/);
 assert.match(read('scripts/cloud_link_business_sync.sh'), /run_host_browser_read_job\.sh/);
