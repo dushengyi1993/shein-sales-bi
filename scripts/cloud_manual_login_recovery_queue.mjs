@@ -131,7 +131,7 @@ async function main() {
       const logFile = path.join(args.logDir, `${item.sessionId}-recovery.log`);
       const run = await runWorker(item, args, logFile);
       const state = await readJson(path.join(args.runtimeDir, `${item.sessionId}.json`)).catch(() => null);
-      const complete = run.ok && ['completed', 'not_required'].includes(String(state?.status || ''));
+      const complete = run.ok && ['completed', 'not_required', 'completed_pending_others'].includes(String(state?.status || ''));
       const archive = await moveQueueFile(processing, complete ? dirs.completed : dirs.failed, name);
       results.push({
         name,
