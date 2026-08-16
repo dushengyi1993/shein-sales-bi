@@ -21,7 +21,7 @@ jobs:
   deploy:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'partner-cli-v')
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       GH_TOKEN: ${{ github.token }}
       DEPLOY_TOKEN: ${{ secrets.PARTNER_CLI_DEPLOY_TOKEN }}

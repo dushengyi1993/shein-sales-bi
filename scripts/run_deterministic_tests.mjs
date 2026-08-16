@@ -205,16 +205,18 @@ for (const file of tests) {
   // readback matrix. The description/update matrices have taken 132-175
   // seconds on the production-sized cloud host. The attribute flow now
   // measures ~508s locally after the adopt-existing, image-binding tamper
-  // and refresh-binding matrices, so it gets its own bounded 720s tier
-  // (~1.4x measured headroom) for the slower GitHub runner; the two heavier
-  // matrices keep 240s and every other deterministic test keeps the default
-  // 30s fail-fast budget.
+  // and refresh-binding matrices, while the same commit hit 626s on the
+  // GitHub CI runner and >720s on another runner, so it gets its own
+  // bounded 900s tier (no coverage reduction) for the slower runners; the
+  // two heavier matrices keep 240s and every other deterministic test
+  // keeps the default 30s fail-fast budget.
   const timeout = (file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     || file === 'scripts/test_link_ops_update_description_flow.mjs')
     ? 240_000
     : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
-      ? 720_000
+      ? 900_000
       : 30_000;
+  console.error(`START ${file} timeoutMs=${timeout}`);
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),
     encoding: 'utf8',
