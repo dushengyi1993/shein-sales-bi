@@ -350,6 +350,15 @@ fi
 
 COST_LEDGER_STATUS=0
 CRITICAL_PORTAL_STATUS=0
+# Inventory-critical linksData synchronous publication status.  It starts
+# UNPROVEN (nonzero) so any queue-mode run that never reaches a successful
+# linksData publish -- portal lock timeout, prewarm failure, or an entire
+# skipped block (PREWARM_DISABLED=1 / DATA_MODE!=api) -- fails closed and
+# cloud_morning_chain can never mark morning-links-ready / morning-supplements
+# done while the inventory-critical section is stale.  Only a real successful
+# prewarm, or the explicit LINK_BUSINESS_MODE=skip caller-owned merge branch,
+# resets it to 0.
+INVENTORY_LINKS_STATUS=75
 if [[ "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "1" || "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "true" ]]; then
   echo "[cloud_daily_refresh] step=inventory-cost-ledger"
   if bash scripts/refresh_inventory_cost_ledger.sh; then
@@ -367,6 +376,7 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
 {
   if ! flock -w "$PORTAL_REFRESH_LOCK_WAIT_SEC" 8; then
     CRITICAL_PORTAL_STATUS=75
+    INVENTORY_LINKS_STATUS=75
     DAILY_WARNINGS+=("portal refresh lock busy")
     echo "[cloud_daily_refresh] WARN portal refresh lock busy after ${PORTAL_REFRESH_LOCK_WAIT_SEC}s; skip portal generation/prewarm this run" >&2
   else
@@ -408,12 +418,15 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
           SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
           SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
           bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+          INVENTORY_LINKS_STATUS=0
           echo "[cloud_daily_refresh] inventory-critical linksData section refreshed"
         else
+          INVENTORY_LINKS_STATUS=$?
           DAILY_WARNINGS+=("linksData section refresh failed")
           echo "[cloud_daily_refresh] WARN linksData section refresh failed; inventory guard will fail closed or retry its own source preparation" >&2
         fi
       else
+        INVENTORY_LINKS_STATUS=0
         echo "[cloud_daily_refresh] linksData was synchronously published by the caller-owned all-store merge"
       fi
 
@@ -476,6 +489,11 @@ if [[ "${#DAILY_WARNINGS[@]}" -gt 0 ]]; then
 else
   rm -f "$ROOT/state/cloud_ops_alerts/daily-refresh-last.json" 2>/dev/null || true
   echo "[cloud_daily_refresh] done date=$DATE log=$LOG_FILE"
+fi
+
+if [[ "$CRITICAL_PORTAL_PREWARM_MODE" == "queue" && "$INVENTORY_LINKS_STATUS" -ne 0 ]]; then
+  echo "[cloud_daily_refresh] inventory-critical linksData was not synchronously published; unified coordinator must retry before marking the daily publish complete" >&2
+  exit 75
 fi
 
 if [[ "$CRITICAL_PORTAL_STATUS" -ne 0 \

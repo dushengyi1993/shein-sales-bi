@@ -48,6 +48,20 @@ assert.match(daily, /invalid SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=\$CRITICAL_P
   'an unknown mode must fail closed with exit 64');
 assert.match(daily, /cannot be combined with SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=1[\s\S]*exit 64/,
   'queue mode with REQUIRE_CRITICAL_PORTAL_SECTIONS=1 must fail closed, never silently downgrade');
+assert.match(daily, /INVENTORY_LINKS_STATUS=75/,
+  'the inventory-critical linksData publish status must start unproven (nonzero) so a skipped publish fails closed');
+assert.match(daily, /CRITICAL_PORTAL_STATUS=75\n\s*INVENTORY_LINKS_STATUS=75/,
+  'a portal refresh lock timeout must also fail the inventory-critical linksData publish');
+assert.match(daily, /else\n\s*INVENTORY_LINKS_STATUS=\$\?[\s\S]*linksData section refresh failed/,
+  'a linksData prewarm failure must be recorded as the inventory-critical publish status');
+assert.match(daily, /bash scripts\/prewarm_bi_portal_sections\.sh 8>&-; then\n\s*INVENTORY_LINKS_STATUS=0/,
+  'only a real successful linksData prewarm may reset the publish status to 0');
+assert.match(daily, /LINK_BUSINESS_MODE" != "skip"[\s\S]*else\n\s*INVENTORY_LINKS_STATUS=0\n\s*echo "[^\n]*linksData was synchronously published/,
+  'the explicit caller-owned merge (LINK_BUSINESS_MODE=skip) branch is the only other way to prove linksData published');
+assert.match(daily, /CRITICAL_PORTAL_PREWARM_MODE" == "queue" && "\$INVENTORY_LINKS_STATUS" -ne 0[\s\S]*inventory-critical linksData was not synchronously published[\s\S]*exit 75/,
+  'queue mode must fail closed when the inventory-critical linksData did not publish');
+assert.match(daily, /CRITICAL_PORTAL_STATUS" -ne 0[\s\S]*SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS:-0\}" == "1"[\s\S]*exit 75/,
+  'the sync REQUIRE_CRITICAL_PORTAL_SECTIONS gate must stay intact');
 
 // ---------------------------------------------------------------------------
 // Source contracts: linksData stays synchronous and outside the mode branches
@@ -166,6 +180,9 @@ cat > "\$SB/scripts/prewarm_bi_portal_sections.sh" <<'STUB'
   echo "async=\$SHEIN_BI_PORTAL_PREWARM_ASYNC"
   echo "host_locked=\$SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED"
 } >> "\$PREWARM_LOG"
+if [[ "\${PREWARM_FAIL_LINKS:-0}" == "1" && "\$SHEIN_BI_PORTAL_PREWARM_SECTIONS" == "linksData" ]]; then
+  exit 75
+fi
 exit 0
 STUB
 chmod +x "\$SB/scripts/prewarm_bi_portal_sections.sh"
@@ -173,6 +190,9 @@ chmod +x "\$SB/scripts/prewarm_bi_portal_sections.sh"
 cat > "\$SB/scripts/enqueue_bi_portal_sections.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "\$@" >> "\$ENQUEUE_LOG"
+if [[ "\${ENQUEUE_FAIL_CRITICAL:-0}" == "1" && "\$*" == *homeRankings* ]]; then
+  exit 75
+fi
 exit 0
 STUB
 chmod +x "\$SB/scripts/enqueue_bi_portal_sections.sh"
@@ -306,6 +326,105 @@ RC=\$?
 check_rc d_invalid_mode_exit 64 "\$RC"
 require_absent d_no_prewarm "\$PREWARM_LOG"
 require_absent d_no_enqueue "\$ENQUEUE_LOG"
+
+# E) queue mode: a nonzero linksData prewarm MUST fail the run closed (75)
+#    even though an older linksData artifact exists and portal files look
+#    healthy -- the synchronous inventory-critical publish did not happen.
+rm -f "\$PREWARM_LOG" "\$ENQUEUE_LOG"
+OUT="\$(PREWARM_FAIL_LINKS=1 \\
+  SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize \\
+  SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1 \\
+  SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=0 \\
+  SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue \\
+  SHEIN_BI_PORTAL_PREWARM_DISABLED=0 \\
+  bash "\$REFRESH" yesterday 2>&1)"
+RC=\$?
+check_rc e_links_fail_closed 75 "\$RC"
+require_log e_links_attempted "\$PREWARM_LOG" "sections=linksData"
+if printf '%s\\n' "\$OUT" | grep -q 'inventory-critical linksData was not synchronously published'; then
+  echo 'PASS[e_fail_closed_message]'
+else
+  echo 'FAIL[e_fail_closed_message]'
+  FAIL=1
+fi
+
+# F) queue mode: a portal refresh lock timeout skips the linksData publish and
+#    MUST exit nonzero so the morning coordinator cannot mark links done.
+rm -f "\$PREWARM_LOG" "\$ENQUEUE_LOG"
+exec 8>>"\$SB/state/locks/portal-refresh.lock"
+flock 8
+OUT="\$(SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize \\
+  SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1 \\
+  SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=0 \\
+  SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue \\
+  SHEIN_BI_PORTAL_PREWARM_DISABLED=0 \\
+  bash "\$REFRESH" yesterday 2>&1)"
+RC=\$?
+exec 8>&-
+check_rc f_lock_timeout 75 "\$RC"
+require_absent f_no_prewarm "\$PREWARM_LOG"
+require_absent f_no_enqueue "\$ENQUEUE_LOG"
+if printf '%s\\n' "\$OUT" | grep -q 'portal refresh lock busy'; then
+  echo 'PASS[f_lock_busy_message]'
+else
+  echo 'FAIL[f_lock_busy_message]'
+  FAIL=1
+fi
+
+# G) queue mode: a homepage-critical enqueue failure AFTER a successful
+#    linksData publish stays a visible warning and MUST NOT block inventory:
+#    the daily run completes, never claims the homepage was refreshed.
+rm -f "\$PREWARM_LOG" "\$ENQUEUE_LOG" "\$SB/state/cloud_ops_alerts/daily-refresh-last.json"
+OUT="\$(ENQUEUE_FAIL_CRITICAL=1 \\
+  SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize \\
+  SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1 \\
+  SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=0 \\
+  SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue \\
+  SHEIN_BI_PORTAL_PREWARM_DISABLED=0 \\
+  bash "\$REFRESH" yesterday 2>&1)"
+RC=\$?
+check_rc g_enqueue_warning_not_blocking 0 "\$RC"
+require_log g_links_ok "\$PREWARM_LOG" "sections=linksData"
+require_log g_critical_enqueue_attempted "\$ENQUEUE_LOG" "homeRankings"
+if printf '%s\\n' "\$OUT" | grep -q 'homepage-critical section enqueue failed'; then
+  echo 'PASS[g_enqueue_warning_visible]'
+else
+  echo 'FAIL[g_enqueue_warning_visible]'
+  FAIL=1
+fi
+if printf '%s\\n' "\$OUT" | grep -q 'homepage-critical sections refreshed'; then
+  echo 'FAIL[g_false_refreshed_claim]'
+  FAIL=1
+else
+  echo 'PASS[g_no_false_refreshed_claim]'
+fi
+if grep -q 'homepage-critical section enqueue failed' "\$SB/state/cloud_ops_alerts/daily-refresh-last.json"; then
+  echo 'PASS[g_warning_alert]'
+else
+  echo 'FAIL[g_warning_alert]'
+  FAIL=1
+fi
+
+# H) queue mode: an entirely skipped linksData publish (PREWARM_DISABLED=1)
+#    must still fail closed -- an unproven inventory-critical publish is never
+#    treated as success, and the homepage enqueue path is not even reached.
+rm -f "\$PREWARM_LOG" "\$ENQUEUE_LOG"
+OUT="\$(SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize \\
+  SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1 \\
+  SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=0 \\
+  SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue \\
+  SHEIN_BI_PORTAL_PREWARM_DISABLED=1 \\
+  bash "\$REFRESH" yesterday 2>&1)"
+RC=\$?
+check_rc h_skipped_publish_fail_closed 75 "\$RC"
+require_absent h_no_prewarm "\$PREWARM_LOG"
+require_absent h_no_enqueue "\$ENQUEUE_LOG"
+if printf '%s\\n' "\$OUT" | grep -q 'inventory-critical linksData was not synchronously published'; then
+  echo 'PASS[h_fail_closed_message]'
+else
+  echo 'FAIL[h_fail_closed_message]'
+  FAIL=1
+fi
 
 if [[ "\$FAIL" -eq 0 ]]; then echo 'PORTAL_ASYNC_HARNESS_OK'; exit 0; fi
 exit 1
