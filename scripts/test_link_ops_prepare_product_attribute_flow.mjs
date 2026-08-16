@@ -2344,6 +2344,186 @@ try {
   check('refresh-v1 lock ok', validateProductAttributeBindingLock(refreshV1Raw, refreshV1Raw.openapiPublishPayload).ok, true);
   await restoreAliasCatalogFiles();
 
+  // A second legitimate v1 refresh must extend the same unique chain. The
+  // intervening dry-run advances task revision without changing the locked
+  // payload/images/descriptions, matching real tasks that are re-preflighted
+  // between registry releases.
+  const refreshV1SecondDrift = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: refreshV1TaskId, mode: 'dry-run', source: 'test'},
+  });
+  check('refresh-v1 second drift dry-run blocked', String(refreshV1SecondDrift.json?.execution?.state || ''), 'blocked');
+  const refreshV1Second = await refreshBinding(cookie, refreshV1TaskId);
+  check('refresh-v1 second refresh 200', refreshV1Second.status, 200);
+  check('refresh-v1 second refresh stage', String(refreshV1Second.json?.stage || ''), 'binding_refreshed_needs_dry_run');
+  const refreshV1Twice = await rawTaskById(refreshV1TaskId);
+  check('refresh-v1 second refresh keeps schema 1', Number(refreshV1Twice.productAttributeBinding?.schemaVersion || 0), PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1);
+  check('refresh-v1 second refresh keeps two history hops', asArray(refreshV1Twice.history)
+    .filter(entry => entry?.event === 'product_attribute_binding_refreshed').length, 2);
+  check('refresh-v1 second refresh chain valid', validateV1ProductAttributeHistory(
+    refreshV1Twice,
+    refreshV1Twice.productAttributeBinding,
+  ).ok, true);
+
+  // Regression: a legitimately refreshed v1 binding can later become stale
+  // when reviewed images/payload rows advance. The re-sign path must prove
+  // original-bound -> refresh -> current-v1, sanitize only invalid attribute
+  // rows, and upgrade to v2 without requiring the task revision to remain at
+  // the historical refresh revision.
+  await updateRawTaskById(refreshV1TaskId, task => {
+    const payload = JSON.parse(JSON.stringify(task.openapiPublishPayload));
+    payload.product_attribute_list.splice(1, 0,
+      {attribute_id: 0, attribute_value_id: 0, marker: 'post-refresh-zero'},
+      {attribute_id: Number.MAX_SAFE_INTEGER + 1, attribute_value_id: 1, marker: 'post-refresh-unsafe'});
+    payload.skc_list[0].sku_list[0].product_sku_attribute_list = [
+      {attribute_id: 0, attribute_value_id: 0, marker: 'post-refresh-nested-zero'},
+      {attribute_id: 27, attribute_value_id: 536, marker: 'post-refresh-legal'},
+    ];
+    const assetBinding = JSON.parse(JSON.stringify(task.publishAssetBinding));
+    assetBinding.images = assetBinding.images.map((row, index) => ({
+      ...row,
+      name: `post-refresh-${row.name}`,
+      sha256: crypto.createHash('sha256').update(`post-refresh-image-${index}`).digest('hex'),
+    }));
+    assetBinding.imageCount = assetBinding.images.length;
+    assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {
+      binding: assetBinding,
+      images: assetBinding.images,
+    });
+    const nextRevision = Number(task.repositoryRevision || 0) + 1;
+    return {
+      ...task,
+      repositoryRevision: nextRevision,
+      openapiPublishPayload: payload,
+      publishAssetBinding: assetBinding,
+      descriptionMaterialBinding: descriptionBindingFor(
+        task.id,
+        payload,
+        nextRevision,
+        String(assetBinding.bindingFingerprint || ''),
+      ),
+    };
+  });
+  const refreshedV1Stale = JSON.parse(JSON.stringify(await rawTaskById(refreshV1TaskId)));
+  check('refreshed-v1 chain validates after later revision', validateV1ProductAttributeHistory(
+    refreshedV1Stale,
+    refreshedV1Stale.productAttributeBinding,
+  ).ok, true);
+
+  const chainNegative = (label, mutate) => {
+    const task = mutate(JSON.parse(JSON.stringify(refreshedV1Stale)));
+    check(`${label} fails closed`, validateV1ProductAttributeHistory(task, task.productAttributeBinding).ok, false);
+  };
+  chainNegative('refreshed-v1 missing original', task => ({
+    ...task,
+    history: asArray(task.history).filter(entry => entry?.event !== 'product_attribute_bound'),
+  }));
+  chainNegative('refreshed-v1 duplicate original', task => {
+    const original = asArray(task.history).find(entry => entry?.event === 'product_attribute_bound');
+    return {...task, history: [...asArray(task.history), JSON.parse(JSON.stringify(original))]};
+  });
+  chainNegative('refreshed-v1 missing refresh history', task => ({
+    ...task,
+    history: asArray(task.history).filter(entry => entry?.event !== 'product_attribute_binding_refreshed'),
+  }));
+  chainNegative('refreshed-v1 orphan history without current event', task => {
+    delete task.productAttributeRefreshEvent;
+    return task;
+  });
+  chainNegative('refreshed-v1 conflicting refresh history', task => {
+    const refresh = asArray(task.history).find(entry => entry?.event === 'product_attribute_binding_refreshed');
+    return {
+      ...task,
+      history: [...asArray(task.history), {...JSON.parse(JSON.stringify(refresh)), donor: {...refresh.donor, skc: `${refresh.donor.skc}-conflict`}}],
+    };
+  });
+  chainNegative('refreshed-v1 previous key mismatch', task => ({
+    ...task,
+    productAttributeRefreshEvent: {...task.productAttributeRefreshEvent, previousBindingRequestKey: 'f'.repeat(64)},
+  }));
+  chainNegative('refreshed-v1 revision mismatch', task => ({
+    ...task,
+    productAttributeRefreshEvent: {
+      ...task.productAttributeRefreshEvent,
+      previousRepositoryRevision: Number(task.productAttributeRefreshEvent.previousRepositoryRevision || 0) + 1,
+    },
+  }));
+  chainNegative('refreshed-v1 descending cross-hop revisions', task => {
+    const rows = asArray(task.history)
+      .filter(entry => entry?.event === 'product_attribute_binding_refreshed')
+      .sort((a, b) => Number(a.currentRepositoryRevision || 0) - Number(b.currentRepositoryRevision || 0));
+    const older = JSON.parse(JSON.stringify(rows[0]));
+    const newer = JSON.parse(JSON.stringify(rows[1]));
+    older.previousRepositoryRevision = Number(newer.previousRepositoryRevision || 0) + 5;
+    older.currentRepositoryRevision = Number(older.previousRepositoryRevision) + 1;
+    older.baseTaskRevision = Number(older.previousRepositoryRevision);
+    older.newBindingRequestKey = productAttributeBindingRequestKey({
+      taskId: task.id,
+      targetStore: task.productAttributeBinding.targetStore,
+      baseTaskRevision: older.baseTaskRevision,
+      attributeId: older.attributeId,
+      attributeValueId: older.attributeValueId,
+      donorStore: older.donor?.storeKey || '',
+      donorSkc: older.donor?.skc || '',
+      donorSpu: older.donor?.spu || '',
+      evidenceSha256: older.evidenceSha256,
+    });
+    older.eventKey = productAttributeRefreshEventKey({
+      taskId: task.id,
+      previousBindingRequestKey: older.previousBindingRequestKey,
+      newBindingRequestKey: older.newBindingRequestKey,
+    });
+    newer.previousBindingRequestKey = older.newBindingRequestKey;
+    newer.eventKey = productAttributeRefreshEventKey({
+      taskId: task.id,
+      previousBindingRequestKey: newer.previousBindingRequestKey,
+      newBindingRequestKey: newer.newBindingRequestKey,
+    });
+    let refreshIndex = 0;
+    const history = asArray(task.history).map(entry => {
+      if (entry?.event !== 'product_attribute_binding_refreshed') return entry;
+      const replacement = refreshIndex === 0 ? older : newer;
+      refreshIndex += 1;
+      return replacement;
+    });
+    return {
+      ...task,
+      history,
+      productAttributeRefreshEvent: {
+        ...task.productAttributeRefreshEvent,
+        eventKey: newer.eventKey,
+        previousBindingRequestKey: older.newBindingRequestKey,
+        previousEvidenceSha256: older.evidenceSha256,
+        previousBaseTaskRevision: older.baseTaskRevision,
+      },
+    };
+  });
+  chainNegative('refreshed-v1 current identity mismatch', task => ({
+    ...task,
+    productAttributeBinding: {...task.productAttributeBinding, canonicalCode: `${task.productAttributeBinding.canonicalCode}-conflict`},
+  }));
+  chainNegative('refreshed-v1 current payload mismatch', task => ({
+    ...task,
+    productAttributeBinding: {...task.productAttributeBinding, oldPayloadHash: 'f'.repeat(64)},
+  }));
+
+  const refreshedV1Revision = Number(refreshedV1Stale.repositoryRevision || 0);
+  const refreshedV1Resign = await bindProductAttribute(cookie, refreshV1TaskId, {
+    bindingMode: PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND,
+  });
+  check('refreshed-v1 re-sign 200', refreshedV1Resign.status, 200);
+  check('refreshed-v1 upgrades from v1', refreshedV1Resign.json?.binding?.upgradedFromV1, true);
+  check('refreshed-v1 removes invalid rows only', Number(refreshedV1Resign.json?.binding?.invalidAttributeRowsRemoved || 0), 3);
+  const refreshedV1ResignedRaw = await rawTaskById(refreshV1TaskId);
+  check('refreshed-v1 re-sign revision +1', Number(refreshedV1ResignedRaw.repositoryRevision || 0), refreshedV1Revision + 1);
+  check('refreshed-v1 re-sign schema 2', Number(refreshedV1ResignedRaw.productAttributeBinding?.schemaVersion || 0), PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION);
+  check('refreshed-v1 re-sign lock valid', validateProductAttributeBindingLock(
+    refreshedV1ResignedRaw,
+    refreshedV1ResignedRaw.openapiPublishPayload,
+  ).ok, true);
+  check('refreshed-v1 re-sign never publishes', publishAttemptCount, 0);
+
   // Coordinated image-binding swap on v1: swap the canonical asset binding
   // and synchronize both the description and attribute image fingerprints,
   // but leave the original immutable product_attribute_bound history
