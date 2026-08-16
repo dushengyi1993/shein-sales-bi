@@ -29,6 +29,7 @@
 // temp paths; the Windows host runs unit/source contracts and the harness.
 
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -181,6 +182,159 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
         lastErrorAfterRetry: __testHooks.biPortalCoreWarmupState.lastError || '',
         retryEntries: entriesAfterRetry.map(entry => entry.section).sort(),
         sectionsGenerated: await sectionsGenerated(),
+      };
+    } else if (caseName === 'queued-tz') {
+      // Production generatedAt carries a +08:00 offset whose '+' is outside
+      // the manager's strict idempotency-key charset.  The scheduler derives a
+      // deterministic sha256 base key, so the full warmup set enqueues without
+      // QUEUE_IDEMPOTENCY_KEY_INVALID and health reports queued + external
+      // owner.  A second, different +08:00 generation must produce distinct
+      // keys (no collision on the digest derivation).
+      const tzAt = '2026-08-16T22:44:17.313125+08:00';
+      await apiCore(tzAt);
+      const scheduled = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
+      const entries = await queueEntries();
+      const expectedDigest = createHash('sha256').update(tzAt).digest('hex');
+      const expectedKeys = WARMUP_SECTIONS.map(section => `core-warmup:sha256:${expectedDigest}::${section}`).sort();
+      const actualKeys = [...new Set(entries.map(entry => entry.idempotencyKey))].sort();
+      await apiCore('2026-08-16T23:00:00.000+08:00');
+      const second = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
+      const entriesAfterSecond = await queueEntries();
+      const secondKeys = [...new Set(entriesAfterSecond.map(entry => entry.idempotencyKey))];
+      report = {
+        ok: true,
+        caseName,
+        scheduleReason: scheduled.reason,
+        queued: scheduled.queued,
+        state: __testHooks.biPortalCoreWarmupState.status,
+        owner: __testHooks.biPortalCoreWarmupState.owner || '',
+        lastError: __testHooks.biPortalCoreWarmupState.lastError || '',
+        sectionCount: entries.length,
+        keysMatchExpected: JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
+        keysMatchPattern: entries.every(entry => /^[A-Za-z0-9._:-]{1,120}$/.test(String(entry.idempotencyKey || ''))),
+        baseKeyLengthOk: entries.every(entry => String(entry.idempotencyKey || '').length <= 120),
+        reasons: [...new Set(entries.flatMap(entry => entry.reasons || []))],
+        secondReason: second.reason,
+        secondKeysDistinct: secondKeys.some(key => !actualKeys.includes(key)),
+      };
+    } else if (caseName === 'queued-long-safe') {
+      // A LONG but charset-safe generatedAt (over the 64-char safe ceiling)
+      // must be auto-digested: keeping it verbatim would push the full
+      // core-warmup:<raw>::<section> key beyond the manager's 120-char bound.
+      const longAt = 'A'.repeat(80);
+      await apiCore(longAt);
+      const scheduled = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
+      const entries = await queueEntries();
+      const expectedDigest = createHash('sha256').update(longAt).digest('hex');
+      const expectedKeys = WARMUP_SECTIONS.map(section => `core-warmup:sha256:${expectedDigest}::${section}`).sort();
+      const actualKeys = [...new Set(entries.map(entry => entry.idempotencyKey))].sort();
+      report = {
+        ok: true,
+        caseName,
+        scheduleReason: scheduled.reason,
+        state: __testHooks.biPortalCoreWarmupState.status,
+        owner: __testHooks.biPortalCoreWarmupState.owner || '',
+        lastError: __testHooks.biPortalCoreWarmupState.lastError || '',
+        sectionCount: entries.length,
+        keysMatchExpected: JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
+        allBaseKeysSafe: entries.every(entry => /^[A-Za-z0-9._:-]{1,120}$/.test(String(entry.idempotencyKey || ''))),
+        allFullKeysWithinBound: entries.every(entry => String(entry.idempotencyKey || '').length <= 120),
+        longestKeyLength: entries.reduce((max, entry) => Math.max(max, String(entry.idempotencyKey || '').length), 0),
+      };
+    } else if (caseName === 'queued-nul') {
+      // A generatedAt carrying NUL, DEL and C1 control bytes must never reach
+      // exec argv raw: the key is digested and the reason is %HH-encoded, so
+      // the real scheduler->script->manager chain enqueues all seven sections
+      // without "string without null bytes" or enqueue-failed.
+      const nulAt = 'bad\u0000\u007F\u009Ftime';
+      await apiCore(nulAt);
+      const scheduled = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
+      const entries = await queueEntries();
+      const expectedDigest = createHash('sha256').update(nulAt).digest('hex');
+      const expectedKeys = WARMUP_SECTIONS.map(section => `core-warmup:sha256:${expectedDigest}::${section}`).sort();
+      const actualKeys = [...new Set(entries.map(entry => entry.idempotencyKey))].sort();
+      const reasons = [...new Set(entries.flatMap(entry => entry.reasons || []))];
+      report = {
+        ok: true,
+        caseName,
+        scheduleReason: scheduled.reason,
+        state: __testHooks.biPortalCoreWarmupState.status,
+        owner: __testHooks.biPortalCoreWarmupState.owner || '',
+        lastError: __testHooks.biPortalCoreWarmupState.lastError || '',
+        sectionCount: entries.length,
+        keysMatchExpected: JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
+        reasons,
+        reasonsEncoded: reasons.every(reason => reason === 'core-warmup-bad%00%7F%9Ftime'),
+        reasonsControlFree: entries.every(entry => (entry.reasons || []).every(reason => !/[\u0000-\u001F\u007F-\u009F]/.test(String(reason)))),
+        reasonLengthsOk: entries.every(entry => (entry.reasons || []).every(reason => String(reason).length <= 240)),
+      };
+    } else if (caseName === 'queued-long-reason') {
+      // An over-long generatedAt must keep the readable encoded head plus a
+      // sha256 digest tail (explicit truncation semantics) so the reason stays
+      // <=240 and unique, and the full set still enqueues.
+      const longAt = 'A'.repeat(300);
+      await apiCore(longAt);
+      const scheduled = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
+      const entries = await queueEntries();
+      const digest = createHash('sha256').update(longAt).digest('hex');
+      const expectedReason = `core-warmup-${'A'.repeat(160)}..sha256:${digest.slice(0, 40)}`;
+      const expectedKeyDigest = createHash('sha256').update(longAt).digest('hex');
+      const expectedKeys = WARMUP_SECTIONS.map(section => `core-warmup:sha256:${expectedKeyDigest}::${section}`).sort();
+      const actualKeys = [...new Set(entries.map(entry => entry.idempotencyKey))].sort();
+      const reasons = [...new Set(entries.flatMap(entry => entry.reasons || []))];
+      report = {
+        ok: true,
+        caseName,
+        scheduleReason: scheduled.reason,
+        state: __testHooks.biPortalCoreWarmupState.status,
+        owner: __testHooks.biPortalCoreWarmupState.owner || '',
+        lastError: __testHooks.biPortalCoreWarmupState.lastError || '',
+        sectionCount: entries.length,
+        keysMatchExpected: JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
+        reasons,
+        reasonMatch: reasons.every(reason => reason === expectedReason),
+        longestReasonLength: reasons.reduce((max, reason) => Math.max(max, String(reason).length), 0),
+        reasonHasDigestTail: reasons.every(reason => String(reason).includes(`..sha256:${digest.slice(0, 20)}`)),
+      };
+    } else if (caseName === 'queued-collision') {
+      // Cross-namespace collision: raw '+' digests to a 64-char hex base key
+      // under `core-warmup:sha256:`, while that exact hex string is itself a
+      // verbatim-safe token under `core-warmup:`.  The domain label keeps the
+      // two generations' seven-section key sets completely disjoint.
+      const plusAt = '+';
+      const hexAt = createHash('sha256').update('+').digest('hex');
+      await apiCore(plusAt);
+      const first = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
+      const firstEntries = await queueEntries();
+      await apiCore(hexAt);
+      const second = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
+      const secondEntries = await queueEntries();
+      const plusDigest = createHash('sha256').update('+').digest('hex');
+      const expectedPlusKeys = WARMUP_SECTIONS.map(section => `core-warmup:sha256:${plusDigest}::${section}`).sort();
+      const expectedHexKeys = WARMUP_SECTIONS.map(section => `core-warmup:${hexAt}::${section}`).sort();
+      const plusKeys = [...new Set(firstEntries.map(entry => entry.idempotencyKey))].sort();
+      const hexKeys = [...new Set(secondEntries.map(entry => entry.idempotencyKey))].sort();
+      report = {
+        ok: true,
+        caseName,
+        firstReason: first.reason,
+        secondReason: second.reason,
+        firstQueued: first.queued,
+        secondQueued: second.queued,
+        state: __testHooks.biPortalCoreWarmupState.status,
+        owner: __testHooks.biPortalCoreWarmupState.owner || '',
+        lastError: __testHooks.biPortalCoreWarmupState.lastError || '',
+        plusKeys,
+        hexKeys,
+        plusKeysExpected: JSON.stringify(plusKeys) === JSON.stringify(expectedPlusKeys),
+        hexKeysExpected: JSON.stringify(hexKeys) === JSON.stringify(expectedHexKeys),
+        disjoint: plusKeys.every(key => !hexKeys.includes(key)) && hexKeys.every(key => !plusKeys.includes(key)),
+        plusCount: firstEntries.length,
+        hexCount: secondEntries.length,
+        longestKeyLength: Math.max(
+          ...plusKeys.map(key => key.length),
+          ...hexKeys.map(key => key.length),
+        ),
       };
     } else if (caseName === 'contradiction') {
       await apiCore('G1');
@@ -690,8 +844,19 @@ assert.match(source, /SHEIN_BI_CORE_WARMUP_QUEUE_OWNED \|\| ''\)\.trim\(\)\.toLo
 assert.match(source, /\[\'1\', \'true\', \'yes\', \'on\'\]\.includes\(raw\)\) return true;/,
   'explicit true values must enable queue ownership');
 assert.match(source,
-  /const sections = configuredBiPortalCoreWarmupSections\(\);[\s\S]*if \(BI_CORE_WARMUP_QUEUE_OWNED\) \{[\s\S]*const warmupIdempotencyKey = `core-warmup:\$\{generatedAt\}`;[\s\S]*persistHostLockedBiSectionPlan\(plan, generatedAt, \{\s*reason: `core-warmup-\$\{generatedAt\}`,\s*idempotencyKey: warmupIdempotencyKey,/,
+  /const sections = configuredBiPortalCoreWarmupSections\(\);[\s\S]*if \(BI_CORE_WARMUP_QUEUE_OWNED\) \{[\s\S]*const warmupIdempotencyKey = biPortalCoreWarmupIdempotencyKey\(generatedAt\);[\s\S]*persistHostLockedBiSectionPlan\(plan, generatedAt, \{\s*reason: biPortalCoreWarmupReason\(generatedAt\),\s*idempotencyKey: warmupIdempotencyKey,/,
   'queue-owned scheduling must enqueue with the deterministic core-warmup idempotency key');
+assert.match(source,
+  /function biPortalCoreWarmupIdempotencyKey\(generatedAt\) \{[\s\S]*if \(\/\^\[A-Za-z0-9._:-\]\{1,64\}\$\/\.test\(raw\)\) return `core-warmup:\$\{raw\}`;[\s\S]*createHash\('sha256'\)\.update\(raw\)\.digest\('hex'\)[\s\S]*return `core-warmup:sha256:\$\{digest\}`;/,
+  'the key helper must preserve safe synthetic tokens and digest any other generation under a distinct sha256 domain label');
+assert.match(source, /function sanitizeBiQueueReason\(text\) \{[\s\S]*%HH/,
+  'the reason sanitizer must percent-encode control bytes');
+assert.ok(source.includes('.replace(/[\\u0000-\\u001F\\u007F-\\u009F]/g,'),
+  'the reason sanitizer must encode C0 control, NUL, DEL and C1 bytes');
+assert.match(source, /function biPortalCoreWarmupReason\(generatedAt\) \{[\s\S]*const MAX_BODY = 240 - PREFIX\.length;[\s\S]*reason: biPortalCoreWarmupReason\(generatedAt\),[\s\S]*reason: biPortalCoreWarmupReason\(generatedAt\),[\s\S]*reason: biPortalCoreWarmupReason\(generatedAt\),/,
+  'the warmup reason helper must be bounded to 240 and used by both persists and the queued log');
+assert.match(source, /\.\.sha256:\$\{digest\.slice\(0, 40\)\}/,
+  'over-long reasons must carry a digest tail with explicit truncation');
 assert.match(source, /if \(biPortalCoreWarmupState\.status === 'queued' && biPortalCoreWarmupState\.generatedAt === generatedAt\) \{[\s\S]*reason: 'already-queued'/,
   'the same generation must be enqueued exactly once in-process');
 assert.match(source, /reason: 'queue-owned-without-external-queue'/,
@@ -818,6 +983,87 @@ assert.deepEqual(queued.firstIdempotencyKeys, [`core-warmup:G1::profit`, `core-w
 assert.ok(queued.firstReasons.some(reason => reason === 'core-warmup-G1'), 'deterministic reason with generatedAt');
 assert.ok(queued.thirdReasons.some(reason => reason === 'core-warmup-G2'), 'new generation reason');
 assert.ok(queued.thirdIdempotencyKeys.every(key => key.startsWith('core-warmup:G2::')), 'new generation idempotency keys');
+
+// Production +08:00 generatedAt: the manager's strict key charset rejects '+',
+// so the scheduler must derive a deterministic sha256 base key.  The full
+// warmup set enqueues (7 sections), health reports queued + external owner
+// with no QUEUE_IDEMPOTENCY_KEY_INVALID, and a different +08:00 generation
+// produces distinct keys.
+const queuedTz = hookCase('queued-tz', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
+assert.equal(queuedTz.scheduleReason, 'queued', 'a +08:00 core generation must enqueue without key rejection');
+assert.equal(queuedTz.state, 'queued');
+assert.equal(queuedTz.owner, 'external-section-queue');
+assert.equal(queuedTz.lastError, '', 'no QUEUE_IDEMPOTENCY_KEY_INVALID may surface as lastError');
+assert.equal(queuedTz.sectionCount, 7, 'the full warmup set must be enqueued');
+assert.equal(queuedTz.keysMatchExpected, true, 'per-section keys must be the deterministic digest key plus ::section');
+assert.equal(queuedTz.keysMatchPattern, true, 'every per-section key must satisfy the manager charset');
+assert.equal(queuedTz.baseKeyLengthOk, true, 'every base key must stay within the 120-char bound');
+assert.ok(queuedTz.reasons.some(reason => reason === 'core-warmup-2026-08-16T22:44:17.313125+08:00'),
+  'the human-readable reason keeps the original generation');
+assert.equal(queuedTz.secondReason, 'queued', 'a second +08:00 generation must enqueue normally');
+assert.equal(queuedTz.secondKeysDistinct, true, 'different generations must derive distinct digest keys');
+
+// A LONG but charset-safe generatedAt (>64 chars) must be auto-digested so
+// every full core-warmup key stays within the manager's 120-char bound even
+// for the longest configured section suffix.
+const queuedLongSafe = hookCase('queued-long-safe', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
+assert.equal(queuedLongSafe.scheduleReason, 'queued');
+assert.equal(queuedLongSafe.state, 'queued');
+assert.equal(queuedLongSafe.owner, 'external-section-queue');
+assert.equal(queuedLongSafe.lastError, '', 'no key-bound rejection may surface');
+assert.equal(queuedLongSafe.sectionCount, 7, 'the full warmup set must be enqueued');
+assert.equal(queuedLongSafe.keysMatchExpected, true, 'a safe-but-long generation must be digested deterministically');
+assert.equal(queuedLongSafe.allBaseKeysSafe, true, 'every base key must satisfy the manager charset');
+assert.equal(queuedLongSafe.allFullKeysWithinBound, true, 'every full core-warmup key must stay <= 120 chars');
+assert.ok(queuedLongSafe.longestKeyLength <= 120, `longest key must respect the 120-char bound (got ${queuedLongSafe.longestKeyLength})`);
+
+// A generatedAt carrying NUL+DEL control bytes must never reach exec argv raw:
+// the idempotency key is digested and the queue reason %HH-encoded.  The real
+// scheduler->script->manager chain enqueues all seven sections, health reports
+// queued + external owner, and no enqueue-failed / null-byte error surfaces.
+const queuedNul = hookCase('queued-nul', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
+assert.equal(queuedNul.scheduleReason, 'queued', 'a NUL/DEL/C1 generation must enqueue, never enqueue-failed');
+assert.equal(queuedNul.state, 'queued');
+assert.equal(queuedNul.owner, 'external-section-queue');
+assert.equal(queuedNul.lastError, '', 'no null-byte argv failure may surface as lastError');
+assert.equal(queuedNul.sectionCount, 7, 'the full warmup set must enqueue');
+assert.equal(queuedNul.keysMatchExpected, true, 'the NUL-containing generation must use its deterministic digest key');
+assert.equal(queuedNul.reasonsEncoded, true, 'the reason must be core-warmup-bad%00%7F%9Ftime (NUL, DEL and C1 %HH-encoded)');
+assert.equal(queuedNul.reasonsControlFree, true, 'no raw C0/DEL/C1 byte may survive in any queue reason');
+assert.equal(queuedNul.reasonLengthsOk, true, 'every reason must stay within the 240-char bound');
+
+// An over-long generatedAt (300 chars) keeps a readable encoded head plus a
+// sha256 digest tail: explicit truncation semantics, deterministic, <=240,
+// yet unique per generation.
+const queuedLongReason = hookCase('queued-long-reason', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
+assert.equal(queuedLongReason.scheduleReason, 'queued');
+assert.equal(queuedLongReason.state, 'queued');
+assert.equal(queuedLongReason.owner, 'external-section-queue');
+assert.equal(queuedLongReason.lastError, '');
+assert.equal(queuedLongReason.sectionCount, 7);
+assert.equal(queuedLongReason.keysMatchExpected, true);
+assert.equal(queuedLongReason.reasonMatch, true, 'the over-long reason must match the deterministic head+digest form');
+assert.ok(queuedLongReason.longestReasonLength <= 240,
+  `the longest reason must respect the 240-char bound (got ${queuedLongReason.longestReasonLength})`);
+assert.equal(queuedLongReason.reasonHasDigestTail, true, 'the digest tail must bind the full generation uniquely');
+
+// Cross-namespace collision regression: raw '+' must digest under the
+// `core-warmup:sha256:` domain label while its own sha256 hex (a verbatim-safe
+// token) stays under `core-warmup:` -- both generations enqueue seven distinct
+// per-section keys with no overlap.
+const queuedCollision = hookCase('queued-collision', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
+assert.equal(queuedCollision.firstReason, 'queued', 'the digest-domain generation must enqueue');
+assert.equal(queuedCollision.secondReason, 'queued', 'the verbatim hex-token generation must enqueue');
+assert.equal(queuedCollision.state, 'queued');
+assert.equal(queuedCollision.owner, 'external-section-queue');
+assert.equal(queuedCollision.lastError, '');
+assert.equal(queuedCollision.plusKeysExpected, true, 'raw "+" must use core-warmup:sha256:<digest>::section');
+assert.equal(queuedCollision.hexKeysExpected, true, 'the hex token itself must use core-warmup:<hex>::section verbatim');
+assert.equal(queuedCollision.disjoint, true, 'the digest-domain and verbatim keys must never collide');
+assert.equal(queuedCollision.plusCount, 7);
+assert.equal(queuedCollision.hexCount, 7);
+assert.ok(queuedCollision.longestKeyLength <= 120,
+  `every full key must stay within the 120-char bound (got ${queuedCollision.longestKeyLength})`);
 
 const retry = hookCase('enqueue-fail-retry', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
 assert.equal(retry.failedReason, 'enqueue-failed');

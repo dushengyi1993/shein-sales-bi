@@ -315,6 +315,53 @@ const BI_CORE_WARMUP_QUEUE_OWNED = (() => {
   return false;
 })();
 const BI_CORE_WARMUP_QUEUE_PRIORITY = 10;
+// Durable per-generation idempotency base key.  Production generatedAt values
+// are full ISO timestamps such as 2026-08-16T22:44:17.313125+08:00 whose '+'
+// is outside the manager's strictly bounded key charset [A-Za-z0-9._:-] -- the
+// CLI would reject them with QUEUE_IDEMPOTENCY_KEY_INVALID.  Safe synthetic
+// tokens (G1, G2, dash/colon timestamps) keep their exact legacy key; any
+// other value gets a deterministic cryptographic digest so the base key stays
+// bounded and collision-free, and the manager still appends ::section.  The
+// safe-raw ceiling (64) is deliberately conservative: the longest configured
+// section suffix (::homeTrafficDaily = 18 chars) keeps every full per-section
+// key well within the manager's 120-char idempotency key bound.
+function biPortalCoreWarmupIdempotencyKey(generatedAt) {
+  const raw = String(generatedAt || '');
+  if (/^[A-Za-z0-9._:-]{1,64}$/.test(raw)) return `core-warmup:${raw}`;
+  const digest = crypto.createHash('sha256').update(raw).digest('hex');
+  // Namespaced digest branch: a raw value whose sha256 hex happens to BE a
+  // verbatim-safe token (e.g. '+' digests to a 64-char hex string) must never
+  // collide with that token's own verbatim key, so the digest form carries a
+  // distinct `sha256:` domain label.  Longest full key stays well below the
+  // manager's 120-char bound (12 + 7 + 64 + 2 + 16 = 101).
+  return `core-warmup:sha256:${digest}`;
+}
+// Queue reason sanitizer: every C0 control character (including NUL), DEL
+// and C1 range byte is %HH-encoded so a reason can never corrupt exec argv
+// ("argument must be a string without null bytes") and stays deterministic.
+// Printable bytes pass through unchanged; the payload is bounded to the
+// manager's 240-char reason slice.
+function sanitizeBiQueueReason(text) {
+  return String(text || '').replace(/[\u0000-\u001F\u007F-\u009F]/g, byte => {
+    const hex = byte.charCodeAt(0).toString(16).toUpperCase();
+    return `%${hex.padStart(2, '0')}`;
+  }).slice(0, 240);
+}
+// Deterministic bounded warmup reason.  Normal production generations keep the
+// readable `core-warmup-<generatedAt>` form (e.g. +08:00 timestamps) while all
+// C0/DEL control characters are %HH-encoded so the value can never corrupt
+// exec argv.  Over-long values keep a readable encoded head plus a sha256 tail
+// with explicit truncation semantics: distinct generations never collide and
+// the total stays <=240 (manager's reason bound).
+function biPortalCoreWarmupReason(generatedAt) {
+  const raw = String(generatedAt || '');
+  const PREFIX = 'core-warmup-';
+  const MAX_BODY = 240 - PREFIX.length;
+  const encoded = sanitizeBiQueueReason(raw);
+  if (encoded.length <= MAX_BODY) return `${PREFIX}${encoded}`;
+  const digest = crypto.createHash('sha256').update(raw).digest('hex');
+  return `${PREFIX}${encoded.slice(0, 160)}..sha256:${digest.slice(0, 40)}`;
+}
 const biExternalSectionQueuePending = new Set();
 const biAccountingCatchupTargets = new Map();
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter'];
@@ -10766,7 +10813,7 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
     : (options.force === true
       ? '0'
       : (BI_OWNER_VISIBLE_PRIORITY_SECTIONS.has(section) ? '10' : '50'));
-  const reason = String(options.reason || `portal-${generatedAt || 'current'}`).slice(0, 240);
+  const reason = sanitizeBiQueueReason(options.reason || `portal-${generatedAt || 'current'}`);
   const child = spawn('/usr/bin/env', [
     'bash',
     path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
@@ -10810,7 +10857,7 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
     }
     group.sections.push(section);
   }
-  const reason = String(options.reason || `live-accounting-${generatedAt || 'current'}`).slice(0, 240);
+  const reason = sanitizeBiQueueReason(options.reason || `live-accounting-${generatedAt || 'current'}`);
   const aggregate = {
     newlyQueued: [],
     updatedRevision: [],
@@ -12405,12 +12452,12 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       // a Portal restart the same core generation deduplicates in the managed
       // queue instead of enqueueing a fresh revision.  A new generatedAt
       // produces a new key and a normal new revision.
-      const warmupIdempotencyKey = `core-warmup:${generatedAt}`;
+      const warmupIdempotencyKey = biPortalCoreWarmupIdempotencyKey(generatedAt);
       // Serialize concurrent watcher/index triggers: only one enqueue per
       // generation may be in flight (the shared inFlight slot also makes the
       // earlier already-running guard apply to queue-owned scheduling).
       const enqueueRun = persistHostLockedBiSectionPlan(plan, generatedAt, {
-        reason: `core-warmup-${generatedAt}`,
+        reason: biPortalCoreWarmupReason(generatedAt),
         idempotencyKey: warmupIdempotencyKey,
       }).finally(() => {
         if (biPortalCoreWarmupState.inFlight === enqueueRun) biPortalCoreWarmupState.inFlight = null;
@@ -12474,7 +12521,7 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
           sections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY})),
           generatedAt,
           {
-            reason: `core-warmup-${generatedAt}`,
+            reason: biPortalCoreWarmupReason(generatedAt),
             idempotencyKey: warmupIdempotencyKey,
             requeueCompletedSections: terminal.invalid,
           },
@@ -12521,7 +12568,7 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       logBiPortalCoreWarmup('queued', {
         generatedAt,
         sections: sections.join(','),
-        reason: `core-warmup-${generatedAt}`,
+        reason: biPortalCoreWarmupReason(generatedAt),
         newlyQueued: (enqueued.newlyQueued || []).join(','),
         updatedRevision: (enqueued.updatedRevision || []).join(','),
         deduplicatedPending: (enqueued.deduplicatedPending || []).join(','),
