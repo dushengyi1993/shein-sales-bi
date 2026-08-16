@@ -99,14 +99,37 @@ for (const unitName of [
 }
 
 const sessionManager = readUnit('shein-bi-cloud-session-manager.service');
+const sessionManagerTimer = readUnit('shein-bi-cloud-session-manager.timer');
+const sessionManagerCoordinator = fs.readFileSync(new URL('./run_cloud_session_manager_job.sh', import.meta.url), 'utf8');
 assert.equal(property(sessionManager, 'User'), 'sheinops');
 assert.equal(property(sessionManager, 'Group'), 'sheinops');
 assert.equal(property(sessionManager, 'UMask'), '0077', 'session manager persists browser credentials and must create private files');
 assertCommonHardening(sessionManager, 'session manager', {allowAuditedSudo: true, umask: '0077'});
 assert.match(sessionManager, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
+assert.match(sessionManager, /SHEIN_BI_SESSION_MANAGER_RETRY_MAX=0/,
+  'session-manager retry-max must default to unlimited (the 01:27 deadline is the only boundary)');
+assert.match(sessionManager, /run_cloud_session_manager_job\.sh/,
+  'session manager must own one bounded coordinator run');
 assert.match(sessionManager, /--deadline-at 01:27/);
+assert.doesNotMatch(sessionManager, /--deadline-epoch/,
+  'the normal 00:45 unit must retain only its wall-clock deadline');
 assert.match(sessionManager, /--stage nightly-session/);
 assert.match(sessionManager, /flock -w 120/);
+assert.doesNotMatch(sessionManager, /^SuccessExitStatus=75$/m,
+  'terminal resource deferral must remain a real unit failure');
+assert.equal(property(sessionManagerTimer, 'Persistent'), 'true');
+assert.equal(property(sessionManagerTimer, 'OnCalendar'), '*-*-* 00:45:00');
+assert.match(sessionManagerCoordinator, /LANE_DEADLINE_ARGS=\(--deadline-at "\$DEADLINE_AT"\)/);
+assert.match(sessionManagerCoordinator, /LANE_DEADLINE_ARGS=\(--deadline-epoch "\$DEADLINE_EPOCH"\)/,
+  'an explicit epoch must replace the stale 01:27 lane argument');
+assert.match(sessionManagerCoordinator, /--check-only\)/,
+  'the coordinator must expose a read-only strong-evidence check for the morning gate');
+assert.match(sessionManagerCoordinator, /nightly_session_completed\(\)/,
+  'only the coordinator owns the strong marker+report completion predicate');
+assert.match(sessionManagerCoordinator, /completion_evidence_missing/,
+  'inner exit 0 without strong evidence must fail closed');
+assert.match(sessionManagerCoordinator, /RETRY_MAX="\$\{SHEIN_BI_SESSION_MANAGER_RETRY_MAX:-0\}"/,
+  'the coordinator default retry-max must be unlimited');
 assert.match(property(sessionManager, 'Before'), /shein-bi-db-backup\.service/);
 assert.match(property(sessionManager, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
@@ -245,8 +268,19 @@ assert.doesNotMatch(storageFeeSync, /^RestrictSUIDSGID=true$/m,
 const morningTimer = readUnit('shein-bi-cloud-morning-chain.timer');
 const morningService = readUnit('shein-bi-cloud-morning-chain.service');
 const morningScript = fs.readFileSync(new URL('./cloud_morning_chain.sh', import.meta.url), 'utf8');
+const morningWrapper = fs.readFileSync(new URL('./run_cloud_morning_chain_job.sh', import.meta.url), 'utf8');
 assert.equal(property(morningTimer, 'Persistent'), 'true');
+assert.equal(property(morningTimer, 'OnCalendar'), '*-*-* 07:10:00',
+  'the morning chain keeps exactly one daily window');
 assert.match(morningService, /SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC=600/);
+assert.match(morningService, /run_cloud_morning_chain_job\.sh/,
+  'ExecStart must point at the resume-aware wrapper');
+assert.equal(property(morningService, 'Restart'), 'on-failure',
+  'a failed/interrupted morning run must auto-restart the same service');
+assert.equal(property(morningService, 'RestartSec'), '60',
+  'the restart backoff keeps a rolling failure far from the StartLimit window');
+assert.doesNotMatch(morningService, /^SuccessExitStatus=.*75$/m,
+  'the morning chain must surface real failures, never mask them');
 assert.match(morningScript, /pipeline_marker_done "daily-operating-refresh"/);
 assert.match(morningScript, /wait_for_catchup_startup_window/);
 assert.match(morningScript, /catch-up is yielding to the full-managed priority run/);
@@ -254,10 +288,45 @@ assert.ok(
   morningScript.indexOf("NODE\n}\n\nactive_full_managed_priority_services()") >= 0,
   'catch-up shell functions must be declared after the pipeline-marker Node heredoc closes',
 );
+assert.match(morningScript, /SHEIN_BI_MORNING_RUN_DATE/,
+  'the chain must honor the wrapper-injected immutable run date');
+assert.match(morningScript, /SHEIN_BI_MORNING_BUSINESS_DATE/,
+  'the chain must honor the wrapper-injected immutable business date');
+assert.match(morningWrapper, /state\/cloud_morning_chain\/active\.json/,
+  'the wrapper persists the active run context under state/cloud_morning_chain');
+assert.match(morningWrapper, /daily-operating-refresh\.json/,
+  'the wrapper verifies the exact completion marker');
+assert.match(morningWrapper, /mode: 0o660/,
+  'the persisted context must be mode 0660');
+assert.match(morningWrapper, /exit 0/,
+  'a completed idempotent skip must exit 0 so Restart can never loop');
+
+// The two modified unit/timer pairs must pass systemd-analyze verify when the
+// tool is available (CI Linux runners without systemd skip this live check;
+// the static contracts above remain authoritative everywhere).
+const spawnSync = (await import('node:child_process')).spawnSync;
+const systemdAnalyze = spawnSync('bash', ['-lc', 'command -v systemd-analyze && systemd-analyze --version'], {encoding: 'utf8'});
+if (process.platform !== 'win32' && systemdAnalyze.status === 0) {
+  const units = [
+    'shein-bi-cloud-morning-chain.service',
+    'shein-bi-cloud-morning-chain.timer',
+    'shein-bi-cloud-session-manager.service',
+    'shein-bi-cloud-session-manager.timer',
+  ].map(name => `infra/systemd/${name}`);
+  const verify = spawnSync('systemd-analyze', ['verify', '--man=no', ...units], {
+    cwd: new URL('..', import.meta.url),
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.equal(verify.status, 0,
+    `systemd-analyze verify must pass for both modified pairs\nstdout:\n${verify.stdout}\nstderr:\n${verify.stderr}`);
+  console.log('PASS systemd-analyze verify both modified service/timer pairs');
+} else {
+  console.log('SKIP systemd-analyze verify (not available on this host)');
+}
 
 for (const timerName of [
   'shein-bi-cloud-order-closure.timer',
-  'shein-bi-cloud-session-manager.timer',
   'shein-bi-cloud-yesterday.timer',
   'shein-bi-db-backup.timer',
   'shein-bi-cloud-rtv-verify.timer',

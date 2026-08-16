@@ -49,4 +49,14 @@ MemoryHigh=2600M
 MemoryMax=3400M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_morning_chain.sh all
+# The wrapper owns the single daily run: it atomically persists the active
+# run context (runDate/businessDate), resumes it on restart and injects
+# immutable dates into the child chain.  Restart=on-failure keeps the SAME
+# service/slot (no second timer or queue) retrying a failed/interrupted run
+# with the context intact.  The wrapper exits 0 only after verified
+# completion evidence or after the persisted first-start deadline has
+# converged to an explicit watchdog-visible terminal failure, so neither a
+# completed idempotent skip nor an expired run can spin forever.
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_morning_chain_job.sh --root /opt/shein-bi/app
+Restart=on-failure
+RestartSec=60

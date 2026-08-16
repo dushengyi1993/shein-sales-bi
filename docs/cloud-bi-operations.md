@@ -86,7 +86,7 @@
 
 | 每日经营刷新 | `07:10` 单一 coordinator | 同一 run 完成19店链接/业务域、只补失败店、全店合并与一次原子发布，再刷新 OpenAPI 库存并执行库存守卫；平台未 ready 或资源忙时在原 run 内等待，不拆 timer |
 
-| `shein-bi-cloud-session-manager.timer` | 北京时间 `00:45` | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积并写 session marker |
+| `shein-bi-cloud-session-manager.timer` | 北京时间 `00:45`（单一入口，`Persistent=true`） | 云端登录态管家：顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态，检查 profile 体积并写 session marker；资源 defer 在同一 run 内重试到 `01:27`，只有 `done` marker 与同日19/19报告同时成立才幂等跳过 |
 
 | `shein-bi-cloud-browser-cleanup.timer` | 每天 `03:20/09:25/21:20` | 在共享 host 锁和租约保护下回收半托孤儿浏览器；不与全托 supply/home 同窗 |
 | `shein-bi-cloud-disk-maintenance.timer` | 每天 `00:10` | 旧抓数校验归档到 COS、清理 7 天前临时文件；00:27 前释放 |
@@ -113,12 +113,12 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 |---|---|---|---|---|
 | 实时事件 | 半托订单 Webhook + 按单 OpenAPI 同步 | Webhook 触发，只查发生变化的订单 | 更新当天正式销售事实、日汇总并通知在线 BI | 旧每小时 `today` timer 已删除；失败进入 Webhook 重试/dead-letter 与 watchdog。 |
 | `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | 19 店官方 OpenAPI 全量 | 逐店 fetch/load/每日行完整性通过后原子晋升 OpenAPI 日切片 | 任一失败、缺店或缺少每日行都禁止晋升，避免用不完整日覆盖正式事实。 |
-| `07:10` | 每日经营统一协调器 `shein-bi-cloud-morning-chain.service` | 单个 run 完整执行19店抓取、补充域、一次发布和库存维护 | 不重复抓当天销售；内部最多两个受门禁的只读浏览器 worker | 缺店只在同 run 重试，飞书日报自动发送关闭。 |
+| `07:10` | 每日经营统一协调器 `shein-bi-cloud-morning-chain.service` | wrapper 持久化 active run；失败自动重启恢复同一 runDate/businessDate，跨日先补旧业务日，再完成19店抓取、补充域、一次发布和库存维护 | 不重复抓当天销售；内部最多两个受门禁的只读浏览器 worker | 单 timer；缺店只在同 run 重试，飞书日报自动发送关闭。 |
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 来源/对账层 | 写链接/业务域、SBN 营销概览线索、RTV 复核等慢变数据；其中的销售步骤不直接写正式事实 | 不再重复执行 MBRs 全店营销价格栈扫描；该实时扫描只属于独立 guard。商品四档状态、SBN 经营/流量等仍需 WebAPI/headless。 |
 | 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 更新 `fact.openapi_*` 和 `mart.openapi_*_reconciliation`，不直接对正式事实表做原始 DML | 销售最终日晋升只属于 `03:00` 的 19/19 深度匹配门禁；退货/商品继续按各自隔离对账和切源门禁处理。 |
 | `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
 | `14:10` | ET 仓储费 `shein-bi-cloud-et-storage-fee.service` | ET headless/API，只读 `IncomeBill(sort=2)` + `ExportStoreFee` | 写仓储费事实、canonical 账单与利润 cache | 与通用 ET 共用 profile 锁但隔离输出；只预热利润，不刷新无关库存趋势。 |
-| `02:20` | 登录态管家 `shein-bi-cloud-session-manager.service` | 短生命周期 headless browser + WebAPI/SBN 探针 | 不写销售事实 | 恢复 WebAPI + SBN 登录态，结束后关闭它启动的浏览器。 |
+| `00:45–01:27` | 登录态管家 `shein-bi-cloud-session-manager.service` | 单一 coordinator 按共享锁/pressure 门禁取得短生命周期 headless browser，再执行 WebAPI/SBN 探针 | 不写销售事实 | 外层 defer(75) 在同一 run 内持续退避到 deadline；只有当日 `done` marker 与同日启用店铺19/19报告同时成立才完成，到截止仍不可运行则写 marker/alert 并返回真实失败。 |
 | `06:52` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 一个 coordinator 完成当天整轮，只更新订单生命周期状态，不重写历史销售事实 | 瞬时资源压力在同一 run 内每60秒重试，最晚07:27前启动；不再因一次门禁延期整天漏跑，也不再因店铺后台 Cookie 过期整批失败。 |
 | `11:00` | 每日营销检查 `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 单一 coordinator 读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成待处理营销清单；不持有写授权 | 不启动浏览器；瞬时失败只在同一 run 内重试失败阶段，不再于 13:00/16:00 重跑整套。 |
 | 本机 `11:10/13:10/16:10` | 本地后台营销执行 | Windows headless Chrome，默认 4 店一批、负载较高时 3 店一批 | 只执行负责人长期授权内的限时折扣修复；批内跨店并行、同店 dry-run→hash→事务→库存恢复→定点回读严格串行；整批终态后关闭本批 Profile 再开下一批 | `11:10` 主执行；后两次只续跑未终态队列。本机离线时保留队列，不把 WAITING 报成故障。 |
@@ -134,11 +134,11 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 本地和云端登录态是两套独立运行态：本地 Profile 只服务本机后台执行，云端 session manager 继续独立维护服务器 Profile/session HTTP。任一侧恢复成功都不能冒充另一侧已恢复；验证码或协议弹窗只在该侧自动恢复失败后才打开可见维护窗口。
 - 本机持久 Profile 只保留登录必需状态。`launch_store_browser.mjs` 把磁盘缓存放到 `%LOCALAPPDATA%/SheinBI/browser-cache` 并限制为 100MB，同时写入固定 disposable-root marker；批次结束且无本项目 Chrome 后运行 `cleanup_local_shein_browser_profile_cache.mjs --apply`。清理器只接受 basename 为 `browser-cache`、非文件系统根、非符号链接且 marker 内容精确匹配的缓存根；任一门禁不满足即 fail closed，永不删除 Cookies、Login Data、Local/Session Storage 或 IndexedDB。
 
-- 慢变经营数据只由每天 `07:10` 的 `shein-bi-cloud-morning-chain.service` 这个单一 coordinator 对外负责。逐店浏览器抓取、失败店重试、`cloud_daily_refresh.sh` 补充域和库存维护只是同一 run 的内部阶段；19店或指标 readiness 不完整时禁止 Portal 发布。旧 chunk/recovery/supplements/inventory-retry timer 已移除。MBRs 全店普通活动/优惠券/限时折扣价格栈只由独立 guard 实时读取，禁止在日更内再扫一遍。
+- 慢变经营数据只由每天 `07:10` 的 `shein-bi-cloud-morning-chain.service` 这个单一 coordinator 对外负责。service wrapper 原子保存 active run，失败后 `Restart=on-failure` 恢复同一 runDate/businessDate；即使跨日，也先补完旧业务日再推进当天。逐店浏览器抓取、失败店重试、`cloud_daily_refresh.sh` 补充域和库存维护只是同一 run 的内部阶段；19店或指标 readiness 不完整时禁止 Portal 发布。旧 chunk/recovery/supplements/inventory-retry timer 已移除。
 
 - 营销价格扫描按店有界重试，CLI 为 `--store-attempts 1..5`，生产 guard 由 `SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3` 固定为最多 3 次；只重试已分类的瞬时错误，业务拒绝或确定性错误不能靠无限重试掩盖。
 
-- 通用 ET 和 watchdog 保持 `Persistent=false`，避免开机并发补跑；每日仓储费及其它每日唯一性任务（昨日定稿、晨间链路、备份、订单闭环、登录态、营销 guard/repair）使用 `Persistent=true`，但各 service 仍先检查锁、当天状态和资源窗口，防止重启后堆叠执行。事实以对应 `.timer` 文件为准。
+- 通用 ET、watchdog 及其它未显式声明的 timer 保持 `Persistent=false`。当前只有晨间链路与登录态管家使用 `Persistent=true`：二者都先检查同日完成 marker，防止重启后重复执行；登录态管家的自动 timer 路径仍只使用 `01:27` clock deadline，截止后 fail closed。受控 catch-up 若显式给出未来 epoch，必须只向 browser-read lane 传 epoch，不能同时传已过期的 clock deadline。事实以对应 `.timer` 文件为准。
 
 - `daily-refresh` 启动前会等待销售/昨日销售/ET 写入任务结束，并检查 `MemAvailable`。可用内存低于阈值时写 `skipped_low_memory` 状态后跳过本轮；宁可让慢变数据晚一点，也不能拖慢销售刷新和 BI 页面。
 
@@ -178,9 +178,9 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today` 仅保留为手动临时发送；正式自动发送当前关闭，`scripts/cloud_morning_chain.sh` 默认跳过日报后直接启动慢变日更。
 
-- 晨间生产入口是 `cloud_morning_chain.sh all`：07:10 只建立一个业务 run，19 店内部可并发抓取、失败只重试失败店；所有核心证据完整后才合并并一次原子发布，随后在同一 run 运行 OpenAPI/成本/利润补充和库存守卫。RTV 已移到 04:50 独立受锁窗口，核验成功后只把相关 section 放入队列，不再因重复生成整站 Portal 把任务误报为失败。商品详情由 07:12 库存主轮每日有界补齐；其它高频库存轮只复用详情缓存，待轮转的新商品不作为故障报警。`scripts/cloud_daily_refresh.sh yesterday` 仍保留为受控手动全量恢复入口；旧 `scripts/cloud_openapi_hl_reconciliation.sh` 仅用于显式诊断。
+- 晨间生产入口是 `run_cloud_morning_chain_job.sh`，其 child 为 `cloud_morning_chain.sh all`。wrapper 负责 active run、自动重启和跨日续跑；child 负责一个不可变 runDate/businessDate 的19店分阶段执行。`daily-operating-refresh` 的 done marker（`ok=true/status=done/stage/runDate/businessDate` 全部精确匹配）是完成的**唯一权威证据**，wrapper 不依赖任何第二份文件，所以“marker done 与其它文件之间崩溃”不可能把已成功 child 卡成永久 restart livelock（resume 时 child 按同一 marker 幂等自愈）。active context 同时持久 first-start 绝对 deadline：同一 runDate 的每次 service 重启都复用同一 deadline，绝不重置；deadline 到期后收敛为 failed latest.json + `morning-all` failed marker + `cloud_ops_alerts/morning-chain-last.json` 并 exit 0 停止自动重启（未完成绝不当成功），watchdog 按“晨链当日失败”告警。次日新 run 是新的逻辑窗口、使用新的 first-start deadline，不会被昨日失败上下文永久阻塞；昨日失败保留在 failed marker/alert 中供人工跟进。所有核心证据完整后才合并并一次原子发布，随后在同一 run 运行 OpenAPI/成本/利润补充和库存守卫。RTV 已移到 04:50 独立受锁窗口；商品详情由 07:12 库存主轮每日有界补齐。`scripts/cloud_daily_refresh.sh yesterday` 仍只作为受控手动恢复入口。
 
-- 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。
+- 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。晨间链路失败 service 的退出只有同日 `done` 的 `morning-links-ready` marker（`ok=true`）且完成时间晚于单元退出时，才在 `recoveries` 中记为业务恢复；`warning` 状态（即使管线层 `ok=true`）或 done 但 `ok=false` 一律不算恢复。当日晨链已收敛为 failed/partial/deferred 终态且单元已退出时，watchdog 直接以“晨链当日失败”告警。
 
 - 云端覆盖审计入口：`scripts/audit_cloud_data_coverage.mjs`。最新日防漏用 `--expected-start range-start`，历史断档排查用 `--expected-start first-seen`；后者按每个店自己的首个有效日期之后查中间断档，避免把店铺尚未开通/尚未接入前的日期误判为缺抓。
 
@@ -322,13 +322,13 @@ GitHub 应保存：
 
 - `shein-bi-cloud-morning-chain.timer` 应保持 active；慢变日更由它启动 `shein-bi-cloud-daily-refresh.service`。手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志。当天销售由半托订单 Webhook 触发按单 OpenAPI 写正式事实，`03:00` 全店 OpenAPI 在19店逐店 fetch/load/每日行完整性通过后原子晋升最终日切片；退货退款、商品/链接等其它数据域仍按各自 OpenAPI、WebAPI/headless 与日更边界处理。不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
 
-- `shein-bi-cloud-session-manager.timer` 应保持 active；手动复跑用 `scripts/cloud_shein_session_manager.sh`。报告文件在 `outputs/reports/cloud-session-manager-latest.json` / `.md`，若失败会被 watchdog 按 service failed 逻辑提醒。
+- `shein-bi-cloud-session-manager.timer` 应保持 active，且只有一个 `00:45` OnCalendar。完整受控复跑应走 `scripts/run_cloud_session_manager_job.sh`（正常窗口使用 `--deadline-at 01:27`；显式 catch-up 只使用未来 `--deadline-epoch`），不要创建第二个 timer/queue。`--check-only` 只有在同日 `done` marker 且 `cloud-session-manager-latest.json` 满足启用店铺**精确逐店证据**时才返回成功：`report.date==runDate`、报表同日新鲜、summary 计数=启用店数、results 与启用 storeKey 集合完全一致且唯一、每行 `ok=true` 且带 producer 实际写出的 `exportSession.stores[].webApiProbe.ok` 探针证明；伪造 summary 19/19 + `results=[]`、重复/多余/缺店行、缺逐店探针证明或 store 配置缺失一律不成立。无证据 warning、陈旧或缺店报告都必须恢复。资源窗口耗尽写 `state/cloud_ops_alerts/session-manager-last.json` 并返回真实失败。
 
 - `shein-bi-cloud-daily-refresh.service` 必须以 `User=sheinops` / `Group=sheinops` 运行，因为它会启动当前 19 店 SHEIN Chrome profile；不要改回 root，否则会生成 root-owned profile 文件并让 `shein-bi-cloud-session-manager.service` 第二天因 `EACCES` 失败。ET forwarder 仍保留 root 执行，因为入仓依赖 Docker/root 环境，且它不写 SHEIN 店铺 profile。
 
 - 历史 V1 时间筛选弹窗回归检查已随 V1 线上下线而停止；如需排查旧版，只能从 GitHub release tag `2026.06.18-v1-final-archive` 临时恢复到隔离环境。
 
-- 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch`，同时原子刷新 browser session 与可复用 WebAPI Cookie session，并用一次只读 GSP 请求验证导出文件。每日 `02:20` session manager 只有在本轮 WebAPI 导出时间新鲜且探针通过时才算该店成功，不能因为历史 session 文件“存在”就报绿。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈，若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 处理一次；若只是协议/通知弹窗阻塞，运维代理可先点掉弹窗并重试登录，不必直接判定为用户验证码阻塞。
+- 登录态恢复统一走 `restore_shein_store_session.mjs`：先用服务器私有 `state/shein_browser_sessions/*.local.json` / `state/shein_webapi_sessions/*.local.json` bootstrap，再运行 `auto_relogin_shein_store.mjs` 验证 GSP order WebAPI 和 SBN 商品分析页；验证成功后必须立即调用 `export_shein_browser_session.mjs --no-launch`，同时原子刷新 browser session 与可复用 WebAPI Cookie session，并用一次只读 GSP 请求验证导出文件。每日 `00:45` session manager 只有在本轮 WebAPI 导出时间新鲜且探针通过时才算该店成功，不能因为历史 session 文件“存在”就报绿。云端没有保存密码的店铺不能只靠 Chrome autofill 自愈；登录页密码输入为空时稳定分类为 `saved_password_unavailable`，验证码/安全验证、session expired 与 bootstrap 失败分别分类，且只记录页面布尔/文本，不读取或打印输入值。若 SBN 已过期且无保存密码，需要走 `/cloud-login-maintenance` 处理一次；若只是协议/通知弹窗阻塞，运维代理可先点掉弹窗并重试登录，不必直接判定为用户验证码阻塞。
 
 - 云端人工登录入口验证：`/cloud-login-maintenance` 返回 `200`；`/cloud-login/novnc/vnc.html` 返回 `200`；创建会话后 `/cloud-login/session/:id` 返回 `200` 且 WebSocket 升级返回 `101 Switching Protocols`；点“我已完成并关闭”后 export/probe 成功且不残留 Chrome/Xvfb/x11vnc/websockify 进程。
 
@@ -451,5 +451,5 @@ CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/l
 
 - 商品对账以 **当前 OpenAPI 商品列表、库存、每日全量详情和商品上下架 Webhook** 为准。19店分别使用独立 App 配额，`cloud_openapi_product_reconciliation.sh` 默认 `maxDetails=0`，不再轮转；近期成功详情只在单条瞬时失败时作为短期降级证据。OpenAPI 独有链接、API 合法的待上架/下架状态和浏览器四态快照差异只保留为诊断信息。没有任何可用详情、当前库存缺失、详情缓存超过21天，或实时详情显示“已上架 → 非已上架”但没有对应 Webhook 证据，才是需要处理的 warning。
 - `scripts/audit_bi_warehouse.mjs`、watchdog 和 `state/openapi-probes/product-reconciliation.latest.json` 使用同一语义。先看具体店铺和具体缺口，不把“browser mismatch”当成可操作事故。
-- 凌晨登录态、备份、昨日最终核对共享同一把锁。正常运行时后启动任务等待；宕机后 Persistent timer 同时补跑时，软 `Before/After` 只做 `session-manager → db-backup → yesterday` 排序，不触发额外任务，`flock` 仍是最终互斥。验收时检查三个 service 的 journal 是否按顺序出现锁等待及最终完成记录。
+- 凌晨登录态、备份、昨日最终核对共享同一把锁。正常运行时后启动任务等待；只有登录态 timer 在该夜间链中使用 `Persistent=true`，补触发仍先查当日 marker 并受有效 deadline 限制，备份与昨日最终核对不会因该补触发被额外启动。软 `Before/After` 只表达 `session-manager → db-backup → yesterday` 顺序，`flock` 仍是最终互斥。验收时检查三个 service 的 journal 是否按顺序出现锁等待及最终完成记录。
 - 云端 Linux 的运行状态只看 systemd、watchdog、Portal `/api/health` 与数仓审计；旧 Windows 计划任务不参与生产健康判断。
