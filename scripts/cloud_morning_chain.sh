@@ -6,17 +6,45 @@ TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 STAGE="${1:-all}"
 LOG_DIR="${SHEIN_BI_MORNING_CHAIN_LOG_DIR:-/srv/shein-bi/logs/cloud-morning-chain}"
 STATE_DIR="${SHEIN_BI_MORNING_CHAIN_STATE_DIR:-$ROOT/state/cloud_morning_chain}"
-RUN_DATE="$(TZ="$TZ_NAME" date +%F)"
-DATA_DATE="$(TZ="$TZ_NAME" date -d yesterday +%F)"
+# The owning wrapper injects immutable runDate/businessDate; defaults remain
+# today/yesterday so the script keeps working when invoked directly.
+RUN_DATE="${SHEIN_BI_MORNING_RUN_DATE:-$(TZ="$TZ_NAME" date +%F)}"
+DATA_DATE="${SHEIN_BI_MORNING_BUSINESS_DATE:-$(TZ="$TZ_NAME" date -d yesterday +%F)}"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/morning-${STAGE}-${DATA_DATE}-${STAMP}.log"
 DRY_RUN="${SHEIN_BI_MORNING_CHAIN_DRY_RUN:-0}"
 RUN_STARTED_EPOCH="$(date +%s)"
 RUN_BUDGET_SEC="${SHEIN_BI_MORNING_RUN_BUDGET_SEC:-10200}"
-RUN_DEADLINE_EPOCH=$((RUN_STARTED_EPOCH + RUN_BUDGET_SEC))
+# The owning wrapper injects the persisted FIRST-START absolute deadline so a
+# service restart can never reset the daily run budget.  When invoked directly
+# the script still derives today's budget from its own start time.
+RUN_DEADLINE_EPOCH="${SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH:-$((RUN_STARTED_EPOCH + RUN_BUDGET_SEC))}"
+SESSION_RECOVERY_BUDGET_SEC="${SHEIN_BI_MORNING_SESSION_RECOVERY_BUDGET_SEC:-1800}"
+LINK_COLLECTION_RESERVE_SEC="${SHEIN_BI_MORNING_LINK_COLLECTION_RESERVE_SEC:-7200}"
+MAX_STORE_NO_PROGRESS_ROUNDS="${SHEIN_BI_MORNING_STORE_NO_PROGRESS_MAX:-3}"
 CATCHUP_MIN_UPTIME_SEC="${SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC:-600}"
 CATCHUP_RETRY_DELAY_SEC="${SHEIN_BI_MORNING_CATCHUP_RETRY_DELAY_SEC:-30}"
 FULL_MANAGED_PRIORITY_SERVICES="${SHEIN_BI_MORNING_FULL_MANAGED_PRIORITY_SERVICES:-shein-fm-home-realtime.service shein-fm-home-daily.service shein-fm-session-renewal.service shein-fm-supply-sync.service shein-fm-home-finance-daily.service}"
+
+validate_date() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+  TZ="$TZ_NAME" date -d "$value" +%F >/dev/null 2>&1
+}
+
+if ! validate_date "$RUN_DATE" || ! validate_date "$DATA_DATE"; then
+  echo "[cloud_morning_chain] ERROR invalid injected run/business date runDate=$RUN_DATE businessDate=$DATA_DATE; refusing to run" >&2
+  exit 64
+fi
+
+# Fail closed on any mismatched pair (runDate == businessDate, or any other
+# non-adjacent pair).  The daily run can only ever operate on
+# businessDate = runDate - 1 (Asia/Shanghai calendar day).
+EXPECTED_BUSINESS_DATE="$(TZ="$TZ_NAME" date -d "$RUN_DATE - 1 day" +%F)"
+if [[ "$DATA_DATE" != "$EXPECTED_BUSINESS_DATE" ]]; then
+  echo "[cloud_morning_chain] ERROR injected businessDate=$DATA_DATE does not equal runDate=$RUN_DATE minus one day ($EXPECTED_BUSINESS_DATE); refusing to run" >&2
+  exit 64
+fi
 
 now_iso() {
   TZ="$TZ_NAME" date --iso-8601=seconds
@@ -112,6 +140,17 @@ try {
 NODE
 }
 
+latest_state_status() {
+  STATE_DIR="$STATE_DIR" node - <<'NODE' 2>/dev/null || true
+const fs = require('fs');
+const path = require('path');
+try {
+  const payload = JSON.parse(fs.readFileSync(path.join(process.env.STATE_DIR, 'latest.json'), 'utf8'));
+  process.stdout.write(String(payload?.status || ''));
+} catch {}
+NODE
+}
+
 active_full_managed_priority_services() {
   local service active=()
   command -v systemctl >/dev/null 2>&1 || return 0
@@ -121,6 +160,121 @@ active_full_managed_priority_services() {
     fi
   done
   printf '%s' "${active[*]:-}"
+}
+
+session_recovery_deadline_epoch() {
+  local now budget_deadline reserve_deadline
+  now="$(date +%s)"
+  budget_deadline=$((now + SESSION_RECOVERY_BUDGET_SEC))
+  reserve_deadline=$((RUN_DEADLINE_EPOCH - LINK_COLLECTION_RESERVE_SEC))
+  if (( budget_deadline < reserve_deadline )); then
+    printf '%s\n' "$budget_deadline"
+  else
+    printf '%s\n' "$reserve_deadline"
+  fi
+}
+
+run_nightly_session_readiness_gate() {
+  local recovery_deadline recovery_status now
+  # Strong evidence gate: only an ok=true done marker with matching
+  # stage/runDate/businessDate AND a same-day ok=true report covering every
+  # enabled store counts as completed.  The session helper owns this predicate
+  # (--check-only) so the morning chain never re-implements a weaker
+  # marker-only judgement, and a warning marker without evidence must trigger
+  # recovery instead of a skip.
+  if bash scripts/run_cloud_session_manager_job.sh \
+    --check-only \
+    --root "$ROOT" \
+    --marker-stage nightly-session \
+    --marker-root "$ROOT/state/pipeline-markers" \
+    --run-date "$RUN_DATE"; then
+    echo "[cloud_morning_chain] session-ready strong evidence (done marker + same-day 19/19 report) runDate=$RUN_DATE; no session-manager work started"
+    return 0
+  fi
+
+  recovery_deadline="$(session_recovery_deadline_epoch)"
+  now="$(date +%s)"
+  if (( recovery_deadline <= now )); then
+    write_state "failed" "nightly session recovery cannot start without consuming the reserved ${LINK_COLLECTION_RESERVE_SEC}s link-collection budget; link collection was not started"
+    write_marker "morning-all" "failed" "nightly-session recovery had no safe budget before link collection" "$LOG_FILE" >/dev/null || true
+    echo "[cloud_morning_chain] ERROR session recovery has no safe budget runDeadline=$RUN_DEADLINE_EPOCH linkReserveSec=$LINK_COLLECTION_RESERVE_SEC" >&2
+    return 79
+  fi
+
+  write_state "running" "nightly-session completion evidence is missing; one bounded in-run session recovery is running before link collection"
+  echo "[cloud_morning_chain] session-recovery needed deadlineEpoch=$recovery_deadline runDeadline=$RUN_DEADLINE_EPOCH budgetSec=$SESSION_RECOVERY_BUDGET_SEC linkReserveSec=$LINK_COLLECTION_RESERVE_SEC"
+  if bash scripts/run_cloud_session_manager_job.sh \
+    --root "$ROOT" \
+    --domain session-manager \
+    --lock-wait-sec "${SHEIN_BI_MORNING_SESSION_LOCK_WAIT_SEC:-120}" \
+    --deadline-epoch "$recovery_deadline" \
+    --defer-state "${SHEIN_BI_MORNING_SESSION_DEFER_STATE:-/srv/shein-bi/runtime/host-scheduler/session-manager.latest.json}" \
+    --marker-stage nightly-session \
+    --marker-root "$ROOT/state/pipeline-markers" \
+    --alert-file "${SHEIN_BI_MORNING_SESSION_ALERT_FILE:-$ROOT/state/cloud_ops_alerts/session-manager-last.json}" \
+    --run-date "$RUN_DATE" \
+    -- /usr/bin/env bash "$ROOT/scripts/run_pipeline_stage.sh" \
+      --stage nightly-session \
+      --message "19-store session maintenance completed" \
+      -- /usr/bin/flock -w "${SHEIN_BI_MORNING_SESSION_INNER_LOCK_WAIT_SEC:-120}" \
+        "${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE:-$ROOT/state/locks/shein-bi-nightly-maintenance.lock}" \
+        /usr/bin/env bash "$ROOT/scripts/cloud_shein_session_manager.sh"; then
+    recovery_status=0
+  else
+    recovery_status=$?
+  fi
+
+  if [[ "$recovery_status" != "0" ]]; then
+    write_state "failed" "nightly session recovery failed status=$recovery_status; link collection was not started"
+    write_marker "morning-all" "failed" "nightly-session recovery failed status=$recovery_status before link collection" "$LOG_FILE" >/dev/null || true
+    echo "[cloud_morning_chain] ERROR session recovery failed status=$recovery_status; all-store fetch skipped" >&2
+    return "$recovery_status"
+  fi
+
+  # Re-verify through the same strong helper; never trust the recovery exit
+  # code or an intermediate marker alone.
+  if bash scripts/run_cloud_session_manager_job.sh \
+    --check-only \
+    --root "$ROOT" \
+    --marker-stage nightly-session \
+    --marker-root "$ROOT/state/pipeline-markers" \
+    --run-date "$RUN_DATE"; then
+    write_state "running" "nightly session recovery evidence verified; all-store link collection is starting"
+    echo "[cloud_morning_chain] session-recovery evidence verified (done marker + same-day 19/19 report); continuing to all-store fetch"
+    return 0
+  fi
+
+  write_state "failed" "nightly session recovery exited 0 but completion evidence (done marker + same-day 19/19 report) is missing; link collection was not started"
+  write_marker "morning-all" "failed" "nightly-session recovery evidence missing after exit 0" "$LOG_FILE" >/dev/null || true
+  echo "[cloud_morning_chain] ERROR session recovery evidence missing after exit 0; all-store fetch skipped" >&2
+  return 79
+}
+
+# Idempotent terminal-state convergence.  Only a non-terminal latest state
+# (missing / running / waiting / waiting_resource) is replaced with failed so
+# the successful paths that already wrote ok are never overwritten by the EXIT
+# trap, and repeated TERM/INT/EXIT invocations converge to the same single
+# failed state plus a failed pipeline marker.
+converge_terminal_state() {
+  local reason="$1"
+  [[ "${TERMINAL_STATE_WRITTEN:-0}" == "1" ]] && return 0
+  TERMINAL_STATE_WRITTEN=1
+  set +e
+  local current_status
+  current_status="$(latest_state_status)"
+  case "$current_status" in
+    ""|running|waiting|waiting_resource)
+      write_state "failed" "$reason"
+      write_marker "morning-$STAGE" "failed" "$reason" "$LOG_FILE" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+on_termination() {
+  local signal_name="$1"
+  local exit_code="$2"
+  converge_terminal_state "cloud_morning_chain received SIG$signal_name before a terminal state was recorded; the owning service Restart resumes the same active run context (runDate=$RUN_DATE businessDate=$DATA_DATE)"
+  exit "$exit_code"
 }
 
 wait_for_catchup_startup_window() {
@@ -280,9 +434,15 @@ run_inventory_stage() {
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
+trap 'on_termination TERM 143' TERM
+trap 'on_termination INT 130' INT
+trap 'converge_terminal_state "cloud_morning_chain exited without a terminal non-running state; success and failure paths already recorded their own states"' EXIT
 cd "$ROOT"
 export SHEIN_BI_ROOT="$ROOT"
 export SHEIN_BI_MORNING_CHAIN_STATE_DIR="$STATE_DIR"
+# The absolute run deadline propagates to every per-store browser wrapper so a
+# single store / the whole round can never run past the internal budget.
+export SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH="$RUN_DEADLINE_EPOCH"
 
 echo "[cloud_morning_chain] start stage=$STAGE runDate=$RUN_DATE businessDate=$DATA_DATE dryRun=$DRY_RUN"
 
@@ -310,11 +470,19 @@ case "$STAGE" in
       echo "[cloud_morning_chain] resume-skip all-store fetch; exact-date evidence already exists for all enabled stores"
       node scripts/build_morning_resume_evidence.mjs --date "$DATA_DATE" --out "$RESULT_FILE"
     else
+      if run_nightly_session_readiness_gate; then
+        :
+      else
+        SESSION_GATE_STATUS=$?
+        exit "$SESSION_GATE_STATUS"
+      fi
       run_all_store_fetch "$RESULT_FILE"
       MISSING_STORES="$(missing_exact_date_stores)"
       RETRY_ROUND=0
+      NO_PROGRESS_ROUNDS=0
       while [[ -n "$MISSING_STORES" ]]; do
         require_run_budget "store-retry"
+        PREV_MISSING_STORES="$MISSING_STORES"
         RETRY_ROUND=$((RETRY_ROUND + 1))
         echo "[cloud_morning_chain] retryRound=$RETRY_ROUND missingStores=$MISSING_STORES; retrying only those stores inside the same run"
         if (( RETRY_ROUND > 1 )); then
@@ -329,6 +497,16 @@ case "$STAGE" in
         SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
           bash scripts/cloud_link_business_sync.sh "$DATA_DATE"
         MISSING_STORES="$(missing_exact_date_stores)"
+        if [[ "$PREV_MISSING_STORES" == "$MISSING_STORES" ]]; then
+          NO_PROGRESS_ROUNDS=$((NO_PROGRESS_ROUNDS + 1))
+        else
+          NO_PROGRESS_ROUNDS=0
+        fi
+        if (( NO_PROGRESS_ROUNDS >= MAX_STORE_NO_PROGRESS_ROUNDS )); then
+          write_state "failed" "store fetch made no progress in ${NO_PROGRESS_ROUNDS} consecutive retry rounds (bound=${MAX_STORE_NO_PROGRESS_ROUNDS}); missing=$MISSING_STORES; the previous complete BI snapshot remains active"
+          write_marker "morning-all" "failed" "no-progress store retry bound reached after ${NO_PROGRESS_ROUNDS} rounds: $MISSING_STORES" "$LOG_FILE" >/dev/null || true
+          exit 78
+        fi
       done
     fi
 

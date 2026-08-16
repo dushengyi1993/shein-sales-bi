@@ -121,13 +121,49 @@ function laterThanServiceExit(completedAt, status) {
   return Number.isFinite(completed) && (!Number.isFinite(exited) || completed >= exited);
 }
 
-function assessBusinessRecovery(unit, status, {morningMarker, orderRecheckState} = {}) {
+/**
+ * A morning-chain run must converge to a terminal non-running latest state.
+ * When the oneshot unit has already left the active set (failed/inactive/dead)
+ * but its latest.json is still `running`, that is a stale-running failure that
+ * must surface as an explicit blocker instead of being treated as normal.
+ * `unknown`/`activating`/`active` never qualify so an unreadable systemd state
+ * cannot create a false alert.
+ */
+export function isMorningChainStaleRunning(latestState, unitState) {
+  if (!latestState || typeof latestState !== 'object') return false;
+  if (String(latestState.status || '') !== 'running') return false;
+  const activeState = String(unitState?.ActiveState || '');
+  return ['failed', 'inactive', 'dead'].includes(activeState);
+}
+
+/**
+ * A morning-chain run that converged to a terminal failure (wrapper or chain
+ * recorded failed/deferred/partial for the CURRENT runDate) while the oneshot
+ * unit has already left the active set is the deadline/terminal-failure state
+ * the watchdog must surface.  `running`, `ok`, stale dates, in-between unit
+ * states and unreadable payloads never qualify, so neither a live run nor an
+ * old daily failure can create a false alert.
+ */
+export function isMorningChainTerminalFailure(latestState, unitState) {
+  if (!latestState || typeof latestState !== 'object') return false;
+  if (!['failed', 'deferred', 'partial'].includes(String(latestState.status || ''))) return false;
+  if (String(latestState.date || '') !== bjDateKey()) return false;
+  const activeState = String(unitState?.ActiveState || '');
+  return ['failed', 'inactive', 'dead'].includes(activeState);
+}
+
+export function assessBusinessRecovery(unit, status, {morningMarker, orderRecheckState} = {}) {
   const morningUnits = new Set([
     'shein-bi-cloud-morning-chain.service',
   ]);
+  // Only an actual `done` morning-links-ready marker may resolve a failed
+  // service exit.  A `warning` marker (ok=true at the pipeline layer but not a
+  // completion) or any other non-done status must NEVER count as recovery:
+  // the failed unit stays visible until real done evidence exists.
   if (morningUnits.has(unit)
     && morningMarker?.runDate === bjDateKey()
-    && ['done', 'warning'].includes(String(morningMarker?.status || ''))
+    && String(morningMarker?.status || '') === 'done'
+    && morningMarker?.ok === true
     && laterThanServiceExit(morningMarker?.completedAt, status)) {
     return {recovered: true, reason: 'morning_links_ready_after_unit_exit', completedAt: morningMarker.completedAt};
   }
@@ -502,6 +538,7 @@ async function main() {
   }
   const serviceExitAcks = await readServiceExitAcks();
   const morningReadyMarker = await readJsonIfExists(path.join(ROOT, 'state', 'pipeline-markers', 'morning-links-ready.latest.json'));
+  const morningChainLatest = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_morning_chain', 'latest.json'));
   const orderRecheckStateForServices = await readJsonIfExists(path.join(ROOT, 'state', 'order_status_recheck_last.json'));
   const sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
   const manualLoginState = await readJsonIfExists(
@@ -521,6 +558,16 @@ async function main() {
     const status = systemctlShow(unit);
     units.push(status);
     if (status.LoadState === 'not-found') continue;
+    if (unit === 'shein-bi-cloud-morning-chain.service'
+      && isMorningChainStaleRunning(morningChainLatest, status)) {
+      issues.push(`晨链终态未收敛：${unit} 已退出但 latest.json 仍为 running state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} latestGeneratedAt=${morningChainLatest?.generatedAt || '-'}；该 service 已配置 Restart=on-failure 恢复同一 active run context（runDate/businessDate），wrapper 会在重启时重写 latest.json；若持续未修复需人工确认当日任务`);
+      continue;
+    }
+    if (unit === 'shein-bi-cloud-morning-chain.service'
+      && isMorningChainTerminalFailure(morningChainLatest, status)) {
+      issues.push(`晨链当日失败：${unit} 已退出且 latest.json 为终态失败 date=${morningChainLatest?.date || '-'} status=${morningChainLatest?.status || '-'} state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} message=${morningChainLatest?.message || '-'}；wrapper 已在 first-start 绝对 deadline 后收敛终态并停止自动重启，需人工确认当日任务`);
+      continue;
+    }
     const {
       exitStatus,
       expectedConditionSkip,
@@ -879,6 +926,7 @@ async function main() {
     marketingRepairState,
     marketingRepairService,
     marketingRepairHealth,
+    morningChainLatest,
     portal,
     coverage,
     orphanStoreBrowsers,
@@ -924,7 +972,10 @@ async function main() {
   if (issues.length) process.exitCode = args.dryRun ? 0 : 1;
 }
 
-main().catch(err => {
-  console.error(err?.stack || String(err));
-  process.exitCode = 1;
-});
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+if (isMain) {
+  main().catch(err => {
+    console.error(err?.stack || String(err));
+    process.exitCode = 1;
+  });
+}

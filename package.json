@@ -20,6 +20,7 @@
     "pending-discuss:daily": "node scripts/pending_discuss_daily.mjs daily",
     "build:portal-shell": "node scripts/generate_bi_portal_shell.mjs",
     "test:deterministic": "npm run build:portal-shell && node scripts/run_deterministic_tests.mjs",
+    "test:session-manager-reliability": "node scripts/test_cloud_session_manager_reliability.mjs",
     "test": "npm run check:generated && npm run check:source && npm run test:deterministic"
   },
   "dependencies": {

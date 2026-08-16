@@ -15,6 +15,12 @@ Environment=HOME=/home/sheinops
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_LOG_DIR=/srv/shein-bi/logs/cloud-session-manager
 Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+# 0 = unlimited in-run retries; the 01:27 deadline is the only termination
+# boundary.  A non-zero value is an explicit test/emergency override only.
+Environment=SHEIN_BI_SESSION_MANAGER_RETRY_MAX=0
+Environment=SHEIN_BI_SESSION_MANAGER_RETRY_BACKOFF_SEC=20
+Environment=SHEIN_BI_SESSION_MANAGER_RETRY_BACKOFF_MAX_SEC=120
+Environment=SHEIN_BI_SESSION_MANAGER_DEADLINE_SAFETY_SEC=30
 TimeoutStartSec=7200
 Nice=10
 IOSchedulingClass=best-effort
@@ -34,5 +40,4 @@ LockPersonality=true
 RestrictRealtime=true
 ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 2770 /opt/shein-bi/app/state/locks
 ExecStartPre=+/usr/bin/install -o sheinops -g sheinops -m 0660 /dev/null /opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_browser_read_job.sh --domain session-manager --lock-wait-sec 120 --deadline-at 01:27 --defer-state /srv/shein-bi/runtime/host-scheduler/session-manager.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage nightly-session --message "19-store session maintenance completed" -- /usr/bin/flock -w 120 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_shein_session_manager.sh
-SuccessExitStatus=75
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_session_manager_job.sh --domain session-manager --lock-wait-sec 120 --deadline-at 01:27 --defer-state /srv/shein-bi/runtime/host-scheduler/session-manager.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage nightly-session --message "19-store session maintenance completed" -- /usr/bin/flock -w 120 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_shein_session_manager.sh

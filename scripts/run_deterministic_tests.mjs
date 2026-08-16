@@ -76,6 +76,7 @@ const tests = [
   'scripts/test_bi_profit_mart_freshness.mjs',
   'scripts/test_profit_refresh_pipeline_contract.mjs',
   'scripts/test_marketing_price_snapshot_health.mjs',
+  'scripts/test_cloud_session_manager_reliability.mjs',
   'scripts/test_bi_ops_agent_governor.mjs',
   'scripts/test_bi_ops_model_policy.mjs',
   'scripts/test_bi_ops_intent_planner.mjs',
@@ -134,6 +135,9 @@ const tests = [
   'scripts/test_link_ops_schema_sync.mjs',
   'scripts/test_link_ops_migration_compat.mjs',
   'scripts/test_migrate_link_ops_runtime_to_postgres.mjs',
+  'scripts/test_morning_chain_reliability.mjs',
+  'scripts/test_morning_chain_watchdog_stale_running.mjs',
+  'scripts/test_morning_chain_wrapper_reliability.mjs',
   'scripts/test_shared_lock_security.mjs',
   'scripts/test_pipeline_marker.mjs',
   'scripts/test_morning_resume_evidence.mjs',
@@ -214,6 +218,10 @@ for (const file of tests) {
     ? 240_000
     : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
       ? 720_000
+      : ['scripts/test_morning_chain_reliability.mjs',
+        'scripts/test_morning_chain_wrapper_reliability.mjs',
+        'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
+        ? 120_000
       : 30_000;
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),

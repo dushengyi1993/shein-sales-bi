@@ -29,6 +29,90 @@ const LOGIN_URLS = [
 ];
 const MAX_STORES_PER_RUN = Math.max(1, Number(process.env.SHEIN_AUTO_RELOGIN_MAX_STORES || 3));
 
+export const BLOCKER_CODES = Object.freeze([
+  'bootstrap_failed',
+  'session_expired',
+  'saved_password_unavailable',
+  'verification_code_required',
+  'security_verification_required',
+]);
+
+/**
+ * Deterministic, desensitized login-blocker classification based ONLY on page
+ * booleans and page text markers, never on input values. It turns a generic
+ * "login_not_restored" into a stable blocker code so evidence such as
+ * 20302/login_not_restored/hasPasswordValue=false resolves to exactly
+ * saved_password_unavailable instead of an unactionable failure.
+ *
+ * pages: [{href, title, hasLoginText, textPreview,
+ *          inputs: [{type, placeholder, hasValue, visible}],
+ *          buttons: [{text}]}]
+ * probeCodes: API probe response codes observed while the profile was not
+ *             restored (e.g. 20302 for an SSO redirect).
+ * bootstrapError: set when the browser/CDP stage failed before any page state
+ *                 was observed.
+ */
+export function classifyLoginBlocker({pages = [], probeCodes = [], bootstrapError = ''} = {}) {
+  const pageText = page => [
+    page?.title || '',
+    page?.textPreview || '',
+    ...(Array.isArray(page?.inputs) ? page.inputs.map(input => input?.placeholder || '') : []),
+    ...(Array.isArray(page?.buttons) ? page.buttons.map(button => button?.text || '') : []),
+  ].join('\n');
+  const hasVisiblePasswordInput = page => Array.isArray(page?.inputs)
+    && page.inputs.some(input => String(input?.type).toLowerCase() === 'password' && input?.visible === true);
+  const hasVisiblePasswordValue = page => Array.isArray(page?.inputs)
+    && page.inputs.some(input => String(input?.type).toLowerCase() === 'password'
+      && input?.visible === true && input?.hasValue === true);
+  const sawLoginPage = pages.some(page => page?.hasLoginText === true || hasVisiblePasswordInput(page));
+  const sawPasswordInput = pages.some(hasVisiblePasswordInput);
+  const sawPasswordValue = pages.some(hasVisiblePasswordValue);
+  const sawCaptchaText = pages.some(page => {
+    const text = pageText(page);
+    return text.includes('\u9a8c\u8bc1\u7801') || /captcha/i.test(text);
+  });
+  const sawSecurityVerificationText = pages.some(page => {
+    const text = pageText(page);
+    return text.includes('\u5b89\u5168\u9a8c\u8bc1')
+      || text.includes('\u6ed1\u52a8\u9a8c\u8bc1')
+      || text.includes('\u56fe\u5f62\u9a8c\u8bc1')
+      || /security verification/i.test(text)
+      || /verify you are human/i.test(text);
+  });
+  const redirectedToLogin = pages.some(page => /\/login\/GMPSSO\//.test(page?.href || ''));
+  const probesRedirected = probeCodes.length > 0
+    && probeCodes.every(code => String(code) !== '0');
+  const details = {
+    sawLoginPage,
+    sawPasswordInput,
+    sawPasswordValue,
+    sawCaptchaText,
+    sawSecurityVerificationText,
+    redirectedToLogin,
+    probesRedirected,
+  };
+
+  if (bootstrapError) {
+    return {blocker: 'bootstrap_failed', reason: 'browser bootstrap failed before page state was observed', details};
+  }
+  if (!sawLoginPage) {
+    if (redirectedToLogin || probesRedirected) {
+      return {blocker: 'session_expired', reason: 'session is expired but no login form was observed for automated restore', details};
+    }
+    return {blocker: 'bootstrap_failed', reason: 'no login form or application page was observed', details};
+  }
+  if (sawCaptchaText) {
+    return {blocker: 'verification_code_required', reason: 'login page shows a verification-code marker', details};
+  }
+  if (sawSecurityVerificationText) {
+    return {blocker: 'security_verification_required', reason: 'login page shows a security-verification marker', details};
+  }
+  if (sawPasswordInput && !sawPasswordValue) {
+    return {blocker: 'saved_password_unavailable', reason: 'login page password input is empty (no saved credential available)', details};
+  }
+  return {blocker: 'session_expired', reason: 'session is expired and automated restore without credentials did not complete', details};
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -322,18 +406,24 @@ async function clickLogin(send) {
 }
 
 async function restoreOne(store, opts) {
-  await launchStore(store.storeKey, opts.visible);
-  const connectionTimeoutMs = Math.min(opts.timeoutMs, 60_000);
-  await waitForCdpTargets(store.port, connectionTimeoutMs);
-  const {send, close} = await connectCdp(store.port, {
-    targetTimeoutMs: Math.min(connectionTimeoutMs, 8000),
-    commandTimeoutMs: connectionTimeoutMs,
-  });
-  const started = Date.now();
   const steps = [];
+  const observedPages = [];
+  const probeCodes = [];
+  let close = null;
   try {
+    await launchStore(store.storeKey, opts.visible);
+    const connectionTimeoutMs = Math.min(opts.timeoutMs, 60_000);
+    await waitForCdpTargets(store.port, connectionTimeoutMs);
+    const cdp = await connectCdp(store.port, {
+      targetTimeoutMs: Math.min(connectionTimeoutMs, 8000),
+      commandTimeoutMs: connectionTimeoutMs,
+    });
+    close = cdp.close;
+    const {send} = cdp;
+    const started = Date.now();
     await navigate(send, ORDER_URL, 2500);
     let probe = await apiProbe(send, opts.date);
+    probeCodes.push(String(probe.code || ''));
     steps.push({step: 'initial-probe', probe});
     if (probe.code === '0') {
       const marketing = await marketingProbe(send);
@@ -352,6 +442,7 @@ async function restoreOne(store, opts) {
       const refreshed = await refreshIfBlank(send);
       await closeModalIfAny(send);
       let info = await pageInfo(send);
+      observedPages.push(info);
       steps.push({step: 'navigate', url, refreshed, info: {href: info.href, title: info.title, hasLoginText: info.hasLoginText, inputs: info.inputs}});
 
       const hasPasswordInput = info.inputs?.some(x => String(x.type).toLowerCase() === 'password' && x.visible);
@@ -404,6 +495,7 @@ async function restoreOne(store, opts) {
 
       await navigate(send, ORDER_URL, 3500);
       probe = await apiProbe(send, opts.date);
+      probeCodes.push(String(probe.code || ''));
       steps.push({step: 'probe-after-url', url, probe});
       if (probe.code === '0') {
         const marketing = await marketingProbe(send);
@@ -414,43 +506,81 @@ async function restoreOne(store, opts) {
         if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
       }
     }
-    return {storeKey: store.storeKey, ok: false, reason: 'login_not_restored', steps};
+    const blocker = classifyLoginBlocker({pages: observedPages, probeCodes});
+    return {
+      storeKey: store.storeKey,
+      ok: false,
+      reason: 'login_not_restored',
+      blocker: blocker.blocker,
+      blockerReason: blocker.reason,
+      steps,
+    };
+  } catch (error) {
+    return {
+      storeKey: store.storeKey,
+      ok: false,
+      reason: 'login_not_restored',
+      blocker: 'bootstrap_failed',
+      blockerReason: String(error?.message || error),
+      steps,
+    };
   } finally {
-    close();
+    if (close) close();
   }
 }
 
-const args = parseArgs(process.argv.slice(2));
-const storesConfig = JSON.parse(await fs.readFile(STORES_PATH, 'utf8'));
-const selected = args.stores.map(key => {
-  const s = storesConfig.stores.find(x => x.storeKey.toUpperCase() === key);
-  if (!s) throw new Error(`Unknown store: ${key}`);
-  return s;
-});
+async function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  const storesConfig = JSON.parse(await fs.readFile(STORES_PATH, 'utf8'));
+  const selected = args.stores.map(key => {
+    const s = storesConfig.stores.find(x => x.storeKey.toUpperCase() === key);
+    if (!s) throw new Error(`Unknown store: ${key}`);
+    return s;
+  });
 
-const results = [];
-for (const store of selected) {
-  try {
-    const result = await restoreOne(store, args);
-    results.push(result);
-    console.log(JSON.stringify({storeKey: result.storeKey, ok: result.ok, alreadyOk: result.alreadyOk || false, reason: result.reason || null}));
-  } catch (err) {
-    results.push({storeKey: store.storeKey, ok: false, error: String(err?.stack || err)});
-    console.log(JSON.stringify({storeKey: store.storeKey, ok: false, error: String(err?.message || err)}));
-  } finally {
-    if (args.closeAfter) closeStoreChrome(store);
+  const results = [];
+  for (const store of selected) {
+    try {
+      const result = await restoreOne(store, args);
+      results.push(result);
+      console.log(JSON.stringify({
+        storeKey: result.storeKey,
+        ok: result.ok,
+        alreadyOk: result.alreadyOk || false,
+        reason: result.reason || null,
+        blocker: result.blocker || null,
+        blockerReason: result.blockerReason || null,
+      }));
+    } catch (err) {
+      results.push({storeKey: store.storeKey, ok: false, error: String(err?.stack || err)});
+      console.log(JSON.stringify({storeKey: store.storeKey, ok: false, error: String(err?.message || err)}));
+    } finally {
+      if (args.closeAfter) closeStoreChrome(store);
+    }
   }
+
+  const summary = {
+    ok: results.every(r => r.ok),
+    date: args.date || null,
+    stores: results.map(r => r.storeKey),
+    failedStores: results.filter(r => !r.ok).map(r => r.storeKey),
+    results,
+  };
+  await fs.mkdir(path.join(ROOT, 'outputs', 'reports'), {recursive: true});
+  const reportFile = path.join(ROOT, 'outputs', 'reports', `auto-relogin-${Date.now()}.json`);
+  await fs.writeFile(reportFile, JSON.stringify(summary, null, 2), 'utf8');
+  console.log(JSON.stringify({...summary, results: undefined, reportFile: path.relative(ROOT, reportFile)}, null, 2));
+  return summary.ok ? 0 : 1;
 }
 
-const summary = {
-  ok: results.every(r => r.ok),
-  date: args.date || null,
-  stores: results.map(r => r.storeKey),
-  failedStores: results.filter(r => !r.ok).map(r => r.storeKey),
-  results,
-};
-await fs.mkdir(path.join(ROOT, 'outputs', 'reports'), {recursive: true});
-const reportFile = path.join(ROOT, 'outputs', 'reports', `auto-relogin-${Date.now()}.json`);
-await fs.writeFile(reportFile, JSON.stringify(summary, null, 2), 'utf8');
-console.log(JSON.stringify({...summary, results: undefined, reportFile: path.relative(ROOT, reportFile)}, null, 2));
-process.exit(summary.ok ? 0 : 1);
+const RUN_AS_MAIN = process.argv[1]
+  && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+
+if (RUN_AS_MAIN) {
+  main().then(code => {
+    process.exitCode = code;
+  }).catch(error => {
+    console.error(String(error?.stack || error));
+    process.exitCode = 1;
+  });
+}
