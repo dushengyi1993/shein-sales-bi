@@ -30,6 +30,7 @@ const read = file => fs.readFileSync(path.join(ROOT, file), 'utf8');
 const guard = read('scripts/cloud_daily_inventory_replenishment_guard.sh');
 const reconciliation = read('scripts/cloud_openapi_product_reconciliation.sh');
 const planner = read('scripts/inventory/build_daily_inventory_replenishment_plan.mjs');
+const executor = read('scripts/inventory/execute_daily_inventory_replenishment_plan.mjs');
 
 let checks = 0;
 const check = (name, fn) => {
@@ -461,5 +462,60 @@ match('non-executable plans never reach the executor',
   guard,
   /if \[\[ "\$EXECUTABLE" != "true" \]\]; then[\s\S]*state:"plan_blocked"[\s\S]*exit 2/,
   'blocked plans must exit before any execute step');
+
+match('coordinator run date is injected', guard,
+  /DATE="\$\{SHEIN_BI_INVENTORY_RUN_DATE:-/,
+  'the guard must not silently switch to the wall-clock date');
+match('business date is exact previous day', guard,
+  /BUSINESS_DATE="\$\{SHEIN_BI_INVENTORY_BUSINESS_DATE:-[\s\S]*EXPECTED_BUSINESS_DATE=/,
+  'runDate/businessDate drift must fail closed');
+match('inventory mutex contention is retryable not success', guard,
+  /if ! flock -n 9; then[\s\S]*exit 75/,
+  'lock contention must never produce a false done marker');
+match('done marker binds plan and result evidence', guard,
+  /write_inventory_marker\(\)[\s\S]*--evidence "\$PLAN"[\s\S]*--evidence "\$RESULT"/,
+  'successful completion must bind immutable plan/result evidence');
+match('terminal result states are explicit allowlist', guard,
+  /skipped_target_already_matched[\s\S]*skipped_safety_no_increase[\s\S]*skipped_within_scarcity_band[\s\S]*skipped_recovered[\s\S]*else false end/,
+  'unknown skipped states must not promote the run to done');
+match('updated readback equals target', guard,
+  /after\.totalUsableInventory == \.targetUsableInventory/,
+  'a status string alone is not enough without exact after inventory');
+match('guard and final marker share semantic inventory validator', guard,
+  /validate_daily_operating_refresh\.mjs[\s\S]*--inventory-only/,
+  'guard must not write done from a weaker jq-only interpretation');
+match('exact pending readback remains retryable in same run', guard,
+  /result_is_readback_pending_only[\s\S]*submitted_but_readback_pending[\s\S]*exit 75/,
+  'an exact durable intent waiting only for propagation must not become restart-prevented exit 2');
+match('deadline prevents executor dispatch', guard,
+  /run deadline reached before executor dispatch; no inventory request was submitted[\s\S]*exit 76/,
+  'no new inventory batch may start after the reserved window expires');
+match('platform idempotency survives plan evidence refresh', executor,
+  /logicalActionKey = stableInventoryHash\(\{[\s\S]*runDate: plan\.date[\s\S]*target: approvedTarget[\s\S]*actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET'[\s\S]*policyVersion: plan\.policyVersion[\s\S]*authorizationId:/,
+  'the same logical daily action must reuse its SHEIN idempotency key after a crash');
+match('recovery lookup cannot be bypassed by target or authorization drift', executor,
+  /pendingIntentsByScope\.get\(recoveryScopeKey\)/,
+  'all non-rejected intents for the same run/store/SKC/SKU scope must block a new POST');
+match('rebuilt plan cannot delete an unresolved intent', executor,
+  /unresolvedIntents = \[\.\.\.pendingIntentsByScope\.entries\(\)\][\s\S]*absent from the rebuilt current plan[\s\S]*for \(const row of unresolvedIntents\.length \? \[\] : rows\)/,
+  'an intent scope omitted by a rebuilt plan must block all current-plan writes and final success');
+noMatch('idempotency excludes mutable attempt and overwrite', executor,
+  /logicalActionKey = stableInventoryHash\(\{[^}]*\b(?:attempt|overwrite)\b[^}]*\}\)/s,
+  'attempt number and observed overwrite quantity must not change the platform key');
+match('durable intent helper owns the single submission', executor,
+  /submitDurableInventoryWriteOnce\(\{[\s\S]*journalFile[\s\S]*intent: activeIntent[\s\S]*maxReadbackAttempts: 10/,
+  'the exact intent must be fsync-visible before the only network submission');
+match('write POST bypasses read retry helper', executor,
+  /submit: \(\) => \{[\s\S]*assertInventoryWriteWindow\(plan\.date\)[\s\S]*return client\.request\(request\.pathname/,
+  'the inventory write must issue one transport POST, not a rate-limit retry loop');
+noMatch('journal is never truncated on restart', executor,
+  /writeFile\(journalFile, ''/,
+  'a restart must preserve already-audited terminal rows');
+noMatch('historical journal results never bypass fresh readback', executor,
+  /results\.push\(entry\.row\)/,
+  'journal rows are audit history; a restart must re-read live stock under the SKU lock');
+match('midnight and deadline checked before every POST', executor,
+  /assertInventoryWriteWindow\(plan\.date\)[\s\S]*submitDurableInventoryWriteOnce/,
+  'a stale runDate or exhausted safety window must fail before a new request');
 
 console.log(JSON.stringify({ok: true, checks}, null, 2));

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {
   assertDailyInventoryExecutionAuthorization,
@@ -20,6 +21,13 @@ import {
   validateStoreIdentity,
 } from '../../lib/shein_store_identity.mjs';
 import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock.mjs';
+import {
+  appendDurableJournalRecord,
+  classifyRecoveredInventoryIntent,
+  inventoryRecoveryScopeKey,
+  recoveredInventoryIntentMismatch,
+  submitDurableInventoryWriteOnce,
+} from '../../lib/durable_inventory_write.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
@@ -62,6 +70,16 @@ const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const asArray = value => value == null ? [] : Array.isArray(value) ? value : [value];
 const ageHours = value => (Date.now() - new Date(value || '').getTime()) / 3_600_000;
+const runDeadlineEpoch = Number(process.env.SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH || 0);
+
+function assertInventoryWriteWindow(runDate) {
+  const currentDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
+  if (currentDate !== runDate) throw new Error(`Inventory write date drifted across midnight: ${runDate} -> ${currentDate}`);
+  if (Number.isFinite(runDeadlineEpoch) && runDeadlineEpoch > 0) {
+    const remaining = runDeadlineEpoch - Math.floor(Date.now() / 1000);
+    if (remaining < 60) throw new Error(`Inventory write safety window is exhausted: remainingSeconds=${remaining}`);
+  }
+}
 
 function isRateLimitedResponse(response) {
   const code = String(response?.data?.code ?? '');
@@ -236,6 +254,10 @@ if (planActionableRows.length > args.maxRows) {
   throw new Error(`Plan actionable rows ${planActionableRows.length} exceed the per-run row ceiling ${args.maxRows}; refusing partial execution before any write`);
 }
 const rows = planActionableRows;
+const planRecoveryScopes = rows.map(row => inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode}));
+if (new Set(planRecoveryScopes).size !== planRecoveryScopes.length) {
+  throw new Error('Plan contains duplicate inventory recovery scope; refusing all writes');
+}
 if (plan?.executionConstraints?.decreaseOnly === true && rows.some(row => (
   Number(row.targetUsableInventory) >= Number(row.platformUsableInventory)
 ))) {
@@ -252,6 +274,7 @@ if (args.execute) {
     confirmHash: args.confirmHash,
   });
 }
+let unresolvedIntents = [];
 const resultEnvelope = currentResults => ({
   schemaVersion: 'daily-inventory-replenishment-result/v1',
   generatedAt: new Date().toISOString(),
@@ -262,6 +285,7 @@ const resultEnvelope = currentResults => ({
   authorizationId: executionAuthorization?.authorizationId || null,
   authorizationContext: executionAuthorization?.context || null,
   executionConstraints: plan.executionConstraints || null,
+  unresolvedIntents,
   results: currentResults,
 });
 const writeResultFile = async currentResults => {
@@ -272,15 +296,52 @@ const writeResultFile = async currentResults => {
 };
 const journalFile = `${args.out}.journal.ndjson`;
 await fs.mkdir(path.dirname(args.out), {recursive: true});
-await fs.writeFile(journalFile, '', {encoding: 'utf8', mode: 0o600});
-const recordResult = async row => {
-  results.push(row);
-  await fs.appendFile(journalFile, `${JSON.stringify({
-    sequence: results.length,
+const results = [];
+const pendingIntents = new Map();
+try {
+  const journal = await fs.readFile(journalFile, 'utf8');
+  if (journal && !journal.endsWith('\n')) throw new Error('INVENTORY_JOURNAL_TORN_TAIL');
+  const lines = journal.split(/\r?\n/).filter(Boolean);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.kind === 'intent' && entry?.logicalActionKey) {
+        const intentId = entry.intentId || `legacy-${index}-${entry.logicalActionKey}`;
+        pendingIntents.set(intentId, {...entry, intentId});
+        continue;
+      }
+      if (entry?.kind === 'write_outcome' && entry?.intentId) {
+        if (['rejected', 'readback_matched'].includes(entry.disposition)) pendingIntents.delete(entry.intentId);
+        continue;
+      }
+      // Historical result rows are audit evidence only.  They are never
+      // restored as current terminal state: every restart re-runs read-only
+      // guards and performs a fresh stock readback under the SKU lock.
+    } catch (error) {
+      throw new Error(`INVENTORY_JOURNAL_INVALID_LINE:${index + 1}:${error.message}`);
+    }
+  }
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+const appendJournalRecord = async entry => {
+  await appendDurableJournalRecord(journalFile, entry);
+};
+if (!results.length) {
+  const handle = await fs.open(journalFile, 'a', 0o600);
+  await handle.close();
+}
+const recordResult = async (row, logicalActionKey = '') => {
+  await appendJournalRecord({
+    kind: 'result',
+    sequence: results.length + 1,
     planHash: plan.payloadHash,
+    logicalActionKey: logicalActionKey || undefined,
     recordedAt: new Date().toISOString(),
     row,
-  })}\n`, {encoding: 'utf8', mode: 0o600});
+  });
+  results.push(row);
 };
 const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
   String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
@@ -307,10 +368,60 @@ for (const metrics of linkMetricRows) {
   if (!onShelfSkcsByStoreMatchKey.has(key)) onShelfSkcsByStoreMatchKey.set(key, new Set());
   onShelfSkcsByStoreMatchKey.get(key).add(String(metrics.skc || ''));
 }
-const results = [];
 const clients = new Map();
-for (const row of rows) {
-  const result = {storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode, canonical: row.canonical, state: 'planned'};
+const pendingIntentsByScope = new Map();
+for (const intent of pendingIntents.values()) {
+  const scopeKey = intent?.recoveryScopeKey || inventoryRecoveryScopeKey({
+    runDate: intent?.runDate,
+    storeKey: intent?.storeKey,
+    skc: intent?.skc,
+    skuCode: intent?.skuCode,
+  });
+  if (!pendingIntentsByScope.has(scopeKey)) pendingIntentsByScope.set(scopeKey, []);
+  pendingIntentsByScope.get(scopeKey).push(intent);
+}
+const currentPlanScopeSet = new Set(planRecoveryScopes);
+unresolvedIntents = [...pendingIntentsByScope.entries()]
+  .filter(([scopeKey]) => !currentPlanScopeSet.has(scopeKey))
+  .flatMap(([scopeKey, intents]) => intents.map(intent => ({
+    intentId: intent.intentId,
+    recoveryScopeKey: scopeKey,
+    logicalActionKey: intent.logicalActionKey,
+    runDate: intent.runDate,
+    storeKey: intent.storeKey,
+    skc: intent.skc,
+    skuCode: intent.skuCode,
+    targetUsableInventory: intent.targetUsableInventory,
+    planHash: intent.planHash,
+    policyVersion: intent.policyVersion,
+    authorizationId: intent.authorizationId,
+    state: 'needs_manual_resolve',
+    reason: 'durable intent scope is absent from the rebuilt current plan; duplicate submission and final success are forbidden',
+  })));
+if (unresolvedIntents.length) {
+  for (const row of rows) {
+    await recordResult({
+      storeKey: row.storeKey,
+      skc: row.skc,
+      skuCode: row.skuCode,
+      canonical: row.canonical,
+      ruleClass: row.ruleClass,
+      targetUsableInventory: Number(row.targetUsableInventory),
+      state: 'needs_manual_resolve',
+      error: `${unresolvedIntents.length} durable inventory intent(s) are absent from the rebuilt plan; no current-plan POST was attempted`,
+    });
+  }
+}
+for (const row of unresolvedIntents.length ? [] : rows) {
+  const result = {
+    storeKey: row.storeKey,
+    skc: row.skc,
+    skuCode: row.skuCode,
+    canonical: row.canonical,
+    ruleClass: row.ruleClass,
+    targetUsableInventory: Number(row.targetUsableInventory),
+    state: 'planned',
+  };
   try {
     const et = etByKey.get(String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase());
     const etQty = Number(et?.current_sellable_quantity ?? et?.et_estimated_available_qty);
@@ -381,6 +492,17 @@ for (const row of rows) {
       await recordResult({...result, state: 'dry_run_ready', etSellableInventory: etQty});
       continue;
     }
+    const logicalActionKey = stableInventoryHash({
+      runDate: plan.date,
+      store: row.storeKey,
+      skc: row.skc,
+      sku: row.skuCode,
+      target: approvedTarget,
+      actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+      policyVersion: plan.policyVersion,
+      authorizationId: executionAuthorization?.authorizationId || '',
+    });
+    const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
     let client = clients.get(row.storeKey);
     if (!client) {
       client = await createStoreClient(config, row.storeKey);
@@ -388,9 +510,71 @@ for (const row of rows) {
     }
     const lockFile = path.join(ROOT, 'state', 'locks', `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
     const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
+    let activeIntent = null;
     try {
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
+      const scopeIntents = pendingIntentsByScope.get(recoveryScopeKey) || [];
+      if (scopeIntents.length) {
+        if (scopeIntents.length !== 1) {
+          await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, error: `multiple durable inventory intents exist in recovery scope ${recoveryScopeKey}; duplicate submission forbidden`}, logicalActionKey);
+          continue;
+        }
+        const [recoveredIntent] = scopeIntents;
+        const mismatch = recoveredInventoryIntentMismatch(recoveredIntent, {
+          logicalActionKey,
+          plan,
+          row,
+          approvedTarget,
+          authorizationId: executionAuthorization?.authorizationId || null,
+        });
+        if (mismatch) {
+          await recordResult({
+            ...result,
+            logicalActionKey,
+            state: 'needs_manual_resolve',
+            before,
+            idempotencyKey: recoveredIntent.idempotencyKey || null,
+            requestPayloadHash: recoveredIntent.requestPayloadHash || null,
+            error: `durable inventory intent does not belong to the current immutable plan: ${mismatch}; duplicate submission forbidden`,
+          }, logicalActionKey);
+          continue;
+        }
+        if (classifyRecoveredInventoryIntent(recoveredIntent, before.totalUsableInventory) === 'readback_matched') {
+          const recoveredWrite = {
+            attempt: 1,
+            overwrite: recoveredIntent?.request?.body?.updateSkuInventoryQuantityRequests?.[0]?.changeQuantity,
+            idempotencyKey: recoveredIntent.idempotencyKey,
+            requestPayloadHash: recoveredIntent.requestPayloadHash,
+            request: recoveredIntent.request,
+            code: '0',
+            msg: 'exact live readback matched after recovery of durable pre-submit intent',
+            traceId: '',
+            success: true,
+            recoveredFromIntent: true,
+          };
+          await appendJournalRecord({
+            kind: 'write_outcome',
+            intentId: recoveredIntent.intentId,
+            logicalActionKey,
+            disposition: 'readback_matched',
+            recordedAt: new Date().toISOString(),
+          });
+          pendingIntents.delete(recoveredIntent.intentId);
+          await recordResult({...result, logicalActionKey, state: 'updated_readback_matched', before: recoveredIntent.before, after: before, writes: [recoveredWrite]}, logicalActionKey);
+        } else {
+          await recordResult({
+            ...result,
+            logicalActionKey,
+            state: 'submitted_but_readback_pending',
+            before,
+            idempotencyKey: recoveredIntent.idempotencyKey,
+            requestPayloadHash: recoveredIntent.requestPayloadHash,
+            error: 'durable pre-submit intent exists and exact target is not visible; duplicate submission is forbidden',
+          }, logicalActionKey);
+        }
+        continue;
+      }
       if (before.totalUsableInventory === approvedTarget) {
         await recordResult({...result, state: 'skipped_target_already_matched', before});
         continue;
@@ -417,56 +601,127 @@ for (const row of rows) {
         : '';
       let after = before;
       const writes = [];
-      for (let attempt = 1; attempt <= 2 && after.totalUsableInventory !== approvedTarget; attempt += 1) {
-        const overwrite = computeInventoryOverwriteQuantity(approvedTarget, after);
-        const idempotencyKey = `bi-inv-${stableInventoryHash({planHash: plan.payloadHash, store: row.storeKey, sku: row.skuCode, target: approvedTarget, overwrite, attempt}).slice(0, 42)}`;
-        const response = await requestWithRateLimitRetry(client, '/open-api/stock/change-inventory/v2', {
-          method: 'POST',
-          body: {updateSkuInventoryQuantityRequests: [{
-            idempotencyKey,
-            skuCode: row.skuCode,
-            invType: 'VI',
-            ...(warehouseCode ? {warehouseCode} : {}),
-            changeType: 'OVERWRITE',
-            changeQuantity: overwrite,
-            changeReason: plan?.executionConstraints?.decreaseOnly
-              ? 'Owner-authorized ET low-inventory safety reduction after current-day ET guard'
-              : 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
-          }]},
-          headers: {language: 'en'},
-        });
-        writes.push({
-          attempt,
-          overwrite,
-          code: response.data?.code,
-          msg: response.data?.msg || '',
-          traceId: response.data?.traceId || '',
-          success: response.data?.info?.success ?? null,
-        });
-        if (String(response.data?.code) !== '0' || response.data?.info?.success === false) {
-          throw new Error(`inventory write failed: ${response.data?.code} ${response.data?.msg || ''}`);
-        }
-        for (let readbackAttempt = 1; readbackAttempt <= 10; readbackAttempt += 1) {
-          if (readbackAttempt > 1) await sleep(Math.min(3000, 500 * (2 ** (readbackAttempt - 2))));
-          after = await readStock(client, row.skuCode);
-          if (after.totalUsableInventory === approvedTarget) break;
-        }
+      const overwrite = computeInventoryOverwriteQuantity(approvedTarget, before);
+      const idempotencyKey = `bi-inv-${logicalActionKey.slice(0, 42)}`;
+      const request = {
+        pathname: '/open-api/stock/change-inventory/v2',
+        method: 'POST',
+        body: {updateSkuInventoryQuantityRequests: [{
+          idempotencyKey,
+          skuCode: row.skuCode,
+          invType: 'VI',
+          ...(warehouseCode ? {warehouseCode} : {}),
+          changeType: 'OVERWRITE',
+          changeQuantity: overwrite,
+          changeReason: plan?.executionConstraints?.decreaseOnly
+            ? 'Owner-authorized ET low-inventory safety reduction after current-day ET guard'
+            : 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
+        }]},
+        headers: {language: 'en'},
+      };
+      const requestPayloadHash = stableInventoryHash(request);
+      activeIntent = {
+        kind: 'intent',
+        intentId: randomUUID(),
+        logicalActionKey,
+        recoveryScopeKey,
+        planHash: plan.payloadHash,
+        runDate: plan.date,
+        storeKey: row.storeKey,
+        skc: row.skc,
+        skuCode: row.skuCode,
+        targetUsableInventory: approvedTarget,
+        policyVersion: plan.policyVersion,
+        authorizationId: executionAuthorization?.authorizationId || null,
+        idempotencyKey,
+        requestPayloadHash,
+        request,
+        before,
+        recordedAt: new Date().toISOString(),
+      };
+      // Persist and fsync the exact immutable write intent before the network
+      // call.  A crash after SHEIN accepts the request therefore leaves a
+      // durable lock which recovery must read back; it can never invent a new
+      // key or submit a second overwrite.
+      assertInventoryWriteWindow(plan.date);
+      pendingIntents.set(logicalActionKey, activeIntent);
+      const submission = await submitDurableInventoryWriteOnce({
+        journalFile,
+        intent: activeIntent,
+        // The write interface is called exactly once.  Read-only requests may
+        // retry rate limits, but a write never retries at the transport layer;
+        // the durable intent makes any unknown outcome readback-only.
+        submit: () => {
+          // Re-check immediately after the durable fsync and immediately
+          // before the transport call; scheduler/disk stalls cannot carry a
+          // request across midnight or below the readback safety reserve.
+          assertInventoryWriteWindow(plan.date);
+          return client.request(request.pathname, {
+            method: request.method,
+            body: request.body,
+            headers: request.headers,
+          });
+        },
+        readback: () => readStock(client, row.skuCode),
+        wait: attempt => sleep(Math.min(3000, 500 * (2 ** (attempt - 2)))),
+        maxReadbackAttempts: 10,
+      });
+      const response = submission.response;
+      writes.push({
+        attempt: 1,
+        overwrite,
+        idempotencyKey,
+        requestPayloadHash,
+        request,
+        code: response?.data?.code,
+        msg: response?.data?.msg || '',
+        traceId: response?.data?.traceId || '',
+        success: response?.data?.info?.success ?? null,
+      });
+      if (submission.state === 'rejected') {
+        pendingIntents.delete(activeIntent.intentId);
+        activeIntent = null;
+        throw new Error(`inventory write failed: ${response?.data?.code} ${response?.data?.msg || ''}`);
       }
-      if (after.totalUsableInventory !== approvedTarget) throw new Error(`readback usable inventory ${after.totalUsableInventory} does not match target ${approvedTarget}`);
-      await recordResult({...result, state: 'updated_readback_matched', before, after, writes});
+      if (submission.state === 'ambiguous_response') {
+        await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, writes, error: 'inventory write response did not contain explicit code=0 and info.success=true; durable intent retained and duplicate submission forbidden'}, logicalActionKey);
+        activeIntent = null;
+        continue;
+      }
+      after = submission.after;
+      if (submission.state === 'submitted_but_readback_pending') {
+        await recordResult({...result, logicalActionKey, state: 'submitted_but_readback_pending', before, after, writes, error: `readback usable inventory ${after?.totalUsableInventory ?? 'unavailable'} does not match target ${approvedTarget}; duplicate submission forbidden`}, logicalActionKey);
+        activeIntent = null;
+        continue;
+      }
+      pendingIntents.delete(activeIntent.intentId);
+      activeIntent = null;
+      await recordResult({...result, logicalActionKey, state: 'updated_readback_matched', before, after, writes}, logicalActionKey);
     } finally {
       await release();
     }
   } catch (error) {
-    await recordResult({...result, state: 'blocked', error: error.message});
+    if (activeIntent && error?.inventoryIntentDurable === true) {
+      await recordResult({
+        ...result,
+        logicalActionKey: activeIntent.logicalActionKey,
+        state: 'suspicious_write_attempted',
+        idempotencyKey: activeIntent.idempotencyKey,
+        requestPayloadHash: activeIntent.requestPayloadHash,
+        error: `${error.message}; write intent is durable and automatic resubmission is forbidden`,
+      }, activeIntent.logicalActionKey);
+    } else {
+      await recordResult({...result, state: 'blocked', error: error.message});
+    }
   }
 }
+const unsafeResultCount = results.filter(row => ['blocked', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve'].includes(row.state)).length;
 const counts = {
   total: results.length,
   updated: results.filter(row => row.state === 'updated_readback_matched').length,
   dryRunReady: results.filter(row => row.state === 'dry_run_ready').length,
   skipped: results.filter(row => row.state.startsWith('skipped_')).length,
-  blocked: results.filter(row => row.state === 'blocked').length,
+  blocked: Math.max(unsafeResultCount, unresolvedIntents.length),
 };
 // Per-row progress is append-only in the journal. Publish the complete JSON
 // envelope exactly once so result-file IO stays O(N), not O(N²).

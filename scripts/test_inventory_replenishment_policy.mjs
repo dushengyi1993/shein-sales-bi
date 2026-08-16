@@ -169,6 +169,7 @@ const dailyCoordinator = fs.readFileSync(new URL('./cloud_morning_chain.sh', imp
 const etSafetyGuard = fs.readFileSync(new URL('./cloud_et_low_inventory_guard.sh', import.meta.url), 'utf8');
 const etSafetyService = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-guard.service', import.meta.url), 'utf8');
 const executorScript = fs.readFileSync(new URL('./inventory/execute_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
+const durableWriteScript = fs.readFileSync(new URL('../lib/durable_inventory_write.mjs', import.meta.url), 'utf8');
 const builderScript = fs.readFileSync(new URL('./inventory/build_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
 assert.equal(livePolicy.execution.mode, 'automatic');
 assert.equal(livePolicy.execution.perRunUserConfirmationRequired, false);
@@ -206,9 +207,10 @@ assert.match(dailyCoordinator, /SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="\$\{RUN_DAT
 assert.match(dailyCoordinator, /cloud_daily_inventory_replenishment_guard\.sh/);
 assert.match(executorScript, /append-only in the journal[\s\S]*await writeResultFile\(results\);/);
 assert.equal((executorScript.match(/await writeResultFile\(results\);/g) || []).length, 1, 'inventory executor writes the full result envelope once');
-assert.match(executorScript, /if \(readbackAttempt > 1\) await sleep\(/, 'inventory executor performs immediate first readback');
+assert.match(durableWriteScript, /for \(let attempt = 1; attempt <= maxReadbackAttempts; attempt \+= 1\)[\s\S]*if \(attempt > 1\) await wait\(attempt\)/, 'inventory executor performs immediate first readback');
 assert.match(executorScript, /\.journal\.ndjson/, 'inventory executor preserves incremental progress in an append-only journal');
-assert.match(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/);
+assert.match(executorScript, /submit: \(\) => \{[\s\S]*return client\.request\(request\.pathname/);
+assert.doesNotMatch(executorScript, /requestWithRateLimitRetry\(client, '\/open-api\/stock\/change-inventory\/v2'/, 'inventory writes must never use transport retry');
 assert.match(executorScript, /assertCurrentInventoryListingIdentity/);
 assert.match(executorScript, /linksData canonical identity changed or is unavailable/);
 assert.doesNotMatch(executorScript, /\.slice\(0, args\.maxRows\)/, 'the executor must never silently slice the actionable set');

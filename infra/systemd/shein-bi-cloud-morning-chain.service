@@ -2,6 +2,9 @@
 Description=SHEIN BI unified daily operating refresh (19 stores, supplements and inventory)
 Wants=network-online.target docker.service shein-bi-portal.service
 After=network-online.target docker.service shein-bi-portal.service systemd-tmpfiles-setup.service
+StartLimitIntervalSec=900
+StartLimitBurst=200
+StartLimitAction=none
 
 [Service]
 Type=oneshot
@@ -32,6 +35,7 @@ Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRIES=12
 Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRY_SLEEP_SEC=30
 Environment=SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=2
 Environment=SHEIN_BI_MORNING_RUN_BUDGET_SEC=10200
+Environment=SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=4500
 Environment=SHEIN_BI_MORNING_STORE_RETRY_DELAY_SEC=120
 Environment=SHEIN_BI_MORNING_PLATFORM_RETRY_DELAY_SEC=300
 Environment=SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC=600
@@ -53,10 +57,10 @@ KillMode=control-group
 # run context (runDate/businessDate), resumes it on restart and injects
 # immutable dates into the child chain.  Restart=on-failure keeps the SAME
 # service/slot (no second timer or queue) retrying a failed/interrupted run
-# with the context intact.  The wrapper exits 0 only after verified
-# completion evidence or after the persisted first-start deadline has
-# converged to an explicit watchdog-visible terminal failure, so neither a
-# completed idempotent skip nor an expired run can spin forever.
+# with the context intact.  The wrapper exits 0 only after verified completion
+# evidence. Terminal deadline/configuration failures use restart-prevented
+# non-zero codes so systemd stays visibly failed without spinning forever.
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_morning_chain_job.sh --root /opt/shein-bi/app
 Restart=on-failure
 RestartSec=60
+RestartPreventExitStatus=64 76 78

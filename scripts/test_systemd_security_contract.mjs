@@ -279,9 +279,16 @@ assert.equal(property(morningService, 'Restart'), 'on-failure',
   'a failed/interrupted morning run must auto-restart the same service');
 assert.equal(property(morningService, 'RestartSec'), '60',
   'the restart backoff keeps a rolling failure far from the StartLimit window');
+assert.equal(property(morningService, 'RestartPreventExitStatus'), '64 76 78',
+  'terminal/data/config failures stay visible without an infinite restart loop');
+assert.equal(property(morningService, 'StartLimitIntervalSec'), '900');
+assert.equal(property(morningService, 'StartLimitBurst'), '200',
+  'one-minute retries must remain possible across the full three-hour window');
+assert.match(morningService, /SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=4500/,
+  'the production unit reserves the bounded stock-refresh plus inventory window');
 assert.doesNotMatch(morningService, /^SuccessExitStatus=.*75$/m,
   'the morning chain must surface real failures, never mask them');
-assert.match(morningScript, /pipeline_marker_done "daily-operating-refresh"/);
+assert.match(morningScript, /daily_operating_refresh_done/);
 assert.match(morningScript, /wait_for_catchup_startup_window/);
 assert.match(morningScript, /catch-up is yielding to the full-managed priority run/);
 assert.ok(
@@ -294,8 +301,8 @@ assert.match(morningScript, /SHEIN_BI_MORNING_BUSINESS_DATE/,
   'the chain must honor the wrapper-injected immutable business date');
 assert.match(morningWrapper, /state\/cloud_morning_chain\/active\.json/,
   'the wrapper persists the active run context under state/cloud_morning_chain');
-assert.match(morningWrapper, /daily-operating-refresh\.json/,
-  'the wrapper verifies the exact completion marker');
+assert.match(morningWrapper, /validate_daily_operating_refresh\.mjs/,
+  'the wrapper verifies the exact semantic completion bundle');
 assert.match(morningWrapper, /mode: 0o660/,
   'the persisted context must be mode 0660');
 assert.match(morningWrapper, /exit 0/,

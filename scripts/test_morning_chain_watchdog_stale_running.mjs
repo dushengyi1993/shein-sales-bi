@@ -33,6 +33,8 @@ const today = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(new Date());
 const yesterday = new Date(Date.now() - 24 * 3600_000).toISOString().slice(0, 10);
+const todayParts = today.split('-').map(Number);
+const expectedBusiness = new Date(Date.UTC(todayParts[0], todayParts[1] - 1, todayParts[2] - 1, 12)).toISOString().slice(0, 10);
 
 // A service that failed or already exited while the latest state is still
 // running is the stale-running blocker we must alert on.
@@ -92,29 +94,44 @@ assert.equal(isMorningChainTerminalFailure({error: 'unreadable'}, {ActiveState: 
 assert.equal(isMorningChainTerminalFailure(null, {ActiveState: 'inactive'}), false);
 assert.equal(isMorningChainTerminalFailure(undefined, {ActiveState: 'inactive'}), false);
 
-// --- business recovery: only a real done morning-links-ready marker counts --
+// --- business recovery: only final done evidence counts --
 
 const unitStatus = {ActiveState: 'inactive', Result: 'success', ExecMainExitTimestamp: '2026-08-16 07:12:00'};
-const doneMarker = {runDate: today, status: 'done', ok: true, completedAt: '2026-08-16 09:00:00'};
-const warningMarker = {runDate: today, status: 'warning', ok: true, completedAt: '2026-08-16 09:00:00'};
-const doneButNotOk = {runDate: today, status: 'done', ok: false, completedAt: '2026-08-16 09:00:00'};
-const wrongDate = {runDate: '2026-08-01', status: 'done', ok: true, completedAt: '2026-08-16 09:00:00'};
-const tooOld = {runDate: today, status: 'done', ok: true, completedAt: '2026-08-16 07:00:00'};
+const doneMarker = {stage: 'daily-operating-refresh', runDate: today, businessDate: expectedBusiness, status: 'done', ok: true, completedAt: '2026-08-16 09:00:00'};
+const warningMarker = {...doneMarker, status: 'warning'};
+const doneButNotOk = {...doneMarker, ok: false};
+const wrongDate = {...doneMarker, runDate: '2026-08-01'};
+const tooOld = {...doneMarker, completedAt: '2026-08-16 07:00:00'};
 
 assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
   morningMarker: doneMarker,
-}).recovered, true, 'a real done morning-links-ready marker after unit exit must recover the failed service');
+  morningMarkerEvidenceOk: true,
+}).recovered, true, 'a final done marker with verified evidence after unit exit must recover the failed service');
 assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
   morningMarker: warningMarker,
-}).recovered, false, 'a warning morning-links-ready marker must NEVER recover the failed service');
+  morningMarkerEvidenceOk: true,
+}).recovered, false, 'a warning marker must NEVER recover the failed service');
+assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
+  morningMarker: doneMarker,
+  morningMarkerEvidenceOk: false,
+}).recovered, false, 'a final marker with unverified evidence must not recover the failed service');
 assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
   morningMarker: doneButNotOk,
+  morningMarkerEvidenceOk: true,
 }).recovered, false, 'a done marker with ok=false must not recover the failed service');
 assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
   morningMarker: wrongDate,
+  morningMarkerEvidenceOk: true,
 }).recovered, false, 'a marker for another run date must not recover today\'s failed service');
+for (const badBusinessDate of ['', today, new Date(Date.UTC(todayParts[0], todayParts[1] - 1, todayParts[2] - 2, 12)).toISOString().slice(0, 10)]) {
+  assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
+    morningMarker: {...doneMarker, businessDate: badBusinessDate},
+    morningMarkerEvidenceOk: true,
+  }).recovered, false, `invalid businessDate ${badBusinessDate || '(missing)'} must not recover the service`);
+}
 assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
   morningMarker: tooOld,
+  morningMarkerEvidenceOk: true,
 }).recovered, false, 'a marker written before the unit exit must not recover the failed service');
 assert.equal(assessBusinessRecovery('shein-bi-cloud-morning-chain.service', unitStatus, {
   morningMarker: null,
@@ -143,11 +160,17 @@ assert.match(watchdog, /^      issues\.push\(`晨链当日失败/m,
 assert.match(watchdog, /export function isMorningChainTerminalFailure/, 'the terminal-failure predicate must be importable');
 assert.match(watchdog, /export function assessBusinessRecovery/, 'the business-recovery predicate must be importable');
 assert.match(watchdog, /String\(morningMarker\?\.status \|\| ''\) === 'done'/,
-  'business recovery must require the morning-links-ready status to be done');
+  'business recovery must require final marker status done');
 assert.doesNotMatch(watchdog, /\['done', 'warning'\]/,
-  'a warning morning-links-ready marker must never be part of business recovery');
+  'a warning marker must never be part of business recovery');
 assert.match(watchdog, /morningChainLatest,/,
   'the observed latest state must be part of the watchdog report for follow-up');
+assert.match(watchdog, /today, 'daily-operating-refresh\.json'/,
+  'watchdog recovery must use the current date-scoped final marker, never a split latest index');
+assert.match(watchdog, /validateDailyOperatingRefresh/,
+  'watchdog must re-run the same final semantic evidence validator as the wrapper');
+assert.match(watchdog, /晨链最终证据失效/,
+  'a successful unit must still alert if final evidence bytes or hashes later drift');
 assert.match(watchdog, /const isMain = process\.argv\[1\]/,
   'the watchdog main loop must only run when executed directly so tests can import the predicate');
 

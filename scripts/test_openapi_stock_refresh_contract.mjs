@@ -70,6 +70,10 @@ assert.match(refresh, /inventory_refresh/,
   'the live event must have a dedicated inventory refresh kind');
 assert.match(refresh, /pipeline_marker\.mjs[\s\S]*--stage stock-refresh/,
   'a successful 19-store refresh must publish the inventory dependency marker');
+assert.match(refresh, /RUN_DATE="\$\{SHEIN_OPENAPI_STOCK_REFRESH_RUN_DATE:-/,
+  'the morning coordinator must inject the immutable stock-refresh run date');
+assert.match(refresh, /stock refresh runDate drift:/,
+  'a coordinator/date mismatch must fail closed before refreshing stock');
 
 assert.match(service, /User=sheinops/,
   'the inventory refresh must not run as root');

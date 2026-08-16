@@ -530,7 +530,9 @@ ok('cs11 report.date mismatch fails');
     '--report-file', toWslPath(noConfigReport),
     '--run-date', runDate,
   ], {
-    cwd: noConfigRoot,
+    // Do not make the child process hold the directory that this test removes
+    // immediately afterwards; Windows/WSL can otherwise surface a false EPERM.
+    cwd: os.tmpdir(),
     env: {...process.env, SHEIN_BI_ROOT: noConfigMsys},
     encoding: 'utf8',
     timeout: 30_000,

@@ -34,21 +34,23 @@ set -Eeuo pipefail
 #   6. when the persisted first-start deadline has already been reached, the
 #      run converges to an explicit terminal failure (failed latest.json +
 #      failed morning-all marker + cloud_ops_alert, visible to the watchdog)
-#      and exits 0 so Restart=on-failure can never spin forever past the
-#      deadline.  An incomplete run is NEVER reported as success: exit 0 only
-#      ever means "terminal state recorded" (done marker, or convergent
-#      deadline failure with watchdog-visible evidence).
+#      and exits 76.  The service declares 76 in RestartPreventExitStatus, so
+#      systemd records a visible failure without spinning forever.  Exit 0 is
+#      reserved exclusively for verified complete evidence.
 #
 # No credentials are stored or printed.  The only mutable state is the active
 # context file in state/cloud_morning_chain (atomically replaced, mode 0660).
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 STATE_DIR="${SHEIN_BI_MORNING_CHAIN_STATE_DIR:-$ROOT/state/cloud_morning_chain}"
 ACTIVE_FILE="$STATE_DIR/active.json"
 MARKER_ROOT="${SHEIN_BI_PIPELINE_MARKER_ROOT:-$ROOT/state/pipeline-markers}"
 CHAIN_SCRIPT="${SHEIN_BI_MORNING_CHAIN_SCRIPT:-$ROOT/scripts/cloud_morning_chain.sh}"
 RUN_BUDGET_SEC="${SHEIN_BI_MORNING_RUN_BUDGET_SEC:-10200}"
+WRAPPER_LOCK_FILE="${SHEIN_BI_MORNING_WRAPPER_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-morning-chain.lock}"
+INVENTORY_RUNTIME_ROOT="${SHEIN_BI_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/daily-inventory-replenishment}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -149,6 +151,28 @@ clear_active_context() {
   echo "[cloud-morning-chain-wrapper] active context cleared runDate=$run_date"
 }
 
+write_completed_latest_state() {
+  local run_date="$1"
+  local business_date="$2"
+  STATE_DIR="$STATE_DIR" RUN_DATE="$run_date" BUSINESS_DATE="$business_date" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const file = path.join(process.env.STATE_DIR, 'latest.json');
+const payload = {
+  date: process.env.RUN_DATE,
+  businessDate: process.env.BUSINESS_DATE,
+  generatedAt: new Date().toISOString(),
+  stage: 'all',
+  status: 'ok',
+  message: 'semantic daily-operating-refresh evidence verified by owning wrapper',
+};
+fs.mkdirSync(path.dirname(file), {recursive: true});
+const temporary = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(temporary, file);
+NODE
+}
+
 # SINGLE authoritative completion evidence for one run: the exact
 # daily-operating-refresh pipeline marker (ok=true, status=done,
 # stage/runDate/businessDate all match).  There is deliberately no second
@@ -158,23 +182,13 @@ clear_active_context() {
 daily_run_completed() {
   local run_date="$1"
   local business_date="$2"
-  MARKER_ROOT="$MARKER_ROOT" STATE_DIR="$STATE_DIR" \
-  RUN_DATE="$run_date" BUSINESS_DATE="$business_date" node - <<'NODE'
-const fs = require('fs');
-const path = require('path');
-const markerFile = path.join(process.env.MARKER_ROOT, process.env.RUN_DATE, 'daily-operating-refresh.json');
-try {
-  const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
-  const markerOk = marker?.ok === true
-    && marker?.status === 'done'
-    && marker?.stage === 'daily-operating-refresh'
-    && marker?.runDate === process.env.RUN_DATE
-    && marker?.businessDate === process.env.BUSINESS_DATE;
-  process.exit(markerOk ? 0 : 1);
-} catch {
-  process.exit(1);
-}
-NODE
+  node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
+    --root "$ROOT" \
+    --marker-root "$MARKER_ROOT" \
+    --state-dir "$STATE_DIR" \
+    --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
+    --run-date "$run_date" \
+    --business-date "$business_date" >/dev/null
 }
 
 # Current latest.json status (missing/unreadable prints nothing).
@@ -300,7 +314,14 @@ fresh_deadline() {
   if [[ -n "${SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH:-}" ]]; then
     printf '%s\n' "$SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH"
   else
-    printf '%s\n' "$(( $(now_epoch) + RUN_BUDGET_SEC ))"
+    local budget_deadline midnight_deadline
+    budget_deadline=$(( $(now_epoch) + RUN_BUDGET_SEC ))
+    midnight_deadline="$(TZ="$TZ_NAME" date -d "$(mktoday) + 1 day 00:00:00" +%s)"
+    if (( budget_deadline < midnight_deadline )); then
+      printf '%s\n' "$budget_deadline"
+    else
+      printf '%s\n' "$midnight_deadline"
+    fi
   fi
 }
 
@@ -331,6 +352,7 @@ run_chain_once() {
     echo "[cloud-morning-chain-wrapper] ERROR child chain exited 0 but the single completion marker (daily-operating-refresh done with matching dates) is missing runDate=$run_date businessDate=$business_date; treated as failure, context kept" >&2
     return 78
   fi
+  write_completed_latest_state "$run_date" "$business_date"
   clear_active_context "$run_date"
   echo "[cloud-morning-chain-wrapper] run completed with marker evidence runDate=$run_date businessDate=$business_date"
 }
@@ -339,22 +361,24 @@ ATTEMPT=0
 
 # One logical run window for a runDate: reuse the persisted first-start
 # deadline; never recompute it.  If the deadline is already reached and the run
-# has NOT completed, converge to a terminal failure and exit 0 (so systemd
-# stops restarting).  If it HAS completed (self-healed child), just clear the
+# has NOT completed, converge to a terminal failure and exit 76 (so systemd
+# records failure and RestartPreventExitStatus stops restarting).  If it HAS completed (self-healed child), just clear the
 # context.  A child failure is propagated: the caller exits non-zero and the
 # service Restart resumes the SAME context with the SAME deadline.
 run_one_date() {
   local run_date="$1"
   local business_date="$2"
   local deadline="$3"
-  if deadline_expired "$deadline"; then
-    if daily_run_completed "$run_date" "$business_date"; then
-      clear_active_context "$run_date"
-      echo "[cloud-morning-chain-wrapper] deadline passed but completion marker already present runDate=$run_date businessDate=$business_date; self-healed, context cleared"
-      return 0
-    fi
-    write_terminal_deadline_failure "$run_date" "$business_date" "$deadline"
+  if daily_run_completed "$run_date" "$business_date"; then
+    write_completed_latest_state "$run_date" "$business_date"
+    clear_active_context "$run_date"
+    echo "[cloud-morning-chain-wrapper] verified completion already exists runDate=$run_date businessDate=$business_date; no child started"
     return 0
+  fi
+  if deadline_expired "$deadline"; then
+    write_terminal_deadline_failure "$run_date" "$business_date" "$deadline"
+    clear_active_context "$run_date"
+    return 76
   fi
   ATTEMPT=$((ATTEMPT + 1))
   run_chain_once "$run_date" "$business_date" "$ATTEMPT" "$deadline"
@@ -362,9 +386,17 @@ run_one_date() {
 
 mkdir -p "$STATE_DIR"
 
+. "$SCRIPT_DIR/lib/shared_lock.sh"
+prepare_shared_lock_file "$WRAPPER_LOCK_FILE"
+exec 8>"$WRAPPER_LOCK_FILE"
+if ! flock -n 8; then
+  echo "[cloud-morning-chain-wrapper] another coordinator owns $WRAPPER_LOCK_FILE; active context was not touched" >&2
+  exit 75
+fi
+
 if [[ ! -f "$CHAIN_SCRIPT" ]]; then
   echo "[cloud-morning-chain-wrapper] ERROR child chain script not found: $CHAIN_SCRIPT" >&2
-  exit 64
+  exit 78
 fi
 
 TODAY="$(mktoday)"
@@ -381,6 +413,15 @@ if ((${#RECOVERED_CONTEXT[@]} >= 3)); then
       echo "[cloud-morning-chain-wrapper] active context runDate=$RECOVERED_RUN_DATE is in the future; ignored as untrusted and replaced by a fresh today run"
     elif [[ "$(prev_day "$RECOVERED_RUN_DATE")" != "$RECOVERED_BUSINESS_DATE" ]]; then
       echo "[cloud-morning-chain-wrapper] active context is mismatched (businessDate=$RECOVERED_BUSINESS_DATE is not runDate=$RECOVERED_RUN_DATE - 1 day); failed closed and replaced by a correctly derived fresh run"
+    elif [[ "$RECOVERED_RUN_DATE" < "$TODAY" ]]; then
+      if daily_run_completed "$RECOVERED_RUN_DATE" "$RECOVERED_BUSINESS_DATE"; then
+        clear_active_context "$RECOVERED_RUN_DATE"
+        echo "[cloud-morning-chain-wrapper] cleared completed stale context runDate=$RECOVERED_RUN_DATE"
+      else
+        write_terminal_deadline_failure "$RECOVERED_RUN_DATE" "$RECOVERED_BUSINESS_DATE" "$RECOVERED_DEADLINE"
+        clear_active_context "$RECOVERED_RUN_DATE"
+        echo "[cloud-morning-chain-wrapper] unfinished cross-day context was not executed; its failure evidence is retained and this activation proceeds to today's independent run" >&2
+      fi
     else
       echo "[cloud-morning-chain-wrapper] resume active context runDate=$RECOVERED_RUN_DATE businessDate=$RECOVERED_BUSINESS_DATE deadlineEpoch=$RECOVERED_DEADLINE (first-start absolute, reused across restarts)"
       run_one_date "$RECOVERED_RUN_DATE" "$RECOVERED_BUSINESS_DATE" "$RECOVERED_DEADLINE" || exit $?
@@ -393,8 +434,8 @@ if ((${#RECOVERED_CONTEXT[@]} >= 3)); then
   fi
 fi
 
-# After a completed/converged recovery of an older runDate, continue with
-# today.  Today's run is a NEW logical window: it gets a fresh first-start
+# After a verified completed older context, continue with today.  An unfinished
+# older context exits 76 above and can never mix old and current dates. Today's run is a NEW logical window: it gets a fresh first-start
 # deadline.  A context already equal to today means today's run was handled
 # above (completed, converged, or failed with the context kept).
 if [[ "$TODAY_RAN" -eq 0 ]]; then
