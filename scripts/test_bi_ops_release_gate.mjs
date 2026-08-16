@@ -193,6 +193,7 @@ const BI_OPS_V2_JS_FILES = [
   'lib/partner_cli_release_store.mjs',
   'lib/partner_cli_updater.mjs',
   'lib/link_ops_publish_asset_binding.mjs',
+  'lib/link_ops_product_attribute_binding.mjs',
   'scripts/owner_knowledge_sync.mjs',
   'scripts/owner_knowledge_admin.mjs',
   'scripts/validate_owner_knowledge_distribution.mjs',
@@ -211,6 +212,7 @@ const BI_OPS_V2_JS_FILES = [
   'scripts/verify_partner_cli_package_artifact.mjs',
   'scripts/partner_cli_bootstrap.mjs',
   'scripts/test_link_ops_publish_asset_binding.mjs',
+  'scripts/test_link_ops_prepare_product_attribute_flow.mjs',
   'scripts/test_owner_knowledge_portal_flow.mjs',
   'scripts/test_owner_knowledge_execute_distribution_guard.mjs',
   'scripts/test_owner_knowledge_execute_toctou_guard.mjs',
@@ -272,6 +274,18 @@ const SK5110_LOCAL_ARTIFACTS = [
   'tmp/sk5110-batch-prep/sk5110-batch-draft-plan.local-only.json',
   'tmp/sk5110-batch-prep/sk5110-cloud-execution-handoff.local-only.json',
 ];
+const PRODUCT_ATTRIBUTE_FLOW_TEST = 'scripts/test_link_ops_prepare_product_attribute_flow.mjs';
+const PRODUCT_ATTRIBUTE_FLOW_TIMEOUT_MS = 1_800_000;
+
+function countDirectProductAttributeFlowInvocations(source) {
+  const escapedTarget = PRODUCT_ATTRIBUTE_FLOW_TEST.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const targetExpression = `(?:PRODUCT_ATTRIBUTE_FLOW_TEST|['"]${escapedTarget}['"])`;
+  const directInvocationPattern = new RegExp(
+    `\\brun\\s*\\(\\s*process\\.execPath\\s*,\\s*\\[\\s*${targetExpression}(?=\\s*(?:,|\\]))`,
+    'gu',
+  );
+  return [...String(source || '').matchAll(directInvocationPattern)].length;
+}
 
 function run(command, args, {allowFailure = false} = {}) {
   return new Promise((resolve) => {
@@ -295,6 +309,33 @@ async function pathExists(rel) {
   } catch {
     return false;
   }
+}
+
+async function checkDeterministicProductAttributeRegistration() {
+  const startedAt = Date.now();
+  const [runner, releaseGateSource] = await Promise.all([
+    fs.readFile(path.join(ROOT, 'scripts/run_deterministic_tests.mjs'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'scripts/test_bi_ops_release_gate.mjs'), 'utf8'),
+  ]);
+  const testsBlock = runner.match(/const tests = \[([\s\S]*?)\n\];/u)?.[1] || '';
+  const registeredCount = testsBlock.split(`'${PRODUCT_ATTRIBUTE_FLOW_TEST}'`).length - 1;
+  const timeoutSourceLiteral = String(PRODUCT_ATTRIBUTE_FLOW_TIMEOUT_MS).replace(/\B(?=(\d{3})+(?!\d))/g, '_');
+  const timeoutPattern = new RegExp(
+    `file === ['"]${PRODUCT_ATTRIBUTE_FLOW_TEST.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]\\s*\\?\\s*${timeoutSourceLiteral}`,
+    'u',
+  );
+  const timeoutRegistered = timeoutPattern.test(runner);
+  const directInvocationCount = countDirectProductAttributeFlowInvocations(releaseGateSource);
+  const ok = registeredCount === 1 && timeoutRegistered && directInvocationCount === 0;
+  return {
+    command: 'static deterministic product-attribute registration check',
+    args: [],
+    code: ok ? 0 : 1,
+    durationMs: Date.now() - startedAt,
+    stdout: ok ? `${PRODUCT_ATTRIBUTE_FLOW_TEST} registered once with timeoutMs=${PRODUCT_ATTRIBUTE_FLOW_TIMEOUT_MS} directInvocationCount=0` : '',
+    stderr: ok ? '' : `registeredCount=${registeredCount} timeoutRegistered=${timeoutRegistered} directInvocationCount=${directInvocationCount}`,
+    ok,
+  };
 }
 
 async function scanStaleConfirmText() {
@@ -411,6 +452,7 @@ async function main() {
   results.push({name: 'store identity merchant fallback smoke', ...(await run(process.execPath, ['scripts/test_shein_store_identity_merchant_fallback.mjs']))});
   results.push({name: 'account writeStores scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
+  results.push({name: 'deterministic product attribute registration and timeout guard', ...(await checkDeterministicProductAttributeRegistration())});
   results.push({name: 'copy_product_draft success lifecycle smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs']))});
   results.push({name: 'copy_product_draft approved asset binding smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--asset-binding']))});
   results.push({name: 'copy_product_draft searchProduct readback smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--search-product-readback']))});

@@ -121,12 +121,16 @@ import {
   productAttributeBindingRequestKey,
   productAttributeBindingRequestKeyV2,
   productAttributeRefreshEventKey,
+  productAttributeResignEventKey,
+  productAttributeResignSanitizationEvidence,
   productAttributeTargetStandardGoodsSn,
   productModelFromPayload,
   productAttributeRowsForId,
   projectProductAttributeBindingCommit,
+  sanitizeInvalidProductAttributeListRows,
   validateProductAttributeBindingLock,
   validateProductAttributeRefreshEvent,
+  validateProductAttributeResignEvent,
   validateV1ProductAttributeHistory,
   whitelistedProductAttributeName,
 } from '../lib/link_ops_product_attribute_binding.mjs';
@@ -2584,6 +2588,61 @@ async function appendProductAttributeAudit(file, entry) {
     throw error;
   }
   return appendAudit(file, entry);
+}
+
+async function inspectProductAttributeResignAudit(file, {
+  taskId,
+  eventKey,
+  revision,
+  binding,
+} = {}) {
+  let text = '';
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return {ok: true, state: 'missing', entries: []};
+    return {ok: false, state: 'unavailable', reason: error?.message || String(error), entries: []};
+  }
+  const entries = [];
+  for (const line of text.split(/\r?\n/).filter(Boolean)) {
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      return {ok: false, state: 'unavailable', reason: 'audit_json_invalid', entries: []};
+    }
+  }
+  const expectedTaskId = String(taskId || '');
+  const expectedEventKey = String(eventKey || '').toLowerCase();
+  const expectedRevision = Number(revision || 0);
+  const expectedBindingHash = sha256StableJson(binding || {});
+  const resigned = entries.filter(entry => entry?.type === 'link-ops-prepare-product-attribute-resigned');
+  const eventKeyCollision = resigned.some(entry => (
+    String(entry?.eventKey || '').toLowerCase() === expectedEventKey
+    && String(entry?.task?.id || '') !== expectedTaskId
+  ));
+  if (eventKeyCollision) {
+    return {ok: false, state: 'conflict', reason: 'event_key_task_collision', entries: []};
+  }
+  const scoped = resigned.filter(entry => (
+    String(entry?.task?.id || '') === expectedTaskId
+    && (String(entry?.eventKey || '').toLowerCase() === expectedEventKey
+      || Number(entry?.task?.revision || 0) === expectedRevision)
+  ));
+  if (!scoped.length) return {ok: true, state: 'missing', entries: []};
+  if (scoped.length !== 1) {
+    return {ok: false, state: 'conflict', reason: `audit_scope_count_${scoped.length}`, entries: scoped};
+  }
+  const entry = scoped[0];
+  const exact = String(entry?.eventKey || '').toLowerCase() === expectedEventKey
+    && Number(entry?.task?.revision || 0) === expectedRevision
+    && sha256StableJson(entry?.binding || {}) === expectedBindingHash
+    && (entry?.auditRepair === true || entry?.auditRepair === false);
+  if (!exact) return {ok: false, state: 'conflict', reason: 'audit_projection_mismatch', entries: scoped};
+  return {
+    ok: true,
+    state: entry.auditRepair === true ? 'repaired' : 'initial',
+    entries: scoped,
+  };
 }
 
 function compactLinkOpsAuditEntry(entry) {
@@ -7982,6 +8041,8 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
   bindingRequestKey,
   oldPayloadHash: expectedOldPayloadHash,
   newPayloadHash: expectedNewPayloadHash,
+  existingBindingForResign = null,
+  sanitization = null,
 } = {}) {
   if (!task || typeof task !== 'object') throw new Error('Task not found');
   if (taskRequiresOwnerLifecycleResolve(task)) {
@@ -8111,6 +8172,7 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     throw error;
   }
   const isAdopt = bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT;
+  const isResign = Boolean(existingBindingForResign && typeof existingBindingForResign === 'object');
   if (!isAdopt && bindingMode !== PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND) {
     const error = new Error('商品属性绑定 bindingMode 必须是 append_missing/adopt_existing');
     error.status = 400;
@@ -8118,13 +8180,23 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     throw error;
   }
   const existingRows = productAttributeRowsForId(originalPayload, id);
-  if (!isAdopt && existingRows.length) {
+  if (!isAdopt && !isResign && existingRows.length) {
     const error = new Error(`目标 payload 已存在属性 ${id}（${existingRows.length} 行），本命令只修复缺失属性，请人工核销`);
     error.status = 409;
     error.code = 'PRODUCT_ATTRIBUTE_ALREADY_PRESENT';
     throw error;
   }
-  if (isAdopt) {
+  if (isResign) {
+    const exactExistingValue = existingRows.length === 1
+      && normalizeProductAttributeId(existingRows[0]?.attribute_value_id ?? existingRows[0]?.attributeValueId) === valueId;
+    if (!exactExistingValue) {
+      const error = new Error(`重签要求当前 payload 中属性 ${id}=${valueId} 恰好出现一次（当前 ${existingRows.length} 行）`);
+      error.status = 409;
+      error.code = 'PRODUCT_ATTRIBUTE_EXISTING_BINDING_CONFLICT';
+      throw error;
+    }
+  }
+  if (isAdopt && !isResign) {
     const adoptGate = adoptablePayloadAttributeRow(originalPayload, id);
     if (!adoptGate.ok) {
       const error = new Error(adoptGate.blockers.map(row => row.message).join('；'));
@@ -8138,8 +8210,10 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       error.code = 'PRODUCT_ATTRIBUTE_ADOPT_VALUE_MISMATCH';
       throw error;
     }
-    // Adopt must never touch the payload; both description and image
-    // bindings must be present and currently valid before adoption.
+    // Fresh adopt must never touch the payload; both description and image
+    // bindings must be present and currently valid before adoption. A
+    // re-sign path proves these gates against the pre-sanitized payload in
+    // the endpoint before the allowed invalid-ID cleanup is applied.
     const adoptImageGate = validateExistingPublishAssetBindingForAdopt(task);
     if (!adoptImageGate.ok) {
       const error = new Error(adoptImageGate.blockers[0]?.message || 'adopt_existing 要求当前审核图片绑定有效');
@@ -8155,7 +8229,7 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     }
   }
   let boundPayload;
-  if (isAdopt) {
+  if (isResign || isAdopt) {
     // Deep-prove payload unchanged: no append/replace/reorder/canonicalize.
     // The task keeps the exact same payload object (JSON deep-equal).
     boundPayload = originalPayload;
@@ -8174,7 +8248,9 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
   if (newPayloadHash !== linkOpsPayloadHash(boundPayload)) {
     throw new Error('商品属性绑定 payload hash 算法与 link-ops canonical hash 不一致');
   }
-  const oldPayloadHash = linkOpsPayloadHash(originalPayload);
+  const oldPayloadHash = isResign && !isAdopt
+    ? String(existingBindingForResign.oldPayloadHash || '').toLowerCase()
+    : linkOpsPayloadHash(originalPayload);
   if (expectedOldPayloadHash && expectedOldPayloadHash !== oldPayloadHash) {
     const error = new Error('商品属性绑定 oldPayloadHash 与请求不一致');
     error.status = 409;
@@ -8206,7 +8282,37 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       }
     : {ar: '', en: '', 'zh-cn': ''};
   const now = new Date().toISOString();
-  const resetNote = isAdopt
+  const sanitizedCount = Number(sanitization?.removedCount || 0);
+  const currentPayloadHashBeforeSanitization = String(sanitization?.currentPayloadHashBeforeSanitization || '');
+  const currentPayloadHashAfterSanitization = String(sanitization?.currentPayloadHashAfterSanitization || '');
+  const resignSanitization = isResign
+    ? productAttributeResignSanitizationEvidence({
+        removedCount: sanitizedCount,
+        currentPayloadHashBeforeSanitization,
+        currentPayloadHashAfterSanitization,
+        removedPathSummary: asArray(sanitization?.removedPathSummary ?? sanitization?.removed)
+          .map(row => typeof row === 'string' ? row : String(row?.path || ''))
+          .filter(Boolean),
+      })
+    : null;
+  const previousBindingRequestKey = isResign
+    ? String(existingBindingForResign.bindingRequestKey || '').toLowerCase()
+    : '';
+  const currentRepositoryRevision = Number(baseTaskRevision) + 1;
+  const resignEventKey = isResign
+    ? productAttributeResignEventKey({
+        taskId: String(task?.id || ''),
+        previousBindingRequestKey,
+        newBindingRequestKey: bindingRequestKey,
+        previousRepositoryRevision: Number(baseTaskRevision),
+        currentRepositoryRevision,
+      })
+    : '';
+  const previousSchemaVersion = isResign ? Number(existingBindingForResign.schemaVersion || 0) : 0;
+  const upgradedFromV1 = previousSchemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1;
+  const resetNote = isResign
+    ? `既有白名单商品属性绑定已在当前 revision 现场复核并安全重签${upgradedFromV1 ? '（schema v1→v2）' : ''}（mode=${bindingMode}，attribute ${id}=${valueId}，donor=${evidence.donorStore}/${evidence.donorSkc}，canonical=${evidence.canonicalCode}）；仅删除 ${sanitizedCount} 行 attribute_id 非正/非 safe-integer 的历史属性行，图片/描述/标题/价格/库存未被改写，旧预演锁已作废。`
+    : isAdopt
     ? `既有白名单商品属性已 adopt（attribute ${id}=${valueId}，值经同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc} 现场核验，canonical=${evidence.canonicalCode}）；payload 未做任何修改（old=new=${oldPayloadHash.slice(0, 12)}…），描述/图片绑定保持原样无需重绑，旧预演锁已作废，重新预演通过即可提交。`
     : `缺失白名单商品属性已绑定（attribute ${id}，值来自同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc}，服务端独立核验 canonical=${evidence.canonicalCode}）；旧预演/提交锁全部作废，描述绑定保持原样并留待 prepare-descriptions 用原始审核 HTML 在同一任务重新绑定，之后重新预演通过才可提交。`;
   const nextTask = {
@@ -8265,7 +8371,28 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       imageBindingFingerprint,
       descriptionContentSha256,
       descriptionHashes,
+      ...(isResign ? {resignSanitization} : {}),
     },
+    ...(isResign ? {
+      productAttributeResignEvent: {
+        eventKey: resignEventKey,
+        previousBindingRequestKey,
+        newBindingRequestKey: String(bindingRequestKey || '').toLowerCase(),
+        previousRepositoryRevision: Number(baseTaskRevision),
+        currentRepositoryRevision,
+        requestIdentity: {
+          targetStore,
+          bindingMode,
+          attributeId: id,
+          attributeValueId: valueId,
+          donorStore: String(evidence.donorStore || ''),
+          donorSkc: String(evidence.donorSkc || ''),
+          donorSpu: String(evidence.donorSpu || ''),
+          actorUser: actorUser(actor, req),
+        },
+        resignedAt: now,
+      },
+    } : {}),
     execution: {
       ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
       state: 'needs_repreflight',
@@ -8306,7 +8433,7 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       : resetNote,
     updatedAt: now,
   };
-  nextTask.history = appendTaskHistory(nextTask, isAdopt ? 'product_attribute_adopted' : 'product_attribute_bound', actor, req, {
+  nextTask.history = appendTaskHistory(nextTask, isResign ? 'product_attribute_resigned' : isAdopt ? 'product_attribute_adopted' : 'product_attribute_bound', actor, req, {
     bindingMode,
     targetStore,
     attributeId: id,
@@ -8331,6 +8458,14 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     payloadHashAlgorithm: PRODUCT_ATTRIBUTE_PAYLOAD_HASH_ALGORITHM,
     baseTaskRevision: Number(baseTaskRevision),
     bindingRequestKey,
+    ...(isResign ? {
+      eventKey: resignEventKey,
+      previousBindingRequestKey,
+      newBindingRequestKey: String(bindingRequestKey || '').toLowerCase(),
+      previousRepositoryRevision: Number(baseTaskRevision),
+      currentRepositoryRevision,
+      resignSanitization,
+    } : {}),
     imageBindingFingerprint,
     descriptionContentSha256,
     descriptionHashes,
@@ -8338,6 +8473,13 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     lifecycleReset: true,
     writeAuditReset: true,
     oldPayloadHashInvalidated: true,
+    resignedExistingBinding: isResign,
+    previousSchemaVersion: isResign ? previousSchemaVersion : undefined,
+    upgradedFromV1,
+    invalidAttributeRowsRemoved: sanitizedCount,
+    currentPayloadHashBeforeSanitization: isResign ? currentPayloadHashBeforeSanitization : undefined,
+    currentPayloadHashAfterSanitization: isResign ? currentPayloadHashAfterSanitization : undefined,
+    sanitizedAttributePaths: isResign ? resignSanitization.removedPathSummary : [],
   });
   const bindingGate = validateProductAttributeBindingLock(nextTask, boundPayload);
   if (!bindingGate.ok) {
@@ -8346,12 +8488,29 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     error.code = 'PRODUCT_ATTRIBUTE_BINDING_LOCK_INVALID';
     throw error;
   }
+  if (isResign) {
+    const eventGate = validateProductAttributeResignEvent({
+      ...nextTask,
+      repositoryRevision: currentRepositoryRevision,
+    });
+    if (!eventGate.ok) {
+      const error = new Error(`商品属性重签事件未通过最终锁校验：${eventGate.blockers.map(row => row.message).join('；')}`);
+      error.status = 409;
+      error.code = 'PRODUCT_ATTRIBUTE_RESIGN_EVENT_INVALID';
+      throw error;
+    }
+  }
   return {
     task: nextTask,
     binding: {
       ...projectProductAttributeBindingCommit(nextTask),
       payloadSource: 'task',
       preflightInvalidated: true,
+      resignedExistingBinding: isResign,
+      upgradedFromV1,
+      invalidAttributeRowsRemoved: sanitizedCount,
+      currentPayloadHashBeforeSanitization: isResign ? currentPayloadHashBeforeSanitization : '',
+      currentPayloadHashAfterSanitization: isResign ? currentPayloadHashAfterSanitization : '',
     },
   };
 }
@@ -15506,6 +15665,7 @@ async function main() {
                   evidenceSha256: String(refreshedBinding.evidenceSha256 || ''),
                   oldPayloadHash: String(refreshedBinding.oldPayloadHash || ''),
                   newPayloadHash: String(refreshedBinding.newPayloadHash || ''),
+                  resignSanitization: refreshedBinding.resignSanitization || null,
                 })
               : productAttributeBindingRequestKey({
                   taskId: taskRef,
@@ -15722,17 +15882,38 @@ async function main() {
           : {};
         const existingLock = validateProductAttributeBindingLock(task, task?.openapiPublishPayload);
         const existingGate = productAttributeExecutionGate(task);
-        const existingIdentityMatches = String(existingBinding.targetStore || '').toUpperCase() === targetStore
+        const existingCoreIdentityMatches = String(existingBinding.targetStore || '') === targetStore
           && normalizeProductAttributeId(existingBinding.attributeId) === attributeId
-          && String(existingDonor.storeKey || '').toUpperCase() === donorStore
+          && String(existingDonor.storeKey || '') === donorStore
           && String(existingDonor.skc || '') === donorSkc
-          && String(existingBinding.bindingMode || PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND) === bindingMode
-          && (Number(existingBinding.schemaVersion) === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION
-            || (Number(existingBinding.schemaVersion) === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1
-              && bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND))
+          && String(existingBinding.kind || '') === PRODUCT_ATTRIBUTE_BINDING_KIND
+          && String(existingBinding.authority || '') === PRODUCT_ATTRIBUTE_BINDING_AUTHORITY;
+        const existingV2Binding = existingBinding.schemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION
+          && [PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND, PRODUCT_ATTRIBUTE_BINDING_MODE_ADOPT].includes(existingBinding.bindingMode)
+          && existingBinding.bindingMode === bindingMode;
+        const existingV1AppendBinding = existingBinding.schemaVersion === PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION_V1
+          && bindingMode === PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND
+          && [undefined, PRODUCT_ATTRIBUTE_BINDING_MODE_APPEND].includes(existingBinding.bindingMode);
+        // v1 is never admitted through the generic replay/default-mode path.
+        // It must enter the dedicated history-proven append upgrade below.
+        const existingSchemaReplayMatches = existingV2Binding;
+        const existingSchemaResignMatches = existingV2Binding || existingV1AppendBinding;
+        const existingBoundValue = normalizeProductAttributeId(existingBinding.attributeValueId);
+        const existingRows = productAttributeRowsForId(task?.openapiPublishPayload, attributeId);
+        const existingPayloadValueMatches = existingBoundValue !== null
+          && existingRows.length === 1
+          && normalizeProductAttributeId(existingRows[0]?.attribute_value_id ?? existingRows[0]?.attributeValueId) === existingBoundValue;
+        const existingIdentityMatches = existingCoreIdentityMatches
+          && existingSchemaReplayMatches
+          && existingPayloadValueMatches
           && existingLock.ok
           && existingGate.ok;
-        if (hasExistingBinding && !existingIdentityMatches) {
+        const existingResignIdentityMatches = existingCoreIdentityMatches
+          && existingSchemaResignMatches
+          && existingPayloadValueMatches;
+        const resignExistingBinding = hasExistingBinding && !existingIdentityMatches && existingResignIdentityMatches;
+        const resignExistingV1Binding = resignExistingBinding && existingV1AppendBinding;
+        if (hasExistingBinding && !existingIdentityMatches && !resignExistingBinding) {
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-prepare-product-attribute-existing-binding-conflict',
@@ -15743,10 +15924,134 @@ async function main() {
           }).catch(() => {});
           return sendJson(res, 409, {
             ok: false,
-            error: '任务已有不同的或失效的商品属性绑定（不同 donor/mode/schema 或锁定校验失败），禁止覆盖；请人工核销或先删除绑定后重新现场核验',
+            error: '任务已有不同静态身份的商品属性绑定（target store/attribute/mode/donor/schema/value/identity 不一致），禁止覆盖；请人工核销',
             code: 'PRODUCT_ATTRIBUTE_EXISTING_BINDING_CONFLICT',
             retryable: false,
           });
+        }
+        const resignEventValidation = task?.productAttributeResignEvent
+          ? validateProductAttributeResignEvent(task)
+          : {ok: false, blockers: [], recomputedEventKey: ''};
+        const resignRequestIdentity = task?.productAttributeResignEvent?.requestIdentity;
+        const exactResignAuditRetry = currentRevision && currentRevision !== expectedRevision
+          && existingCoreIdentityMatches
+          && existingV2Binding
+          && existingPayloadValueMatches
+          && existingLock.ok
+          && resignEventValidation.ok
+          && Number(task.productAttributeResignEvent?.previousRepositoryRevision || 0) === expectedRevision
+          && String(resignRequestIdentity?.targetStore || '') === targetStore
+          && String(resignRequestIdentity?.bindingMode || '') === bindingMode
+          && normalizeProductAttributeId(resignRequestIdentity?.attributeId) === attributeId
+          && normalizeProductAttributeId(resignRequestIdentity?.attributeValueId) === existingBoundValue
+          && String(resignRequestIdentity?.donorStore || '') === donorStore
+          && String(resignRequestIdentity?.donorSkc || '') === donorSkc
+          && String(resignRequestIdentity?.donorSpu || '') === String(existingDonor.spu || '')
+          && String(resignRequestIdentity?.actorUser || '') === actorUser(actor, req)
+          && String(existingBinding.boundByUser || '') === actorUser(actor, req);
+        if (exactResignAuditRetry) {
+          if (linkOpsExecutionLocks.has(lockId)) {
+            return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
+          }
+          linkOpsExecutionLocks.add(lockId);
+          try {
+            const retryStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            const retryTask = findLinkOpsTaskOrThrow(retryStore, taskRef).task;
+            const retryBinding = retryTask?.productAttributeBinding && typeof retryTask.productAttributeBinding === 'object'
+              ? retryTask.productAttributeBinding
+              : {};
+            const retryDonor = retryBinding.donor && typeof retryBinding.donor === 'object' ? retryBinding.donor : {};
+            const retryIdentity = retryTask?.productAttributeResignEvent?.requestIdentity;
+            const retryLock = validateProductAttributeBindingLock(retryTask, retryTask?.openapiPublishPayload);
+            const retryEvent = validateProductAttributeResignEvent(retryTask);
+            const retryStateExact = Number(retryTask?.repositoryRevision || 0) === currentRevision
+              && String(retryBinding.bindingRequestKey || '') === String(existingBinding.bindingRequestKey || '')
+              && linkOpsPayloadHash(retryTask?.openapiPublishPayload) === linkOpsPayloadHash(task?.openapiPublishPayload)
+              && retryLock.ok
+              && retryEvent.ok
+              && retryEvent.recomputedEventKey === resignEventValidation.recomputedEventKey
+              && Number(retryTask.productAttributeResignEvent?.previousRepositoryRevision || 0) === expectedRevision
+              && String(retryIdentity?.targetStore || '') === targetStore
+              && String(retryIdentity?.bindingMode || '') === bindingMode
+              && normalizeProductAttributeId(retryIdentity?.attributeId) === attributeId
+              && normalizeProductAttributeId(retryIdentity?.attributeValueId) === existingBoundValue
+              && String(retryIdentity?.donorStore || '') === donorStore
+              && String(retryIdentity?.donorSkc || '') === donorSkc
+              && String(retryIdentity?.donorSpu || '') === String(retryDonor.spu || '')
+              && String(retryIdentity?.actorUser || '') === actorUser(actor, req)
+              && String(retryBinding.boundByUser || '') === actorUser(actor, req);
+            if (!retryStateExact) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: '重签 audit 补写要求 binding/revision/history/readback/request identity 完全一致；当前证据已变化',
+                code: 'LINK_OPS_REVISION_CONFLICT',
+                retryable: true,
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            const auditBinding = projectProductAttributeBindingCommit(retryTask);
+            const projectedBinding = projectProductAttributeBindingCommit(retryTask, {idempotentReplay: true});
+            let auditEvidence = await inspectProductAttributeResignAudit(args.auditFile, {
+              taskId: taskRef,
+              eventKey: retryEvent.recomputedEventKey,
+              revision: currentRevision,
+              binding: auditBinding,
+            });
+            if (!auditEvidence.ok || auditEvidence.state === 'initial') {
+              return sendJson(res, 409, {
+                ok: false,
+                error: auditEvidence.state === 'initial'
+                  ? '重签外部审计已由初次请求完整写入；旧 revision 请求属于并发冲突'
+                  : `重签外部审计证据冲突或不可验证：${auditEvidence.reason || auditEvidence.state}`,
+                code: 'LINK_OPS_REVISION_CONFLICT',
+                retryable: false,
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            let auditPending = false;
+            if (auditEvidence.state === 'missing') {
+              try {
+                await appendProductAttributeAudit(args.auditFile, {
+                  at: new Date().toISOString(),
+                  type: 'link-ops-prepare-product-attribute-resigned',
+                  actor,
+                  ...requestMeta(req),
+                  task: {id: taskRef, revision: currentRevision, stores: taskTargetStores(retryTask), writeStores: taskWriteStores(retryTask)},
+                  eventKey: retryEvent.recomputedEventKey,
+                  auditRepair: true,
+                  binding: auditBinding,
+                });
+                auditEvidence = await inspectProductAttributeResignAudit(args.auditFile, {
+                  taskId: taskRef,
+                  eventKey: retryEvent.recomputedEventKey,
+                  revision: currentRevision,
+                  binding: auditBinding,
+                });
+                auditPending = !auditEvidence.ok || auditEvidence.state !== 'repaired';
+              } catch {
+                auditPending = true;
+              }
+            }
+            const removedCount = Number(retryBinding.resignSanitization?.removedCount || 0);
+            return sendJson(res, 200, {
+              ok: !auditPending,
+              bindingCommitted: true,
+              repositoryEventCommitted: true,
+              readbackVerified: true,
+              auditPending,
+              stage: auditPending
+                ? 'binding_committed_audit_pending'
+                : removedCount > 0
+                  ? 'binding_resigned_needs_description_rebind'
+                  : 'binding_resigned_verified',
+              eventKey: retryEvent.recomputedEventKey,
+              task: projectLinkOpsTaskForClient(retryTask),
+              binding: projectedBinding,
+              safety: {realPublishOccurred: false, dryRunAttempted: false},
+            });
+          } finally {
+            linkOpsExecutionLocks.delete(lockId);
+          }
         }
         if (currentRevision && currentRevision !== expectedRevision && !existingIdentityMatches) {
           try {
@@ -15814,10 +16119,121 @@ async function main() {
             artifactErrors: legacyRecovery.errors.slice(0, 5),
           });
         }
+        if (resignExistingV1Binding) {
+          const v1HistoryGate = validateV1ProductAttributeHistory(bindingTask, existingBinding);
+          if (!v1HistoryGate.ok) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: v1HistoryGate.blockers[0]?.message || 'schema v1 重签要求存在与当前绑定逐字段一致的原始历史事件',
+              code: v1HistoryGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_REFRESH_V1_HISTORY_INVALID',
+              safety: {realPublishOccurred: false, dryRunAttempted: false},
+            });
+          }
+          const allowedV1StaleCodes = new Set([
+            'PRODUCT_ATTRIBUTE_BINDING_IMAGE_FINGERPRINT_DRIFT',
+            'PRODUCT_ATTRIBUTE_BINDING_DESCRIPTION_CONTENT_DRIFT',
+            'PRODUCT_ATTRIBUTE_BINDING_DESCRIPTION_HASH_DRIFT',
+            'PRODUCT_ATTRIBUTE_BINDING_PAYLOAD_HASH_DRIFT',
+          ]);
+          const unsupportedV1LockBlockers = asArray(existingLock.blockers)
+            .filter(blocker => !allowedV1StaleCodes.has(String(blocker?.code || '')));
+          if (unsupportedV1LockBlockers.length) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'schema v1 原绑定结构/requestKey/evidence 无法完整证明，禁止升级重签',
+              code: 'PRODUCT_ATTRIBUTE_RESIGN_V1_BINDING_INVALID',
+              blockers: unsupportedV1LockBlockers.map(blocker => blocker?.code || '').filter(Boolean).slice(0, 12),
+              safety: {realPublishOccurred: false, dryRunAttempted: false},
+            });
+          }
+        }
         if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他检查，请等待当前操作结束'});
         linkOpsExecutionLocks.add(lockId);
         try {
-          const payload = bindingTask.openapiPublishPayload;
+          // The per-process lock may be acquired after another request that
+          // started from the same revision has already committed. Re-read the
+          // authoritative repository under the lock before any live donor
+          // call or CAS so a stale in-memory snapshot can never overwrite the
+          // winner (including JSON-store gateways whose own write is not a
+          // cross-request mutex).
+          let lockedTask;
+          try {
+            const lockedStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            lockedTask = findLinkOpsTaskOrThrow(lockedStore, taskRef).task;
+          } catch (error) {
+            const message = error?.message || String(error);
+            return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+          }
+          const lockedStateMatches = Number(lockedTask?.repositoryRevision || 0) === currentRevision
+            && String(lockedTask?.productAttributeBinding?.bindingRequestKey || '') === String(task?.productAttributeBinding?.bindingRequestKey || '')
+            && linkOpsPayloadHash(lockedTask?.openapiPublishPayload) === linkOpsPayloadHash(task?.openapiPublishPayload)
+            && String(lockedTask?.publishAssetBinding?.bindingFingerprint || '') === String(task?.publishAssetBinding?.bindingFingerprint || '')
+            && String(lockedTask?.descriptionMaterialBinding?.bindingRequestKey || '') === String(task?.descriptionMaterialBinding?.bindingRequestKey || '')
+            && String(lockedTask?.descriptionMaterialBinding?.newPayloadHash || '') === String(task?.descriptionMaterialBinding?.newPayloadHash || '');
+          if (!lockedStateMatches) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: `任务在重签锁内已变化：起始 revision ${currentRevision}，当前 ${Number(lockedTask?.repositoryRevision || 0)}；请重新读取后重试`,
+              code: 'LINK_OPS_REVISION_CONFLICT',
+              retryable: true,
+              safety: {realPublishOccurred: false, dryRunAttempted: false},
+            });
+          }
+          const currentPayload = bindingTask.openapiPublishPayload;
+          let resignSanitization = {
+            payload: currentPayload,
+            removedCount: 0,
+            removed: [],
+            currentPayloadHashBeforeSanitization: linkOpsPayloadHash(currentPayload),
+            currentPayloadHashAfterSanitization: linkOpsPayloadHash(currentPayload),
+          };
+          if (resignExistingBinding) {
+            const resignImageGate = validateExistingPublishAssetBindingForAdopt(bindingTask);
+            if (!resignImageGate.ok) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: resignImageGate.blockers[0]?.message || '重签要求当前审核图片绑定有效',
+                code: 'PRODUCT_ATTRIBUTE_RESIGN_IMAGE_BINDING_INVALID',
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            const resignDescriptionGate = bindingTask?.descriptionMaterialBinding
+              ? validateDescriptionBindingLock(bindingTask, currentPayload)
+              : {ok: false, blockers: []};
+            if (!resignDescriptionGate.ok) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: '重签要求当前 descriptionMaterialBinding 存在且对净化前 payload 完全有效',
+                code: 'PRODUCT_ATTRIBUTE_RESIGN_DESCRIPTION_INVALID',
+                blockers: asArray(resignDescriptionGate.blockers).map(row => row?.code || '').filter(Boolean).slice(0, 12),
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+            const sanitized = sanitizeInvalidProductAttributeListRows(currentPayload);
+            const sanitizationEvidence = productAttributeResignSanitizationEvidence({
+              removedCount: sanitized.removedCount,
+              currentPayloadHashBeforeSanitization: linkOpsPayloadHash(currentPayload),
+              currentPayloadHashAfterSanitization: linkOpsPayloadHash(sanitized.payload),
+              removedPathSummary: asArray(sanitized.removed).map(row => String(row?.path || '')).filter(Boolean),
+            });
+            resignSanitization = {
+              ...sanitized,
+              ...sanitizationEvidence,
+            };
+            if (isAdopt && sanitized.removedCount > 0) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: 'adopt_existing 重签绝不允许修改 payload；检测到待删除的非法 attribute_id 行，请人工核销',
+                code: 'PRODUCT_ATTRIBUTE_RESIGN_ADOPT_SANITIZATION_REQUIRED',
+                invalidAttributeRows: sanitized.removedCount,
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+          }
+          const operationTask = resignExistingBinding
+            ? {...bindingTask, openapiPublishPayload: resignSanitization.payload}
+            : bindingTask;
+          const payload = operationTask.openapiPublishPayload;
           if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
             return sendJson(res, 409, {
               ok: false,
@@ -15873,7 +16289,7 @@ async function main() {
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });
             }
-            const adoptImageGate = validateExistingPublishAssetBindingForAdopt(bindingTask);
+            const adoptImageGate = validateExistingPublishAssetBindingForAdopt(operationTask);
             if (!adoptImageGate.ok) {
               return sendJson(res, 409, {
                 ok: false,
@@ -15882,7 +16298,7 @@ async function main() {
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });
             }
-            if (!bindingTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(bindingTask, payload).ok) {
+            if (!resignExistingBinding && (!operationTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(operationTask, payload).ok)) {
               return sendJson(res, 409, {
                 ok: false,
                 error: 'adopt_existing 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效（无需重绑）；先修复描述绑定',
@@ -15927,6 +16343,26 @@ async function main() {
           }
           const evidence = donorVerification.evidence;
           const attributeValueId = donorVerification.attributeValueId;
+          if (resignExistingBinding) {
+            const resignMismatches = [];
+            if (String(donorVerification.donorSpu || '') !== String(existingDonor.spu || '')) resignMismatches.push('donorSpu');
+            if (String(evidence.rawDonorCode || '') !== String(existingDonor.rawCode || '')) resignMismatches.push('rawDonorCode');
+            if (String(evidence.canonicalCode || '') !== String(existingBinding.canonicalCode || '')) resignMismatches.push('canonicalCode');
+            if (String(evidence.rawTaskCode || '') !== String(existingBinding.taskRawCode || '')) resignMismatches.push('taskRawCode');
+            if (String(evidence.taskModelValue || '') !== String(existingBinding.taskModelValue || '')) resignMismatches.push('taskModel');
+            if (String(evidence.donorModelValue || '') !== String(existingBinding.donorModelValue || '')) resignMismatches.push('donorModel');
+            if (normalizeProductAttributeId(evidence.attributeId) !== normalizeProductAttributeId(existingBinding.attributeId)) resignMismatches.push('attributeId');
+            if (normalizeProductAttributeId(evidence.attributeValueId) !== existingBoundValue) resignMismatches.push('attributeValueId');
+            if (resignMismatches.length) {
+              return sendJson(res, 409, {
+                ok: false,
+                error: `现场 donor 证据与现有绑定身份/值不一致，禁止重签：${resignMismatches.join('/')}`,
+                code: 'PRODUCT_ATTRIBUTE_EXISTING_BINDING_CONFLICT',
+                mismatches: resignMismatches,
+                safety: {realPublishOccurred: false, dryRunAttempted: false},
+              });
+            }
+          }
           if (isAdopt) {
             const adoptRow = adoptablePayloadAttributeRow(payload, attributeId);
             if (adoptRow.valueId !== attributeValueId) {
@@ -15943,6 +16379,9 @@ async function main() {
           if (isAdopt) {
             oldPayloadHash = linkOpsPayloadHash(payload);
             newPayloadHash = oldPayloadHash;
+          } else if (resignExistingBinding) {
+            oldPayloadHash = String(existingBinding.oldPayloadHash || '').toLowerCase();
+            newPayloadHash = linkOpsPayloadHash(payload);
           } else {
             oldPayloadHash = linkOpsPayloadHash(payload);
             newPayloadHash = sha256StableJson(bindProductAttributeToPayload(payload, {
@@ -15964,8 +16403,9 @@ async function main() {
             evidenceSha256: evidence.evidenceSha256,
             oldPayloadHash,
             newPayloadHash,
+            resignSanitization: resignExistingBinding ? resignSanitization : null,
           });
-          const bound = bindApprovedProductAttributeToTask(bindingTask, targetStore, {
+          const bound = bindApprovedProductAttributeToTask(operationTask, targetStore, {
             attributeId,
             attributeValueId,
             bindingMode,
@@ -15975,6 +16415,8 @@ async function main() {
             bindingRequestKey,
             oldPayloadHash,
             newPayloadHash,
+            existingBindingForResign: resignExistingBinding ? existingBinding : null,
+            sanitization: resignSanitization,
           });
           if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
             const error = new Error('商品属性绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用');
@@ -15992,9 +16434,13 @@ async function main() {
             const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
             const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
             const verifyGate = validateProductAttributeBindingLock(verifyFound.task, verifyFound.task?.openapiPublishPayload);
+            const verifyResignEvent = resignExistingBinding
+              ? validateProductAttributeResignEvent(verifyFound.task)
+              : {ok: true};
             if (verifyFound.task?.productAttributeBinding?.bindingRequestKey === bindingRequestKey
               && Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)
-              && verifyGate.ok) {
+              && verifyGate.ok
+              && verifyResignEvent.ok) {
               readbackTask = verifyFound.task;
               readbackVerified = true;
             }
@@ -16003,12 +16449,18 @@ async function main() {
           try {
             await appendProductAttributeAudit(args.auditFile, {
               at: new Date().toISOString(),
-              type: isAdopt
-                ? 'link-ops-prepare-product-attribute-adopted'
-                : 'link-ops-prepare-product-attribute-bound',
+              type: resignExistingBinding
+                ? 'link-ops-prepare-product-attribute-resigned'
+                : isAdopt
+                  ? 'link-ops-prepare-product-attribute-adopted'
+                  : 'link-ops-prepare-product-attribute-bound',
               actor,
               ...requestMeta(req),
               task: {id: persisted.id, revision: persisted.repositoryRevision, stores: taskTargetStores(persisted), writeStores: taskWriteStores(persisted)},
+              ...(resignExistingBinding ? {
+                eventKey: String(persisted?.productAttributeResignEvent?.eventKey || ''),
+                auditRepair: false,
+              } : {}),
               binding: projectProductAttributeBindingCommit(persisted),
             });
           } catch {
@@ -16020,16 +16472,42 @@ async function main() {
             repositoryEventCommitted: true,
             readbackVerified,
             auditPending,
+            ...(resignExistingBinding ? {eventKey: String(readbackTask?.productAttributeResignEvent?.eventKey || '')} : {}),
             stage: !readbackVerified
               ? 'binding_committed_readback_unverified'
               : auditPending
                 ? 'binding_committed_audit_pending'
+                : resignExistingBinding
+                  ? Number(resignSanitization.removedCount || 0) > 0
+                    ? 'binding_resigned_needs_description_rebind'
+                    : 'binding_resigned_verified'
                 : isAdopt
                   ? 'binding_committed_verified'
                   : 'binding_committed_needs_description_rebind',
             task: projectLinkOpsTaskForClient(readbackTask),
-            binding: projectProductAttributeBindingCommit(readbackTask),
-            nextStep: isAdopt
+            binding: {
+              ...projectProductAttributeBindingCommit(readbackTask),
+              ...(resignExistingBinding ? {
+                resignedExistingBinding: true,
+                upgradedFromV1: resignExistingV1Binding,
+                invalidAttributeRowsRemoved: Number(resignSanitization.removedCount || 0),
+                currentPayloadHashBeforeSanitization: String(resignSanitization.currentPayloadHashBeforeSanitization || ''),
+                currentPayloadHashAfterSanitization: String(resignSanitization.currentPayloadHashAfterSanitization || ''),
+              } : {}),
+            },
+            nextStep: resignExistingBinding
+              ? Number(resignSanitization.removedCount || 0) > 0
+                ? {
+                    command: 'prepare-descriptions',
+                    note: '绑定已在当前 revision 现场重签；仅移除非法 attribute_id 行导致描述 payload hash 按设计失效，请用同一审核 HTML 重绑描述后重新预演。',
+                    realPublish: false,
+                  }
+                : {
+                    command: 'preflight',
+                    note: '绑定已在当前 revision 现场重签，payload/图片/描述内容未变更；重新预演通过后按既有流程确认提交。',
+                    realPublish: false,
+                  }
+              : isAdopt
               ? {
                   command: 'preflight',
                   note: '既有属性已 adopt 并锁定来源证据，payload/描述/图片绑定均未变更；重新预演通过后按既有流程确认提交。',
