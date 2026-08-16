@@ -14,7 +14,7 @@ const client = fs.readFileSync(path.join(root, 'scripts', 'bi_app', 'client.js')
 // ---- Server: productProfit is a request-state branch, never a cache section.
 assert.doesNotMatch(server, /BI_PORTAL_SECTION_KEYS = new Set\([^)]*productProfit/,
   'productProfit must stay outside BI_PORTAL_SECTION_KEYS so warmup/prewarm/queue can never select it');
-assert.match(server, /if \(section === 'productProfit'\) \{\n\s*\/\/ Request-state productProfit[\s\S]*return loadBiProductProfitSection\(args, root, options\);/,
+assert.match(server, /if \(section === 'productProfit'\) \{\r?\n\s*\/\/ Request-state productProfit[\s\S]*return loadBiProductProfitSection\(args, root, options\);/,
   'loadBiSection must route productProfit to its request-state branch before the generic cache/queue flow');
 
 const productSectionStart = server.indexOf('async function loadBiProductProfitSection');

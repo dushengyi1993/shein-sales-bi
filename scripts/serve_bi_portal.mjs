@@ -301,6 +301,20 @@ const BI_OWNER_VISIBLE_PRIORITY_SECTIONS = new Set([
 ]);
 const BI_EXTERNAL_SECTION_QUEUE_ENABLED = process.platform !== 'win32'
   && !['0', 'false', 'no', 'off'].includes(String(process.env.SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED || '1').trim().toLowerCase());
+// Production-only core-warmup queue ownership.  ONLY the tracked portal unit
+// sets SHEIN_BI_CORE_WARMUP_QUEUE_OWNED=1; env unset (Linux/WSL/dev) preserves
+// the exact legacy inline watcher/index behavior.  The boolean is validated
+// strictly: anything other than an explicit true/1/yes/on value disables the
+// queue-owned path.
+const BI_CORE_WARMUP_QUEUE_OWNED = (() => {
+  const raw = String(process.env.SHEIN_BI_CORE_WARMUP_QUEUE_OWNED || '').trim().toLowerCase();
+  if (!raw) return false;
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  console.error(`[bi-core-warmup] invalid SHEIN_BI_CORE_WARMUP_QUEUE_OWNED=${raw}; queue ownership disabled`);
+  return false;
+})();
+const BI_CORE_WARMUP_QUEUE_PRIORITY = 10;
 const biExternalSectionQueuePending = new Set();
 const biAccountingCatchupTargets = new Map();
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter'];
@@ -308,6 +322,7 @@ const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SH
 const biPortalCoreWarmupState = {
   generatedAt: '',
   status: 'idle',
+  owner: '',
   startedAt: 0,
   finishedAt: 0,
   inFlight: null,
@@ -10796,13 +10811,28 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
     group.sections.push(section);
   }
   const reason = String(options.reason || `live-accounting-${generatedAt || 'current'}`).slice(0, 240);
+  const aggregate = {
+    newlyQueued: [],
+    updatedRevision: [],
+    deduplicatedPending: [],
+    deduplicatedCompleted: [],
+    coalescedRerun: [],
+    requeuedCompleted: [],
+    supersededByExisting: [],
+  };
   for (const group of groups) {
+    const idempotencyKey = String(options.idempotencyKey || '');
+    const requeueCompleted = Array.isArray(options.requeueCompletedSections)
+      ? options.requeueCompletedSections.filter(section => group.sections.includes(section))
+      : [];
     const run = await runChildProcess('/usr/bin/env', [
       'bash',
       path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
       '--sections', group.sections.join(','),
       '--priority', String(group.priority),
       '--reason', reason,
+      ...(idempotencyKey ? ['--idempotency-key', idempotencyKey] : []),
+      ...(requeueCompleted.length ? ['--requeue-completed-sections', requeueCompleted.join(',')] : []),
     ], {
       cwd: ROOT,
       timeoutMs: 30_000,
@@ -10812,14 +10842,67 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
         `live accounting queue persistence failed: priority=${group.priority} code=${run.code} timedOut=${run.timedOut}`,
       );
     }
+    // The manager CLI prints one JSON document; parse it and verify that every
+    // requested section is accounted exactly once across the structured
+    // outcomes.  Malformed or missing manager output is a hard failure: the
+    // caller must never assume a section was queued without proof.
+    let managerReport = null;
+    const stdoutLines = String(run.stdout || '').trim().split('\n').filter(Boolean);
+    for (let index = stdoutLines.length - 1; index >= 0; index -= 1) {
+      try {
+        managerReport = JSON.parse(stdoutLines.slice(index).join('\n'));
+        break;
+      } catch {}
+    }
+    const requested = new Set(group.sections);
+    const outcome = {
+      newlyQueued: Array.isArray(managerReport?.newlyQueued) ? managerReport.newlyQueued : null,
+      updatedRevision: Array.isArray(managerReport?.updatedRevision) ? managerReport.updatedRevision : null,
+      deduplicatedPending: Array.isArray(managerReport?.deduplicatedPending) ? managerReport.deduplicatedPending : null,
+      deduplicatedCompleted: Array.isArray(managerReport?.deduplicatedCompleted) ? managerReport.deduplicatedCompleted : null,
+      coalescedRerun: Array.isArray(managerReport?.coalescedRerun) ? managerReport.coalescedRerun : null,
+      requeuedCompleted: Array.isArray(managerReport?.requeuedCompleted) ? managerReport.requeuedCompleted : null,
+      supersededByExisting: Array.isArray(managerReport?.supersededByExisting) ? managerReport.supersededByExisting : null,
+    };
+    if (!managerReport || Object.values(outcome).some(value => value === null)) {
+      throw new Error(
+        `live accounting queue persistence returned malformed manager output: priority=${group.priority} stdout=${String(run.stdout || '').slice(0, 300)}`,
+      );
+    }
+    const accounted = new Set([
+      ...outcome.newlyQueued,
+      ...outcome.updatedRevision,
+      ...outcome.deduplicatedPending,
+      ...outcome.deduplicatedCompleted,
+      ...outcome.coalescedRerun,
+      ...outcome.supersededByExisting,
+    ]);
+    const requeueOutcome = new Set(outcome.requeuedCompleted);
+    if (
+      accounted.size !== requested.size
+      || [...requested].some(section => !accounted.has(section))
+      || outcome.newlyQueued.length + outcome.updatedRevision.length + outcome.deduplicatedPending.length + outcome.deduplicatedCompleted.length + outcome.coalescedRerun.length + outcome.supersededByExisting.length !== requested.size
+      || [...requeueOutcome].some(section => !accounted.has(section) || outcome.deduplicatedCompleted.includes(section))
+    ) {
+      throw new Error(
+        `live accounting queue persistence did not account for every requested section exactly once: priority=${group.priority} requested=${[...requested].join(',')} accounted=${[...accounted].join(',')}`,
+      );
+    }
     for (const section of group.sections) {
       const key = `${section}|${generatedAt || ''}`;
       biExternalSectionQueuePending.add(key);
       const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
       timer.unref?.();
     }
+    for (const field of ['newlyQueued', 'updatedRevision', 'deduplicatedPending', 'deduplicatedCompleted', 'coalescedRerun', 'requeuedCompleted', 'supersededByExisting']) {
+      aggregate[field].push(...outcome[field]);
+    }
   }
-  return {queued: true, sections: groups.flatMap(group => group.sections)};
+  return {
+    queued: true,
+    sections: groups.flatMap(group => group.sections),
+    ...aggregate,
+  };
 }
 
 async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt = '') {
@@ -12296,6 +12379,162 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
   const sections = configuredBiPortalCoreWarmupSections();
   if (!sections.length) return {scheduled: false, reason: 'no-sections', generatedAt};
 
+  // Production-only queue ownership (watcher tick AND index trigger): the
+  // complete configured warmup set is handed to the managed external section
+  // queue exactly once per core generation, never generated inline.  The
+  // queue worker already yields while the morning chain is active and runs
+  // under run_host_heavy_job.  Env unset (Linux/WSL/dev) preserves the legacy
+  // inline warmup path above unchanged.  A contradictory queue-owned=1 with
+  // the external queue disabled fails visibly and never falls back inline.
+  if (BI_CORE_WARMUP_QUEUE_OWNED) {
+    if (!BI_EXTERNAL_SECTION_QUEUE_ENABLED) {
+      const message = 'SHEIN_BI_CORE_WARMUP_QUEUE_OWNED=1 requires the managed external section queue';
+      biPortalCoreWarmupState.lastError = message;
+      logBiPortalCoreWarmup('queue-owned-contradiction', {error: message});
+      return {scheduled: false, reason: 'queue-owned-without-external-queue', error: message};
+    }
+    if (biPortalCoreWarmupState.status === 'queued' && biPortalCoreWarmupState.generatedAt === generatedAt) {
+      return {scheduled: false, reason: 'already-queued', generatedAt};
+    }
+    if (biPortalCoreWarmupState.status === 'done' && biPortalCoreWarmupState.generatedAt === generatedAt) {
+      return {scheduled: false, reason: 'already-completed', generatedAt};
+    }
+    try {
+      const plan = sections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY}));
+      // Durable per-generation idempotency key for the whole warmup set: after
+      // a Portal restart the same core generation deduplicates in the managed
+      // queue instead of enqueueing a fresh revision.  A new generatedAt
+      // produces a new key and a normal new revision.
+      const warmupIdempotencyKey = `core-warmup:${generatedAt}`;
+      // Serialize concurrent watcher/index triggers: only one enqueue per
+      // generation may be in flight (the shared inFlight slot also makes the
+      // earlier already-running guard apply to queue-owned scheduling).
+      const enqueueRun = persistHostLockedBiSectionPlan(plan, generatedAt, {
+        reason: `core-warmup-${generatedAt}`,
+        idempotencyKey: warmupIdempotencyKey,
+      }).finally(() => {
+        if (biPortalCoreWarmupState.inFlight === enqueueRun) biPortalCoreWarmupState.inFlight = null;
+      });
+      biPortalCoreWarmupState.inFlight = enqueueRun;
+      const enqueued = await enqueueRun;
+      const requestedCount = sections.length;
+      const completedCount = (enqueued.deduplicatedCompleted || []).length;
+      const activeCount = (enqueued.newlyQueued || []).length
+        + (enqueued.updatedRevision || []).length
+        + (enqueued.deduplicatedPending || []).length
+        + (enqueued.coalescedRerun || []).length;
+      // Truthful terminal state: when EVERY requested section was already
+      // completed (tombstones, queue entries 0) the generation is done, never
+      // queued.  Any active/queued section keeps the state queued.
+      const allCompleted = completedCount === requestedCount && activeCount === 0;
+      biPortalCoreWarmupState.owner = 'external-section-queue';
+      biPortalCoreWarmupState.generatedAt = generatedAt;
+      biPortalCoreWarmupState.startedAt = Date.now();
+      biPortalCoreWarmupState.lastError = '';
+      if (allCompleted) {
+        // Tombstones are historical receipts only: before claiming done,
+        // verify EVERY configured section against the authoritative terminal
+        // artifact validator for the exact current core generation.  Only all
+        // exit 0 => done; missing/corrupt/stale/validator-error => requeue.
+        const terminal = await verifyWarmupSectionsTerminal(root, sections, generatedAt);
+        // Cross-generation guard: the core can flip between this watch tick
+        // and the last of the 7 validators.  Re-read the authoritative core
+        // BEFORE either claiming done or mutating tombstones.  A changed
+        // generation is a truthful stale/superseded state with zero queue or
+        // tombstone mutation; the next tick processes the new generation.
+        const stillCurrent = await warmupCoreStillCurrent(root, generatedAt);
+        if (!stillCurrent.current) {
+          biPortalCoreWarmupState.status = 'stale';
+          biPortalCoreWarmupState.generatedAt = stillCurrent.latest || generatedAt;
+          biPortalCoreWarmupState.finishedAt = 0;
+          biPortalCoreWarmupState.lastError = `core generation changed during terminal verification: ${generatedAt} -> ${stillCurrent.latest || '(unreadable)'}`;
+          logBiPortalCoreWarmup('core-generation-changed', {
+            generatedAt,
+            latestGeneratedAt: stillCurrent.latest || '',
+            terminal: terminal.ok ? 'all-pass' : `invalid=${terminal.invalid.join(',')}`,
+          });
+          return {
+            scheduled: false,
+            reason: 'core-generation-changed',
+            generatedAt: stillCurrent.latest || generatedAt,
+            previousGeneratedAt: generatedAt,
+          };
+        }
+        if (terminal.ok) {
+          biPortalCoreWarmupState.status = 'done';
+          biPortalCoreWarmupState.finishedAt = Date.now();
+          logBiPortalCoreWarmup('already-completed', {generatedAt});
+          return {scheduled: false, reason: 'already-completed', generatedAt, sections, queued: false};
+        }
+        // Atomic requeue of exactly the invalid sections: the matching
+        // tombstones are removed under the queue lock and their entries are
+        // recreated; valid tombstones stay.  Failures stay visible and the
+        // next tick retries.
+        const requeued = await persistHostLockedBiSectionPlan(
+          sections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY})),
+          generatedAt,
+          {
+            reason: `core-warmup-${generatedAt}`,
+            idempotencyKey: warmupIdempotencyKey,
+            requeueCompletedSections: terminal.invalid,
+          },
+        );
+        // A requeue can be superseded by a newer-generation entry that already
+        // owns one or more section slots in the queue: this generation must
+        // never claim queued/done.  Re-read live state and defer to the newer
+        // generation; the next tick handles it.
+        const superseded = requeued.supersededByExisting || [];
+        if (superseded.length) {
+          const latestNow = await warmupCoreStillCurrent(root, generatedAt);
+          biPortalCoreWarmupState.status = 'stale';
+          biPortalCoreWarmupState.generatedAt = latestNow.latest || generatedAt;
+          biPortalCoreWarmupState.finishedAt = 0;
+          biPortalCoreWarmupState.lastError = `warmup requeue superseded by existing newer-generation entry: sections=${superseded.join(',')}`;
+          logBiPortalCoreWarmup('superseded', {generatedAt, sections: superseded.join(',')});
+          return {
+            scheduled: false,
+            reason: 'core-generation-superseded',
+            generatedAt: latestNow.latest || generatedAt,
+            previousGeneratedAt: generatedAt,
+            supersededSections: superseded,
+          };
+        }
+        biPortalCoreWarmupState.status = 'queued';
+        biPortalCoreWarmupState.finishedAt = 0;
+        biPortalCoreWarmupState.lastError = `terminal verification failed for sections: ${terminal.invalid.join(',')}; invalid tombstones requeued`;
+        logBiPortalCoreWarmup('requeued', {
+          generatedAt,
+          sections: terminal.invalid.join(','),
+          requeuedCompleted: (requeued.requeuedCompleted || []).join(','),
+        });
+        return {
+          scheduled: true,
+          reason: 'queued',
+          generatedAt,
+          sections,
+          queued: requeued.queued,
+          requeuedSections: terminal.invalid,
+        };
+      }
+      biPortalCoreWarmupState.status = 'queued';
+      biPortalCoreWarmupState.finishedAt = 0;
+      logBiPortalCoreWarmup('queued', {
+        generatedAt,
+        sections: sections.join(','),
+        reason: `core-warmup-${generatedAt}`,
+        newlyQueued: (enqueued.newlyQueued || []).join(','),
+        updatedRevision: (enqueued.updatedRevision || []).join(','),
+        deduplicatedPending: (enqueued.deduplicatedPending || []).join(','),
+        deduplicatedCompleted: (enqueued.deduplicatedCompleted || []).join(','),
+      });
+      return {scheduled: true, reason: 'queued', generatedAt, sections, queued: enqueued.queued};
+    } catch (error) {
+      biPortalCoreWarmupState.lastError = error?.message || String(error || 'warmup enqueue failed');
+      logBiPortalCoreWarmup('enqueue-failed', {generatedAt, error: biPortalCoreWarmupState.lastError.slice(0, 500)});
+      return {scheduled: false, reason: 'enqueue-failed', error: biPortalCoreWarmupState.lastError};
+    }
+  }
+
   const run = runBiPortalCoreWarmup(args, root, {generatedAt, mode: meta.mode}, {
     ...options,
     allowGenerate,
@@ -12408,6 +12647,46 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
     failures: failures.length,
   });
   return {ok: failures.length === 0, generatedAt, results, failures};
+}
+
+async function warmupCoreStillCurrent(root, expectedGeneratedAt) {
+  // Authoritative re-read used to gate cross-generation races: after the
+  // terminal checks (and before done or any tombstone mutation) the core must
+  // still carry the exact generation this warmup was pinned to.  An unreadable
+  // core is fail-closed: not current.
+  let latest = '';
+  try {
+    latest = String((await readBiPortalCoreMeta(root))?.generatedAt || '');
+  } catch {}
+  return {
+    current: Boolean(latest) && latest === String(expectedGeneratedAt || ''),
+    latest,
+  };
+}
+
+async function verifyWarmupSectionsTerminal(root, sections, expectedGeneratedAt) {
+  // Authoritative read-only terminal verification pinned to the exact core
+  // generation under warmup.  Bounded and deterministic: each section gets one
+  // child validator invocation with a hard timeout; any error/timeout/non-zero
+  // is treated as NON-terminal so the scheduler requeues instead of claiming
+  // done.  The expected-generation pin makes a mid-verification core flip fail
+  // every later check instead of silently validating against a newer core.
+  const validatorScript = process.env.SHEIN_BI_TERMINAL_VALIDATOR
+    || path.join(ROOT, 'scripts', 'check_bi_portal_section_terminal.mjs');
+  const invalid = [];
+  for (const section of sections) {
+    const probe = await runChildProcess(process.execPath, [
+      validatorScript,
+      '--root', root,
+      '--section', section,
+      '--expected-generated-at', expectedGeneratedAt,
+    ], {
+      cwd: root,
+      timeoutMs: 10_000,
+    });
+    if (probe.code !== 0 || probe.timedOut) invalid.push(section);
+  }
+  return {ok: invalid.length === 0, invalid};
 }
 
 function startBiPortalCoreWarmupWatcher(args, root, options = {}) {
@@ -14272,6 +14551,7 @@ async function main() {
           biCoreWarmup: {
             generatedAt: biPortalCoreWarmupState.generatedAt,
             status: biPortalCoreWarmupState.status,
+            owner: biPortalCoreWarmupState.owner || '',
             startedAt: biPortalCoreWarmupState.startedAt ? new Date(biPortalCoreWarmupState.startedAt).toISOString() : null,
             finishedAt: biPortalCoreWarmupState.finishedAt ? new Date(biPortalCoreWarmupState.finishedAt).toISOString() : null,
             inFlight: Boolean(biPortalCoreWarmupState.inFlight),
@@ -17805,7 +18085,13 @@ ${uploadCheckAnswer}` : `
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
-      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+      // Normalize the index path so encoded variants (/index.html, /%69ndex.html)
+      // trigger the legacy index warmup scheduling exactly like the plain
+      // paths.  The comparison is a strict equality on the decoded path only;
+      // it never resolves a filesystem path, so no traversal surface is added.
+      let biIndexPath = url.pathname;
+      try { biIndexPath = decodeURIComponent(url.pathname); } catch {}
+      if (req.method === 'GET' && (biIndexPath === '/' || biIndexPath === '/index.html')) {
         scheduleBiPortalCoreWarmup(args, root, {allowGenerate: allowGenerateSections, reason: 'index'}).catch(err => {
           biPortalCoreWarmupState.lastError = err?.message || String(err || 'schedule failed');
           logBiPortalCoreWarmup('schedule-failed', {reason: 'index', error: biPortalCoreWarmupState.lastError.slice(0, 500)});
@@ -17960,6 +18246,11 @@ if (IS_DIRECT_RUN) {
 }
 
 export const __testHooks = {
+  BI_CORE_WARMUP_QUEUE_OWNED,
+  BI_CORE_WARMUP_QUEUE_PRIORITY,
+  biPortalCoreWarmupState,
+  scheduleBiPortalCoreWarmup,
+  startBiPortalCoreWarmupWatcher,
   biPortalCoreFileIdentity,
   buildBiPortalCoreStreamPlan,
   canonicalPublishAssetBindingFingerprint,

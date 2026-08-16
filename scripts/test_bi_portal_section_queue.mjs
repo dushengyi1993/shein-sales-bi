@@ -455,4 +455,349 @@ try {
   fs.rmSync(temp, {recursive: true, force: true});
 }
 
+// ---- Durable per-section idempotency: same key is a strict no-op; final
+// completion tombstones the key; a fresh invocation must not recreate it.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  const key = 'core-warmup:2026-08-17T03:00:00.000Z';
+  let outcome = enqueueSections(queue, {sections: ['profit', 'homeRankings'], priority: 10, idempotencyKey: key, now: at(0)});
+  assert.equal(outcome.mutated, true);
+  assert.deepEqual(outcome.deduplicated, []);
+  assert.equal(queue.entries[0].idempotencyKey, `${key}::profit`);
+  assert.equal(queue.entries[1].idempotencyKey, `${key}::homeRankings`);
+
+  const claim = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-ip-1', now: at(1_000)});
+  assert.equal(claim.section, 'profit');
+  assert.equal(claim.requestRevision, 1);
+
+  // Re-enqueue the same key while running: strict no-op.
+  outcome = enqueueSections(queue, {sections: ['profit'], priority: 0, idempotencyKey: key, reason: 'force', now: at(2_000)});
+  assert.equal(outcome.mutated, false);
+  assert.deepEqual(outcome.deduplicated, ['profit']);
+  const running = queue.entries.find(e => e.section === 'profit');
+  assert.equal(running.requestRevision, 1, 'same-key re-enqueue must not bump revision');
+  assert.equal(running.rerun, false, 'same-key re-enqueue must not mark rerun');
+  assert.equal(running.leaseId, 'lease-ip-1', 'lease must not be reset');
+  assert.equal(running.attempts, 1);
+
+  // Final completion tombstones the durable key.
+  assert.equal(completeClaim(queue, {section: 'profit', leaseId: 'lease-ip-1', now: at(3_000)}), true);
+  assert.equal(queue.entries.some(e => e.section === 'profit'), false);
+  assert.ok(queue.completedIdempotency.some(r => r.idempotencyKey === `${key}::profit` && r.section === 'profit'));
+
+  // Re-enqueue the same key after completion: no entry recreation.
+  outcome = enqueueSections(queue, {sections: ['profit'], priority: 10, idempotencyKey: key, now: at(4_000)});
+  assert.equal(outcome.mutated, false);
+  assert.deepEqual(outcome.deduplicated, ['profit']);
+  assert.equal(queue.entries.some(e => e.section === 'profit'), false, 'tombstoned key must not recreate the entry');
+
+  // Pending section with the same key deduplicates too.
+  outcome = enqueueSections(queue, {sections: ['homeRankings'], priority: 10, idempotencyKey: key, now: at(4_000)});
+  assert.equal(outcome.mutated, false);
+  assert.deepEqual(outcome.deduplicated, ['homeRankings']);
+
+  // A new generation key enqueues a normal fresh revision.
+  const key2 = 'core-warmup:2026-08-17T04:00:00.000Z';
+  outcome = enqueueSections(queue, {sections: ['profit'], priority: 10, idempotencyKey: key2, now: at(5_000)});
+  assert.equal(outcome.mutated, true);
+  const fresh = queue.entries.find(e => e.section === 'profit');
+  assert.equal(fresh.idempotencyKey, `${key2}::profit`);
+  assert.equal(fresh.requestRevision, 1);
+
+  // Legacy enqueue without a key keeps the old bumping behavior.
+  const legacy = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  enqueueSections(legacy, {sections: ['orders'], priority: 50, now: at(0)});
+  claimNext(legacy, {leaseSeconds: 60, leaseId: 'lease-legacy-1', now: at(1_000)});
+  enqueueSections(legacy, {sections: ['orders'], priority: 0, reason: 'force', now: at(2_000)});
+  assert.equal(legacy.entries.find(e => e.section === 'orders').requestRevision, 2, 'legacy enqueue must keep bumping revision');
+  assert.equal('idempotencyKey' in legacy.entries.find(e => e.section === 'orders'), false, 'legacy entries must not gain the key field');
+}
+
+// ---- Idempotency key validation and bounded completed ledger.
+{
+  assert.throws(
+    () => enqueueSections({version: 1, entries: [], completedIdempotency: []}, {sections: ['profit'], idempotencyKey: '../evil'}),
+    /QUEUE_IDEMPOTENCY_KEY_INVALID/,
+  );
+  assert.throws(
+    () => enqueueSections({version: 1, entries: [], completedIdempotency: []}, {sections: ['profit'], idempotencyKey: 'x'.repeat(121)}),
+    /QUEUE_IDEMPOTENCY_KEY_INVALID/,
+  );
+
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  for (let i = 0; i < 2050; i += 1) {
+    const k = `cap:${String(i).padStart(4, '0')}`;
+    enqueueSections(queue, {sections: ['profit'], priority: 50, idempotencyKey: k, now: at(i)});
+    const claimed = claimNext(queue, {leaseSeconds: 60, leaseId: `lease-cap-${i}`, now: at(i)});
+    assert.equal(claimed.section, 'profit');
+    completeClaim(queue, {section: 'profit', leaseId: `lease-cap-${i}`, now: at(i + 1)});
+  }
+  assert.ok(queue.completedIdempotency.length <= 2048, `ledger must be bounded, got ${queue.completedIdempotency.length}`);
+  assert.equal(queue.completedIdempotency[0].idempotencyKey, 'cap:2049::profit', 'newest completions must be kept');
+
+  const aged = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  const day = 24 * 60 * 60 * 1_000;
+  enqueueSections(aged, {sections: ['profit'], priority: 50, idempotencyKey: 'old:key', now: at(0)});
+  claimNext(aged, {leaseSeconds: 60, leaseId: 'lease-aged', now: at(1_000)});
+  completeClaim(aged, {section: 'profit', leaseId: 'lease-aged', now: at(2_000)});
+  assert.equal(aged.completedIdempotency.length, 1);
+  enqueueSections(aged, {sections: ['profit'], priority: 50, idempotencyKey: 'new:key', now: at(31 * day)});
+  claimNext(aged, {leaseSeconds: 60, leaseId: 'lease-new', now: at(31 * day + 1_000)});
+  completeClaim(aged, {section: 'profit', leaseId: 'lease-new', now: at(31 * day + 2_000)});
+  assert.equal(aged.completedIdempotency.some(r => r.idempotencyKey === 'old:key::profit'), false, '>30d tombstones must be dropped');
+  assert.equal(aged.completedIdempotency.some(r => r.idempotencyKey === 'new:key::profit'), true);
+}
+
+// ---- Structured outcomes + tombstone-first precedence: replaying a
+// completed G1 is a strict no-op even when the current entry is a newer G2.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  const keyG1 = 'core-warmup:G1';
+  const keyG2 = 'core-warmup:G2';
+  // G1 completed (tombstone) and G2 pending on the SAME section.
+  enqueueSections(queue, {sections: ['profit'], priority: 10, idempotencyKey: keyG1, now: at(0)});
+  const g1Claim = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-g1', now: at(1_000)});
+  completeClaim(queue, {section: 'profit', leaseId: 'lease-g1', now: at(2_000)});
+  enqueueSections(queue, {sections: ['profit'], priority: 10, idempotencyKey: keyG2, now: at(3_000)});
+  const g2Entry = queue.entries.find(e => e.section === 'profit');
+  const g2Before = JSON.stringify({key: g2Entry.idempotencyKey, revision: g2Entry.requestRevision, status: g2Entry.status});
+
+  // Replay G1: tombstone check precedes the existing-entry logic.
+  const replay = enqueueSections(queue, {sections: ['profit'], priority: 0, idempotencyKey: keyG1, reason: 'replay', now: at(4_000)});
+  assert.deepEqual(replay.deduplicatedCompleted, ['profit'], 'completed replay must be reported as deduplicatedCompleted');
+  assert.deepEqual(replay.deduplicatedPending, [], 'a completed key is never a pending dedupe');
+  assert.deepEqual(replay.newlyQueued, []);
+  assert.deepEqual(replay.updatedRevision, [], 'the G2 entry must not be bumped or re-keyed');
+  assert.deepEqual(replay.deduplicated, ['profit'], 'legacy aggregate must stay consistent');
+  const g2After = queue.entries.find(e => e.section === 'profit');
+  assert.equal(JSON.stringify({key: g2After.idempotencyKey, revision: g2After.requestRevision, status: g2After.status}), g2Before,
+    'replaying completed G1 must leave the G2 entry key/revision/status untouched');
+
+  // 31-day DIRECT replay with no intervening completion: the expired G1
+  // tombstone is trimmed at enqueue start and the request enqueues fresh.
+  const day = 24 * 60 * 60 * 1_000;
+  const replayExpired = enqueueSections(queue, {sections: ['profit'], priority: 10, idempotencyKey: keyG1, now: at(31 * day)});
+  assert.equal(queue.completedIdempotency.some(r => r.idempotencyKey === `${keyG1}::profit`), false,
+    'the expired G1 tombstone must be trimmed before lookup');
+  assert.deepEqual(replayExpired.deduplicatedCompleted, [], 'expired tombstone no longer deduplicates');
+  assert.deepEqual(replayExpired.updatedRevision, ['profit'], 'the expired G1 replay is a fresh request on the existing section entry');
+  assert.equal(queue.entries.find(e => e.section === 'profit').idempotencyKey, `${keyG1}::profit`, 'the entry adopts the fresh G1 key');
+}
+
+// ---- Trim-only mutation is persisted: expired tombstones removed even when
+// no entry changes.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  const day = 24 * 60 * 60 * 1_000;
+  enqueueSections(queue, {sections: ['orders'], priority: 50, idempotencyKey: 'old:key', now: at(0)});
+  const claim = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-old', now: at(1_000)});
+  completeClaim(queue, {section: 'orders', leaseId: 'lease-old', now: at(2_000)});
+  assert.equal(queue.completedIdempotency.length, 1);
+  const outcome = enqueueSections(queue, {sections: [], now: at(31 * day)});
+  assert.equal(outcome.mutated, true, 'trimmed expired tombstones must report mutation');
+  assert.equal(queue.completedIdempotency.length, 0);
+}
+
+// ---- Narrow requeue of completed sections: only the listed invalid
+// tombstones are removed atomically; valid tombstones stay; entries recreate.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  const key = 'core-warmup:G1';
+  // Complete profit and orders.
+  enqueueSections(queue, {sections: ['profit', 'orders'], priority: 10, idempotencyKey: key, now: at(0)});
+  for (const [section, leaseId] of [['profit', 'lease-rq-p'], ['orders', 'lease-rq-o']]) {
+    claimNext(queue, {leaseSeconds: 60, leaseId, now: at(1_000)});
+    completeClaim(queue, {section, leaseId, now: at(2_000)});
+  }
+  assert.equal(queue.completedIdempotency.length, 2);
+
+  // Requeue ONLY profit: its tombstone is removed and the entry recreated;
+  // the orders tombstone is untouched.
+  const requeued = enqueueSections(queue, {sections: ['profit', 'orders'], priority: 10, idempotencyKey: key, requeueCompletedSections: ['profit'], now: at(3_000)});
+  assert.deepEqual(requeued.requeuedCompleted, ['profit'], 'the invalid tombstone must be removed and requeued');
+  assert.deepEqual(requeued.newlyQueued, ['profit'], 'the requeued section must create a fresh entry');
+  assert.equal(queue.entries.some(e => e.section === 'profit'), true);
+  assert.equal(queue.entries.find(e => e.section === 'profit').idempotencyKey, `${key}::profit`);
+  assert.equal(queue.completedIdempotency.some(r => r.idempotencyKey === `${key}::profit`), false, 'invalid tombstone must be gone');
+  assert.equal(queue.completedIdempotency.some(r => r.idempotencyKey === `${key}::orders`), true, 'valid tombstone must stay');
+
+  // Validation: requeue requires a non-empty idempotency key and a requested
+  // subset.
+  assert.throws(
+    () => enqueueSections(queue, {sections: ['profit'], requeueCompletedSections: ['profit']}),
+    /QUEUE_REQUEUE_REQUIRES_IDEMPOTENCY_KEY/,
+  );
+  assert.throws(
+    () => enqueueSections(queue, {sections: ['profit'], idempotencyKey: key, requeueCompletedSections: ['orders']}),
+    /QUEUE_REQUEUE_NOT_REQUESTED/,
+  );
+}
+
+// ---- Coalesced rerun: a different key on an already-rerun running entry
+// with an unchanged numeric revision classifies coalescedRerun, never
+// updatedRevision.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  enqueueSections(queue, {sections: ['orders'], priority: 50, idempotencyKey: 'gen:A', now: at(0)});
+  const claim = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-coalesce', now: at(1_000)});
+  assert.equal(claim.requestRevision, 1);
+  const firstBump = enqueueSections(queue, {sections: ['orders'], priority: 0, idempotencyKey: 'gen:B', now: at(2_000)});
+  assert.deepEqual(firstBump.updatedRevision, ['orders'], 'the first different key on a fresh running entry bumps the revision');
+  assert.deepEqual(firstBump.coalescedRerun, []);
+  assert.equal(queue.entries.find(e => e.section === 'orders').requestRevision, 2);
+  const coalesced = enqueueSections(queue, {sections: ['orders'], priority: 0, idempotencyKey: 'gen:C', now: at(3_000)});
+  assert.deepEqual(coalesced.coalescedRerun, ['orders'], 'an already-rerun running entry with an unchanged revision must be coalescedRerun');
+  assert.deepEqual(coalesced.updatedRevision, [], 'no updatedRevision claim when the revision did not increase');
+  assert.equal(queue.entries.find(e => e.section === 'orders').requestRevision, 2, 'the revision must stay unchanged');
+  assert.equal(queue.entries.find(e => e.section === 'orders').rerun, true);
+}
+
+// ---- CLI-level durable idempotency across process invocations (restart).
+{
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'queue-idem-cli-'));
+  const queueFile = path.join(temp, 'queue.json');
+  const run = (...args) => spawnSync(
+    process.execPath,
+    ['scripts/manage_bi_portal_section_queue.mjs', ...args, '--file', queueFile],
+    {cwd: process.cwd(), encoding: 'utf8'},
+  );
+  const key = 'core-warmup:2026-08-17T03:00:00.000Z';
+  try {
+    let r = run('enqueue', '--sections', 'profit,orders', '--priority', '10', '--idempotency-key', key);
+    assert.equal(r.status, 0, r.stderr);
+    let queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    const firstRevision = queue.entries.map(e => [e.section, e.requestRevision]);
+    assert.deepEqual(queue.entries.map(e => e.idempotencyKey), [`${key}::profit`, `${key}::orders`]);
+    // Structured CLI schema: every outcome array is present and the legacy
+    // aggregate stays consistent.
+    const enqueueOut = JSON.parse(r.stdout);
+    assert.deepEqual(enqueueOut.newlyQueued, ['profit', 'orders']);
+    assert.deepEqual(enqueueOut.updatedRevision, []);
+    assert.deepEqual(enqueueOut.deduplicatedPending, []);
+    assert.deepEqual(enqueueOut.deduplicatedCompleted, []);
+    assert.deepEqual(enqueueOut.coalescedRerun, []);
+    assert.deepEqual(enqueueOut.requeuedCompleted, []);
+    assert.deepEqual(enqueueOut.supersededByExisting, []);
+    assert.deepEqual(enqueueOut.deduplicated, []);
+
+    // Claim one (running), then a FRESH process invocation re-enqueues the
+    // same key: deduplicated, no revision change, no rerun.
+    r = run('claim', '--lease-seconds', '60');
+    assert.equal(r.status, 0, r.stderr);
+    const claim = JSON.parse(r.stdout);
+    assert.equal(claim.claimed, true);
+    r = run('enqueue', '--sections', 'profit,orders', '--priority', '10', '--idempotency-key', key);
+    assert.equal(r.status, 0, r.stderr);
+    const dedupOut = JSON.parse(r.stdout);
+    assert.deepEqual(dedupOut.deduplicatedPending, ['profit', 'orders'], 'fresh process must report deduplicatedPending');
+    assert.deepEqual(dedupOut.deduplicatedCompleted, []);
+    assert.deepEqual(dedupOut.supersededByExisting, []);
+    assert.deepEqual(dedupOut.deduplicated, ['profit', 'orders'], 'legacy aggregate must stay consistent');
+    queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    assert.deepEqual(queue.entries.map(e => [e.section, e.requestRevision]), firstRevision, 'no revision change across process invocation');
+    assert.equal(queue.entries.find(e => e.section === claim.entry.section).rerun, false, 'no rerun across process invocation');
+
+    // Complete the running claim, then a FRESH process re-enqueues: tombstone
+    // no-op, the entry is not recreated.
+    r = run('complete', '--section', claim.entry.section, '--lease-id', claim.entry.leaseId);
+    assert.equal(r.status, 0, r.stderr);
+    r = run('enqueue', '--sections', claim.entry.section, '--priority', '10', '--idempotency-key', key);
+    assert.equal(r.status, 0, r.stderr);
+    queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    assert.equal(queue.entries.some(e => e.section === claim.entry.section), false, 'completed key must not be recreated');
+    assert.ok(queue.completedIdempotency.some(rec => rec.idempotencyKey === `${key}::${claim.entry.section}`), 'tombstone must persist');
+
+    // A new generation key enqueues normally in the same queue document.
+    r = run('enqueue', '--sections', 'profit', '--priority', '10', '--idempotency-key', 'core-warmup:2026-08-17T04:00:00.000Z');
+    assert.equal(r.status, 0, r.stderr);
+    queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    assert.equal(queue.entries.find(e => e.section === 'profit').requestRevision, 1);
+  } finally {
+    fs.rmSync(temp, {recursive: true, force: true});
+  }
+}
+
+// ---- Requeue conflict: a completed G1 whose requeue collides with an entry
+// bound to a different nonempty key (a newer G2) is a strict no-op classified
+// supersededByExisting -- the G1 tombstone stays and the G2 entry stays
+// byte-identical.  Same-key/no-entry requeues proceed normally.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  const keyG1 = 'core-warmup:G1';
+  const keyG2 = 'core-warmup:G2';
+  // G1 completes profit (tombstone) and orders (tombstone); profit then gets a
+  // fresh G2 pending entry (a newer generation already owns the slot).
+  enqueueSections(queue, {sections: ['profit', 'orders'], priority: 10, idempotencyKey: keyG1, now: at(0)});
+  for (const [section, leaseId] of [['profit', 'lease-sc-p'], ['orders', 'lease-sc-o']]) {
+    claimNext(queue, {leaseSeconds: 60, leaseId, now: at(1_000)});
+    completeClaim(queue, {section, leaseId, now: at(2_000)});
+  }
+  assert.equal(queue.completedIdempotency.length, 2);
+  enqueueSections(queue, {sections: ['profit'], priority: 10, idempotencyKey: keyG2, now: at(3_000)});
+  const g2Entry = queue.entries.find(e => e.section === 'profit');
+  const g2Before = JSON.stringify({
+    key: g2Entry.idempotencyKey,
+    revision: g2Entry.requestRevision,
+    rerun: g2Entry.rerun,
+    status: g2Entry.status,
+    priority: g2Entry.priority,
+  });
+
+  // Requeue G1 for BOTH completed sections: profit is superseded by the G2
+  // entry, orders requeues normally.
+  const conflicted = enqueueSections(queue, {
+    sections: ['profit', 'orders'],
+    priority: 10,
+    idempotencyKey: keyG1,
+    requeueCompletedSections: ['profit', 'orders'],
+    now: at(4_000),
+  });
+  assert.deepEqual(conflicted.supersededByExisting, ['profit'], 'the G2-owned slot must classify supersededByExisting');
+  assert.deepEqual(conflicted.requeuedCompleted, ['orders'], 'only the non-conflicting invalid tombstone is requeued');
+  assert.deepEqual(conflicted.newlyQueued, ['orders'], 'the non-conflicting section recreates a fresh entry');
+  // Every requested section is accounted exactly once across the structured
+  // outcomes.
+  const accounted = [
+    ...conflicted.newlyQueued,
+    ...conflicted.updatedRevision,
+    ...conflicted.deduplicatedPending,
+    ...conflicted.deduplicatedCompleted,
+    ...conflicted.coalescedRerun,
+    ...conflicted.supersededByExisting,
+  ].slice().sort();
+  assert.deepEqual(accounted, ['orders', 'profit'], 'requested sections must be accounted exactly once');
+
+  const g2After = queue.entries.find(e => e.section === 'profit');
+  assert.equal(JSON.stringify({
+    key: g2After.idempotencyKey,
+    revision: g2After.requestRevision,
+    rerun: g2After.rerun,
+    status: g2After.status,
+    priority: g2After.priority,
+  }), g2Before, 'the G2 entry must stay byte-identical under the G1 requeue');
+  assert.equal(g2After.idempotencyKey, `${keyG2}::profit`, 'the newer key must never be adopted');
+  assert.equal(
+    queue.completedIdempotency.some(record => record.idempotencyKey === `${keyG1}::profit`),
+    true,
+    'the G1 profit tombstone must be retained',
+  );
+  assert.equal(
+    queue.completedIdempotency.some(record => record.idempotencyKey === `${keyG1}::orders`),
+    false,
+    'the G1 orders tombstone is removed because orders requeued normally',
+  );
+  assert.equal(queue.entries.find(e => e.section === 'orders').idempotencyKey, `${keyG1}::orders`);
+
+  // Same-key existing entry requeues normally (deduplicated pending).
+  const sameKey = enqueueSections(queue, {
+    sections: ['orders'],
+    priority: 10,
+    idempotencyKey: keyG1,
+    requeueCompletedSections: ['orders'],
+    now: at(5_000),
+  });
+  assert.deepEqual(sameKey.supersededByExisting, [], 'a same-key entry is never superseded');
+  assert.deepEqual(sameKey.deduplicatedPending, ['orders'], 'the same-key entry deduplicates as pending');
+}
+
 console.log('bi_portal_section_queue: sequence/revision/backoff reliability invariants passed');

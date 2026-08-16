@@ -68,6 +68,66 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   }
 }
 
+// ---- Validator: --expected-generated-at pins the exact core generation.
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-expected-'));
+  const otherGeneration = '2026-08-10T00:00:00.000Z';
+  try {
+    makePortal(dir, {section: 'orders'});
+    const exact = await validateTerminalArtifact({
+      root: dir,
+      section: 'orders',
+      expectedGeneratedAt: generatedAt,
+    });
+    assert.equal(exact.ok, true, JSON.stringify(exact));
+    assert.equal(exact.expectedGeneratedAt, generatedAt, 'the report must carry the expected generation');
+
+    const mismatch = await validateTerminalArtifact({
+      root: dir,
+      section: 'orders',
+      expectedGeneratedAt: otherGeneration,
+    });
+    assert.equal(mismatch.ok, false, 'a different expected generation must never be terminal');
+    assert.equal(mismatch.reason, 'core_generated_at_unexpected');
+    assert.equal(mismatch.coreGeneratedAt, generatedAt);
+    assert.equal(mismatch.expectedGeneratedAt, otherGeneration);
+
+    // CLI parity: --expected-generated-at is accepted, output includes it,
+    // and a mismatch exits non-zero while an invalid token is a usage error.
+    const script = path.join(root, 'scripts', 'check_bi_portal_section_terminal.mjs');
+    const okRun = spawnSync(process.execPath, [
+      script,
+      '--root', dir,
+      '--section', 'orders',
+      '--expected-generated-at', generatedAt,
+    ], {encoding: 'utf8'});
+    assert.equal(okRun.status, 0, okRun.stderr);
+    assert.equal(JSON.parse(okRun.stdout).expectedGeneratedAt, generatedAt);
+    assert.equal(JSON.parse(okRun.stdout).ok, true);
+
+    const badRun = spawnSync(process.execPath, [
+      script,
+      '--root', dir,
+      '--section', 'orders',
+      '--expected-generated-at', otherGeneration,
+    ], {encoding: 'utf8'});
+    assert.equal(badRun.status, 1, 'an expected-generation mismatch must exit non-zero');
+    assert.equal(JSON.parse(badRun.stdout).reason, 'core_generated_at_unexpected');
+
+    const invalidToken = 'x'.repeat(2_000);
+    const usageRun = spawnSync(process.execPath, [
+      script,
+      '--root', dir,
+      '--section', 'orders',
+      '--expected-generated-at', invalidToken,
+    ], {encoding: 'utf8'});
+    assert.equal(usageRun.status, 2, 'an over-long expected generation must be a usage error');
+    assert.match(usageRun.stderr, /EXPECTED_GENERATED_AT_INVALID/);
+  } finally {
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+}
+
 // ---- Validator: homeProfit source invariants fail closed.
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-home-profit-'));

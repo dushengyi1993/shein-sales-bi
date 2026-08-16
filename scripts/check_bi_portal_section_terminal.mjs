@@ -33,6 +33,10 @@ const MAX_HEAD_BYTES = 1024 * 1024;
 const HOME_PROFIT_MAX_SIZE = 64 * 1024 * 1024;
 const STREAM_SCAN_CHUNK_BYTES = 1024 * 1024;
 const STREAM_SCAN_CARRY_CHARS = 256;
+// Strict nonempty bounded expected generation token: printable ASCII only so
+// it can never be misread as a path, section or shell argument, length capped
+// at the same magnitude as the core generatedAt field scan limit.
+const EXPECTED_GENERATED_AT_PATTERN = /^[\x21-\x7E]{1,1024}$/;
 const CORE_FIELD_LIMITS = Object.freeze({
   generatedAt: 4 * 1024,
   __sections: 1024 * 1024,
@@ -41,7 +45,7 @@ const CORE_FIELD_LIMITS = Object.freeze({
 function usage(message = '') {
   if (message) console.error(message);
   console.error(`Usage:
-  check_bi_portal_section_terminal.mjs --section NAME [--root DIR] [--head-bytes N]`);
+  check_bi_portal_section_terminal.mjs --section NAME [--root DIR] [--head-bytes N] [--expected-generated-at TOKEN]`);
   return 2;
 }
 
@@ -50,6 +54,7 @@ function parseArgs(argv) {
     root: path.join(process.cwd(), 'outputs', 'bi-portal'),
     section: '',
     headBytes: DEFAULT_HEAD_BYTES,
+    expectedGeneratedAt: '',
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -61,6 +66,7 @@ function parseArgs(argv) {
     if (token === '--root') options.root = path.resolve(next());
     else if (token === '--section') options.section = String(next()).trim();
     else if (token === '--head-bytes') options.headBytes = Number(next());
+    else if (token === '--expected-generated-at') options.expectedGeneratedAt = validateExpectedGeneratedAt(next());
     else throw new TypeError(`QUEUE_ARGUMENT_UNKNOWN_${token}`);
   }
   if (!SECTION_PATTERN.test(options.section)) throw new TypeError(`SECTION_INVALID_${options.section}`);
@@ -68,6 +74,13 @@ function parseArgs(argv) {
     throw new TypeError('HEAD_BYTES_INVALID');
   }
   return options;
+}
+
+function validateExpectedGeneratedAt(value) {
+  const expected = String(value ?? '').trim();
+  if (!expected) return '';
+  if (!EXPECTED_GENERATED_AT_PATTERN.test(expected)) throw new TypeError('EXPECTED_GENERATED_AT_INVALID');
+  return expected;
 }
 
 function extractStringField(text, field) {
@@ -134,7 +147,16 @@ async function readCoreGeneratedAt(coreFile) {
   }
 }
 
-export async function validateTerminalArtifact({root, section, headBytes = DEFAULT_HEAD_BYTES} = {}) {
+export async function validateTerminalArtifact({root, section, headBytes = DEFAULT_HEAD_BYTES, expectedGeneratedAt} = {}) {
+  const expected = validateExpectedGeneratedAt(expectedGeneratedAt);
+  const result = await validateTerminalArtifactInner({root, section, headBytes, expectedGeneratedAt: expected});
+  // CLI parity: every report carries the expected generation when provided so
+  // callers can prove which generation the validator was pinned to.
+  if (expected) result.expectedGeneratedAt = expected;
+  return result;
+}
+
+async function validateTerminalArtifactInner({root, section, headBytes, expectedGeneratedAt}) {
   const normalizedSection = String(section || '').trim();
   if (!SECTION_PATTERN.test(normalizedSection)) {
     return {ok: false, reason: 'section_invalid', section: normalizedSection};
@@ -148,6 +170,20 @@ export async function validateTerminalArtifact({root, section, headBytes = DEFAU
   }
   if (!coreGeneratedAt) {
     return {ok: false, reason: 'core_generated_at_missing', section: normalizedSection};
+  }
+  // Explicit cross-generation pin: unless the core generation matches the
+  // expected token exactly, the artifact is not terminal for this caller.  A
+  // mid-verification core flip makes every later section check fail here
+  // instead of being validated against a newer core than the one the caller
+  // pinned.
+  if (expectedGeneratedAt && coreGeneratedAt !== expectedGeneratedAt) {
+    return {
+      ok: false,
+      reason: 'core_generated_at_unexpected',
+      section: normalizedSection,
+      coreGeneratedAt,
+      expectedGeneratedAt,
+    };
   }
 
   const sectionFile = path.join(root, 'sections', `${normalizedSection}.json`);
