@@ -21,6 +21,12 @@ PER_STORE_BROWSER_WRAPPER="${SHEIN_LINK_BUSINESS_PER_STORE_BROWSER_WRAPPER:-0}"
 RESOURCE_RETRIES="${SHEIN_LINK_BUSINESS_RESOURCE_RETRIES:-12}"
 RESOURCE_RETRY_SLEEP_SEC="${SHEIN_LINK_BUSINESS_RESOURCE_RETRY_SLEEP_SEC:-30}"
 BROWSER_CONCURRENCY="${SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY:-2}"
+LINK_PARTIAL_LOCK_FILE="${SHEIN_LINK_BUSINESS_PARTIAL_LOCK_FILE:-$ROOT/state/locks/link-business-partial.lock}"
+LINK_PARTIAL_LOCK_WAIT_SEC="${SHEIN_LINK_BUSINESS_PARTIAL_LOCK_WAIT_SEC:-60}"
+LINK_RUN_LOCK_FILE="${SHEIN_LINK_BUSINESS_RUN_LOCK_FILE:-$ROOT/state/locks/link-business-run.lock}"
+LINK_RUN_LOCK_WAIT_SEC="${SHEIN_LINK_BUSINESS_RUN_LOCK_WAIT_SEC:-1800}"
+
+source "$ROOT/scripts/lib/shared_lock.sh"
 
 is_true() {
   [[ "$1" == "1" || "$1" == "true" ]]
@@ -298,6 +304,15 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[cloud_link_business_sync] start target=$TARGET date=$DATE root=$ROOT"
 cd "$ROOT"
+prepare_shared_lock_file "$LINK_PARTIAL_LOCK_FILE"
+prepare_shared_lock_file "$LINK_RUN_LOCK_FILE"
+if ! is_true "$FETCH_ONLY"; then
+  exec 8>"$LINK_RUN_LOCK_FILE"
+  flock -w "$LINK_RUN_LOCK_WAIT_SEC" 8 || {
+    echo "[cloud_link_business_sync] could not acquire full-run/publish lifecycle lock" >&2
+    exit 75
+  }
+fi
 
 export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
 export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
@@ -449,23 +464,136 @@ if is_true "$FETCH_ONLY"; then
   exit 0
 fi
 
+# Targeted manual-login recovery runs select exactly the stores recorded in the
+# canonical partial.  They may never publish a one-store subset: when a
+# same-date partial exists and the targeted store succeeded, it is atomically
+# moved from failed to success in the partial; if other failed stores remain
+# the reduced partial is persisted and the run exits before any warehouse/portal
+# publication.  Only when the combined evidence exactly covers every enabled
+# store with an empty failed set may the run proceed once to full
+# merge/load/publish.
+if [[ -n "${SHEIN_LINK_BUSINESS_STORES:-}" ]]; then
+  TARGETED_RECOVERY=1
+else
+  TARGETED_RECOVERY=0
+fi
+
+if [[ "$TARGETED_RECOVERY" == "1" && "${#FAILED_STORES[@]}" -eq 0 ]]; then
+  if [[ ! -e "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" ]]; then
+    echo "[cloud_link_business_sync] targeted run has no canonical partial to reconcile; refusing warehouse/portal publication of a store subset" >&2
+    check_portal_health
+    exit 0
+  fi
+  if [[ ! -s "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" ]]; then
+    echo "[cloud_link_business_sync] canonical partial exists but is empty; refusing recovery" >&2
+    exit 1
+  fi
+  # The canonical partial read-modify-write and the hold/publish decision are
+  # one critical section under the shared partial lock: no concurrent fallback
+  # seed, targeted update or final decision can observe a half-written partial.
+  TARGETED_RECOVERY_OUTCOME="$(
+    {
+      flock -w "$LINK_PARTIAL_LOCK_WAIT_SEC" 9 || {
+        echo "[cloud_link_business_sync] could not acquire canonical partial lock; aborting targeted recovery update" >&2
+        exit 75
+      }
+      DATE="$DATE" CURRENT_SUCCESS_STORES="${SUCCESS_STORES[*]}" CURRENT_FAILED_STORES="${FAILED_STORES[*]}" LOG_FILE="$LOG_FILE" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.cwd();
+const split = value => (Array.isArray(value) ? value : String(value || '').split(/[\s,]+/))
+  .map(item => String(item || '').trim().toUpperCase())
+  .filter(Boolean);
+const file = path.join(root, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json');
+const prior = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (!prior || String(prior.date || '') !== String(process.env.DATE || '')) {
+  process.stdout.write('nomatch|no_same_date_partial');
+  process.exit(0);
+}
+const success = new Set(split(prior.successStores));
+const failed = new Set(split(prior.failedStores));
+for (const store of split(process.env.CURRENT_SUCCESS_STORES)) {
+  success.add(store);
+  failed.delete(store);
+}
+for (const store of split(process.env.CURRENT_FAILED_STORES)) {
+  failed.add(store);
+  success.delete(store);
+}
+const payload = {
+  date: process.env.DATE,
+  generatedAt: new Date().toISOString(),
+  failedStores: [...failed].sort().join(' '),
+  successStores: [...success].sort().join(' '),
+  logFile: process.env.LOG_FILE,
+  recoveryRunId: process.env.SHEIN_LINK_BUSINESS_RUN_ID || '',
+};
+const temporary = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+fs.renameSync(temporary, file);
+if (failed.size > 0) {
+  process.stdout.write('hold|failed_stores_remain');
+  process.exit(0);
+}
+const config = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
+const expected = (config.stores || [])
+  .filter(store => store.enabled !== false)
+  .map(store => String(store.storeKey || '').trim().toUpperCase())
+  .filter(Boolean)
+  .sort();
+const merged = [...success].sort();
+if (expected.length !== merged.length || expected.some((store, index) => store !== merged[index])) {
+  process.stdout.write('hold|store_set_not_exact');
+  process.exit(0);
+}
+process.stdout.write(`publish ${expected.join(' ')}`);
+NODE
+    } 9>"$LINK_PARTIAL_LOCK_FILE"
+  )"
+  case "$TARGETED_RECOVERY_OUTCOME" in
+    publish*)
+      SUCCESS_STORES=(${TARGETED_RECOVERY_OUTCOME#publish })
+      echo "[cloud_link_business_sync] targeted recovery completed prior partial; merged all-store evidence: ${SUCCESS_STORES[*]}"
+      ;;
+    hold*)
+      echo "[cloud_link_business_sync] targeted recovery recorded in canonical partial; other failed stores remain; skipping BI warehouse/portal refresh" >&2
+      check_portal_health
+      exit 0
+      ;;
+    nomatch*)
+      echo "[cloud_link_business_sync] targeted run cannot reconcile with the canonical partial; refusing BI warehouse/portal refresh" >&2
+      check_portal_health
+      exit 0
+      ;;
+    *)
+      echo "[cloud_link_business_sync] targeted recovery outcome unrecognized (${TARGETED_RECOVERY_OUTCOME:-empty}); refusing BI warehouse/portal refresh" >&2
+      check_portal_health
+      exit 0
+      ;;
+  esac
+fi
+
 if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
   echo "[cloud_link_business_sync] WARN failed stores: ${FAILED_STORES[*]}" >&2
   mkdir -p "$ROOT/state/cloud_ops_alerts"
-  DATE="$DATE" \
-  GENERATED_AT="$(TZ="$TZ_NAME" date --iso-8601=seconds)" \
-  FAILED_STORES="${FAILED_STORES[*]}" \
-  SUCCESS_STORES="${SUCCESS_STORES[*]}" \
-  LOG_FILE="$LOG_FILE" \
-  node - <<'NODE'
+  (
+    flock -w "$LINK_PARTIAL_LOCK_WAIT_SEC" 9 || {
+      echo "[cloud_link_business_sync] could not acquire canonical partial lock; aborting partial update" >&2
+      exit 75
+    }
+    DATE="$DATE" \
+    GENERATED_AT="$(TZ="$TZ_NAME" date --iso-8601=seconds)" \
+    FAILED_STORES="${FAILED_STORES[*]}" \
+    SUCCESS_STORES="${SUCCESS_STORES[*]}" \
+    LOG_FILE="$LOG_FILE" \
+    node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const file = path.join(process.cwd(), 'state', 'cloud_ops_alerts', 'link-business-last-partial.json');
 const split = value => (Array.isArray(value) ? value : String(value || '').split(/[\s,]+/))
   .map(item => String(item || '').trim().toUpperCase())
   .filter(Boolean);
-let prior = null;
-try { prior = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+const prior = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
 const sameDate = String(prior?.date || '') === String(process.env.DATE || '');
 const success = new Set(sameDate ? split(prior?.successStores) : []);
 const failed = new Set(sameDate ? split(prior?.failedStores) : []);
@@ -483,11 +611,13 @@ const payload = {
   failedStores: [...failed].join(' '),
   successStores: [...success].join(' '),
   logFile: process.env.LOG_FILE,
+  recoveryRunId: process.env.SHEIN_LINK_BUSINESS_RUN_ID || '',
 };
 const temporary = `${file}.${process.pid}.tmp`;
 fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 fs.renameSync(temporary, file);
 NODE
+  ) 9>"$LINK_PARTIAL_LOCK_FILE"
   if [[ "${SHEIN_LINK_BUSINESS_LOAD_PARTIAL:-0}" != "1" && "${SHEIN_LINK_BUSINESS_LOAD_PARTIAL:-0}" != "true" ]]; then
     echo "[cloud_link_business_sync] partial result recorded; skip BI warehouse/portal refresh to avoid presenting incomplete link/business date" >&2
     check_portal_health
@@ -532,6 +662,98 @@ NODE
   if [[ -n "$MERGED_RECOVERY_STORES" ]]; then
     SUCCESS_STORES=($MERGED_RECOVERY_STORES)
     echo "[cloud_link_business_sync] targeted recovery completed prior partial; merged all-store evidence: ${SUCCESS_STORES[*]}"
+  fi
+fi
+
+# Final publish gate: before any full merge/load/publish, every enabled store
+# must have exact-date link and business evidence files with a valid
+# ok/date/storeKey schema (same predicate as store_evidence_is_complete).
+# Missing, corrupt or stale evidence keeps the canonical partial (the invalid
+# stores are recorded back as failed under the shared partial lock) and exits
+# before any warehouse/portal publication.
+if [[ "${#FAILED_STORES[@]}" -eq 0 ]]; then
+  EVIDENCE_OUTCOME="$(
+    DATE="$DATE" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.cwd();
+const date = process.env.DATE;
+const config = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
+const invalid = [];
+for (const row of config.stores || []) {
+  if (row.enabled === false) continue;
+  const store = String(row.storeKey || '').trim().toUpperCase();
+  let complete = Boolean(store);
+  for (const domain of ['shein_links', 'shein_business_domains']) {
+    const file = path.join(root, 'outputs', domain, store, `${date}.json`);
+    try {
+      const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const payloadStore = String(payload?.store?.storeKey || '').trim().toUpperCase();
+      if (payload?.ok !== true || String(payload?.date || '') !== date || payloadStore !== store) complete = false;
+    } catch {
+      complete = false;
+    }
+  }
+  if (!complete) invalid.push(store);
+}
+process.stdout.write(invalid.length ? `evidence-missing|${invalid.join(' ')}` : 'evidence-ok');
+NODE
+  )"
+  if [[ "$EVIDENCE_OUTCOME" != "evidence-ok" ]]; then
+    INVALID_EVIDENCE_STORES="${EVIDENCE_OUTCOME#evidence-missing|}"
+    echo "[cloud_link_business_sync] final publish blocked: exact-date link/business evidence invalid for ${INVALID_EVIDENCE_STORES}; keeping canonical partial" >&2
+    (
+      flock -w "$LINK_PARTIAL_LOCK_WAIT_SEC" 9 || {
+        echo "[cloud_link_business_sync] could not acquire canonical partial lock; aborting evidence partial update" >&2
+        exit 75
+      }
+      DATE="$DATE" \
+      GENERATED_AT="$(TZ="$TZ_NAME" date --iso-8601=seconds)" \
+      INVALID_EVIDENCE_STORES="$INVALID_EVIDENCE_STORES" \
+      LOG_FILE="$LOG_FILE" \
+      node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const root = process.cwd();
+const file = path.join(root, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json');
+const split = value => (Array.isArray(value) ? value : String(value || '').split(/[\s,]+/))
+  .map(item => String(item || '').trim().toUpperCase())
+  .filter(Boolean);
+const config = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
+const enabled = (config.stores || [])
+  .filter(store => store.enabled !== false)
+  .map(store => String(store.storeKey || '').trim().toUpperCase())
+  .filter(Boolean);
+const invalid = new Set(split(process.env.INVALID_EVIDENCE_STORES));
+const prior = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+const sameDate = String(prior?.date || '') === String(process.env.DATE || '');
+const success = new Set(sameDate ? split(prior?.successStores) : []);
+const failed = new Set(sameDate ? split(prior?.failedStores) : []);
+for (const store of enabled) {
+  if (invalid.has(store)) {
+    failed.add(store);
+    success.delete(store);
+  } else {
+    success.add(store);
+    failed.delete(store);
+  }
+}
+const payload = {
+  date: process.env.DATE,
+  generatedAt: process.env.GENERATED_AT,
+  failedStores: [...failed].join(' '),
+  successStores: [...success].join(' '),
+  logFile: process.env.LOG_FILE,
+  recoveryRunId: process.env.SHEIN_LINK_BUSINESS_RUN_ID || '',
+};
+const temporary = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+fs.renameSync(temporary, file);
+NODE
+    ) 9>"$LINK_PARTIAL_LOCK_FILE"
+    check_portal_health
+    echo "[cloud_link_business_sync] done with evidence-incomplete date=$DATE invalid=${INVALID_EVIDENCE_STORES} log=$LOG_FILE"
+    exit 0
   fi
 fi
 
@@ -628,7 +850,13 @@ node scripts/marketing/export_marketing_price_leads_for_bi.mjs || true
 if [[ "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "true" ]]; then
   echo "[cloud_link_business_sync] warehouse load done; skip portal refresh because SHEIN_LINK_BUSINESS_REFRESH_PORTAL=${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-}"
   if [[ "${#FAILED_STORES[@]}" -eq 0 ]]; then
-    rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" 2>/dev/null || true
+    (
+      flock -w "$LINK_PARTIAL_LOCK_WAIT_SEC" 9 || {
+        echo "[cloud_link_business_sync] could not acquire canonical partial lock; aborting partial removal" >&2
+        exit 75
+      }
+      rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json"
+    ) 9>"$LINK_PARTIAL_LOCK_FILE"
     write_link_business_success false
   fi
   echo "[cloud_link_business_sync] done date=$DATE log=$LOG_FILE"
@@ -643,7 +871,15 @@ node scripts/generate_bi_portal.mjs \
 node scripts/generate_bi_portal_shell.mjs
 
 if command -v systemctl >/dev/null 2>&1; then
-  systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
+  # Structured proof only: start the portal when LoadState=loaded AND
+  # ActiveState=inactive.  Any unknown/error state fails closed (no start).
+  PORTAL_LOAD_STATE="$(systemctl show --no-pager --property=LoadState --value shein-bi-portal.service 2>/dev/null || true)"
+  PORTAL_ACTIVE_STATE="$(systemctl show --no-pager --property=ActiveState --value shein-bi-portal.service 2>/dev/null || true)"
+  if [[ "$PORTAL_LOAD_STATE" == "loaded" && "$PORTAL_ACTIVE_STATE" == "inactive" ]]; then
+    systemctl start shein-bi-portal.service || true
+  else
+    echo "[cloud_link_business_sync] portal start skipped: structured state load=$PORTAL_LOAD_STATE active=$PORTAL_ACTIVE_STATE (start only on loaded+inactive)" >&2
+  fi
 fi
 
 if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
@@ -663,7 +899,13 @@ check_portal_health
 if [[ "${#FAILED_STORES[@]}" -gt 0 ]]; then
   echo "[cloud_link_business_sync] done with partial failures date=$DATE failed=${FAILED_STORES[*]} log=$LOG_FILE"
 else
-  rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" 2>/dev/null || true
+  (
+    flock -w "$LINK_PARTIAL_LOCK_WAIT_SEC" 9 || {
+      echo "[cloud_link_business_sync] could not acquire canonical partial lock; aborting partial removal" >&2
+      exit 75
+    }
+    rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json"
+  ) 9>"$LINK_PARTIAL_LOCK_FILE"
   write_link_business_success true
   echo "[cloud_link_business_sync] done date=$DATE log=$LOG_FILE"
 fi

@@ -69,6 +69,7 @@ function parseArgs(argv) {
   const args = {
     group: 'ALL',
     stores: null,
+    storesSpecified: false,
     date: bjDate(0),
     restore: true,
     closeLaunched: true,
@@ -82,8 +83,13 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--group') args.group = String(argv[++i] || args.group).toUpperCase();
-    else if (a === '--store') args.stores = [String(argv[++i] || '').trim().toUpperCase()].filter(Boolean);
-    else if (a === '--stores') args.stores = String(argv[++i] || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
+    else if (a === '--store') {
+      args.storesSpecified = true;
+      args.stores = [String(argv[++i] || '').trim().toUpperCase()].filter(Boolean);
+    } else if (a === '--stores') {
+      args.storesSpecified = true;
+      args.stores = String(argv[++i] || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
+    }
     else if (a === '--date') args.date = String(argv[++i] || args.date);
     else if (a === '--no-restore') args.restore = false;
     else if (a === '--restore') args.restore = true;
@@ -99,16 +105,92 @@ function parseArgs(argv) {
   return args;
 }
 
+// ---------------------------------------------------------------------------
+// Report-scope protection
+//
+// The canonical `cloud-session-manager-latest.json` is all-store strong
+// evidence consumed by the coordinator/wake-up gate and the cloud watchdog.
+// It may be atomically replaced only by an invocation whose requested/result
+// store set exactly equals the current enabled-store set (unique, no missing,
+// no extra).  Every other invocation (single store, group, subset, duplicates
+// or extra keys) is a partial run: it keeps its own timestamped report and an
+// explicit `latest-partial` artifact, and can never overwrite the canonical
+// latest evidence.
+// ---------------------------------------------------------------------------
+
+export function normalizeStoreKeyList(keys) {
+  const unique = [];
+  const duplicates = [];
+  const seen = new Set();
+  for (const raw of keys || []) {
+    const key = String(raw || '').trim().toUpperCase();
+    if (!key) continue;
+    if (seen.has(key)) duplicates.push(key);
+    else {
+      seen.add(key);
+      unique.push(key);
+    }
+  }
+  return {unique, duplicates};
+}
+
+export function classifyStoreScope({enabledStoreKeys, coveredStoreKeys} = {}) {
+  const expected = normalizeStoreKeyList(enabledStoreKeys).unique;
+  const coveredInfo = normalizeStoreKeyList(coveredStoreKeys);
+  const covered = coveredInfo.unique;
+  const expectedSet = new Set(expected);
+  const coveredSet = new Set(covered);
+  const missingStoreKeys = expected.filter(key => !coveredSet.has(key));
+  const extraStoreKeys = covered.filter(key => !expectedSet.has(key));
+  const canonicalLatestAllowed = expected.length > 0
+    && covered.length === expected.length
+    && missingStoreKeys.length === 0
+    && extraStoreKeys.length === 0
+    && coveredInfo.duplicates.length === 0;
+  return {
+    kind: canonicalLatestAllowed ? 'all-enabled' : 'partial',
+    canonicalLatestAllowed,
+    expectedStoreKeys: expected,
+    coveredStoreKeys: covered,
+    missingStoreKeys,
+    extraStoreKeys,
+    duplicateStoreKeys: coveredInfo.duplicates,
+  };
+}
+
+export function assertSelectionWithinEnabled({selectedStoreKeys, enabledStoreKeys} = {}) {
+  const selected = normalizeStoreKeyList(selectedStoreKeys);
+  const enabled = normalizeStoreKeyList(enabledStoreKeys).unique;
+  if (selected.unique.length === 0) {
+    throw new Error('Empty store selection: at least one enabled store is required');
+  }
+  if (selected.duplicates.length) {
+    throw new Error(`Duplicate store selection rejected: ${[...new Set(selected.duplicates)].join(', ')}`);
+  }
+  const enabledSet = new Set(enabled);
+  const unknown = selected.unique.filter(key => !enabledSet.has(key));
+  if (unknown.length) {
+    throw new Error(`Unknown or disabled store selection rejected: ${unknown.join(', ')}`);
+  }
+  return selected.unique;
+}
+
 async function readJson(file) {
   return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
 }
 
 function selectStores(config, args) {
   const enabled = config.stores.filter(s => s.enabled !== false);
-  const keys = args.stores?.length ? args.stores : (args.group === 'ALL' ? enabled.map(s => s.storeKey) : config.groups?.[args.group]);
+  const enabledStoreKeys = enabled
+    .map(s => String(s.storeKey || '').trim().toUpperCase())
+    .filter(Boolean);
+  const keys = args.storesSpecified
+    ? args.stores
+    : (args.group === 'ALL' ? enabledStoreKeys : (config.groups?.[args.group] || []).map(k => String(k).toUpperCase()));
   if (!Array.isArray(keys)) throw new Error(`Unknown store group: ${args.group}`);
-  return keys.map(key => {
-    const store = enabled.find(s => s.storeKey.toUpperCase() === String(key).toUpperCase());
+  const selected = assertSelectionWithinEnabled({selectedStoreKeys: keys, enabledStoreKeys});
+  return selected.map(key => {
+    const store = enabled.find(s => s.storeKey.toUpperCase() === key);
     if (!store) throw new Error(`Unknown or disabled store: ${key}`);
     return store;
   });
@@ -161,6 +243,17 @@ async function fileMeta(file) {
     return {exists: true, sizeBytes: st.size, updatedAt: st.mtime.toISOString()};
   } catch {
     return {exists: false, sizeBytes: 0, updatedAt: null};
+  }
+}
+
+async function atomicWrite(file, data) {
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+  await fs.writeFile(tmp, data, 'utf8');
+  try {
+    await fs.rename(tmp, file);
+  } catch (err) {
+    await fs.rm(tmp, {force: true}).catch(() => null);
+    throw err;
   }
 }
 
@@ -358,6 +451,10 @@ function renderMarkdown(report) {
   lines.push(`- 日期口径：${report.date}`);
   lines.push(`- 结果：${report.ok ? '通过' : '异常'}`);
   lines.push(`- 店铺：${report.summary.okStores}/${report.summary.totalStores} 通过`);
+  const scopeText = report.scope?.kind === 'all-enabled'
+    ? `全部启用店铺（${report.scope.expectedStoreKeys.length}/${report.scope.expectedStoreKeys.length}）`
+    : `部分店铺（${report.scope?.coveredStoreKeys?.length || 0}/${report.scope?.expectedStoreKeys?.length || 0}${report.scope?.missingStoreKeys?.length ? `，缺 ${report.scope.missingStoreKeys.join('、')}` : ''}）`;
+  lines.push(`- 范围：${scopeText}`);
   lines.push(`- profile 总占用：${report.summary.profilesTotalHuman}`);
   lines.push('');
   if (report.issues.length) {
@@ -379,9 +476,51 @@ function renderMarkdown(report) {
   return `${lines.join('\n')}\n`;
 }
 
+/**
+ * Write the report artifacts for one invocation.
+ *
+ * Every invocation keeps its timestamped report.  Only a run whose
+ * `report.scope.canonicalLatestAllowed === true` (exact all-enabled store set)
+ * atomically replaces the canonical `cloud-session-manager-latest.json` and
+ * `.md`.  Partial runs write `cloud-session-manager-partial-<name>.json` plus
+ * `cloud-session-manager-latest-partial.json`/`.md` and never touch the
+ * canonical latest evidence.
+ */
+export async function writeSessionManagerArtifacts({reportDir, logDir, name, report}) {
+  const isPartial = report?.scope?.canonicalLatestAllowed !== true;
+  const prefix = isPartial ? 'cloud-session-manager-partial' : 'cloud-session-manager';
+  const latestBase = isPartial ? 'cloud-session-manager-latest-partial' : 'cloud-session-manager-latest';
+  await fs.mkdir(reportDir, {recursive: true});
+  const json = JSON.stringify(report, null, 2);
+  const md = renderMarkdown(report);
+  const reportFile = path.join(reportDir, `${prefix}-${name}.json`);
+  const latestJson = path.join(reportDir, `${latestBase}.json`);
+  const latestMd = path.join(reportDir, `${latestBase}.md`);
+  await atomicWrite(reportFile, json);
+  await atomicWrite(latestJson, json);
+  await atomicWrite(latestMd, md);
+  if (logDir) {
+    await fs.mkdir(logDir, {recursive: true}).catch(() => null);
+    if (fssync.existsSync(logDir)) {
+      await atomicWrite(path.join(logDir, `${prefix}-${name}.json`), json).catch(() => null);
+    }
+  }
+  return {
+    reportFile: path.relative(ROOT, reportFile),
+    latestJson: path.relative(ROOT, latestJson),
+    latestMd: path.relative(ROOT, latestMd),
+    partial: isPartial,
+    canonicalLatestUpdated: !isPartial,
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = await readJson(STORES_PATH);
+  const enabledStoreKeys = (config.stores || [])
+    .filter(s => s.enabled !== false)
+    .map(s => String(s.storeKey || '').trim().toUpperCase())
+    .filter(Boolean);
   const stores = selectStores(config, args);
   await fs.mkdir(args.reportDir, {recursive: true});
   await fs.mkdir(args.logDir, {recursive: true}).catch(() => null);
@@ -401,11 +540,17 @@ async function main() {
     for (const w of r.warnings) warnings.push(`${r.storeKey}: ${w}`);
   }
   if (profilesTotalBytes > args.profilesTotalWarnBytes) warnings.push(`profiles_total_size_high:${humanBytes(profilesTotalBytes)}`);
+  const scope = classifyStoreScope({
+    enabledStoreKeys,
+    coveredStoreKeys: results.map(r => String(r.storeKey || '').trim().toUpperCase()),
+  });
   const report = {
     ok: issues.length === 0,
     generatedAt: new Date().toISOString(),
     date: args.date,
     mode: args.restore ? 'restore' : 'check',
+    scope,
+    canonicalLatestUpdated: scope.canonicalLatestAllowed,
     closeLaunched: args.closeLaunched,
     cleanupCache: args.cleanupCache,
     summary: {
@@ -419,32 +564,33 @@ async function main() {
     warnings,
     results,
   };
-  const name = `cloud-session-manager-${stamp()}`;
-  const reportFile = path.join(args.reportDir, `${name}.json`);
-  const latestJson = path.join(args.reportDir, 'cloud-session-manager-latest.json');
-  const latestMd = path.join(args.reportDir, 'cloud-session-manager-latest.md');
-  await fs.writeFile(reportFile, JSON.stringify(report, null, 2), 'utf8');
-  await fs.writeFile(latestJson, JSON.stringify(report, null, 2), 'utf8');
-  await fs.writeFile(latestMd, renderMarkdown(report), 'utf8');
-  if (args.logDir && fssync.existsSync(args.logDir)) {
-    await fs.writeFile(path.join(args.logDir, `${name}.json`), JSON.stringify(report, null, 2), 'utf8').catch(() => null);
-  }
+  const artifacts = await writeSessionManagerArtifacts({
+    reportDir: args.reportDir,
+    logDir: args.logDir,
+    name: stamp(),
+    report,
+  });
   console.log(JSON.stringify({
     ok: report.ok,
     generatedAt: report.generatedAt,
     date: report.date,
     mode: report.mode,
+    scope: report.scope,
+    canonicalLatestUpdated: report.canonicalLatestUpdated,
     summary: report.summary,
     issues: report.issues,
     warnings: report.warnings.slice(0, 30),
-    reportFile: path.relative(ROOT, reportFile),
-    latestJson: path.relative(ROOT, latestJson),
-    latestMd: path.relative(ROOT, latestMd),
+    reportFile: artifacts.reportFile,
+    latestJson: artifacts.latestJson,
+    latestMd: artifacts.latestMd,
+    partial: artifacts.partial,
   }, null, 2));
   process.exit(report.ok ? 0 : 1);
 }
 
-main().catch(err => {
-  console.error(err?.stack || String(err));
-  process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch(err => {
+    console.error(err?.stack || String(err));
+    process.exitCode = 1;
+  });
+}

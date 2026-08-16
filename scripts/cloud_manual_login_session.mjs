@@ -16,7 +16,10 @@ import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 import net from 'node:net';
-import {planManualLoginLinkRecovery} from '../lib/cloud_manual_login_recovery.mjs';
+import {
+  planManualLoginLinkRecovery,
+  planManualLoginLinkRecoveryFromMorningChunks,
+} from '../lib/cloud_manual_login_recovery.mjs';
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
@@ -29,6 +32,11 @@ const DEFAULT_LOG_DIR = process.env.SHEIN_MANUAL_LOGIN_LOG_DIR || '/srv/shein-bi
 const DEFAULT_RECOVERY_DIR = process.env.SHEIN_MANUAL_LOGIN_RECOVERY_DIR || '/srv/shein-bi/runtime/cloud_manual_login_recovery';
 const DEFAULT_LINK_PARTIAL_FILE = process.env.SHEIN_LINK_BUSINESS_PARTIAL_FILE
   || path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json');
+const DEFAULT_LINK_PARTIAL_LOCK_FILE = process.env.SHEIN_LINK_BUSINESS_PARTIAL_LOCK_FILE
+  || path.join(ROOT, 'state', 'locks', 'link-business-partial.lock');
+const PARTIAL_LOCK_WAIT_SEC = String(process.env.SHEIN_LINK_BUSINESS_PARTIAL_LOCK_WAIT_SEC || '60');
+const DEFAULT_MORNING_CHAIN_DIR = process.env.SHEIN_BI_MORNING_CHAIN_STATE_DIR
+  || path.join(ROOT, 'state', 'cloud_morning_chain');
 const DEFAULT_EXPIRES_MINUTES = 30;
 const DEFAULT_WIDTH = 1365;
 const DEFAULT_HEIGHT = 900;
@@ -114,6 +122,15 @@ async function readJson(file, fallback) {
     return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
   } catch {
     return fallback;
+  }
+}
+
+async function readJsonIfExistsStrict(file) {
+  try {
+    return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
   }
 }
 
@@ -323,11 +340,39 @@ function pidFromProcessLine(line) {
   return m ? Number(m[1]) : 0;
 }
 
+function systemdUnitState(unit) {
+  if (process.platform === 'win32') return null;
+  const result = spawnSync('systemctl', [
+    'show', '--no-pager', '--property=LoadState', '--property=ActiveState', unit,
+  ], {encoding: 'utf8'});
+  if (result.error || result.status !== 0) return null;
+  const loadState = /^LoadState=(.*)$/m.exec(String(result.stdout || ''))?.[1]?.trim() || '';
+  const activeState = /^ActiveState=(.*)$/m.exec(String(result.stdout || ''))?.[1]?.trim() || '';
+  if (!loadState || !activeState) return null;
+  return {loadState, activeState};
+}
+
+function isSystemdUnitInactive(unit) {
+  // Structured proof only: LoadState=loaded together with ActiveState=inactive
+  // proves the unit is not running.  Every unknown/error state fails closed
+  // as not-inactive.
+  const state = systemdUnitState(unit);
+  return Boolean(state && state.loadState === 'loaded' && state.activeState === 'inactive');
+}
+
+function isSystemdUnitActive(unit) {
+  if (process.platform === 'win32') return null;
+  const state = systemdUnitState(unit);
+  if (!state) return null; // unknown fails closed: neither active nor inactive
+  return !(state.loadState === 'loaded' && state.activeState === 'inactive');
+}
+
 function isAnySyncServiceActive() {
   if (process.platform === 'win32') return false;
   for (const service of BUSY_SYNC_SERVICES) {
-    const r = spawnSync('systemctl', ['is-active', '--quiet', service], {stdio: 'ignore'});
-    if (r.status === 0) return true;
+    const state = systemdUnitState(service);
+    if (!state) return true; // unknown query state fails closed as busy
+    if (['active', 'activating', 'deactivating', 'reloading'].includes(state.activeState)) return true;
   }
   return false;
 }
@@ -430,10 +475,110 @@ async function finishExport(session) {
   };
 }
 
+async function readMorningChunkDocuments(stateDir, runDate) {
+  let names;
+  try {
+    names = await fs.readdir(stateDir);
+  } catch {
+    return [];
+  }
+  const pattern = new RegExp(`^${runDate}-(?:all|retry-[0-9]+)\\.json$`);
+  const documents = [];
+  for (const name of names.sort()) {
+    if (!pattern.test(name)) continue;
+    const payload = await readJson(path.join(stateDir, name), null);
+    documents.push({name, payload});
+  }
+  return documents;
+}
+
+async function attemptMorningChunkFallback(storeKey) {
+  const runDate = bjDate(0);
+  const config = await readStoreConfig();
+  const enabledStores = (config.stores || [])
+    .filter(store => store.enabled !== false)
+    .map(store => String(store.storeKey || '').trim().toUpperCase())
+    .filter(Boolean);
+  const chunkDocuments = await readMorningChunkDocuments(DEFAULT_MORNING_CHAIN_DIR, runDate);
+  const latestState = await readJson(path.join(DEFAULT_MORNING_CHAIN_DIR, 'latest.json'), null);
+  return planManualLoginLinkRecoveryFromMorningChunks({
+    storeKey,
+    runDate,
+    chunkDocuments,
+    enabledStores,
+    latestState,
+    morningServiceActive: isSystemdUnitActive('shein-bi-cloud-morning-chain.service'),
+  });
+}
+
+async function seedLinkBusinessPartialFromFallback(plan) {
+  // The canonical partial read-merge-write is one critical section shared with
+  // cloud_link_business_sync.sh: the lock is prepared by shared_lock.sh and
+  // held by flock while a child node process performs the atomic seed/merge.
+  const lockFile = DEFAULT_LINK_PARTIAL_LOCK_FILE;
+  const planJson = JSON.stringify({
+    date: plan.date,
+    failedStores: plan.failedStores,
+    successStores: plan.successStores,
+    logFile: plan.logFile,
+    recoveryRunId: '',
+  });
+  const bash = [
+    'set -Eeuo pipefail',
+    'source "$1"',
+    'prepare_shared_lock_file "$2"',
+    'exec 9>"$2"',
+    `flock -w ${PARTIAL_LOCK_WAIT_SEC} 9 || { echo "could not acquire canonical partial lock for fallback seed" >&2; exit 75; }`,
+    'exec node "$3"',
+  ].join('\n');
+  const result = spawnSync('bash', [
+    '-c', bash, 'manual-login-partial-seed',
+    path.join(ROOT, 'scripts', 'lib', 'shared_lock.sh'),
+    lockFile,
+    path.join(ROOT, 'scripts', 'seed_link_business_partial_state.mjs'),
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 90_000,
+    env: {
+      ...process.env,
+      SEED_PARTIAL_FILE: DEFAULT_LINK_PARTIAL_FILE,
+      SEED_PARTIAL_PLAN: planJson,
+    },
+  });
+  if (!result.error && result.status === 17) return false;
+  if (result.error || result.status !== 0) {
+    throw new Error(`fallback partial seed failed (lock/write): ${String(result.stderr || result.stdout || result.error || '').trim().slice(0, 500)}`);
+  }
+  return true;
+}
+
 async function scheduleLinkRecovery(session, args) {
-  const partialState = await readJson(DEFAULT_LINK_PARTIAL_FILE, null);
-  const plan = planManualLoginLinkRecovery({partialState, storeKey: session.storeKey});
-  if (!plan.required) return {status: 'not_required', reason: plan.reason};
+  const partialState = await readJsonIfExistsStrict(DEFAULT_LINK_PARTIAL_FILE);
+  let plan = planManualLoginLinkRecovery({partialState, storeKey: session.storeKey});
+  let fallback = null;
+  if (!plan.required && !partialState) {
+    // The morning chain runs the link/business sync in fetch-only mode, which
+    // exits before the canonical partial is created when a chunk fails.  Fall
+    // back only to authoritative same-run morning chunk evidence and atomically
+    // seed/merge the canonical partial before queueing.
+    fallback = await attemptMorningChunkFallback(session.storeKey);
+    if (fallback.required) {
+      plan = fallback;
+      const seeded = await seedLinkBusinessPartialFromFallback(fallback);
+      if (!seeded) {
+        const currentPartial = await readJsonIfExistsStrict(DEFAULT_LINK_PARTIAL_FILE);
+        plan = planManualLoginLinkRecovery({partialState: currentPartial, storeKey: session.storeKey});
+      }
+    }
+  }
+  if (!plan.required) {
+    return {
+      status: 'not_required',
+      reason: plan.reason,
+      fallback: fallback ? {status: 'declined', reason: fallback.reason} : undefined,
+    };
+  }
 
   const queueDir = path.join(DEFAULT_RECOVERY_DIR, 'queue');
   await fs.mkdir(queueDir, {recursive: true});
@@ -447,7 +592,7 @@ async function scheduleLinkRecovery(session, args) {
     storeKey: plan.storeKey,
     date: plan.date,
     scheduledAt,
-    priorLogFile: plan.priorLogFile,
+    priorLogFile: plan.priorLogFile || plan.logFile || '',
   }, null, 2)}\n`, 'utf8');
   await fs.rename(temporary, queueFile);
   return {

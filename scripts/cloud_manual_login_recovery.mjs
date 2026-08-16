@@ -67,6 +67,22 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function targetStoreEvidenceComplete(storeKey, date) {
+  // Same predicate as store_evidence_is_complete in cloud_link_business_sync.sh:
+  // both exact-date link and business evidence files must carry a valid
+  // ok/date/storeKey schema for the target store.
+  const files = [
+    path.join(ROOT, 'outputs', 'shein_links', storeKey, `${date}.json`),
+    path.join(ROOT, 'outputs', 'shein_business_domains', storeKey, `${date}.json`),
+  ];
+  for (const file of files) {
+    const payload = await readJson(file, null);
+    const payloadStore = String(payload?.store?.storeKey || '').trim().toUpperCase();
+    if (payload?.ok !== true || String(payload?.date || '') !== date || payloadStore !== storeKey) return false;
+  }
+  return true;
+}
+
 function run(command, argv, {env = {}, timeoutMs = 0} = {}) {
   return new Promise(resolve => {
     const child = spawn(command, argv, {
@@ -132,25 +148,36 @@ async function main() {
 
   for (let attempt = 1; attempt <= args.maxAttempts; attempt += 1) {
     const attemptStartedAt = new Date().toISOString();
+    const attemptRunId = `${args.sessionId}-a${attempt}`;
     const result = await run('bash', ['scripts/cloud_link_business_sync.sh', args.date], {
       timeoutMs: args.commandTimeoutMs,
       env: {
         SHEIN_LINK_BUSINESS_STORES: args.storeKey,
         SHEIN_LINK_BUSINESS_STORE_ATTEMPTS: '2',
         SHEIN_LINK_BUSINESS_LEASE_TASK: 'manual-login-recovery',
+        SHEIN_LINK_BUSINESS_RUN_ID: attemptRunId,
       },
     });
     const partialState = await readJson(args.partialFile, null);
     const successState = await readJson(args.successFile, null);
+    const evidenceVerified = await targetStoreEvidenceComplete(args.storeKey, args.date);
     const completion = assessLinkRecoveryCompletion({
       successState,
       partialState,
       plan: requestedPlan,
       startedAt: attemptStartedAt,
+      attempt: {
+        commandOk: result.ok,
+        startedAt: attemptStartedAt,
+        recoveryRunId: attemptRunId,
+        evidenceVerified,
+      },
     });
     state.attempts.push({
       attempt,
       startedAt: attemptStartedAt,
+      runId: attemptRunId,
+      evidenceVerified,
       finishedAt: new Date().toISOString(),
       command: result,
       completion,
@@ -159,6 +186,21 @@ async function main() {
     if (completion.complete) {
       state.status = 'completed';
       state.reason = 'targeted_link_business_recovery_completed';
+      state.completedAt = state.updatedAt;
+      state.completion = completion;
+      await writeJsonAtomic(stateFile, state);
+      await run(process.execPath, ['scripts/cloud_ops_watchdog.mjs', '--dry-run'], {timeoutMs: 180_000});
+      console.log(JSON.stringify({ok: true, stateFile, ...state}, null, 2));
+      return;
+    }
+    // The targeted store was removed from the same-date canonical partial
+    // (moved failed -> success) while other stores remain pending.  This is a
+    // successful terminal state for this queue item: the partial now owns the
+    // remaining failures, and no useless retries are needed.  The final store
+    // still requires the full success evidence above.
+    if (completion.pendingOthers) {
+      state.status = 'completed_pending_others';
+      state.reason = 'targeted_store_removed_from_partial_pending_others';
       state.completedAt = state.updatedAt;
       state.completion = completion;
       await writeJsonAtomic(stateFile, state);

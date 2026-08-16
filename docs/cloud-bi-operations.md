@@ -234,7 +234,9 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 操作流程：打开维护中心 -> 选店铺和页面 -> 打开云端登录窗口 -> 处理普通登录弹窗或人工完成登录/验证码 -> 回维护中心点“我已完成并关闭”。完成动作会触发 `export_shein_browser_session.mjs --no-launch` 和 `bootstrap_shein_browser_session.mjs --no-launch` 双重验证，然后关闭 Chrome / x11vnc / websockify / Xvfb；任一验证失败都不会标成“已完成”。
 
-- 自动续跑：若 `link-business-last-partial.json` 仍记录该店因登录失效导致的链接/业务域缺口，验证成功后会写入私有恢复队列；`shein-bi-cloud-manual-login-recovery.path` 会立即唤醒独立 service，timer 每 2 分钟作漏触发兜底。恢复任务只租用、清理和补抓该店，成功后合并之前已成功的其他店铺证据、入仓、刷新 BI，并让 watchdog 将旧 session-manager 退出状态识别为已恢复。用户不需要再通知维护人员手工续跑；任务不挂在 Portal 进程下，Portal 重启或内存限制不会中断其监督边界。
+- 自动续跑：若 `link-business-last-partial.json` 仍记录该店因登录失效导致的链接/业务域缺口，验证成功后会写入私有恢复队列；`shein-bi-cloud-manual-login-recovery.path` 会立即唤醒独立 service，timer 每 2 分钟作漏触发兜底。恢复任务只租用、清理和补抓该店；成功后该店会从 canonical partial 的 failed 原子移到 success。若其他店仍失败，则持久化缩小后的 partial 并在任何入仓/Portal 发布前退出（绝不发布单店子集）；仅当合并集合精确覆盖全部启用店铺、failed 为空，并逐店验证当天 links/business 两份文件的 `ok/date/storeKey` 后，才执行一次全量 merge/load/publish。所有非 fetch-only 运行由同一 full-run/publish lifecycle lock 串行到发布和 partial 删除结束，partial 自身的读改写另由共享 partial lock 保护。被移出 partial 的店只有在本次命令成功、run-id 匹配、partial 比本次 attempt 新且目标店两份证据完整时，才以 `completed_pending_others` 终态归档。用户不需要再通知维护人员手工续跑；任务不挂在 Portal 进程下，Portal 重启或内存限制不会中断其监督边界。
+
+- 缺 canonical partial 时的回退：morning chain 的逐店抓取走 fetch-only 模式，chunk 失败时会在写 `link-business-last-partial.json` 之前退出。此时登录验证成功会回退到 `state/cloud_morning_chain` 下同 run 的权威 chunk 证据：runDate 必须是今天、businessDate 必须恰为 runDate-1；`latest.json` 必须为终态 `failed`，或虽仍是 `running` 但 systemd 已以 `LoadState=loaded + ActiveState=inactive` 证明晨链停止且有更新的 chunk 证据；chunk 状态为 warning/failed/partial/running（`done` 不得含失败店），并按每店最新时间证据决胜，同时间戳冲突直接拒绝，全部店的最终成功+失败集合必须恰好等于启用店铺集。fallback seed 在 partial lock 内做 expected-absent CAS；若 canonical 已由其他恢复创建，就重读新状态，绝不以旧 chunk 覆盖。证据缺失、损坏、过期、跨日或集合不精确一律拒绝恢复。
 
 - 普通登录弹窗边界：协议签署、公告、通知确认、`知道了` / `确认` / `同意` 等不涉及店铺经营承诺、资质、付费、活动报名或授权范围变更的弹窗，可由运维代理在维护窗口中关闭/确认后再点登录；它们不等同于验证码阻塞。若弹窗内容是新的法律承诺、资质承诺、付费/结算、活动报名、授权范围变化，或出现验证码、滑块、短信、人脸、缺账号密码，则停下让用户处理。
 
@@ -444,7 +446,7 @@ CODEX_HOME=/home/sheinops/.codex SHEIN_QA_CODEX_GATEWAY_ENABLED=1 node scripts/l
 
 - 修复：`scripts/bootstrap_shein_browser_session.mjs` 现在会把新鲜 WebAPI cookie 与浏览器导出的子系统 `localStorage/sessionStorage` 合并使用，避免只用 WebAPI cookie 时丢掉 SBN 子系统状态。
 
-- 兜底：`scripts/cloud_link_business_sync.sh` 支持部分店铺失败继续执行并记录 `state/cloud_ops_alerts/link-business-last-partial.json`；默认不把部分成功结果入仓刷新 BI，避免把不完整链接/业务域日期展示成全量成功。
+- 兜底：`scripts/cloud_link_business_sync.sh` 支持部分店铺失败继续执行并记录 `state/cloud_ops_alerts/link-business-last-partial.json`；默认不把部分成功结果入仓刷新 BI，避免把不完整链接/业务域日期展示成全量成功。定向恢复运行（设置了 `SHEIN_LINK_BUSINESS_STORES` 且非 fetch-only/finalize-only）只可能是 manual-login-recovery 队列触发；该店成功后原子地把 partial 中该店从 failed 移到 success，若仍有失败店则持久化并退出，不发布单店子集；只有合并后精确覆盖全部启用店铺且失败为空时才继续一次全量 merge/load/publish。
 
 - 恢复手段：若云端 SBN 子系统态整体失效，可在本机用 `scripts/auto_relogin_shein_store.mjs` 恢复对应店铺、再用 `scripts/export_shein_browser_session.mjs` 导出 `state/shein_browser_sessions/*.local.json` 并同步到云端私有同名目录；这些 session 文件是敏感运行态，不进 GitHub。若失败页面其实是协议签署 / 公告 / 通知确认挡住登录按钮，应先在可见/noVNC 窗口中关闭或确认普通弹窗并再次点击登录，然后导出/回灌 session；不要只看 `login_not_restored` 就认定必须用户扫码。
 # 2026-07-26 运行语义补充

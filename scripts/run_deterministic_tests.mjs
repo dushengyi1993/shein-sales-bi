@@ -77,6 +77,7 @@ const tests = [
   'scripts/test_profit_refresh_pipeline_contract.mjs',
   'scripts/test_marketing_price_snapshot_health.mjs',
   'scripts/test_cloud_session_manager_reliability.mjs',
+  'scripts/test_cloud_session_manager_latest_scope.mjs',
   'scripts/test_bi_ops_agent_governor.mjs',
   'scripts/test_bi_ops_model_policy.mjs',
   'scripts/test_bi_ops_intent_planner.mjs',
