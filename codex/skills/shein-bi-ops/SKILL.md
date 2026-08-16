@@ -109,6 +109,20 @@ Never upload images separately and then create a new shortened task. Keep one ta
 
 Pass `--title-ar` / `--title-en` and `--category-id` when those exact values are known. This command verifies local dimensions, uploads selected files, binds returned URLs and explicit fields to the **same task**, then reruns preflight. It does not perform final publish.
 
+When a `copy_product_draft` task already has a valid server-side approved image
+binding and only an explicit publish field must be corrected, reuse those exact
+images without scanning or uploading local files again:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-publish --task-id <task-id> --store <target-store> --reuse-approved-binding --standard-goods-sn '<exact supplier code>' --supply-price <SAR> --inventory <quantity> [--input-current-ma <mA>]
+```
+
+`--reuse-approved-binding` is mutually exclusive with `--image-dir` and
+`--source-task-id`. The server must find an existing approved binding on the
+same task, rebind it with the new structured publish preparation, invalidate the
+old preflight, and return a fresh dry-run hash; otherwise the command fails
+closed. It never performs the final SHEIN write.
+
 For a copy_product_draft task whose reviewed 审核资料 contains a 三语核心卖点
 section (HTML with a unique new `section#s09`, or deterministic legacy
 `section#s9`), bind the verbatim ar/en 5-line

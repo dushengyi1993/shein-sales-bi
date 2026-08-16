@@ -39,6 +39,18 @@ function check(checks, label, actual, expected) {
   checks.push({label, actual, expected: typeof expected === 'function' ? expected.toString() : expected, pass});
 }
 
+function hasOnlyPositiveSafeAttributeIds(value) {
+  if (Array.isArray(value)) return value.every(hasOnlyPositiveSafeAttributeIds);
+  if (!value || typeof value !== 'object') return true;
+  for (const [key, item] of Object.entries(value)) {
+    if ((key === 'attribute_id' || key === 'attributeId') && item !== undefined && item !== null && item !== '') {
+      if (!Number.isSafeInteger(Number(item)) || Number(item) <= 0) return false;
+    }
+    if (!hasOnlyPositiveSafeAttributeIds(item)) return false;
+  }
+  return true;
+}
+
 async function writeJson(file, data) {
   await fs.mkdir(path.dirname(file), {recursive: true});
   await fs.writeFile(file, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
@@ -89,6 +101,7 @@ function completeDetailEntry() {
         supplierCode: 'SOURCE-SKC-SUPPLIER-505',
         attributeId: 1001466,
         attributeValueId: 2535083,
+        saleAttributeList: [{attributeId: 0, attributeValueId: 0}],
         skcImageInfoList: [
           {imageUrl: 'https://example.invalid/main.jpg', imageType: 'MAIN'},
           {imageUrl: 'https://example.invalid/detail.jpg', imageType: 'DETAIL'},
@@ -103,7 +116,16 @@ function completeDetailEntry() {
           weight: 2500,
           sellerSkuWeight: {length: '31.10', width: '29.50', height: '14.70', weight: 2500},
           mallState: 1,
-          saleAttributeList: [{attributeId: 27, attributeValueId: 536}],
+          saleAttributeList: [
+            {attributeId: 27, attributeValueId: 536},
+            {attributeId: '301', attributeValueId: '401'},
+            {attributeId: 0, attributeValueId: 0},
+            {attribute_id: 0, attribute_value_id: 0},
+            {attributeId: 1.5, attributeValueId: 0},
+            {attributeId: -7, attributeValueId: 0},
+            {attributeId: 9007199254740993, attributeValueId: 0},
+            {attribute_id: 'not-a-number', attribute_value_id: 0},
+          ],
           costInfoList: [
             {currency: 'CNY', costPrice: 205.21},
             {currency: 'SAR', costPrice: 124.44},
@@ -183,6 +205,11 @@ async function runScenario({name, detailResults, detailFallbackResults, fetchedA
   c('sale attribute is object for publishOrEdit', Array.isArray(skc.sale_attribute), false);
   c('SKC sale attribute copied from OpenAPI detail', skc.sale_attribute?.attribute_id, 1001466);
   c('SKU sale attribute list copied from OpenAPI detail', sku.sale_attribute_list?.[0]?.attribute_id, 27);
+  c('degenerate sales attributes fully removed', sku.sale_attribute_list?.length, 2);
+  c('legal SKU sale attribute preserved', JSON.stringify(sku.sale_attribute_list?.[0]), JSON.stringify({attribute_id: 27, attribute_value_id: 536}));
+  c('legal digit-string sale attribute normalized and preserved', JSON.stringify(sku.sale_attribute_list?.[1]), JSON.stringify({attribute_id: 301, attribute_value_id: 401}));
+  c('degenerate SKC-level id=0 sales attribute removed', skc.sale_attribute_list?.length ?? 0, 0);
+  c('only positive safe-integer attribute_id values remain in payload draft', hasOnlyPositiveSafeAttributeIds(payload), true);
   c('sales attrs are not mixed into product attrs', payload.product_attribute_list?.some(row => [27, 1001466].includes(Number(row.attribute_id))), false);
   c('SKU dimensions copied from OpenAPI detail', [sku.length, sku.width, sku.height, sku.weight].join('|'), '31.1|29.5|14.7|2500');
   c('SAR cost preferred', sku.cost_info?.currency, 'SAR');
