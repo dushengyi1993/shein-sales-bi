@@ -10,6 +10,7 @@ LOCK_WAIT_SEC=0
 DEADLINE_MINUTE=""
 DEADLINE_NEXT_HOUR=0
 DEADLINE_AT=""
+DEADLINE_EPOCH=""
 DEFER_STATE_FILE=""
 DEFER_REASON="host_heavy_unavailable"
 
@@ -18,7 +19,7 @@ usage() {
 Usage:
   run_host_heavy_job.sh --domain NAME [--class browser|openapi|materializer]
     [--lock-wait-sec N] [--deadline-minute 0..59]
-    [--deadline-next-hour] [--deadline-at HH:MM]
+    [--deadline-next-hour] [--deadline-at HH:MM] [--deadline-epoch EPOCH]
     [--defer-state FILE] [--defer-reason TEXT] -- COMMAND [ARG...]
 EOF
   exit 64
@@ -55,6 +56,11 @@ while (($#)); do
       DEADLINE_AT="$2"
       shift 2
       ;;
+    --deadline-epoch)
+      (($# >= 2)) || usage
+      DEADLINE_EPOCH="$2"
+      shift 2
+      ;;
     --defer-state)
       (($# >= 2)) || usage
       DEFER_STATE_FILE="$2"
@@ -86,6 +92,10 @@ if [[ -n "$DEADLINE_AT" ]]; then
   [[ "$DEADLINE_AT" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || usage
   [[ -z "$DEADLINE_MINUTE" && "$DEADLINE_NEXT_HOUR" -eq 0 ]] || usage
 fi
+if [[ -n "$DEADLINE_EPOCH" ]]; then
+  [[ "$DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]] || usage
+  [[ -z "$DEADLINE_AT" && -z "$DEADLINE_MINUTE" && "$DEADLINE_NEXT_HOUR" -eq 0 ]] || usage
+fi
 (($# > 0)) || usage
 
 DOMAIN_LOCK="${SHEIN_BI_HOST_DOMAIN_LOCK_FILE:-$ROOT/state/locks/shein-bi-host-${DOMAIN}.lock}"
@@ -114,6 +124,28 @@ fs.renameSync(temporary, file);
 NODE
 }
 
+lock_wait_for_current_deadline() {
+  local wait="$LOCK_WAIT_SEC"
+  if [[ -n "$DEADLINE_EPOCH" ]]; then
+    local remaining=$((DEADLINE_EPOCH - $(date +%s)))
+    if (( remaining <= 0 )); then
+      return 1
+    fi
+    if (( wait > remaining )); then wait="$remaining"; fi
+  fi
+  printf '%s\n' "$wait"
+}
+
+if [[ -n "$DEADLINE_EPOCH" ]]; then
+  REMAINING_SEC=$((DEADLINE_EPOCH - $(date +%s)))
+  if (( REMAINING_SEC <= 0 )); then
+    echo "[host-heavy] defer domain=$DOMAIN reason=deadline_elapsed deadlineEpoch=$DEADLINE_EPOCH" >&2
+    record_defer "${DEFER_REASON}:deadline_elapsed"
+    exit 75
+  fi
+  if (( LOCK_WAIT_SEC > REMAINING_SEC )); then LOCK_WAIT_SEC="$REMAINING_SEC"; fi
+fi
+
 if [[ -L "$HOST_LOCK" || ! -f "$HOST_LOCK" || ! -r "$HOST_LOCK" || ! -w "$HOST_LOCK" ]]; then
   echo "[host-heavy] invalid shared host lock: $HOST_LOCK" >&2
   record_defer "host_lock_invalid"
@@ -126,21 +158,36 @@ prepare_shared_lock_file "$PROJECT_LOCK"
 prepare_shared_lock_file "$DOMAIN_LOCK"
 
 exec 9<>"$HOST_LOCK"
-if ! flock -w "$LOCK_WAIT_SEC" 9; then
+CURRENT_LOCK_WAIT="$(lock_wait_for_current_deadline)" || {
+  echo "[host-heavy] defer domain=$DOMAIN reason=deadline_elapsed before_host_lock" >&2
+  record_defer "${DEFER_REASON}:deadline_elapsed"
+  exit 75
+}
+if ! flock -w "$CURRENT_LOCK_WAIT" 9; then
   echo "[host-heavy] defer domain=$DOMAIN reason=host_lock_busy" >&2
   record_defer "${DEFER_REASON}:host_lock_busy"
   exit 75
 fi
 
 exec 8<>"$PROJECT_LOCK"
-if ! flock -w "$LOCK_WAIT_SEC" 8; then
+CURRENT_LOCK_WAIT="$(lock_wait_for_current_deadline)" || {
+  echo "[host-heavy] defer domain=$DOMAIN reason=deadline_elapsed before_project_lock" >&2
+  record_defer "${DEFER_REASON}:deadline_elapsed"
+  exit 75
+}
+if ! flock -w "$CURRENT_LOCK_WAIT" 8; then
   echo "[host-heavy] defer domain=$DOMAIN reason=project_lock_busy" >&2
   record_defer "${DEFER_REASON}:project_lock_busy"
   exit 75
 fi
 
 exec 7<>"$DOMAIN_LOCK"
-if ! flock -w "$LOCK_WAIT_SEC" 7; then
+CURRENT_LOCK_WAIT="$(lock_wait_for_current_deadline)" || {
+  echo "[host-heavy] defer domain=$DOMAIN reason=deadline_elapsed before_domain_lock" >&2
+  record_defer "${DEFER_REASON}:deadline_elapsed"
+  exit 75
+}
+if ! flock -w "$CURRENT_LOCK_WAIT" 7; then
   echo "[host-heavy] defer domain=$DOMAIN reason=domain_lock_busy" >&2
   record_defer "${DEFER_REASON}:domain_lock_busy"
   exit 75
@@ -157,7 +204,17 @@ if [[ "$PRESSURE_STATUS" -ne 0 ]]; then
 fi
 
 TIMEOUT_ARGS=()
-if [[ -n "$DEADLINE_AT" ]]; then
+if [[ -n "$DEADLINE_EPOCH" ]]; then
+  NOW_EPOCH="$(date +%s)"
+  BUDGET_SEC=$((DEADLINE_EPOCH - NOW_EPOCH))
+  if (( BUDGET_SEC <= 0 )); then
+    echo "[host-heavy] defer domain=$DOMAIN reason=deadline_elapsed deadlineEpoch=$DEADLINE_EPOCH" >&2
+    record_defer "${DEFER_REASON}:deadline_elapsed"
+    exit 75
+  fi
+  TIMEOUT_ARGS=(timeout --signal=TERM --kill-after=30s "${BUDGET_SEC}s")
+  echo "[host-heavy] deadline domain=$DOMAIN epoch=$DEADLINE_EPOCH budgetSec=$BUDGET_SEC"
+elif [[ -n "$DEADLINE_AT" ]]; then
   NOW_EPOCH="$(date +%s)"
   CURRENT_DATE="$(date +%F)"
   DEADLINE_EPOCH="$(date -d "${CURRENT_DATE}T${DEADLINE_AT}:00" +%s)"

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
-DATE="$(TZ=Asia/Shanghai date +%F)"
+DATE="${SHEIN_BI_INVENTORY_RUN_DATE:-$(TZ=Asia/Shanghai date +%F)}"
+BUSINESS_DATE="${SHEIN_BI_INVENTORY_BUSINESS_DATE:-$(TZ=Asia/Shanghai date -d yesterday +%F)}"
+RUN_DEADLINE_EPOCH="${SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH:-0}"
 RUNTIME_ROOT="${SHEIN_BI_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/daily-inventory-replenishment}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 LINKS_DATA_FILE="${SHEIN_BI_LINKS_DATA_FILE:-$ROOT/outputs/bi-portal/sections/linksData.json}"
@@ -44,6 +46,16 @@ RESULT="$RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.json"
 DETAIL_TARGETS_DIR="$RUNTIME_ROOT/detail-targets"
 DETAIL_TARGETS="$DETAIL_TARGETS_DIR/daily-inventory-detail-targets-$DATE.json"
 LOCK="$ROOT/state/locks/daily-inventory-replenishment.lock"
+if [[ ! "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+  || [[ "$(TZ=Asia/Shanghai date -d "$DATE" +%F 2>/dev/null || true)" != "$DATE" ]]; then
+  echo "[daily_inventory_guard] invalid runDate=$DATE" >&2
+  exit 65
+fi
+EXPECTED_BUSINESS_DATE="$(TZ=Asia/Shanghai date -d "$DATE - 1 day" +%F)"
+if [[ "$BUSINESS_DATE" != "$EXPECTED_BUSINESS_DATE" ]]; then
+  echo "[daily_inventory_guard] businessDate=$BUSINESS_DATE must equal runDate=$DATE minus one day ($EXPECTED_BUSINESS_DATE)" >&2
+  exit 65
+fi
 if [[ ! "$DETAIL_TARGET_BUDGET_PER_STORE" =~ ^[1-9][0-9]*$ ]]; then
   echo "[daily_inventory_guard] invalid SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE=$DETAIL_TARGET_BUDGET_PER_STORE" >&2
   exit 64
@@ -58,15 +70,71 @@ prepare_shared_lock_file "$LOCK"
 exec 9>"$LOCK"
 if ! flock -n 9; then
   echo "daily inventory replenishment guard is already running" >&2
-  exit 0
+  exit 75
 fi
 cd "$ROOT"
+
+write_inventory_marker() {
+  local status="$1"
+  local message="$2"
+  local args=(write --stage daily-inventory-guard --date "$DATE" --business-date "$BUSINESS_DATE" --status "$status" --message "$message")
+  [[ -s "$PLAN" ]] && args+=(--evidence "$PLAN")
+  [[ -s "$RESULT" ]] && args+=(--evidence "$RESULT")
+  node scripts/pipeline_marker.mjs "${args[@]}" >/dev/null
+}
+
+result_is_complete_and_safe() {
+  jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
+    . as $result
+    | .planHash == $hash
+    and .execute == true
+    and .executionMode == "automatic"
+    and (.results | length) == $total
+    and all(.results[];
+      if .state == "updated_readback_matched" then
+        (.after.totalUsableInventory == .targetUsableInventory) and ((.writes // []) | length > 0)
+      elif .state == "skipped_target_already_matched" then
+        .before.totalUsableInventory == .targetUsableInventory
+      elif .state == "skipped_safety_no_increase" then
+        ($result.executionConstraints.decreaseOnly == true)
+        and (.before.totalUsableInventory | type) == "number"
+        and .before.totalUsableInventory < .targetUsableInventory
+      elif .state == "skipped_within_scarcity_band" then
+        .ruleClass == "recent_sale_scarcity" and ((.before.totalUsableInventory | type) == "number")
+      elif .state == "skipped_recovered" then
+        .ruleClass == "legacy_virtual_inventory_top_up" and ((.before.totalUsableInventory | type) == "number")
+      else false end)
+  ' "$RESULT" >/dev/null \
+    && node scripts/validate_daily_operating_refresh.mjs \
+      --inventory-only \
+      --root "$ROOT" \
+      --marker-root "$ROOT/state/pipeline-markers" \
+      --state-dir "$ROOT/state/cloud_morning_chain" \
+      --inventory-runtime-root "$RUNTIME_ROOT" \
+      --run-date "$DATE" \
+      --business-date "$BUSINESS_DATE" >/dev/null
+}
+
+result_is_readback_pending_only() {
+  jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
+    .planHash == $hash
+    and .execute == true
+    and .executionMode == "automatic"
+    and (.results | length) == $total
+    and ([.results[] | select(.state == "submitted_but_readback_pending")] | length) > 0
+    and all(.results[];
+      .state == "submitted_but_readback_pending"
+      or .state == "updated_readback_matched"
+      or (.state | startswith("skipped_")))
+  ' "$RESULT" >/dev/null
+}
 
 if [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true" ]]; then
   node scripts/pipeline_marker.mjs require \
     --stage morning-links-ready \
     --date "$DATE" \
-    --status done,warning \
+    --status done \
+    --require-evidence \
     || {
       echo "[daily_inventory_guard] all-store morning link merge is not ready" >&2
       exit 75
@@ -74,8 +142,9 @@ if [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true
   node scripts/pipeline_marker.mjs require \
     --stage stock-refresh \
     --date "$DATE" \
-    --status done,warning \
+    --status done \
     --not-before "$STOCK_NOT_BEFORE" \
+    --require-evidence \
     || {
       echo "[daily_inventory_guard] stock refresh marker is not ready after $STOCK_NOT_BEFORE" >&2
       exit 75
@@ -392,13 +461,23 @@ if [[ -f "$RESULT" ]] && jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   and (.results | length) == $total
   and ([.results[].state] | all(. != "planned" and . != "dry_run_ready"))
 ' "$RESULT" >/dev/null; then
-  jq '{ok: (([.results[]|select(.state=="blocked")]|length) == 0),state:"already_completed",planHash,executionMode,generatedAt,counts:{
-    total:(.results|length),
-    updated:([.results[]|select(.state=="updated_readback_matched")]|length),
-    skipped:([.results[]|select(.state|startswith("skipped_"))]|length),
-    blocked:([.results[]|select(.state=="blocked")]|length)
-  }}' "$RESULT"
-  exit 0
+  if result_is_complete_and_safe; then
+    write_inventory_marker done "automatic inventory execution completed with plan/result hash and terminal readback evidence"
+    jq '{ok:true,state:"already_completed",planHash,executionMode,generatedAt,counts:{
+      total:(.results|length),
+      updated:([.results[]|select(.state=="updated_readback_matched")]|length),
+      skipped:([.results[]|select(.state|startswith("skipped_"))]|length),
+      blocked:0
+    }}' "$RESULT"
+    exit 0
+  fi
+  echo "[daily_inventory_guard] prior result is not a safe current terminal readback; re-run read-only guards and executor recovery (durable intents forbid duplicate writes)" >&2
+fi
+
+if [[ "$RUN_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]] && (( $(date +%s) >= RUN_DEADLINE_EPOCH )); then
+  echo "[daily_inventory_guard] run deadline reached before executor dispatch; no inventory request was submitted" >&2
+  write_inventory_marker failed "run deadline reached before executor dispatch"
+  exit 76
 fi
 
 set +e
@@ -413,7 +492,7 @@ EXECUTOR_STATUS=$?
 set -e
 
 if [[ ! -f "$RESULT" ]] || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
-  .planHash == $hash and .execute == true and (.results | length) == $total
+  .planHash == $hash and .execute == true and .executionMode == "automatic" and (.results | length) == $total
 ' "$RESULT" >/dev/null; then
   echo "automatic inventory executor did not produce a complete result" >&2
   if (( EXECUTOR_STATUS != 0 )); then
@@ -422,8 +501,30 @@ if [[ ! -f "$RESULT" ]] || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   exit 1
 fi
 
-# Row-level blockers are terminal, auditable business results. The 14:45 report
-# surfaces them; they must not turn a completed daily scan into a systemd crash.
+# Row-level blockers remain terminal and auditable, but they are not a successful
+# inventory run and cannot be promoted to daily-operating-refresh done.
+if result_is_readback_pending_only; then
+  write_inventory_marker warning "automatic inventory write has an exact durable intent and is waiting for readback; same run will retry readback only"
+  jq '{ok:false,state:"submitted_but_readback_pending",planHash,executionMode,generatedAt,counts:{
+    total:(.results|length),
+    pending:([.results[]|select(.state=="submitted_but_readback_pending")]|length),
+    updated:([.results[]|select(.state=="updated_readback_matched")]|length),
+    skipped:([.results[]|select(.state|startswith("skipped_"))]|length)
+  }}' "$RESULT"
+  exit 75
+fi
+if result_is_complete_and_safe; then
+  write_inventory_marker done "automatic inventory execution completed with plan/result hash and terminal readback evidence"
+else
+  write_inventory_marker warning "automatic inventory execution has terminal blockers or non-matching readback; overall morning run remains failed"
+  jq '{ok:false,state:"completed_with_blockers",planHash,executionMode,generatedAt,counts:{
+    total:(.results|length),
+    updated:([.results[]|select(.state=="updated_readback_matched")]|length),
+    skipped:([.results[]|select(.state|startswith("skipped_"))]|length),
+    blocked:([.results[]|select(.state=="blocked")]|length)
+  }}' "$RESULT"
+  exit 2
+fi
 jq '{ok: (([.results[]|select(.state=="blocked")]|length) == 0),state:"completed",planHash,executionMode,generatedAt,counts:{
   total:(.results|length),
   updated:([.results[]|select(.state=="updated_readback_matched")]|length),

@@ -21,6 +21,10 @@ RUN_BUDGET_SEC="${SHEIN_BI_MORNING_RUN_BUDGET_SEC:-10200}"
 RUN_DEADLINE_EPOCH="${SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH:-$((RUN_STARTED_EPOCH + RUN_BUDGET_SEC))}"
 SESSION_RECOVERY_BUDGET_SEC="${SHEIN_BI_MORNING_SESSION_RECOVERY_BUDGET_SEC:-1800}"
 LINK_COLLECTION_RESERVE_SEC="${SHEIN_BI_MORNING_LINK_COLLECTION_RESERVE_SEC:-7200}"
+INVENTORY_RESERVE_SEC="${SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC:-4500}"
+PRE_INVENTORY_DEADLINE_EPOCH=$((RUN_DEADLINE_EPOCH - INVENTORY_RESERVE_SEC))
+STOCK_REFRESH_MAX_SEC="${SHEIN_BI_MORNING_STOCK_REFRESH_MAX_SEC:-900}"
+INVENTORY_RUNTIME_ROOT="${SHEIN_BI_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/daily-inventory-replenishment}"
 MAX_STORE_NO_PROGRESS_ROUNDS="${SHEIN_BI_MORNING_STORE_NO_PROGRESS_MAX:-3}"
 CATCHUP_MIN_UPTIME_SEC="${SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC:-600}"
 CATCHUP_RETRY_DELAY_SEC="${SHEIN_BI_MORNING_CATCHUP_RETRY_DELAY_SEC:-30}"
@@ -63,6 +67,17 @@ require_run_budget() {
     write_marker "daily-operating-refresh" "failed" "run safety budget exhausted during $phase" "$LOG_FILE" >/dev/null || true
     echo "[cloud_morning_chain] ERROR safety budget exhausted phase=$phase" >&2
     exit 75
+  fi
+}
+
+require_pre_inventory_budget() {
+  local phase="$1"
+  local remaining=$((PRE_INVENTORY_DEADLINE_EPOCH - $(date +%s)))
+  if (( remaining <= 0 )); then
+    write_state "failed" "inventory reserve (${INVENTORY_RESERVE_SEC}s) was reached before $phase completed; inventory was not started and the previous complete snapshot remains active"
+    write_marker "morning-all" "failed" "inventory reserve reached before $phase completed" "$LOG_FILE" >/dev/null || true
+    echo "[cloud_morning_chain] ERROR inventory reserve reached phase=$phase preInventoryDeadline=$PRE_INVENTORY_DEADLINE_EPOCH runDeadline=$RUN_DEADLINE_EPOCH" >&2
+    exit 76
   fi
 }
 
@@ -138,6 +153,40 @@ try {
   process.exit(1);
 }
 NODE
+}
+
+daily_operating_refresh_done() {
+  node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
+    --root "$ROOT" \
+    --marker-root "$ROOT/state/pipeline-markers" \
+    --state-dir "$STATE_DIR" \
+    --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
+    --run-date "$RUN_DATE" \
+    --business-date "$DATA_DATE" >/dev/null
+}
+
+inventory_marker_done() {
+  if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" ROOT="$ROOT" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+try {
+  const file = path.join(process.env.ROOT, 'state', 'pipeline-markers', process.env.RUN_DATE, 'daily-inventory-guard.json');
+  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(marker?.ok === true
+    && marker?.stage === 'daily-inventory-guard'
+    && marker?.status === 'done'
+    && marker?.runDate === process.env.RUN_DATE
+    && marker?.businessDate === process.env.DATA_DATE ? 0 : 1);
+} catch { process.exit(1); }
+NODE
+  then
+    return 1
+  fi
+  node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage daily-inventory-guard \
+    --date "$RUN_DATE" \
+    --status done \
+    --require-evidence >/dev/null
 }
 
 latest_state_status() {
@@ -294,7 +343,7 @@ wait_for_catchup_startup_window() {
   fi
 
   while true; do
-    require_run_budget "catch-up-priority-window"
+    require_pre_inventory_budget "catch-up-priority-window"
     active="$(active_full_managed_priority_services)"
     [[ -z "$active" ]] && break
     write_state "waiting_resource" "same-day boot catch-up is yielding to the full-managed priority run: $active"
@@ -369,19 +418,25 @@ run_supplements_stage() {
   write_state "running" "all-store evidence is complete; warehouse merge, supplements and one atomic Portal publish are running"
   local status
   set +e
+  local remaining=$((PRE_INVENTORY_DEADLINE_EPOCH - $(date +%s)))
+  if (( remaining <= 0 )); then return 76; fi
   SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize \
   SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1 \
   SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=1 \
   SHEIN_BI_DAILY_RTV_VERIFY=0 \
   SHEIN_BI_PORTAL_PREWARM_DISABLED=0 \
-    bash scripts/cloud_daily_refresh.sh "$DATA_DATE"
+    timeout --signal=TERM --kill-after=30s "${remaining}s" bash scripts/cloud_daily_refresh.sh "$DATA_DATE"
   status=$?
   set -e
+  if [[ "$status" -eq 124 || "$status" -eq 137 || "$status" -eq 143 ]]; then
+    echo "[cloud_morning_chain] supplements crossed the inventory reserve boundary" >&2
+    return 76
+  fi
   if [[ "$status" -ne 0 ]]; then
     return "$status"
   fi
   write_marker "morning-links-ready" "done" "all 19 stores merged and published in the unified daily run" \
-    "$STATE_DIR/${RUN_DATE}-all.json" "$LOG_FILE" >/dev/null
+    "$STATE_DIR/${RUN_DATE}-all.json" >/dev/null
   write_marker "morning-supplements" "done" "daily supplements completed inside the unified run" \
     "$LOG_FILE" >/dev/null
 }
@@ -390,7 +445,22 @@ run_inventory_stage() {
   write_state "running" "refreshing current OpenAPI stock and running the one daily inventory guard"
   # OpenAPI stock is an api-light phase.  It must not reserve the exclusive
   # browser/DB lane for the whole 19-store request.
-  bash scripts/cloud_openapi_stock_refresh.sh
+  local stock_remaining stock_budget
+  stock_remaining=$((RUN_DEADLINE_EPOCH - $(date +%s)))
+  if (( stock_remaining <= 0 )); then return 76; fi
+  stock_budget="$STOCK_REFRESH_MAX_SEC"
+  if (( stock_budget > stock_remaining )); then stock_budget="$stock_remaining"; fi
+  set +e
+  SHEIN_OPENAPI_STOCK_REFRESH_RUN_DATE="$RUN_DATE" \
+  SHEIN_BI_MORNING_RUN_DATE="$RUN_DATE" \
+    timeout --signal=TERM --kill-after=30s "${stock_budget}s" bash scripts/cloud_openapi_stock_refresh.sh
+  local stock_status=$?
+  set -e
+  if [[ "$stock_status" -eq 124 || "$stock_status" -eq 137 || "$stock_status" -eq 143 ]]; then
+    echo "[cloud_morning_chain] stock refresh exhausted its bounded inventory-reserve slice" >&2
+    return 76
+  fi
+  if [[ "$stock_status" -ne 0 ]]; then return "$stock_status"; fi
 
   local inventory_status retry_delay
   retry_delay="${SHEIN_BI_MORNING_RESOURCE_RETRY_DELAY_SEC:-60}"
@@ -399,6 +469,9 @@ run_inventory_stage() {
     # Keep the command in an if-condition so the inherited ERR trap does not
     # turn the scheduler's temporary 75 into a failed business run.
     if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1 \
+      SHEIN_BI_INVENTORY_RUN_DATE="$RUN_DATE" \
+      SHEIN_BI_INVENTORY_BUSINESS_DATE="$DATA_DATE" \
+      SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH="$RUN_DEADLINE_EPOCH" \
       SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="${RUN_DATE}T00:00:00+08:00" \
       SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_daily_inventory_replenishment_guard \
       SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=owner-automatic-inventory-20260803-v1 \
@@ -406,6 +479,7 @@ run_inventory_stage() {
           --domain daily-operating-inventory \
           --class openapi \
           --lock-wait-sec 900 \
+          --deadline-epoch "$RUN_DEADLINE_EPOCH" \
           --defer-state /srv/shein-bi/runtime/host-scheduler/daily-operating-inventory.latest.json \
           -- bash scripts/cloud_daily_inventory_replenishment_guard.sh; then
       inventory_status=0
@@ -414,12 +488,15 @@ run_inventory_stage() {
     fi
 
     if [[ "$inventory_status" == "0" ]]; then
-      write_marker "daily-inventory-guard" "done" "daily inventory guard completed inside the unified run" "$LOG_FILE" >/dev/null
-      return 0
+      if inventory_marker_done; then
+        return 0
+      fi
+      echo "[cloud_morning_chain] ERROR inventory guard exited 0 without verified date-scoped plan/result evidence" >&2
+      return 76
     fi
     if [[ "$inventory_status" == "2" ]]; then
-      write_marker "daily-inventory-guard" "warning" "daily inventory guard completed with business blockers; no unsafe write was presented" "$LOG_FILE" >/dev/null
-      return 0
+      echo "[cloud_morning_chain] ERROR inventory guard completed with business blockers; overall run cannot be done" >&2
+      return 76
     fi
     if [[ "$inventory_status" == "75" ]]; then
       write_state "waiting_resource" "daily inventory guard is waiting for host capacity inside the same run; completed daily data remains published"
@@ -442,7 +519,7 @@ export SHEIN_BI_ROOT="$ROOT"
 export SHEIN_BI_MORNING_CHAIN_STATE_DIR="$STATE_DIR"
 # The absolute run deadline propagates to every per-store browser wrapper so a
 # single store / the whole round can never run past the internal budget.
-export SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH="$RUN_DEADLINE_EPOCH"
+export SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH="$PRE_INVENTORY_DEADLINE_EPOCH"
 
 echo "[cloud_morning_chain] start stage=$STAGE runDate=$RUN_DATE businessDate=$DATA_DATE dryRun=$DRY_RUN"
 
@@ -457,7 +534,7 @@ fi
 
 case "$STAGE" in
   all)
-    if pipeline_marker_done "daily-operating-refresh"; then
+    if daily_operating_refresh_done; then
       write_state "ok" "today's complete daily operating run is already published; no duplicate work was started"
       echo "[cloud_morning_chain] resume-skip complete daily-operating-refresh marker"
       exit 0
@@ -470,6 +547,7 @@ case "$STAGE" in
       echo "[cloud_morning_chain] resume-skip all-store fetch; exact-date evidence already exists for all enabled stores"
       node scripts/build_morning_resume_evidence.mjs --date "$DATA_DATE" --out "$RESULT_FILE"
     else
+      require_pre_inventory_budget "all-store-fetch"
       if run_nightly_session_readiness_gate; then
         :
       else
@@ -481,7 +559,7 @@ case "$STAGE" in
       RETRY_ROUND=0
       NO_PROGRESS_ROUNDS=0
       while [[ -n "$MISSING_STORES" ]]; do
-        require_run_budget "store-retry"
+        require_pre_inventory_budget "store-retry"
         PREV_MISSING_STORES="$MISSING_STORES"
         RETRY_ROUND=$((RETRY_ROUND + 1))
         echo "[cloud_morning_chain] retryRound=$RETRY_ROUND missingStores=$MISSING_STORES; retrying only those stores inside the same run"
@@ -510,12 +588,17 @@ case "$STAGE" in
       done
     fi
 
+    # Normalize the initial fetch and every retry into one immutable 19-store
+    # bundle.  A chunk result can retain stores that succeeded in a later
+    # retry, so chunk status is never accepted as final completion evidence.
+    node scripts/build_morning_resume_evidence.mjs --date "$DATA_DATE" --out "$RESULT_FILE"
+
     if pipeline_marker_done "morning-supplements"; then
       echo "[cloud_morning_chain] resume-skip completed supplements/Portal checkpoint; continuing with inventory in the same logical daily run"
     else
       SUPPLEMENT_RETRY_ROUND=0
       while true; do
-        require_run_budget "platform-readiness-and-publish"
+        require_pre_inventory_budget "platform-readiness-and-publish"
         if run_supplements_stage; then
           break
         else
@@ -532,9 +615,18 @@ case "$STAGE" in
         sleep "${SHEIN_BI_MORNING_PLATFORM_RETRY_DELAY_SEC:-300}"
       done
     fi
+    if pipeline_marker_done "inventory-started"; then
+      echo "[cloud_morning_chain] resume inventory stage inside the original run deadline"
+    else
+      require_pre_inventory_budget "inventory-stage-dispatch"
+      write_marker "inventory-started" "done" "inventory reserve entered; restarts may resume this stage until the absolute run deadline" "$RESULT_FILE" >/dev/null
+    fi
     run_inventory_stage
+    INVENTORY_PLAN="$INVENTORY_RUNTIME_ROOT/plans/daily-inventory-replenishment-$RUN_DATE.json"
+    INVENTORY_RESULT="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$RUN_DATE.json"
     write_marker "daily-operating-refresh" "done" "all 19 stores, supplements and inventory completed in one run" \
-      "$RESULT_FILE" "$LOG_FILE" >/dev/null
+      "$RESULT_FILE" "$ROOT/state/pipeline-markers/$RUN_DATE/daily-inventory-guard.json" \
+      "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
     printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
       > "$STATE_DIR/${RUN_DATE}.done"
     write_state "ok" "all 19 stores, supplements and inventory completed; the complete daily snapshot was published once"

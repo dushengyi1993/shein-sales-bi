@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
-RUN_DATE="$(TZ="$TZ_NAME" date +%F)"
+RUN_DATE="${SHEIN_OPENAPI_STOCK_REFRESH_RUN_DATE:-$(TZ="$TZ_NAME" date +%F)}"
 STATE_FILE="${SHEIN_OPENAPI_STOCK_REFRESH_STATE_FILE:-$ROOT/state/openapi-probes/stock-refresh.latest.json}"
 REPORT_FILE="${SHEIN_OPENAPI_PRODUCT_RECONCILE_LATEST_FILE:-$ROOT/state/openapi-probes/product-reconciliation.latest.json}"
 STARTED_AT="$(date -Is)"
@@ -12,6 +12,16 @@ DETAIL_MODE="${SHEIN_OPENAPI_STOCK_REFRESH_DETAILS_MODE:-auto}"
 DETAIL_BUDGET="${SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_BUDGET:-32}"
 DETAIL_REFRESH_CLOCK="${SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_CLOCK:-07:12}"
 CURRENT_CLOCK="$(TZ="$TZ_NAME" date +%H:%M)"
+
+if [[ ! "$RUN_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+  || [[ "$(TZ="$TZ_NAME" date -d "$RUN_DATE" +%F 2>/dev/null || true)" != "$RUN_DATE" ]]; then
+  echo "Invalid SHEIN_OPENAPI_STOCK_REFRESH_RUN_DATE=$RUN_DATE" >&2
+  exit 65
+fi
+if [[ -n "${SHEIN_BI_MORNING_RUN_DATE:-}" && "$RUN_DATE" != "$SHEIN_BI_MORNING_RUN_DATE" ]]; then
+  echo "stock refresh runDate drift: injected=$RUN_DATE coordinator=$SHEIN_BI_MORNING_RUN_DATE" >&2
+  exit 65
+fi
 
 cd "$ROOT"
 
@@ -85,12 +95,14 @@ jq -n \
   --arg reportFile "$REPORT_FILE" \
   --arg stockFile "$STOCK_FILE" \
   --arg mode "$REFRESH_MODE" \
+  --arg runDate "$RUN_DATE" \
   '{
     ok: true,
     startedAt: $startedAt,
     generatedAt: $generatedAt,
     stores: 19,
     mode: $mode,
+    runDate: $runDate,
     reportFile: $reportFile,
     stockFile: $stockFile
   }' > "$TMP_FILE"

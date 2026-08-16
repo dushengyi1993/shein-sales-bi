@@ -55,6 +55,12 @@ assert.ok(
   'lock order must remain host -> project -> domain -> pressure -> command',
 );
 assert.match(hostWrapper, /--deadline-at/);
+assert.match(hostWrapper, /--deadline-epoch/,
+  'the morning inventory lane needs an immutable absolute deadline');
+assert.equal((hostWrapper.match(/CURRENT_LOCK_WAIT="\$\(lock_wait_for_current_deadline\)"/g) || []).length, 3,
+  'host, project and domain lock waits must each recompute the absolute deadline');
+assert.match(hostWrapper, /if \(\( LOCK_WAIT_SEC > REMAINING_SEC \)\); then LOCK_WAIT_SEC="\$REMAINING_SEC"/,
+  'lock wait must be clamped so it cannot consume the inventory window');
 assert.match(hostWrapper, /status="deferred_to_local"/);
 assert.doesNotMatch(hostWrapper, /touch -- "\$HOST_LOCK"/,
   'the half-managed project consumes the neutral host lock and must not recreate it');
@@ -193,7 +199,7 @@ assert.match(morningWrapper, /cloud_morning_chain\.sh/, 'the wrapper must invoke
 assert.match(morningWrapper, /active\.json/, 'the wrapper must persist the active run context');
 assert.match(morningWrapper, /SHEIN_BI_MORNING_RUN_DATE/, 'the wrapper must inject the immutable run date');
 assert.match(morningWrapper, /SHEIN_BI_MORNING_BUSINESS_DATE/, 'the wrapper must inject the immutable business date');
-assert.match(morningWrapper, /daily-operating-refresh\.json/, 'the wrapper must verify the exact completion marker');
+assert.match(morningWrapper, /validate_daily_operating_refresh\.mjs/, 'the wrapper must verify the complete semantic evidence bundle');
 assert.match(morningWrapper, /exit 0/, 'a completed idempotent skip must exit 0 so Restart can never loop');
 assert.match(morning, /SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize/);
 assert.match(morning, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1/,
@@ -210,8 +216,8 @@ assert.match(morning, /waiting platform readiness retryRound=/,
 assert.match(morning, /run_inventory_stage/);
 assert.match(morning, /pipeline_marker_done "morning-supplements"/,
   'a restarted coordinator must resume after the completed atomic publish checkpoint instead of rebuilding it');
-assert.match(morning, /pipeline_marker_done "daily-operating-refresh"/,
-  'a completed business date must be an idempotent no-op when the service is started again');
+assert.match(morning, /daily_operating_refresh_done/,
+  'a semantically completed business date must be an idempotent no-op when the service is started again');
 assert.match(morning, /resume-skip all-store fetch; exact-date evidence already exists for all enabled stores/,
   'a restarted failed morning publish must reuse complete exact-date store evidence');
 assert.match(morning, /daily supplements failed status=\$SUPPLEMENT_STATUS; the previous complete BI snapshot remains active/,
