@@ -199,31 +199,34 @@ const tests = [
   'scripts/test_bi_ops_portal_shell_sync.mjs',
   'scripts/test_pending_discuss_batch.mjs',
   'scripts/test_pending_discuss_daily.mjs',
+  'scripts/test_deterministic_timeout_contract.mjs',
 ];
 
 const failures = [];
 for (const file of tests) {
   const startedAt = Date.now();
-  // These integration tests intentionally start an isolated portal plus a
-  // fake OpenAPI server and exercise the complete bind/dry-run/execute/
-  // readback matrix. The description/update matrices have taken 132-175
-  // seconds on the production-sized cloud host. The attribute flow now
-  // measures ~508s locally after the adopt-existing, image-binding tamper
-  // and refresh-binding matrices, while the same commit hit 626s on the
-  // GitHub CI runner and >720s on another runner, so it gets its own
-  // bounded 900s tier (no coverage reduction) for the slower runners; the
-  // two heavier matrices keep 240s and every other deterministic test
-  // keeps the default 30s fail-fast budget.
+  // Keep deterministic tests bounded and fail-fast, with explicit tiers only
+  // where measured evidence exceeds the default. PR #99 CI attempt 1 killed
+  // source-detail-lock at 30042ms on the default 30s tier; attempt 2 passed it
+  // in 26012ms, then killed the attribute flow at 720017ms on its old 720s
+  // tier, both by timeout SIGTERM with no assertion failure. Local evidence is
+  // 24.7s for source-detail-lock and 709s for attribute flow. Their bounded
+  // 60s and 900s tiers retain roughly 2.4x / 1.27x local headroom (and 180s
+  // absolute attribute margin) without disabling timeout or suite fail-fast.
+  // Description/update matrices keep 240s, morning reliability keeps 120s,
+  // and every other deterministic test keeps the default 30s budget.
   const timeout = (file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     || file === 'scripts/test_link_ops_update_description_flow.mjs')
-      ? 240_000
+    ? 240_000
+    : file === 'scripts/test_link_ops_executor_source_detail_lock.mjs'
+      ? 60_000
       : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
         ? 900_000
-        : ['scripts/test_morning_chain_reliability.mjs',
-          'scripts/test_morning_chain_wrapper_reliability.mjs',
-          'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
-          ? 120_000
-        : 30_000;
+       : ['scripts/test_morning_chain_reliability.mjs',
+         'scripts/test_morning_chain_wrapper_reliability.mjs',
+         'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
+         ? 120_000
+       : 30_000;
   console.error(`START ${file} timeoutMs=${timeout}`);
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),
