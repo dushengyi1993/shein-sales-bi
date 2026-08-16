@@ -63,6 +63,7 @@ function parseArgs(argv) {
     password: process.env.SHEIN_BI_PASSWORD || '',
     taskId: '',
     sourceTaskId: '',
+    reuseApprovedBinding: false,
     jobId: '',
     chatSessionId: '',
     text: '',
@@ -155,6 +156,7 @@ function parseArgs(argv) {
     else if (a === '--password-stdin') args.passwordStdin = true;
     else if (a === '--task-id' || a === '--id') args.taskId = String(argv[++i] || '').trim();
     else if (a === '--source-task-id' || a === '--source-publish-task-id') args.sourceTaskId = String(argv[++i] || '').trim();
+    else if (a === '--reuse-approved-binding' || a === '--reuse-binding') args.reuseApprovedBinding = true;
     else if (a === '--job-id') args.jobId = String(argv[++i] || '').trim();
     else if (a === '--chat-session' || a === '--chat-session-id') args.chatSessionId = String(argv[++i] || '').trim();
     else if (a === '--text' || a === '--command') args.text = String(argv[++i] || '').trim();
@@ -320,6 +322,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --supply-price 210 --inventory 100 --input-current-ma 700
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --adopt-existing --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
@@ -384,6 +387,10 @@ Options:
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
   --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
+  --reuse-approved-binding
+                   prepare-publish 用；同一 copy_product_draft 任务已有服务端已审图片绑定时，仅复用该绑定并更新
+                   publishPreparation（如 --input-current-ma），不扫描/读取/上传本地图片；与 --image-dir 互斥，
+                   不能与 update_images 维护模式的 --source-task-id 组合
   --source-file     prepare-descriptions 必填；实际审核资料 HTML（唯一 section#s09），工具从文件字节计算 SHA 并逐字提取三语各5行
   --material-json   prepare-descriptions 可选；提供时逐字核验其 ar/en/zh-cn 行与实际 section#s09 一致，任一字节不同即拒绝
   --expected-revision prepare-descriptions 用；任务当前 repository revision，可选项，绑定前做 CAS 校验
@@ -419,6 +426,9 @@ Safety:
   - 用户当轮明确指令和“已审可用”素材高于 AI 语义推断；标题未采用某参数不等于图片禁用。
   - plan-images 只做本地图包角色规划，备用目录和明确“产品封面/AB测试”图不提交；会读取真实尺寸再判断方形图。
   - prepare-publish 上传后把图片 URL 和显式字段绑定回同一 task，再重新预演；不会新建替代任务，也不会静默复制源图。
+  - prepare-publish --reuse-approved-binding 只复用该任务服务端已存的已审图片绑定（body=sourceApproved:true、
+    reuseApprovedBinding:true、bindings:[]），不调用图片角色规划或 upload-pic；仍按新 publishPreparation 绑定并 dry-run，
+    输出 realPublishOccurred=false。
   - prepare-descriptions 用确定性 extractor 从实际 HTML 唯一 section#s09 逐字提取“三语核心卖点”（英文/阿文 code、中文 displaybox，
     各恰好5行），以文件字节计算 sourceFileSha256 并逐字核验；绑定为固定 ar/en 各5行（zh-cn 仅材料审计SHA），
     绑定后旧预演锁作废并重新预演；不会生成/翻译/改写描述，不会自动映射源 OpenAPI 商品描述，也不会重传图片。
@@ -1153,69 +1163,100 @@ function preparedImageAssignments(plan) {
 
 async function runPreparePublish(args) {
   if (!args.taskId) throw new Error('prepare-publish requires --task-id <id>');
-  if (!args.imageDir) throw new Error('prepare-publish requires --image-dir <reviewed image folder>');
+  if (args.reuseApprovedBinding) {
+    if (args.imageDir) throw new Error('--reuse-approved-binding 与 --image-dir 互斥：复用服务端已审绑定时不扫描、不读取、不上传本地图片');
+    if (args.sourceTaskId) throw new Error('--reuse-approved-binding 仅服务 copy_product_draft 发布准备；不能用于 update_images 维护任务的 --source-task-id 模式');
+  } else if (!args.imageDir) {
+    throw new Error('prepare-publish requires --image-dir <reviewed image folder>（或加 --reuse-approved-binding 复用该任务的已审图片绑定）');
+  }
   const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
   if (!store) throw new Error('prepare-publish requires --store <target store>');
-  const plan = await planLinkOpsImageRoles({dir: args.imageDir, sourceApproved: args.approvedAssets ? true : null, storeKey: store});
-  const sourceApproved = args.approvedAssets || plan.approval?.sourceApproved === true;
-  if (!sourceApproved) throw new Error('图片目录未标记为“已审可用”；请确认人工审核后加 --approved-assets');
-  if (!plan.ok) throw new Error(`图片角色规划未通过：${(plan.blockers || []).join('；')}`);
-  if (!plan.roles?.squareImage) throw new Error('读取真实图片尺寸后仍未找到 1:1 方形图，已在上传前停止');
-  const assignments = preparedImageAssignments(plan);
-  if (!assignments.length) throw new Error('没有可上传并绑定的审核图片');
-  const uploaded = [];
-  try {
-    for (const [index, assignment] of assignments.entries()) {
-      const file = await fileToCloudUploadBody(assignment.path);
-      if (!['image/jpeg', 'image/png'].includes(file.type)) throw new Error(`SHEIN upload-pic 不支持该格式：${assignment.name}`);
-      if (!args.json) process.stderr.write(`上传审核图片 ${index + 1}/${assignments.length}：${assignment.name}\n`);
-      const {json} = await request(args, '/api/openapi-image-asset/upload-pic', {
-        method: 'POST',
-        body: {store, imageType: assignment.imageType, file},
-      });
-      const imageUrl = String(json?.result?.imageUrl || json?.adapterResult?.result?.imageUrl || '').trim();
-      if (!imageUrl) throw new Error(`云端上传没有返回 imageUrl：${assignment.name}`);
-      const bytes = await fs.readFile(assignment.path);
-      uploaded.push({
-        ...assignment,
-        path: undefined,
-        imageUrl,
-        sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
-      });
-    }
-  } catch (error) {
-    error.response = {ok: false, uploadedBeforeFailure: uploaded.map(row => ({name: row.name, role: row.role, imageUrl: row.imageUrl}))};
-    throw error;
-  }
   const publishPreparation = publishPreparationFromArgs(args);
-  const {json: bindingJson} = await request(args, '/api/link-ops-publish-assets', {
-    method: 'POST',
-    body: {
-      taskId: args.taskId,
-      store,
-      sourceApproved: true,
-      sourceDirLabel: path.basename(args.imageDir),
-      bindings: uploaded,
-      publishPreparation,
-      sourceTaskId: args.sourceTaskId || '',
-      productIdentity: {
-        spuName: args.spuList[0] || '',
-        skcName: args.skcList[0] || '',
-        skuCodes: args.skuCodeList || [],
+  let plan = null;
+  let uploaded = [];
+  let bindingJson = null;
+  if (args.reuseApprovedBinding) {
+    ({json: bindingJson} = await request(args, '/api/link-ops-publish-assets', {
+      method: 'POST',
+      body: {
+        taskId: args.taskId,
+        store,
+        sourceApproved: true,
+        reuseApprovedBinding: true,
+        bindings: [],
+        publishPreparation,
       },
-    },
-  });
+    }));
+  } else {
+    plan = await planLinkOpsImageRoles({dir: args.imageDir, sourceApproved: args.approvedAssets ? true : null, storeKey: store});
+    const sourceApproved = args.approvedAssets || plan.approval?.sourceApproved === true;
+    if (!sourceApproved) throw new Error('图片目录未标记为“已审可用”；请确认人工审核后加 --approved-assets');
+    if (!plan.ok) throw new Error(`图片角色规划未通过：${(plan.blockers || []).join('；')}`);
+    if (!plan.roles?.squareImage) throw new Error('读取真实图片尺寸后仍未找到 1:1 方形图，已在上传前停止');
+    const assignments = preparedImageAssignments(plan);
+    if (!assignments.length) throw new Error('没有可上传并绑定的审核图片');
+    try {
+      for (const [index, assignment] of assignments.entries()) {
+        const file = await fileToCloudUploadBody(assignment.path);
+        if (!['image/jpeg', 'image/png'].includes(file.type)) throw new Error(`SHEIN upload-pic 不支持该格式：${assignment.name}`);
+        if (!args.json) process.stderr.write(`上传审核图片 ${index + 1}/${assignments.length}：${assignment.name}\n`);
+        const {json} = await request(args, '/api/openapi-image-asset/upload-pic', {
+          method: 'POST',
+          body: {store, imageType: assignment.imageType, file},
+        });
+        const imageUrl = String(json?.result?.imageUrl || json?.adapterResult?.result?.imageUrl || '').trim();
+        if (!imageUrl) throw new Error(`云端上传没有返回 imageUrl：${assignment.name}`);
+        const bytes = await fs.readFile(assignment.path);
+        uploaded.push({
+          ...assignment,
+          path: undefined,
+          imageUrl,
+          sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+        });
+      }
+    } catch (error) {
+      error.response = {ok: false, uploadedBeforeFailure: uploaded.map(row => ({name: row.name, role: row.role, imageUrl: row.imageUrl}))};
+      throw error;
+    }
+    ({json: bindingJson} = await request(args, '/api/link-ops-publish-assets', {
+      method: 'POST',
+      body: {
+        taskId: args.taskId,
+        store,
+        sourceApproved: true,
+        sourceDirLabel: path.basename(args.imageDir),
+        bindings: uploaded,
+        publishPreparation,
+        sourceTaskId: args.sourceTaskId || '',
+        productIdentity: {
+          spuName: args.spuList[0] || '',
+          skcName: args.skcList[0] || '',
+          skuCodes: args.skuCodeList || [],
+        },
+      },
+    }));
+  }
   if (!String(bindingJson?.binding?.payloadSource || '').startsWith('task')) throw new Error('云端没有确认图片 payload 已绑定到同一 task，已停止重新预演');
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_publish'},
   });
+  const reused = args.reuseApprovedBinding;
   print({
     ok: true,
     taskId: args.taskId,
     store,
     sourceApproved: true,
-    plan: {
+    reuseApprovedBinding: reused,
+    plan: reused ? {
+      source: 'existing_task_publishAssetBinding',
+      sourceDir: '',
+      scannedImages: 0,
+      eligibleImages: 0,
+      ignoredAbTestCovers: [],
+      storeStyle: null,
+      warnings: [],
+    } : {
       sourceDir: plan.sourceDir,
       scannedImages: plan.counts?.scannedImages || 0,
       eligibleImages: plan.counts?.eligibleImages || 0,
@@ -1231,6 +1272,7 @@ async function runPreparePublish(args) {
       sameTask: true,
       payloadSource: bindingJson.binding.payloadSource,
       realPublishOccurred: false,
+      reusedApprovedBinding: reused,
       nextStep: '核对新预演的 payloadHash 和字段；只有用户明确确认后才调用 execute。',
     },
   });

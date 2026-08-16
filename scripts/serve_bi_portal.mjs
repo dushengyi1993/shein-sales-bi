@@ -8953,6 +8953,99 @@ function verifyPersistedPublishAssetBindingReadback(freshTask, prepared) {
   return {ok: drift.length === 0, drift};
 }
 
+function attributeOverrideIdOf(row) {
+  const raw = row?.attribute_id ?? row?.attributeId ?? row?.id;
+  if (typeof raw === 'number') return Number.isSafeInteger(raw) && raw > 0 ? raw : NaN;
+  if (typeof raw !== 'string') return NaN;
+  const text = raw.trim();
+  if (!/^[1-9]\d*$/.test(text)) return NaN;
+  const id = Number(text);
+  return Number.isSafeInteger(id) && id > 0 ? id : NaN;
+}
+
+function sparseMergePublishPreparation(existing, incoming) {
+  const base = normalizePublishPreparationOverrides(existing || {});
+  const next = normalizePublishPreparationOverrides(incoming || {});
+  const baseRawAttributes = asArray(existing?.attributeOverrides || existing?.attribute_overrides);
+  const nextRawAttributes = asArray(incoming?.attributeOverrides || incoming?.attribute_overrides);
+  const mergedAttributes = new Map();
+  for (const [source, rows] of [['existing', baseRawAttributes], ['incoming', nextRawAttributes]]) {
+    for (const row of rows) {
+      const id = attributeOverrideIdOf(row);
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        const error = new Error(`reuseApprovedBinding ${source} publishPreparation contains invalid attribute override id`);
+        error.code = 'REUSE_APPROVED_BINDING_ATTRIBUTE_OVERRIDE_INVALID';
+        error.status = 409;
+        error.response = {ok: false, error: error.message, code: error.code};
+        throw error;
+      }
+      mergedAttributes.set(id, {...row});
+    }
+  }
+  if (mergedAttributes.size > 100) {
+    const error = new Error(`reuseApprovedBinding merged publishPreparation exceeds 100 unique attribute overrides (${mergedAttributes.size})`);
+    error.code = 'REUSE_APPROVED_BINDING_ATTRIBUTE_OVERRIDE_LIMIT_EXCEEDED';
+    error.status = 409;
+    error.response = {ok: false, error: error.message, code: error.code, count: mergedAttributes.size};
+    throw error;
+  }
+  return {
+    standardGoodsSn: next.standardGoodsSn || base.standardGoodsSn || '',
+    supplierSku: next.supplierSku || base.supplierSku || '',
+    supplyPrice: next.supplyPrice ?? base.supplyPrice,
+    inventory: next.inventory ?? base.inventory,
+    categoryId: next.categoryId ?? base.categoryId,
+    titles: {...(base.titles || {}), ...(next.titles || {})},
+    attributeOverrides: [...mergedAttributes.values()],
+  };
+}
+
+function validateReusedApprovedTaskBinding(task, {targetStore, expectedKind = 'copy_product_draft'}) {
+  if (!task?.publishAssetBinding || typeof task.publishAssetBinding !== 'object' || Array.isArray(task.publishAssetBinding)) {
+    const error = new Error('reuseApprovedBinding requires an existing approved publishAssetBinding on the same task');
+    error.code = 'REUSE_APPROVED_BINDING_MISSING';
+    error.status = 409;
+    error.response = {ok: false, error: error.message, code: error.code};
+    throw error;
+  }
+  const binding = task?.publishAssetBinding;
+  const blockers = [];
+  if (expectedKind === 'copy_product_draft') {
+    blockers.push(...validateExistingPublishAssetBindingForAdopt(task).blockers);
+  } else {
+    const explicitKind = String(binding.kind || '');
+    if (explicitKind !== 'update_images') blockers.push({code: 'REUSE_APPROVED_BINDING_KIND_INVALID', message: `expected explicit binding.kind=update_images, got ${explicitKind || '(missing)'}`});
+    if (Number(binding.schemaVersion) !== 2) blockers.push({code: 'REUSE_APPROVED_BINDING_SCHEMA_INVALID', message: `expected update_images binding schemaVersion=2, got ${binding.schemaVersion ?? '(missing)'}`});
+    if (binding.sourceApproved !== true) blockers.push({code: 'REUSE_APPROVED_BINDING_SOURCE_INVALID', message: 'update_images binding must have sourceApproved=true'});
+    if (String(binding.authority || '') !== 'human_reviewed_source') blockers.push({code: 'REUSE_APPROVED_BINDING_AUTHORITY_INVALID', message: 'update_images binding must have authority=human_reviewed_source'});
+    const images = canonicalPublishAssetBindingImages(binding.images);
+    if (!images.length || images.length > 14) blockers.push({code: 'REUSE_APPROVED_BINDING_IMAGE_COUNT_INVALID', message: `update_images binding requires 1-14 images (got ${images.length})`});
+    if (images.some(row => !/^[a-f0-9]{64}$/.test(String(row.sha256 || '')))) blockers.push({code: 'REUSE_APPROVED_BINDING_IMAGE_SHA_INVALID', message: 'every update_images binding image must have a valid sha256'});
+    const imageCount = Number(binding.imageCount);
+    if (!Number.isSafeInteger(imageCount) || imageCount !== images.length) blockers.push({code: 'REUSE_APPROVED_BINDING_IMAGE_COUNT_INVALID', message: `imageCount=${binding.imageCount ?? '(missing)'} does not match images=${images.length}`});
+    const storedFingerprint = String(binding.bindingFingerprint || '');
+    const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {binding, images: binding.images});
+    if (!storedFingerprint || storedFingerprint !== recomputedFingerprint) blockers.push({code: 'REUSE_APPROVED_BINDING_FINGERPRINT_INVALID', message: `bindingFingerprint does not match canonical recomputation`});
+  }
+  const canonicalImages = canonicalPublishAssetBindingImages(binding.images);
+  if (canonicalImages.length > 14) blockers.push({code: 'REUSE_APPROVED_BINDING_IMAGE_COUNT_INVALID', message: `approved binding exceeds 14 images (${canonicalImages.length})`});
+  const storedTargetStore = String(binding?.targetStore || '').trim().toUpperCase();
+  if (storedTargetStore !== targetStore) {
+    blockers.push({
+      code: 'REUSE_APPROVED_BINDING_TARGET_STORE_MISMATCH',
+      message: `approved binding target store ${storedTargetStore || '(missing)'} does not match ${targetStore}`,
+    });
+  }
+  if (blockers.length) {
+    const error = new Error(`approved image binding validation failed; reuse denied: ${blockers.map(row => row.message).join('; ')}`);
+    error.code = 'REUSE_APPROVED_BINDING_METADATA_INVALID';
+    error.status = 409;
+    error.response = {ok: false, error: error.message, code: error.code, blockers};
+    throw error;
+  }
+  return binding;
+}
+
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
   if (!task || typeof task !== 'object') throw new Error('Task not found');
   if (taskRequiresOwnerLifecycleResolve(task)) {
@@ -8972,14 +9065,35 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     throw error;
   }
   if (body.sourceApproved !== true) throw new Error('必须明确 sourceApproved=true 才能绑定人工审核素材');
+  const isReuse = body.reuseApprovedBinding === true && !asArray(body.bindings).length;
   const bindings = asArray(body.bindings).length
     ? asArray(body.bindings)
-    : body.reuseApprovedBinding === true
+    : isReuse
       ? asArray(task?.publishAssetBinding?.images)
       : [];
-  if (!bindings.length || bindings.length > 14) throw new Error('Approved publish asset binding requires 1-14 uploaded images');
   const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
   const isMaintenanceImageBinding = intents.includes('update_images') && !intents.includes('copy_product_draft');
+  if (isReuse && !isMaintenanceImageBinding) {
+    if (!intents.includes('copy_product_draft')) {
+      const error = new Error('reuseApprovedBinding only supports copy_product_draft tasks');
+      error.code = 'REUSE_APPROVED_BINDING_INTENT_REJECTED';
+      error.status = 409;
+      error.response = {ok: false, error: error.message, code: error.code};
+      throw error;
+    }
+    validateReusedApprovedTaskBinding(task, {targetStore});
+  }
+  if (isReuse && isMaintenanceImageBinding && !String(body.sourceTaskId || '').trim()) {
+    const error = new Error('update_images binding reuse requires sourceTaskId; the pure reuse path only supports copy_product_draft');
+    error.code = 'REUSE_APPROVED_BINDING_MAINTENANCE_SOURCE_REQUIRED';
+    error.status = 409;
+    error.response = {ok: false, error: error.message, code: error.code};
+    throw error;
+  }
+  if (isReuse && isMaintenanceImageBinding) {
+    validateReusedApprovedTaskBinding(task, {targetStore, expectedKind: 'update_images'});
+  }
+  if (!bindings.length || bindings.length > 14) throw new Error('Approved publish asset binding requires 1-14 uploaded images');
   if (isMaintenanceImageBinding) {
     const otherMaintenanceIntents = intents.filter(intent => LINK_MAINTENANCE_INTENTS.has(intent) && intent !== 'update_images');
     if (otherMaintenanceIntents.length) {
@@ -9085,7 +9199,13 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   if (!intents.includes('copy_product_draft')) {
     throw new Error('Approved image binding supports copy_product_draft or a standalone update_images task only');
   }
-  const publishPreparation = normalizePublishPreparationOverrides(body.publishPreparation || body);
+  let publishPreparation = normalizePublishPreparationOverrides(body.publishPreparation || body);
+  if (isReuse) {
+    publishPreparation = sparseMergePublishPreparation(
+      task?.publishPreparation || task?.targets?.publishPreparation || {},
+      publishPreparation,
+    );
+  }
   const taskForCapture = {
     ...task,
     status: String(task.status || '') === 'draft' ? 'confirmed' : task.status,
@@ -17366,6 +17486,8 @@ export const __testHooks = {
   buildBiPortalCoreStreamPlan,
   canonicalPublishAssetBindingFingerprint,
   canonicalPublishAssetBindingImages,
+  sparseMergePublishPreparation,
+  validateReusedApprovedTaskBinding,
   readBiPortalCoreEnvelope,
   resetBiPortalCoreEnvelopeCache() {
     biPortalCoreEnvelopeCache = null;

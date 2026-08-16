@@ -16,6 +16,8 @@ const CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
   'scripts/test_portal_security.mjs',
   'scripts/bi_ops_cli.mjs',
+  'scripts/test_bi_ops_cli_reuse_approved_binding.mjs',
+  'scripts/test_bi_ops_publish_asset_reuse_guard.mjs',
   'lib/shein_openapi_client.mjs',
   'scripts/test_shein_openapi_client_windows_guard.mjs',
   'scripts/test_bi_ops_local_openapi_boundary.mjs',
@@ -90,6 +92,8 @@ const DIFF_CHECK_FILES = [
   'infra/nginx/shein-bi.conf',
   'infra/caddy/Caddyfile.shein-bi',
   'scripts/bi_ops_cli.mjs',
+  'scripts/test_bi_ops_cli_reuse_approved_binding.mjs',
+  'scripts/test_bi_ops_publish_asset_reuse_guard.mjs',
   'lib/shein_openapi_client.mjs',
   'scripts/test_shein_openapi_client_windows_guard.mjs',
   'scripts/test_bi_ops_local_openapi_boundary.mjs',
@@ -384,6 +388,8 @@ async function main() {
   results.push({name: 'permission matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_permissions.mjs']))});
   results.push({name: 'portal security and TLS proxy-chain config smoke', ...(await run(process.execPath, ['scripts/test_portal_security.mjs']))});
   results.push({name: 'CLI flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_flow.mjs']))});
+  results.push({name: 'CLI approved-binding reuse zero-upload smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_reuse_approved_binding.mjs']))});
+  results.push({name: 'approved-binding reuse integrity and sparse-merge smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_publish_asset_reuse_guard.mjs']))});
   results.push({name: 'shared OpenAPI client Windows guard smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_client_windows_guard.mjs']))});
   results.push({name: 'local OpenAPI boundary smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_local_openapi_boundary.mjs']))});
   results.push({name: 'cloud image asset through BI session smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cloud_image_asset.mjs']))});

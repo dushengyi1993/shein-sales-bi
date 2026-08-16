@@ -184,7 +184,8 @@ const targetSupplierSku = productCase.targetSupplierSku;
 // publish endpoint stays 'sv-smoke-copy-product' and is used by the readback
 // tests; the two identities must never be mixed.
 const SOURCE_SKC = 'sv25082902871830770';
-const SOURCE_SPU = 'v-smoke-copy-product';
+const SOURCE_SPU = 'v209901010000';
+const SOURCE_SUPPLIER_CODE = productCase.requireInputCurrent ? 'SM-505A' : 'SRC-COPY-SUCCESS-CODE';
 const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const sourceLinkFixtureDir = path.join(ROOT, 'outputs', 'shein_links', 'DL');
 const sourceOpenApiFixtureDir = path.join(ROOT, 'outputs', 'shein_openapi_products', 'DL');
@@ -225,7 +226,7 @@ async function writeSourceDetailFixtures() {
         ],
         skcInfoList: [{
           skcName: SOURCE_SKC,
-          supplierCode: 'SRC-COPY-SUCCESS-CODE',
+          supplierCode: SOURCE_SUPPLIER_CODE,
           skcImageInfoList: [
             {imageUrl: 'https://example.invalid/copy-main.jpg', imageType: 'MAIN'},
             {imageUrl: 'https://example.invalid/copy-detail.jpg', imageType: 'DETAIL'},
@@ -368,15 +369,16 @@ const fakeOpenApi = http.createServer(async (req, res) => {
   const body = await requestBody(req);
   fakeOpenApiCalls.push({method: req.method, path: req.url.split('?')[0], url: req.url, body: body.json || body.text, publishAttemptCount});
   const pathname = req.url.split('?')[0];
+  const isDlCredential = String(req.headers['x-lt-openkeyid'] || '') === 'dummy-open-key-dl';
   if (pathname === '/open-api/openapi-business-backend/query-store-info') {
     return sendJson(res, {
       code: '0',
       msg: 'OK',
       info: {
-        accountNo: 'GS8313514',
-        merchantId: '12224658',
-        companyName: '皓兰',
-        shopName: 'Copy Success HL',
+        accountNo: isDlCredential ? 'GS5337922' : 'GS8313514',
+        merchantId: isDlCredential ? '6720288' : '12224658',
+        companyName: isDlCredential ? '地利' : '皓兰',
+        shopName: isDlCredential ? 'Copy Success DL Source' : 'Copy Success HL',
       },
     });
   }
@@ -622,21 +624,47 @@ const fakeOpenApi = http.createServer(async (req, res) => {
   if (pathname === '/open-api/goods/spu-info') {
     const requestedSpu = String(body.json?.spuName || '').trim();
     const searchProductAlreadyCalled = fakeOpenApiCalls.some(call => call.path === '/open-api/goods/searchProduct');
+    const targetSearchProductAfterPublish = fakeOpenApiCalls.some(call => call.path === '/open-api/goods/searchProduct' && call.publishAttemptCount > 0);
     if (requestedSpu === 'v-smoke-copy-product'
-      && (publishAttemptCount === 0
-        || (!WEAK_READBACK_ONLY && (!SEARCH_PRODUCT_READBACK || searchProductAlreadyCalled)))) {
+      && publishAttemptCount > 0
+      && !WEAK_READBACK_ONLY
+      && (!SEARCH_PRODUCT_READBACK || targetSearchProductAfterPublish)) {
       return sendJson(res, {
         code: '0',
         msg: 'OK',
         info: {
           spuName: 'v-smoke-copy-product',
           productMultiDescList: [
+            {language: 'ar', productDesc: descriptionLines.ar.join('\n')},
+            {language: 'en', productDesc: descriptionLines.en.join('\n')},
+          ],
+          skcInfoList: [{
+            skcName: 'sv-smoke-copy-product',
+            supplierCode: taskStandardGoodsSn,
+            skuInfoList: [{skuCode: 'sku-smoke-copy-product', supplierSku: taskStandardGoodsSn}],
+          }],
+        },
+      });
+    }
+    if (requestedSpu === SOURCE_SPU
+      && (publishAttemptCount === 0
+        || (!WEAK_READBACK_ONLY && (!SEARCH_PRODUCT_READBACK || searchProductAlreadyCalled)))) {
+      return sendJson(res, {
+        code: '0',
+        msg: 'OK',
+        info: {
+          spuName: SOURCE_SPU,
+          productAttributeInfoList: [
+            {attributeId: 1000546, attributeValueId: 0, attributeValue: productCase.productModel},
+            ...(productCase.requireInputCurrent ? [{attributeId: 1002328, attributeValueId: 316914660}] : []),
+          ],
+          productMultiDescList: [
             {language: 'ar', productDesc: (PREVALID_RETRY_REBIND ? reboundDescriptionLines : descriptionLines).ar.join('\n')},
             {language: 'en', productDesc: (PREVALID_RETRY_REBIND ? reboundDescriptionLines : descriptionLines).en.join('\n')},
           ],
           skcInfoList: [{
             skcName: SOURCE_SKC,
-            supplierCode: targetSupplierCode,
+            supplierCode: isDlCredential ? SOURCE_SUPPLIER_CODE : targetSupplierCode,
             skuInfoList: [{
               skuCode: 'sku-smoke-copy-product',
               supplierSku: targetSupplierSku,
@@ -658,20 +686,20 @@ const fakeOpenApi = http.createServer(async (req, res) => {
   if (pathname === '/open-api/goods/searchProduct') {
     // Exact source SKC -> SPU resolution for bound-payload copies: the source
     // store searchProduct must resolve exactly one case-sensitive SPU.
-    if (asArray(body.json?.skcNameList).includes(SOURCE_SKC)) {
+    if (isDlCredential && asArray(body.json?.skcNameList).includes(SOURCE_SKC)) {
       return sendJson(res, {
         code: '0',
         msg: 'OK',
         info: {
           list: [{
-            spuName: 'v-smoke-copy-product',
-            skcList: [{skcName: SOURCE_SKC}],
+            spuName: SOURCE_SPU,
+            skcList: [{skcName: SOURCE_SKC, supplierCode: SOURCE_SUPPLIER_CODE}],
           }],
           count: 1,
         },
       });
     }
-    if (SEARCH_PRODUCT_READBACK && publishAttemptCount > 0 && !WEAK_READBACK_ONLY) {
+    if (SEARCH_PRODUCT_READBACK && publishAttemptCount > 0 && !WEAK_READBACK_ONLY && !isDlCredential) {
       const skcNames = asArray(body.json?.skcNameList).map(String);
       const spuNames = asArray(body.json?.spuNameList).map(String);
       const skuCodes = asArray(body.json?.skuCodeList).map(String);
@@ -1404,11 +1432,11 @@ try {
           titleEn: productCase.englishName,
         },
         bindings: [
-          {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1},
-          {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2},
-          {name: '11-approved-15-speed.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/15-speed.png', width: 900, height: 1200, order: 3},
-          {name: '12-approved-45db.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/45db.png', width: 900, height: 1200, order: 4},
-          {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 5},
+          {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1, sha256: 'a'.repeat(64)},
+          {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2, sha256: 'b'.repeat(64)},
+          {name: '11-approved-15-speed.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/15-speed.png', width: 900, height: 1200, order: 3, sha256: 'c'.repeat(64)},
+          {name: '12-approved-45db.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/45db.png', width: 900, height: 1200, order: 4, sha256: 'd'.repeat(64)},
+          {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 5, sha256: 'e'.repeat(64)},
         ],
       },
     });
@@ -1469,10 +1497,10 @@ try {
         sourceApproved: true,
         sourceTaskId: correctionSourceTaskId,
         bindings: [
-          {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1},
-          {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2},
-          {name: '11-approved-detail.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/detail.png', width: 900, height: 1200, order: 3},
-          {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 4},
+          {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1, sha256: '1'.repeat(64)},
+          {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2, sha256: '2'.repeat(64)},
+          {name: '11-approved-detail.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/detail.png', width: 900, height: 1200, order: 3, sha256: '3'.repeat(64)},
+          {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 4, sha256: '4'.repeat(64)},
         ],
       },
     });
@@ -1516,6 +1544,33 @@ try {
     check('approved update_images dry-run resolves one exact target', maintenanceExecutors?.[0]?.adapterEvidence?.matchedLinksCount, 1);
     check('approved update_images dry-run locks payload hash', Boolean(maintenanceExecutors?.[0]?.payload?.payloadHash), true);
     check('approved update_images without SKU image remains warning only', maintenanceExecutors?.[0]?.adapterEvidence?.imagePayloadInspection?.warnings || [], rows => asArray(rows).some(row => /未提供 SKU 图/.test(String(row))));
+  }
+
+  if (!ASSET_BINDING && productCase.requireInputCurrent) {
+    const minimalApprovedBinding = await req('/api/link-ops-publish-assets', {
+      method: 'POST',
+      cookie,
+      body: {
+        taskId,
+        store: 'HL',
+        sourceApproved: true,
+        publishPreparation: {
+          standardGoodsSn: taskStandardGoodsSn,
+          supplyPrice: 210,
+          inventory: 100,
+          titleAr: productCase.arName,
+          titleEn: productCase.englishName,
+        },
+        bindings: [
+          {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1, sha256: 'a'.repeat(64)},
+          {name: '05-approved-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/carousel.png', width: 900, height: 1200, order: 2, sha256: 'b'.repeat(64)},
+          {name: '11-approved-15-speed.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/15-speed.png', width: 900, height: 1200, order: 3, sha256: 'c'.repeat(64)},
+          {name: '12-approved-45db.png', role: 'detail', imageType: 2, imageUrl: 'https://img.shein.com/approved/45db.png', width: 900, height: 1200, order: 4, sha256: 'd'.repeat(64)},
+          {name: '03-approved-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/approved/square.png', width: 1254, height: 1254, order: 5, sha256: 'e'.repeat(64)},
+        ],
+      },
+    });
+    check('controlled attribute variants bind reviewed images before adoption', minimalApprovedBinding.status, 200);
   }
 
   // Descriptions are the final reviewed-material mutation: bind after any
@@ -1566,6 +1621,25 @@ try {
   check('reviewed description binding committed and read back', descriptionBind.json?.bindingCommitted === true && descriptionBind.json?.readbackVerified === true, true);
   check('reviewed description binding keeps task id', descriptionBind.json?.task?.id, taskId);
   check('reviewed description binding carries exact English hash', descriptionBind.json?.binding?.hashes?.en, descriptionMaterial.rows.en.sha256);
+
+  if (productCase.requireInputCurrent) {
+    const attributeBindBase = await rawTaskById(taskId);
+    const attributeBind = await req('/api/link-ops-prepare-product-attribute', {
+      method: 'POST',
+      cookie,
+      body: {
+        taskId,
+        store: 'HL',
+        donorStore: 'DL',
+        donorSkc: SOURCE_SKC,
+        attributeId: 1002328,
+        bindingMode: 'adopt_existing',
+        expectedRevision: attributeBindBase?.repositoryRevision,
+      },
+    });
+    check('controlled attribute flow adopts live same-product hazardous classification', attributeBind.status, 200);
+    check('controlled attribute flow persists product attribute binding', Boolean((await rawTaskById(taskId))?.productAttributeBinding), true);
+  }
 
   const dryRun = await req('/api/link-ops-execute', {
     method: 'POST',
@@ -1807,6 +1881,22 @@ try {
       check('fake searchProduct uses official pageSize limit', fakeOpenApiCalls
         .filter(call => call.path === '/open-api/goods/searchProduct')
         .every(call => Number(call.body?.pageSize) <= 10), true);
+      check('fake searchProduct strong readback carries an expected target identity', fakeOpenApiCalls
+        .filter(call => call.path === '/open-api/goods/searchProduct' && call.publishAttemptCount > 0)
+        .some(call => (
+          asArray(call.body?.spuNameList).includes('v-smoke-copy-product')
+          || asArray(call.body?.skcNameList).includes('sv-smoke-copy-product')
+          || asArray(call.body?.skuCodeList).includes('sku-smoke-copy-product')
+          || asArray(call.body?.skcSupplierCodeList).includes(taskStandardGoodsSn)
+          || asArray(call.body?.supplierSkuList).includes(taskStandardGoodsSn)
+        )), true);
+      const mismatchReadbackResponse = await fetch(`http://127.0.0.1:${fakeOpenApiPort}/open-api/goods/searchProduct`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json', 'x-lt-openKeyId': 'dummy-open-key-hl'},
+        body: JSON.stringify({pageNum: 1, pageSize: 10, skcNameList: ['sv-deliberately-wrong']}),
+      });
+      const mismatchReadback = await mismatchReadbackResponse.json();
+      check('fake searchProduct rejects wrong target identity', asArray(mismatchReadback?.info?.list).length, 0);
     }
   }
   const publishCall = fakeOpenApiCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').at(-1);
