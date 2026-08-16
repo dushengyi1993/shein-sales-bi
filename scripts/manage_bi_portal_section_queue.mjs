@@ -10,16 +10,28 @@ const DEFAULT_FILE = process.env.SHEIN_BI_PORTAL_SECTION_QUEUE_FILE
 const SECTION_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,79}$/;
 const QUEUE_AGING_INTERVAL_MS = 2 * 60 * 1_000;
 const DEFAULT_FAIL_BACKOFF_SECONDS = 60;
+// Durable per-section idempotency key: strict bounded safe characters so it
+// can never be interpreted as a section, path or shell argument.
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,120}$/;
+const COMPLETED_LEDGER_MAX_ENTRIES = 2_048;
+const COMPLETED_LEDGER_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
 function usage(message = '') {
   if (message) console.error(message);
   console.error(`Usage:
-  manage_bi_portal_section_queue.mjs enqueue --sections CSV [--priority N] [--reason TEXT] [--file PATH]
+  manage_bi_portal_section_queue.mjs enqueue --sections CSV [--priority N] [--reason TEXT] [--idempotency-key KEY] [--requeue-completed-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID [--file PATH]
   manage_bi_portal_section_queue.mjs fail --section NAME --lease-id ID [--error TEXT] [--backoff-seconds N] [--file PATH]
   manage_bi_portal_section_queue.mjs status [--file PATH]`);
   return 64;
+}
+
+function validateIdempotencyKey(value) {
+  const key = String(value || '').trim();
+  if (!key) return '';
+  if (!IDEMPOTENCY_KEY_PATTERN.test(key)) throw new TypeError('QUEUE_IDEMPOTENCY_KEY_INVALID');
+  return key;
 }
 
 function normalizeSection(value) {
@@ -37,8 +49,10 @@ function parseArgs(argv) {
     command,
     file: DEFAULT_FILE,
     sections: [],
+    requeueCompletedSections: [],
     priority: 50,
     reason: '',
+    idempotencyKey: '',
     section: '',
     leaseId: undefined,
     leaseSeconds: 2_700,
@@ -58,6 +72,10 @@ function parseArgs(argv) {
       options.sections.push(...next().split(',').map(normalizeSection));
     } else if (token === '--priority') options.priority = Number(next());
     else if (token === '--reason') options.reason = next();
+    else if (token === '--idempotency-key') options.idempotencyKey = validateIdempotencyKey(next());
+    else if (token === '--requeue-completed-sections') {
+      options.requeueCompletedSections.push(...next().split(',').map(normalizeSection));
+    }
     else if (token === '--section') options.section = normalizeSection(next());
     else if (token === '--lease-id') options.leaseId = next();
     else if (token === '--lease-seconds') options.leaseSeconds = Number(next());
@@ -78,6 +96,13 @@ function parseArgs(argv) {
     throw new TypeError('QUEUE_BACKOFF_SECONDS_INVALID');
   }
   if (command === 'enqueue' && !options.sections.length) throw new TypeError('QUEUE_SECTIONS_REQUIRED');
+  if (options.requeueCompletedSections.length) {
+    if (!options.idempotencyKey) throw new TypeError('QUEUE_REQUEUE_REQUIRES_IDEMPOTENCY_KEY');
+    const requested = new Set(options.sections);
+    if (options.requeueCompletedSections.some(section => !requested.has(section))) {
+      throw new TypeError('QUEUE_REQUEUE_NOT_REQUESTED');
+    }
+  }
   if (['complete', 'fail'].includes(command) && (!options.section || !options.leaseId)) {
     throw new TypeError('QUEUE_LEASE_TARGET_REQUIRED');
   }
@@ -90,6 +115,7 @@ function emptyQueue() {
     updatedAt: '',
     nextSequence: 0,
     entries: [],
+    completedIdempotency: [],
   };
 }
 
@@ -123,6 +149,7 @@ function normalizeQueue(queue) {
     const rerunPriority = Number(entry.rerunPriority ?? NaN);
     entry.rerunPriority = Number.isSafeInteger(rerunPriority) && rerunPriority >= 0 ? rerunPriority : null;
     entry.dependencyYield = Boolean(entry.dependencyYield);
+    entry.idempotencyKey = typeof entry.idempotencyKey === 'string' ? entry.idempotencyKey : '';
     const priority = Number(entry.priority ?? 50);
     entry.priority = Number.isSafeInteger(priority) && priority >= 0 ? priority : 50;
     if (!['pending', 'running'].includes(entry.status)) entry.status = 'pending';
@@ -139,6 +166,7 @@ function readQueue(file) {
       updatedAt: String(value?.updatedAt || ''),
       nextSequence: Number(value?.nextSequence || 0),
       entries: Array.isArray(value?.entries) ? value.entries : [],
+      completedIdempotency: Array.isArray(value?.completedIdempotency) ? value.completedIdempotency : [],
     });
   } catch (error) {
     if (error?.code === 'ENOENT') return emptyQueue();
@@ -179,9 +207,24 @@ export function enqueueSections(queue, {
   sections,
   priority = 50,
   reason = '',
+  idempotencyKey = '',
+  requeueCompletedSections = [],
   now = new Date(),
 } = {}) {
   const nowIso = now.toISOString();
+  const key = validateIdempotencyKey(idempotencyKey);
+  if (requeueCompletedSections.length && !key) {
+    throw new TypeError('QUEUE_REQUEUE_REQUIRES_IDEMPOTENCY_KEY');
+  }
+  const requestedSet = new Set((sections || []).map(normalizeSection));
+  const requeueSet = new Set(requeueCompletedSections.map(normalizeSection));
+  if (requeueCompletedSections.some(section => !requestedSet.has(normalizeSection(section)))) {
+    throw new TypeError('QUEUE_REQUEUE_NOT_REQUESTED');
+  }
+  // Expired/over-bound tombstones are trimmed BEFORE any lookup using the
+  // caller-provided now; the trimmed ledger must be persisted even when no
+  // entry changes (trim reports whether it mutated the document).
+  let mutated = trimCompletedIdempotency(queue, now);
   let nextSequence = Number.isSafeInteger(queue.nextSequence) && queue.nextSequence >= 0
     ? queue.nextSequence
     : 0;
@@ -190,9 +233,60 @@ export function enqueueSections(queue, {
     if (Number.isSafeInteger(sequence) && sequence > nextSequence) nextSequence = sequence;
   }
   queue.nextSequence = nextSequence;
+  const outcome = {
+    newlyQueued: [],
+    updatedRevision: [],
+    deduplicatedPending: [],
+    deduplicatedCompleted: [],
+    coalescedRerun: [],
+    requeuedCompleted: [],
+    supersededByExisting: [],
+  };
   for (const rawSection of sections || []) {
     const section = normalizeSection(rawSection);
+    const entryKey = key ? `${key}::${section}` : '';
     let entry = queue.entries.find(candidate => candidate.section === section);
+    // Cross-generation requeue conflict: when a requeue targets a section
+    // that already has an entry bound to a DIFFERENT nonempty idempotency
+    // key (a newer generation), the requeue is a strict no-op: the old
+    // tombstone is NOT deleted, the newer entry is NOT adopted/revisioned/
+    // rerun, and the section is classified supersededByExisting so the caller
+    // re-reads live state and defers to the newer generation instead of
+    // claiming this generation queued/done.  Same key or no entry requeue
+    // normally below.
+    if (requeueSet.has(section) && entryKey && entry?.idempotencyKey && entry.idempotencyKey !== entryKey) {
+      outcome.supersededByExisting.push(section);
+      continue;
+    }
+    // A narrow requeue of invalid completed sections: under the same lock and
+    // mutation, remove ONLY the matching ${key}::section tombstones for the
+    // listed sections so the normal enqueue below recreates their entries;
+    // valid tombstones stay untouched.  No manual deletes.
+    if (requeueSet.has(section) && entryKey && Array.isArray(queue.completedIdempotency)) {
+      const before = queue.completedIdempotency.length;
+      queue.completedIdempotency = queue.completedIdempotency.filter(record => record.idempotencyKey !== entryKey);
+      if (queue.completedIdempotency.length !== before) {
+        outcome.requeuedCompleted.push(section);
+        mutated = true;
+      }
+    }
+    // A NON-expired completed tombstone check MUST precede the existing-entry
+    // logic: replaying a completed G1 is a strict no-op even when the current
+    // entry is a newer G2 request -- G2's key/revision/status stay untouched
+    // and the old key is never adopted.  Only an expired/trimmed tombstone
+    // (declared 30d semantics) makes the request eligible again.
+    if (entryKey && Array.isArray(queue.completedIdempotency)
+      && queue.completedIdempotency.some(record => record.idempotencyKey === entryKey)) {
+      outcome.deduplicatedCompleted.push(section);
+      continue;
+    }
+    // Durable per-section idempotency: an existing pending/running entry with
+    // the exact same key is a strict no-op (no revision bump, no rerun, no
+    // lease/backoff reset).
+    if (entry && entryKey && entry.idempotencyKey === entryKey) {
+      outcome.deduplicatedPending.push(section);
+      continue;
+    }
     if (!entry) {
       queue.nextSequence += 1;
       entry = {
@@ -204,6 +298,7 @@ export function enqueueSections(queue, {
         rerun: false,
         rerunPriority: null,
         dependencyYield: false,
+        ...(entryKey ? {idempotencyKey: entryKey} : {}),
         status: 'pending',
         requestedAt: nowIso,
         updatedAt: nowIso,
@@ -215,14 +310,24 @@ export function enqueueSections(queue, {
         lastError: '',
       };
       queue.entries.push(entry);
+      outcome.newlyQueued.push(section);
+      mutated = true;
     } else {
+      // A legacy entry without a key, or an entry bound to a different key,
+      // keeps the old behavior; the entry adopts the new key so later
+      // duplicates of this request deduplicate correctly.
+      if (entryKey && entry.idempotencyKey !== entryKey) {
+        entry.idempotencyKey = entryKey;
+        mutated = true;
+      }
       entry.priority = Math.min(Number(entry.priority ?? priority), priority);
       // One running lease needs at most one coalesced rerun. Repeated events
       // during the same build update its audit metadata without creating an
       // unbounded revision chase that can starve dependent homepage sections.
       const alreadyHasRerun = entry.status === 'running' && entry.rerun === true;
+      const revisionBefore = Number(entry.requestRevision || 0);
       if (!alreadyHasRerun) {
-        entry.requestRevision = (Number(entry.requestRevision || 0) || 0) + 1;
+        entry.requestRevision = revisionBefore + 1;
       }
       entry.updatedAt = nowIso;
       // An explicit new request supersedes failure backoff. The revision
@@ -238,10 +343,26 @@ export function enqueueSections(queue, {
           : Math.min(Number(entry.rerunPriority), priority);
       }
       if (entry.status !== 'running') entry.status = 'pending';
+      // Coalescing: a repeated request on an already-rerun running entry does
+      // not increase the numeric revision -- classify it explicitly instead of
+      // claiming an updatedRevision.
+      if (alreadyHasRerun && Number(entry.requestRevision) === revisionBefore) {
+        outcome.coalescedRerun.push(section);
+      } else {
+        outcome.updatedRevision.push(section);
+      }
+      mutated = true;
     }
     if (reason && !entry.reasons.includes(reason)) entry.reasons.push(reason.slice(0, 300));
   }
-  return queue;
+  return {
+    queue,
+    mutated,
+    ...outcome,
+    // Legacy aggregate kept for backward compatibility; the structured
+    // arrays above carry the exact semantics.
+    deduplicated: [...outcome.deduplicatedPending, ...outcome.deduplicatedCompleted],
+  };
 }
 
 export function claimNext(queue, {
@@ -344,7 +465,34 @@ export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) 
     return false;
   }
   queue.entries.splice(index, 1);
+  if (entry.idempotencyKey) {
+    // Final completion tombstones the durable idempotency key so a later
+    // Portal restart with the same request is a no-op instead of a
+    // re-enqueue of a fresh revision.
+    queue.completedIdempotency = Array.isArray(queue.completedIdempotency) ? queue.completedIdempotency : [];
+    queue.completedIdempotency.push({
+      idempotencyKey: entry.idempotencyKey,
+      section: entry.section,
+      completedAt: now.toISOString(),
+    });
+    trimCompletedIdempotency(queue, now);
+  }
   return true;
+}
+
+function trimCompletedIdempotency(queue, now = new Date()) {
+  const nowMillis = now.getTime();
+  const records = Array.isArray(queue.completedIdempotency) ? queue.completedIdempotency : [];
+  const current = (records || []).filter(record => {
+    const at = Date.parse(String(record?.completedAt || ''));
+    return Number.isFinite(at) && nowMillis - at <= COMPLETED_LEDGER_MAX_AGE_MS;
+  });
+  current.sort((left, right) => Date.parse(String(right.completedAt || '')) - Date.parse(String(left.completedAt || '')));
+  queue.completedIdempotency = current.slice(0, COMPLETED_LEDGER_MAX_ENTRIES);
+  // Whether any ledger record was actually removed (expired or over the count
+  // bound); a caller that persisted nothing else must still write the trimmed
+  // ledger so expired tombstones are durably removed.
+  return queue.completedIdempotency.length !== (records || []).length;
 }
 
 export function failClaim(queue, {
@@ -409,9 +557,19 @@ export function main(argv = process.argv.slice(2)) {
   }
   const queue = readQueue(options.file);
   if (options.command === 'enqueue') {
-    enqueueSections(queue, options);
-    const saved = writeQueue(options.file, queue);
-    console.log(JSON.stringify(statusPayload(saved, options.file)));
+    const outcome = enqueueSections(queue, options);
+    const saved = outcome.mutated ? writeQueue(options.file, outcome.queue) : outcome.queue;
+    console.log(JSON.stringify({
+      ...statusPayload(saved, options.file),
+      newlyQueued: outcome.newlyQueued,
+      updatedRevision: outcome.updatedRevision,
+      deduplicatedPending: outcome.deduplicatedPending,
+      deduplicatedCompleted: outcome.deduplicatedCompleted,
+      coalescedRerun: outcome.coalescedRerun,
+      requeuedCompleted: outcome.requeuedCompleted,
+      supersededByExisting: outcome.supersededByExisting,
+      deduplicated: outcome.deduplicated,
+    }));
     return 0;
   }
   if (options.command === 'claim') {
