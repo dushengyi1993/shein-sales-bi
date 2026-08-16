@@ -518,4 +518,33 @@ match('midnight and deadline checked before every POST', executor,
   /assertInventoryWriteWindow\(plan\.date\)[\s\S]*submitDurableInventoryWriteOnce/,
   'a stale runDate or exhausted safety window must fail before a new request');
 
+// ---------------------------------------------------------------------------
+// Per-row catch scope and live pendingIntents key invariant.  Production
+// 2026.08.16.10 hit `ReferenceError: activeIntent is not defined` at the row
+// catch because the declaration lived inside the inner try; the declaration
+// must stay in the outer per-row scope so pre-durable errors record `blocked`
+// and durable errors record `suspicious_write_attempted`.
+// ---------------------------------------------------------------------------
+match('catch classifies durable vs pre-durable errors', executor,
+  /if \(activeIntent && error\?\.inventoryIntentDurable === true\)[\s\S]*state: 'suspicious_write_attempted'[\s\S]*state: 'blocked'/,
+  'pre-durable failures record blocked; durable failures record suspicious_write_attempted in the same catch');
+match('in-run intent insert uses the intentId key', executor,
+  /pendingIntents\.set\(activeIntent\.intentId, activeIntent\)/,
+  'the live map must share the journal load/delete intentId key');
+noMatch('in-run intent map never keyed by logicalActionKey', executor,
+  /pendingIntents\.set\(logicalActionKey, activeIntent\)/,
+  'keying the live map by logicalActionKey makes the intentId deletes no-ops');
+check('activeIntent is declared outside the per-row try block', () => {
+  const loopAt = executor.indexOf('for (const row of unresolvedIntents.length ? [] : rows) {');
+  const outerTryAt = executor.indexOf('\n  try {', loopAt);
+  const declarationAt = executor.indexOf('let activeIntent = null;', loopAt);
+  assert.ok(loopAt >= 0 && outerTryAt > loopAt && declarationAt > loopAt,
+    'the execution loop, per-row try and declaration must exist');
+  assert.ok(declarationAt < outerTryAt,
+    'activeIntent must be declared before the per-row try: a catch block cannot see let bindings from its try block');
+  const insertAt = executor.indexOf('pendingIntents.set(activeIntent.intentId, activeIntent)');
+  assert.ok(insertAt > declarationAt && insertAt < executor.indexOf('} catch (error) {', outerTryAt),
+    'the map insert stays inside the same per-row scope as the declaration');
+});
+
 console.log(JSON.stringify({ok: true, checks}, null, 2));

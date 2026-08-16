@@ -422,6 +422,12 @@ for (const row of unresolvedIntents.length ? [] : rows) {
     targetUsableInventory: Number(row.targetUsableInventory),
     state: 'planned',
   };
+  // Per-row catch scope: activeIntent must be declared outside the per-row
+  // try.  A catch block cannot see `let` bindings declared inside its try
+  // block, so an error before the durable intent would otherwise raise
+  // `ReferenceError: activeIntent is not defined` instead of recording
+  // `blocked` (production 2026.08.16.10 regression).
+  let activeIntent = null;
   try {
     const et = etByKey.get(String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase());
     const etQty = Number(et?.current_sellable_quantity ?? et?.et_estimated_available_qty);
@@ -510,7 +516,6 @@ for (const row of unresolvedIntents.length ? [] : rows) {
     }
     const lockFile = path.join(ROOT, 'state', 'locks', `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
     const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
-    let activeIntent = null;
     try {
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
@@ -644,7 +649,10 @@ for (const row of unresolvedIntents.length ? [] : rows) {
       // durable lock which recovery must read back; it can never invent a new
       // key or submit a second overwrite.
       assertInventoryWriteWindow(plan.date);
-      pendingIntents.set(logicalActionKey, activeIntent);
+      // The live map shares the journal's intentId key (load and every delete
+      // path use intentId), so terminal outcomes below actually release the
+      // entry instead of leaving a stale pending record behind.
+      pendingIntents.set(activeIntent.intentId, activeIntent);
       const submission = await submitDurableInventoryWriteOnce({
         journalFile,
         intent: activeIntent,
