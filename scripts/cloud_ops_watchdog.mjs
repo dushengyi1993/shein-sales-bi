@@ -20,6 +20,7 @@ import {
 } from '../lib/cloud_watchdog_issue_collapse.mjs';
 import {assessSessionManagerManualRecovery} from '../lib/cloud_manual_login_recovery.mjs';
 import {inspectReleaseSourceState} from './check_release_source_state.mjs';
+import {validateDailyOperatingRefresh} from './validate_daily_operating_refresh.mjs';
 import {
   CLOUD_ALWAYS_RUNNING_UNITS,
   CLOUD_AUXILIARY_UNITS,
@@ -115,6 +116,13 @@ function bjDateKey(now = new Date()) {
   }).format(now);
 }
 
+function previousBjDateKey(now = new Date()) {
+  const parts = bjDateKey(now).split('-').map(Number);
+  const previous = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], 12));
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  return previous.toISOString().slice(0, 10);
+}
+
 function laterThanServiceExit(completedAt, status) {
   const completed = parseDate(completedAt)?.getTime();
   const exited = parseDate(status?.ExecMainExitTimestamp || status?.StateChangeTimestamp)?.getTime();
@@ -152,20 +160,22 @@ export function isMorningChainTerminalFailure(latestState, unitState) {
   return ['failed', 'inactive', 'dead'].includes(activeState);
 }
 
-export function assessBusinessRecovery(unit, status, {morningMarker, orderRecheckState} = {}) {
+export function assessBusinessRecovery(unit, status, {morningMarker, morningMarkerEvidenceOk = false, orderRecheckState} = {}) {
   const morningUnits = new Set([
     'shein-bi-cloud-morning-chain.service',
   ]);
-  // Only an actual `done` morning-links-ready marker may resolve a failed
-  // service exit.  A `warning` marker (ok=true at the pipeline layer but not a
-  // completion) or any other non-done status must NEVER count as recovery:
-  // the failed unit stays visible until real done evidence exists.
+  // Only the final daily-operating-refresh marker with reverified immutable
+  // evidence may resolve a failed service exit. Earlier links/supplement
+  // markers are checkpoints, never proof that inventory completed.
   if (morningUnits.has(unit)
     && morningMarker?.runDate === bjDateKey()
+    && morningMarker?.businessDate === previousBjDateKey()
+    && morningMarker?.stage === 'daily-operating-refresh'
     && String(morningMarker?.status || '') === 'done'
     && morningMarker?.ok === true
+    && morningMarkerEvidenceOk === true
     && laterThanServiceExit(morningMarker?.completedAt, status)) {
-    return {recovered: true, reason: 'morning_links_ready_after_unit_exit', completedAt: morningMarker.completedAt};
+    return {recovered: true, reason: 'daily_operating_refresh_after_unit_exit', completedAt: morningMarker.completedAt};
   }
   if (unit === 'shein-bi-cloud-order-closure.service'
     && orderRecheckState?.ok === true
@@ -537,7 +547,34 @@ async function main() {
     for (const message of productReconciliationHealth.messages) issues.push(`商品 OpenAPI 对账需处理：${message}`);
   }
   const serviceExitAcks = await readServiceExitAcks();
-  const morningReadyMarker = await readJsonIfExists(path.join(ROOT, 'state', 'pipeline-markers', 'morning-links-ready.latest.json'));
+  const today = bjDateKey();
+  const expectedBusinessDate = previousBjDateKey();
+  const morningReadyMarker = await readJsonIfExists(path.join(ROOT, 'state', 'pipeline-markers', today, 'daily-operating-refresh.json'));
+  let morningReadyEvidenceOk = false;
+  if (morningReadyMarker?.runDate === today
+    && morningReadyMarker?.businessDate === expectedBusinessDate
+    && morningReadyMarker?.stage === 'daily-operating-refresh'
+    && morningReadyMarker?.status === 'done') {
+    try {
+      await validateDailyOperatingRefresh({
+        root: ROOT,
+        markerRoot: path.join(ROOT, 'state', 'pipeline-markers'),
+        stateDir: process.env.SHEIN_BI_MORNING_CHAIN_STATE_DIR || path.join(ROOT, 'state', 'cloud_morning_chain'),
+        inventoryRuntimeRoot: process.env.SHEIN_BI_INVENTORY_RUNTIME_ROOT || '/srv/shein-bi/runtime/daily-inventory-replenishment',
+        runDate: today,
+        businessDate: expectedBusinessDate,
+      });
+      morningReadyEvidenceOk = true;
+    } catch {
+      morningReadyEvidenceOk = false;
+    }
+  }
+  if (morningReadyMarker?.runDate === bjDateKey()
+    && morningReadyMarker?.stage === 'daily-operating-refresh'
+    && morningReadyMarker?.status === 'done'
+    && morningReadyEvidenceOk !== true) {
+    issues.push('晨链最终证据失效：daily-operating-refresh 标记为 done，但受管 evidence 的文件/大小/SHA-256 回验不一致');
+  }
   const morningChainLatest = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_morning_chain', 'latest.json'));
   const orderRecheckStateForServices = await readJsonIfExists(path.join(ROOT, 'state', 'order_status_recheck_last.json'));
   const sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
@@ -581,6 +618,7 @@ async function main() {
     const isSessionManager = unit === 'shein-bi-cloud-session-manager.service';
     const businessRecovery = assessBusinessRecovery(unit, status, {
       morningMarker: morningReadyMarker,
+      morningMarkerEvidenceOk: morningReadyEvidenceOk,
       orderRecheckState: orderRecheckStateForServices,
     });
     status.businessRecovery = businessRecovery;

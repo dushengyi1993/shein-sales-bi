@@ -49,8 +49,8 @@ assert.match(chain, /owning service Restart resumes the same active run context/
 // ---------------------------------------------------------------------------
 // Source contracts: absolute run deadline handed to every per-store wrapper
 // ---------------------------------------------------------------------------
-assert.match(chain, /export SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH="\$RUN_DEADLINE_EPOCH"/,
-  'the coordinator must export its absolute run deadline so every per-store browser wrapper inherits it');
+assert.match(chain, /export SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH="\$PRE_INVENTORY_DEADLINE_EPOCH"/,
+  'all pre-inventory browser work must stop at the inventory-reserve boundary');
 assert.match(chain, /RUN_DEADLINE_EPOCH="\$\{SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH:-\$\(\(RUN_STARTED_EPOCH \+ RUN_BUDGET_SEC\)\)\}"\n/,
   'the persisted first-start absolute deadline must override the derived budget on every start');
 assert.match(chain, /EXPECTED_BUSINESS_DATE="\$\(TZ="\$TZ_NAME" date -d "\$RUN_DATE - 1 day" \+%F\)"/,
@@ -59,6 +59,17 @@ assert.match(chain, /SESSION_RECOVERY_BUDGET_SEC="\$\{SHEIN_BI_MORNING_SESSION_R
   'morning session recovery must have a bounded configurable budget');
 assert.match(chain, /LINK_COLLECTION_RESERVE_SEC="\$\{SHEIN_BI_MORNING_LINK_COLLECTION_RESERVE_SEC:-7200\}"/,
   'morning session recovery must reserve enough internal run budget for link collection');
+assert.match(chain, /INVENTORY_RESERVE_SEC="\$\{SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC:-4500\}"/,
+  'the coordinator must reserve a real stock-refresh plus inventory-guard window');
+assert.match(chain, /PRE_INVENTORY_DEADLINE_EPOCH=\$\(\(RUN_DEADLINE_EPOCH - INVENTORY_RESERVE_SEC\)\)/);
+assert.match(chain, /timeout --signal=TERM --kill-after=30s "\$\{remaining\}s" bash scripts\/cloud_daily_refresh\.sh/,
+  'supplements must be forcibly bounded by the pre-inventory deadline');
+assert.match(chain, /--deadline-epoch "\$RUN_DEADLINE_EPOCH"/,
+  'the inventory host-heavy lock and child must inherit the absolute run deadline');
+assert.match(chain, /pipeline_marker_done "inventory-started"/,
+  'a restart after entering the reserve must resume inventory instead of reapplying the pre-inventory cutoff');
+assert.match(chain, /"\$INVENTORY_PLAN" "\$INVENTORY_RESULT"/,
+  'the final marker must directly bind the real inventory plan and result');
 assert.match(chain, /budget_deadline=\$\(\(now \+ SESSION_RECOVERY_BUDGET_SEC\)\)/);
 assert.match(chain, /reserve_deadline=\$\(\(RUN_DEADLINE_EPOCH - LINK_COLLECTION_RESERVE_SEC\)\)/);
 assert.match(chain, /--check-only/, 'the gate must reuse the session helper strong-evidence predicate');
@@ -314,13 +325,38 @@ if (out) {
 }
 process.exit(0);
 EOF
-for stub in cloud_daily_refresh cloud_openapi_stock_refresh run_host_heavy_job cloud_daily_inventory_replenishment_guard; do
+for stub in cloud_daily_refresh cloud_openapi_stock_refresh; do
   cat > "\$SB/scripts/\$stub.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
   chmod +x "\$SB/scripts/\$stub.sh"
 done
+cat > "\$SB/scripts/run_host_heavy_job.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while ((\$#)); do
+  if [[ "\$1" == "--" ]]; then shift; break; fi
+  shift
+done
+exec "\$@"
+EOF
+cat > "\$SB/scripts/cloud_daily_inventory_replenishment_guard.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+R="\$SHEIN_BI_INVENTORY_RUN_DATE"
+B="\$SHEIN_BI_INVENTORY_BUSINESS_DATE"
+IR="\$SHEIN_BI_INVENTORY_RUNTIME_ROOT"
+mkdir -p "\$IR/plans" "\$IR/results"
+PLAN="\$IR/plans/daily-inventory-replenishment-\$R.json"
+RESULT="\$IR/results/daily-inventory-replenishment-\$R.json"
+printf '{"date":"%s","payloadHash":"%064d","executable":true}\n' "\$R" 0 > "\$PLAN"
+printf '{"planHash":"%064d","execute":true,"executionMode":"automatic","results":[]}\n' 0 > "\$RESULT"
+node "\$SHEIN_BI_ROOT/scripts/pipeline_marker.mjs" write --stage daily-inventory-guard \
+  --date "\$R" --business-date "\$B" --status done --message complete \
+  --evidence "\$PLAN" --evidence "\$RESULT" >/dev/null
+EOF
+chmod +x "\$SB/scripts/run_host_heavy_job.sh" "\$SB/scripts/cloud_daily_inventory_replenishment_guard.sh"
 cat > "\$SB/scripts/cloud_link_business_sync.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "$0" >> "$SYNC_COUNT_FILE"
@@ -402,6 +438,7 @@ export SHEIN_BI_MORNING_CHAIN_LOG_DIR="\$SB/logs"
 export SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC=0
 export SHEIN_BI_MORNING_SESSION_DEFER_STATE="\$SB/runtime/host-scheduler/session-manager.latest.json"
 export SHEIN_BI_MORNING_SESSION_ALERT_FILE="\$SB/state/cloud_ops_alerts/session-manager-last.json"
+export SHEIN_BI_INVENTORY_RUNTIME_ROOT="\$SB/state/inventory-runtime"
 
 RUN_DATE="\$(TZ=Asia/Shanghai date +%F)"
 CHAIN_STATE="\$SB/state/cloud_morning_chain"
@@ -529,6 +566,7 @@ export STUB_SESSION_MODE=success
 export SHEIN_BI_MORNING_RUN_BUDGET_SEC=1000
 export SHEIN_BI_MORNING_SESSION_RECOVERY_BUDGET_SEC=900
 export SHEIN_BI_MORNING_LINK_COLLECTION_RESERVE_SEC=600
+export SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=300
 rm -rf "\$SB/outputs" "\$SB/state/cloud_morning_chain" "\$SB/state/pipeline-markers"
 mkdir -p "\$SB/state/cloud_morning_chain"
 T4_BEFORE="\$(date +%s)"
@@ -607,6 +645,7 @@ export STUB_SESSION_MODE=success
 export SHEIN_BI_MORNING_STORE_RETRY_DELAY_SEC=0
 export SHEIN_BI_MORNING_SESSION_RECOVERY_BUDGET_SEC=900
 export SHEIN_BI_MORNING_LINK_COLLECTION_RESERVE_SEC=600
+export SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=300
 INJECTED_DEADLINE=\$(( $(date +%s) + 2500 ))
 rm -rf "\$SB/outputs" "\$SB/state/cloud_morning_chain" "\$SB/state/pipeline-markers"
 mkdir -p "\$SB/state/cloud_morning_chain"
@@ -615,8 +654,9 @@ SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH="\$INJECTED_DEADLINE" bash "\$CHAIN" all > "
 RC=\$?
 if [[ "\$RC" -ne 0 ]]; then echo "FAIL[t7 exit=\$RC]"; cat "\$SB/t7.out"; exit 1; fi
 SEEN="\$(cat "\$DEADLINE_EXPORT_LOG")"
-if [[ "\$SEEN" != "\$INJECTED_DEADLINE" ]]; then
-  echo "FAIL[t7 exported deadline=\$SEEN want=\$INJECTED_DEADLINE]"
+EXPECTED_PRE_INVENTORY_DEADLINE=\$(( INJECTED_DEADLINE - 300 ))
+if [[ "\$SEEN" != "\$EXPECTED_PRE_INVENTORY_DEADLINE" ]]; then
+  echo "FAIL[t7 exported deadline=\$SEEN want=\$EXPECTED_PRE_INVENTORY_DEADLINE]"
   exit 1
 fi
 sleep 1
@@ -628,8 +668,8 @@ SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH="\$INJECTED_DEADLINE" bash "\$CHAIN" all > "
 RC=\$?
 if [[ "\$RC" -ne 0 ]]; then echo "FAIL[t7b exit=\$RC]"; cat "\$SB/t7b.out"; exit 1; fi
 SEEN2="\$(cat "\$DEADLINE_EXPORT_LOG")"
-if [[ "\$SEEN2" != "\$INJECTED_DEADLINE" ]]; then
-  echo "FAIL[t7b deadline was reset: seen=\$SEEN2 want=\$INJECTED_DEADLINE]"
+if [[ "\$SEEN2" != "\$EXPECTED_PRE_INVENTORY_DEADLINE" ]]; then
+  echo "FAIL[t7b deadline was reset: seen=\$SEEN2 want=\$EXPECTED_PRE_INVENTORY_DEADLINE]"
   exit 1
 fi
 echo 'PASS[t7 first-start absolute deadline injected and not reset across starts]'

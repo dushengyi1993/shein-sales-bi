@@ -1,0 +1,316 @@
+#!/usr/bin/env node
+
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+
+const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const DOMAINS = Object.freeze(['shein_business_domains', 'shein_links']);
+
+function parseArgs(argv) {
+  const args = {
+    root: process.env.SHEIN_BI_ROOT || SCRIPT_ROOT,
+    markerRoot: process.env.SHEIN_BI_PIPELINE_MARKER_ROOT || '',
+    stateDir: process.env.SHEIN_BI_MORNING_CHAIN_STATE_DIR || '',
+    inventoryRuntimeRoot: process.env.SHEIN_BI_INVENTORY_RUNTIME_ROOT || '/srv/shein-bi/runtime/daily-inventory-replenishment',
+    runDate: '',
+    businessDate: '',
+    inventoryOnly: false,
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    const next = () => {
+      index += 1;
+      if (index >= argv.length) throw new Error(`missing value for ${token}`);
+      return argv[index];
+    };
+    if (token === '--root') args.root = next();
+    else if (token === '--marker-root') args.markerRoot = next();
+    else if (token === '--state-dir') args.stateDir = next();
+    else if (token === '--inventory-runtime-root') args.inventoryRuntimeRoot = next();
+    else if (token === '--run-date') args.runDate = next();
+    else if (token === '--business-date') args.businessDate = next();
+    else if (token === '--inventory-only') args.inventoryOnly = true;
+    else throw new Error(`unknown argument: ${token}`);
+  }
+  args.root = path.resolve(args.root);
+  args.markerRoot = path.resolve(args.markerRoot || path.join(args.root, 'state', 'pipeline-markers'));
+  args.stateDir = path.resolve(args.stateDir || path.join(args.root, 'state', 'cloud_morning_chain'));
+  args.inventoryRuntimeRoot = path.resolve(args.inventoryRuntimeRoot);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(args.runDate) || !/^\d{4}-\d{2}-\d{2}$/.test(args.businessDate)) {
+    throw new Error('runDate and businessDate must be YYYY-MM-DD');
+  }
+  const previous = new Date(`${args.runDate}T12:00:00Z`);
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  if (args.businessDate !== previous.toISOString().slice(0, 10)) throw new Error('businessDate must equal runDate minus one calendar day');
+  return args;
+}
+
+const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
+const stable = input => {
+  if (Array.isArray(input)) return input.map(stable);
+  if (!input || typeof input !== 'object') return input;
+  return Object.fromEntries(Object.keys(input).sort().map(key => [key, stable(input[key])]));
+};
+const stableHash = value => crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
+const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
+const rowKey = row => `${String(row?.storeKey || '').toUpperCase()}::${String(row?.skc || '')}::${String(row?.skuCode || '')}`;
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+function storedPath(root, value) {
+  const candidate = String(value || '');
+  return path.resolve(path.isAbsolute(candidate) ? candidate : path.join(root, candidate));
+}
+
+async function verifyEvidenceRecords(entries, expectedFiles, root, label) {
+  assert(Array.isArray(entries), `${label} evidence is not an array`);
+  const expected = expectedFiles.map(file => path.resolve(file)).sort();
+  const actual = entries.map(entry => storedPath(root, entry?.path)).sort();
+  assert(JSON.stringify(actual) === JSON.stringify(expected), `${label} evidence path set mismatch`);
+  for (const entry of entries) {
+    const file = storedPath(root, entry.path);
+    const stat = await fs.lstat(file);
+    assert(stat.isFile() && !stat.isSymbolicLink(), `${label} evidence is not a regular file: ${file}`);
+    assert(Number(entry.bytes) === stat.size, `${label} evidence size mismatch: ${file}`);
+    assert(String(entry.sha256 || '') === await fileHash(file), `${label} evidence hash mismatch: ${file}`);
+  }
+}
+
+async function validateMorningEvidence({root, businessDate, file, enabledStores}) {
+  const document = await readJson(file);
+  assert(document?.schemaVersion === 'shein-morning-resume-evidence/v1', 'morning evidence schema mismatch');
+  assert(document?.ok === true && document?.date === businessDate, 'morning evidence date/status mismatch');
+  assert(document?.expectedStoreCount === 19, 'morning evidence expectedStoreCount must be 19');
+  assert(document?.artifactCount === 38, 'morning evidence artifactCount must be 38');
+  const stores = [...new Set((document?.stores || []).map(value => String(value).toUpperCase()))].sort();
+  assert(JSON.stringify(stores) === JSON.stringify(enabledStores), 'morning evidence 19-store set mismatch');
+  assert(JSON.stringify([...(document?.domains || [])].sort()) === JSON.stringify([...DOMAINS]), 'morning evidence domain set mismatch');
+  const artifacts = Array.isArray(document?.artifacts) ? document.artifacts : [];
+  assert(artifacts.length === 38, 'morning evidence must contain 38 store/domain artifacts');
+  const seen = new Set();
+  for (const artifact of artifacts) {
+    const storeKey = String(artifact?.storeKey || '').toUpperCase();
+    const domain = String(artifact?.domain || '');
+    const key = `${storeKey}::${domain}`;
+    assert(enabledStores.includes(storeKey) && DOMAINS.includes(domain) && !seen.has(key), `morning evidence duplicate/unknown artifact: ${key}`);
+    seen.add(key);
+    const expected = path.resolve(root, 'outputs', domain, storeKey, `${businessDate}.json`);
+    const actual = storedPath(root, artifact?.path);
+    assert(actual === expected, `morning evidence artifact path mismatch: ${key}`);
+    const stat = await fs.lstat(actual);
+    assert(stat.isFile() && !stat.isSymbolicLink(), `morning evidence artifact is not a regular file: ${key}`);
+    assert(Number(artifact.bytes) === stat.size, `morning evidence artifact size mismatch: ${key}`);
+    assert(String(artifact.sha256 || '') === await fileHash(actual), `morning evidence artifact hash mismatch: ${key}`);
+    const payload = await readJson(actual);
+    assert(payload?.ok === true && payload?.date === businessDate, `morning evidence payload date/status mismatch: ${key}`);
+    assert(String(payload?.store?.storeKey || '').toUpperCase() === storeKey, `morning evidence payload store mismatch: ${key}`);
+  }
+  assert(seen.size === 38, 'morning evidence store/domain coverage is incomplete');
+}
+
+function expectedPlanHash(plan) {
+  return stableHash({
+    schemaVersion: plan.schemaVersion,
+    date: plan.date,
+    policyVersion: plan.policyVersion,
+    actionable: plan.actionable,
+    lowEtAllocations: plan.lowEtAllocations,
+    ...(plan.detailRefreshTargets ? {detailRefreshTargets: plan.detailRefreshTargets} : {}),
+    sourceEvidence: Array.isArray(plan.sourceEvidence)
+      ? plan.sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence)
+      : [],
+    ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
+  });
+}
+
+function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now()) {
+  const evidence = Array.isArray(plan?.sourceEvidence) ? plan.sourceEvidence : [];
+  const et = evidence.filter(row => row?.store === 'ET');
+  const links = evidence.filter(row => row?.store === 'BI_LINKS');
+  const openApi = evidence.filter(row => enabledStores.includes(String(row?.store || '').toUpperCase()));
+  assert(et.length === 1 && links.length === 1 && openApi.length === 19, 'inventory plan sourceEvidence must contain ET, BI_LINKS and 19 unique OpenAPI stores');
+  assert(new Set(openApi.map(row => String(row.store).toUpperCase())).size === 19, 'inventory plan OpenAPI sourceEvidence store set is duplicate/incomplete');
+  assert(Number(et[0].totalEtRows) > 0 && Number(et[0].matchedCurrentDayEtRows) > 0, 'inventory plan ET sourceEvidence has no matched current-day rows');
+  const now = Number(referenceTime);
+  assert(Number.isFinite(now), 'inventory plan sourceEvidence reference time is invalid');
+  for (const row of evidence) {
+    const fetchedAt = Date.parse(String(row?.fetchedAt || ''));
+    assert(Number.isFinite(fetchedAt) && fetchedAt <= now + 15 * 60_000, `inventory plan sourceEvidence timestamp invalid: ${row?.store || ''}`);
+    const maxHours = row.store === 'ET'
+      ? Number(policy.maxBiSnapshotAgeHours || 4)
+      : row.store === 'BI_LINKS'
+        ? Number(plan?.executionConstraints?.decreaseOnly ? policy?.lowEtFastGuard?.maxLinksSnapshotAgeHours || policy.maxLinksSnapshotAgeHours || 4 : policy.maxLinksSnapshotAgeHours || 4)
+        : Number(policy.maxOpenApiSnapshotAgeHours || 2);
+    assert((now - fetchedAt) / 3_600_000 <= maxHours, `inventory plan sourceEvidence is stale: ${row?.store || ''}`);
+    assert(typeof row.file === 'string' && row.file.length > 0, `inventory plan sourceEvidence file missing: ${row?.store || ''}`);
+  }
+  for (const row of openApi) {
+    assert(Number(row.stockFailedChunkCount) === 0, `inventory plan OpenAPI source has failed stock chunks: ${row.store}`);
+  }
+  assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
+}
+
+function resultRowIsSafe(row, planRow, plan, result, policy) {
+  if (!row || !planRow || rowKey(row) !== rowKey(planRow)) return false;
+  const target = Number(planRow.targetUsableInventory);
+  if (!Number.isInteger(target) || Number(row.targetUsableInventory) !== target || row.ruleClass !== planRow.ruleClass) return false;
+  const before = Number(row?.before?.totalUsableInventory);
+  if (row.state === 'updated_readback_matched') {
+    const writes = Array.isArray(row.writes) ? row.writes : [];
+    const logicalActionKey = stableHash({
+      runDate: plan.date,
+      store: planRow.storeKey,
+      skc: planRow.skc,
+      sku: planRow.skuCode,
+      target,
+      actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+      policyVersion: plan.policyVersion,
+      authorizationId: result.authorizationId || '',
+    });
+    return Number(row?.after?.totalUsableInventory) === target
+      && row.logicalActionKey === logicalActionKey
+      && writes.length > 0
+      && writes.every(write => write?.idempotencyKey === `bi-inv-${logicalActionKey.slice(0, 42)}`
+        && write?.requestPayloadHash === stableHash(write?.request)
+        && write?.request?.pathname === '/open-api/stock/change-inventory/v2'
+        && write?.request?.method === 'POST'
+        && write?.request?.body?.updateSkuInventoryQuantityRequests?.length === 1
+        && write.request.body.updateSkuInventoryQuantityRequests[0]?.idempotencyKey === write.idempotencyKey
+        && write.request.body.updateSkuInventoryQuantityRequests[0]?.skuCode === planRow.skuCode
+        && write.request.body.updateSkuInventoryQuantityRequests[0]?.invType === 'VI'
+        && write.request.body.updateSkuInventoryQuantityRequests[0]?.changeType === 'OVERWRITE'
+        && Number(write.request.body.updateSkuInventoryQuantityRequests[0]?.changeQuantity) === Number(write.overwrite)
+        && String(write?.code) === '0'
+        && write?.success === true);
+  }
+  if (row.state === 'skipped_target_already_matched') return before === target;
+  if (row.state === 'skipped_safety_no_increase') return plan?.executionConstraints?.decreaseOnly === true && Number.isFinite(before) && before < target;
+  if (row.state === 'skipped_within_scarcity_band') {
+    return row.ruleClass === 'recent_sale_scarcity'
+      && Number.isFinite(before)
+      && before >= Number(policy?.recentSaleScarcity?.refillWhenBelow ?? 5)
+      && before <= Number(policy?.recentSaleScarcity?.capWhenAbove ?? 10);
+  }
+  if (row.state === 'skipped_recovered') {
+    return row.ruleClass === 'legacy_virtual_inventory_top_up'
+      && Number.isFinite(before)
+      && before > Number(policy?.triggerUsableInventoryAtOrBelow ?? 20);
+  }
+  return false;
+}
+
+export async function validateInventoryArtifacts({root, markerRoot, inventoryRuntimeRoot, runDate, businessDate, enabledStores, requireMarker = true}) {
+  const previous = new Date(`${runDate}T12:00:00Z`);
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  assert(businessDate === previous.toISOString().slice(0, 10), 'businessDate must equal runDate minus one calendar day');
+  const planFile = path.join(inventoryRuntimeRoot, 'plans', `daily-inventory-replenishment-${runDate}.json`);
+  const resultFile = path.join(inventoryRuntimeRoot, 'results', `daily-inventory-replenishment-${runDate}.json`);
+  const inventoryMarkerFile = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  const [plan, result, policy] = await Promise.all([
+    readJson(planFile),
+    readJson(resultFile),
+    readJson(path.join(root, 'config', 'inventory_replenishment_policy.json')),
+  ]);
+  let sourceReferenceTime = Date.now();
+  if (requireMarker) {
+    const marker = await readJson(inventoryMarkerFile);
+    assert(marker?.ok === true && marker?.stage === 'daily-inventory-guard' && marker?.status === 'done', 'inventory marker is not done');
+    assert(marker?.runDate === runDate && marker?.businessDate === businessDate, 'inventory marker date mismatch');
+    await verifyEvidenceRecords(marker.evidence, [planFile, resultFile], root, 'inventory marker');
+    sourceReferenceTime = Date.parse(String(marker.completedAt || ''));
+    assert(Number.isFinite(sourceReferenceTime), 'inventory marker completedAt is invalid');
+  }
+  assert(plan?.date === runDate && plan?.policyVersion === policy?.policyVersion, 'inventory plan date/policy mismatch');
+  assert(plan?.executable === true && Array.isArray(plan?.blockers) && plan.blockers.length === 0, 'inventory plan is not executable');
+  assert(/^[a-f0-9]{64}$/.test(String(plan?.payloadHash || '')) && expectedPlanHash(plan) === plan.payloadHash, 'inventory plan payloadHash mismatch');
+  validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime);
+  assert(result?.planHash === plan.payloadHash && result?.policyVersion === plan.policyVersion, 'inventory result plan/policy hash mismatch');
+  assert(result?.execute === true && result?.executionMode === 'automatic', 'inventory result is not an automatic execution');
+  assert(Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length === 0, 'inventory result contains unresolved durable intents');
+  const automatic = policy?.execution?.automaticExecution || {};
+  const allowed = new Set([...(automatic.allowedContexts || []), automatic.allowedContext].filter(Boolean).map(String));
+  const expectedAuthorization = automatic?.authorizationByContext?.[result.authorizationContext]
+    || (result.authorizationContext === automatic.allowedContext ? automatic.authorizationId : '');
+  assert(automatic.enabled === true && allowed.has(result.authorizationContext), 'inventory authorization context mismatch');
+  assert(expectedAuthorization && result.authorizationId === expectedAuthorization, 'inventory authorization id mismatch');
+  const actionable = Array.isArray(plan.actionable) ? plan.actionable : [];
+  const rows = Array.isArray(result.results) ? result.results : [];
+  assert(rows.length === actionable.length, 'inventory result row count mismatch');
+  const planByKey = new Map();
+  for (const row of actionable) {
+    const key = rowKey(row);
+    assert(key !== '::::' && !planByKey.has(key), `inventory plan row identity duplicate: ${key}`);
+    assert(enabledStores.includes(String(row.storeKey || '').toUpperCase()), `inventory plan contains unknown store: ${row.storeKey}`);
+    planByKey.set(key, row);
+  }
+  const seen = new Set();
+  for (const row of rows) {
+    const key = rowKey(row);
+    assert(!seen.has(key), `inventory result row identity duplicate: ${key}`);
+    seen.add(key);
+    assert(resultRowIsSafe(row, planByKey.get(key), plan, result, policy), `inventory result lacks exact terminal readback: ${key}`);
+  }
+  assert(seen.size === planByKey.size && [...planByKey.keys()].every(key => seen.has(key)), 'inventory plan/result identity set mismatch');
+  return {planFile, resultFile, inventoryMarkerFile, planHash: plan.payloadHash, resultCount: rows.length};
+}
+
+export async function validateDailyOperatingRefresh(options) {
+  const args = {...options};
+  const previous = new Date(`${args.runDate}T12:00:00Z`);
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  assert(args.businessDate === previous.toISOString().slice(0, 10), 'businessDate must equal runDate minus one calendar day');
+  const storesConfig = await readJson(path.join(args.root, 'config', 'stores.json'));
+  const enabledStores = (Array.isArray(storesConfig?.stores) ? storesConfig.stores : [])
+    .filter(row => row?.enabled !== false)
+    .map(row => String(row?.storeKey || '').toUpperCase())
+    .filter(Boolean)
+    .sort();
+  assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
+  const morningFile = path.join(args.stateDir, `${args.runDate}-all.json`);
+  const inventory = await validateInventoryArtifacts({...args, enabledStores, requireMarker: true});
+  await validateMorningEvidence({...args, file: morningFile, enabledStores});
+  const finalMarkerFile = path.join(args.markerRoot, args.runDate, 'daily-operating-refresh.json');
+  const marker = await readJson(finalMarkerFile);
+  assert(marker?.ok === true && marker?.stage === 'daily-operating-refresh' && marker?.status === 'done', 'daily operating marker is not done');
+  assert(marker?.runDate === args.runDate && marker?.businessDate === args.businessDate, 'daily operating marker date mismatch');
+  await verifyEvidenceRecords(marker.evidence, [
+    morningFile,
+    inventory.inventoryMarkerFile,
+    inventory.planFile,
+    inventory.resultFile,
+  ], args.root, 'daily operating marker');
+  return {
+    ok: true,
+    runDate: args.runDate,
+    businessDate: args.businessDate,
+    storeCount: enabledStores.length,
+    artifactCount: enabledStores.length * DOMAINS.length,
+    planHash: inventory.planHash,
+    resultCount: inventory.resultCount,
+  };
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const args = parseArgs(process.argv.slice(2));
+    if (args.inventoryOnly) {
+      const storesConfig = await readJson(path.join(args.root, 'config', 'stores.json'));
+      const enabledStores = (Array.isArray(storesConfig?.stores) ? storesConfig.stores : [])
+        .filter(row => row?.enabled !== false)
+        .map(row => String(row?.storeKey || '').toUpperCase())
+        .filter(Boolean)
+        .sort();
+      assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
+      console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({...args, enabledStores, requireMarker: false}))}, null, 2));
+    } else {
+      console.log(JSON.stringify(await validateDailyOperatingRefresh(args), null, 2));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({ok: false, error: String(error?.message || error)}, null, 2));
+    process.exitCode = 1;
+  }
+}
