@@ -30,13 +30,33 @@ assert.match(
 );
 assert.match(
   dailySource,
-  /SHEIN_BI_DAILY_CRITICAL_PORTAL_SECTIONS:-homeRankings,homeTrafficDaily,priceScatter,afterSales,orders,profit,homeProfit[\s\S]*SHEIN_BI_PORTAL_PREWARM_ASYNC=0[\s\S]*SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1[\s\S]*bash scripts\/prewarm_bi_portal_sections\.sh 8>&-/,
-  'daily refresh must synchronously build profit before homeProfit and finish all homepage-critical sections before the unified run can complete',
+  /SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM:-\s*sync/,
+  'the synchronous homepage-critical prewarm must remain the default for standalone daily runs',
+);
+assert.match(
+  dailySource,
+  /SHEIN_BI_DAILY_CRITICAL_PORTAL_SECTIONS:-\s*homeRankings,homeTrafficDaily,priceScatter,afterSales,orders,profit,homeProfit[\s\S]*CRITICAL_PORTAL_PREWARM_MODE" == "sync"[\s\S]*SHEIN_BI_PORTAL_PREWARM_ASYNC=0[\s\S]*SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1[\s\S]*bash scripts\/prewarm_bi_portal_sections\.sh 8>&-/,
+  'sync mode must synchronously build profit before homeProfit and finish all homepage-critical sections before the standalone run completes',
+);
+assert.match(
+  dailySource,
+  /enqueue homepage-critical sections for the bounded queue worker[\s\S]*bash scripts\/enqueue_bi_portal_sections\.sh[\s\S]*--sections "\$CRITICAL_PORTAL_SECTIONS"[\s\S]*--priority "\$\{SHEIN_BI_DAILY_CRITICAL_PORTAL_QUEUE_PRIORITY:-10\}"/,
+  'queue mode must hand every homepage-critical section to the bounded section queue instead of a synchronous prewarm',
+);
+assert.match(
+  dailySource,
+  /SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue cannot be combined with SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=1[\s\S]*exit 64/,
+  'queue mode combined with REQUIRE_CRITICAL_PORTAL_SECTIONS=1 must fail closed instead of silently downgrading the requirement',
 );
 assert.match(
   morningSource,
+  /SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=0[\s\S]*SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue/,
+  'the morning coordinator must delegate homepage-critical sections to the bounded queue instead of forcing synchronous critical completion',
+);
+assert.doesNotMatch(
+  morningSource,
   /SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=1/,
-  'the unified daily coordinator must keep the same run open when a critical Portal section fails',
+  'the morning coordinator must never force a synchronous homepage-critical gate that can exhaust the reserved inventory window',
 );
 assert.match(
   dailySource,
@@ -58,10 +78,15 @@ assert.match(
   /bash scripts\/enqueue_bi_portal_sections\.sh[\s\S]*--sections actions,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings\s*\\[\s\S]*--priority 50/,
   'daily refresh must queue the remaining heavy sections instead of fanning them out',
 );
+const dailyEnqueues = dailySource.match(/bash scripts\/enqueue_bi_portal_sections\.sh[\s\S]*?--reason "daily-refresh-\$DATE"/g) || [];
+assert.ok(
+  dailyEnqueues.length >= 1,
+  'daily refresh must enqueue portal sections with the daily-refresh reason',
+);
 assert.doesNotMatch(
-  dailySource.match(/bash scripts\/enqueue_bi_portal_sections\.sh[\s\S]*?--reason "daily-refresh-\$DATE"/)?.[0] || '',
+  dailyEnqueues[dailyEnqueues.length - 1] || '',
   /--sections[^\n]*\bprofit\b/,
-  'daily refresh must not queue profit again after the synchronous profit -> homeProfit critical chain',
+  'the final non-critical enqueue must never re-queue profit after the homepage-critical batch (sync prewarm or queue lane)',
 );
 assert.doesNotMatch(
   dailySource,

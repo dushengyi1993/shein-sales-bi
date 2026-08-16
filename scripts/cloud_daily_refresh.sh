@@ -181,6 +181,32 @@ export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 DAILY_WARNINGS=()
 LINK_BUSINESS_MODE="${SHEIN_BI_DAILY_LINK_BUSINESS_MODE:-full}"
 LINK_BUSINESS_STATUS=0
+# Homepage-critical Portal sections (homeRankings..homeProfit) belong to the
+# homepage lane, not to the morning inventory coordinator.  `sync` preserves
+# the legacy one-shot behavior: the daily run itself builds every
+# homepage-critical section before it may return (default for standalone daily
+# refresh).  `queue` (used by the 07:10 morning coordinator) hands the same
+# sections to the bounded host-locked section queue worker instead, so a slow
+# homeRankings/profit refresh can never consume the reserved inventory
+# window.  linksData is inventory-critical and stays synchronous in BOTH
+# modes; the inventory guard keeps its own fail-closed linksData gate.
+CRITICAL_PORTAL_PREWARM_MODE="${SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM:-sync}"
+case "$CRITICAL_PORTAL_PREWARM_MODE" in
+  sync|queue) ;;
+  *)
+    echo "[cloud_daily_refresh] invalid SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=$CRITICAL_PORTAL_PREWARM_MODE" >&2
+    exit 64
+    ;;
+esac
+# A queue-mode caller cannot simultaneously demand synchronous critical
+# completion: the queue worker owns those sections and this run would return
+# before they are terminal.  Fail closed on the contradiction instead of
+# silently downgrading the requirement.
+if [[ "$CRITICAL_PORTAL_PREWARM_MODE" == "queue" \
+  && "${SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS:-0}" == "1" ]]; then
+  echo "[cloud_daily_refresh] ERROR SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue cannot be combined with SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=1; a queue cannot prove synchronous critical-section completion" >&2
+  exit 64
+fi
 
 wait_for_busy_writers
 wait_for_lark_report_lock
@@ -391,22 +417,42 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
         echo "[cloud_daily_refresh] linksData was synchronously published by the caller-owned all-store merge"
       fi
 
-      # The daily coordinator is not complete while homepage-critical caches
-      # still belong to the previous core generation.  Previously these six
-      # sections were only queued two-at-a-time, so recurring order/return
-      # refreshes could leave the homepage on a multi-day fallback even though
-      # the daily run had already been marked done.
       CRITICAL_PORTAL_SECTIONS="${SHEIN_BI_DAILY_CRITICAL_PORTAL_SECTIONS:-homeRankings,homeTrafficDaily,priceScatter,afterSales,orders,profit,homeProfit}"
-      echo "[cloud_daily_refresh] refresh homepage-critical sections synchronously sections=$CRITICAL_PORTAL_SECTIONS"
-      if SHEIN_BI_PORTAL_PREWARM_SECTIONS="$CRITICAL_PORTAL_SECTIONS" \
-        SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
-        SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
-        bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
-        echo "[cloud_daily_refresh] homepage-critical sections refreshed"
+      if [[ "$CRITICAL_PORTAL_PREWARM_MODE" == "sync" ]]; then
+        # The standalone daily run is not complete while homepage-critical
+        # caches still belong to the previous core generation.  Previously
+        # these six sections were only queued two-at-a-time, so recurring
+        # order/return refreshes could leave the homepage on a multi-day
+        # fallback even though the daily run had already been marked done.
+        echo "[cloud_daily_refresh] refresh homepage-critical sections synchronously sections=$CRITICAL_PORTAL_SECTIONS"
+        if SHEIN_BI_PORTAL_PREWARM_SECTIONS="$CRITICAL_PORTAL_SECTIONS" \
+          SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+          SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
+          bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+          echo "[cloud_daily_refresh] homepage-critical sections refreshed"
+        else
+          CRITICAL_PORTAL_STATUS=$?
+          DAILY_WARNINGS+=("homepage-critical section refresh failed status=$CRITICAL_PORTAL_STATUS")
+          echo "[cloud_daily_refresh] WARN homepage-critical section refresh failed; keep the run open and retain cache fallbacks" >&2
+        fi
       else
-        CRITICAL_PORTAL_STATUS=$?
-        DAILY_WARNINGS+=("homepage-critical section refresh failed status=$CRITICAL_PORTAL_STATUS")
-        echo "[cloud_daily_refresh] WARN homepage-critical section refresh failed; keep the run open and retain cache fallbacks" >&2
+        # The morning coordinator enters the reserved inventory window as soon
+        # as the 19-store merge and inventory-critical linksData are complete.
+        # Homepage-critical sections are handed to the bounded host-locked
+        # queue worker (lease + per-section timeout + dependency barriers), so
+        # a slow homeRankings/profit refresh can never consume the inventory
+        # window.  The queue worker and watchdog own their terminal evidence;
+        # an enqueue failure stays a visible warning, never a success claim.
+        echo "[cloud_daily_refresh] enqueue homepage-critical sections for the bounded queue worker sections=$CRITICAL_PORTAL_SECTIONS"
+        if bash scripts/enqueue_bi_portal_sections.sh \
+            --sections "$CRITICAL_PORTAL_SECTIONS" \
+            --priority "${SHEIN_BI_DAILY_CRITICAL_PORTAL_QUEUE_PRIORITY:-10}" \
+            --reason "daily-refresh-$DATE"; then
+          echo "[cloud_daily_refresh] homepage-critical sections queued"
+        else
+          DAILY_WARNINGS+=("homepage-critical section enqueue failed")
+          echo "[cloud_daily_refresh] WARN homepage-critical section enqueue failed; the queue worker will not refresh these sections this run" >&2
+        fi
       fi
 
       if bash scripts/enqueue_bi_portal_sections.sh \

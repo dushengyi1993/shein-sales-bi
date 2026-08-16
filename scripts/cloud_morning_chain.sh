@@ -420,9 +420,19 @@ run_supplements_stage() {
   set +e
   local remaining=$((PRE_INVENTORY_DEADLINE_EPOCH - $(date +%s)))
   if (( remaining <= 0 )); then return 76; fi
+  # The inventory coordinator enters the reserved inventory window as soon as
+  # the 19-store merge and the inventory-critical linksData section are
+  # complete.  Homepage-critical Portal sections (homeRankings..homeProfit)
+  # are NOT on this critical path: cloud_daily_refresh enqueues them for the
+  # bounded host-locked queue worker instead of a synchronous prewarm that can
+  # take many minutes per section and exhaust the inventory window.  linksData
+  # stays synchronous and the inventory guard keeps its own fail-closed
+  # linksData/inventoryTrend gates, so a linksData failure is never treated as
+  # success by this coordinator.
   SHEIN_BI_DAILY_LINK_BUSINESS_MODE=finalize \
   SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1 \
-  SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=1 \
+  SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=0 \
+  SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue \
   SHEIN_BI_DAILY_RTV_VERIFY=0 \
   SHEIN_BI_PORTAL_PREWARM_DISABLED=0 \
     timeout --signal=TERM --kill-after=30s "${remaining}s" bash scripts/cloud_daily_refresh.sh "$DATA_DATE"

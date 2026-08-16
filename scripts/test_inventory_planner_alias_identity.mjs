@@ -113,7 +113,8 @@ assert.ok(!aliasPlan.blockers.some(text => /canonical evidence/.test(text)),
 const allocation = aliasPlan.lowEtAllocations.find(row => row.skc === 'sv260628195825371800298');
 assert.ok(allocation, 'the alias-equivalent YJ row must be processed for low-ET allocation');
 assert.equal(allocation.canonical, 'SK-GT-3065蒸汽熨烫机');
-assert.equal(allocation.matchKey, 'SKGT3065', 'grouping matchKey semantics must stay unchanged');
+assert.equal(allocation.matchKey, 'SK-GT-3065蒸汽熨烫机',
+  'grouping matchKey is the alias-resolved identity so explicitly separate products never collapse');
 assert.equal(aliasPlan.counts.lowEtBlockedCanonicalCount, 0);
 
 // 2. a genuinely different links code still fails closed.

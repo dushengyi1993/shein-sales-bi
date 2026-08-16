@@ -189,8 +189,8 @@ assert.equal(plan.ignored.find(row => row.skc === 'skc-wait')?.shelfStatusName, 
 assert.equal(plan.ignored.find(row => row.skc === 'skc-dup-sold')?.decision, 'sold_out_has_same_store_on_shelf_link');
 assert.deepEqual(plan.ignored.find(row => row.skc === 'skc-dup-sold')?.sameStoreOnShelfSkcs, ['skc-dup-active']);
 assert.deepEqual(plan.crossStoreSoldOutFindings.map(row => row.skc), ['skc-cross-sold']);
-assert.deepEqual(plan.actionable.filter(row => row.matchKey === 'ALLSOLD1').map(row => [row.storeKey, row.targetUsableInventory]), [['A', 100], ['B', 10]]);
-assert.equal(plan.ignored.some(row => row.matchKey === 'ALLSOLD1'), false);
+assert.deepEqual(plan.actionable.filter(row => row.matchKey === 'ALLSOLD-1产品').map(row => [row.storeKey, row.targetUsableInventory]), [['A', 100], ['B', 10]]);
+assert.equal(plan.ignored.some(row => row.matchKey === 'ALLSOLD-1产品'), false);
 assert.match(plan.payloadHash, /^[a-f0-9]{64}$/);
 
 const conflictingLinksFile = path.join(tmp, 'linksData-conflict.json');

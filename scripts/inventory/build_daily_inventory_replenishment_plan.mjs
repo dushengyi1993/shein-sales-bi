@@ -97,7 +97,21 @@ if (!Number.isFinite(linksAge) || linksAge < -0.25 || linksAge > maximumLinksAge
 }
 
 const etRows = Array.isArray(bi?.inventoryDepletion?.products) ? bi.inventoryDepletion.products : [];
-const etByKey = new Map(etRows.map(row => [String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(), row]));
+// ET rows are indexed by the alias-aware identity key (resolveInventoryIdentityKey
+// honors config/product_aliases.json, so explicitly separate products such as
+// KJ-102S三明治机和早餐机 vs KJ-102三明治机和早餐机 NEVER collapse into one
+// canonicalInventoryKey like KJ102).  A separate canonical-form index exists
+// only to detect the fail-closed case below: an alias miss with a canonical
+// hit must block the row instead of sharing another product's ET evidence.
+const etIdentityKey = row => String(
+  resolveInventoryIdentityKey(row.standard_goods_sn || row.match_key || '')
+  || canonicalInventoryKey(row.standard_goods_sn || row.match_key || ''),
+).toUpperCase();
+const etByIdentityKey = new Map(etRows.map(row => [etIdentityKey(row), row]));
+const etByCanonicalKey = new Map(etRows.map(row => [
+  String(canonicalInventoryKey(row.standard_goods_sn || row.match_key || '')).toUpperCase(),
+  row,
+]));
 const etMatchedCurrentDayRows = etRows.filter(row => {
   if (String(row?.inventory_match_status || '') !== 'matched') return false;
   const rowOperationalDate = dateText(
@@ -257,14 +271,14 @@ const ignored = [];
 const lowEtAllocations = [];
 const rowContexts = linkRows.map(row => {
   const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
-  const productMatchKey = canonicalInventoryKey(row.supplierCode);
   const rawMetricsKey = metrics?.standard_goods_sn
     ?? metrics?.standardGoodsSn
     ?? metrics?.raw_goods_sn
     ?? metrics?.rawGoodsSn;
-  const metricsMatchKey = canonicalInventoryKey(
-    rawMetricsKey,
-  );
+  const resolvedProductKey = resolveInventoryIdentityKey(row.supplierCode);
+  const resolvedMetricsKey = metrics ? resolveInventoryIdentityKey(rawMetricsKey) : '';
+  const productMatchKey = resolvedProductKey || canonicalInventoryKey(row.supplierCode);
+  const metricsMatchKey = resolvedMetricsKey || canonicalInventoryKey(rawMetricsKey);
   const matchKey = args.operationMode === 'et_low_inventory_safety'
     ? (metricsMatchKey || productMatchKey)
     : productMatchKey;
@@ -273,15 +287,20 @@ const rowContexts = linkRows.map(row => {
     metrics,
     matchKey,
     productMatchKey,
-    resolvedProductKey: resolveInventoryIdentityKey(row.supplierCode),
-    resolvedMetricsKey: metrics ? resolveInventoryIdentityKey(rawMetricsKey) : '',
+    resolvedProductKey,
+    resolvedMetricsKey,
     shelfStatus: resolveInventoryShelfStatus(metrics, row.shelfStatusCode),
   };
 });
 const onShelfSkcsByStoreMatchKey = new Map();
 for (const metrics of linkMetricRows) {
   if (resolveInventoryShelfStatus(metrics).code !== '1') continue;
-  const matchKey = canonicalInventoryKey(
+  const matchKey = resolveInventoryIdentityKey(
+    metrics.standard_goods_sn
+    ?? metrics.standardGoodsSn
+    ?? metrics.raw_goods_sn
+    ?? metrics.rawGoodsSn,
+  ) || canonicalInventoryKey(
     metrics.standard_goods_sn
     ?? metrics.standardGoodsSn
     ?? metrics.raw_goods_sn
@@ -309,7 +328,13 @@ for (const context of rowContexts) {
   const {row, metrics, matchKey, productMatchKey, resolvedProductKey, resolvedMetricsKey, shelfStatus} = context;
   const canonicalEvidenceConflict = Boolean(metrics)
     && (!resolvedProductKey || !resolvedMetricsKey || resolvedProductKey !== resolvedMetricsKey);
-  const et = etByKey.get(matchKey);
+  // ET evidence is bound by the alias-aware identity of the product itself,
+  // never by the collapsed canonicalInventoryKey: two products that the alias
+  // catalog keeps separate must not share an ET row.  When the alias-aware key
+  // misses but a canonical-form key would hit, the row fails closed (block)
+  // instead of generating an action from another product's ET evidence.
+  const et = etByIdentityKey.get(String(resolvedProductKey || resolvedMetricsKey || '').toUpperCase()) || null;
+  const etCanonicalAmbiguity = !et && Boolean(etByCanonicalKey.get(String(canonicalInventoryKey(matchKey) || '').toUpperCase()));
   const otherSellingStores = [...(sellingStoresByMatchKey.get(matchKey) || [])]
     .filter(storeKey => storeKey && storeKey !== row.storeKey)
     .sort();
@@ -335,9 +360,11 @@ for (const context of rowContexts) {
     c7SaleCount: metrics?.c7_sale_cnt,
     policy,
   });
-  const decision = canonicalEvidenceConflict
-    ? {action: 'block', reason: 'openapi_linksdata_canonical_evidence_conflict'}
-    : policyDecision;
+  const decision = etCanonicalAmbiguity
+    ? {action: 'block', reason: 'et_canonical_identity_ambiguous'}
+    : canonicalEvidenceConflict
+      ? {action: 'block', reason: 'openapi_linksdata_canonical_evidence_conflict'}
+      : policyDecision;
   const base = {
     storeKey: row.storeKey,
     spu: row.spu,
@@ -553,11 +580,11 @@ const inventoryRelevantMatchKeys = new Set(
   evaluatedRows.filter(item => item.inventoryRelevant).map(item => item.base.matchKey).filter(Boolean),
 );
 const etAlertsExcludedNoRelevantLinks = etRows.filter(row => !inventoryRelevantMatchKeys.has(
-  String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
+  etIdentityKey(row),
 )).length;
 const etAlerts = etRows
   .filter(row => inventoryRelevantMatchKeys.has(
-    String(row.match_key || canonicalInventoryKey(row.standard_goods_sn)).toUpperCase(),
+    etIdentityKey(row),
   ))
   .map(row => {
     const daysOfSupplyOnHand = row.days_of_supply_on_hand ?? null;
