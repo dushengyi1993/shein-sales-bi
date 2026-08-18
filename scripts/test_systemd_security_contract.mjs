@@ -37,6 +37,8 @@ assert.equal(property(portal, 'OOMPolicy'), 'stop');
 assert.equal(property(portal, 'Restart'), 'always');
 assert.equal(property(portal, 'MemoryHigh'), '1200M');
 assert.equal(property(portal, 'MemoryMax'), '2200M');
+assert.doesNotMatch(portal, /SHEIN_BI_OPS_CLI_(?:MIN|RECOMMENDED)_VERSION=/,
+  'Portal CLI version policy must follow the packaged BI_OPS_CLI_VERSION instead of a stale systemd override');
 const nodeOptions = [...portal.matchAll(/^Environment=NODE_OPTIONS=(.*)$/gm)];
 assert.equal(nodeOptions.length, 1, 'Environment=NODE_OPTIONS must be declared exactly once');
 assert.equal(nodeOptions[0][1], '--max-old-space-size=1536');
@@ -47,6 +49,82 @@ assert.ok(memoryMaxMb > v8HeapCapMb, 'V8 heap cap must stay below the systemd Me
 assertCommonHardening(portal, 'portal');
 assert.doesNotMatch(portal, /^NoNewPrivileges=true$/m, 'portal uses audited sudo child commands and cannot enable this yet');
 assert.doesNotMatch(portal, /^PrivateTmp=true$/m, 'portal browser maintenance must share the host temporary namespace');
+assert.equal(property(portal, 'Requires'), 'shein-bi-session-secret.service');
+assert.match(property(portal, 'After'), /(?:^|\s)shein-bi-session-secret\.service(?:\s|$)/);
+assert.match(portal, /--session-secret-file \/data\/shein-bi\/state\/bi_portal_session_secret\.local/);
+assert.equal(property(portal, 'KillMode'), 'control-group',
+  'systemd must retain every OpenAPI executor descendant in the Portal cgroup during shutdown');
+const portalTimeoutStopSec = Number(property(portal, 'TimeoutStopSec'));
+const portalShutdownBudgetMatches = [...portal.matchAll(/^Environment=SHEIN_BI_PORTAL_SHUTDOWN_TIMEOUT_MS=(\d+)$/gm)];
+const portalExecutorKillGraceMatches = [...portal.matchAll(/^Environment=SHEIN_LINK_OPS_OPENAPI_EXECUTOR_KILL_GRACE_MS=(\d+)$/gm)];
+assert.equal(portalShutdownBudgetMatches.length, 1, 'Portal app shutdown budget must be declared exactly once');
+assert.equal(portalExecutorKillGraceMatches.length, 1, 'executor kill grace must be declared exactly once');
+const portalShutdownBudgetMs = Number(portalShutdownBudgetMatches[0][1]);
+const portalExecutorKillGraceMs = Number(portalExecutorKillGraceMatches[0][1]);
+assert.equal(portalTimeoutStopSec, 20);
+assert.equal(portalShutdownBudgetMs, 12_000,
+  'Portal must have an explicit bounded application shutdown budget');
+assert.equal(portalExecutorKillGraceMs, 1_500,
+  'OpenAPI executor cancellation must escalate from SIGTERM to SIGKILL within a bounded grace');
+assert.ok(portalShutdownBudgetMs + 5_000 <= portalTimeoutStopSec * 1_000,
+  'systemd TimeoutStopSec must retain at least five seconds of margin beyond the app shutdown budget');
+
+const query = readUnit('shein-bi-query.service');
+assert.equal(property(query, 'User'), 'sheinops');
+assert.equal(property(query, 'Group'), 'sheinops');
+assert.equal(property(query, 'OOMPolicy'), 'stop');
+assert.equal(property(query, 'Restart'), 'always');
+assert.equal(property(query, 'MemoryHigh'), '1024M');
+assert.equal(property(query, 'MemoryMax'), '1400M');
+assert.equal(property(query, 'NoNewPrivileges'), 'true');
+assert.equal(property(query, 'PrivateTmp'), 'true');
+assertCommonHardening(query, 'query runtime', {protectSystem: 'strict', umask: '0077'});
+assert.equal(property(query, 'TasksMax'), '128');
+assert.match(query, /^Environment=SHEIN_BI_SURFACE=query$/m);
+assert.match(query, /^Environment=SHEIN_BI_QUERY_MAX_CONCURRENT=1$/m);
+assert.match(query, /^Environment=SHEIN_BI_QUERY_MAX_QUEUED=3$/m);
+assert.match(query, /^Environment=SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS=120000$/m);
+assert.match(query, /^Environment=SHEIN_BI_QUERY_GRACE_MS=30000$/m, 'the query unit must pin the bounded grace window for the fail-fast contract');
+
+assert.match(query, /^Environment=NODE_OPTIONS=--max-old-space-size=1024$/m);
+assert.match(query, /^ExecStart=.*--surface query --host 127\.0\.0\.1 --port 8788 /m);
+assert.match(query, /--dir \/data\/shein-bi\/outputs\/bi-portal/);
+assert.match(query, /--session-secret-file \/data\/shein-bi\/state\/bi_portal_session_secret\.local/);
+assert.equal(property(query, 'Requires'), 'shein-bi-session-secret.service');
+assert.match(property(query, 'After'), /(?:^|\s)shein-bi-session-secret\.service(?:\s|$)/);
+assert.match(property(query, 'ReadOnlyPaths'), /(?:^|\s)\/data\/shein-bi\/state(?:\s|$)/,
+  'query runtime must retain read-only access to the shared state namespace');
+assert.match(query, /^InaccessiblePaths=\/data\/shein-bi\/profiles \/opt\/shein-bi\/app\/profiles$/m);
+assert.doesNotMatch(query, /SHEIN_BI_JOB_WORKER_ENABLED=1|SHEIN_WEBHOOK_REPOSITORY_ENABLED=1|SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED=1/);
+assert.doesNotMatch(query, /^ExecCondition=/m, 'query is an always-available read surface, not a scheduled maintenance participant');
+assert.ok(Number(property(query, 'MemoryMax').replace(/M$/, '')) > 1024,
+  'query cgroup MemoryMax must retain non-heap headroom for large bounded JSON responses');
+
+const sessionSecret = readUnit('shein-bi-session-secret.service');
+assert.equal(property(sessionSecret, 'Type'), 'oneshot');
+assert.equal(property(sessionSecret, 'User'), 'sheinops');
+assert.equal(property(sessionSecret, 'Group'), 'sheinops');
+assert.equal(property(sessionSecret, 'RemainAfterExit'), 'yes');
+assert.equal(property(sessionSecret, 'NoNewPrivileges'), 'true');
+assert.equal(property(sessionSecret, 'PrivateTmp'), 'true');
+assertCommonHardening(sessionSecret, 'session secret provisioner', {protectSystem: 'strict', umask: '0077'});
+assert.equal(
+  property(sessionSecret, 'ExecStart'),
+  '/usr/bin/node scripts/provision_bi_session_secret.mjs --file /data/shein-bi/state/bi_portal_session_secret.local',
+);
+assert.equal(property(sessionSecret, 'ReadWritePaths'), '/data/shein-bi/state');
+assert.doesNotMatch(sessionSecret, /^ExecCondition=/m,
+  'session secret provisioning is an always-available auth prerequisite');
+assert.equal(property(sessionSecret, 'Before'), 'shein-bi-portal.service shein-bi-query.service');
+assert.doesNotMatch(property(sessionSecret, 'After'), /shein-bi-(?:portal|query)\.service/,
+  'the provisioning owner must not depend on either consumer');
+assert.doesNotMatch(sessionSecret, /^Requires=.*shein-bi-(?:portal|query)\.service/m,
+  'the provisioning owner must not introduce a dependency cycle');
+const sessionProvisionOwners = fs.readdirSync(new URL('../infra/systemd/', import.meta.url))
+  .filter(name => name.endsWith('.service'))
+  .filter(name => readUnit(name).includes('scripts/provision_bi_session_secret.mjs'));
+assert.deepEqual(sessionProvisionOwners, ['shein-bi-session-secret.service'],
+  'the oneshot unit must be the only systemd writer for the BI session secret');
 
 const webhook = readUnit('shein-bi-webhook.service');
 const webhookProvision = fs.readFileSync(new URL('./provision_shein_webhook_postgres_role.sh', import.meta.url), 'utf8');
@@ -134,6 +212,9 @@ assert.match(property(sessionManager, 'Before'), /shein-bi-db-backup\.service/);
 assert.match(property(sessionManager, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
 const dbBackup = readUnit('shein-bi-db-backup.service');
+const remoteVerifierLauncherPath = 'scripts/verify_cos_backup_remote.sh';
+const remoteVerifierLauncher = fs.readFileSync(new URL(`../${remoteVerifierLauncherPath}`, import.meta.url), 'utf8');
+const systemdReadme = fs.readFileSync(new URL('../infra/systemd/README.md', import.meta.url), 'utf8');
 assert.equal(property(dbBackup, 'User'), 'root');
 assert.equal(property(dbBackup, 'Group'), 'sheinops');
 assert.equal(property(dbBackup, 'UMask'), '0027');
@@ -141,11 +222,40 @@ assert.equal(property(dbBackup, 'NoNewPrivileges'), 'true');
 assert.equal(property(dbBackup, 'PrivateTmp'), 'true');
 assertCommonHardening(dbBackup, 'db backup');
 assert.match(dbBackup, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
+assert.match(dbBackup, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=1/);
+assert.match(dbBackup, /SHEIN_BI_BROWSER_STATE_BACKUP_KEY_FILE=\/srv\/shein-bi\/secrets\/browser-state-backup\.key/);
+assert.match(dbBackup, /SHEIN_BI_BROWSER_PROFILE_ROOT=\/data\/shein-bi\/profiles/);
+assert.match(dbBackup, /SHEIN_BI_BROWSER_SESSION_ROOT=\/data\/shein-bi\/state\/shein_webapi_sessions/);
 assert.match(dbBackup, /--deadline-at 01:52/);
 assert.match(dbBackup, /--stage nightly-backup --require nightly-session/);
 assert.match(dbBackup, /flock -w 120/);
 assert.equal(property(dbBackup, 'TimeoutStartSec'), '10800',
   'backup timeout must cover the longest lock wait plus the backup execution budget');
+assert.match(dbBackup, /^Wants=.*network-online\.target/m, 'backup must order network-online before the COS verifier runs');
+assert.match(property(dbBackup, 'After'), /network-online\.target/, 'network-online.target must be an After dependency');
+assert.match(dbBackup, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=\/opt\/shein-bi\/app\/scripts\/verify_cos_backup_remote\.sh/,
+  'the production unit must wire the repository verifier launcher');
+assert.equal((dbBackup.match(/^LoadCredential=/gm) || []).length, 3,
+  'exactly three LoadCredential entries are required for the verifier');
+assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-secret:.*$/m, 'verifier secret credential is injected by systemd');
+assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-target:.*$/m, 'verifier target credential is injected by systemd');
+assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-target-sha:.*$/m, 'verifier target SHA lock credential is injected by systemd');
+assert.doesNotMatch(dbBackup, /^Environment=.*SHEIN_BI_COS_VERIFY_/m,
+  'credential VALUES must never enter the unit environment; only paths in the launcher');
+assert.doesNotMatch(dbBackup, /^Environment=.*(SECRET|TOKEN|KEY)=.*/i,
+  'no secret-looking Environment assignment may exist in the backup unit');
+assert.match(dbBackup, /ExecStartPre=.*verify_cos_backup_remote\.sh --check-config/,
+  'the unit must preflight the verifier credentials before starting the backup');
+assert.match(remoteVerifierLauncher, /^#!\/usr\/bin\/env bash\r?$/m,
+  'the directly executed COS verifier launcher must have a valid bash shebang');
+assert.match(remoteVerifierLauncher, /^exec node "\$VERIFIER" "\$@"\r?$/m,
+  'the COS verifier launcher must replace itself with the bounded Node verifier');
+assert.match(systemdReadme, /^chmod \+x .*scripts\/verify_cos_backup_remote\.sh\r?$/m,
+  'the production install checklist must preserve launcher executable permission');
+assert.match(systemdReadme, /^systemd-analyze verify .*\/shein-bi-db-backup\.service\r?$/m,
+  'the production parser check must cover the modified database backup service');
+assert.doesNotMatch(dbBackup, /^Environment=\TrueSHEIN_BI_COS_VERIFY_(SECRET|TARGET)/i,
+  'the launcher resolves credential paths, never Environment values');
 assert.match(property(dbBackup, 'After'), /shein-bi-cloud-session-manager\.service/);
 assert.match(property(dbBackup, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
@@ -180,7 +290,10 @@ assert.equal(property(diskMaintenanceTimer, 'OnCalendar'), '*-*-* 00:10:00 Asia/
 assert.equal(property(diskMaintenanceTimer, 'Persistent'), 'false');
 
 const dataDiskGuard = readUnit('shein-bi-data-disk-requires-mounts.conf');
-assert.match(dataDiskGuard, /^RequiresMountsFor=\/data .*\/opt\/shein-bi\/app\/profiles .*\/opt\/shein-bi\/app\/outputs .*\/srv\/shein-bi\/runtime .*\/srv\/shein-bi\/backups$/m);
+assert.equal(
+  property(dataDiskGuard, 'RequiresMountsFor'),
+  '/data/shein-bi/profiles /data/shein-bi/state /data/shein-bi/outputs /srv/shein-bi/runtime /srv/shein-bi/backups',
+);
 assert.equal(property(dataDiskGuard, 'After'), 'local-fs.target');
 
 const marketingGuardTimer = readUnit('shein-bi-cloud-marketing-live-guard.timer');
@@ -308,17 +421,35 @@ assert.match(morningWrapper, /mode: 0o660/,
 assert.match(morningWrapper, /exit 0/,
   'a completed idempotent skip must exit 0 so Restart can never loop');
 
-// The two modified unit/timer pairs must pass systemd-analyze verify when the
+// The modified auth units, backup service, and the two unit/timer pairs must pass systemd-analyze verify when the
 // tool is available (CI Linux runners without systemd skip this live check;
 // the static contracts above remain authoritative everywhere).
 const spawnSync = (await import('node:child_process')).spawnSync;
-const systemdAnalyze = spawnSync('bash', ['-lc', 'command -v systemd-analyze && systemd-analyze --version'], {encoding: 'utf8'});
-if (process.platform !== 'win32' && systemdAnalyze.status === 0) {
+const launcherStage = spawnSync('git', ['ls-files', '--stage', '--', remoteVerifierLauncherPath], {
+  cwd: new URL('..', import.meta.url),
+  encoding: 'utf8',
+  timeout: 10_000,
+});
+assert.equal(launcherStage.status, 0,
+  `git must report the COS verifier launcher mode: ${launcherStage.stderr || launcherStage.error?.message || ''}`);
+assert.match(launcherStage.stdout.trim(), /^100755 [0-9a-f]{40} 0\tscripts\/verify_cos_backup_remote\.sh$/,
+  'the systemd-executed COS verifier launcher must be committed with Git mode 100755');
+const systemdAnalyze = process.platform === 'win32'
+  ? null
+  : spawnSync('bash', ['-lc', 'command -v systemd-analyze && systemd-analyze --version'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+if (systemdAnalyze?.status === 0) {
   const units = [
+    'shein-bi-session-secret.service',
+    'shein-bi-portal.service',
+    'shein-bi-query.service',
     'shein-bi-cloud-morning-chain.service',
     'shein-bi-cloud-morning-chain.timer',
     'shein-bi-cloud-session-manager.service',
     'shein-bi-cloud-session-manager.timer',
+    'shein-bi-db-backup.service',
   ].map(name => `infra/systemd/${name}`);
   const verify = spawnSync('systemd-analyze', ['verify', '--man=no', ...units], {
     cwd: new URL('..', import.meta.url),
@@ -326,8 +457,8 @@ if (process.platform !== 'win32' && systemdAnalyze.status === 0) {
     timeout: 30_000,
   });
   assert.equal(verify.status, 0,
-    `systemd-analyze verify must pass for both modified pairs\nstdout:\n${verify.stdout}\nstderr:\n${verify.stderr}`);
-  console.log('PASS systemd-analyze verify both modified service/timer pairs');
+    `systemd-analyze verify must pass for modified units\nstdout:\n${verify.stdout}\nstderr:\n${verify.stderr}`);
+  console.log('PASS systemd-analyze verify modified auth units, backup service, and service/timer pairs');
 } else {
   console.log('SKIP systemd-analyze verify (not available on this host)');
 }
@@ -346,6 +477,8 @@ console.log(JSON.stringify({
   ok: true,
   checked: [
     'shein-bi-portal.service',
+    'shein-bi-query.service',
+    'shein-bi-session-secret.service',
     'shein-bi-webhook.service',
     'shein-bi-lark-sales-qa.service',
     'three off-window lease-aware browser cleanup windows',

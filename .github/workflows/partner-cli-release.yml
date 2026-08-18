@@ -1,16 +1,19 @@
 name: Partner CLI release to BI
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: Published partner-cli-v* release tag to deploy
+        description: Exact partner-cli-vYYYY.MM.DD.N draft or immutable published release tag
+        required: true
+        type: string
+      expected_commit:
+        description: Exact 40-character origin/main commit bound to the annotated tag
         required: true
         type: string
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -19,148 +22,552 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'partner-cli-v')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       GH_TOKEN: ${{ github.token }}
-      DEPLOY_TOKEN: ${{ secrets.PARTNER_CLI_DEPLOY_TOKEN }}
       DEPLOY_URL: https://sa.dushengyi.cc/api/partner-cli/release/deploy
       STATUS_URL: https://sa.dushengyi.cc/api/partner-cli/release/status
     steps:
-      - id: release
-        name: Resolve published release
-        shell: bash
-        env:
-          DISPATCH_TAG: ${{ inputs.tag }}
-          EVENT_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          tag="${DISPATCH_TAG:-$EVENT_TAG}"
-          case "$tag" in
-            partner-cli-v*) ;;
-            *) echo "Refusing non-partner release tag: $tag" >&2; exit 1 ;;
-          esac
-          release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,publishedAt)"
-          test "$(jq -r '.tagName' <<<"$release_json")" = "$tag"
-          test "$(jq -r '.isDraft' <<<"$release_json")" = 'false'
-          test "$(jq -r '.isPrerelease' <<<"$release_json")" = 'false'
-          published_at="$(jq -r '.publishedAt' <<<"$release_json")"
-          test -n "$published_at"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "published_at=$published_at" >> "$GITHUB_OUTPUT"
-
-      - name: Check deployment credential
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$DEPLOY_TOKEN"
-
-      - name: Checkout deployment automation
-        uses: actions/checkout@v7
+      - name: Checkout current release automation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: refs/heads/main
           path: automation
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout immutable release source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.release.outputs.tag }}
+          ref: ${{ inputs.expected_commit }}
           path: release-source
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - name: Use the tested Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: release-source/package-lock.json
 
-      - name: Validate release source
+      - id: release_input
+        name: Bind annotated tag, release state, and exact main commit
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+          tag="$INPUT_TAG"
+          expected_commit="$INPUT_EXPECTED_COMMIT"
+          case "$tag" in
+            partner-cli-v*) ;;
+            *) echo "Refusing non-Partner CLI release tag: $tag" >&2; exit 1 ;;
+          esac
+          version="${tag#partner-cli-v}"
+          if [[ ! "$expected_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'expected_commit must be one exact lowercase 40-character commit SHA.' >&2
+            exit 1
+          fi
+          node - "$version" <<'NODE'
+          const version = process.argv[2];
+          const match = /^(\d{4})\.(\d{2})\.(\d{2})\.([1-9]\d*)$/.exec(version);
+          if (!match) throw new Error('Partner CLI version must be YYYY.MM.DD.N');
+          const [, year, month, day] = match;
+          const date = new Date(year + '-' + month + '-' + day + 'T00:00:00.000Z');
+          if (date.getUTCFullYear() !== Number(year)
+            || date.getUTCMonth() + 1 !== Number(month)
+            || date.getUTCDate() !== Number(day)) {
+            throw new Error('Partner CLI version contains an invalid calendar date');
+          }
+          NODE
+
+          automation_head="$(git -C automation rev-parse --verify 'HEAD^{commit}')"
+          release_head="$(git -C release-source rev-parse --verify 'HEAD^{commit}')"
+          main_head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$automation_head" != "$main_head" ] || [ "$release_head" != "$expected_commit" ]; then
+            echo "Checkout binding failed: automation=$automation_head main=$main_head release=$release_head expected=$expected_commit" >&2
+            exit 1
+          fi
+          node - "$version" <<'NODE'
+          const fs = require('fs');
+          const expected = process.argv[2];
+          const manifest = JSON.parse(fs.readFileSync('release-source/config/partner_cli_package.json', 'utf8'));
+          if (manifest.version !== expected) {
+            throw new Error('Partner CLI tag version does not equal config/partner_cli_package.json');
+          }
+          NODE
+
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "$temp_dir"' EXIT
+          tag_ref="$temp_dir/tag-ref.json"
+          tag_object="$temp_dir/tag-object.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > "$tag_ref"
+          jq -e --arg tag "$tag" '
+            .ref == ("refs/tags/" + $tag)
+            and .object.type == "tag"
+            and (.object.sha | type == "string" and test("^[0-9a-f]{40}$"))
+          ' "$tag_ref" >/dev/null
+          tag_object_sha="$(jq -r '.object.sha' "$tag_ref")"
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" > "$tag_object"
+          jq -e --arg tag "$tag" --arg commit "$expected_commit" '
+            .tag == $tag
+            and .object.type == "commit"
+            and .object.sha == $commit
+            and (.message | type == "string" and length > 0)
+            and (.tagger.date | type == "string" and length > 0)
+          ' "$tag_object" >/dev/null
+
+          release_pages="$temp_dir/releases.json"
+          release_json="$temp_dir/release.json"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$release_pages"
+          jq -e --arg tag "$tag" '
+            [.[][] | select(.tag_name == $tag)]
+            | if length == 1 then .[0] else error("expected exactly one release for tag") end
+          ' "$release_pages" > "$release_json"
+          zip_name="shein-bi-ops-cli-${version}.zip"
+          checksum_name="${zip_name}.sha256"
+          jq -e --arg zip "$zip_name" --arg checksum "$checksum_name" '
+            ([.assets[] | select(.name != $zip and .name != $checksum)] | length) == 0
+            and ([.assets[] | select(.name == $zip)] | length) <= 1
+            and ([.assets[] | select(.name == $checksum)] | length) <= 1
+          ' "$release_json" >/dev/null
+          if jq -e '
+            .draft == true and .prerelease == false
+            and (.published_at == null) and (.immutable != true)
+          ' "$release_json" >/dev/null; then
+            mode='draft'
+          elif jq -e --arg zip "$zip_name" --arg checksum "$checksum_name" '
+            .draft == false and .prerelease == false and .immutable == true
+            and (.published_at | type == "string" and length > 0)
+            and ([.assets[] | select(.name == $zip)] | length) == 1
+            and ([.assets[] | select(.name == $checksum)] | length) == 1
+          ' "$release_json" >/dev/null; then
+            mode='published'
+          else
+            echo 'Release must be an exact draft or an already immutable published release.' >&2
+            exit 1
+          fi
+          if [ "$mode" = 'draft' ] && [ "$main_head" != "$expected_commit" ]; then
+            echo "Draft release source must still be current origin/main: main=$main_head expected=$expected_commit" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "expected_commit=$expected_commit"
+            echo "initial_mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run bounded source and Partner CLI validation
         working-directory: release-source
         shell: bash
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
-          npm test
+          npm run check:generated
+          npm run check:source
+          npm run build:portal-shell
+          node scripts/test_partner_cli_package.mjs
+          node scripts/test_partner_cli_version_change.mjs
+          node scripts/test_partner_cli_updater.mjs
+          node scripts/test_partner_cli_portal_release.mjs
+          node scripts/test_partner_cli_release_pipeline.mjs
 
-      - id: assets
-        name: Resolve or build immutable release assets
+      - name: Check deployment credential before release mutation
         shell: bash
         env:
-          TAG: ${{ steps.release.outputs.tag }}
+          DEPLOY_TOKEN: ${{ secrets.PARTNER_CLI_DEPLOY_TOKEN }}
         run: |
           set -euo pipefail
-          version="${TAG#partner-cli-v}"
+          test -n "$DEPLOY_TOKEN"
+
+      - id: immutable_release
+        name: Build, publish once if draft, and verify immutable assets
+        shell: bash
+        env:
+          TAG: ${{ steps.release_input.outputs.tag }}
+          VERSION: ${{ steps.release_input.outputs.version }}
+          EXPECTED_COMMIT: ${{ steps.release_input.outputs.expected_commit }}
+          INITIAL_MODE: ${{ steps.release_input.outputs.initial_mode }}
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          version="$VERSION"
+          expected_commit="$EXPECTED_COMMIT"
           zip_name="shein-bi-ops-cli-${version}.zip"
           checksum_name="${zip_name}.sha256"
-          mkdir -p artifacts
-          asset_names="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          zip_count="$(grep -Fxc "$zip_name" <<<"$asset_names" || true)"
-          checksum_count="$(grep -Fxc "$checksum_name" <<<"$asset_names" || true)"
-          if [ "$zip_count" = '1' ] && [ "$checksum_count" = '1' ]; then
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir artifacts --pattern "$zip_name" --pattern "$checksum_name" --clobber
-            origin='existing-release-assets'
-          elif [ "$zip_count" = '0' ] && [ "$checksum_count" = '0' ]; then
-            pwsh -NoProfile -File release-source/scripts/build_partner_bi_ops_cli_package.ps1 \
-              -SourceRoot "$PWD/release-source" -OutputDir "$PWD/artifacts"
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" \
-              "artifacts/$zip_name" "artifacts/$checksum_name"
-            origin='built-and-uploaded'
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "$temp_dir"' EXIT
+          rm -rf artifacts-built artifacts-readback artifacts-terminal artifact-extracted
+          mkdir -p artifacts-built
+          pwsh -NoProfile -File release-source/scripts/build_partner_bi_ops_cli_package.ps1 \
+            -SourceRoot "$PWD/release-source" -OutputDir "$PWD/artifacts-built"
+          test -f "artifacts-built/$zip_name"
+          test -f "artifacts-built/$checksum_name"
+          (cd artifacts-built && sha256sum -c "$checksum_name")
+          built_zip_sha="$(sha256sum "artifacts-built/$zip_name" | awk '{print $1}')"
+          built_checksum_sha="$(sha256sum "artifacts-built/$checksum_name" | awk '{print $1}')"
+          built_zip_size="$(stat -c '%s' "artifacts-built/$zip_name")"
+          built_checksum_size="$(stat -c '%s' "artifacts-built/$checksum_name")"
+
+          extract_and_verify() {
+            local artifact_dir="$1"
+            rm -rf artifact-extracted
+            mkdir artifact-extracted
+            set +e
+            unzip -q "$artifact_dir/$zip_name" -d artifact-extracted
+            local unzip_status="$?"
+            set -e
+            if [ "$unzip_status" -gt 1 ]; then
+              echo "Partner CLI ZIP extraction failed with status $unzip_status" >&2
+              exit "$unzip_status"
+            fi
+            chmod -R u+rwX artifact-extracted
+            node automation/scripts/verify_partner_cli_package_artifact.mjs \
+              --source-root "$PWD/release-source" --extracted-root "$PWD/artifact-extracted"
+          }
+
+          fetch_main_head() {
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha'
+          }
+
+          assert_main_exact() {
+            local observed
+            observed="$(fetch_main_head)"
+            local automation_head release_head
+            automation_head="$(git -C automation rev-parse --verify 'HEAD^{commit}')"
+            release_head="$(git -C release-source rev-parse --verify 'HEAD^{commit}')"
+            if [ "$automation_head" != "$observed" ] || [ "$release_head" != "$expected_commit" ]; then
+              echo "Checkout binding drifted: automation=$automation_head main=$observed release=$release_head expected=$expected_commit" >&2
+              exit 1
+            fi
+            if [ "$INITIAL_MODE" = 'draft' ] && [ "$observed" != "$expected_commit" ]; then
+              echo "Draft release source drifted from origin/main $observed (expected $expected_commit)." >&2
+              exit 1
+            fi
+          }
+
+          assert_tag_exact() {
+            local label="$1"
+            local ref_file="$temp_dir/tag-ref-${label}.json"
+            local object_file="$temp_dir/tag-object-${label}.json"
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > "$ref_file"
+            jq -e --arg tag "$tag" '
+              .ref == ("refs/tags/" + $tag)
+              and .object.type == "tag"
+              and (.object.sha | type == "string" and test("^[0-9a-f]{40}$"))
+            ' "$ref_file" >/dev/null
+            local object_sha
+            object_sha="$(jq -r '.object.sha' "$ref_file")"
+            gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" > "$object_file"
+            jq -e --arg tag "$tag" --arg commit "$expected_commit" '
+              .tag == $tag and .object.type == "commit" and .object.sha == $commit
+              and (.message | type == "string" and length > 0)
+              and (.tagger.date | type == "string" and length > 0)
+            ' "$object_file" >/dev/null || {
+              echo "Annotated tag drifted during $label." >&2
+              exit 1
+            }
+          }
+
+          fetch_release() {
+            local output="$1"
+            local pages="$temp_dir/release-pages.json"
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$pages"
+            jq -e --arg tag "$tag" '
+              [.[][] | select(.tag_name == $tag)]
+              | if length == 1 then .[0] else error("expected exactly one release for tag") end
+            ' "$pages" > "$output"
+          }
+
+          assert_release_mode() {
+            local file="$1"
+            local mode="$2"
+            jq -e --arg tag "$tag" --arg mode "$mode" --arg zip "$zip_name" --arg checksum "$checksum_name" '
+              .tag_name == $tag
+              and .prerelease == false
+              and ([.assets[] | select(.name != $zip and .name != $checksum)] | length) == 0
+              and ([.assets[] | select(.name == $zip)] | length) <= 1
+              and ([.assets[] | select(.name == $checksum)] | length) <= 1
+              and (
+                if $mode == "draft" then
+                  .draft == true and .published_at == null and .immutable != true
+                else
+                  .draft == false and .immutable == true
+                  and (.published_at | type == "string" and length > 0)
+                  and ([.assets[] | select(.name == $zip)] | length) == 1
+                  and ([.assets[] | select(.name == $checksum)] | length) == 1
+                end
+              )
+            ' "$file" >/dev/null
+          }
+
+          fresh_trust_gate() {
+            local label="$1"
+            node --input-type=module - "$expected_commit" > "$temp_dir/trust-${label}.json" <<'NODE'
+          import {
+            createGitHubEvidenceClient,
+            fetchLatestCiBindingEvidence,
+            fetchRepositoryTrustEvidence,
+            readSourceReleaseTrustPolicy,
+          } from './automation/lib/source_release_github_evidence.mjs';
+          const commit = process.argv[2];
+          const {policy} = await readSourceReleaseTrustPolicy('automation/config/source_release_trust_policy.json');
+          const client = createGitHubEvidenceClient({
+            token: process.env.GH_TOKEN,
+            apiBaseUrl: process.env.GITHUB_API_URL || 'https://api.github.com',
+          });
+          const repository = await fetchRepositoryTrustEvidence({client, policy});
+          const ci = await fetchLatestCiBindingEvidence({client, policy, commit});
+          process.stdout.write(JSON.stringify({
+            repositoryId: repository.id,
+            immutable: repository.immutable,
+            runId: ci.bound.runId,
+            runAttempt: ci.bound.runAttempt,
+            jobsSha256: ci.bound.jobsSha256,
+          }) + '\n');
+          NODE
+          }
+
+          verify_asset_metadata() {
+            local release_file="$1"
+            local zip_sha="$2"
+            local checksum_sha="$3"
+            local zip_size="$4"
+            local checksum_size="$5"
+            jq -e \
+              --arg zip "$zip_name" --arg checksum "$checksum_name" \
+              --arg zipDigest "sha256:$zip_sha" --arg checksumDigest "sha256:$checksum_sha" \
+              --argjson zipSize "$zip_size" --argjson checksumSize "$checksum_size" '
+                ([.assets[] | select(.name == $zip)] | length) == 1
+                and ([.assets[] | select(.name == $checksum)] | length) == 1
+                and ([.assets[] | select(.name == $zip)][0]
+                  | .state == "uploaded" and .size == $zipSize and .digest == $zipDigest
+                    and (.id | type == "number" and . > 0))
+                and ([.assets[] | select(.name == $checksum)][0]
+                  | .state == "uploaded" and .size == $checksumSize and .digest == $checksumDigest
+                    and (.id | type == "number" and . > 0))
+              ' "$release_file" >/dev/null
+          }
+
+          download_and_verify() {
+            local mode="$1"
+            local destination="$2"
+            local compare_built="$3"
+            local release_file="$temp_dir/release-download.json"
+            fetch_release "$release_file"
+            assert_release_mode "$release_file" "$mode"
+            local zip_id checksum_id
+            zip_id="$(jq -r --arg name "$zip_name" '.assets[] | select(.name == $name) | .id' "$release_file")"
+            checksum_id="$(jq -r --arg name "$checksum_name" '.assets[] | select(.name == $name) | .id' "$release_file")"
+            test -n "$zip_id"
+            test -n "$checksum_id"
+            rm -rf "$destination"
+            mkdir -p "$destination"
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$zip_id" > "$destination/$zip_name"
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$checksum_id" > "$destination/$checksum_name"
+            local zip_sha checksum_sha zip_size checksum_size
+            zip_sha="$(sha256sum "$destination/$zip_name" | awk '{print $1}')"
+            checksum_sha="$(sha256sum "$destination/$checksum_name" | awk '{print $1}')"
+            zip_size="$(stat -c '%s' "$destination/$zip_name")"
+            checksum_size="$(stat -c '%s' "$destination/$checksum_name")"
+            verify_asset_metadata "$release_file" "$zip_sha" "$checksum_sha" "$zip_size" "$checksum_size"
+            (cd "$destination" && sha256sum -c "$checksum_name")
+            if [ "$compare_built" = 'true' ]; then
+              cmp -s "artifacts-built/$zip_name" "$destination/$zip_name"
+              cmp -s "artifacts-built/$checksum_name" "$destination/$checksum_name"
+            fi
+            extract_and_verify "$destination"
+          }
+
+          extract_and_verify artifacts-built
+          assert_main_exact
+          assert_tag_exact initial
+          fresh_trust_gate initial
+          release_json="$temp_dir/release-initial.json"
+          fetch_release "$release_json"
+          assert_release_mode "$release_json" "$INITIAL_MODE"
+
+          if [ "$INITIAL_MODE" = 'draft' ]; then
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+              "artifacts-built/$zip_name" "artifacts-built/$checksum_name"
+            download_and_verify draft artifacts-readback true
+
+            assert_main_exact
+            assert_tag_exact immediately-before-publish
+            fresh_trust_gate immediately-before-publish
+            armed_release="$temp_dir/release-armed.json"
+            fetch_release "$armed_release"
+            assert_release_mode "$armed_release" draft
+            verify_asset_metadata "$armed_release" \
+              "$built_zip_sha" "$built_checksum_sha" "$built_zip_size" "$built_checksum_size"
+            release_id="$(jq -r '.id' "$armed_release")"
+            if [[ ! "$release_id" =~ ^[1-9][0-9]*$ ]]; then
+              echo 'Draft release id is invalid.' >&2
+              exit 1
+            fi
+            publish_payload="$temp_dir/publish.json"
+            printf '%s\n' '{"draft":false,"prerelease":false}' > "$publish_payload"
+            set +e
+            publish_http_status="$(curl --silent --show-error \
+              --connect-timeout 15 --max-time 60 \
+              --output "$temp_dir/publish-response.json" \
+              --write-out '%{http_code}' \
+              --request PATCH \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header 'Content-Type: application/json' \
+              --data-binary "@$publish_payload" \
+              "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/releases/$release_id")"
+            publish_transport_status="$?"
+            set -e
+            echo "Single publish request transport=$publish_transport_status http=${publish_http_status:-unknown}"
+
+            published='false'
+            terminal_release="$temp_dir/release-published.json"
+            for attempt in $(seq 1 12); do
+              if fetch_release "$terminal_release"; then
+                if assert_release_mode "$terminal_release" published \
+                  && verify_asset_metadata "$terminal_release" \
+                    "$built_zip_sha" "$built_checksum_sha" "$built_zip_size" "$built_checksum_size"; then
+                  published='true'
+                  break
+                fi
+                if ! verify_asset_metadata "$terminal_release" \
+                    "$built_zip_sha" "$built_checksum_sha" "$built_zip_size" "$built_checksum_size" \
+                  || ! jq -e '
+                    .prerelease == false
+                    and (
+                      (.draft == true and .published_at == null and .immutable != true)
+                      or (.draft == false and (.published_at | type == "string" and length > 0))
+                    )
+                  ' "$terminal_release" >/dev/null; then
+                  echo 'Release entered a non-terminal conflicting state after the single publish request.' >&2
+                  exit 1
+                fi
+              fi
+              sleep 5
+            done
+            if [ "$published" != 'true' ]; then
+              echo 'PUBLISH_OUTCOME_UNKNOWN: immutable publication was not proven; no publish retry was attempted.' >&2
+              exit 1
+            fi
+            asset_origin='draft-assets-uploaded-before-publish'
+            compare_terminal='true'
           else
-            echo 'Release has a partial or duplicate Partner CLI asset set; refusing mutation.' >&2
-            exit 1
+            asset_origin='existing-immutable-release-assets'
+            compare_terminal='false'
           fi
-          (cd artifacts && sha256sum -c "$checksum_name")
-          rm -rf artifact-extracted
-          mkdir artifact-extracted
-          # Windows PowerShell Compress-Archive writes backslash separators. Info-ZIP
-          # extracts them correctly on Linux but returns 1 for that compatibility warning.
-          set +e
-          unzip -q "artifacts/$zip_name" -d artifact-extracted
-          unzip_status="$?"
-          set -e
-          if [ "$unzip_status" -gt 1 ]; then
-            echo "Partner CLI ZIP extraction failed with status $unzip_status" >&2
-            exit "$unzip_status"
-          fi
-          # The same Windows archive may carry zeroed Unix directory modes.
-          # Restore owner read/traverse access before the byte-for-byte verifier.
-          chmod -R u+rwX artifact-extracted
-          node automation/scripts/verify_partner_cli_package_artifact.mjs \
-            --source-root release-source --extracted-root artifact-extracted
-          source_commit="$(git -C release-source rev-parse HEAD)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
-          echo "checksum_name=$checksum_name" >> "$GITHUB_OUTPUT"
-          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
-          echo "origin=$origin" >> "$GITHUB_OUTPUT"
+
+          assert_main_exact
+          assert_tag_exact terminal
+          fresh_trust_gate terminal
+          download_and_verify published artifacts-terminal "$compare_terminal"
+          final_release="$temp_dir/release-final.json"
+          fetch_release "$final_release"
+          assert_release_mode "$final_release" published
+          published_at="$(jq -r '.published_at' "$final_release")"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "source_commit=$expected_commit"
+            echo "published_at=$published_at"
+            echo "zip_name=$zip_name"
+            echo "checksum_name=$checksum_name"
+            echo "asset_origin=$asset_origin"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build validated deployment envelope
         shell: bash
         env:
-          TAG: ${{ steps.release.outputs.tag }}
-          PUBLISHED_AT: ${{ steps.release.outputs.published_at }}
-          SOURCE_COMMIT: ${{ steps.assets.outputs.source_commit }}
-          ZIP_NAME: ${{ steps.assets.outputs.zip_name }}
-          CHECKSUM_NAME: ${{ steps.assets.outputs.checksum_name }}
+          TAG: ${{ steps.immutable_release.outputs.tag }}
+          PUBLISHED_AT: ${{ steps.immutable_release.outputs.published_at }}
+          SOURCE_COMMIT: ${{ steps.immutable_release.outputs.source_commit }}
+          ZIP_NAME: ${{ steps.immutable_release.outputs.zip_name }}
+          CHECKSUM_NAME: ${{ steps.immutable_release.outputs.checksum_name }}
         run: |
           set -euo pipefail
           node automation/scripts/build_partner_cli_deploy_payload.mjs \
-            --source-root release-source \
-            --package-file "artifacts/$ZIP_NAME" \
-            --checksum-file "artifacts/$CHECKSUM_NAME" \
+            --source-root "$PWD/release-source" \
+            --package-file "artifacts-terminal/$ZIP_NAME" \
+            --checksum-file "artifacts-terminal/$CHECKSUM_NAME" \
             --tag "$TAG" \
             --source-commit "$SOURCE_COMMIT" \
             --published-at "$PUBLISHED_AT" \
             --output deployment-payload.json
 
-      - name: Deploy atomically to BI
+      - name: Re-read GitHub facts immediately before BI deployment
         shell: bash
         env:
-          EXPECTED_VERSION: ${{ steps.assets.outputs.version }}
-          EXPECTED_SOURCE_COMMIT: ${{ steps.assets.outputs.source_commit }}
+          TAG: ${{ steps.immutable_release.outputs.tag }}
+          EXPECTED_COMMIT: ${{ steps.immutable_release.outputs.source_commit }}
+          INITIAL_MODE: ${{ steps.release_input.outputs.initial_mode }}
+          ZIP_NAME: ${{ steps.immutable_release.outputs.zip_name }}
+          CHECKSUM_NAME: ${{ steps.immutable_release.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+          main_head="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          test "$(git -C automation rev-parse --verify 'HEAD^{commit}')" = "$main_head"
+          test "$(git -C release-source rev-parse --verify 'HEAD^{commit}')" = "$EXPECTED_COMMIT"
+          if [ "$INITIAL_MODE" = 'draft' ]; then test "$main_head" = "$EXPECTED_COMMIT"; fi
+          tag_ref="$(mktemp)"
+          tag_object="$(mktemp)"
+          release_json="$(mktemp)"
+          trap 'rm -f "$tag_ref" "$tag_object" "$release_json"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > "$tag_ref"
+          jq -e --arg tag "$TAG" '.ref == ("refs/tags/" + $tag) and .object.type == "tag"' "$tag_ref" >/dev/null
+          tag_object_sha="$(jq -r '.object.sha' "$tag_ref")"
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" > "$tag_object"
+          jq -e --arg tag "$TAG" --arg commit "$EXPECTED_COMMIT" '
+            .tag == $tag and .object.type == "commit" and .object.sha == $commit
+          ' "$tag_object" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$release_json"
+          zip_sha="$(sha256sum "artifacts-terminal/$ZIP_NAME" | awk '{print $1}')"
+          checksum_sha="$(sha256sum "artifacts-terminal/$CHECKSUM_NAME" | awk '{print $1}')"
+          zip_size="$(stat -c '%s' "artifacts-terminal/$ZIP_NAME")"
+          checksum_size="$(stat -c '%s' "artifacts-terminal/$CHECKSUM_NAME")"
+          jq -e \
+            --arg tag "$TAG" --arg zip "$ZIP_NAME" --arg checksum "$CHECKSUM_NAME" \
+            --arg zipDigest "sha256:$zip_sha" --arg checksumDigest "sha256:$checksum_sha" \
+            --argjson zipSize "$zip_size" --argjson checksumSize "$checksum_size" '
+              .tag_name == $tag and .draft == false and .prerelease == false and .immutable == true
+              and ([.assets[] | select(.name != $zip and .name != $checksum)] | length) == 0
+              and ([.assets[] | select(.name == $zip)] | length) == 1
+              and ([.assets[] | select(.name == $checksum)] | length) == 1
+              and ([.assets[] | select(.name == $zip)][0]
+                | .state == "uploaded" and .size == $zipSize and .digest == $zipDigest)
+              and ([.assets[] | select(.name == $checksum)][0]
+                | .state == "uploaded" and .size == $checksumSize and .digest == $checksumDigest)
+            ' "$release_json" >/dev/null
+          node --input-type=module - "$EXPECTED_COMMIT" <<'NODE'
+          import {
+            createGitHubEvidenceClient,
+            fetchLatestCiBindingEvidence,
+            fetchRepositoryTrustEvidence,
+            readSourceReleaseTrustPolicy,
+          } from './automation/lib/source_release_github_evidence.mjs';
+          const commit = process.argv[2];
+          const {policy} = await readSourceReleaseTrustPolicy('automation/config/source_release_trust_policy.json');
+          const client = createGitHubEvidenceClient({
+            token: process.env.GH_TOKEN,
+            apiBaseUrl: process.env.GITHUB_API_URL || 'https://api.github.com',
+          });
+          await fetchRepositoryTrustEvidence({client, policy});
+          await fetchLatestCiBindingEvidence({client, policy, commit});
+          NODE
+
+      - name: Deploy atomically to BI and read back
+        shell: bash
+        env:
+          DEPLOY_TOKEN: ${{ secrets.PARTNER_CLI_DEPLOY_TOKEN }}
+          EXPECTED_VERSION: ${{ steps.immutable_release.outputs.version }}
+          EXPECTED_SOURCE_COMMIT: ${{ steps.immutable_release.outputs.source_commit }}
         run: |
           set -euo pipefail
           response_file="$(mktemp)"
@@ -182,7 +589,9 @@ jobs:
           const fs = require('fs');
           const [file, version, sourceCommit] = process.argv.slice(2);
           const body = JSON.parse(fs.readFileSync(file, 'utf8'));
-          if (body.ok !== true || body.data?.active?.version !== version || body.data?.active?.sourceCommit !== sourceCommit) process.exit(1);
+          if (body.ok !== true
+            || body.data?.active?.version !== version
+            || body.data?.active?.sourceCommit !== sourceCommit) process.exit(1);
           NODE
           status_code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
             --output "$status_file" --write-out '%{http_code}' \
@@ -193,23 +602,26 @@ jobs:
           const fs = require('fs');
           const [file, version, sourceCommit] = process.argv.slice(2);
           const body = JSON.parse(fs.readFileSync(file, 'utf8'));
-          if (body.ok !== true || body.data?.active?.source !== 'managed' || body.data?.active?.version !== version || body.data?.active?.sourceCommit !== sourceCommit) process.exit(1);
+          if (body.ok !== true
+            || body.data?.active?.source !== 'managed'
+            || body.data?.active?.version !== version
+            || body.data?.active?.sourceCommit !== sourceCommit) process.exit(1);
           NODE
 
       - name: Publish deployment summary
         shell: bash
         env:
-          TAG: ${{ steps.release.outputs.tag }}
-          VERSION: ${{ steps.assets.outputs.version }}
-          SOURCE_COMMIT: ${{ steps.assets.outputs.source_commit }}
-          ASSET_ORIGIN: ${{ steps.assets.outputs.origin }}
+          TAG: ${{ steps.immutable_release.outputs.tag }}
+          VERSION: ${{ steps.immutable_release.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.immutable_release.outputs.source_commit }}
+          ASSET_ORIGIN: ${{ steps.immutable_release.outputs.asset_origin }}
         run: |
           {
-            echo '## Partner CLI production deployment'
+            echo '## Partner CLI immutable production deployment'
             echo
-            echo "- Tag: \`$TAG\`"
-            echo "- Version: \`$VERSION\`"
-            echo "- Source commit: \`$SOURCE_COMMIT\`"
-            echo "- Assets: \`$ASSET_ORIGIN\`"
-            echo '- BI activation: verified by authenticated readback'
+            echo "- Tag: $TAG"
+            echo "- Version: $VERSION"
+            echo "- Source commit: $SOURCE_COMMIT"
+            echo "- Assets: $ASSET_ORIGIN"
+            echo '- GitHub immutable release, exact main CI, package bytes, and BI activation: verified'
           } >> "$GITHUB_STEP_SUMMARY"

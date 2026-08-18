@@ -5,18 +5,24 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'owner-knowledge-execute-guard-'));
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const port = await freePort();
 const activationToken = ['test', 'owner', 'knowledge', 'activation', 'token', '1234567890'].join('-');
 const authFile = path.join(temp, 'users.json');
 const rolesFile = path.join(temp, 'roles.json');
+const portalDir = path.join(temp, 'portal');
+await fs.mkdir(portalDir, {recursive: true});
+await fs.writeFile(path.join(portalDir, 'index.html'), '<!doctype html><title>owner knowledge execute guard</title>', 'utf8');
 await fs.writeFile(authFile, JSON.stringify({users: [{username: 'owner', password: 'owner-password', role: 'owner'}]}));
 await fs.writeFile(rolesFile, JSON.stringify({defaults: {owner: {readStores: ['*'], writeStores: ['*']}}, users: {owner: {role: 'owner', readStores: ['*'], writeStores: ['*']}}}));
 
 const child = spawn(process.execPath, [
   'scripts/serve_bi_portal.mjs', '--host', '127.0.0.1', '--port', String(port),
+  '--dir', portalDir,
   '--auth-file', authFile, '--access-roles-file', rolesFile,
   '--htpasswd-file', path.join(temp, 'missing.htpasswd'), '--session-secret-file', path.join(temp, 'session-secret'),
   '--state-file', path.join(temp, 'state.json'), '--link-ops-task-file', path.join(temp, 'tasks.json'),

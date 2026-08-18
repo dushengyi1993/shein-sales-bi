@@ -66,11 +66,13 @@ const DESCRIPTION_LINES = Object.freeze({
 });
 const DESCRIPTION_SOURCE_BYTES = Buffer.from('reviewed source-detail-lock smoke fixture', 'utf8');
 const DESCRIPTION_SOURCE_LABEL = 'source-detail-lock-reviewed-fixture.html';
-const sourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', SOURCE_STORE);
-const sourceOpenApiDir = path.join(ROOT, 'outputs', 'shein_openapi_products', SOURCE_STORE);
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-source-detail-lock-'));
+const testOutputDir = path.join(tmpRoot, 'outputs');
+process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+const sourceLinkDir = path.join(testOutputDir, 'shein_links', SOURCE_STORE);
+const sourceOpenApiDir = path.join(testOutputDir, 'shein_openapi_products', SOURCE_STORE);
 
 const nowMs = Date.now();
 const FRESH_AT = new Date(nowMs - 23 * 60 * 60 * 1000).toISOString();
@@ -356,13 +358,42 @@ function baseTask() {
   };
 }
 
-async function runExecutor({label, mode, executionContext = null, task = null, expectedPayloadHash = ''}) {
+async function runExecutor({
+  label,
+  mode,
+  executionContext = null,
+  task = null,
+  expectedPayloadHash = '',
+  includeWriteClaim = true,
+  claimOperations = ['copy_product_draft'],
+}) {
+  let activeTask = JSON.parse(JSON.stringify(task || baseTask()));
+  let activeExecutionContext = executionContext ? JSON.parse(JSON.stringify(executionContext)) : null;
+  let claimNonce = '';
+  if (mode === 'execute' && includeWriteClaim) {
+    const lockedHash = typeof activeExecutionContext?.expectedPayloadHash === 'string'
+      ? activeExecutionContext.expectedPayloadHash
+      : String(expectedPayloadHash || '');
+    claimNonce = `claim-${label.replace(/[^a-z0-9]+/gi, '-').slice(0, 48)}`;
+    const writeClaim = {
+      schemaVersion: 1,
+      claimId: `wc-${label.replace(/[^a-z0-9]+/gi, '-').slice(0, 48)}`,
+      nonce: claimNonce,
+      taskId: String(activeTask.id || ''),
+      storeKey: 'HL',
+      operations: claimOperations,
+      expectedPayloadHash: lockedHash,
+      state: 'claimed',
+    };
+    activeExecutionContext = {...(activeExecutionContext || {}), writeClaim};
+    activeTask.execution = {...(activeTask.execution || {}), writeClaim};
+  }
   const storeFile = path.join(tmpRoot, `task-${label.replace(/[^a-z0-9]+/gi, '-')}.json`);
   await writeJson(storeFile, {
     version: 1,
     updatedAt: null,
-    ...(executionContext ? {executionContext} : {}),
-    tasks: [task || baseTask()],
+    ...(activeExecutionContext ? {executionContext: activeExecutionContext} : {}),
+    tasks: [activeTask],
   });
   const args = [
     'scripts/link_ops_hl_openapi_executor.mjs',
@@ -371,6 +402,7 @@ async function runExecutor({label, mode, executionContext = null, task = null, e
     '--store', 'HL',
     mode === 'execute' ? '--execute' : '--dry-run',
     ...(mode === 'execute' ? ['--confirm', 'SHEIN_OPENAPI_SUBMIT'] : []),
+    ...(mode === 'execute' && includeWriteClaim ? ['--claim-nonce', claimNonce] : []),
     '--out-dir', path.join(tmpRoot, `logs-${label.replace(/[^a-z0-9]+/gi, '-')}`),
   ];
   const run = await runNode(args);
@@ -915,6 +947,30 @@ try {
   check('timestamp-only refresh updates full evidence timestamp', timestampRefresh.output?.payload?.sourceDetailLock?.detailFetchedAt || '', refreshedAt);
   check('timestamp-only refresh keeps content hash', timestampRefresh.output?.payload?.sourceDetailLock?.detailContentSha256 || '', preflightOutput.payload.sourceDetailLock.detailContentSha256);
   check('timestamp-only refresh does not publish', publishAttemptCount, 0);
+
+  const missingClaim = await runExecutor({
+    label: 'execute-missing-write-claim',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: executeTask(),
+    includeWriteClaim: false,
+  });
+  check('execute without durable write claim is blocked', missingClaim.output?.state, 'blocked');
+  check('execute without durable write claim explains claim gate', missingClaim.output?.blockers || [],
+    blockers => blockers.some(message => /write-claim/.test(String(message))));
+  check('execute without durable write claim does not publish', publishAttemptCount, 0);
+
+  const overbroadClaim = await runExecutor({
+    label: 'execute-overbroad-write-claim',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: executeTask(),
+    claimOperations: ['copy_product_draft', 'update_title'],
+  });
+  check('execute with overbroad write claim is blocked', overbroadClaim.output?.state, 'blocked');
+  check('execute with overbroad write claim explains claim gate', overbroadClaim.output?.blockers || [],
+    blockers => blockers.some(message => /write-claim/.test(String(message))));
+  check('execute with overbroad write claim does not publish', publishAttemptCount, 0);
 
   // Fresh execute: same content/identity with a refreshed timestamp and the
   // original preflight lock -> publishOrEdit once.

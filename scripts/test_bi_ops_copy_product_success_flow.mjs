@@ -21,6 +21,7 @@ import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {sha256Utf8} from '../lib/link_ops_product_descriptions.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEEP_TEMP = process.argv.includes('--keep-temp');
@@ -37,6 +38,8 @@ const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-copy-success-smoke-'));
+const testOutputDir = path.join(tmpRoot, 'outputs');
+process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function getFreePort() {
@@ -187,8 +190,8 @@ const SOURCE_SKC = 'sv25082902871830770';
 const SOURCE_SPU = 'v209901010000';
 const SOURCE_SUPPLIER_CODE = productCase.requireInputCurrent ? 'SM-505A' : 'SRC-COPY-SUCCESS-CODE';
 const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-const sourceLinkFixtureDir = path.join(ROOT, 'outputs', 'shein_links', 'DL');
-const sourceOpenApiFixtureDir = path.join(ROOT, 'outputs', 'shein_openapi_products', 'DL');
+const sourceLinkFixtureDir = path.join(testOutputDir, 'shein_links', 'DL');
+const sourceOpenApiFixtureDir = path.join(testOutputDir, 'shein_openapi_products', 'DL');
 async function writeSourceDetailFixtures() {
   await fs.mkdir(sourceLinkFixtureDir, {recursive: true});
   await fs.mkdir(sourceOpenApiFixtureDir, {recursive: true});
@@ -840,6 +843,7 @@ const taskFile = path.join(tmpRoot, 'tasks.json');
 const chatFile = path.join(tmpRoot, 'chats.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 
 const portalPort = await getFreePort();

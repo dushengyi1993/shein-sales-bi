@@ -3,12 +3,24 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
+import {
+  DEFAULT_CLOUD_MAINTENANCE_FILE,
+  readCloudMaintenanceStatus,
+} from '../lib/cloud_maintenance_mode.mjs';
 import {buildCloudRuntimeSnapshot} from '../lib/cloud_runtime_snapshot.mjs';
-import {CLOUD_RUNTIME_UNITS} from '../lib/cloud_runtime_inventory.mjs';
+import {
+  CLOUD_EXPECTED_INSTALLED_UNITS,
+  CLOUD_LEGACY_MASKED_UNIT_ALLOWLIST,
+  CLOUD_RUNTIME_SNAPSHOT_UNITS,
+} from '../lib/cloud_runtime_inventory.mjs';
 import {buildOpsRun, compactOpsRun, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
 import {collectSystemdUnitSnapshot} from '../lib/systemd_unit_snapshot.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
-import {inspectReleaseSourceState} from './check_release_source_state.mjs';
+import {
+  inspectRecordedDeploymentReleaseEvidence,
+  inspectReleaseSourceState,
+} from './check_release_source_state.mjs';
+import {auditCloudMaintenanceGuards} from './manage_cloud_maintenance_mode.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -18,8 +30,12 @@ function parseArgs(argv) {
     outDir: '',
     expectedCommit: '',
     deploymentStateFile: process.env.SHEIN_BI_DEPLOYED_RELEASE_FILE || '/srv/shein-bi/runtime/deployed_release.json',
+    releaseAttestationRoot: process.env.SHEIN_BI_RELEASE_ATTESTATION_ROOT
+      || '/srv/shein-bi/runtime/release-attestations',
+    maintenanceFile: DEFAULT_CLOUD_MAINTENANCE_FILE,
     portalUrl: 'http://127.0.0.1:8787/api/health',
     webhookUrl: 'http://127.0.0.1:8792/healthz',
+    queryUrl: 'http://127.0.0.1:8788/api/health',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const value = () => String(argv[++i] || '').trim();
@@ -27,8 +43,11 @@ function parseArgs(argv) {
     else if (argv[i] === '--out-dir') args.outDir = path.resolve(value());
     else if (argv[i] === '--expected-commit') args.expectedCommit = value();
     else if (argv[i] === '--deployment-state-file') args.deploymentStateFile = path.resolve(value());
+    else if (argv[i] === '--release-attestation-root') args.releaseAttestationRoot = path.resolve(value());
+    else if (argv[i] === '--maintenance-file') args.maintenanceFile = path.resolve(value());
     else if (argv[i] === '--portal-url') args.portalUrl = value();
     else if (argv[i] === '--webhook-url') args.webhookUrl = value();
+    else if (argv[i] === '--query-url') args.queryUrl = value();
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
   if (!args.outDir) throw new Error('Usage: node scripts/capture_ops_runtime_snapshot.mjs --out-dir <new-directory> [--expected-commit <tag-or-sha>]');
@@ -43,6 +62,17 @@ async function fetchHealth(url, kind) {
   try {
     const response = await fetch(url, {signal: AbortSignal.timeout(5_000)});
     const json = await response.json();
+    if (kind === 'query') {
+      return {
+        httpStatus: response.status,
+        ok: json.ok === true,
+        surface: String(json.surface || ''),
+        sideEffectsStartedIsArray: Array.isArray(json.sideEffectsStarted),
+        sideEffectsStarted: Array.isArray(json.sideEffectsStarted)
+          ? json.sideEffectsStarted.map(value => String(value || ''))
+          : null,
+      };
+    }
     if (kind === 'portal') {
       return {
         httpStatus: response.status,
@@ -68,28 +98,48 @@ async function main() {
     throw error;
   }
   const deployedRelease = await readJson(args.deploymentStateFile).catch(() => ({}));
+  const deploymentEvidence = inspectRecordedDeploymentReleaseEvidence({
+    cwd: args.root,
+    marker: deployedRelease,
+    releaseAttestationRoot: args.releaseAttestationRoot,
+  });
   let releaseSourceState;
   try {
     releaseSourceState = inspectReleaseSourceState({
       cwd: args.root,
-      expectedCommit: args.expectedCommit || deployedRelease.commit || '',
+      expectedCommit: args.expectedCommit || deploymentEvidence.commit || '',
     });
   } catch (error) {
     releaseSourceState = {ok: false, errorCode: String(error?.code || 'SOURCE_INSPECTION_FAILED')};
   }
-  const [systemdSnapshot, portalHealth, webhookHealth] = await Promise.all([
-    collectSystemdUnitSnapshot(CLOUD_RUNTIME_UNITS),
+  const [systemdSnapshot, maintenanceStatus, maintenanceGuardAudit, portalHealth, webhookHealth, queryHealth] = await Promise.all([
+    collectSystemdUnitSnapshot(CLOUD_RUNTIME_SNAPSHOT_UNITS, {
+      expectedUnitFiles: CLOUD_EXPECTED_INSTALLED_UNITS,
+      legacyMaskedAllowlist: CLOUD_LEGACY_MASKED_UNIT_ALLOWLIST,
+    }),
+    readCloudMaintenanceStatus(args.maintenanceFile),
+    auditCloudMaintenanceGuards().catch(error => ({
+      ok: false,
+      policyCount: 0,
+      unchanged: 0,
+      issues: [{code: String(error?.code || 'MAINTENANCE_GUARD_AUDIT_FAILED'), message: String(error?.message || error).slice(0, 500)}],
+    })),
     fetchHealth(args.portalUrl, 'portal'),
     fetchHealth(args.webhookUrl, 'webhook'),
+    fetchHealth(args.queryUrl, 'query'),
   ]);
   const finishedAt = new Date().toISOString();
   const snapshot = buildCloudRuntimeSnapshot({
     generatedAt: finishedAt,
     releaseSourceState,
     deployedRelease,
+    deploymentEvidence,
     systemdSnapshot,
+    maintenanceStatus,
+    maintenanceGuardAudit,
     portalHealth,
     webhookHealth,
+    queryHealth,
   });
   const snapshotFile = path.join(args.outDir, 'snapshot.json');
   await writeJsonFileAtomic(snapshotFile, snapshot, {mode: 0o600});
@@ -101,17 +151,35 @@ async function main() {
     coverage: {
       requestedUnits: snapshot.runtimeProbe.requestedUnitCount,
       unknownUnits: snapshot.runtimeProbe.unknownUnits.length,
-      healthEndpoints: 2,
+      expectedUnitFiles: snapshot.unitFiles.expectedCount,
+      installedUnitFiles: snapshot.unitFiles.installedCount,
+      missingUnitFiles: snapshot.unitFiles.missing.length,
+      unexpectedUnitFiles: snapshot.unitFiles.unexpected.length,
+      healthEndpoints: 3,
     },
     summary: {
       releaseCommitMatches: snapshot.releaseSource.commitMatches,
+      deploymentEvidenceOk: snapshot.deployedRelease.evidenceOk,
       trackedDirtyCount: snapshot.releaseSource.dirtyCount,
       requiredServicesInactive: snapshot.runtimeProbe.inactiveAlwaysRunning.length,
       requiredServicesRestarted: snapshot.runtimeProbe.restartedAlwaysRunning.length,
       timersInactive: snapshot.runtimeProbe.inactiveTimers.length,
+      timersMaintenanceInactive: snapshot.runtimeProbe.maintenanceInactiveTimers.length,
       portalHealthy: snapshot.health.portal.ok,
       webhookHealthy: snapshot.health.webhook.ok,
+      queryHealthy: snapshot.health.query.ok,
       systemctlCommandCount: snapshot.runtimeProbe.systemctlCommandCount,
+      maintenance: {
+        ok: snapshot.maintenance.ok,
+        active: snapshot.maintenance.active,
+        mode: snapshot.maintenance.mode,
+        generation: snapshot.maintenance.generation,
+        hash: snapshot.maintenance.hash,
+        startedAt: snapshot.maintenance.startedAt || null,
+        errorCode: snapshot.maintenance.errorCode || null,
+      },
+      maintenanceGuardsOk: snapshot.maintenanceGuards.ok,
+      effectiveRuntimeControlsOk: snapshot.effectiveControls.ok,
     },
     blockers: snapshot.blockers,
   });

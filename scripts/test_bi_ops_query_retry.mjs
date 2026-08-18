@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 
-import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
+import {
+  biQueryRequestTimeoutMs,
+  isBusyBiQueryError,
+  isIncompleteBiQueryError,
+  runBiQueryWithWait,
+} from '../lib/bi_ops_query_retry.mjs';
 
 assert.equal(biQueryRequestTimeoutMs(['linksData'], {}), 60_000);
 assert.equal(biQueryRequestTimeoutMs(['orders'], {}), 30_000);
@@ -11,6 +16,8 @@ assert.equal(isIncompleteBiQueryError({status: 503}), false);
 assert.equal(isIncompleteBiQueryError({response: {code: 'BI_QUERY_DATA_INCOMPLETE'}}), true);
 assert.equal(isIncompleteBiQueryError({status: 503, response: {code: 'UPSTREAM_UNAVAILABLE'}}), false);
 assert.equal(isIncompleteBiQueryError({status: 401}), false);
+assert.equal(isBusyBiQueryError({status: 429, response: {code: 'QUERY_SURFACE_BUSY'}}), true);
+assert.equal(isBusyBiQueryError({status: 503, response: {code: 'QUERY_SURFACE_BUSY'}}), false);
 
 let clock = 0;
 let attempts = 0;
@@ -32,6 +39,28 @@ const completed = await runBiQueryWithWait(async () => {
 assert.deepEqual(completed.value, {ok: true});
 assert.equal(completed.attempts, 3);
 assert.equal(completed.waitedMs, 2_000);
+
+clock = 0;
+let busyAttempts = 0;
+const busyThenSuccess = await runBiQueryWithWait(async () => {
+  busyAttempts += 1;
+  if (busyAttempts === 1) {
+    const error = new Error('query lane busy');
+    error.status = 429;
+    error.retryAfterMs = 2_000;
+    error.response = {code: 'QUERY_SURFACE_BUSY'};
+    throw error;
+  }
+  return {ok: true};
+}, {
+  waitSeconds: 5,
+  intervalMs: 1_000,
+  now: () => clock,
+  sleep: async ms => { clock += ms; },
+});
+assert.deepEqual(busyThenSuccess.value, {ok: true});
+assert.equal(busyThenSuccess.attempts, 2);
+assert.equal(busyThenSuccess.waitedMs, 2_000);
 
 clock = 0;
 await assert.rejects(
@@ -98,4 +127,4 @@ await assert.rejects(
   error => error.code === 'BI_QUERY_REQUEST_TIMEOUT' && error.queryAttempts === 1,
 );
 
-console.log(JSON.stringify({ok: true, checks: ['bounded_retry', 'deadline_abort', 'timeout_retry', 'section_timeout_budget', 'non_target_503', 'non_retryable_error']}, null, 2));
+console.log(JSON.stringify({ok: true, checks: ['bounded_retry', 'busy_retry_after', 'deadline_abort', 'timeout_retry', 'section_timeout_budget', 'non_target_503', 'non_retryable_error']}, null, 2));

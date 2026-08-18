@@ -20,7 +20,7 @@ node scripts/bi_ops_cli.mjs query --text "原始问题" --out outputs/query.json
 node scripts/inspect_ops_run.mjs --manifest outputs/query.json.manifest.json
 ```
 
-CLI 对 `BI_QUERY_DATA_INCOMPLETE` 在同一次进程内最多等待 30 秒，避免主任务重复发起相同查询。仍不完整时会原子覆盖 `--out` 为失败证据，并返回缺失 section；不会沿用旧文件或把缺失写成 0。可用 `--wait-seconds 0..300` 显式覆盖等待时间。
+CLI 默认在同一次进程/90 秒预算内等待 `BI_QUERY_DATA_INCOMPLETE`；Query 隔离进程返回 HTTP 429 + `QUERY_SURFACE_BUSY` 时按 `Retry-After` 继续有界等待。鉴权和其它 5xx 不重试。预算耗尽后原子覆盖 `--out` 为失败证据并返回缺失 section/错误码，不沿用旧文件或把缺失写成 0。可用 `--wait-seconds 0..300` 显式覆盖总预算。
 
 ## 云端运行态
 
@@ -30,13 +30,13 @@ node scripts/capture_ops_runtime_snapshot.mjs \
   --expected-commit <release-tag>
 ```
 
-该入口一次完成部署标记、源码一致性、全部受管 systemd unit/timer、Portal health 和 Webhook health 回读。所有 systemd 状态只调用一次 `systemctl show`。主任务先读 manifest 和紧凑 summary，仅对 blocker 做定向探针。
+该入口一次完成 attestation-bound schema v3 deployment marker（`shein-bi-deployed-release/v3`）、源码一致性、canonical maintenance marker、全部受管 systemd unit/timer/path，以及 Portal/Query/Webhook 三个 health 回读。所有 systemd 状态只调用一次 `systemctl show`，unit-file inventory 另调用一次 `list-unit-files`。主任务先读 manifest 和紧凑 summary，仅对 blocker 做定向探针；旧 v1/v2 marker、Query 副作用或 unit inventory 缺口都必须是 blocker。
 
 ## 巡检与 pipeline marker
 
 `pipeline_marker.mjs write --evidence` 现在要求证据存在且为普通文件，并记录 bytes/SHA-256。`require --require-evidence` 可执行终态哈希回读。旧 marker 在未启用该开关时保持兼容；消费者应在一次完整的新业务日 marker 生成后再分批启用强校验，避免把迁移前 marker 误判为损坏。
 
-`cloud_ops_watchdog.mjs` 继续保留原业务判断，但 systemd 探针从逐 unit 串行调用改为一次批量快照，并在报告中记录 `runtimeProbe.systemctlCommandCount`。
+`cloud_ops_watchdog.mjs` 继续保留原业务判断，但 systemd 探针从逐 unit 串行调用改为一次批量快照，并在报告中记录 `runtimeProbe.systemctlCommandCount`。它每轮只读一次维护 marker；告警/recovery 写入持久 outbox，同轮业务恢复与维护结束合并成一条通知，失败沿用同一 idempotency 重试。
 
 ## 边界
 

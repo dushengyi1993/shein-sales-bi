@@ -13,6 +13,7 @@ import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_
 import {
   buildProductDraftFromSnapshots,
   inferSourceProductFromTask,
+  resolveLinkOpsOutputDir,
   summarizeDraftForExecutor,
 } from '../lib/link_ops_product_draft_mapper.mjs';
 import {
@@ -86,6 +87,7 @@ function parseArgs(argv) {
     outDir: DEFAULT_OUT_DIR,
     store: TARGET_STORE,
     confirm: '',
+    claimNonce: '',
     quiet: false,
     payloadOut: '',
   };
@@ -101,6 +103,7 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.mode = 'dry-run';
     else if (a === '--execute') args.mode = 'execute';
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
+    else if (a === '--claim-nonce') args.claimNonce = String(argv[++i] || '').trim();
     else if (a === '--payload-out') args.payloadOut = path.resolve(argv[++i]);
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--help' || a === '-h') {
@@ -546,9 +549,10 @@ function sourceCandidateMetrics(row) {
 
 async function inferSourceCandidatesFromBi(task, {targetStore}) {
   const rows = [];
+  const outputDir = resolveLinkOpsOutputDir();
   for (const file of [
-    path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
-    path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+    path.join(outputDir, 'bi-portal', 'sections', 'linksData.json'),
+    path.join(outputDir, 'bi-portal', 'data.json'),
   ]) {
     const data = await readJsonIfExists(file);
     rows.push(...biPortalLinkRows(data));
@@ -4191,6 +4195,24 @@ async function main() {
       blockers.push('真实提交缺少 dry-run 锁定的 payload hash，不能提交未经锁定的发布 payload。');
     } else if (!payloadHash || payloadHash !== expectedHash) {
       blockers.push(`真实提交 payload hash 与 dry-run 锁定值不一致：expected=${expectedHash || 'missing'} actual=${payloadHash || 'missing'}`);
+    }
+    const writeClaim = executionContext?.writeClaim && typeof executionContext.writeClaim === 'object'
+      ? executionContext.writeClaim
+      : null;
+    const claimOperations = Array.isArray(writeClaim?.operations)
+      ? [...new Set(writeClaim.operations.map(value => String(value || '').trim().toLowerCase()).filter(Boolean))].sort()
+      : [];
+    const claimOk = Boolean(writeClaim
+      && args.claimNonce
+      && String(writeClaim.nonce || '') === args.claimNonce
+      && String(writeClaim.taskId || '') === String(task?.id || '')
+      && normalizeStoreKey(writeClaim.storeKey) === targetStore
+      && JSON.stringify(claimOperations) === JSON.stringify(['copy_product_draft'])
+      && String(writeClaim.expectedPayloadHash || '') === expectedHash
+      && String(writeClaim.expectedPayloadHash || '') === payloadHash
+      && String(writeClaim.state || '') === 'claimed');
+    if (!claimOk) {
+      blockers.push('copy_product_draft 真实提交缺少服务端持久化 write-claim（nonce/taskId/store/expectedPayloadHash/operation 必须一致），禁止调用 publishOrEdit。');
     }
   }
 

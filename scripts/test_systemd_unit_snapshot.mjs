@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 
-import {collectSystemdUnitSnapshot, parseSystemdShowMany} from '../lib/systemd_unit_snapshot.mjs';
+import {
+  collectSystemdUnitSnapshot,
+  compareSystemdUnitFiles,
+  parseSystemdListUnitFiles,
+  parseSystemdShowMany,
+} from '../lib/systemd_unit_snapshot.mjs';
 
 const fixture = `Id=shein-bi-portal.service
 LoadState=loaded
@@ -15,6 +20,12 @@ ActiveEnterTimestamp=
 ExecMainStartTimestamp=
 ExecMainExitTimestamp=
 NRestarts=0
+ExecCondition=
+RequiresMountsFor=
+BindPaths=
+BindReadOnlyPaths=
+ReadOnlyPaths=
+InaccessiblePaths=
 
 Id=shein-bi-webhook.service
 LoadState=loaded
@@ -28,6 +39,12 @@ ActiveEnterTimestamp=
 ExecMainStartTimestamp=
 ExecMainExitTimestamp=
 NRestarts=2
+ExecCondition=
+RequiresMountsFor=
+BindPaths=
+BindReadOnlyPaths=
+ReadOnlyPaths=/data/shein-bi/state /data/shein-bi/outputs
+InaccessiblePaths=
 
 Id=not-found.service
 LoadState=not-found
@@ -41,6 +58,12 @@ ActiveEnterTimestamp=
 ExecMainStartTimestamp=
 ExecMainExitTimestamp=
 NRestarts=0
+ExecCondition=
+RequiresMountsFor=
+BindPaths=
+BindReadOnlyPaths=
+ReadOnlyPaths=
+InaccessiblePaths=
 
 Id=shein-bi-daily.timer
 LoadState=loaded
@@ -78,28 +101,106 @@ assert.equal(incomplete['partial.service'].complete, false);
 assert.ok(incomplete['partial.service'].missingProperties.includes('ActiveState'));
 
 const aliasMismatch = parseSystemdShowMany(
-  'Id=canonical.service\nLoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainCode=0\nExecMainStatus=0\nStateChangeTimestamp=\nActiveEnterTimestamp=\nExecMainStartTimestamp=\nExecMainExitTimestamp=\nNRestarts=0\n',
+  'Id=canonical.service\nLoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainCode=0\nExecMainStatus=0\nStateChangeTimestamp=\nActiveEnterTimestamp=\nExecMainStartTimestamp=\nExecMainExitTimestamp=\nNRestarts=0\nExecCondition=\nRequiresMountsFor=\nBindPaths=\nBindReadOnlyPaths=\nReadOnlyPaths=\nInaccessiblePaths=\n',
   ['alias.service'],
   {code: 0},
 );
 assert.equal(aliasMismatch['alias.service'].complete, false);
 assert.equal(aliasMismatch['canonical.service'].complete, true);
 
+const unitFileFixture = `shein-bi-portal.service enabled enabled
+shein-bi-webhook.service enabled enabled
+shein-bi-cloud-link-business.timer masked enabled
+shein-bi-cloud-openapi-hl.service masked enabled
+shein-bi-unexpected.timer disabled enabled
+shein-bi-unknown.path future-state enabled
+unrelated.service enabled enabled
+`;
+const unitFileInventory = parseSystemdListUnitFiles(unitFileFixture, {code: 0});
+assert.equal(unitFileInventory.complete, true);
+assert.equal(unitFileInventory.entries['shein-bi-portal.service'].state, 'enabled');
+assert.equal(unitFileInventory.entries['shein-bi-cloud-link-business.timer'].state, 'masked');
+assert.deepEqual(unitFileInventory.unknownState, [{name: 'shein-bi-unknown.path', state: 'future-state'}]);
+
+const unexpectedInstalled = compareSystemdUnitFiles({
+  inventory: unitFileInventory,
+  expectedNames: ['shein-bi-portal.service', 'shein-bi-webhook.service'],
+  legacyMaskedAllowlist: [
+    'shein-bi-cloud-link-business.timer',
+    'shein-bi-cloud-openapi-hl.service',
+  ],
+});
+assert.equal(unexpectedInstalled.ok, false);
+assert.deepEqual(unexpectedInstalled.allowedLegacyMasked, [
+  {name: 'shein-bi-cloud-link-business.timer', state: 'masked'},
+  {name: 'shein-bi-cloud-openapi-hl.service', state: 'masked'},
+]);
+assert.ok(unexpectedInstalled.unexpected.some(row => row.name === 'shein-bi-unexpected.timer'));
+assert.ok(unexpectedInstalled.unknownState.some(row => row.name === 'shein-bi-unknown.path'));
+
+const missingInstalled = compareSystemdUnitFiles({
+  inventory: parseSystemdListUnitFiles('shein-bi-portal.service enabled enabled\n', {code: 0}),
+  expectedNames: ['shein-bi-portal.service', 'shein-bi-webhook.service'],
+});
+assert.deepEqual(missingInstalled.missing, ['shein-bi-webhook.service']);
+assert.equal(missingInstalled.ok, false);
+
 let calls = 0;
+let listCalls = 0;
+let showCalls = 0;
 const snapshot = await collectSystemdUnitSnapshot([
   'shein-bi-portal.service', 'shein-bi-webhook.service', 'shein-bi-portal.service',
 ], {
   execute: async args => {
     calls += 1;
-    assert.equal(args[0], 'show');
-    assert.equal(args.filter(value => value === 'shein-bi-portal.service').length, 1);
-    return {code: 1, stdout: fixture, stderr: 'one unrelated unit was not found'};
+    if (args[0] === 'show') {
+      showCalls += 1;
+      assert.equal(args.filter(value => value === 'shein-bi-portal.service').length, 1);
+      return {code: 1, stdout: fixture, stderr: 'one unrelated unit was not found'};
+    }
+    assert.equal(args[0], 'list-unit-files');
+    listCalls += 1;
+    assert.equal(args.filter(value => value === 'shein-bi-*.service').length, 1);
+    return {
+      code: 0,
+      stdout: 'shein-bi-portal.service enabled enabled\nshein-bi-webhook.service enabled enabled\n',
+      stderr: '',
+    };
   },
+  expectedUnitFiles: ['shein-bi-portal.service', 'shein-bi-webhook.service'],
 });
-assert.equal(calls, 1);
-assert.equal(snapshot.commandCount, 1);
+assert.equal(calls, 2);
+assert.equal(showCalls, 1);
+assert.equal(listCalls, 1);
+assert.equal(snapshot.commandCount, 2);
+assert.equal(snapshot.showCommandCount, 1);
+assert.equal(snapshot.listUnitFilesCommandCount, 1);
 assert.equal(snapshot.requested.length, 2);
 assert.equal(snapshot.units['shein-bi-portal.service'].ok, true);
+assert.equal(snapshot.unitFileComparison.ok, true);
 assert.equal(snapshot.ok, true, 'nonzero command semantics are evaluated per complete unit block');
 
-console.log(JSON.stringify({ok: true, unitCount: snapshot.requested.length, systemctlCommandCount: snapshot.commandCount}, null, 2));
+
+const readOnlyCollected = parseSystemdShowMany(
+  'Id=readonly-collect.service\nLoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainCode=0\nExecMainStatus=0\nStateChangeTimestamp=\nActiveEnterTimestamp=\nExecMainStartTimestamp=\nExecMainExitTimestamp=\nNRestarts=0\nExecCondition=\nRequiresMountsFor=\nBindPaths=\nBindReadOnlyPaths=\nReadOnlyPaths=/data/shein-bi/state /data/shein-bi/outputs\nInaccessiblePaths=\n',
+  ['readonly-collect.service'],
+  {code: 0},
+);
+assert.equal(readOnlyCollected['readonly-collect.service'].complete, true);
+assert.equal(readOnlyCollected['readonly-collect.service'].ReadOnlyPaths, '/data/shein-bi/state /data/shein-bi/outputs');
+
+const readOnlyOmitted = parseSystemdShowMany(
+  'Id=readonly-omitted.service\nLoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainCode=0\nExecMainStatus=0\nStateChangeTimestamp=\nActiveEnterTimestamp=\nExecMainStartTimestamp=\nExecMainExitTimestamp=\nNRestarts=0\nExecCondition=\nRequiresMountsFor=\nBindPaths=\nBindReadOnlyPaths=\nInaccessiblePaths=\n',
+  ['readonly-omitted.service'],
+  {code: 0},
+);
+assert.equal(readOnlyOmitted['readonly-omitted.service'].complete, false);
+assert.ok(readOnlyOmitted['readonly-omitted.service'].missingProperties.includes('ReadOnlyPaths'));
+console.log(JSON.stringify({
+  ok: true,
+  unitCount: snapshot.requested.length,
+  systemctlCommandCount: snapshot.commandCount,
+  unexpectedInstalledCounterexample: true,
+  missingInstalledCounterexample: true,
+  unknownStateCounterexample: true,
+}, null, 2));

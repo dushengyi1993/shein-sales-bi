@@ -1,0 +1,71 @@
+[Unit]
+Description=SHEIN BI authenticated query-only runtime
+Wants=network-online.target
+Requires=shein-bi-session-secret.service
+After=network-online.target shein-bi-session-secret.service
+
+[Service]
+Type=simple
+User=sheinops
+Group=sheinops
+UMask=0077
+WorkingDirectory=/opt/shein-bi/app
+EnvironmentFile=/srv/shein-bi/secrets/portal-warehouse.env
+Environment=NODE_ENV=production
+Environment=SHEIN_BI_SURFACE=query
+Environment=SHEIN_OWNER_KNOWLEDGE_PRINCIPAL=dushengyi
+Environment=SHEIN_LINK_OPS_STORE=postgres
+Environment=SHEIN_WEBHOOK_REPOSITORY_ENABLED=0
+Environment=SHEIN_BI_INTENT_PLANNER_ENABLED=0
+Environment=SHEIN_BI_JOB_WORKER_ENABLED=0
+Environment=SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED=0
+Environment=SHEIN_BI_CORE_WARMUP_DISABLED=1
+Environment=SHEIN_BI_QUERY_MAX_CONCURRENT=1
+Environment=SHEIN_BI_QUERY_MAX_QUEUED=3
+Environment=SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS=120000
+# On deadline/disconnect the client response ends immediately but the serial
+# lane slot stays held until the lane work settles; a work that never settles
+# within this bounded grace window exits with code 70 and Restart=always
+# recovers the runtime. The slot is never released to a second query while
+# the first work is still running.
+Environment=SHEIN_BI_QUERY_GRACE_MS=30000
+Environment=SHEIN_WAREHOUSE_PG_HOST=127.0.0.1
+Environment=SHEIN_WAREHOUSE_PG_PORT=54329
+Environment=SHEIN_WAREHOUSE_PG_DATABASE=shein_bi
+Environment=SHEIN_WAREHOUSE_PG_USER=shein_link_ops
+Environment=SHEIN_WAREHOUSE_PG_POOL_MAX=2
+Environment=NODE_OPTIONS=--max-old-space-size=1024
+ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --surface query --host 127.0.0.1 --port 8788 --dir /data/shein-bi/outputs/bi-portal --state-file /data/shein-bi/state/bi_action_state.json --link-ops-task-file /data/shein-bi/state/bi_link_ops_tasks.json --link-ops-chat-file /data/shein-bi/state/bi_link_ops_chats.json --link-ops-runtime-file /data/shein-bi/state/bi_link_ops_runtime.json --auth-file /opt/shein-bi/app/config/bi_users.local.json --access-roles-file /opt/shein-bi/app/config/bi_access_roles.json --htpasswd-file /srv/shein-bi/secrets/bi_basic_auth.htpasswd --session-secret-file /data/shein-bi/state/bi_portal_session_secret.local
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+KillMode=control-group
+MemoryHigh=1024M
+MemoryMax=1400M
+TasksMax=128
+LimitNOFILE=4096
+OOMPolicy=stop
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadOnlyPaths=/opt/shein-bi/app /data/shein-bi/outputs /data/shein-bi/state /srv/shein-bi/secrets
+InaccessiblePaths=/data/shein-bi/profiles /opt/shein-bi/app/profiles
+
+[Install]
+WantedBy=multi-user.target

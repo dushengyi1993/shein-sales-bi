@@ -85,6 +85,9 @@ const CHECK_FILES = [
   'lib/pending_discuss_daily.mjs',
   'scripts/pending_discuss_daily.mjs',
   'scripts/test_pending_discuss_daily.mjs',
+  'scripts/test_bi_portal_repository_crud.mjs',
+  'scripts/test_bi_portal_mutation_queue.mjs',
+  'scripts/test_bi_runtime_shutdown_lifecycle.mjs',
 ];
 const DIFF_CHECK_FILES = [
   'scripts/serve_bi_portal.mjs',
@@ -165,9 +168,13 @@ const DIFF_CHECK_FILES = [
   'docs/bi-ops-openapi-automation-plan.md',
   'docs/shein-openapi-integration.md',
   'docs/pending-discuss-batch.md',
+  'scripts/test_bi_portal_repository_crud.mjs',
+  'scripts/test_bi_portal_mutation_queue.mjs',
+  'scripts/test_bi_runtime_shutdown_lifecycle.mjs',
 ];
 const BI_OPS_V2_JS_FILES = [
   'lib/bi_ops_query_retry.mjs',
+  'lib/deterministic_test_shards.mjs',
   'lib/cloud_runtime_inventory.mjs',
   'lib/cloud_runtime_snapshot.mjs',
   'lib/morning_resume_evidence.mjs',
@@ -208,6 +215,8 @@ const BI_OPS_V2_JS_FILES = [
   'scripts/test_partner_cli_updater.mjs',
   'scripts/test_partner_cli_portal_release.mjs',
   'scripts/test_partner_cli_release_pipeline.mjs',
+  'scripts/test_deterministic_test_shards.mjs',
+  'scripts/test_deterministic_timeout_contract.mjs',
   'scripts/build_partner_cli_deploy_payload.mjs',
   'scripts/verify_partner_cli_package_artifact.mjs',
   'scripts/partner_cli_bootstrap.mjs',
@@ -276,6 +285,67 @@ const SK5110_LOCAL_ARTIFACTS = [
 ];
 const PRODUCT_ATTRIBUTE_FLOW_TEST = 'scripts/test_link_ops_prepare_product_attribute_flow.mjs';
 const PRODUCT_ATTRIBUTE_FLOW_TIMEOUT_MS = 1_800_000;
+const RELEASE_GATE_TEST = 'scripts/test_bi_ops_release_gate.mjs';
+const OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT = 184;
+const OWNERSHIP_BASELINE_DIRECT_CALL_COUNT = 49;
+const OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT = 41;
+const OWNERSHIP_BASELINE_INTERSECTION_COUNT = 19;
+const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
+  + OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT
+  - OWNERSHIP_BASELINE_INTERSECTION_COUNT;
+const DIRECT_TESTS_TRANSFERRED_TO_DETERMINISTIC_SHARDS = [
+  'scripts/test_bi_ops_chat_action_matrix.mjs',
+  'scripts/test_bi_ops_chat_inference.mjs',
+  'scripts/test_bi_ops_cli_flow.mjs',
+  'scripts/test_bi_ops_frontend_confirm_feedback.mjs',
+  'scripts/test_bi_ops_permissions.mjs',
+  'scripts/test_bi_ops_portal_shell_sync.mjs',
+  'scripts/test_bi_ops_task_projection.mjs',
+  'scripts/test_bi_portal_mutation_queue.mjs',
+  'scripts/test_bi_portal_repository_crud.mjs',
+  'scripts/test_bi_runtime_shutdown_lifecycle.mjs',
+  'scripts/test_link_ops_executor_live_source_titles.mjs',
+  'scripts/test_link_ops_executor_source_detail_lock.mjs',
+  'scripts/test_link_ops_image_role_planner.mjs',
+  'scripts/test_link_ops_preflight_product_lock.mjs',
+  'scripts/test_link_retire_candidate_policy.mjs',
+  'scripts/test_link_retire_candidates_from_csv.mjs',
+  'scripts/test_portal_security.mjs',
+  'scripts/test_retire_supplier_code_repair_payload.mjs',
+  'scripts/test_shein_store_identity_merchant_fallback.mjs',
+];
+
+function extractDeterministicRunnerTests(source) {
+  const testsBlock = String(source || '').match(/const tests = \[([\s\S]*?)\r?\n\];/u)?.[1] || '';
+  return [...testsBlock.matchAll(/['"](scripts\/test_[^'"]+\.mjs)['"]/gu)].map(match => match[1]);
+}
+
+function extractDirectReleaseGateTestInvocations(source) {
+  const pattern = /\brun\s*\(\s*process\.execPath\s*,\s*\[\s*['"](scripts\/test_[^'"]+\.mjs)['"]/gu;
+  return [...String(source || '').matchAll(pattern)].map(match => match[1]);
+}
+
+function extractWorkflowJobBlock(source, jobName) {
+  const lines = String(source || '').split(/\r?\n/u);
+  const start = lines.findIndex(line => line === `  ` + jobName + ':');
+  if (start < 0) return '';
+  let end = start + 1;
+  while (end < lines.length && !/^  [a-zA-Z0-9_-]+:\s*$/u.test(lines[end])) end += 1;
+  return lines.slice(start, end).join('\n');
+}
+
+function countLiteral(source, literal) {
+  return String(source || '').split(literal).length - 1;
+}
+
+function terminalJobIsExactAndFailClosed(workflow) {
+  const terminalJob = extractWorkflowJobBlock(workflow, 'ci-terminal');
+  return /^    needs: \[source-checks, deterministic-shards, release-gate\]$/mu.test(terminalJob)
+    && /^          SOURCE_CHECKS_RESULT: \$\{\{ needs\.source-checks\.result \}\}$/mu.test(terminalJob)
+    && /^          DETERMINISTIC_SHARDS_RESULT: \$\{\{ needs\.deterministic-shards\.result \}\}$/mu.test(terminalJob)
+    && /^          RELEASE_GATE_RESULT: \$\{\{ needs\.release-gate\.result \}\}$/mu.test(terminalJob)
+    && /if \[ "\$SOURCE_CHECKS_RESULT" != 'success' \] \|\| \[ "\$DETERMINISTIC_SHARDS_RESULT" != 'success' \] \|\| \[ "\$RELEASE_GATE_RESULT" != 'success' \]; then[\s\S]*?^            exit 1$/mu.test(terminalJob);
+}
 
 function countDirectProductAttributeFlowInvocations(source) {
   const escapedTarget = PRODUCT_ATTRIBUTE_FLOW_TEST.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -338,6 +408,125 @@ async function checkDeterministicProductAttributeRegistration() {
   };
 }
 
+async function checkDeterministicSuiteDelegation() {
+  const startedAt = Date.now();
+  const [runner, workflow, releaseGateSource] = await Promise.all([
+    fs.readFile(path.join(ROOT, 'scripts/run_deterministic_tests.mjs'), 'utf8'),
+    fs.readFile(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'scripts/test_bi_ops_release_gate.mjs'), 'utf8'),
+  ]);
+  const nestedFullRun = /results\.push\(\{name:\s*['"]deterministic BI Ops V2 suite['"][\s\S]{0,240}run_deterministic_tests\.mjs/u.test(releaseGateSource);
+  const requiredShards = ['1/4', '2/4', '3/4', '4/4'];
+  const deterministicTests = extractDeterministicRunnerTests(runner);
+  const directInvocations = extractDirectReleaseGateTestInvocations(releaseGateSource);
+  const deterministicSet = new Set(deterministicTests);
+  const directSet = new Set(directInvocations);
+  const intersection = [...deterministicSet].filter(file => directSet.has(file)).sort();
+  const transferredOwnership = DIRECT_TESTS_TRANSFERRED_TO_DETERMINISTIC_SHARDS.map(file => ({
+    file,
+    deterministicCount: deterministicTests.filter(candidate => candidate === file).length,
+    directCount: directInvocations.filter(candidate => candidate === file).length,
+  }));
+  const releaseGateJob = extractWorkflowJobBlock(workflow, 'release-gate');
+  const releaseGateCommand = 'node ' + RELEASE_GATE_TEST;
+  const ownershipUnion = new Set([...deterministicSet, ...directSet, RELEASE_GATE_TEST]);
+  const ownership = {
+    baseline: {
+      deterministicUnique: OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT,
+      directCalls: OWNERSHIP_BASELINE_DIRECT_CALL_COUNT,
+      directUnique: OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT,
+      intersection: OWNERSHIP_BASELINE_INTERSECTION_COUNT,
+      union: OWNERSHIP_BASELINE_UNION_COUNT,
+    },
+    current: {
+      deterministicEntries: deterministicTests.length,
+      deterministicUnique: deterministicSet.size,
+      directCalls: directInvocations.length,
+      directUnique: directSet.size,
+      intersection: intersection.length,
+      unionIncludingDedicatedReleaseGate: ownershipUnion.size,
+      dedicatedReleaseGateCiCommands: countLiteral(workflow, releaseGateCommand),
+    },
+    intersection,
+    transferredOwnership,
+  };
+  const checks = {
+    runnerUsesDeterministicShardSelector: /selectDeterministicTestShard/.test(runner)
+      && /--shard/.test(runner),
+    shardContractTestsRegistered: [
+      'scripts/test_deterministic_test_shards.mjs',
+      'scripts/test_deterministic_timeout_contract.mjs',
+    ].every(file => runner.split(`'${file}'`).length - 1 === 1),
+    workflowOwnsAllFourShards: requiredShards.every(shard => workflow.includes(`'${shard}'`))
+      && /max-parallel:\s*4/.test(workflow)
+      && /node scripts\/run_deterministic_tests\.mjs --shard/.test(workflow),
+    deterministicRegistrationsAreUnique: deterministicTests.length === deterministicSet.size,
+    deterministicCountPreservedAfterDedicatedGateTransfer:
+      deterministicSet.size === OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT - 1,
+    directCallCountReducedOnlyByTransferredTests:
+      directInvocations.length === OWNERSHIP_BASELINE_DIRECT_CALL_COUNT - DIRECT_TESTS_TRANSFERRED_TO_DETERMINISTIC_SHARDS.length,
+    directUniqueCountReducedOnlyByTransferredTests:
+      directSet.size === OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT - DIRECT_TESTS_TRANSFERRED_TO_DETERMINISTIC_SHARDS.length,
+    releaseGateAbsentFromDeterministicRunner: !deterministicSet.has(RELEASE_GATE_TEST),
+    deterministicAndDirectOwnershipIntersectionEmpty: intersection.length === 0,
+    transferredTestsOwnedExactlyOnceByDeterministicRunner: transferredOwnership.every(
+      entry => entry.deterministicCount === 1 && entry.directCount === 0,
+    ),
+    dedicatedReleaseGateCiOwnerExactlyOnce: countLiteral(releaseGateJob, releaseGateCommand) === 1
+      && countLiteral(workflow, releaseGateCommand) === 1,
+    ownershipUnionPreserved: ownershipUnion.size === OWNERSHIP_BASELINE_UNION_COUNT,
+    terminalGateRequiresExactThreeJobsAndFailsClosed: terminalJobIsExactAndFailClosed(workflow),
+    releaseGateDoesNotNestFullSuite: !nestedFullRun,
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    command: 'static deterministic shard ownership check',
+    args: [],
+    code: ok ? 0 : 1,
+    durationMs: Date.now() - startedAt,
+    stdout: ok ? JSON.stringify({checks, ownership}) : '',
+    stderr: ok ? '' : JSON.stringify({checks, ownership}),
+    ok,
+  };
+}
+
+async function checkCiReleaseGateReachability() {
+  const startedAt = Date.now();
+  const [runner, workflow] = await Promise.all([
+    fs.readFile(path.join(ROOT, 'scripts/run_deterministic_tests.mjs'), 'utf8'),
+    fs.readFile(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8'),
+  ]);
+  const deterministicTests = extractDeterministicRunnerTests(runner);
+  const registeredCount = file => deterministicTests.filter(candidate => candidate === file).length;
+  const releaseGateJob = extractWorkflowJobBlock(workflow, 'release-gate');
+  const releaseGateCommand = 'node ' + RELEASE_GATE_TEST;
+  const releaseGateEstimateCount = [...runner.matchAll(/['"]scripts\/test_bi_ops_release_gate\.mjs['"]\s*:/gu)].length;
+  const releaseGateTimeoutTierCount = [...runner.matchAll(/file === ['"]scripts\/test_bi_ops_release_gate\.mjs['"]\s*\?/gu)].length;
+  const checks = {
+    releaseGateAbsentFromDeterministicRunner: registeredCount(RELEASE_GATE_TEST) === 0,
+    releaseGateAbsentFromDeterministicEstimates: releaseGateEstimateCount === 0,
+    releaseGateAbsentFromDeterministicTimeoutTiers: releaseGateTimeoutTierCount === 0,
+    repositoryCrudRegisteredOnce: registeredCount('scripts/test_bi_portal_repository_crud.mjs') === 1,
+    mutationQueueRegisteredOnce: registeredCount('scripts/test_bi_portal_mutation_queue.mjs') === 1,
+    mutationQueueBoundedTier: /file === 'scripts\/test_bi_portal_mutation_queue\.mjs'\s*\? 120_000/.test(runner),
+    ciHasExactlyOneDedicatedReleaseGateOwner: /^  release-gate:$/mu.test(releaseGateJob)
+      && /^    needs: source-checks$/mu.test(releaseGateJob)
+      && countLiteral(releaseGateJob, releaseGateCommand) === 1
+      && countLiteral(workflow, releaseGateCommand) === 1,
+    terminalGateRequiresExactThreeJobsAndFailsClosed: terminalJobIsExactAndFailClosed(workflow),
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    command: 'static CI release-gate reachability check',
+    args: [],
+    code: ok ? 0 : 1,
+    durationMs: Date.now() - startedAt,
+    stdout: ok ? JSON.stringify(checks) : '',
+    stderr: ok ? '' : JSON.stringify(checks),
+    ok,
+  };
+}
+
 async function scanStaleConfirmText() {
   const roots = ['docs', 'scripts'];
   const hits = [];
@@ -371,6 +560,7 @@ async function checkBiOpsV2DeploymentBoundary() {
   const ownerInstaller = await fs.readFile(path.join(ROOT, 'scripts/install_owner_knowledge_sync_task.ps1'), 'utf8');
   const ownerWorkflow = await fs.readFile(path.join(ROOT, '.github/workflows/owner-knowledge.yml'), 'utf8');
   const portalSource = await fs.readFile(path.join(ROOT, 'scripts/serve_bi_portal.mjs'), 'utf8');
+  const partnerCliManifest = JSON.parse(await fs.readFile(path.join(ROOT, 'config/partner_cli_package.json'), 'utf8'));
   const partnerCache = await fs.readFile(path.join(ROOT, 'lib/partner_knowledge_cache.mjs'), 'utf8');
   const ticketLock = await fs.readFile(path.join(ROOT, 'lib/cross_process_ticket_lock.mjs'), 'utf8');
   const activeLarkCommand = /^[ \t]*(?!#)systemctl\s+(?:enable|start|restart)(?:\s+--now)?[^\r\n]*shein-bi-lark-sales-qa\.service/im;
@@ -400,7 +590,9 @@ async function checkBiOpsV2DeploymentBoundary() {
       && /process\.hrtime\.bigint/.test(ticketLock)
       && /handle\.utimes/.test(ticketLock)
       && /removeDeadStaleTicket/.test(ticketLock),
-    partnerCliVersionBoundary: /SHEIN_BI_OPS_CLI_MIN_VERSION=2026\.07\.12\.1/.test(portalUnit),
+    partnerCliVersionBoundary: /^\d{4}\.\d{2}\.\d{2}\.\d+$/.test(String(partnerCliManifest.version || ''))
+      && /minimumVersion:\s*process\.env\.SHEIN_BI_OPS_CLI_MIN_VERSION\s*\|\|\s*BI_OPS_CLI_VERSION/.test(portalSource)
+      && !/SHEIN_BI_OPS_CLI_MIN_VERSION=/.test(portalUnit),
     eventDrivenOwnerSync: /completion-spool/.test(ownerSync)
       && /\/api\/owner-knowledge\/completions/.test(ownerSync)
       && /SHEIN-Owner-Knowledge-Completion-Uploader/.test(ownerInstaller)
@@ -426,30 +618,15 @@ async function main() {
   for (const rel of CHECK_FILES) {
     results.push({name: `node --check ${rel}`, ...(await run(process.execPath, ['--check', rel]))});
   }
-  results.push({name: 'permission matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_permissions.mjs']))});
-  results.push({name: 'portal security and TLS proxy-chain config smoke', ...(await run(process.execPath, ['scripts/test_portal_security.mjs']))});
-  results.push({name: 'CLI flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_flow.mjs']))});
   results.push({name: 'CLI approved-binding reuse zero-upload smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cli_reuse_approved_binding.mjs']))});
   results.push({name: 'approved-binding reuse integrity and sparse-merge smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_publish_asset_reuse_guard.mjs']))});
   results.push({name: 'shared OpenAPI client Windows guard smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_client_windows_guard.mjs']))});
   results.push({name: 'local OpenAPI boundary smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_local_openapi_boundary.mjs']))});
   results.push({name: 'cloud image asset through BI session smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cloud_image_asset.mjs']))});
-  results.push({name: 'chat inference smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_inference.mjs']))});
   results.push({name: 'bad transcript replay smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_bad_transcript_replay.mjs']))});
-  results.push({name: 'chat action matrix smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_action_matrix.mjs']))});
   results.push({name: 'chat maintenance flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_maintenance_flow.mjs']))});
-  results.push({name: 'task projection smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_task_projection.mjs']))});
-  results.push({name: 'ops frontend confirm feedback smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_frontend_confirm_feedback.mjs']))});
-  results.push({name: 'ops portal shell sync smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_portal_shell_sync.mjs']))});
   results.push({name: 'source candidate policy smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_source_candidate_policy.mjs']))});
-  results.push({name: 'preflight product source/date lock smoke', ...(await run(process.execPath, ['scripts/test_link_ops_preflight_product_lock.mjs']))});
   results.push({name: 'OpenAPI product-detail payload mapper smoke', ...(await run(process.execPath, ['scripts/test_link_ops_product_draft_openapi_detail.mjs']))});
-  results.push({name: 'OpenAPI live source title enrichment smoke', ...(await run(process.execPath, ['scripts/test_link_ops_executor_live_source_titles.mjs']))});
-  results.push({name: 'OpenAPI executor source-detail lock write-gate smoke', ...(await run(process.execPath, ['scripts/test_link_ops_executor_source_detail_lock.mjs']))});
-  results.push({name: 'link retire candidate 15-day guard smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidate_policy.mjs']))});
-  results.push({name: 'link retire candidate CSV report smoke', ...(await run(process.execPath, ['scripts/test_link_retire_candidates_from_csv.mjs']))});
-  results.push({name: 'retire supplier-code repair payload smoke', ...(await run(process.execPath, ['scripts/test_retire_supplier_code_repair_payload.mjs']))});
-  results.push({name: 'store identity merchant fallback smoke', ...(await run(process.execPath, ['scripts/test_shein_store_identity_merchant_fallback.mjs']))});
   results.push({name: 'account writeStores scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
   results.push({name: 'production real-write safety smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_production_safety.mjs']))});
   results.push({name: 'deterministic product attribute registration and timeout guard', ...(await checkDeterministicProductAttributeRegistration())});
@@ -464,7 +641,6 @@ async function main() {
   results.push({name: 'copy_product_draft chat locked lifecycle guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--chat-natural', '--weak-readback']))});
   results.push({name: 'copy_product_draft all-stores capability smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_all_stores_capability.mjs']))});
   results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_executor_flow.mjs']))});
-  results.push({name: 'local image role planner smoke', ...(await run(process.execPath, ['scripts/test_link_ops_image_role_planner.mjs']))});
   const hasSk5110LocalArtifacts = (await Promise.all(SK5110_LOCAL_ARTIFACTS.map(pathExists))).every(Boolean);
   if (hasSk5110LocalArtifacts) {
     results.push({name: 'SK-5110 batch draft static guard', ...(await run(process.execPath, ['scripts/test_sk5110_batch_draft_plan.mjs']))});
@@ -482,7 +658,8 @@ async function main() {
   results.push({name: 'OpenAPI catalog executor smoke', ...(await run(process.execPath, ['scripts/test_openapi_catalog_executor.mjs']))});
   results.push({name: 'official doc detail parser smoke', ...(await run(process.execPath, ['scripts/test_shein_openapi_doc_detail_parser.mjs']))});
   results.push({name: 'maintenance readiness smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_readiness.mjs']))});
-  results.push({name: 'deterministic BI Ops V2 suite', ...(await run(process.execPath, ['scripts/run_deterministic_tests.mjs']))});
+  results.push({name: 'CI test ownership: zero runner/gate overlap and preserved owner union', ...(await checkDeterministicSuiteDelegation())});
+  results.push({name: 'CI release gate reachability: dedicated sole owner and fail-closed terminal dependency', ...(await checkCiReleaseGateReachability())});
 
   if (await pathExists('.git')) {
     results.push({name: 'git diff --check automation scope', ...(await run('git', ['diff', '--check', '--', ...DIFF_CHECK_FILES]))});
@@ -497,22 +674,10 @@ async function main() {
     staleConfirm,
     biOpsV2DeploymentBoundary,
     notes: [
-      'permission and CLI flow smokes use isolated temporary auth/task/audit files',
-      'chat inference smoke proves one chat send can create a current-session same-store copy task without calling the LLM or SHEIN',
       'bad transcript replay smoke proves old Feishu/V1/read-only/task-pool assistant prose cannot pollute source/target facts, natural confirmation or user-facing browser responses',
-      'chat action matrix smoke proves copy, shelf, title, image, inventory, price and certificate commands all enter the same BI chat state machine through askAgent=true',
-      'chat maintenance flow smoke proves non-copy actions enter the same natural-language chat path, then natural confirmation can execute against an isolated fake OpenAPI server and read back success',
-      'task projection smoke proves the automation page receives only safe task progress summaries, not historical internals, confirm tokens or old cross-entry wording',
-      'ops frontend confirm feedback smoke proves the page stays chat-only, slow actions show busy feedback, task evidence is summarized, and Markdown rendering has readable structure',
-      'ops portal shell sync smoke proves the generated production HTML carries the current-session task filtering and no stale global task loader',
+      'chat maintenance flow smoke proves non-copy actions enter the same natural-language chat path, persist exact write claims, and never turn an identity-only probe into mutation success; only exact inventory evidence auto-closes while other fake writes remain manual-resolve',
       'source candidate policy smoke proves explicit cross-store sources are respected while same-store source links remain valid when no source is explicit',
-      'preflight product source/date lock smoke proves execute reuses the source link and scheduled date approved during dry-run, including recovery from a later blocked run',
       'OpenAPI product-detail mapper smoke proves copy_product_draft dynamically maps spu-info attributes, SKU dimensions and cost without inventing supplier_sku',
-      'OpenAPI live source title enrichment smoke proves stale source caches missing Arabic titles are repaired from official spu-info before publish validation',
-      'link retire candidate smoke proves low-exposure zero-sales candidates exclude first-shelf links inside the fixed 15-day protection window even when newGoodsTag is empty',
-      'link retire CSV report smoke proves the batch confirmation table uses the same 15-day and newGoodsTag guards and does not submit writes',
-      'retire supplier-code repair smoke proves failed waste-code partialEdit is not counted as done, repair mode never emits shelf payloads, FY/SK-5110 stays hard-excluded, and payloads fill required attributes/titles without local OpenAPI',
-      'store identity merchant fallback smoke proves merchant-only OpenAPI identity is accepted only when static truth matches and no GS/merchant conflicts exist',
       'account scope smoke proves BI writeStores authorizes assigned stores while safeWriteOperations remains the platform action gate',
       'production safety smoke checks locked and narrow-pilot configs through temporary files only',
       'copy_product_draft success smoke uses a local fake OpenAPI server only',
@@ -523,15 +688,16 @@ async function main() {
       'copy_product_draft weak-readback smoke proves weak evidence cannot auto-close a write task',
       'copy_product_draft chat locked lifecycle smoke proves submitted/needs-manual-resolve tasks cannot be rechecked or resubmitted from chat',
       'copy_product_draft all-stores capability smoke proves non-HL stores can become confirmable when authorized, probed, platform-gated and inside the actor writeStores scope',
-      'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads and readback',
-      'local image role planner smoke proves 本地图包规划 only scans files and does not upload or submit SHEIN writes',
+      'maintenance executor smoke uses a local fake OpenAPI server to verify activate/retire/inventory/supply-price/product-price/title/image/certificate payloads, mandatory claims, exact inventory readback and fail-closed identity-only mutation probes',
       'SK-5110 batch draft static guard proves local-only 19-store draft keeps NM/HL old-link scope, XC dopamine set, title groups and product-cover exclusion before cloud execution',
       'SK-5110 cloud handoff static guard proves the post-sample batch handoff remains local-only, keeps the HL/DX user-review gate, and requires cloud dry-run/hash before any execute',
       'SK-5110 local-only artifact guards run only when both private draft files exist; clean CI/cloud worktrees report an explicit skip instead of treating absent private tmp data as a code failure',
       'cloud image asset smoke proves bi_ops_cli image execute uses the BI session/cloud endpoint and fake OpenAPI, not local SHEIN credentials',
       'official doc detail parser smoke uses offline fixtures and never prints/saves cookies',
       'maintenance readiness smoke requires schema, per-store permission and strong readback before pilot_ready',
-      'deterministic BI Ops V2 suite covers PostgreSQL repositories, migration compatibility, durable jobs, intent planning, model governance, account isolation, CLI and frontend projections',
+      'the full deterministic suite is owned by four balanced CI shards and is not nested inside this already-serial release gate',
+      'all tests removed from direct release-gate execution remain registered exactly once in deterministic shards, with a zero ownership intersection and preserved union',
+      'CI runs the release gate only in its dedicated release-gate job; ci-terminal exact-needs source checks, all deterministic shards and that gate and fails closed unless all three owners succeed',
       'owner knowledge distribution smokes cover event-driven local capture, GitHub-safe immutable bundles, CI-gated activation, server-side execute blocking, locked generation caches, minimum CLI version and source-metadata redaction',
       'BI Ops V2 deployment boundary requires the restricted PostgreSQL role, durable worker, bounded model routing and an explicitly paused Lark service',
       'production safety smoke asserts production-style configs remain locked unless explicitly configured; write-enabled smokes use temporary fake OpenAPI only',

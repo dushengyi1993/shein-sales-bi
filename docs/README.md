@@ -5,6 +5,7 @@
 ## 当前架构
 
 - [BI 系统架构](bi-system-architecture.md)、[运行环境架构](runtime-architecture.md)、[仓库数据模型](data-model.md)、[BI 数仓模型](bi-warehouse-model.md)
+- [BI V4 稳定性审计与整改](bi-v4-stability-audit-2026-08-17.md)、[项目工作流证据契约](ops-workflow-contract.md)
 - [BI Portal 当前界面](bi-portal-ui-current.md)、[Metabase BI](metabase-bi.md)、[链接运营产品主数据](link-ops-product-master.md)
 - [OpenAPI 集成](shein-openapi-integration.md)、[OpenAPI 19店独立应用切回（2026-07-30）](openapi-per-store-production-cutback-2026-07-30.md)、[OpenAPI 单应用生产切换（2026-07-26，历史）](openapi-single-app-production-cutover-2026-07-26.md)、[OpenAPI API schema 索引](shein-openapi-api-schema-index.md)、[Webhook 接收与平台动态](shein-webhook-receiver-design.md)
 
@@ -28,7 +29,8 @@
 
 ## 历史、发布与归档
 
-- [当前发布说明（2026.08.02.4）](bi-ops-release-2026-08-02-4.md)、[上一正式版本（2026.08.02.3）](https://github.com/dushengyi1993/shein-sales-bi/releases/tag/2026.08.02.3)、[19店独立应用切回（2026-07-30）](openapi-per-store-production-cutback-2026-07-30.md)、[共享商品详情额度与持续门禁（2026.07.30.3，历史）](bi-ops-release-2026-07-30-3.md)、[源码一致性门禁（2026.07.30.2）](bi-ops-release-2026-07-30-2.md)、[利润、营销与运行态隔离（2026.07.30.1）](bi-ops-release-2026-07-30.md)、[上一正式版本（2026.07.28.4）](bi-ops-release-2026-07-28-4.md)、[Partner CLI 长会话（2026.07.28.3）](bi-ops-release-2026-07-28-3.md)、[加车访客与查询修复（2026.07.28.2）](bi-ops-release-2026-07-28-2.md)、[无模型只读 query（2026.07.28.1）](bi-ops-release-2026-07-28.md)、[利润成本修复（2026-07-28）](bi-profit-cost-correction-2026-07-28.md)
+- [2026.08.17.7 V4 稳定性源码发布说明](bi-ops-release-2026-08-17-7.md)、[V4 稳定性审计与整改](bi-v4-stability-audit-2026-08-17.md)
+- 整改前生产基线为 GitHub Release `2026.08.17.6`；当前整改状态与发布硬门以 [BI V4 稳定性审计与整改](bi-v4-stability-audit-2026-08-17.md) 为准。历史索引：[2026.08.02.4](bi-ops-release-2026-08-02-4.md)、[19店独立应用切回（2026-07-30）](openapi-per-store-production-cutback-2026-07-30.md)、[共享商品详情额度与持续门禁（2026.07.30.3）](bi-ops-release-2026-07-30-3.md)、[源码一致性门禁（2026.07.30.2）](bi-ops-release-2026-07-30-2.md)、[利润、营销与运行态隔离（2026.07.30.1）](bi-ops-release-2026-07-30.md)、[2026.07.28.4](bi-ops-release-2026-07-28-4.md)、[Partner CLI 长会话](bi-ops-release-2026-07-28-3.md)、[加车访客与查询修复](bi-ops-release-2026-07-28-2.md)、[无模型只读 query](bi-ops-release-2026-07-28.md)、[利润成本修复](bi-profit-cost-correction-2026-07-28.md)
 - [CLI 自动更新收口（2026.07.27.3）](bi-ops-release-2026-07-27.3.md)、[售后对账可见性修复（2026.07.27.2）](bi-ops-release-2026-07-27.2.md)、[历史店铺与售后口径修复（2026.07.27.1）](bi-ops-release-2026-07-27.md)、[全项目审查修复（2026.07.26.2）](bi-ops-release-2026-07-26.md)、[单应用生产切换（2026-07-26）](openapi-single-app-production-cutover-2026-07-26.md)、[半托 Webhook 实时销售切换（2026-07-23）](bi-webhook-live-cutover-2026-07-23.md)
 - [Partner CLI 最低折后价修复（2026.07.21.1，历史 ask 口径）](bi-ops-release-2026-07-21.md)、[自动运营与 Partner CLI（2026.07.16.1）](bi-ops-release-2026-07-16.md)
 - [Webhook/平台动态发布说明（2026.07.20.2）](bi-webhook-release-2026-07-19.md)、[仓储费发布说明（2026.07.19.1）](bi-ops-release-2026-07-19.md)、[仓储费历史重述（2026-07-19）](storage-fee-history-restatement-2026-07-19.md)、[业务逻辑与营销加固（2026.07.18.1）](bi-ops-release-2026-07-18.md)、[BI V2 发布说明（2026-07-12）](bi-ops-v2-release-2026-07-12.md)

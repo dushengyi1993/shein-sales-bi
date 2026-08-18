@@ -153,6 +153,10 @@ noMatch('no bare full-scan reconciliation invocation remains',
 // guard bounded-refreshes inventoryTrend itself before the first plan build.
 // The write interface is called at most once per run and is never retried.
 // ---------------------------------------------------------------------------
+match('inventory force refresh owns one stable run token',
+  guard,
+  /SHEIN_BI_INVENTORY_REFRESH_TOKEN:-daily-inventory:/,
+  'all force-refresh retries inside one inventory run must reuse one token');
 match('inventoryTrend file default is the planner input',
   guard,
   /INVENTORY_TREND_FILE="\$\{SHEIN_BI_INVENTORY_TREND_FILE:-\$ROOT\/outputs\/bi-portal\/sections\/inventoryTrend\.json\}"/,
@@ -171,7 +175,7 @@ match('inventoryTrend age reads cachedAt/generatedAt like linksData',
   'freshness derives from the published cache timestamp');
 match('inventoryTrend refresh is host-locked and section-scoped',
   guard,
-  /curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \\\n\s*-H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \\\n\s*"\$PORTAL_URL\/api\/bi\/section\/inventoryTrend\?refresh=1" >\/dev\/null/,
+  /curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \\\n\s*-H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \\\n\s*"\$PORTAL_URL\/api\/bi\/section\/inventoryTrend\?refresh=1&refreshToken=\$\{REFRESH_RUN_TOKEN\}" >\/dev\/null/,
   'the sync refresh must reuse the host-locked worker header on the section endpoint');
 match('fresh inventoryTrend skips duplicate refresh',
   guard,

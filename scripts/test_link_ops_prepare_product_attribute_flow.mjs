@@ -69,11 +69,14 @@ import {
   sha256Utf8,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-prepare-product-attribute-'));
+const testOutputDir = path.join(tmpRoot, 'outputs');
+process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
 
 const TARGET_STORE = 'FY';
 const DONOR_STORE = 'YJ';
@@ -158,8 +161,8 @@ const descContentSha = sha256Utf8([
 const donorModes = {search: 'exact', attribute: 'present', identity: 'ok'};
 const fakeOpenApiCalls = [];
 let publishAttemptCount = 0;
-const sourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', 'DL');
-const sourceOpenApiDir = path.join(ROOT, 'outputs', 'shein_openapi_products', 'DL');
+const sourceLinkDir = path.join(testOutputDir, 'shein_links', 'DL');
+const sourceOpenApiDir = path.join(testOutputDir, 'shein_openapi_products', 'DL');
 async function writeSourceFixtures() {
   await fs.mkdir(sourceLinkDir, {recursive: true});
   await fs.mkdir(sourceOpenApiDir, {recursive: true});
@@ -472,6 +475,7 @@ const chatFile = path.join(tmpRoot, 'chats.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const attributeAuditFailMarker = path.join(tmpRoot, 'fail-attribute-audit.marker');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 const portalDir = path.join(tmpRoot, 'portal');
 await fs.mkdir(portalDir, {recursive: true});

@@ -27,8 +27,38 @@ try {
 
   await writeJsonFileAtomic(target, {version: 'new', complete: true});
   assert.deepEqual(JSON.parse(await fs.readFile(target, 'utf8')), {version: 'new', complete: true}, 'a successful publish must expose one complete JSON artifact');
+
+  await assert.rejects(
+    () => writeFileAtomic(path.join(dir, 'uid-without-gid.json'), '{}\n', {uid: 0}),
+    /uid and gid must be supplied together/,
+  );
+  await assert.rejects(
+    () => writeFileAtomic(path.join(dir, 'gid-without-uid.json'), '{}\n', {gid: 0}),
+    /uid and gid must be supplied together/,
+  );
+
+  if (process.platform !== 'win32') {
+    const exactModeTarget = path.join(dir, 'exact-mode.json');
+    let beforeRenameMode = null;
+    const previousUmask = process.umask(0o077);
+    try {
+      await writeFileAtomic(exactModeTarget, '{"mode":"exact"}\n', {
+        encoding: 'utf8',
+        mode: 0o644,
+        beforeRename: async tmp => {
+          beforeRenameMode = (await fs.stat(tmp)).mode & 0o777;
+        },
+      });
+    } finally {
+      process.umask(previousUmask);
+    }
+    assert.equal(beforeRenameMode, 0o644,
+      'the temporary artifact must already have exact mode 0644 before rename under umask 077');
+    assert.equal((await fs.stat(exactModeTarget)).mode & 0o777, 0o644,
+      'the published artifact must retain exact mode 0644 under umask 077');
+  }
 } finally {
   await fs.rm(dir, {recursive: true, force: true});
 }
 
-console.log('atomic_file_publish: fsync/rename publish preserves previous complete artifacts on injected failure');
+console.log('atomic_file_publish: durable exclusive-temp publish preserves complete bytes and exact metadata');

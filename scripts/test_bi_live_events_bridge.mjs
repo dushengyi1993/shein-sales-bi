@@ -15,6 +15,7 @@ import {
   liveSectionsForBiUpdate,
   normalizeBiLiveUpdatePayload,
 } from './serve_bi_portal.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -179,8 +180,10 @@ assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='priceScatter'\)
 assert.match(productionClient, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'the homepage must load the current-day profit overlay even before a new SSE event');
 assert.match(productionClient, /if\(!\['liveSalesToday','productState'\]\.includes\(n\)\)params\.set\('async','1'\)/,
   'the lightweight today-sales and product-state sections must refresh synchronously');
-assert.match(productionClient, /params\.set\('refreshToken',LIVE_REFRESH_TOKEN\)/,
-  'all open pages must identify the same live event when requesting a section refresh');
+assert.match(productionClient, /LIVE_REFRESH_RUNNING&&LIVE_REFRESH_TOKEN\?LIVE_REFRESH_TOKEN:manualSectionRefreshToken\(n\)/,
+  'all open pages must identify the same live event while manual retries receive a distinct intent token');
+assert.match(productionClient, /params\.set\('refreshToken',refreshToken\)/,
+  'every forced section request must carry its selected live-event or manual intent token');
 assert.match(productionClient, /queueLiveRefresh\(\{kind:'order',receivedAt:at,sections:LIVE_ORDER_SECTIONS\}\)/, 'a newly opened page must catch up from the persisted last order receipt');
 assert.match(productionClient, /profitStoreRows/, 'the current-day store profit rows must replace the stale cached day');
 assert.match(productionClient, /订单变动已计入销售；利润正在同步/,
@@ -251,12 +254,16 @@ assert.match(portalServer, /refreshToken !== activeToken[\s\S]*biSectionPendingR
   'duplicate refreshes for the same live event must not queue another expensive rebuild');
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-bi-live-events-'));
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const port = await freePort();
 const authFile = path.join(temp, 'users.json');
+const portalDir = path.join(temp, 'portal');
+await fs.mkdir(portalDir, {recursive: true});
+await fs.writeFile(path.join(portalDir, 'index.html'), '<!doctype html><title>live events fixture</title>');
 await fs.writeFile(authFile, JSON.stringify({users: [{username: 'live-test', password: 'correct-password', role: 'admin'}]}));
 const server = spawn(process.execPath, [
   path.join(ROOT, 'scripts', 'serve_bi_portal.mjs'),
-  '--host', '127.0.0.1', '--port', String(port), '--dir', path.join(ROOT, 'outputs', 'bi-portal'),
+  '--host', '127.0.0.1', '--port', String(port), '--dir', portalDir,
   '--auth-file', authFile, '--htpasswd-file', path.join(temp, 'missing.htpasswd'),
   '--session-secret-file', path.join(temp, 'session-secret'), '--state-file', path.join(temp, 'state.json'),
   '--link-ops-task-file', path.join(temp, 'tasks.json'), '--link-ops-chat-file', path.join(temp, 'chats.json'),

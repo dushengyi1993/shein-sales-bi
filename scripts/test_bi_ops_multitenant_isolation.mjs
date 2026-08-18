@@ -6,6 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
+import {createLinkOpsJsonRepository} from '../lib/link_ops_json_repository.mjs';
+import {createLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-bi-ops-multitenant-'));
@@ -14,7 +17,9 @@ const authFile = path.join(temp, 'auth.json');
 const accessRolesFile = path.join(temp, 'access_roles.json');
 const htpasswdFile = path.join(temp, 'empty.htpasswd');
 const sessionSecretFile = path.join(temp, 'session_secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const stateFile = path.join(temp, 'action_state.json');
+const runtimeFile = path.join(temp, 'link_ops_runtime.json');
 const taskFile = path.join(temp, 'tasks.json');
 const chatFile = path.join(temp, 'chats.json');
 const auditFile = path.join(temp, 'audit.jsonl');
@@ -82,6 +87,7 @@ const child = spawn(process.execPath, [
   '--state-file', stateFile,
   '--link-ops-task-file', taskFile,
   '--link-ops-chat-file', chatFile,
+  '--link-ops-runtime-file', runtimeFile,
   '--manual-login-state-file', manualLoginStateFile,
   '--audit-file', auditFile,
 ], {
@@ -114,6 +120,8 @@ try {
   };
 
   await testActionStateGates(cookies);
+  await testActionStateCasGateway(cookies);
+  await testActionStateCasConcurrency(cookies);
   const sessions = await testSessionIsolation(cookies);
   await testTaskIsolation(cookies, sessions);
   await testLegacyOwnership(cookies);
@@ -164,6 +172,126 @@ async function testActionStateGates(cookies) {
   assert.equal(raw.actions[dxKey]?.status, 'review', 'mixed-store batch must be atomic and leave the prior DX state unchanged');
   assert.equal(raw.actions[hlKey], undefined, 'operator must not write an unauthorized store action');
   results.checks += 7;
+}
+
+async function testActionStateCasGateway(cookies) {
+  const dxKey = '2026-07-11|DX|inventory|low stock|SKU-A|';
+  const dxKey2 = '2026-07-11|DX|inventory|low stock|SKU-C|';
+  const dxKey3 = '2026-07-11|DX|inventory|low stock|SKU-D|';
+
+  // Single update through the route must carry the same-request fresh
+  // repositoryRevision under the CAS gateway.
+  await expectStatus('/api/action-state', 200, {
+    method: 'POST', cookie: cookies.alice, body: {key: dxKey, status: 'done', note: 'CAS update'},
+  });
+  let data = (await expectStatus('/api/action-state', 200, {cookie: cookies.alice})).json.data;
+  assert.equal(data.actions[dxKey]?.status, 'done', 'single update must persist under the gateway');
+
+  // Single delete is an explicit row delete bound to the fresh revision, not
+  // an ignored omission.
+  await expectStatus('/api/action-state', 200, {
+    method: 'POST', cookie: cookies.alice, body: {key: dxKey3, status: 'open', note: 'temporary'},
+  });
+  await expectStatus('/api/action-state', 200, {
+    method: 'POST', cookie: cookies.alice, body: {key: dxKey3, status: 'open', note: ''},
+  });
+  data = (await expectStatus('/api/action-state', 200, {cookie: cookies.alice})).json.data;
+  assert.equal(data.actions[dxKey3], undefined, 'deleted action must disappear from GET');
+  const rawRuntime = JSON.parse(await fs.readFile(runtimeFile, 'utf8'));
+  assert.ok(rawRuntime.records?.action_state?.[dxKey3]?.deletedAt, 'delete must be a repository deletion, not a no-op omission');
+
+  // A multi-action batch in one request must be applied as a single atomic
+  // changes array: update dxKey and create dxKey2 in the same POST.
+  await expectStatus('/api/action-state', 200, {
+    method: 'POST', cookie: cookies.alice, body: {
+      actions: [
+        {key: dxKey, status: 'review', note: 'batched update'},
+        {key: dxKey2, status: 'ignored', note: 'batched create'},
+      ],
+    },
+  });
+  data = (await expectStatus('/api/action-state', 200, {cookie: cookies.alice})).json.data;
+  assert.equal(data.actions[dxKey]?.status, 'review', 'batched update must persist');
+  assert.equal(data.actions[dxKey2]?.status, 'ignored', 'batched create must persist');
+  results.checks += 8;
+}
+
+async function testActionStateCasConcurrency(cookies) {
+  // A second store instance over the same runtime is the concurrent writer
+  // that races the portal's fresh read.
+  const repository = createLinkOpsJsonRepository({
+    taskFile,
+    sessionFile: chatFile,
+    actionFile: stateFile,
+    runtimeFile,
+  });
+  const peer = createLinkOpsStoreGateway({repository});
+  const dxKey = '2026-07-11|DX|inventory|low stock|SKU-A|';
+  const atomicKey = '2026-07-11|DX|inventory|low stock|SKU-ATOMIC|';
+
+  const peerState = await peer.readActionState();
+  const winnerSnapshot = structuredClone(peerState.actions[dxKey]);
+  const winnerReadback = await peer.applyActionChanges([
+    {
+      key: dxKey,
+      expectedRevision: winnerSnapshot.repositoryRevision,
+      record: {...winnerSnapshot, status: 'ignored', note: 'concurrent winner'},
+    },
+  ], {actorUser: 'owner'});
+  const winnerRevision = Number(winnerReadback.actions[dxKey].repositoryRevision);
+  assert.equal(winnerRevision, Number(winnerSnapshot.repositoryRevision) + 1, 'winner advances the revision');
+
+  // A stale writer that read before the winner must fail closed and never
+  // overwrite the winner's committed row.
+  await assert.rejects(
+    peer.applyActionChanges([
+      {
+        key: dxKey,
+        expectedRevision: winnerSnapshot.repositoryRevision,
+        record: {...winnerSnapshot, status: 'done', note: 'stale loser'},
+      },
+    ], {actorUser: 'alice'}),
+    error => error?.code === 'LINK_OPS_REVISION_CONFLICT',
+    'stale revision must surface a repository conflict'
+  );
+  const afterConflict = await peer.readActionState();
+  assert.equal(afterConflict.actions[dxKey].status, 'ignored', 'stale writer must not overwrite the winner');
+  assert.equal(afterConflict.actions[dxKey].note, 'concurrent winner');
+  assert.equal(Number(afterConflict.actions[dxKey].repositoryRevision), winnerRevision);
+
+  // A stale update inside an atomic batch rejects the whole batch; the create
+  // in the same batch must not partially persist.
+  await assert.rejects(
+    peer.applyActionChanges([
+      {
+        key: dxKey,
+        expectedRevision: winnerSnapshot.repositoryRevision,
+        record: {...winnerSnapshot, status: 'done'},
+      },
+      {
+        key: atomicKey,
+        expectedRevision: null,
+        record: {status: 'review', note: 'must roll back', updatedAt: new Date().toISOString()},
+      },
+    ], {actorUser: 'alice'}),
+    error => error?.code === 'LINK_OPS_REVISION_CONFLICT',
+    'a stale entry in an atomic batch must reject the batch'
+  );
+  const atomicState = await peer.readActionState();
+  assert.equal(atomicState.actions[atomicKey], undefined, 'conflicting batch must persist nothing');
+
+  // The portal route still fails closed with the normalized 409 conflict
+  // response when the store advanced between its snapshot and write: peer
+  // deletes the row first, and the portal's create attempt collides.
+  await peer.applyActionChanges([
+    {key: dxKey, delete: true, expectedRevision: winnerRevision},
+  ], {actorUser: 'owner'});
+  const conflict = await request('/api/action-state', {
+    method: 'POST', cookie: cookies.alice, body: {key: dxKey, status: 'review', note: 'after winner'},
+  });
+  assert.equal(conflict.status, 409, 'concurrent store advance must fail closed at the HTTP boundary');
+  assert.equal(conflict.json?.code, 'LINK_OPS_ALREADY_EXISTS');
+  results.checks += 12;
 }
 
 async function testSessionIsolation(cookies) {

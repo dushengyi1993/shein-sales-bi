@@ -43,11 +43,14 @@ import {
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-prepare-descriptions-'));
+const testOutputDir = path.join(tmpRoot, 'outputs');
+process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const SOURCE_STORE = 'NM';
 const SOURCE_SPU = 'v20990101999999';
@@ -55,6 +58,7 @@ const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const DESC_SUPPLIER_CODES = [
   'DESC-CONCURRENT',
   'DESC-MATCH',
+  'DESC-POST-COMMIT',
   'DESC-NO-SUCCESS',
   'DESC-DRIFT',
   'DESC-FALLBACK',
@@ -71,6 +75,7 @@ const DESC_SUPPLIER_CODES = [
   'DESC-HISTORY-WRITE',
   'DESC-AUDIT-HISTORY',
   'DESC-CLI',
+  'DESC-CLI-UNCONFIRMED',
   'DESC-CLI-LEGACY-S9',
   'DESC-CLI-AUDIT-PENDING',
   'DESC-AUDIT-FAILURE',
@@ -85,6 +90,7 @@ const DESC_SUPPLIER_CODES = [
 ];
 const SOURCE_LOCKED_CODES = new Set([
   'DESC-MATCH',
+  'DESC-POST-COMMIT',
   'DESC-NO-SUCCESS',
   'DESC-DRIFT',
   'DESC-FALLBACK',
@@ -93,6 +99,7 @@ const SOURCE_LOCKED_CODES = new Set([
   'DESC-PRODUCT-EXACT',
   'DESC-PRODUCT-DRIFT',
   'DESC-CLI',
+  'DESC-CLI-UNCONFIRMED',
   'DESC-CLI-LEGACY-S9',
   'DESC-CLI-AUDIT-PENDING',
   'DESC-POST-BIND-BLOCKED',
@@ -102,8 +109,8 @@ const SOURCE_LOCKED_CODES = new Set([
   'DESC-EXPECTED-REVISION',
 ]);
 const sourceSkcFor = code => `sv20990101${String(DESC_SUPPLIER_CODES.indexOf(code)).padStart(6, '0')}`;
-const descSourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', SOURCE_STORE);
-const descSourceOpenApiDir = path.join(ROOT, 'outputs', 'shein_openapi_products', SOURCE_STORE);
+const descSourceLinkDir = path.join(testOutputDir, 'shein_links', SOURCE_STORE);
+const descSourceOpenApiDir = path.join(testOutputDir, 'shein_openapi_products', SOURCE_STORE);
 async function writeDescSourceFixtures() {
   await fs.mkdir(descSourceLinkDir, {recursive: true});
   await fs.mkdir(descSourceOpenApiDir, {recursive: true});
@@ -553,7 +560,10 @@ const taskFile = path.join(tmpRoot, 'tasks.json');
 const chatFile = path.join(tmpRoot, 'chats.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const auditFailureMarker = path.join(tmpRoot, 'fail-description-audit.marker');
+const executionAuditFailureMarker = path.join(tmpRoot, 'fail-execution-audit.marker');
+const executionPostCommitFailureMarker = path.join(tmpRoot, 'fail-execution-post-commit.marker');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 const portalDir = path.join(tmpRoot, 'portal');
 await fs.mkdir(portalDir, {recursive: true});
@@ -595,6 +605,8 @@ const portal = spawn(process.execPath, [
     SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS: '15000',
     SHEIN_LINK_OPS_READBACK_MAX_PAGES: '1',
     SHEIN_BI_TEST_DESCRIPTION_AUDIT_FAIL_FILE: auditFailureMarker,
+    SHEIN_BI_TEST_EXECUTION_AUDIT_FAIL_FILE: executionAuditFailureMarker,
+    SHEIN_BI_TEST_EXECUTION_POST_COMMIT_FAIL_FILE: executionPostCommitFailureMarker,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -995,12 +1007,62 @@ try {
     cookie,
     body: {id: taskId1, mode: 'execute', confirm: CONFIRM_TEXT, source: 'test'},
   });
+  check('execute response status 200', execute.status, 200);
+  check('execute confirmed top-level remains ok', execute.json?.ok, true);
+  check('execute response is a bounded single-task projection',
+    execute.json?.data?.partial === true && execute.json?.data?.tasks?.length === 1, true);
   check('execute lifecycle submitted_readback_matched', execute.json?.task?.lifecycle?.lifecycleStatus, 'submitted_readback_matched');
   check('execute status done', execute.json?.task?.status, 'done');
   const executorRun = execute.json?.task?.execution?.openApiProductExecutors?.[0] || {};
   check('execute readback ok', executorRun.readback?.ok, true);
   check('execute readback description matched', executorRun.readback?.descriptionReadback?.status, 'description_readback_matched');
   check('execute readback projection carries hashes only', JSON.stringify(executorRun.readback?.descriptionReadback?.summary || {}), text => !text.includes('selling point') && !text.includes('سطر'));
+
+  // A repository adapter can throw after its atomic write (for example a
+  // transient Windows lock-file release error), and the external JSONL audit
+  // can fail after that. The route must recover only from the exact persisted
+  // revision+payload hash and return a committed/audit-pending stage; a caller
+  // must never see a generic retryable 500 after a real SHEIN submission.
+  const taskIdPostCommit = await createTask(cookie, 'DESC-POST-COMMIT');
+  await attachPayload(taskIdPostCommit, publishPayloadFor('DESC-POST-COMMIT'));
+  const postCommitBind = await bindDescriptions(cookie, taskIdPostCommit);
+  check('post-commit recovery fixture binds', postCommitBind.status, 200);
+  await req('/api/link-ops-execute', {method: 'POST', cookie, body: {id: taskIdPostCommit, mode: 'dry-run', source: 'test'}});
+  await Promise.all([
+    fs.writeFile(executionPostCommitFailureMarker, 'fail-after-commit', 'utf8'),
+    fs.writeFile(executionAuditFailureMarker, 'fail-external-audit', 'utf8'),
+  ]);
+  let executePostCommit;
+  try {
+    executePostCommit = await req('/api/link-ops-execute', {
+      method: 'POST',
+      cookie,
+      body: {id: taskIdPostCommit, mode: 'execute', confirm: CONFIRM_TEXT, source: 'test'},
+    });
+  } finally {
+    await Promise.all([
+      fs.rm(executionPostCommitFailureMarker, {force: true}),
+      fs.rm(executionAuditFailureMarker, {force: true}),
+    ]);
+  }
+  check('post-commit adapter error returns HTTP 200 exact recovery', executePostCommit.status, 200);
+  check('post-commit adapter error is classified as recovered', executePostCommit.json?.commitRecovered, true);
+  check('post-commit external audit error is explicit', executePostCommit.json?.auditPending, true);
+  check('post-commit audit warning states persistence without overstating readback', executePostCommit.json?.warning,
+    '执行结果已持久化，但外部审计暂待补写；请勿重复提交。');
+  check('post-commit audit warning does not claim exact readback', executePostCommit.json?.warning,
+    text => !text.includes('精确回读'));
+  check('post-commit response blocks blind retry with exact stage', executePostCommit.json?.stage, 'execution_committed_audit_pending');
+  check('post-commit response returns the persisted terminal task',
+    executePostCommit.json?.task?.lifecycle?.lifecycleStatus, 'submitted_readback_matched');
+  const postCommitPersisted = await rawTaskById(taskIdPostCommit);
+  check('post-commit recovery persisted one terminal write',
+    postCommitPersisted?.execution?.writeAudit?.actualWriteSubmitted, true);
+  const postCommitRetry = await req('/api/link-ops-execute', {
+    method: 'POST', cookie,
+    body: {id: taskIdPostCommit, mode: 'execute', confirm: CONFIRM_TEXT, source: 'test-retry-must-block'},
+  });
+  check('post-commit lifecycle blocks a duplicate retry', postCommitRetry.status, 409);
 
   // code=0 without explicit success flag is not success
   publishSuccessMode.mode = 'no_success_flag';
@@ -1031,6 +1093,11 @@ try {
     body: {id: taskId3, mode: 'execute', confirm: CONFIRM_TEXT, source: 'test'},
   });
   const driftLifecycle = executeDrift.json?.task?.lifecycle?.lifecycleStatus || '';
+  check('drift response keeps HTTP 200 for committed result', executeDrift.status, 200);
+  check('drift response preserves committed true', executeDrift.json?.committed, true);
+  check('drift response top-level ok is false', executeDrift.json?.ok, false);
+  check('drift response is explicitly partial', executeDrift.json?.partial, true);
+  check('drift response outcome is unconfirmed', executeDrift.json?.outcome, 'unconfirmed');
   check('drift readback never submitted_readback_matched', driftLifecycle, text => text !== 'submitted_readback_matched');
   check('drift readback classified as failed/needs manual resolve', driftLifecycle, 'submitted_readback_failed');
   const driftRun = executeDrift.json?.task?.execution?.openApiProductExecutors?.[0] || {};
@@ -1345,6 +1412,23 @@ try {
   check('unit: product submitted state cannot replace missing success', portalHooks.linkOpsProductExecutorSubmitted({state: 'submitted', publishResult: {code: '0', info: {}}}), false);
   check('unit: maintenance submitted requires strict adapter evidence', portalHooks.linkOpsMaintenanceExecutorSubmitted({state: 'submitted', adapterKind: 'link_maintenance_openapi_executor', adapterEvidence: {realSubmit: true, writeAttempted: true, recoveryRequired: false}, publishResult: {code: '0'}}), true);
   check('unit: maintenance submitted state alone is insufficient', portalHooks.linkOpsMaintenanceExecutorSubmitted({state: 'submitted', publishResult: {code: '0'}}), false);
+  const unconfirmedNoBlockerOutcome = portalHooks.linkOpsExecutionResponseOutcome({
+    preflight: {ok: true, blockers: []},
+    execution: {
+      preflight: {ok: true, blockers: []},
+      writeClaim: {state: 'unconfirmed'},
+      linkMaintenanceExecutors: [{
+        ok: false,
+        state: 'submitted',
+        adapterEvidence: {realSubmit: true},
+        readback: {ok: false, status: 'product_identity_only_not_mutation_proof'},
+        blockers: [],
+      }],
+    },
+    lifecycle: {lifecycleStatus: 'submitted_readback_failed', needsManualResolve: true},
+  }, {requestedExecute: true});
+  check('unit: committed executor false without blockers is not top-level success', unconfirmedNoBlockerOutcome.ok, false);
+  check('unit: committed executor false without blockers is unconfirmed', unconfirmedNoBlockerOutcome.outcome, 'unconfirmed');
   check('unit: explicit pre-valid rejection task passes the predicate', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask()).ok, true);
   check('unit: explicitSuccess=false audit projection also passes', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun()], {})).ok, true);
   check('unit: code0/info{} is never explicit rejection even with pre-valid markers', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun({publishResult: {httpStatus: 200, code: '0', msg: 'OK', info: {}}})])).ok, false);
@@ -1530,6 +1614,34 @@ try {
     && !text.includes(zhLines[0])
     && !text.includes(cliSourceFile)
   ));
+
+  const cliUnconfirmedTaskId = await createTask(cookie, 'DESC-CLI-UNCONFIRMED');
+  await attachPayload(cliUnconfirmedTaskId, publishPayloadFor('DESC-CLI-UNCONFIRMED'));
+  const cliUnconfirmedBind = await bindDescriptions(cookie, cliUnconfirmedTaskId);
+  check('managed CLI unconfirmed fixture binds', cliUnconfirmedBind.status, 200);
+  const cliUnconfirmedDryRun = await req('/api/link-ops-execute', {
+    method: 'POST',
+    cookie,
+    body: {id: cliUnconfirmedTaskId, mode: 'dry-run', source: 'test_cli_unconfirmed'},
+  });
+  check('managed CLI unconfirmed fixture dry-run ready', cliUnconfirmedDryRun.json?.task?.execution?.preflight?.ok, true);
+  descReadbackMode.mode = 'drift';
+  let cliUnconfirmed;
+  try {
+    cliUnconfirmed = await runCli([
+      'execute',
+      '--task-id', cliUnconfirmedTaskId,
+      '--confirm', CONFIRM_TEXT,
+    ]);
+  } finally {
+    descReadbackMode.mode = 'exact';
+  }
+  check('managed CLI unconfirmed execute exits nonzero', cliUnconfirmed.code, code => code !== 0);
+  check('managed CLI unconfirmed execute prints top-level failure', cliUnconfirmed.json?.ok, false);
+  check('managed CLI unconfirmed execute preserves committed true', cliUnconfirmed.json?.committed, true);
+  check('managed CLI unconfirmed execute prints partial true', cliUnconfirmed.json?.partial, true);
+  check('managed CLI unconfirmed execute prints outcome', cliUnconfirmed.json?.outcome, 'unconfirmed');
+  check('managed CLI unconfirmed execute retains failed lifecycle', cliUnconfirmed.json?.task?.lifecycle?.lifecycleStatus, 'submitted_readback_failed');
 
   // --expected-revision is optional, but once supplied it must be a positive
   // Number.isSafeInteger. Exercise values exactly as parseArgs can produce

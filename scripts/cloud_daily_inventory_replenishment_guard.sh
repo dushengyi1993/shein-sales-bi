@@ -6,6 +6,16 @@ BUSINESS_DATE="${SHEIN_BI_INVENTORY_BUSINESS_DATE:-$(TZ=Asia/Shanghai date -d ye
 RUN_DEADLINE_EPOCH="${SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH:-0}"
 RUNTIME_ROOT="${SHEIN_BI_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/daily-inventory-replenishment}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
+# Stable per-run force-refresh token: the same run reuses it (retries inside
+# this run dedupe against the Portal queue), while a later business re-run
+# forms a new token and can never be swallowed by the 30-day completed
+# tombstone of the previous run on the same core generation. Deterministic
+# source: the UTC start second of this run; overridable for pinned runs.
+REFRESH_RUN_TOKEN="${SHEIN_BI_INVENTORY_REFRESH_TOKEN:-daily-inventory:$(date -u +%s)}"
+if [[ ! "$REFRESH_RUN_TOKEN" =~ ^[A-Za-z0-9._:-]{1,160}$ ]]; then
+  echo "[daily_inventory_guard] refresh token must be 1-160 safe characters" >&2
+  exit 64
+fi
 LINKS_DATA_FILE="${SHEIN_BI_LINKS_DATA_FILE:-$ROOT/outputs/bi-portal/sections/linksData.json}"
 LINKS_MAX_AGE_SECONDS="${SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS:-1800}"
 LINKS_REFRESH_TIMEOUT_SECONDS="${SHEIN_BI_INVENTORY_LINKS_REFRESH_TIMEOUT_SECONDS:-1200}"
@@ -173,7 +183,7 @@ ensure_links_data_fresh() {
   echo "[daily_inventory_guard] refresh linksData synchronously force=$force previousAgeSeconds=${age:-unknown}"
   curl -fsS --max-time "$LINKS_REFRESH_TIMEOUT_SECONDS" \
     -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
-    "$PORTAL_URL/api/bi/section/linksData?refresh=1" >/dev/null
+    "$PORTAL_URL/api/bi/section/linksData?refresh=1&refreshToken=${REFRESH_RUN_TOKEN}" >/dev/null
   age="$(links_data_age_seconds 2>/dev/null || true)"
   if [[ ! "$age" =~ ^[0-9]+$ ]] || (( age > LINKS_MAX_AGE_SECONDS )); then
     echo "[daily_inventory_guard] linksData refresh did not publish a fresh cache ageSeconds=${age:-unknown}" >&2
@@ -244,7 +254,7 @@ ensure_inventory_trend_fresh() {
   echo "[daily_inventory_guard] refresh inventoryTrend synchronously force=$force previousAgeSeconds=${age:-unknown}"
   if ! curl -fsS --max-time "$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \
     -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
-    "$PORTAL_URL/api/bi/section/inventoryTrend?refresh=1" >/dev/null; then
+    "$PORTAL_URL/api/bi/section/inventoryTrend?refresh=1&refreshToken=${REFRESH_RUN_TOKEN}" >/dev/null; then
     echo "[daily_inventory_guard] inventoryTrend HTTP refresh failed; blocking the daily inventory guard" >&2
     return 1
   fi

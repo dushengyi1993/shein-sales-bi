@@ -15,6 +15,7 @@ import net from 'node:net';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
@@ -213,6 +214,7 @@ try {
   const chatFile = path.join(tmpRoot, 'chats.json');
   const auditFile = path.join(tmpRoot, 'audit.jsonl');
   const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+  await provisionBiSessionSecret(sessionSecretFile);
   const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
   const portalPort = await freePort();
   const baseUrl = `http://127.0.0.1:${portalPort}`;

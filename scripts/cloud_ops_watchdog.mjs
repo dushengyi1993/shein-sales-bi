@@ -4,6 +4,11 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {
+  DEFAULT_CLOUD_MAINTENANCE_FILE,
+  maintenanceBlocksClass,
+  readCloudMaintenanceStatus,
+} from '../lib/cloud_maintenance_mode.mjs';
+import {
   assessDailyLinkBusinessRecovery,
   assessDailyMarketingGuardHealth,
   assessDailyMarketingRepairHealth,
@@ -19,16 +24,24 @@ import {
   prepareWatchdogNotificationIssues,
 } from '../lib/cloud_watchdog_issue_collapse.mjs';
 import {assessSessionManagerManualRecovery} from '../lib/cloud_manual_login_recovery.mjs';
-import {inspectReleaseSourceState} from './check_release_source_state.mjs';
+import {
+  inspectRecordedDeploymentReleaseEvidence,
+  inspectReleaseSourceState,
+} from './check_release_source_state.mjs';
+import {auditCloudMaintenanceGuards} from './manage_cloud_maintenance_mode.mjs';
 import {validateDailyOperatingRefresh} from './validate_daily_operating_refresh.mjs';
 import {
   CLOUD_ALWAYS_RUNNING_UNITS,
   CLOUD_AUXILIARY_UNITS,
-  CLOUD_RUNTIME_UNITS,
+  CLOUD_MAINTENANCE_POLICY_BY_SERVICE,
+  CLOUD_RUNTIME_SNAPSHOT_UNITS,
   CLOUD_SERVICE_UNITS,
+  CLOUD_TIMER_MAINTENANCE_POLICY,
   CLOUD_TIMER_UNITS,
 } from '../lib/cloud_runtime_inventory.mjs';
 import {collectSystemdUnitSnapshot} from '../lib/systemd_unit_snapshot.mjs';
+import {validateCloudRuntimeEffectiveControls} from '../lib/cloud_runtime_snapshot.mjs';
+import {validateDeployedReleaseMarker} from '../lib/source_release_attestation.mjs';
 import {
   applyWatchdogAlertState,
   markWatchdogDispatchAttempt,
@@ -37,6 +50,8 @@ import {
   pendingWatchdogDispatches,
   prepareWatchdogDispatches,
 } from '../lib/cloud_watchdog_alert_state.mjs';
+import {acquireCrossProcessTicketLock} from '../lib/cross_process_ticket_lock.mjs';
+import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_STATE_DIR = path.join(ROOT, 'state', 'cloud_ops_watchdog');
@@ -44,22 +59,309 @@ const DEFAULT_LOG_DIR = process.env.SHEIN_CLOUD_WATCHDOG_LOG_DIR || '/srv/shein-
 const UNIT_NAMES = CLOUD_SERVICE_UNITS;
 const ALWAYS_RUNNING_UNITS = new Set(CLOUD_ALWAYS_RUNNING_UNITS);
 const TIMER_NAMES = CLOUD_TIMER_UNITS;
+const WATCHDOG_MAINTENANCE_STATE_SCHEMA = 'cloud-watchdog-maintenance-state/v1';
+const VALID_MAINTENANCE_CLASSES = new Set(['scheduled', 'infrastructure', 'always']);
+
+// Cross-process single-instance lock.  The ticket queue lives inside
+// args.stateDir so concurrent duplicate runs cannot touch each other's
+// maintenance state, alert state, legacy marker, or watchdog logs.  A
+// duplicate that cannot acquire within the short timeout reports an explicit
+// skipped/already-running success without doing any watchdog work.
+const SINGLE_INSTANCE_LOCK_FILE = 'cloud-ops-watchdog.single-instance.lock';
+const SINGLE_INSTANCE_LOCK_TIMEOUT_MS = 5_000;
+const SINGLE_INSTANCE_ALREADY_RUNNING_CODE = 'WATCHDOG_ALREADY_RUNNING';
+
+// Source-integrity verdict for the deployment provenance check. Any dirty
+// tracked edit, hidden index entry (skip-worktree/assume-unchanged), missing
+// tracked file, or commit drift must fail closed as an issue; a clean state
+// returns null. The raw fields are checked independently so a stale truthy
+// `ok` flag can never produce a false green. This verdict is intentionally
+// NOT routed through maintenance suppression: infrastructure source drift
+// must never become a silent ops-group note.
+export function sourceIntegrityIssueFor(state = {}) {
+  const dirty = Number.isInteger(state.dirtyEntries?.length) ? state.dirtyEntries.length : 0;
+  const hidden = Number.isInteger(state.hiddenIndexEntries?.length) ? state.hiddenIndexEntries.length : 0;
+  const missing = Number.isInteger(state.missingTrackedFiles?.length) ? state.missingTrackedFiles.length : 0;
+  const commitClean = state.commitMatches === true;
+  const broken = state.ok === false || !commitClean || dirty > 0 || hidden > 0 || missing > 0;
+  if (!broken) return null;
+  return `云端源码不一致：commitMatch=${state.commitMatches ?? 'unknown'} dirty=${dirty} hidden=${hidden} missing=${missing}`;
+}
+
+export function summarizeWatchdogMaintenanceStatus(status) {
+  const valid = status?.ok === true;
+  return {
+    schemaVersion: String(status?.schemaVersion || 'cloud-maintenance-mode/v1'),
+    ok: valid,
+    valid,
+    exists: status?.exists === true,
+    active: valid ? status.active === true : null,
+    mode: valid ? String(status.mode || 'none') : 'unknown',
+    generation: valid && Number.isSafeInteger(status.generation) ? status.generation : null,
+    hash: String(status?.hash || ''),
+    markerFile: String(status?.markerFile || ''),
+    errorCode: valid ? '' : String(status?.errorCode || 'MAINTENANCE_MARKER_INVALID'),
+  };
+}
+
+export function watchdogMaintenanceBlocksClass(maintenance, unitClass) {
+  const normalizedClass = String(unitClass || '').trim().toLowerCase();
+  if (!VALID_MAINTENANCE_CLASSES.has(normalizedClass)) return null;
+  const status = maintenance?.valid === undefined
+    ? maintenance
+    : {
+        ok: maintenance.valid === true,
+        active: maintenance.active,
+        mode: maintenance.mode,
+      };
+  return maintenanceBlocksClass(status, normalizedClass);
+}
+
+export function partitionWatchdogMaintenanceChecks(maintenance, checks = []) {
+  const runnable = [];
+  const suppressed = [];
+  const policyErrors = [];
+  for (const rawCheck of checks) {
+    const check = rawCheck && typeof rawCheck === 'object' ? rawCheck : {};
+    const id = String(check.id || '').trim() || 'unnamed-check';
+    const unitClass = String(check.unitClass || '').trim().toLowerCase();
+    const blocked = watchdogMaintenanceBlocksClass(maintenance, unitClass);
+    if (blocked === null) {
+      policyErrors.push({id, unitClass: unitClass || 'missing'});
+      suppressed.push({
+        id,
+        class: unitClass || 'missing',
+        kind: String(check.kind || 'check'),
+        unit: String(check.unit || ''),
+        reason: 'maintenance_policy_invalid_fail_closed',
+      });
+    } else if (blocked) {
+      suppressed.push({
+        id,
+        class: unitClass,
+        kind: String(check.kind || 'check'),
+        unit: String(check.unit || ''),
+        reason: maintenance?.valid === false
+          ? 'maintenance_marker_invalid_fail_closed'
+          : `maintenance_${maintenance?.mode || 'unknown'}_blocked`,
+      });
+    } else {
+      runnable.push(check);
+    }
+  }
+  return {runnable, suppressed, policyErrors};
+}
+
+export function watchdogMaintenanceConfigurationIssue(maintenance, policyErrors = []) {
+  if (maintenance?.valid !== false && !policyErrors.length) return '';
+  const markerError = maintenance?.valid === false
+    ? `marker=${maintenance.errorCode || 'invalid'} generation=${maintenance.generation ?? '-'} hash=${maintenance.hash || '-'}`
+    : 'marker=valid';
+  const policyDetail = policyErrors.length
+    ? ` policy=${policyErrors.map(row => `${row.id}:${row.unitClass}`).join(',')}`
+    : '';
+  return `维护模式配置故障（高优先级）：${markerError}${policyDetail}；scheduled/infrastructure 检查已 fail closed，always 与源码完整性继续检查`;
+}
+
+function maintenanceEpisodeKey(maintenance) {
+  return `generation=${maintenance.generation ?? '-'};hash=${maintenance.hash || '-'}`;
+}
+
+function emptyWatchdogMaintenanceState(nowIso) {
+  return {
+    schemaVersion: WATCHDOG_MAINTENANCE_STATE_SCHEMA,
+    updatedAt: nowIso,
+    lastObserved: null,
+    activeEpisode: null,
+    pendingRecovery: null,
+    lastRecoveryKey: '',
+  };
+}
+
+export function applyWatchdogMaintenanceTransition({previousState, maintenance, now = new Date()} = {}) {
+  const nowIso = new Date(now).toISOString();
+  const previous = previousState?.schemaVersion === WATCHDOG_MAINTENANCE_STATE_SCHEMA
+    ? structuredClone(previousState)
+    : emptyWatchdogMaintenanceState(nowIso);
+  const nextState = {
+    ...previous,
+    schemaVersion: WATCHDOG_MAINTENANCE_STATE_SCHEMA,
+    updatedAt: nowIso,
+    lastObserved: {
+      valid: maintenance?.valid === true,
+      active: maintenance?.active ?? null,
+      mode: String(maintenance?.mode || 'unknown'),
+      generation: maintenance?.generation ?? null,
+      hash: String(maintenance?.hash || ''),
+      observedAt: nowIso,
+    },
+  };
+  let recoveryCreated = null;
+  if (maintenance?.valid === true && maintenance.active === true) {
+    if (nextState.pendingRecovery) {
+      nextState.lastRecoveryKey = nextState.pendingRecovery.key;
+      nextState.lastRecoveryCancelledAt = nowIso;
+      nextState.pendingRecovery = null;
+    }
+    const key = maintenanceEpisodeKey(maintenance);
+    if (nextState.activeEpisode?.key !== key) {
+      nextState.activeEpisode = {
+        key,
+        mode: maintenance.mode,
+        generation: maintenance.generation,
+        hash: maintenance.hash,
+        firstObservedAt: nowIso,
+      };
+    }
+  } else if (maintenance?.valid === true && maintenance.active === false) {
+    const prior = nextState.activeEpisode;
+    if (prior
+      && nextState.lastRecoveryKey !== prior.key
+      && nextState.pendingRecovery?.key !== prior.key) {
+      recoveryCreated = {
+        key: prior.key,
+        idempotencyKey: `cloud-watchdog-maintenance-recovery-${prior.generation}-${prior.hash}`,
+        status: 'pending',
+        attemptCount: 0,
+        createdAt: nowIso,
+        from: {
+          mode: prior.mode,
+          generation: prior.generation,
+          hash: prior.hash,
+        },
+        to: {
+          mode: maintenance.mode,
+          generation: maintenance.generation,
+          hash: maintenance.hash,
+        },
+      };
+      nextState.pendingRecovery = recoveryCreated;
+    }
+    nextState.activeEpisode = null;
+  }
+  return {
+    nextState,
+    recoveryCreated,
+    pendingRecovery: nextState.pendingRecovery || null,
+  };
+}
+
+export function markWatchdogMaintenanceRecoverySent(state, key, sentAt = new Date()) {
+  const next = structuredClone(state);
+  if (next.pendingRecovery?.key !== key) return next;
+  next.lastRecoveryKey = key;
+  next.lastRecoveryAt = new Date(sentAt).toISOString();
+  next.pendingRecovery = null;
+  next.updatedAt = next.lastRecoveryAt;
+  return next;
+}
+
+export function markWatchdogMaintenanceRecoveryAttempt(state, key, attemptedAt = new Date()) {
+  const next = structuredClone(state);
+  if (next.pendingRecovery?.key !== key) return next;
+  next.pendingRecovery.attemptCount = Number(next.pendingRecovery.attemptCount || 0) + 1;
+  next.pendingRecovery.lastAttemptAt = new Date(attemptedAt).toISOString();
+  next.updatedAt = next.pendingRecovery.lastAttemptAt;
+  return next;
+}
+
+export function bindWatchdogMaintenanceRecoveryDelivery(state, key, idempotencyKey, boundAt = new Date()) {
+  const next = structuredClone(state);
+  if (next.pendingRecovery?.key !== key) return next;
+  const deliveryKey = String(idempotencyKey || '').trim();
+  if (!deliveryKey) throw new Error('maintenance recovery delivery idempotency key is required');
+  const existing = String(next.pendingRecovery.deliveryIdempotencyKey || '').trim();
+  if (existing && existing !== deliveryKey) {
+    throw new Error('maintenance recovery delivery idempotency key drifted');
+  }
+  next.pendingRecovery.deliveryIdempotencyKey = deliveryKey;
+  next.pendingRecovery.deliveryBoundAt ||= new Date(boundAt).toISOString();
+  next.updatedAt = new Date(boundAt).toISOString();
+  return next;
+}
+
+export function mergeMaintenanceRecoveryNotification(issues, maintenanceRecovery) {
+  const rows = Array.isArray(issues) ? issues.map(value => String(value)).filter(Boolean) : [];
+  if (!maintenanceRecovery) return {issues: rows, coalesced: false};
+  return {
+    issues: [
+      ...rows,
+      `云端维护模式已恢复：mode=${maintenanceRecovery.from.mode} generation=${maintenanceRecovery.from.generation} hash=${maintenanceRecovery.from.hash}`,
+    ],
+    coalesced: true,
+  };
+}
+
+export function watchdogIssueMaintenanceClass(issue) {
+  const raw = String(issue || '').trim();
+  const service = /^(?:服务异常|常驻服务未运行)：(\S+)/.exec(raw)?.[1] || '';
+  if (service) return CLOUD_MAINTENANCE_POLICY_BY_SERVICE[service] || 'unknown';
+  const timer = /^定时器未运行：(\S+)/.exec(raw)?.[1] || '';
+  if (timer) return CLOUD_TIMER_MAINTENANCE_POLICY[timer] || 'unknown';
+  if (/^服务器硬盘(?:检查失败|即将写满|快满了|空间偏紧)/.test(raw)) return 'infrastructure';
+  if (/^生产部署证明/.test(raw)) return 'infrastructure';
+  if (/^(?:云端源码|维护模式配置故障|systemd 批量快照不完整|BI 数据文件不可读|BI 实时运行状态不可读|BI 实时更新通道未连接)/.test(raw)) return 'always';
+  return 'scheduled';
+}
+
+export function detachMaintenanceHeldAlertState(state, maintenance) {
+  const activeState = structuredClone(state);
+  const held = {episodes: {}, outbox: {}};
+  const heldFamilies = new Set();
+  for (const [family, episode] of Object.entries(activeState.episodes || {})) {
+    if (episode.status !== 'resolved'
+      && watchdogMaintenanceBlocksClass(maintenance, watchdogIssueMaintenanceClass(episode.lastRaw)) === true) {
+      heldFamilies.add(family);
+      held.episodes[family] = episode;
+      delete activeState.episodes[family];
+    }
+  }
+  for (const [id, intent] of Object.entries(activeState.outbox || {})) {
+    if (!heldFamilies.has(intent.family)) continue;
+    const heldIntent = structuredClone(intent);
+    delete heldIntent.dispatchId;
+    held.outbox[id] = heldIntent;
+    delete activeState.outbox[id];
+  }
+  for (const [id, dispatch] of Object.entries(activeState.dispatches || {})) {
+    const intentIds = (dispatch.intentIds || []).filter(intentId => Object.hasOwn(activeState.outbox || {}, intentId));
+    if (intentIds.length) activeState.dispatches[id] = {...dispatch, intentIds};
+    else delete activeState.dispatches[id];
+  }
+  return {activeState, held, heldFamilies: [...heldFamilies]};
+}
+
+function mergeMaintenanceHeldAlertState(state, held) {
+  const next = structuredClone(state);
+  next.episodes = {...(next.episodes || {}), ...(held.episodes || {})};
+  next.outbox = {...(next.outbox || {}), ...(held.outbox || {})};
+  return next;
+}
 
 function parseArgs(argv) {
   const args = {
     stateDir: DEFAULT_STATE_DIR,
     logDir: DEFAULT_LOG_DIR,
     portalData: path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+    maintenanceFile: process.env.SHEIN_CLOUD_MAINTENANCE_FILE || DEFAULT_CLOUD_MAINTENANCE_FILE,
     dryRun: false,
     force: false,
+    lockTimeoutMs: SINGLE_INSTANCE_LOCK_TIMEOUT_MS,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--state-dir') args.stateDir = path.resolve(argv[++i]);
     else if (a === '--log-dir') args.logDir = path.resolve(argv[++i]);
     else if (a === '--portal-data') args.portalData = path.resolve(argv[++i]);
+    else if (a === '--maintenance-file') args.maintenanceFile = path.resolve(argv[++i]);
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--force') args.force = true;
+    else if (a === '--lock-timeout-ms') {
+      const parsedTimeout = Number(argv[++i]);
+      args.lockTimeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0
+        ? parsedTimeout
+        : SINGLE_INSTANCE_LOCK_TIMEOUT_MS;
+    }
   }
   return args;
 }
@@ -221,9 +523,13 @@ async function readJsonIfExists(file) {
 }
 
 async function writeJsonAtomic(file, value) {
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await fs.rename(tmp, file);
+  await writeJsonFileAtomic(file, value);
+}
+
+export async function persistWatchdogMaintenanceState(file, state, {dryRun = false} = {}) {
+  if (dryRun) return false;
+  await writeJsonAtomic(file, state);
+  return true;
 }
 
 async function readLatestWatchdogReport(logDir) {
@@ -499,93 +805,191 @@ async function notify(args, message, logFile, {kind = 'cloud-watchdog', idempote
   return await run(process.execPath, argv);
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  if (!args.dryRun) {
-    await fs.mkdir(args.stateDir, {recursive: true});
-    await fs.mkdir(args.logDir, {recursive: true});
+async function acquireWatchdogSingleInstance(args, {lockTimeoutMs = SINGLE_INSTANCE_LOCK_TIMEOUT_MS} = {}) {
+  const stateDir = String(args?.stateDir || '').trim();
+  if (!stateDir) throw new TypeError('watchdog single-instance lock requires args.stateDir');
+  await fs.mkdir(stateDir, {recursive: true});
+  const lockPath = path.join(stateDir, SINGLE_INSTANCE_LOCK_FILE);
+  const deadlineMs = Number.isFinite(lockTimeoutMs) && lockTimeoutMs > 0
+    ? lockTimeoutMs
+    : SINGLE_INSTANCE_LOCK_TIMEOUT_MS;
+  try {
+    const release = await acquireCrossProcessTicketLock(lockPath, {
+      timeoutMs: deadlineMs,
+      timeoutCode: SINGLE_INSTANCE_ALREADY_RUNNING_CODE,
+    });
+    return {skipped: false, lockPath, release};
+  } catch (error) {
+    if (error?.code === SINGLE_INSTANCE_ALREADY_RUNNING_CODE) {
+      return {skipped: true, lockPath};
+    }
+    throw error;
   }
+}
+
+export async function withWatchdogSingleInstance(args, body, options = {}) {
+  const handle = await acquireWatchdogSingleInstance(args, options);
+  if (handle.skipped) return {skipped: true, lockPath: handle.lockPath};
+  try {
+    const result = await body();
+    return {skipped: false, result};
+  } finally {
+    await handle.release();
+  }
+}
+
+async function runWatchdog(args) {
+  if (!args.dryRun) await fs.mkdir(args.logDir, {recursive: true});
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
   const logFile = path.join(args.logDir, `watchdog-${stamp}.json`);
 
   const issues = [];
   const maintenanceNotes = [];
   const recoveries = [];
+  const maintenanceStatus = await readCloudMaintenanceStatus(args.maintenanceFile);
+  const maintenance = summarizeWatchdogMaintenanceStatus(maintenanceStatus);
+  const maintenanceStateFile = path.join(args.stateDir, 'maintenance-state.json');
+  const previousMaintenanceState = await readJsonIfExists(maintenanceStateFile);
+  const maintenanceTransition = applyWatchdogMaintenanceTransition({
+    previousState: previousMaintenanceState?.error ? null : previousMaintenanceState,
+    maintenance,
+  });
+  let maintenanceState = maintenanceTransition.nextState;
+  const maintenanceGuardAudit = await auditCloudMaintenanceGuards().catch(error => ({
+    ok: false,
+    policyCount: 0,
+    unchanged: 0,
+    issues: [{code: String(error?.code || 'MAINTENANCE_GUARD_AUDIT_FAILED'), message: String(error?.message || error).slice(0, 500)}],
+  }));
+  if (!maintenanceGuardAudit.ok) {
+    issues.push(`维护总闸安装漂移：${JSON.stringify(maintenanceGuardAudit.issues || []).slice(0, 1200)}；本轮不抑制任何运行态检查`);
+  }
+  const suppressedById = new Map();
+  const maintenancePolicyErrorsById = new Map();
+  const suppressCheck = (id, unitClass, detail = {}) => {
+    if (!maintenanceGuardAudit.ok) return false;
+    const decision = partitionWatchdogMaintenanceChecks(maintenance, [{id, unitClass, ...detail}]);
+    for (const row of decision.suppressed) suppressedById.set(row.id, row);
+    for (const row of decision.policyErrors) maintenancePolicyErrorsById.set(row.id, row);
+    return decision.suppressed.length > 0;
+  };
+  const classIsSuppressed = unitClass => maintenanceGuardAudit.ok
+    && watchdogMaintenanceBlocksClass(maintenance, unitClass) === true;
+  if (maintenanceTransition.recoveryCreated) {
+    const from = maintenanceTransition.recoveryCreated.from;
+    maintenanceNotes.push(
+      `云端维护模式已恢复：mode=${from.mode} generation=${from.generation} hash=${from.hash}；本次恢复记录仅生成一次`,
+    );
+  }
   const deployedRelease = await readJsonIfExists(
     process.env.SHEIN_BI_DEPLOYED_RELEASE_FILE || '/srv/shein-bi/runtime/deployed_release.json',
   );
+  const deployedReleaseValidation = validateDeployedReleaseMarker(deployedRelease, {requireV3: true});
+  if (!deployedReleaseValidation.ok) {
+    issues.push(`生产部署证明无效（生产健康必须绑定 source release v3 回执）：${deployedReleaseValidation.issues.join(',') || 'marker_missing'}`);
+  }
+  const deploymentEvidence = inspectRecordedDeploymentReleaseEvidence({
+    cwd: ROOT,
+    marker: deployedRelease,
+    releaseAttestationRoot: process.env.SHEIN_BI_RELEASE_ATTESTATION_ROOT
+      || '/srv/shein-bi/runtime/release-attestations',
+  });
+  if (!deploymentEvidence.ok) {
+    issues.push(`生产部署证明缺少 attestation/tag 实证：${deploymentEvidence.issues.join(',') || deploymentEvidence.errorCode || 'evidence_missing'}`);
+  }
   let releaseSourceState;
   try {
     releaseSourceState = inspectReleaseSourceState({
       cwd: ROOT,
-      expectedCommit: deployedRelease?.commit || '',
+      expectedCommit: deploymentEvidence.commit || '',
     });
-    const sourceIntegrityBroken = releaseSourceState.commitMatches !== true
-      || releaseSourceState.missingTrackedFiles.length > 0;
-    if (sourceIntegrityBroken) {
-      issues.push(
-        `云端源码不一致：commitMatch=${releaseSourceState.commitMatches} dirty=${releaseSourceState.dirtyEntries.length} `
-        + `hidden=${releaseSourceState.hiddenIndexEntries.length} missing=${releaseSourceState.missingTrackedFiles.length}`,
-      );
-    } else if (releaseSourceState.dirtyEntries.length || releaseSourceState.hiddenIndexEntries.length) {
-      maintenanceNotes.push(
-        `服务器运行目录有未发布改动：dirty=${releaseSourceState.dirtyEntries.length} `
-        + `hidden=${releaseSourceState.hiddenIndexEntries.length}；版本号一致且正式文件完整，不向运营群报警`,
-      );
-    }
+    const sourceIntegrityIssue = sourceIntegrityIssueFor(releaseSourceState);
+    if (sourceIntegrityIssue) issues.push(sourceIntegrityIssue);
   } catch (error) {
     releaseSourceState = {ok: false, error: String(error?.message || error)};
     issues.push(`云端源码一致性检查失败：${releaseSourceState.error}`);
   }
-  const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
-  const expectedStoreKeys = (Array.isArray(storeConfig?.stores) ? storeConfig.stores : [])
-    .filter(store => store?.enabled !== false)
-    .map(store => store?.storeKey);
-  const productReport = await readJsonIfExists(path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json'));
-  const productReconciliationHealth = assessOpenapiProductReport(productReport, expectedStoreKeys);
-  if (!productReconciliationHealth.healthy) {
-    for (const message of productReconciliationHealth.messages) issues.push(`商品 OpenAPI 对账需处理：${message}`);
+  let expectedStoreKeys = [];
+  let productReport = {suppressed: true, class: 'scheduled'};
+  let productReconciliationHealth = {suppressed: true, class: 'scheduled'};
+  if (!suppressCheck('business:openapi-product-reconciliation', 'scheduled', {kind: 'business'})) {
+    const storeConfig = await readJsonIfExists(path.join(ROOT, 'config', 'stores.json'));
+    expectedStoreKeys = (Array.isArray(storeConfig?.stores) ? storeConfig.stores : [])
+      .filter(store => store?.enabled !== false)
+      .map(store => store?.storeKey);
+    productReport = await readJsonIfExists(path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json'));
+    productReconciliationHealth = assessOpenapiProductReport(productReport, expectedStoreKeys);
+    if (!productReconciliationHealth.healthy) {
+      for (const message of productReconciliationHealth.messages) issues.push(`商品 OpenAPI 对账需处理：${message}`);
+    }
   }
   const serviceExitAcks = await readServiceExitAcks();
   const today = bjDateKey();
   const expectedBusinessDate = previousBjDateKey();
-  const morningReadyMarker = await readJsonIfExists(path.join(ROOT, 'state', 'pipeline-markers', today, 'daily-operating-refresh.json'));
+  let morningReadyMarker = {suppressed: true, class: 'scheduled'};
   let morningReadyEvidenceOk = false;
-  if (morningReadyMarker?.runDate === today
-    && morningReadyMarker?.businessDate === expectedBusinessDate
-    && morningReadyMarker?.stage === 'daily-operating-refresh'
-    && morningReadyMarker?.status === 'done') {
-    try {
-      await validateDailyOperatingRefresh({
-        root: ROOT,
-        markerRoot: path.join(ROOT, 'state', 'pipeline-markers'),
-        stateDir: process.env.SHEIN_BI_MORNING_CHAIN_STATE_DIR || path.join(ROOT, 'state', 'cloud_morning_chain'),
-        inventoryRuntimeRoot: process.env.SHEIN_BI_INVENTORY_RUNTIME_ROOT || '/srv/shein-bi/runtime/daily-inventory-replenishment',
-        runDate: today,
-        businessDate: expectedBusinessDate,
-      });
-      morningReadyEvidenceOk = true;
-    } catch {
-      morningReadyEvidenceOk = false;
+  let morningChainLatest = {suppressed: true, class: 'scheduled'};
+  let orderRecheckStateForServices = null;
+  let sessionManagerReport = null;
+  let manualLoginState = null;
+  if (!suppressCheck('business:daily-markers-and-recovery-evidence', 'scheduled', {kind: 'business'})) {
+    morningReadyMarker = await readJsonIfExists(path.join(ROOT, 'state', 'pipeline-markers', today, 'daily-operating-refresh.json'));
+    if (morningReadyMarker?.runDate === today
+      && morningReadyMarker?.businessDate === expectedBusinessDate
+      && morningReadyMarker?.stage === 'daily-operating-refresh'
+      && morningReadyMarker?.status === 'done') {
+      try {
+        await validateDailyOperatingRefresh({
+          root: ROOT,
+          markerRoot: path.join(ROOT, 'state', 'pipeline-markers'),
+          stateDir: process.env.SHEIN_BI_MORNING_CHAIN_STATE_DIR || path.join(ROOT, 'state', 'cloud_morning_chain'),
+          inventoryRuntimeRoot: process.env.SHEIN_BI_INVENTORY_RUNTIME_ROOT || '/srv/shein-bi/runtime/daily-inventory-replenishment',
+          runDate: today,
+          businessDate: expectedBusinessDate,
+        });
+        morningReadyEvidenceOk = true;
+      } catch {
+        morningReadyEvidenceOk = false;
+      }
     }
+    if (morningReadyMarker?.runDate === bjDateKey()
+      && morningReadyMarker?.stage === 'daily-operating-refresh'
+      && morningReadyMarker?.status === 'done'
+      && morningReadyEvidenceOk !== true) {
+      issues.push('晨链最终证据失效：daily-operating-refresh 标记为 done，但受管 evidence 的文件/大小/SHA-256 回验不一致');
+    }
+    morningChainLatest = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_morning_chain', 'latest.json'));
+    orderRecheckStateForServices = await readJsonIfExists(path.join(ROOT, 'state', 'order_status_recheck_last.json'));
+    sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
+    manualLoginState = await readJsonIfExists(
+      process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
+    );
   }
-  if (morningReadyMarker?.runDate === bjDateKey()
-    && morningReadyMarker?.stage === 'daily-operating-refresh'
-    && morningReadyMarker?.status === 'done'
-    && morningReadyEvidenceOk !== true) {
-    issues.push('晨链最终证据失效：daily-operating-refresh 标记为 done，但受管 evidence 的文件/大小/SHA-256 回验不一致');
+  let sessionManagerManualRecovery = classIsSuppressed('scheduled')
+    ? {suppressed: true, class: 'scheduled'}
+    : {recovered: false, reason: 'session_manager_unit_not_checked'};
+  const systemdSnapshot = await collectSystemdUnitSnapshot(CLOUD_RUNTIME_SNAPSHOT_UNITS);
+  const effectiveControls = validateCloudRuntimeEffectiveControls(systemdSnapshot.units);
+  if (!effectiveControls.ok) {
+    const pathIssues = effectiveControls.issues.filter(issue => issue.kind === 'runtime-path' || issue.kind === 'snapshot');
+    const guardIssues = effectiveControls.issues.filter(issue => issue.kind === 'maintenance-guard');
+    if (pathIssues.length) issues.push(`运行态 namespace 有效属性漂移：${JSON.stringify(pathIssues).slice(0, 1600)}`);
+    if (guardIssues.length) issues.push(`维护总闸 ExecCondition 有效属性漂移：${JSON.stringify(guardIssues).slice(0, 1600)}`);
   }
-  const morningChainLatest = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_morning_chain', 'latest.json'));
-  const orderRecheckStateForServices = await readJsonIfExists(path.join(ROOT, 'state', 'order_status_recheck_last.json'));
-  const sessionManagerReport = await readJsonIfExists(path.join(ROOT, 'outputs', 'reports', 'cloud-session-manager-latest.json'));
-  const manualLoginState = await readJsonIfExists(
-    process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json',
-  );
-  let sessionManagerManualRecovery = {recovered: false, reason: 'session_manager_unit_not_checked'};
-  const systemdSnapshot = await collectSystemdUnitSnapshot(CLOUD_RUNTIME_UNITS);
   if (!systemdSnapshot.ok) {
-    const incompleteUnits = systemdSnapshot.requested.filter(name => systemdSnapshot.units[name]?.complete !== true);
-    issues.push(`systemd 批量快照不完整：units=${incompleteUnits.join(',') || '-'}；停止按缺失字段判断运行态`);
+    const incompleteUnits = systemdSnapshot.requested.filter(name => {
+      const unitClass = CLOUD_MAINTENANCE_POLICY_BY_SERVICE[name]
+        || CLOUD_TIMER_MAINTENANCE_POLICY[name]
+        || '';
+      if (!VALID_MAINTENANCE_CLASSES.has(unitClass)) {
+        suppressCheck(`systemd:${name}`, unitClass, {kind: 'systemd', unit: name});
+        return false;
+      }
+      return !classIsSuppressed(unitClass) && systemdSnapshot.units[name]?.complete !== true;
+    });
+    if (incompleteUnits.length) {
+      issues.push(`systemd 批量快照不完整：units=${incompleteUnits.join(',')}；停止按缺失字段判断运行态`);
+    }
   }
   const systemctlShow = name => systemdSnapshot.units[name] || {
     name, ok: false, code: 1, LoadState: 'unknown', ActiveState: 'unknown', Result: 'unknown',
@@ -594,7 +998,18 @@ async function main() {
   for (const unit of UNIT_NAMES) {
     const status = systemctlShow(unit);
     units.push(status);
-    if (status.LoadState === 'not-found') continue;
+    const unitClass = CLOUD_MAINTENANCE_POLICY_BY_SERVICE[unit] || '';
+    if (suppressCheck(`service:${unit}`, unitClass, {kind: 'service', unit})) {
+      status.maintenanceSuppressed = true;
+      status.maintenanceClass = unitClass || 'missing';
+      continue;
+    }
+    if (status.LoadState === 'not-found') {
+      if (ALWAYS_RUNNING_UNITS.has(unit)) {
+        issues.push(`常驻服务未运行：${unit} state=not-found result=${status.Result || '-'}`);
+      }
+      continue;
+    }
     if (unit === 'shein-bi-cloud-morning-chain.service'
       && isMorningChainStaleRunning(morningChainLatest, status)) {
       issues.push(`晨链终态未收敛：${unit} 已退出但 latest.json 仍为 running state=${status.ActiveState || '-'} result=${status.Result || '-'} exit=${status.ExecMainStatus || '-'} latestGeneratedAt=${morningChainLatest?.generatedAt || '-'}；该 service 已配置 Restart=on-failure 恢复同一 active run context（runDate/businessDate），wrapper 会在重启时重写 latest.json；若持续未修复需人工确认当日任务`);
@@ -653,51 +1068,70 @@ async function main() {
   for (const timer of TIMER_NAMES) {
     const status = systemctlShow(timer);
     timers.push(status);
+    const unitClass = CLOUD_TIMER_MAINTENANCE_POLICY[timer] || '';
+    if (suppressCheck(`timer:${timer}`, unitClass, {kind: 'timer', unit: timer})) {
+      status.maintenanceSuppressed = true;
+      status.maintenanceClass = unitClass || 'missing';
+      continue;
+    }
     if (status.LoadState === 'not-found') continue;
     if (status.ActiveState !== 'active') {
       issues.push(`定时器未运行：${timer} state=${status.ActiveState || '-'} result=${status.Result || '-'}`);
     }
   }
 
-  const marketingGuardState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last.json'));
-  const marketingGuardLastOkState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last-ok.json'));
-  const marketingGuardService = systemctlShow(CLOUD_AUXILIARY_UNITS[0]);
-  const marketingGuardHealth = assessDailyMarketingGuardHealth({
-    guardState: marketingGuardState,
-    lastOkState: marketingGuardLastOkState,
-    guardRunning: ['active', 'activating', 'reloading'].includes(marketingGuardService.ActiveState),
-    guardStartedAt: marketingGuardService.ExecMainStartTimestamp || marketingGuardService.ActiveEnterTimestamp,
-  });
-  if (!marketingGuardHealth.healthy) {
-    issues.push(`营销无人值守守卫未完成：date=${marketingGuardHealth.today} reason=${marketingGuardHealth.reason} lastStatus=${marketingGuardState?.status || '-'} lastDate=${marketingGuardState?.date || '-'} message=${marketingGuardState?.message || '-'}`);
-  }
-  const marketingRepairQueue = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_marketing_live_guard', 'repair-queues', `marketing-repair-${marketingGuardHealth.today}.json`));
-  const marketingRepairState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-repair-last.json'));
-  const marketingRepairService = systemctlShow(CLOUD_AUXILIARY_UNITS[1]);
-  const marketingRepairHealth = assessDailyMarketingRepairHealth({
-    queueState: marketingRepairQueue,
-    repairState: marketingRepairState,
-    repairRunning: ['active', 'activating', 'reloading'].includes(marketingRepairService.ActiveState),
-    repairStartedAt: marketingRepairService.ExecMainStartTimestamp || marketingRepairService.ActiveEnterTimestamp,
-  });
-  if (!marketingRepairHealth.healthy) {
-    issues.push(`营销修复队列未闭环：date=${marketingRepairHealth.today} reason=${marketingRepairHealth.reason} queueStatus=${marketingRepairQueue?.status || '-'} rows=${marketingRepairQueue?.counts?.totalRows ?? '-'} groups=${marketingRepairQueue?.counts?.totalGroups ?? '-'} workerStatus=${marketingRepairState?.status || '-'}`);
-  } else if (marketingRepairHealth.reason === 'today_repair_queue_deferred_to_local') {
-    maintenanceNotes.push(
-      `营销修复队列已移交本地受控执行：date=${marketingRepairHealth.today} rows=${marketingRepairQueue?.counts?.totalRows ?? '-'} groups=${marketingRepairQueue?.counts?.totalGroups ?? '-'}`,
-    );
+  let marketingGuardState = {suppressed: true, class: 'scheduled'};
+  let marketingGuardLastOkState = {suppressed: true, class: 'scheduled'};
+  let marketingGuardService = {suppressed: true, class: 'scheduled'};
+  let marketingGuardHealth = {suppressed: true, class: 'scheduled'};
+  let marketingRepairQueue = {suppressed: true, class: 'scheduled'};
+  let marketingRepairState = {suppressed: true, class: 'scheduled'};
+  let marketingRepairService = {suppressed: true, class: 'scheduled'};
+  let marketingRepairHealth = {suppressed: true, class: 'scheduled'};
+  if (!suppressCheck('business:marketing-guard-and-repair-queue', 'scheduled', {kind: 'business'})) {
+    marketingGuardState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last.json'));
+    marketingGuardLastOkState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-live-guard-last-ok.json'));
+    marketingGuardService = systemctlShow(CLOUD_AUXILIARY_UNITS[0]);
+    marketingGuardHealth = assessDailyMarketingGuardHealth({
+      guardState: marketingGuardState,
+      lastOkState: marketingGuardLastOkState,
+      guardRunning: ['active', 'activating', 'reloading'].includes(marketingGuardService.ActiveState),
+      guardStartedAt: marketingGuardService.ExecMainStartTimestamp || marketingGuardService.ActiveEnterTimestamp,
+    });
+    if (!marketingGuardHealth.healthy) {
+      issues.push(`营销无人值守守卫未完成：date=${marketingGuardHealth.today} reason=${marketingGuardHealth.reason} lastStatus=${marketingGuardState?.status || '-'} lastDate=${marketingGuardState?.date || '-'} message=${marketingGuardState?.message || '-'}`);
+    }
+    marketingRepairQueue = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_marketing_live_guard', 'repair-queues', `marketing-repair-${marketingGuardHealth.today}.json`));
+    marketingRepairState = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'marketing-repair-last.json'));
+    marketingRepairService = systemctlShow(CLOUD_AUXILIARY_UNITS[1]);
+    marketingRepairHealth = assessDailyMarketingRepairHealth({
+      queueState: marketingRepairQueue,
+      repairState: marketingRepairState,
+      repairRunning: ['active', 'activating', 'reloading'].includes(marketingRepairService.ActiveState),
+      repairStartedAt: marketingRepairService.ExecMainStartTimestamp || marketingRepairService.ActiveEnterTimestamp,
+    });
+    if (!marketingRepairHealth.healthy) {
+      issues.push(`营销修复队列未闭环：date=${marketingRepairHealth.today} reason=${marketingRepairHealth.reason} queueStatus=${marketingRepairQueue?.status || '-'} rows=${marketingRepairQueue?.counts?.totalRows ?? '-'} groups=${marketingRepairQueue?.counts?.totalGroups ?? '-'} workerStatus=${marketingRepairState?.status || '-'}`);
+    } else if (marketingRepairHealth.reason === 'today_repair_queue_deferred_to_local') {
+      maintenanceNotes.push(
+        `营销修复队列已移交本地受控执行：date=${marketingRepairHealth.today} rows=${marketingRepairQueue?.counts?.totalRows ?? '-'} groups=${marketingRepairQueue?.counts?.totalGroups ?? '-'}`,
+      );
+    }
   }
 
-  const partialLinkBusiness = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json'));
-  if (partialLinkBusiness?.error) {
-    issues.push(`链接/业务域部分失败状态不可读：${partialLinkBusiness.error}`);
-  } else if (partialLinkBusiness?.failedStores) {
-    issues.push(`链接/业务域日更部分店铺失败：date=${partialLinkBusiness.date || '-'} failed=${partialLinkBusiness.failedStores || '-'} log=${partialLinkBusiness.logFile || '-'}`);
-  }
-  const dailyRefresh = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'daily-refresh-last.json'));
-  const linkBusinessSuccess = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-success.json'));
+  let dailyRefresh = {suppressed: true, class: 'scheduled'};
+  let linkBusinessSuccess = {suppressed: true, class: 'scheduled'};
   let dailyRefreshRecovery = null;
-  if (dailyRefresh?.error) {
+  if (!suppressCheck('business:daily-refresh-link-queue-and-freshness', 'scheduled', {kind: 'business'})) {
+    const partialLinkBusiness = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json'));
+    if (partialLinkBusiness?.error) {
+      issues.push(`链接/业务域部分失败状态不可读：${partialLinkBusiness.error}`);
+    } else if (partialLinkBusiness?.failedStores) {
+      issues.push(`链接/业务域日更部分店铺失败：date=${partialLinkBusiness.date || '-'} failed=${partialLinkBusiness.failedStores || '-'} log=${partialLinkBusiness.logFile || '-'}`);
+    }
+    dailyRefresh = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'daily-refresh-last.json'));
+    linkBusinessSuccess = await readJsonIfExists(path.join(ROOT, 'state', 'cloud_ops_alerts', 'link-business-last-success.json'));
+    if (dailyRefresh?.error) {
     issues.push(`日更补采状态不可读：${dailyRefresh.error}`);
   } else if (dailyRefresh?.status && dailyRefresh.status !== 'ok' && !String(dailyRefresh.status).startsWith('skipped')) {
     const linkRecovery = assessDailyLinkBusinessRecovery({
@@ -801,89 +1235,133 @@ async function main() {
     } else {
       issues.push(`日更补采异常：date=${dailyRefresh.date || '-'} status=${dailyRefresh.status} message=${dailyRefresh.message || '-'} log=${dailyRefresh.logFile || '-'}`);
     }
+    }
   }
 
-  const portal = await readPortalDates(args.portalData);
+  const portalData = await readPortalDates(args.portalData);
   const portalRuntime = await readPortalRuntimeHealth();
-  if (portal.error) {
-    issues.push(`BI 数据文件不可读：${portal.error}`);
-  } else {
-    const generatedAge = hoursSince(portal.generatedAt);
+  const portalFreshnessSuppressed = suppressCheck(
+    'business:portal-data-freshness',
+    'scheduled',
+    {kind: 'freshness'},
+  );
+  let portal = portalData;
+  if (portalData.error) {
+    issues.push(`BI 数据文件不可读：${portalData.error}`);
+  }
+  if (!portalRuntime) {
+    issues.push('BI 实时运行状态不可读：Portal /api/health 无响应');
+  }
+  if (portalRuntime?.liveUpdates?.enabled === true && portalRuntime.liveUpdates.connected !== true) {
+    issues.push(`BI 实时更新通道未连接：channel=${portalRuntime.liveUpdates.channel || '-'} error=${portalRuntime.liveUpdates.lastError || '-'}`);
+  }
+  if (!portalData.error && !portalFreshnessSuppressed) {
+    const generatedAge = hoursSince(portalData.generatedAt);
     const salesTimestamp = newerTimestamp(
-      portal.dates?.salesUpdatedAt,
+      portalData.dates?.salesUpdatedAt,
       portalRuntime?.liveUpdates?.lastOrderAt,
     );
     const salesAge = hoursSince(salesTimestamp);
-    const businessAge = hoursSince(portal.dates?.businessUpdatedAt);
-    const linkAge = hoursSince(portal.dates?.linkUpdatedAt);
-    const etAge = hoursSince(portal.dates?.etUpdatedAt);
-    if (generatedAge === null || generatedAge > 30) issues.push(`BI 页面底稿过期：${portal.generatedAt || '-'} age=${fmtHours(generatedAge)}，阈值=30h`);
+    const businessAge = hoursSince(portalData.dates?.businessUpdatedAt);
+    const linkAge = hoursSince(portalData.dates?.linkUpdatedAt);
+    const etAge = hoursSince(portalData.dates?.etUpdatedAt);
+    if (generatedAge === null || generatedAge > 30) issues.push(`BI 页面底稿过期：${portalData.generatedAt || '-'} age=${fmtHours(generatedAge)}，阈值=30h`);
     if (salesAge === null || salesAge > 30) issues.push(`SHEIN 销售数据过期：${salesTimestamp || '-'} age=${fmtHours(salesAge)}，阈值=30h`);
-    if (!portalRuntime) {
-      issues.push('BI 实时运行状态不可读：Portal /api/health 无响应');
-    }
-    if (portalRuntime?.liveUpdates?.enabled === true && portalRuntime.liveUpdates.connected !== true) {
-      issues.push(`BI 实时更新通道未连接：channel=${portalRuntime.liveUpdates.channel || '-'} error=${portalRuntime.liveUpdates.lastError || '-'}`);
-    }
     // 业务域/链接表现是低频日更，不按销售高频阈值判断。
-    if (businessAge === null || businessAge > 48) issues.push(`SHEIN 业务域日更过期：${portal.dates?.businessUpdatedAt || '-'} age=${fmtHours(businessAge)}，阈值=48h`);
-    if (linkAge === null || linkAge > 48) issues.push(`SHEIN 链接表现日更过期：${portal.dates?.linkUpdatedAt || '-'} age=${fmtHours(linkAge)}，阈值=48h`);
-    if (etAge === null || etAge > 36) issues.push(`ET 货代仓过期：${portal.dates?.etUpdatedAt || '-'} age=${fmtHours(etAge)}，阈值=36h`);
+    if (businessAge === null || businessAge > 48) issues.push(`SHEIN 业务域日更过期：${portalData.dates?.businessUpdatedAt || '-'} age=${fmtHours(businessAge)}，阈值=48h`);
+    if (linkAge === null || linkAge > 48) issues.push(`SHEIN 链接表现日更过期：${portalData.dates?.linkUpdatedAt || '-'} age=${fmtHours(linkAge)}，阈值=48h`);
+    if (etAge === null || etAge > 36) issues.push(`ET 货代仓过期：${portalData.dates?.etUpdatedAt || '-'} age=${fmtHours(etAge)}，阈值=36h`);
+  } else if (!portalData.error) {
+    portal = {
+      suppressed: true,
+      class: 'scheduled',
+      dataReadable: true,
+      portalRuntimeChecked: true,
+    };
   }
 
-  const coverage = await auditRecentCoverage();
-  if (coverage.error) {
-    issues.push(`BI 日期×店铺覆盖审计失败：${coverage.error}`);
-  } else {
-    for (const check of coverage.checks || []) {
-      for (const issue of check.issues || []) {
-        issues.push(`BI 覆盖不足：${issue}`);
+  let coverage = {suppressed: true, class: 'scheduled'};
+  if (!suppressCheck('business:data-coverage', 'scheduled', {kind: 'business'})) {
+    coverage = await auditRecentCoverage();
+    if (coverage.error) {
+      issues.push(`BI 日期×店铺覆盖审计失败：${coverage.error}`);
+    } else {
+      for (const check of coverage.checks || []) {
+        for (const issue of check.issues || []) {
+          issues.push(`BI 覆盖不足：${issue}`);
+        }
       }
     }
   }
 
-  const orphanStoreBrowsers = await auditOrphanStoreBrowsers();
-  if (orphanStoreBrowsers.error) {
-    issues.push(`SHEIN 店铺浏览器残留审计失败：${orphanStoreBrowsers.error}`);
-  } else if (Number(orphanStoreBrowsers.orphanCount || 0) > 0) {
-    const sample = (orphanStoreBrowsers.processes || [])
-      .slice(0, 6)
-      .map(p => `${p.storeKey}:pid=${p.pid},age=${fmtHours((p.ageMin || 0) / 60)},rss=${Math.round((p.rssKb || 0) / 1024)}MiB`)
-      .join('; ');
-    issues.push(`SHEIN 店铺浏览器残留：count=${orphanStoreBrowsers.orphanCount} threshold=${orphanStoreBrowsers.maxAgeMin}min ${sample}`);
-  }
-
-  const rootDisk = await auditRootDisk();
-  const diskIssue = rootDiskIssue(rootDisk);
-  if (diskIssue) issues.push(diskIssue);
-
-  const orderClosure = await auditOrderClosure(args);
-  if (orderClosure.state?.error) {
-    issues.push(`订单状态复查状态不可读：${orderClosure.state.error}`);
-  }
-  const stateFinishedAge = hoursSince(orderClosure.state?.finishedAt);
-  if (!orderClosure.state?.finishedAt) {
-    issues.push('订单状态复查尚未成功运行：state/order_status_recheck_last.json 缺少 finishedAt');
-  } else if (orderClosure.state?.dryRun === true) {
-    issues.push('订单状态复查最近一次只是 dry-run，尚未真正写入复查层');
-  } else if (stateFinishedAge !== null && stateFinishedAge > 26) {
-    issues.push(`订单状态复查过期：${orderClosure.state.finishedAt} age=${fmtHours(stateFinishedAge)}，阈值=26h`);
-  }
-  if (orderClosure.state && orderClosure.state.ok === false) {
-    issues.push(`订单状态复查最近一次失败：failedPairs=${orderClosure.state?.totals?.failedPairs ?? '-'} run=${orderClosure.state?.runId || '-'}`);
-  } else if (orderClosure.state?.qualityStatus === 'partial') {
-    maintenanceNotes.push(`订单状态复查已完成主体数据，少量接口失败保留定向重试：failedPairs=${orderClosure.state?.totals?.failedPairs ?? 0}。`);
-  }
-  if (!orderClosure.db?.ok) {
-    issues.push(`订单闭环 DB 审计失败：${orderClosure.db?.error || 'unknown'}`);
-  } else {
-    const d = orderClosure.db.data || {};
-    if (Number(d.pendingRecheckItems || 0) > 0) {
-      issues.push(`订单闭环待复查：items=${d.pendingRecheckItems} pairs=${d.agedOpenPairs || 0} oldest=${d.oldestOpenDate || '-'}`);
+  let orphanStoreBrowsers = {suppressed: true, class: 'scheduled'};
+  if (!suppressCheck('business:orphan-store-browsers', 'scheduled', {kind: 'business'})) {
+    orphanStoreBrowsers = await auditOrphanStoreBrowsers();
+    if (orphanStoreBrowsers.error) {
+      issues.push(`SHEIN 店铺浏览器残留审计失败：${orphanStoreBrowsers.error}`);
+    } else if (Number(orphanStoreBrowsers.orphanCount || 0) > 0) {
+      const sample = (orphanStoreBrowsers.processes || [])
+        .slice(0, 6)
+        .map(p => `${p.storeKey}:pid=${p.pid},age=${fmtHours((p.ageMin || 0) / 60)},rss=${Math.round((p.rssKb || 0) / 1024)}MiB`)
+        .join('; ');
+      issues.push(`SHEIN 店铺浏览器残留：count=${orphanStoreBrowsers.orphanCount} threshold=${orphanStoreBrowsers.maxAgeMin}min ${sample}`);
     }
-    // platformUnclosedItems means the recheck layer has fresh evidence, but SHEIN still returns
-    // a non-terminal status or no longer returns the historical order. Keep it in the JSON report
-    // for operations follow-up, but do not page Feishu unless pending/stale/failed checks above fire.
+  }
+
+  let rootDisk = {suppressed: true, class: 'infrastructure'};
+  if (!suppressCheck('infrastructure:root-disk', 'infrastructure', {kind: 'infrastructure'})) {
+    rootDisk = await auditRootDisk();
+    const diskIssue = rootDiskIssue(rootDisk);
+    if (diskIssue) issues.push(diskIssue);
+  }
+
+  let orderClosure = {suppressed: true, class: 'scheduled'};
+  if (!suppressCheck('business:order-closure', 'scheduled', {kind: 'business'})) {
+    orderClosure = await auditOrderClosure(args);
+    if (orderClosure.state?.error) {
+      issues.push(`订单状态复查状态不可读：${orderClosure.state.error}`);
+    }
+    const stateFinishedAge = hoursSince(orderClosure.state?.finishedAt);
+    if (!orderClosure.state?.finishedAt) {
+      issues.push('订单状态复查尚未成功运行：state/order_status_recheck_last.json 缺少 finishedAt');
+    } else if (orderClosure.state?.dryRun === true) {
+      issues.push('订单状态复查最近一次只是 dry-run，尚未真正写入复查层');
+    } else if (stateFinishedAge !== null && stateFinishedAge > 26) {
+      issues.push(`订单状态复查过期：${orderClosure.state.finishedAt} age=${fmtHours(stateFinishedAge)}，阈值=26h`);
+    }
+    if (orderClosure.state && orderClosure.state.ok === false) {
+      issues.push(`订单状态复查最近一次失败：failedPairs=${orderClosure.state?.totals?.failedPairs ?? '-'} run=${orderClosure.state?.runId || '-'}`);
+    } else if (orderClosure.state?.qualityStatus === 'partial') {
+      maintenanceNotes.push(`订单状态复查已完成主体数据，少量接口失败保留定向重试：failedPairs=${orderClosure.state?.totals?.failedPairs ?? 0}。`);
+    }
+    if (!orderClosure.db?.ok) {
+      issues.push(`订单闭环 DB 审计失败：${orderClosure.db?.error || 'unknown'}`);
+    } else {
+      const d = orderClosure.db.data || {};
+      if (Number(d.pendingRecheckItems || 0) > 0) {
+        issues.push(`订单闭环待复查：items=${d.pendingRecheckItems} pairs=${d.agedOpenPairs || 0} oldest=${d.oldestOpenDate || '-'}`);
+      }
+      // platformUnclosedItems remains report-only when this scheduled check runs.
+    }
+  }
+
+  const intentionalSuppressed = [...suppressedById.values()]
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const maintenancePolicyErrors = [...maintenancePolicyErrorsById.values()]
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const maintenanceConfigurationIssue = watchdogMaintenanceConfigurationIssue(
+    maintenance,
+    maintenancePolicyErrors,
+  );
+  if (maintenanceConfigurationIssue) issues.unshift(maintenanceConfigurationIssue);
+  if (maintenance.valid && maintenance.active) {
+    maintenanceNotes.push(
+      `云端维护模式生效：mode=${maintenance.mode} generation=${maintenance.generation} hash=${maintenance.hash || '-'} intentionalSuppressed=${intentionalSuppressed.length}`,
+    );
+  } else if (!maintenance.valid) {
+    maintenanceNotes.push(
+      `云端维护 marker 无效：mode=unknown generation=- hash=${maintenance.hash || '-'} intentionalSuppressed=${intentionalSuppressed.length}`,
+    );
   }
 
   for (const row of Array.isArray(sessionManagerReport?.results) ? sessionManagerReport.results : []) {
@@ -917,19 +1395,28 @@ async function main() {
       migratedEpisodeCount: Object.keys(alertState.episodes || {}).length,
     };
   }
+  const maintenanceAlertHold = detachMaintenanceHeldAlertState(alertState, maintenance);
+  const maintenanceConfigurationFirstObservation = Boolean(maintenanceConfigurationIssue)
+    && !Object.values(maintenanceAlertHold.activeState.episodes || {}).some(episode =>
+      episode.status !== 'resolved'
+      && String(episode.lastRaw || '').startsWith('维护模式配置故障（高优先级）'));
   const alertTransition = applyWatchdogAlertState({
-    previousState: alertState,
+    previousState: maintenanceAlertHold.activeState,
     issues,
-    force: args.force && !(alertStateMigration?.migratedEpisodeCount > 0 && issues.length === 0),
+    force: maintenanceConfigurationFirstObservation
+      || (args.force && !(alertStateMigration?.migratedEpisodeCount > 0 && issues.length === 0)),
   });
-  alertState = prepareWatchdogDispatches(alertTransition.nextState);
-  const dispatches = pendingWatchdogDispatches(alertState);
+  const activeAlertState = prepareWatchdogDispatches(alertTransition.nextState);
+  const dispatches = pendingWatchdogDispatches(activeAlertState);
+  alertState = mergeMaintenanceHeldAlertState(activeAlertState, maintenanceAlertHold.held);
   const alertStateSummary = {
     schemaVersion: alertState.schemaVersion,
     episodeCount: Object.keys(alertState.episodes || {}).length,
     pendingIssueCount: alertTransition.pendingIssues.length,
     activeIssueCount: alertTransition.activeIssues.length,
     pendingDispatchCount: dispatches.length,
+    maintenanceHeldIssueCount: maintenanceAlertHold.heldFamilies.length,
+    maintenanceHeldFamilies: maintenanceAlertHold.heldFamilies,
     migration: alertStateMigration,
   };
 
@@ -938,8 +1425,39 @@ async function main() {
     generatedAt: new Date().toISOString(),
     issues,
     maintenanceNotes,
+    maintenance: {
+      schemaVersion: maintenance.schemaVersion,
+      status: maintenance.valid ? (maintenance.active ? 'active' : 'inactive') : 'invalid',
+      valid: maintenance.valid,
+      active: maintenance.active,
+      mode: maintenance.mode,
+      generation: maintenance.generation,
+      hash: maintenance.hash,
+      markerFile: maintenance.markerFile,
+      errorCode: maintenance.errorCode,
+      configurationFault: Boolean(maintenanceConfigurationIssue),
+      intentionalSuppressed,
+      recoveryCreated: maintenanceTransition.recoveryCreated
+        ? {
+            key: maintenanceTransition.recoveryCreated.key,
+            from: maintenanceTransition.recoveryCreated.from,
+            to: maintenanceTransition.recoveryCreated.to,
+          }
+        : null,
+      recoveryPending: maintenanceState.pendingRecovery
+        ? {
+            key: maintenanceState.pendingRecovery.key,
+            createdAt: maintenanceState.pendingRecovery.createdAt,
+            attemptCount: maintenanceState.pendingRecovery.attemptCount,
+          }
+        : null,
+      dryRunStateWriteSuppressed: args.dryRun,
+    },
+    maintenanceGuardAudit,
     recoveries,
     deployedRelease,
+    deployedReleaseValidation,
+    deploymentEvidence,
     releaseSourceState,
     dailyRefresh,
     linkBusinessSuccess,
@@ -972,26 +1490,78 @@ async function main() {
     orderClosure,
     units,
     timers,
-    runtimeProbe: {systemctlCommandCount: systemdSnapshot.commandCount, requestedUnitCount: systemdSnapshot.requested.length},
+    runtimeProbe: {
+      systemctlCommandCount: systemdSnapshot.commandCount,
+      requestedUnitCount: systemdSnapshot.requested.length,
+      effectiveControls,
+    },
   };
   if (!args.dryRun) await fs.writeFile(logFile, JSON.stringify(report, null, 2), 'utf8');
 
   const notificationOutcomes = [];
   if (!args.dryRun) {
+    await persistWatchdogMaintenanceState(maintenanceStateFile, maintenanceState);
     await writeJsonAtomic(alertStateFile, alertState);
+    let maintenanceRecovery = maintenance.valid === true && maintenance.active === false
+      ? maintenanceState.pendingRecovery
+      : null;
+    let maintenanceRecoveryCoalesced = false;
     for (const dispatch of dispatches) {
       const raws = dispatch.intentIds.map(id => alertState.outbox?.[id]?.raw).filter(Boolean);
       const selected = prepareWatchdogNotificationIssues({issues: raws, limit: 12});
-      const result = await notify(args, selected.issues.join('\n'), logFile, {
+      const merged = dispatch.kind === 'recovery' && !maintenanceRecoveryCoalesced
+        ? mergeMaintenanceRecoveryNotification(selected.issues, maintenanceRecovery)
+        : {issues: selected.issues, coalesced: false};
+      if (merged.coalesced) {
+        maintenanceState = bindWatchdogMaintenanceRecoveryDelivery(
+          maintenanceState,
+          maintenanceRecovery.key,
+          dispatch.idempotencyKey,
+        );
+        maintenanceRecovery = maintenanceState.pendingRecovery;
+        // Persist the shared delivery key before the external send. If the
+        // process crashes after delivery, every retry path reuses this key.
+        await persistWatchdogMaintenanceState(maintenanceStateFile, maintenanceState);
+      }
+      const result = await notify(args, merged.issues.join('\n'), logFile, {
         kind: dispatch.kind === 'recovery' ? 'cloud-watchdog-recovery' : 'cloud-watchdog',
         idempotencyKey: dispatch.idempotencyKey,
       });
       if (result.ok) alertState = markWatchdogDispatchSent(alertState, dispatch.id);
       else alertState = markWatchdogDispatchAttempt(alertState, dispatch.id);
       await writeJsonAtomic(alertStateFile, alertState);
+      if (merged.coalesced) {
+        maintenanceState = result.ok
+          ? markWatchdogMaintenanceRecoverySent(maintenanceState, maintenanceRecovery.key)
+          : markWatchdogMaintenanceRecoveryAttempt(maintenanceState, maintenanceRecovery.key);
+        await persistWatchdogMaintenanceState(maintenanceStateFile, maintenanceState);
+        maintenanceRecoveryCoalesced = true;
+      }
       notificationOutcomes.push({
         dispatchId: dispatch.id,
         kind: dispatch.kind,
+        ok: result.ok,
+        code: result.code,
+        maintenanceRecoveryCoalesced: merged.coalesced,
+      });
+    }
+    if (maintenanceRecovery && !maintenanceRecoveryCoalesced) {
+      const result = await notify(
+        args,
+        `云端维护模式已恢复：mode=${maintenanceRecovery.from.mode} generation=${maintenanceRecovery.from.generation} hash=${maintenanceRecovery.from.hash}`,
+        logFile,
+        {
+          kind: 'cloud-watchdog-recovery',
+          idempotencyKey: maintenanceRecovery.deliveryIdempotencyKey || maintenanceRecovery.idempotencyKey,
+        },
+      );
+      maintenanceState = result.ok
+        ? markWatchdogMaintenanceRecoverySent(maintenanceState, maintenanceRecovery.key)
+        : markWatchdogMaintenanceRecoveryAttempt(maintenanceState, maintenanceRecovery.key);
+      await persistWatchdogMaintenanceState(maintenanceStateFile, maintenanceState);
+      notificationOutcomes.push({
+        dispatchId: maintenanceRecovery.key,
+        kind: 'maintenance-recovery',
         ok: result.ok,
         code: result.code,
       });
@@ -1001,6 +1571,18 @@ async function main() {
   }
   const finalReport = {
     ...report,
+    maintenance: {
+      ...report.maintenance,
+      recoveryPending: maintenanceState.pendingRecovery
+        ? {
+            key: maintenanceState.pendingRecovery.key,
+            createdAt: maintenanceState.pendingRecovery.createdAt,
+            attemptCount: maintenanceState.pendingRecovery.attemptCount,
+          }
+        : null,
+      lastRecoveryKey: maintenanceState.lastRecoveryKey || '',
+      lastRecoveryAt: maintenanceState.lastRecoveryAt || null,
+    },
     notificationOutcomes,
     notified: notificationOutcomes.some(row => row.ok),
     notifyCode: notificationOutcomes.find(row => !row.ok)?.code ?? (notificationOutcomes.length ? 0 : null),
@@ -1008,6 +1590,33 @@ async function main() {
   if (!args.dryRun) await fs.writeFile(logFile, JSON.stringify(finalReport, null, 2), 'utf8');
   console.log(JSON.stringify({...finalReport, logFile}, null, 2));
   if (issues.length) process.exitCode = args.dryRun ? 0 : 1;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.dryRun) {
+    // A dry-run is a strictly zero-write inspection: it must never create the
+    // single-instance lock, its ticket directory, state markers, caches, or
+    // logs. Taking the cross-process lock would write the lock ticket queue,
+    // so a dry-run bypasses the lock entirely and only reads.
+    await runWatchdog(args);
+    return;
+  }
+  const outcome = await withWatchdogSingleInstance(
+    args,
+    () => runWatchdog(args),
+    {lockTimeoutMs: args.lockTimeoutMs},
+  );
+  if (outcome.skipped) {
+    console.log(JSON.stringify({
+      ok: true,
+      skipped: true,
+      alreadyRunning: true,
+      reason: 'another cloud_ops_watchdog instance is already running',
+      lockPath: outcome.lockPath,
+    }));
+    return;
+  }
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);

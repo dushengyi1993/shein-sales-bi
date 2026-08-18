@@ -21,9 +21,11 @@
     "build:portal-shell": "node scripts/generate_bi_portal_shell.mjs",
     "test:deterministic": "npm run build:portal-shell && node scripts/run_deterministic_tests.mjs",
     "test:session-manager-reliability": "node scripts/test_cloud_session_manager_reliability.mjs",
+    "test:link-ops-job-worker-shutdown": "node scripts/test_link_ops_job_worker_shutdown.mjs",
     "test": "npm run check:generated && npm run check:source && npm run test:deterministic"
   },
   "dependencies": {
+    "cos-nodejs-sdk-v5": "3.0.0",
     "pg": "8.16.3"
   }
 }

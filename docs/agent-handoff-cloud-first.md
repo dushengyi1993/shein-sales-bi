@@ -1,6 +1,6 @@
 # SHEIN BI Agent 交接说明（云端优先）
 
-> 更新时间：2026-07-26
+> 更新时间：2026-08-17
 > 用途：后续 agent 接手开发、排障、部署或业务核验时的最短入口。详细排班以 `infra/systemd/*.timer` 为准，运行步骤见 [cloud-bi-operations.md](cloud-bi-operations.md)。
 
 ## 1. 一句话原则
@@ -30,15 +30,16 @@
 
 ## 3. 当前关键服务
 
-- `shein-bi-portal.service`：BI、section API、网页问数、自动运营任务与 SSE。
+- `shein-bi-portal.service`：完整 BI 页面、section 生成、自动运营任务与 SSE，监听 `8787`。
+- `shein-bi-query.service`：认证只读 Query/Partner CLI/知识 bundle 面，监听 `8788`；无 worker、生成或浏览器副作用。
 - `shein-bi-webhook.service`：半托 Webhook 接收、幂等队列、按单同步与经营风险事件。
 - `shein-warehouse-db` / `shein-metabase` / `shein-metabase-db`：Docker 数据与分析层。
-- `shein-bi-cloud-yesterday.timer`：`03:00` 最终日核对与 OpenAPI 晋升门禁。
-- `shein-bi-cloud-morning-chain.timer`：`07:10` 单 run 完成前一完整日19店慢变补采、补充域、一次发布和库存维护。
-- `shein-bi-cloud-marketing-live-guard.timer`：每天 `11:00` 单次只读巡检；失败阶段在同一个 coordinator 内有界重试。
+- `shein-bi-cloud-yesterday.timer`：最终日核对与 OpenAPI 晋升门禁。
+- `shein-bi-cloud-morning-chain.timer`：单 run 完成前一完整日19店慢变补采、补充域、一次发布和库存维护。
+- `shein-bi-cloud-marketing-live-guard.timer`：每日单次只读巡检；失败阶段在同一个 coordinator 内有界重试。
 - `shein-bi-cloud-marketing-repair.timer`：有界营销修复与最终回读。
-- `shein-bi-cloud-watchdog.timer`：每小时 `:50` 只读体检与异常提醒。
-- `shein-bi-cloud-browser-cleanup.timer`：`03:45/09:50/21:00` 租约感知的孤儿浏览器清理。
+- `shein-bi-cloud-watchdog.timer`：只读体检、维护 class 抑制、持久告警/recovery outbox 与异常提醒。
+- `shein-bi-cloud-browser-cleanup.timer`：租约感知的孤儿浏览器清理。
 - `shein-bi-lark-sales-qa.service`：必须保持 `disabled + inactive`。
 
 不要从本文件复制完整排班；部署前直接读取：
@@ -81,16 +82,13 @@ cd /opt/shein-bi/app
 git rev-parse HEAD
 git status --short
 
-systemctl is-active shein-bi-portal.service
-systemctl is-active shein-bi-webhook.service
-systemctl is-enabled shein-bi-lark-sales-qa.service || true
-systemctl is-active shein-bi-lark-sales-qa.service || true
-
-systemctl list-timers --all | grep shein-bi
-journalctl -u shein-bi-portal.service -n 100 --no-pager
-journalctl -u shein-bi-webhook.service -n 100 --no-pager
-
-node scripts/cloud_ops_watchdog.mjs --dry-run
+# 先用一次紧凑快照；只对其中的 blocker 再定向展开 systemctl/journal。
+node scripts/capture_ops_runtime_snapshot.mjs \
+  --out-dir /srv/shein-bi/runtime/ops-snapshots/<new-run-id> \
+  --expected-commit <release-tag>
+node scripts/manage_cloud_maintenance_mode.mjs status
+curl -fsS http://127.0.0.1:8787/api/health
+curl -fsS http://127.0.0.1:8788/api/health
 node scripts/audit_bi_warehouse.mjs
 ```
 
@@ -106,7 +104,7 @@ node scripts/audit_bi_warehouse.mjs
    - 过期或未知文件。
 3. 私有运行态绝不回填 GitHub。
 4. 生产热修只按精确文件审查、测试和提交，不能 `git add -A` 把云端目录整体当源码。
-5. GitHub 发布不自动代表已部署；云端部署后必须记录目标 SHA、服务状态和业务回读。
+5. GitHub 发布不自动代表已部署；云端必须验证 schema v3 attestation、annotated tag、精确 main-push CI attempt，并由 `check_release_source_state.mjs --record-deployment` 写出 schema v3 的 `shein-bi-deployed-release/v3` marker（绑定 repository id、trust policy SHA-256 与 exact source fingerprint），再做服务与业务回读。
 
 标准顺序：
 

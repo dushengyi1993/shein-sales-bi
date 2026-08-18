@@ -12,6 +12,10 @@ import {
   parsePressureFullAvg10,
   parseUptimeSeconds,
 } from './check_host_resource_pressure.mjs';
+import {
+  executeBiLiveAccountingRefreshAttempt,
+  liveAccountingQueuePlan,
+} from './serve_bi_portal.mjs';
 
 const read = relative => fs.readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8');
 const unit = name => read(`infra/systemd/${name}`);
@@ -337,21 +341,67 @@ assert.match(cloudWriteGate, /cloud_marketing_write_requires_shared_host_wrapper
 assert.match(cloudWriteGate, /cloud_marketing_write_wrapper_ancestor_missing/);
 
 const portal = read('scripts/serve_bi_portal.mjs');
-const liveWorker = portal.slice(
-  portal.indexOf('const runLiveAccountingRefresh = async () =>'),
-  portal.indexOf('const mergeLiveAccountingRefreshEvent ='),
-);
-assert.ok(
-  liveWorker.indexOf("generateBiSection(args, root, 'liveSalesToday'") < liveWorker.indexOf('persistHostLockedBiSectionPlan(accountingQueue, generatedAt'),
-  'liveSalesToday must publish before canonical accounting enters the host-locked queue',
-);
-assert.match(liveWorker, /const accountingQueue = liveAccountingQueuePlan\(sourceEvent\);/,
-  'current-day orders must enter the deferred canonical accounting plan after the live projection publishes');
-assert.match(liveWorker, /if \(!accountingQueue\.length\) return;/);
-assert.doesNotMatch(liveWorker, /canonicalAccountingRequired/,
-  'current-day orders must not be excluded from deferred accounting');
-assert.match(liveWorker, /liveProjectionRefreshed: true/);
-assert.doesNotMatch(liveWorker, /ensureProfitMartCacheFresh/,
-  'the Portal live fast lane must never rebuild the cost ledger itself');
+const currentDayOrder = {
+  kind: 'order',
+  entityId: 'schedule-contract-current-day-order',
+  businessDate: '2026-08-18',
+  occurredAt: '2026-08-18T12:00:00.000Z',
+};
+const canonicalAccountingPlan = liveAccountingQueuePlan(currentDayOrder);
+assert.deepEqual(canonicalAccountingPlan, [
+  {section: 'profit', priority: 5},
+  {section: 'homeRankings', priority: 5},
+  {section: 'homeProfit', priority: 5},
+], 'current-day orders must retain the deferred canonical accounting plan');
+
+const liveAccountingCalls = [];
+const executeCurrentDayOrder = persistAccountingPlan => executeBiLiveAccountingRefreshAttempt({
+  sourceEvent: currentDayOrder,
+  allowGenerateSections: true,
+  readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
+  generateLiveProjection: async generatedAt => liveAccountingCalls.push(['generate-live', generatedAt]),
+  clearLiveProjectionFailure: () => liveAccountingCalls.push(['clear-live-failure']),
+  publish: event => liveAccountingCalls.push([event.accountingQueued ? 'publish-accounting-queued' : 'publish-live', event]),
+  persistAccountingPlan,
+  now: () => new Date('2026-08-18T12:00:01.000Z'),
+});
+
+const queueFailure = new Error('host-locked accounting queue unavailable');
+let firstIdempotencyKey = '';
+await assert.rejects(() => executeCurrentDayOrder(async (plan, generatedAt, options) => {
+  liveAccountingCalls.push(['persist-accounting-failed', plan, generatedAt, options]);
+  firstIdempotencyKey = options.idempotencyKey;
+  throw queueFailure;
+}), error => error === queueFailure && error.liveProjectionRefreshed === true,
+'a queue failure after live publication must remain retryable without losing projection state');
+assert.deepEqual(liveAccountingCalls.map(call => call[0]), [
+  'generate-live',
+  'clear-live-failure',
+  'publish-live',
+  'persist-accounting-failed',
+], 'liveSalesToday must publish before canonical accounting enters the host-locked queue');
+
+liveAccountingCalls.length = 0;
+let retryIdempotencyKey = '';
+const retryResult = await executeCurrentDayOrder(async (plan, generatedAt, options) => {
+  liveAccountingCalls.push(['persist-accounting', plan, generatedAt, options]);
+  retryIdempotencyKey = options.idempotencyKey;
+});
+assert.deepEqual(liveAccountingCalls.map(call => call[0]), [
+  'generate-live',
+  'clear-live-failure',
+  'publish-live',
+  'persist-accounting',
+  'publish-accounting-queued',
+]);
+assert.deepEqual(liveAccountingCalls[3][1], canonicalAccountingPlan);
+assert.equal(retryResult.accountingQueued, true);
+assert.match(firstIdempotencyKey, /^portal-live:sha256:/);
+assert.equal(retryIdempotencyKey, firstIdempotencyKey,
+  'a retry of the same event and generation must reuse one queue identity');
+assert.match(portal, /liveAccountingRefreshStopped \|\| liveAccountingRefreshRunning \|\| !liveAccountingRefreshPendingEvent/,
+  'the live accounting runner must reject parallel duplicate execution');
+assert.match(portal, /liveAccountingRefreshPendingEvent \|\|= sourceEvent[\s\S]*setTimeout\(runLiveAccountingRefresh, liveAccountingRetryMs\)/,
+  'a failed queue persistence must retain the event for the single bounded retry timer');
 
 console.log(JSON.stringify({ok: true, heavyUnits: heavyUnits.length}));

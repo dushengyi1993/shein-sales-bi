@@ -7906,7 +7906,13 @@ async function startLinkOpsExecutor(id, options = {}){
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
-    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    if (payload?.task?.id) {
+      const taskIndex = linkOpsStore.tasks.findIndex(task => task?.id === payload.task.id);
+      if (taskIndex >= 0) linkOpsStore.tasks.splice(taskIndex, 1, payload.task);
+      else linkOpsStore.tasks.unshift(payload.task);
+    } else if (payload?.data?.partial !== true) {
+      linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    }
     const state = payload?.execution?.state || '';
     const blockers = payload?.execution?.preflight?.blockers || payload?.task?.execution?.preflight?.blockers || [];
     if (state === 'blocked') showToast('执行器已启动但被预检阻断：' + (blockers[0] || '请查看任务详情'));

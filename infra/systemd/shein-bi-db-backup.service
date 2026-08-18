@@ -1,7 +1,7 @@
 [Unit]
-Description=SHEIN BI PostgreSQL backup
-Wants=docker.service
-After=docker.service shein-bi-cloud-session-manager.service systemd-tmpfiles-setup.service
+Description=SHEIN BI database and encrypted browser-state backup
+Wants=docker.service network-online.target
+After=docker.service shein-bi-cloud-session-manager.service systemd-tmpfiles-setup.service network-online.target
 Before=shein-bi-cloud-yesterday.service
 
 [Service]
@@ -16,6 +16,15 @@ Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks
 Environment=SHEIN_BI_BACKUP_RETENTION_DAYS=7
 Environment=SHEIN_BI_BACKUP_COS_MOUNT=/lhcos-data
 Environment=SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT=/lhcos-data/shein-bi-db-backups
+Environment=SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=1
+Environment=SHEIN_BI_BROWSER_STATE_BACKUP_KEY_FILE=/srv/shein-bi/secrets/browser-state-backup.key
+Environment=SHEIN_BI_BROWSER_PROFILE_ROOT=/data/shein-bi/profiles
+Environment=SHEIN_BI_BROWSER_SESSION_ROOT=/data/shein-bi/state/shein_webapi_sessions
+Environment=SHEIN_BI_BROWSER_STATE_LIMIT_TOTAL_BYTES=8g
+Environment=SHEIN_BI_REMOTE_VERIFY_CMD=/opt/shein-bi/app/scripts/verify_cos_backup_remote.sh
+LoadCredential=shein-bi-cos-verify-secret:/srv/shein-bi/secrets/shein-bi-cos-verify.secret
+LoadCredential=shein-bi-cos-verify-target:/srv/shein-bi/secrets/shein-bi-cos-verify-target.json
+LoadCredential=shein-bi-cos-verify-target-sha:/srv/shein-bi/secrets/shein-bi-cos-verify-target.sha256
 TimeoutStartSec=10800
 Nice=19
 IOSchedulingClass=best-effort
@@ -39,5 +48,6 @@ LockPersonality=true
 RestrictRealtime=true
 ExecStartPre=/usr/bin/install -d -o sheinops -g sheinops -m 2770 /opt/shein-bi/app/state/locks
 ExecStartPre=/usr/bin/install -o sheinops -g sheinops -m 0660 /dev/null /opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
+ExecStartPre=/opt/shein-bi/app/scripts/verify_cos_backup_remote.sh --check-config
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain db-backup --class materializer --lock-wait-sec 120 --deadline-at 01:52 --defer-state /srv/shein-bi/runtime/host-scheduler/db-backup.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage nightly-backup --require nightly-session --message "PostgreSQL backup completed" -- /usr/bin/flock -w 120 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_db_backup.sh
 SuccessExitStatus=75

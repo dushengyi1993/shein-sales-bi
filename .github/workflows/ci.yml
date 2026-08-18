@@ -6,22 +6,406 @@ on:
   pull_request:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
-  deterministic-tests:
+  source-checks:
+    name: Source checks
     runs-on: ubuntu-latest
-    # The full deterministic matrix includes the isolated Portal integration
-    # flows plus the product-attribute flow, which now measures about 20 minutes
-    # by itself. Keep a bounded 45-minute job budget so per-test fail-fast
-    # timeouts can report the actual failure instead of GitHub cancelling first.
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       # v7 actions pinned to immutable commits; Dependabot owns future bumps.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The Partner CLI version boundary compares Git objects against the PR
+          # merge-base or the entire pushed range and fails when history is absent.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check:generated
+      - run: npm run check:source
+      - name: Check Partner CLI version boundary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "$temp_dir"' EXIT
+
+          if [ "$GITHUB_EVENT_NAME" = 'pull_request' ]; then
+            if [[ ! "${PR_BASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'PR base SHA must be an exact lowercase 40-character commit SHA.' >&2
+              exit 1
+            fi
+            if ! git cat-file -e "${PR_BASE_SHA}^{commit}" 2>/dev/null; then
+              echo "PR base SHA cannot be resolved to a commit: $PR_BASE_SHA" >&2
+              exit 1
+            fi
+            if ! base="$(git merge-base HEAD "$PR_BASE_SHA")" || [[ ! "$base" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Unable to resolve PR merge-base for HEAD and $PR_BASE_SHA." >&2
+              exit 1
+            fi
+            node scripts/check_partner_cli_version_change.mjs \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --base "$base"
+            exit 0
+          fi
+          if [ "$GITHUB_EVENT_NAME" != 'push' ]; then
+            echo "Unsupported CI event for Partner CLI version boundary: $GITHUB_EVENT_NAME" >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo 'Current GitHub SHA or workflow run id is invalid.' >&2
+            exit 1
+          fi
+          if [[ ! "${PUSH_BEFORE:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'github.event.before must be an exact lowercase 40-character commit SHA.' >&2
+            exit 1
+          fi
+
+          gh api --paginate --slurp --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f branch=main \
+            -f event=push \
+            -f status=completed \
+            -f per_page=100 > "$temp_dir/ci-runs.json"
+          jq -c --arg currentSha "$GITHUB_SHA" --argjson currentRunId "$GITHUB_RUN_ID" '
+            [.[].workflow_runs[]
+              | select(
+                  .id < $currentRunId
+                  and .id != $currentRunId
+                  and .head_sha != $currentSha
+                  and .head_branch == "main"
+                  and .event == "push"
+                  and .status == "completed"
+                  and .conclusion == "success"
+                )]
+            | sort_by(.id)
+            | last // empty
+          ' "$temp_dir/ci-runs.json" > "$temp_dir/trusted-ci.json"
+          if [ ! -s "$temp_dir/trusted-ci.json" ]; then
+            echo "No prior completed+success main push CI exists before run $GITHUB_RUN_ID; refusing an untrusted baseline." >&2
+            exit 1
+          fi
+
+          trusted_run_id="$(jq -r '.id // empty' "$temp_dir/trusted-ci.json")"
+          trusted_run_attempt="$(jq -r '.run_attempt // empty' "$temp_dir/trusted-ci.json")"
+          trusted_sha="$(jq -r '.head_sha // empty' "$temp_dir/trusted-ci.json")"
+          trusted_url="$(jq -r '.html_url // empty' "$temp_dir/trusted-ci.json")"
+          if [[ ! "$trusted_run_id" =~ ^[0-9]+$ ]] || [[ ! "$trusted_run_attempt" =~ ^[1-9][0-9]*$ ]] \
+            || [[ ! "$trusted_sha" =~ ^[0-9a-f]{40}$ ]] || [ -z "$trusted_url" ]; then
+            echo 'Trusted CI baseline is missing run id, attempt, SHA, or URL.' >&2
+            exit 1
+          fi
+          if [ "$trusted_sha" = "$GITHUB_SHA" ]; then
+            echo 'Trusted CI baseline unexpectedly points at the current SHA.' >&2
+            exit 1
+          fi
+
+          gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$trusted_run_id/attempts/$trusted_run_attempt" > "$temp_dir/trusted-attempt.json"
+          gh api --paginate --slurp --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$trusted_run_id/attempts/$trusted_run_attempt/jobs?per_page=100" \
+            > "$temp_dir/trusted-jobs-pages.json"
+          # Read the mutable latest-run endpoint last so an attempt change that
+          # races the attempt-specific read is rejected before the baseline runs.
+          gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$GITHUB_REPOSITORY/actions/runs/$trusted_run_id" > "$temp_dir/trusted-latest.json"
+          node - \
+            "$temp_dir/trusted-ci.json" \
+            "$temp_dir/trusted-attempt.json" \
+            "$temp_dir/trusted-latest.json" \
+            "$temp_dir/trusted-jobs-pages.json" \
+            "$temp_dir/trusted-evidence.json" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_SHA" <<'NODE'
+          const fs = require('fs');
+          // TRUSTED_CI_EVIDENCE_VALIDATOR_BEGIN
+          function validateTrustedCiEvidence({candidate, exactAttempt, latestRun, jobPages, currentRunId, currentSha}) {
+            const shaPattern = /^[0-9a-f]{40}$/;
+            const workflowPath = '.github/workflows/ci.yml';
+            const positiveInteger = value => Number.isInteger(value) && value > 0;
+            const parseCompletedAt = (value, label) => {
+              if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
+                || !Number.isFinite(Date.parse(value))) {
+                throw new Error(`${label} completed_at is missing or invalid`);
+              }
+              return value;
+            };
+            if (!candidate || !positiveInteger(candidate.id) || !positiveInteger(candidate.run_attempt)
+              || !shaPattern.test(String(candidate.head_sha || '')) || typeof candidate.html_url !== 'string'
+              || candidate.html_url.length === 0) {
+              throw new Error('Trusted CI candidate identity is incomplete');
+            }
+            if (candidate.id === currentRunId || candidate.head_sha === currentSha || candidate.id >= currentRunId) {
+              throw new Error('Trusted CI candidate must precede and differ from the current run');
+            }
+            const assertRun = (run, label) => {
+              if (!run || run.id !== candidate.id || run.run_attempt !== candidate.run_attempt
+                || run.head_sha !== candidate.head_sha || run.path !== workflowPath
+                || run.head_branch !== 'main' || run.event !== 'push'
+                || run.status !== 'completed' || run.conclusion !== 'success') {
+                throw new Error(`${label} is not the exact successful main-push CI run/attempt`);
+              }
+            };
+            assertRun(candidate, 'Listed run');
+            assertRun(exactAttempt, 'Exact attempt');
+            assertRun(latestRun, 'Latest run');
+            if (!Array.isArray(jobPages) || jobPages.length === 0) {
+              throw new Error('Exact-attempt jobs pagination returned no pages');
+            }
+            const declaredTotal = jobPages[0]?.total_count;
+            if (!positiveInteger(declaredTotal)) {
+              throw new Error('Exact-attempt jobs total_count must be positive');
+            }
+            const jobs = [];
+            for (const [pageIndex, page] of jobPages.entries()) {
+              if (!page || page.total_count !== declaredTotal || !Array.isArray(page.jobs) || page.jobs.length === 0) {
+                throw new Error(`Exact-attempt jobs page ${pageIndex + 1} is malformed or inconsistent`);
+              }
+              jobs.push(...page.jobs);
+            }
+            if (jobs.length !== declaredTotal) {
+              throw new Error(`Exact-attempt jobs pagination is incomplete: expected ${declaredTotal}, received ${jobs.length}`);
+            }
+            const jobIds = new Set();
+            let completedAt = '';
+            for (const [jobIndex, job] of jobs.entries()) {
+              const label = `Exact-attempt job ${jobIndex + 1}`;
+              if (!job || !positiveInteger(job.id) || jobIds.has(job.id)
+                || job.run_id !== candidate.id || job.run_attempt !== candidate.run_attempt
+                || job.head_sha !== candidate.head_sha) {
+                throw new Error(`${label} identity or attempt does not match the trusted run`);
+              }
+              jobIds.add(job.id);
+              if (job.status !== 'completed' || job.conclusion !== 'success') {
+                throw new Error(`${label} is not completed+success`);
+              }
+              const jobCompletedAt = parseCompletedAt(job.completed_at, label);
+              if (completedAt === '' || Date.parse(jobCompletedAt) > Date.parse(completedAt)) completedAt = jobCompletedAt;
+            }
+            return {
+              runId: candidate.id,
+              runAttempt: candidate.run_attempt,
+              headSha: candidate.head_sha,
+              workflowPath,
+              completedAt,
+              jobCount: jobs.length,
+            };
+          }
+          // TRUSTED_CI_EVIDENCE_VALIDATOR_END
+          const [candidateFile, attemptFile, latestFile, jobsFile, outputFile, currentRunIdRaw, currentSha] = process.argv.slice(2);
+          try {
+            const evidence = validateTrustedCiEvidence({
+              candidate: JSON.parse(fs.readFileSync(candidateFile, 'utf8')),
+              exactAttempt: JSON.parse(fs.readFileSync(attemptFile, 'utf8')),
+              latestRun: JSON.parse(fs.readFileSync(latestFile, 'utf8')),
+              jobPages: JSON.parse(fs.readFileSync(jobsFile, 'utf8')),
+              currentRunId: Number(currentRunIdRaw),
+              currentSha,
+            });
+            fs.writeFileSync(outputFile, `${JSON.stringify(evidence)}\n`);
+          } catch (error) {
+            console.error(`Trusted CI evidence rejected: ${error.message}`);
+            process.exit(1);
+          }
+          NODE
+          trusted_completed_at="$(jq -r '.completedAt // empty' "$temp_dir/trusted-evidence.json")"
+          if [ -z "$trusted_completed_at" ]; then
+            echo 'Trusted CI evidence did not derive a completion time from exact-attempt jobs.' >&2
+            exit 1
+          fi
+
+          if ! git fetch --no-tags --force origin "$trusted_sha"; then
+            echo "Unable to fetch exact trusted baseline SHA: $trusted_sha" >&2
+            exit 1
+          fi
+          if ! trusted_resolved="$(git rev-parse --verify --end-of-options "${trusted_sha}^{commit}" 2>/dev/null)" \
+            || [ "$trusted_resolved" != "$trusted_sha" ]; then
+            echo "Fetched trusted baseline SHA cannot be resolved exactly: $trusted_sha" >&2
+            exit 1
+          fi
+
+          before_all_zero=false
+          before_resolvable=false
+          before_resolved=''
+          if [[ "$PUSH_BEFORE" =~ ^0{40}$ ]]; then
+            before_all_zero=true
+          else
+            if ! before_resolved="$(git rev-parse --verify --end-of-options "${PUSH_BEFORE}^{commit}" 2>/dev/null)"; then
+              git fetch --no-tags --force origin "$PUSH_BEFORE" >/dev/null 2>&1 || true
+              before_resolved="$(git rev-parse --verify --end-of-options "${PUSH_BEFORE}^{commit}" 2>/dev/null || true)"
+            fi
+            if [ "$before_resolved" = "$PUSH_BEFORE" ]; then before_resolvable=true; fi
+          fi
+
+          jq -n \
+            --arg currentSha "$GITHUB_SHA" \
+            --arg beforeSha "$PUSH_BEFORE" \
+            --argjson beforeAllZero "$before_all_zero" \
+            --argjson beforeResolvable "$before_resolvable" \
+            --arg beforeResolvedCommit "$before_resolved" \
+            --arg trustedSha "$trusted_sha" \
+            --argjson trustedRunId "$trusted_run_id" \
+            --argjson trustedRunAttempt "$trusted_run_attempt" \
+            --arg trustedUrl "$trusted_url" \
+            --arg trustedCompletedAt "$trusted_completed_at" \
+            --argjson trustedFetched true \
+            '{
+              currentSha: $currentSha,
+              before: {
+                sha: $beforeSha,
+                allZero: $beforeAllZero,
+                resolvable: $beforeResolvable,
+                resolvedCommit: $beforeResolvedCommit
+              },
+              trusted: {
+                sha: $trustedSha,
+                runId: $trustedRunId,
+                runAttempt: $trustedRunAttempt,
+                url: $trustedUrl,
+                completedAt: $trustedCompletedAt,
+                status: "completed",
+                conclusion: "success",
+                fetched: $trustedFetched
+              }
+            }' > "$temp_dir/baseline-state.json"
+
+          node - "$temp_dir/baseline-state.json" "$temp_dir/baseline-plan.json" <<'NODE'
+          const fs = require('fs');
+          // PARTNER_CLI_BASELINE_STATE_MACHINE_BEGIN
+          function decidePartnerCliBaselineState(state) {
+            const shaPattern = /^[0-9a-f]{40}$/;
+            const zeroSha = '0'.repeat(40);
+            if (!state || !shaPattern.test(String(state.currentSha || ''))) throw new Error('Current SHA is invalid');
+            const trusted = state.trusted;
+            if (!trusted) throw new Error('Trusted successful main push CI baseline is required');
+            if (!shaPattern.test(String(trusted.sha || '')) || trusted.sha === state.currentSha) {
+              throw new Error('Trusted baseline SHA is invalid or points at current SHA');
+            }
+            if (!Number.isInteger(trusted.runId) || trusted.runId < 1
+              || !Number.isInteger(trusted.runAttempt) || trusted.runAttempt < 1
+              || typeof trusted.completedAt !== 'string' || !Number.isFinite(Date.parse(trusted.completedAt))
+              || trusted.status !== 'completed' || trusted.conclusion !== 'success'
+              || trusted.fetched !== true) {
+              throw new Error('Trusted baseline run/attempt is not fetched completed+success evidence');
+            }
+            const before = state.before || {};
+            if (!shaPattern.test(String(before.sha || ''))) throw new Error('github.event.before is invalid');
+            const bases = [trusted.sha];
+            let beforeMode;
+            if (before.sha === zeroSha || before.allZero === true) {
+              beforeMode = 'all-zero-trusted-fallback';
+            } else if (before.resolvable === true) {
+              if (before.resolvedCommit !== before.sha) throw new Error('github.event.before resolved to a different commit');
+              bases.unshift(before.sha);
+              beforeMode = 'before-and-trusted';
+            } else {
+              beforeMode = 'unreachable-trusted-fallback';
+            }
+            return {
+              bases: [...new Set(bases)],
+              beforeMode,
+              trustedRunId: trusted.runId,
+              trustedRunAttempt: trusted.runAttempt,
+              trustedUrl: trusted.url,
+            };
+          }
+          // PARTNER_CLI_BASELINE_STATE_MACHINE_END
+          const [inputFile, outputFile] = process.argv.slice(2);
+          try {
+            const plan = decidePartnerCliBaselineState(JSON.parse(fs.readFileSync(inputFile, 'utf8')));
+            fs.writeFileSync(outputFile, `${JSON.stringify(plan)}\n`);
+          } catch (error) {
+            console.error(`Partner CLI baseline state rejected: ${error.message}`);
+            process.exit(1);
+          }
+          NODE
+
+          checker_args=(--repo-root "$GITHUB_WORKSPACE")
+          while IFS= read -r base; do checker_args+=(--base "$base"); done < <(jq -r '.bases[]' "$temp_dir/baseline-plan.json")
+          node scripts/check_partner_cli_version_change.mjs "${checker_args[@]}"
+          {
+            echo '### Partner CLI trusted version boundary'
+            echo
+            echo "- Trusted main push CI: run \`$trusted_run_id\`, attempt \`$trusted_run_attempt\`"
+            echo "- Trusted SHA: \`$trusted_sha\`"
+            echo "- Trusted CI URL: $trusted_url"
+            echo "- Trusted completion from exact-attempt jobs: \`$trusted_completed_at\`"
+            echo "- Push-before mode: \`$(jq -r '.beforeMode' "$temp_dir/baseline-plan.json")\`"
+            echo "- Checked bases: \`$(jq -r '.bases | join(",")' "$temp_dir/baseline-plan.json")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deterministic-shards:
+    name: Deterministic shard ${{ matrix.shard }}
+    needs: source-checks
+    runs-on: ubuntu-latest
+    # Shard 1 owns the long product-attribute flow. A 45-minute job budget is
+    # above every 30-minute per-test bound in the suite: the product-attribute
+    # flow and runtime-layout migration A-P/Q1-Q4 suite keep explicit 1800s
+    # tiers, and the worst-case shard estimate stays near 30 minutes so
+    # per-test fail-fast timeouts still report first.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: ['1/4', '2/4', '3/4', '4/4']
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm test
+      - run: npm run build:portal-shell
+      - run: node scripts/run_deterministic_tests.mjs --shard '${{ matrix.shard }}'
+
+  release-gate:
+    name: Release gate
+    needs: source-checks
+    runs-on: ubuntu-latest
+    # This dedicated job is the sole CI owner of the release gate. Deterministic
+    # shards own their registered tests and do not invoke the gate. ci-terminal
+    # fails closed unless this job succeeds, and its 45m budget stays bounded.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node scripts/test_bi_ops_release_gate.mjs
+
+  ci-terminal:
+    name: CI terminal gate
+    if: always()
+    needs: [source-checks, deterministic-shards, release-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require source checks, every deterministic shard, and the release gate
+        shell: bash
+        env:
+          SOURCE_CHECKS_RESULT: ${{ needs.source-checks.result }}
+          DETERMINISTIC_SHARDS_RESULT: ${{ needs.deterministic-shards.result }}
+          RELEASE_GATE_RESULT: ${{ needs.release-gate.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE_CHECKS_RESULT" != 'success' ] || [ "$DETERMINISTIC_SHARDS_RESULT" != 'success' ] || [ "$RELEASE_GATE_RESULT" != 'success' ]; then
+            echo "CI did not reach an all-success terminal state: source-checks=$SOURCE_CHECKS_RESULT deterministic-shards=$DETERMINISTIC_SHARDS_RESULT release-gate=$RELEASE_GATE_RESULT" >&2
+            exit 1
+          fi
+          echo 'Source checks, all four deterministic shards, and the release gate completed successfully.'

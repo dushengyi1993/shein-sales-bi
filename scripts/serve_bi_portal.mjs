@@ -21,8 +21,9 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import {createGzip, gzipSync} from 'node:zlib';
+import {createGzip} from 'node:zlib';
 import pg from 'pg';
+import {loadBiSessionSecret} from './provision_bi_session_secret.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
 import {executeTransformPic} from '../lib/openapi_adapters/transform_pic.mjs';
@@ -44,6 +45,7 @@ import {
   acceptsGzip,
   readBiSectionCache,
   readBiSectionCacheAnyGeneratedAt,
+  readBiSectionMetadata,
   readBiSectionCacheRaw,
   readBiSectionStaleRaw,
   writeBiSectionCache,
@@ -68,7 +70,7 @@ import {
 import {loadBiOpsQueryData} from '../lib/bi_ops_query_context.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
-import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
+import {LinkOpsValidationError, linkOpsPayloadHash, stripLinkOpsRepositoryMetadata} from '../lib/link_ops_repository.mjs';
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
 import {createSheinWebhookTaskReconciler} from '../lib/shein_webhook_task_reconciler.mjs';
 import {evaluateSheinWebhookWriteGates} from '../lib/shein_webhook_write_gate.mjs';
@@ -187,6 +189,7 @@ function parseArgs(argv) {
     sessionSecretFile: process.env.SHEIN_BI_SESSION_SECRET_FILE || path.join(ROOT, 'state', 'bi_portal_session_secret.local'),
     sessionTtlDays: Number(process.env.SHEIN_BI_SESSION_TTL_DAYS || DEFAULT_BI_SESSION_TTL_DAYS),
     partnerCliSessionTtlDays: Number(process.env.SHEIN_BI_PARTNER_CLI_SESSION_TTL_DAYS || DEFAULT_BI_PARTNER_CLI_SESSION_TTL_DAYS),
+    surface: String(process.env.SHEIN_BI_SURFACE || 'portal').trim().toLowerCase(),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     distro: 'Ubuntu-24.04',
     container: 'shein-warehouse-db',
@@ -212,6 +215,7 @@ function parseArgs(argv) {
     else if (a === '--session-secret-file') args.sessionSecretFile = path.resolve(argv[++i]);
     else if (a === '--session-ttl-days') args.sessionTtlDays = Number(argv[++i]);
     else if (a === '--partner-cli-session-ttl-days') args.partnerCliSessionTtlDays = Number(argv[++i]);
+    else if (a === '--surface') args.surface = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--distro') args.distro = argv[++i];
     else if (a === '--container') args.container = argv[++i];
@@ -228,6 +232,9 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(args.partnerCliSessionTtlDays) || args.partnerCliSessionTtlDays < 1 || args.partnerCliSessionTtlDays > 365) {
     throw new Error(`Invalid --partner-cli-session-ttl-days: ${args.partnerCliSessionTtlDays}; expected 1-365`);
+  }
+  if (!['portal', 'query'].includes(args.surface)) {
+    throw new Error(`Invalid --surface: ${args.surface}; expected portal or query`);
   }
   args.sessionTtlDays = Math.round(args.sessionTtlDays);
   args.partnerCliSessionTtlDays = Math.round(args.partnerCliSessionTtlDays);
@@ -336,6 +343,69 @@ function biPortalCoreWarmupIdempotencyKey(generatedAt) {
   // manager's 120-char bound (12 + 7 + 64 + 2 + 16 = 101).
   return `core-warmup:sha256:${digest}`;
 }
+
+function biPortalQueueHashIdempotencyKey(namespace, ...parts) {
+  const safeNamespace = String(namespace || 'request').replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 16) || 'request';
+  const digest = crypto.createHash('sha256').update(JSON.stringify(parts.map(value => String(value ?? '')))).digest('hex');
+  return `portal-${safeNamespace}:sha256:${digest}`;
+}
+
+function biPortalForceRefreshIdempotencyKey(generatedAt, refreshToken = '') {
+  // A force refresh is one explicit refresh intent on top of a core
+  // generation. Without a stable token the 30-day completed tombstone of the
+  // managed section queue can swallow a LATER unrelated business rerun of the
+  // same generation (incident re-pull, order re-check), silently serving stale
+  // results. Callers therefore MUST supply a deterministic run/attempt token:
+  // the same run reuses its token (retries dedupe), a different run uses a new
+  // token (it forms a new request). The token is hashed so arbitrary browser
+  // text never reaches the queue key or its 120-character boundary.
+  const token = String(refreshToken || '').trim();
+  if (!token) {
+    throw new TypeError('BI_FORCE_REFRESH_TOKEN_REQUIRED: host-locked force refresh requires a stable refreshToken');
+  }
+  return biPortalQueueHashIdempotencyKey('force', generatedAt, token);
+}
+
+function biPortalHomepageAccountingIdempotencyKey(accountingState, generatedAt = '') {
+  const minimumPublishedAt = String(accountingState?.minimumPublishedAt || '');
+  const targetAt = String(
+    accountingState?.freshness?.accountingInputUpdatedAt
+    || accountingState?.freshness?.orderFactUpdatedAt
+    || accountingState?.freshness?.factUpdatedAt
+    || minimumPublishedAt
+    || '',
+  );
+  return biPortalQueueHashIdempotencyKey('accounting', generatedAt, minimumPublishedAt, targetAt);
+}
+
+function biPortalLiveAccountingEventIdentity(event = {}) {
+  const entityId = String(event?.entityId || '');
+  // Startup catch-up is a synthetic generation-level invalidation. Its wall
+  // clock changes on every restart but the underlying request does not.
+  const occurredAt = entityId === 'portal-startup-accounting-catchup'
+    ? ''
+    : String(event?.occurredAt || '');
+  return crypto.createHash('sha256').update(JSON.stringify([
+    String(event?.kind || ''),
+    String(event?.storeKey || ''),
+    entityId,
+    String(event?.receiptId || ''),
+    String(event?.businessDate || ''),
+    String(event?.orderStatus || ''),
+    String(event?.orderStatusDesc || ''),
+    event?.cancelledBeforePickup === true ? '1' : '0',
+    String(event?.salesQuantity ?? ''),
+    String(event?.salesSar ?? ''),
+    occurredAt,
+  ])).digest('hex');
+}
+
+function biPortalLiveAccountingIdempotencyKey(generatedAt, event = {}) {
+  const eventIdentities = Array.isArray(event?.accountingEventIdentities)
+    ? [...new Set(event.accountingEventIdentities.map(value => String(value || '')).filter(Boolean))].sort()
+    : [biPortalLiveAccountingEventIdentity(event)];
+  return biPortalQueueHashIdempotencyKey('live', generatedAt, ...eventIdentities);
+}
 // Queue reason sanitizer: every C0 control character (including NUL), DEL
 // and C1 range byte is %HH-encoded so a reason can never corrupt exec argv
 // ("argument must be a string without null bytes") and stays deterministic.
@@ -366,6 +436,26 @@ const biExternalSectionQueuePending = new Set();
 const biAccountingCatchupTargets = new Map();
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
+function boundedBiPortalWarmupMs(name, fallback, minimum, maximum) {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(parsed)));
+}
+const BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS = boundedBiPortalWarmupMs(
+  'SHEIN_BI_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS',
+  60_000,
+  1_000,
+  15 * 60_000,
+);
+const BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS = Math.max(
+  BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS,
+  boundedBiPortalWarmupMs(
+    'SHEIN_BI_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS',
+    15 * 60_000,
+    1_000,
+    60 * 60_000,
+  ),
+);
 const biPortalCoreWarmupState = {
   generatedAt: '',
   status: 'idle',
@@ -374,7 +464,36 @@ const biPortalCoreWarmupState = {
   finishedAt: 0,
   inFlight: null,
   lastError: '',
+  consecutiveFailures: 0,
+  nextAttemptAt: 0,
+  lastFailureAt: 0,
+  failureGeneratedAt: '',
 };
+function resetBiPortalCoreWarmupEnqueueBackoff() {
+  biPortalCoreWarmupState.consecutiveFailures = 0;
+  biPortalCoreWarmupState.nextAttemptAt = 0;
+  biPortalCoreWarmupState.lastFailureAt = 0;
+  biPortalCoreWarmupState.failureGeneratedAt = '';
+}
+function recordBiPortalCoreWarmupEnqueueFailure(generatedAt, error, atMs = Date.now()) {
+  if (biPortalCoreWarmupState.failureGeneratedAt !== generatedAt) resetBiPortalCoreWarmupEnqueueBackoff();
+  const consecutiveFailures = biPortalCoreWarmupState.consecutiveFailures + 1;
+  const exponent = Math.min(30, Math.max(0, consecutiveFailures - 1));
+  const delayMs = Math.min(
+    BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS,
+    BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS * (2 ** exponent),
+  );
+  biPortalCoreWarmupState.generatedAt = generatedAt;
+  biPortalCoreWarmupState.status = 'error';
+  biPortalCoreWarmupState.owner = 'external-section-queue';
+  biPortalCoreWarmupState.finishedAt = 0;
+  biPortalCoreWarmupState.lastError = error;
+  biPortalCoreWarmupState.consecutiveFailures = consecutiveFailures;
+  biPortalCoreWarmupState.lastFailureAt = atMs;
+  biPortalCoreWarmupState.nextAttemptAt = atMs + delayMs;
+  biPortalCoreWarmupState.failureGeneratedAt = generatedAt;
+  return {consecutiveFailures, delayMs, nextAttemptAt: biPortalCoreWarmupState.nextAttemptAt};
+}
 const linkOpsExecutionLocks = new Set();
 // Store capability must come from the same dynamic evidence for every store.
 // Do not add one-store readiness fallbacks here: they make an expired shared
@@ -793,6 +912,15 @@ function send(res, status, body, headers = {}) {
   writeResponseHead(res, status, headers);
   res.end(body);
 }
+async function sendBiSectionRawStream(res, status, stream, headers = {}) {
+  writeResponseHead(res, status, headers);
+  try {
+    await pipeline(stream, res);
+  } catch {
+    if (!res.destroyed && !res.writableFinished) res.destroy();
+  }
+}
+
 
 async function readJsonFile(file, fallback) {
   try {
@@ -2049,18 +2177,6 @@ function parseCookies(req) {
   return out;
 }
 
-async function ensureSessionSecret(file) {
-  try {
-    const text = (await fs.readFile(file, 'utf8')).trim();
-    if (text.length >= 32) return text;
-  } catch {}
-  const secret = crypto.randomBytes(48).toString('base64url');
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  await fs.writeFile(file, secret + '\n', {encoding: 'utf8', mode: 0o600});
-  try { await fs.chmod(file, 0o600); } catch {}
-  return secret;
-}
-
 function signSessionPayload(payload, secret) {
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const sig = crypto.createHmac('sha256', secret).update(body).digest('base64url');
@@ -2201,41 +2317,241 @@ function inferredLinkOpsStoreActor(value) {
 
 async function readLinkOpsTaskStore(args) {
   if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readTaskStore();
-  return readLinkOpsTaskStore(args);
-}
-
-async function writeLinkOpsTaskStore(args, value) {
-  if (args.linkOpsStoreGateway) {
-    return args.linkOpsStoreGateway.replaceTaskStore(value, {actorUser: inferredLinkOpsStoreActor(value)});
-  }
-  await writeLinkOpsTaskStore(args, value);
-  return value;
+  return readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []});
 }
 
 async function readLinkOpsChatStore(args) {
   if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readChatStore();
-  return readLinkOpsChatStore(args);
-}
-
-async function writeLinkOpsChatStore(args, value) {
-  if (args.linkOpsStoreGateway) {
-    return args.linkOpsStoreGateway.replaceChatStore(value, {actorUser: inferredLinkOpsStoreActor(value)});
-  }
-  await writeLinkOpsChatStore(args, value);
-  return value;
+  return readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []});
 }
 
 async function readLinkOpsActionState(args) {
   if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readActionState();
-  return readLinkOpsActionState(args);
+  return readJsonFile(args.stateFile, defaultActionState());
 }
 
-async function writeLinkOpsActionState(args, value) {
-  if (args.linkOpsStoreGateway) {
-    return args.linkOpsStoreGateway.replaceActionState(value, {actorUser: inferredLinkOpsStoreActor(value)});
+function repositoryRevisionAtRequestStart(record, label) {
+  const revision = Number(record?.repositoryRevision);
+  if (!Number.isSafeInteger(revision) || revision <= 0) {
+    throw new LinkOpsValidationError(`${label} repositoryRevision must be a positive integer from the request-start read`);
   }
-  await writeLinkOpsActionState(args, value);
-  return value;
+  return revision;
+}
+
+function linkOpsGatewayMethod(args, method) {
+  const fn = args?.linkOpsStoreGateway?.[method];
+  if (typeof fn !== 'function') {
+    throw Object.assign(new Error(`linkOpsStoreGateway.${method} unavailable`), {
+      status: 503,
+      code: 'LINK_OPS_GATEWAY_UNAVAILABLE',
+    });
+  }
+  return fn.bind(args.linkOpsStoreGateway);
+}
+
+async function createLinkOpsTaskRecord(args, task, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'createTaskRecord')(task, {actorUser});
+}
+
+async function updateLinkOpsTaskRecord(args, original, next, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'updateTaskRecord')(String(original?.id || ''), next, {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `task ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+async function deleteLinkOpsTaskRecord(args, original, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'deleteTaskRecord')(String(original?.id || ''), {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `task ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+async function createLinkOpsChatRecord(args, session, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'createChatSessionRecord')(session, {actorUser});
+}
+
+async function updateLinkOpsChatRecord(args, original, next, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'updateChatSessionRecord')(String(original?.id || ''), next, {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `chat session ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+async function deleteLinkOpsChatRecord(args, original, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'deleteChatSessionRecord')(String(original?.id || ''), {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `chat session ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+function replacePersistedStoreRecord(store, collection, persisted) {
+  const rows = Array.isArray(store?.[collection]) ? store[collection].slice() : [];
+  const index = rows.findIndex(row => String(row?.id || '') === String(persisted?.id || ''));
+  if (index >= 0) rows[index] = persisted;
+  else rows.unshift(persisted);
+  return {...store, updatedAt: persisted?.updatedAt || new Date().toISOString(), [collection]: rows};
+}
+
+function buildLinkOpsActionChanges(current, patches, {updatedAt, updatedBy, updatedByUser} = {}) {
+  const currentActions = current?.actions && typeof current.actions === 'object' ? current.actions : {};
+  const seen = new Set();
+  return patches.map((patch, index) => {
+    const key = String(patch?.key || '').trim();
+    if (!key) throw new LinkOpsValidationError(`actions[${index}].key is required`);
+    if (seen.has(key)) throw new LinkOpsValidationError(`Duplicate action key: ${key}`);
+    seen.add(key);
+    const status = String(patch?.status || 'open');
+    if (!['open', 'done', 'review', 'ignored'].includes(status)) {
+      throw new LinkOpsValidationError(`Invalid action status: ${status}`);
+    }
+    const previous = currentActions[key] && typeof currentActions[key] === 'object' ? currentActions[key] : null;
+    const owner = typeof patch?.owner === 'string' ? patch.owner.trim().slice(0, 80) : String(previous?.owner || '');
+    const note = typeof patch?.note === 'string' ? patch.note.trim().slice(0, 500) : String(previous?.note || '');
+    if (status === 'open' && !owner && !note) {
+      if (!previous) return null;
+      return {
+        key,
+        delete: true,
+        expectedRevision: repositoryRevisionAtRequestStart(previous, `action ${key}`),
+      };
+    }
+    return {
+      key,
+      expectedRevision: previous ? repositoryRevisionAtRequestStart(previous, `action ${key}`) : null,
+      record: {
+        status,
+        owner,
+        note,
+        updatedAt: updatedAt || new Date().toISOString(),
+        updatedBy: String(updatedBy || ''),
+        updatedByUser: String(updatedByUser || ''),
+      },
+    };
+  }).filter(Boolean);
+}
+
+async function applyLinkOpsActionChanges(args, changes, actorUser = '') {
+  const apply = linkOpsGatewayMethod(args, 'applyActionChanges');
+  try {
+    return await apply(changes, {actorUser});
+  } catch (error) {
+    // applyActionChanges commits the entity batch before derived legacy-state
+    // flushing. If that post-commit flush fails, prove the exact requested
+    // revisions and payloads from one readback; never retry the atomic batch.
+    let observed;
+    try {
+      observed = await readLinkOpsActionState(args);
+    } catch {
+      throw error;
+    }
+    const actions = observed?.actions && typeof observed.actions === 'object' ? observed.actions : {};
+    const committed = changes.every(change => {
+      const row = actions[change.key];
+      if (change.delete) return !row;
+      const expectedRevision = change.expectedRevision === null || change.expectedRevision === undefined
+        ? 1
+        : Number(change.expectedRevision) + 1;
+      return Number(row?.repositoryRevision || 0) === expectedRevision
+        && linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(row))
+          === linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(change.record));
+    });
+    if (!committed) throw error;
+    return {
+      ...observed,
+      postCommitRecovered: true,
+      postCommitErrorCode: String(error?.code || 'POST_COMMIT_ERROR').slice(0, 120),
+    };
+  }
+}
+
+async function settleLinkOpsPostCommit(persisted, effects = []) {
+  const failures = [];
+  for (let index = 0; index < effects.length; index += 1) {
+    try {
+      await effects[index]();
+    } catch (error) {
+      failures.push({index, code: String(error?.code || 'POST_COMMIT_ERROR'), error: String(error?.message || error)});
+    }
+  }
+  return {
+    persisted,
+    committed: true,
+    postCommitPending: failures.length > 0,
+    postCommitFailures: failures,
+  };
+}
+
+async function deleteLinkOpsChatThenCleanup(args, original, {actorUser = '', cleanup = null} = {}) {
+  const deleted = await deleteLinkOpsChatRecord(args, original, actorUser);
+  const settled = await settleLinkOpsPostCommit(deleted, cleanup ? [cleanup] : []);
+  return settled;
+}
+
+function createLinkOpsRequestWriter(args, {actorUser = ''} = {}) {
+  const gateway = args?.linkOpsStoreGateway;
+  for (const method of [
+    'createTaskRecord',
+    'updateTaskRecord',
+    'deleteTaskRecord',
+    'createChatSessionRecord',
+    'updateChatSessionRecord',
+    'deleteChatSessionRecord',
+  ]) linkOpsGatewayMethod(args, method);
+  const tasks = new Map();
+  const sessions = new Map();
+  const observe = (map, record) => {
+    const id = String(record?.id || '');
+    if (id && !map.has(id)) map.set(id, record);
+  };
+  return {
+    supportsCrud: true,
+    observeTask(record) { observe(tasks, record); },
+    observeTaskStore(store) {
+      for (const record of normalizeLinkOpsTaskStore(store).tasks) observe(tasks, record);
+    },
+    observeSession(record) { observe(sessions, record); },
+    observeSessionStore(store) {
+      for (const record of normalizeLinkOpsChatStore(store).sessions) observe(sessions, record);
+    },
+    async persistTask(next, {store = null, actorUser: overrideActor = ''} = {}) {
+      const id = String(next?.id || '');
+      const original = tasks.get(id) || null;
+      const persisted = original
+        ? await updateLinkOpsTaskRecord(args, original, next, overrideActor || actorUser)
+        : await createLinkOpsTaskRecord(args, next, overrideActor || actorUser);
+      tasks.set(id, persisted);
+      return {
+        task: persisted,
+        store: replacePersistedStoreRecord(store || {version: 1, tasks: []}, 'tasks', persisted),
+        created: !original,
+      };
+    },
+    async persistSession(next, {store = null} = {}) {
+      const id = String(next?.id || '');
+      const original = sessions.get(id) || null;
+      const persisted = original
+        ? await updateLinkOpsChatRecord(args, original, next, actorUser)
+        : await createLinkOpsChatRecord(args, next, actorUser);
+      sessions.set(id, persisted);
+      return {
+        session: persisted,
+        store: replacePersistedStoreRecord(store || {version: 1, memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions: []}, 'sessions', persisted),
+        created: !original,
+      };
+    },
+    async deleteSession(sessionId, {expectedRevision, actorUser: overrideActor = ''} = {}) {
+      const id = String(sessionId || '');
+      const original = sessions.get(id);
+      if (!original || (expectedRevision !== undefined && Number(original.repositoryRevision) !== Number(expectedRevision))) {
+        throw new LinkOpsValidationError(`chat session ${id} request-start revision mismatch`);
+      }
+      const deleted = await deleteLinkOpsChatRecord(args, original, overrideActor || actorUser);
+      sessions.delete(id);
+      return deleted;
+    },
+    gateway,
+  };
 }
 
 function actorHasGlobalOpsView(actor) {
@@ -2640,6 +2956,26 @@ async function appendDescriptionBindingAudit(file, entry) {
     throw error;
   }
   return appendAudit(file, entry);
+}
+
+async function appendLinkOpsExecutionAudit(file, entry, {attempts = 3} = {}) {
+  const failureMarker = String(process.env.SHEIN_BI_TEST_EXECUTION_AUDIT_FAIL_FILE || '');
+  let lastError;
+  for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+    try {
+      if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+        const injected = new Error('injected link ops execution audit failure');
+        injected.code = 'LINK_OPS_EXECUTION_AUDIT_INJECTED_FAILURE';
+        throw injected;
+      }
+      await appendAudit(file, entry);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, attempt * 40));
+    }
+  }
+  throw lastError;
 }
 
 async function appendProductAttributeAudit(file, entry) {
@@ -3901,6 +4237,7 @@ function projectLinkOpsProductExecutorForClient(executor) {
     mode: projectLinkOpsClientMode(result.mode || executor.mode || ''),
     state: String(result.state || executor.state || executor.status || ''),
     status: String(result.status || executor.status || ''),
+    ...projectOpenApiExecutorAbortEvidence(result, executor),
     payload: {
       found: Boolean(payload.found || payload.payloadHash),
       payloadHash: safeSha256(payload.payloadHash),
@@ -3969,6 +4306,7 @@ function projectLinkOpsMaintenanceExecutorForClient(executor) {
     mode: projectLinkOpsClientMode(result.mode || executor.mode || ''),
     state: String(result.state || executor.state || executor.status || ''),
     status: String(result.status || executor.status || ''),
+    ...projectOpenApiExecutorAbortEvidence(result, executor),
     adapterKind: sanitizeLinkOpsClientText(result.adapterKind || executor.adapterKind || '', 120),
     matchedLinksCount,
     adapterEvidence: {matchedLinksCount},
@@ -4539,6 +4877,15 @@ function taskRequiresOwnerLifecycleResolve(task) {
     || LINK_OPS_RESTRICTED_LIFECYCLE_STATUSES.has(lifecycleStatus);
 }
 
+function taskCannotRepeatRealExecution(task) {
+  const status = String(task?.status || '');
+  const lifecycle = task?.lifecycle && typeof task.lifecycle === 'object' ? task.lifecycle : {};
+  return ['done', 'archived'].includes(status)
+    || lifecycle.terminal === true
+    || task?.execution?.actualWriteSubmitted === true
+    || task?.execution?.writeAudit?.actualWriteSubmitted === true;
+}
+
 function patchLinkOpsTask(task, body, actor, req) {
   for (const field of Object.keys(body || {})) {
     if (LINK_OPS_PROTECTED_TASK_PATCH_FIELDS.has(field)) {
@@ -4971,10 +5318,11 @@ async function appendLinkOpsChatAssistantMessageForTask(args, task, answer, meta
   const idx = current.sessions.findIndex(s => String(s.id || '') === sessionId);
   if (idx < 0) return {ok: false, reason: 'session_not_found'};
   const sessions = current.sessions.slice();
-  sessions[idx] = appendAssistantChatMessage(sessions[idx], content, meta);
-  const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-  await writeLinkOpsChatStore(args, next);
-  return {ok: true, session: sessions[idx], store: next};
+  const original = sessions[idx];
+  const nextSession = appendAssistantChatMessage(original, content, meta);
+  const persisted = await updateLinkOpsChatRecord(args, original, nextSession, inferredLinkOpsStoreActor({sessions: [nextSession]}));
+  const next = replacePersistedStoreRecord(current, 'sessions', persisted);
+  return {ok: true, session: persisted, store: next};
 }
 
 async function removeLinkOpsTaskAssetDir(taskId, args) {
@@ -5386,6 +5734,14 @@ function buildChatExecutionAnswer(task, {userMessage = ''} = {}) {
 
 async function executeChatNaturalLanguageTask({task, taskData, session, userMessage, actor, req, args}) {
   const current = normalizeLinkOpsTaskStore(taskData || {version: 1, updatedAt: null, tasks: []});
+  if (taskCannotRepeatRealExecution(task)) {
+    return {
+      handled: true,
+      task,
+      taskData: current,
+      answer: '这件事已经有终态或真实提交证据，我不会重复提交。请先查看现有平台回读；如果确实需要修正，请明确新建一件修复任务。',
+    };
+  }
   if (taskRequiresOwnerLifecycleResolve(task)) {
     const deniedLifecycle = {
       ok: false,
@@ -5408,59 +5764,92 @@ async function executeChatNaturalLanguageTask({task, taskData, session, userMess
   }
   if (id) linkOpsExecutionLocks.add(id);
   try {
-    const {task: updated, writeClaim: executionWriteClaim} = await startControlledLinkOpsExecution(task, actor, req, args, {
+    const executionResult = await startControlledLinkOpsExecution(task, actor, req, args, {
       mode: 'execute',
       executionMode: 'execute',
       confirm: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
       confirmText: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
       source: 'chat_natural_language_execute',
     });
+    let updated = executionResult.task;
+    const executionWriteClaim = executionResult.writeClaim;
+    let commitRecovered = false;
+    let recoveryCauseCode = '';
     let nextData;
     if (executionWriteClaim) {
       // Claim path: single-task CAS only, never a whole-store replace.
-      const persisted = await persistClaimedLinkOpsExecutionResult(args, {
+      const commit = await persistClaimedLinkOpsExecutionResult(args, {
         taskId: String(updated.id || ''),
         next: updated,
         writeClaim: executionWriteClaim,
         actorUser: actorUser(actor, req),
         now: new Date().toISOString(),
       });
-      updated.task = persisted;
-      updated.execution = persisted.execution;
-      nextData = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
-    } else {
+      updated = commit.task;
+      commitRecovered = commit.commitRecovered;
+      recoveryCauseCode = commit.recoveryCauseCode;
       const tasks = current.tasks.slice();
-      const idx = tasks.findIndex(t => String(t.id || '') === String(updated.id || ''));
+      const idx = tasks.findIndex(row => String(row.id || '') === String(updated.id || ''));
       if (idx >= 0) tasks[idx] = updated;
       else tasks.unshift(updated);
-      nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
-      await writeLinkOpsTaskStore(args, nextData);
+      nextData = {version: 1, updatedAt: updated.updatedAt || new Date().toISOString(), tasks: tasks.slice(0, 1000)};
+    } else {
+      const idx = current.tasks.findIndex(t => String(t.id || '') === String(updated.id || ''));
+      const commit = await persistUnclaimedLinkOpsExecutionResult(args, {
+        current,
+        taskIndex: idx,
+        next: updated,
+        actorUser: actorUser(actor, req),
+        now: new Date().toISOString(),
+      });
+      updated = commit.task;
+      commitRecovered = commit.commitRecovered;
+      recoveryCauseCode = commit.recoveryCauseCode;
+      const tasks = current.tasks.slice();
+      if (idx >= 0) tasks[idx] = updated;
+      else tasks.unshift(updated);
+      nextData = {version: 1, updatedAt: updated.updatedAt || new Date().toISOString(), tasks: tasks.slice(0, 1000)};
     }
-    await appendAudit(args.auditFile, {
-      at: new Date().toISOString(),
-      type: 'link-ops-chat-natural-execute',
-      actor,
-      ...requestMeta(req),
-      session: {id: session?.id || ''},
-      task: {
-        id: updated.id,
-        status: updated.status,
-        state: updated.execution?.state || '',
-        stores: taskTargetStores(updated),
-        writeStores: taskWriteStores(updated),
-      },
-      naturalLanguageConfirm: compactChatLine(userMessage, 200),
-      submitted: Boolean(updated.execution?.actualWriteSubmitted || updated.execution?.writeAudit?.actualWriteSubmitted),
-    });
-    return {handled: true, task: updated, taskData: nextData, answer: buildChatExecutionAnswer(updated, {userMessage})};
+    let auditPending = false;
+    try {
+      await appendLinkOpsExecutionAudit(args.auditFile, {
+        at: new Date().toISOString(),
+        type: 'link-ops-chat-natural-execute',
+        actor,
+        ...requestMeta(req),
+        session: {id: session?.id || ''},
+        task: {
+          id: updated.id,
+          status: updated.status,
+          state: updated.execution?.state || '',
+          stores: taskTargetStores(updated),
+          writeStores: taskWriteStores(updated),
+        },
+        naturalLanguageConfirm: compactChatLine(userMessage, 200),
+        submitted: Boolean(updated.execution?.actualWriteSubmitted || updated.execution?.writeAudit?.actualWriteSubmitted),
+        commitRecovered,
+        recoveryCauseCode,
+      });
+    } catch {
+      auditPending = true;
+    }
+    const auditNote = auditPending
+      ? '\n\n执行结果已经按任务 revision/hash 精确回读；外部审计文件暂待补写，请勿重复提交。'
+      : '';
+    return {
+      handled: true,
+      task: updated,
+      taskData: nextData,
+      answer: `${buildChatExecutionAnswer(updated, {userMessage})}${auditNote}`,
+    };
   } catch (err) {
-    return {handled: true, task, taskData: current, answer: `我收到你的确认了，但执行没有跑完：${String(err?.message || err || 'unknown error')}。\n\n这件事没有被重复提交；你可以继续在聊天里补充或让我重试。`};
+    return {handled: true, task, taskData: current, answer: `我收到你的确认了，但执行链路没有完整返回：${String(err?.message || err || 'unknown error')}。\n\n当前是否已经提交不能只凭这次报错判断。请先回读任务和 SHEIN 平台状态，不要直接重试；若任务已有提交锁或提交证据，必须由全店管理账号人工核销。`};
   } finally {
     if (id) linkOpsExecutionLocks.delete(id);
   }
 }
 
-async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, taskData, actor, req, args}) {
+async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, taskData, writer = null, actor, req, args}) {
   const current = normalizeLinkOpsTaskStore(taskData || {version: 1, updatedAt: null, tasks: []});
   const actorTasks = linkOpsTasksForActor(current.tasks, actor, {mode: 'mutate'});
   const activeTasks = activeChatTasks(actorTasks, session?.id);
@@ -5483,7 +5872,7 @@ async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, 
       const task = activeTasks[0];
       const eligibility = chatNaturalExecutionEligibility(task);
       await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-needs-check', actor, ...requestMeta(req), session: {id: session?.id || ''}, task: {id: task.id, status: task.status, state: task.execution?.state || '', reasons: eligibility.reasons}});
-      const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: current, actor, req, args, updated: true});
+      const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: current, writer, actor, req, args, updated: true});
       if (checked.task && chatNaturalExecutionEligibility(checked.task).ok) {
         await appendAudit(args.auditFile, {
           at: new Date().toISOString(),
@@ -5510,8 +5899,10 @@ async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, 
   if (knowledgeBinding.changed) {
     task = knowledgeBinding.task;
     const reboundStore = replaceLinkOpsTaskInStore(current, task);
-    await writeLinkOpsTaskStore(args, reboundStore);
-    const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: reboundStore, actor, req, args, updated: true});
+    if (!writer) throw new Error('explicit task CRUD writer required');
+    const taskPersist = await writer.persistTask(task, {store: reboundStore});
+    task = taskPersist.task;
+    const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: taskPersist.store, writer, actor, req, args, updated: true});
     if (previousKnowledgeFingerprint && previousKnowledgeFingerprint !== knowledgeBinding.bundle?.fingerprint) {
       return {
         handled: true,
@@ -5604,7 +5995,7 @@ function buildChatSystemCheckAnswer(task, {updated = false} = {}) {
   return lines.join('\n\n');
 }
 
-async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req, args, updated = false}) {
+async function runImmediateChatSystemCheckIfPossible({task, taskData, writer = null, actor, req, args, updated = false}) {
   if (!task || !shouldRunImmediateChatSystemCheck(task)) {
     return {task, taskData, answer: ''};
   }
@@ -5637,7 +6028,12 @@ async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req
     if (idx >= 0) tasks[idx] = checked;
     else tasks.unshift(checked);
     const nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
-    await writeLinkOpsTaskStore(args, nextData);
+    let persistedChecked = checked;
+    let persistedStoreData = nextData;
+    if (!writer) throw new Error('explicit task CRUD writer required');
+    const taskPersist = await writer.persistTask(checked, {store: nextData});
+    persistedChecked = taskPersist.task;
+    persistedStoreData = taskPersist.store;
     await appendAudit(args.auditFile, {
       at: new Date().toISOString(),
       type: 'link-ops-chat-immediate-system-check',
@@ -5651,7 +6047,7 @@ async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req
         writeStores: taskWriteStores(checked),
       },
     });
-    return {task: checked, taskData: nextData, answer: buildChatSystemCheckAnswer(checked, {updated})};
+    return {task: persistedChecked, taskData: persistedStoreData, answer: buildChatSystemCheckAnswer(checked, {updated})};
   } catch (err) {
     const answer = `我已收到，但刚才自动检查没有跑完：${String(err?.message || err || 'unknown error')}。\n\n你不用重新说需求，稍后我会继续按当前会话处理。`;
     return {task, taskData, answer};
@@ -5979,6 +6375,7 @@ function projectProductExecutorHistoryEvidence(executorRun = {}) {
     storeKey: executorResult.storeKey || '',
     mode: executorRun?.mode || '',
     state: executorResult.state || '',
+    ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
     runId: executorResult.runId || '',
     savedTo: executorResult.savedTo || '',
     payloadFound: Boolean(executorResult.payload?.found),
@@ -6046,6 +6443,7 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         mode: executorRun?.mode || '',
         state: result.state || '',
         ok: Boolean(result.ok),
+        ...projectOpenApiExecutorAbortEvidence(result, executorRun),
         childRunId: result.runId || '',
         savedTo: result.savedTo || '',
         adapterKind: result.adapterKind || '',
@@ -6119,6 +6517,63 @@ function executorReadbackOutcomes(executorResults = []) {
       matchedCount: Array.isArray(result?.readback?.matchedRows) ? result.readback.matchedRows.length : 0,
       weakMatchedCount: Array.isArray(result?.readback?.weakMatchedRows) ? result.readback.weakMatchedRows.length : 0,
     }));
+}
+
+function linkOpsExecutionResponseOutcome(task, {requestedExecute = false} = {}) {
+  const execution = task?.execution && typeof task.execution === 'object' ? task.execution : {};
+  const lifecycle = task?.lifecycle && typeof task.lifecycle === 'object'
+    ? task.lifecycle
+    : (execution?.lifecycle && typeof execution.lifecycle === 'object' ? execution.lifecycle : {});
+  const executorRuns = [
+    ...asArray(execution.openApiProductExecutors),
+    ...asArray(execution.linkMaintenanceExecutors),
+  ];
+  if (execution.hlOpenApiExecutor && typeof execution.hlOpenApiExecutor === 'object') {
+    executorRuns.push(execution.hlOpenApiExecutor);
+  }
+  const blockers = uniqueMessages([
+    ...asArray(task?.preflight?.blockers),
+    ...asArray(execution?.preflight?.blockers),
+    ...executorRuns.flatMap(run => asArray(run?.blockers)),
+  ]);
+  const lifecycleStatus = String(lifecycle.lifecycleStatus || lifecycle.status || '');
+  const executorFailed = executorRuns.some(run => run?.ok === false);
+  const executorSubmittedUnconfirmed = executorRuns.some(run => run?.ok === false && (
+    String(run?.state || '') === 'submitted'
+    || run?.adapterEvidence?.realSubmit === true
+    || run?.submittedPossibly === true
+    || run?.suspiciousWriteAttempted === true
+    || (run?.publishResult && run?.readback?.ok === false)
+  ));
+  const unconfirmedLifecycleStatuses = new Set([
+    'submitted_but_readback_pending',
+    'submitted_readback_pending',
+    'submitted_readback_failed',
+    'suspicious_write_attempted',
+  ]);
+  const unconfirmed = requestedExecute && (
+    String(execution?.writeClaim?.state || '') === 'unconfirmed'
+    || lifecycle?.needsManualResolve === true
+    || unconfirmedLifecycleStatuses.has(lifecycleStatus)
+    || executorSubmittedUnconfirmed
+  );
+  if (unconfirmed) {
+    return {
+      ok: false,
+      partial: true,
+      outcome: 'unconfirmed',
+      error: 'SHEIN 写入结果已持久化，但强回读未确认业务完成；任务已锁定，禁止重复提交，需人工核销。',
+    };
+  }
+  if (executorFailed || blockers.length > 0 || execution?.preflight?.ok === false || task?.preflight?.ok === false) {
+    return {
+      ok: false,
+      partial: true,
+      outcome: 'blocked',
+      error: '执行结果已持久化，但业务操作未完成；请查看任务 blockers 和 execution 状态。',
+    };
+  }
+  return {ok: true, partial: false, outcome: requestedExecute ? 'completed' : 'ready', error: ''};
 }
 
 function classifyLinkOpsLifecycle({
@@ -6313,6 +6768,96 @@ function blockedStoreExecutorResult(storeKey, blockers = []) {
   };
 }
 
+function buildOpenApiExecutorChildOutcome({
+  kind,
+  storeKey,
+  mode,
+  childResult,
+  parsed = null,
+  capturedPublishPayload = null,
+} = {}) {
+  const targetStore = String(storeKey || '').trim().toUpperCase();
+  const executeMode = String(mode || '') === 'execute';
+  const productExecutor = kind === 'product';
+  const executorLabel = productExecutor ? 'OpenAPI 商品执行器' : 'OpenAPI 维护执行器';
+  const run = childResult && typeof childResult === 'object' ? childResult : {};
+  const stderrTail = String(run.stderr || '').slice(-1200);
+  const common = {
+    mode,
+    storeKey: targetStore,
+    code: run.code ?? null,
+    timedOut: run.timedOut === true,
+    aborted: run.aborted === true,
+    abortReason: sanitizeLinkOpsClientText(run.abortReason || '', 300),
+    terminationSignal: sanitizeLinkOpsClientText(run.terminationSignal || '', 40),
+    exitSignal: sanitizeLinkOpsClientText(run.exitSignal || '', 40),
+    stderrTail,
+    ...(productExecutor ? {capturedPublishPayload} : {}),
+  };
+  if (run.aborted === true) {
+    const abortReason = common.abortReason || 'Portal runtime shutdown';
+    return {
+      ...common,
+      ok: false,
+      result: {
+        ok: false,
+        state: executeMode ? 'suspicious_write_attempted' : 'aborted',
+        blockers: executeMode
+          ? []
+          : [`${targetStore} ${executorLabel}因 Portal 关停被取消；本次系统检查未完成。`],
+        warnings: executeMode
+          ? [`${targetStore} ${executorLabel}在真实提交模式下因 Portal 关停被终止。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
+          : [],
+        aborted: true,
+        abortReason,
+        terminationSignal: common.terminationSignal,
+        exitSignal: common.exitSignal,
+        suspiciousWriteAttempted: executeMode,
+        submittedPossibly: executeMode,
+        rawStdoutTail: String(run.stdout || '').slice(-1200),
+        rawStderrTail: stderrTail,
+      },
+    };
+  }
+  if (parsed && typeof parsed === 'object') {
+    return {
+      ...common,
+      ok: Boolean(parsed.ok),
+      result: parsed,
+    };
+  }
+  return {
+    ...common,
+    ok: false,
+    result: {
+      ok: false,
+      state: executeMode ? 'suspicious_write_attempted' : (run.timedOut ? 'timeout' : 'error'),
+      blockers: executeMode
+        ? []
+        : [`${targetStore} ${executorLabel}未返回可解析结果：code=${run.code}${run.timedOut ? ' timeout=true' : ''}`],
+      warnings: executeMode
+        ? [`${targetStore} ${executorLabel}在真实提交模式下未返回可解析结果：code=${run.code}${run.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
+        : [],
+      suspiciousWriteAttempted: executeMode,
+      submittedPossibly: executeMode,
+      rawStdoutTail: String(run.stdout || '').slice(-1200),
+      rawStderrTail: stderrTail,
+    },
+  };
+}
+
+function projectOpenApiExecutorAbortEvidence(result = {}, run = {}) {
+  if (result?.aborted !== true && run?.aborted !== true) return {};
+  return {
+    aborted: true,
+    abortReason: sanitizeLinkOpsClientText(result?.abortReason || run?.abortReason || '', 300),
+    terminationSignal: sanitizeLinkOpsClientText(result?.terminationSignal || run?.terminationSignal || '', 40),
+    exitSignal: sanitizeLinkOpsClientText(result?.exitSignal || run?.exitSignal || '', 40),
+    suspiciousWriteAttempted: result?.suspiciousWriteAttempted === true,
+    submittedPossibly: result?.submittedPossibly === true,
+  };
+}
+
 const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v3';
 
 function payloadHashForStoreFromTaskExecution(task, storeKey = '') {
@@ -6349,15 +6894,41 @@ function payloadHashForMaintenanceFromTaskExecution(task, storeKey = '', operati
 }
 
 /**
- * Durable write-attempt claim for update_description. Executed through the
- * atomic single-task CAS (repositoryRevision predicate), so a process crash
- * between the claim and the partialEdit leaves a persisted claim that blocks
- * any repeated submit until manual resolution. The executor requires the
- * claim nonce/taskId/expectedPayloadHash/operation to match before writing.
+ * Durable single-task write-attempt claim. Executed through repository CAS,
+ * so a process crash between the claim and SHEIN leaves a persisted claim
+ * that blocks any repeated submit until exact readback/manual resolution.
+ * Each executor must verify nonce/taskId/store/operation/payload hash.
  */
-async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, storeKey, expectedPayloadHash, now}) {
+async function claimLinkOpsWriteAttempt(task, args, {
+  actor,
+  req,
+  storeKey,
+  operation = '',
+  operations = [],
+  expectedPayloadHash,
+  now,
+}) {
+  const normalizedOperations = [...new Set([
+    ...asArray(operations),
+    operation,
+  ].map(value => String(value || '').trim().toLowerCase()).filter(Boolean))];
+  if (!normalizedOperations.length) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_OPERATION_REQUIRED', error: 'write-claim 缺少精确 operation'};
+  }
+  const unsupportedOperations = normalizedOperations.filter(value => !BI_OPS_STRUCTURED_WRITE_INTENTS.has(value));
+  if (unsupportedOperations.length) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_OPERATION_INVALID', error: `write-claim 包含未受控 operation：${unsupportedOperations.join(',')}`};
+  }
+  const normalizedStoreKey = String(storeKey || '').trim().toUpperCase();
+  if (!normalizedStoreKey) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_STORE_REQUIRED', error: 'write-claim 缺少精确目标店铺'};
+  }
+  const normalizedExpectedPayloadHash = String(expectedPayloadHash || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(normalizedExpectedPayloadHash)) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_PAYLOAD_HASH_INVALID', error: 'write-claim 缺少有效的系统检查 payload hash'};
+  }
   if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
-    return {ok: false, code: 'DESCRIPTION_WRITE_CLAIM_GATEWAY_UNAVAILABLE', error: 'write-claim 需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用，禁止真实提交。'};
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_GATEWAY_UNAVAILABLE', error: 'write-claim 需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用，禁止真实提交。'};
   }
   let current;
   let found;
@@ -6376,8 +6947,8 @@ async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, store
   if (existingClaim && ['claimed', 'unconfirmed'].includes(String(existingClaim.state || ''))) {
     return {
       ok: false,
-      code: 'DESCRIPTION_WRITE_CLAIM_ACTIVE',
-      error: `该任务已有进行中/未确认的写 claim（state=${existingClaim.state}，claimId=${existingClaim.claimId}），禁止重复提交 partialEdit；请由全店管理账号人工核销后再处理。`,
+      code: 'LINK_OPS_WRITE_CLAIM_ACTIVE',
+      error: `该任务已有进行中/未确认的写 claim（state=${existingClaim.state}，claimId=${existingClaim.claimId}），禁止重复提交 ${normalizedOperations.join(',')}；请由全店管理账号人工核销后再处理。`,
     };
   }
   const claim = {
@@ -6385,9 +6956,9 @@ async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, store
     claimId: `wc_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`,
     nonce: crypto.randomBytes(16).toString('hex'),
     taskId: String(record.id || ''),
-    storeKey: String(storeKey || '').trim().toUpperCase(),
-    operations: ['update_description'],
-    expectedPayloadHash: String(expectedPayloadHash || ''),
+    storeKey: normalizedStoreKey,
+    operations: normalizedOperations,
+    expectedPayloadHash: normalizedExpectedPayloadHash,
     claimedAt: now,
     claimedBy: actorUser(actor, req),
     state: 'claimed',
@@ -6409,7 +6980,7 @@ async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, store
   } catch (error) {
     const mapped = linkOpsRepositoryHttpDetails(error);
     if (mapped) return {ok: false, code: mapped.body?.code || 'LINK_OPS_REVISION_CONFLICT', error: mapped.body?.error || 'write-claim CAS 冲突'};
-    return {ok: false, code: 'DESCRIPTION_WRITE_CLAIM_FAILED', error: `write-claim 持久化失败：${String(error?.message || error).slice(0, 300)}`};
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_FAILED', error: `write-claim 持久化失败：${String(error?.message || error).slice(0, 300)}`};
   }
 }
 
@@ -6440,7 +7011,15 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   const mode = requestedExecute && cap.productPublishExecuteAdapter
     ? 'execute'
     : 'dry-run';
-  const {actorForWriteGate: _actorForWriteGate, beforeStoreWrite: _beforeStoreWrite, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
+  const {
+    actorForWriteGate: _actorForWriteGate,
+    beforeStoreWrite: _beforeStoreWrite,
+    executionContext: _bodyExecutionContext,
+    ...safeBodyForSnapshot
+  } = body && typeof body === 'object' ? body : {};
+  const {signal: runtimeCancellationSignal, ...serializableExecutionContext} = executionContext && typeof executionContext === 'object'
+    ? executionContext
+    : {};
   const expectedPayloadHash = mode === 'execute'
     ? payloadHashForStoreFromTaskExecution(task, targetStore)
     : '';
@@ -6455,7 +7034,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     version: 1,
     updatedAt: new Date().toISOString(),
     executionContext: {
-      ...executionContext,
+      ...serializableExecutionContext,
       request: safeBodyForSnapshot,
       targetStore,
       requestedMode: mode,
@@ -6475,6 +7054,8 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   ];
   if (mode === 'execute') {
     childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
+    const claimNonce = String(executionContext?.writeClaim?.nonce || '');
+    if (claimNonce) childArgs.push('--claim-nonce', claimNonce);
   }
   if (payloadCaptureFile) childArgs.push('--payload-out', payloadCaptureFile);
   let result;
@@ -6487,6 +7068,8 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     result = await runChildProcess(process.execPath, childArgs, {
       cwd: ROOT,
       timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
+      killGraceMs: OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
+      signal: runtimeCancellationSignal || args?.runtimeCancellationSignal || null,
     });
     if (payloadCaptureFile) capturedPublishPayload = await readJsonFile(payloadCaptureFile, null);
   } finally {
@@ -6494,41 +7077,14 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     if (payloadCaptureFile) await fs.rm(payloadCaptureFile, {force: true}).catch(() => {});
   }
   const parsed = parseChildJsonOutput(result.stdout);
-  if (parsed) {
-    return {
-      ok: Boolean(parsed.ok),
-      mode,
-      storeKey: targetStore,
-      code: result.code,
-      timedOut: result.timedOut,
-      result: parsed,
-      capturedPublishPayload,
-      stderrTail: String(result.stderr || '').slice(-1200),
-    };
-  }
-  return {
-    ok: false,
-    mode,
+  return buildOpenApiExecutorChildOutcome({
+    kind: 'product',
     storeKey: targetStore,
-    code: result.code,
-    timedOut: result.timedOut,
+    mode,
+    childResult: result,
+    parsed,
     capturedPublishPayload,
-      result: {
-        ok: false,
-        state: mode === 'execute' ? 'suspicious_write_attempted' : (result.timedOut ? 'timeout' : 'error'),
-        blockers: mode === 'execute'
-          ? []
-          : [`${targetStore} OpenAPI 商品系统检查执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
-        warnings: mode === 'execute'
-          ? [`${targetStore} OpenAPI 商品执行器在真实提交模式下未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
-          : [],
-        suspiciousWriteAttempted: mode === 'execute',
-        submittedPossibly: mode === 'execute',
-        rawStdoutTail: String(result.stdout || '').slice(-1200),
-        rawStderrTail: String(result.stderr || '').slice(-1200),
-    },
-    stderrTail: String(result.stderr || '').slice(-1200),
-  };
+  });
 }
 
 /**
@@ -9580,7 +10136,15 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     return cap.authorized && cap.verifiedRead && control.enabled;
   });
   const mode = requestedExecute && allActionsEnabled ? 'execute' : 'dry-run';
-  const {actorForWriteGate: _actorForWriteGate, beforeStoreWrite: _beforeStoreWrite, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
+  const {
+    actorForWriteGate: _actorForWriteGate,
+    beforeStoreWrite: _beforeStoreWrite,
+    executionContext: _bodyExecutionContext,
+    ...safeBodyForSnapshot
+  } = body && typeof body === 'object' ? body : {};
+  const {signal: runtimeCancellationSignal, ...serializableExecutionContext} = executionContext && typeof executionContext === 'object'
+    ? executionContext
+    : {};
   const expectedPayloadHash = mode === 'execute'
     ? (intents.map(intent => payloadHashForMaintenanceFromTaskExecution(task, targetStore, intent)).find(Boolean) || '')
     : '';
@@ -9591,7 +10155,7 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     version: 1,
     updatedAt: new Date().toISOString(),
     executionContext: {
-      ...executionContext,
+      ...serializableExecutionContext,
       request: safeBodyForSnapshot,
       targetStore,
       requestedMode: mode,
@@ -9612,7 +10176,7 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     mode === 'execute' ? '--execute' : '--dry-run',
   ];
   if (mode === 'execute') childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
-  if (mode === 'execute' && intents.includes('update_description')) {
+  if (mode === 'execute') {
     const claimNonce = String(executionContext?.writeClaim?.nonce || '');
     if (claimNonce) childArgs.push('--claim-nonce', claimNonce);
   }
@@ -9625,44 +10189,20 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     result = await runChildProcess(process.execPath, childArgs, {
       cwd: ROOT,
       timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
+      killGraceMs: OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
+      signal: runtimeCancellationSignal || args?.runtimeCancellationSignal || null,
     });
   } finally {
     await fs.rm(taskSnapshotFile, {force: true}).catch(() => {});
   }
   const parsed = parseChildJsonOutput(result.stdout);
-  if (parsed) {
-    return {
-      ok: Boolean(parsed.ok),
-      mode,
-      storeKey: targetStore,
-      code: result.code,
-      timedOut: result.timedOut,
-      result: parsed,
-      stderrTail: String(result.stderr || '').slice(-1200),
-    };
-  }
-  return {
-    ok: false,
-    mode,
+  return buildOpenApiExecutorChildOutcome({
+    kind: 'maintenance',
     storeKey: targetStore,
-    code: result.code,
-    timedOut: result.timedOut,
-    result: {
-      ok: false,
-      state: mode === 'execute' ? 'suspicious_write_attempted' : (result.timedOut ? 'timeout' : 'error'),
-      blockers: mode === 'execute'
-        ? []
-        : [`${targetStore} OpenAPI 维护执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
-      warnings: mode === 'execute'
-        ? [`${targetStore} OpenAPI 维护执行器在真实提交模式下未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
-        : [],
-      suspiciousWriteAttempted: mode === 'execute',
-      submittedPossibly: mode === 'execute',
-      rawStdoutTail: String(result.stdout || '').slice(-1200),
-      rawStderrTail: String(result.stderr || '').slice(-1200),
-    },
-    stderrTail: String(result.stderr || '').slice(-1200),
-  };
+    mode,
+    childResult: result,
+    parsed,
+  });
 }
 
 async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
@@ -9672,6 +10212,44 @@ async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
     out.push(await runOpenApiMaintenanceExecutorForStore(task, args, body, store, body.executionContext || {}));
   }
   return out;
+}
+
+function resolveLinkOpsWriteClaimState({writeClaim, productExecutors = [], maintenanceExecutors = []} = {}) {
+  if (!writeClaim) return '';
+  const claimStore = String(writeClaim.storeKey || '').trim().toUpperCase();
+  const claimOperations = asArray(writeClaim.operations).map(value => String(value || '').trim().toLowerCase());
+  const productClaim = claimOperations.includes('copy_product_draft');
+  const claimRuns = productClaim ? productExecutors : maintenanceExecutors;
+  const relevant = asArray(claimRuns).find(run => (
+    String(run?.storeKey || '').trim().toUpperCase() === claimStore
+  )) || asArray(claimRuns)[0];
+  const result = relevant?.result || {};
+  // Runtime cancellation is explicit ambiguous-write evidence. Even if a
+  // terminating child managed to flush parseable stdout, shutdown cannot prove
+  // where it was relative to the remote write boundary, so the durable claim
+  // must remain locked for readback/manual resolution.
+  if (relevant?.aborted === true || result?.aborted === true) return 'unconfirmed';
+  if (productClaim) {
+    if (linkOpsProductExecutorSubmitted(result)) {
+      return result?.readback?.ok === true ? 'completed' : 'unconfirmed';
+    }
+    if (linkOpsExecutorExplicitPreValidFailure(result)) return 'released';
+    if (result?.publishResult
+      || result?.suspiciousWriteAttempted === true
+      || result?.submittedPossibly === true) {
+      return 'unconfirmed';
+    }
+    return 'released';
+  }
+  if (result?.adapterEvidence?.realSubmit === true) {
+    return result?.readback?.ok === true ? 'completed' : 'unconfirmed';
+  }
+  if (result?.adapterEvidence?.writeAttempted === true
+    || String(result?.state || '') === 'suspicious_write_attempted'
+    || relevant?.suspiciousWriteAttempted === true) {
+    return 'unconfirmed';
+  }
+  return 'released';
 }
 
 /**
@@ -9686,7 +10264,7 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
   if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
     throw Object.assign(new Error('claim 结果持久化需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用'), {
       status: 503,
-      code: 'DESCRIPTION_WRITE_CLAIM_GATEWAY_UNAVAILABLE',
+      code: 'LINK_OPS_WRITE_CLAIM_GATEWAY_UNAVAILABLE',
     });
   }
   const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
@@ -9704,7 +10282,7 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
     || String(freshClaim.nonce || '') !== String(writeClaim?.nonce || '')) {
     throw Object.assign(new Error('执行期间任务的写 claim 已被替换或清除；拒绝整库覆盖，任务保持 claim 锁定，必须人工核销。'), {
       status: 409,
-      code: 'DESCRIPTION_WRITE_CLAIM_MISSING',
+      code: 'LINK_OPS_WRITE_CLAIM_MISSING',
     });
   }
   const freshRevision = Number(fresh.repositoryRevision || 0);
@@ -9715,6 +10293,7 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
       code: 'LINK_OPS_REVISION_CONFLICT',
     });
   }
+  const committedAt = now || next.updatedAt || new Date().toISOString();
   const merged = {
     ...fresh,
     status: next.status,
@@ -9727,11 +10306,102 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
     lifecycle: next.lifecycle,
     executionHistory: next.executionHistory,
     history: next.history,
-    updatedAt: now || next.updatedAt || new Date().toISOString(),
+    updatedAt: committedAt,
   };
-  return args.linkOpsStoreGateway.updateTaskRecord(String(taskId), merged, {
-    expectedRevision: freshRevision,
-    actorUser: String(actorUser || ''),
+  const expectedRevision = freshRevision + 1;
+  const expectedPayloadHash = linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(merged));
+  try {
+    const persisted = await args.linkOpsStoreGateway.updateTaskRecord(String(taskId), merged, {
+      expectedRevision: freshRevision,
+      actorUser: String(actorUser || ''),
+    });
+    const failureMarker = String(process.env.SHEIN_BI_TEST_EXECUTION_POST_COMMIT_FAIL_FILE || '');
+    if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+      const injected = new Error('injected link ops execution post-commit failure');
+      injected.code = 'LINK_OPS_EXECUTION_POST_COMMIT_INJECTED_FAILURE';
+      throw injected;
+    }
+    return {task: persisted, commitRecovered: false, recoveryCauseCode: ''};
+  } catch (error) {
+    // updateTaskRecord may fail after the atomic repository write (for
+    // example, a transient lock-file release/readback error). Never turn an
+    // exact committed SHEIN result into a generic retryable failure: recover
+    // only from the immutable revision+payload hash written by this attempt.
+    let observed = null;
+    try {
+      const readback = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+      observed = readback.tasks.find(row => String(row.id || '') === String(taskId || '')) || null;
+    } catch {}
+    if (observed
+      && Number(observed.repositoryRevision || 0) === expectedRevision
+      && String(observed.repositoryPayloadHash || '') === expectedPayloadHash) {
+      return {
+        task: observed,
+        commitRecovered: true,
+        recoveryCauseCode: String(error?.code || 'POST_COMMIT_ERROR').slice(0, 120),
+      };
+    }
+    throw error;
+  }
+}
+
+async function persistUnclaimedLinkOpsExecutionResult(args, {
+  current,
+  taskIndex,
+  next,
+  actorUser = '',
+  now = '',
+}) {
+  const tasks = normalizeLinkOpsTaskStore(current).tasks.slice();
+  if (!Number.isInteger(taskIndex) || taskIndex < 0 || taskIndex >= tasks.length) {
+    throw Object.assign(new Error('执行结果持久化缺少精确任务位置'), {
+      status: 409,
+      code: 'LINK_OPS_REVISION_CONFLICT',
+    });
+  }
+  const committedAt = now || next.updatedAt || new Date().toISOString();
+  const committedTask = {...next, updatedAt: committedAt};
+  const expectedPayloadHash = linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(committedTask));
+  const currentRevision = Number(tasks[taskIndex]?.repositoryRevision || 0);
+  if (!currentRevision) repositoryRevisionAtRequestStart(tasks[taskIndex], `task ${String(committedTask.id || '')}`);
+  const expectedRevision = currentRevision + 1;
+  let persistenceError = null;
+  try {
+    const persisted = await updateLinkOpsTaskRecord(args, tasks[taskIndex], committedTask, String(actorUser || ''));
+    const failureMarker = String(process.env.SHEIN_BI_TEST_EXECUTION_POST_COMMIT_FAIL_FILE || '');
+    if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+      const injected = new Error('injected link ops execution post-commit failure');
+      injected.code = 'LINK_OPS_EXECUTION_POST_COMMIT_INJECTED_FAILURE';
+      throw injected;
+    }
+    if (persisted
+      && String(persisted.repositoryPayloadHash || '') === expectedPayloadHash
+      && Number(persisted.repositoryRevision || 0) === expectedRevision) {
+      return {task: persisted, commitRecovered: false, recoveryCauseCode: ''};
+    }
+  } catch (error) {
+    persistenceError = error;
+  }
+  let observed = null;
+  try {
+    const readback = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+    observed = readback.tasks.find(row => String(row.id || '') === String(committedTask.id || '')) || null;
+  } catch (error) {
+    if (!persistenceError) persistenceError = error;
+  }
+  if (observed
+    && String(observed.repositoryPayloadHash || '') === expectedPayloadHash
+    && Number(observed.repositoryRevision || 0) === expectedRevision) {
+    return {
+      task: observed,
+      commitRecovered: Boolean(persistenceError),
+      recoveryCauseCode: persistenceError ? String(persistenceError?.code || 'POST_COMMIT_ERROR').slice(0, 120) : '',
+    };
+  }
+  if (persistenceError) throw persistenceError;
+  throw Object.assign(new Error('执行结果写入后无法按任务 payload hash 精确回读'), {
+    status: 409,
+    code: 'LINK_OPS_EXECUTION_READBACK_MISMATCH',
   });
 }
 
@@ -9740,6 +10410,13 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const now = new Date().toISOString();
   const rawRequestedMode = String(body.mode || body.executionMode || (body.execute === true ? 'execute' : 'dry-run') || 'dry-run').toLowerCase();
   const requestedMode = rawRequestedMode === 'execute' ? 'execute' : 'dry-run';
+  const runtimeCancellationSignal = args?.runtimeCancellationSignal || null;
+  if (requestedMode === 'execute' && taskCannotRepeatRealExecution(task)) {
+    const error = new Error('该任务已有终态或真实提交证据，禁止再次执行');
+    error.code = 'LINK_OPS_TERMINAL_EXECUTION_RETRY_DENIED';
+    error.status = 409;
+    throw error;
+  }
   let ownerKnowledgeDistribution = null;
   let ownerKnowledgeDistributionError = '';
   const ownerKnowledgeGenerationAtStart = Number(args?.getOwnerKnowledgeGeneration?.() || 0);
@@ -9842,6 +10519,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       preflight.blockers.push('真实提交必须先完成一次 系统检查，并停在“等你确认”状态。');
     }
     if (hasProductPublishIntent) {
+      if (writeStores.length !== 1) {
+        preflight.blockers.push('复制上品真实提交必须拆成单店任务串行执行；当前任务不能用一次确认覆盖多个目标店。');
+      }
       if (task?.execution?.state !== 'openapi_product_preflight_ready' || task?.execution?.preflight?.ok !== true) {
         preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 商品系统检查证据。');
       }
@@ -9859,6 +10539,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       }
     }
     if (hasMaintenanceIntent) {
+      if (writeStores.length !== 1) {
+        preflight.blockers.push('链接维护真实提交必须拆成单店任务串行执行；当前任务不能用一次确认覆盖多个目标店。');
+      }
       const maintenancePreflightReady = task?.execution?.state === 'link_maintenance_preflight_ready'
         || (intents.includes('update_description') && task?.execution?.state === 'update_description_already_matched');
       if (!maintenancePreflightReady || task?.execution?.preflight?.ok !== true) {
@@ -9885,6 +10568,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
             preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 缺少上一次 系统检查 锁定的 payload hash，不能真实提交。`);
           }
         }
+        const maintenancePayloadHashes = [...new Set(maintenanceIntents
+          .map(operation => payloadHashForMaintenanceFromTaskExecution(task, store, operation))
+          .filter(Boolean))];
+        if (maintenancePayloadHashes.length > 1) {
+          preflight.blockers.push(`${store} 的维护动作系统检查 payload hash 不一致，必须重新系统检查并拆分任务。`);
+        }
       }
     }
     executeAllowed = confirmTextPresent
@@ -9899,6 +10588,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       );
   }
   const executionContext = {
+    signal: runtimeCancellationSignal,
     actor: auditActor,
     requestMeta: auditRequestMeta,
     parentTaskId: String(task?.id || ''),
@@ -9934,7 +10624,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           confirm: allowExecute ? confirmText : '',
           confirmText: allowExecute ? confirmText : '',
           beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
-          executionContext,
+          executionContext: writeClaim ? {...executionContext, writeClaim} : executionContext,
         });
       } else {
         product = openApiProductExecutorTargetStores(runnableTask).map(storeKey => (
@@ -9951,7 +10641,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         confirm: allowExecute ? confirmText : '',
         confirmText: allowExecute ? confirmText : '',
         beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
-        executionContext,
+        executionContext: writeClaim ? {...executionContext, writeClaim} : executionContext,
       });
     }
     const maintenance = await runOpenApiMaintenanceExecutors(runnableTask, args, {
@@ -10011,19 +10701,50 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     if (testDelayMs) await new Promise(resolve => setTimeout(resolve, testDelayMs));
     const withConsistencyLock = args?.withOwnerKnowledgeConsistencyLock || (work => work());
     const guarded = await withConsistencyLock(async () => {
+      if (runtimeCancellationSignal?.aborted) {
+        return {guard: {ok: true, manifest: ownerKnowledgeDistribution}, webhookGate: null, executions: null, writeClaim: null, runtimeCancelled: true};
+      }
       const guard = await verifyDistributionUnchanged();
       if (!guard.ok || !executeAllowed) return {guard, webhookGate: null, executions: null};
       // Re-evaluate immediately before the executor receives execute=true. A
       // webhook may have closed a store gate during preparation.
       const webhookGate = await evaluateWebhookWriteGates();
       if (!webhookGate.ok) return {guard, webhookGate, executions: null};
-      if (maintenanceIntents.includes('update_description') && writeStores.length === 1) {
-        const expectedPayloadHash = payloadHashForMaintenanceFromTaskExecution(runnableTask, writeStores[0], 'update_description');
-        const claimResult = await claimUpdateDescriptionWriteAttempt(runnableTask, args, {
+      if (runtimeCancellationSignal?.aborted) {
+        return {guard, webhookGate, executions: null, writeClaim: null, runtimeCancelled: true};
+      }
+      if (hasProductPublishIntent && writeStores.length === 1) {
+        const expectedPayloadHash = payloadHashForStoreFromTaskExecution(runnableTask, writeStores[0]);
+        const claimResult = await claimLinkOpsWriteAttempt(runnableTask, args, {
           actor,
           req,
           storeKey: writeStores[0],
+          operation: 'copy_product_draft',
           expectedPayloadHash,
+          now,
+        });
+        if (!claimResult.ok) {
+          preflight.blockers.push(claimResult.error);
+          return {guard, webhookGate, executions: null, writeClaim: null};
+        }
+        executeWriteClaim = claimResult.claim;
+        executeWriteClaimState = 'claimed';
+        executeWriteClaimRevision = Number(claimResult.revision || 0);
+        runnableTask = claimResult.task;
+      } else if (hasMaintenanceIntent && writeStores.length === 1) {
+        const expectedPayloadHashes = [...new Set(maintenanceIntents
+          .map(operation => payloadHashForMaintenanceFromTaskExecution(runnableTask, writeStores[0], operation))
+          .filter(Boolean))];
+        if (expectedPayloadHashes.length !== 1) {
+          preflight.blockers.push(`${writeStores[0]} 的维护动作无法绑定唯一系统检查 payload hash，禁止真实提交。`);
+          return {guard, webhookGate, executions: null, writeClaim: null};
+        }
+        const claimResult = await claimLinkOpsWriteAttempt(runnableTask, args, {
+          actor,
+          req,
+          storeKey: writeStores[0],
+          operations: maintenanceIntents,
+          expectedPayloadHash: expectedPayloadHashes[0],
           now,
         });
         if (!claimResult.ok) {
@@ -10037,6 +10758,10 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       }
       return {guard, webhookGate, executions: await runExecutors(true, executeWriteClaim), writeClaim: executeWriteClaim};
     });
+    if (guarded.runtimeCancelled) {
+      preflight.blockers.push('Portal 正在关停；本次未创建 write claim，也未向 SHEIN 启动新的真实写执行器。');
+      executeAllowed = false;
+    }
     if (!guarded.guard.ok) {
       preflight.blockers.push('负责人规则在执行准备期间发生变化或尚未完成 GitHub 校验；本次未向 SHEIN 发出真实写请求，请重新系统检查和确认。');
       executeAllowed = false;
@@ -10054,18 +10779,11 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       openApiMaintenanceExecutors = dryRun.maintenance;
     }
     if (guarded.writeClaim && guarded.executions) {
-      const claimStore = String(guarded.writeClaim.storeKey || '').trim().toUpperCase();
-      const relevant = (openApiMaintenanceExecutors || []).find(run => (
-        String(run?.storeKey || '').trim().toUpperCase() === claimStore
-      )) || (openApiMaintenanceExecutors || [])[0];
-      const result = relevant?.result || {};
-      if (result?.adapterEvidence?.realSubmit === true) {
-        executeWriteClaimState = result?.readback?.ok === true ? 'completed' : 'unconfirmed';
-      } else if (result?.adapterEvidence?.writeAttempted === true || String(result?.state || '') === 'suspicious_write_attempted' || relevant?.suspiciousWriteAttempted === true) {
-        executeWriteClaimState = 'unconfirmed';
-      } else {
-        executeWriteClaimState = 'released';
-      }
+      executeWriteClaimState = resolveLinkOpsWriteClaimState({
+        writeClaim: guarded.writeClaim,
+        productExecutors: openApiProductExecutors,
+        maintenanceExecutors: openApiMaintenanceExecutors,
+      }) || executeWriteClaimState;
     }
   } else {
     const dryRun = await runExecutors(false);
@@ -10162,6 +10880,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ok: Boolean(executorResult.ok),
       mode: executorRun.mode || '',
       state: executorResult.state || '',
+      ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
       runId: executorResult.runId || '',
       savedTo: executorResult.savedTo || '',
       payload: executorResult.payload || null,
@@ -10190,6 +10909,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ok: Boolean(executorResult.ok),
       mode: executorRun.mode || '',
       state: executorResult.state || '',
+      ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
       runId: executorResult.runId || '',
       savedTo: executorResult.savedTo || '',
       adapterKind: executorResult.adapterKind || '',
@@ -10254,6 +10974,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         ok: Boolean(executorResults[0].ok),
         mode: executorRuns[0]?.mode || '',
         state: executorResults[0].state || '',
+        ...projectOpenApiExecutorAbortEvidence(executorResults[0], executorRuns[0]),
         runId: executorResults[0].runId || '',
         savedTo: executorResults[0].savedTo || '',
         payload: executorResults[0].payload || null,
@@ -10323,6 +11044,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           mode: executorRun?.mode || '',
           state: result.state || '',
           ok: Boolean(result.ok),
+          ...projectOpenApiExecutorAbortEvidence(result, executorRun),
           runId: result.runId || '',
           payloadHash: result.payload?.payloadHash || '',
           payloadHashAlgorithm: result.payload?.payloadHashAlgorithm || '',
@@ -10362,6 +11084,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       return {
         storeKey: executorResult.storeKey || '',
         state: executorResult.state || '',
+        ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
         runId: executorResult.runId || '',
         savedTo: executorResult.savedTo || '',
         adapterKind: executorResult.adapterKind || '',
@@ -10383,6 +11106,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       return {
         storeKey: executorResult.storeKey || '',
         state: executorResult.state || '',
+        ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
         runId: executorResult.runId || '',
         adapterKind: executorResult.adapterKind || '',
         matchedLinksCount: Number(executorResult.adapterEvidence?.matchedLinksCount || 0),
@@ -10404,46 +11128,190 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   };
 }
 
+const OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS = (() => {
+  const parsed = Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_KILL_GRACE_MS || 1_500);
+  return Number.isFinite(parsed) ? Math.max(50, Math.min(5_000, Math.floor(parsed))) : 1_500;
+})();
+
+// Bound after the SIGKILL escalation: if the child still never emits close by
+// this deadline, runChildProcess abandons the local stdio/unrefs the child and
+// settles with explicit ambiguous-failure evidence instead of hanging forever
+// or inventing a success. systemd KillMode=control-group remains the final
+// cgroup fallback for an unkillable process in production.
+const RUN_CHILD_PROCESS_FINAL_SETTLE_GRACE_MS = (() => {
+  const parsed = Number(process.env.SHEIN_LINK_OPS_CHILD_FINAL_SETTLE_GRACE_MS || 250);
+  return Number.isFinite(parsed) ? Math.max(50, Math.min(2_000, Math.floor(parsed))) : 250;
+})();
+
+function childAbortReason(signal) {
+  const reason = signal?.reason;
+  if (reason === undefined || reason === null || reason === '') return 'AbortSignal aborted';
+  if (typeof reason === 'string') return reason.slice(0, 300);
+  return String(reason?.message || reason?.code || reason).slice(0, 300);
+}
+
 function runChildProcess(command, args, options = {}) {
-  return new Promise(resolve => {
-    const child = spawn(command, args, {
-      cwd: options.cwd || ROOT,
-      env: {...process.env, ...(options.env || {})},
-      windowsHide: true,
-      stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+  const signal = options.signal || null;
+  const timeoutValue = Number(options.timeoutMs ?? 120_000);
+  const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue > 0 ? Math.floor(timeoutValue) : 120_000;
+  const killGraceValue = Number(options.killGraceMs ?? 2_000);
+  const killGraceMs = Number.isFinite(killGraceValue)
+    ? Math.max(50, Math.min(5_000, Math.floor(killGraceValue)))
+    : 2_000;
+  const settleGraceValue = Number(options.settleGraceMs ?? RUN_CHILD_PROCESS_FINAL_SETTLE_GRACE_MS);
+  const finalSettleGraceMs = Number.isFinite(settleGraceValue)
+    ? Math.max(50, Math.min(2_000, Math.floor(settleGraceValue)))
+    : RUN_CHILD_PROCESS_FINAL_SETTLE_GRACE_MS;
+  // Internal-only test seam used by the shutdown-lifecycle suite to inject a
+  // fake child whose kill() never produces close. Production callers never
+  // pass it, and no external input can reach this option.
+  const spawnImpl = typeof options.spawnImpl === 'function' ? options.spawnImpl : spawn;
+  const startedAt = Date.now();
+  if (signal?.aborted) {
+    return Promise.resolve({
+      ok: false,
+      code: null,
+      timedOut: false,
+      aborted: true,
+      abortReason: childAbortReason(signal),
+      terminationRequested: false,
+      terminationSignals: [],
+      terminationSignal: '',
+      exitSignal: '',
+      closeNeverObserved: false,
+      stdout: '',
+      stderr: '',
+      wallMs: Date.now() - startedAt,
     });
+  }
+  return new Promise(resolve => {
+    let child = null;
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 2000).unref?.();
-    }, options.timeoutMs || 120_000);
+    let aborted = false;
+    let abortReason = '';
+    let settled = false;
+    let terminationRequested = false;
+    const terminationSignals = [];
+    let timeoutTimer = null;
+    let killTimer = null;
+    let finalSettleTimer = null;
+    let abortListener = null;
+    let childErrorListener = null;
+    let childCloseListener = null;
+    const onStdout = chunk => { stdout += chunk; };
+    const onStderr = chunk => { stderr += chunk; };
+    const onStdinError = error => { stderr += `\nstdin error: ${error?.message || error}`; };
+
+    const cleanup = () => {
+      clearTimeout(timeoutTimer);
+      clearTimeout(killTimer);
+      clearTimeout(finalSettleTimer);
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener);
+      child?.stdout?.off?.('data', onStdout);
+      child?.stderr?.off?.('data', onStderr);
+      child?.stdin?.off?.('error', onStdinError);
+      if (childErrorListener) child?.off?.('error', childErrorListener);
+      if (childCloseListener) child?.off?.('close', childCloseListener);
+    };
+    const settle = ({code = null, exitSignal = '', spawnError = null, closeNeverObserved = false} = {}) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (spawnError) stderr += `${stderr ? '\n' : ''}${String(spawnError?.stack || spawnError)}`;
+      resolve({
+        ok: code === 0 && !timedOut && !aborted && !spawnError && !closeNeverObserved,
+        code: spawnError ? -1 : code,
+        timedOut,
+        aborted,
+        abortReason,
+        terminationRequested,
+        terminationSignals: [...terminationSignals],
+        terminationSignal: terminationSignals.at(-1) || '',
+        exitSignal: String(exitSignal || ''),
+        closeNeverObserved,
+        stdout,
+        stderr,
+        wallMs: Date.now() - startedAt,
+      });
+    };
+    const terminate = cause => {
+      if (settled) return;
+      if (cause === 'abort') {
+        aborted = true;
+        abortReason = childAbortReason(signal);
+      } else if (cause === 'timeout') {
+        timedOut = true;
+      }
+      if (!child || terminationRequested) return;
+      terminationRequested = true;
+      terminationSignals.push('SIGTERM');
+      try { child.kill('SIGTERM'); } catch (error) {
+        stderr += `\nSIGTERM failed: ${error?.message || error}`;
+      }
+      killTimer = setTimeout(() => {
+        if (settled) return;
+        terminationSignals.push('SIGKILL');
+        try { child.kill('SIGKILL'); } catch (error) {
+          stderr += `\nSIGKILL failed: ${error?.message || error}`;
+        }
+        // Bounded final settle grace after SIGKILL. If the child still never
+        // emits close (unkillable process / zombie), destroy the local stdio so
+        // no output is buffered against a dead pipe, unref the child so the
+        // runtime is not held hostage, and settle with explicit ambiguous
+        // failure evidence. Never a false success, never an unbounded hang.
+        // The settle timer deliberately stays ref'd: it is the guarantee that
+        // the failure evidence is produced even when no child handle keeps the
+        // event loop alive (ignored termination / already-orphaned child).
+        finalSettleTimer = setTimeout(() => {
+          if (settled) return;
+          try { child?.stdin?.destroy?.(); } catch {}
+          try { child?.stdout?.destroy?.(); } catch {}
+          try { child?.stderr?.destroy?.(); } catch {}
+          try { child?.unref?.(); } catch {}
+          settle({closeNeverObserved: true});
+        }, finalSettleGraceMs);
+      }, killGraceMs);
+    };
+
+    try {
+      child = spawnImpl(command, args, {
+        cwd: options.cwd || ROOT,
+        env: {...process.env, ...(options.env || {})},
+        windowsHide: true,
+        stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      settle({spawnError: error});
+      return;
+    }
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', d => { stdout += d; });
-    child.stderr.on('data', d => { stderr += d; });
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
+    childErrorListener = error => settle({spawnError: error});
+    childCloseListener = (code, exitSignal) => settle({code, exitSignal});
+    child.once('error', childErrorListener);
+    child.once('close', childCloseListener);
+    if (signal) {
+      abortListener = () => terminate('abort');
+      signal.addEventListener('abort', abortListener, {once: true});
+      // Close the spawn/listener race: AbortSignal dispatch is synchronous, but
+      // it may have fired between the pre-spawn check and listener attachment.
+      if (signal.aborted) abortListener();
+    }
+    timeoutTimer = setTimeout(() => terminate('timeout'), timeoutMs);
     if (options.stdin) {
-      child.stdin.on('error', err => {
-        stderr += `\nstdin error: ${err?.message || err}`;
-      });
+      child.stdin.on('error', onStdinError);
       try {
         child.stdin.write(String(options.stdin));
         child.stdin.end();
-      } catch (err) {
-        stderr += `\nstdin write failed: ${err?.message || err}`;
-        try { child.kill('SIGTERM'); } catch {}
+      } catch (error) {
+        stderr += `\nstdin write failed: ${error?.message || error}`;
+        terminate('stdin-error');
       }
     }
-    child.on('error', err => {
-      clearTimeout(timer);
-      resolve({ok: false, code: -1, timedOut, stdout, stderr: String(err?.stack || err)});
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve({ok: code === 0 && !timedOut, code, timedOut, stdout, stderr});
-    });
   });
 }
 
@@ -10800,9 +11668,68 @@ function withBiSectionRefreshFailureHeaders(root, section, headers = {}) {
   };
 }
 
+const BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.SHEIN_BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS || 15_000);
+  return Number.isFinite(raw) ? Math.max(1_500, Math.min(120_000, Math.trunc(raw))) : 15_000;
+})();
+
+const BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS = (() => {
+  const raw = Number(process.env.SHEIN_BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS || 2_000);
+  return Number.isFinite(raw) ? Math.max(250, Math.min(10_000, Math.trunc(raw))) : 2_000;
+})();
+
+// Injectable spawn specification for the fire-and-forget enqueue child. The
+// production default is the tracked enqueue script under /usr/bin/env; tests
+// may point the spec at a deterministic fixture to prove that a hung child is
+// really terminated and the pending key is only released after the child
+// closes. Env values are "command|arg1|arg2" (pipe-separated pieces).
+function biSectionEnqueueChildSpec() {
+  const raw = String(process.env.SHEIN_BI_SECTION_ENQUEUE_CHILD_SPEC || '').trim();
+  if (raw) {
+    const parts = raw.split('|').map(part => String(part || '').trim()).filter(Boolean);
+    if (!parts.length) {
+      throw new Error('SHEIN_BI_SECTION_ENQUEUE_CHILD_SPEC must be command|arg1|arg2');
+    }
+    return {command: parts[0], args: parts.slice(1)};
+  }
+  return {
+    command: '/usr/bin/env',
+    args: ['bash', path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh')],
+  };
+}
+
+function terminateBiSectionEnqueueChild(child, signal) {
+  const pid = Number(child?.pid || 0);
+  if (process.platform !== 'win32' && Number.isSafeInteger(pid) && pid > 0) {
+    try {
+      // The production child is detached into its own process group, so kill
+      // bash plus any lock/helper descendants instead of orphaning them.
+      process.kill(-pid, signal);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ESRCH') return true;
+    }
+  }
+  try { return child?.kill?.(signal) === true; } catch { return false; }
+}
+
 function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
   if (!BI_EXTERNAL_SECTION_QUEUE_ENABLED || BI_INLINE_FAST_SECTIONS.has(section)) return false;
-  const key = `${section}|${generatedAt || ''}`;
+  const refreshToken = String(options.refreshToken || '').trim().slice(0, 160);
+  // A force refresh must never enter the managed queue without an explicit
+  // refresh token: the queue would blindly reuse one stable per-generation key
+  // and its 30-day completed tombstone would swallow later business reruns.
+  // Fail closed here no matter how the caller reached the host-locked path.
+  if (options.force === true && !refreshToken) {
+    console.error(`[bi-section-queue] refusing force enqueue without refreshToken section=${section} generatedAt=${generatedAt || ''}`);
+    return false;
+  }
+  const idempotencyKey = String(options.idempotencyKey || (
+    options.force === true
+      ? biPortalForceRefreshIdempotencyKey(generatedAt, refreshToken)
+      : biPortalCoreWarmupIdempotencyKey(generatedAt)
+  ));
+  const key = `${section}|${generatedAt || ''}|${idempotencyKey}`;
   if (biExternalSectionQueuePending.has(key)) return true;
   biExternalSectionQueuePending.add(key);
   // A user pressing "force refresh" must not sit behind background rebuilds.
@@ -10814,28 +11741,61 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
       ? '0'
       : (BI_OWNER_VISIBLE_PRIORITY_SECTIONS.has(section) ? '10' : '50'));
   const reason = sanitizeBiQueueReason(options.reason || `portal-${generatedAt || 'current'}`);
-  const child = spawn('/usr/bin/env', [
-    'bash',
-    path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
+  const spec = biSectionEnqueueChildSpec();
+  const child = spawn(spec.command, [
+    ...spec.args,
     '--sections', section,
     '--priority', priority,
     '--reason', reason,
+    '--idempotency-key', idempotencyKey,
   ], {
     cwd: ROOT,
     env: process.env,
     stdio: ['ignore', 'ignore', 'ignore'],
+    detached: process.platform !== 'win32',
   });
+  // The in-process pending key is released ONLY on a real terminal child
+  // state ('error' or 'close'). A fire-and-forget enqueue that wedges must be
+  // terminated (SIGTERM then SIGKILL after a bounded grace period) so the same
+  // section/generation can be enqueued again instead of stacking duplicate
+  // worker processes behind a never-cleared pending entry.
+  let settled = false;
+  let deadlineExceeded = false;
+  let pendingTimer = null;
+  let killGraceTimer = null;
+  const clearPending = () => {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    if (killGraceTimer) { clearTimeout(killGraceTimer); killGraceTimer = null; }
+    biExternalSectionQueuePending.delete(key);
+  };
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    clearPending();
+  };
   child.once('error', error => {
+    settle();
     console.error(`[bi-section-queue] enqueue failed section=${section} error=${String(error?.message || error)}`);
   });
-  child.once('exit', code => {
+  child.once('close', (code, signal) => {
+    settle();
     if (code && code !== 75) {
-      console.error(`[bi-section-queue] enqueue exited section=${section} code=${code}`);
+      console.error(`[bi-section-queue] enqueue exited section=${section} code=${code} signal=${String(signal || '')}${deadlineExceeded ? ' terminated-after-deadline' : ''}`);
     }
   });
   child.unref?.();
-  const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
-  timer.unref?.();
+  pendingTimer = setTimeout(() => {
+    pendingTimer = null;
+    deadlineExceeded = true;
+    console.error(`[bi-section-queue] enqueue child exceeded ${BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS}ms; terminating section=${section} pid=${child.pid}`);
+    terminateBiSectionEnqueueChild(child, 'SIGTERM');
+    killGraceTimer = setTimeout(() => {
+      killGraceTimer = null;
+      terminateBiSectionEnqueueChild(child, 'SIGKILL');
+    }, BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS);
+    killGraceTimer.unref?.();
+  }, BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS);
+  pendingTimer.unref?.();
   return true;
 }
 
@@ -10935,12 +11895,6 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
         `live accounting queue persistence did not account for every requested section exactly once: priority=${group.priority} requested=${[...requested].join(',')} accounted=${[...accounted].join(',')}`,
       );
     }
-    for (const section of group.sections) {
-      const key = `${section}|${generatedAt || ''}`;
-      biExternalSectionQueuePending.add(key);
-      const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
-      timer.unref?.();
-    }
     for (const field of ['newlyQueued', 'updatedRevision', 'deduplicatedPending', 'deduplicatedCompleted', 'coalescedRerun', 'requeuedCompleted', 'supersededByExisting']) {
       aggregate[field].push(...outcome[field]);
     }
@@ -10960,13 +11914,15 @@ async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt
     || accountingState?.minimumPublishedAt
     || '',
   );
-  const key = `${generatedAt || ''}|${targetAt}`;
+  const idempotencyKey = biPortalHomepageAccountingIdempotencyKey(accountingState, generatedAt);
+  const key = idempotencyKey;
   if (biAccountingCatchupTargets.has(key)) {
     await biAccountingCatchupTargets.get(key);
     return false;
   }
   const pending = persistHostLockedBiSectionPlan(liveAccountingQueuePlan({kind: 'order'}), generatedAt, {
     reason: `homepage-accounting-stale-${generatedAt || 'current'}`,
+    idempotencyKey,
   });
   biAccountingCatchupTargets.set(key, pending);
   try {
@@ -11005,6 +11961,7 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
     return enqueueHostLockedBiSection(section, generatedAt, {
       reason: force ? `portal-force-${generatedAt || 'current'}` : `portal-cache-miss-${generatedAt || 'current'}`,
       force,
+      refreshToken,
       priority: options.priority,
     });
   }
@@ -11128,30 +12085,15 @@ function isCurrentProfitSectionCache(cache, generatedAt, minCachedAt = '') {
 }
 
 async function readBiSectionArtifactIdentity(root, section) {
-  const file = path.join(root, 'sections', `${section}.json`);
-  let handle;
-  try {
-    handle = await fs.open(file, 'r');
-    const stat = await handle.stat();
-    const buffer = Buffer.alloc(Math.min(8192, Math.max(1, Number(stat.size || 0))));
-    const {bytesRead} = await handle.read(buffer, 0, buffer.length, 0);
-    const head = buffer.subarray(0, bytesRead).toString('utf8');
-    const stringField = field => new RegExp(`"${field}"\\s*:\\s*"([^"]*)"`).exec(head)?.[1] || '';
-    const generatedAt = stringField('generatedAt');
-    const cachedAt = stringField('cachedAt');
-    if (!generatedAt || !cachedAt) return null;
-    return {
-      generatedAt,
-      cachedAt,
-      size: Number(stat.size || 0),
-      mtimeMs: Number(stat.mtimeMs || 0),
-      cacheKey: `${path.resolve(root)}|${section}|${generatedAt}|${cachedAt}|${Number(stat.size || 0)}|${Number(stat.mtimeMs || 0)}`,
-    };
-  } catch {
-    return null;
-  } finally {
-    await handle?.close().catch(() => {});
-  }
+  const meta = await readBiSectionMetadata(root, section);
+  if (!meta) return null;
+  return {
+    generatedAt: meta.generatedAt,
+    cachedAt: meta.cachedAt,
+    size: meta.size,
+    mtimeMs: meta.mtimeMs,
+    cacheKey: meta.cacheKey,
+  };
 }
 
 function buildBiProductProfitIndex(profitCache, cacheKey = '', productDisplayNames = {}) {
@@ -11640,9 +12582,27 @@ async function loadBiSection(args, root, section, options = {}) {
       ...biSectionRefreshFailureFields(root, section),
     },
   };
-  const force = !!options.force;
-  const allowGenerate = options.allowGenerate !== false;
-  const allowStale = options.allowStale !== false;
+ const force = !!options.force;
+ const allowGenerate = options.allowGenerate !== false;
+ const allowStale = options.allowStale !== false;
+  if (force && sectionRequiresHostLockedWorker(section, options) && !String(options.refreshToken || '').trim()) {
+    // A force refresh of a host-locked section always flows through the
+    // managed queue at some point. Without an explicit refresh token it would
+    // collapse to one stable per-generation key whose 30-day completed
+    // tombstone silently swallows later business reruns of the same core
+    // generation. Reject explicitly instead of minting an untokened request:
+    // callers must pass a deterministic run/attempt token (same run reuses it,
+    // a different run forms a new request).
+    return {
+      status: 400,
+      payload: {
+        ok: false,
+        section,
+        code: 'BI_SECTION_FORCE_REFRESH_TOKEN_REQUIRED',
+        error: 'host-locked section force refresh requires a stable refreshToken (same run reuses it; a different run uses a new token)',
+      },
+    };
+  }
   if (section === 'productProfit') {
     // Request-state productProfit is deliberately outside BI_PORTAL_SECTION_KEYS:
     // it must never be prewarmed, never enter the external section queue, and
@@ -11831,7 +12791,7 @@ async function loadBiSection(args, root, section, options = {}) {
               coreGeneratedAt: meta.generatedAt,
             },
           });
-          if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+          if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
           return {status: 200, payload: {...derived, cacheHit: false, coreGeneratedAt: meta.generatedAt}};
         }
       } catch (error) {
@@ -11860,11 +12820,11 @@ async function loadBiSection(args, root, section, options = {}) {
       },
     });
     if (currentRaw) {
-      return {status: 202, rawBody: currentRaw.body, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)}};
+      return {status: 202, rawBody: currentRaw.stream, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)}};
     }
     const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, {...options, refreshScheduled});
     if (staleRaw) {
-      return {status: 202, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)})};
+      return {status: 202, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)})};
     }
     const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
     if (stale) {
@@ -11897,7 +12857,7 @@ async function loadBiSection(args, root, section, options = {}) {
     );
     if (sourceFresh) {
       const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
-      if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
+      if (rawCached) return {status: 200, rawBody: rawCached.stream, headers: rawCached.headers};
       return {status: 200, payload: {...cached, cacheHit: true}};
     }
     // A stale-source homeProfit cache is never a valid 200: only the current
@@ -11978,7 +12938,7 @@ async function loadBiSection(args, root, section, options = {}) {
     }
     if (payload) {
       const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
-      if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+      if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
       return {status: 200, payload: {...payload, cacheHit: false}};
     }
     return {
@@ -11993,14 +12953,14 @@ async function loadBiSection(args, root, section, options = {}) {
   }
   if (!force) {
     const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
-    if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
+    if (rawCached) return {status: 200, rawBody: rawCached.stream, headers: rawCached.headers};
     const cached = await readBiSectionCache(root, section, meta.generatedAt);
     if (cached) return {status: 200, payload: {...cached, cacheHit: true}};
   }
   if (!allowGenerate) {
     if (!force && allowStale) {
       const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
-      if (staleRaw) return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
+      if (staleRaw) return {status: 200, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
       const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
       if (stale) {
         return {status: 200, payload: {...stale, cacheHit: true, staleSection: true, cacheStale: true, coreGeneratedAt: meta.generatedAt}};
@@ -12029,12 +12989,17 @@ async function loadBiSection(args, root, section, options = {}) {
       refreshScheduled,
     });
     if (staleRaw) {
-      return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
+      return {status: 200, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
     }
   }
   if (sectionRequiresHostLockedWorker(section, options)) {
     const refreshScheduled = enqueueHostLockedBiSection(section, meta.generatedAt, {
-      reason: `portal-empty-cache-${meta.generatedAt || 'current'}`,
+      reason: force && options.refreshToken
+        ? `portal-force-sync-${meta.generatedAt || 'current'}`
+        : `portal-empty-cache-${meta.generatedAt || 'current'}`,
+      force: force === true,
+      refreshToken: options.refreshToken,
+      priority: force === true ? '0' : undefined,
     });
     return {
       status: 202,
@@ -12063,13 +13028,13 @@ async function loadBiSection(args, root, section, options = {}) {
     if (allowStale) {
       const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
       if (staleRaw) {
-        return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
+        return {status: 200, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
       }
     }
     throw error;
   }
   const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
-  if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+  if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
   return {status: 200, payload: {...payload, cacheHit: false}};
 }
 
@@ -12235,6 +13200,72 @@ export function liveAccountingQueuePlan(event = {}) {
   ];
 }
 
+export function normalizeBiLiveAccountingGeneration(meta) {
+  const generatedAt = String(meta?.generatedAt || '').trim();
+  const exactIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
+  if (meta?.mode !== 'api' || !exactIso.test(generatedAt) || !Number.isFinite(Date.parse(generatedAt))) return '';
+  return generatedAt;
+}
+
+function biLiveAccountingGuardError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+export async function executeBiLiveAccountingRefreshAttempt({
+  sourceEvent,
+  allowGenerateSections,
+  readCoreMeta,
+  generateLiveProjection,
+  clearLiveProjectionFailure,
+  persistAccountingPlan,
+  publish,
+  now = () => new Date(),
+} = {}) {
+  if (!allowGenerateSections) {
+    throw biLiveAccountingGuardError(
+      'BI_LIVE_ACCOUNTING_GENERATION_DISABLED',
+      'live accounting generation is disabled for this Portal surface',
+    );
+  }
+  const meta = await readCoreMeta();
+  const generatedAt = normalizeBiLiveAccountingGeneration(meta);
+  if (!generatedAt) {
+    throw biLiveAccountingGuardError(
+      'BI_LIVE_ACCOUNTING_GENERATION_MISSING',
+      'live accounting requires a valid API core generation',
+    );
+  }
+  await generateLiveProjection(generatedAt);
+  clearLiveProjectionFailure?.();
+  publish?.({
+    ...sourceEvent,
+    occurredAt: now().toISOString(),
+    liveProjectionRefreshed: true,
+  });
+  const accountingQueue = liveAccountingQueuePlan(sourceEvent);
+  if (!accountingQueue.length) {
+    return {ok: true, generatedAt, liveProjectionRefreshed: true, accountingQueued: false};
+  }
+  try {
+    await persistAccountingPlan(accountingQueue, generatedAt, {
+      reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
+      idempotencyKey: biPortalLiveAccountingIdempotencyKey(generatedAt, sourceEvent),
+    });
+  } catch (error) {
+    if (error && typeof error === 'object') error.liveProjectionRefreshed = true;
+    throw error;
+  }
+  publish?.({
+    ...sourceEvent,
+    occurredAt: now().toISOString(),
+    liveProjectionRefreshed: true,
+    accountingQueued: true,
+  });
+  return {ok: true, generatedAt, liveProjectionRefreshed: true, accountingQueued: true};
+}
+
 function livePgClientConfig(env = process.env) {
   const {max, ...config} = warehousePgConfigFromEnv(env);
   return {
@@ -12289,6 +13320,31 @@ export function createBiLiveUpdateBridge(options = {}) {
     try { await target?.end?.(); } catch {}
     if (!stopped) scheduleReconnect();
   };
+  const removeSseClient = (response, {terminate = false} = {}) => {
+    if (!response) return false;
+    const removed = clients.delete(response);
+    if (terminate && removed) {
+      try { response.end?.(); } catch {}
+      if (!response.writableEnded && !response.destroyed) {
+        try { response.destroy?.(); } catch {}
+      }
+    }
+    return removed;
+  };
+  const writeSse = (response, payload) => {
+    if (!clients.has(response)) return false;
+    try {
+      const accepted = response.write(payload);
+      if (accepted === false) {
+        removeSseClient(response, {terminate: true});
+        return false;
+      }
+      return true;
+    } catch {
+      removeSseClient(response, {terminate: true});
+      return false;
+    }
+  };
   const publish = event => {
     if (!event) return;
     const wire = JSON.stringify({
@@ -12297,11 +13353,7 @@ export function createBiLiveUpdateBridge(options = {}) {
       receivedAt: now().toISOString(),
     });
     for (const response of [...clients]) {
-      try {
-        response.write(`event: live-update\ndata: ${wire}\n\n`);
-      } catch {
-        clients.delete(response);
-      }
+      writeSse(response, `event: live-update\ndata: ${wire}\n\n`);
     }
   };
   const handleNotification = notification => {
@@ -12360,14 +13412,17 @@ export function createBiLiveUpdateBridge(options = {}) {
   };
   const addSseClient = response => {
     clients.add(response);
-    response.write(`retry: ${Math.max(1_000, reconnectMs)}\nevent: ready\ndata: ${JSON.stringify({ok: true, live: status()})}\n\n`);
-    return () => clients.delete(response);
+    const remove = () => removeSseClient(response);
+    response.once?.('error', remove);
+    response.once?.('close', remove);
+    writeSse(response, `retry: ${Math.max(1_000, reconnectMs)}\nevent: ready\ndata: ${JSON.stringify({ok: true, live: status()})}\n\n`);
+    return remove;
   };
   const start = async () => {
     if (heartbeatMs > 0 && !heartbeatTimer) {
       heartbeatTimer = setInterval(() => {
         for (const response of [...clients]) {
-          try { response.write(`: keepalive ${now().toISOString()}\n\n`); } catch { clients.delete(response); }
+          writeSse(response, `: keepalive ${now().toISOString()}\n\n`);
         }
       }, heartbeatMs);
       heartbeatTimer.unref?.();
@@ -12375,21 +13430,21 @@ export function createBiLiveUpdateBridge(options = {}) {
     await connect();
     return status();
   };
+  const closeSseClients = () => {
+    for (const response of [...clients]) removeSseClient(response, {terminate: true});
+  };
   const stop = async () => {
     stopped = true;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = null;
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = null;
-    for (const response of clients) {
-      try { response.end(); } catch {}
-    }
-    clients.clear();
+    closeSseClients();
     const current = client;
     client = null;
     await Promise.allSettled([connecting, current?.end?.()]);
   };
-  return {start, stop, addSseClient, publish, status};
+  return {start, stop, closeSseClients, addSseClient, publish, status};
 }
 
 async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
@@ -12440,6 +13495,25 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       logBiPortalCoreWarmup('queue-owned-contradiction', {error: message});
       return {scheduled: false, reason: 'queue-owned-without-external-queue', error: message};
     }
+    const attemptNow = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+    if (biPortalCoreWarmupState.failureGeneratedAt
+      && biPortalCoreWarmupState.failureGeneratedAt !== generatedAt) {
+      resetBiPortalCoreWarmupEnqueueBackoff();
+      if (biPortalCoreWarmupState.status === 'error') {
+        biPortalCoreWarmupState.status = 'idle';
+        biPortalCoreWarmupState.lastError = '';
+      }
+    }
+    if (biPortalCoreWarmupState.failureGeneratedAt === generatedAt
+      && biPortalCoreWarmupState.nextAttemptAt > attemptNow) {
+      return {
+        scheduled: false,
+        reason: 'enqueue-backoff',
+        generatedAt,
+        consecutiveFailures: biPortalCoreWarmupState.consecutiveFailures,
+        nextAttemptAt: new Date(biPortalCoreWarmupState.nextAttemptAt).toISOString(),
+      };
+    }
     if (biPortalCoreWarmupState.status === 'queued' && biPortalCoreWarmupState.generatedAt === generatedAt) {
       return {scheduled: false, reason: 'already-queued', generatedAt};
     }
@@ -12464,6 +13538,7 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       });
       biPortalCoreWarmupState.inFlight = enqueueRun;
       const enqueued = await enqueueRun;
+      resetBiPortalCoreWarmupEnqueueBackoff();
       const requestedCount = sections.length;
       const completedCount = (enqueued.deduplicatedCompleted || []).length;
       const activeCount = (enqueued.newlyQueued || []).length
@@ -12526,6 +13601,7 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
             requeueCompletedSections: terminal.invalid,
           },
         );
+        resetBiPortalCoreWarmupEnqueueBackoff();
         // A requeue can be superseded by a newer-generation entry that already
         // owns one or more section slots in the queue: this generation must
         // never claim queued/done.  Re-read live state and defer to the newer
@@ -12576,9 +13652,23 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       });
       return {scheduled: true, reason: 'queued', generatedAt, sections, queued: enqueued.queued};
     } catch (error) {
-      biPortalCoreWarmupState.lastError = error?.message || String(error || 'warmup enqueue failed');
-      logBiPortalCoreWarmup('enqueue-failed', {generatedAt, error: biPortalCoreWarmupState.lastError.slice(0, 500)});
-      return {scheduled: false, reason: 'enqueue-failed', error: biPortalCoreWarmupState.lastError};
+      const message = error?.message || String(error || 'warmup enqueue failed');
+      const failedAt = Number.isFinite(Number(options.nowMs)) ? attemptNow : Date.now();
+      const failure = recordBiPortalCoreWarmupEnqueueFailure(generatedAt, message, failedAt);
+      logBiPortalCoreWarmup('enqueue-failed', {
+        generatedAt,
+        error: message.slice(0, 500),
+        consecutiveFailures: failure.consecutiveFailures,
+        delayMs: failure.delayMs,
+        nextAttemptAt: new Date(failure.nextAttemptAt).toISOString(),
+      });
+      return {
+        scheduled: false,
+        reason: 'enqueue-failed',
+        error: message,
+        consecutiveFailures: failure.consecutiveFailures,
+        nextAttemptAt: new Date(failure.nextAttemptAt).toISOString(),
+      };
     }
   }
 
@@ -12628,6 +13718,9 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
       }
 
       const sectionStartedAt = Date.now();
+      // `result` lives at iteration scope so the finally below always sees
+      // the rawBody handover, even when a statement in between throws.
+      let result = null;
       try {
         const existingCache = await readBiSectionCache(root, section, generatedAt).catch(() => null);
         const existingHomeProfit = existingCache?.data?.homeProfitSummary;
@@ -12645,7 +13738,7 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
           logBiPortalCoreWarmup('section-skip-cache', {section, generatedAt});
           continue;
         }
-        const result = await loadBiSection(args, root, section, {
+        result = await loadBiSection(args, root, section, {
           force: true,
           allowGenerate: options.allowGenerate !== false,
           allowStale: false,
@@ -12669,6 +13762,12 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
         const error = err?.message || String(err || 'section failed');
         failures.push({section, status: 500, error});
         logBiPortalCoreWarmup('section-failed', {section, durationMs, error: error.slice(0, 500)});
+      } finally {
+        // Warmup only reads status/headers of the freshly generated section;
+        // deterministically release any rawBody stream before the next pass.
+        // finally (not an after-the-fact call) guarantees the release even
+        // when a statement between the load and the disposal throws.
+        await disposeBiSectionRawBody(result?.rawBody);
       }
     }
   } catch (err) {
@@ -12807,13 +13906,86 @@ async function askReadonlyOpsAgent(question, options = {}) {
   };
 }
 
+/**
+ * Deterministically release a section raw-body stream that loadBiSection
+ * returned but that is not delivered to any HTTP response. The direct query
+ * preparation loop and the core warmup loop only read status/headers, so an
+ * unconsumed rawBody stream keeps its transferred FileHandle open until a GC
+ * finalizer closes it and emits a DEP0137 warning.
+ *
+ * The promise never resolves early: only the real 'close' event (or a stream
+ * already observed `closed`) counts as released, matching the cache layer
+ * where ownedSectionStream releases the FileHandle inside the close handler.
+ * A stream that is merely `destroyed` is still awaited until its close
+ * lands, so tight call loops cannot stack up fds behind a premature resolve.
+ * Errors are swallowed by a listener but never treated as completion,
+ * destroy() is only invoked on a pristine (not destroyed/not ended) stream
+ * so an install/close race cannot deadlock the waiter, and no error is
+ * rethrown into the caller.
+ */
+async function disposeBiSectionRawBody(rawBody) {
+  if (!rawBody || typeof rawBody.destroy !== 'function') return;
+  await new Promise(resolve => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      rawBody.removeListener('close', finish);
+      rawBody.removeListener('error', swallow);
+      resolve();
+    };
+    const swallow = () => {
+      // An error after destroy never shortcuts the wait: the FileHandle is
+      // released only when 'close' fires. The listener exists solely so the
+      // error cannot become an unhandled 'error' event while we wait.
+    };
+    rawBody.once('close', finish);
+    rawBody.once('error', swallow);
+    if (rawBody.closed === true) {
+      // A close that raced between the initial check and listener
+      // installation must not deadlock the waiter.
+      finish();
+      return;
+    }
+    // `destroyed` alone is NOT proof of closure: it flips synchronously while
+    // 'close' (and the fd release in ownedSectionStream) can still be pending
+    // for a tick. Only a pristine stream needs the destroy that schedules the
+    // close; an already destroyed or already ended stream is left alone and
+    // the waiter resolves on the real 'close'.
+    if (rawBody.destroyed || rawBody.readableEnded) return;
+    try {
+      rawBody.destroy();
+    } catch {
+      // destroy() throwing synchronously is outside the stream contract;
+      // settle so the caller never hangs. Owned cache streams never throw
+      // here -- their close always follows destroy.
+      finish();
+    }
+  });
+}
+
 async function loadDirectBiQuery(args, root, actor, question, options = {}) {
   const plan = planBiOpsDirectQuerySections(question, {sections: options.sections || []});
   const preparation = [];
+  const signal = options.signal || null;
+  const cancelledError = () => {
+    const error = new Error('BI query cancelled by deadline or client disconnect');
+    error.name = 'AbortError';
+    error.code = 'BI_QUERY_CANCELLED';
+    return error;
+  };
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw cancelledError();
+  };
   for (const section of plan.sections) {
     const startedAt = Date.now();
+    throwIfAborted();
+    // `result` lives at iteration scope so the finally can always reach the
+    // rawBody handover, even when a statement between the load and the
+    // disposal throws.
+    let result = null;
     try {
-      const result = await loadBiSection(args, root, section, {
+      result = await loadBiSection(args, root, section, {
         force: false,
         allowGenerate: options.allowGenerate !== false,
         // Link performance is a daily business snapshot while the core sales
@@ -12838,17 +14010,30 @@ async function loadDirectBiQuery(args, root, actor, question, options = {}) {
         durationMs: Date.now() - startedAt,
         error: String(error?.message || error).slice(0, 500),
       });
+    } finally {
+      // The preparation loop only reads status/payload; any rawBody stream
+      // must be destroyed and awaited closed so its FileHandle is not
+      // leaked. finally (not an after-the-fact call) guarantees the release
+      // even when the status/payload handling above throws.
+      await disposeBiSectionRawBody(result?.rawBody);
     }
   }
 
-  const loaded = await loadBiOpsQueryData({
+  throwIfAborted();
+  // The AbortSignal is handed to the JSON reader itself (chunked, checked
+  // between reads), so a deadline or disconnect cancels the heap-heavy read
+  // cooperatively instead of racing it and leaving it running.
+  const loadPromise = loadBiOpsQueryData({
     question,
     dataPath: path.join(root, 'data.json'),
     sectionsDir: path.join(root, 'sections'),
     sections: plan.sections,
     maxCoreBytes: 64 * 1024 * 1024,
     maxSectionBytes: 96 * 1024 * 1024,
+    signal,
   });
+  const loaded = await loadPromise;
+  throwIfAborted();
   const response = buildBiOpsDirectQueryResponse({
     question,
     sections: plan.sections,
@@ -12956,23 +14141,333 @@ function sendJson(res, status, value, headers = {}) {
   send(res, status, JSON.stringify(value, null, 2), {'Content-Type': 'application/json; charset=utf-8', ...headers});
 }
 
-function sendLargeJson(req, res, status, value, headers = {}) {
-  const body = Buffer.from(JSON.stringify(value), 'utf8');
-  if (body.length >= 64 * 1024 && acceptsGzip(req.headers['accept-encoding'])) {
-    const compressed = gzipSync(body, {level: 6});
-    return send(res, status, compressed, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Encoding': 'gzip',
-      'Content-Length': String(compressed.length),
-      'Vary': 'Accept-Encoding',
-      ...headers,
-    });
+const JSON_STRING_SLICE = 8192;
+const JSON_STREAM_CHUNK_LIMIT = 64 * 1024;
+
+function streamingAbortError() {
+  const error = new Error('BI large JSON stream cancelled by deadline or client disconnect');
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+function serializationError(code, message) {
+  const error = new TypeError(message);
+  error.code = code;
+  return error;
+}
+
+function checkStreamingAbort(state) {
+  if (state.signal?.aborted || state.req?.destroyed || state.res?.destroyed) {
+    throw streamingAbortError();
   }
-  return send(res, status, body, {
+}
+
+// Genuine boxed String/Number/Boolean/BigInt objects carry the corresponding
+// internal data slot. The builtin prototype valueOf calls can observe that
+// slot but cannot be forged by an own valueOf, Symbol.toStringTag or a
+// prototype alias, so they are the JSON.stringify-compatible discriminator
+// (JSON.stringify unboxes genuine boxed primitives and their subclasses, but
+// serializes a forged/aliased object as an ordinary object).
+function unboxBuiltinPrimitive(value) {
+  try { return {kind: 'number', value: Number.prototype.valueOf.call(value)}; } catch {}
+  try { return {kind: 'string', value: String.prototype.valueOf.call(value)}; } catch {}
+  try { return {kind: 'boolean', value: Boolean.prototype.valueOf.call(value)}; } catch {}
+  try { return {kind: 'bigint', value: BigInt.prototype.valueOf.call(value)}; } catch {}
+  return null;
+}
+
+// JSON.stringify-compatible string escaping with a strict UTF-16 boundary: a
+// valid surrogate pair is never split across slice boundaries, and lone
+// surrogates are escaped as \uXXXX (lowercase hex, matching JSON.stringify).
+function escapeJsonStringSlice(str, start, end) {
+  const parts = [];
+  let index = start;
+  while (index < end) {
+    const code = str.charCodeAt(index);
+    if (code === 0x22) {
+      parts.push('\\"');
+      index += 1;
+      continue;
+    }
+    if (code === 0x5c) {
+      parts.push('\\\\');
+      index += 1;
+      continue;
+    }
+    if (code < 0x20) {
+      if (code === 0x08) parts.push('\\b');
+      else if (code === 0x09) parts.push('\\t');
+      else if (code === 0x0a) parts.push('\\n');
+      else if (code === 0x0c) parts.push('\\f');
+      else if (code === 0x0d) parts.push('\\r');
+      else parts.push(`\\u${code.toString(16).padStart(4, '0')}`);
+      index += 1;
+      continue;
+    }
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < end ? str.charCodeAt(index + 1) : -1;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        parts.push(str[index], str[index + 1]);
+        index += 2;
+      } else {
+        parts.push(`\\u${code.toString(16).padStart(4, '0')}`);
+        index += 1;
+      }
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      parts.push(`\\u${code.toString(16).padStart(4, '0')}`);
+      index += 1;
+      continue;
+    }
+    // Batch a run of plain (non-surrogate, non-special) code units so normal
+    // ASCII/Chinese runs do not emit one micro-token per character.
+    let runEnd = index + 1;
+    while (runEnd < end) {
+      const next = str.charCodeAt(runEnd);
+      if (next === 0x22 || next === 0x5c || next < 0x20 || (next >= 0xd800 && next <= 0xdfff)) break;
+      runEnd += 1;
+    }
+    parts.push(str.slice(index, runEnd));
+    index = runEnd;
+  }
+  return parts.join('');
+}
+
+function* jsonStringPieces(str, state) {
+  const length = str.length;
+  let index = 0;
+  while (index < length) {
+    checkStreamingAbort(state);
+    let end = Math.min(index + JSON_STRING_SLICE, length);
+    if (end < length) {
+      const previous = str.charCodeAt(end - 1);
+      if (previous >= 0xd800 && previous <= 0xdbff) {
+        const next = str.charCodeAt(end);
+        if (next >= 0xdc00 && next <= 0xdfff) end += 1;
+      }
+    }
+    yield escapeJsonStringSlice(str, index, end);
+    index = end;
+  }
+}
+
+function* jsonKeyStringPieces(key, state) {
+  yield '"';
+  yield* jsonStringPieces(key, state);
+  yield '"';
+}
+
+// Mirrors JSON.stringify: toJSON is called once for each object/function value
+// (key is the property key; '' for the root), and the caller decides whether
+// the resolved value is omitted (object property), null (array element), or
+// invalid (root).
+function resolveJsonValue(value, key, state) {
+  let current = value;
+  if (current !== null && (typeof current === 'object' || typeof current === 'function')) {
+    const toJson = current.toJSON;
+    if (typeof toJson === 'function') {
+      checkStreamingAbort(state);
+      current = toJson.call(current, key);
+    }
+    // JSON.stringify unboxes genuine String/Number/Boolean wrapper objects to
+    // their primitive value and rejects boxed BigInts exactly like primitive
+    // ones. An object pretending to be boxed (Symbol.toStringTag or a proto
+    // alias) is intentionally left as a normal object.
+    if (typeof current === 'object' && current !== null) {
+      const unboxed = unboxBuiltinPrimitive(current);
+      if (unboxed && unboxed.kind === 'bigint') {
+        throw serializationError('JSON_SERIALIZE_BIGINT', 'Do not know how to serialize a BigInt');
+      }
+      if (unboxed) current = unboxed.value;
+    }
+  }
+  return {
+    value: current,
+    omittable: current === undefined || typeof current === 'function' || typeof current === 'symbol',
+  };
+}
+
+function* jsonObjectPieces(obj, key, ancestors, state) {
+  const keys = Object.keys(obj);
+  yield '{';
+  let first = true;
+  for (const propertyKey of keys) {
+    const resolved = resolveJsonValue(obj[propertyKey], propertyKey, state);
+    if (resolved.omittable) continue;
+    if (!first) yield ',';
+    yield* jsonKeyStringPieces(propertyKey, state);
+    yield ':';
+    yield* jsonPieces(resolved.value, propertyKey, ancestors, state);
+    first = false;
+  }
+  yield '}';
+}
+
+function* jsonArrayPieces(arr, key, ancestors, state) {
+  const length = arr.length;
+  yield '[';
+  for (let index = 0; index < length; index += 1) {
+    if (index > 0) yield ',';
+    const resolved = resolveJsonValue(arr[index], String(index), state);
+    if (resolved.omittable) {
+      yield 'null';
+      continue;
+    }
+    yield* jsonPieces(resolved.value, String(index), ancestors, state);
+  }
+  yield ']';
+}
+
+function* jsonPieces(value, key, ancestors, state) {
+  checkStreamingAbort(state);
+  if (value === null) {
+    yield 'null';
+    return;
+  }
+  const type = typeof value;
+  if (type === 'string') {
+    yield '"';
+    yield* jsonStringPieces(value, state);
+    yield '"';
+    return;
+  }
+  if (type === 'boolean') {
+    yield value ? 'true' : 'false';
+    return;
+  }
+  if (type === 'number') {
+    yield Number.isFinite(value) ? String(value) : 'null';
+    return;
+  }
+  if (type === 'bigint') {
+    throw serializationError('JSON_SERIALIZE_BIGINT', 'Do not know how to serialize a BigInt');
+  }
+  if (type === 'undefined' || type === 'function' || type === 'symbol') {
+    throw serializationError('JSON_SERIALIZE_UNSERIALIZABLE', 'JSON.stringify cannot serialize this value here');
+  }
+  if (typeof value === 'object') {
+    if (ancestors.has(value)) {
+      throw serializationError('JSON_CIRCULAR', 'Converting circular structure to JSON');
+    }
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) yield* jsonArrayPieces(value, key, ancestors, state);
+      else yield* jsonObjectPieces(value, key, ancestors, state);
+    } finally {
+      ancestors.delete(value);
+    }
+    return;
+  }
+  yield 'null';
+}
+
+// Bounded-memory JSON encoder: yields ~64KB string chunks, never materializes
+// the whole JSON string/Buffer, honors an optional AbortSignal and socket
+// liveness between chunks, and preserves JSON.stringify semantics for plain
+// serializable objects.
+function* emitJsonChunks(value, options = {}) {
+  const state = {signal: options.signal || null, req: options.req || null, res: options.res || null};
+  const ancestors = new Set();
+  const rootResolved = resolveJsonValue(value, '', state);
+  if (rootResolved.omittable) {
+    throw serializationError('JSON_SERIALIZE_UNSERIALIZABLE', 'JSON.stringify cannot serialize this value at the top level');
+  }
+  const pending = [];
+  let pendingLength = 0;
+  for (const piece of jsonPieces(rootResolved.value, '', ancestors, state)) {
+    if (!piece.length) continue;
+    if (pendingLength && pendingLength + piece.length > JSON_STREAM_CHUNK_LIMIT) {
+      checkStreamingAbort(state);
+      yield pending.join('');
+      pending.length = 0;
+      pendingLength = 0;
+    }
+    pending.push(piece);
+    pendingLength += piece.length;
+  }
+  if (pendingLength) {
+    checkStreamingAbort(state);
+    yield pending.join('');
+  }
+}
+
+async function collectStreamJson(value, options = {}) {
+  let json = '';
+  for await (const chunk of emitJsonChunks(value, options)) {
+    json += chunk;
+  }
+  return json;
+}
+
+async function streamJsonByteLength(value, options = {}) {
+  let bytes = 0;
+  for await (const chunk of emitJsonChunks(value, options)) {
+    bytes += Buffer.byteLength(chunk, 'utf8');
+  }
+  return bytes;
+}
+
+async function sendLargeJson(req, res, status, value, headers = {}, options = {}) {
+  const signal = options.signal || null;
+  const reqObject = options.req || req;
+  // The first chunk is produced (or the encoder throws) before the response
+  // headers are written. A serialization error in that window therefore
+  // surfaces as a structured JSON error; anything after the first write can
+  // only terminate the socket because the response has already started.
+  const iterator = emitJsonChunks(value, {signal, req: reqObject, res});
+  let firstChunk = null;
+  try {
+    const first = await iterator.next();
+    if (!first.done) firstChunk = first.value;
+  } catch (error) {
+    // Header not written yet: keep the socket alive so the caller can hand a
+    // structured error back to the client. Only terminate when the peer is
+    // already gone or a cancellation already answered this response. An
+    // already-sent or already-ended response (for example the lane timeout
+    // handler completing a 503 during this window) must never be destroyed,
+    // even when its finish event has not flushed yet.
+    if ((reqObject.destroyed || res.destroyed)
+      && !res.headersSent && !res.writableEnded && !res.writableFinished) res.destroy();
+    throw error;
+  }
+  if (signal?.aborted || reqObject.destroyed || res.destroyed || res.headersSent || res.writableFinished) {
+    // A pending timeout/disconnect may already have answered this response
+    // with a terminal status or ended it; never destroy a response that has
+    // begun or been ended. Only cancel a socket that never started and whose
+    // peer is gone or cancellation already fired.
+    if (!res.headersSent && !res.writableEnded && !res.writableFinished && !res.destroyed) res.destroy();
+    return;
+  }
+  const gzip = acceptsGzip(reqObject.headers?.['accept-encoding']);
+  writeResponseHead(res, status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': String(body.length),
+    'Vary': 'Accept-Encoding',
+    ...(gzip ? {'Content-Encoding': 'gzip'} : {}),
     ...headers,
   });
+  // The first chunk is replayed into the SAME pipeline as the rest of the
+  // stream: a gzip response must be compressed from the very first byte.
+  const source = Readable.from(function* () {
+    if (firstChunk !== null) yield firstChunk;
+    yield* iterator;
+  }());
+  try {
+    if (gzip) {
+      if (signal) await pipeline(source, createGzip({level: 6}), res, {signal});
+      else await pipeline(source, createGzip({level: 6}), res);
+    } else {
+      if (signal) await pipeline(source, res, {signal});
+      else await pipeline(source, res);
+    }
+  } catch (error) {
+    // A mid-stream failure (deadline, disconnect, or a late serialization
+    // error) must terminate the socket: the client must never receive a
+    // truncated body that parses as a successful JSON response.
+    if (!res.destroyed && !res.writableFinished) res.destroy();
+    throw error;
+  }
 }
 
 async function sendBoundedCoreJson(req, res, handle, stat, replacement = null, headers = {}) {
@@ -13296,8 +14791,1066 @@ async function handleManualLoginWsUpgrade(req, socket, args, {authRequired, auth
   socket.on('error', () => { try { upstream.destroy(); } catch {} });
 }
 
+const QUERY_SURFACE_METHODS = new Map([
+  ['/api/health', 'GET'],
+  ['/api/login', 'POST'],
+  ['/api/logout', 'POST'],
+  ['/api/auth/me', 'GET'],
+  ['/api/bi/query-data', 'GET'],
+  ['/api/partner-cli/package', 'GET'],
+  ['/api/partner-cli/manifest', 'GET'],
+  ['/api/partner-cli/bundle', 'GET'],
+  ['/api/owner-knowledge/manifest', 'GET'],
+  ['/api/owner-knowledge/bundle', 'GET'],
+]);
+
+export function createHttpRuntimeLifecycle(server) {
+  if (!server || typeof server.close !== 'function') {
+    throw new TypeError('HTTP lifecycle requires a Node HTTP server');
+  }
+  // Admission is closed by default. The runtime must not accept traffic until
+  // every bridge/reconciler/watcher/worker component has started and the
+  // caller explicitly opens admission, otherwise requests race a half-started
+  // service. openAdmission() is the single atomic gate.
+  let accepting = false;
+  let admissionOpened = false;
+  let closeStarted = false;
+  let serverClosePromise = null;
+  let activeHandlers = 0;
+  const activeWaiters = new Set();
+  const upgradeWaiters = new Set();
+  const sockets = new Set();
+  const upgradeSockets = new Set();
+  const activeResponses = new Set();
+
+  const closeIdleConnectionsIfClosing = () => {
+    if (!closeStarted) return;
+    try { server.closeIdleConnections?.(); } catch {}
+  };
+
+  const notifyActiveDrained = () => {
+    if (activeHandlers !== 0) return;
+    for (const resolve of activeWaiters) resolve();
+    activeWaiters.clear();
+  };
+  const waitForActiveHandlers = () => activeHandlers === 0
+    ? Promise.resolve()
+    : new Promise(resolve => activeWaiters.add(resolve));
+  const notifyUpgradesDrained = () => {
+    if (upgradeSockets.size !== 0) return;
+    for (const resolve of upgradeWaiters) resolve();
+    upgradeWaiters.clear();
+  };
+  const waitForUpgradeSockets = () => upgradeSockets.size === 0
+    ? Promise.resolve()
+    : new Promise(resolve => upgradeWaiters.add(resolve));
+  // Pre-open (BI_RUNTIME_STARTING) and post-close (BI_RUNTIME_SHUTTING_DOWN)
+  // both refuse traffic with 503, but keep the two states distinguishable for
+  // operators and health probes.
+  const rejectUnavailable = res => {
+    const shuttingDown = closeStarted;
+    try {
+      writeResponseHead(res, 503, {
+        'Connection': 'close',
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({
+        ok: false,
+        code: shuttingDown ? 'BI_RUNTIME_SHUTTING_DOWN' : 'BI_RUNTIME_STARTING',
+        error: shuttingDown ? 'Service is shutting down' : 'Service is starting; try again shortly',
+      }));
+    } catch {
+      try { res.destroy?.(); } catch {}
+    }
+  };
+  const dispatchRequest = (req, res, handler) => {
+    if (!accepting) {
+      rejectUnavailable(res);
+      return false;
+    }
+    activeHandlers += 1;
+    activeResponses.add(res);
+    let responseSettled = false;
+    const settleResponse = () => {
+      if (responseSettled) return;
+      responseSettled = true;
+      activeResponses.delete(res);
+      res.removeListener?.('finish', settleResponse);
+      res.removeListener?.('close', settleResponse);
+      // server.close() only sweeps connections that are idle at the instant it
+      // starts. A request that finishes afterwards can otherwise sit in the
+      // keep-alive pool until keepAliveTimeout, consuming the whole shutdown
+      // budget and turning an otherwise graceful restart into a forced error.
+      // Re-sweep after the response has transitioned from active to idle; the
+      // immediate retry runs after Node's internal finish bookkeeping.
+      closeIdleConnectionsIfClosing();
+      if (closeStarted) setImmediate(closeIdleConnectionsIfClosing);
+    };
+    res.once?.('finish', settleResponse);
+    res.once?.('close', settleResponse);
+    Promise.resolve()
+      .then(() => handler(req, res))
+      .catch(error => {
+        console.error(`[http-lifecycle] request failed: ${String(error?.stack || error)}`);
+        if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+          try { sendJson(res, 500, {ok: false, error: 'Server error'}, {'Connection': 'close'}); } catch {}
+        } else if (!res.writableEnded && !res.destroyed) {
+          try { res.destroy(); } catch {}
+        }
+      })
+      .finally(() => {
+        activeHandlers = Math.max(0, activeHandlers - 1);
+        notifyActiveDrained();
+      });
+    return true;
+  };
+  const admitUpgrade = socket => {
+    if (!accepting) {
+      try { socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch {}
+      try { socket.destroy(); } catch {}
+      return false;
+    }
+    upgradeSockets.add(socket);
+    const remove = () => {
+      upgradeSockets.delete(socket);
+      notifyUpgradesDrained();
+    };
+    socket.once?.('close', remove);
+    socket.once?.('error', remove);
+    return true;
+  };
+  // Atomic admission open: called exactly once by the runtime owner after all
+  // components have started. Returns false if close already began.
+  const openAdmission = () => {
+    if (closeStarted) return false;
+    accepting = true;
+    admissionOpened = true;
+    return true;
+  };
+  const beginClose = () => {
+    if (closeStarted) return serverClosePromise;
+    accepting = false;
+    closeStarted = true;
+    for (const response of activeResponses) {
+      try {
+        response.shouldKeepAlive = false;
+        if (!response.headersSent && !response.writableEnded && !response.destroyed) {
+          response.setHeader?.('Connection', 'close');
+        }
+      } catch {}
+    }
+    serverClosePromise = new Promise(resolve => {
+      try {
+        server.close(error => resolve({ok: !error, error: error?.message || ''}));
+      } catch (error) {
+        resolve({
+          ok: error?.code === 'ERR_SERVER_NOT_RUNNING',
+          error: error?.code === 'ERR_SERVER_NOT_RUNNING' ? '' : String(error?.message || error),
+        });
+      }
+    });
+    try { server.closeIdleConnections?.(); } catch {}
+    for (const socket of [...upgradeSockets]) {
+      try { socket.end(); } catch {}
+    }
+    return serverClosePromise;
+  };
+  const forceClose = () => {
+    try { server.closeAllConnections?.(); } catch {}
+    for (const socket of [...sockets, ...upgradeSockets]) {
+      try { socket.destroy(); } catch {}
+    }
+  };
+  const waitForDrain = async (timeoutMs, forceGraceMs = 250) => {
+    beginClose();
+    const boundedTimeoutMs = Math.max(1, Number(timeoutMs) || 1);
+    const drainWork = Promise.all([serverClosePromise, waitForActiveHandlers(), waitForUpgradeSockets()]);
+    let timer;
+    const graceful = await Promise.race([
+      drainWork.then(values => ({settled: true, values})),
+      new Promise(resolve => { timer = setTimeout(() => resolve({settled: false}), boundedTimeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    if (graceful.settled) {
+      const closeResult = graceful.values[0];
+      return {
+        ok: closeResult.ok,
+        timedOut: false,
+        forced: false,
+        activeHandlers,
+        openConnections: sockets.size,
+        openUpgrades: upgradeSockets.size,
+        error: closeResult.error || '',
+      };
+    }
+    forceClose();
+    let forceTimer;
+    const settledAfterForce = await Promise.race([
+      drainWork.then(() => true),
+      new Promise(resolve => { forceTimer = setTimeout(() => resolve(false), Math.max(1, forceGraceMs)); }),
+    ]);
+    clearTimeout(forceTimer);
+    return {
+      ok: false,
+      timedOut: true,
+      forced: true,
+      settledAfterForce,
+      activeHandlers,
+      openConnections: sockets.size,
+      openUpgrades: upgradeSockets.size,
+      error: `HTTP drain timed out after ${boundedTimeoutMs}ms`,
+    };
+  };
+  const status = () => ({
+    accepting,
+    admissionOpened,
+    closeStarted,
+    activeHandlers,
+    openConnections: sockets.size,
+    openUpgrades: upgradeSockets.size,
+  });
+
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  return {dispatchRequest, admitUpgrade, openAdmission, beginClose, waitForDrain, forceClose, status};
+}
+
+/**
+ * Maps a bounded mutation-queue rejection (error.queueRejected === true) to an
+ * HTTP response for the request surface. Saturation and queue-deadline
+ * rejections are transient backpressure and map to 429; shutdown/cancellation
+ * map to 503. Returns null when the error is not a queue rejection so callers
+ * keep their existing error handling for everything else.
+ */
+function queueRejectionHttpDetails(error, surface = 'portal') {
+  if (!error || error.queueRejected !== true) return null;
+  const query = surface === 'query';
+  const reason = String(error.reason || '');
+ if (reason === 'shutdown' || reason === 'cancelled') {
+   return {
+     status: 503,
+     code: query ? 'QUERY_SURFACE_SHUTTING_DOWN' : 'BI_MUTATION_QUEUE_SHUTTING_DOWN',
+     message: query
+       ? 'BI query runtime is shutting down; the request was cancelled before it started'
+       : 'Service is shutting down; the mutation was cancelled before it started and was not retried',
+      // During shutdown the connection is not reused: closing it lets the
+      // HTTP drain settle promptly instead of waiting out keep-alive.
+      headers: {'Cache-Control': 'no-store', 'Retry-After': '5', 'Connection': 'close'},
+    };
+ }
+  if (reason === 'saturated') {
+    return {
+      status: 429,
+      code: query ? 'QUERY_SURFACE_BUSY' : 'BI_MUTATION_QUEUE_SATURATED',
+      message: query
+        ? 'BI query runtime is busy; retry shortly'
+        : 'Mutation queue is saturated; retry shortly',
+      headers: {'Cache-Control': 'no-store', 'Retry-After': '2'},
+    };
+  }
+  if (reason === 'deadline-exceeded') {
+    return {
+      status: query ? 503 : 429,
+      code: query ? 'BI_QUERY_TIMEOUT' : 'BI_MUTATION_QUEUE_DEADLINE_EXCEEDED',
+      message: query
+        ? 'BI query deadline exceeded; the request was cancelled before it started'
+        : 'Mutation queue deadline exceeded before the write started; nothing was written',
+      headers: {'Cache-Control': 'no-store', 'Retry-After': '5'},
+    };
+  }
+  return null;
+}
+
+async function runBoundedRuntimeClosePhase(phase, operation, timeoutMs) {
+  if (timeoutMs <= 0) return {ok: false, timedOut: true, phase, error: `${phase} had no shutdown budget`};
+  const startedAt = Date.now();
+  let timer;
+  const work = Promise.resolve().then(operation).then(
+    value => ({ok: true, value}),
+    error => ({ok: false, error: String(error?.message || error || `${phase} failed`)}),
+  );
+  const result = await Promise.race([
+    work,
+    new Promise(resolve => { timer = setTimeout(() => resolve({ok: false, timedOut: true, error: `${phase} timed out after ${timeoutMs}ms`}), timeoutMs); }),
+  ]);
+  clearTimeout(timer);
+  return {...result, phase, wallMs: Date.now() - startedAt};
+}
+
+export async function shutdownHttpRuntime({
+  lifecycle,
+  timeoutMs = 5_000,
+  onAdmissionClosed = null,
+  stopWorkers = null,
+  closeStores = null,
+} = {}) {
+  if (!lifecycle?.beginClose || !lifecycle?.waitForDrain) {
+    throw new TypeError('shutdownHttpRuntime requires an HTTP lifecycle');
+  }
+  const startedAt = Date.now();
+  const boundedTimeoutMs = Math.max(100, Math.min(30_000, Number(timeoutMs) || 5_000));
+  const deadlineAt = startedAt + boundedTimeoutMs;
+  lifecycle.beginClose();
+  let admission = {ok: true, phase: 'admission-close', wallMs: 0};
+  try {
+    const result = onAdmissionClosed?.();
+    if (result && typeof result.then === 'function') {
+      throw new TypeError('onAdmissionClosed must be synchronous');
+    }
+  } catch (error) {
+    admission = {ok: false, phase: 'admission-close', wallMs: 0, error: String(error?.message || error)};
+  }
+  // HTTP drain and worker/bridge stop start concurrently within the same
+  // total deadline. Each phase is independently bounded, so a drain that never
+  // settles (handler stuck past the deadline) must not block the worker drain,
+  // and a worker drain timeout must not be re-reported later as skipped. Both
+  // results are reported truthfully; store close stays gated on both.
+  const drainPromise = lifecycle.waitForDrain(Math.max(1, deadlineAt - Date.now()));
+  const workersPromise = runBoundedRuntimeClosePhase(
+    'workers-and-bridges',
+    () => stopWorkers?.(),
+    Math.max(0, deadlineAt - Date.now()),
+  );
+  const [drain, workers] = await Promise.all([drainPromise, workersPromise]);
+  let stores;
+  if (drain.ok && workers.ok) {
+    stores = await runBoundedRuntimeClosePhase(
+      'stores',
+      () => closeStores?.(),
+      Math.max(0, deadlineAt - Date.now()),
+    );
+  } else {
+    // Any failed or timed-out phase skips store close; the reasons stay
+    // explicit so the caller can see which prerequisite did not pass.
+    const failures = [];
+    if (!drain.ok) failures.push('http-drain-failed');
+    if (!workers.ok) failures.push('workers-not-stopped');
+    stores = {
+      ok: false,
+      skipped: true,
+      phase: 'stores',
+      reason: failures.join(';') || 'prerequisite-not-met',
+    };
+  }
+  return {
+    ok: admission.ok && drain.ok && workers.ok && stores.ok,
+    admission,
+    drain,
+    workers,
+    stores,
+    wallMs: Date.now() - startedAt,
+  };
+}
+
+/**
+ * Single source of truth for the Portal's shutdown wiring. The Portal's
+ * shutdown() passes exactly this object to shutdownHttpRuntime, and tests
+ * import this factory to prove the ordering contract:
+ *
+ *  1. onAdmissionClosed (synchronous): HTTP admission closes AND worker claim
+ *     admission closes in the same call. linkOpsJobWorker.stopAdmitting() is
+ *     synchronous, so from this instant no job that has not already entered
+ *     claimJob() may start. The shared runtime AbortController also signals
+ *     every in-flight OpenAPI executor child in this same synchronous phase;
+ *     its result still drains through the durable claim path.
+ *  2. stopWorkers runs concurrently with the HTTP drain inside the same total
+ *     deadline and awaits linkOpsJobWorker.stop(), which drains every
+ *     in-flight iteration to a terminal state before returning.
+ *  3. closeStores runs only after BOTH the HTTP drain and stopWorkers succeed,
+ *     so no store is closed underneath a stuck handler or an in-flight worker
+ *     iteration. Any drain or worker failure/timed-out skips the store close.
+ *     Both stopAdmitting/drain are idempotent, so repeated shutdown is safe.
+ */
+export function createPortalShutdownHooks({
+  enqueueMutationRequest,
+  linkOpsJobWorker = null,
+  webhookTaskReconciler = null,
+  waitForStartup = null,
+  liveAccountingRefreshStop = () => {},
+  biCoreWarmupWatcher = null,
+  ownerKnowledgeReconcileTimer = null,
+  liveUpdateBridge = null,
+  linkOpsStoreGateway = null,
+  sheinWebhookRepository = null,
+  runtimeCancellationController = null,
+} = {}) {
+  return {
+    onAdmissionClosed: () => {
+      // Synchronous claim admission close: no new link-ops job may be claimed
+      // from this point on. An iteration that already entered claimJob() is
+      // in-flight and is drained by stopWorkers() before any store is closed.
+      linkOpsJobWorker?.stopAdmitting();
+      enqueueMutationRequest.shutdown();
+      if (runtimeCancellationController && !runtimeCancellationController.signal?.aborted) {
+        const reason = Object.assign(new Error('Portal runtime shutdown cancelled in-flight OpenAPI executors'), {
+          code: 'BI_RUNTIME_SHUTDOWN',
+        });
+        runtimeCancellationController.abort(reason);
+      }
+      liveAccountingRefreshStop();
+      if (biCoreWarmupWatcher) clearInterval(biCoreWarmupWatcher);
+      if (ownerKnowledgeReconcileTimer) clearInterval(ownerKnowledgeReconcileTimer);
+      liveUpdateBridge?.closeSseClients?.();
+    },
+    stopWorkers: async () => {
+      let startupFailure = null;
+      try {
+        await waitForStartup?.();
+      } catch (error) {
+        startupFailure = error;
+      }
+      const results = await Promise.allSettled([
+        linkOpsJobWorker?.stop(),
+        webhookTaskReconciler?.stop(),
+        liveUpdateBridge?.stop?.(),
+      ]);
+      const rejected = results.filter(result => result.status === 'rejected');
+      if (startupFailure || rejected.length) {
+        const startupDetail = startupFailure
+          ? '; startup phase failed: ' + String(startupFailure?.message || startupFailure)
+          : '';
+        throw new Error(String(rejected.length) + ' worker/bridge stop operation(s) failed' + startupDetail);
+      }
+    },
+    closeStores: async () => {
+      const results = await Promise.allSettled([
+        linkOpsStoreGateway?.close?.(),
+        sheinWebhookRepository?.close?.(),
+      ]);
+      const rejected = results.filter(result => result.status === 'rejected');
+      if (rejected.length) throw new Error(`${rejected.length} store close operation(s) failed`);
+    },
+  };
+}
+
+/**
+ * Minimal, fail-closed runtime for deterministic BI reads and signed bundle
+ * distribution.  This deliberately does not construct any Portal worker,
+ * webhook repository, live bridge, generator, warmup watcher or reconciliation
+ * timer.  Domain reads reuse the same authentication, query loader and release
+ * stores as the full Portal; only the HTTP orchestration is isolated.
+ */
+async function runQuerySurface(args) {
+  const root = path.resolve(args.dir);
+  const authUsers = await loadPortalUsers(args);
+  if (authUsers.length === 0) {
+    throw new Error(`BI query runtime requires at least one user from ${args.authFile}, ${args.htpasswdFile}, or infra/metabase/.admin.local.json`);
+  }
+  const sessionSecret = await loadBiSessionSecret(args.sessionSecretFile);
+  const loginRateLimiter = createLoginRateLimiter();
+  const linkOpsStoreGateway = createConfiguredLinkOpsStoreGateway({
+    env: process.env,
+    rootDir: ROOT,
+    taskFile: args.linkOpsTaskFile,
+    sessionFile: args.linkOpsChatFile,
+    actionFile: args.stateFile,
+    runtimeFile: args.linkOpsRuntimeFile,
+  });
+  const ownerKnowledgeService = createOwnerKnowledgeService({
+    repository: linkOpsStoreGateway.repository,
+    authorityId: process.env.SHEIN_OWNER_KNOWLEDGE_PRINCIPAL || 'dushengyi',
+  });
+  const sideEffectsStarted = Object.freeze([]);
+  // A current production profit shard is about 100 MB before JSON parsing and
+  // response serialization.  Keep those heap-heavy reads strictly serial so
+  // two otherwise valid CLI requests cannot OOM this independent runtime.
+  // Lightweight auth, health and signed-bundle routes remain available while
+  // the query lane is busy.
+  const configuredMaxConcurrent = Number(process.env.SHEIN_BI_QUERY_MAX_CONCURRENT || 1);
+  if (configuredMaxConcurrent !== 1) {
+    throw new Error('SHEIN_BI_QUERY_MAX_CONCURRENT must be exactly 1 for the bounded query runtime');
+  }
+  const maxConcurrent = configuredMaxConcurrent;
+  const configuredMaxQueued = Number(process.env.SHEIN_BI_QUERY_MAX_QUEUED || 3);
+  const maxQueued = Number.isInteger(configuredMaxQueued)
+    ? Math.max(0, Math.min(16, configuredMaxQueued))
+    : 3;
+  // Absolute per-request lifetime for the serial lane: queue wait AND work
+  // execution combined. On deadline or client disconnect the client response
+  // ends immediately, but the execution slot stays held until the lane work
+  // settles; a work that never settles trips the bounded grace window below
+  // and fail-fasts this process so systemd Restart=always recovers it. The
+  // slot is never released to a second query while the first work runs.
+  const configuredQueryTimeoutMs = Number(process.env.SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS || 120_000);
+  const queryTimeoutMs = Number.isFinite(configuredQueryTimeoutMs)
+    ? Math.max(1_000, Math.min(600_000, Math.trunc(configuredQueryTimeoutMs)))
+    : 120_000;
+  // Bounded grace window after a deadline/disconnect cancellation while the
+  // lane work is still running. The client response may end immediately, but
+  // the execution slot is NOT released until the work settles; a work that
+  // never settles trips this window and fail-fasts the whole query process so
+  // systemd Restart=always recovers it. Releasing the slot earlier would let
+  // a second query overlap the still-running first work and break the serial
+  // heap-heavy read invariant. Default 30s keeps deadline(120s)+grace(30s)
+  // inside the nginx 180s proxy_read_timeout for /api/bi/query-data.
+  const configuredQueryGraceMs = Number(process.env.SHEIN_BI_QUERY_GRACE_MS || 30_000);
+  const queryGraceMs = Number.isFinite(configuredQueryGraceMs)
+    ? Math.max(1_000, Math.min(120_000, Math.trunc(configuredQueryGraceMs)))
+    : 30_000;
+  const QUERY_LANE_FAILFAST_EXIT_CODE = 70;
+  // Deterministic, env-gated test control: any question containing one of
+  // these markers is delayed for SHEIN_BI_QUERY_TEST_HANG_MS before doing
+  // real work. Production never sets these variables; tests use them to prove
+  // the lane deadline and the client-disconnect path deterministically.
+  const queryTestHangMarkers = String(process.env.SHEIN_BI_QUERY_TEST_HANG_FOR || '').split(',').map(value => String(value || '').trim()).filter(Boolean);
+  const queryTestNeverMarkers = String(process.env.SHEIN_BI_QUERY_TEST_NEVER_FOR || '').split(',').map(value => String(value || '').trim()).filter(Boolean);
+  const queryTestHangMs = Math.max(0, Number(process.env.SHEIN_BI_QUERY_TEST_HANG_MS || 60_000) || 0);
+  const delayAbortable = (ms, signal) => new Promise(resolve => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+    if (!signal) return;
+    signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, {once: true});
+  });
+  // Bounded serial lane: the per-lane saturation/deadline logic below remains
+  // the primary backpressure (429) and timeout (503) control, so the queue is
+  // sized to never reject before the lane does while still bounding the
+  // promise tail instead of growing without limit.
+  const enqueueQuery = createSerialMutationQueue({
+    capacity: maxConcurrent + maxQueued,
+    deadlineMs: queryTimeoutMs + 5_000,
+  });
+  let activeQueries = 0;
+  let queuedQueries = 0;
+  let rejectedQueries = 0;
+  let timedOutQueries = 0;
+  let clientCancelledQueries = 0;
+
+  const waitForResponseCompletion = res => {
+    if (res.writableFinished || res.destroyed) return Promise.resolve();
+    return new Promise(resolve => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        res.off('finish', done);
+        res.off('close', done);
+        res.off('error', done);
+        resolve();
+      };
+      res.once('finish', done);
+      res.once('close', done);
+      res.once('error', done);
+    });
+  };
+
+  const runInQueryLane = async (req, res, work) => {
+    if (activeQueries + queuedQueries >= maxConcurrent + maxQueued) {
+      rejectedQueries += 1;
+      return sendJson(res, 429, {
+        ok: false,
+        code: 'QUERY_SURFACE_BUSY',
+        error: 'BI query runtime is busy; retry shortly',
+      }, {'Cache-Control': 'no-store', 'Retry-After': '2'});
+    }
+    queuedQueries += 1;
+    const controller = new AbortController();
+    let state = 'queued'; // queued | running | done | timed-out | client-gone
+    let timer = null;
+    let graceTimer = null;
+    // Strict single execution slot: activeQueries is decremented ONLY when the
+    // work promise settles (or the whole process fail-fasts). A deadline or
+    // disconnect may end the client response immediately, but it must never
+    // release the slot while the first work is still executing, otherwise a
+    // second query would overlap the first heap-heavy JSON read.
+    const startGraceWindow = () => {
+      if (graceTimer) return;
+      graceTimer = setTimeout(failFastQueryProcess, queryGraceMs);
+      graceTimer.unref?.();
+    };
+    const failFastQueryProcess = () => {
+      // The work ignored AbortSignal for the whole bounded grace window. The
+      // process must not keep serving: releasing the slot would overlap the
+      // orphan work with the next query, and keeping the slot would wedge the
+      // queue forever. Exit now; systemd Restart=always restarts the runtime.
+      const message = `[bi-query] lane work did not settle within ${queryGraceMs}ms after cancellation; ` +
+        `fail-fast exit ${QUERY_LANE_FAILFAST_EXIT_CODE} so systemd Restart=always recovers; ` +
+        `the execution slot is never released to a second query while the first work is still running`;
+      try { fssync.writeSync(2, message + '\n'); } catch { /* stderr may already be gone */ }
+      process.exit(QUERY_LANE_FAILFAST_EXIT_CODE);
+    };
+    const onClientGone = () => {
+      if (state === 'done' || state === 'timed-out' || state === 'client-gone') return;
+      const previous = state;
+      state = 'client-gone';
+      clientCancelledQueries += 1;
+      controller.abort();
+      if (previous === 'queued') {
+        // Cancelled before execution started: no overlap is possible, so the
+        // queued slot is released immediately and the queued task short-
+        // circuits when it reaches the head of the queue.
+        queuedQueries -= 1;
+        return;
+      }
+      // Running: the client is gone, but the slot stays held until the work
+      // settles; a never-settling work trips the bounded grace fail-fast.
+      startGraceWindow();
+    };
+    const onTimeout = () => {
+      if (state === 'done' || state === 'timed-out' || state === 'client-gone') return;
+      const previous = state;
+      state = 'timed-out';
+      timedOutQueries += 1;
+      controller.abort();
+      if (previous === 'queued') {
+        queuedQueries -= 1;
+        if (!res.destroyed && !res.headersSent) {
+          sendJson(res, 503, {
+            ok: false,
+            code: 'BI_QUERY_TIMEOUT',
+            error: 'BI query deadline exceeded; the request was cancelled before it started',
+          }, {'Cache-Control': 'no-store', 'Retry-After': '5'});
+        }
+        return;
+      }
+      // The client response ends now, but the execution slot stays held until
+      // the work settles; a never-settling work trips the bounded grace
+      // fail-fast instead of ever overlapping the next query.
+      if (!res.destroyed && !res.headersSent) {
+        sendJson(res, 503, {
+          ok: false,
+          code: 'BI_QUERY_TIMEOUT',
+          error: 'BI query deadline exceeded; the request was cancelled while the lane work finishes',
+        }, {'Cache-Control': 'no-store', 'Retry-After': '5'});
+      }
+      startGraceWindow();
+    };
+    const onResponseClose = () => {
+      if (!res.writableFinished) onClientGone();
+    };
+    req.once('aborted', onClientGone);
+    res.once('close', onResponseClose);
+    timer = setTimeout(onTimeout, queryTimeoutMs);
+    timer.unref?.();
+    return enqueueQuery(async () => {
+      if (state === 'timed-out' || state === 'client-gone') {
+        // Cancelled while queued: the slot was already released and the work
+        // never started; nothing else to do.
+        return;
+      }
+      state = 'running';
+      queuedQueries -= 1;
+      activeQueries += 1;
+      try {
+        await Promise.resolve().then(() => work(controller.signal));
+      } catch (error) {
+        // work() reports its own failures; the slot must still release once
+        // the work has settled.
+      } finally {
+        // The slot is released here and only here: the work has settled.
+        // Cooperative work settles promptly after AbortSignal; non-cooperative
+        // never-work already triggered failFastQueryProcess via the grace
+        // window, so this code no longer runs in that case.
+        clearTimeout(timer);
+        clearTimeout(graceTimer);
+        req.off('aborted', onClientGone);
+        res.off('close', onResponseClose);
+        if (state === 'running') state = 'done';
+        activeQueries -= 1;
+      }
+    }).catch(queueError => {
+      // The queue refused the item before it started (shutdown cancellation,
+      // saturation, or queue deadline defense). Release the lane slot that was
+      // reserved while queued, stop the lane timers/listeners, and map the
+      // bounded-queue rejection to the same 429/503 semantics the lane already
+      // publishes for its own saturation and deadline paths.
+      const mapped = queueRejectionHttpDetails(queueError, 'query');
+      if (!mapped) throw queueError;
+      clearTimeout(timer);
+      clearTimeout(graceTimer);
+      req.off('aborted', onClientGone);
+      res.off('close', onResponseClose);
+      if (state === 'queued') {
+        state = 'done';
+        queuedQueries -= 1;
+      }
+      if (!res.destroyed && !res.headersSent) {
+        sendJson(res, mapped.status, {ok: false, code: mapped.code, error: mapped.message}, mapped.headers);
+      }
+      return undefined;
+    });
+  };
+
+  const handleRequest = async (req, res) => {
+    try {
+      const url = new URL(req.url || '/', 'http://localhost');
+      const expectedMethod = QUERY_SURFACE_METHODS.get(url.pathname);
+      if (!expectedMethod) {
+        return sendJson(res, 404, {ok: false, code: 'QUERY_SURFACE_ROUTE_DENIED', error: 'Not found'}, {'Cache-Control': 'no-store'});
+      }
+      if (req.method !== expectedMethod) {
+        return sendJson(res, 405, {ok: false, code: 'QUERY_SURFACE_METHOD_DENIED', error: 'Method not allowed'}, {
+          'Allow': expectedMethod,
+          'Cache-Control': 'no-store',
+        });
+      }
+
+      const trustedHealthProbe = url.pathname === '/api/health' && isTrustedInternalRequest(req);
+      const authenticatedActor = authenticateRequest(req, authUsers, sessionSecret);
+      const actor = authenticatedActor || (trustedHealthProbe ? internalActor() : null);
+
+      if (url.pathname === '/api/login') {
+        if (!mutationOriginAllowed(req, {trustedInternal: isTrustedInternalRequest(req)})) {
+          return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'}, {'Cache-Control': 'no-store'});
+        }
+        const contentType = String(req.headers['content-type'] || '');
+        let body;
+        if (contentType.includes('application/json')) {
+          body = await readBodyJson(req, 32 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        } else {
+          const raw = await readBodyText(req, 32 * 1024).catch(error => `__ERROR__${error?.message || String(error)}`);
+          body = raw.startsWith('__ERROR__') ? {_error: raw.slice(9)} : Object.fromEntries(new URLSearchParams(raw));
+        }
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error}, {'Cache-Control': 'no-store'});
+        const username = String(body.username || '').trim();
+        const password = String(body.password || '');
+        const rateKey = loginRateKey(req, username);
+        const rate = loginRateLimiter.inspect(rateKey);
+        if (!rate.allowed) {
+          return sendJson(res, 429, {ok: false, error: '登录尝试过多，请稍后重试'}, {'Retry-After': String(rate.retryAfterSec), 'Cache-Control': 'no-store'});
+        }
+        const user = authUsers.find(candidate => candidate.username.toLowerCase() === username.toLowerCase());
+        if (!verifyPassword(user, password)) {
+          const failedRate = loginRateLimiter.fail(rateKey);
+          return sendJson(res, failedRate.allowed ? 401 : 429, {
+            ok: false,
+            error: failedRate.allowed ? '账号或密码不正确' : '登录尝试过多，请稍后重试',
+          }, failedRate.allowed ? {'Cache-Control': 'no-store'} : {'Retry-After': String(failedRate.retryAfterSec), 'Cache-Control': 'no-store'});
+        }
+        loginRateLimiter.success(rateKey);
+        const loginActor = actorFromUser(user);
+        const requestedClient = String(body.client || '').trim().toLowerCase();
+        const partnerCliLogin = requestedClient === 'partner-cli'
+          || /^shein-bi-ops-cli\//i.test(String(req.headers['user-agent'] || '').trim());
+        const sessionClient = partnerCliLogin ? 'partner-cli' : 'portal';
+        const sessionTtlDays = partnerCliLogin ? args.partnerCliSessionTtlDays : args.sessionTtlDays;
+        const issuedAt = Date.now();
+        const expiresAtMs = issuedAt + sessionTtlDays * 86400 * 1000;
+        const token = signSessionPayload({
+          username: user.username,
+          client: sessionClient,
+          iat: issuedAt,
+          exp: expiresAtMs,
+        }, sessionSecret);
+        writeResponseHead(res, 200, {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': sessionCookie(token, req, sessionTtlDays * 86400),
+        });
+        res.end(JSON.stringify({
+          ok: true,
+          user: publicActor(loginActor),
+          session: {
+            client: sessionClient,
+            ttlDays: sessionTtlDays,
+            issuedAt: new Date(issuedAt).toISOString(),
+            expiresAt: new Date(expiresAtMs).toISOString(),
+          },
+        }));
+        return;
+      }
+
+      if (!actor) return unauthorized(res, url.pathname);
+
+      if (url.pathname === '/api/health') {
+        const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
+        return sendJson(res, 200, {
+          ok: true,
+          service: 'shein-bi-query',
+          surface: 'query',
+          time: new Date().toISOString(),
+          host: args.host,
+          port: args.port,
+          url: `http://${urlHost}:${args.port}/api/health`,
+          authRequired: true,
+          allowGenerate: false,
+          allowGenerateSections: false,
+          worker: null,
+          workers: [],
+          concurrency: {
+            active: activeQueries,
+            queued: queuedQueries,
+            max: maxConcurrent,
+            maxQueued,
+            rejected: rejectedQueries,
+            timedOut: timedOutQueries,
+            clientCancelled: clientCancelledQueries,
+            deadlineMs: queryTimeoutMs,
+            graceMs: queryGraceMs,
+          },
+          sideEffectsStarted,
+          runtime: httpLifecycle.status(),
+          mutationQueue: enqueueQuery.status(),
+        }, {'Cache-Control': 'no-store'});
+      }
+      if (url.pathname === '/api/logout') {
+        if (!mutationOriginAllowed(req, {trustedInternal: isTrustedInternalRequest(req)})) {
+          return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'}, {'Cache-Control': 'no-store'});
+        }
+        writeResponseHead(res, 200, {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': clearSessionCookie(req),
+        });
+        res.end(JSON.stringify({ok: true}));
+        return;
+      }
+      if (url.pathname === '/api/auth/me') {
+        return sendJson(res, 200, {ok: true, user: publicActor(actor)}, {'Cache-Control': 'private, no-store'});
+      }
+      if (url.pathname === '/api/bi/query-data') {
+        return runInQueryLane(req, res, async signal => {
+          const responseCompleted = waitForResponseCompletion(res);
+          const sendOpen = (status, value, headers = {}) => {
+            if (req.destroyed || res.destroyed || res.headersSent) return;
+            sendJson(res, status, value, headers);
+          };
+          const question = String(url.searchParams.get('q') || url.searchParams.get('question') || '').normalize('NFKC').trim().slice(0, 4_000);
+          if (!question) {
+            sendOpen(400, {ok: false, code: 'BI_QUERY_QUESTION_REQUIRED', error: 'query-data requires q'}, {'Cache-Control': 'no-store'});
+            await responseCompleted;
+            return;
+          }
+          if (queryTestNeverMarkers.some(marker => question.includes(marker))) {
+            // Test-only non-cooperative work: unlike delayAbortable this
+            // promise intentionally ignores AbortSignal, proving that the
+            // lane slot is never released to a second query while the work is
+            // still running and that the bounded grace window fail-fasts the
+            // process for systemd Restart=always to recover.
+            await new Promise(() => {});
+          }
+          if (queryTestHangMarkers.some(marker => question.includes(marker))) {
+            await delayAbortable(queryTestHangMs, signal);
+            if (signal?.aborted) {
+              // Deadline or client disconnect already ended the client
+              // response; the lane slot stays held until this work settles,
+              // which is exactly now.
+              await responseCompleted;
+              return;
+            }
+          }
+          const sections = [
+            ...url.searchParams.getAll('section'),
+            ...String(url.searchParams.get('sections') || '').split(/[,\s，、]+/),
+          ].map(value => String(value || '').trim()).filter(Boolean);
+          const stores = [
+            ...url.searchParams.getAll('store'),
+            ...String(url.searchParams.get('stores') || '').split(/[,\s，、]+/),
+          ].map(value => String(value || '').trim()).filter(Boolean);
+          try {
+            const result = await loadDirectBiQuery(args, root, actor, question, {sections, stores, allowGenerate: false, signal});
+            if (!result.ok) {
+              const {data: _incompleteData, ...diagnostic} = result;
+              sendOpen(503, {...diagnostic, ok: false, code: 'BI_QUERY_DATA_INCOMPLETE', error: '所需 BI 数据分区未完整加载，未返回不完整结果'}, {'Cache-Control': 'private, no-store'});
+            } else {
+              if (!req.destroyed && !res.destroyed && !res.headersSent) {
+                await sendLargeJson(req, res, 200, result, {'Cache-Control': 'private, no-store'}, {signal});
+              }
+            }
+          } catch (error) {
+            if (signal?.aborted) {
+              // Timeout/disconnect already answered or the socket is gone.
+              await responseCompleted;
+              return;
+            }
+            if (res.headersSent || res.destroyed) {
+              // A mid-stream serialization or pipeline failure must never
+              // hand a second response to a socket that already started.
+              // Terminating it keeps the failure visible to the client
+              // instead of faking success with a truncated body.
+              if (!res.destroyed && !res.writableFinished) res.destroy();
+              await responseCompleted;
+              return;
+            }
+            const forbidden = String(error?.code || '') === 'BI_QUERY_STORE_FORBIDDEN';
+            const invalid = ['BI_QUERY_SECTION_UNSUPPORTED', 'BI_QUERY_TOO_MANY_SECTIONS'].includes(String(error?.code || ''));
+            sendOpen(forbidden ? 403 : invalid ? 400 : 503, {
+              ok: false,
+              code: String(error?.code || 'BI_QUERY_FAILED'),
+              error: forbidden || invalid ? String(error?.message || error) : 'BI 数据暂时不可用',
+            }, {'Cache-Control': 'private, no-store'});
+          }
+          await responseCompleted;
+        });
+      }
+      if (url.pathname === '/api/partner-cli/package') {
+        try {
+          const release = await partnerCliReleaseStore.getCurrentRelease();
+          const packageFile = release.package;
+          if (String(req.headers['if-none-match'] || '') === packageFile.etag) {
+            writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: packageFile.etag});
+            return res.end();
+          }
+          writeResponseHead(res, 200, {
+            'Cache-Control': 'private, no-cache, must-revalidate',
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${packageFile.fileName}"`,
+            'Content-Length': String(packageFile.size),
+            'X-Checksum-SHA256': packageFile.sha256,
+            ETag: packageFile.etag,
+          });
+          res.end(packageFile.bytes);
+          return;
+        } catch (error) {
+          return sendJson(res, 503, {ok: false, error: `CLI 安装包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+        }
+      }
+      if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
+        try {
+          const release = await partnerCliReleaseStore.getCurrentRelease();
+          const etag = `"pcli-${release.manifest.bundleSha256}"`;
+          if (String(req.headers['if-none-match'] || '') === etag) {
+            writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+            return res.end();
+          }
+          const data = url.pathname.endsWith('/bundle') ? release.bundle : release.manifest;
+          return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+        } catch (error) {
+          return sendJson(res, 503, {ok: false, error: `CLI 发布包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+        }
+      }
+      if (url.pathname === '/api/owner-knowledge/manifest') {
+        const manifest = await ownerKnowledgeService.distributionManifest();
+        if (!manifest.ready) return sendJson(res, 503, {ok: false, error: '负责人规则包尚未完成发布', data: manifest}, {'Cache-Control': 'no-store'});
+        const data = {
+          schemaVersion: 1,
+          authorityId: ownerKnowledgeService.authorityId,
+          ...manifest,
+          cli: {
+            minimumVersion: process.env.SHEIN_BI_OPS_CLI_MIN_VERSION || BI_OPS_CLI_VERSION,
+            recommendedVersion: process.env.SHEIN_BI_OPS_CLI_RECOMMENDED_VERSION || BI_OPS_CLI_VERSION,
+          },
+        };
+        const etag = `"okb-${crypto.createHash('sha256').update(`${data.fingerprint}|${data.activeFingerprint}|${data.sourceCommit}|${data.current}`).digest('hex').slice(0, 32)}"`;
+        if (String(req.headers['if-none-match'] || '') === etag) {
+          writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+          return res.end();
+        }
+        return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+      }
+      if (url.pathname === '/api/owner-knowledge/bundle') {
+        const bundle = await ownerKnowledgeService.distributionBundle();
+        if (!bundle.manifest?.ready) return sendJson(res, 503, {ok: false, error: '负责人规则包尚未完成发布'}, {'Cache-Control': 'no-store'});
+        const data = {...bundle, manifest: {schemaVersion: 1, authorityId: ownerKnowledgeService.authorityId, ...bundle.manifest}};
+        const etag = `"okb-${crypto.createHash('sha256').update(`${bundle.fingerprint}|${bundle.manifest.sourceCommit}`).digest('hex').slice(0, 32)}"`;
+        return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+      }
+      return sendJson(res, 404, {ok: false, code: 'QUERY_SURFACE_ROUTE_DENIED', error: 'Not found'}, {'Cache-Control': 'no-store'});
+    } catch (error) {
+      console.error(`query surface handleRequest error: ${error?.stack || error}`);
+      return sendJson(res, 500, {ok: false, error: 'Server error'}, {'Cache-Control': 'no-store'});
+    }
+  };
+
+  const server = http.createServer();
+  const httpLifecycle = createHttpRuntimeLifecycle(server);
+  server.on('request', (req, res) => {
+    httpLifecycle.dispatchRequest(req, res, handleRequest);
+  });
+
+  const queryShutdownTimeoutMs = Math.max(
+    100,
+    Math.min(30_000, Number(process.env.SHEIN_BI_QUERY_SHUTDOWN_TIMEOUT_MS || 5_000) || 5_000),
+  );
+  let shutdownPromise = null;
+  const shutdown = signal => {
+    if (shutdownPromise) return shutdownPromise;
+    console.log(JSON.stringify({ok: true, event: 'shutdown', surface: 'query', signal, time: new Date().toISOString()}));
+    // Cancels every queued-but-not-started query lane item (503) and refuses
+    // new admissions; an already-started query drain ends exactly once.
+    enqueueQuery.shutdown();
+    shutdownPromise = shutdownHttpRuntime({
+      lifecycle: httpLifecycle,
+      timeoutMs: queryShutdownTimeoutMs,
+      stopWorkers: async () => {},
+      closeStores: () => linkOpsStoreGateway.close(),
+    }).then(result => {
+      console.log(JSON.stringify({
+        ok: result.ok,
+        event: 'shutdown-complete',
+        surface: 'query',
+        signal,
+        forcedConnections: Boolean(result.drain?.forced),
+        wallMs: result.wallMs,
+        drain: result.drain,
+        workers: result.workers,
+        stores: result.stores,
+      }));
+      process.exit(result.ok ? 0 : 1);
+    }, error => {
+      console.error(JSON.stringify({ok: false, event: 'shutdown-failed', surface: 'query', signal, error: error?.message || String(error)}));
+      process.exit(1);
+    });
+    return shutdownPromise;
+  };
+  // Signals are registered before listen so a shutdown signal arriving during
+  // startup goes through the same unified shutdown instead of the process
+  // dying with a listening-but-half-started surface.
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(args.port, args.host, resolve);
+    });
+  } catch (startupError) {
+    console.log(JSON.stringify({
+      ok: false,
+      event: 'startup-failure',
+      surface: 'query',
+      phase: 'listen',
+      error: String(startupError?.message || startupError),
+    }));
+    try {
+      enqueueQuery.shutdown();
+      await shutdownHttpRuntime({
+        lifecycle: httpLifecycle,
+        timeoutMs: queryShutdownTimeoutMs,
+        stopWorkers: async () => {},
+        closeStores: () => linkOpsStoreGateway.close(),
+      });
+    } catch (cleanupError) {
+      console.error(JSON.stringify({ok: false, event: 'startup-cleanup-failed', surface: 'query', error: String(cleanupError?.message || cleanupError)}));
+    }
+    process.exit(1);
+  }
+  // The surface is ready: atomically open admission. Before this point the
+  // lifecycle refused traffic by default (BI_RUNTIME_STARTING / 503).
+  httpLifecycle.openAdmission();
+
+  const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
+  console.log(JSON.stringify({
+    ok: true,
+    service: 'shein-bi-query',
+    surface: 'query',
+    url: `http://${urlHost}:${args.port}/api/health`,
+    host: args.host,
+    port: args.port,
+    root,
+    authRequired: true,
+    allowGenerate: false,
+    maxConcurrent,
+    maxQueued,
+    sideEffectsStarted,
+  }));
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.surface === 'query') {
+    await runQuerySurface(args);
+    return;
+  }
+  const openApiExecutorAbortController = new AbortController();
+  Object.defineProperty(args, 'runtimeCancellationSignal', {
+    value: openApiExecutorAbortController.signal,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
   const linkOpsStoreGateway = createConfiguredLinkOpsStoreGateway({
     env: process.env,
     rootDir: ROOT,
@@ -13410,10 +15963,31 @@ async function main() {
   if (authRequired && authUsers.length === 0) {
     throw new Error(`BI portal requires at least one user from ${args.authFile}, ${args.htpasswdFile}, or infra/metabase/.admin.local.json`);
   }
-  const sessionSecret = authRequired ? await ensureSessionSecret(args.sessionSecretFile) : '';
+  const sessionSecret = authRequired ? await loadBiSessionSecret(args.sessionSecretFile) : '';
   const allowGenerateSections = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
   const loginRateLimiter = createLoginRateLimiter();
-  const enqueueMutationRequest = createSerialMutationQueue();
+  // Bounded serial mutation queue: capacity bounds queued-but-not-started
+  // mutation handlers, every queued item has a start deadline, and shutdown
+  // cancels queued work (503) while an already-started write drain ends
+  // exactly once. Saturation and queue-deadline rejections map to 429/503 at
+  // the request surface; an admitted mutation is never automatically retried.
+  const mutationQueueCapacity = Number(process.env.SHEIN_BI_MUTATION_QUEUE_CAPACITY);
+  const mutationQueueDeadlineMs = Number(process.env.SHEIN_BI_MUTATION_QUEUE_DEADLINE_MS);
+  const enqueueMutationRequest = createSerialMutationQueue({
+    capacity: Number.isFinite(mutationQueueCapacity) && mutationQueueCapacity > 0 ? Math.floor(mutationQueueCapacity) : 256,
+    deadlineMs: Number.isFinite(mutationQueueDeadlineMs) && mutationQueueDeadlineMs > 0 ? Math.floor(mutationQueueDeadlineMs) : 30_000,
+  });
+  // Env-gated deterministic test control (production never sets these): when a
+  // mutation request URL contains one of these markers, its admitted task holds
+  // for SHEIN_BI_MUTATION_TEST_HOLD_MS before the handler runs so tests can
+  // prove bounded capacity, queue deadline and shutdown cancellation without
+  // racing a real write.
+  const mutationTestHoldMarkers = String(process.env.SHEIN_BI_MUTATION_TEST_HOLD_FOR || '').split(',').map(value => String(value || '').trim()).filter(Boolean);
+  const mutationTestHoldMsRaw = Number(process.env.SHEIN_BI_MUTATION_TEST_HOLD_MS);
+  const mutationTestHoldMs = Number.isFinite(mutationTestHoldMsRaw) && mutationTestHoldMsRaw > 0 ? Math.floor(mutationTestHoldMsRaw) : 0;
+  const shouldHoldMutationQueueRequest = urlString => mutationTestHoldMs > 0
+    && mutationTestHoldMarkers.length > 0
+    && mutationTestHoldMarkers.some(marker => String(urlString || '').includes(marker));
   const webhookTaskReconciler = sheinWebhookRepository && linkOpsStoreGateway.mode === 'postgres'
     ? createSheinWebhookTaskReconciler({
         webhookRepository: sheinWebhookRepository,
@@ -13445,33 +16019,23 @@ async function main() {
     liveAccountingRefreshRunning = true;
     let liveProjectionRefreshed = false;
     try {
-      const meta = await readBiPortalCoreMeta(root);
-      const generatedAt = String(meta?.generatedAt || '');
-      if (allowGenerateSections && generatedAt) {
-        await generateBiSection(args, root, 'liveSalesToday', generatedAt);
-        clearBiSectionRefreshFailure(root, 'liveSalesToday');
-      }
-      liveProjectionRefreshed = true;
-      // Publish current sales first. A normal current-day order must never wait
-      // for moving-average cost or historical profit rebuilds before becoming
-      // visible on the homepage and order center.
-      biLiveUpdateBridge?.publish({
-        ...sourceEvent,
-        occurredAt: new Date().toISOString(),
-        liveProjectionRefreshed: true,
+      const result = await executeBiLiveAccountingRefreshAttempt({
+        sourceEvent,
+        allowGenerateSections,
+        readCoreMeta: () => readBiPortalCoreMeta(root),
+        generateLiveProjection: generatedAt => generateBiSection(args, root, 'liveSalesToday', generatedAt),
+        clearLiveProjectionFailure: () => clearBiSectionRefreshFailure(root, 'liveSalesToday'),
+        persistAccountingPlan: async (accountingQueue, generatedAt, options) => {
+          await persistHostLockedBiSectionPlan(accountingQueue, generatedAt, {
+            ...options,
+            reason: options?.reason || `live-accounting-${sourceEvent?.kind || 'event'}`,
+          });
+        },
+        publish: event => biLiveUpdateBridge?.publish(event),
       });
-      const accountingQueue = liveAccountingQueuePlan(sourceEvent);
-      if (!accountingQueue.length) return;
-      await persistHostLockedBiSectionPlan(accountingQueue, generatedAt, {
-        reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
-      });
-      biLiveUpdateBridge?.publish({
-        ...sourceEvent,
-        occurredAt: new Date().toISOString(),
-        liveProjectionRefreshed: true,
-        accountingQueued: true,
-      });
+      liveProjectionRefreshed = result.liveProjectionRefreshed;
     } catch (error) {
+      liveProjectionRefreshed = liveProjectionRefreshed || error?.liveProjectionRefreshed === true;
       recordBiSectionRefreshFailure(root, liveProjectionRefreshed ? 'profit' : 'liveSalesToday', error);
       console.error(`[bi-live-accounting] ${String(error?.message || error)}`);
       biLiveUpdateBridge?.publish({
@@ -13507,10 +16071,19 @@ async function main() {
     const currentDate = shanghaiDateKey(event?.occurredAt || new Date());
     const eventNeedsHistoricalRefresh = event?.kind === 'return'
       || Boolean(businessDate && currentDate && businessDate !== currentDate);
+    const accountingEventIdentities = [...new Set([
+      ...(Array.isArray(current?.accountingEventIdentities)
+        ? current.accountingEventIdentities
+        : (current ? [biPortalLiveAccountingEventIdentity(current)] : [])),
+      ...(Array.isArray(event?.accountingEventIdentities)
+        ? event.accountingEventIdentities
+        : [biPortalLiveAccountingEventIdentity(event)]),
+    ].map(value => String(value || '')).filter(Boolean))].slice(-64);
     return {
       ...(current || {}),
       ...event,
       accountingKinds: [...kinds],
+      accountingEventIdentities,
       refreshHistoricalSections: Boolean(
         current?.refreshHistoricalSections
         || event?.refreshHistoricalSections
@@ -13938,9 +16511,12 @@ async function main() {
         plannerFactsIgnored,
         advisoryOnly: existingActionTask,
       });
-      const tasks = taskStore.tasks.slice();
-      tasks[taskIndex] = updatedTask;
-      await writeLinkOpsTaskStore(args, {...taskStore, updatedAt: completedAt, tasks});
+      const persistedTask = await updateLinkOpsTaskRecord(
+        args,
+        task,
+        updatedTask,
+        String(job.actorUser || inferredLinkOpsStoreActor({tasks: [updatedTask]}) || ''),
+      );
 
       const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
       const sessionIndex = chatStore.sessions.findIndex(session => String(session?.id || '') === String(job.chatSessionId || ''));
@@ -13959,21 +16535,25 @@ async function main() {
             const answer = questions.length
               ? `结构化检查完成：${plan.summary}\n\n还需要你确认：\n${questions.map(question => `- ${question}`).join('\n')}`
               : `结构化检查完成：${plan.summary}\n\n我已把识别出的店铺、商品、动作参数和风险写入当前任务；任何真实写操作仍会先重新检查并等你确认。`;
-            const sessions = chatStore.sessions.slice();
-            sessions[sessionIndex] = appendAssistantChatMessage(sessionAccess.record, answer, {
+            const nextSession = appendAssistantChatMessage(sessionAccess.record, answer, {
               mode: 'structured-intent-plan',
               intentPlanJobId: job.jobId,
-              autoTaskId: updatedTask.id,
+              autoTaskId: persistedTask.id,
               agentProfile: modelProfilePublicSummary(profile),
             });
-            await writeLinkOpsChatStore(args, {...chatStore, updatedAt: completedAt, sessions});
+            await updateLinkOpsChatRecord(
+              args,
+              sessionAccess.record,
+              nextSession,
+              String(job.actorUser || inferredLinkOpsStoreActor({sessions: [nextSession]}) || ''),
+            );
           }
         }
       }
 
       return {
         applied: true,
-        taskId: updatedTask.id,
+        taskId: persistedTask.id,
         requestType: plan.requestType,
         summary: plan.summary,
         confidence: plan.confidence,
@@ -14163,6 +16743,12 @@ async function main() {
           ...url.searchParams.getAll('store'),
           ...String(url.searchParams.get('stores') || '').split(/[,\s，、]+/),
         ].map(value => String(value || '').trim()).filter(Boolean);
+        const streamController = new AbortController();
+        const streamAbortOnClose = () => {
+          if (!res.writableFinished) streamController.abort();
+        };
+        req.once('aborted', streamAbortOnClose);
+        res.once('close', streamAbortOnClose);
         const startedAt = Date.now();
         try {
           const result = await loadDirectBiQuery(args, root, actor || internalActor(), question, {
@@ -14193,8 +16779,12 @@ async function main() {
               error: '所需 BI 数据分区未完整加载，未返回不完整结果',
             }, {'Cache-Control': 'private, no-store'});
           }
-          return sendLargeJson(req, res, 200, result, {'Cache-Control': 'private, no-store'});
+          return await sendLargeJson(req, res, 200, result, {'Cache-Control': 'private, no-store'}, {signal: streamController.signal});
         } catch (error) {
+          if (res.headersSent || res.destroyed) {
+            if (!res.destroyed && !res.writableFinished) res.destroy();
+            return;
+          }
           const forbidden = String(error?.code || '') === 'BI_QUERY_STORE_FORBIDDEN';
           const invalid = ['BI_QUERY_SECTION_UNSUPPORTED', 'BI_QUERY_TOO_MANY_SECTIONS'].includes(String(error?.code || ''));
           await appendAudit(args.auditFile, {
@@ -14220,6 +16810,9 @@ async function main() {
             ...(Array.isArray(error?.allowedStores) ? {allowedStores: error.allowedStores} : {}),
             ...(Array.isArray(error?.deniedStores) ? {deniedStores: error.deniedStores} : {}),
           }, {'Cache-Control': 'private, no-store'});
+        } finally {
+          req.off('aborted', streamAbortOnClose);
+          res.off('close', streamAbortOnClose);
         }
       }
       if (url.pathname === '/api/bi/live-events') {
@@ -14592,10 +17185,12 @@ async function main() {
           writableLinkOpsTasks: !args.readOnly,
           writableLinkOpsChats: !args.readOnly,
           readOnly: args.readOnly,
-          authRequired,
-          allowGenerateSections,
-          liveUpdates: biLiveUpdateBridge.status(),
-          biCoreWarmup: {
+         authRequired,
+         allowGenerateSections,
+         liveUpdates: biLiveUpdateBridge.status(),
+          runtime: httpLifecycle.status(),
+          mutationQueue: enqueueMutationRequest.status(),
+         biCoreWarmup: {
             generatedAt: biPortalCoreWarmupState.generatedAt,
             status: biPortalCoreWarmupState.status,
             owner: biPortalCoreWarmupState.owner || '',
@@ -14603,6 +17198,9 @@ async function main() {
             finishedAt: biPortalCoreWarmupState.finishedAt ? new Date(biPortalCoreWarmupState.finishedAt).toISOString() : null,
             inFlight: Boolean(biPortalCoreWarmupState.inFlight),
             lastError: biPortalCoreWarmupState.lastError,
+            consecutiveFailures: biPortalCoreWarmupState.consecutiveFailures,
+            nextAttemptAt: biPortalCoreWarmupState.nextAttemptAt ? new Date(biPortalCoreWarmupState.nextAttemptAt).toISOString() : null,
+            lastFailureAt: biPortalCoreWarmupState.lastFailureAt ? new Date(biPortalCoreWarmupState.lastFailureAt).toISOString() : null,
           },
           user: actor ? {
             username: actor.username,
@@ -14640,6 +17238,9 @@ async function main() {
               q,
               actor,
             });
+            if (result.rawBody && typeof result.rawBody.pipe === 'function') {
+              return await sendBiSectionRawStream(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
+            }
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {
@@ -14818,31 +17419,19 @@ async function main() {
             return sendJson(res, 403, denied);
           }
           const current = await readLinkOpsActionState(args);
-          const actions = current.actions && typeof current.actions === 'object' ? current.actions : {};
-          for (const patch of patches) {
-            const key = String(patch.key || '');
-            const status = String(patch.status || 'open');
-            const owner = typeof patch.owner === 'string' ? patch.owner.trim().slice(0, 80) : undefined;
-            const note = typeof patch.note === 'string' ? patch.note.trim().slice(0, 500) : undefined;
-            if (!key) return sendJson(res, 400, {ok: false, error: 'Missing key'});
-            if (!['open', 'done', 'review', 'ignored'].includes(status)) {
-              return sendJson(res, 400, {ok: false, error: 'Invalid status'});
-            }
-            const prev = actions[key] && typeof actions[key] === 'object' ? actions[key] : {};
-            const nextItem = {
-              status,
-              owner: owner ?? String(prev.owner || ''),
-              note: note ?? String(prev.note || ''),
-              updatedAt: new Date().toISOString(),
+          const now = new Date().toISOString();
+          let changes;
+          try {
+            changes = buildLinkOpsActionChanges(current, patches, {
+              updatedAt: now,
               updatedBy: actorLabel(actor, req),
               updatedByUser: actorUser(actor, req),
-            };
-            if (status === 'open' && !nextItem.owner && !nextItem.note) delete actions[key];
-            else actions[key] = nextItem;
+            });
+          } catch (error) {
+            return sendJson(res, 400, {ok: false, error: error?.message || String(error), code: error?.code || 'LINK_OPS_VALIDATION'});
           }
-          const next = {version: 1, updatedAt: new Date().toISOString(), actions};
-          await writeLinkOpsActionState(args, next);
-          await appendAudit(args.auditFile, {
+          const persisted = await applyLinkOpsActionChanges(args, changes, actorUser(actor, req));
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'action-state',
             actor,
@@ -14853,8 +17442,8 @@ async function main() {
               owner: typeof p.owner === 'string' ? p.owner.slice(0, 80) : undefined,
               hasNote: typeof p.note === 'string' && p.note.length > 0,
             })),
-          });
-          return sendJson(res, 200, {ok: true, data: next});
+          }); } catch {}
+          return sendJson(res, 200, {ok: true, data: persisted});
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
@@ -14923,12 +17512,15 @@ async function main() {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-denied', actor, ...requestMeta(req), task: {stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task), commandLength: String(task.command || '').length}, denied: sourceDenied});
             return sendJson(res, 403, sourceDenied);
           }
+          const taskCreateActor = actorUser(actor, req);
+          const taskCreateWriter = createLinkOpsRequestWriter(args, {actorUser: taskCreateActor});
           if (task.chatSessionId) {
             let sessionId;
             try { sessionId = safeLinkOpsChatSessionId(task.chatSessionId); } catch (err) {
               return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
             }
             const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+            taskCreateWriter.observeSessionStore(chatStore);
             const sessionIdx = chatStore.sessions.findIndex(session => String(session?.id || '') === sessionId);
             if (sessionIdx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
             const sessionAccess = authorizeLinkOpsRecord(actor, chatStore.sessions[sessionIdx], {kind: 'session', mode: 'mutate', claimLegacy: true});
@@ -14938,21 +17530,17 @@ async function main() {
             }
             task.chatSessionId = sessionId;
             if (sessionAccess.claimedLegacy || sessionAccess.ownershipMigrated) {
-              const sessions = chatStore.sessions.slice();
-              sessions[sessionIdx] = sessionAccess.record;
-              await writeLinkOpsChatStore(args, {...chatStore, updatedAt: new Date().toISOString(), sessions});
+              await taskCreateWriter.persistSession(sessionAccess.record, {store: chatStore});
             }
           }
           const knowledgeBinding = await bindOwnerKnowledgeToTask(task, args, task.command || '');
           task = knowledgeBinding.task;
           const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
-          const next = {
-            version: 1,
-            updatedAt: new Date().toISOString(),
-            tasks: [task, ...current.tasks].slice(0, 1000),
-          };
-          await writeLinkOpsTaskStore(args, next);
-          await appendAudit(args.auditFile, {
+          taskCreateWriter.observeTaskStore(current);
+          const taskPersist = await taskCreateWriter.persistTask(task, {store: current});
+          task = taskPersist.task;
+          const next = taskPersist.store;
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task',
             actor,
@@ -14966,7 +17554,7 @@ async function main() {
               commandLength: task.command.length,
               ownerKnowledgeFingerprint: String(task.ownerKnowledgePolicy?.fingerprint || ''),
             },
-          });
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
@@ -15030,29 +17618,35 @@ async function main() {
             }
             let persisted;
             try {
-              persisted = await args.linkOpsStoreGateway.updateTaskRecord(id, updated, {
-                expectedRevision: Number(body.expectedRevision || 0),
-                actorUser: actorUser(actor, req),
-              });
+              const requestStartRevision = repositoryRevisionAtRequestStart(access.record, `task ${id}`);
+              if (Number(body.expectedRevision || 0) !== requestStartRevision) {
+                throw Object.assign(new Error(`任务 revision 已变化：请求期望 ${Number(body.expectedRevision || 0)}，请求开始读取 ${requestStartRevision}`), {
+                  code: 'LINK_OPS_REVISION_CONFLICT',
+                  status: 409,
+                });
+              }
+              persisted = await updateLinkOpsTaskRecord(args, access.record, updated, actorUser(actor, req));
             } catch (error) {
               const mapped = linkOpsRepositoryHttpDetails(error);
               if (mapped) return sendJson(res, mapped.status, mapped.body);
               throw error;
             }
-            await appendAudit(args.auditFile, {
+            try { await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
               type: 'link-ops-task-update',
               actor,
               ...requestMeta(req),
               task: {id, event: 'lock_source_skc_cli', status: persisted.status, progress: normalizeProgress(persisted.progress, 0)},
-            });
+            }); } catch {}
             return sendJson(res, 200, {ok: true, task: projectLinkOpsTaskForClient(persisted)});
           }
-          const tasks = current.tasks.slice();
-          tasks[idx] = updated;
-          const next = {version: 1, updatedAt: new Date().toISOString(), tasks};
-          await writeLinkOpsTaskStore(args, next);
-          await appendAudit(args.auditFile, {
+          const taskUpdateActor = actorUser(actor, req);
+          const taskUpdateWriter = createLinkOpsRequestWriter(args, {actorUser: taskUpdateActor});
+          taskUpdateWriter.observeTaskStore(current);
+          const taskPersist = await taskUpdateWriter.persistTask(updated, {store: current});
+          updated = taskPersist.task;
+          const next = taskPersist.store;
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task-update',
             actor,
@@ -15065,7 +17659,7 @@ async function main() {
               claimedLegacy: access.claimedLegacy,
               ownershipMigrated: access.ownershipMigrated,
             },
-          });
+          }); } catch {}
           if (!['done', 'archived'].includes(String(access.record.status || ''))
               && ['done', 'archived'].includes(String(updated.status || ''))
               && actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) {
@@ -15121,28 +17715,29 @@ async function main() {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-delete-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task)}, denied: deniedLifecycle});
             return sendJson(res, 403, deniedLifecycle);
           }
+          const taskDeleteActor = actorUser(actor, req);
+          const deletedTaskRecord = await deleteLinkOpsTaskRecord(args, task, taskDeleteActor);
           const next = {
-            version: 1,
+            ...current,
             updatedAt: new Date().toISOString(),
             tasks: current.tasks.filter(t => String(t.id || '') !== id),
           };
-          await writeLinkOpsTaskStore(args, next);
           let assetsDeleted = false;
           try {
             await removeLinkOpsTaskAssetDir(id, args);
             assetsDeleted = true;
           } catch {}
-          await appendAudit(args.auditFile, {
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task-delete',
             actor,
             ...requestMeta(req),
             task: {id, status: task.status, commandLength: String(task.command || '').length, assetsDeleted, claimedLegacy: access.claimedLegacy},
-          });
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
-            deleted: {id},
+            deleted: projectLinkOpsTaskForClient(deletedTaskRecord) || {id},
           });
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
@@ -17220,6 +19815,10 @@ async function main() {
           }
 
           const chatCurrent = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+          const assetsMutationActor = actorUser(actor, req);
+          const assetsWriter = createLinkOpsRequestWriter(args, {actorUser: assetsMutationActor});
+          assetsWriter.observeTaskStore(current);
+          assetsWriter.observeSessionStore(chatCurrent);
           let sessionId = String(body.sessionId || body.chatSessionId || targetTask?.chatSessionId || targetTask?.chat?.sessionId || targetTask?.targets?.chatSessionId || '').trim();
           let chatSession = null;
           let chatCreated = false;
@@ -17259,22 +19858,25 @@ async function main() {
               });
               responseStore = result.store;
               responseTask = result.task;
+              const taskPersist = await assetsWriter.persistTask(result.task, {store: result.store});
+              responseStore = taskPersist.store;
+              responseTask = taskPersist.task;
               try {
                 const checkResult = await runImmediateChatSystemCheckIfPossible({
-                  task: result.task,
-                  taskData: result.store,
+                  task: responseTask,
+                  taskData: responseStore,
+                  writer: assetsWriter,
                   actor,
                   req,
                   args,
                   updated: true,
                 });
-                responseStore = checkResult.taskData || result.store;
-                responseTask = checkResult.task || result.task;
+                responseStore = checkResult.taskData || responseStore;
+                responseTask = checkResult.task || responseTask;
                 uploadCheckAnswer = checkResult.answer || '';
               } catch (err) {
                 uploadCheckAnswer = `我已收到你上传的资料，但重新检查时没有跑完：${String(err?.message || err || 'unknown error')}。你可以继续在聊天里补充或让我重试。`;
               }
-              await writeLinkOpsTaskStore(args, responseStore);
             } else {
               const stored = await storeLinkOpsUploadedFiles({
                 bucketId: `session-${sessionId}`,
@@ -17304,11 +19906,8 @@ ${uploadCheckAnswer}` : `
             message: sessionMessage,
             meta: {mode: targetTask ? 'bi-ops-upload-check' : 'bi-ops-session-upload', autoTaskId: responseTask?.id || ''},
           });
-          const sessions = chatCreated
-            ? [chatSession, ...chatCurrent.sessions].slice(0, 300)
-            : chatCurrent.sessions.map(s => String(s.id || '') === chatSession.id ? chatSession : s);
-          const nextChatStore = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeLinkOpsChatStore(args, nextChatStore);
+          const sessionPersist = await assetsWriter.persistSession(chatSession, {store: chatCurrent});
+          if (sessionPersist.session) chatSession = sessionPersist.session;
           const projectedChatSession = projectLinkOpsChatSessionForClient(chatSession);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
@@ -17357,6 +19956,28 @@ ${uploadCheckAnswer}` : `
             return sendJson(res, 403, access.denied);
           }
           current.tasks[idx] = access.record;
+          const requestedExecute = String(body.mode || body.executionMode || '').trim().toLowerCase() === 'execute'
+            || body.execute === true;
+          if (requestedExecute && taskCannotRepeatRealExecution(access.record)) {
+            const deniedTerminal = {
+              ok: false,
+              error: '该任务已有终态或真实提交证据，禁止再次执行；请读取现有回读，必要时由全店管理账号新建明确的修复任务。',
+              code: 'LINK_OPS_TERMINAL_EXECUTION_RETRY_DENIED',
+              taskId: id,
+              status: access.record.status || '',
+              lifecycleStatus: access.record.lifecycle?.lifecycleStatus || access.record.lifecycle?.status || '',
+              actualWriteSubmitted: access.record.execution?.writeAudit?.actualWriteSubmitted === true,
+            };
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-execute-denied-terminal-retry',
+              actor,
+              ...requestMeta(req),
+              task: {id, status: access.record.status || ''},
+              denied: deniedTerminal,
+            });
+            return sendJson(res, 409, deniedTerminal);
+          }
           if (taskRequiresOwnerLifecycleResolve(access.record)) {
             const deniedLifecycle = {
               ok: false,
@@ -17375,51 +19996,97 @@ ${uploadCheckAnswer}` : `
           }
           linkOpsExecutionLocks.add(id);
           try {
-            const {task: updated, writeClaim: executionWriteClaim} = await startControlledLinkOpsExecution(access.record, actor, req, args, body);
-            let storeForResponse;
+            const executionResult = await startControlledLinkOpsExecution(access.record, actor, req, args, body);
+            let updated = executionResult.task;
+            const executionWriteClaim = executionResult.writeClaim;
+            let commitRecovered = false;
+            let recoveryCauseCode = '';
             if (executionWriteClaim) {
               // Claim path: single-task CAS only. Never a whole-store replace.
-              const persisted = await persistClaimedLinkOpsExecutionResult(args, {
+              const commit = await persistClaimedLinkOpsExecutionResult(args, {
                 taskId: id,
                 next: updated,
                 writeClaim: executionWriteClaim,
                 actorUser: actorUser(actor, req),
                 now: new Date().toISOString(),
               });
-              updated.task = persisted;
-              updated.execution = persisted.execution;
-              storeForResponse = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              updated = commit.task;
+              commitRecovered = commit.commitRecovered;
+              recoveryCauseCode = commit.recoveryCauseCode;
             } else {
-              const tasks = current.tasks.slice();
-              tasks[idx] = updated;
-              storeForResponse = {version: 1, updatedAt: new Date().toISOString(), tasks};
-              await writeLinkOpsTaskStore(args, storeForResponse);
+              const commit = await persistUnclaimedLinkOpsExecutionResult(args, {
+                current,
+                taskIndex: idx,
+                next: updated,
+                actorUser: actorUser(actor, req),
+                now: new Date().toISOString(),
+              });
+              updated = commit.task;
+              commitRecovered = commit.commitRecovered;
+              recoveryCauseCode = commit.recoveryCauseCode;
             }
-            await appendAudit(args.auditFile, {
-              at: new Date().toISOString(),
-              type: 'link-ops-execute',
-              actor,
-              ...requestMeta(req),
-              task: {
-                id: updated.id,
-                status: updated.status,
-                progress: normalizeProgress(updated.progress, 0),
-                execution: {
-                  runId: updated.execution?.runId || '',
-                  state: updated.execution?.state || '',
-                  lifecycleStatus: updated.lifecycle?.lifecycleStatus || updated.execution?.lifecycle?.lifecycleStatus || '',
-                  lifecycleLocked: Boolean(updated.lifecycle?.locked || updated.execution?.lifecycle?.locked),
-                  needsManualResolve: Boolean(updated.lifecycle?.needsManualResolve || updated.execution?.lifecycle?.needsManualResolve),
-                  canSilentWrite: false,
-                  canAutoSubmit: false,
+            let auditPending = false;
+            try {
+              await appendLinkOpsExecutionAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-execute',
+                actor,
+                ...requestMeta(req),
+                task: {
+                  id: updated.id,
+                  status: updated.status,
+                  progress: normalizeProgress(updated.progress, 0),
+                  execution: {
+                    runId: updated.execution?.runId || '',
+                    state: updated.execution?.state || '',
+                    lifecycleStatus: updated.lifecycle?.lifecycleStatus || updated.execution?.lifecycle?.lifecycleStatus || '',
+                    lifecycleLocked: Boolean(updated.lifecycle?.locked || updated.execution?.lifecycle?.locked),
+                    needsManualResolve: Boolean(updated.lifecycle?.needsManualResolve || updated.execution?.lifecycle?.needsManualResolve),
+                    canSilentWrite: false,
+                    canAutoSubmit: false,
+                  },
+                  writeAudit: updated.execution?.writeAudit || null,
                 },
-                writeAudit: updated.execution?.writeAudit || null,
-              },
-            });
+                commitRecovered,
+                recoveryCauseCode,
+              });
+            } catch {
+              auditPending = true;
+            }
+            const projectedTask = projectLinkOpsTaskForClient(updated);
+            const stage = auditPending
+              ? 'execution_committed_audit_pending'
+              : commitRecovered
+                ? 'execution_committed_recovered'
+                : executionWriteClaim
+                  ? 'execution_committed_verified'
+                  : 'execution_check_persisted';
+            const responseOutcome = linkOpsExecutionResponseOutcome(updated, {requestedExecute});
+            const responseWarning = uniqueMessages([
+              auditPending ? '执行结果已持久化，但外部审计暂待补写；请勿重复提交。' : '',
+              responseOutcome.outcome === 'unconfirmed'
+                ? '业务强回读尚未确认完成；持久提交已保留，请勿重复写。'
+                : '',
+            ]).join('；');
             return sendJson(res, 200, {
-              ok: true,
-              data: projectLinkOpsTaskStoreForActor(storeForResponse, actor, {limit: 500}),
-              task: projectLinkOpsTaskForClient(updated),
+              ok: responseOutcome.ok,
+              committed: true,
+              ...(responseOutcome.ok ? {} : {
+                partial: responseOutcome.partial,
+                outcome: responseOutcome.outcome,
+                error: responseOutcome.error,
+              }),
+              commitRecovered,
+              auditPending,
+              stage,
+              warning: responseWarning,
+              data: {
+                version: 1,
+                updatedAt: updated.updatedAt || new Date().toISOString(),
+                partial: true,
+                tasks: [projectedTask],
+              },
+              task: projectedTask,
               execution: projectLinkOpsExecutionForClient(updated.execution),
             });
           } finally {
@@ -17511,6 +20178,13 @@ ${uploadCheckAnswer}` : `
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
           }
           const current = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+          // Request-scoped explicit-CRUD coordinator. Every dependent task /
+          // chat mutation in this request feeds the authoritative record from
+          // the previous create/update into the next expectedRevision instead
+          // of re-submitting a stale whole-store snapshot.
+          const chatMutationActor = actorUser(actor, req);
+          const chatWriter = createLinkOpsRequestWriter(args, {actorUser: chatMutationActor});
+          chatWriter.observeSessionStore(current);
           const sessionId = String(body.sessionId || body.id || '').trim();
           let session;
           let created = false;
@@ -17549,20 +20223,15 @@ ${uploadCheckAnswer}` : `
             // brand-new chat before any auto-task is written, then update the
             // same session with assistant/preflight messages at the end.
             if (created && linkOpsStoreGateway.mode === 'postgres') {
-              const bootstrapSessions = [session, ...current.sessions].slice(0, 300);
-              await writeLinkOpsChatStore(args, {
-                version: 1,
-                updatedAt: new Date().toISOString(),
-                memoryPolicy: CLOUD_AI_MEMORY_POLICY,
-                sessions: bootstrapSessions,
-              });
-              await appendAudit(args.auditFile, {
+              const sessionPersist = await chatWriter.persistSession(session, {store: current});
+              session = sessionPersist.session;
+              try { await appendAudit(args.auditFile, {
                 at: new Date().toISOString(),
                 type: 'link-ops-chat-session-bootstrap',
                 actor,
                 ...requestMeta(req),
                 session: {id: session.id, created: true},
-              });
+              }); } catch {}
             }
             let attributeContextTask = null;
             try {
@@ -17598,10 +20267,12 @@ ${uploadCheckAnswer}` : `
             let naturalExecutionHandled = false;
             if (confirmExecuteCommand && !explicitActionCommand) {
               taskData = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              chatWriter.observeTaskStore(taskData);
               const executionResult = await runChatNaturalLanguageExecutionIfPossible({
                 session,
                 userMessage,
                 taskData,
+                writer: chatWriter,
                 actor,
                 req,
                 args,
@@ -17678,6 +20349,7 @@ ${uploadCheckAnswer}` : `
             }
             if (!naturalExecutionHandled && shouldAutoTask) {
               const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              chatWriter.observeTaskStore(taskStore);
               const actorTasks = linkOpsTasksForActor(taskStore.tasks, actor, {mode: 'mutate'});
               const duplicate = findDuplicateAutoTask(actorTasks, session.id, effectiveTaskCommand);
               const reusable = duplicate || findReusableChatTask(actorTasks, session.id);
@@ -17709,7 +20381,9 @@ ${uploadCheckAnswer}` : `
                 const tasks = taskStore.tasks.slice();
                 if (idx >= 0) tasks[idx] = autoTask;
                 taskData = {version: 1, updatedAt: new Date().toISOString(), tasks};
-                await writeLinkOpsTaskStore(args, taskData);
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
                 await appendAudit(args.auditFile, {
                   at: new Date().toISOString(),
                   type: 'link-ops-chat-update-task',
@@ -17763,7 +20437,9 @@ ${uploadCheckAnswer}` : `
                   updatedAt: new Date().toISOString(),
                   tasks: [autoTask, ...taskStore.tasks].slice(0, 1000),
                 };
-                await writeLinkOpsTaskStore(args, taskData);
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
                 await appendAudit(args.auditFile, {
                   at: new Date().toISOString(),
                   type: 'link-ops-chat-auto-task',
@@ -17784,17 +20460,24 @@ ${uploadCheckAnswer}` : `
               if (taskWithSessionAssets !== autoTask) {
                 autoTask = taskWithSessionAssets;
                 taskData = replaceLinkOpsTaskInStore(taskData, autoTask);
-                await writeLinkOpsTaskStore(args, taskData);
+              {
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
+              }
               }
               const knowledgeBinding = await bindOwnerKnowledgeToTask(autoTask, args, userMessage);
               if (knowledgeBinding.changed) {
                 autoTask = knowledgeBinding.task;
                 taskData = replaceLinkOpsTaskInStore(taskData, autoTask);
-                await writeLinkOpsTaskStore(args, taskData);
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
               }
               const checkResult = await runImmediateChatSystemCheckIfPossible({
                 task: autoTask,
                 taskData,
+                writer: chatWriter,
                 actor,
                 req,
                 args,
@@ -17814,6 +20497,7 @@ ${uploadCheckAnswer}` : `
             }
             if (!naturalExecutionHandled && !shouldAutoTask && userAttributeOverrides.length) {
               const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              chatWriter.observeTaskStore(taskStore);
               const reusable = findReusableChatTask(linkOpsTasksForActor(taskStore.tasks, actor, {mode: 'mutate'}), session.id);
               if (reusable) {
                 const denied = requireWriteStores(actor, taskWriteStores(reusable));
@@ -17859,8 +20543,9 @@ ${uploadCheckAnswer}` : `
                   const tasks = taskStore.tasks.slice();
                   if (idx >= 0) tasks[idx] = updatedTask;
                   taskData = {version: 1, updatedAt: nowForOverride, tasks};
-                  await writeLinkOpsTaskStore(args, taskData);
-                  autoTask = updatedTask;
+                  const taskPersist = await chatWriter.persistTask(updatedTask, {store: taskData});
+                  autoTask = taskPersist.task;
+                  taskData = taskPersist.store;
                   await appendAudit(args.auditFile, {
                     at: nowForOverride,
                     type: 'link-ops-chat-manual-attribute-override',
@@ -17871,8 +20556,9 @@ ${uploadCheckAnswer}` : `
                     attributeOverrides: userAttributeOverrides,
                   });
                   const checkResult = await runImmediateChatSystemCheckIfPossible({
-                    task: updatedTask,
+                    task: autoTask,
                     taskData,
+                    writer: chatWriter,
                     actor,
                     req,
                     args,
@@ -17901,11 +20587,9 @@ ${uploadCheckAnswer}` : `
           } catch (err) {
             return sendJson(res, 500, {ok: false, error: err?.message || String(err || 'Chat failed')});
           }
-          const sessions = created
-            ? [session, ...current.sessions].slice(0, 300)
-            : current.sessions.map(s => String(s.id || '') === session.id ? session : s);
-          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeLinkOpsChatStore(args, next);
+          const sessionPersist = await chatWriter.persistSession(session, {store: current});
+          if (sessionPersist.session) session = sessionPersist.session;
+          const next = sessionPersist.store;
           if (ownerKnowledgeCapture?.captured) {
             await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
@@ -17996,21 +20680,19 @@ ${uploadCheckAnswer}` : `
             memoryPolicy: CLOUD_AI_MEMORY_POLICY,
             updatedAt: new Date().toISOString(),
           };
-          const sessions = current.sessions.slice();
-          sessions[idx] = session;
-          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeLinkOpsChatStore(args, next);
-          await appendAudit(args.auditFile, {
+          const persistedSession = await updateLinkOpsChatRecord(args, access.record, session, actorUser(actor, req));
+          const next = replacePersistedStoreRecord(current, 'sessions', persistedSession);
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-chat-update',
             actor,
             ...requestMeta(req),
-            session: {id, claimedLegacy: access.claimedLegacy, ownershipMigrated: access.ownershipMigrated, status: session.status || ''},
-          });
+            session: {id, claimedLegacy: access.claimedLegacy, ownershipMigrated: access.ownershipMigrated, status: persistedSession.status || session.status || ''},
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsChatStoreForActor(next, actor, {limit: 300}),
-            session: projectLinkOpsChatSessionForClient(session),
+            session: projectLinkOpsChatSessionForClient(persistedSession),
           });
         }
         if (req.method === 'DELETE') {
@@ -18035,21 +20717,23 @@ ${uploadCheckAnswer}` : `
           }
           const deletedSession = access.record;
           let codexSessionDelete = {ok: true, skipped: true, reason: 'no_codex_session_id', deletedFiles: []};
-          if (deletedSession?.codexSessionId) {
-            try {
-              codexSessionDelete = await deleteCodexSessionRecord(deletedSession.codexSessionId);
-            } catch (err) {
-              codexSessionDelete = {
-                ok: false,
-                sessionId: safeCodexSessionId(deletedSession.codexSessionId),
-                deletedFiles: [],
-                warnings: [String(err?.message || err).slice(0, 300)],
-              };
-            }
-          }
-          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions: current.sessions.filter(s => String(s.id || '') !== id)};
-          await writeLinkOpsChatStore(args, next);
-          await appendAudit(args.auditFile, {
+          const deletion = await deleteLinkOpsChatThenCleanup(args, deletedSession, {
+            actorUser: actorUser(actor, req),
+            cleanup: deletedSession?.codexSessionId ? async () => {
+              try {
+                codexSessionDelete = await deleteCodexSessionRecord(deletedSession.codexSessionId);
+              } catch (err) {
+                codexSessionDelete = {
+                  ok: false,
+                  sessionId: safeCodexSessionId(deletedSession.codexSessionId),
+                  deletedFiles: [],
+                  warnings: [String(err?.message || err).slice(0, 300)],
+                };
+              }
+            } : null,
+          });
+          const next = {...current, updatedAt: new Date().toISOString(), sessions: current.sessions.filter(s => String(s.id || '') !== id)};
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-chat-delete',
             actor,
@@ -18061,13 +20745,14 @@ ${uploadCheckAnswer}` : `
               codexSessionId: deletedSession?.codexSessionId || '',
               codexSessionDelete,
             },
-          });
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsChatStoreForActor(next, actor, {limit: 300}),
             deleted: {
-              id,
-              existed: Boolean(deletedSession),
+              ...projectLinkOpsChatSessionForClient(deletion.persisted),
+              id: deletion.persisted?.id || id,
+              existed: true,
               codexSession: {
                 ok: codexSessionDelete.ok !== false,
                 skipped: Boolean(codexSessionDelete.skipped),
@@ -18190,6 +20875,13 @@ ${uploadCheckAnswer}` : `
       const data = await fs.readFile(file);
       send(res, 200, data, {'Content-Type': types[ext] || 'application/octet-stream'});
     } catch (err) {
+      // A mutation handler that enqueues deeper work (for example the
+      // intent-plan path) surfaces bounded-queue backpressure here; map it to
+      // 429/503 so deep rejections never become a generic 500.
+      const queueFailure = queueRejectionHttpDetails(err);
+      if (queueFailure) {
+        return sendJson(res, queueFailure.status, {ok: false, code: queueFailure.code, error: queueFailure.message}, queueFailure.headers);
+      }
       const storageFailure = linkOpsRepositoryHttpDetails(err);
       if (storageFailure) {
         return sendJson(res, storageFailure.status, storageFailure.body);
@@ -18202,16 +20894,31 @@ ${uploadCheckAnswer}` : `
     }
   };
 
-  const server = http.createServer((req, res) => {
-    const task = () => handleRequest(req, res);
-    if (isMutationMethod(req.method)) {
-      void enqueueMutationRequest(task);
-      return;
-    }
-    void task();
+  const server = http.createServer();
+  const httpLifecycle = createHttpRuntimeLifecycle(server);
+  server.on('request', (req, res) => {
+    httpLifecycle.dispatchRequest(req, res, () => {
+      if (!isMutationMethod(req.method)) return handleRequest(req, res);
+      const task = () => handleRequest(req, res);
+      const mutationTask = shouldHoldMutationQueueRequest(req.url || '')
+        ? () => new Promise(resolve => setTimeout(resolve, mutationTestHoldMs)).then(task)
+        : task;
+      // Bounded-queue backpressure maps here at the admission boundary: 429 for
+      // saturation/queue-deadline, 503 for shutdown cancellation. An admitted
+      // mutation task is still executed exactly once and never auto-retried.
+      return enqueueMutationRequest(mutationTask).catch(queueError => {
+        const mapped = queueRejectionHttpDetails(queueError);
+        if (!mapped) throw queueError;
+        if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+          sendJson(res, mapped.status, {ok: false, code: mapped.code, error: mapped.message}, mapped.headers);
+        }
+        return undefined;
+      });
+    });
   });
 
   server.on('upgrade', (req, socket) => {
+    if (!httpLifecycle.admitUpgrade(socket)) return;
     handleManualLoginWsUpgrade(req, socket, args, {authRequired, authUsers, sessionSecret}).catch(err => {
       try {
         socket.write(`HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n${String(err?.message || err)}`);
@@ -18220,40 +20927,141 @@ ${uploadCheckAnswer}` : `
     });
   });
 
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(args.port, args.host, resolve);
-  });
-
-  await biLiveUpdateBridge.start();
-  scheduleLiveAccountingRefresh({
-    kind: 'order',
-    accountingKinds: ['order', 'return'],
-    refreshHistoricalSections: true,
-    entityId: 'portal-startup-accounting-catchup',
-    occurredAt: new Date().toISOString(),
-  });
-  await webhookTaskReconciler?.start();
-  startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
-  linkOpsJobWorker?.start();
-
-  let shuttingDown = false;
-  const shutdown = async signal => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(JSON.stringify({ok: true, event: 'shutdown', signal, time: new Date().toISOString()}));
-    stopLiveAccountingRefresh();
-    await linkOpsJobWorker?.stop();
-    await webhookTaskReconciler?.stop();
-    await biLiveUpdateBridge.stop();
-    await new Promise(resolve => server.close(resolve));
-    await Promise.allSettled([
-      linkOpsStoreGateway.close(),
-      args.sheinWebhookRepository?.close?.(),
-    ]);
+  const configuredShutdownTimeoutMs = Number(process.env.SHEIN_BI_PORTAL_SHUTDOWN_TIMEOUT_MS || 5_000);
+  const shutdownTimeoutMs = Number.isFinite(configuredShutdownTimeoutMs)
+    ? Math.max(100, Math.min(30_000, Math.floor(configuredShutdownTimeoutMs)))
+    : 5_000;
+  let shutdownPromise = null;
+  let biCoreWarmupWatcher = null;
+  let portalStartupPhase = null;
+  const runPortalStartupPhase = async operation => {
+    const phase = Promise.resolve().then(operation);
+    portalStartupPhase = phase;
+    try {
+      return await phase;
+    } finally {
+      if (portalStartupPhase === phase) portalStartupPhase = null;
+    }
   };
-  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
-  process.once('SIGINT', () => { void shutdown('SIGINT'); });
+  const waitForPortalStartupPhase = () => portalStartupPhase || Promise.resolve();
+  const shutdown = signal => {
+    if (shutdownPromise) return shutdownPromise;
+    console.log(JSON.stringify({ok: true, event: 'shutdown', surface: 'portal', signal, time: new Date().toISOString()}));
+    shutdownPromise = shutdownHttpRuntime({
+      lifecycle: httpLifecycle,
+      timeoutMs: shutdownTimeoutMs,
+      // Single source of truth for the shutdown ordering: worker claim
+      // admission closes synchronously with HTTP admission (onAdmissionClosed),
+      // in-flight iterations drain inside stopWorkers, and store close runs
+      // only after the worker has drained. See createPortalShutdownHooks.
+      ...createPortalShutdownHooks({
+        enqueueMutationRequest,
+        linkOpsJobWorker,
+        webhookTaskReconciler,
+        waitForStartup: waitForPortalStartupPhase,
+        liveAccountingRefreshStop: stopLiveAccountingRefresh,
+        biCoreWarmupWatcher,
+        ownerKnowledgeReconcileTimer,
+        liveUpdateBridge: biLiveUpdateBridge,
+        linkOpsStoreGateway,
+        sheinWebhookRepository: args.sheinWebhookRepository,
+        runtimeCancellationController: openApiExecutorAbortController,
+      }),
+    }).then(result => {
+      console.log(JSON.stringify({
+        ok: result.ok,
+        event: 'shutdown-complete',
+        surface: 'portal',
+        signal,
+        forcedConnections: Boolean(result.drain?.forced),
+        wallMs: result.wallMs,
+        admission: result.admission,
+        drain: result.drain,
+        workers: result.workers,
+        stores: result.stores,
+      }));
+      return result;
+    });
+    return shutdownPromise;
+  };
+  const handleShutdownSignal = signal => {
+    void shutdown(signal).then(
+      result => process.exit(result.ok ? 0 : 1),
+      error => {
+        console.error(JSON.stringify({ok: false, event: 'shutdown-failed', signal, error: error?.message || String(error)}));
+        process.exit(1);
+      },
+    );
+  };
+  // Signals are registered before listen so a shutdown signal arriving during
+  // startup (bridge/reconciler/watcher/worker bring-up) goes through the same
+  // unified shutdown instead of leaving a listening-but-half-started runtime.
+ process.once('SIGTERM', () => handleShutdownSignal('SIGTERM'));
+ process.once('SIGINT', () => handleShutdownSignal('SIGINT'));
+  // Env-gated deterministic test control (production never sets these): when
+  // SHEIN_BI_TEST_SHUTDOWN_FILE is set, the appearance of that file drives the
+  // exact same unified shutdown path as SIGTERM/SIGINT. Windows cannot deliver
+  // a catchable POSIX signal to a spawned subprocess, so integration tests use
+  // this to prove the shutdown/admission contract deterministically on every
+  // platform. Mirrors the existing SHEIN_BI_QUERY_TEST_* controls.
+  const testShutdownFile = process.env.SHEIN_BI_TEST_SHUTDOWN_FILE
+    ? path.resolve(String(process.env.SHEIN_BI_TEST_SHUTDOWN_FILE).trim())
+    : '';
+  if (testShutdownFile) {
+    const testShutdownTimer = setInterval(() => {
+      if (fssync.existsSync(testShutdownFile)) {
+        clearInterval(testShutdownTimer);
+        handleShutdownSignal('test-shutdown-trigger');
+      }
+    }, 25);
+    testShutdownTimer.unref?.();
+  }
+
+ try {
+    await runPortalStartupPhase(() => new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(args.port, args.host, resolve);
+    }));
+    if (shutdownPromise) { await shutdownPromise; return; }
+    await runPortalStartupPhase(() => biLiveUpdateBridge.start());
+    if (shutdownPromise) { await shutdownPromise; return; }
+    scheduleLiveAccountingRefresh({
+      kind: 'order',
+      accountingKinds: ['order', 'return'],
+      refreshHistoricalSections: true,
+      entityId: 'portal-startup-accounting-catchup',
+      occurredAt: new Date().toISOString(),
+    });
+    await runPortalStartupPhase(() => webhookTaskReconciler?.start());
+    if (shutdownPromise) { await shutdownPromise; return; }
+    biCoreWarmupWatcher = startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
+    linkOpsJobWorker?.start();
+  } catch (startupError) {
+    // Any startup failure (listen error or a bridge/reconciler/watcher/worker
+    // bring-up failure) goes through the same unified shutdown path: admission
+    // closes synchronously, started components stop, stores close, then the
+    // process exits non-zero. No half-started runtime keeps listening.
+    console.log(JSON.stringify({
+      ok: false,
+      event: 'startup-failure',
+      surface: 'portal',
+      phase: 'startup',
+      error: String(startupError?.message || startupError),
+    }));
+    try {
+      await shutdown('startup-failure');
+    } catch (cleanupError) {
+      console.error(JSON.stringify({ok: false, event: 'startup-cleanup-failed', surface: 'portal', error: String(cleanupError?.message || cleanupError)}));
+    }
+    process.exit(1);
+  }
+  // Every bridge/reconciler/watcher/worker component is up: atomically open
+  // admission. Before this point the lifecycle refused traffic by default
+  // (503 BI_RUNTIME_STARTING).
+  if (!httpLifecycle.openAdmission()) {
+    if (shutdownPromise) { await shutdownPromise; return; }
+    throw new Error('Portal admission could not open after startup');
+  }
 
   const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
   console.log(JSON.stringify({
@@ -18293,9 +21101,42 @@ if (IS_DIRECT_RUN) {
 }
 
 export const __testHooks = {
+  linkOpsRepositoryHttpDetails,
+  repositoryRevisionAtRequestStart,
+  createLinkOpsTaskRecord,
+  updateLinkOpsTaskRecord,
+  deleteLinkOpsTaskRecord,
+  createLinkOpsChatRecord,
+  updateLinkOpsChatRecord,
+  deleteLinkOpsChatRecord,
+  deleteLinkOpsChatThenCleanup,
+  buildLinkOpsActionChanges,
+  applyLinkOpsActionChanges,
+  settleLinkOpsPostCommit,
+  createLinkOpsRequestWriter,
+  emitJsonChunks,
+  collectStreamJson,
+  streamJsonByteLength,
+  sendLargeJson,
+  disposeBiSectionRawBody,
   BI_CORE_WARMUP_QUEUE_OWNED,
   BI_CORE_WARMUP_QUEUE_PRIORITY,
+  BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS,
+  BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS,
   biPortalCoreWarmupState,
+  biPortalCoreWarmupIdempotencyKey,
+  biPortalForceRefreshIdempotencyKey,
+  BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS,
+  BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS,
+  biSectionEnqueueChildSpec,
+  enqueueHostLockedBiSection,
+  biExternalSectionQueuePendingSize() {
+    return biExternalSectionQueuePending.size;
+  },
+  biPortalHomepageAccountingIdempotencyKey,
+  biPortalLiveAccountingEventIdentity,
+  biPortalLiveAccountingIdempotencyKey,
+  resetBiPortalCoreWarmupEnqueueBackoff,
   scheduleBiPortalCoreWarmup,
   startBiPortalCoreWarmupWatcher,
   biPortalCoreFileIdentity,
@@ -18314,10 +21155,17 @@ export const __testHooks = {
   verifyPersistedPublishAssetBindingReadback,
   descriptionBindingExplicitPreValidRejectionEvidence,
   strictOwnBooleanField,
+  linkOpsExecutionResponseOutcome,
   linkOpsPublishResultSucceeded,
   linkOpsExecutorExplicitPreValidFailure,
   linkOpsProductExecutorSubmitted,
   linkOpsMaintenanceExecutorSubmitted,
+  buildOpenApiExecutorChildOutcome,
+  resolveLinkOpsWriteClaimState,
+  classifyLinkOpsLifecycle,
+  persistClaimedLinkOpsExecutionResult,
+  runChildProcess,
+  OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
   legacyPreValidArtifactCandidates,
   verifyLegacyPreValidArtifact,
   hydrateLegacyPreValidProofs,

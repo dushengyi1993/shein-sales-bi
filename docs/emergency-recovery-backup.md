@@ -1,6 +1,6 @@
 # 硬盘故障应急恢复与 GitHub 备份边界
 
-更新时间：2026-07-30
+更新时间：2026-08-17
 
 ## 结论
 
@@ -33,8 +33,8 @@
 
 | 路径 | 原因 | 丢失后怎么恢复 |
 | --- | --- | --- |
-| `profiles/` | 浏览器登录态、Cookie、保存密码和大量缓存，体积几十 GB | 新机器重新登录；或者用加密外部备份迁移，不进 GitHub |
-| `state/shein_webapi_sessions/*.local.json` | SHEIN WebAPI Cookie session，敏感 | 新机器重新登录/刷新 session；后续官方 OpenAPI 替代后减少依赖 |
+| `profiles/` | 浏览器登录态、Cookie、保存密码和大量缓存，敏感且体积大 | 每日现有数据库备份链会流式生成 AES-256-GCM 加密归档并校验；恢复只允许先落到全新 staging 目录，绝不进 GitHub |
+| `state/shein_webapi_sessions/*.local.json` | SHEIN WebAPI Cookie session，敏感 | 与 Profile 一并进入加密归档；仍可通过重新登录/刷新 session 重建 |
 | `config/shein_openapi.local.json` | SHEIN OpenAPI app secret / token 等真实密钥 | 只能通过密码管理器或加密渠道单独迁移 |
 | `config/bi_users.local.json` | 本地 BI 账号密码 | 新环境重新设置 |
 | `config/lark_report.json` | 飞书真实接收配置 | 由 `config/lark_report.example.json` 复制后手动填 |
@@ -66,6 +66,49 @@
 2. **数据库 dump：** 保存 PostgreSQL 业务仓库和 Metabase 配置库。这是未来最重要的恢复层，不能靠 GitHub 替代。
 3. **加密密钥包：** 保存 `.env`、OpenAPI secret、Cookie session、必要账号密码；只能放密码管理器、加密 U 盘或云盘，不进普通 Git。
 4. **可选原始输出归档：** `outputs/shein_*`、`outputs/et-forwarder` 如要精确保留历史，可单独压缩到外部硬盘/云盘；不建议进 GitHub。
+
+## 浏览器登录态加密备份与恢复
+
+`scripts/cloud_db_backup.sh` 继续由原有 `shein-bi-db-backup.timer` 调度，不新增第二套 timer。数据库 dump 完成后，它会调用
+`scripts/manage_encrypted_browser_state_backup.mjs`：
+
+- 直接把 Profile 与 `state/shein_webapi_sessions` 流式加密为 `browser-state.sheinenc`，不产生明文 tar/zip；v2 认证记录同时保存 numeric uid/gid、mode 与 mtime，root 执行恢复时不会把原属主静默改成 root；
+- 使用 AES-256-GCM 同时提供保密性和篡改检测；每个文件另有 SHA-256，整份归档创建后必须再完整解密校验一次；
+- 排除 Cache、GPUCache、Code Cache、Crashpad、Singleton 锁和日志等可重建项；Cookie、Login Data、Local State、Local/Session Storage、IndexedDB 等登录关键状态保留；
+- 检测到 Chrome 正在使用 Profile 时失败关闭，避免备份半写状态；
+- 归档和两份 create/verify 回执进入现有 `SHA256SUMS.txt`、本地保留和 COS 归档链。
+
+生产密钥固定为 `/srv/shein-bi/secrets/browser-state-backup.key`，必须是 root 可读、组/其他用户不可读的 32 字节随机文件。密钥不进 Git，也不写入日志。首次启用时用受控通道生成，并把独立恢复副本保存到密码管理器或离线加密介质；**只有备份没有异机密钥副本，整机损坏后仍无法恢复。**
+
+恢复分两步，防止旧归档覆盖当前登录态：
+
+```bash
+node scripts/manage_encrypted_browser_state_backup.mjs verify \
+  --key-file /srv/shein-bi/secrets/browser-state-backup.key \
+  --archive /path/to/browser-state.sheinenc
+
+node scripts/manage_encrypted_browser_state_backup.mjs restore \
+  --key-file /srv/shein-bi/secrets/browser-state-backup.key \
+  --archive /path/to/browser-state.sheinenc \
+  --destination /srv/shein-bi/runtime/profile-restore-staging-YYYYMMDD \
+  --confirm RESTORE_ENCRYPTED_BROWSER_STATE_TO_EMPTY_STAGING
+```
+
+`--destination` 必须不存在；工具只恢复到这个新 staging 目录。停止浏览器、逐店身份核验、备份当前 live 目录、原子切换和登录回读仍是单独的生产变更门，不能由 restore 命令自动完成。
+
+## COS 归档完整性与本地删除硬门
+
+每日备份目录完成后，`SHA256SUMS.txt` 只登记该目录顶层普通文件，并使用确定排序的可移植相对文件名；清单自身不进入清单。归档前必须先在备份目录内执行 `sha256sum -c`，同时确认清单无绝对路径、`..`、重复文件名、缺失文件、额外文件或非普通文件。历史备份若仍使用绝对路径清单，会明确失败并保留本地副本，不会被兼容逻辑悄悄标绿；应由人工审计后重新生成安全清单和归档。
+
+COS 中无论是本轮新建还是已经存在的 `.tar.gz`，都不能只信归档旁的 `.sha256` 或归档内清单文本。校验器以不跟随归档符号链接的只读文件描述符读取 tar/gzip，不把不可信内容解压到文件系统，并逐项验证：
+
+- tar 只能有一个预期根目录，根目录下只能是清单列出的顶层普通文件和 `SHA256SUMS.txt`；
+- 绝对路径、路径逃逸、嵌套路径、重复条目、额外或缺失条目全部失败；
+- symlink、hardlink、目录、设备、FIFO 等非预期类型全部失败；
+- 归档内清单必须与已验证的本地清单逐字节一致，每个受保护文件的实际归档字节必须重新计算 SHA-256 并匹配；
+- 归档在校验期间必须保持同一 inode、大小和修改状态；完整内容校验成功后才生成或更新 sidecar，并立即回读 sidecar 校验归档。
+
+只有上述全部条件成功且本次调用明确处于过期备份删除阶段（`remove_after=1`），才允许删除本地备份目录。同日归档默认保留本地；任何清单、归档内容、类型、sidecar、I/O 或删除异常都会返回失败，撤掉不再可信的 sidecar，并保留本地源以供排查。
 
 ## 从 GitHub 裸恢复的最小路径
 

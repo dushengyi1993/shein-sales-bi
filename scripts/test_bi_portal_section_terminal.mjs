@@ -312,6 +312,10 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     'a busy prewarm lock in critical sync mode must exit retryable 75');
   assert.match(prewarm, /another prewarm is running; skip[\s\S]*exit 0/,
     'a busy prewarm lock in async mode must keep the skip 0 behavior');
+  assert.match(prewarm, /SHEIN_BI_PORTAL_PREWARM_REFRESH_TOKEN:-prewarm:/,
+    'one prewarm invocation must own a stable refresh intent token');
+  assert.match(prewarm, /\?refresh=1&refreshToken=\$\{REFRESH_RUN_TOKEN\}/,
+    'every forced prewarm request must carry the run token required by host-locked sections');
 
   assert.match(prewarm, /-w '%\{http_code\}'/, 'prewarm must capture the explicit HTTP status code');
   assert.match(prewarm, /\[\[ "\$HTTP_CODE" != "200" \]\]/, 'prewarm must reject every non-200 response');

@@ -6,9 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'owner-knowledge-execute-toctou-'));
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const port = await freePort();
 const authFile = path.join(temp, 'users.json');
 const rolesFile = path.join(temp, 'roles.json');

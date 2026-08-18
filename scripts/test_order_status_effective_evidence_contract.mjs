@@ -40,6 +40,9 @@ assert.match(recheck, /\['openapi', 'webapi', 'auto', 'browser'\]/);
 assert.match(closureUnit, /SHEIN_SALES_TRANSPORT=openapi/);
 assert.match(closureUnit, /cloud_order_closure_coordinator\.sh/);
 assert.match(closureScript, /--transport openapi/);
+assert.match(closureScript, /SHEIN_ORDER_CLOSURE_REFRESH_TOKEN:-order-closure:/);
+assert.match(closureScript, /orders\?refresh=1&refreshToken=\$\{REFRESH_RUN_TOKEN\}/,
+  'each order-closure run must pass one stable force-refresh intent token');
 assert.match(closureCoordinator, /retrying inside the same daily run/);
 assert.match(closureCoordinator, /status" -ne 75/);
 assert.match(closureCoordinator, /resource deferral persisted until the start deadline/);

@@ -17,16 +17,20 @@
 
 ## 构建与发布
 
-- [ ] 固定目标 commit SHA，并记录发布分支、Git tag 和 GitHub release（或明确说明为何不创建）。
-- [ ] 确认发布资产与目标 SHA 一致，release note 写清变更范围、回滚点和已知限制。
+- [ ] 固定目标 commit SHA；源码版本不低于 fresh 远端最新 `YYYY.MM.DD.N`，Tag/Release 只通过 `source-release.yml` 状态机创建或恢复，不人工创建轻量 Tag。
+- [ ] 确认 annotated tag message、peeled commit、schema v3 attestation（repository id、trust policy SHA-256、CI job count/jobs SHA-256）、checksum、Release asset API digest/size/state 和下载字节全部一致；正式 Release 必须 `immutable=true`；release note 写清变更范围、回滚点和已知限制。
+- [ ] 发布前串行启用/确认 GitHub immutable releases policy，并权威 GET 回读 `enabled=true` 且 `enforced_by_owner=true`；不能只信 mutation 响应。
 - [ ] release note 明确“仅源码发布”或“已部署生产”；不得把 GitHub tag 自动等同于生产版本。
-- [ ] CI 已针对目标 SHA 完成；失败、未配置或未运行的检查必须如实列出。
+- [ ] PR CI 与合并后同一 SHA 的 main-push CI 均完成；源码发布绑定后者的精确 run ID + run attempt，并在 publish 前后重新回读。失败、未配置或未运行的检查必须如实列出。
+- [ ] 若发布 Partner CLI，先创建指向同一 `origin/main` commit 的 annotated `partner-cli-vYYYY.MM.DD.N` tag 和 draft Release；只以 `tag + expected_commit` 手动触发 `partner-cli-release.yml`，不得手工先 publish。工作流必须在 draft 阶段上传并回读唯一 ZIP/SHA256，fresh 复验 CI/immutable policy 后单次 publish；已发布 immutable 重跑不得修改资产。
 - [ ] GitHub Actions 使用固定 commit SHA；Dependabot 已覆盖 `github-actions` 更新。
 - [ ] 云端部署仅在得到对应权限后执行；普通生产写入遵守 preflight、精确 payload hash、明确确认、审计与 readback。负责人已登记的长期自动化策略可免逐次人工确认，但不得免除 hash：系统必须自动计算、锁定并校验精确 payload/work hash，同时校验授权 ID/上下文、动作与店铺范围、实时证据、预校验、审计和 readback。
 
 ## 发布后
 
 - [ ] 对生产入口、关键 service/timer、日志和数据新鲜度做与风险相称的真实验收。
-- [ ] 云端 `HEAD` 等于 release target SHA，且 `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>` 通过；watchdog 以该部署标记持续检查 commit、脏改、隐藏索引和缺失文件。
+- [ ] 云端 `HEAD` 等于 attested commit，两份证明资产位于 `/srv/shein-bi/runtime/release-attestations/<tag>/`，且 `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>` 写出有效 schema v3 的 `shein-bi-deployed-release/v3`；watchdog 持续检查 attestation/CI 绑定、commit、脏改、隐藏索引和缺失文件。
+- [ ] Portal `8787`、Query `8788`、Webhook `8792` 分别健康；重启 Portal 不改变 Query PID，Query health 的 `surface=query` 且 `sideEffectsStarted=[]`。
+- [ ] 维护 marker 已通过 fresh generation/hash CAS 恢复；只读巡检、timer、写链按阶段恢复，没有 `Persistent` catch-up 或重复 scheduler 意外拉起。
 - [ ] 云端真实 warning、partial、stale、blocked 或 reconciliation 差异不得因发布而抹除、静默或改写为成功；在 release note/runbook 中保留其状态和下一步负责人。
 - [ ] 记录最终 target SHA、验证证据、残余风险及回滚命令/版本。

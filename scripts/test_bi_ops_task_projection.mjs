@@ -19,6 +19,7 @@ import {
   sha256StableJson,
   sha256Utf8,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
@@ -368,6 +369,7 @@ try {
   const stateFile = await writeJson('action_state.json', {version: 1, updatedAt: null, actions: {}});
   const auditFile = path.join(tmpRoot, 'audit.jsonl');
   const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+  await provisionBiSessionSecret(sessionSecretFile);
   const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
   const fakeOpenApiPort = await freePort();
   fakeOpenApi = http.createServer((_req, res) => {

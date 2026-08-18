@@ -1,6 +1,6 @@
 # SHEIN BI 系统架构
 
-更新时间：2026-07-26
+更新时间：2026-08-17
 
 ## 结论
 
@@ -45,7 +45,23 @@ flowchart LR
 
 - `shein-metabase`：Metabase BI 页面；
 - `shein-metabase-db`：Metabase 自身配置库；
-- `shein-warehouse-db`：SHEIN 数据仓库 PostgreSQL。
+- `shein-warehouse-db`：SHEIN 数据仓库 PostgreSQL；
+- `shein-bi-portal.service`：`127.0.0.1:8787` 的完整 Portal、Link Ops 与 section 队列入口；
+- `shein-bi-query.service`：`127.0.0.1:8788` 的认证只读查询面，只开放登录、账号、CLI/知识 bundle 和 `/api/bi/query-data` 精确路由，不启动 worker、Webhook、AI、实时桥或 section 生成；
+- `shein-bi-webhook.service`：`127.0.0.1:8792` 的独立 Webhook 接收与数据库队列 worker。
+
+```mermaid
+flowchart LR
+  A["公网 HTTPS"] --> B["Nginx 127.0.0.1:8080"]
+  B -->|"页面、Link Ops、写路由"| C["Portal 8787"]
+  B -->|"9 个精确认证只读路由"| D["Query 8788"]
+  B -->|"SHEIN 官方回调"| E["Webhook 8792"]
+  C --> F["PostgreSQL 与 section queue"]
+  D -->|"只读、并发 1、排队 3"| F
+  E --> F
+```
+
+Query 使用与 Portal 相同的 `bi_session`，但进程、V8 heap、cgroup 和路由故障域分离。重启或 OOM 处置 Portal 不应改变 Query PID；Nginx 对精确只读路由直接连接 8788，失败时不得回退到 8787。
 
 已初始化数据仓库 schema：
 
@@ -65,7 +81,7 @@ flowchart LR
 - Metabase 运行在云端 Docker 内部，不在文档中写公网裸地址；本地旧 WSL 地址只作历史排障参考。
 - Metabase dashboard 编号仍可作为内部迁移参考，但不要使用旧本地 WSL IP 作为正式入口。
 
-## 当前运行态（2026-07-26）
+## 当前运行态（2026-08-17）
 
 BI 系统当前分为三层入口：
 
@@ -85,11 +101,17 @@ BI 系统当前分为三层入口：
    - 云端入口：`https://sa.dushengyi.cc/`，旧 IP `http://43.165.167.135/` 仅作兜底
    - 负责“每天先看什么、先处理什么、如何复制指令、如何标记处理状态”。
    - API section cache 位于 `outputs/bi-portal/sections/`；派生 section 要遵守源缓存生命周期，例如 `homeProfit` 必须从当前 `profit` section 派生。`serve_bi_portal.mjs` 负责 section API、gzip/raw cache 返回，以及 core `generatedAt` 变化后的后台 warmup 兜底。
+   - cache-miss、force、accounting、warmup 与 live event 的所有 enqueue 入口都必须按各自事实身份生成稳定幂等键；同一事实重复访问不得推进 revision。Query 返回 `QUERY_SURFACE_BUSY` 时 Partner CLI 只在原等待预算内按 `Retry-After` 有界重试。
    - 首页"单货号成交价格分布"面板：依赖销售明细/homeRankings 行，客户端计算每行均价并分桶，无新写路径，只读决策支持。
    - 首页"成交价散点图"（priceScatter section）：基于 `fact.order_item` 的 `unit_price_sar = sales_sar / quantity`，按订单日期 × 成交单价绘制散点；不筛选货号时显示全货盘分布，筛选后缩小到单货号。Section API 为 `/api/bi/section/priceScatter`，需同时在 `BI_PORTAL_SECTION_KEYS` 白名单注册。
    - 本地 `127.0.0.1:8787` 和局域网入口已封存，不再作为正式入口。
    - 自动运营会话、任务、job、事件和审计已进入 PostgreSQL `ops.link_ops_*`，revision、idempotency 和租约共同防并发覆盖。
    - `fact.openapi_*` 与 `mart.openapi_sales_reconciliation` 是 OpenAPI 可追溯来源和最终日门禁证据；切换日以后当天事实由 Webhook 定向写入，最终日仍需全店匹配后原子晋升。
+
+4. **运行态与维护控制面**
+   - canonical 运行态为 `/data/shein-bi/{profiles,state,outputs}`。宿主 `/opt/shein-bi/app/profiles` 与 `state` 只保留只读兼容入口，`outputs` 不再做宿主级 bind；28 个 service 按 `lib/cloud_runtime_path_policy.mjs` 获得 unit-private 读写 namespace，无浏览器职责的 Query 看不到 profile。
+   - `/var/lib/shein-bi-control/cloud-maintenance.json` 是 systemd、watchdog 和 Codex heartbeat 共用的 CAS 总闸。控制目录为 `root:root 0755`、marker 为 `root:root 0644`；非敏感控制元数据可被服务读取，但只有 root 能替换或删除。28 个 service 分为 `scheduled`、`infrastructure`、`always`；Portal、Query、Webhook 与 watchdog 类检查在维护期仍保持可见。
+   - 生产部署 marker 使用 schema v3 的 `shein-bi-deployed-release/v3`，同时绑定 repository id、trust policy SHA-256、annotated tag object、commit、attestation/checksum SHA-256、精确 main-push CI run/attempt 与 jobs SHA-256，以及 exact source fingerprint；旧 v1/v2 marker 均不满足运行态健康门（v2 只作迁移读取兼容）。
 
 当前团队访问状态：
 

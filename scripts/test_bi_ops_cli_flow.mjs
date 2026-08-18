@@ -4,6 +4,11 @@ import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import http from 'node:http';
+import {buildOwnerKnowledgeDistribution} from '../lib/owner_knowledge_distribution.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
+import {createLinkOpsJsonRepository} from '../lib/link_ops_json_repository.mjs';
+import {createLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cliSource = await fs.readFile(path.join(ROOT, 'scripts', 'bi_ops_cli.mjs'), 'utf8');
@@ -94,8 +99,59 @@ async function getFreePort() {
 
 async function writeJson(name, value) {
   const file = path.join(tmpRoot, name);
+  await fs.mkdir(path.dirname(file), {recursive: true});
   await fs.writeFile(file, JSON.stringify(value, null, 2), 'utf8');
   return file;
+}
+
+function sendJson(res, value, status = 200, headers = {}) {
+  res.writeHead(status, {'content-type': 'application/json; charset=utf-8', ...headers});
+  res.end(JSON.stringify(value));
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString('utf8');
+  if (!text) return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+async function listenLoopback(server) {
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+async function closeHttpServer(server) {
+  if (!server.listening) return;
+  await new Promise(resolve => server.close(resolve));
+}
+
+function runNode(args, {env = {}} = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      cwd: ROOT,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {...process.env, ...env},
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString(); });
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.once('error', reject);
+    child.on('close', code => {
+      let json = null;
+      try { json = stdout.trim() ? JSON.parse(stdout) : null; } catch {}
+      resolve({code, stdout, stderr, json});
+    });
+  });
 }
 
 const authFile = await writeJson('auth.json', {
@@ -138,6 +194,7 @@ const chatFile = path.join(tmpRoot, 'chats.json');
 const runtimeFile = path.join(tmpRoot, 'runtime.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 const ownerSessionFile = path.join(tmpRoot, 'owner-session.json');
 const operatorSessionFile = path.join(tmpRoot, 'operator-session.json');
@@ -221,12 +278,14 @@ async function waitReady() {
   throw new Error(`server not ready\nstdout=${serverStdout}\nstderr=${serverStderr}`);
 }
 
-function runCli(cliArgs, {input = ''} = {}) {
+function runCli(cliArgs, {input = '', baseUrl: cliBaseUrl = null, knowledgeCacheDir: cliKnowledgeCacheDir = null} = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['scripts/bi_ops_cli.mjs', '--base-url', baseUrl, '--knowledge-cache-dir', knowledgeCacheDir, ...cliArgs], {
+    const targetBaseUrl = cliBaseUrl || baseUrl;
+    const targetKnowledgeCacheDir = cliKnowledgeCacheDir || knowledgeCacheDir;
+    const child = spawn(process.execPath, ['scripts/bi_ops_cli.mjs', '--base-url', targetBaseUrl, '--knowledge-cache-dir', targetKnowledgeCacheDir, ...cliArgs], {
       cwd: ROOT,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {...process.env, SHEIN_BI_BASE_URL: baseUrl},
+      env: {...process.env, SHEIN_BI_BASE_URL: targetBaseUrl},
     });
     let stdout = '';
     let stderr = '';
@@ -254,8 +313,344 @@ function expectCliOk(label, run) {
   check(`${label} exit`, run.code, 0);
   check(`${label} ok`, run.json?.ok, true);
 }
+function expectCliBlocked(label, run) {
+  check(`${label} exit`, run.code, 75);
+  check(`${label} ok`, run.json?.ok, false);
+  check(`${label} committed`, run.json?.committed, true);
+  check(`${label} partial`, run.json?.partial, true);
+  check(`${label} outcome`, run.json?.outcome, 'blocked');
+}
+
+async function runMaintenanceExecutorOutcomeFixture() {
+  const fixtureRoot = path.join(tmpRoot, 'p1-maintenance-executor');
+  const calls = [];
+  let inventoryValue = 7;
+  const fakeOpenApi = http.createServer(async (req, res) => {
+    const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
+    const body = await readJsonBody(req);
+    calls.push({method: req.method, path: pathname, body});
+    if (pathname === '/open-api/openapi-business-backend/query-store-info') {
+      return sendJson(res, {code: '0', msg: 'OK', info: {shopName: 'P1 Fixture Store'}});
+    }
+    if (pathname === '/open-api/goods/query-site-list') {
+      return sendJson(res, {code: '0', msg: 'OK', info: [{sub_site_list: [{site_abbr: 'shein-sa', currency: 'SAR'}]}]});
+    }
+    if (pathname === '/open-api/msc/warehouse/list') {
+      return sendJson(res, {code: '0', msg: 'OK', info: {list: [{warehouseCode: 'WH-1', warehouseName: 'Saudi fixture', saleCountryList: ['SA']}]}});
+    }
+    if (pathname === '/open-api/goods/product/partialEdit') {
+      const title = body?.multi_language_name_list?.find(row => row?.language === 'en')?.name || '';
+      const row = body?.skc_list?.[0] || {};
+      if (body?.spu_name !== 'spu-p1-title' || row.skc_name !== 'sv-p1-title' || title !== 'P1 Confirmed Title') {
+        return sendJson(res, {code: '400', msg: 'invalid title fixture payload'});
+      }
+      return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-p1-title', info: {success: true, version: 'P1-TITLE-V1'}});
+    }
+    if (pathname === '/open-api/stock/change-inventory/v2') {
+      const row = body?.updateSkuInventoryQuantityRequests?.[0] || {};
+      if (row.skuCode !== 'sku-p1-inventory' || row.changeQuantity !== 30 || row.changeType !== 'OVERWRITE' || row.warehouseCode !== 'WH-1') {
+        return sendJson(res, {code: '400', msg: 'invalid inventory fixture payload'});
+      }
+      inventoryValue = 30;
+      return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-p1-inventory'});
+    }
+    if (pathname === '/open-api/stock/stock-query') {
+      return sendJson(res, {code: '0', msg: 'OK', info: [{goodsInventory: [{
+        skcName: 'sv-p1-inventory',
+        skuList: [{skuCode: 'sku-p1-inventory', totalUsableInventory: inventoryValue}],
+      }]}]});
+    }
+    if (pathname === '/open-api/openapi-business-backend/product/query') {
+      return sendJson(res, {code: '0', msg: 'OK', info: {data: [
+        {skcName: 'sv-p1-title', spuName: 'spu-p1-title', supplierCode: 'P1-TITLE', skuCodeList: ['sku-p1-title']},
+        {skcName: 'sv-p1-inventory', spuName: 'spu-p1-inventory', supplierCode: 'P1-INVENTORY', skuCodeList: ['sku-p1-inventory']},
+      ]}});
+    }
+    return sendJson(res, {code: '404', msg: `Unhandled fixture endpoint ${pathname}`}, 404);
+  });
+
+  const fakeBaseUrl = await listenLoopback(fakeOpenApi);
+  try {
+    const configFile = await writeJson('p1-maintenance-executor/openapi.json', {
+      apiBaseUrls: {prodSemiManaged: fakeBaseUrl},
+      stores: [{storeKey: 'SMK', enabled: true, openKeyId: 'fixture-open-key', secretKey: 'fixture-secret-key'}],
+    });
+    const biDir = path.join(fixtureRoot, 'bi-portal');
+    await writeJson('p1-maintenance-executor/bi-portal/sections/linksData.json', {
+      data: {storeLinks: [
+        {store_key: 'SMK', skc: 'sv-p1-title', spu: 'spu-p1-title', standard_goods_sn: 'P1-TITLE', is_on_shelf: true},
+        {store_key: 'SMK', skc: 'sv-p1-inventory', spu: 'spu-p1-inventory', standard_goods_sn: 'P1-INVENTORY', is_on_shelf: true},
+      ]},
+    });
+    const productCacheDir = path.join(fixtureRoot, 'products');
+    await writeJson('p1-maintenance-executor/products/SMK/latest.json', {
+      normalizedRows: [
+        {storeKey: 'SMK', skc: 'sv-p1-title', spu: 'spu-p1-title', supplierCode: 'P1-TITLE', skuCodes: ['sku-p1-title']},
+        {storeKey: 'SMK', skc: 'sv-p1-inventory', spu: 'spu-p1-inventory', supplierCode: 'P1-INVENTORY', skuCodes: ['sku-p1-inventory']},
+      ],
+    });
+    const outDir = path.join(fixtureRoot, 'out');
+    const commonArgs = [
+      'scripts/link_ops_maintenance_openapi_executor.mjs',
+      '--config', configFile,
+      '--store', 'SMK',
+      '--dir', biDir,
+      '--product-cache-dir', productCacheDir,
+      '--out-dir', outDir,
+    ];
+    const runExecutor = (extraArgs) => runNode([...commonArgs, ...extraArgs], {
+      env: {NODE_ENV: 'test', SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1'},
+    });
+    const executeSnapshot = async (name, task, payloadHash, nonce) => writeJson(name, {
+      version: 1,
+      executionContext: {
+        expectedPayloadHash: payloadHash,
+        writeClaim: {
+          schemaVersion: 1,
+          claimId: `claim-${task.id}`,
+          nonce,
+          taskId: task.id,
+          storeKey: 'SMK',
+          operations: task.intents,
+          expectedPayloadHash: payloadHash,
+          claimedAt: '2026-08-18T00:00:00.000Z',
+          claimedBy: 'p1-cli-flow-fixture',
+          state: 'claimed',
+        },
+      },
+      tasks: [task],
+    });
+
+    const titleTask = {
+      id: 'p1-title-unconfirmed',
+      status: 'waiting_review',
+      command: '使用结构化参数更新标题',
+      planning: {source: 'structured_cli', parameters: {title: 'P1 Confirmed Title'}},
+      targets: {stores: ['SMK'], productRefs: ['P1-TITLE']},
+      intents: ['update_title'],
+    };
+    const titleDryFile = await writeJson('p1-maintenance-executor/title-dry.json', {version: 1, tasks: [titleTask]});
+    const titleDryCallStart = calls.length;
+    const titleDry = await runExecutor(['--task-id', titleTask.id, '--task-json', titleDryFile, '--dry-run']);
+    const titleDryCalls = calls.slice(titleDryCallStart);
+    check('P1 title dry-run exits 0', titleDry.code, 0);
+    check('P1 title dry-run ready', titleDry.json?.ok, true);
+    check('P1 title dry-run outcome', titleDry.json?.outcome, 'ready');
+    check('P1 title dry-run is not committed', titleDry.json?.committed, false);
+    check('P1 title dry-run is not partial', titleDry.json?.partial, false);
+    check('P1 title dry-run never writes', titleDryCalls.some(call => call.path === '/open-api/goods/product/partialEdit'), false);
+    const titleHash = titleDry.json?.payload?.payloadHash || '';
+    check('P1 title dry-run locks payload hash', titleHash, value => /^[a-f0-9]{64}$/.test(String(value || '')));
+
+    const titleNoClaimFile = await writeJson('p1-maintenance-executor/title-no-claim.json', {
+      version: 1,
+      executionContext: {expectedPayloadHash: titleHash},
+      tasks: [titleTask],
+    });
+    const titleNoClaimCallStart = calls.length;
+    const titleNoClaim = await runExecutor(['--task-id', titleTask.id, '--task-json', titleNoClaimFile, '--execute', '--confirm', 'SHEIN_OPENAPI_SUBMIT']);
+    const titleNoClaimCalls = calls.slice(titleNoClaimCallStart);
+    check('P1 title execute without durable claim is blocked', titleNoClaim.json?.outcome, 'blocked');
+    check('P1 title execute without durable claim is not committed', titleNoClaim.json?.committed, false);
+    check('P1 title execute without durable claim never writes', titleNoClaimCalls.some(call => call.path === '/open-api/goods/product/partialEdit'), false);
+    check('P1 title durable claim blocker is explicit', titleNoClaim.json?.blockers || [], rows => rows.some(row => /write-claim/.test(String(row))));
+
+    const titleNonce = 'nonce-p1-title-unconfirmed';
+    const titleExecuteFile = await executeSnapshot('p1-maintenance-executor/title-execute.json', titleTask, titleHash, titleNonce);
+    const titleExecuteCallStart = calls.length;
+    const titleExecute = await runExecutor(['--task-id', titleTask.id, '--task-json', titleExecuteFile, '--execute', '--confirm', 'SHEIN_OPENAPI_SUBMIT', '--claim-nonce', titleNonce]);
+    const titleExecuteCalls = calls.slice(titleExecuteCallStart);
+    check('P1 unconfirmed executor process exits deterministically', titleExecute.code, 0);
+    check('P1 unconfirmed executor top-level ok false', titleExecute.json?.ok, false);
+    check('P1 unconfirmed executor partial true', titleExecute.json?.partial, true);
+    check('P1 unconfirmed executor outcome', titleExecute.json?.outcome, 'unconfirmed');
+    check('P1 unconfirmed executor committed true', titleExecute.json?.committed, true);
+    check('P1 unconfirmed executor state stays submitted', titleExecute.json?.state, 'submitted');
+    check('P1 unconfirmed executor keeps locked payload hash', titleExecute.json?.payload?.payloadHash, titleHash);
+    check('P1 unconfirmed executor keeps adapter real-submit evidence', titleExecute.json?.adapterEvidence?.realSubmit, true);
+    check('P1 unconfirmed executor keeps adapter write-attempt evidence', titleExecute.json?.adapterEvidence?.writeAttempted, true);
+    check('P1 unconfirmed executor keeps validated durable claim', titleExecute.json?.adapterEvidence?.writeClaim?.validated, true);
+    check('P1 unconfirmed executor keeps durable claim id', titleExecute.json?.adapterEvidence?.writeClaim?.claimId, `claim-${titleTask.id}`);
+    check('P1 unconfirmed executor binds durable claim payload hash', titleExecute.json?.adapterEvidence?.writeClaim?.expectedPayloadHash, titleHash);
+    check('P1 unconfirmed executor binds durable claim operations', titleExecute.json?.adapterEvidence?.writeClaim?.operations || [], rows => rows.length === 1 && rows[0] === 'update_title');
+    check('P1 unconfirmed executor never echoes claim nonce', titleExecute.json?.adapterEvidence?.writeClaim?.nonce, undefined);
+    check('P1 unconfirmed executor keeps phase result', titleExecute.json?.adapterEvidence?.phaseResults?.[0]?.operation, 'update_title');
+    check('P1 unconfirmed executor keeps successful adapter code', titleExecute.json?.adapterEvidence?.phaseResults?.[0]?.code, '0');
+    check('P1 unconfirmed executor keeps publish result', titleExecute.json?.publishResult?.code, '0');
+    check('P1 unconfirmed executor readback is not upgraded', titleExecute.json?.readback?.ok, false);
+    check('P1 unconfirmed executor records title readback mismatch', titleExecute.json?.readback?.status, 'title_readback_mismatch');
+    check('P1 unconfirmed executor readback fingerprint matches hash', titleExecute.json?.readbackFingerprint?.payloadHash, titleHash);
+    check('P1 unconfirmed executor performs one real title write', titleExecuteCalls.filter(call => call.path === '/open-api/goods/product/partialEdit').length, 1);
+
+    const inventoryTask = {
+      id: 'p1-inventory-confirmed',
+      status: 'waiting_review',
+      command: '使用结构化参数更新库存',
+      planning: {source: 'structured_cli', parameters: {inventory: 30}},
+      targets: {stores: ['SMK'], productRefs: ['P1-INVENTORY']},
+      intents: ['update_inventory'],
+    };
+    const inventoryDryFile = await writeJson('p1-maintenance-executor/inventory-dry.json', {version: 1, tasks: [inventoryTask]});
+    const inventoryDryCallStart = calls.length;
+    const inventoryDry = await runExecutor(['--task-id', inventoryTask.id, '--task-json', inventoryDryFile, '--dry-run']);
+    const inventoryDryCalls = calls.slice(inventoryDryCallStart);
+    check('P1 inventory dry-run exits 0', inventoryDry.code, 0);
+    check('P1 inventory dry-run ready', inventoryDry.json?.ok, true);
+    check('P1 inventory dry-run outcome', inventoryDry.json?.outcome, 'ready');
+    check('P1 inventory dry-run is not committed', inventoryDry.json?.committed, false);
+    check('P1 inventory dry-run never writes', inventoryDryCalls.some(call => call.path === '/open-api/stock/change-inventory/v2'), false);
+    const inventoryHash = inventoryDry.json?.payload?.payloadHash || '';
+    check('P1 inventory dry-run locks payload hash', inventoryHash, value => /^[a-f0-9]{64}$/.test(String(value || '')));
+    const inventoryNonce = 'nonce-p1-inventory-confirmed';
+    const inventoryExecuteFile = await executeSnapshot('p1-maintenance-executor/inventory-execute.json', inventoryTask, inventoryHash, inventoryNonce);
+    const inventoryExecuteCallStart = calls.length;
+    const inventoryExecute = await runExecutor(['--task-id', inventoryTask.id, '--task-json', inventoryExecuteFile, '--execute', '--confirm', 'SHEIN_OPENAPI_SUBMIT', '--claim-nonce', inventoryNonce]);
+    const inventoryExecuteCalls = calls.slice(inventoryExecuteCallStart);
+    check('P1 confirmed inventory executor exits 0', inventoryExecute.code, 0);
+    check('P1 confirmed inventory executor ok true', inventoryExecute.json?.ok, true);
+    check('P1 confirmed inventory executor partial false', inventoryExecute.json?.partial, false);
+    check('P1 confirmed inventory executor outcome', inventoryExecute.json?.outcome, 'completed');
+    check('P1 confirmed inventory executor committed true', inventoryExecute.json?.committed, true);
+    check('P1 confirmed inventory executor exact readback', inventoryExecute.json?.readback?.status, 'matched_stock_query_exact');
+    check('P1 confirmed inventory executor readback ok', inventoryExecute.json?.readback?.ok, true);
+    check('P1 confirmed inventory executor keeps adapter evidence', inventoryExecute.json?.adapterEvidence?.realSubmit, true);
+    check('P1 confirmed inventory executor keeps validated durable claim', inventoryExecute.json?.adapterEvidence?.writeClaim?.validated, true);
+    check('P1 confirmed inventory uses unique SA warehouse', inventoryExecuteCalls.find(call => call.path === '/open-api/stock/change-inventory/v2')?.body?.updateSkuInventoryQuantityRequests?.[0]?.warehouseCode, 'WH-1');
+    check('P1 confirmed inventory performs one real write', inventoryExecuteCalls.filter(call => call.path === '/open-api/stock/change-inventory/v2').length, 1);
+    result.summary.p1Executor = {
+      unconfirmed: {outcome: titleExecute.json?.outcome, committed: titleExecute.json?.committed, readback: titleExecute.json?.readback?.status},
+      confirmed: {outcome: inventoryExecute.json?.outcome, committed: inventoryExecute.json?.committed, readback: inventoryExecute.json?.readback?.status},
+    };
+  } finally {
+    await closeHttpServer(fakeOpenApi);
+  }
+}
+
+async function runCliExecutionOutcomeFixture() {
+  const published = buildOwnerKnowledgeDistribution({authorityId: 'p1-cli-fixture', rules: []});
+  const sourceCommit = 'f'.repeat(40);
+  const etag = `\"${published.manifest.fingerprint}-${sourceCommit}\"`;
+  const calls = [];
+  const stub = http.createServer(async (req, res) => {
+    const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
+    const body = await readJsonBody(req);
+    calls.push({method: req.method, path: pathname, body});
+    if (pathname === '/api/owner-knowledge/manifest') {
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, {etag});
+        res.end();
+        return;
+      }
+      return sendJson(res, {ok: true, data: {
+        ...published.manifest,
+        enabled: true,
+        ready: true,
+        current: true,
+        source: 'fixture',
+        sourceCommit,
+        distributionRevision: 1,
+        activeFingerprint: published.manifest.fingerprint,
+        cli: {minimumVersion: '2026.08.17.1', recommendedVersion: '2026.08.17.1'},
+      }}, 200, {etag});
+    }
+    if (pathname === '/api/owner-knowledge/bundle') {
+      return sendJson(res, {ok: true, data: {...published.bundle, manifest: {...published.manifest, sourceCommit}}});
+    }
+    if (pathname === '/api/link-ops-execute') {
+      const id = String(body?.id || '');
+      const task = {id, status: id === 'ready-task' ? 'waiting_review' : 'submitted'};
+      if (id === 'unconfirmed-task' && body?.mode === 'execute') {
+        // Deliberately contradictory upstream body: the CLI must fail closed
+        // even when the service mistakenly leaves ok=true.
+        return sendJson(res, {
+          ok: true,
+          committed: true,
+          partial: true,
+          outcome: 'unconfirmed',
+          error: 'strong readback pending',
+          stage: 'execution_committed_verified',
+          task,
+          execution: {state: 'submitted', writeAudit: {actualWriteSubmitted: true}, adapterEvidence: {realSubmit: true}},
+        });
+      }
+      if (id === 'completed-task' && body?.mode === 'execute') {
+        return sendJson(res, {
+          ok: true,
+          committed: true,
+          partial: false,
+          outcome: 'completed',
+          stage: 'execution_committed_verified',
+          task,
+          execution: {state: 'submitted', writeAudit: {actualWriteSubmitted: true}, readback: {ok: true}},
+        });
+      }
+      if (id === 'ready-task' && body?.mode === 'dry-run') {
+        return sendJson(res, {
+          ok: true,
+          committed: true,
+          partial: false,
+          outcome: 'ready',
+          stage: 'execution_check_persisted',
+          task,
+          execution: {state: 'ready_for_submit', writeAudit: {actualWriteSubmitted: false}},
+        });
+      }
+      return sendJson(res, {ok: false, error: 'unknown fixture task'}, 404);
+    }
+    return sendJson(res, {ok: false, error: `Unhandled CLI fixture endpoint ${pathname}`}, 404);
+  });
+
+  const stubBaseUrl = await listenLoopback(stub);
+  try {
+    const sessionFile = await writeJson('p1-cli/stub-session.json', {cookie: 'stub-cookie'});
+    const stubKnowledgeCache = path.join(tmpRoot, 'p1-cli', 'knowledge-cache');
+    const options = {baseUrl: stubBaseUrl, knowledgeCacheDir: stubKnowledgeCache};
+
+    const ready = await runCli(['--session-file', sessionFile, 'preflight', '--task-id', 'ready-task'], options);
+    check('P1 CLI dry-run ready exits 0', ready.code, 0);
+    check('P1 CLI dry-run ready stays ok', ready.json?.ok, true);
+    check('P1 CLI dry-run preserves ready outcome', ready.json?.outcome, 'ready');
+    check('P1 CLI dry-run stays non-partial', ready.json?.partial, undefined);
+
+    const unconfirmed = await runCli([
+      '--session-file', sessionFile,
+      'execute',
+      '--task-id', 'unconfirmed-task',
+      '--confirm', 'SHEIN_OPENAPI_SUBMIT',
+    ], options);
+    check('P1 CLI unconfirmed maps to exit 75', unconfirmed.code, 75);
+    check('P1 CLI unconfirmed cannot print top-level success', unconfirmed.json?.ok, false);
+    check('P1 CLI unconfirmed preserves partial', unconfirmed.json?.partial, true);
+    check('P1 CLI unconfirmed preserves outcome', unconfirmed.json?.outcome, 'unconfirmed');
+    check('P1 CLI unconfirmed preserves committed evidence', unconfirmed.json?.committed, true);
+    check('P1 CLI unconfirmed preserves task', unconfirmed.json?.task?.id, 'unconfirmed-task');
+    check('P1 CLI unconfirmed preserves adapter evidence', unconfirmed.json?.execution?.adapterEvidence?.realSubmit, true);
+
+    const completed = await runCli([
+      '--session-file', sessionFile,
+      'execute',
+      '--task-id', 'completed-task',
+      '--confirm', 'SHEIN_OPENAPI_SUBMIT',
+    ], options);
+    check('P1 CLI confirmed completed exits 0', completed.code, 0);
+    check('P1 CLI confirmed completed stays ok', completed.json?.ok, true);
+    check('P1 CLI confirmed completed preserves outcome', completed.json?.outcome, 'completed');
+    check('P1 CLI confirmed completed stays non-partial', completed.json?.partial, undefined);
+    check('P1 CLI confirmed completed preserves committed evidence', completed.json?.committed, true);
+    check('P1 CLI fixture uses only local deterministic endpoints', calls.some(call => !['/api/owner-knowledge/manifest', '/api/owner-knowledge/bundle', '/api/link-ops-execute'].includes(call.path)), false);
+    result.summary.p1Cli = {
+      ready: {exit: ready.code, outcome: ready.json?.outcome},
+      unconfirmed: {exit: unconfirmed.code, outcome: unconfirmed.json?.outcome, partial: unconfirmed.json?.partial},
+      completed: {exit: completed.code, outcome: completed.json?.outcome},
+    };
+  } finally {
+    await closeHttpServer(stub);
+  }
+}
 
 try {
+  await runMaintenanceExecutorOutcomeFixture();
+  await runCliExecutionOutcomeFixture();
   await waitReady();
 
   const operatorLogin = await runCli(['--session-file', operatorSessionFile, 'login', '--username', 'operator_cli_smoke', '--password-stdin'], {input: 'operator-cli-pass\n'});
@@ -382,6 +777,15 @@ try {
   check('operator doctor retire DX require real report not ok', result.summary.operatorDoctorRetireDxRequireOk, false);
   check('operator doctor retire DX require real readiness false', result.summary.operatorDoctorRetireDxRequireReadiness, false);
 
+  const missingTaskPreflight = await runCli([
+    '--session-file', operatorSessionFile,
+    'preflight',
+    '--task-id', 'missing-task-protocol-check',
+  ]);
+  check('missing task preflight exits failed', missingTaskPreflight.code, 1);
+  check('missing task preflight stays on stderr', missingTaskPreflight.json, null);
+  check('missing task preflight does not claim committed evidence', missingTaskPreflight.errorJson?.committed, undefined);
+
   const operatorCreateDx = await runCli([
     '--session-file', operatorSessionFile,
     'operate',
@@ -390,17 +794,21 @@ try {
     '--stores', 'DX',
     '--products', 'PA4-6L',
   ]);
-  expectCliOk('operator structured operate DX', operatorCreateDx);
+  expectCliBlocked('operator structured operate DX', operatorCreateDx);
   const operatorTaskId = operatorCreateDx.json?.task?.id || '';
   result.summary.operatorTaskId = operatorTaskId;
   check('operator task id present', Boolean(operatorTaskId), true);
+  check('operator blocked task remains waiting review', operatorCreateDx.json?.task?.status, 'waiting_review');
   check('operator structured operate invokes no cloud AI', operatorCreateDx.json?.aiInvoked, false);
   check('operator structured operation bypasses keyword inference', operatorCreateDx.json?.task?.intents || [], intents => intents.length === 1 && intents[0] === 'retire_link');
   check('operator structured operate runs preflight', Boolean(operatorCreateDx.json?.execution), true);
+  check('operator structured operate preserves blocked execution', operatorCreateDx.json?.execution?.state, 'blocked');
+  check('operator blocked operate instructs task reuse', operatorCreateDx.json?.nextStep, text => /task ID/.test(String(text)) && /勿重复 operate/.test(String(text)));
   check('operator task projection hides owner knowledge internals', Boolean(operatorCreateDx.json?.task?.ownerKnowledgePolicy), false);
 
   const operatorPreflight = await runCli(['--session-file', operatorSessionFile, 'preflight', '--task-id', operatorTaskId]);
-  expectCliOk('operator preflight DX', operatorPreflight);
+  expectCliBlocked('operator preflight DX', operatorPreflight);
+  check('operator blocked preflight preserves same task id', operatorPreflight.json?.task?.id, operatorTaskId);
   result.summary.operatorPreflightState = operatorPreflight.json?.execution?.state || '';
   result.summary.operatorPreflightSubmitted = Boolean(operatorPreflight.json?.execution?.writeAudit?.submitted);
   check('operator preflight does not submit real write', result.summary.operatorPreflightSubmitted, false);
@@ -519,6 +927,105 @@ try {
   check('all explicit and chat tasks carry owner knowledge snapshot', tasks.tasks || [], rows => Array.isArray(rows) && rows.every(row => Boolean(row?.ownerKnowledgePolicy?.fingerprint)));
   check('partner knowledge manifest cached atomically', fssync.existsSync(path.join(knowledgeCacheDir, 'manifest.json')), true);
   check('audit lines from CLI flow >= 12', result.summary.auditLines, n => n >= 12);
+  // Deterministic gateway CAS contract (isolated files, independent of the
+  // running portal): the portal request writer relies on these guarantees.
+  const casRoot = await fs.mkdtemp(path.join(tmpBase, 'biops-cas-chain-'));
+  const casRepo = createLinkOpsJsonRepository({
+    taskFile: path.join(casRoot, 'tasks.json'),
+    sessionFile: path.join(casRoot, 'sessions.json'),
+    actionFile: path.join(casRoot, 'actions.json'),
+    runtimeFile: path.join(casRoot, 'runtime.json'),
+  });
+  const casGateway = createLinkOpsStoreGateway({repository: casRepo});
+  const casNow = new Date().toISOString();
+  const casTaskId = 'cas-task-1';
+  const casBaseTask = {
+    id: casTaskId,
+    title: 'CAS chain',
+    status: 'draft',
+    command: '把 DX 的 PA4-6L 库存改成 30',
+    intents: ['update_inventory'],
+    targets: {stores: ['DX'], productRefs: ['PA4-6L']},
+    ownership: {version: 1, state: 'owned', actorKey: 'cas-actor', username: 'cas-actor', ownerKey: 'CAS'},
+    requestedByUser: 'cas-actor',
+    history: [],
+    createdAt: casNow,
+    updatedAt: casNow,
+  };
+  // (1) same-request create -> update threads the authoritative revision.
+  const casCreated = await casGateway.createTaskRecord(casBaseTask, {actorUser: 'cas-actor'});
+  const casCreatedRev = Number(casCreated.repositoryRevision || 0);
+  check('deterministic cas create returns positive revision', casCreatedRev > 0, true);
+  const casUpdatedTask = {...casCreated, status: 'confirmed', progress: 30, updatedAt: new Date().toISOString()};
+  const casUpdated = await casGateway.updateTaskRecord(casTaskId, casUpdatedTask, {expectedRevision: casCreatedRev, actorUser: 'cas-actor'});
+  check('deterministic cas create->update advances revision', Number(casUpdated.repositoryRevision || 0), casCreatedRev + 1);
+  check('deterministic cas create->update returns authoritative record', String(casUpdated.id || ''), casTaskId);
+  // (2) stale expectedRevision must fail closed and never overwrite.
+  let casStaleError = null;
+  try {
+    await casGateway.updateTaskRecord(casTaskId, {...casUpdatedTask, title: 'stale-stick-token', status: 'done'}, {expectedRevision: casCreatedRev, actorUser: 'cas-actor'});
+  } catch (err) {
+    casStaleError = err;
+  }
+  check('deterministic cas stale revision is rejected', Boolean(casStaleError), true);
+  check('deterministic cas stale revision is a conflict', casStaleError?.code, 'LINK_OPS_REVISION_CONFLICT');
+  const casAfterStale = await casGateway.readTaskStore();
+  const casAfterStaleRow = (casAfterStale.tasks || []).find(row => String(row?.id || '') === casTaskId) || null;
+  check('deterministic cas stale write never overwrites content', casAfterStaleRow?.title, casUpdated.title);
+  check('deterministic cas stale write never regresses revision', Number(casAfterStaleRow?.repositoryRevision || 0), Number(casUpdated.repositoryRevision || 0));
+  // (3) post-commit ambiguity: a retried create must never double-create. The
+  // gateway replays the same create idempotently (returning the original
+  // authoritative row) or fails with the already-exists code; either way only
+  // one row may ever exist for the id.
+  let casReplay = null;
+  let casDuplicateError = null;
+  try {
+    casReplay = await casGateway.createTaskRecord(casBaseTask, {actorUser: 'cas-actor'});
+  } catch (err) {
+    casDuplicateError = err;
+  }
+  const casRetryUnexpected = Boolean(casDuplicateError) && casDuplicateError?.code !== 'LINK_OPS_ALREADY_EXISTS';
+  check('deterministic cas retry create has no unexpected error', casRetryUnexpected, false);
+  const casReadback = await casGateway.readTaskStore();
+  const casDuplicateCount = (casReadback.tasks || []).filter(row => String(row?.id || '') === casTaskId).length;
+  check('deterministic cas duplicate create never duplicates rows', casDuplicateCount, 1);
+  check('deterministic cas retry reuses the same authoritative id', String((casReplay && casReplay.id) || (casReadback.tasks.find(row => String(row?.id || '') === casTaskId) || {}).id || ''), casTaskId);
+  // (4) chat session create -> append messages threads the authoritative revision.
+  const casSessionId = 'cas-session-1';
+  const casSession = {
+    id: casSessionId,
+    title: 'CAS session',
+    status: 'chatting',
+    memoryPolicy: 'shared',
+    ownership: {version: 1, state: 'owned', actorKey: 'cas-actor', username: 'cas-actor', ownerKey: 'CAS'},
+    messages: [{id: 'cas-msg-1', role: 'user', content: '改库存 30', at: casNow}],
+    requestedByUser: 'cas-actor',
+    createdAt: casNow,
+    updatedAt: casNow,
+  };
+  const casSessionCreated = await casGateway.createChatSessionRecord(casSession, {actorUser: 'cas-actor'});
+  check('deterministic cas session create returns positive revision', Number(casSessionCreated.repositoryRevision || 0) > 0, true);
+  const casSessionMessages = Array.isArray(casSessionCreated.messages) ? casSessionCreated.messages : [];
+  const casNextSession = {
+    ...casSessionCreated,
+    messages: [...casSessionMessages, {id: 'cas-msg-2', role: 'assistant', content: '已收到', at: new Date().toISOString()}],
+    updatedAt: new Date().toISOString(),
+  };
+  const casSessionUpdated = await casGateway.updateChatSessionRecord(casSessionId, casNextSession, {
+    expectedRevision: Number(casSessionCreated.repositoryRevision || 0),
+    actorUser: 'cas-actor',
+  });
+  check('deterministic cas session append advances revision', Number(casSessionUpdated.repositoryRevision || 0), Number(casSessionCreated.repositoryRevision || 0) + 1);
+  const casSessionMessageIds = Array.isArray(casSessionUpdated.messages) ? casSessionUpdated.messages.map(row => String(row?.id || '')) : [];
+  check('deterministic cas session keeps appended message', casSessionMessageIds.includes('cas-msg-2'), true);
+  // (5) explicit session delete actually removes the row (a whole-store replace cannot).
+  await casGateway.deleteChatSessionRecord(casSessionId, {
+    expectedRevision: Number(casSessionUpdated.repositoryRevision || 0),
+    actorUser: 'cas-actor',
+  });
+  const casChatAfterDelete = await casGateway.readChatStore();
+  check('deterministic cas session delete removes the row', (casChatAfterDelete.sessions || []).some(row => String(row?.id || '') === casSessionId), false);
+  await casRepo.close();
   check('direct queries are audited without agent route', auditText, text => {
     const directCount = (String(text).match(/"type":"bi-direct-query"/g) || []).length;
     return directCount >= 2 && !String(text).includes('"type":"ops-agent-ask"');

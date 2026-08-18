@@ -43,7 +43,14 @@ import {
   productAttributeBindingRequestKeyV2,
 } from '../lib/link_ops_product_attribute_binding.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
-import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsJsonArtifactAtomic, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
+import {
+  OPS_EXIT_CODES,
+  buildOpsRun,
+  compactOpsRun,
+  invalidateOpsRunManifest,
+  writeOpsJsonArtifactAtomic,
+  writeOpsRunManifest,
+} from '../lib/ops_run_bundle.mjs';
 import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -595,9 +602,86 @@ async function request(args, pathname, {method = 'GET', body, auth = true, allow
     const err = new Error(json.error || `HTTP ${res.status}`);
     err.status = res.status;
     err.response = json;
+    const retryAfterSeconds = Number(res.headers.get('retry-after') || 0);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      err.retryAfterMs = Math.min(30_000, Math.ceil(retryAfterSeconds * 1_000));
+    }
     throw err;
   }
   return {json, res};
+}
+
+const LINK_OPS_DEFERRED_OUTCOMES = new Set(['blocked', 'incomplete', 'unconfirmed']);
+
+function linkOpsExecutionResponse(json, {fallbackTask = null} = {}) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    const error = new Error('Link Ops execution returned an invalid JSON response');
+    error.code = 'LINK_OPS_EXECUTION_PROTOCOL_INVALID';
+    throw error;
+  }
+  const task = json.task && typeof json.task === 'object' && !Array.isArray(json.task)
+    ? json.task
+    : fallbackTask;
+  const execution = json.execution && typeof json.execution === 'object' && !Array.isArray(json.execution)
+    ? json.execution
+    : null;
+  if (!task || !execution) {
+    const error = new Error('Link Ops execution response is missing the persisted task or execution evidence');
+    error.code = 'LINK_OPS_EXECUTION_PROTOCOL_INVALID';
+    throw error;
+  }
+  const declaredOk = json.ok === true;
+  const partial = json.partial === true;
+  const rawOutcome = String(json.outcome || '').trim().toLowerCase();
+  const deferredOutcome = LINK_OPS_DEFERRED_OUTCOMES.has(rawOutcome);
+  // A contradictory service response must fail closed. In particular, an
+  // HTTP-200 body cannot claim top-level success while also declaring that
+  // the durable execution is partial or its business outcome is unconfirmed.
+  const ok = declaredOk && !partial && !deferredOutcome;
+  const outcome = rawOutcome || (partial ? 'incomplete' : (ok ? '' : 'failed'));
+  if (!ok && (partial || LINK_OPS_DEFERRED_OUTCOMES.has(outcome)) && json.committed !== true) {
+    const error = new Error(`Link Ops ${outcome} response did not prove that its execution evidence was persisted`);
+    error.code = 'LINK_OPS_EXECUTION_COMMIT_UNPROVEN';
+    throw error;
+  }
+  return {
+    ok,
+    committed: json.committed === true,
+    ...(outcome ? {outcome} : {}),
+    ...(ok ? {} : {
+      partial: partial || deferredOutcome,
+      error: String(json.error || 'Link Ops execution did not reach a confirmed business outcome'),
+    }),
+    commitRecovered: json.commitRecovered === true,
+    auditPending: json.auditPending === true,
+    stage: String(json.stage || ''),
+    warning: String(json.warning || ''),
+    task,
+    execution,
+  };
+}
+
+function linkOpsExecutionSummary(response) {
+  return {
+    ok: response.ok,
+    committed: response.committed,
+    ...(response.outcome ? {outcome: response.outcome} : {}),
+    ...(response.ok ? {} : {
+      partial: response.partial,
+      error: response.error,
+    }),
+    commitRecovered: response.commitRecovered,
+    auditPending: response.auditPending,
+    stage: response.stage,
+    warning: response.warning,
+  };
+}
+
+function applyLinkOpsExecutionExitCode(output) {
+  if (output?.ok === true) return;
+  process.exitCode = LINK_OPS_DEFERRED_OUTCOMES.has(String(output?.outcome || '').toLowerCase())
+    ? OPS_EXIT_CODES.blocked
+    : OPS_EXIT_CODES.failed;
 }
 
 const KNOWLEDGE_CHECK_COMMANDS = new Set([
@@ -794,14 +878,18 @@ async function runLockSource(args) {
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_lock_source'},
+    allowJsonFailure: true,
   });
+  const preflightResponse = linkOpsExecutionResponse(preflightJson, {fallbackTask: json.task});
   print({
     ok: true,
     aiInvoked: false,
     taskId: args.taskId,
     lockedSource: {sourceStore: sourceStores[0], sourceSkc: sourceSkcs[0]},
-    task: preflightJson.task || json.task,
-    execution: preflightJson.execution,
+    preflightReady: preflightResponse.ok,
+    preflightResult: linkOpsExecutionSummary(preflightResponse),
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
     safety: {realPublishOccurred: false, nextStep: '核对精确源链接证据与新 payloadHash；用户确认前不得 execute。'},
   });
 }
@@ -1240,7 +1328,9 @@ async function runPreparePublish(args) {
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_publish'},
+    allowJsonFailure: true,
   });
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
   const reused = args.reuseApprovedBinding;
   print({
     ok: true,
@@ -1266,8 +1356,10 @@ async function runPreparePublish(args) {
     },
     uploaded: uploaded.map(row => ({name: row.name, role: row.role, imageType: row.imageType, width: row.width, height: row.height, sha256: row.sha256})),
     binding: bindingJson.binding,
-    task: preflightJson.task,
-    execution: preflightJson.execution,
+    preflightReady: preflightResponse.ok,
+    preflightResult: linkOpsExecutionSummary(preflightResponse),
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
     safety: {
       sameTask: true,
       payloadSource: bindingJson.binding.payloadSource,
@@ -1494,6 +1586,7 @@ async function runPrepareDescriptions(args) {
     ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_descriptions'},
+      allowJsonFailure: true,
     }));
   } catch (error) {
     print({
@@ -1526,7 +1619,8 @@ async function runPrepareDescriptions(args) {
     process.exitCode = 1;
     return;
   }
-  const execution = preflightJson.execution || {};
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const execution = preflightResponse.execution;
   const productExecutor = execution.openApiProductExecutors?.[0] || execution.hlOpenApiExecutor || {};
   const payloadSummary = productExecutor.payload?.summary || {};
   const dryRun = {
@@ -1542,15 +1636,22 @@ async function runPrepareDescriptions(args) {
   };
   // Terminal output carries hashes/counts/languages only. Full description text
   // never leaves the local source file into CLI stdout.
-  const output = buildPrepareDescriptionsCliOutput({
+  const preparedOutput = buildPrepareDescriptionsCliOutput({
     summary,
     binding: {...binding, sameTask: true},
     dryRun,
     taskId: args.taskId,
     store,
   });
+  const output = {
+    ...preparedOutput,
+    ...linkOpsExecutionSummary(preflightResponse),
+    ok: preparedOutput.ok === true && preflightResponse.ok,
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
+  };
   print(output);
-  if (!output.ok) process.exitCode = 1;
+  applyLinkOpsExecutionExitCode(output);
 }
 
 async function runRefreshProductAttributeBinding(args, store) {
@@ -1883,6 +1984,7 @@ async function runPrepareProductAttribute(args) {
     ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_product_attribute'},
+      allowJsonFailure: true,
     }));
   } catch (error) {
     print({
@@ -1911,7 +2013,8 @@ async function runPrepareProductAttribute(args) {
     process.exitCode = 1;
     return;
   }
-  const execution = preflightJson.execution || {};
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const execution = preflightResponse.execution;
   const productExecutor = execution.openApiProductExecutors?.[0] || execution.hlOpenApiExecutor || {};
   // Re-read the task after dry-run: the binding lock must still be KNOWN,
   // current and ok against the persisted payload, proving the bound attribute
@@ -1983,6 +2086,10 @@ async function runPrepareProductAttribute(args) {
       rawTaskCode: String(binding.rawTaskCode || ''),
       rawDonorCode: String(binding.rawDonorCode || ''),
     },
+    preflightReady: preflightResponse.ok,
+    preflightResult: linkOpsExecutionSummary(preflightResponse),
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
     dryRun,
     nextStep: bindJson.nextStep || {
       command: 'prepare-descriptions',
@@ -2219,6 +2326,7 @@ async function runUpdateDescription(args) {
     ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: taskId, mode: 'dry-run', source: 'codex_desktop_cli_update_description'},
+      allowJsonFailure: true,
     }));
   } catch (error) {
     print({
@@ -2252,7 +2360,8 @@ async function runUpdateDescription(args) {
     process.exitCode = 1;
     return;
   }
-  const execution = preflightJson.execution || {};
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const execution = preflightResponse.execution;
   const maintenanceExecutor = (execution.linkMaintenanceExecutors || [])[0] || {};
   const executorSummary = maintenanceExecutor.payload?.summary || {};
   const descriptionUpdate = executorSummary.descriptionUpdate || {};
@@ -2267,7 +2376,7 @@ async function runUpdateDescription(args) {
     descriptionBindingLocked: Number(descriptionUpdate.descriptionCount || 0) === 2
       && String(descriptionUpdate.payloadHash || '').toLowerCase() === String(binding.newPayloadHash || '').toLowerCase(),
   };
-  const output = {
+  const preparedOutput = {
     ok: dryRun.ok && dryRun.descriptionBindingLocked
       && dryRun.descriptionCount === 2
       && dryRun.payloadHash.length === 64,
@@ -2302,8 +2411,15 @@ async function runUpdateDescription(args) {
       nextStep: '核对新预演的 payloadHash 和描述 hash；只有用户明确确认后才调用 execute。',
     },
   };
+  const output = {
+    ...preparedOutput,
+    ...linkOpsExecutionSummary(preflightResponse),
+    ok: preparedOutput.ok === true && preflightResponse.ok,
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
+  };
   print(output);
-  if (!output.ok) process.exitCode = 1;
+  applyLinkOpsExecutionExitCode(output);
 }
 
 async function runPreparePendingImageCorrection(args) {
@@ -2327,22 +2443,24 @@ async function runPreparePendingImageCorrection(args) {
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_pending_image_correction'},
+    allowJsonFailure: true,
   });
-  print({
-    ok: true,
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const output = {
+    ...preflightResponse,
     taskId: args.taskId,
     sourceTaskId: args.sourceTaskId,
     store,
     binding: bindingJson.binding,
-    task: preflightJson.task,
-    execution: preflightJson.execution,
     safety: {
       imagesReused: true,
       imagesUploadedAgain: false,
       realWriteOccurred: false,
       nextStep: '核对撤回+完整重提计划及 payloadHash；只有用户明确确认后才调用 execute。',
     },
-  });
+  };
+  print(output);
+  applyLinkOpsExecutionExitCode(output);
 }
 
 function operatorGuide() {
@@ -2867,15 +2985,18 @@ async function main() {
     const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: taskId, mode: 'dry-run', source: 'codex_desktop_cli_structured'},
+      allowJsonFailure: true,
     });
-    print({
-      ok: true,
+    const output = {
+      ...linkOpsExecutionResponse(preflightJson, {fallbackTask: json.task}),
       aiInvoked: false,
       mode: 'structured-operation',
-      task: preflightJson.task || json.task,
-      execution: preflightJson.execution,
-      nextStep: '核对系统检查结果；只有用户明确确认后才调用 execute。',
-    });
+      nextStep: preflightJson.ok === false
+        ? '任务已保留；请按 task ID 处理 blockers 后重跑 preflight，勿重复 operate 创建任务。'
+        : '核对系统检查结果；只有用户明确确认后才调用 execute。',
+    };
+    print(output);
+    applyLinkOpsExecutionExitCode(output);
     return;
   }
   if (args.command === 'authorize-duplicate-publish') {
@@ -2908,8 +3029,11 @@ async function main() {
     const {json} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli'},
+      allowJsonFailure: true,
     });
-    print({ok: true, task: json.task, execution: json.execution});
+    const output = linkOpsExecutionResponse(json);
+    print(output);
+    applyLinkOpsExecutionExitCode(output);
     return;
   }
   if (args.command === 'execute') {
@@ -2918,8 +3042,11 @@ async function main() {
     const {json} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'execute', confirm: args.confirm, source: 'codex_desktop_cli'},
+      allowJsonFailure: true,
     });
-    print({ok: true, task: json.task, execution: json.execution});
+    const output = linkOpsExecutionResponse(json);
+    print(output);
+    applyLinkOpsExecutionExitCode(output);
     return;
   }
   if (args.command === 'resolve') {

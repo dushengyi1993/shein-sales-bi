@@ -75,7 +75,8 @@
 
 - 发布验收：
 
-  - `check_release_source_state.mjs`：同时核对目标 commit、工作树、`skip-worktree` / `assume-unchanged` 和 tracked 文件完整性，避免云端出现 `git status` 假干净。
+  - `check_release_source_state.mjs`：同时核对目标 commit、工作树、`skip-worktree` / `assume-unchanged` 和 tracked 文件完整性。`--record-deployment` 还必须读取 `/srv/shein-bi/runtime/release-attestations/<tag>/` 两份证明，验证 checksum、schema v3、origin repository、trust policy SHA-256、annotated tag object/message/peeled commit 与 exact source fingerprint，原子写出 schema v3 的 `shein-bi-deployed-release/v3`；旧 v2/tag/commit-only marker 不再通过。
+  - `check_source_release_version_order.mjs` / `lib/source_release_version.mjs`：fresh 枚举远端源码 Tag，以数值年月日/revision 禁止版本回退；同版本只用于精确恢复，非法源码命名空间 Tag fail closed。
 
 - 销售/日报/看板：
 
@@ -139,7 +140,9 @@
 
   - 历史 V2 平行预览生成器已移除；正式入口只使用 `generate_bi_portal.mjs` / `outputs/bi-portal/index.html`。
 
-  - `serve_bi_portal.mjs`：云端 BI Portal 服务，提供静态页、健康检查和 `/api/bi/section/:section`；缓存读写、generation 校验、raw/gzip sidecar 与 stale 元数据统一由 `lib/bi_section_cache.mjs` 负责；`homeProfit` / `homeRankings` 都从最后一份完整 cache 派生并由 `liveSalesToday` 覆盖当前日，不等待移动成本台账重算，且走独立 fast lane。当前日订单、排行与成交价散点也由 `liveSalesToday` 覆盖，同一个 SSE token 只允许服务端生成一次；普通同代刷新不弹顶部缓存告警，失败自动重试耗尽后才提示。`inventoryTrend` 必须读取已发布利润 cache，禁止每次展开实时 `mart.profit_order_item`；服务启动和首页访问会触发 core `generatedAt` watcher 兜底预热 section，健康接口暴露 `biCoreWarmup` 状态。
+  - `serve_bi_portal.mjs`：同一源码支持完整 Portal 与 `--surface query` 两种严格模式。Portal 提供静态页、写流程、worker、实时桥和 section 生成；Query 只开放精确认证只读路由，不启动任何 worker/生成副作用。cache-miss、force、accounting、warmup 与 live event enqueue 全部使用稳定事实幂等键，重复访问不得推进 revision；live accounting 只有拿到有效 API core generation 且真实生成成功后才发布 refreshed/enqueue，缺失或 disabled 进入有界 retry。SSE 对 `write=false` 立即剔除慢客户端。两种 surface 的停机都先封 HTTP/upgrade admission，再排空 handler，最后按 worker/bridge → store 关闭；超时强制断连接并失败退出。warmup 使用有界指数退避与有界关闭。缓存读写、generation、raw/gzip 与 stale 元数据统一由 `lib/bi_section_cache.mjs` 负责。
+
+  - `provision_bi_session_secret.mjs`：Portal/Query 共享会话签名 secret 的独立 oneshot owner；仅在安全父目录内以 `O_EXCL` 创建 0600 普通文件，竞争进程统一回读同一值，已有文件幂等校验，软链/非普通文件/权限或内容异常失败关闭。生产 server 只导入其 load-only 函数，绝不自行生成，日志只输出 fingerprint。
 
   - `cloud_openapi_stock_refresh.sh`：云端19店当前虚拟库存轻量刷新入口；定时器安排在每小时 `:25/:55`，避开全托整点任务和`:12`销售同步。商品详情复用最近成功缓存，只请求商品列表与库存。必须19/19店成功且库存无缺失后才重建独立的轻量 `inventoryStock` section，随后发送 `inventory_refresh` 数据库通知，让已打开的 BI 页面通过 SSE 更新库存矩阵；不重复生成耗时较长的完整 `linksData`。矩阵只接受45分钟内、OpenAPI 确认已上架的库存，不回退到日更浏览器快照。
 
@@ -381,8 +384,11 @@
 
 - `notify_sync_issue.mjs`
 
-- `cloud_ops_watchdog.mjs`：云端 systemd/watchdog 新鲜度检查；销售/BI 页面按高频阈值，链接/业务域按日更低频阈值，并按 80% / 88% / 93% 三档监测根盘容量，异常时调用 `notify_sync_issue.mjs` 发飞书提醒。对孤立的历史营销扫描 warning，仅在 `lib/cloud_watchdog_recovery.mjs` 验证后续扫描更新、新鲜、19 店完整且 payload/行数自洽时记录 recovery；不删除历史 warning，也不吞掉其它异常。
-- `cloud_disk_maintenance.sh`：每周低优先级磁盘维护；抓数产物本地保留 30 天，COS 归档必须通过 gzip、成员清单和 SHA256 校验后才删除未变化的本地文件。profile 缓存仅在根盘达到 80%、没有有效浏览器租约且没有 Chrome 进程时清理，Cookie 与持久登录状态不在目标清单中。
+- `cloud_ops_watchdog.mjs`：一次读取 canonical maintenance marker 和一次批量 systemd snapshot，按 `scheduled|infrastructure|always` 抑制预期停机，仍检查 Portal/Query/Webhook、源码和 schema v3 部署 marker（`shein-bi-deployed-release/v3`）。告警/recovery 进入持久 outbox；业务恢复与维护结束同轮时合并为一次通知并复用同一 idempotency 重试。历史营销 warning 仅在 19 店完整新证据下收口，不删除原 warning。
+- `cloud_disk_maintenance.sh`：每日低优先级磁盘维护；抓数产物本地保留 30 天，COS 归档必须通过 gzip、成员清单和 SHA256 校验后才删除未变化的本地文件。profile 缓存仅在根盘达到 80%、没有有效浏览器租约且没有 Chrome 进程时清理，Cookie 与持久登录状态不在目标清单中。
+- `manage_cloud_maintenance_mode.mjs` / `install_cloud_maintenance_guards.sh`：维护 marker 的 status/pause/resume/check/systemd-condition 与 28-service 完整 policy 安装；写操作使用 generation/hash CAS，死亡 lock owner 可安全回收，live owner/所有权漂移时拒绝。
+- `install_cloud_runtime_path_namespaces.sh` / `migrate_cloud_runtime_mount_layout.sh` / `lib/cloud_runtime_path_policy.mjs`：把 profiles/state/outputs 权限按 28 个 service 完整列举并安装 unit-private namespace；一次性 V2 layout 迁移只在 `mode=all`、全部服务 inactive、无 Chrome、source tree 外备份时执行。
+- `manage_encrypted_browser_state_backup.mjs`：Profile + WebAPI session 的流式 gzip/AES-256-GCM create/verify/empty-staging restore；拒绝 symlink、特殊文件和活动 Chrome，完整认证前不创建 staging。由现有 `cloud_db_backup.sh` 调用，不新增 timer。
 
 - `lark_sales_qa_bot.mjs`：历史飞书只读问数实现；生产 service 必须保持 `disabled + inactive`，当前网页/Partner CLI 只读查询不再复用它，也不调用它背后的模型。仅在明确诊断旧飞书问数产品时运行；其输出不能作为经营事实或写入依据。
 
@@ -667,7 +673,7 @@
 - `scripts/inspect_ops_run.mjs`：只读验证 manifest 和产物 hash，并输出供主任务优先读取的紧凑摘要。
 - `scripts/capture_ops_runtime_snapshot.mjs`：云端一次读取部署源码、受管 systemd units/timers、Portal/Webhook 健康状态；不执行恢复或业务写入。
 - `lib/systemd_unit_snapshot.mjs` / `lib/cloud_runtime_inventory.mjs`：把 watchdog 的逐 unit `systemctl show` 合并为一次调用，并共享 unit 清单。
-- `lib/bi_ops_query_retry.mjs`：只对 `BI_QUERY_DATA_INCOMPLETE` 做同进程、有上限的 section readiness 等待；鉴权和其它错误不重试。
+- `lib/bi_ops_query_retry.mjs`：只对 `BI_QUERY_DATA_INCOMPLETE` 和 HTTP 429 + `QUERY_SURFACE_BUSY` 做同进程、有上限等待；后者遵守服务端 `Retry-After`，鉴权和其它错误不重试。
 - `scripts/pipeline_marker.mjs`：marker 写入时锁定 evidence bytes/SHA-256；消费者可在业务日迁移后启用 `--require-evidence`。
 - `scripts/build_morning_resume_evidence.mjs`：morning-chain 已有全部逐店精确日期产物而跳过重复抓取时，确定性汇总现存 19 店双域文件及 hash，避免恢复路径依赖不存在的旧 chunk 文件。
 - 契约与边界：`docs/ops-workflow-contract.md`。

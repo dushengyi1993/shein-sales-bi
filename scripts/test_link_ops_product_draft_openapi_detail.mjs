@@ -14,8 +14,8 @@
  *   masquerade as fallback freshness.
  * - provenance records the actual matched SPU/SKC, source, and detailFetchedAt.
  *
- * This uses temporary fixture files under outputs/ and removes them in finally;
- * it never calls SHEIN and never enables real writes.
+ * This uses a process-private output root and removes it in finally; it never
+ * calls SHEIN and never enables real writes.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -33,6 +33,11 @@ const FRESH_AT = '2026-06-27T10:00:00.000Z'; // 6h before build -> fresh
 const BOUNDARY_AT = '2026-06-26T16:00:00.000Z'; // exactly 24h before build -> allowed
 const EXPIRED_AT = '2026-06-26T15:59:59.000Z'; // 24h + 1s -> expired
 const FUTURE_AT = '2026-06-28T00:00:00.000Z'; // after build -> future
+const tmpBase = path.join(ROOT, 'tmp');
+await fs.mkdir(tmpBase, {recursive: true});
+const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-product-detail-'));
+const testOutputDir = path.join(tmpRoot, 'outputs');
+process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
 
 function check(checks, label, actual, expected) {
   const pass = typeof expected === 'function' ? expected(actual) : Object.is(actual, expected);
@@ -57,13 +62,13 @@ async function writeJson(file, data) {
 }
 
 const fixtureRoots = [
-  path.join(ROOT, 'outputs', 'shein_links', STORE),
-  path.join(ROOT, 'outputs', 'shein_links_raw', STORE),
-  path.join(ROOT, 'outputs', 'shein_openapi_products', STORE),
+  path.join(testOutputDir, 'shein_links', STORE),
+  path.join(testOutputDir, 'shein_links_raw', STORE),
+  path.join(testOutputDir, 'shein_openapi_products', STORE),
 ];
 
 async function writeLinkFixture() {
-  await writeJson(path.join(ROOT, 'outputs', 'shein_links', STORE, `${DATE}.json`), {
+  await writeJson(path.join(testOutputDir, 'shein_links', STORE, `${DATE}.json`), {
     linkRows: [{
       storeKey: STORE,
       skc: SKC,
@@ -163,7 +168,7 @@ function fallbackEntry(overrides = {}) {
 }
 
 async function writeDetailSnapshot({detailResults, detailFallbackResults, fetchedAt = FETCHED_AT}) {
-  await writeJson(path.join(ROOT, 'outputs', 'shein_openapi_products', STORE, 'latest.json'), {
+  await writeJson(path.join(testOutputDir, 'shein_openapi_products', STORE, 'latest.json'), {
     normalizedRows: [{store: STORE, spu: SPU, skc: SKC}],
     fetchedAt,
     detailResults,
@@ -423,4 +428,5 @@ try {
   if (!ok) process.exit(1);
 } finally {
   await cleanup();
+  await fs.rm(tmpRoot, {recursive: true, force: true});
 }

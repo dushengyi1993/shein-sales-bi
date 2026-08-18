@@ -6,9 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-bi-http-security-'));
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const port = await freePort();
 const authFile = path.join(temp, 'users.json');
 await fs.writeFile(authFile, JSON.stringify({users: [{username: 'security-test', password: 'correct-password', role: 'admin'}]}));
@@ -102,6 +104,12 @@ try {
 
   const logoutGet = await fetch(`${base}/api/logout`, {headers: {...publicHeaders, cookie: sessionCookie}});
   assert.equal(logoutGet.status, 405, 'logout is POST-only');
+  const health = await fetch(`${base}/api/health`);
+  assert.equal(health.status, 200);
+  const healthBody = await health.json();
+  assert.equal(healthBody.runtime?.admissionOpened, true, 'portal must open admission only after startup completes');
+  assert.equal(healthBody.runtime?.accepting, true);
+  assert.ok(Number(healthBody.mutationQueue?.capacity) >= 1, 'health must expose the bounded mutation-queue capacity');
 } finally {
   const waitForExit = timeoutMs => new Promise(resolve => {
     if (child.exitCode !== null || child.signalCode !== null) return resolve(true);

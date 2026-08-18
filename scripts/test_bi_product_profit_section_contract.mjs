@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const server = fs.readFileSync(path.join(root, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
@@ -216,6 +217,7 @@ const isolatedPortalEnv = {
   SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR: '',
 };
 
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const child = spawn(process.execPath, [
   path.join(root, 'scripts', 'serve_bi_portal.mjs'),
   '--host', '127.0.0.1', '--port', String(port), '--dir', portalDir,

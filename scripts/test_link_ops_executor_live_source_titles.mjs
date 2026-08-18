@@ -64,6 +64,8 @@ const DESCRIPTION_LINES = Object.freeze({
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-live-source-title-'));
+const testOutputDir = path.join(tmpRoot, 'outputs');
+process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -141,8 +143,8 @@ function sourceSpuInfo({includeArabic = false} = {}) {
   };
 }
 
-const sourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', SOURCE_STORE);
-const sourceOpenApiDir = path.join(ROOT, 'outputs', 'shein_openapi_products', SOURCE_STORE);
+const sourceLinkDir = path.join(testOutputDir, 'shein_links', SOURCE_STORE);
+const sourceOpenApiDir = path.join(testOutputDir, 'shein_openapi_products', SOURCE_STORE);
 
 const fakeOpenApiPort = await getFreePort();
 const fakeCalls = [];

@@ -14,8 +14,8 @@ assert.match(source, /document\.addEventListener\('visibilitychange'/, 'long-ope
 assert.match(source, /setInterval\(\(\)=>\{revalidateCore\(\)\.catch\(\(\)=>\{\}\)\},CORE_VISIBLE_POLL_MS\)/, 'visible long-open tabs periodically revalidate core');
 assert.match(source, /if\(n==='liveSalesToday'\)LAST_LIVE_REFRESH_MS=Date\.now\(\)/,
   'every accepted live-order projection records the last successful refresh time');
-assert.match(source, /async function revalidateCore\(\).*liveDue=now-LAST_LIVE_REFRESH_MS>=CORE_VISIBLE_POLL_MS.*if\(liveDue\)await load\('liveSalesToday',true,true\)/,
-  'the five-minute visible-tab fallback force-refreshes live orders when SSE delivery is missed');
+assert.match(source, /async function revalidateCore\(\).*liveDue=now-LAST_LIVE_REFRESH_MS>=CORE_VISIBLE_POLL_MS.*if\(liveDue&&SS\.liveSalesToday\?\.status!=='error'\)await load\('liveSalesToday',true,true\)/,
+  'the five-minute visible-tab fallback refreshes live orders without bypassing terminal section errors');
 assert.match(source, /\[D\.liveSalesToday\?\.date,D\.dates\?\.salesDate,D\.dates\?\.businessDate,D\.dates\?\.linkDate\]/,
   'the authoritative live-sales business date participates in the page date anchor even before the first order arrives');
 assert.match(source, /const key=\[genAt\(\),ISO\(D\.liveSalesToday\?\.date\),/,
@@ -31,6 +31,137 @@ assert.match(source, /function dates\(force=false\)\{const preset=S\.rangePreset
 
 const sourceLines = source.split(/\r?\n/);
 const functionLine = name => sourceLines.find(line => line.startsWith(`function ${name}(`)) || '';
+const callableLine = name => functionLine(name) || sourceLines.find(line => line.startsWith(`async function ${name}(`)) || '';
+
+const manualRefreshTokenSource = functionLine('manualSectionRefreshToken');
+const sectionUrlSource = functionLine('surl');
+assert.ok(manualRefreshTokenSource, 'manual force refreshes must have an explicit intent-token generator');
+assert.match(sectionUrlSource,
+  /LIVE_REFRESH_RUNNING&&LIVE_REFRESH_TOKEN\?LIVE_REFRESH_TOKEN:manualSectionRefreshToken\(n\)/,
+  'one live event must reuse its event token while every non-live force intent gets a fresh token');
+assert.match(sectionUrlSource, /params\.set\('refreshToken',refreshToken\)/,
+  'every HTTP force refresh must send its selected refresh token');
+const manualSectionRefreshToken = Function(`let MANUAL_REFRESH_SEQUENCE=0;${manualRefreshTokenSource};return manualSectionRefreshToken;`)();
+const firstManualRefreshToken = manualSectionRefreshToken('orders');
+const secondManualRefreshToken = manualSectionRefreshToken('orders');
+assert.match(firstManualRefreshToken, /^portal-manual:orders:/);
+assert.notEqual(secondManualRefreshToken, firstManualRefreshToken,
+  'two explicit operator retries must be separate intents instead of colliding with one completed tombstone');
+assert.ok(firstManualRefreshToken.length <= 160 && secondManualRefreshToken.length <= 160,
+  'manual force tokens must stay within the server-side token bound');
+
+const makeCoreRecoveryRuntime = () => {
+  const callbacks = [];
+  const cleared = [];
+  let coreCalls = 0;
+  const runtime = Function('setTimeout','clearTimeout','document','core',`
+    let S={core:'error'},CORE_ERROR_RECOVERY_TIMER=null,CORE_ERROR_RECOVERY_ATTEMPT=0;
+    const CORE_ERROR_RECOVERY_BASE_MS=60000;
+    const CORE_ERROR_RECOVERY_MAX_MS=240000;
+    const CORE_ERROR_RECOVERY_MAX_ATTEMPTS=3;
+    ${functionLine('clearCoreErrorRecoveryTimer')}
+    ${functionLine('resetCoreErrorRecovery')}
+    ${functionLine('scheduleCoreErrorRecovery')}
+    return {scheduleCoreErrorRecovery,resetCoreErrorRecovery,state:()=>({attempt:CORE_ERROR_RECOVERY_ATTEMPT,timer:CORE_ERROR_RECOVERY_TIMER})};
+  `)((callback,delay)=>{const id=callbacks.length+1;callbacks.push({callback,delay,id});return id},id=>cleared.push(id),{visibilityState:'visible'},()=>{coreCalls+=1;return Promise.resolve(false)});
+  return {runtime,callbacks,cleared,coreCalls:()=>coreCalls};
+};
+{
+  const harness = makeCoreRecoveryRuntime();
+  for(let index=0;index<3;index+=1){
+    harness.runtime.scheduleCoreErrorRecovery();
+    assert.equal(harness.callbacks.length,index+1,`core recovery attempt ${index+1} must be scheduled once`);
+    harness.callbacks[index].callback();
+  }
+  assert.deepEqual(harness.callbacks.map(item=>item.delay),[60000,120000,240000],
+    'core recovery uses bounded low-frequency exponential delays starting at 60s');
+  assert.equal(harness.coreCalls(),3);
+  assert.equal(harness.runtime.state().attempt,3);
+  harness.runtime.scheduleCoreErrorRecovery();
+  assert.equal(harness.callbacks.length,3,'core recovery must stop permanently after the third automatic attempt');
+}
+{
+  const harness = makeCoreRecoveryRuntime();
+  harness.runtime.scheduleCoreErrorRecovery();
+  assert.notEqual(harness.runtime.state().timer,null);
+  harness.runtime.resetCoreErrorRecovery();
+  assert.deepEqual(harness.runtime.state(),{attempt:0,timer:null},'manual retry or success resets the core recovery state');
+  assert.deepEqual(harness.cleared,[1],'reset clears the old core recovery timer before a manual request');
+  harness.runtime.scheduleCoreErrorRecovery();
+  assert.equal(harness.callbacks[1].delay,60000,'a reset restarts recovery from the first 60s delay');
+}
+
+const httpErrorRuntimeParts = [
+  functionLine('portalErrorText'), functionLine('portalErrorCode'), functionLine('portalRequestId'),
+  functionLine('portalRetryAfter'), functionLine('portalPublicDetail'), functionLine('portalHttpAction'),
+  callableLine('portalHttpError'),
+];
+assert.ok(httpErrorRuntimeParts.every(Boolean), 'HTTP error helpers are extractable for deterministic behavior checks');
+const portalHttpError = Function(`${httpErrorRuntimeParts.join('\n')}\nreturn portalHttpError;`)();
+const mockResponse = (status, payload, headers={}) => ({
+  status,
+  headers: {get: name => headers[String(name).toLowerCase()] || ''},
+  json: async () => payload,
+});
+{
+  const error = await portalHttpError(mockResponse(400, {
+    code: 'INVALID_RANGE',
+    message: '开始日期不能晚于结束日期',
+    requestId: 'req-400-safe',
+    debug: {password: 'must-not-render'},
+  }), 'Core');
+  assert.match(error.message, /Core HTTP 400/);
+  assert.match(error.message, /请求参数不合法/);
+  assert.match(error.message, /开始日期不能晚于结束日期/);
+  assert.match(error.message, /错误码 INVALID_RANGE/);
+  assert.match(error.message, /请求 ID req-400-safe/);
+  assert.doesNotMatch(error.message, /must-not-render|password/i);
+}
+{
+  const error = await portalHttpError(mockResponse(429, {
+    error: {code: 'RATE_LIMITED', message: '请求过于频繁'},
+    correlationId: 'corr-429-safe',
+  }, {'retry-after': '120'}), '订单');
+  assert.match(error.message, /订单 HTTP 429/);
+  assert.match(error.message, /错误码 RATE_LIMITED/);
+  assert.match(error.message, /请求 ID corr-429-safe/);
+  assert.match(error.message, /Retry-After 120 秒/);
+}
+{
+  const error = await portalHttpError(mockResponse(502, {
+    code: 'UPSTREAM_FAILURE',
+    message: 'connect ECONNREFUSED 10.0.0.5 password=super-secret',
+    stack: 'at internalCall /opt/private/server.js:12',
+  }, {'x-request-id': 'req-502-safe'}), 'Core');
+  assert.match(error.message, /Core HTTP 502/);
+  assert.match(error.message, /云端数据服务暂不可用/);
+  assert.match(error.message, /错误码 UPSTREAM_FAILURE/);
+  assert.match(error.message, /请求 ID req-502-safe/);
+  assert.doesNotMatch(error.message, /10\.0\.0\.5|super-secret|ECONNREFUSED|\/opt\/|stack|internalCall/i,
+    'sensitive upstream details must never reach the operator-facing error');
+}
+
+{
+  const recoverySource = functionLine('scheduleSectionErrorRecovery');
+  const state = {orders:{status:'error',error:'HTTP 502',recoveryAttempt:3}};
+  const timers = {};
+  const callbacks = [];
+  let loads = 0;
+  const schedule = Function('SS','SECTION_RECHECK_TIMERS','setTimeout','document','load',`
+    const SECTION_ERROR_RECOVERY_MS=60000;
+    const SECTION_ERROR_RECOVERY_MAX_ATTEMPTS=3;
+    ${recoverySource}
+    return scheduleSectionErrorRecovery;
+  `)(state,timers,callback=>{callbacks.push(callback);return callbacks.length},{visibilityState:'visible'},()=>{loads+=1;return Promise.resolve(false)});
+  schedule('orders');
+  assert.equal(callbacks.length,0,'an exhausted section error must not retry forever');
+  state.orders.recoveryAttempt=2;
+  schedule('orders');
+  assert.equal(callbacks.length,1,'one final bounded recovery attempt may be scheduled');
+  callbacks[0]();
+  assert.equal(loads,1);
+  assert.equal(state.orders.recoveryAttempt,3);
+}
 const collectDatesStart = source.indexOf('function collectDates()');
 const collectDatesEnd = source.indexOf('\nfunction dataAnchorDate()', collectDatesStart);
 const collectDatesSource = source.slice(collectDatesStart, collectDatesEnd);
@@ -130,14 +261,37 @@ const makeDateRuntime = (data, state, DateCtor=Date) => Function('D', 'S', 'Date
 }
 assert.doesNotMatch(source.match(/async function revalidateCore\(\)[^\n]*/)?.[0] || '', /load\('orders'/,
   'the missed-SSE fallback must not rebuild the large historical orders section');
+assert.match(source, /if\(S\.core==='error'\)\{scheduleCoreErrorRecovery\(\);return\}/,
+  'a failed core routes visible polling through the bounded recovery scheduler');
+assert.match(source, /CORE_ERROR_RECOVERY_BASE_MS=60\*1000[\s\S]*CORE_ERROR_RECOVERY_MAX_ATTEMPTS=3/,
+  'core recovery starts at 60s and is capped at three automatic attempts');
+assert.match(source, /manual=!silent&&S\.core==='error'.*if\(manual\)resetCoreErrorRecovery\(\)/,
+  'the retryCore click path is recognized as manual and resets prior recovery state');
+assert.match(source, /if\(manual\)resetCoreErrorRecovery\(\);if\(CORE_PROMISE\)return CORE_PROMISE/,
+  'manual retry resets the circuit even if an older automatic request is still settling');
+assert.match(source, /S\.core='ok';S\.err='';resetCoreErrorRecovery\(\)/,
+  'a successful core request clears attempts and any pending timer');
+assert.match(source, /S\.core==='error'&&!manual&&!recovery\)\{scheduleCoreErrorRecovery\(\);return false\}/,
+  'SSE and ordinary polling cannot bypass the bounded core recovery circuit');
+assert.match(source, /if\(!r\.ok\)throw await portalHttpError\(r,'Core'\)/,
+  'core non-2xx responses use the structured actionable error formatter');
+assert.match(source, /if\(!r\.ok\)throw await portalHttpError\(r,SL\[n\]\|\|n\)/,
+  'section non-2xx responses use the structured actionable error formatter');
 assert.match(source, /function scheduleSectionRecheck\(n\)/, 'stale sections schedule an automatic recheck');
-assert.match(source, /function scheduleSectionErrorRecovery\(n\)[\s\S]*SECTION_ERROR_RECOVERY_MS/,
-  'an exhausted browser error must keep a bounded low-frequency recovery probe');
+assert.match(source, /function scheduleSectionErrorRecovery\(n\).*attempt>=SECTION_ERROR_RECOVERY_MAX_ATTEMPTS.*SECTION_ERROR_RECOVERY_MS/,
+  'an exhausted browser error must stop after a bounded low-frequency recovery sequence');
 assert.match(source, /if\(prev\.status==='error'&&!force&&!recheck\)\{scheduleSectionErrorRecovery\(n\);return false\}/,
   'render-time ensure must re-arm recovery instead of permanently pinning a section error');
+assert.match(source, /if\(force&&!silent&&!recheck\)\{clearSectionRecheck\(n\);prev=\{\.\.\.prev,recoveryAttempt:0\};\}.*if\(P\[promiseKey\]\)return P\[promiseKey\]/,
+  'manual forced section retries clear a stale timer before any in-flight short circuit or fetch');
 assert.match(source, /load\(n,true,false,true\)/, 'section rechecks bypass browser state without forcing duplicate generation');
 assert.match(source, /if\(needsRecheck\)scheduleSectionRecheck\(n\)/, 'stale or background-refresh responses are polled until current');
 assert.match(source, /完成后页面会自动更新/, 'operator copy promises only the implemented automatic update');
+const sectionCopySource=source.slice(source.indexOf('function sectionRefreshFailureText'),source.indexOf('\nfunction chips'));
+assert.match(sectionCopySource, /有限次自动重试；耗尽后请手动重试/,
+  'section failure copy states the finite retry and manual fallback boundary');
+assert.doesNotMatch(sectionCopySource, /系统会继续重试|页面会自动重试|系统会自动重试/,
+  'section copy must not promise unlimited automatic retry');
 assert.match(source, /await core\(\{silent:true,ensureAfter:false\}\)/, 'section version mismatches revalidate core first');
 assert.match(source, /versionWarning=.*数据版本与 core 暂未同步/, 'persistent mismatches degrade to an explicit stale warning');
 assert.match(source, /const transitionPending=!!\(j\?\.refreshScheduled&&!j\?\.refreshFailed\)/,
@@ -218,8 +372,8 @@ assert.match(source, /function sectionFailureNotice\(ns\).*data-load=.*role=\"al
 assert.match(source, /缓存写入 \$\{fmtStamp\(st\.cachedAt\|\|st\.generatedAt\)\}；页面最新/, 'cache fallback always exposes its cache timestamp and current-page timestamp');
 assert.match(source, /const needsRecheck=stale\|\|!!j\.refreshScheduled\|\|!!j\.refreshFailed/,
   'a failed background refresh remains on automatic recheck instead of pinning an error in the browser');
-assert.match(source, /function sectionRefreshFailureText\(j\).*系统会继续重试；当前仍显示上次完整数据/,
-  'persistent refresh failures use operator-readable copy instead of raw server stack text');
+assert.match(source, /function sectionRefreshFailureText\(j\).*有限次自动重试；耗尽后请手动重试。当前仍显示上次完整数据/,
+  'persistent refresh failures use truthful bounded-retry copy instead of raw server stack text');
 assert.match(source, /function sectionNeedsBanner\(n\).*loading=st\.status==='loading'.*slow=loading.*st\.pendingSection.*loading&&\(st\.refreshing\|\|slow\).*actual!==expected.*!st\.refreshing&&st\.refreshError/,
   'pending and visible section refreshes keep the cache status banner on screen');
 assert.match(source, /缓存正在刷新.*data-reset-cache=.*重置缓存/,

@@ -16,6 +16,28 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'partner-cli-release-pipeline-'));
 
+function occurrenceCount(text, needle) {
+  return text.split(needle).length - 1;
+}
+
+function workflowRunBlocks(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/^\s*run:\s*\|\s*$/.test(lines[index])) continue;
+    const indentation = /^ */.exec(lines[index])?.[0].length || 0;
+    const body = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor];
+      const width = /^ */.exec(line)?.[0].length || 0;
+      if (line.trim() && width <= indentation) break;
+      body.push(line.length >= indentation + 2 ? line.slice(indentation + 2) : '');
+    }
+    blocks.push(body.join('\n') + '\n');
+  }
+  return blocks;
+}
+
 async function copyPackageSource(sourceRoot) {
   const manifest = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'partner_cli_package.json'), 'utf8'));
   for (const relative of [...manifest.files, 'config/partner_cli_package.json', 'scripts/install_partner_bi_ops_cli.ps1']) {
@@ -45,6 +67,71 @@ function deploymentPayload({release, packageBytes, packageFileName, sourceCommit
 }
 
 try {
+  const releaseWorkflow = await fs.readFile(
+    path.join(ROOT, '.github', 'workflows', 'partner-cli-release.yml'),
+    'utf8',
+  );
+  assert.match(releaseWorkflow, /^  workflow_dispatch:\s*$/m);
+  assert.doesNotMatch(releaseWorkflow, /^  release:\s*$/m);
+  assert.match(releaseWorkflow, /^      expected_commit:\s*$/m);
+  assert.match(releaseWorkflow, /^  actions: read\s*$/m);
+  assert.match(releaseWorkflow, /^  contents: write\s*$/m);
+  assert.match(releaseWorkflow, /actions\/checkout@[0-9a-f]{40}/);
+  assert.match(releaseWorkflow, /actions\/setup-node@[0-9a-f]{40}/);
+  assert.doesNotMatch(releaseWorkflow, /^\s+npm test\s*$/m);
+  for (const command of [
+    'npm run check:generated',
+    'npm run check:source',
+    'npm run build:portal-shell',
+    'node scripts/test_partner_cli_package.mjs',
+    'node scripts/test_partner_cli_version_change.mjs',
+    'node scripts/test_partner_cli_updater.mjs',
+    'node scripts/test_partner_cli_portal_release.mjs',
+    'node scripts/test_partner_cli_release_pipeline.mjs',
+  ]) assert.ok(releaseWorkflow.includes(command), 'Partner CLI release workflow is missing ' + command);
+  for (const contract of [
+    'fetchRepositoryTrustEvidence',
+    'fetchLatestCiBindingEvidence',
+    '.object.type == "tag"',
+    '.object.sha == $commit',
+    '.immutable == true',
+    '.state == "uploaded"',
+    '.digest == $zipDigest',
+    'path: automation',
+    'path: release-source',
+    'working-directory: release-source',
+    '--source-root "$PWD/release-source"',
+    'if [ "$mode" = \'draft\' ] && [ "$main_head" != "$expected_commit" ]',
+    'artifacts-terminal',
+    'PUBLISH_OUTCOME_UNKNOWN',
+    'no publish retry was attempted',
+    'Re-read GitHub facts immediately before BI deployment',
+  ]) assert.ok(releaseWorkflow.includes(contract), 'Partner CLI immutable release contract is missing ' + contract);
+  assert.equal(occurrenceCount(releaseWorkflow, 'gh release upload'), 1);
+  assert.equal(occurrenceCount(releaseWorkflow, '--request PATCH'), 1);
+  const credentialGateIndex = releaseWorkflow.indexOf('Check deployment credential before release mutation');
+  const draftBranchIndex = releaseWorkflow.indexOf('if [ "$INITIAL_MODE" = \'draft\' ]; then');
+  const uploadIndex = releaseWorkflow.indexOf('gh release upload');
+  const publishIndex = releaseWorkflow.indexOf('--request PATCH');
+  const publishedBranchIndex = releaseWorkflow.indexOf("asset_origin='existing-immutable-release-assets'");
+  const terminalReadbackIndex = releaseWorkflow.indexOf('download_and_verify published artifacts-terminal');
+  const deploymentPreflightIndex = releaseWorkflow.indexOf('Re-read GitHub facts immediately before BI deployment');
+  const deploymentIndex = releaseWorkflow.indexOf('Deploy atomically to BI and read back');
+  assert.ok(credentialGateIndex > 0 && credentialGateIndex < draftBranchIndex);
+  assert.ok(draftBranchIndex < uploadIndex && uploadIndex < publishIndex);
+  assert.ok(publishIndex < publishedBranchIndex && publishedBranchIndex < terminalReadbackIndex);
+  assert.ok(terminalReadbackIndex < deploymentPreflightIndex && deploymentPreflightIndex < deploymentIndex);
+  const bashBlocks = workflowRunBlocks(releaseWorkflow);
+  assert.equal(bashBlocks.length, 8, 'Partner CLI release workflow Bash block inventory drifted');
+  for (const [index, block] of bashBlocks.entries()) {
+    const syntax = spawnSync('bash', ['-n'], {input: block, encoding: 'utf8'});
+    assert.equal(
+      syntax.status,
+      0,
+      'Partner CLI release Bash block ' + (index + 1) + ' failed syntax validation: ' + syntax.stderr,
+    );
+  }
+
   const sourceRoot = path.join(temp, 'source');
   const manifest = await copyPackageSource(sourceRoot);
   const release = await buildPartnerCliRelease({sourceRoot});
@@ -138,6 +225,8 @@ try {
     artifactSourceMatchVerified: true,
     platformLineEndingsAccepted: true,
     realArtifactChangeRejected: true,
+    draftFirstImmutableWorkflowVerified: true,
+    workflowBashSyntaxVerified: true,
   }));
 } finally {
   await fs.rm(temp, {recursive: true, force: true});
