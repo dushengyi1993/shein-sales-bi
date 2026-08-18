@@ -80,6 +80,7 @@ assert.equal(missingConfirmation.status, 64);
 assert.match(missingConfirmation.stderr, /--apply\/--rollback requires exact --confirm/);
 
 assert.match(source, /MIGRATE_CLOUD_RUNTIME_LAYOUT_V2/);
+assert.match(source, /export GIT_OPTIONAL_LOCKS=0/);
 assert.match(source, /--apply\/--rollback requires exact --confirm/);
 assert.match(source, /real apply\/rollback requires root/);
 assert.match(source, /maintenance marker must be active mode=all/);
@@ -481,6 +482,9 @@ async function buildFixture(tempDir) {
   git(['config', 'core.filemode', 'true']);
   git(['add', 'outputs']);
   git(['commit', '-q', '-m', 'fixture outputs']);
+  const gitIndexPath = path.join(appRoot, '.git', 'index');
+  const gitIndexBefore = await fs.readFile(gitIndexPath);
+  const gitIndexStatBefore = await fs.stat(gitIndexPath, {bigint: true});
 
   await fs.copyFile(NAMESPACE_INSTALLER, path.join(appRoot, 'scripts', 'install_cloud_runtime_path_namespaces.sh'));
   let guardsContent = await fs.readFile(GUARDS_INSTALLER, 'utf8');
@@ -830,6 +834,7 @@ cp -a "\${src}." "\${dst}/"
     appRoot, dataRoot, dataParent, systemdDir, backupRoot, fstabPath, markerPath, binDir, stateFile,
     systemctlLog, servicesFile, effectiveControlsFile, effectiveShowCountFile, systemctlShowHelper,
     dataProfiles, dataState, dataOutputs, appProfiles, appState, appOutputs, legacyFstab,
+    gitIndexPath, gitIndexBefore, gitIndexStatBefore,
     m,
     w: win,
   };
@@ -944,6 +949,16 @@ async function expectTrackedClean(fx) {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), '');
 }
+
+async function expectGitIndexUnchanged(fx) {
+  assert.deepEqual(await fs.readFile(fx.gitIndexPath), fx.gitIndexBefore,
+    'root-style read-only migration probes must not rewrite Git index bytes');
+  const after = await fs.stat(fx.gitIndexPath, {bigint: true});
+  assert.equal(after.ino, fx.gitIndexStatBefore.ino,
+    'read-only migration probes must not replace the Git index inode');
+  assert.equal(after.mtimeNs, fx.gitIndexStatBefore.mtimeNs,
+    'read-only migration probes must not refresh Git index mtime');
+}
 // ---------------------------------------------------------------------------
 // Scenario A: clean legacy -> v2 migration, idempotent re-run, audit
 // ---------------------------------------------------------------------------
@@ -995,6 +1010,7 @@ async function expectTrackedClean(fx) {
     await fs.lstat(path.join(runDir, 'state-underlay', 'cache.json'));
     await fs.lstat(path.join(runDir, 'outputs-git-underlay', 'nested', 'sample.json'));
     await fs.lstat(path.join(fx.dataRoot, 'state', 'cache.json'));
+    await expectGitIndexUnchanged(fx);
     await expectTrackedClean(fx);
 
     const rerun = invoke(fx, [...fx.baseArgs, '--apply', '--confirm', CONFIRMATION]);
@@ -1681,6 +1697,7 @@ console.log(JSON.stringify({
     'metadata_fingerprint_hardlink_sensitive',
     'metadata_fingerprint_xattr_sensitive_when_supported',
     'exact_fstab_transform',
+    'git_index_not_refreshed_by_readonly_migration',
     'failpoint_hook',
     'fresh_apply_idempotent',
     'kill_after_publish_resume',

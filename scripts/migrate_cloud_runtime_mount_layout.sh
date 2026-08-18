@@ -3,6 +3,11 @@ set -Eeuo pipefail
 
 umask 077
 
+# This script runs as root in production, but every Git operation is read-only.
+# Disable optional index refresh locks so `git status` cannot rewrite .git/index
+# with root ownership and lock the deployment user out of the repository.
+export GIT_OPTIONAL_LOCKS=0
+
 readonly CONFIRMATION='MIGRATE_CLOUD_RUNTIME_LAYOUT_V2'
 readonly STANDARD_ROOT='/opt/shein-bi/app'
 readonly STANDARD_DATA_ROOT='/data/shein-bi'
