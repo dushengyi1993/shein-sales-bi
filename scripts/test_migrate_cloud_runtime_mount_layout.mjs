@@ -380,7 +380,29 @@ try {
   const v2 = execute('mode');
   assert.equal(v2.status, 0, v2.stderr);
   assert.equal(v2.stdout, 'v2');
-  assert.equal(execute('content').stdout, transformed.stdout, 'v2 transform must be stable');
+
+  const systemdDependency = 'x-systemd.requires=/data';
+  const productionLegacy = legacy
+    .replace(`${dataProfiles} ${appProfiles} none bind,rw 0 0`,
+      `${dataProfiles} ${appProfiles} none bind,${systemdDependency} 0 0`)
+    .replace(`${dataOutputs} ${appOutputs} none bind 0 0`,
+      `${dataOutputs} ${appOutputs} none bind,${systemdDependency} 0 0`);
+  await fs.writeFile(fstab, productionLegacy, 'utf8');
+  const productionMode = execute('mode');
+  assert.equal(productionMode.status, 0, productionMode.stderr);
+  assert.equal(productionMode.stdout, 'legacy');
+  const productionTransform = execute('content');
+  assert.equal(productionTransform.status, 0, productionTransform.stderr);
+  assert.equal(productionTransform.stdout, productionLegacy
+    .replace(`${dataProfiles} ${appProfiles} none bind,${systemdDependency} 0 0`,
+      `${dataProfiles} ${appProfiles} none bind,ro,${systemdDependency} 0 0`)
+    .replace(`${dataOutputs} ${appOutputs} none bind,${systemdDependency} 0 0`,
+      `${dataState} ${appState} none bind,ro,${systemdDependency} 0 0`));
+  await fs.writeFile(fstab, productionTransform.stdout, 'utf8');
+  const productionV2 = execute('mode');
+  assert.equal(productionV2.status, 0, productionV2.stderr);
+  assert.equal(productionV2.stdout, 'v2');
+  assert.equal(execute('content').stdout, productionTransform.stdout, 'v2 transform must be stable');
 
   await fs.writeFile(fstab, `${legacy}${dataProfiles} ${appProfiles} none bind 0 0\n`, 'utf8');
   const duplicate = execute('mode');
@@ -394,6 +416,11 @@ try {
   const ambiguous = execute('mode');
   assert.notEqual(ambiguous.status, 0);
   assert.match(ambiguous.stderr, /neither exact legacy nor exact v2/);
+
+  await fs.writeFile(fstab, productionLegacy.replaceAll('/data 0 0', '/unexpected 0 0'), 'utf8');
+  const wrongDependency = execute('mode');
+  assert.notEqual(wrongDependency.status, 0);
+  assert.match(wrongDependency.stderr, /neither exact legacy nor exact v2/);
 } finally {
   await fs.rm(transformTemp, {recursive: true, force: true});
 }
@@ -495,8 +522,8 @@ async function buildFixture(tempDir) {
   const legacyFstab = [
     '# fixture fstab',
     '/dev/data /data ext4 defaults 0 2',
-    `${win(dataProfiles)} ${win(appProfiles)} none bind,rw 0 0`,
-    `${win(dataOutputs)} ${win(appOutputs)} none bind 0 0`,
+    `${win(dataProfiles)} ${win(appProfiles)} none bind,x-systemd.requires=/data 0 0`,
+    `${win(dataOutputs)} ${win(appOutputs)} none bind,x-systemd.requires=/data 0 0`,
     '',
   ].join('\n');
   await fs.writeFile(fstabPath, legacyFstab, 'utf8');
@@ -934,8 +961,8 @@ async function expectTrackedClean(fx) {
     assert.equal(result.generatedMountContract, true);
 
     const fstabNow = await fs.readFile(fx.fstabPath, 'utf8');
-    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro 0 0`));
-    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataState)} ${fx.w(fx.appState)} none bind,ro 0 0`));
+    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro,x-systemd[.]requires=/data 0 0`));
+    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataState)} ${fx.w(fx.appState)} none bind,ro,x-systemd[.]requires=/data 0 0`));
     assert.doesNotMatch(fstabNow, new RegExp(`^${fx.w(fx.dataOutputs)} .*${fx.w(fx.appOutputs)}`, 'm'));
 
     const mounts = await readMountState(fx);
@@ -994,7 +1021,7 @@ async function expectTrackedClean(fx) {
     const status = await readJson(path.join(runDir, 'migration-status.json'));
     assert.equal(status.status, 'started', 'EXIT trap must not have rolled back after SIGKILL');
     const fstabNow = await fs.readFile(fx.fstabPath, 'utf8');
-    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro 0 0`), 'fstab publish must already be durable');
+    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro,x-systemd[.]requires=/data 0 0`), 'fstab publish must already be durable');
     const mounts = await readMountState(fx);
     assert.equal(mounts[fx.m(fx.appProfiles)].options, 'ro');
     assert.equal(mounts[fx.m(fx.appState)].options, 'ro');
@@ -1036,7 +1063,7 @@ async function expectTrackedClean(fx) {
     const status = await readJson(path.join(runDir, 'migration-status.json'));
     assert.equal(status.status, 'started');
     const fstabNow = await fs.readFile(fx.fstabPath, 'utf8');
-    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,rw 0 0`), 'fstab must still be legacy before publish');
+    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,x-systemd[.]requires=/data 0 0`), 'fstab must still be legacy before publish');
     await fs.lstat(path.join(fx.appRoot, 'state', 'cache.json'), 'state underlay must still be in place');
     await fs.lstat(path.join(runDir, 'outputs-git-underlay', 'nested', 'sample.json'));
     await fs.lstat(path.join(fx.dataRoot, 'state', 'cache.json'));
@@ -1079,8 +1106,8 @@ async function expectTrackedClean(fx) {
     assert.equal(rbResult.hostOutputsMounted, true);
 
     const fstabNow = await fs.readFile(fx.fstabPath, 'utf8');
-    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,rw 0 0`));
-    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataOutputs)} ${fx.w(fx.appOutputs)} none bind 0 0`));
+    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,x-systemd[.]requires=/data 0 0`));
+    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataOutputs)} ${fx.w(fx.appOutputs)} none bind,x-systemd[.]requires=/data 0 0`));
     const mounts = await readMountState(fx);
     assert.equal(mounts[fx.m(fx.appProfiles)].options, 'rw');
     assert.equal(mounts[fx.m(fx.appOutputs)].options, 'rw');
@@ -1178,7 +1205,7 @@ async function expectTrackedClean(fx) {
       recordedAt: new Date().toISOString(),
     }, null, 2)}\n`, 'utf8');
     const fstabNow = await fs.readFile(fx.fstabPath, 'utf8');
-    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro 0 0`));
+    assert.match(fstabNow, new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro,x-systemd[.]requires=/data 0 0`));
 
     const resume = invoke(fx, [...fx.baseArgs, '--apply', '--confirm', CONFIRMATION]);
     assert.equal(resume.status, 0, resume.stderr);
@@ -1251,11 +1278,11 @@ for (const scenario of [
     if (scenario.fstabLayout === 'legacy') {
       assert.equal(before.phase, 'fstab-publish-prepared');
       assert.match(await fs.readFile(fx.fstabPath, 'utf8'),
-        new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,rw 0 0`),
+        new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,x-systemd[.]requires=/data 0 0`),
         `${scenario.name}: interruption before atomic rename must preserve the complete legacy fstab`);
     } else if (scenario.fstabLayout === 'v2') {
       assert.match(await fs.readFile(fx.fstabPath, 'utf8'),
-        new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro 0 0`),
+        new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro,x-systemd[.]requires=/data 0 0`),
         `${scenario.name}: interruption after atomic rename must expose the complete v2 fstab`);
     }
     const resumed = invoke(fx, [...fx.baseArgs, '--apply', '--confirm', CONFIRMATION]);
@@ -1383,7 +1410,7 @@ for (const scenario of [
     assert.equal(journal.phase, 'fstab-published', 'effective path drift must never publish verified');
     const publishedFstab = await fs.readFile(fx.fstabPath, 'utf8');
     assert.match(publishedFstab,
-      new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro 0 0`));
+      new RegExp(`${fx.w(fx.dataProfiles)} ${fx.w(fx.appProfiles)} none bind,ro,x-systemd[.]requires=/data 0 0`));
     const publishedMounts = await readMountState(fx);
     const journalBytes = await fs.readFile(path.join(runDir, 'migration-journal.json'), 'utf8');
     const statusBytes = await fs.readFile(path.join(runDir, 'migration-status.json'), 'utf8');

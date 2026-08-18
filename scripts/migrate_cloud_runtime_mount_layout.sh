@@ -345,9 +345,18 @@ const original = fs.readFileSync(file, 'utf8');
 const finalNewline = original.endsWith('\n');
 const lines = original.split('\n');
 if (finalNewline) lines.pop();
-const desiredProfiles = `${dataProfiles} ${appProfiles} none bind,ro 0 0`;
-const desiredState = `${dataState} ${appState} none bind,ro 0 0`;
-const legacyProfileOptions = new Set(['bind', 'bind,rw']);
+const systemdDataDependency = 'x-systemd.requires=/data';
+const legacyProfileOptions = new Set([
+  'bind',
+  'bind,rw',
+  `bind,${systemdDataDependency}`,
+  `bind,rw,${systemdDataDependency}`,
+]);
+const desiredProfileOptions = new Set([
+  'bind,ro',
+  `bind,ro,${systemdDataDependency}`,
+]);
+const desiredOptions = record => `bind,ro${record.options.includes(systemdDataDependency) ? `,${systemdDataDependency}` : ''}`;
 const relevantPaths = new Set([dataProfiles, appProfiles, dataState, appState, dataOutputs, appOutputs]);
 const records = {profiles: [], state: [], outputs: []};
 
@@ -387,8 +396,8 @@ const state = records.state[0];
 const outputs = records.outputs[0];
 const legacy = Boolean(profile && legacyProfileOptions.has(profile.options)
   && !state && outputs && legacyProfileOptions.has(outputs.options));
-const desired = Boolean(profile && profile.options === 'bind,ro'
-  && state && state.options === 'bind,ro' && !outputs);
+const desired = Boolean(profile && desiredProfileOptions.has(profile.options)
+  && state && desiredProfileOptions.has(state.options) && !outputs);
 if (!legacy && !desired) {
   throw new Error(`runtime fstab layout is neither exact legacy nor exact v2: ${JSON.stringify({profiles: records.profiles, state: records.state, outputs: records.outputs})}`);
 }
@@ -396,8 +405,8 @@ if (action === 'mode') {
   process.stdout.write(legacy ? 'legacy' : 'v2');
 } else if (action === 'content') {
   if (legacy) {
-    lines[profile.index] = desiredProfiles;
-    lines[outputs.index] = desiredState;
+    lines[profile.index] = `${dataProfiles} ${appProfiles} none ${desiredOptions(profile)} 0 0`;
+    lines[outputs.index] = `${dataState} ${appState} none ${desiredOptions(outputs)} 0 0`;
   }
   process.stdout.write(lines.join('\n') + (finalNewline ? '\n' : ''));
 } else {
