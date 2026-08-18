@@ -286,6 +286,34 @@ const readOnlyExtraDrift = buildCloudRuntimeSnapshot({
 assert.equal(readOnlyExtraDrift.ok, false);
 assert.ok(readOnlyExtraDrift.blockers.some(row => row.code === 'RUNTIME_PATH_EFFECTIVE_ISOLATION_DRIFT' && (row.issues || []).some(issue => issue.kind === 'runtime-path' && issue.property === 'ReadOnlyPaths')));
 
+const queryBaseHardeningOmissionUnits = healthyUnits();
+queryBaseHardeningOmissionUnits['shein-bi-query.service'].ReadOnlyPaths =
+  queryBaseHardeningOmissionUnits['shein-bi-query.service'].ReadOnlyPaths
+    .replace('/srv/shein-bi/secrets', '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+const queryBaseHardeningOmission = buildCloudRuntimeSnapshot({
+  ...base,
+  systemdSnapshot: {...base.systemdSnapshot, units: queryBaseHardeningOmissionUnits},
+});
+assert.equal(queryBaseHardeningOmission.ok, false);
+assert.ok(queryBaseHardeningOmission.blockers.some(row => row.code === 'RUNTIME_PATH_EFFECTIVE_ISOLATION_DRIFT'
+  && (row.issues || []).some(issue => issue.service === 'shein-bi-query.service' && issue.property === 'ReadOnlyPaths')));
+
+const sessionSecretBaseHardeningOmissionUnits = healthyUnits();
+sessionSecretBaseHardeningOmissionUnits['shein-bi-session-secret.service'].InaccessiblePaths =
+  sessionSecretBaseHardeningOmissionUnits['shein-bi-session-secret.service'].InaccessiblePaths
+    .replace('/srv/shein-bi/secrets', '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+const sessionSecretBaseHardeningOmission = buildCloudRuntimeSnapshot({
+  ...base,
+  systemdSnapshot: {...base.systemdSnapshot, units: sessionSecretBaseHardeningOmissionUnits},
+});
+assert.equal(sessionSecretBaseHardeningOmission.ok, false);
+assert.ok(sessionSecretBaseHardeningOmission.blockers.some(row => row.code === 'RUNTIME_PATH_EFFECTIVE_ISOLATION_DRIFT'
+  && (row.issues || []).some(issue => issue.service === 'shein-bi-session-secret.service' && issue.property === 'InaccessiblePaths')));
+
 const effectiveGuardUnits = healthyUnits();
 effectiveGuardUnits['shein-bi-cloud-yesterday.service'].ExecCondition = '';
 const effectiveGuardDrift = buildCloudRuntimeSnapshot({

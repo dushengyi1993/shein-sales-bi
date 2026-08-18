@@ -5,7 +5,9 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 import {
+  CLOUD_RUNTIME_EFFECTIVE_PATH_EXTRAS_BY_SERVICE,
   CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE,
+  cloudRuntimePathDropInDirectives,
   cloudRuntimePathEffectiveDirectives,
   discoverCloudRuntimeServices,
   renderCloudRuntimePathDropIn,
@@ -117,7 +119,7 @@ for (const [service, policy] of Object.entries(CLOUD_RUNTIME_PATH_POLICY_BY_SERV
   if (policy.profiles === 'host-ro') expectedReadOnly.push('/data/shein-bi/profiles');
   if (policy.state === 'ro') expectedReadOnly.push('/data/shein-bi/state');
   if (policy.outputs === 'ro') expectedReadOnly.push('/data/shein-bi/outputs');
-  const directives = cloudRuntimePathEffectiveDirectives(service, policy);
+  const directives = cloudRuntimePathDropInDirectives(service, policy);
   assert.deepEqual(directives.readOnlyPaths, expectedReadOnly, `${service} readOnlyPaths must cover every canonically read-only domain`);
   if (expectedReadOnly.length) {
     const readOnlyLine = rendered.match(/^ReadOnlyPaths=(.+)$/m);
@@ -175,6 +177,76 @@ assert.deepEqual(CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE['shein-bi-query.service'],
 assert.deepEqual(CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE['shein-bi-session-secret.service'], {
   profiles: 'none', state: 'rw', outputs: 'ro',
 });
+assert.deepEqual(CLOUD_RUNTIME_EFFECTIVE_PATH_EXTRAS_BY_SERVICE, {
+  'shein-bi-query.service': {
+    readOnlyPaths: ['/opt/shein-bi/app', '/srv/shein-bi/secrets'],
+    inaccessiblePaths: [],
+  },
+  'shein-bi-session-secret.service': {
+    readOnlyPaths: ['/opt/shein-bi/app'],
+    inaccessiblePaths: ['/srv/shein-bi/secrets'],
+  },
+});
+assert.deepEqual(
+  cloudRuntimePathEffectiveDirectives(
+    'shein-bi-query.service',
+    CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE['shein-bi-query.service'],
+  ),
+  {
+    requiresMountsFor: [
+      '/data/shein-bi/profiles',
+      '/data/shein-bi/state',
+      '/data/shein-bi/outputs',
+    ],
+    bindPaths: [],
+    bindReadOnlyPaths: [
+      '/data/shein-bi/state:/opt/shein-bi/app/state',
+      '/data/shein-bi/outputs:/opt/shein-bi/app/outputs',
+    ],
+    readOnlyPaths: [
+      '/data/shein-bi/state',
+      '/data/shein-bi/outputs',
+      '/opt/shein-bi/app',
+      '/srv/shein-bi/secrets',
+    ],
+    inaccessiblePaths: [
+      '/data/shein-bi/profiles',
+      '/opt/shein-bi/app/profiles',
+    ],
+  },
+);
+assert.deepEqual(
+  cloudRuntimePathEffectiveDirectives(
+    'shein-bi-session-secret.service',
+    CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE['shein-bi-session-secret.service'],
+  ),
+  {
+    requiresMountsFor: [
+      '/data/shein-bi/profiles',
+      '/data/shein-bi/state',
+      '/data/shein-bi/outputs',
+    ],
+    bindPaths: ['/data/shein-bi/state:/opt/shein-bi/app/state'],
+    bindReadOnlyPaths: ['/data/shein-bi/outputs:/opt/shein-bi/app/outputs'],
+    readOnlyPaths: ['/data/shein-bi/outputs', '/opt/shein-bi/app'],
+    inaccessiblePaths: [
+      '/data/shein-bi/profiles',
+      '/opt/shein-bi/app/profiles',
+      '/srv/shein-bi/secrets',
+    ],
+  },
+);
+const queryUnit = await fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-query.service'), 'utf8');
+assert.ok(queryUnit.split('\n').includes(
+  'ReadOnlyPaths=/opt/shein-bi/app /data/shein-bi/outputs /data/shein-bi/state /srv/shein-bi/secrets',
+));
+const sessionSecretUnit = await fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-session-secret.service'), 'utf8');
+assert.ok(sessionSecretUnit.split('\n').includes(
+  'ReadOnlyPaths=/opt/shein-bi/app /data/shein-bi/outputs',
+));
+assert.ok(sessionSecretUnit.split('\n').includes(
+  'InaccessiblePaths=/data/shein-bi/profiles /opt/shein-bi/app/profiles /srv/shein-bi/secrets',
+));
 assert.deepEqual(CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE['shein-bi-cloud-marketing-live-guard.service'], {
   profiles: 'host-ro', state: 'rw', outputs: 'rw',
 });
