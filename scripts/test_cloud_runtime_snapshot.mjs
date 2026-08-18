@@ -267,6 +267,31 @@ const namespaceDrift = buildCloudRuntimeSnapshot({
 assert.equal(namespaceDrift.ok, false);
 assert.ok(namespaceDrift.blockers.some(row => row.code === 'RUNTIME_PATH_EFFECTIVE_ISOLATION_DRIFT'));
 
+const requiresMountExtrasUnits = healthyUnits();
+requiresMountExtrasUnits['shein-bi-query.service'].RequiresMountsFor +=
+  ' /opt/shein-bi/app /var/tmp /srv/shein-bi/runtime';
+const requiresMountExtras = buildCloudRuntimeSnapshot({
+  ...base,
+  systemdSnapshot: {...base.systemdSnapshot, units: requiresMountExtrasUnits},
+});
+assert.equal(requiresMountExtras.ok, true,
+  'base-unit and implicit systemd mount dependencies must not be treated as runtime namespace drift');
+
+const requiresMountMissingUnits = healthyUnits();
+requiresMountMissingUnits['shein-bi-query.service'].RequiresMountsFor =
+  requiresMountMissingUnits['shein-bi-query.service'].RequiresMountsFor
+    .replace('/data/shein-bi/state', '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+const requiresMountMissing = buildCloudRuntimeSnapshot({
+  ...base,
+  systemdSnapshot: {...base.systemdSnapshot, units: requiresMountMissingUnits},
+});
+assert.equal(requiresMountMissing.ok, false);
+assert.ok(requiresMountMissing.blockers.some(row => row.code === 'RUNTIME_PATH_EFFECTIVE_ISOLATION_DRIFT'
+  && (row.issues || []).some(issue => issue.service === 'shein-bi-query.service'
+    && issue.code === 'RUNTIME_PATH_REQUIRED_MOUNT_MISSING')));
+
 const readOnlyOmissionUnits = healthyUnits();
 readOnlyOmissionUnits['shein-bi-query.service'].ReadOnlyPaths = '';
 const readOnlyOmissionDrift = buildCloudRuntimeSnapshot({

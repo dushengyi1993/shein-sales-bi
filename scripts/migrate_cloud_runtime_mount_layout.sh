@@ -558,15 +558,14 @@ assert_effective_systemd_controls() {
   validation_output="$({
     EFFECTIVE_SYSTEMD_SHOW="$show_output" node --input-type=module - \
       "$RUNTIME_INVENTORY_MODULE" "$RUNTIME_SNAPSHOT_MODULE" \
-      "$RUNTIME_PATH_POLICY_MODULE" "$SYSTEMD_SNAPSHOT_MODULE" \
+      "$SYSTEMD_SNAPSHOT_MODULE" \
       "$scope" "$label" "${installed_services[@]}" <<'NODE_EFFECTIVE_SYSTEMD'
 import {pathToFileURL} from 'node:url';
 
-const [inventoryFile, runtimeSnapshotFile, pathPolicyFile, systemdSnapshotFile,
+const [inventoryFile, runtimeSnapshotFile, systemdSnapshotFile,
   scope, label, ...installedServices] = process.argv.slice(2);
 const inventory = await import(pathToFileURL(inventoryFile).href);
 const runtimeSnapshot = await import(pathToFileURL(runtimeSnapshotFile).href);
-const pathPolicy = await import(pathToFileURL(pathPolicyFile).href);
 const systemdSnapshot = await import(pathToFileURL(systemdSnapshotFile).href);
 const expectedServices = [...inventory.CLOUD_EXPECTED_SERVICE_UNITS].sort();
 const installed = [...new Set(installedServices)].sort();
@@ -594,28 +593,13 @@ if (scope === 'all') {
   if (!runtimeValidation.ok || runtimeValidation.checkedServiceCount !== expectedServices.length) {
     throw new Error(`effective runtime path validation failed at ${label}: ${JSON.stringify(runtimeValidation)}`);
   }
-  const tokens = value => [...new Set(String(value || '').trim().split(/\s+/u).filter(Boolean))].sort();
-  const exactRequiresIssues = [];
-  for (const service of expectedServices) {
-    const expected = tokens(pathPolicy.cloudRuntimePathEffectiveDirectives(
-      service,
-      pathPolicy.CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE[service],
-    ).requiresMountsFor.join(' '));
-    const actual = tokens(units[service]?.RequiresMountsFor);
-    if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
-      exactRequiresIssues.push({
-        kind: 'runtime-path',
-        service,
-        property: 'RequiresMountsFor',
-        code: 'RUNTIME_PATH_EFFECTIVE_PROPERTY_MISMATCH',
-        expected,
-        actual,
-      });
-    }
-  }
-  if (exactRequiresIssues.length) {
-    throw new Error(`effective RequiresMountsFor exact validation failed at ${label}: ${JSON.stringify(exactRequiresIssues)}`);
-  }
+  // RequiresMountsFor is intentionally a minimum-set contract. systemd adds
+  // legitimate implicit dependencies for base-unit paths such as
+  // WorkingDirectory and PrivateTmp, while older reviewed units may also have
+  // explicit non-runtime dependencies. The validator above still fails closed
+  // when any canonical runtime mount is missing. Namespace access properties
+  // remain exact because an extra BindPaths/BindReadOnlyPaths/ReadOnlyPaths/
+  // InaccessiblePaths token changes the service's filesystem view.
 }
 process.stdout.write(JSON.stringify({
   ok: true,

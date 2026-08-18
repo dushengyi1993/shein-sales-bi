@@ -131,7 +131,8 @@ assert.match(source, /assert_generated_mount_contract/);
 assert.match(source, /RequiresMountsFor is missing/);
 assert.match(source, /validateCloudMaintenanceEffectiveGuards/);
 assert.match(source, /validateCloudRuntimeEffectiveControls/);
-assert.match(source, /effective RequiresMountsFor exact validation failed/);
+assert.match(source, /RequiresMountsFor is intentionally a minimum-set contract/);
+assert.doesNotMatch(source, /effective RequiresMountsFor exact validation failed/);
 const effectivePropertyMatch = source.match(/--property=([A-Za-z,]+)/);
 assert.ok(effectivePropertyMatch, 'effective systemd property query must be extractable');
 assert.deepEqual(effectivePropertyMatch[1].split(','), SYSTEMD_SNAPSHOT_PROPERTIES,
@@ -523,7 +524,10 @@ async function buildFixture(tempDir) {
       ExecCondition: unitClass === 'always'
         ? ''
         : expectedCloudMaintenanceExecCondition(service, unitClass, '%n'),
-      RequiresMountsFor: directives.requiresMountsFor.join(' '),
+      // Production systemd appends base-unit/implicit mount dependencies (for
+      // example WorkingDirectory and PrivateTmp). They are legitimate extras;
+      // the canonical runtime mount set remains mandatory.
+      RequiresMountsFor: [...directives.requiresMountsFor, '/implicit/base-unit-mount'].join(' '),
       BindPaths: directives.bindPaths.join(' '),
       BindReadOnlyPaths: directives.bindReadOnlyPaths.join(' '),
       ReadOnlyPaths: directives.readOnlyPaths.join(' '),
@@ -568,7 +572,7 @@ for (const service of services) {
     unit.ExecCondition = '/usr/bin/false --effective-override';
   }
   if (daemonReloaded && pathDriftService === service) {
-    unit.RequiresMountsFor = unit.RequiresMountsFor + ' /unexpected-effective-mount';
+    unit.BindPaths = (unit.BindPaths + ' /unexpected-effective-source:/unexpected-effective-target').trim();
   }
   for (const property of properties) {
     process.stdout.write(property + '=' + String(unit[property] ?? '') + '\\n');
@@ -1359,8 +1363,8 @@ for (const scenario of [
 }
 
 // ---------------------------------------------------------------------------
-// Scenario O: an extra effective RequiresMountsFor value introduced by the
-// daemon reload must block the verified journal. The resulting published-v2
+// Scenario O: an extra effective writable bind introduced by the daemon reload
+// must block the verified journal. The resulting published-v2
 // state is then used to prove rollback fstab publication is atomic across a
 // hard interruption before rename.
 // ---------------------------------------------------------------------------
@@ -1373,7 +1377,7 @@ for (const scenario of [
       SHEIN_BI_TEST_RUNTIME_PATH_DRIFT_AFTER_DAEMON_RELOAD: driftService,
     });
     assert.notEqual(rejected.status, 0);
-    assert.match(rejected.stderr, /effective RequiresMountsFor exact validation failed at before-verified-journal/);
+    assert.match(rejected.stderr, /effective runtime path validation failed at before-verified-journal/);
     const runDir = await runDirOf(fx);
     const journal = await readJson(path.join(runDir, 'migration-journal.json'));
     assert.equal(journal.phase, 'fstab-published', 'effective path drift must never publish verified');
@@ -1651,7 +1655,7 @@ console.log(JSON.stringify({
     'unsafe_journal_stage_path_rejected',
     'effective_exec_condition_override_zero_mutation',
     'effective_exec_condition_critical_point_refresh',
-    'effective_28_service_path_exact_before_verified',
+    'effective_28_service_namespace_exact_before_verified',
     'rollback_fstab_atomic_interruption',
     'rollback_fstab_mode_preserved',
     'rollback_missing_required_backups_zero_mutation',
