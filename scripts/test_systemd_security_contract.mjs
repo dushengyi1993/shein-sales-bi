@@ -224,11 +224,12 @@ assert.equal(property(dbBackup, 'NoNewPrivileges'), 'true');
 assert.equal(property(dbBackup, 'PrivateTmp'), 'true');
 assertCommonHardening(dbBackup, 'db backup');
 assert.match(dbBackup, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
-assert.match(dbBackup, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=1/);
+assert.match(dbBackup, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=0/);
 assert.match(dbBackup, /SHEIN_BI_BROWSER_STATE_BACKUP_KEY_FILE=\/srv\/shein-bi\/secrets\/browser-state-backup\.key/);
 assert.match(dbBackup, /SHEIN_BI_BROWSER_PROFILE_ROOT=\/data\/shein-bi\/profiles/);
 assert.match(dbBackup, /SHEIN_BI_BROWSER_SESSION_ROOT=\/data\/shein-bi\/state\/shein_webapi_sessions/);
-assert.match(dbBackup, /--deadline-at 01:52/);
+assert.match(dbBackup, /--deadline-at 02:37/,
+  'the 01:45 database backup needs a real window while retaining an eight-minute handoff before 02:45 yesterday-final');
 assert.match(dbBackup, /--stage nightly-backup --require nightly-session/);
 assert.match(dbBackup, /flock -w 120/);
 assert.equal(property(dbBackup, 'TimeoutStartSec'), '10800',

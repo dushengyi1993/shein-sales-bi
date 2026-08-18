@@ -181,6 +181,8 @@ assert.deepEqual(calendars(unit('shein-bi-et-low-inventory-recheck.timer')), [
 ]);
 assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
 assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), ['*-*-* 01:45:00']);
+assert.match(unit('shein-bi-db-backup.service'), /--deadline-at 02:37/,
+  'database backup must retain a measured window and stop before the 02:45 yesterday-final lane');
 assert.deepEqual(calendars(unit('shein-bi-cloud-yesterday.timer')), ['*-*-* 02:45:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-rtv-verify.timer')), ['*-*-* 04:50:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-chain.timer')), ['*-*-* 07:10:00']);

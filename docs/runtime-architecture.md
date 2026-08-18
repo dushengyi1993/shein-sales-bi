@@ -11,7 +11,7 @@
 - 公网入口在 Nginx 精确拆分：完整 Portal `8787`、认证只读 Query `8788`、Webhook `8792`。Query 与 Portal 共享登录 cookie 语义，但不共享进程、heap、cgroup、worker 或生成副作用；Portal 重启不能中断已经独立运行的 CLI 查询面。
 - 云端运行态 canonical 路径是 `/data/shein-bi/{profiles,state,outputs}`。宿主 app 下 profiles/state 只读，outputs 无宿主 bind；28 个 service 通过独立 systemd namespace 获得最小读写权限，Query 完全不可见 profile。
 - systemd、watchdog 与 Codex heartbeat 统一读取 `/var/lib/shein-bi-control/cloud-maintenance.json`，通过 CAS generation/hash 切换 `business|all`；canonical marker 由 root 原子写、服务用户只读，marker 非法时 scheduled/infrastructure fail closed，不另建 timer、queue 或巡检副本。
-- 现有数据库备份同轮加密保护 Profile/WebAPI session 并做真实 verify；生产部署 marker 是 schema v3 的 `shein-bi-deployed-release/v3`，绑定 repository id、trust policy SHA-256、annotated tag、attestation SHA-256、精确 main-push CI run/attempt 与 jobs SHA-256，以及 exact source fingerprint；旧 v2/tag/commit-only marker 不算健康。
+- 数据库备份与 Profile/WebAPI session 灾备解耦：前者按生产 SLA 自动运行，后者保留经测试的加密归档能力但默认关闭，只有独立密钥托管和恢复演练完成后才启用。生产部署 marker 是 schema v3 的 `shein-bi-deployed-release/v3`，绑定 repository id、trust policy SHA-256、annotated tag、attestation SHA-256、精确 main-push CI run/attempt 与 jobs SHA-256，以及 exact source fingerprint；旧 v2/tag/commit-only marker 不算健康。
 - 当前正式门户为 V2；V1 已从线上 `/v1/` 下线，只保留 GitHub final/archive release `2026.06.18-v1-final-archive` 作为恢复点，不再进入正式 release 或日常刷新。
 - SHEIN 临时人工登录维护入口已云端化：BI `/cloud-login-maintenance` 通过 noVNC 打开指定店铺独立 profile 的短时 Chrome 窗口，完成后导出/探测 session 并关闭临时进程。
 - BI Portal 生成端会用 `lib/product_display_name.mjs` 给 `data.json` 补齐 `product_display_name` / `productDisplayNames`；前端页面和云端飞书问数机器人共用该显示名，后台归因 key 仍保持 `standard_goods_sn`。

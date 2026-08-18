@@ -34,7 +34,7 @@
 - 运行态 namespace：canonical 目录为 `/data/shein-bi/{profiles,state,outputs}`。宿主 `/opt/shein-bi/app/profiles` 与 `state` 是只读兼容 bind，宿主 `outputs` 不再挂载；每个 service 通过 `50-runtime-paths.conf` 获得独立最小权限。Query 对两处 profile 路径均为 `InaccessiblePaths`。runtime snapshot/watchdog 必须批量回读 28 个 service 的有效 `BindPaths`、`BindReadOnlyPaths`、`ReadOnlyPaths`、`InaccessiblePaths`、`RequiresMountsFor`；只看 drop-in 文件或当前进程健康不算通过。
 - layout 迁移恢复：迁移器把 v2 journal 和备份写在 `/srv/shein-bi/runtime/layout-migration-backups`。普通失败或 SIGKILL 不自动回滚；无参数审计必须显示唯一 `recovery.action=resume` 后，才可用同一 `--apply` 恢复。`--rollback` 只允许针对该 active journal 显式确认执行，禁止另起 run 或手工搬移运行态。
 - 部署证明：`deployed_release.json` 必须是 schema v3 的 `shein-bi-deployed-release/v3`，同时绑定 repository id、trust policy SHA-256、annotated tag object、commit、attestation/checksum SHA-256、CI run/attempt 与 jobs SHA-256、source workflow 和 exact source fingerprint；旧 v2 marker 只作迁移读取兼容，不满足健康门。`capture_ops_runtime_snapshot.mjs` 和 watchdog 不只检查 marker 格式，还会从 `/srv/shein-bi/runtime/release-attestations/<tag>/` 重新读取两份证明、复算 hash，并核对本地 annotated tag object/message/peeled commit；marker 自己声明的 commit 不能给自己作证。
-- Profile/session 灾备：现有 `shein-bi-db-backup.timer` 同轮生成并完整 verify AES-256-GCM v2 归档；恢复只能先到不存在的 staging 目录。create/verify/restore 共用生产显式总明文上限 `8g`（高于当前约 2.4GB 的受保护集，仍须部署前重测 entry/byte 总量），单文件、条目数、压缩比和空闲空间仍各自有硬门；认证记录保存 numeric uid/gid、mode/mtime，staging 回读必须核对属主与内容。密钥 `/srv/shein-bi/secrets/browser-state-backup.key` 必须另有异机恢复副本，不能只留在被备份主机。
+- Profile/session 灾备：仓库保留 AES-256-GCM v2 的 create/verify/empty-staging restore 能力，但当前生产数据库备份 unit 默认关闭该可选项，不生成密钥，也不把 5GB 级 Profile 纳入数据库备份 SLA。以后若单独启用，必须先实测 entry/byte 总量、另行保管异机密钥副本并完成恢复演练；恢复仍只能落到不存在的 staging 目录。
 
 维护变更必须先读 status，把回读的 `generation` 与 `hash` 原样带入下一次 CAS；不得猜值或直接改 JSON：
 
@@ -110,7 +110,7 @@ sudo node scripts/manage_cloud_maintenance_mode.mjs resume \
 | `shein-bi-cloud-today-sales-reconcile.timer` | 每 15 分钟 | 在 Webhook 之外用19店 OpenAPI 纠偏当天销售，只刷新 `liveSalesToday`；属于轻量快车道 |
 | `shein-bi-cloud-yesterday.timer` | 北京时间 `02:45` | 依赖 session/backup marker，刷新前一天最终销售并复核稳定日 |
 
-| `shein-bi-db-backup.timer` | 北京时间 `01:45` | 备份业务库、Metabase 元数据库、生产登记，并流式加密/复验 Profile + WebAPI session 到 `/srv/shein-bi/backups/auto`；COS 内容级校验完成前不删本地 |
+| `shein-bi-db-backup.timer` | 北京时间 `01:45`，宿主 deadline `02:37` | 备份业务库、Metabase 元数据库和生产登记；Profile + WebAPI session 加密归档为保留但默认关闭的独立可选项；COS 内容级校验完成前不删本地 |
 
 | `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:12/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
 

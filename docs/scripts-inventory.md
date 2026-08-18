@@ -388,7 +388,7 @@
 - `cloud_disk_maintenance.sh`：每日低优先级磁盘维护；抓数产物本地保留 30 天，COS 归档必须通过 gzip、成员清单和 SHA256 校验后才删除未变化的本地文件。profile 缓存仅在根盘达到 80%、没有有效浏览器租约且没有 Chrome 进程时清理，Cookie 与持久登录状态不在目标清单中。
 - `manage_cloud_maintenance_mode.mjs` / `install_cloud_maintenance_guards.sh`：维护 marker 的 status/pause/resume/check/systemd-condition 与 28-service 完整 policy 安装；写操作使用 generation/hash CAS，死亡 lock owner 可安全回收，live owner/所有权漂移时拒绝。
 - `install_cloud_runtime_path_namespaces.sh` / `migrate_cloud_runtime_mount_layout.sh` / `lib/cloud_runtime_path_policy.mjs`：把 profiles/state/outputs 权限按 28 个 service 完整列举并安装 unit-private namespace；一次性 V2 layout 迁移只在 `mode=all`、全部服务 inactive、无 Chrome、source tree 外备份时执行。
-- `manage_encrypted_browser_state_backup.mjs`：Profile + WebAPI session 的流式 gzip/AES-256-GCM create/verify/empty-staging restore；拒绝 symlink、特殊文件和活动 Chrome，完整认证前不创建 staging。由现有 `cloud_db_backup.sh` 调用，不新增 timer。
+- `manage_encrypted_browser_state_backup.mjs`：Profile + WebAPI session 的流式 gzip/AES-256-GCM create/verify/empty-staging restore；拒绝 symlink、特殊文件和活动 Chrome，完整认证前不创建 staging。`cloud_db_backup.sh` 可按显式开关调用，但生产默认关闭且不新增 timer。
 
 - `lark_sales_qa_bot.mjs`：历史飞书只读问数实现；生产 service 必须保持 `disabled + inactive`，当前网页/Partner CLI 只读查询不再复用它，也不调用它背后的模型。仅在明确诊断旧飞书问数产品时运行；其输出不能作为经营事实或写入依据。
 

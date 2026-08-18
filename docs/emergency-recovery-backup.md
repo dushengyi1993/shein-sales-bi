@@ -33,8 +33,8 @@
 
 | 路径 | 原因 | 丢失后怎么恢复 |
 | --- | --- | --- |
-| `profiles/` | 浏览器登录态、Cookie、保存密码和大量缓存，敏感且体积大 | 每日现有数据库备份链会流式生成 AES-256-GCM 加密归档并校验；恢复只允许先落到全新 staging 目录，绝不进 GitHub |
-| `state/shein_webapi_sessions/*.local.json` | SHEIN WebAPI Cookie session，敏感 | 与 Profile 一并进入加密归档；仍可通过重新登录/刷新 session 重建 |
+| `profiles/` | 浏览器登录态、Cookie、保存密码和大量缓存，敏感且体积大 | 仓库保留 AES-256-GCM 加密归档工具，但生产默认关闭；当前恢复路径是重新登录，绝不把 Profile 放进 GitHub |
+| `state/shein_webapi_sessions/*.local.json` | SHEIN WebAPI Cookie session，敏感 | 可按需与 Profile 一并加密归档；当前仍以重新登录/刷新 session 重建 |
 | `config/shein_openapi.local.json` | SHEIN OpenAPI app secret / token 等真实密钥 | 只能通过密码管理器或加密渠道单独迁移 |
 | `config/bi_users.local.json` | 本地 BI 账号密码 | 新环境重新设置 |
 | `config/lark_report.json` | 飞书真实接收配置 | 由 `config/lark_report.example.json` 复制后手动填 |
@@ -69,8 +69,7 @@
 
 ## 浏览器登录态加密备份与恢复
 
-`scripts/cloud_db_backup.sh` 继续由原有 `shein-bi-db-backup.timer` 调度，不新增第二套 timer。数据库 dump 完成后，它会调用
-`scripts/manage_encrypted_browser_state_backup.mjs`：
+`scripts/cloud_db_backup.sh` 继续由原有 `shein-bi-db-backup.timer` 调度，不新增第二套 timer。Profile/session 归档是保留的可选能力，当前生产 unit 显式设置 `SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=0`，不会生成密钥或归档。以后单独启用时，数据库 dump 完成后才会调用 `scripts/manage_encrypted_browser_state_backup.mjs`：
 
 - 直接把 Profile 与 `state/shein_webapi_sessions` 流式加密为 `browser-state.sheinenc`，不产生明文 tar/zip；v2 认证记录同时保存 numeric uid/gid、mode 与 mtime，root 执行恢复时不会把原属主静默改成 root；
 - 使用 AES-256-GCM 同时提供保密性和篡改检测；每个文件另有 SHA-256，整份归档创建后必须再完整解密校验一次；

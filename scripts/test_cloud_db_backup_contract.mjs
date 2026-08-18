@@ -192,7 +192,9 @@ assert.match(service, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=\/opt\/shein-bi\/a
   'production service now wires the repository launcher as the independent verifier');
 assert.match(service, /SHEIN_BI_BACKUP_COS_MOUNT=\/lhcos-data/);
 assert.match(service, /SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT=\/lhcos-data\/shein-bi-db-backups/);
-assert.match(service, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=1/);
+assert.match(service, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=0/,
+  'browser-state archival must remain opt-in and outside the database-backup SLA');
+assert.doesNotMatch(service, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=1/);
 assert.match(service, /SHEIN_BI_BROWSER_STATE_BACKUP_KEY_FILE=\/srv\/shein-bi\/secrets\/browser-state-backup\.key/);
 assert.match(service, /SHEIN_BI_BROWSER_STATE_LIMIT_TOTAL_BYTES=8g/);
 assert.match(service, /SHEIN_BI_BROWSER_PROFILE_ROOT=\/data\/shein-bi\/profiles/);
