@@ -22,7 +22,7 @@
 2. 下载并 live 核验 Release 两份 attestation、Tag、immutable Release 终态与 exact CI attempt；备份 tracked diff、关键运行态和 Portal 输出。Profile/session 不属于本次部署备份范围。
 3. 在冻结状态下精确部署 attested commit，但不启动或恢复任何业务 timer/写链；安装 maintenance guards，执行 daemon-reload，并权威回读 23 个唯一有效 `ExecCondition`。
 4. 先以普通 `sheinops` 读取 canonical absent 状态并确认 `.lock` 不存在，再由 root 使用 fresh generation/hash CAS 在 `/var/lib/shein-bi-control/cloud-maintenance.json` 进入 `mode=all`；canonical orphan lock 不自动回收，只有在核对 marker、PID/process-start 与当前进程后才可人工处置。分别以 root 与 `sudo -u sheinops` 回读完整 marker hash，并验证 scheduled/infrastructure `systemd-condition` 返回 1 而非 64/255；若返回“已提交但锁清理未确认”，禁止盲重试。
-5. 安装并回读 28-service runtime namespace 和 Query/Nginx 配置。在全部 SHEIN BI 业务 service inactive、无 Chrome 的前提下先做 runtime layout V2 只读审计，再执行迁移；备份与 v2 journal 固定在 `/srv/shein-bi/runtime/layout-migration-backups`。中断后保留阶段证据，以同一 `--apply` 恢复，不能隐式回滚或另开迁移 run。
+5. 安装并回读 28-service runtime namespace 和 Query/Nginx 配置。在全部 SHEIN BI 业务 service inactive、无 Chrome 的前提下先做 runtime layout V2 只读审计，再执行迁移；为保证 state/outputs underlay 可原子 rename，备份与 v2 journal 固定在与 `/opt/shein-bi/app` 同盘、但位于 Git 工作树外的 root 专用目录 `/var/lib/shein-bi-layout-migration-backups`。中断后保留阶段证据，以同一 `--apply` 恢复，不能隐式回滚或另开迁移 run。
 6. 保持 Profile/session 归档开关关闭，不生成新密钥；只核对迁移器不会复制、删除或改写 canonical Profile 内容。
 7. 写入 schema v3 deployment marker（`shein-bi-deployed-release/v3`），启动 Portal/Query/Webhook/watchdog，预热并回读当前 generation 的受影响 section。
 8. 完成浸泡后由 root 使用 fresh generation/hash CAS 退出维护，按只读巡检 → timer → 写链分阶段恢复；每阶段 fresh preflight 与终态回读，不使用 `enable --now` 批量拉起。

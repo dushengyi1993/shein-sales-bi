@@ -9,7 +9,7 @@ readonly STANDARD_DATA_ROOT='/data/shein-bi'
 readonly STANDARD_FSTAB='/etc/fstab'
 readonly STANDARD_SYSTEMD_DIR='/etc/systemd/system'
 readonly STANDARD_MAINTENANCE_MARKER='/var/lib/shein-bi-control/cloud-maintenance.json'
-readonly STANDARD_BACKUP_ROOT='/srv/shein-bi/runtime/layout-migration-backups'
+readonly STANDARD_BACKUP_ROOT='/var/lib/shein-bi-layout-migration-backups'
 readonly KNOWN_PHASES='init|fstab-backed-up|state-data-created|outputs-underlay-prepared|outputs-underlay-moved|state-underlay-moved|readonly-mounts-done|fstab-publish-prepared|fstab-published|verified|rolled-back'
 
 ROOT="$STANDARD_ROOT"
@@ -140,7 +140,7 @@ if ((!FIXTURE)); then
   [[ "$MAINTENANCE_MARKER" == "$STANDARD_MAINTENANCE_MARKER" ]] \
     || usage_error 'real mode requires the canonical maintenance marker'
   [[ "$BACKUP_ROOT" == "$STANDARD_BACKUP_ROOT" ]] \
-    || usage_error 'real mode requires --backup-root /srv/shein-bi/runtime/layout-migration-backups'
+    || usage_error 'real mode requires --backup-root /var/lib/shein-bi-layout-migration-backups'
   if ((APPLY || ROLLBACK_FLAG)) && ((EUID != 0)); then fail 'real apply/rollback requires root'; fi
   [[ -z "${SHEIN_BI_MIGRATION_STAGE_LIMIT:-}" && -z "${SHEIN_BI_MIGRATION_FAILPOINT:-}" ]] \
     || usage_error 'migration failpoints are fixture-only'
@@ -198,6 +198,24 @@ assert_backup_root_path() {
   assert_real_directory "$parent" 'layout migration backup parent'
   [[ "$(realpath -m -- "$BACKUP_ROOT")" == "$BACKUP_ROOT" ]] \
     || fail "backup root path must be canonical: $BACKUP_ROOT"
+}
+
+assert_backup_root_device_compatible() {
+  local root_device backup_device_probe backup_root_device state_underlay_device
+  root_device="$(stat -Lc '%d' -- "$ROOT")" || fail 'cannot read application root device'
+  if [[ -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]]; then
+    backup_device_probe="$BACKUP_ROOT"
+  else
+    backup_device_probe="$(dirname -- "$BACKUP_ROOT")"
+  fi
+  backup_root_device="$(stat -Lc '%d' -- "$backup_device_probe")" || fail 'cannot read backup root device'
+  [[ "$root_device" == "$backup_root_device" ]] \
+    || fail "backup root must share the application underlay device: root=$root_device backup=$backup_root_device"
+  if [[ -d "$APP_STATE" && ! -L "$APP_STATE" ]] && ! is_mountpoint "$APP_STATE"; then
+    state_underlay_device="$(stat -Lc '%d' -- "$APP_STATE")" || fail 'cannot read state underlay device'
+    [[ "$state_underlay_device" == "$root_device" ]] \
+      || fail "state underlay must share the application device before migration: root=$root_device state=$state_underlay_device"
+  fi
 }
 
 command_available() {
@@ -2022,7 +2040,7 @@ run_resume() {
 }
 
 apply_run_init() {
-  local root_device state_underlay_device backup_device_probe backup_root_device reserved_path
+  local root_device reserved_path
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   BACKUP_RUN_DIR="$BACKUP_ROOT/$STAMP"
   FSTAB_BACKUP="$BACKUP_RUN_DIR/fstab"
@@ -2037,16 +2055,8 @@ apply_run_init() {
     [[ ! -e "$reserved_path" && ! -L "$reserved_path" ]] \
       || fail "reserved migration path already exists: $reserved_path"
   done
+  assert_backup_root_device_compatible
   root_device="$(stat -Lc '%d' -- "$ROOT")" || fail 'cannot read application root device'
-  state_underlay_device="$(stat -Lc '%d' -- "$APP_STATE")" || fail 'cannot read state underlay device'
-  if [[ -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]]; then
-    backup_device_probe="$BACKUP_ROOT"
-  else
-    backup_device_probe="$(dirname -- "$BACKUP_ROOT")"
-  fi
-  backup_root_device="$(stat -Lc '%d' -- "$backup_device_probe")" || fail 'cannot read backup root device'
-  [[ "$root_device" == "$backup_root_device" && "$state_underlay_device" == "$backup_root_device" ]] \
-    || fail "backup root must share the application underlay device: root=$root_device state=$state_underlay_device backup=$backup_root_device"
   assert_critical_effective_gate 'before-migration-journal-init' guards
   if [[ ! -e "$BACKUP_ROOT" ]]; then
     mkdir -p -- "$BACKUP_ROOT"
@@ -2205,6 +2215,7 @@ assert_real_directory "$APP_PROFILES" 'application profiles path'
 assert_real_directory "$DATA_PROFILES" 'canonical profiles path'
 assert_real_directory "$DATA_OUTPUTS" 'canonical outputs path'
 assert_real_data_mount
+assert_backup_root_device_compatible
 maintenance_generation="$(read_maintenance_gate)" || fail 'maintenance marker validation failed'
 maintenance_policy_count="$(maintenance_guard_audit)" || fail 'maintenance guard audit validation failed'
 policy_count="$(namespace_audit)" || fail 'namespace audit validation failed'
