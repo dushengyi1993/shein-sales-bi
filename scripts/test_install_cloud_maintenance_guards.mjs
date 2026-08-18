@@ -103,7 +103,9 @@ const blocks = services.map(service => {
   const condition = loaded && unitClass !== 'always'
     ? '/usr/bin/node /opt/shein-bi/app/scripts/manage_cloud_maintenance_mode.mjs systemd-condition --class ' + unitClass + ' --unit ' + service
     : '';
-  return 'Id=' + service + '\\nLoadState=loaded\\nExecCondition=' + condition;
+  const lines = ['Id=' + service, 'LoadState=loaded'];
+  if (condition) lines.push('ExecCondition=' + condition);
+  return lines.join('\\n');
 });
 process.stdout.write(blocks.join('\\n\\n') + '\\n');
 `, 'utf8');
@@ -297,6 +299,7 @@ export async function writeJsonFileAtomic() {}
       'exact_confirmation_gate',
       'class_template_install',
       'always_guard_absent',
+      'systemd_omitted_empty_exec_condition',
       'daemon_reload_only',
       'effective_guard_readback',
       'failed_reload_cannot_pause',

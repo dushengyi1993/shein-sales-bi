@@ -322,7 +322,12 @@ function parseEffectiveGuardShow(stdout, policies) {
     if (!service) continue;
     units[service] = {
       ...row,
-      complete: ['Id', 'LoadState', 'ExecCondition'].every(property => Object.hasOwn(row, property)),
+      // systemd 255 omits an explicitly requested property when its effective
+      // value is empty. Normalize that omission to the semantic empty value;
+      // non-always services still fail below unless their exact non-empty
+      // ExecCondition matches the reviewed maintenance policy.
+      ExecCondition: String(row.ExecCondition || ''),
+      complete: ['Id', 'LoadState'].every(property => Object.hasOwn(row, property)),
     };
   }
   for (const {service} of policies) {
