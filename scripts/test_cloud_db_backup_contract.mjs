@@ -423,7 +423,7 @@ function envFor({
 }
 
 function runArchiveVerification(source, removeAfter = '0', options = {}) {
-  return runBash('"$1" --test-archive-verified "$2" "$3"', [
+  return runBash('bash "$1" --test-archive-verified "$2" "$3"', [
     bashScriptPath,
     toBashPath(source),
     removeAfter,
@@ -431,7 +431,7 @@ function runArchiveVerification(source, removeAfter = '0', options = {}) {
 }
 
 function runScriptFlag(flag, args = [], env = envFor()) {
-  const result = runBash(`"$1" ${flag} ${args.join(' ')}`, [bashScriptPath], { env });
+  const result = runBash(`bash "$1" ${flag} ${args.join(' ')}`, [bashScriptPath], { env });
   return result;
 }
 
