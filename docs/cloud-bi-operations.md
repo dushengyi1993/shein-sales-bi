@@ -15,7 +15,7 @@
 
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
 
-- 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS；Nginx `127.0.0.1:8080` 把页面/写路由送往 Portal `8787`，把 9 个精确认证只读路由送往 Query `8788`，把官方回调送往 Webhook `8792`。身份认证继续使用同一 `bi_session`，但三个 Node 进程、heap 与 cgroup 隔离；PostgreSQL + Metabase 由 Docker Compose 承载。
+- 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS；Nginx `127.0.0.1:8080` 把页面/写路由送往 Portal `8787`，把 9 个精确认证只读路由送往 Query `8791`，把官方回调送往 Webhook `8792`。身份认证继续使用同一 `bi_session`，但三个 Node 进程、heap 与 cgroup 隔离；PostgreSQL + Metabase 由 Docker Compose 承载。
 
 - 域名入口：`https://sa.dushengyi.cc/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 
@@ -29,7 +29,7 @@
 
 ### 2026-08-17 稳定性控制面
 
-- Query 只读面：`shein-bi-query.service` 固定 `SHEIN_BI_SURFACE=query`、`SHEIN_BI_QUERY_MAX_CONCURRENT=1`、`SHEIN_BI_QUERY_MAX_QUEUED=3`，V8 old space 1024MiB，cgroup `MemoryHigh=1024M` / `MemoryMax=1400M`。`/api/health` 仍属于 Portal；Query 自检直接访问 `http://127.0.0.1:8788/api/health`，要求 `surface=query` 且 `sideEffectsStarted=[]`。429 `QUERY_SURFACE_BUSY` 由受管 CLI 在既有等待预算内按 `Retry-After` 重试，不无限循环。请求 deadline/断连必须把 AbortSignal 传到文件读取；执行槽只能在实际 work 收口后释放，非协作 work 超过 grace 时由 Query 进程 fail-fast 并交给 systemd 重启，禁止旧解析与下一查询重叠。
+- Query 只读面：`shein-bi-query.service` 固定 `SHEIN_BI_SURFACE=query`、`SHEIN_BI_QUERY_MAX_CONCURRENT=1`、`SHEIN_BI_QUERY_MAX_QUEUED=3`，V8 old space 1024MiB，cgroup `MemoryHigh=1024M` / `MemoryMax=1400M`。`/api/health` 仍属于 Portal；Query 自检直接访问 `http://127.0.0.1:8791/api/health`，要求 `surface=query` 且 `sideEffectsStarted=[]`。429 `QUERY_SURFACE_BUSY` 由受管 CLI 在既有等待预算内按 `Retry-After` 重试，不无限循环。请求 deadline/断连必须把 AbortSignal 传到文件读取；执行槽只能在实际 work 收口后释放，非协作 work 超过 grace 时由 Query 进程 fail-fast 并交给 systemd 重启，禁止旧解析与下一查询重叠。
 - 维护总闸：`/var/lib/shein-bi-control/cloud-maintenance.json` 是唯一 marker。canonical 目录固定 `root:root 0755`、marker 固定 `root:root 0644`，仅存放通过 secret-like 检查的非敏感控制元数据；服务用户可读但不能替换或删除，canonical `pause/resume` 只允许 root。`scheduled` 在 `business|all` 下阻断，`infrastructure` 仅在 `all` 下阻断，`always` 不阻断；marker 缺失表示正常，祖先路径、owner、mode、symlink、hard-link、JSON 或 schema 非法则 scheduled 与 infrastructure fail closed。canonical 死 owner 锁禁止自动回收，必须核对 marker、PID/process-start 与当前进程后人工处置，避免回收竞态误删新 owner；若命令报告 marker 已提交但锁清理未确认，先以 status 精确回读 generation/hash，再核验锁，禁止盲重试。每次 transition 以完整序列化字节的 SHA-256 回读，不只比较 generation。systemd 共 28 个 service、18 个 timer、1 个 path 必须与 `lib/cloud_runtime_inventory.mjs` 一致；不得新建第二套 timer、队列或 heartbeat。CLI `pause` 在 CAS 写 marker 前先审计 23 个 guard；runtime snapshot/watchdog 同时核对文件安装状态与有效 `ExecCondition`，guard 漂移时不允许 marker 把异常静默抑制。
 - 运行态 namespace：canonical 目录为 `/data/shein-bi/{profiles,state,outputs}`。宿主 `/opt/shein-bi/app/profiles` 与 `state` 是只读兼容 bind，宿主 `outputs` 不再挂载；每个 service 通过 `50-runtime-paths.conf` 获得独立最小权限。Query 对两处 profile 路径均为 `InaccessiblePaths`。runtime snapshot/watchdog 必须批量回读 28 个 service 的有效 `BindPaths`、`BindReadOnlyPaths`、`ReadOnlyPaths`、`InaccessiblePaths`、`RequiresMountsFor`；只看 drop-in 文件或当前进程健康不算通过。
 - layout 迁移恢复：迁移器把 v2 journal 和 underlay 备份写在 `/var/lib/shein-bi-layout-migration-backups`；该 root 专用目录位于 Git 工作树外，并必须和 `/opt/shein-bi/app` 同一文件系统，保证 state/outputs 使用原子 rename。普通失败或 SIGKILL 不自动回滚；无参数审计必须显示唯一 `recovery.action=resume` 后，才可用同一 `--apply` 恢复。`--rollback` 只允许针对该 active journal 显式确认执行，禁止另起 run 或手工搬移运行态。

@@ -31,7 +31,7 @@
 ## 3. 当前关键服务
 
 - `shein-bi-portal.service`：完整 BI 页面、section 生成、自动运营任务与 SSE，监听 `8787`。
-- `shein-bi-query.service`：认证只读 Query/Partner CLI/知识 bundle 面，监听 `8788`；无 worker、生成或浏览器副作用。
+- `shein-bi-query.service`：认证只读 Query/Partner CLI/知识 bundle 面，监听 `8791`；无 worker、生成或浏览器副作用。
 - `shein-bi-webhook.service`：半托 Webhook 接收、幂等队列、按单同步与经营风险事件。
 - `shein-warehouse-db` / `shein-metabase` / `shein-metabase-db`：Docker 数据与分析层。
 - `shein-bi-cloud-yesterday.timer`：最终日核对与 OpenAPI 晋升门禁。
@@ -88,7 +88,7 @@ node scripts/capture_ops_runtime_snapshot.mjs \
   --expected-commit <release-tag>
 node scripts/manage_cloud_maintenance_mode.mjs status
 curl -fsS http://127.0.0.1:8787/api/health
-curl -fsS http://127.0.0.1:8788/api/health
+curl -fsS http://127.0.0.1:8791/api/health
 node scripts/audit_bi_warehouse.mjs
 ```
 

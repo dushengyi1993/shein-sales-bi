@@ -167,7 +167,7 @@ Query 大响应随后又按真实响应路径完成了有界性复核：独立 1
 - 已完成事故止血：业务 timer、四个业务 heartbeat、OpenCodex 守护均保持暂停；没有创建新 timer/automation/queue。
 - 已修正五个 heartbeat 的维护语义和任务类型冲突，原 ID、时间、绑定会话保持不变。
 - 已完成 Portal 全入口稳定幂等键、指数退避、section integrity FIFO/keyed 准入与有界关闭；58 秒真实 lease/高频重试、完整性准入先于重 I/O、HTTP 卡死时 worker 仍收口、永不 close child 的 SIGKILL 后最终 settle、active-to-idle keep-alive 正常关停、挂死请求强制终止及双 drain→store 门序回归均已通过，不再只覆盖 warmup 单入口。
-- 已完成 Query `8788` 只读隔离面、Nginx 9 个精确路由、1+3 并发队列与独立 cgroup；Portal 重启时 Query PID/查询保持独立，写路由在 Query 上拒绝。约 30.27 MB 的 identity/gzip 响应已在 128 MB old-space 限额下通过逐字节完整性、首末行和有界内存验证；中途断线、非协作超时、exit 70 重启后的 lane 生命周期也已覆盖。受管 CLI 对 429 只在总预算内按 `Retry-After` 重试。
+- 已完成 Query `8791` 只读隔离面、Nginx 9 个精确路由、1+3 并发队列与独立 cgroup；Portal 重启时 Query PID/查询保持独立，写路由在 Query 上拒绝。约 30.27 MB 的 identity/gzip 响应已在 128 MB old-space 限额下通过逐字节完整性、首末行和有界内存验证；中途断线、非协作超时、exit 70 重启后的 lane 生命周期也已覆盖。受管 CLI 对 429 只在总预算内按 `Retry-After` 重试。
 - 已完成 28-service/18-timer/1-path 维护 policy、CAS 总闸、systemd guard、死亡 lock owner 安全回收、watchdog 抑制/恢复合并，以及五个既有 heartbeat 提示词对账；未创建新调度源。
 - 已完成 canonical runtime path policy、installer 与可回滚迁移器；systemd 255 临时探针证明 host RO + unit-private RW 可用。迁移 A-R 全故障注入已通过，指纹覆盖 mtime/mode/uid/gid/ACL/xattr/hard-link；正式生产迁移尚未执行。
 - 已完成 encrypted profile/session backup、完整认证与空 staging restore 测试；create/verify/restore 共用条目、单文件、总字节、压缩比上限，认证 manifest 同时保存 numeric uid/gid 与 mode/mtime，避免 root 备份恢复成不可用的 root-owned Profile。Linux 恢复以绑定父目录 fd 的 `renameat2(RENAME_NOREPLACE)` 发布并要求 parent fsync=`ok`；任意失败保留 captured staging，绝不递归删除 destination 或被替换路径。Windows fail-closed 与 WSL Ubuntu root 真恢复已独立通过。数据库备份的 COS 归档改为逐成员类型/路径/内容校验，单归档总量显式上限为 8 GiB。生产密钥异机副本、真实备份和真实 staging restore 尚未执行。

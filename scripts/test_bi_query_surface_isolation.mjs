@@ -941,7 +941,7 @@ server.listen(0, '127.0.0.1', () => {
   console.error('MARK: portal abort done');
 
   const unit = await fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-query.service'), 'utf8');
-  assert.match(unit, /--surface query --host 127\.0\.0\.1 --port 8788/);
+  assert.match(unit, /--surface query --host 127\.0\.0\.1 --port 8791/);
   assert.match(unit, /^MemoryMax=1400M$/m);
   assert.match(unit, /^MemoryHigh=1024M$/m);
   assert.match(unit, /^TasksMax=128$/m);
@@ -970,7 +970,7 @@ server.listen(0, '127.0.0.1', () => {
   const authUpstream = /(?:^|\n)upstream shein_bi_auth \{([\s\S]*?)\n\}/.exec(nginx)?.[1] || '';
   assert.ok(authUpstream, 'missing auth failover upstream');
   assert.deepEqual(authUpstream.split('\n').map(line => line.trim()).filter(Boolean), [
-    'server 127.0.0.1:8788;',
+    'server 127.0.0.1:8791;',
     'server 127.0.0.1:8787 backup;',
   ], 'Query must be the sole auth primary and Portal the sole backup');
   for (const [route, method] of exactRoutes) {
@@ -988,7 +988,7 @@ server.listen(0, '127.0.0.1', () => {
       assert.match(block, /proxy_next_upstream_tries 2;/, `${route} must perform at most one backup attempt`);
       assert.doesNotMatch(block, /proxy_request_buffering off;/, `${route} must retain a replayable buffered request body`);
     } else {
-      assert.match(block, /proxy_pass http:\/\/127\.0\.0\.1:8788;/);
+      assert.match(block, /proxy_pass http:\/\/127\.0\.0\.1:8791;/);
       assert.match(block, /proxy_next_upstream off;/, `${route} must fail closed when Query is unavailable`);
       assert.doesNotMatch(block, /shein_bi_auth|127\.0\.0\.1:8787/, `${route} must never fall back to Portal`);
     }
@@ -997,7 +997,7 @@ server.listen(0, '127.0.0.1', () => {
     assert.match(block, /proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;/);
     assert.match(block, /proxy_set_header X-Forwarded-Proto \$http_x_forwarded_proto;/);
   }
-  assert.doesNotMatch(nginx, /location = \/api\/health\s*\{[\s\S]*?8788/);
+  assert.doesNotMatch(nginx, /location = \/api\/health\s*\{[\s\S]*?8791/);
 
   console.log(JSON.stringify({
     ok: true,

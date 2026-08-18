@@ -47,21 +47,21 @@ flowchart LR
 - `shein-metabase-db`：Metabase 自身配置库；
 - `shein-warehouse-db`：SHEIN 数据仓库 PostgreSQL；
 - `shein-bi-portal.service`：`127.0.0.1:8787` 的完整 Portal、Link Ops 与 section 队列入口；
-- `shein-bi-query.service`：`127.0.0.1:8788` 的认证只读查询面，只开放登录、账号、CLI/知识 bundle 和 `/api/bi/query-data` 精确路由，不启动 worker、Webhook、AI、实时桥或 section 生成；
+- `shein-bi-query.service`：`127.0.0.1:8791` 的认证只读查询面，只开放登录、账号、CLI/知识 bundle 和 `/api/bi/query-data` 精确路由，不启动 worker、Webhook、AI、实时桥或 section 生成；
 - `shein-bi-webhook.service`：`127.0.0.1:8792` 的独立 Webhook 接收与数据库队列 worker。
 
 ```mermaid
 flowchart LR
   A["公网 HTTPS"] --> B["Nginx 127.0.0.1:8080"]
   B -->|"页面、Link Ops、写路由"| C["Portal 8787"]
-  B -->|"9 个精确认证只读路由"| D["Query 8788"]
+  B -->|"9 个精确认证只读路由"| D["Query 8791"]
   B -->|"SHEIN 官方回调"| E["Webhook 8792"]
   C --> F["PostgreSQL 与 section queue"]
   D -->|"只读、并发 1、排队 3"| F
   E --> F
 ```
 
-Query 使用与 Portal 相同的 `bi_session`，但进程、V8 heap、cgroup 和路由故障域分离。重启或 OOM 处置 Portal 不应改变 Query PID；Nginx 对精确只读路由直接连接 8788，失败时不得回退到 8787。
+Query 使用与 Portal 相同的 `bi_session`，但进程、V8 heap、cgroup 和路由故障域分离。重启或 OOM 处置 Portal 不应改变 Query PID；Nginx 对精确只读路由直接连接 8791，失败时不得回退到 8787。
 
 已初始化数据仓库 schema：
 

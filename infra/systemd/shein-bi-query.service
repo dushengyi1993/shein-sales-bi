@@ -35,7 +35,7 @@ Environment=SHEIN_WAREHOUSE_PG_DATABASE=shein_bi
 Environment=SHEIN_WAREHOUSE_PG_USER=shein_link_ops
 Environment=SHEIN_WAREHOUSE_PG_POOL_MAX=2
 Environment=NODE_OPTIONS=--max-old-space-size=1024
-ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --surface query --host 127.0.0.1 --port 8788 --dir /data/shein-bi/outputs/bi-portal --state-file /data/shein-bi/state/bi_action_state.json --link-ops-task-file /data/shein-bi/state/bi_link_ops_tasks.json --link-ops-chat-file /data/shein-bi/state/bi_link_ops_chats.json --link-ops-runtime-file /data/shein-bi/state/bi_link_ops_runtime.json --auth-file /opt/shein-bi/app/config/bi_users.local.json --access-roles-file /opt/shein-bi/app/config/bi_access_roles.json --htpasswd-file /srv/shein-bi/secrets/bi_basic_auth.htpasswd --session-secret-file /data/shein-bi/state/bi_portal_session_secret.local
+ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --surface query --host 127.0.0.1 --port 8791 --dir /data/shein-bi/outputs/bi-portal --state-file /data/shein-bi/state/bi_action_state.json --link-ops-task-file /data/shein-bi/state/bi_link_ops_tasks.json --link-ops-chat-file /data/shein-bi/state/bi_link_ops_chats.json --link-ops-runtime-file /data/shein-bi/state/bi_link_ops_runtime.json --auth-file /opt/shein-bi/app/config/bi_users.local.json --access-roles-file /opt/shein-bi/app/config/bi_access_roles.json --htpasswd-file /srv/shein-bi/secrets/bi_basic_auth.htpasswd --session-secret-file /data/shein-bi/state/bi_portal_session_secret.local
 Restart=always
 RestartSec=3
 TimeoutStopSec=10

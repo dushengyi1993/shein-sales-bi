@@ -8,7 +8,7 @@
 - 当天订单入仓后，Portal 通过 PostgreSQL `NOTIFY` + SSE 立即更新销售，不再每 60 秒轮询；新订单或已有订单金额/数量变化都先显示正式事实值并标记利润待补账，相同内容重放不误报。订单/退货事件按 45 秒合并，自动重建移动加权成本与利润 cache，完成后再次推送。补账期间只显示“利润正自动补成本”，不以旧成本或假零值替代；服务重启会追赶、失败 5 分钟后重试。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
 - 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；半托出站 OpenAPI 为19店独立 App，Webhook 入站由 DL 中央 App 统一验签。
-- 公网入口在 Nginx 精确拆分：完整 Portal `8787`、认证只读 Query `8788`、Webhook `8792`。Query 与 Portal 共享登录 cookie 语义，但不共享进程、heap、cgroup、worker 或生成副作用；Portal 重启不能中断已经独立运行的 CLI 查询面。
+- 公网入口在 Nginx 精确拆分：完整 Portal `8787`、认证只读 Query `8791`、Webhook `8792`。Query 与 Portal 共享登录 cookie 语义，但不共享进程、heap、cgroup、worker 或生成副作用；Portal 重启不能中断已经独立运行的 CLI 查询面。
 - 云端运行态 canonical 路径是 `/data/shein-bi/{profiles,state,outputs}`。宿主 app 下 profiles/state 只读，outputs 无宿主 bind；28 个 service 通过独立 systemd namespace 获得最小读写权限，Query 完全不可见 profile。
 - systemd、watchdog 与 Codex heartbeat 统一读取 `/var/lib/shein-bi-control/cloud-maintenance.json`，通过 CAS generation/hash 切换 `business|all`；canonical marker 由 root 原子写、服务用户只读，marker 非法时 scheduled/infrastructure fail closed，不另建 timer、queue 或巡检副本。
 - 数据库备份与 Profile/WebAPI session 灾备解耦：前者按生产 SLA 自动运行，后者保留经测试的加密归档能力但默认关闭，只有独立密钥托管和恢复演练完成后才启用。生产部署 marker 是 schema v3 的 `shein-bi-deployed-release/v3`，绑定 repository id、trust policy SHA-256、annotated tag、attestation SHA-256、精确 main-push CI run/attempt 与 jobs SHA-256，以及 exact source fingerprint；旧 v2/tag/commit-only marker 不算健康。

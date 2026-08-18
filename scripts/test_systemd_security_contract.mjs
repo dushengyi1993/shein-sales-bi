@@ -89,7 +89,7 @@ assert.match(query, /^Environment=SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS=120000$/m);
 assert.match(query, /^Environment=SHEIN_BI_QUERY_GRACE_MS=30000$/m, 'the query unit must pin the bounded grace window for the fail-fast contract');
 
 assert.match(query, /^Environment=NODE_OPTIONS=--max-old-space-size=1024$/m);
-assert.match(query, /^ExecStart=.*--surface query --host 127\.0\.0\.1 --port 8788 /m);
+assert.match(query, /^ExecStart=.*--surface query --host 127\.0\.0\.1 --port 8791 /m);
 assert.match(query, /--dir \/data\/shein-bi\/outputs\/bi-portal/);
 assert.match(query, /--session-secret-file \/data\/shein-bi\/state\/bi_portal_session_secret\.local/);
 assert.equal(property(query, 'Requires'), 'shein-bi-session-secret.service');

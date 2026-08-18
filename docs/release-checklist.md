@@ -30,7 +30,7 @@
 
 - [ ] 对生产入口、关键 service/timer、日志和数据新鲜度做与风险相称的真实验收。
 - [ ] 云端 `HEAD` 等于 attested commit，两份证明资产位于 `/srv/shein-bi/runtime/release-attestations/<tag>/`，且 `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>` 写出有效 schema v3 的 `shein-bi-deployed-release/v3`；watchdog 持续检查 attestation/CI 绑定、commit、脏改、隐藏索引和缺失文件。
-- [ ] Portal `8787`、Query `8788`、Webhook `8792` 分别健康；重启 Portal 不改变 Query PID，Query health 的 `surface=query` 且 `sideEffectsStarted=[]`。
+- [ ] Portal `8787`、Query `8791`、Webhook `8792` 分别健康；重启 Portal 不改变 Query PID，Query health 的 `surface=query` 且 `sideEffectsStarted=[]`。
 - [ ] 维护 marker 已通过 fresh generation/hash CAS 恢复；只读巡检、timer、写链按阶段恢复，没有 `Persistent` catch-up 或重复 scheduler 意外拉起。
 - [ ] 云端真实 warning、partial、stale、blocked 或 reconciliation 差异不得因发布而抹除、静默或改写为成功；在 release note/runbook 中保留其状态和下一步负责人。
 - [ ] 记录最终 target SHA、验证证据、残余风险及回滚命令/版本。

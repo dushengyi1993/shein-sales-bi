@@ -35,7 +35,7 @@ function parseArgs(argv) {
     maintenanceFile: DEFAULT_CLOUD_MAINTENANCE_FILE,
     portalUrl: 'http://127.0.0.1:8787/api/health',
     webhookUrl: 'http://127.0.0.1:8792/healthz',
-    queryUrl: 'http://127.0.0.1:8788/api/health',
+    queryUrl: 'http://127.0.0.1:8791/api/health',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const value = () => String(argv[++i] || '').trim();

@@ -126,7 +126,7 @@ const captureSource = await fs.readFile(path.join(ROOT, 'scripts', 'capture_ops_
 assert.match(captureSource, /readCloudMaintenanceStatus\(args\.maintenanceFile\)/);
 assert.match(captureSource, /expectedUnitFiles:\s*CLOUD_EXPECTED_INSTALLED_UNITS/);
 assert.match(captureSource, /summary:\s*\{[\s\S]*?maintenance:\s*\{/);
-assert.match(captureSource, /queryUrl:\s*'http:\/\/127\.0\.0\.1:8788\/api\/health'/);
+assert.match(captureSource, /queryUrl:\s*'http:\/\/127\.0\.0\.1:8791\/api\/health'/);
 assert.match(captureSource, /fetchHealth\(args\.queryUrl, 'query'\)/);
 assert.match(captureSource, /surface:\s*String\(json\.surface/);
 assert.match(captureSource, /sideEffectsStartedIsArray:\s*Array\.isArray\(json\.sideEffectsStarted\)/);

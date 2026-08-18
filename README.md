@@ -19,7 +19,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 店铺范围 | 19 店：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL` |
 | 分组 | DSY：`DL DX FY LQ NM HL JY ZL TS MZ`；LGM：`CX YJ XL QY QH TZ JSH TZZ XC` |
 | BI 入口 | `https://sa.dushengyi.cc/`（应用内登录 + `bi_session`） |
-| 云端进程 | Portal `8787`；认证只读 Query `8788`；Webhook `8792`（均仅 loopback） |
+| 云端进程 | Portal `8787`；认证只读 Query `8791`；Webhook `8792`（均仅 loopback） |
 | 云端维护入口 | `https://sa.dushengyi.cc/cloud-login-maintenance` |
 | 云端代码目录 | `/opt/shein-bi/app` |
 | 云端 SSH | `ssh shein-bi-tencent` |

@@ -110,7 +110,7 @@ cd /opt/shein-bi/app
 node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>
 systemctl is-active shein-bi-portal.service shein-bi-query.service shein-bi-webhook.service
 curl -fsS http://127.0.0.1:8787/api/health
-curl -fsS http://127.0.0.1:8788/api/health
+curl -fsS http://127.0.0.1:8791/api/health
 ```
 
 版本一致只解决“运行的是什么代码”，不能代替业务验收。销售、利润、营销和 Webhook 结论仍需回读云端 PostgreSQL、OpenAPI、日志和正式 Portal。
