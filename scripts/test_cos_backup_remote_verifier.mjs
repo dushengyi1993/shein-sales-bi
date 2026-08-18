@@ -261,15 +261,18 @@ function expectConfigError(fn, code) {
     );
     fs.writeFileSync(targetFile, JSON.stringify(target), {mode: 0o600});
 
-    // Path swap (rename a different file over the path) after open.  POSIX
-    // permits renaming over an open descriptor; Windows denies it (EPERM),
-    // so the rename-based swap is exercised on POSIX where it is meaningful.
+    // Path swap (rename a different file over the path) after the second
+    // descriptor stat and before the final path lstat. POSIX permits renaming
+    // over an open descriptor; Windows denies it (EPERM), so the rename-based
+    // swap is exercised on POSIX where it is meaningful. Injecting immediately
+    // after open would first change the unlinked descriptor's ctime and
+    // correctly produce the broader COS_CREDENTIAL_FILE_RACE guard.
     if (process.platform !== 'win32') {
       const swapped = path.join(root, 'swapped.json');
       fs.writeFileSync(swapped, 'other bytes');
       await expectConfigError(
         () => readBoundedCredentialFile(targetFile, 64 * 1024, 'swapped', {
-          hooks: {onAfterOpen: async () => { fs.renameSync(swapped, targetFile); }},
+          hooks: {onAfterSecondFstat: async () => { fs.renameSync(swapped, targetFile); }},
         }),
         'COS_CREDENTIAL_FILE_PATH_SWAPPED',
       );

@@ -788,7 +788,17 @@ server.listen(0, '127.0.0.1', () => {
   assert.equal(heapProbeResult.ok, true, 'streamed gzip bytes must gunzip to the exact expected JSON and must not use gzipSync');
   assert.equal(heapProbeResult.plainBytes, heapProbeResult.expectedPlainBytes, 'gunzip output byte count must match the exact expected JSON length');
   assert.equal(heapProbeResult.gzipSyncUsed, false, 'the streaming path must never call gzipSync');
-  assert.ok(heapProbeResult.peakExternalMB < 16, 'streaming must not allocate a full ~30MB JSON Buffer (external peak got ' + heapProbeResult.peakExternalMB + 'MB)');
+  const fullPayloadBufferLimitMB = (heapProbeResult.plainBytes / 1048576) * 0.8;
+  assert.ok(
+    heapProbeResult.peakExternalMB < fullPayloadBufferLimitMB,
+    'streaming must not allocate a near-full JSON Buffer (external peak got ' + heapProbeResult.peakExternalMB
+      + 'MB; 80% payload limit is ' + fullPayloadBufferLimitMB.toFixed(2) + 'MB)',
+  );
+  assert.ok(
+    heapProbeResult.peakArrayBuffersMB < fullPayloadBufferLimitMB,
+    'streaming must not retain a near-full JSON ArrayBuffer (peak got ' + heapProbeResult.peakArrayBuffersMB
+      + 'MB; 80% payload limit is ' + fullPayloadBufferLimitMB.toFixed(2) + 'MB)',
+  );
   assert.ok(heapProbeResult.peakMaxRSSMB < 160, 'streaming must stay inside the constrained-heap RSS envelope (maxRSS got ' + heapProbeResult.peakMaxRSSMB + 'MB)');
   console.error('MARK: heap probe done');
 

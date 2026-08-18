@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 function readUnit(name) {
   return fs.readFileSync(new URL(`../infra/systemd/${name}`, import.meta.url), 'utf8');
@@ -421,9 +423,11 @@ assert.match(morningWrapper, /mode: 0o660/,
 assert.match(morningWrapper, /exit 0/,
   'a completed idempotent skip must exit 0 so Restart can never loop');
 
-// The modified auth units, backup service, and the two unit/timer pairs must pass systemd-analyze verify when the
-// tool is available (CI Linux runners without systemd skip this live check;
-// the static contracts above remain authoritative everywhere).
+// The modified auth units, backup service, and the two unit/timer pairs must
+// pass systemd-analyze verify when the tool is available. Production keeps the
+// fixed /usr/bin/node path; a clean CI runner whose setup-node runtime lives in
+// the toolcache verifies an otherwise byte-identical temporary unit fixture.
+// The static contracts above remain authoritative for the production path.
 const spawnSync = (await import('node:child_process')).spawnSync;
 const launcherStage = spawnSync('git', ['ls-files', '--stage', '--', remoteVerifierLauncherPath], {
   cwd: new URL('..', import.meta.url),
@@ -441,7 +445,7 @@ const systemdAnalyze = process.platform === 'win32'
     timeout: 10_000,
   });
 if (systemdAnalyze?.status === 0) {
-  const units = [
+  const unitNames = [
     'shein-bi-session-secret.service',
     'shein-bi-portal.service',
     'shein-bi-query.service',
@@ -450,15 +454,30 @@ if (systemdAnalyze?.status === 0) {
     'shein-bi-cloud-session-manager.service',
     'shein-bi-cloud-session-manager.timer',
     'shein-bi-db-backup.service',
-  ].map(name => `infra/systemd/${name}`);
-  const verify = spawnSync('systemd-analyze', ['verify', '--man=no', ...units], {
-    cwd: new URL('..', import.meta.url),
-    encoding: 'utf8',
-    timeout: 30_000,
-  });
-  assert.equal(verify.status, 0,
-    `systemd-analyze verify must pass for modified units\nstdout:\n${verify.stdout}\nstderr:\n${verify.stderr}`);
-  console.log('PASS systemd-analyze verify modified auth units, backup service, and service/timer pairs');
+  ];
+  let fixtureRoot = null;
+  try {
+    let units = unitNames.map(name => `infra/systemd/${name}`);
+    if (!fs.existsSync('/usr/bin/node')) {
+      assert.ok(fs.existsSync(process.execPath), 'the setup-node runtime used by the systemd fixture must exist');
+      fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-systemd-verify-'));
+      units = unitNames.map((name) => {
+        const target = path.join(fixtureRoot, name);
+        fs.writeFileSync(target, readUnit(name).replaceAll('/usr/bin/node', process.execPath), 'utf8');
+        return target;
+      });
+    }
+    const verify = spawnSync('systemd-analyze', ['verify', '--man=no', ...units], {
+      cwd: new URL('..', import.meta.url),
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.equal(verify.status, 0,
+      `systemd-analyze verify must pass for modified units\nstdout:\n${verify.stdout}\nstderr:\n${verify.stderr}`);
+    console.log('PASS systemd-analyze verify modified auth units, backup service, and service/timer pairs');
+  } finally {
+    if (fixtureRoot) fs.rmSync(fixtureRoot, {recursive: true, force: true});
+  }
 } else {
   console.log('SKIP systemd-analyze verify (not available on this host)');
 }

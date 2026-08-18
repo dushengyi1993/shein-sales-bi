@@ -198,14 +198,18 @@ assert.match(service, /SHEIN_BI_BROWSER_STATE_LIMIT_TOTAL_BYTES=8g/);
 assert.match(service, /SHEIN_BI_BROWSER_PROFILE_ROOT=\/data\/shein-bi\/profiles/);
 assert.match(service, /SHEIN_BI_BROWSER_SESSION_ROOT=\/data\/shein-bi\/state\/shein_webapi_sessions/);
 
+const windows = process.platform === 'win32';
 const bash = [
   process.env.SHEIN_BI_TEST_BASH,
-  'D:\\Program Files\\Git\\bin\\bash.exe',
-  'C:\\Program Files\\Git\\bin\\bash.exe',
+  ...(windows
+    ? ['D:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\bin\\bash.exe']
+    : ['/bin/bash', '/usr/bin/bash']),
 ].find((candidate) => candidate && fs.existsSync(candidate));
-assert.ok(bash, 'Git Bash is required for dynamic cloud backup contract fixtures');
+assert.ok(bash, 'a real Bash runtime is required for dynamic cloud backup contract fixtures');
 const python = process.env.SHEIN_BI_TEST_PYTHON
-  || 'C:\\Users\\dushengyi\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe';
+  || (windows
+    ? 'C:\\Users\\dushengyi\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe'
+    : '/usr/bin/python3');
 assert.ok(fs.existsSync(python), 'a real Python runtime is required for dynamic archive verification');
 
 function runBash(command, args = [], options = {}) {
@@ -220,6 +224,7 @@ function runBash(command, args = [], options = {}) {
 }
 
 function toBashPath(value) {
+  if (!windows) return value;
   const result = runBash('cygpath -u -- "$1"', [value]);
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
@@ -329,8 +334,8 @@ const verifierPath = path.join(verifierRoot, 'remote-verify.sh');
 fs.writeFileSync(verifierPath, verifierScript, 'utf8');
 fs.chmodSync(verifierPath, 0o755);
 const bashVerifier = toBashPath(verifierPath);
-// Git Bash lacks mountpoint; a stub lets the prune/retention path pass the
-// cos_ready gate deterministically.  Only used when the prune scenario sets it.
+// A stub lets the prune/retention path pass the cos_ready gate deterministically
+// on every host. Only used when the prune scenario sets it.
 const mountpointStub = path.join(verifierRoot, 'mountpoint');
 fs.writeFileSync(mountpointStub, '#!/usr/bin/env bash\nexit 0\n', 'utf8');
 fs.chmodSync(mountpointStub, 0o755);
