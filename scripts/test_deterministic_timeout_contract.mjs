@@ -95,6 +95,7 @@ const ownershipUnion = new Set([...deterministicSet, ...directSet, releaseGateTe
 const releaseGateJob = extractWorkflowJobBlock(ciWorkflow, 'release-gate');
 const ciTerminalJob = extractWorkflowJobBlock(ciWorkflow, 'ci-terminal');
 const releaseGateCiCommand = 'node ' + releaseGateTest;
+const releaseGateBuildCommand = 'npm run build:portal-shell';
 
 assert.match(runner,
   /file === 'scripts\/test_link_ops_executor_source_detail_lock\.mjs'\s*\? 60_000/,
@@ -227,6 +228,10 @@ assert.match(releaseGateJob, /^    timeout-minutes: 45$/mu,
   'dedicated release-gate job must retain a finite 45-minute budget');
 assert.equal(countLiteral(releaseGateJob, releaseGateCiCommand), 1,
   'dedicated release-gate job must invoke the release gate exactly once');
+assert.equal(countLiteral(releaseGateJob, releaseGateBuildCommand), 1,
+  'dedicated release-gate job must generate the ignored Portal shell exactly once');
+assert.ok(releaseGateJob.indexOf(releaseGateBuildCommand) < releaseGateJob.indexOf(releaseGateCiCommand),
+  'dedicated release-gate job must generate the Portal shell before running the gate');
 assert.equal(countLiteral(ciWorkflow, releaseGateCiCommand), 1,
   'no other CI job may invoke the release gate');
 const ciTerminalThreeDependencyNeeds = /^    needs: \[source-checks, deterministic-shards, release-gate\]$/mu;

@@ -454,6 +454,11 @@ async function buildFixture(tempDir) {
   await fs.copyFile(NAMESPACE_INSTALLER, path.join(appRoot, 'scripts', 'install_cloud_runtime_path_namespaces.sh'));
   let guardsContent = await fs.readFile(GUARDS_INSTALLER, 'utf8');
   if (isWindows) guardsContent = guardsContent.replace('/usr/bin/node', 'node');
+  else if (!existsSync('/usr/bin/node')) {
+    assert.match(process.execPath, /^\/[A-Za-z0-9._\/-]+$/,
+      'clean Linux fixture Node path must be shell-safe before launcher substitution');
+    guardsContent = guardsContent.replace('/usr/bin/node', process.execPath);
+  }
   await fs.writeFile(path.join(appRoot, 'scripts', 'install_cloud_maintenance_guards.sh'), guardsContent, 'utf8');
   await fs.copyFile(MANAGER, path.join(appRoot, 'scripts', 'manage_cloud_maintenance_mode.mjs'));
   for (const lib of [

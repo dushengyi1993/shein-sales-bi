@@ -387,6 +387,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts
+      - run: npm run build:portal-shell
       - run: node scripts/test_bi_ops_release_gate.mjs
 
   ci-terminal:

@@ -500,6 +500,7 @@ async function checkCiReleaseGateReachability() {
   const registeredCount = file => deterministicTests.filter(candidate => candidate === file).length;
   const releaseGateJob = extractWorkflowJobBlock(workflow, 'release-gate');
   const releaseGateCommand = 'node ' + RELEASE_GATE_TEST;
+  const releaseGateBuildCommand = 'npm run build:portal-shell';
   const releaseGateEstimateCount = [...runner.matchAll(/['"]scripts\/test_bi_ops_release_gate\.mjs['"]\s*:/gu)].length;
   const releaseGateTimeoutTierCount = [...runner.matchAll(/file === ['"]scripts\/test_bi_ops_release_gate\.mjs['"]\s*\?/gu)].length;
   const checks = {
@@ -511,7 +512,9 @@ async function checkCiReleaseGateReachability() {
     mutationQueueBoundedTier: /file === 'scripts\/test_bi_portal_mutation_queue\.mjs'\s*\? 120_000/.test(runner),
     ciHasExactlyOneDedicatedReleaseGateOwner: /^  release-gate:$/mu.test(releaseGateJob)
       && /^    needs: source-checks$/mu.test(releaseGateJob)
+      && countLiteral(releaseGateJob, releaseGateBuildCommand) === 1
       && countLiteral(releaseGateJob, releaseGateCommand) === 1
+      && releaseGateJob.indexOf(releaseGateBuildCommand) < releaseGateJob.indexOf(releaseGateCommand)
       && countLiteral(workflow, releaseGateCommand) === 1,
     terminalGateRequiresExactThreeJobsAndFailsClosed: terminalJobIsExactAndFailClosed(workflow),
   };

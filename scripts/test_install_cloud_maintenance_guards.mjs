@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -56,7 +57,13 @@ try {
   await fs.mkdir(fixtureLib, {recursive: true});
   await fs.mkdir(fixtureSystemdSource, {recursive: true});
   await fs.mkdir(systemdRoot);
-  await fs.copyFile(INSTALLER, fixtureInstaller);
+  let fixtureInstallerSource = installerSource;
+  if (process.platform !== 'win32' && !existsSync('/usr/bin/node')) {
+    assert.match(process.execPath, /^\/[A-Za-z0-9._\/-]+$/,
+      'clean Linux fixture Node path must be shell-safe before launcher substitution');
+    fixtureInstallerSource = fixtureInstallerSource.replace('/usr/bin/node', process.execPath);
+  }
+  await fs.writeFile(fixtureInstaller, fixtureInstallerSource, 'utf8');
   await fs.copyFile(MANAGER, fixtureManager);
   for (const moduleName of [
     'atomic_file_publish.mjs',
