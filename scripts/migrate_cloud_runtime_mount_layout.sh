@@ -1746,7 +1746,10 @@ step_state_move() {
 step_readonly_mounts() {
   assert_critical_effective_gate 'before-readonly-remounts' guards
   if ! is_mountpoint "$APP_STATE"; then
-    "$MOUNT_BIN" -- "$APP_STATE" || fail 'state mount failed'
+    # The v2 fstab entry is intentionally published only after both read-only
+    # mounts are live and verified. Mount the new canonical state explicitly;
+    # a target-only `mount $APP_STATE` cannot work while fstab is still legacy.
+    "$MOUNT_BIN" --bind -- "$DATA_STATE" "$APP_STATE" || fail 'state bind mount failed'
   fi
   "$MOUNT_BIN" -o remount,bind,ro -- "$APP_STATE" || fail 'state read-only remount failed'
   "$MOUNT_BIN" -o remount,bind,ro -- "$APP_PROFILES" || fail 'profiles read-only remount failed'

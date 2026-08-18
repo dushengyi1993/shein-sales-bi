@@ -130,6 +130,8 @@ assert.doesNotMatch(onExitMatch[1], /restore_legacy/,
   'an ordinary migration failure must preserve evidence; only explicit --rollback may mutate again');
 assert.match(source, /assert_generated_mount_contract/);
 assert.match(source, /RequiresMountsFor is missing/);
+assert.match(source, /"\$MOUNT_BIN" --bind -- "\$DATA_STATE" "\$APP_STATE"/);
+assert.doesNotMatch(source, /"\$MOUNT_BIN" -- "\$APP_STATE" \|\| fail 'state mount failed'/);
 assert.match(source, /validateCloudMaintenanceEffectiveGuards/);
 assert.match(source, /validateCloudRuntimeEffectiveControls/);
 assert.match(source, /RequiresMountsFor is intentionally a minimum-set contract/);
@@ -613,13 +615,17 @@ for (const service of services) {
   const fakeMount = `#!/usr/bin/env bash
 set -euo pipefail
 STATE="\${SHEIN_BI_MOUNT_STATE:?}"
+FSTAB="\${SHEIN_BI_FSTAB_FILE:?}"
 target=''
 options='rw'
+saw_options=0
+positional_count=0
 args=("$@")
 i=0
 while ((i < $#)); do
   a="\${args[$i]}"
   if [[ "$a" == '-o' ]]; then
+    saw_options=1
     i=$((i+1))
     opt="\${args[$i]}"
     case "$opt" in
@@ -629,15 +635,22 @@ while ((i < $#)); do
       *rw*) options='rw' ;;
     esac
   elif [[ "$a" == '--' ]]; then
-    i=$((i+1)); target="\${args[$i]}"
+    i=$((i+1)); target="\${args[$i]}"; positional_count=$((positional_count+1))
   elif [[ "$a" == -* ]]; then
     :
   else
-    target="$a"
+    target="$a"; positional_count=$((positional_count+1))
   fi
   i=$((i+1))
 done
 [[ -n "$target" ]] || exit 2
+if ((saw_options == 0 && positional_count == 1)); then
+  target_alt=''
+  if command -v cygpath >/dev/null 2>&1; then target_alt="$(cygpath -a -m "$target")"; fi
+  awk -v target="$target" -v target_alt="$target_alt" \
+    'NF == 6 && ($2 == target || (target_alt != "" && $2 == target_alt)) { found=1 } END { exit(found ? 0 : 1) }' "$FSTAB" \
+    || { printf 'fake_mount_target_not_in_fstab=%s\n' "$target" >&2; exit 32; }
+fi
 tmp="$STATE.$$"
 grep -v "^\${target} " "$STATE" > "$tmp" 2>/dev/null || true
 printf '%s ext4 %s\\n' "$target" "$options" >> "$tmp"
@@ -839,6 +852,7 @@ cp -a "\${src}." "\${dst}/"
     SHEIN_BI_RSYNC_BIN: m(path.join(binDir, 'fake-rsync.sh')),
     SHEIN_BI_SYSTEMD_ESCAPE_BIN: m(path.join(binDir, 'fake-systemd-escape.sh')),
     SHEIN_BI_MOUNT_STATE: m(stateFile),
+    SHEIN_BI_FSTAB_FILE: m(fstabPath),
     SHEIN_BI_SERVICES_FILE: m(servicesFile),
     SHEIN_BI_SYSTEMCTL_LOG: m(systemctlLog),
     SHEIN_BI_SYSTEMCTL_REQUIRES: `${m(dataProfiles)} ${m(dataState)} ${m(dataOutputs)}`,
