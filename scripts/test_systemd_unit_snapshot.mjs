@@ -93,8 +93,9 @@ const serviceWithoutExecMain = parseSystemdShowMany(
   ['no-exec.service'],
   {code: 0},
 );
-assert.equal(serviceWithoutExecMain['no-exec.service'].complete, false);
-assert.ok(serviceWithoutExecMain['no-exec.service'].missingProperties.includes('ExecMainStatus'));
+assert.equal(serviceWithoutExecMain['no-exec.service'].complete, true);
+assert.equal(serviceWithoutExecMain['no-exec.service'].ExecMainStatus, '');
+assert.equal(serviceWithoutExecMain['no-exec.service'].ExecCondition, '');
 
 const incomplete = parseSystemdShowMany('Id=partial.service\nLoadState=loaded\n', ['partial.service'], {code: 1});
 assert.equal(incomplete['partial.service'].complete, false);
@@ -194,8 +195,8 @@ const readOnlyOmitted = parseSystemdShowMany(
   ['readonly-omitted.service'],
   {code: 0},
 );
-assert.equal(readOnlyOmitted['readonly-omitted.service'].complete, false);
-assert.ok(readOnlyOmitted['readonly-omitted.service'].missingProperties.includes('ReadOnlyPaths'));
+assert.equal(readOnlyOmitted['readonly-omitted.service'].complete, true);
+assert.equal(readOnlyOmitted['readonly-omitted.service'].ReadOnlyPaths, '');
 console.log(JSON.stringify({
   ok: true,
   unitCount: snapshot.requested.length,
