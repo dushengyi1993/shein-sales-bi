@@ -15,6 +15,7 @@ const {emitJsonChunks, collectStreamJson, sendLargeJson} = __testHooks;
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-bi-query-surface-'));
 const queryPort = await freePort();
 const queryStreamPort = await freePort();
+const queryUnavailablePort = await freePort();
 const portalPort = await freePort();
 const authFile = path.join(temp, 'users.json');
 const rolesFile = path.join(temp, 'roles.json');
@@ -67,6 +68,7 @@ const commonEnv = {
   SHEIN_BI_QUERY_TEST_HANG_FOR: 'hangtest',
   SHEIN_BI_QUERY_TEST_HANG_MS: '60000',
   SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR: '',
+  SHEIN_PARTNER_CLI_RELEASE_DIR: '',
   SHEIN_PARTNER_CLI_PACKAGE_FILE: cliPackageFile,
   SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE: `${cliPackageFile}.sha256`,
 };
@@ -74,6 +76,7 @@ const commonEnv = {
 let query = null;
 let queryStream = null;
 let queryNever = null;
+let queryUnavailable = null;
 let portal = null;
 const allChildren = new Set();
 
@@ -283,6 +286,34 @@ try {
   assert.equal(health.body.runtime?.admissionOpened, true, 'the query surface must open admission only after startup completes');
   assert.equal(health.body.runtime?.accepting, true);
   assert.ok(Number(health.body.mutationQueue?.capacity) >= 1, 'health must expose the bounded query queue capacity');
+  assert.deepEqual(health.body.partnerCliRelease, {
+    ready: true, source: 'fallback', version: cliConfig.version, errorCode: '',
+  });
+
+  // A Query process whose declared source version has no verified package is
+  // alive but not ready: health and authenticated release routes return a
+  // stable path-free 503 instead of leaking ENOENT or absolute filesystem
+  // locations. It must not fall through to an older/unverified package.
+  const missingPackageFile = path.join(temp, 'missing-release', `shein-bi-ops-cli-${cliConfig.version}.zip`);
+  queryUnavailable = startRuntime('query-release-unavailable', queryUnavailablePort, [
+    '--surface', 'query',
+    '--state-file', path.join(temp, 'query-unavailable-state.json'),
+    '--link-ops-task-file', path.join(temp, 'query-unavailable-tasks.json'),
+    '--link-ops-chat-file', path.join(temp, 'query-unavailable-chats.json'),
+    '--link-ops-runtime-file', path.join(temp, 'query-unavailable-runtime.json'),
+    ...commonArgs,
+  ], {
+    SHEIN_PARTNER_CLI_RELEASE_DIR: '',
+    SHEIN_PARTNER_CLI_PACKAGE_FILE: missingPackageFile,
+    SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE: `${missingPackageFile}.sha256`,
+  });
+  const unavailableHealth = await waitForHttpStatus(
+    queryUnavailable, queryUnavailablePort, '/api/health', 503,
+  );
+  assert.equal(unavailableHealth.body.ok, false);
+  assert.equal(unavailableHealth.body.partnerCliRelease?.ready, false);
+  assert.equal(unavailableHealth.body.partnerCliRelease?.errorCode, 'PARTNER_CLI_RELEASE_UNAVAILABLE');
+  assert.doesNotMatch(JSON.stringify(unavailableHealth.body), /ENOENT|[A-Za-z]:\\\\|\/opt\/|\/srv\/|missing-release/u);
 
   // The BI JSON reader itself must observe AbortSignal: a pre-aborted signal
   // fails fast with AbortError instead of reading a heap-heavy core file.
@@ -452,6 +483,14 @@ process.exit(0);
   assert.equal(login.status, 200, await login.text());
   console.error('MARK: login done');
   const cookie = String(login.headers.get('set-cookie') || '').split(';')[0];
+  for (const route of ['/api/partner-cli/manifest', '/api/partner-cli/package']) {
+    const unavailable = await fetchJson(`http://127.0.0.1:${queryUnavailablePort}${route}`, {headers: {cookie}});
+    assert.equal(unavailable.response.status, 503);
+    assert.equal(unavailable.body.code, 'PARTNER_CLI_RELEASE_UNAVAILABLE');
+    assert.doesNotMatch(JSON.stringify(unavailable.body), /ENOENT|[A-Za-z]:\\\\|\/opt\/|\/srv\/|missing-release/u);
+  }
+  await stopRuntime(queryUnavailable);
+  queryUnavailable = null;
   assert.match(cookie, /^bi_session=/);
 
   const meOnQuery = await fetchJson(`${queryBase}/api/auth/me`, {headers: {cookie}});
@@ -949,12 +988,14 @@ server.listen(0, '127.0.0.1', () => {
   assert.match(unit, /^Environment=SHEIN_BI_QUERY_MAX_QUEUED=3$/m);
   assert.match(unit, /^Environment=SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS=120000$/m);
   assert.match(unit, /^Environment=SHEIN_BI_QUERY_GRACE_MS=30000$/m, 'the systemd unit must pin the bounded grace window');
+  assert.match(unit, /^Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=\/srv\/shein-bi\/partner-cli$/m);
   assert.match(unit, /^Environment=NODE_OPTIONS=--max-old-space-size=1024$/m);
   assert.match(unit, /^Restart=always$/m);
   assert.match(unit, /^KillMode=control-group$/m);
   assert.match(unit, /\/data\/shein-bi\/outputs\/bi-portal/);
   assert.match(unit, /\/data\/shein-bi\/state\/bi_portal_session_secret\.local/);
   assert.match(unit, /^ProtectSystem=strict$/m);
+  assert.match(unit, /^ReadOnlyPaths=.*\/srv\/shein-bi\/partner-cli$/m);
   assert.doesNotMatch(unit, /ExecCondition=/);
 
   const nginx = await fs.readFile(path.join(ROOT, 'infra', 'nginx', 'shein-bi.conf'), 'utf8');
@@ -1017,6 +1058,7 @@ server.listen(0, '127.0.0.1', () => {
       manifestVersion: manifest.body.data.version,
       sideEffectsStarted: health.body.sideEffectsStarted,
       allowGenerate: health.body.allowGenerate,
+      partnerCliRelease: health.body.partnerCliRelease,
       rejectedWriteRoutes: ['/api/link-ops/tasks', '/api/owner-knowledge/events', '/api/partner-cli/release/deploy'],
       laneConcurrency: {
         max: 1,
@@ -1035,6 +1077,7 @@ server.listen(0, '127.0.0.1', () => {
   if (query) await stopRuntime(query).catch(() => {});
   if (queryStream) await stopRuntime(queryStream).catch(() => {});
   if (queryNever) await stopRuntime(queryNever).catch(() => {});
+  if (queryUnavailable) await stopRuntime(queryUnavailable).catch(() => {});
   for (const runtime of allChildren) {
     if (runtime.child.exitCode === null && runtime.child.signalCode === null) runtime.child.kill('SIGKILL');
   }
@@ -1081,6 +1124,22 @@ async function waitReady(runtime, port, pathname) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   throw new Error(`${runtime.label} not ready\nstdout=${runtime.stdout}\nstderr=${runtime.stderr}`);
+}
+
+async function waitForHttpStatus(runtime, port, pathname, expectedStatus, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    if (runtime.child.exitCode !== null || runtime.child.signalCode !== null) {
+      throw new Error(`${runtime.label} exited before HTTP ${expectedStatus}\nstdout=${runtime.stdout}\nstderr=${runtime.stderr}`);
+    }
+    try {
+      last = await fetchJson(`http://127.0.0.1:${port}${pathname}`);
+      if (last.response.status === expectedStatus) return last;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`${runtime.label} did not return HTTP ${expectedStatus}: ${JSON.stringify(last?.body || null)}`);
 }
 
 async function stopRuntime(runtime) {

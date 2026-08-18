@@ -19,6 +19,7 @@ Environment=SHEIN_OWNER_KNOWLEDGE_GIT_BRANCH=owner-knowledge
 Environment=SHEIN_OWNER_KNOWLEDGE_GIT_REMOTE=origin
 Environment=SHEIN_OWNER_KNOWLEDGE_GIT_LOCK_FILE=/srv/shein-bi/runtime/owner-knowledge-git-publish.lock
 Environment=SHEIN_OWNER_KNOWLEDGE_RECONCILE_MS=3600000
+Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=/srv/shein-bi/partner-cli
 # The Portal defaults both values to BI_OPS_CLI_VERSION from the packaged
 # source.  Do not pin a second, manually drifting version in systemd.
 Environment=SHEIN_LINK_OPS_STORE=postgres

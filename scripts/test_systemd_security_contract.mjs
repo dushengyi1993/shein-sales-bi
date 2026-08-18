@@ -41,6 +41,8 @@ assert.equal(property(portal, 'MemoryHigh'), '1200M');
 assert.equal(property(portal, 'MemoryMax'), '2200M');
 assert.doesNotMatch(portal, /SHEIN_BI_OPS_CLI_(?:MIN|RECOMMENDED)_VERSION=/,
   'Portal CLI version policy must follow the packaged BI_OPS_CLI_VERSION instead of a stale systemd override');
+assert.match(portal, /^Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=\/srv\/shein-bi\/partner-cli$/m,
+  'Portal must remain the managed Partner CLI release writer');
 const nodeOptions = [...portal.matchAll(/^Environment=NODE_OPTIONS=(.*)$/gm)];
 assert.equal(nodeOptions.length, 1, 'Environment=NODE_OPTIONS must be declared exactly once');
 assert.equal(nodeOptions[0][1], '--max-old-space-size=1536');
@@ -87,6 +89,8 @@ assert.match(query, /^Environment=SHEIN_BI_QUERY_MAX_CONCURRENT=1$/m);
 assert.match(query, /^Environment=SHEIN_BI_QUERY_MAX_QUEUED=3$/m);
 assert.match(query, /^Environment=SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS=120000$/m);
 assert.match(query, /^Environment=SHEIN_BI_QUERY_GRACE_MS=30000$/m, 'the query unit must pin the bounded grace window for the fail-fast contract');
+assert.match(query, /^Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=\/srv\/shein-bi\/partner-cli$/m,
+  'Query must read the same managed Partner CLI release store as Portal');
 
 assert.match(query, /^Environment=NODE_OPTIONS=--max-old-space-size=1024$/m);
 assert.match(query, /^ExecStart=.*--surface query --host 127\.0\.0\.1 --port 8791 /m);
@@ -96,6 +100,8 @@ assert.equal(property(query, 'Requires'), 'shein-bi-session-secret.service');
 assert.match(property(query, 'After'), /(?:^|\s)shein-bi-session-secret\.service(?:\s|$)/);
 assert.match(property(query, 'ReadOnlyPaths'), /(?:^|\s)\/data\/shein-bi\/state(?:\s|$)/,
   'query runtime must retain read-only access to the shared state namespace');
+assert.match(property(query, 'ReadOnlyPaths'), /(?:^|\s)\/srv\/shein-bi\/partner-cli(?:\s|$)/,
+  'Query must see the Partner CLI release store read-only');
 assert.match(query, /^InaccessiblePaths=\/data\/shein-bi\/profiles \/opt\/shein-bi\/app\/profiles$/m);
 assert.doesNotMatch(query, /SHEIN_BI_JOB_WORKER_ENABLED=1|SHEIN_WEBHOOK_REPOSITORY_ENABLED=1|SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED=1/);
 assert.doesNotMatch(query, /^ExecCondition=/m, 'query is an always-available read surface, not a scheduled maintenance participant');

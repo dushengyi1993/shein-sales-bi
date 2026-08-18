@@ -78,7 +78,11 @@ import {createLoopbackTestWebhookWriteGuard} from '../lib/shein_webhook_external
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
 import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
-import {createPartnerCliReleaseStore} from '../lib/partner_cli_release_store.mjs';
+import {
+  createPartnerCliReleaseStore,
+  partnerCliReleasePublicErrorCode,
+  partnerCliReleasePublicMessage,
+} from '../lib/partner_cli_release_store.mjs';
 import {
   applyApprovedImageBindingsToPublishPayload,
   applyApprovedImageBindingsToMaintenancePayload,
@@ -171,6 +175,11 @@ const partnerCliReleaseStore = createPartnerCliReleaseStore({
   fallbackPackageFile: process.env.SHEIN_PARTNER_CLI_PACKAGE_FILE || '',
   fallbackChecksumFile: process.env.SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE || '',
 });
+
+function partnerCliReleaseUnavailablePayload(error) {
+  const code = partnerCliReleasePublicErrorCode(error);
+  return {ok: false, code, error: partnerCliReleasePublicMessage(code)};
+}
 
 function parseArgs(argv) {
   const args = {
@@ -15556,8 +15565,10 @@ async function runQuerySurface(args) {
 
       if (url.pathname === '/api/health') {
         const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
-        return sendJson(res, 200, {
-          ok: true,
+        const partnerCliRelease = await partnerCliReleaseStore.currentReleaseSummary();
+        const ready = partnerCliRelease.ready === true;
+        return sendJson(res, ready ? 200 : 503, {
+          ok: ready,
           service: 'shein-bi-query',
           surface: 'query',
           time: new Date().toISOString(),
@@ -15581,6 +15592,7 @@ async function runQuerySurface(args) {
             graceMs: queryGraceMs,
           },
           sideEffectsStarted,
+          partnerCliRelease,
           runtime: httpLifecycle.status(),
           mutationQueue: enqueueQuery.status(),
         }, {'Cache-Control': 'no-store'});
@@ -15694,7 +15706,7 @@ async function runQuerySurface(args) {
           res.end(packageFile.bytes);
           return;
         } catch (error) {
-          return sendJson(res, 503, {ok: false, error: `CLI 安装包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
         }
       }
       if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
@@ -15708,7 +15720,7 @@ async function runQuerySurface(args) {
           const data = url.pathname.endsWith('/bundle') ? release.bundle : release.manifest;
           return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
         } catch (error) {
-          return sendJson(res, 503, {ok: false, error: `CLI 发布包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
         }
       }
       if (url.pathname === '/api/owner-knowledge/manifest') {
@@ -16907,7 +16919,7 @@ async function main() {
           res.end(packageFile.bytes);
           return;
         } catch (error) {
-          return sendJson(res, 503, {ok: false, error: `CLI 安装包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
         }
       }
       if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
@@ -16932,7 +16944,7 @@ async function main() {
           }
           return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
         } catch (error) {
-          return sendJson(res, 503, {ok: false, error: `CLI 发布包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
         }
       }
       if (url.pathname === '/api/owner-knowledge/distribution/activate') {

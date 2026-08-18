@@ -185,6 +185,9 @@ const base = {
     surface: 'query',
     sideEffectsStartedIsArray: true,
     sideEffectsStarted: [],
+    partnerCliRelease: {
+      ready: true, source: 'managed', version: '2026.08.17.1', errorCode: '',
+    },
   },
 };
 
@@ -209,6 +212,9 @@ assert.deepEqual(healthy.health.query, {
   ok: true,
   surface: 'query',
   sideEffectsStarted: [],
+  partnerCliRelease: {
+    ready: true, source: 'managed', version: '2026.08.17.1', errorCode: '',
+  },
 });
 
 const brokenUnits = healthyUnits();
@@ -381,6 +387,36 @@ const queryMissingSideEffectsArray = buildCloudRuntimeSnapshot({
 });
 assert.equal(queryMissingSideEffectsArray.ok, false);
 assert.ok(queryMissingSideEffectsArray.blockers.some(row => row.code === 'QUERY_HEALTH_FAILED'));
+const queryReleaseUnavailable = buildCloudRuntimeSnapshot({
+  ...base,
+  queryHealth: {
+    ...base.queryHealth,
+    httpStatus: 503,
+    ok: false,
+    partnerCliRelease: {
+      ready: false, source: '', version: '', errorCode: 'PARTNER_CLI_RELEASE_UNAVAILABLE',
+    },
+  },
+});
+assert.equal(queryReleaseUnavailable.ok, false);
+assert.ok(queryReleaseUnavailable.blockers.some(row => row.code === 'QUERY_HEALTH_FAILED'
+  && row.partnerCliRelease?.errorCode === 'PARTNER_CLI_RELEASE_UNAVAILABLE'));
+assert.ok(!queryReleaseUnavailable.blockers.some(row => row.code === 'PARTNER_CLI_RELEASE_UNMANAGED'));
+const queryEmergencyFallback = buildCloudRuntimeSnapshot({
+  ...base,
+  queryHealth: {
+    ...base.queryHealth,
+    partnerCliRelease: {
+      ready: true, source: 'fallback', version: '2026.08.17.1', errorCode: '',
+    },
+  },
+});
+assert.equal(queryEmergencyFallback.health.query.ok, true,
+  'a verified emergency fallback remains available for urgent CLI use');
+assert.equal(queryEmergencyFallback.ok, false,
+  'an emergency fallback must not satisfy the formal managed-release gate');
+assert.ok(queryEmergencyFallback.blockers.some(row => row.code === 'PARTNER_CLI_RELEASE_UNMANAGED'
+  && row.source === 'fallback' && row.version === '2026.08.17.1'));
 
 const unexpectedUnit = buildCloudRuntimeSnapshot({
   ...base,

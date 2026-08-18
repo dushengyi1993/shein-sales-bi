@@ -14,6 +14,7 @@ EnvironmentFile=/srv/shein-bi/secrets/portal-warehouse.env
 Environment=NODE_ENV=production
 Environment=SHEIN_BI_SURFACE=query
 Environment=SHEIN_OWNER_KNOWLEDGE_PRINCIPAL=dushengyi
+Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=/srv/shein-bi/partner-cli
 Environment=SHEIN_LINK_OPS_STORE=postgres
 Environment=SHEIN_WEBHOOK_REPOSITORY_ENABLED=0
 Environment=SHEIN_BI_INTENT_PLANNER_ENABLED=0
@@ -64,7 +65,7 @@ RestrictSUIDSGID=true
 RestrictNamespaces=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
-ReadOnlyPaths=/opt/shein-bi/app /data/shein-bi/outputs /data/shein-bi/state /srv/shein-bi/secrets
+ReadOnlyPaths=/opt/shein-bi/app /data/shein-bi/outputs /data/shein-bi/state /srv/shein-bi/secrets /srv/shein-bi/partner-cli
 InaccessiblePaths=/data/shein-bi/profiles /opt/shein-bi/app/profiles
 
 [Install]

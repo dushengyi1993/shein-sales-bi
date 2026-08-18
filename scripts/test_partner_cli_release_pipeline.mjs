@@ -10,6 +10,8 @@ import {buildPartnerCliRelease} from '../lib/partner_cli_release.mjs';
 import {
   createPartnerCliReleaseStore,
   PARTNER_CLI_DEPLOYMENT_SCHEMA_VERSION,
+  PARTNER_CLI_RELEASE_CONFLICT_CODE,
+  PARTNER_CLI_RELEASE_DOWNGRADE_BLOCKED_CODE,
   validatePartnerCliDeploymentPayload,
 } from '../lib/partner_cli_release_store.mjs';
 
@@ -47,6 +49,24 @@ async function copyPackageSource(sourceRoot) {
     await fs.copyFile(source, target);
   }
   return manifest;
+}
+
+async function setPackageVersion(sourceRoot, version) {
+  const manifestFile = path.join(sourceRoot, 'config', 'partner_cli_package.json');
+  const manifest = JSON.parse(await fs.readFile(manifestFile, 'utf8'));
+  manifest.version = version;
+  await fs.writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  return manifest;
+}
+
+async function writeFixturePackage(sourceRoot, version, packageBytes) {
+  const fileName = `shein-bi-ops-cli-${version}.zip`;
+  const file = path.join(sourceRoot, 'outputs', 'releases', fileName);
+  const checksum = crypto.createHash('sha256').update(packageBytes).digest('hex');
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  await fs.writeFile(file, packageBytes);
+  await fs.writeFile(`${file}.sha256`, `${checksum}  ${fileName}\n`, 'ascii');
+  return {file, fileName, checksum};
 }
 
 function deploymentPayload({release, packageBytes, packageFileName, sourceCommit = 'a'.repeat(40)}) {
@@ -162,6 +182,79 @@ try {
   const idempotent = await store.deploy(payload);
   assert.equal(idempotent.changed, false);
 
+  // A newer deployed source/fallback must not be shadowed by an older managed
+  // pointer. Missing or corrupt newer fallback bytes fail closed instead of
+  // silently downgrading; once the managed release catches up it becomes the
+  // preferred source and no fallback file is required.
+  const oldSource = path.join(temp, 'old-source');
+  await copyPackageSource(oldSource);
+  const oldManifest = await setPackageVersion(oldSource, '2026.08.16.5');
+  const oldRelease = await buildPartnerCliRelease({sourceRoot: oldSource});
+  const oldPackage = await writeFixturePackage(oldSource, oldManifest.version, packageBytes);
+  const mixedManagedRoot = path.join(temp, 'mixed-release-store');
+  const oldStore = createPartnerCliReleaseStore({
+    releaseRoot: mixedManagedRoot,
+    fallbackSourceRoot: oldSource,
+    fallbackPackageFile: oldPackage.file,
+  });
+  await oldStore.deploy(deploymentPayload({
+    release: oldRelease,
+    packageBytes,
+    packageFileName: oldPackage.fileName,
+  }));
+  const mixedStore = createPartnerCliReleaseStore({
+    releaseRoot: mixedManagedRoot,
+    fallbackSourceRoot: sourceRoot,
+    fallbackPackageFile: packageFile,
+  });
+  const newerFallback = await mixedStore.status();
+  assert.equal(newerFallback.source, 'fallback');
+  assert.equal(newerFallback.version, manifest.version);
+
+  await fs.rm(packageFile);
+  await fs.rm(`${packageFile}.sha256`);
+  const missingNewerFallback = createPartnerCliReleaseStore({
+    releaseRoot: mixedManagedRoot,
+    fallbackSourceRoot: sourceRoot,
+    fallbackPackageFile: packageFile,
+  });
+  await assert.rejects(
+    () => missingNewerFallback.status(),
+    error => error?.code === PARTNER_CLI_RELEASE_DOWNGRADE_BLOCKED_CODE,
+  );
+  await fs.writeFile(packageFile, packageBytes);
+  await fs.writeFile(`${packageFile}.sha256`, `${packageSha256}  ${packageFileName}\n`, 'ascii');
+
+  const recoveredManaged = await mixedStore.deploy(payload);
+  assert.equal(recoveredManaged.changed, true);
+  assert.equal(recoveredManaged.active.source, 'managed');
+  await fs.rm(packageFile);
+  await fs.rm(`${packageFile}.sha256`);
+  const managedWithoutFallback = createPartnerCliReleaseStore({
+    releaseRoot: mixedManagedRoot,
+    fallbackSourceRoot: sourceRoot,
+    fallbackPackageFile: packageFile,
+  });
+  const managedCurrent = await managedWithoutFallback.status();
+  assert.equal(managedCurrent.source, 'managed');
+  assert.equal(managedCurrent.version, manifest.version);
+  await fs.writeFile(packageFile, packageBytes);
+  await fs.writeFile(`${packageFile}.sha256`, `${packageSha256}  ${packageFileName}\n`, 'ascii');
+
+  const conflictingSource = path.join(temp, 'conflicting-source');
+  await copyPackageSource(conflictingSource);
+  await fs.appendFile(path.join(conflictingSource, 'AGENTS.md'), '\nSame-version source conflict fixture.\n', 'utf8');
+  const conflictingPackage = await writeFixturePackage(conflictingSource, manifest.version, packageBytes);
+  const conflictingSelection = createPartnerCliReleaseStore({
+    releaseRoot: mixedManagedRoot,
+    fallbackSourceRoot: conflictingSource,
+    fallbackPackageFile: conflictingPackage.file,
+  });
+  await assert.rejects(
+    () => conflictingSelection.status(),
+    error => error?.code === PARTNER_CLI_RELEASE_CONFLICT_CODE,
+  );
+
   const alternateSource = path.join(temp, 'alternate-source');
   await copyPackageSource(alternateSource);
   await fs.appendFile(path.join(alternateSource, 'AGENTS.md'), '\nRelease conflict fixture.\n', 'utf8');
@@ -221,6 +314,7 @@ try {
     bundleSha256: validated.bundleSha256,
     packageSha256,
     managedActivation: true,
+    sourceManagedSelectionVerified: true,
     immutableConflictRejected: true,
     artifactSourceMatchVerified: true,
     platformLineEndingsAccepted: true,

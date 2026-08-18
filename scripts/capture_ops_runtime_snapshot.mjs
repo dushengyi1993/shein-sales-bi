@@ -63,6 +63,9 @@ async function fetchHealth(url, kind) {
     const response = await fetch(url, {signal: AbortSignal.timeout(5_000)});
     const json = await response.json();
     if (kind === 'query') {
+      const partnerCliRelease = json.partnerCliRelease && typeof json.partnerCliRelease === 'object'
+        ? json.partnerCliRelease
+        : {};
       return {
         httpStatus: response.status,
         ok: json.ok === true,
@@ -71,6 +74,12 @@ async function fetchHealth(url, kind) {
         sideEffectsStarted: Array.isArray(json.sideEffectsStarted)
           ? json.sideEffectsStarted.map(value => String(value || ''))
           : null,
+        partnerCliRelease: {
+          ready: partnerCliRelease.ready === true,
+          source: String(partnerCliRelease.source || ''),
+          version: String(partnerCliRelease.version || ''),
+          errorCode: String(partnerCliRelease.errorCode || ''),
+        },
       };
     }
     if (kind === 'portal') {
@@ -168,6 +177,7 @@ async function main() {
       portalHealthy: snapshot.health.portal.ok,
       webhookHealthy: snapshot.health.webhook.ok,
       queryHealthy: snapshot.health.query.ok,
+      queryPartnerCliRelease: snapshot.health.query.partnerCliRelease,
       systemctlCommandCount: snapshot.runtimeProbe.systemctlCommandCount,
       maintenance: {
         ok: snapshot.maintenance.ok,

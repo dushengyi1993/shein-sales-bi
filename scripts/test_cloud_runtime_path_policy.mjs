@@ -179,7 +179,7 @@ assert.deepEqual(CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE['shein-bi-session-secret.s
 });
 assert.deepEqual(CLOUD_RUNTIME_EFFECTIVE_PATH_EXTRAS_BY_SERVICE, {
   'shein-bi-query.service': {
-    readOnlyPaths: ['/opt/shein-bi/app', '/srv/shein-bi/secrets'],
+    readOnlyPaths: ['/opt/shein-bi/app', '/srv/shein-bi/secrets', '/srv/shein-bi/partner-cli'],
     inaccessiblePaths: [],
   },
   'shein-bi-session-secret.service': {
@@ -208,6 +208,7 @@ assert.deepEqual(
       '/data/shein-bi/outputs',
       '/opt/shein-bi/app',
       '/srv/shein-bi/secrets',
+      '/srv/shein-bi/partner-cli',
     ],
     inaccessiblePaths: [
       '/data/shein-bi/profiles',
@@ -238,7 +239,7 @@ assert.deepEqual(
 );
 const queryUnit = await fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-query.service'), 'utf8');
 assert.ok(queryUnit.split('\n').includes(
-  'ReadOnlyPaths=/opt/shein-bi/app /data/shein-bi/outputs /data/shein-bi/state /srv/shein-bi/secrets',
+  'ReadOnlyPaths=/opt/shein-bi/app /data/shein-bi/outputs /data/shein-bi/state /srv/shein-bi/secrets /srv/shein-bi/partner-cli',
 ));
 const sessionSecretUnit = await fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-session-secret.service'), 'utf8');
 assert.ok(sessionSecretUnit.split('\n').includes(

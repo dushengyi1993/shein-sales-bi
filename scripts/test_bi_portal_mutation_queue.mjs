@@ -12,6 +12,7 @@
 // - SIGTERM cancels queued-but-not-started mutations with 503 while the
 //   already-started mutation drains exactly once and the process exits 0.
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -36,6 +37,12 @@ await fs.writeFile(authFile, JSON.stringify({users: [{username: 'mutation-test',
 const sessionSecretFile = path.join(temp, 'session-secret');
 await provisionBiSessionSecret(sessionSecretFile);
 const shutdownTrigger = path.join(temp, 'shutdown-trigger');
+const cliConfig = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'partner_cli_package.json'), 'utf8'));
+const cliPackageFile = path.join(temp, `shein-bi-ops-cli-${cliConfig.version}.zip`);
+const cliPackageBytes = Buffer.from([0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+const cliPackageSha = crypto.createHash('sha256').update(cliPackageBytes).digest('hex');
+await fs.writeFile(cliPackageFile, cliPackageBytes);
+await fs.writeFile(`${cliPackageFile}.sha256`, `${cliPackageSha}  ${path.basename(cliPackageFile)}\n`, 'ascii');
 
 const baseArgs = [
   '--host', '127.0.0.1',
@@ -60,6 +67,9 @@ const baseEnv = {
   SHEIN_BI_JOB_WORKER_ENABLED: '0',
   SHEIN_BI_EXTERNAL_SECTION_QUEUE_ENABLED: '0',
   SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR: '',
+  SHEIN_PARTNER_CLI_RELEASE_DIR: '',
+  SHEIN_PARTNER_CLI_PACKAGE_FILE: cliPackageFile,
+  SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE: `${cliPackageFile}.sha256`,
 };
 
 const children = new Set();
@@ -211,6 +221,9 @@ try {
     assert.equal(health.body?.runtime?.admissionOpened, true,
       'the query surface must open admission only after startup completes');
     assert.equal(health.body?.runtime?.accepting, true);
+    assert.deepEqual(health.body?.partnerCliRelease, {
+      ready: true, source: 'fallback', version: cliConfig.version, errorCode: '',
+    });
     assert.ok(Number(health.body?.mutationQueue?.capacity) >= 1,
       'the query surface must expose the bounded queue capacity');
     await stopRuntime(runtime);
