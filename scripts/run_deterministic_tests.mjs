@@ -76,6 +76,7 @@ const tests = [
   'scripts/test_bi_section_portal_streaming.mjs',
   'scripts/test_bi_portal_section_queue.mjs',
   'scripts/test_bi_portal_core_warmup_queue_owned.mjs',
+  'scripts/test_bi_core_warmup_health.mjs',
   'scripts/test_bi_portal_section_terminal.mjs',
   'scripts/test_bi_portal_data_mode.mjs',
   'scripts/test_bi_live_page_recovery.mjs',

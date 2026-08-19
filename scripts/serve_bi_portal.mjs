@@ -469,6 +469,12 @@ const BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS = Math.max(
     60 * 60_000,
   ),
 );
+const BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS = boundedBiPortalWarmupMs(
+  'SHEIN_BI_CORE_WARMUP_STALLED_AFTER_MS',
+  45 * 60_000,
+  5 * 60_000,
+  6 * 60 * 60_000,
+);
 const biPortalCoreWarmupState = {
   generatedAt: '',
   status: 'idle',
@@ -482,6 +488,19 @@ const biPortalCoreWarmupState = {
   lastFailureAt: 0,
   failureGeneratedAt: '',
 };
+function evaluateBiPortalCoreWarmupHealth(
+  state = biPortalCoreWarmupState,
+  {nowMs = Date.now(), stalledAfterMs = BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS} = {},
+) {
+  const queued = state?.status === 'queued' && state?.owner === 'external-section-queue';
+  const startedAt = Number(state?.startedAt || 0);
+  const queuedAgeMs = queued && startedAt > 0 ? Math.max(0, Number(nowMs) - startedAt) : 0;
+  const stalled = queued
+    && !Boolean(state?.inFlight)
+    && startedAt > 0
+    && queuedAgeMs >= Math.max(1, Number(stalledAfterMs) || BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS);
+  return {ok: !stalled, stalled, queuedAgeMs, stalledAfterMs};
+}
 function resetBiPortalCoreWarmupEnqueueBackoff() {
   biPortalCoreWarmupState.consecutiveFailures = 0;
   biPortalCoreWarmupState.nextAttemptAt = 0;
@@ -12621,10 +12640,23 @@ async function generateBiSection(args, root, section, generatedAt) {
   if (section === 'homeRankings') {
     data = compactHomeRankingsSectionData(data);
   }
-  return writeBiSectionCache(root, section, generatedAt, data, refreshRun ? {
+  const written = await writeBiSectionCache(root, section, generatedAt, data, refreshRun ? {
     ...run,
     stderr: `${run.stderr || ''}\n${refreshRun.stdout || ''}\n${refreshRun.stderr || ''}`,
   } : run);
+  if (section === 'profit') {
+    // A newer accounting revision may arrive while the multi-minute profit
+    // build is running. The queue must preserve that newer revision, but the
+    // exact-generation profit artifact we just published is still a safe
+    // homepage fallback while the next revision catches up. Derive it here so
+    // homeProfit can return 200 + accountingPending instead of remaining 202
+    // behind a superseded profit lease forever.
+    const derived = await deriveHomeProfitSectionFromProfitCache(root, generatedAt);
+    if (!derived?.data?.homeProfitSummary) {
+      throw new Error('profit refresh could not publish its exact-generation homeProfit fallback');
+    }
+  }
+  return written;
 }
 
 function compactHomeRankingsSectionData(data) {
@@ -17237,8 +17269,9 @@ async function main() {
       }
       if (url.pathname === '/api/health') {
         const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
+        const warmupHealth = evaluateBiPortalCoreWarmupHealth();
         return sendJson(res, 200, {
-          ok: true,
+          ok: warmupHealth.ok,
           service: 'shein-bi-portal',
           time: new Date().toISOString(),
           host: args.host,
@@ -17282,6 +17315,9 @@ async function main() {
             consecutiveFailures: biPortalCoreWarmupState.consecutiveFailures,
             nextAttemptAt: biPortalCoreWarmupState.nextAttemptAt ? new Date(biPortalCoreWarmupState.nextAttemptAt).toISOString() : null,
             lastFailureAt: biPortalCoreWarmupState.lastFailureAt ? new Date(biPortalCoreWarmupState.lastFailureAt).toISOString() : null,
+            stalled: warmupHealth.stalled,
+            queuedAgeMs: warmupHealth.queuedAgeMs,
+            stalledAfterMs: warmupHealth.stalledAfterMs,
           },
           user: actor ? {
             username: actor.username,
@@ -21204,7 +21240,9 @@ export const __testHooks = {
   BI_CORE_WARMUP_QUEUE_PRIORITY,
   BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS,
   BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS,
+  BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS,
   biPortalCoreWarmupState,
+  evaluateBiPortalCoreWarmupHealth,
   biPortalCoreWarmupIdempotencyKey,
   biPortalForceRefreshIdempotencyKey,
   BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS,

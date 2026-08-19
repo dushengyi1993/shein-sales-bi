@@ -75,6 +75,8 @@ assert.match(server, /if \(force \|\| options\.hostLockedWorker === true\) \{[\s
   'host-locked/force homeProfit without current profit must fail with 503');
 assert.match(server, /status: 202,[\s\S]*error: 'homeProfit requires a current profit section cache/,
   'a normal homeProfit request without current profit must return 202 pending instead of stale data');
+assert.match(server, /const written = await writeBiSectionCache\(root, section, generatedAt,[\s\S]*if \(section === 'profit'\) \{[\s\S]*deriveHomeProfitSectionFromProfitCache\(root, generatedAt\)[\s\S]*return written;/,
+  'a successful profit publish must atomically derive an exact-generation homeProfit fallback before the worker reports success');
 
 // ---- Server: the HTTP route passes q and actor into the section loader.
 assert.match(server, /const q = String\(url\.searchParams\.get\('q'\) \|\| ''\)\.trim\(\);/,
