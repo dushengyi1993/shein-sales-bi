@@ -23,6 +23,15 @@ async function collect(stream) {
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-bi-section-cache-'));
 try {
+  const cacheSource = await fs.readFile(new URL('../lib/bi_section_cache.mjs', import.meta.url), 'utf8');
+  const readStart = cacheSource.indexOf('export async function readBiSectionCache(');
+  const readEnd = cacheSource.indexOf('export async function readBiSectionCacheAnyGeneratedAt', readStart);
+  const readBody = cacheSource.slice(readStart, readEnd);
+  assert.ok(
+    readBody.indexOf('readBiSectionMetadata(root, section)') >= 0
+      && readBody.indexOf('readBiSectionMetadata(root, section)') < readBody.indexOf('parseValidatedSection'),
+    'generation metadata preflight must run before a complete section parse',
+  );
   const rows = Array.from({length: 250}, (_, index) => ({index, label: 'row-' + index, value: index * 3}));
   const written = await writeBiSectionCache(root, 'sample', 'generation-1', {rows}, {
     code: 0,
