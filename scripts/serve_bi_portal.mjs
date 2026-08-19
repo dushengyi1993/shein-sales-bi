@@ -303,6 +303,10 @@ const biSectionRefreshFailures = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
 let biSectionFastBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
+const PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS = Math.max(
+  1_000,
+  Math.min(5 * 60_000, Number(process.env.SHEIN_BI_PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS || 30_000)),
+);
 const INVENTORY_COST_SNAPSHOT_RETRY_RE = /(?:inventory-cost source changed after snapshot|stale inventory-cost rebuild refused)/i;
 const INVENTORY_COST_REFRESH_MAX_ATTEMPTS = Math.max(1, Math.min(5, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_MAX_ATTEMPTS || 3)));
 const BI_FAST_BACKGROUND_SECTIONS = new Set(['homeRankings', 'homeProfit']);
@@ -12301,6 +12305,7 @@ async function refreshProfitMarts(args) {
     const tail = String(run.stderr || run.stdout || '').slice(-4000);
     throw new Error(`profit mart cache refresh failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
   }
+  invalidateProfitAccountingStateCache();
   return run;
 }
 
@@ -12324,6 +12329,7 @@ async function refreshInventoryCostLedger(args) {
     });
     runs.push(run);
     if (run.ok) {
+      invalidateProfitAccountingStateCache();
       return {
         ...run,
         stdout: `${runs.slice(0, -1).map((item, index) => `[inventory-cost retry ${index + 1}] ${item.stderr || item.stdout || ''}`).join('\n')}\n${run.stdout || ''}`.trim(),
@@ -12409,20 +12415,79 @@ SELECT jsonb_build_object(
   return JSON.parse(String(run.stdout || '{}').trim() || '{}');
 }
 
-async function readProfitAccountingState(args, generatedAt = '') {
-  const freshness = await readProfitMartCacheFreshness(args);
-  const decision = evaluateProfitMartCacheFreshness(freshness, {
-    coreGeneratedAt: generatedAt,
-    allowedCoreSkewMs: Math.max(
-      0,
-      Number(process.env.SHEIN_BI_PROFIT_MART_CORE_SKEW_MS || PROFIT_MART_CORE_SKEW_MS),
-    ),
-  });
-  return {
-    freshness,
-    decision,
-    minimumPublishedAt: String(freshness.metaRefreshedAt || ''),
+function profitAccountingStateCacheKey(args, generatedAt) {
+  return JSON.stringify([
+    String(args?.distro || ''),
+    String(args?.container || ''),
+    String(args?.database || ''),
+    String(args?.user || ''),
+    String(generatedAt || ''),
+  ]);
+}
+
+function createProfitAccountingStateReader(options = {}) {
+  const loadFreshness = options.loadFreshness || readProfitMartCacheFreshness;
+  const now = options.now || Date.now;
+  const ttlMs = Math.max(0, Number(options.ttlMs ?? PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS));
+  let entry = null;
+
+  const read = async (args, generatedAt = '', readOptions = {}) => {
+    const key = profitAccountingStateCacheKey(args, generatedAt);
+    const forceFresh = readOptions.forceFresh === true;
+    if (entry?.key === key) {
+      // One warehouse probe is shared even when a host-locked refresh and
+      // several browser reads arrive together. A forceFresh caller bypasses
+      // only a settled cache value, never an identical in-flight probe.
+      if (entry.promise) return entry.promise;
+      if (!forceFresh && entry.value && entry.expiresAt > now()) return entry.value;
+    }
+
+    const promise = (async () => {
+      const freshness = await loadFreshness(args);
+      const decision = evaluateProfitMartCacheFreshness(freshness, {
+        coreGeneratedAt: generatedAt,
+        allowedCoreSkewMs: Math.max(
+          0,
+          Number(process.env.SHEIN_BI_PROFIT_MART_CORE_SKEW_MS || PROFIT_MART_CORE_SKEW_MS),
+        ),
+      });
+      return {
+        freshness,
+        decision,
+        minimumPublishedAt: String(freshness.metaRefreshedAt || ''),
+      };
+    })();
+    entry = {key, promise, value: null, expiresAt: 0};
+    try {
+      const value = await promise;
+      if (entry?.key === key && entry.promise === promise) {
+        entry = {key, promise: null, value, expiresAt: now() + ttlMs};
+      }
+      return value;
+    } catch (error) {
+      // A failed warehouse probe is never negative-cached. The next bounded
+      // retry must be able to observe recovery immediately.
+      if (entry?.key === key && entry.promise === promise) entry = null;
+      throw error;
+    }
   };
+
+  return {
+    read,
+    invalidate() {
+      entry = null;
+    },
+  };
+}
+
+const profitAccountingStateReader = createProfitAccountingStateReader();
+
+function invalidateProfitAccountingStateCache() {
+  profitAccountingStateReader.invalidate();
+}
+
+async function readProfitAccountingState(args, generatedAt = '', options = {}) {
+  return profitAccountingStateReader.read(args, generatedAt, options);
 }
 
 async function ensureProfitMartCacheFresh(args, generatedAt = '') {
@@ -12504,7 +12569,7 @@ async function generateBiSection(args, root, section, generatedAt) {
     ? await ensureProfitMartCacheFresh(args, generatedAt)
     : null;
   if (sourceMode === 'cache' && section === 'homeProfit') {
-    const accountingState = await readProfitAccountingState(args, generatedAt);
+    const accountingState = await readProfitAccountingState(args, generatedAt, {forceFresh: true});
     let currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
     if (
       !accountingState.decision.fresh
@@ -12515,7 +12580,7 @@ async function generateBiSection(args, root, section, generatedAt) {
         throw new Error('homeProfit requires a fresh profit section cache');
       }
       currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
-      const after = await readProfitAccountingState(args, generatedAt);
+      const after = await readProfitAccountingState(args, generatedAt, {forceFresh: true});
       if (!after.decision.fresh || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
         throw new Error('homeProfit profit source remained stale after canonical refresh');
       }
@@ -16111,6 +16176,10 @@ async function main() {
       || !allowGenerateSections
       || !['order','return'].includes(String(event?.kind || ''))
     ) return;
+    // New order/return facts invalidate the short read cache immediately. The
+    // 30s TTL protects polling tabs when nothing changed; live facts never wait
+    // for TTL expiry before the next accounting decision.
+    invalidateProfitAccountingStateCache();
     // Preserve the widest invalidation scope across a burst. Otherwise a
     // current-day sale arriving after a prior-day cancellation could replace
     // its metadata and leave the historical page cache stale.
@@ -21177,6 +21246,8 @@ export const __testHooks = {
   classifyLinkOpsLifecycle,
   persistClaimedLinkOpsExecutionResult,
   runChildProcess,
+  createProfitAccountingStateReader,
+  profitAccountingStateCacheKey,
   OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
   legacyPreValidArtifactCandidates,
   verifyLegacyPreValidArtifact,

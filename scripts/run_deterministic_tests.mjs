@@ -83,6 +83,7 @@ const tests = [
   'scripts/test_atomic_file_publish.mjs',
   'scripts/test_ops_run_bundle.mjs',
   'scripts/test_bi_profit_mart_freshness.mjs',
+  'scripts/test_bi_portal_accounting_state_cache.mjs',
   'scripts/test_profit_refresh_pipeline_contract.mjs',
   'scripts/test_marketing_price_snapshot_health.mjs',
   'scripts/test_cloud_session_manager_reliability.mjs',
