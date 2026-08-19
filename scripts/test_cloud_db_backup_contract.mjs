@@ -65,6 +65,8 @@ assert.ok(
 );
 assert.match(script, /same-day offsite terminal=exhausted.*reason=cos-unavailable.*local-preserved=/,
   'COS exhaustion must preserve the local backup and end non-successfully');
+assert.match(script, /retention warning=legacy-local-backup-preserved current-backup-valid=1/,
+  'a verified current backup must survive non-terminal legacy retention warnings');
 assert.match(service, /SHEIN_BI_BACKUP_RETENTION_DAYS=7/);
 assert.match(script, /SHEIN_BI_REMOTE_VERIFY_CMD/);
 assert.match(script, /independent remote verifier not configured; persistence gate fails closed reason=remote-verifier-missing/,

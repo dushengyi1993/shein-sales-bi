@@ -871,6 +871,16 @@ prune_expired() {
     echo "[cloud_db_backup] retention terminal=remote-verify status=$terminal local-preserved=1" >&2
     return "$terminal"
   fi
+  # A fully published and independently verified current backup must not be
+  # invalidated solely because an older local directory cannot pass today's
+  # stricter deletion contract (for example a legacy absolute-path checksum
+  # manifest). Keep that old directory and surface a warning. Explicit
+  # --prune-only runs still return non-zero so retention-only automation can
+  # alert on the unresolved legacy artifact.
+  if (( failed != 0 && PRUNE_ONLY == 0 )); then
+    echo "[cloud_db_backup] retention warning=legacy-local-backup-preserved current-backup-valid=1" >&2
+    return 0
+  fi
   return "$failed"
 }
 
