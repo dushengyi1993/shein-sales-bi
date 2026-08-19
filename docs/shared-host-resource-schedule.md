@@ -21,7 +21,7 @@
 | 实时销售 | Webhook + 每15分钟 reconciliation | 只更新受影响订单/当天事实与轻量投影 | 分钟级 |
 | 当前库存 | 每小时 `:12/:45` OpenAPI | 19店本轮全部成功后切换 `inventoryStock` | 15分钟内 |
 | 登录态维护 | 每天仅一个 `00:45` `shein-bi-cloud-session-manager.timer` | 只有同日 `done` marker + 同日启用店铺19/19报告才幂等跳过；共享 browser-read lane defer(75) 在同一 service/run 内重试到 `01:27`，失败写 marker/alert 并返回非成功 | 晨间链路前完成；无证据 warning 不算完成；不创建第二 timer/queue |
-| 每日经营刷新 | 每天 `07:10` 一个 `shein-bi-cloud-morning-chain.service` | wrapper 保存 active run（含 first-start 绝对 deadline）；同日失败自动重启恢复同一 runDate/businessDate；跨日不再执行旧 child，只保留旧失败证据后推进当天；19店链接/业务域与补充阶段不得越过库存前置截止，库存独占最后4500秒窗口 | 单 timer；`daily-operating-refresh` done marker 直接绑定19店结果、库存 marker、plan 与 result；deadline 到期以 restart-prevented exit 76 保持 systemd failed，不假成功 |
+| 每日经营刷新 | 每天 `07:10` 一个 `shein-bi-cloud-morning-chain.service` | wrapper 保存 active run（含 first-start 绝对 deadline）；同日失败自动重启恢复同一 runDate/businessDate；跨日不再执行旧 child，只保留旧失败证据后推进当天；19店链接/业务域与补充阶段不得越过库存前置截止，生产 unit 的库存独占最后2700秒窗口 | 单 timer；`daily-operating-refresh` done marker 直接绑定19店结果、库存 marker、plan 与 result；deadline 到期以 restart-prevented exit 76 保持 systemd failed，不假成功 |
 | 昨日销售定稿 | 每天 `02:45` | 19店OpenAPI完整门禁后一次晋升 | 03:30前 |
 | RTV | 每天一次独立业务run | 完整追踪复核后更新RTV投影 | 日结前 |
 | 订单闭环 | 每天一次独立业务run | 只重查未终态订单，完成后一次刷新订单投影 | 上班前 |

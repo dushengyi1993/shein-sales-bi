@@ -146,7 +146,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 |---|---|---|---|---|
 | 实时事件 | 半托订单 Webhook + 按单 OpenAPI 同步 | Webhook 触发，只查发生变化的订单 | 更新当天正式销售事实、日汇总并通知在线 BI | 旧每小时 `today` timer 已删除；失败进入 Webhook 重试/dead-letter 与 watchdog。 |
 | `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | 19 店官方 OpenAPI 全量 | 逐店 fetch/load/每日行完整性通过后原子晋升 OpenAPI 日切片 | 任一失败、缺店或缺少每日行都禁止晋升，避免用不完整日覆盖正式事实。 |
-| `07:10` | 每日经营统一协调器 `shein-bi-cloud-morning-chain.service` | wrapper 持久化 active run；同日失败恢复同一日期与绝对 deadline；跨日不执行旧 child，留存失败证据后推进当天；前序阶段不得侵占最后4500秒库存窗口 | 不重复抓当天销售；内部最多两个受门禁的只读浏览器 worker | 单 timer；终态非零且禁止无限重启。 |
+| `07:10` | 每日经营统一协调器 `shein-bi-cloud-morning-chain.service` | wrapper 持久化 active run；同日失败恢复同一日期与绝对 deadline；跨日不执行旧 child，留存失败证据后推进当天；生产 unit 前序阶段不得侵占最后2700秒库存窗口 | 不重复抓当天销售；内部最多两个受门禁的只读浏览器 worker | 单 timer；终态非零且禁止无限重启。 |
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 来源/对账层 | 写链接/业务域、SBN 营销概览线索、RTV 复核等慢变数据；其中的销售步骤不直接写正式事实 | 不再重复执行 MBRs 全店营销价格栈扫描；该实时扫描只属于独立 guard。商品四档状态、SBN 经营/流量等仍需 WebAPI/headless。 |
 | 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 更新 `fact.openapi_*` 和 `mart.openapi_*_reconciliation`，不直接对正式事实表做原始 DML | 销售最终日晋升只属于 `03:00` 的 19/19 深度匹配门禁；退货/商品继续按各自隔离对账和切源门禁处理。 |
 | `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
@@ -211,7 +211,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today` 仅保留为手动临时发送；正式自动发送当前关闭，`scripts/cloud_morning_chain.sh` 默认跳过日报后直接启动慢变日更。
 
-- 晨间生产入口是 `run_cloud_morning_chain_job.sh`，其 child 为 `cloud_morning_chain.sh all`。wrapper 负责 mutex、active context 与 first-start 绝对 deadline；exit 0 只表示 `daily-operating-refresh` final marker 的日期和所有直接 evidence hash 均通过，deadline/数据/配置终态使用非零码并由 `RestartPreventExitStatus` 停止循环。19店抓取与 supplements 在库存前置截止前完成；库存阶段拥有最后4500秒，`inventory-started` checkpoint 允许同日重启直接续跑库存。final marker 直接绑定19店结果、库存 marker、plan 与 result；watchdog 在 service 成功后仍持续回验这些证据。跨日旧 child 不执行，只保留旧失败后启动当天独立窗口。
+- 晨间生产入口是 `run_cloud_morning_chain_job.sh`，其 child 为 `cloud_morning_chain.sh all`。wrapper 负责 mutex、active context 与 first-start 绝对 deadline；exit 0 只表示 `daily-operating-refresh` final marker 的日期和所有直接 evidence hash 均通过，deadline/数据/配置终态使用非零码并由 `RestartPreventExitStatus` 停止循环。19店抓取与 supplements 在库存前置截止前完成；生产 unit 的库存阶段拥有最后2700秒（脚本直跑保守默认4500秒），`inventory-started` checkpoint 允许同日重启直接续跑库存。final marker 直接绑定19店结果、库存 marker、plan 与 result；watchdog 在 service 成功后仍持续回验这些证据。跨日旧 child 不执行，只保留旧失败后启动当天独立窗口。
 
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。晨间链路失败 service 的退出只有同日 `done` 的 `morning-links-ready` marker（`ok=true`）且完成时间晚于单元退出时，才在 `recoveries` 中记为业务恢复；`warning` 状态（即使管线层 `ok=true`）或 done 但 `ok=false` 一律不算恢复。当日晨链已收敛为 failed/partial/deferred 终态且单元已退出时，watchdog 直接以“晨链当日失败”告警。
 

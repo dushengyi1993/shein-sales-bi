@@ -408,7 +408,7 @@ assert.equal(property(morningService, 'RestartPreventExitStatus'), '64 76 78',
 assert.equal(property(morningService, 'StartLimitIntervalSec'), '900');
 assert.equal(property(morningService, 'StartLimitBurst'), '200',
   'one-minute retries must remain possible across the full three-hour window');
-assert.match(morningService, /SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=4500/,
+assert.match(morningService, /SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=2700/,
   'the production unit reserves the bounded stock-refresh plus inventory window');
 assert.doesNotMatch(morningService, /^SuccessExitStatus=.*75$/m,
   'the morning chain must surface real failures, never mask them');
