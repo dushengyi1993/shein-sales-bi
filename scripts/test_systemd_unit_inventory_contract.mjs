@@ -63,7 +63,11 @@ for (const service of serviceFiles) {
     'shein-bi-webhook.service',
   ].includes(service)
     ? 'always'
-    : ['shein-bi-db-backup.service', 'shein-bi-cloud-disk-maintenance.service'].includes(service)
+    : [
+        'shein-bi-db-backup.service',
+        'shein-bi-cloud-disk-maintenance.service',
+        'shein-bi-cloud-portal-section-queue.service',
+      ].includes(service)
       ? 'infrastructure'
       : 'scheduled';
   assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE[service], expectedPolicy);
@@ -75,6 +79,7 @@ assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-session-secret.servic
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-watchdog.service'], 'always');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-db-backup.service'], 'infrastructure');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-disk-maintenance.service'], 'infrastructure');
+assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-portal-section-queue.service'], 'infrastructure');
 
 const omittedServicePolicy = {...CLOUD_MAINTENANCE_POLICY_BY_SERVICE};
 delete omittedServicePolicy['shein-bi-cloud-daily-refresh.service'];
