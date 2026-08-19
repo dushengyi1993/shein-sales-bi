@@ -4,12 +4,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 import {
+  calculateCpuBusyRatio,
   evaluateHostResourcePressure,
   HOST_RESOURCE_DEFER_EXIT_CODE,
   HOST_RESOURCE_PRESSURE_PROFILES,
   parseLoadAverage,
   parseMemAvailableMiB,
   parsePressureFullAvg10,
+  parseCpuTimes,
   parseUptimeSeconds,
 } from './check_host_resource_pressure.mjs';
 import {
@@ -25,20 +27,57 @@ assert.equal(parseUptimeSeconds('1200.5 20\n'), 1200.5);
 assert.equal(parseLoadAverage('1.25 1.0 0.5 1/10 20\n'), 1.25);
 assert.equal(parseMemAvailableMiB('MemAvailable: 3145728 kB\n'), 3072);
 assert.equal(parsePressureFullAvg10('some avg10=4\nfull avg10=1.5 avg60=0\n'), 1.5);
+assert.deepEqual(parseCpuTimes('cpu  100 0 50 850 0 0 0 0 0 0\n'), {total: 1000, idle: 850});
+assert.equal(calculateCpuBusyRatio(
+  {total: 1000, idle: 850},
+  {total: 1200, idle: 1000},
+), 0.25);
 assert.equal(HOST_RESOURCE_DEFER_EXIT_CODE, 75);
 assert.equal(evaluateHostResourcePressure({
   uptimeSeconds: 3600,
   cpuCount: 2,
   load1: 0.8,
+  cpuBusyRatio: 0.9,
   availableMemoryMiB: 4096,
   memoryFullAvg10: 0,
   ioFullAvg10: 0,
 }, HOST_RESOURCE_PRESSURE_PROFILES.browser).ready, true);
+assert.equal(evaluateHostResourcePressure({
+  uptimeSeconds: 3600,
+  cpuCount: 2,
+  load1: 3.2,
+  cpuBusyRatio: 0.1,
+  availableMemoryMiB: 4096,
+  memoryFullAvg10: 0,
+  ioFullAvg10: 0,
+}, HOST_RESOURCE_PRESSURE_PROFILES.browser).ready, true,
+'short-window idle CPU must override only the lagging load average');
+assert.equal(evaluateHostResourcePressure({
+  uptimeSeconds: 3600,
+  cpuCount: 2,
+  load1: 3.2,
+  cpuBusyRatio: 0.8,
+  availableMemoryMiB: 4096,
+  memoryFullAvg10: 0,
+  ioFullAvg10: 0,
+}, HOST_RESOURCE_PRESSURE_PROFILES.browser).ready, false,
+'high load plus high short-window CPU must still defer');
+assert.equal(evaluateHostResourcePressure({
+  uptimeSeconds: 3600,
+  cpuCount: 2,
+  load1: 3.2,
+  cpuBusyRatio: 0.1,
+  availableMemoryMiB: 2000,
+  memoryFullAvg10: 0,
+  ioFullAvg10: 0,
+}, HOST_RESOURCE_PRESSURE_PROFILES.browser).ready, false,
+'short-window CPU override must never bypass the memory floor');
 assert.equal(HOST_RESOURCE_PRESSURE_PROFILES['browser-secondary'].minimumAvailableMemoryMiB, 4096);
 assert.equal(evaluateHostResourcePressure({
   uptimeSeconds: 3600,
   cpuCount: 2,
   load1: 0.8,
+  cpuBusyRatio: 0.1,
   availableMemoryMiB: 3900,
   memoryFullAvg10: 0,
   ioFullAvg10: 0,
