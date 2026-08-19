@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Independent authenticated remote-object verifier for SHEIN BI backups.
+// Independent remote-object verifier for SHEIN BI backups. Production may
+// use signed credentials or the explicit anonymous-public mode for objects
+// intentionally readable without a signing secret.
 //
 // Contract (see cloud_db_backup.sh verify_independent_remote):
 //   verify_cos_backup_remote.mjs "<YYYY-MM-DD/base.tar>" <sha256> <size>
@@ -9,8 +11,8 @@
 // raw SDK errors.
 //
 // The verifier is deliberately independent of the COS FUSE write path.  The
-// officially locked cos-nodejs-sdk-v5 is used ONLY as the signer (getAuth is a
-// pure synchronous primitive); the actual request is one non-Range HTTP 200
+// officially locked cos-nodejs-sdk-v5 is used ONLY as the signer in signed
+// mode (getAuth is a pure synchronous primitive); the actual request is one non-Range HTTP 200
 // GetObject issued with Node's http/https modules and streamed into a bounded
 // SHA-256 sink (never buffering the whole object, never touching disk).  The
 // transport owns the ClientRequest, the response and the underlying client
@@ -18,8 +20,9 @@
 // failures settle only after the real client socket observed 'close'; a
 // bounded no-close path instead returns TEARDOWN_UNCONFIRMED and never success.
 // A response/request-level close is never treated as a socket close.  There is
-// no default credential chain: every request is signed only with credentials
-// read from root-only credential files injected through systemd LoadCredential.
+// no default credential chain: signed requests use only root-owned systemd
+// credentials; anonymous-public sends no Authorization or token header while
+// retaining the same hash-locked target and exact byte/hash gates.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsPromise from 'node:fs/promises';
@@ -444,7 +447,7 @@ export function resolveRequestProtocol(cos, target) {
   return protocol;
 }
 
-// Performs ONE authenticated non-Range GET and streams the response body into
+// Performs ONE signed or explicitly anonymous non-Range GET and streams the response body into
 // a bounded SHA-256 sink.  The ClientRequest's underlying client socket is
 // captured and held for the whole call; success is delivered only after that
 // real socket has emitted 'close' (a response/request-level close is never
@@ -456,20 +459,23 @@ export function resolveRequestProtocol(cos, target) {
 // a completed body is waiting for socket close: a candidate success can still
 // become COS_VERIFY_TIMEOUT.  Teardown then has its own bounded grace, so the
 // maximum failure latency is request/body deadline plus teardown grace.
-function performAuthenticatedGet({cos, target, key, size, maxBytes, deadlineMs, client, teardownGraceMs = TEARDOWN_GRACE_MS}) {
+function performAuthenticatedGet({
+  cos, target, key, size, maxBytes, deadlineMs, client,
+  teardownGraceMs = TEARDOWN_GRACE_MS, signed = true,
+}) {
   const host = resolveOriginHost(target);
   const protocol = resolveRequestProtocol(cos, target);
-  const authorization = buildAuthorizationHeader(cos, target, key, host);
-  const securityToken = String(cos && cos.options && cos.options.SecurityToken || '');
+  const authorization = signed ? buildAuthorizationHeader(cos, target, key, host) : '';
+  const securityToken = signed ? String(cos && cos.options && cos.options.SecurityToken || '') : '';
   const transport = client || (protocol === 'https:' ? https : http);
   const url = protocol + '//' + host + '/' + key;
   const headers = {
     Host: host,
-    Authorization: authorization,
     Connection: 'close',
     Accept: 'application/octet-stream',
     'Accept-Encoding': 'identity',
   };
+  if (signed) headers.Authorization = authorization;
   if (securityToken !== '') headers['x-cos-security-token'] = securityToken;
 
   return new Promise((resolve, reject) => {
@@ -741,7 +747,9 @@ function assertObjectMeta(objectMeta, expectedSize) {
   }
 }
 
-export async function verifyRemoteObject(cos, target, {rel, digest, size}, {env = process.env, hooks = {}, client} = {}) {
+export async function verifyRemoteObject(cos, target, {rel, digest, size}, {
+  env = process.env, hooks = {}, client, authMode = 'signed',
+} = {}) {
   const key = buildObjectKey(target.prefix, rel);
   const maxBytes = target.maxObjectBytes;
   if (size > maxBytes) {
@@ -760,6 +768,7 @@ export async function verifyRemoteObject(cos, target, {rel, digest, size}, {env 
     deadlineMs: target.requestTimeoutMs,
     client,
     teardownGraceMs: Number(hooks && hooks.teardownGraceMs) || TEARDOWN_GRACE_MS,
+    signed: authMode !== 'anonymous-public',
   });
   if (result.bytes !== size) {
     throw verifyError('COS_VERIFY_SIZE_MISMATCH', 'remote object byte count does not match the expected size');
@@ -770,14 +779,23 @@ export async function verifyRemoteObject(cos, target, {rel, digest, size}, {env 
   return Object.freeze({ok: true});
 }
 
+export function resolveAuthMode(env = process.env) {
+  const value = String(env.SHEIN_BI_COS_VERIFY_AUTH_MODE || 'signed').trim();
+  if (!['signed', 'anonymous-public'].includes(value)) {
+    throw verifyError('COS_CONFIG_AUTH_MODE_INVALID', 'remote verifier auth mode is invalid');
+  }
+  return value;
+}
+
 export function resolveCredentialPaths(env = process.env) {
+  const authMode = resolveAuthMode(env);
   const secretFile = env.SHEIN_BI_COS_VERIFY_SECRET_FILE;
   const targetFile = env.SHEIN_BI_COS_VERIFY_TARGET_FILE;
   const targetShaLockFile = env.SHEIN_BI_COS_VERIFY_TARGET_SHA_FILE;
-  if (!secretFile || !targetFile || !targetShaLockFile) {
+  if ((authMode === 'signed' && !secretFile) || !targetFile || !targetShaLockFile) {
     throw verifyError('COS_CREDENTIAL_PATH_MISSING', 'credential file paths are not configured');
   }
-  return {secretFile, targetFile, targetShaLockFile};
+  return {authMode, secretFile, targetFile, targetShaLockFile};
 }
 
 const CONFIG_CODE_PREFIXES = ['COS_CREDENTIAL', 'COS_SECRET_', 'COS_TARGET_', 'COS_CONFIG_', 'COS_REL_KEY_', 'COS_DIGEST_', 'COS_SIZE_', 'COS_USAGE'];
@@ -799,7 +817,11 @@ export async function runMain({
   if (args.length === 1 && args[0] === '--check-config') {
     try {
       const paths = resolveCredentialPaths(env);
-      await loadLockedTargetAndSecret({...paths, env, hooks});
+      if (paths.authMode === 'anonymous-public') {
+        await loadLockedTarget({...paths, env, hooks});
+      } else {
+        await loadLockedTargetAndSecret({...paths, env, hooks});
+      }
       out.write('check-config ok\n');
       return {code: EXIT_OK, ok: true, mode: 'check-config'};
     } catch (error) {
@@ -818,9 +840,15 @@ export async function runMain({
   }
   try {
     const paths = resolveCredentialPaths(env);
-    const loaded = await loadLockedTargetAndSecret({...paths, env, hooks});
-    const cos = (cosFactory || createLockedCos)(loaded.target, loaded.secret);
-    await verifyRemoteObject(cos, loaded.target, {rel: request.rel, digest: request.digest, size: request.size}, {env, hooks, client});
+    const loaded = paths.authMode === 'anonymous-public'
+      ? await loadLockedTarget({...paths, env, hooks})
+      : await loadLockedTargetAndSecret({...paths, env, hooks});
+    const cos = paths.authMode === 'anonymous-public'
+      ? {options: {Protocol: isTestMode(env) && loaded.target.domain ? 'http:' : 'https:'}}
+      : (cosFactory || createLockedCos)(loaded.target, loaded.secret);
+    await verifyRemoteObject(cos, loaded.target, {rel: request.rel, digest: request.digest, size: request.size}, {
+      env, hooks, client, authMode: paths.authMode,
+    });
     out.write('remote-ok ' + request.digest + ' ' + request.size + '\n');
     return {code: EXIT_OK, ok: true, mode: 'verify'};
   } catch (error) {

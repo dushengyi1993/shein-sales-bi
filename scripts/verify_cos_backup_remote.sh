@@ -26,7 +26,10 @@ resolve_credential_path() {
   printf -v "$var_name" '%s' "$value"
   export "$var_name=$value"
 }
-resolve_credential_path SHEIN_BI_COS_VERIFY_SECRET_FILE shein-bi-cos-verify-secret
+AUTH_MODE="${SHEIN_BI_COS_VERIFY_AUTH_MODE:-signed}"
+if [[ "$AUTH_MODE" == "signed" ]]; then
+  resolve_credential_path SHEIN_BI_COS_VERIFY_SECRET_FILE shein-bi-cos-verify-secret
+fi
 resolve_credential_path SHEIN_BI_COS_VERIFY_TARGET_FILE shein-bi-cos-verify-target
 resolve_credential_path SHEIN_BI_COS_VERIFY_TARGET_SHA_FILE shein-bi-cos-verify-target-sha
 

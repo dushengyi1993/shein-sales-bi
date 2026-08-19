@@ -831,6 +831,42 @@ function expectConfigError(fn, code) {
     assert.equal(noPathsOut.text(), '');
     assert.match(noPathsErr.text(), /code=COS_CREDENTIAL_PATH_MISSING/);
 
+    // Anonymous-public mode needs only the hash-locked target and must send
+    // no Authorization header. It remains HTTPS-only in production; the
+    // explicit test mode permits this loopback HTTP fixture.
+    const anonymousRequests = [];
+    const anonymousServer = http.createServer((req2, res) => {
+      anonymousRequests.push({authorization: req2.headers.authorization, token: req2.headers['x-cos-security-token']});
+      const body = Buffer.from('anonymous public object');
+      res.writeHead(200, {'content-length': String(body.length)});
+      res.end(body);
+    });
+    await new Promise((resolve) => anonymousServer.listen(0, '127.0.0.1', resolve));
+    const anonymousPort = anonymousServer.address().port;
+    const anonymousTarget = makeTarget({domain: '127.0.0.1:' + anonymousPort, requestTimeoutMs: 2000});
+    writeTargetFiles(root, anonymousTarget);
+    const anonymousBody = Buffer.from('anonymous public object');
+    const anonymousOut = captureStream();
+    const anonymousErr = captureStream();
+    result = await runMain({
+      argv: ['2026-08-17/public.tar', sha256(anonymousBody), String(anonymousBody.length)],
+      env: {
+        ...process.env,
+        ...files,
+        SHEIN_BI_COS_VERIFY_AUTH_MODE: 'anonymous-public',
+        SHEIN_BI_COS_VERIFY_SECRET_FILE: '',
+      },
+      out: anonymousOut.stream,
+      err: anonymousErr.stream,
+    });
+    assert.equal(result.code, EXIT_OK, anonymousErr.text());
+    assert.equal(anonymousRequests.length, 1);
+    assert.equal(anonymousRequests[0].authorization, undefined);
+    assert.equal(anonymousRequests[0].token, undefined);
+    anonymousServer.closeAllConnections();
+    anonymousServer.close();
+    writeTargetFiles(root, target);
+
     // check-config success and failure
     const checkOut = captureStream();
     const checkErr = captureStream();

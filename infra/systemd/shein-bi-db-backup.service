@@ -25,9 +25,9 @@ Environment=SHEIN_BI_BROWSER_PROFILE_ROOT=/data/shein-bi/profiles
 Environment=SHEIN_BI_BROWSER_SESSION_ROOT=/data/shein-bi/state/shein_webapi_sessions
 Environment=SHEIN_BI_BROWSER_STATE_LIMIT_TOTAL_BYTES=8g
 Environment=SHEIN_BI_REMOTE_VERIFY_CMD=/opt/shein-bi/app/scripts/verify_cos_backup_remote.sh
-LoadCredential=shein-bi-cos-verify-secret:/srv/shein-bi/secrets/shein-bi-cos-verify.secret
-LoadCredential=shein-bi-cos-verify-target:/srv/shein-bi/secrets/shein-bi-cos-verify-target.json
-LoadCredential=shein-bi-cos-verify-target-sha:/srv/shein-bi/secrets/shein-bi-cos-verify-target.sha256
+Environment=SHEIN_BI_COS_VERIFY_AUTH_MODE=anonymous-public
+LoadCredential=shein-bi-cos-verify-target:/opt/shein-bi/app/config/cos_backup_remote_target.json
+LoadCredential=shein-bi-cos-verify-target-sha:/opt/shein-bi/app/config/cos_backup_remote_target.sha256
 TimeoutStartSec=10800
 Nice=19
 IOSchedulingClass=best-effort

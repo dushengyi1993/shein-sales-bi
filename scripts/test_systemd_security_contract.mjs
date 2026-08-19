@@ -244,13 +244,15 @@ assert.match(dbBackup, /^Wants=.*network-online\.target/m, 'backup must order ne
 assert.match(property(dbBackup, 'After'), /network-online\.target/, 'network-online.target must be an After dependency');
 assert.match(dbBackup, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=\/opt\/shein-bi\/app\/scripts\/verify_cos_backup_remote\.sh/,
   'the production unit must wire the repository verifier launcher');
-assert.equal((dbBackup.match(/^LoadCredential=/gm) || []).length, 3,
-  'exactly three LoadCredential entries are required for the verifier');
-assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-secret:.*$/m, 'verifier secret credential is injected by systemd');
+assert.match(dbBackup, /^Environment=SHEIN_BI_COS_VERIFY_AUTH_MODE=anonymous-public$/m,
+  'the public COS mount must use the explicit no-secret verifier mode');
+assert.equal((dbBackup.match(/^LoadCredential=/gm) || []).length, 2,
+  'anonymous verification needs exactly the locked target and its hash');
+assert.doesNotMatch(dbBackup, /^LoadCredential=shein-bi-cos-verify-secret:.*$/m, 'anonymous mode must not require a nonexistent signing secret');
 assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-target:.*$/m, 'verifier target credential is injected by systemd');
 assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-target-sha:.*$/m, 'verifier target SHA lock credential is injected by systemd');
-assert.doesNotMatch(dbBackup, /^Environment=.*SHEIN_BI_COS_VERIFY_/m,
-  'credential VALUES must never enter the unit environment; only paths in the launcher');
+assert.doesNotMatch(dbBackup, /^Environment=.*SHEIN_BI_COS_VERIFY_(SECRET|TARGET)/m,
+  'credential values and paths must never enter the unit environment');
 assert.doesNotMatch(dbBackup, /^Environment=.*(SECRET|TOKEN|KEY)=.*/i,
   'no secret-looking Environment assignment may exist in the backup unit');
 assert.match(dbBackup, /ExecStartPre=.*verify_cos_backup_remote\.sh --check-config/,
