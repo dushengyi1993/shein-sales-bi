@@ -28,10 +28,12 @@ if [[ "$SCHEDULED_ENTRY" != "1" ]]; then
   echo "[portal-section-worker] defer reason=unscheduled_direct_entry; use shein-bi-cloud-portal-section-queue.service" >&2
   exit 75
 fi
-if [[ "$START_HOUR" =~ ^(01|06|08)$ ]] || ! ((
-  (10#$START_MINUTE >= 13 && 10#$START_MINUTE <= 16)
-  || (10#$START_MINUTE >= 43 && 10#$START_MINUTE <= 46)
-)); then
+SAFE_START=0
+case "$START_HOUR:$START_MINUTE" in
+  01:*|06:4[3-6]) ;;
+  *:1[3-6]|*:4[3-6]) SAFE_START=1 ;;
+esac
+if (( SAFE_START == 0 )); then
   echo "[portal-section-worker] defer reason=outside_safe_start_window hour=$START_HOUR minute=$START_MINUTE" >&2
   exit 75
 fi

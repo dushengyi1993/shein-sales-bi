@@ -52,6 +52,7 @@
 - `browser-read`：全机最多2个不同 Profile。第2槽仅在 `MemAvailable >= 4GiB` 且负载/PSI门禁通过时准入。
 - `browser-write`：全机1个，排他；事务中不中杀，店铺终态后才释放。
 - `db-projection`：全机1个，只覆盖最终成本/利润/Portal投影阶段。
+- Portal section 队列的静态起跑门由 systemd unit 与 worker 保持一致：仅允许 timer `:14/:44` 对应的 `:13–16` / `:43–46` 窗口；`01` 整小时拒绝，`06:43–46` 后半槽拒绝，`08` 不做静态禁跑。08 时若晨链正在运行，仍由既有 slot wrapper 动态 guard 让路；timer、锁、section 优先级与 deadline 不因该静态门改变。
 - `io-heavy`：全机1个，备份、恢复测试、大归档不与大物化并行。
 - coordinator 按阶段拿取并释放令牌，禁止在HTTP等待、平台未ready或整个多店循环期间长期占有不需要的重令牌。
 - 登录态 coordinator 每次重试都重新取得共享 lane，让路全托优先级；正常 timer run 只传 `--deadline-at 01:27`，受控 catch-up 显式传未来 epoch 时只传 `--deadline-epoch`，不得叠加 stale clock deadline。

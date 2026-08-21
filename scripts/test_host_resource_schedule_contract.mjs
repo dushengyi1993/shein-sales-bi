@@ -347,6 +347,15 @@ assert.match(unit('shein-bi-cloud-portal-section-queue.timer'), /^\s*OnCalendar=
 const portalQueueUnit = unit('shein-bi-cloud-portal-section-queue.service');
 const portalQueueWorker = read('scripts/cloud_portal_section_queue_worker.sh');
 const portalQueueSlot = read('scripts/run_cloud_portal_section_queue_slot.sh');
+const portalQueueConditionMatch = portalQueueUnit.match(
+  /^ExecCondition=\/usr\/bin\/bash -c '(.+)'$/m,
+);
+assert.ok(portalQueueConditionMatch, 'Portal queue unit must expose a parseable static schedule condition');
+assert.match(portalQueueUnit, /date \+%%H/,
+  'Portal queue unit must preserve systemd escaping for the hour format');
+assert.match(portalQueueUnit, /date \+%%M/,
+  'Portal queue unit must preserve systemd escaping for the minute format');
+const portalQueueCondition = portalQueueConditionMatch[1].replaceAll('%%', '%');
 assert.match(portalQueueUnit, /run_cloud_portal_section_queue_slot\.sh/);
 assert.doesNotMatch(portalQueueUnit, /--deadline-next-hour/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=17/);
@@ -384,12 +393,110 @@ const toPosixPath = value => {
     : normalized;
 };
 
+assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
+assert.match(portalQueueWorker, /01:\*\|06:4\[3-6\]\)/,
+  'the worker must keep 01 blocked and only block the 06:43-46 half-slot');
+assert.match(portalQueueWorker, /\*:1\[3-6\]\|\*:4\[3-6\]\) SAFE_START=1/,
+  'the worker must allow all other :13-16/:43-46 slots, including 08:14');
+
 // Execute the actual slot script with deterministic date/systemctl/host-wrapper
 // stubs. This catches a guard that is only present in an unused function, a
 // missing ET hour, and an active-path defer that happens after host execution.
 const bashProbe = spawnSync('bash', ['--version'], {encoding: 'utf8'});
 assert.equal(bashProbe.error, undefined,
   'slot behavior contract requires bash to execute the shell entrypoint');
+
+// Execute both static schedule gates with deterministic date/queue stubs. The
+// worker must reach its queue-empty path only for the same cases accepted by
+// the unit condition; no cloud or Portal process is contacted here.
+const portalScheduleBehaviorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-schedule-behavior-'));
+try {
+  const portalScheduleBin = path.join(portalScheduleBehaviorRoot, 'bin');
+  const portalScheduleLib = path.join(portalScheduleBehaviorRoot, 'scripts', 'lib');
+  const portalScheduleDate = path.join(portalScheduleBin, 'date');
+  const portalScheduleNode = path.join(portalScheduleBin, 'node');
+  const portalScheduleFlock = path.join(portalScheduleBin, 'flock');
+  const portalScheduleWorker = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cloud_portal_section_queue_worker.sh');
+  const portalScheduleLock = path.join(portalScheduleBehaviorRoot, 'state', 'locks', 'portal.lock');
+  fs.mkdirSync(portalScheduleLib, {recursive: true});
+  fs.mkdirSync(portalScheduleBin, {recursive: true});
+  fs.writeFileSync(portalScheduleDate, `#!/usr/bin/env bash
+set -Eeuo pipefail
+case "\${1:-}" in
+  +%H) printf '%s\\n' "\${SHEIN_TEST_SCHEDULE_HOUR:?}" ;;
+  +%M) printf '%s\\n' "\${SHEIN_TEST_SCHEDULE_MINUTE:?}" ;;
+  +%s) printf '0\\n' ;;
+  +%Y-%m-%dT%H) printf '2026-08-22T%s\\n' "\${SHEIN_TEST_SCHEDULE_HOUR:?}" ;;
+  -d) printf '9999\\n' ;;
+  *) exit 64 ;;
+esac
+`);
+  fs.writeFileSync(path.join(portalScheduleLib, 'shared_lock.sh'), `#!/usr/bin/env bash
+prepare_shared_lock_file() {
+  mkdir -p "$(dirname "$1")"
+  : > "$1"
+}
+`);
+  fs.writeFileSync(portalScheduleNode, `#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "\${1:-}" == scripts/manage_bi_portal_section_queue.mjs ]] || exit 64
+printf '%s\\n' '{"counts":{"pending":0}}'
+exit 75
+`);
+  fs.writeFileSync(portalScheduleFlock, '#!/usr/bin/env bash\nexit 0\n');
+
+  const spawnScheduleProcess = (hour, minute, body) => spawnSync('bash', ['-c', [
+    'set -Eeuo pipefail',
+    `chmod +x ${shellQuote(toPosixPath(portalScheduleDate))} ${shellQuote(toPosixPath(portalScheduleNode))} ${shellQuote(toPosixPath(portalScheduleFlock))}`,
+    `export PATH=${shellQuote(toPosixPath(portalScheduleBin))}:"$PATH"`,
+    'hash -r',
+    `export SHEIN_TEST_SCHEDULE_HOUR=${shellQuote(hour)}`,
+    `export SHEIN_TEST_SCHEDULE_MINUTE=${shellQuote(minute)}`,
+    `export SHEIN_BI_ROOT=${shellQuote(toPosixPath(portalScheduleBehaviorRoot))}`,
+    `export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1`,
+    `export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE=27`,
+    `export SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS=1`,
+    `export SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE=${shellQuote(toPosixPath(portalScheduleLock))}`,
+    body,
+  ].join('; ')], {
+    cwd: path.dirname(portalScheduleWorker),
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+
+  const runPortalScheduleCase = ({label, hour, minute, expectedUnitExit, expectedWorkerExit}) => {
+    const unitConditionForCase = portalQueueCondition
+      .replace('$(date +%H)', hour)
+      .replace('$(date +%M)', minute);
+    const unitResult = spawnScheduleProcess(hour, minute,
+      `eval ${shellQuote(unitConditionForCase)}`);
+    assert.equal(unitResult.error, undefined, `${label}: unit condition failed to start`);
+    assert.equal(unitResult.status, expectedUnitExit,
+      `${label}: unexpected unit condition exit=${unitResult.status} condition=${portalQueueCondition} stdout=${unitResult.stdout} stderr=${unitResult.stderr}`);
+
+    const workerResult = spawnScheduleProcess(hour, minute,
+      `exec bash ${shellQuote(toPosixPath(portalScheduleWorker))}`);
+    assert.equal(workerResult.error, undefined, `${label}: worker failed to start`);
+    assert.equal(workerResult.status, expectedWorkerExit,
+      `${label}: unexpected worker exit=${workerResult.status} stdout=${workerResult.stdout} stderr=${workerResult.stderr}`);
+  };
+
+  runPortalScheduleCase({
+    label: '06:14 allowed', hour: '06', minute: '14', expectedUnitExit: 0, expectedWorkerExit: 0,
+  });
+  runPortalScheduleCase({
+    label: '06:44 rejected', hour: '06', minute: '44', expectedUnitExit: 1, expectedWorkerExit: 75,
+  });
+  runPortalScheduleCase({
+    label: '08:14 static gate allowed', hour: '08', minute: '14', expectedUnitExit: 0, expectedWorkerExit: 0,
+  });
+  runPortalScheduleCase({
+    label: '01:14 rejected', hour: '01', minute: '14', expectedUnitExit: 1, expectedWorkerExit: 75,
+  });
+} finally {
+  fs.rmSync(portalScheduleBehaviorRoot, {recursive: true, force: true});
+}
+
 const slotBehaviorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-slot-behavior-'));
 try {
 const slotBehaviorBin = path.join(slotBehaviorRoot, 'bin');
@@ -413,7 +520,7 @@ printf '%s\\n' "$*" >> "\${SHEIN_TEST_SYSTEMCTL_LOG:?}"
 if [[ "\${1:-}" != is-active || "\${2:-}" != --quiet ]]; then exit 64; fi
 case "\${3:-}" in
   shein-bi-cloud-rtv-verify.timer) [[ "\${SHEIN_TEST_RTV_ACTIVE:-0}" == 1 ]] ;;
-  shein-bi-cloud-morning-chain.service) exit 1 ;;
+  shein-bi-cloud-morning-chain.service) [[ "\${SHEIN_TEST_MORNING_ACTIVE:-0}" == 1 ]] ;;
   *) exit 1 ;;
 esac
 `);
@@ -430,7 +537,20 @@ set -Eeuo pipefail
 } > "\${SHEIN_TEST_HOST_LOG:?}"
 `);
 
-const runSlotBehaviorCase = ({label, hour, minute, rtvActive, expectedExit, expectedHost, expectedDeadline, expectedMax, expectRtvCheck, expectRtvDefer = false}) => {
+const runSlotBehaviorCase = ({
+  label,
+  hour,
+  minute,
+  rtvActive,
+  morningActive = false,
+  expectedExit,
+  expectedHost,
+  expectedDeadline,
+  expectedMax,
+  expectRtvCheck,
+  expectRtvDefer = false,
+  expectMorningDefer = false,
+}) => {
   fs.rmSync(slotBehaviorHostLog, {force: true});
   fs.writeFileSync(slotBehaviorSystemctlLog, '');
   const command = [
@@ -441,6 +561,7 @@ const runSlotBehaviorCase = ({label, hour, minute, rtvActive, expectedExit, expe
     `export SHEIN_TEST_SLOT_HOUR=${shellQuote(hour)}`,
     `export SHEIN_TEST_SLOT_MINUTE=${shellQuote(minute)}`,
     `export SHEIN_TEST_RTV_ACTIVE=${shellQuote(rtvActive ? 1 : 0)}`,
+    `export SHEIN_TEST_MORNING_ACTIVE=${shellQuote(morningActive ? 1 : 0)}`,
     `export SHEIN_TEST_HOST_LOG=${shellQuote(toPosixPath(slotBehaviorHostLog))}`,
     `export SHEIN_TEST_SYSTEMCTL_LOG=${shellQuote(toPosixPath(slotBehaviorSystemctlLog))}`,
     `exec bash ${shellQuote(toPosixPath(slotScript))}`,
@@ -481,11 +602,26 @@ const runSlotBehaviorCase = ({label, hour, minute, rtvActive, expectedExit, expe
     assert.doesNotMatch(output, /defer reason=rtv_verify_timer_active/,
       `${label}: inactive/non-04 slot must not produce the RTV defer reason`);
   }
+  if (expectMorningDefer) {
+    assert.match(result.stderr, /defer reason=daily_operating_refresh_active/,
+      `${label}: active morning chain must produce the recognizable defer reason`);
+  } else {
+    assert.doesNotMatch(output, /defer reason=daily_operating_refresh_active/,
+      `${label}: inactive morning chain must not produce the morning defer reason`);
+  }
 };
 
   runSlotBehaviorCase({
     label: '04:14 ET hour', hour: 4, minute: 14, rtvActive: false,
     expectedExit: 0, expectedHost: true, expectedDeadline: 17, expectedMax: 1, expectRtvCheck: false,
+  });
+  runSlotBehaviorCase({
+    label: '08:14 morning active', hour: 8, minute: 14, rtvActive: false, morningActive: true,
+    expectedExit: 75, expectedHost: false, expectRtvCheck: false, expectMorningDefer: true,
+  });
+  runSlotBehaviorCase({
+    label: '08:14 morning inactive', hour: 8, minute: 14, rtvActive: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 2, expectRtvCheck: false,
   });
   runSlotBehaviorCase({
     label: '04:44 RTV active', hour: 4, minute: 44, rtvActive: true,
@@ -508,8 +644,9 @@ const runSlotBehaviorCase = ({label, hour, minute, rtvActive, expectedExit, expe
 }
 
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
-assert.match(portalQueueWorker, /10#\$START_MINUTE >= 13/);
-assert.match(portalQueueWorker, /10#\$START_MINUTE >= 43/);
+assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
+assert.match(portalQueueWorker, /01:\*\|06:4\[3-6\]\)/);
+assert.match(portalQueueWorker, /\*:1\[3-6\]\|\*:4\[3-6\]\) SAFE_START=1/);
 assert.match(portalQueueWorker, /outside_safe_start_window/);
 assert.match(portalQueueWorker, /stop before next core lane/);
 
