@@ -1159,8 +1159,11 @@ assert.match(source, /SHEIN_BI_CORE_WARMUP_QUEUE_OWNED \|\| ''\)\.trim\(\)\.toLo
 assert.match(source, /\[\'1\', \'true\', \'yes\', \'on\'\]\.includes\(raw\)\) return true;/,
   'explicit true values must enable queue ownership');
 assert.match(source,
-  /const sections = configuredBiPortalCoreWarmupSections\(\);[\s\S]*if \(BI_CORE_WARMUP_QUEUE_OWNED\) \{[\s\S]*const warmupIdempotencyKey = biPortalCoreWarmupIdempotencyKey\(generatedAt\);[\s\S]*persistHostLockedBiSectionPlan\(plan, generatedAt, \{\s*reason: biPortalCoreWarmupReason\(generatedAt\),\s*idempotencyKey: warmupIdempotencyKey,/,
-  'queue-owned scheduling must enqueue with the deterministic core-warmup idempotency key');
+  /const sections = configuredBiPortalCoreWarmupSections\(\);[\s\S]*if \(BI_CORE_WARMUP_QUEUE_OWNED\) \{[\s\S]*const warmupIdempotencyKey = biPortalCoreWarmupIdempotencyKey\(generatedAt\);[\s\S]*persistHostLockedBiSectionPlan\(plan, generatedAt, \{\s*reason: biPortalCoreWarmupReason\(generatedAt\),\s*idempotencyKey: warmupIdempotencyKey,\s*coalesceKey: biPortalGenerationCoalesceKey\(generatedAt\),/,
+  'queue-owned scheduling must enqueue with the deterministic core-warmup identity and shared generation coalesce group');
+assert.match(source,
+  /persistHostLockedBiSectionPlan\(\s*sections\.map\(section => \(\{section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY\}\)\),\s*generatedAt,\s*\{\s*reason: biPortalCoreWarmupReason\(generatedAt\),\s*idempotencyKey: warmupIdempotencyKey,\s*coalesceKey: biPortalGenerationCoalesceKey\(generatedAt\),\s*requeueCompletedSections: terminal\.invalid,/,
+  'queue-owned terminal repair must preserve the shared generation coalesce group');
 assert.match(source,
   /function biPortalCoreWarmupIdempotencyKey\(generatedAt\) \{[\s\S]*if \(\/\^\[A-Za-z0-9._:-\]\{1,64\}\$\/\.test\(raw\)\) return `core-warmup:\$\{raw\}`;[\s\S]*createHash\('sha256'\)\.update\(raw\)\.digest\('hex'\)[\s\S]*return `core-warmup:sha256:\$\{digest\}`;/,
   'the key helper must preserve safe synthetic tokens and digest any other generation under a distinct sha256 domain label');

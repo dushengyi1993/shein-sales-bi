@@ -13944,6 +13944,7 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       const enqueueRun = persistHostLockedBiSectionPlan(plan, generatedAt, {
         reason: biPortalCoreWarmupReason(generatedAt),
         idempotencyKey: warmupIdempotencyKey,
+        coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
       }).finally(() => {
         if (biPortalCoreWarmupState.inFlight === enqueueRun) biPortalCoreWarmupState.inFlight = null;
       });
@@ -14009,6 +14010,7 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
           {
             reason: biPortalCoreWarmupReason(generatedAt),
             idempotencyKey: warmupIdempotencyKey,
+            coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
             requeueCompletedSections: terminal.invalid,
           },
         );
