@@ -159,6 +159,21 @@ const executedAfterMidnight = reevaluateBiLiveAccountingRefreshEvent(
 assert.equal(executedAfterMidnight.refreshHistoricalSections, true,
   'a debounce that crosses midnight must upgrade the prior-day mutation to sticky historical scope');
 assert.deepEqual(liveAccountingQueuePlan(executedAfterMidnight), liveAccountingQueuePlan({kind: 'return'}));
+const afterMidnightOrder = {
+  kind: 'order',
+  businessDate: '2026-08-22',
+  occurredAt: '2026-08-22T00:00:09+08:00',
+  receivedAt: '2026-08-22T00:00:10+08:00',
+};
+const crossMidnightBurst = mergeBiLiveAccountingRefreshEvent(
+  beforeMidnight,
+  afterMidnightOrder,
+  new Date('2026-08-22T00:00:10+08:00'),
+);
+assert.equal(crossMidnightBurst.refreshHistoricalSections, true,
+  'a post-midnight order joining the debounce burst must make the pre-midnight pending order sticky historical');
+assert.equal(crossMidnightBurst.accountingEventIdentities.length, 2);
+assert.deepEqual(liveAccountingQueuePlan(crossMidnightBurst), liveAccountingQueuePlan({kind: 'return'}));
 assert.equal(cancelled.cancelledBeforePickup, true);
 
 const bridge = createBiLiveUpdateBridge({

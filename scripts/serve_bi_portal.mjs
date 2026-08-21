@@ -448,7 +448,7 @@ export function mergeBiLiveAccountingRefreshEvent(current, event, now = new Date
   const eventNeedsHistoricalRefresh = evaluatedEvent?.kind === 'return'
     || (evaluatedEvent?.kind === 'order' && !isOrdinaryCurrentDayAccountingEvent(evaluatedEvent, evaluatedEvent.receivedAt));
   const currentNeedsHistoricalRefresh = current?.kind === 'return'
-    || (current?.kind === 'order' && !isOrdinaryCurrentDayAccountingEvent(current, current?.receivedAt || now));
+    || (current?.kind === 'order' && !isOrdinaryCurrentDayAccountingEvent(current, now));
   const accountingEventIdentities = [...new Set([
     ...(Array.isArray(current?.accountingEventIdentities)
       ? current.accountingEventIdentities
