@@ -707,9 +707,13 @@ async function findPublishPayload(task) {
 function exactCopySourceLock(task) {
   const intents = asArray(task?.intents).map(value => String(value || '').trim());
   if (!intents.includes('copy_product_draft')) return null;
-  const sourceStore = normalizeStoreKey(asArray(task?.targets?.sourceStores)[0] || '');
-  const sourceSkc = safeString(task?.targets?.sourceSkc || '', 120);
-  return sourceStore && sourceSkc ? {sourceStore, sourceSkc} : null;
+  const sourceStores = task?.targets?.sourceStores;
+  if (!Array.isArray(sourceStores) || sourceStores.length !== 1) return null;
+  const sourceStore = normalizeStoreKey(sourceStores[0]);
+  const sourceSkc = task?.targets?.sourceSkc;
+  if (!sourceStore) return null;
+  if (typeof sourceSkc !== 'string' || !/^s[avb]\d{8,}$/.test(sourceSkc)) return null;
+  return {sourceStore, sourceSkc};
 }
 
 function exactSourcePayloadReadiness(generated, source) {
@@ -1111,14 +1115,11 @@ async function buildExactSourceLockedPayload(task, {targetStore, source, existin
 }
 
 export async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
-  const exactSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
-  const exactSourceStore = exactSourceStores.length === 1 ? exactSourceStores[0] : '';
-  const exactSourceSkc = safeString(task?.targets?.sourceSkc || '', 120);
-  const hasExactSourceLock = Boolean(exactSourceStore && exactSourceSkc);
-  const taskExactSource = hasExactSourceLock ? {sourceStore: exactSourceStore, sourceSkc: exactSourceSkc} : null;
+  const taskExactSource = exactCopySourceLock(task);
+  const hasExactSourceLock = Boolean(taskExactSource);
 
   const existing = await findPublishPayload(task);
-  const exactSource = exactCopySourceLock(task);
+  const exactSource = taskExactSource;
   if (exactSource) {
     if (taskHasUnboundImageAssets(task) && !task?.publishAssetBinding) {
       return {
@@ -3035,9 +3036,38 @@ function summarizeProductAttributes(productAttributeList, templateById) {
   }).filter(row => row.attributeId);
 }
 
+function exactSourceRequiresHazardTemplateDerivation(payload, sourceContext = {}) {
+  if (sourceContext?.copyProductDraft !== true || sourceContext?.exactSourceLock !== true) return false;
+  const list = asArray(payload?.product_attribute_list || payload?.productAttributeList)
+    .filter(row => row && typeof row === 'object');
+  const hazardRows = list.filter(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === HAZARD_CATEGORY_ATTRIBUTE_ID);
+  const classificationRows = list.filter(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID);
+  return hazardRows.length === 1
+    && normalizeAttributeId(hazardRows[0]?.attribute_value_id ?? hazardRows[0]?.attributeValueId) === HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID
+    && !classificationRows.some(payloadAttributeHasValue);
+}
+
+function shouldIssuePublishOrEdit(mode, readyForSubmit) {
+  return mode === 'execute' && readyForSubmit === true;
+}
+
+function hazardousMaterialsTemplateBlocker(reason) {
+  return `精确源商品已标记 Hazard Category(${HAZARD_CATEGORY_ATTRIBUTE_ID})=${HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID} 且缺少 Hazardous materials classification(${HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID})；${reason}，无法按官方模板确定性补值，禁止发布。`;
+}
+
 async function applyAttributeTemplateRules(client, payload, sourceContext = {}) {
+  const requiresHazardTemplateDerivation = exactSourceRequiresHazardTemplateDerivation(payload, sourceContext);
   const productTypeId = payloadProductTypeId(payload);
-  if (!productTypeId) return {payload, applied: [], warnings: [], blockers: [], evidence: {status: 'skipped_missing_product_type_id'}, call: null};
+  if (!productTypeId) return {
+    payload,
+    applied: [],
+    warnings: [],
+    blockers: requiresHazardTemplateDerivation
+      ? [hazardousMaterialsTemplateBlocker('源 payload 缺少 product_type_id，不能查询官方属性模板')]
+      : [],
+    evidence: {status: 'skipped_missing_product_type_id'},
+    call: null,
+  };
   let response = null;
   try {
     response = await client.request('/open-api/goods/query-attribute-template', {
@@ -3050,7 +3080,9 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
       payload,
       applied: [],
       warnings: [`查询商品属性模板失败：${safeString(err?.message || err, 300)}`],
-      blockers: [],
+      blockers: requiresHazardTemplateDerivation
+        ? [hazardousMaterialsTemplateBlocker('官方属性模板请求异常')]
+        : [],
       evidence: {status: 'query_failed', productTypeId, error: safeString(err?.message || err, 300)},
       call: null,
     };
@@ -3068,7 +3100,9 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
       payload,
       applied: [],
       warnings: [`查询商品属性模板失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`],
-      blockers: [],
+      blockers: requiresHazardTemplateDerivation
+        ? [hazardousMaterialsTemplateBlocker('官方属性模板返回失败')]
+        : [],
       evidence,
       call,
     };
@@ -3082,6 +3116,9 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
   const applied = [];
   const blockers = [];
   const warnings = [];
+  if (requiresHazardTemplateDerivation && !byId.has(HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID)) {
+    blockers.push(hazardousMaterialsTemplateBlocker(`官方模板缺少属性 ${HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID}`));
+  }
   const powerSupplyInputVoltage = ensurePowerSupplyInputVoltage(next, list, byId);
   if (powerSupplyInputVoltage.inputVoltageRequired && !listHasFilledInputVoltage(list)) {
     // Locked owner authorization: ONLY a copy_product_draft task whose source
@@ -4836,7 +4873,7 @@ async function main() {
 
   const readyForSubmit = blockers.length === 0 && Boolean(publishPayload);
   let publishResult = null;
-  if (args.mode === 'execute' && readyForSubmit) {
+  if (shouldIssuePublishOrEdit(args.mode, readyForSubmit)) {
     const testWebhookGuard = createLoopbackTestWebhookWriteGuard({baseUrl: client.baseUrl});
     const guardedWrite = await runSheinWebhookExternalWriteGuarded({
       writeStores: [targetStore],
@@ -5021,6 +5058,9 @@ if (process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST !== '1') main().catch(err => {
 });
 
 export const __testHooks = {
+  exactCopySourceLock,
+  exactSourceRequiresHazardTemplateDerivation,
+  shouldIssuePublishOrEdit,
   applySafeDefaults,
   applyManualAttributeOverrides,
   applyAttributeTemplateRules,

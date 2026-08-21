@@ -8461,13 +8461,43 @@ function loadProductAliasContextSync() {
   }
 }
 
+function portalExactCopySourceLock(task) {
+  const intents = asArray(task?.intents).map(value => String(value || '').trim());
+  if (!intents.includes('copy_product_draft')) return null;
+  const sourceStores = task?.targets?.sourceStores;
+  if (!Array.isArray(sourceStores) || sourceStores.length !== 1) return null;
+  const sourceStore = String(sourceStores[0] || '').trim().toUpperCase();
+  const sourceSkc = task?.targets?.sourceSkc;
+  if (!sourceStore) return null;
+  if (typeof sourceSkc !== 'string' || !/^s[avb]\d{8,}$/.test(sourceSkc)) return null;
+  return {sourceStore, sourceSkc};
+}
+
+function isExactSourceCopyProductDraftTask(task, payload) {
+  if (!portalExactCopySourceLock(task)) return false;
+  const unboundClassificationRows = productAttributeRowsForId(payload, 1002328);
+  const sourceHazardCategoryRows = productAttributeRowsForId(payload, 1000462);
+  const classificationValueId = normalizeProductAttributeId(unboundClassificationRows[0]?.attribute_value_id
+    ?? unboundClassificationRows[0]?.attributeValueId);
+  const hazardCategoryValueId = normalizeProductAttributeId(sourceHazardCategoryRows[0]?.attribute_value_id
+    ?? sourceHazardCategoryRows[0]?.attributeValueId);
+  return unboundClassificationRows.length === 1
+    && classificationValueId === 316914660
+    && sourceHazardCategoryRows.length === 1
+    && hazardCategoryValueId === 1006206;
+}
+
 /**
  * Execution gate for the actual copy_product_draft dry-run AND execute path.
  * Whenever a productAttributeBinding exists OR the payload carries a
  * whitelisted (donor-bound) attribute row, the persisted lock must be valid
  * and the alias/catalog registry fingerprints must match the live config;
- * otherwise both dry-run and execute are blocked. Unbound whitelisted rows
- * are treated as tampering and fail closed.
+ * otherwise both dry-run and execute are blocked. An unbound whitelisted row
+ * is allowed only for an exact-source copy whose task payload has exactly one
+ * 1002328=316914660 row and exactly one source hazard row
+ * 1000462=1006206: the executor must rebuild from the locked
+ * sourceStore/sourceSkc and apply template rules there; this gate never
+ * treats the task row as a destination protection binding.
  */
 function productAttributeExecutionGate(task) {
   const payload = task?.openapiPublishPayload;
@@ -8480,6 +8510,9 @@ function productAttributeExecutionGate(task) {
   }
   const blockers = [];
   if (!binding) {
+    if (isExactSourceCopyProductDraftTask(task, payload)) {
+      return {ok: true, active: true, blockers: [], exactSourceUnboundRowsAllowed: true};
+    }
     blockers.push({
       code: 'PRODUCT_ATTRIBUTE_UNBOUND_ROWS',
       message: 'payload 含受控白名单商品属性行但缺少 productAttributeBinding，来源不明，禁止系统检查/执行',
@@ -10819,8 +10852,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     // Whitelisted product attribute execution gate: whenever a donor-bound
     // attribute exists (productAttributeBinding or a whitelisted row), the
     // persisted lock and the live alias/catalog registry fingerprints must be
-    // valid for BOTH dry-run and execute. Unbound whitelisted rows are
-    // tampering and fail closed.
+    // valid for BOTH dry-run and execute. The only unbound-row exception is
+    // the exact-source copy path; its executor rebuilds from sourceStore /
+    // sourceSkc and does not project the task row into the destination.
     let product;
     if (hasProductPublishIntent) {
       const attributeGate = productAttributeExecutionGate(runnableTask);
@@ -21404,6 +21438,8 @@ if (IS_DIRECT_RUN) {
 }
 
 export const __testHooks = {
+  portalExactCopySourceLock,
+  productAttributeExecutionGate,
   linkOpsRepositoryHttpDetails,
   repositoryRevisionAtRequestStart,
   createLinkOpsTaskRecord,
