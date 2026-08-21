@@ -116,6 +116,7 @@ function parseArgs(argv) {
     productPrice: null,
     inventory: null,
     inputCurrentMa: null,
+    titleGroup: '',
     titleAr: '',
     titleEn: '',
     outputFile: '',
@@ -215,6 +216,7 @@ function parseArgs(argv) {
     else if (a === '--product-price' || a === '--sale-price' || a === '--shop-price') args.productPrice = Number(argv[++i]);
     else if (a === '--inventory' || a === '--stock-qty') args.inventory = Number(argv[++i]);
     else if (a === '--input-current-ma') args.inputCurrentMa = Number(argv[++i]);
+    else if (a === '--title-group') args.titleGroup = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--title-ar') args.titleAr = String(argv[++i] || '').trim();
     else if (a === '--title-en') args.titleEn = String(argv[++i] || '').trim();
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
@@ -1205,7 +1207,10 @@ function publishPreparationFromArgs(args) {
   }
   const categoryId = String(args.categoryId || '').trim();
   if (categoryId && (!/^\d+$/.test(categoryId) || Number(categoryId) <= 0)) throw new Error('--category-id must be a positive integer');
+  const titleGroup = String(args.titleGroup || '').trim().toLowerCase();
+  if (titleGroup && !/^title[123]$/.test(titleGroup)) throw new Error('--title-group must be title1, title2 or title3');
   return {
+    titleGroup,
     standardGoodsSn: args.standardGoodsSn || '',
     supplierSku: args.supplierSkuList[0] || '',
     supplyPrice: args.supplyPrice,

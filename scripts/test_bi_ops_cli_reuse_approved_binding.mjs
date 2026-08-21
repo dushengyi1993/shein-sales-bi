@@ -128,6 +128,7 @@ async function run() {
   }, null, 2), 'utf8');
 
   const publishPreparation = {
+    titleGroup: '',
     standardGoodsSn: '',
     supplierSku: '',
     supplyPrice: 210,

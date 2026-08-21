@@ -9972,6 +9972,25 @@ function persistedPublishPreparationLock(publishPreparation = {}) {
   return JSON.parse(JSON.stringify(normalized));
 }
 
+function invalidateDependentPublishLocksForPreparationMigration(task) {
+  const next = JSON.parse(JSON.stringify(task || {}));
+  const payload = next.openapiPublishPayload && typeof next.openapiPublishPayload === 'object'
+    && !Array.isArray(next.openapiPublishPayload)
+    ? next.openapiPublishPayload
+    : null;
+  if (payload) {
+    delete payload.multi_language_desc_list;
+    delete payload.multiLanguageDescList;
+    delete payload.productMultiDescList;
+    delete payload.product_multi_desc_list;
+  }
+  const invalidatedDescriptionBinding = Boolean(next.descriptionMaterialBinding);
+  const invalidatedProductAttributeBinding = Boolean(next.productAttributeBinding);
+  delete next.descriptionMaterialBinding;
+  delete next.productAttributeBinding;
+  return {task: next, invalidatedDescriptionBinding, invalidatedProductAttributeBinding};
+}
+
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
   if (!task || typeof task !== 'object') throw new Error('Task not found');
   if (taskRequiresOwnerLifecycleResolve(task)) {
@@ -10125,14 +10144,18 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   if (!intents.includes('copy_product_draft')) {
     throw new Error('Approved image binding supports copy_product_draft or a standalone update_images task only');
   }
-  let publishPreparation = normalizePublishPreparationOverrides(body.publishPreparation || body);
+  let publishPreparation = {
+    ...normalizePublishPreparationOverrides(body.publishPreparation || body),
+    targetStore,
+  };
   if (isReuse) {
     publishPreparation = sparseMergePublishPreparation(
       task?.publishPreparation || task?.targets?.publishPreparation || {},
       publishPreparation,
     );
+    publishPreparation.targetStore = targetStore;
   }
-  const taskForCapture = {
+  let taskForCapture = {
     ...task,
     status: String(task.status || '') === 'draft' ? 'confirmed' : task.status,
     targets: {
@@ -10150,20 +10173,33 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       ? {publishAssetBinding: {...task.publishAssetBinding, publishPreparation}}
       : {}),
   };
-  let captureTask = {
+  if (isReuse && Object.keys(publishPreparation.titles || {}).length && taskForCapture.openapiPublishPayload) {
+    const replaced = replaceExplicitPublishPreparationTitlesInCapturePayload(
+      taskForCapture.openapiPublishPayload,
+      publishPreparation,
+    );
+    taskForCapture = {...taskForCapture, openapiPublishPayload: replaced.payload};
+  }
+  const priorBindingPreparation = task?.publishAssetBinding?.publishPreparation;
+  const requiresPreparationMigration = isReuse && (
+    !priorBindingPreparation
+    || sha256StableJson(normalizePublishPreparationOverrides(priorBindingPreparation)) !== sha256StableJson(publishPreparation)
+  );
+  let invalidatedDescriptionBinding = false;
+  let invalidatedProductAttributeBinding = false;
+  if (requiresPreparationMigration) {
+    const invalidated = invalidateDependentPublishLocksForPreparationMigration(taskForCapture);
+    taskForCapture = invalidated.task;
+    invalidatedDescriptionBinding = invalidated.invalidatedDescriptionBinding;
+    invalidatedProductAttributeBinding = invalidated.invalidatedProductAttributeBinding;
+  }
+  const captureTask = {
     ...taskForCapture,
     // The reviewed bindings below replace every publish image. Raw image assets
     // attached to the task must not make the base-payload capture fall back to
     // source images or block this explicit same-task preparation step.
     assets: asArray(taskForCapture.assets).filter(asset => !String(asset?.mime || asset?.type || '').toLowerCase().startsWith('image/')),
   };
-  if (isReuse && Object.keys(publishPreparation.titles || {}).length && taskForCapture.openapiPublishPayload) {
-    const replaced = replaceExplicitPublishPreparationTitlesInCapturePayload(
-      taskForCapture.openapiPublishPayload,
-      publishPreparation,
-    );
-    captureTask = {...captureTask, openapiPublishPayload: replaced.payload};
-  }
   const captured = await runOpenApiProductExecutorForStore(
     captureTask,
     args,
@@ -10214,7 +10250,13 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
         height: row.height,
         sha256: row.sha256,
       })),
-      evidence: {...bound.evidence, preflightInvalidated: true},
+      evidence: {
+        ...bound.evidence,
+        preflightInvalidated: true,
+        preparationMigration: requiresPreparationMigration,
+        descriptionBindingInvalidated: invalidatedDescriptionBinding,
+        productAttributeBindingInvalidated: invalidatedProductAttributeBinding,
+      },
       // Persist the complete normalized destination lock.  Audit/history may
       // remain compact, but executor preflight and fingerprint validation must
       // retain the exact title values and attribute overrides.
@@ -21404,6 +21446,7 @@ export const __testHooks = {
   sparseMergePublishPreparation,
   replaceExplicitPublishPreparationTitlesInCapturePayload,
   persistedPublishPreparationLock,
+  invalidateDependentPublishLocksForPreparationMigration,
   validateReusedApprovedTaskBinding,
   readBiPortalCoreEnvelope,
   resetBiPortalCoreEnvelopeCache() {

@@ -3,6 +3,7 @@ import {__testHooks} from './serve_bi_portal.mjs';
 
 const {
   canonicalPublishAssetBindingFingerprint,
+  invalidateDependentPublishLocksForPreparationMigration,
   persistedPublishPreparationLock,
   replaceExplicitPublishPreparationTitlesInCapturePayload,
   sparseMergePublishPreparation,
@@ -126,6 +127,18 @@ check('FY Title3 replaces old English title in its existing row', fyReplaced.pay
 check('FY Title3 leaves non-target title row unchanged', fyReplaced.payload.multiLanguageNameList.find(row => row.language === 'zh-cn')?.name, 'FY old Chinese title');
 check('FY Title3 leaves protected non-title fields unchanged', JSON.stringify({category_id: fyReplaced.payload.category_id, skc_list: fyReplaced.payload.skc_list}), JSON.stringify({category_id: 123, skc_list: [{supplier_code: 'FY-SN', sku_list: [{supplier_sku: 'FY-SKU'}]}]}));
 check('FY Title3 replacement does not mutate old capture snapshot', fyCapturePayload.multiLanguageNameList.find(row => row.language === 'en')?.product_name, 'FY old English title');
+const migratedDependencies = invalidateDependentPublishLocksForPreparationMigration({
+  openapiPublishPayload: {
+    ...fyReplaced.payload,
+    multi_language_desc_list: [{language: 'en', product_desc: 'locked description'}],
+  },
+  descriptionMaterialBinding: {contentSha256: 'a'.repeat(64)},
+  productAttributeBinding: {evidenceSha256: 'b'.repeat(64)},
+});
+check('preparation migration removes bound descriptions before rebind', Object.hasOwn(migratedDependencies.task.openapiPublishPayload, 'multi_language_desc_list'), false);
+check('preparation migration removes stale description binding', Object.hasOwn(migratedDependencies.task, 'descriptionMaterialBinding'), false);
+check('preparation migration removes stale product attribute binding', Object.hasOwn(migratedDependencies.task, 'productAttributeBinding'), false);
+check('preparation migration reports both invalidated dependencies', migratedDependencies.invalidatedDescriptionBinding && migratedDependencies.invalidatedProductAttributeBinding, true);
 const fyNoExplicit = replaceExplicitPublishPreparationTitlesInCapturePayload(fyCapturePayload, {targetStore: 'FY', titleGroup: 'title3'});
 check('missing explicit FY title leaves old capture snapshot unchanged', fyNoExplicit.payload === fyCapturePayload && fyNoExplicit.replacedLanguages.length, 0);
 try {
