@@ -557,6 +557,17 @@ const exactSourceContext = {
   standardGoodsSn: 'HL-03012-SN',
   sourcePayloadSupplierCodes: ['HL-03012-SN'],
 };
+const mergedTargetIdentityPayload = {
+  ...clone(wallPlugPayload),
+  skc_list: [{supplier_code: 'TARGET-B', sale_name: 'Wall Plug'}],
+};
+check('exact source provenance uses pre-merge source identity', __testHooks.sourcePayloadSupplierCodesForProvenance({
+  exactSourceLock: true,
+  sourcePayloadSupplierCodes: ['SOURCE-A'],
+}, mergedTargetIdentityPayload), value => JSON.stringify(value) === JSON.stringify(['SOURCE-A']));
+check('exact source provenance fails closed when pre-merge identity is missing', __testHooks.sourcePayloadSupplierCodesForProvenance({
+  exactSourceLock: true,
+}, mergedTargetIdentityPayload), value => Array.isArray(value) && value.length === 0);
 // Locked owner authorization: the locked copy payload itself (exact DL
 // sourceSkc) already carries official Plug(Voltage)=220-240V, so the
 // deterministic range inference fills 1002322 without any live lookup.

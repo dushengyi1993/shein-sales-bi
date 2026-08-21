@@ -6418,6 +6418,9 @@ function projectProductExecutorHistoryEvidence(executorRun = {}) {
     sourceStore: String(executorResult.sourceStore || '').toUpperCase(),
     sourceSkc: sanitizeLinkOpsClientText(executorResult.sourceSkc || '', 120),
     payload: {
+      sourceDetailHash: /^[a-f0-9]{64}$/.test(String(executorResult.payload?.sourceDetailHash || ''))
+        ? String(executorResult.payload.sourceDetailHash)
+        : '',
       sourceDetailLock: compactSourceDetailLock(executorResult.payload?.sourceDetailLock),
     },
     payloadSummary: executorResult.payload?.summary || null,
@@ -6485,6 +6488,9 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         payloadHash: result.payload?.payloadHash || '',
         payloadHashAlgorithm: result.payload?.payloadHashAlgorithm || '',
         payload: {
+          sourceDetailHash: /^[a-f0-9]{64}$/.test(String(result.payload?.sourceDetailHash || ''))
+            ? String(result.payload.sourceDetailHash)
+            : '',
           sourceDetailLock: compactSourceDetailLock(result.payload?.sourceDetailLock),
         },
         payloadSummary: result.payload?.summary || null,

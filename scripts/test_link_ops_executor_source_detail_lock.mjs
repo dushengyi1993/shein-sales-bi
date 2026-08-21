@@ -568,6 +568,7 @@ try {
         found: true,
         payloadHash: 'a'.repeat(64),
         payloadHashAlgorithm: 'sha256-stable-json-scope-v4',
+        sourceDetailHash: 'b'.repeat(64),
         sourceDetailLock: baseLock,
       },
     },
@@ -575,6 +576,7 @@ try {
   check('portal history projection preserves scope-v4 algorithm', projectedHistoryEvidence.payloadHashAlgorithm, 'sha256-stable-json-scope-v4');
   check('portal history projection preserves exact source store', projectedHistoryEvidence.sourceStore, SOURCE_STORE);
   check('portal history projection preserves exact source SKC', projectedHistoryEvidence.sourceSkc, SOURCE_SKC);
+  check('portal history projection preserves canonical source detail hash', projectedHistoryEvidence.payload?.sourceDetailHash, 'b'.repeat(64));
   check('portal history projection preserves full source lock', projectedHistoryEvidence.payload?.sourceDetailLock, value => value?.detailFetchedAt === baseLock.detailFetchedAt
     && value?.detailContentSha256 === baseLock.detailContentSha256
     && Object.keys(value || {}).length === 5);

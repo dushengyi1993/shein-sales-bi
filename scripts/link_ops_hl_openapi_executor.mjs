@@ -1087,6 +1087,10 @@ async function buildExactSourceLockedPayload(task, {targetStore, source, existin
       generationError: `exact source detail cache drifted since preflight: expected=${expectedSourceDetailHash} actual=${currentSourceDetailHash || 'missing'}`,
     };
   }
+  // Capture source identity before any destination-owned preparation can
+  // rewrite supplier_code. Provenance guards must never treat the merged
+  // target identity as evidence about the locked source product.
+  const sourcePayloadSupplierCodes = publishTargetSupplierCodes(readiness.payload);
   const merged = mergeExactSourceDestinationBindings(readiness.payload, task, existingPayload, targetStore);
   return {
     source: 'webapi_snapshot_exact_source_lock',
@@ -1101,6 +1105,7 @@ async function buildExactSourceLockedPayload(task, {targetStore, source, existin
     destinationProjection: merged.projection.protectedFields,
     sourceDetailHash: readiness.sourceDetailHash,
     sourceDetailLock: readiness.sourceDetailLock,
+    sourcePayloadSupplierCodes,
     taskPayloadIgnored: Boolean(existingPayload),
   };
 }
@@ -2943,6 +2948,13 @@ function resolveExplicitSameProductIdentity(rawCodes) {
   };
 }
 
+function sourcePayloadSupplierCodesForProvenance(payloadFound, publishStandardPayload) {
+  if (payloadFound?.exactSourceLock === true) {
+    return [...new Set(asArray(payloadFound?.sourcePayloadSupplierCodes).map(normalizeSupplierIdentity).filter(Boolean))];
+  }
+  return publishTargetSupplierCodes(publishStandardPayload);
+}
+
 /**
  * Owner-authorized fail-closed provenance lookup: when Input voltage(1002322)
  * is required by the target template path but cannot be filled authoritatively,
@@ -4654,7 +4666,7 @@ async function main() {
     else if (liveSourceNames.call) calls.push(liveSourceNames.call);
     const publishStandardApplied = await applyPublishFillInStandardRules(client, liveSourceNames.payload);
     if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
-    const sourcePayloadSupplierCodes = publishTargetSupplierCodes(publishStandardApplied.payload);
+    const sourcePayloadSupplierCodes = sourcePayloadSupplierCodesForProvenance(payloadFound, publishStandardApplied.payload);
     const preserveExplicitSupplierSku = task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link';
     // Order contract: the target standard goods number must be applied to the
     // payload BEFORE any template/provenance transform, so the provenance guard
@@ -5012,6 +5024,7 @@ export const __testHooks = {
   applySafeDefaults,
   applyManualAttributeOverrides,
   applyAttributeTemplateRules,
+  sourcePayloadSupplierCodesForProvenance,
   inspectTargetDuplicateProducts,
   resolveLockedSourceScope,
   resolveSourceSpuByExactSkc,
