@@ -418,6 +418,20 @@ try {
   check('FY explicit prepare-publish title fills the same task lock', fyPreparedResult.payload?.multi_language_name_list?.find(row => row.language === 'en')?.name, 'FY explicit English title');
   check('FY explicit title lock is projected structurally', fyPreparedResult.destinationProjection?.titleGroup, 'title3');
 
+  const fyWithoutExplicitTitle = withTargetStore(clearStructuredTitleLocks(taskWithPayload()), 'FY');
+  fyWithoutExplicitTitle.targets.publishPreparation = {
+    targetStore: 'FY',
+    titleGroup: 'title3',
+  };
+  const fyWithoutExplicitTitleResult = await findOrBuildPublishPayload(fyWithoutExplicitTitle, {targetStore: 'FY'});
+  check('FY title group without explicit title values fails closed', fyWithoutExplicitTitleResult.payload, null);
+  check('FY title group without explicit title reports structured lock blocker', fyWithoutExplicitTitleResult.generationError, value => /title|structured|lock/i.test(String(value)));
+
+  const fyWrongStore = withTargetStore(withFullApprovedImages(fyPreparedPayload, {targetStore: 'FY'}), 'LQ');
+  const fyWrongStoreResult = await findOrBuildPublishPayload(fyWrongStore, {targetStore: 'LQ'});
+  check('FY explicit title preparation cannot be reused for another store', fyWrongStoreResult.payload, null);
+  check('FY wrong-store reuse reports destination store drift', fyWrongStoreResult.generationError, value => /store|destination/i.test(String(value)));
+
   // An old approved binding can retain an earlier preparation snapshot. Root
   // task/targets fields must not silently outrank that historical binding: the
   // portal must materialize the current explicit prepare-publish input into the

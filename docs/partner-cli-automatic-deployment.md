@@ -5,7 +5,7 @@
 - GitHub 是唯一版本事实源：代码、`config/partner_cli_package.json`、Tag、Release、资产和 CI 结果都在 GitHub 留档。
 - BI 是鉴权分发入口：普通合伙人不需要 GitHub 仓库权限，只通过已有 BI 登录态读取当前 `manifest`、`bundle` 和首次安装 ZIP。
 - `2026.07.13.1` 是最后一次必须人工安装的引导版。从该版本开始，业务命令执行前会检查 BI；发现新版后完成逐文件哈希校验、不可变目录安装、原子切换并重新执行原命令。
-- 本轮稳定化 manifest 版本为 `2026.08.17.1`。运行时 `BI_OPS_CLI_VERSION` 必须在集成时同步，且既有包测试必须证明两者相等后才能发布。
+- 本轮稳定化 manifest 版本为 `2026.08.21.1`。运行时 `BI_OPS_CLI_VERSION` 必须在集成时同步，且既有包测试必须证明两者相等后才能发布。
 - 同版本修复先在 dot staging 中完成 manifest、逐文件 SHA256 和 bundle hash 全量复验，再用同目录 rename 交换。稳定 bootstrap 与 updater 使用同一个跨进程 ticket 队列；有效死 PID 票据可在身份二次核验后立即回收，无法解析的票据只有超过 stale 窗口才删除。旧 staging/swap backup 是掉电恢复证据，只有在新的 canonical root 再次完整复验后才可清理；连续两次在 swap 前掉电也必须至少保留上一份已验证 staging。
 - 离线 bootstrap 只会启动完整验证且受 current/update-state/verified marker 锚定的版本；未锚定或损坏的 staging 永不执行。更新器在 staging、swap-away、swap-in、pointer publish 任一点被杀后，下一次启动都从保留证据确定性恢复或 fail closed。
 

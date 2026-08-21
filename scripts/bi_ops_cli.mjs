@@ -29,7 +29,11 @@ import {
   buildPrepareDescriptionsCliOutput,
   describeDescriptionMaterial,
   descriptionBindingRequestKey,
+  DESCRIPTION_SOURCE_PROOF,
+  DESCRIPTION_SOURCE_PROOF_S9,
+  DESCRIPTION_SOURCE_PROOF_DOCX,
   validateDescriptionMaterialJson,
+  verifyDescriptionMaterialAgainstDocx,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {
@@ -330,7 +334,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --supply-price 210 --inventory 100 --input-current-ma 700
-  node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
+  node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML或普通OOXML DOCX> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --adopt-existing --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --refresh-binding --task-id <copy_product_draft任务id> --store FY [--expected-revision <n>] [--expected-binding-request-key <64位sha256>]
@@ -398,7 +402,7 @@ Options:
                    prepare-publish 用；同一 copy_product_draft 任务已有服务端已审图片绑定时，仅复用该绑定并更新
                    publishPreparation（如 --input-current-ma），不扫描/读取/上传本地图片；与 --image-dir 互斥，
                    不能与 update_images 维护模式的 --source-task-id 组合
-  --source-file     prepare-descriptions 必填；实际审核资料 HTML（唯一 section#s09），工具从文件字节计算 SHA 并逐字提取三语各5行
+  --source-file     prepare-descriptions 必填；审核资料 HTML（唯一 section#s09/s9）或普通 OOXML DOCX 固定标题/卖点结构；工具从文件字节计算 SHA 并逐字提取三语各5行
   --material-json   prepare-descriptions 可选；提供时逐字核验其 ar/en/zh-cn 行与实际 section#s09 一致，任一字节不同即拒绝
   --expected-revision prepare-descriptions 用；任务当前 repository revision，可选项，绑定前做 CAS 校验
   --donor-store / --donor-skc / --attribute-id
@@ -1372,7 +1376,7 @@ async function runPreparePublish(args) {
 
 async function runPrepareDescriptions(args) {
   if (!args.taskId) throw new Error('prepare-descriptions requires --task-id <id>');
-  if (!args.sourceFile) throw new Error('prepare-descriptions requires --source-file <实际审核资料HTML>');
+  if (!args.sourceFile) throw new Error('prepare-descriptions requires --source-file <实际审核资料HTML或普通OOXML DOCX>');
   const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
   if (!store) throw new Error('prepare-descriptions requires --store <target store>');
   const section = String(args.section || 'auto').trim().toLowerCase();
@@ -1391,22 +1395,32 @@ async function runPrepareDescriptions(args) {
   } catch {
     throw new Error(`无法读取审核资料文件：${path.basename(args.sourceFile) || '(unknown)'}`);
   }
-  const htmlText = sourceBytes.toString('utf8');
+  const isDocx = /\.docx$/i.test(path.basename(args.sourceFile));
+  const htmlText = isDocx ? '' : sourceBytes.toString('utf8');
   let providedMaterial = null;
   if (args.materialJsonFile) {
     providedMaterial = JSON.parse(await fs.readFile(args.materialJsonFile, 'utf8'));
   }
-  const verified = verifyDescriptionMaterialAgainstHtml(htmlText, sourceBytes, {
-    material: providedMaterial,
-    sourceFileBasename: path.basename(args.sourceFile),
-    sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
-    section,
-  });
+  const verified = isDocx
+    ? verifyDescriptionMaterialAgainstDocx(sourceBytes, {
+        material: providedMaterial,
+        sourceFileBasename: path.basename(args.sourceFile),
+        sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
+        section,
+      })
+    : verifyDescriptionMaterialAgainstHtml(htmlText, sourceBytes, {
+        material: providedMaterial,
+        sourceFileBasename: path.basename(args.sourceFile),
+        sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
+        section,
+      });
   const material = validateDescriptionMaterialJson(verified.material);
   const summary = describeDescriptionMaterial(material);
-  const sourceProof = verified.sectionUsed === 's9'
-    ? 'server_verified_html_section_s9'
-    : 'server_verified_html_section_s09';
+  const sourceProof = verified.sectionUsed === 'docx'
+    ? DESCRIPTION_SOURCE_PROOF_DOCX
+    : verified.sectionUsed === 's9'
+      ? DESCRIPTION_SOURCE_PROOF_S9
+      : DESCRIPTION_SOURCE_PROOF;
   const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
   const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
   if (!currentTask) throw new Error('当前账号无法精确读取目标 task，描述未绑定');
@@ -1457,7 +1471,7 @@ async function runPrepareDescriptions(args) {
         sourceProof,
       })
     : '';
-  const existingLegacyS09BindingRequestKey = sourceProof === 'server_verified_html_section_s09'
+  const existingLegacyS09BindingRequestKey = sourceProof === DESCRIPTION_SOURCE_PROOF
     && Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
     ? descriptionBindingRequestKey({
         taskId: args.taskId,

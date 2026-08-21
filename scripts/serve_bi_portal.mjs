@@ -103,6 +103,8 @@ import {
   DESCRIPTION_PUBLISH_LANGUAGES,
   DESCRIPTION_SOURCE_PROOF,
   DESCRIPTION_SOURCE_PROOF_S9,
+  DESCRIPTION_SOURCE_PROOF_DOCX,
+  verifyDescriptionMaterialAgainstDocx,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {
@@ -7343,15 +7345,17 @@ async function retainOrphanMaterialFile(args, storedPayload) {
 
 function decodeReviewedDescriptionSourceFile(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('必须上传实际审核 HTML 字节，不能只提交自报 material/hash');
+    throw new Error('必须上传实际审核 HTML 或普通 OOXML DOCX 字节，不能只提交自报 material/hash');
   }
   const keys = Object.keys(value).sort();
   if (keys.join(',') !== 'dataBase64,name') {
     throw new Error('sourceFile 必须严格只含 name/dataBase64');
   }
   const name = String(value.name || '').trim();
-  if (!name || path.basename(name) !== name || name.includes('/') || name.includes('\\') || !/\.html?$/i.test(name)) {
-    throw new Error('sourceFile.name 必须是 HTML 文件 basename');
+  const isHtml = /\.html?$/i.test(name);
+  const isDocx = /\.docx$/i.test(name);
+  if (!name || path.basename(name) !== name || name.includes('/') || name.includes('\\') || (!isHtml && !isDocx)) {
+    throw new Error('sourceFile.name 必须是 HTML 或普通 .docx 文件 basename');
   }
   const raw = String(value.dataBase64 || '');
   if (!raw || raw.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw)) {
@@ -7359,15 +7363,23 @@ function decodeReviewedDescriptionSourceFile(value) {
   }
   const bytes = Buffer.from(raw, 'base64');
   if (!bytes.length || bytes.length > DESCRIPTION_SOURCE_MAX_BYTES || bytes.toString('base64') !== raw) {
-    throw new Error(`审核 HTML 字节大小必须在 1-${DESCRIPTION_SOURCE_MAX_BYTES} bytes 且 base64 可逆`);
+    throw new Error(`审核源文件字节大小必须在 1-${DESCRIPTION_SOURCE_MAX_BYTES} bytes 且 base64 可逆`);
   }
-  let htmlText;
-  try {
-    htmlText = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-  } catch {
-    throw new Error('审核 HTML 必须是有效 UTF-8');
+  let htmlText = '';
+  if (isHtml) {
+    try {
+      htmlText = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+    } catch {
+      throw new Error('审核 HTML 必须是有效 UTF-8');
+    }
   }
-  return {name, bytes, htmlText};
+  return {name, bytes, htmlText, kind: isDocx ? 'docx' : 'html'};
+}
+
+function descriptionSourceProofForSection(sectionUsed) {
+  const normalized = String(sectionUsed || 's09').trim().toLowerCase();
+  if (normalized === 'docx') return DESCRIPTION_SOURCE_PROOF_DOCX;
+  return normalized === 's9' ? DESCRIPTION_SOURCE_PROOF_S9 : DESCRIPTION_SOURCE_PROOF;
 }
 
 function descriptionBindingWriteEvidence(task) {
@@ -8234,7 +8246,7 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
     throw error;
   }
   if (!Number.isSafeInteger(Number(sourceByteLength)) || Number(sourceByteLength) <= 0) {
-    const error = new Error('描述绑定缺少审核 HTML 字节长度证明');
+    const error = new Error('描述绑定缺少审核源文件字节长度证明');
     error.status = 400;
     throw error;
   }
@@ -8258,9 +8270,7 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
   const imageBindingFingerprint = String(task?.publishAssetBinding?.bindingFingerprint || '');
   const now = new Date().toISOString();
   const summary = describeDescriptionMaterial(material);
-  const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
-    ? DESCRIPTION_SOURCE_PROOF_S9
-    : DESCRIPTION_SOURCE_PROOF;
+  const sourceProof = descriptionSourceProofForSection(sectionUsed);
   const newPayloadHash = sha256StableJson(boundPayload);
   if (newPayloadHash !== linkOpsPayloadHash(boundPayload)) {
     throw new Error('描述绑定 payload hash 算法与 link-ops canonical hash 不一致');
@@ -8495,7 +8505,55 @@ function productAttributeExecutionGate(task) {
  * carries a valid sha256, imageCount equals the image set, and the approved
  * authority/source invariants hold.
  */
-function validateExistingPublishAssetBindingForAdopt(task) {
+function taskPublishPreparationForBindingFingerprint(task) {
+  const candidates = [task?.publishPreparation, task?.targets?.publishPreparation]
+    .filter(value => value && typeof value === 'object' && !Array.isArray(value));
+  return candidates[0] || null;
+}
+
+function bindingPreparationEvidenceMatchesTask(task, binding, {allowLegacyCompactPreparation = false} = {}) {
+  const taskPreparation = taskPublishPreparationForBindingFingerprint(task);
+  const bindingPreparation = binding?.publishPreparation;
+  if (!taskPreparation || !bindingPreparation || typeof bindingPreparation !== 'object' || Array.isArray(bindingPreparation)) return false;
+  const taskNormalized = normalizePublishPreparationOverrides(taskPreparation);
+  const bindingNormalized = normalizePublishPreparationOverrides(bindingPreparation);
+  if (sha256StableJson(bindingNormalized) === sha256StableJson(taskNormalized)) return true;
+  if (!allowLegacyCompactPreparation) return false;
+  const requiredLegacyKeys = [
+    'attributeOverrideIds', 'categoryId', 'inventory', 'standardGoodsSn', 'supplierSku',
+    'supplyPrice', 'supplyPriceCurrency', 'targetStore', 'titleGroup', 'titleLanguages',
+  ];
+  if (Object.keys(bindingPreparation).sort().join(',') !== requiredLegacyKeys.sort().join(',')) return false;
+  const scalarFields = ['targetStore', 'titleGroup', 'standardGoodsSn', 'supplierSku', 'supplyPrice', 'inventory', 'categoryId'];
+  if (scalarFields.some(field => bindingNormalized[field] !== taskNormalized[field])) return false;
+  if (bindingPreparation.supplyPriceCurrency !== (taskNormalized.supplyPrice === null ? null : 'SAR')) return false;
+  const expectedLanguages = Object.keys(taskNormalized.titles || {}).sort();
+  const actualLanguages = [...new Set(asArray(bindingPreparation.titleLanguages).map(value => String(value || '').trim().toLowerCase()).filter(Boolean))].sort();
+  if (JSON.stringify(actualLanguages) !== JSON.stringify(expectedLanguages)) return false;
+  const expectedAttributeIds = [...new Set(asArray(taskNormalized.attributeOverrides).map(row => attributeOverrideIdOf(row)).filter(Number.isSafeInteger))].sort((a, b) => a - b);
+  const actualAttributeIds = [...new Set(asArray(bindingPreparation.attributeOverrideIds).map(value => Number(value)).filter(Number.isSafeInteger))].sort((a, b) => a - b);
+  return JSON.stringify(actualAttributeIds) === JSON.stringify(expectedAttributeIds);
+}
+
+function publishAssetBindingFingerprintCandidates(task, binding, images) {
+  const candidates = [];
+  const add = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const fingerprint = canonicalPublishAssetBindingFingerprint(task, {
+      binding,
+      images,
+      publishPreparation: value,
+    });
+    if (!candidates.includes(fingerprint)) candidates.push(fingerprint);
+  };
+  const taskPreparation = taskPublishPreparationForBindingFingerprint(task);
+  if (taskPreparation) add(taskPreparation);
+  if (binding?.publishPreparation) add(binding.publishPreparation);
+  if (!candidates.length) add({});
+  return candidates;
+}
+
+function validateExistingPublishAssetBindingForAdopt(task, {allowLegacyCompactPreparation = false} = {}) {
   const blockers = [];
   const binding = task?.publishAssetBinding && typeof task.publishAssetBinding === 'object' && !Array.isArray(task.publishAssetBinding)
     ? task.publishAssetBinding
@@ -8546,15 +8604,14 @@ function validateExistingPublishAssetBindingForAdopt(task) {
     });
   }
   const storedFingerprint = String(binding.bindingFingerprint || '');
-  const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {
-    binding,
-    images: binding.images,
-    publishPreparation: binding.publishPreparation || {},
-  });
-  if (!storedFingerprint || storedFingerprint !== recomputedFingerprint) {
+  const recomputedFingerprints = publishAssetBindingFingerprintCandidates(task, binding, binding.images);
+  const recomputedFingerprint = recomputedFingerprints[0] || '';
+  if (!bindingPreparationEvidenceMatchesTask(task, binding, {allowLegacyCompactPreparation})
+    || !storedFingerprint
+    || !recomputedFingerprints.includes(storedFingerprint)) {
     blockers.push({
       code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
-      message: `adopt_existing 要求 bindingFingerprint 与规范算法重算值一致（stored=${storedFingerprint || '(missing)'} recomputed=${recomputedFingerprint || '(missing)'}）`,
+      message: `adopt_existing 要求 bindingFingerprint 与规范算法重算值一致（stored=${storedFingerprint || '(missing)'} recomputed=${recomputedFingerprint || '(missing)'} candidates=${recomputedFingerprints.join('/') || '(missing)'}）`,
     });
   }
   return {ok: blockers.length === 0, blockers};
@@ -9234,9 +9291,7 @@ async function bindUpdateDescriptionMaterialToTask(task, targetStore, material, 
   }
   const now = new Date().toISOString();
   const summary = describeDescriptionMaterial(material);
-  const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
-    ? DESCRIPTION_SOURCE_PROOF_S9
-    : DESCRIPTION_SOURCE_PROOF;
+  const sourceProof = descriptionSourceProofForSection(sectionUsed);
   const payload = buildUpdateDescriptionPayload(material, spuName);
   const newPayloadHash = sha256StableJson(payload);
   const storedPayload = await writeStoredUpdateDescriptionPayload(task.id, payload);
@@ -9803,6 +9858,8 @@ function sparseMergePublishPreparation(existing, incoming) {
     throw error;
   }
   return {
+    targetStore: next.targetStore || base.targetStore || '',
+    titleGroup: next.titleGroup || base.titleGroup || '',
     standardGoodsSn: next.standardGoodsSn || base.standardGoodsSn || '',
     supplierSku: next.supplierSku || base.supplierSku || '',
     supplyPrice: next.supplyPrice ?? base.supplyPrice,
@@ -9824,7 +9881,7 @@ function validateReusedApprovedTaskBinding(task, {targetStore, expectedKind = 'c
   const binding = task?.publishAssetBinding;
   const blockers = [];
   if (expectedKind === 'copy_product_draft') {
-    blockers.push(...validateExistingPublishAssetBindingForAdopt(task).blockers);
+    blockers.push(...validateExistingPublishAssetBindingForAdopt(task, {allowLegacyCompactPreparation: true}).blockers);
   } else {
     const explicitKind = String(binding.kind || '');
     if (explicitKind !== 'update_images') blockers.push({code: 'REUSE_APPROVED_BINDING_KIND_INVALID', message: `expected explicit binding.kind=update_images, got ${explicitKind || '(missing)'}`});
@@ -9861,6 +9918,58 @@ function validateReusedApprovedTaskBinding(task, {targetStore, expectedKind = 'c
     throw error;
   }
   return binding;
+}
+
+/**
+ * A reuse request may correct only an explicitly supplied destination title.
+ * The old task payload remains the capture snapshot for every other protected
+ * field; an absent/implicit title never gets replaced from source data.
+ */
+function replaceExplicitPublishPreparationTitlesInCapturePayload(payload, publishPreparation = {}) {
+  const normalized = normalizePublishPreparationOverrides(publishPreparation);
+  const explicitTitles = normalized.titles || {};
+  if (!Object.keys(explicitTitles).length) return {payload, replacedLanguages: []};
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('显式标题覆盖要求同任务已有可捕获的 openapiPublishPayload；未找到时拒绝猜测源标题');
+  }
+  const rawRows = asArray(payload.multi_language_name_list || payload.multiLanguageNameList)
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row))
+    .map(row => ({...row}));
+  const titleRowsKey = Array.isArray(payload.multi_language_name_list)
+    ? 'multi_language_name_list'
+    : 'multiLanguageNameList';
+  const rows = rawRows.map(row => ({
+    ...row,
+    language: String(row.language || row.lang || row.languageCode || '').trim().toLowerCase(),
+  }));
+  const next = JSON.parse(JSON.stringify(payload));
+  const replacedLanguages = [];
+  for (const [language, title] of Object.entries(explicitTitles)) {
+    const matches = rows.filter(row => row.language === language);
+    if (matches.length !== 1) {
+      throw new Error(`显式目标标题 ${language} 要求 capture 快照恰有一个对应 structured title row（当前 ${matches.length}）；禁止新增/猜测标题`);
+    }
+    const row = matches[0];
+    const index = rows.indexOf(row);
+    const nextRows = asArray(next[titleRowsKey])
+      .filter(item => item && typeof item === 'object' && !Array.isArray(item))
+      .map(item => ({...item}));
+    if (!nextRows[index]) {
+      throw new Error(`显式目标标题 ${language} 的 capture structured title row 无法重建；禁止新增/猜测标题`);
+    }
+    const existingTitleKeys = ['name', 'product_name', 'productName', 'value']
+      .filter(key => Object.hasOwn(nextRows[index], key));
+    const titleKey = existingTitleKeys[0] || 'name';
+    nextRows[index] = {...nextRows[index], [titleKey]: title};
+    next[titleRowsKey] = nextRows;
+    replacedLanguages.push(language);
+  }
+  return {payload: next, replacedLanguages};
+}
+
+function persistedPublishPreparationLock(publishPreparation = {}) {
+  const normalized = normalizePublishPreparationOverrides(publishPreparation);
+  return JSON.parse(JSON.stringify(normalized));
 }
 
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
@@ -10041,13 +10150,20 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       ? {publishAssetBinding: {...task.publishAssetBinding, publishPreparation}}
       : {}),
   };
-  const captureTask = {
+  let captureTask = {
     ...taskForCapture,
     // The reviewed bindings below replace every publish image. Raw image assets
     // attached to the task must not make the base-payload capture fall back to
     // source images or block this explicit same-task preparation step.
     assets: asArray(taskForCapture.assets).filter(asset => !String(asset?.mime || asset?.type || '').toLowerCase().startsWith('image/')),
   };
+  if (isReuse && Object.keys(publishPreparation.titles || {}).length && taskForCapture.openapiPublishPayload) {
+    const replaced = replaceExplicitPublishPreparationTitlesInCapturePayload(
+      taskForCapture.openapiPublishPayload,
+      publishPreparation,
+    );
+    captureTask = {...captureTask, openapiPublishPayload: replaced.payload};
+  }
   const captured = await runOpenApiProductExecutorForStore(
     captureTask,
     args,
@@ -10099,7 +10215,10 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
         sha256: row.sha256,
       })),
       evidence: {...bound.evidence, preflightInvalidated: true},
-      publishPreparation: explicit.evidence,
+      // Persist the complete normalized destination lock.  Audit/history may
+      // remain compact, but executor preflight and fingerprint validation must
+      // retain the exact title values and attribute overrides.
+      publishPreparation: persistedPublishPreparationLock(publishPreparation),
     },
     execution: {
       ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
@@ -18118,12 +18237,19 @@ async function main() {
         let sectionUsed = '';
         try {
           reviewedSource = decodeReviewedDescriptionSourceFile(body.sourceFile);
-          const verified = verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
-            material: body.materialJson || null,
-            sourceFileBasename: reviewedSource.name,
-            sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
-            section,
-          });
+          const verified = reviewedSource.kind === 'docx'
+            ? verifyDescriptionMaterialAgainstDocx(reviewedSource.bytes, {
+                material: body.materialJson || null,
+                sourceFileBasename: reviewedSource.name,
+                sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
+                section,
+              })
+            : verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
+                material: body.materialJson || null,
+                sourceFileBasename: reviewedSource.name,
+                sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
+                section,
+              });
           sectionUsed = verified.sectionUsed;
           material = validateDescriptionMaterialJson(verified.material);
         } catch (error) {
@@ -18149,9 +18275,7 @@ async function main() {
         }
         const task = access.record;
         const currentRevision = Number(task.repositoryRevision || 0);
-        const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
-          ? DESCRIPTION_SOURCE_PROOF_S9
-          : DESCRIPTION_SOURCE_PROOF;
+        const sourceProof = descriptionSourceProofForSection(sectionUsed);
         const bindingRequestKey = descriptionBindingRequestKey({
           taskId: taskRef,
           targetStore,
@@ -19632,6 +19756,9 @@ async function main() {
         let verified;
         try {
           reviewedSource = decodeReviewedDescriptionSourceFile(body.sourceFile);
+          if (reviewedSource.kind !== 'html') {
+            throw new Error('历史 update-description 维护路径只接受 HTML；DOCX 仅允许 prepare-descriptions');
+          }
           verified = verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
             material: body.materialJson || null,
             sourceFileBasename: reviewedSource.name,
@@ -21273,7 +21400,10 @@ export const __testHooks = {
   buildBiPortalCoreStreamPlan,
   canonicalPublishAssetBindingFingerprint,
   canonicalPublishAssetBindingImages,
+  validateExistingPublishAssetBindingForAdopt,
   sparseMergePublishPreparation,
+  replaceExplicitPublishPreparationTitlesInCapturePayload,
+  persistedPublishPreparationLock,
   validateReusedApprovedTaskBinding,
   readBiPortalCoreEnvelope,
   resetBiPortalCoreEnvelopeCache() {
