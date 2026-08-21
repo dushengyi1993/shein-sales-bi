@@ -13,9 +13,13 @@ const scriptPath = fileURLToPath(new URL('./cloud_db_backup.sh', import.meta.url
 
 assert.match(script, /BACKUP_RETENTION_DAYS:-7/);
 assert.match(script, /--prune-only/);
+assert.match(script, /SHEIN_BI_BACKUP_OFFSITE_ENABLED:-1/,
+  'offsite mode must remain enabled by default for compatible manual/offsite runs');
+assert.match(script, /invalid SHEIN_BI_BACKUP_OFFSITE_ENABLED=.*expected 0 or 1/,
+  'offsite mode must fail closed for any value other than strict 0/1');
 assert.match(script, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY:-\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
 assert.match(script, /marketing_manual_limited_discount_overrides\.json/);
-assert.match(script, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED:-1/);
+assert.match(script, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED:-0/);
 assert.match(script, /SHEIN_BI_BROWSER_STATE_LIMIT_TOTAL_BYTES:-8g/);
 assert.match(script, /--limit-total-bytes "\$BROWSER_STATE_LIMIT_TOTAL_BYTES"/);
 assert.match(script, /node \"\$MANAGE_BROWSER_STATE\" create/);
@@ -51,11 +55,20 @@ assert.match(script, /archive member checksum mismatch/,
 assert.match(script, /O_NOFOLLOW/,
   'archive verification must not follow a symlink archive path');
 assert.match(script, /retention skipped: COS unavailable; local backups preserved/);
+assert.match(script, /retention mode=local-only; COS and remote verifier skipped/);
+assert.match(script, /local-only offsite=disabled; COS and remote verifier skipped/);
+assert.match(script, /remove_local_verified/,
+  'local-only retention must use a local manifest/inode/quarantine deletion path');
 assert.ok(script.includes("printf '%s  %s\\n' \"$archive_digest\" \"$(basename \"$archive\")\""),
   'the COS sidecar is written from the verification digest');
+const offsiteFunctionStart = script.indexOf('archive_verified() {');
+const offsiteFunctionEnd = script.indexOf('\nprune_expired() {', offsiteFunctionStart);
+assert.ok(offsiteFunctionStart !== -1 && offsiteFunctionEnd > offsiteFunctionStart,
+  'the offsite archive function must remain a distinct auditable branch');
+const offsiteFunction = script.slice(offsiteFunctionStart, offsiteFunctionEnd);
 assert.ok(
-  script.indexOf("printf '%s  %s\\n' \"$archive_digest\" \"$(basename \"$archive\")\"") < script.indexOf('rm -rf -- "$quarantine"'),
-  'the COS sidecar must be written before any local backup deletion',
+  offsiteFunction.indexOf("printf '%s  %s\\n' \"$archive_digest\" \"$(basename \"$archive\")\"") < offsiteFunction.indexOf('rm -rf -- "$quarantine"'),
+  'the COS sidecar must be written before any offsite local backup deletion',
 );
 const manifestCreation = 'xargs -0 -r sha256sum -- > SHA256SUMS.txt';
 assert.notEqual(script.indexOf(manifestCreation), -1, 'relative manifest creation command must exist');
@@ -68,6 +81,8 @@ assert.match(script, /same-day offsite terminal=exhausted.*reason=cos-unavailabl
 assert.match(script, /retention warning=legacy-local-backup-preserved current-backup-valid=1/,
   'a verified current backup must survive non-terminal legacy retention warnings');
 assert.match(service, /SHEIN_BI_BACKUP_RETENTION_DAYS=7/);
+assert.match(service, /SHEIN_BI_BACKUP_OFFSITE_ENABLED=0/,
+  'production database backup must pin local-only mode');
 assert.match(script, /SHEIN_BI_REMOTE_VERIFY_CMD/);
 assert.match(script, /independent remote verifier not configured; persistence gate fails closed reason=remote-verifier-missing/,
   'without an independent verifier the complete persistence gate fails closed');
@@ -128,7 +143,7 @@ const remoteReadbackCalls = [...script.matchAll(remoteReadbackCall)];
 assert.equal(remoteReadbackCalls.length, 2, 'remove_after=1 must have a distinct final independent remote readback');
 assert.ok(remoteReadbackCalls[1].index > script.lastIndexOf('! validate_local_backup "$source_dir"'),
   'the pre-delete remote readback must follow the slow local full-content validation');
-assert.ok(remoteReadbackCalls[1].index < script.indexOf('rm -rf -- "$quarantine"'),
+assert.ok(remoteReadbackCalls[1].index < offsiteFunctionStart + offsiteFunction.indexOf('rm -rf -- "$quarantine"'),
   'the second independent readback must be the final remote deletion gate');
 
 // The local deletion path must quarantine first, then re-verify the locked
@@ -147,12 +162,12 @@ assert.ok(script.includes('quarantined_manifest_digest'),
   'the quarantined checksum manifest must be re-checked after the rename');
 assert.ok(script.includes('rm -rf -- "$quarantine"'),
   'only the re-verified quarantine may be removed');
-const gatedSourceDrift = script.indexOf('reason=source-identity-drifted-at-final-delete-gate');
-const gatedParentCheck = script.indexOf('reason=delete-parent-not-secure');
-const gatedHookCall = script.indexOf('after_final_identity_before_quarantine "$source_dir"');
-const gatedQuarantineName = script.indexOf('quarantine="$root_real/.quarantine-');
-const gatedQuarantineDrift = script.indexOf('reason=quarantine-identity-drift');
-const gatedFinalRemove = script.indexOf('rm -rf -- "$quarantine"');
+const gatedSourceDrift = offsiteFunction.indexOf('reason=source-identity-drifted-at-final-delete-gate');
+const gatedParentCheck = offsiteFunction.indexOf('reason=delete-parent-not-secure');
+const gatedHookCall = offsiteFunction.indexOf('after_final_identity_before_quarantine "$source_dir"');
+const gatedQuarantineName = offsiteFunction.indexOf('quarantine="$root_real/.quarantine-');
+const gatedQuarantineDrift = offsiteFunction.indexOf('reason=quarantine-identity-drift');
+const gatedFinalRemove = offsiteFunction.indexOf('rm -rf -- "$quarantine"');
 assert.ok(gatedSourceDrift !== -1 && gatedSourceDrift < gatedParentCheck,
   'the final source-identity gate must run before the parent-security gate');
 assert.ok(gatedParentCheck < gatedHookCall,
@@ -190,10 +205,14 @@ assert.match(service, /SuccessExitStatus=75/, 'the unchanged unit still makes st
 assert.doesNotMatch(service, /SuccessExitStatus=.*(?:74|78)/, '74 and 78 must remain service failures');
 assert.match(service, /run_host_heavy_job\.sh --domain db-backup[\s\S]*flock[\s\S]*cloud_db_backup\.sh/,
   'the one foreground script invocation must remain under host/project/domain and maintenance locks');
-assert.match(service, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=\/opt\/shein-bi\/app\/scripts\/verify_cos_backup_remote\.sh/,
-  'production service now wires the repository launcher as the independent verifier');
-assert.match(service, /SHEIN_BI_BACKUP_COS_MOUNT=\/lhcos-data/);
-assert.match(service, /SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT=\/lhcos-data\/shein-bi-db-backups/);
+assert.doesNotMatch(service, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=/,
+  'local-only production service must not configure a remote verifier');
+assert.doesNotMatch(service, /SHEIN_BI_BACKUP_COS_(?:MOUNT|ARCHIVE_ROOT)=/,
+  'local-only production service must not configure COS paths');
+assert.doesNotMatch(service, /^LoadCredential=/m,
+  'local-only production service must not load COS credentials');
+assert.doesNotMatch(service, /verify_cos_backup_remote\.sh --check-config/,
+  'local-only production service must not force a COS precheck');
 assert.match(service, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=0/,
   'browser-state archival must remain opt-in and outside the database-backup SLA');
 assert.doesNotMatch(service, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=1/);
@@ -341,7 +360,12 @@ const bashVerifier = toBashPath(verifierPath);
 // A stub lets the prune/retention path pass the cos_ready gate deterministically
 // on every host. Only used when the prune scenario sets it.
 const mountpointStub = path.join(verifierRoot, 'mountpoint');
-fs.writeFileSync(mountpointStub, '#!/usr/bin/env bash\nexit 0\n', 'utf8');
+fs.writeFileSync(mountpointStub, [
+  '#!/usr/bin/env bash',
+  'if [[ -n "${SHEIN_BI_TEST_MOUNTPOINT_MARKER:-}" ]]; then printf "called\\n" > "$SHEIN_BI_TEST_MOUNTPOINT_MARKER"; fi',
+  'exit "${SHEIN_BI_TEST_MOUNTPOINT_STATUS:-0}"',
+  '',
+].join('\n'), 'utf8');
 fs.chmodSync(mountpointStub, 0o755);
 const bashMountpointStub = toBashPath(verifierRoot);
 
@@ -356,6 +380,7 @@ function createSource(name, entries, manifest = manifestFor(entries)) {
 }
 function envFor({
   remote = true,
+  offsite = true,
   maxAttempts = '3',
   intervalSec = '0',
   timeoutSec = '5',
@@ -380,6 +405,7 @@ function envFor({
     SHEIN_BI_BACKUP_ROOT: bashBackupRoot,
     SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT: bashCosRoot,
     SHEIN_BI_BACKUP_COS_MOUNT: bashCosRoot,
+    SHEIN_BI_BACKUP_OFFSITE_ENABLED: offsite ? '1' : '0',
     SHEIN_BI_TZ: 'Asia/Shanghai',
     SHEIN_BI_BACKUP_PYTHON: bashPython,
     SHEIN_BI_BACKUP_RETENTION_DAYS: '7',
@@ -537,6 +563,111 @@ try {
     'browser-state.sheinenc': Buffer.from('encrypted browser state fixture'),
     'shein_bi.dump': Buffer.from('database dump fixture'),
   };
+
+  // 0) Local-only mode verifies a local candidate without probing the COS
+  // mount or invoking the configured verifier.  The mountpoint wrapper and
+  // verifier counter are intentionally armed so either forbidden call leaves
+  // an observable marker.
+  const localMountMarker = path.join(verifierRoot, 'local-only-mountpoint-called');
+  const localVerifierCounter = path.join(verifierRoot, 'local-only-verifier.count');
+  const localSource = createSource('20260817-local-only-current', healthyEntries);
+  const localEnv = envFor({
+    offsite: false,
+    counterFile: localVerifierCounter,
+    pruneMountOkay: true,
+  });
+  localEnv.SHEIN_BI_TEST_MOUNTPOINT_MARKER = toBashPath(localMountMarker);
+  const localVerify = runArchiveVerification(localSource, '0', {env: localEnv});
+  assert.equal(localVerify.status, 0, localVerify.stderr);
+  assert.match(localVerify.stdout, /local-only verified=.*local-preserved=/);
+  assert.equal(fs.existsSync(localMountMarker), false,
+    'local-only verification must not probe the COS mount');
+  assert.equal(fs.existsSync(localVerifierCounter), false,
+    'local-only verification must not invoke the remote verifier');
+  assert.equal(fs.readdirSync(cosRoot).length, 0,
+    'local-only verification must not create a COS archive directory');
+  dynamicScenarios.push('local-only-verification-skips-cos-and-remote-verifier');
+
+  // A valid expired direct child is deleted only through the local quarantine
+  // path.  No COS mount or verifier call is allowed even during retention.
+  const localExpired = createSource('20260817-local-only-expired', healthyEntries);
+  const localExpiredOld = new Date(Date.now() - 8 * 24 * 3600 * 1000);
+  fs.utimesSync(localExpired, localExpiredOld, localExpiredOld);
+  const localPruneVerifierCounter = path.join(verifierRoot, 'local-only-prune-verifier.count');
+  const localPruneEnv = envFor({
+    offsite: false,
+    counterFile: localPruneVerifierCounter,
+    pruneMountOkay: true,
+  });
+  const localPruneMountMarker = path.join(verifierRoot, 'local-only-prune-mountpoint-called');
+  localPruneEnv.SHEIN_BI_TEST_MOUNTPOINT_MARKER = toBashPath(localPruneMountMarker);
+  const localPrune = runScriptFlag('--prune-only', [], localPruneEnv);
+  assert.equal(localPrune.status, 0, localPrune.stderr);
+  assert.match(localPrune.stdout, /local-only removed=.*local-only-expired/);
+  assert.equal(fs.existsSync(localExpired), false,
+    'a valid expired local-only backup must be removed after quarantine revalidation');
+  assert.equal(fs.existsSync(localPruneMountMarker), false,
+    'local-only retention must not probe the COS mount');
+  assert.equal(fs.existsSync(localPruneVerifierCounter), false,
+    'local-only retention must not invoke the remote verifier');
+  dynamicScenarios.push('local-only-expired-direct-child-quarantine-delete');
+
+  // Invalid local content is preserved and reported as a real prune failure.
+  const localInvalid = createSource('20260817-local-only-invalid', healthyEntries);
+  fs.writeFileSync(path.join(localInvalid, 'shein_bi.dump'), 'tampered local fixture');
+  fs.utimesSync(localInvalid, localExpiredOld, localExpiredOld);
+  const localInvalidRun = runScriptFlag('--prune-only', [], envFor({offsite: false, pruneMountOkay: true}));
+  assert.equal(localInvalidRun.status, 1, localInvalidRun.stderr);
+  assert.match(localInvalidRun.stderr, /unsafe-or-invalid-local-backup/);
+  assert.ok(fs.existsSync(localInvalid), 'an invalid local backup must be preserved');
+  dynamicScenarios.push('local-only-invalid-manifest-preserved');
+
+  // Direct-child, non-hidden path boundaries are enforced independently from
+  // find's maxdepth/hidden pruning: nested and outside candidates can never be
+  // removed by the local-only deletion helper.
+  const nestedParent = path.join(backupRoot, 'nested');
+  const nestedSource = path.join(nestedParent, '20260817-nested');
+  fs.mkdirSync(nestedSource, {recursive: true});
+  for (const [fileName, value] of Object.entries(healthyEntries)) {
+    fs.writeFileSync(path.join(nestedSource, fileName), value);
+  }
+  fs.writeFileSync(path.join(nestedSource, 'SHA256SUMS.txt'), manifestFor(healthyEntries), 'ascii');
+  const nestedRun = runArchiveVerification(nestedSource, '1', {env: envFor({offsite: false})});
+  assert.equal(nestedRun.status, 73, nestedRun.stderr);
+  assert.ok(fs.existsSync(nestedSource), 'a nested backup must not be removed');
+
+  const hiddenSource = path.join(backupRoot, '.hidden-local-only');
+  fs.mkdirSync(hiddenSource);
+  for (const [fileName, value] of Object.entries(healthyEntries)) {
+    fs.writeFileSync(path.join(hiddenSource, fileName), value);
+  }
+  fs.writeFileSync(path.join(hiddenSource, 'SHA256SUMS.txt'), manifestFor(healthyEntries), 'ascii');
+  fs.utimesSync(hiddenSource, localExpiredOld, localExpiredOld);
+  const hiddenPrune = runScriptFlag('--prune-only', [], envFor({offsite: false}));
+  assert.equal(hiddenPrune.status, 1, hiddenPrune.stderr);
+  assert.ok(fs.existsSync(hiddenSource), 'hidden retention directories must be skipped and preserved');
+
+  const outsideSource = path.join(fixtureRoot, 'outside-backup-root');
+  fs.mkdirSync(outsideSource);
+  for (const [fileName, value] of Object.entries(healthyEntries)) {
+    fs.writeFileSync(path.join(outsideSource, fileName), value);
+  }
+  fs.writeFileSync(path.join(outsideSource, 'SHA256SUMS.txt'), manifestFor(healthyEntries), 'ascii');
+  const outsideRun = runArchiveVerification(outsideSource, '1', {env: envFor({offsite: false})});
+  assert.equal(outsideRun.status, 73, outsideRun.stderr);
+  assert.ok(fs.existsSync(outsideSource), 'a path outside BACKUP_ROOT must never be removed');
+  dynamicScenarios.push('local-only-nested-hidden-and-outside-path-boundaries');
+
+  // The switch is explicit and strict; shell expressions and true/false words
+  // are rejected before any housekeeping path is touched.
+  for (const value of ['2', 'true', 'false', '$(touch-forbidden)']) {
+    const invalidOffsiteEnv = envFor({offsite: false});
+    invalidOffsiteEnv.SHEIN_BI_BACKUP_OFFSITE_ENABLED = value;
+    const invalidOffsite = runScriptFlag('--test-staging-cleanup', [], invalidOffsiteEnv);
+    assert.equal(invalidOffsite.status, 64, `invalid offsite value ${value} must fail closed`);
+    assert.match(invalidOffsite.stderr, /invalid SHEIN_BI_BACKUP_OFFSITE_ENABLED=.*expected 0 or 1/);
+  }
+  dynamicScenarios.push('strict-offsite-boolean-rejects-invalid-values');
 
   // 1) Missing verifier is a deterministic deployment blocker. The archive
   //    and its local source survive, status 78 is not systemd-success 75.
@@ -1061,7 +1192,7 @@ try {
 console.log(JSON.stringify({
   ok: true,
   staticContract: 'passed',
-  deploymentGate: 'remote_verifier_configured',
+  deploymentGate: 'local_only_pinned_production_offsite_compatibility_preserved',
   dynamicScenarioCount: dynamicScenarios.length,
   dynamicScenarios,
   skips: [],

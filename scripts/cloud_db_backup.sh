@@ -4,10 +4,11 @@ set -Eeuo pipefail
 BACKUP_ROOT="${SHEIN_BI_BACKUP_ROOT:-/srv/shein-bi/backups/auto}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 RETENTION_DAYS="${SHEIN_BI_BACKUP_RETENTION_DAYS:-7}"
+OFFSITE_ENABLED="${SHEIN_BI_BACKUP_OFFSITE_ENABLED:-1}"
 COS_MOUNT="${SHEIN_BI_BACKUP_COS_MOUNT:-/lhcos-data}"
 COS_ARCHIVE_ROOT="${SHEIN_BI_BACKUP_COS_ARCHIVE_ROOT:-$COS_MOUNT/shein-bi-db-backups}"
 MANUAL_LIMITED_DISCOUNT_REGISTRY="${SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY:-/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json}"
-BROWSER_STATE_BACKUP_ENABLED="${SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED:-1}"
+BROWSER_STATE_BACKUP_ENABLED="${SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED:-0}"
 BROWSER_STATE_BACKUP_KEY_FILE="${SHEIN_BI_BROWSER_STATE_BACKUP_KEY_FILE:-/srv/shein-bi/secrets/browser-state-backup.key}"
 BROWSER_PROFILE_ROOT="${SHEIN_BI_BROWSER_PROFILE_ROOT:-/data/shein-bi/profiles}"
 BROWSER_SESSION_ROOT="${SHEIN_BI_BROWSER_SESSION_ROOT:-/data/shein-bi/state/shein_webapi_sessions}"
@@ -117,6 +118,16 @@ normalize_bounded_decimal_config() {
   printf -v "$target" '%d' "$normalized"
 }
 
+validate_boolean_config() {
+  case "$OFFSITE_ENABLED" in
+    0|1) ;;
+    *)
+      echo "[cloud_db_backup] invalid SHEIN_BI_BACKUP_OFFSITE_ENABLED=$OFFSITE_ENABLED; expected 0 or 1" >&2
+      return 64
+      ;;
+  esac
+}
+
 validate_numeric_config() {
   normalize_bounded_decimal_config RETENTION_DAYS "$RETENTION_DAYS" 1 "$RETENTION_HARD_MAX_DAYS" SHEIN_BI_BACKUP_RETENTION_DAYS || return $?
   normalize_bounded_decimal_config SHEIN_BI_BACKUP_STALE_STAGING_MINUTES "$SHEIN_BI_BACKUP_STALE_STAGING_MINUTES" 1 "$STALE_STAGING_HARD_MAX_MINUTES" SHEIN_BI_BACKUP_STALE_STAGING_MINUTES || return $?
@@ -125,6 +136,7 @@ validate_numeric_config() {
   normalize_bounded_decimal_config SHEIN_BI_REMOTE_VERIFY_TIMEOUT_SEC "$SHEIN_BI_REMOTE_VERIFY_TIMEOUT_SEC" 1 "$REMOTE_VERIFY_HARD_MAX_TIMEOUT_SEC" SHEIN_BI_REMOTE_VERIFY_TIMEOUT_SEC || return $?
   normalize_bounded_decimal_config SHEIN_BI_REMOTE_VERIFY_KILL_AFTER_SEC "$SHEIN_BI_REMOTE_VERIFY_KILL_AFTER_SEC" 1 "$REMOTE_VERIFY_HARD_MAX_KILL_AFTER_SEC" SHEIN_BI_REMOTE_VERIFY_KILL_AFTER_SEC || return $?
 }
+validate_boolean_config || exit $?
 validate_numeric_config || exit $?
 
 cos_ready() {
@@ -576,11 +588,116 @@ after_final_identity_before_quarantine() {
   cp -a -- "$current.swap-orig" "$current" || return 1
 }
 
+remove_local_verified() {
+  local source_dir remove_after root_real source_real base local_manifest_digest local_manifest_digest_current
+  local source_identity final_source_real quarantine quarantine_identity
+  local quarantined_manifest_digest
+  source_dir="$1"
+  remove_after="${2:-1}"
+  [[ "$remove_after" == "0" || "$remove_after" == "1" ]] || return 64
+
+  # Local-only retention never accepts a caller-supplied path merely because it
+  # exists.  Resolve both sides, require one direct non-hidden child of the
+  # configured retention root, and validate the child's own manifest before
+  # any quarantine or deletion operation.
+  if ! root_real="$(realpath -e -- "$BACKUP_ROOT")" ||
+     ! source_real="$(realpath -e -- "$source_dir")"; then
+    echo "[cloud_db_backup] refuse unresolved local retention path=$source_dir" >&2
+    return 73
+  fi
+  if [[ -L "$source_dir" || "$(dirname "$source_real")" != "$root_real" ]]; then
+    echo "[cloud_db_backup] refuse local retention path outside BACKUP_ROOT=$source_dir" >&2
+    return 73
+  fi
+  source_dir="$source_real"
+  base="$(basename "$source_dir")"
+  [[ "$base" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && -d "$source_dir" ]] || {
+    echo "[cloud_db_backup] refuse hidden or unsafe local retention path=$source_dir" >&2
+    return 73
+  }
+  [[ -s "$source_dir/SHA256SUMS.txt" ]] || {
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=missing-checksums" >&2
+    return 1
+  }
+  if ! validate_local_backup "$source_dir"; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=unsafe-or-invalid-local-backup" >&2
+    return 1
+  fi
+  if ! local_manifest_digest="$(sha256sum -- "$source_dir/SHA256SUMS.txt" | awk '{print $1}')"; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=manifest-digest-unavailable" >&2
+    return 1
+  fi
+  if ! source_identity="$(stat -c '%d:%i' -- "$source_dir")"; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=source-identity-unbound" >&2
+    return 1
+  fi
+
+  if [[ "$remove_after" == "0" ]]; then
+    echo "[cloud_db_backup] local-only verified=$source_dir local-preserved=$source_dir"
+    return 0
+  fi
+
+  # Re-read the local manifest and bind the exact source identity immediately
+  # before quarantine.  This is the local-only equivalent of the offsite
+  # branch's final remote readback gate.
+  if ! validate_local_backup "$source_dir" ||
+     ! local_manifest_digest_current="$(sha256sum -- "$source_dir/SHA256SUMS.txt" | awk '{print $1}')" ||
+     [[ "$local_manifest_digest_current" != "$local_manifest_digest" ]]; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=local-source-changed-before-delete" >&2
+    return 1
+  fi
+  if ! final_source_real="$(realpath -e -- "$source_dir" 2>/dev/null)"; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=source-path-unresolvable-at-final-delete-gate" >&2
+    return 1
+  fi
+  if [[ "$final_source_real" != "$source_real" ]] ||
+     [[ "$(dirname "$final_source_real")" != "$root_real" ]] ||
+     [[ -L "$source_dir" ]] ||
+     [[ "$(basename "$source_dir")" != "$base" ]] ||
+     [[ "$(stat -c '%d:%i' -- "$source_dir" 2>/dev/null)" != "$source_identity" ]]; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=source-identity-drifted-at-final-delete-gate" >&2
+    return 1
+  fi
+  if ! verify_delete_parent_secure "$root_real"; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=delete-parent-not-secure local-preserved=1" >&2
+    return 1
+  fi
+
+  after_final_identity_before_quarantine "$source_dir" || return $?
+  quarantine="$root_real/.quarantine-$base-$STAMP-$$"
+  if [[ "$(dirname "$quarantine")" != "$root_real" ||
+        "$(basename "$quarantine")" != .quarantine-* ]]; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=unsafe-quarantine-path local-preserved=1" >&2
+    return 73
+  fi
+  if ! mv -T -- "$source_dir" "$quarantine"; then
+    echo "[cloud_db_backup] keep local-only backup=$source_dir reason=quarantine-rename-failed local-preserved=1" >&2
+    return 1
+  fi
+  if ! quarantine_identity="$(stat -c '%d:%i' -- "$quarantine" 2>/dev/null)" ||
+     [[ "$quarantine_identity" != "$source_identity" ]] ||
+     ! validate_local_backup "$quarantine" ||
+     ! quarantined_manifest_digest="$(sha256sum -- "$quarantine/SHA256SUMS.txt" | awk '{print $1}')" ||
+     [[ "$quarantined_manifest_digest" != "$local_manifest_digest" ]]; then
+    echo "[cloud_db_backup] keep quarantined local-only backup=$quarantine reason=quarantine-identity-drift source=$source_dir local-preserved=1" >&2
+    return 1
+  fi
+  if ! rm -rf -- "$quarantine" || [[ -e "$quarantine" ]]; then
+    echo "[cloud_db_backup] verified local-only backup but local removal failed=$quarantine" >&2
+    return 1
+  fi
+  echo "[cloud_db_backup] local-only removed=$source_dir"
+}
+
 archive_verified() {
   local source_dir source_real root_real remove_after base archive_day archive_dir archive partial checksum checksum_partial archive_digest local_manifest_digest current_manifest_digest remote_size remote_status stored_id current_id rel partial_identity mount_id mount_id_partial final_source_real source_identity published_new=0 quarantine quarantine_identity quarantined_manifest_digest
   source_dir="$1"
   remove_after="${2:-0}"
   [[ "$remove_after" == "0" || "$remove_after" == "1" ]] || return 64
+  if [[ "$OFFSITE_ENABLED" == "0" ]]; then
+    remove_local_verified "$source_dir" "$remove_after"
+    return $?
+  fi
   if ! root_real="$(realpath -e -- "$BACKUP_ROOT")" ||
      ! source_real="$(realpath -e -- "$source_dir")"; then
     echo "[cloud_db_backup] refuse unresolved retention path=$source_dir" >&2
@@ -839,14 +956,18 @@ prune_expired() {
     echo "[cloud_db_backup] retention no expired backups"
     return 0
   fi
-  if ! cos_ready; then
-    echo "[cloud_db_backup] retention skipped: COS unavailable; local backups preserved" >&2
-    return 0
+  if [[ "$OFFSITE_ENABLED" == "1" ]]; then
+    if ! cos_ready; then
+      echo "[cloud_db_backup] retention skipped: COS unavailable; local backups preserved" >&2
+      return 0
+    fi
+  else
+    echo "[cloud_db_backup] retention mode=local-only; COS and remote verifier skipped"
   fi
   for source_dir in "${expired[@]}"; do
-    # Expired backups are deleted only after an independent remote
-    # confirmation; without a configured verifier archive_verified fails
-    # closed and every local copy is preserved, which is the safe outcome.
+    # In offsite mode, expired backups are deleted only after an independent
+    # remote confirmation; in local-only mode archive_verified performs the
+    # equivalent local manifest/inode/quarantine gates without touching COS.
     # Progression note: `if ! func; then status=$?` would read 0 (the negated
     # condition), so the else-of-if form is used to keep the true status.
     if archive_verified "$source_dir" 1; then
@@ -907,7 +1028,10 @@ test_staging_cleanup() {
 
 # Restricted test-mode dispatch (guarded by SHEIN_BI_BACKUP_TEST_MODE=1).
 if [[ -n "$TEST_ARCHIVE_SOURCE" ]]; then
-  mkdir -p "$BACKUP_ROOT" "$COS_ARCHIVE_ROOT"
+  mkdir -p "$BACKUP_ROOT"
+  if [[ "$OFFSITE_ENABLED" == "1" ]]; then
+    mkdir -p "$COS_ARCHIVE_ROOT"
+  fi
   archive_verified "$TEST_ARCHIVE_SOURCE" "$TEST_ARCHIVE_REMOVE_AFTER"
   exit $?
 fi
@@ -1019,18 +1143,22 @@ if (( PRUNE_ONLY == 0 )); then
     exit 73
   fi
   STAGING_PUBLISHED=1
-  if wait_for_cos_ready_with_retry; then
-    if archive_verified "$OUT_DIR" 0; then
-      :
+  if [[ "$OFFSITE_ENABLED" == "1" ]]; then
+    if wait_for_cos_ready_with_retry; then
+      if archive_verified "$OUT_DIR" 0; then
+        :
+      else
+        same_day_status=$?
+        echo "[cloud_db_backup] same-day offsite terminal=failed status=$same_day_status local-preserved=$OUT_DIR" >&2
+        exit "$same_day_status"
+      fi
     else
       same_day_status=$?
-      echo "[cloud_db_backup] same-day offsite terminal=failed status=$same_day_status local-preserved=$OUT_DIR" >&2
+      echo "[cloud_db_backup] same-day offsite terminal=exhausted status=$same_day_status reason=cos-unavailable local-preserved=$OUT_DIR" >&2
       exit "$same_day_status"
     fi
   else
-    same_day_status=$?
-    echo "[cloud_db_backup] same-day offsite terminal=exhausted status=$same_day_status reason=cos-unavailable local-preserved=$OUT_DIR" >&2
-    exit "$same_day_status"
+    echo "[cloud_db_backup] local-only offsite=disabled; COS and remote verifier skipped local-preserved=$OUT_DIR"
   fi
 else
   echo "[cloud_db_backup] prune-only"
