@@ -45,6 +45,10 @@ import {
   runSheinWebhookExternalWriteGuarded,
 } from '../lib/shein_webhook_external_write_guard.mjs';
 import {INPUT_VOLTAGE_AC_VALUE_ID} from '../lib/retire_supplier_code_repair_payload.mjs';
+import {
+  buildProductAliasContext,
+  resolveExplicitProductAlias,
+} from '../lib/link_ops_product_attribute_binding.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -55,6 +59,18 @@ const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
+const PRODUCT_ALIASES_BYTES = await fs.readFile(path.join(ROOT, 'config', 'product_aliases.json'));
+const PRODUCT_CATALOG_BYTES = await fs.readFile(path.join(ROOT, 'config', 'product_catalog.json'));
+const PRODUCT_ALIAS_REGISTRY_FINGERPRINT = crypto.createHash('sha256').update(PRODUCT_ALIASES_BYTES).digest('hex');
+const PRODUCT_CATALOG_FINGERPRINT = crypto.createHash('sha256').update(PRODUCT_CATALOG_BYTES).digest('hex');
+const PRODUCT_ALIAS_CONTEXT = buildProductAliasContext({
+  aliasRegistryJson: JSON.parse(PRODUCT_ALIASES_BYTES.toString('utf8')),
+  catalogJson: JSON.parse(PRODUCT_CATALOG_BYTES.toString('utf8')),
+  aliasRegistryFingerprint: PRODUCT_ALIAS_REGISTRY_FINGERPRINT,
+  catalogFingerprint: PRODUCT_CATALOG_FINGERPRINT,
+  aliasRegistrySource: 'config/product_aliases.json',
+  catalogSource: 'config/product_catalog.json',
+});
 const ALLOWED_SKC_IMAGE_TYPES = new Set([1, 2, 5, 6]);
 const SKC_IMAGE_TYPE_LABELS = new Map([
   [1, '主图'],
@@ -1156,7 +1172,7 @@ export async function findOrBuildPublishPayload(task, {targetStore, preferredSou
       // The bound payload (root openapiPublishPayload or approved asset) stays
       // authoritative; snapshot hydration is read-only metadata enrichment.
       // The exact task source lock is preserved and enforced separately by the
-      // source scope resolution and the scope-v3 execution hash.
+      // source scope resolution and the scope-v4 execution hash.
       return {
         ...existing,
         inferred,
@@ -1244,7 +1260,7 @@ export async function findOrBuildPublishPayload(task, {targetStore, preferredSou
 // unique task source lock (targets.sourceStores single value + sourceSkc) MUST
 // resolve and preserve that lock, even when the payload comes from a root
 // openapiPublishPayload or an approved asset. The resolved store/skc feed the
-// scope-v3 execution hash, the provenance guard and the executor projection.
+// scope-v4 execution hash, the provenance guard and the executor projection.
 // Missing/multi-valued locks or a conflict between the exact lock and the
 // inferred source fail closed with a blocker instead of an empty source.
 function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore = ''}) {
@@ -1253,7 +1269,7 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
   // itself: single-valued targets.sourceStores plus a non-empty
   // targets.sourceSkc. A copy task that declares NO source at all is allowed
   // through the legacy/approved-asset flow (source may stay empty and the
-  // scope-v3 hash stays stable). Partial declarations, multi-valued stores and
+  // scope-v4 hash stays stable). Partial declarations, multi-valued stores and
   // exact-vs-inferred conflicts fail closed.
   const rawDeclaredSourceStores = asArray(task?.targets?.sourceStores);
   const rawDeclaredSourceSkc = task?.targets?.sourceSkc;
@@ -1311,8 +1327,8 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
 }
 
 const SOURCE_DETAIL_LOCK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v3';
-const PRODUCT_EXECUTION_HASH_SCHEMA = 'copy_product_draft_execution_scope/v3';
+const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v4';
+const PRODUCT_EXECUTION_HASH_SCHEMA = 'copy_product_draft_execution_scope/v4';
 const SOURCE_DETAIL_LOCK_SOURCES = new Set([
   'openapi_product_detail_snapshot',
   'openapi_product_detail_cached_fallback',
@@ -1413,6 +1429,8 @@ function buildProductExecutionHashScope({
   sourceSkc = '',
   standardGoodsSn = '',
   sourceDetailLock = null,
+  productAliasRegistryFingerprint = '',
+  productCatalogFingerprint = '',
 } = {}) {
   return {
     schema: PRODUCT_EXECUTION_HASH_SCHEMA,
@@ -1425,6 +1443,8 @@ function buildProductExecutionHashScope({
     // valid canonical value "ABC DEF" before the gate blocks it.
     standardGoodsSn: executionHashScalar(standardGoodsSn, 160),
     sourceDetailLock: sourceDetailLockExecutionHashScope(sourceDetailLock),
+    productAliasRegistryFingerprint: executionHashScalar(productAliasRegistryFingerprint, 120),
+    productCatalogFingerprint: executionHashScalar(productCatalogFingerprint, 120),
   };
 }
 
@@ -1435,7 +1455,7 @@ function buildProductExecutionHashScope({
 //   bound payload hydration 失败/无锁是结构化 blocker，不能仅 warning 后继续。
 // - requireExpectedLock=true（copy_product_draft 的 execute）：预检锁必须带
 //   sourceDetailLock；旧版只有 payload hash 的预检强制重新 dry-run。
-  // - 其它流程（维护执行等）无预检锁时沿用既有 scope-v3 hash 覆盖，不额外阻断。
+  // - 其它流程（维护执行等）无预检锁时沿用既有 scope-v4 hash 覆盖，不额外阻断。
 function validateSourceDetailLockForWrite({
   currentLock = null,
   expectedLock = null,
@@ -1460,7 +1480,7 @@ function validateSourceDetailLockForWrite({
       gateActive: false,
       blockers: [],
       checkedAt,
-      note: '没有预检详情锁且当前流程不强制详情锁；沿用既有流程，scope-v3 hash 仍覆盖本次执行范围。',
+      note: '没有预检详情锁且当前流程不强制详情锁；沿用既有流程，scope-v4 hash 仍覆盖本次执行范围。',
     };
   }
   if (!current) {
@@ -2908,6 +2928,21 @@ function listHasFilledInputVoltage(list) {
   return list.some(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === INPUT_VOLTAGE_ATTRIBUTE_ID && payloadAttributeHasValue(row));
 }
 
+function resolveExplicitSameProductIdentity(rawCodes) {
+  const values = asArray(rawCodes).map(normalizeSupplierIdentity).filter(Boolean);
+  if (!values.length) return {ok: false, canonical: '', resolutions: []};
+  const resolutions = values.map(value => ({value, ...resolveExplicitProductAlias(PRODUCT_ALIAS_CONTEXT, value)}));
+  if (resolutions.some(row => row.ok !== true || !row.canonical)) {
+    return {ok: false, canonical: '', resolutions};
+  }
+  const canonicals = [...new Set(resolutions.map(row => row.canonical))];
+  return {
+    ok: canonicals.length === 1,
+    canonical: canonicals.length === 1 ? canonicals[0] : '',
+    resolutions,
+  };
+}
+
 /**
  * Owner-authorized fail-closed provenance lookup: when Input voltage(1002322)
  * is required by the target template path but cannot be filled authoritatively,
@@ -3039,8 +3074,9 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
   if (powerSupplyInputVoltage.inputVoltageRequired && !listHasFilledInputVoltage(list)) {
     // Locked owner authorization: ONLY a copy_product_draft task whose source
     // is the exact findOrBuild source lock (sourceStore + sourceSkc present,
-    // exactSourceLock) and whose target standard goods number equals the source
-    // payload supplier identity may derive Input voltage(1002322) from the
+    // exactSourceLock) and whose target standard goods number either exactly
+    // equals the source payload supplier identity or all identities resolve to
+    // one explicit, reviewed catalog alias may derive Input voltage(1002322) from the
     // locked source payload's official Plug(Voltage)/Voltage attributes. No
     // target-store live fallback exists anymore. The range is parsed with the
     // existing deterministic inference and the unit value id reuses the
@@ -3053,6 +3089,20 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
     const lockedStandardGoodsSnNormalized = normalizeSupplierIdentity(lockedStandardGoodsSn);
     const sourcePayloadCodes = [...new Set(asArray(sourceContext?.sourcePayloadSupplierCodes).map(normalizeSupplierIdentity).filter(Boolean))];
     const payloadCodes = [...new Set(publishTargetSupplierCodes(next).map(normalizeSupplierIdentity).filter(Boolean))];
+    const strictIdentityMatches = sourcePayloadCodes.length === 1
+      && payloadCodes.length === 1
+      && sourcePayloadCodes[0] === lockedStandardGoodsSnNormalized
+      && payloadCodes[0] === lockedStandardGoodsSnNormalized;
+    const explicitAliasIdentity = strictIdentityMatches
+      ? {ok: true, canonical: lockedStandardGoodsSnNormalized, resolutions: [], mode: 'strict_exact'}
+      : {
+          ...resolveExplicitSameProductIdentity([
+            lockedStandardGoodsSnNormalized,
+            sourcePayloadCodes.length === 1 ? sourcePayloadCodes[0] : '',
+            payloadCodes.length === 1 ? payloadCodes[0] : '',
+          ]),
+          mode: 'explicit_alias_registry',
+        };
     const provenanceAllowed = sourceContext?.copyProductDraft === true
       && sourceContext?.exactSourceLock === true
       && Boolean(lockedSourceStore)
@@ -3060,8 +3110,7 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
       && Boolean(lockedStandardGoodsSn)
       && sourcePayloadCodes.length === 1
       && payloadCodes.length === 1
-      && sourcePayloadCodes[0] === lockedStandardGoodsSnNormalized
-      && payloadCodes[0] === lockedStandardGoodsSnNormalized;
+      && explicitAliasIdentity.ok === true;
     if (powerSupplyInputVoltage.unitValueIdConflict) {
       blockers.push(...powerSupplyInputVoltage.blockers);
       evidence.inputVoltageProvenance = {
@@ -3087,6 +3136,8 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
         standardGoodsNumber: lockedStandardGoodsSn,
         sourcePayloadSupplierCodes: sourcePayloadCodes,
         payloadSupplierCodes: payloadCodes,
+        identityResolutionMode: explicitAliasIdentity.mode,
+        canonicalCode: explicitAliasIdentity.canonical,
       };
     } else {
       const payloadInferred = inferInputVoltageFromPayload(next, byId);
@@ -3108,6 +3159,8 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
           sourceStore: lockedSourceStore,
           sourceSkc: lockedSourceSkc,
           standardGoodsNumber: lockedStandardGoodsSn,
+          identityResolutionMode: explicitAliasIdentity.mode,
+          canonicalCode: explicitAliasIdentity.canonical,
           sourceAttributeId: payloadInferred.source_attribute_id || null,
           sourceValueId: payloadInferred.source_value_id || null,
           sourceValue: safeString(payloadInferred.source_value, 160),
@@ -4675,7 +4728,7 @@ async function main() {
     appendUnique(blockers, targetDuplicateCheck.blockers);
     payloadValidation = validatePublishPayload(publishPayload);
     payloadSummary = extractPayloadSummary(publishPayload);
-    // Execution lock hash v3: the real expectedPayloadHash must cover the final
+    // Execution lock hash v4: the real expectedPayloadHash must cover the final
     // publish payload PLUS the locked source store/sourceSkc and the target
     // standard goods number plus source identity/content (stable JSON scope).
     // detailFetchedAt is deliberately excluded because it is freshness
@@ -4691,6 +4744,8 @@ async function main() {
       sourceSkc: lockedSourceScope.sourceSkc,
       standardGoodsSn: taskStandardGoodsSn(task, effectiveExecutionContext),
       sourceDetailLock: currentSourceDetailLock,
+      productAliasRegistryFingerprint: PRODUCT_ALIAS_REGISTRY_FINGERPRINT,
+      productCatalogFingerprint: PRODUCT_CATALOG_FINGERPRINT,
     });
     bodyHash = sha256Stable(publishPayload);
     payloadHash = sha256Stable(executionScope);
