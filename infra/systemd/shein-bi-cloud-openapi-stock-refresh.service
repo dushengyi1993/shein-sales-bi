@@ -12,6 +12,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_OPENAPI_PRODUCT_CACHE_DIR=/srv/shein-bi/runtime/openapi-product-cache
 Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
 TimeoutStartSec=900
 Nice=12
@@ -19,4 +20,5 @@ CPUWeight=40
 MemoryHigh=900M
 MemoryMax=1400M
 OOMPolicy=stop
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/openapi-product-cache
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_openapi_stock_refresh.sh

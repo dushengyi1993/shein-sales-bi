@@ -28,11 +28,12 @@ import {
   wasteGoodsSn,
   INPUT_CURRENT_ATTRIBUTE_ID,
 } from '../lib/retire_supplier_code_repair_payload.mjs';
+import {resolveOpenApiProductCacheDir, resolveOpenApiProductCacheFile} from '../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp', 'retire-candidates-execute', 'supplier-code-repair');
-const DEFAULT_OPENAPI_PRODUCTS_DIR = process.env.SHEIN_OPENAPI_PRODUCTS_DIR || path.join(ROOT, 'outputs', 'shein_openapi_products');
+const DEFAULT_OPENAPI_PRODUCTS_DIR = resolveOpenApiProductCacheDir({rootDir: ROOT});
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const PARTIAL_EDIT = '/open-api/goods/product/partialEdit';
 const SPU_INFO = '/open-api/goods/spu-info';
@@ -256,7 +257,8 @@ async function buildSpuInfoSnapshotIndex(openapiProductsDir) {
   for (const entry of stores) {
     if (!entry.isDirectory()) continue;
     try {
-      const data = await readJson(path.join(openapiProductsDir, entry.name, 'latest.json'));
+      const file = resolveOpenApiProductCacheFile(entry.name, {rootDir: ROOT, cacheDir: openapiProductsDir});
+      const data = await readJson(file);
       stats.files += 1;
       const storeKey = normalizeStore(data.storeKey || entry.name);
       for (const detail of asArray(data.detailResults)) {
@@ -265,7 +267,7 @@ async function buildSpuInfoSnapshotIndex(openapiProductsDir) {
         stats.details += 1;
         const spu = safeString(info.spuName || info.spu_name || detail?.spuName || detail?.spu, 180);
         if (!storeKey || !spu) continue;
-        byTarget.set(`${storeKey}|${spu}`, info);
+        byTarget.set(`${storeKey}|${spu}`, {info, file});
         stats.indexed += 1;
       }
     } catch {
@@ -404,11 +406,12 @@ async function prepareStore({storeKey, rows, client, calls, globalHintIndex, spu
 
   for (const row of rows) {
     let spuResp;
-    const snapshotInfo = spuInfoSnapshotIndex?.byTarget?.get(`${storeKey}|${row.spu}`) || null;
+    const snapshotRecord = spuInfoSnapshotIndex?.byTarget?.get(`${storeKey}|${row.spu}`) || null;
+    const snapshotInfo = snapshotRecord?.info || null;
     try {
       if (snapshotInfo) {
         spuResp = {status: 200, data: {code: '0', msg: 'OK', info: snapshotInfo}};
-        calls.push({storeKey, target: row.skc, name: 'spu-info-snapshot', endpoint: SPU_INFO, write: false, source: 'outputs/shein_openapi_products/<store>/latest.json', httpStatus: 200, code: '0', msg: 'OK'});
+        calls.push({storeKey, target: row.skc, name: 'spu-info-snapshot', endpoint: SPU_INFO, write: false, source: snapshotRecord?.file || 'SHEIN_OPENAPI_PRODUCT_CACHE_DIR/<STORE>/latest.json', httpStatus: 200, code: '0', msg: 'OK'});
       } else {
         spuResp = await client.request(SPU_INFO, {method: 'POST', body: {spuName: row.spu, languageList: ['en', 'ar', 'zh-cn']}, headers: {language: 'zh-cn'}});
         calls.push({storeKey, target: row.skc, ...compactCall('spu-info', SPU_INFO, spuResp, false)});

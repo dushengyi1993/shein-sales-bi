@@ -17,6 +17,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
+import {resolveOpenApiProductCacheDir, resolveOpenApiProductCacheFile} from '../lib/shein_openapi_product_cache.mjs';
 import {selectVirtualInventoryWarehouseCode} from '../lib/shein_inventory_warehouse.mjs';
 import {normalizeSheinSkc, sameSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
@@ -44,6 +45,7 @@ import {
 } from '../lib/link_ops_product_descriptions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const DEFAULT_PRODUCT_CACHE_DIR = resolveOpenApiProductCacheDir({rootDir: ROOT});
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_TASK_FILE = path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'logs', 'link-ops-maintenance-openapi-executor');
@@ -101,7 +103,7 @@ const CERTIFICATE_ALLOWED_ENDPOINTS = new Set([
 const MAINTENANCE_INTENTS = new Set(Object.keys(ACTIONS));
 
 function parseArgs(argv) {
-  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', claimNonce: '', dir: '', productCacheDir: process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR || path.join(ROOT, 'outputs', 'shein_openapi_products'), quiet: false};
+  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', claimNonce: '', dir: '', productCacheDir: DEFAULT_PRODUCT_CACHE_DIR, quiet: false};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--config') args.config = path.resolve(argv[++i]);
@@ -258,7 +260,7 @@ function extractRows(payload){ const data=payload?.data&&typeof payload.data==='
 async function loadLinkRows(args){ const root=args.dir||path.join(ROOT,'outputs','bi-portal'); const candidates=[path.join(root,'sections','linksData.json'), path.join(root,'data.json')]; const errors=[]; for(const file of candidates){ try{ const j=await readJson(file); const rows=extractRows(j); if(rows.length) return {file, rows}; errors.push(`${rel(file)}:0 rows`);}catch(e){errors.push(`${rel(file)}:${e.message}`);} } return {file:candidates[0], rows:[], error:errors.join('；')}; }
 function parseSkuCodes(value){ if(Array.isArray(value)) return value.map(x=>safeString(x,80)).filter(Boolean); if(typeof value==='string'){ try{ const j=JSON.parse(value); if(Array.isArray(j)) return j.map(x=>safeString(x,80)).filter(Boolean); }catch{} return value.split(/[;,\s]+/).map(x=>safeString(x,80)).filter(Boolean); } return []; }
 function productRowMatches(row, {skc,spu,standard}){ const refs=[row?.skc,row?.skcName,row?.skc_name,row?.spu,row?.spuName,row?.spu_name,row?.supplierCode,row?.supplier_code,row?.supplier_code,row?.productNameAr,row?.productNameEn].map(compactRef); const qs=[skc,spu,standard].map(compactRef).filter(Boolean); return qs.some(q=>refs.some(x=>x&& (x===q||x.includes(q)||q.includes(x)))); }
-async function loadProductRows(store,args={}){ const file=path.join(args.productCacheDir||path.join(ROOT,'outputs','shein_openapi_products'),store,'latest.json'); try{ const j=await readJson(file); return {file, rows:Array.isArray(j.normalizedRows)?j.normalizedRows:[]}; }catch(e){ return {file, rows:[], error:e.message}; } }
+async function loadProductRows(store,args={}){ const file=resolveOpenApiProductCacheFile(store,{rootDir:ROOT,cacheDir:args.productCacheDir}); try{ const j=await readJson(file); return {file, rows:Array.isArray(j.normalizedRows)?j.normalizedRows:[]}; }catch(e){ return {file, rows:[], error:e.message}; } }
 async function loadJsonAssetPayloads(task){
   const out=[];
   for(const asset of Array.isArray(task?.assets)?task.assets:[]){

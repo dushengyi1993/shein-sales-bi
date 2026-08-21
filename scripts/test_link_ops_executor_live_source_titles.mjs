@@ -17,6 +17,7 @@ import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 import {buildProductDraftFromSnapshots} from '../lib/link_ops_product_draft_mapper.mjs';
 import {
   DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
@@ -66,6 +67,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-live-source-title-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = testOutputDir;
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -241,11 +243,16 @@ function check(label, actual, expected) {
 try {
   await new Promise(resolve => fakeOpenApi.listen(fakeOpenApiPort, '127.0.0.1', resolve));
   await writeJson(path.join(sourceLinkDir, '2099-01-01.json'), {schemaVersion: 'test-empty-aggregate'});
-  await writeJson(path.join(sourceOpenApiDir, 'latest.json'), {
+  await writeOpenApiProductCacheAtomically(path.join(sourceOpenApiDir, 'latest.json'), {
+    ok: true,
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: SOURCE_STORE,
     normalizedRows: [{spu: SOURCE_SPU, skc: SOURCE_SKC}],
     detailResults: [{ok: true, detailFetchedAt: SOURCE_DETAIL_AT, info: sourceSpuInfo({includeArabic: false})}],
+    detailFallbackResults: [],
+  }, {
+    storeKey: SOURCE_STORE,
+    generatedAt: '2026-08-20T00:00:00+08:00',
   });
 
   const descriptionMaterial = {
@@ -268,6 +275,38 @@ try {
   const openapiPublishPayload = {
     ...generatedDraft.openapiPublishPayloadDraft,
     multi_language_desc_list: buildDescriptionPayloadRows(descriptionMaterial),
+  };
+  const destinationPreparation = {
+    targetStore: 'HL',
+    titleGroup: 'title1',
+    titleEn: EN_TITLE,
+    standardGoodsSn: 'SRC-LIVE-CODE',
+    supplierSku: 'SRC-LIVE-SKU-001',
+    supplyPrice: 88,
+    inventory: 100,
+  };
+  const destinationBindingFingerprint = 'a'.repeat(64);
+  const destinationImages = [
+    {name: 'live-destination-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/live-destination-main.png', width: 900, height: 1200, order: 1},
+    {name: 'live-destination-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/live-destination-square.png', width: 1254, height: 1254, order: 2},
+  ];
+  openapiPublishPayload.skc_list[0].image_info = {
+    image_info_list: destinationImages.map(row => ({
+      image_url: row.imageUrl,
+      image_type: row.imageType,
+      image_sort: row.order,
+    })),
+  };
+  const destinationImageBinding = {
+    schemaVersion: 1,
+    sourceApproved: true,
+    authority: 'human_reviewed_source',
+    targetStore: 'HL',
+    boundAt: '2026-08-11T00:00:00.000Z',
+    bindingFingerprint: destinationBindingFingerprint,
+    imageCount: destinationImages.length,
+    images: destinationImages,
+    publishPreparation: destinationPreparation,
   };
   const baseTaskRevision = 1;
   const bindingRequestKey = descriptionBindingRequestKey({
@@ -298,6 +337,7 @@ try {
       sourceSkc: SOURCE_SKC,
       repositoryRevision: baseTaskRevision + 1,
       openapiPublishPayload,
+      publishAssetBinding: destinationImageBinding,
       descriptionMaterialBinding: {
         authority: 'human_reviewed_source',
         baseTaskRevision,
@@ -306,7 +346,7 @@ try {
         boundByUser: 'test-user',
         contentSha256: descriptionSummary.contentSha256,
         hashes: descriptionSummary.hashes,
-        imageBindingFingerprint: '',
+        imageBindingFingerprint: destinationBindingFingerprint,
         kind: 'copy_product_draft',
         lineCounts: descriptionSummary.lineCounts,
         newPayloadHash: sha256StableJson(openapiPublishPayload),
@@ -326,6 +366,7 @@ try {
         sourceStores: [SOURCE_STORE],
         sourceSkc: SOURCE_SKC,
         productRefs: [SOURCE_SKC],
+        publishPreparation: destinationPreparation,
       },
     }],
   });
@@ -358,6 +399,27 @@ try {
   check('official call ledger includes source-spu-info-live', output?.openapi?.calls || [], value => asArray(value).some(call => call?.name === 'source-spu-info-live'));
   check('official call ledger includes attribute template', output?.openapi?.calls || [], value => asArray(value).some(call => call?.name === 'query-attribute-template'));
   check('official call ledger includes target duplicate guard', output?.openapi?.calls || [], value => asArray(value).some(call => call?.name === 'search-existing-target-by-supplier-code'));
+
+  const dryRunPayloadHash = output?.payload?.payloadHash || '';
+  const publishCallsBeforeExecute = fakeCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length;
+  const taskStore = await fs.readFile(taskFile, 'utf8').then(JSON.parse);
+  taskStore.executionContext = {expectedPayloadHash: dryRunPayloadHash};
+  await writeJson(taskFile, taskStore);
+  const executeRun = await runNode([
+    'scripts/link_ops_hl_openapi_executor.mjs',
+    '--config', configFile,
+    '--task-json', taskFile,
+    '--store', 'HL',
+    '--execute',
+    '--confirm', 'SHEIN_OPENAPI_SUBMIT',
+    '--out-dir', path.join(tmpRoot, 'logs'),
+  ]);
+  let executeOutput = null;
+  try { executeOutput = JSON.parse(executeRun.stdout); } catch {}
+  check('execute regression has matching expected payload hash', dryRunPayloadHash, value => /^[a-f0-9]{64}$/i.test(String(value)));
+  check('exact-source execute without productDraftLock is blocked', executeOutput?.state || '', 'blocked');
+  check('missing productDraftLock blocker is explicit', executeOutput?.blockers || [], value => asArray(value).some(item => /productDraftLock|expectedPayloadHash/.test(String(item))));
+  check('publishOrEdit not called without productDraftLock', fakeCalls.filter(call => call.path === '/open-api/goods/product/publishOrEdit').length, publishCallsBeforeExecute);
 
   result.stdout = run.stdout.slice(0, 1000);
   result.stderr = run.stderr.slice(0, 1000);

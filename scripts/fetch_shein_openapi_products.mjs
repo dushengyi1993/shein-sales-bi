@@ -4,7 +4,7 @@
  *
  * Read-only by design:
  * - calls product list, product detail and virtual stock query endpoints only;
- * - writes ignored local/cloud artifacts under outputs/shein_openapi_products/;
+ * - writes runtime product snapshots under SHEIN_OPENAPI_PRODUCT_CACHE_DIR;
  * - never writes PostgreSQL and never changes SHEIN data.
  */
 import fs from 'node:fs/promises';
@@ -15,15 +15,23 @@ import {
   collectOpenapiProductDetailFallbacks,
   selectOpenapiProductDetailSpus,
 } from '../lib/openapi_product_detail_cache.mjs';
+import {
+  resolveOpenApiProductCacheDir,
+  writeOpenApiProductCacheAtomically,
+} from '../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
+
+function defaultProductCacheDir() {
+  return resolveOpenApiProductCacheDir({rootDir: ROOT});
+}
 
 function parseArgs(argv) {
   const args = {
     config: DEFAULT_CONFIG,
     store: '',
-    outDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
+    outDir: defaultProductCacheDir(),
     pageSize: 50,
     maxPages: 200,
     maxDetails: 0,
@@ -64,6 +72,8 @@ function parseArgs(argv) {
   node scripts/fetch_shein_openapi_products.mjs HL --max-details 30
 
 Fetches product/link basics into outputs/shein_openapi_products/<STORE>/latest.json.
+The default root is SHEIN_OPENAPI_PRODUCT_CACHE_DIR when set, otherwise the local
+outputs/shein_openapi_products/ directory.
 Use --max-details 0 for all listed SPUs; --skip-details for list-only smoke tests.
 Use --stock-retry-attempts/--stock-retry-base-delay-ms to tune stock shard retries.`);
       process.exit(0);
@@ -102,11 +112,6 @@ async function readDetailPrioritySpus(file, storeKey) {
   const values = payload?.stores?.[storeKey] ?? payload?.[storeKey] ?? [];
   if (!Array.isArray(values)) throw new Error(`Detail priority file has no array for ${storeKey}`);
   return unique(values);
-}
-
-async function writeJson(file, data) {
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  await fs.writeFile(file, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
 }
 
 async function cleanupOldSnapshots(outDir, keepSnapshots) {
@@ -614,8 +619,14 @@ async function main() {
   const stamp = fetchedAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
   const outFile = path.join(outDir, `${stamp}.json`);
   const latestFile = path.join(outDir, 'latest.json');
-  await writeJson(outFile, payload);
-  await writeJson(latestFile, payload);
+  await writeOpenApiProductCacheAtomically(outFile, payload, {
+    storeKey: args.store,
+    generatedAt: fetchedAt,
+  });
+  await writeOpenApiProductCacheAtomically(latestFile, payload, {
+    storeKey: args.store,
+    generatedAt: fetchedAt,
+  });
   const cleanup = await cleanupOldSnapshots(outDir, args.keepSnapshots);
 
   console.log(JSON.stringify({

@@ -13,8 +13,13 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
+import {resolveOpenApiProductCacheDir} from '../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+function defaultProductCacheDir() {
+  return resolveOpenApiProductCacheDir({rootDir: ROOT});
+}
 
 function parseArgs(argv) {
   const args = {
@@ -23,7 +28,7 @@ function parseArgs(argv) {
     database: 'shein_bi',
     user: 'shein',
     store: '',
-    productDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
+    productDir: defaultProductCacheDir(),
     dryRun: false,
     ensureOnly: false,
     skipEnsure: false,
@@ -44,8 +49,9 @@ function parseArgs(argv) {
       console.log(`Usage:
   node scripts/load_shein_openapi_products_warehouse.mjs --store HL
 
-Loads outputs/shein_openapi_products/<STORE>/latest.json into isolated OpenAPI
-product tables and writes an API-vs-current-link-snapshot reconciliation row.
+Loads SHEIN_OPENAPI_PRODUCT_CACHE_DIR/<STORE>/latest.json (or the local
+outputs/shein_openapi_products/<STORE>/latest.json default) into isolated
+OpenAPI product tables and writes an API-vs-current-link-snapshot reconciliation row.
 
 Schema orchestration:
   --ensure-only   create/migrate parallel tables, then exit

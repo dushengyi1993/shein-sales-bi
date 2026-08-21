@@ -24,7 +24,10 @@ import {
 } from '../lib/shein_store_identity.mjs';
 import {buildProductDisplayName} from '../lib/product_display_name.mjs';
 import {
+  applyApprovedImageBindingsToPublishPayload,
   applyExplicitPublishPreparationOverrides,
+  normalizeApprovedImageBindings,
+  normalizePublishPreparationOverrides,
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {evaluateAdditionalDuplicatePublishOverride} from '../lib/link_ops_duplicate_publish_override.mjs';
@@ -683,13 +686,434 @@ async function findPublishPayload(task) {
   return null;
 }
 
-async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
+function exactCopySourceLock(task) {
+  const intents = asArray(task?.intents).map(value => String(value || '').trim());
+  if (!intents.includes('copy_product_draft')) return null;
+  const sourceStore = normalizeStoreKey(asArray(task?.targets?.sourceStores)[0] || '');
+  const sourceSkc = safeString(task?.targets?.sourceSkc || '', 120);
+  return sourceStore && sourceSkc ? {sourceStore, sourceSkc} : null;
+}
+
+function exactSourcePayloadReadiness(generated, source) {
+  const payload = generated?.openapiPublishPayloadDraft;
+  const blockers = asArray(generated?.blockers).map(value => String(value || '').trim()).filter(Boolean);
+  const detail = generated?.canonicalDraft?.openApiDetail;
+  const skcList = asArray(payload?.skc_list || payload?.skcList);
+  const matchingSourceSkcs = skcList.filter(row => String(row?.source_skc || row?.sourceSkc || row?.skc_name || row?.skcName || '') === source.sourceSkc);
+  const sourceSkc = matchingSourceSkcs.length === 1 ? matchingSourceSkcs[0] : null;
+  const skuList = asArray(sourceSkc?.sku_list || sourceSkc?.skuList);
+  if (generated?.ok !== true) blockers.push('mapper did not return ok=true');
+  if (generated?.readyForOpenApiSubmit !== true) blockers.push('mapper draft is not readyForOpenApiSubmit');
+  if (!looksLikePublishPayload(payload)) blockers.push('mapper did not return a publish payload');
+  if (!['openapi_product_detail_snapshot', 'openapi_product_detail_cached_fallback'].includes(detail?.source)) {
+    blockers.push('fresh exact OpenAPI product detail source is missing');
+  }
+  if (matchingSourceSkcs.length !== 1) blockers.push(`generated payload must contain exactly one source_skc=${source.sourceSkc}; matched=${matchingSourceSkcs.length}`);
+  if (sourceSkc && String(sourceSkc?.source_skc || sourceSkc?.sourceSkc || '') !== source.sourceSkc) {
+    blockers.push(`generated payload source_skc drifted from locked sourceSkc=${source.sourceSkc}`);
+  }
+  if (generated?.sourceSkc !== source.sourceSkc) blockers.push(`mapper sourceSkc drifted from locked sourceSkc=${source.sourceSkc}`);
+  if (detail?.sourceDetailLock?.sourceStore !== source.sourceStore || detail?.sourceDetailLock?.sourceSkc !== source.sourceSkc) {
+    blockers.push('source detail lock identity does not match exact sourceStore/sourceSkc');
+  }
+  if (!/^[a-f0-9]{64}$/i.test(String(detail?.sourceDetailHash || detail?.sourceDetailLock?.sourceDetailHash || ''))) {
+    blockers.push('source detail canonical hash is missing');
+  }
+  if (!Number.isFinite(Number(payload?.category_id ?? payload?.categoryId)) || Number(payload?.category_id ?? payload?.categoryId) <= 0) {
+    blockers.push('exact source detail is missing category_id');
+  }
+  if (!Number.isFinite(Number(payload?.product_type_id ?? payload?.productTypeId)) || Number(payload?.product_type_id ?? payload?.productTypeId) <= 0) {
+    blockers.push('exact source detail is missing product_type_id');
+  }
+  if (!Array.isArray(payload?.product_attribute_list || payload?.productAttributeList) || !(payload.product_attribute_list || payload.productAttributeList).length) {
+    blockers.push('exact source detail is missing product_attribute_list');
+  }
+  if (!sourceSkc || !skuList.length) blockers.push('exact source detail is missing an SKC/SKU payload');
+  for (const [index, sku] of skuList.entries()) {
+    for (const field of ['height', 'length', 'width', 'weight']) {
+      if (!Number.isFinite(Number(sku?.[field])) || Number(sku[field]) <= 0) blockers.push(`exact source detail SKU[${index}] is missing ${field}`);
+    }
+    if (!sku?.cost_info && !sku?.costInfo) blockers.push(`exact source detail SKU[${index}] is missing cost_info`);
+  }
+  if (blockers.length) {
+    return {
+      ok: false,
+      reason: `exact source ${source.sourceStore}/${source.sourceSkc} mapper draft is incomplete: ${blockers.slice(0, 8).join('；')}`,
+    };
+  }
+  return {
+    ok: true,
+    payload,
+    sourceDetailHash: generated.sourceDetailHash || detail.sourceDetailHash,
+    sourceDetailLock: generated.sourceDetailLock || detail.sourceDetailLock,
+  };
+}
+
+function normalizedTargetStore(value) {
+  return normalizeStoreKey(value || '');
+}
+
+function destinationStoreCandidates(task, targetStore) {
+  const sourceStores = new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean));
+  const writeStores = asArray(task?.targets?.writeStores || task?.targets?.targetStores || task?.writeStores || task?.targetStores)
+    .map(normalizeStoreKey)
+    .filter(Boolean);
+  const taskStores = asArray(task?.targets?.stores || task?.stores)
+    .map(normalizeStoreKey)
+    .filter(store => store && !sourceStores.has(store));
+  const candidates = writeStores.length ? writeStores : taskStores;
+  const explicit = [
+    task?.targetStore,
+    task?.target_store,
+    task?.targets?.targetStore,
+    task?.targets?.target_store,
+    task?.targets?.writeStore,
+    task?.targets?.write_store,
+  ].map(normalizedTargetStore).filter(Boolean);
+  return [...new Set([...candidates, ...explicit, normalizedTargetStore(targetStore)].filter(Boolean))];
+}
+
+function structuredDestinationPreparation(task) {
+  const candidates = [
+    ['task.publishPreparation', task?.publishPreparation],
+    ['metadata.publishPreparation', task?.metadata?.publishPreparation],
+    ['targets.publishPreparation', task?.targets?.publishPreparation],
+    ['publishAssetBinding.publishPreparation', task?.publishAssetBinding?.publishPreparation],
+    ['metadata.publishAssetBinding.publishPreparation', task?.metadata?.publishAssetBinding?.publishPreparation],
+  ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+  const raw = {};
+  for (const [, value] of candidates) {
+    for (const [key, item] of Object.entries(value)) {
+      // Binding evidence may carry explicit null placeholders for fields that
+      // were not prepared. Those placeholders must not erase a verified field
+      // from another structured preparation source.
+      if (item === null || item === undefined || item === '') continue;
+      if (key === 'titles' && item && typeof item === 'object' && !Array.isArray(item) && !Object.keys(item).length) continue;
+      raw[key] = item;
+    }
+  }
+  const normalized = normalizePublishPreparationOverrides(raw);
+  return {
+    raw,
+    normalized,
+    sources: candidates.map(([source]) => source),
+  };
+}
+
+function targetTitleRows(payload) {
+  return asArray(payload?.multi_language_name_list || payload?.multiLanguageNameList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({
+      language: safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase(),
+      name: safeString(row.name || row.product_name || row.productName || row.value || '', 1000),
+    }))
+    .filter(row => row.language && row.name);
+}
+
+function targetDescriptionRows(payload) {
+  return asArray(payload?.multi_language_desc_list || payload?.multiLanguageDescList || payload?.productMultiDescList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({
+      language: safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase(),
+      productDesc: safeString(row.product_desc || row.productDesc || row.description || row.name || row.value || '', 10000),
+    }))
+    .filter(row => row.language && row.productDesc);
+}
+
+function targetImageRows(payload) {
+  return asArray(payload?.skc_list || payload?.skcList).flatMap(skc => {
+    const imageInfo = skc?.image_info || skc?.imageInfo || {};
+    return asArray(imageInfo?.image_info_list || imageInfo?.imageInfoList)
+      .filter(row => row && typeof row === 'object')
+      .map(row => ({
+        imageUrl: safeString(row.image_url || row.imageUrl || row.url || '', 3000),
+        imageType: Number(row.image_type ?? row.imageType ?? 0),
+        imageSort: Number(row.image_sort ?? row.imageSort ?? 0),
+      }))
+      .filter(row => row.imageUrl);
+  });
+}
+
+function normalizeImageProjection(rows) {
+  return asArray(rows).map(row => ({
+    imageUrl: safeString(row.imageUrl || row.image_url || row.url || '', 3000),
+    imageType: Number(row.imageType ?? row.image_type ?? 0),
+  })).filter(row => row.imageUrl).sort((a, b) => `${a.imageType}|${a.imageUrl}`.localeCompare(`${b.imageType}|${b.imageUrl}`));
+}
+
+function payloadSkuRows(payload) {
+  return asArray(payload?.skc_list || payload?.skcList).flatMap(skc => asArray(skc?.sku_list || skc?.skuList));
+}
+
+function payloadCostValues(payload) {
+  return payloadSkuRows(payload)
+    .map(sku => sku?.cost_info || sku?.costInfo || {})
+    .map(cost => cost.cost_price ?? cost.costPrice ?? cost.price ?? '')
+    .filter(value => value !== '' && value !== null && value !== undefined)
+    .map(Number)
+    .filter(Number.isFinite);
+}
+
+function payloadInventoryValues(payload) {
+  return payloadSkuRows(payload).flatMap(sku => asArray(sku?.stock_info_list || sku?.stockInfoList))
+    .flatMap(row => ['inventory_num', 'inventoryNum', 'stock', 'stock_num', 'stockNum', 'quantity']
+      .filter(key => row?.[key] !== undefined && row?.[key] !== null && row?.[key] !== '')
+      .map(key => Number(row[key])))
+    .filter(Number.isFinite);
+}
+
+function payloadStandardGoodsValues(payload) {
+  return asArray(payload?.skc_list || payload?.skcList)
+    .map(skc => skc?.supplier_code ?? skc?.supplierCode ?? '')
+    .map(value => safeString(value, 240))
+    .filter(Boolean);
+}
+
+function payloadSupplierSkuValues(payload) {
+  return payloadSkuRows(payload)
+    .map(sku => safeString(sku?.supplier_sku ?? sku?.supplierSku ?? '', 240))
+    .filter(Boolean);
+}
+
+function payloadTargetStoreValues(payload) {
+  return [
+    payload?.target_store,
+    payload?.targetStore,
+    payload?.store_key,
+    payload?.storeKey,
+    payload?.write_store,
+    payload?.writeStore,
+  ].map(normalizedTargetStore).filter(Boolean);
+}
+
+function payloadTitleGroupValues(payload) {
+  return [payload?.title_group, payload?.titleGroup]
+    .map(value => safeString(value, 40).toLowerCase())
+    .filter(Boolean);
+}
+
+function structuredImageBinding(task) {
+  return task?.publishAssetBinding || task?.metadata?.publishAssetBinding || null;
+}
+
+function validateStructuredImageBinding(task, targetStore, existingPayload) {
+  const binding = structuredImageBinding(task);
+  if (!binding) return null;
+  const bindingTarget = normalizedTargetStore(binding.targetStore);
+  if (binding.sourceApproved !== true || String(binding.authority || '') !== 'human_reviewed_source') {
+    throw new Error('exact source lock requires an approved human_reviewed_source destination image binding');
+  }
+  if (bindingTarget !== targetStore) {
+    throw new Error(`destination image binding store ${bindingTarget || '(missing)'} does not match target store ${targetStore}`);
+  }
+  if (!binding.boundAt || !/^[a-f0-9]{64}$/i.test(String(binding.bindingFingerprint || ''))) {
+    throw new Error('destination image binding lacks a verifiable boundAt/bindingFingerprint lock');
+  }
+  const images = normalizeApprovedImageBindings(binding.images, {sourceApproved: true});
+  if (binding.imageCount !== undefined && Number(binding.imageCount) !== images.length) {
+    throw new Error('destination image binding imageCount does not match its normalized images');
+  }
+  const existingImages = normalizeImageProjection(targetImageRows(existingPayload));
+  if (existingImages.length && JSON.stringify(existingImages) !== JSON.stringify(normalizeImageProjection(images))) {
+    throw new Error('existing task payload images do not match the locked destination image binding');
+  }
+  return {binding, images};
+}
+
+function assertEqualNumberField(values, expected, label) {
+  if (!values.length) return;
+  if (expected === null || expected === undefined || !Number.isFinite(Number(expected))) {
+    throw new Error(`existing task payload contains destination ${label} but no structured preparation lock`);
+  }
+  if (values.some(value => Number(value) !== Number(expected))) {
+    throw new Error(`existing task payload destination ${label} differs from the structured preparation lock`);
+  }
+}
+
+function buildProtectedDestinationProjection(task, existingPayload, targetStore) {
+  const destinationStore = normalizedTargetStore(targetStore);
+  const stores = destinationStoreCandidates(task, destinationStore);
+  if (stores.some(store => store !== destinationStore)) {
+    throw new Error(`destination store binding drifted: expected ${destinationStore}, got ${stores.join('/')}`);
+  }
+  const preparation = structuredDestinationPreparation(task);
+  const overrides = preparation.normalized;
+  const payloadStores = payloadTargetStoreValues(existingPayload);
+  if (payloadStores.length && payloadStores.some(store => store !== destinationStore)) {
+    throw new Error(`existing task payload target store does not match ${destinationStore}`);
+  }
+  const payloadGroups = payloadTitleGroupValues(existingPayload);
+  if (payloadGroups.length && (!overrides.titleGroup || payloadGroups.some(group => group !== overrides.titleGroup))) {
+    throw new Error('existing task payload title group has no matching structured destination preparation lock');
+  }
+
+  const titles = targetTitleRows(existingPayload);
+  const structuredTitles = overrides.titles || {};
+  if (titles.length) {
+    for (const row of titles) {
+      if (!structuredTitles[row.language] || structuredTitles[row.language] !== row.name) {
+        throw new Error(`existing task payload title ${row.language} has no matching structured destination title lock`);
+      }
+    }
+  }
+  const descriptions = targetDescriptionRows(existingPayload);
+  const descriptionBinding = task?.descriptionMaterialBinding;
+  if (descriptions.length && (!descriptionBinding || !validatePublishPayloadDescription(existingPayload).ok || !validateDescriptionBindingLock(task, existingPayload).ok)) {
+    throw new Error('existing task payload contains destination descriptions without a valid descriptionMaterialBinding lock');
+  }
+  if (descriptionBinding && (!descriptions.length || !validatePublishPayloadDescription(existingPayload).ok || !validateDescriptionBindingLock(task, existingPayload).ok)) {
+    throw new Error('descriptionMaterialBinding cannot be verified against the existing task payload');
+  }
+
+  const imageBinding = validateStructuredImageBinding(task, destinationStore, existingPayload);
+  if (targetImageRows(existingPayload).length && !imageBinding) {
+    throw new Error('existing task payload contains destination images without a locked publishAssetBinding');
+  }
+
+  const standardGoods = payloadStandardGoodsValues(existingPayload);
+  const supplierSkus = payloadSupplierSkuValues(existingPayload);
+  const costs = payloadCostValues(existingPayload);
+  const inventories = payloadInventoryValues(existingPayload);
+  assertEqualNumberField(costs, overrides.supplyPrice, 'supplyPrice');
+  assertEqualNumberField(inventories, overrides.inventory, 'inventory');
+  if (standardGoods.length && (!overrides.standardGoodsSn || standardGoods.some(value => value !== overrides.standardGoodsSn))) {
+    throw new Error('existing task payload standardGoodsSn has no matching structured preparation lock');
+  }
+  const expectedSupplierSku = overrides.supplierSku || overrides.standardGoodsSn;
+  if (supplierSkus.length && (!expectedSupplierSku || supplierSkus.some(value => value !== expectedSupplierSku))) {
+    throw new Error('existing task payload supplierSku has no matching structured preparation lock');
+  }
+
+  return {
+    targetStore: destinationStore,
+    titleGroup: overrides.titleGroup || '',
+    titles: structuredTitles,
+    descriptionBinding,
+    imageBinding,
+    overrides,
+    preparationSources: preparation.sources,
+    protectedFields: {
+      targetStore: destinationStore,
+      titleGroup: overrides.titleGroup || '',
+      titleLanguages: Object.keys(structuredTitles),
+      descriptionsLocked: Boolean(descriptionBinding),
+      imagesLocked: Boolean(imageBinding),
+      supplyPrice: overrides.supplyPrice,
+      inventory: overrides.inventory,
+      standardGoodsSn: overrides.standardGoodsSn || '',
+      supplierSku: expectedSupplierSku || '',
+    },
+  };
+}
+
+function mergeExactSourceDestinationBindings(sourcePayload, task, existingPayload, targetStore) {
+  let payload = jsonClone(sourcePayload);
+  const applied = [];
+  const projection = buildProtectedDestinationProjection(task, existingPayload, targetStore);
+  const imageBinding = projection.imageBinding;
+  if (imageBinding) {
+    const bound = applyApprovedImageBindingsToPublishPayload(payload, imageBinding.images, {sourceApproved: true});
+    payload = bound.payload;
+    applied.push('destination.publishAssetBinding.images');
+  }
+
+  const descriptionBinding = projection.descriptionBinding;
+  if (descriptionBinding && typeof descriptionBinding === 'object') {
+    payload.multi_language_desc_list = jsonClone(existingPayload.multi_language_desc_list);
+    applied.push('destination.descriptionMaterialBinding.multi_language_desc_list');
+  }
+
+  const preparation = applyExplicitPublishPreparationOverrides(payload, projection.overrides);
+  payload = preparation.payload;
+  applied.push(...preparation.applied.map(value => `destination.publishPreparation.${value}`));
+  return {payload, applied, projection};
+}
+
+async function buildExactSourceLockedPayload(task, {targetStore, source, existingPayload, expectedSourceDetailHash = ''}) {
+  const generated = await buildProductDraftFromSnapshots({
+    sourceStore: source.sourceStore,
+    sourceSkc: source.sourceSkc,
+    date: 'latest',
+    targetStore,
+  });
+  const readiness = exactSourcePayloadReadiness(generated, source);
+  if (!readiness.ok) {
+    return {
+      source: 'exact_source_snapshot_incomplete',
+      payload: null,
+      inferred: source,
+      exactSourceLock: true,
+      generatedDraft: summarizeDraftForExecutor(generated),
+      mappingBlockers: generated?.blockers || [],
+      generationError: readiness.reason,
+    };
+  }
+  const currentSourceDetailHash = String(readiness.sourceDetailHash || '').toLowerCase();
+  if (expectedSourceDetailHash && currentSourceDetailHash !== String(expectedSourceDetailHash).toLowerCase()) {
+    return {
+      source: 'exact_source_cache_drifted',
+      payload: null,
+      inferred: source,
+      exactSourceLock: true,
+      generatedDraft: summarizeDraftForExecutor(generated),
+      sourceDetailLock: readiness.sourceDetailLock || null,
+      generationError: `exact source detail cache drifted since preflight: expected=${expectedSourceDetailHash} actual=${currentSourceDetailHash || 'missing'}`,
+    };
+  }
+  const merged = mergeExactSourceDestinationBindings(readiness.payload, task, existingPayload, targetStore);
+  return {
+    source: 'webapi_snapshot_exact_source_lock',
+    payload: merged.payload,
+    inferred: source,
+    exactSourceLock: true,
+    generatedDraft: summarizeDraftForExecutor(generated),
+    canonicalDraft: generated.canonicalDraft,
+    mappingBlockers: generated.blockers,
+    mappingWarnings: generated.warnings,
+    destinationBindingsApplied: merged.applied,
+    destinationProjection: merged.projection.protectedFields,
+    sourceDetailHash: readiness.sourceDetailHash,
+    sourceDetailLock: readiness.sourceDetailLock,
+    taskPayloadIgnored: Boolean(existingPayload),
+  };
+}
+
+export async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
   const exactSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
   const exactSourceStore = exactSourceStores.length === 1 ? exactSourceStores[0] : '';
   const exactSourceSkc = safeString(task?.targets?.sourceSkc || '', 120);
   const hasExactSourceLock = Boolean(exactSourceStore && exactSourceSkc);
   const taskExactSource = hasExactSourceLock ? {sourceStore: exactSourceStore, sourceSkc: exactSourceSkc} : null;
+
   const existing = await findPublishPayload(task);
+  const exactSource = exactCopySourceLock(task);
+  if (exactSource) {
+    if (taskHasUnboundImageAssets(task) && !task?.publishAssetBinding) {
+      return {
+        source: 'exact_source_unbound_image_assets',
+        payload: null,
+        inferred: exactSource,
+        exactSourceLock: true,
+        generationError: 'exact source lock cannot fall back to unbound destination image assets; bind reviewed images to the same task first',
+      };
+    }
+    try {
+      return await buildExactSourceLockedPayload(task, {
+        targetStore,
+        source: exactSource,
+        existingPayload: existing?.payload || null,
+        expectedSourceDetailHash: preferredSource?.sourceDetailHash || '',
+      });
+    } catch (error) {
+      return {
+        source: 'exact_source_snapshot_error',
+        payload: null,
+        inferred: exactSource,
+        exactSourceLock: true,
+        generationError: error?.message || String(error),
+      };
+    }
+  }
   if (existing?.payload) {
     // A server-bound task keeps the reviewed payload at the task root. Retain
     // that payload as the only publish source, but hydrate read-only source
@@ -1108,51 +1532,109 @@ function validateSourceDetailLockForWrite({
 }
 
 function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
+  const taskPreparation = task?.publishPreparation && typeof task.publishPreparation === 'object'
+    ? task.publishPreparation
+    : {};
+  const metadataPreparation = task?.metadata?.publishPreparation && typeof task.metadata.publishPreparation === 'object'
+    ? task.metadata.publishPreparation
+    : {};
+  const targetPreparation = task?.targets?.publishPreparation && typeof task.targets.publishPreparation === 'object'
+    ? task.targets.publishPreparation
+    : {};
+  const executionPreparation = executionContext?.publishPreparation && typeof executionContext.publishPreparation === 'object'
+    ? executionContext.publishPreparation
+    : {};
   return {
-    ...(task?.publishPreparation && typeof task.publishPreparation === 'object' ? task.publishPreparation : {}),
-    ...(task?.metadata?.publishPreparation && typeof task.metadata.publishPreparation === 'object' ? task.metadata.publishPreparation : {}),
-    ...(task?.targets?.publishPreparation && typeof task.targets.publishPreparation === 'object' ? task.targets.publishPreparation : {}),
-    ...(executionContext?.publishPreparation && typeof executionContext.publishPreparation === 'object' ? executionContext.publishPreparation : {}),
+    ...taskPreparation,
+    ...metadataPreparation,
+    ...targetPreparation,
+    ...executionPreparation,
     standardGoodsSn: firstNonEmpty(
-      executionContext?.publishPreparation?.standardGoodsSn,
-      task?.publishPreparation?.standardGoodsSn,
+      executionPreparation.standardGoodsSn,
+      executionPreparation.standard_goods_sn,
+      taskPreparation.standardGoodsSn,
+      taskPreparation.standard_goods_sn,
+      metadataPreparation.standardGoodsSn,
+      metadataPreparation.standard_goods_sn,
+      targetPreparation.standardGoodsSn,
+      targetPreparation.standard_goods_sn,
       task?.targets?.standardGoodsSn,
       task?.standardGoodsSn,
     ),
     supplierSku: firstNonEmpty(
-      executionContext?.publishPreparation?.supplierSku,
-      task?.publishPreparation?.supplierSku,
+      executionPreparation.supplierSku,
+      executionPreparation.supplier_sku,
+      taskPreparation.supplierSku,
+      taskPreparation.supplier_sku,
+      metadataPreparation.supplierSku,
+      metadataPreparation.supplier_sku,
+      targetPreparation.supplierSku,
+      targetPreparation.supplier_sku,
       task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
         ? task?.notes?.supplierSkuPolicy?.value
         : '',
     ),
     supplyPrice: firstNonEmpty(
-      executionContext?.publishPreparation?.supplyPrice,
-      task?.publishPreparation?.supplyPrice,
+      executionPreparation.supplyPrice,
+      executionPreparation.supply_price,
+      taskPreparation.supplyPrice,
+      taskPreparation.supply_price,
+      metadataPreparation.supplyPrice,
+      metadataPreparation.supply_price,
+      targetPreparation.supplyPrice,
+      targetPreparation.supply_price,
       task?.targets?.supplyPrice,
       task?.supplyPrice,
     ),
     inventory: firstNonEmpty(
-      executionContext?.publishPreparation?.inventory,
-      task?.publishPreparation?.inventory,
+      executionPreparation.inventory,
+      executionPreparation.stockQty,
+      executionPreparation.stock_qty,
+      taskPreparation.inventory,
+      taskPreparation.stockQty,
+      taskPreparation.stock_qty,
+      metadataPreparation.inventory,
+      metadataPreparation.stockQty,
+      metadataPreparation.stock_qty,
+      targetPreparation.inventory,
+      targetPreparation.stockQty,
+      targetPreparation.stock_qty,
       task?.targets?.inventory,
       task?.inventory,
     ),
     categoryId: firstNonEmpty(
-      executionContext?.publishPreparation?.categoryId,
-      task?.publishPreparation?.categoryId,
+      executionPreparation.categoryId,
+      executionPreparation.category_id,
+      taskPreparation.categoryId,
+      taskPreparation.category_id,
+      metadataPreparation.categoryId,
+      metadataPreparation.category_id,
+      targetPreparation.categoryId,
+      targetPreparation.category_id,
       task?.targets?.categoryId,
       task?.categoryId,
     ),
     titleAr: firstNonEmpty(
-      executionContext?.publishPreparation?.titleAr,
-      task?.publishPreparation?.titleAr,
+      executionPreparation.titleAr,
+      executionPreparation.title_ar,
+      taskPreparation.titleAr,
+      taskPreparation.title_ar,
+      metadataPreparation.titleAr,
+      metadataPreparation.title_ar,
+      targetPreparation.titleAr,
+      targetPreparation.title_ar,
       task?.targets?.titleAr,
       task?.titleAr,
     ),
     titleEn: firstNonEmpty(
-      executionContext?.publishPreparation?.titleEn,
-      task?.publishPreparation?.titleEn,
+      executionPreparation.titleEn,
+      executionPreparation.title_en,
+      taskPreparation.titleEn,
+      taskPreparation.title_en,
+      metadataPreparation.titleEn,
+      metadataPreparation.title_en,
+      targetPreparation.titleEn,
+      targetPreparation.title_en,
       task?.targets?.titleEn,
       task?.titleEn,
     ),
@@ -1675,6 +2157,14 @@ function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
   if (!sourceStore || !sourceSkc || !isSha256PayloadHash(payloadHash)
     || payloadHashAlgorithm !== PRODUCT_EXECUTION_HASH_ALGORITHM) return null;
   if (!validRecoverableSourceDetailLock(sourceDetailLock, sourceSkc)) return null;
+  const sourceDetailHash = safeString(
+    payload.sourceDetailHash
+    || sourceDetailLock.sourceDetailHash
+    || generated.sourceDetailHash
+    || generated.openApiDetail?.sourceDetailHash
+    || '',
+    120,
+  );
   return {
     storeKey,
     sourceStore,
@@ -1683,6 +2173,7 @@ function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
     hopeOnSaleDate: safeString(summary.hopeOnSaleDate || summary.hope_on_sale_date || fallback.hopeOnSaleDate || '', 80),
     payloadHash,
     payloadHashAlgorithm,
+    sourceDetailHash,
     sourceDetailLock,
     lockedAt: safeString(fallback.lockedAt || result.endedAt || result.startedAt || '', 80),
     runId: safeString(result.runId || fallback.runId || '', 120),
@@ -4045,6 +4536,10 @@ async function main() {
   const productDraftLock = reusePreflightLock
     ? resolvePreflightProductLock(task, targetStore, {expectedPayloadHash})
     : null;
+  const exactSourceCopy = exactCopySourceLock(task);
+  if (args.mode === 'execute' && exactSourceCopy && !productDraftLock) {
+    blockers.push('精确源 copy_product_draft execute 缺少可解析的 productDraftLock（必须匹配 expectedPayloadHash）；拒绝仅凭 expectedPayloadHash 调用 publishOrEdit。');
+  }
   const effectiveExecutionContext = productDraftLock
     ? {...(executionContext || {}), productDraftLock}
     : executionContext;
@@ -4060,6 +4555,21 @@ async function main() {
   const lockedSourceScope = resolveLockedSourceScope({payloadFound, task, intents, targetStore});
   appendUnique(blockers, lockedSourceScope.blockers);
   if (payloadFound?.sourceMetadataWarning) appendUnique(warnings, payloadFound.sourceMetadataWarning);
+  if (productDraftLock && !productDraftLock.sourceDetailHash) {
+    blockers.push('现有 preflight 锁缺少 sourceDetailHash；缓存漂移不可验证，必须重新预检。');
+  }
+  if (productDraftLock?.sourceDetailHash && payloadFound?.sourceDetailHash
+    && String(productDraftLock.sourceDetailHash).toLowerCase() !== String(payloadFound.sourceDetailHash).toLowerCase()) {
+    blockers.push(`source detail canonical hash 与 preflight 锁不一致：expected=${productDraftLock.sourceDetailHash} actual=${payloadFound.sourceDetailHash}`);
+  }
+  if (payloadFound?.exactSourceLock && payloadFound?.payload && payloadFound?.inferred?.sourceSkc) {
+    const generatedSourceSkc = payloadFound.payload?.skc_list?.[0]?.source_skc
+      || payloadFound.payload?.skc_list?.[0]?.sourceSkc
+      || '';
+    if (generatedSourceSkc !== payloadFound.inferred.sourceSkc) {
+      blockers.push(`最终 publish payload source_skc 与锁定 sourceSkc 不一致：expected=${payloadFound.inferred.sourceSkc} actual=${generatedSourceSkc || 'missing'}`);
+    }
+  }
   let payloadSummary = null;
   let safeDefaults = [];
   let manualAttributeOverrides = [];
@@ -4071,7 +4581,10 @@ async function main() {
     appendUnique(blockers, payloadFound.mappingBlockers);
     appendUnique(warnings, payloadFound.mappingWarnings);
     const applied = applySafeDefaults(payloadFound.payload, {sites, brands, task, executionContext: effectiveExecutionContext});
-    const manualApplied = applyManualAttributeOverrides(applied.payload, task, effectiveExecutionContext);
+    const exactSourceLock = payloadFound.exactSourceLock === true;
+    const manualApplied = exactSourceLock
+      ? {payload: applied.payload, applied: [], overrides: []}
+      : applyManualAttributeOverrides(applied.payload, task, effectiveExecutionContext);
     const liveSourceNames = await enrichPayloadNamesFromLiveSourceOpenApi(config, manualApplied.payload, payloadFound);
     if (liveSourceNames.calls?.length) calls.push(...liveSourceNames.calls);
     else if (liveSourceNames.call) calls.push(liveSourceNames.call);
@@ -4083,11 +4596,13 @@ async function main() {
     // payload BEFORE any template/provenance transform, so the provenance guard
     // sees the final identity and can never source a value from goods number A
     // and publish it under goods number B.
-    const standardGoodsSnApplied = applyTargetStandardGoodsSn(
-      publishStandardApplied.payload,
-      taskStandardGoodsSn(task, effectiveExecutionContext),
-      {preserveExplicitSupplierSku},
-    );
+    const standardGoodsSnApplied = exactSourceLock
+      ? {payload: publishStandardApplied.payload, applied: []}
+      : applyTargetStandardGoodsSn(
+        publishStandardApplied.payload,
+        taskStandardGoodsSn(task, effectiveExecutionContext),
+        {preserveExplicitSupplierSku},
+      );
     const taskStandardGoodsSnValue = taskStandardGoodsSn(task, effectiveExecutionContext);
     const templateApplied = await applyAttributeTemplateRules(client, standardGoodsSnApplied.payload, {
       copyProductDraft: intents.includes('copy_product_draft'),
@@ -4098,17 +4613,21 @@ async function main() {
       sourcePayloadSupplierCodes,
     });
     if (templateApplied.call) calls.push(templateApplied.call);
-    const randomSupplyPriceApplied = applyRandomSupplyPrice(templateApplied.payload, task, effectiveExecutionContext, targetStore);
-    const explicitPreparationApplied = applyExplicitPublishPreparationOverrides(
-      randomSupplyPriceApplied.payload,
-      taskPublishPreparationOverrides(task, effectiveExecutionContext),
-    );
+    const randomSupplyPriceApplied = exactSourceLock
+      ? {payload: templateApplied.payload, applied: [], evidence: null}
+      : applyRandomSupplyPrice(templateApplied.payload, task, effectiveExecutionContext, targetStore);
+    const explicitPreparationApplied = exactSourceLock
+      ? {payload: randomSupplyPriceApplied.payload, applied: [], evidence: null}
+      : applyExplicitPublishPreparationOverrides(
+        randomSupplyPriceApplied.payload,
+        taskPublishPreparationOverrides(task, effectiveExecutionContext),
+      );
     // A reviewed image package is an operator-owned fact, not an AI suggestion.
     // Preserve its explicit order even when an older task/template still carries
     // shuffleImages=true; otherwise a later preflight can silently rewrite the
     // sequence that the operator just approved and locked to this task.
     const approvedImageOrderLocked = taskApprovedImageOrderLocked(task);
-    const imageShuffleApplied = approvedImageOrderLocked
+    const imageShuffleApplied = exactSourceLock || approvedImageOrderLocked
       ? {payload: explicitPreparationApplied.payload, applied: ['publish_asset_binding.approved_order_locked']}
       : shufflePublishDetailImages(explicitPreparationApplied.payload, task, effectiveExecutionContext, targetStore);
     const imageSortApplied = ensurePublishImageSortGlobalUnique(imageShuffleApplied.payload);
@@ -4336,6 +4855,8 @@ async function main() {
         sourceSkc: productDraftLock.sourceSkc,
         hopeOnSaleDate: productDraftLock.hopeOnSaleDate,
         payloadHash: productDraftLock.payloadHash,
+        sourceDetailHash: productDraftLock.sourceDetailHash || '',
+        sourceDetailLock: productDraftLock.sourceDetailLock || null,
         runId: productDraftLock.runId,
       } : null,
     } : null,
@@ -4364,17 +4885,25 @@ async function main() {
       payloadHashAlgorithm: payloadHash ? PRODUCT_EXECUTION_HASH_ALGORITHM : '',
       summary: payloadSummary,
       validation: payloadValidation,
+      sourceStore: payloadFound?.inferred?.sourceStore || null,
+      sourceSkc: payloadFound?.inferred?.sourceSkc || null,
+      sourceDetailHash: payloadFound?.sourceDetailHash || payloadFound?.sourceDetailLock?.sourceDetailHash || null,
+      sourceDetailLock: currentSourceDetailLock,
       generatedDraft: payloadFound?.generatedDraft || null,
       generationError: payloadFound?.generationError || null,
       inferredSource: payloadFound?.inferred || null,
-      sourceDetailLock: currentSourceDetailLock,
-      mappingBlockers: payloadFound?.structuredMappingBlockers || [],
+      mappingBlockers: payloadFound?.structuredMappingBlockers || payloadFound?.mappingBlockers || [],
+      taskPayloadIgnored: payloadFound?.taskPayloadIgnored === true,
+      destinationBindingsApplied: payloadFound?.destinationBindingsApplied || [],
+      destinationProjection: payloadFound?.destinationProjection || null,
       preflightLock: productDraftLock ? {
         reused: true,
         sourceStore: productDraftLock.sourceStore,
         sourceSkc: productDraftLock.sourceSkc,
         hopeOnSaleDate: productDraftLock.hopeOnSaleDate,
         payloadHash: productDraftLock.payloadHash,
+        sourceDetailHash: productDraftLock.sourceDetailHash || '',
+        sourceDetailLock: productDraftLock.sourceDetailLock || null,
         runId: productDraftLock.runId,
       } : null,
     },

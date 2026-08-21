@@ -207,6 +207,8 @@ const tests = [
   'scripts/test_historical_store_identity_repair_contract.mjs',
   'scripts/test_openapi_product_reconciliation_policy.mjs',
   'scripts/test_openapi_product_detail_cache.mjs',
+  'scripts/test_openapi_product_cache_runtime_path.mjs',
+  'scripts/test_link_ops_source_skc_precedence.mjs',
   'scripts/test_fetch_shein_openapi_products_stock_retry.mjs',
   'scripts/test_cloud_bi_refresh_lock_handoff.mjs',
   'scripts/test_portal_security.mjs',

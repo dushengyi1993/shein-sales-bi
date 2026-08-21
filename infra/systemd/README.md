@@ -90,6 +90,10 @@ V4 layout 只在宿主层把 profiles/state 以 `bind,ro` 映射到 `/opt/shein-
 迁移器使用 source tree 外的 v2 journal 记录每个已落盘阶段。`--apply` 失败或进程被终止时不自动回滚，也不删除现场；先无参数重跑只读审计，确认返回的 `recovery.action=resume`、phase 和 stamp，再用同一条 `--apply --confirm MIGRATE_CLOUD_RUNTIME_LAYOUT_V2` 恢复。只有审阅 journal、fstab 与备份指纹后才能显式执行 `--rollback --confirm MIGRATE_CLOUD_RUNTIME_LAYOUT_V2`；脚本拒绝无 active journal 的盲回滚。不要手工移动/删除 profile、state、outputs 或迁移备份。
 
 迁移或恢复后至少验证：
+商品详情/库存 OpenAPI 快照的统一根目录由 `SHEIN_OPENAPI_PRODUCT_CACHE_DIR` 控制。生产
+systemd units 固定为 `/srv/shein-bi/runtime/openapi-product-cache`，该目录不属于
+`/opt/shein-bi/app` checkout，部署替换源码时不会丢失；未设置 env 的本地运行仍默认使用
+`outputs/shein_openapi_products/`。
 
 ```bash
 findmnt --verify

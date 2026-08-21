@@ -11,6 +11,7 @@ import {
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
+import {resolveOpenApiProductCacheDir, resolveOpenApiProductCacheFile} from '../../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -19,7 +20,7 @@ function parseArgs(argv) {
     date: new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date()),
     policy: path.join(ROOT, 'config', 'inventory_replenishment_policy.json'),
     stores: path.join(ROOT, 'config', 'stores.json'),
-    productsDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
+    productsDir: resolveOpenApiProductCacheDir({rootDir: ROOT}),
     biData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json'),
     linksData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
     operationMode: 'daily',
@@ -141,7 +142,7 @@ const linkMetricsByKey = new Map(linkMetricRows.map(row => [
 ]));
 const linkRows = [];
 for (const store of stores) {
-  const file = path.join(args.productsDir, store, 'latest.json');
+  const file = resolveOpenApiProductCacheFile(store, {rootDir: ROOT, cacheDir: args.productsDir});
   try {
     const doc = await readJson(file);
     const sourceAge = ageHours(doc.fetchedAt);
@@ -149,7 +150,7 @@ for (const store of stores) {
     const hasValidStockFailureEvidence = Number.isInteger(stockFailedChunkCount) && stockFailedChunkCount >= 0;
     sourceEvidence.push({
       store,
-      file: `outputs/shein_openapi_products/${store}/latest.json`,
+      file,
       fetchedAt: doc.fetchedAt || '',
       ageHours: Number(sourceAge.toFixed(4)),
       stockFailedChunkCount: hasValidStockFailureEvidence ? stockFailedChunkCount : null,

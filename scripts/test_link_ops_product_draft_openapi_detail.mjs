@@ -21,6 +21,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildProductDraftFromSnapshots, summarizeDraftForExecutor} from '../lib/link_ops_product_draft_mapper.mjs';
+import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORE = 'SMK';
@@ -38,6 +39,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-product-detail-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = testOutputDir;
 
 function check(checks, label, actual, expected) {
   const pass = typeof expected === 'function' ? expected(actual) : Object.is(actual, expected);
@@ -168,11 +170,16 @@ function fallbackEntry(overrides = {}) {
 }
 
 async function writeDetailSnapshot({detailResults, detailFallbackResults, fetchedAt = FETCHED_AT}) {
-  await writeJson(path.join(testOutputDir, 'shein_openapi_products', STORE, 'latest.json'), {
+  await writeOpenApiProductCacheAtomically(path.join(testOutputDir, 'shein_openapi_products', STORE, 'latest.json'), {
+    ok: true,
+    storeKey: STORE,
     normalizedRows: [{store: STORE, spu: SPU, skc: SKC}],
     fetchedAt,
     detailResults,
     detailFallbackResults,
+  }, {
+    storeKey: STORE,
+    generatedAt: '2026-06-27T00:00:00+08:00',
   });
 }
 

@@ -9,6 +9,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
 import {inferInputVoltage, productAttributesFromSpuInfo} from '../lib/retire_supplier_code_repair_payload.mjs';
+import {resolveOpenApiProductCacheDir} from '../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MODEL_ATTRIBUTE_ID = 1000546;
@@ -17,7 +18,7 @@ const ACTIVE_STATUS = new Set(['ON_SHELF', 'WAIT_SHELF', 'SOLD_OUT']);
 
 function parseArgs(argv) {
   const args = {
-    inputDir: path.join(ROOT, 'outputs', 'shein_openapi_products'),
+    inputDir: resolveOpenApiProductCacheDir({rootDir: ROOT}),
     outDir: path.join(ROOT, 'tmp', 'supplier-code-normalization'),
     linkMasterCsv: '',
     linkMasterDir: '',
@@ -31,7 +32,7 @@ function parseArgs(argv) {
     else if (a === '--link-master-dir') args.linkMasterDir = path.resolve(argv[++i]);
     else if (a === '--max-snapshot-age-minutes') args.maxSnapshotAgeMinutes = Number(argv[++i]);
     else if (a === '--help' || a === '-h') {
-      console.log('Usage: node scripts/build_supplier_code_normalization_plan.mjs [--input-dir outputs/shein_openapi_products] [--out-dir tmp/supplier-code-normalization]');
+      console.log('Usage: node scripts/build_supplier_code_normalization_plan.mjs [--input-dir <product-cache-dir>] [--out-dir tmp/supplier-code-normalization]');
       process.exit(0);
     } else throw new Error(`Unknown argument: ${a}`);
   }

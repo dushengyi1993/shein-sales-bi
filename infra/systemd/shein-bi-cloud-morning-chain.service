@@ -16,6 +16,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_OPENAPI_PRODUCT_CACHE_DIR=/srv/shein-bi/runtime/openapi-product-cache
 Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
 Environment=SHEIN_DOCKER_USE_SUDO=1
 Environment=SHEIN_BI_MORNING_CHAIN_LOG_DIR=/srv/shein-bi/logs/cloud-morning-chain
@@ -64,3 +65,4 @@ ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_morning_chain_jo
 Restart=on-failure
 RestartSec=60
 RestartPreventExitStatus=64 76 78
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/openapi-product-cache

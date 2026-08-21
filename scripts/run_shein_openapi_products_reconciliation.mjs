@@ -11,11 +11,21 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
+import {
+  OPENAPI_PRODUCT_CACHE_ENV,
+  readOpenApiProductCache,
+  resolveOpenApiProductCacheDir,
+  resolveOpenApiProductCacheFile,
+} from '../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_OUT = path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json');
 const DEFAULT_STORES = ['CX', 'DL', 'DX', 'FY', 'HL', 'JSH', 'JY', 'LQ', 'MZ', 'NM', 'QH', 'QY', 'TS', 'TZ', 'TZZ', 'XC', 'XL', 'YJ', 'ZL'];
+
+function defaultProductCacheDir() {
+  return resolveOpenApiProductCacheDir({rootDir: ROOT});
+}
 
 function normalizedStoreSet(values) {
   return [...new Set((Array.isArray(values) ? values : [])
@@ -51,7 +61,7 @@ export function resolveProductReconciliationReportTargets({
   };
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     config: DEFAULT_CONFIG,
     stores: [],
@@ -70,6 +80,7 @@ function parseArgs(argv) {
     container: 'shein-warehouse-db',
     database: 'shein_bi',
     user: 'shein',
+    productCacheDir: defaultProductCacheDir(),
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -86,6 +97,7 @@ function parseArgs(argv) {
     else if (a === '--detail-priority-file') args.detailPriorityFile = path.resolve(argv[++i] || '');
     else if (a === '--priority-details-only') args.priorityDetailsOnly = true;
     else if (a === '--latest-out') args.latestOut = path.resolve(argv[++i]);
+    else if (a === '--product-cache-dir') args.productCacheDir = path.resolve(argv[++i]);
     else if (a === '--distro') args.distro = String(argv[++i] || '').trim() || args.distro;
     else if (a === '--container') args.container = String(argv[++i] || '').trim() || args.container;
     else if (a === '--database') args.database = String(argv[++i] || '').trim() || args.database;
@@ -97,8 +109,10 @@ function parseArgs(argv) {
   node scripts/run_shein_openapi_products_reconciliation.mjs --stores DL,DX --max-details 30
 
 Runs fetch_shein_openapi_products + load_shein_openapi_products_warehouse for
-authorized stores. It writes only OpenAPI parallel warehouse tables and emits a
-sanitized summary. Secrets are never printed.`);
+authorized stores. Product snapshots use SHEIN_OPENAPI_PRODUCT_CACHE_DIR when
+set, otherwise the local outputs/shein_openapi_products default. It writes only
+OpenAPI parallel warehouse tables and emits a sanitized summary. Secrets are
+never printed.`);
       process.exit(0);
     } else {
       throw new Error(`Unknown argument: ${a}`);
@@ -115,11 +129,6 @@ sanitized summary. Secrets are never printed.`);
 
 function sqlLiteral(value) {
   return `'${String(value ?? '').replace(/'/g, "''")}'`;
-}
-
-function artifactPath(value) {
-  const text = String(value || '').trim();
-  return text ? (path.isAbsolute(text) ? text : path.join(ROOT, text)) : '';
 }
 
 function compact(value, max = 400) {
@@ -152,10 +161,11 @@ function productSnapshotFromPayload(snapshot) {
   };
 }
 
-async function readProductSnapshot(file) {
+async function readProductSnapshot(file, {expectedStore = ''} = {}) {
   if (!file) return null;
   try {
-    return productSnapshotFromPayload(JSON.parse(await fs.readFile(file, 'utf8')));
+    const cache = await readOpenApiProductCache(file, {expectedStore});
+    return productSnapshotFromPayload(cache.data);
   } catch {
     return null;
   }
@@ -290,11 +300,12 @@ function tail(text, max = 4000) {
   return s.length <= max ? s : s.slice(-max);
 }
 
-function runNodeStep(name, script, args, {timeoutMs}) {
+function runNodeStep(name, script, args, {timeoutMs, env = process.env}) {
   return new Promise((resolve) => {
     const startedAt = new Date().toISOString();
     const child = spawn(process.execPath, [path.join(ROOT, 'scripts', script), ...args], {
       cwd: ROOT,
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -399,14 +410,16 @@ WHERE store_key = ${sqlLiteral(storeKey)};
 }
 
 async function runOneStore(storeKey, args) {
-  const priorSnapshot = await readProductSnapshot(path.join(ROOT, 'outputs', 'shein_openapi_products', storeKey, 'latest.json'));
-  const fetchArgs = [storeKey, '--config', args.config];
+  const cacheFile = resolveOpenApiProductCacheFile(storeKey, {rootDir: ROOT, cacheDir: args.productCacheDir});
+  const childEnv = {...process.env, [OPENAPI_PRODUCT_CACHE_ENV]: args.productCacheDir};
+  const priorSnapshot = await readProductSnapshot(cacheFile, {expectedStore: storeKey});
+  const fetchArgs = [storeKey, '--config', args.config, '--out', args.productCacheDir];
   if (args.maxDetails > 0) fetchArgs.push('--max-details', String(args.maxDetails));
   if (args.skipDetails) fetchArgs.push('--skip-details');
   if (args.skipStock) fetchArgs.push('--skip-stock');
   if (args.detailPriorityFile) fetchArgs.push('--detail-priority-file', args.detailPriorityFile);
   if (args.priorityDetailsOnly) fetchArgs.push('--priority-details-only');
-  const fetchStep = await runNodeStep('fetch', 'fetch_shein_openapi_products.mjs', fetchArgs, {timeoutMs: args.fetchTimeoutMs});
+  const fetchStep = await runNodeStep('fetch', 'fetch_shein_openapi_products.mjs', fetchArgs, {timeoutMs: args.fetchTimeoutMs, env: childEnv});
   if (!fetchStep.ok) return {storeKey, status: 'fetch_failed', ok: false, fetchStep, loadStep: null};
   const loadStep = await runNodeStep('load', 'load_shein_openapi_products_warehouse.mjs', [
     '--store', storeKey,
@@ -415,10 +428,11 @@ async function runOneStore(storeKey, args) {
     '--container', args.container,
     '--database', args.database,
     '--user', args.user,
-  ], {timeoutMs: args.loadTimeoutMs});
+    '--product-dir', args.productCacheDir,
+  ], {timeoutMs: args.loadTimeoutMs, env: childEnv});
   if (!loadStep.ok) return {storeKey, status: 'load_failed', ok: false, fetchStep, loadStep};
   const row = Array.isArray(loadStep.parsed?.reconciliation) ? loadStep.parsed.reconciliation[0] : null;
-  const currentSnapshot = await readProductSnapshot(artifactPath(fetchStep.parsed?.latest));
+  const currentSnapshot = await readProductSnapshot(cacheFile, {expectedStore: storeKey});
   if (!currentSnapshot) {
     return {storeKey, status: 'policy_failed', ok: false, fetchStep, loadStep, policyError: 'OpenAPI fetch completed but latest product snapshot cannot be read'};
   }
@@ -613,6 +627,7 @@ export async function main(argv = process.argv.slice(2)) {
     ok: ensureStep.ok && counts.failed === 0,
     generatedAt: new Date().toISOString(),
     startedAt,
+    productCacheDir: args.productCacheDir,
     endedAt: new Date().toISOString(),
     concurrency: args.concurrency,
     maxDetails: args.maxDetails,
