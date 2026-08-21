@@ -908,10 +908,23 @@ try {
   copyToRemoteStore(driftRel);
   const driftBytes = fs.readFileSync(driftArchive);
   const driftId = fs.readFileSync(`${driftArchive}.mount-id`, 'utf8').trim();
+  const originalDayStat = fs.statSync(path.dirname(driftArchive));
   fs.rmSync(cosRoot, { recursive: true });
   fs.mkdirSync(cosRoot, { recursive: true });
   const dayDir = path.join(cosRoot, driftDay);
-  fs.mkdirSync(dayDir, { recursive: true });
+  const dayParent = path.dirname(dayDir);
+  fs.mkdirSync(dayParent, { recursive: true });
+  let replacementDayStat;
+  for (let reservation = 0; reservation < 32; reservation += 1) {
+    fs.mkdirSync(dayDir);
+    replacementDayStat = fs.statSync(dayDir);
+    if (replacementDayStat.dev !== originalDayStat.dev || replacementDayStat.ino !== originalDayStat.ino) break;
+    fs.rmSync(dayDir, { recursive: true });
+    fs.mkdirSync(path.join(dayParent, `.drift-inode-reservation-${reservation}`));
+  }
+  assert.ok(replacementDayStat
+    && (replacementDayStat.dev !== originalDayStat.dev || replacementDayStat.ino !== originalDayStat.ino),
+  'fixture must establish a different destination directory identity before testing the gate');
   fs.writeFileSync(path.join(dayDir, path.basename(driftArchive)), driftBytes);
   fs.writeFileSync(path.join(dayDir, `${path.basename(driftArchive)}.mount-id`), `${driftId}\n`, 'utf8');
   fs.writeFileSync(path.join(dayDir, `${path.basename(driftArchive)}.sha256`),
