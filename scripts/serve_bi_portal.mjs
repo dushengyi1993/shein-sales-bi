@@ -421,6 +421,14 @@ function biPortalLiveAccountingIdempotencyKey(generatedAt, event = {}) {
     : [biPortalLiveAccountingEventIdentity(event)];
   return biPortalQueueHashIdempotencyKey('live', generatedAt, ...eventIdentities);
 }
+
+function biPortalLiveAccountingCoalesceKey(generatedAt) {
+  // All events for one API core generation share a pending/running group.
+  // A pending materialization reads the latest database state, while a
+  // running materialization needs at most one rerun for events that may land
+  // after its snapshot. A new core generation gets a different group.
+  return biPortalQueueHashIdempotencyKey('livegen', generatedAt);
+}
 // Queue reason sanitizer: every C0 control character (including NUL), DEL
 // and C1 range byte is %HH-encoded so a reason can never corrupt exec argv
 // ("argument must be a string without null bytes") and stays deterministic.
@@ -12149,6 +12157,7 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
   };
   for (const group of groups) {
     const idempotencyKey = String(options.idempotencyKey || '');
+    const coalesceKey = String(options.coalesceKey || '');
     const requeueCompleted = Array.isArray(options.requeueCompletedSections)
       ? options.requeueCompletedSections.filter(section => group.sections.includes(section))
       : [];
@@ -12159,6 +12168,7 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
       '--priority', String(group.priority),
       '--reason', reason,
       ...(idempotencyKey ? ['--idempotency-key', idempotencyKey] : []),
+      ...(coalesceKey ? ['--coalesce-key', coalesceKey] : []),
       ...(requeueCompleted.length ? ['--requeue-completed-sections', requeueCompleted.join(',')] : []),
     ], {
       cwd: ROOT,
@@ -13646,6 +13656,7 @@ export async function executeBiLiveAccountingRefreshAttempt({
     await persistAccountingPlan(accountingQueue, generatedAt, {
       reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
       idempotencyKey: biPortalLiveAccountingIdempotencyKey(generatedAt, sourceEvent),
+      coalesceKey: biPortalLiveAccountingCoalesceKey(generatedAt),
     });
   } catch (error) {
     if (error && typeof error === 'object') error.liveProjectionRefreshed = true;
@@ -21557,6 +21568,7 @@ export const __testHooks = {
   biPortalHomepageAccountingIdempotencyKey,
   biPortalLiveAccountingEventIdentity,
   biPortalLiveAccountingIdempotencyKey,
+  biPortalLiveAccountingCoalesceKey,
   resetBiPortalCoreWarmupEnqueueBackoff,
   scheduleBiPortalCoreWarmup,
   startBiPortalCoreWarmupWatcher,

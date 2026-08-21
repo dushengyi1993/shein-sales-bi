@@ -19,7 +19,7 @@ const COMPLETED_LEDGER_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 function usage(message = '') {
   if (message) console.error(message);
   console.error(`Usage:
-  manage_bi_portal_section_queue.mjs enqueue --sections CSV [--priority N] [--reason TEXT] [--idempotency-key KEY] [--requeue-completed-sections CSV] [--file PATH]
+  manage_bi_portal_section_queue.mjs enqueue --sections CSV [--priority N] [--reason TEXT] [--idempotency-key KEY] [--coalesce-key KEY] [--requeue-completed-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID [--file PATH]
   manage_bi_portal_section_queue.mjs fail --section NAME --lease-id ID [--error TEXT] [--backoff-seconds N] [--file PATH]
@@ -53,6 +53,7 @@ function parseArgs(argv) {
     priority: 50,
     reason: '',
     idempotencyKey: '',
+    coalesceKey: '',
     section: '',
     leaseId: undefined,
     leaseSeconds: 2_700,
@@ -73,6 +74,7 @@ function parseArgs(argv) {
     } else if (token === '--priority') options.priority = Number(next());
     else if (token === '--reason') options.reason = next();
     else if (token === '--idempotency-key') options.idempotencyKey = validateIdempotencyKey(next());
+    else if (token === '--coalesce-key') options.coalesceKey = validateIdempotencyKey(next());
     else if (token === '--requeue-completed-sections') {
       options.requeueCompletedSections.push(...next().split(',').map(normalizeSection));
     }
@@ -150,6 +152,7 @@ function normalizeQueue(queue) {
     entry.rerunPriority = Number.isSafeInteger(rerunPriority) && rerunPriority >= 0 ? rerunPriority : null;
     entry.dependencyYield = Boolean(entry.dependencyYield);
     entry.idempotencyKey = typeof entry.idempotencyKey === 'string' ? entry.idempotencyKey : '';
+    entry.coalesceKey = typeof entry.coalesceKey === 'string' ? entry.coalesceKey : '';
     const priority = Number(entry.priority ?? 50);
     entry.priority = Number.isSafeInteger(priority) && priority >= 0 ? priority : 50;
     if (!['pending', 'running'].includes(entry.status)) entry.status = 'pending';
@@ -208,11 +211,13 @@ export function enqueueSections(queue, {
   priority = 50,
   reason = '',
   idempotencyKey = '',
+  coalesceKey = '',
   requeueCompletedSections = [],
   now = new Date(),
 } = {}) {
   const nowIso = now.toISOString();
   const key = validateIdempotencyKey(idempotencyKey);
+  const groupKey = validateIdempotencyKey(coalesceKey);
   if (requeueCompletedSections.length && !key) {
     throw new TypeError('QUEUE_REQUEUE_REQUIRES_IDEMPOTENCY_KEY');
   }
@@ -299,6 +304,7 @@ export function enqueueSections(queue, {
         rerunPriority: null,
         dependencyYield: false,
         ...(entryKey ? {idempotencyKey: entryKey} : {}),
+        ...(groupKey ? {coalesceKey: groupKey} : {}),
         status: 'pending',
         requestedAt: nowIso,
         updatedAt: nowIso,
@@ -313,11 +319,52 @@ export function enqueueSections(queue, {
       outcome.newlyQueued.push(section);
       mutated = true;
     } else {
+      const sameCoalesceGroup = Boolean(groupKey && entry.coalesceKey === groupKey);
+      // A pending build has not taken its database snapshot yet, so every
+      // event in the same generation/group is already covered by that future
+      // build. Do not turn a steady webhook stream into an unbounded numeric
+      // revision chase. A running build still receives exactly one rerun
+      // below, because an event may land after its snapshot was taken.
+      if (sameCoalesceGroup && entry.status === 'pending') {
+        const nextPriority = Math.min(Number(entry.priority ?? priority), priority);
+        if (nextPriority !== entry.priority) {
+          entry.priority = nextPriority;
+          mutated = true;
+        }
+        if (reason && !entry.reasons.includes(reason.slice(0, 300))) {
+          entry.reasons.push(reason.slice(0, 300));
+          mutated = true;
+        }
+        outcome.deduplicatedPending.push(section);
+        continue;
+      }
+      // Once a running build already owns one coalesced rerun, further events
+      // in the same group are covered by that rerun. Preserve the current
+      // idempotency key/revision so completion can make progress.
+      if (sameCoalesceGroup && entry.status === 'running' && entry.rerun === true) {
+        const nextRerunPriority = entry.rerunPriority == null
+          ? priority
+          : Math.min(Number(entry.rerunPriority), priority);
+        if (nextRerunPriority !== entry.rerunPriority) {
+          entry.rerunPriority = nextRerunPriority;
+          mutated = true;
+        }
+        if (reason && !entry.reasons.includes(reason.slice(0, 300))) {
+          entry.reasons.push(reason.slice(0, 300));
+          mutated = true;
+        }
+        outcome.coalescedRerun.push(section);
+        continue;
+      }
       // A legacy entry without a key, or an entry bound to a different key,
       // keeps the old behavior; the entry adopts the new key so later
       // duplicates of this request deduplicate correctly.
       if (entryKey && entry.idempotencyKey !== entryKey) {
         entry.idempotencyKey = entryKey;
+        mutated = true;
+      }
+      if (entry.coalesceKey !== groupKey) {
+        entry.coalesceKey = groupKey;
         mutated = true;
       }
       entry.priority = Math.min(Number(entry.priority ?? priority), priority);

@@ -1207,6 +1207,8 @@ assert.match(source,
   'the normalized encoded index trigger must be preserved');
 assert.match(source, /\['--idempotency-key', idempotencyKey\]/,
   'persistHostLockedBiSectionPlan must pass the idempotency key to the enqueue script');
+assert.match(source, /\['--coalesce-key', coalesceKey\]/,
+  'live accounting persistence must pass its generation coalesce key to the queue manager');
 assert.match(source, /function enqueueHostLockedBiSection[\s\S]*biPortalCoreWarmupIdempotencyKey\(generatedAt\)[\s\S]*'--idempotency-key', idempotencyKey/,
   'ordinary cache misses must enqueue with the warmup-compatible generation key');
 assert.match(source, /detached: process\.platform !== 'win32'/,
@@ -1228,6 +1230,8 @@ assert.match(source, /persistHomepageAccountingCatchupOnce[\s\S]*const idempoten
   'homepage accounting catch-up must persist its generatedAt/minimum/target identity');
 assert.match(source, /export async function executeBiLiveAccountingRefreshAttempt\(\{[\s\S]*?persistAccountingPlan,[\s\S]*?await persistAccountingPlan\(accountingQueue, generatedAt, \{[\s\S]*?idempotencyKey: biPortalLiveAccountingIdempotencyKey\(generatedAt, sourceEvent\),[\s\S]*?\}\);/,
   'live order/return accounting helper must carry a stable event-derived queue identity');
+assert.match(source, /coalesceKey: biPortalLiveAccountingCoalesceKey\(generatedAt\)/,
+  'live order/return accounting must also carry one stable core-generation coalesce group');
 assert.match(source, /persistAccountingPlan: async \(accountingQueue, generatedAt, options\) => \{[\s\S]*?persistHostLockedBiSectionPlan\(accountingQueue, generatedAt, \{[\s\S]*?\.\.\.options,/,
   'live order/return accounting must adapt the guarded helper to the host-locked queue');
 assert.match(source, /accountingEventIdentities[\s\S]*biPortalLiveAccountingEventIdentity\(event\)[\s\S]*\.slice\(-64\)/,
@@ -1262,6 +1266,8 @@ assert.match(manage, /outcome\.mutated \? writeQueue\(options\.file, outcome\.qu
   'a fully deduplicated enqueue must not rewrite the queue document');
 assert.match(manage, /'--idempotency-key'\) options\.idempotencyKey = validateIdempotencyKey\(next\(\)\);/,
   'the CLI must accept and strictly validate --idempotency-key');
+assert.match(manage, /'--coalesce-key'\) options\.coalesceKey = validateIdempotencyKey\(next\(\)\);/,
+  'the CLI must accept and strictly validate --coalesce-key');
 assert.match(manage, /outcome\.supersededByExisting\.push\(section\);[\s\S]*continue;/,
   'a requeue colliding with a different-key existing entry must be a strict no-op');
 
@@ -1301,12 +1307,17 @@ const liveOrder = {
   orderStatus: 'paid', salesQuantity: 1, salesSar: 42, occurredAt: '2026-08-17T05:03:00.000Z',
 };
 const liveKey = portalIdempotencyHooks.biPortalLiveAccountingIdempotencyKey('G1', liveOrder);
+const liveCoalesceKey = portalIdempotencyHooks.biPortalLiveAccountingCoalesceKey('G1');
+assert.equal(liveCoalesceKey, portalIdempotencyHooks.biPortalLiveAccountingCoalesceKey('G1'),
+  'one core generation must have one stable live-accounting coalesce group');
+assert.notEqual(liveCoalesceKey, portalIdempotencyHooks.biPortalLiveAccountingCoalesceKey('G2'),
+  'a new core generation must not coalesce into the previous generation');
 assert.equal(liveKey, portalIdempotencyHooks.biPortalLiveAccountingIdempotencyKey('G1', {...liveOrder}),
   'replaying the same live fact must be a no-op identity');
 assert.notEqual(liveKey, portalIdempotencyHooks.biPortalLiveAccountingIdempotencyKey('G1', {
   ...liveOrder, orderStatus: 'cancelled', occurredAt: '2026-08-17T05:04:00.000Z',
 }), 'a genuinely new order fact must preserve one coalesced rerun identity');
-for (const key of [forceA, liveKey, portalIdempotencyHooks.biPortalHomepageAccountingIdempotencyKey(accountingState, 'G1')]) {
+for (const key of [forceA, liveKey, liveCoalesceKey, portalIdempotencyHooks.biPortalHomepageAccountingIdempotencyKey(accountingState, 'G1')]) {
   assert.match(key, /^[A-Za-z0-9._:-]{1,101}$/,
     `Portal idempotency base must remain bounded before the manager appends ::section: ${key}`);
 }

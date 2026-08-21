@@ -652,6 +652,49 @@ try {
   assert.equal(queue.entries.find(e => e.section === 'orders').rerun, true);
 }
 
+// ---- Generation-group coalescing: a pending materialization reads the
+// latest database state, and a running materialization needs at most one
+// rerun. A different generation group still supersedes normally.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
+  const first = enqueueSections(queue, {
+    sections: ['profit'], priority: 5, idempotencyKey: 'event:A', coalesceKey: 'livegen:G1', now: at(0),
+  });
+  assert.deepEqual(first.newlyQueued, ['profit']);
+  const pending = enqueueSections(queue, {
+    sections: ['profit'], priority: 5, idempotencyKey: 'event:B', coalesceKey: 'livegen:G1', now: at(1_000),
+  });
+  assert.deepEqual(pending.deduplicatedPending, ['profit']);
+  assert.equal(queue.entries[0].requestRevision, 1, 'same-generation pending events must not chase revisions');
+  assert.equal(queue.entries[0].idempotencyKey, 'event:A::profit', 'the pending request keeps its original tombstone identity');
+
+  const claim = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-livegen', now: at(2_000)});
+  const runningBump = enqueueSections(queue, {
+    sections: ['profit'], priority: 5, idempotencyKey: 'event:C', coalesceKey: 'livegen:G1', now: at(3_000),
+  });
+  assert.deepEqual(runningBump.updatedRevision, ['profit']);
+  assert.equal(queue.entries[0].requestRevision, claim.claimedRevision + 1, 'the first event after a running snapshot requests one rerun');
+  const runningCoalesced = enqueueSections(queue, {
+    sections: ['profit'], priority: 5, idempotencyKey: 'event:D', coalesceKey: 'livegen:G1', now: at(4_000),
+  });
+  assert.deepEqual(runningCoalesced.coalescedRerun, ['profit']);
+  assert.equal(queue.entries[0].requestRevision, claim.claimedRevision + 1, 'further same-generation events must share that rerun');
+
+  completeClaim(queue, {section: 'profit', leaseId: 'lease-livegen', now: at(5_000)});
+  assert.equal(queue.entries[0].status, 'pending');
+  const pendingAgain = enqueueSections(queue, {
+    sections: ['profit'], priority: 5, idempotencyKey: 'event:E', coalesceKey: 'livegen:G1', now: at(6_000),
+  });
+  assert.deepEqual(pendingAgain.deduplicatedPending, ['profit']);
+  assert.equal(queue.entries[0].requestRevision, claim.claimedRevision + 1);
+
+  const newGeneration = enqueueSections(queue, {
+    sections: ['profit'], priority: 5, idempotencyKey: 'event:F', coalesceKey: 'livegen:G2', now: at(7_000),
+  });
+  assert.deepEqual(newGeneration.updatedRevision, ['profit']);
+  assert.equal(queue.entries[0].coalesceKey, 'livegen:G2');
+}
+
 // ---- CLI-level durable idempotency across process invocations (restart).
 {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'queue-idem-cli-'));

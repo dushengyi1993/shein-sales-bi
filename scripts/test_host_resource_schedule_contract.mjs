@@ -409,9 +409,11 @@ const executeCurrentDayOrder = persistAccountingPlan => executeBiLiveAccountingR
 
 const queueFailure = new Error('host-locked accounting queue unavailable');
 let firstIdempotencyKey = '';
+let firstCoalesceKey = '';
 await assert.rejects(() => executeCurrentDayOrder(async (plan, generatedAt, options) => {
   liveAccountingCalls.push(['persist-accounting-failed', plan, generatedAt, options]);
   firstIdempotencyKey = options.idempotencyKey;
+  firstCoalesceKey = options.coalesceKey;
   throw queueFailure;
 }), error => error === queueFailure && error.liveProjectionRefreshed === true,
 'a queue failure after live publication must remain retryable without losing projection state');
@@ -424,9 +426,11 @@ assert.deepEqual(liveAccountingCalls.map(call => call[0]), [
 
 liveAccountingCalls.length = 0;
 let retryIdempotencyKey = '';
+let retryCoalesceKey = '';
 const retryResult = await executeCurrentDayOrder(async (plan, generatedAt, options) => {
   liveAccountingCalls.push(['persist-accounting', plan, generatedAt, options]);
   retryIdempotencyKey = options.idempotencyKey;
+  retryCoalesceKey = options.coalesceKey;
 });
 assert.deepEqual(liveAccountingCalls.map(call => call[0]), [
   'generate-live',
@@ -440,6 +444,9 @@ assert.equal(retryResult.accountingQueued, true);
 assert.match(firstIdempotencyKey, /^portal-live:sha256:/);
 assert.equal(retryIdempotencyKey, firstIdempotencyKey,
   'a retry of the same event and generation must reuse one queue identity');
+assert.match(firstCoalesceKey, /^portal-livegen:sha256:/);
+assert.equal(retryCoalesceKey, firstCoalesceKey,
+  'all retries in the same core generation must reuse one pending/running coalesce group');
 assert.match(portal, /liveAccountingRefreshStopped \|\| liveAccountingRefreshRunning \|\| !liveAccountingRefreshPendingEvent/,
   'the live accounting runner must reject parallel duplicate execution');
 assert.match(portal, /liveAccountingRefreshPendingEvent \|\|= sourceEvent[\s\S]*setTimeout\(runLiveAccountingRefresh, liveAccountingRetryMs\)/,
