@@ -97,6 +97,8 @@ const HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID = 1006206;
 const HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID = 1002328;
 const INPUT_VOLTAGE_AC_UNIT_LABEL = 'Vac 50–60Hz';
 const DEFAULT_AIR_FRYER_INPUT_CURRENT_MA = 6800;
+const MAX_EXPLICIT_INPUT_CURRENT_MA = 100_000;
+const EXPLICIT_PREPARE_PUBLISH_SOURCE = 'explicit_prepare_publish';
 
 function parseArgs(argv) {
   const args = {
@@ -796,17 +798,37 @@ function destinationStoreCandidates(task, targetStore) {
 }
 
 function structuredDestinationPreparation(task) {
-  const bindingPreparation = task?.publishAssetBinding?.publishPreparation
-    || task?.metadata?.publishAssetBinding?.publishPreparation;
+  const directBindingPreparation = task?.publishAssetBinding?.publishPreparation;
+  const metadataBindingPreparation = task?.metadata?.publishAssetBinding?.publishPreparation;
+  const bindingPreparation = directBindingPreparation || metadataBindingPreparation;
+  const persistedTaskPreparations = [
+    ['task.publishPreparation', task?.publishPreparation],
+    ['targets.publishPreparation', task?.targets?.publishPreparation],
+  ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+  const persistedPreparations = [
+    ...persistedTaskPreparations,
+    ['publishAssetBinding.publishPreparation', directBindingPreparation],
+    ['metadata.publishAssetBinding.publishPreparation', metadataBindingPreparation],
+  ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+  const inputCurrentDeclarations = persistedPreparations.map(([source, value]) => ({
+    source,
+    ...normalizeExactSourceInputCurrentDeclaration(value, source),
+  }));
+  const declarationSignatures = new Set(inputCurrentDeclarations.map(declaration => JSON.stringify({
+    declared: declaration.declared,
+    rowCount: declaration.rowCount,
+    override: declaration.override,
+  })));
+  if (declarationSignatures.size > 1) {
+    throw new Error(`exact source Input current(1002323) declarations differ across persisted publishPreparation sources: ${inputCurrentDeclarations.map(row => row.source).join(', ')}`);
+  }
   const candidates = bindingPreparation && typeof bindingPreparation === 'object' && !Array.isArray(bindingPreparation)
-    ? [['publishAssetBinding.publishPreparation', bindingPreparation]]
-    : [
-      ['task.publishPreparation', task?.publishPreparation],
-      ['targets.publishPreparation', task?.targets?.publishPreparation],
-    ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+    ? [[directBindingPreparation ? 'publishAssetBinding.publishPreparation' : 'metadata.publishAssetBinding.publishPreparation', bindingPreparation]]
+    : persistedTaskPreparations;
   const raw = {};
   for (const [, value] of candidates) {
     for (const [key, item] of Object.entries(value)) {
+      if (key === 'attributeOverrides' || key === 'attribute_overrides') continue;
       // Binding evidence may carry explicit null placeholders for fields that
       // were not prepared. Those placeholders must not erase a verified field
       // from another structured preparation source.
@@ -815,11 +837,88 @@ function structuredDestinationPreparation(task) {
       raw[key] = item;
     }
   }
+  const agreedInputCurrent = inputCurrentDeclarations[0] || null;
+  if (agreedInputCurrent?.declared) {
+    raw.attributeOverrides = agreedInputCurrent.rowCount === 1
+      ? [{
+          attribute_id: agreedInputCurrent.override.attributeId,
+          attribute_extra_value: agreedInputCurrent.override.attributeExtraValue,
+          attribute_unit: agreedInputCurrent.override.unit,
+          ...(agreedInputCurrent.override.label ? {label: agreedInputCurrent.override.label} : {}),
+          source: agreedInputCurrent.override.source,
+        }]
+      : [];
+  }
   const normalized = normalizePublishPreparationOverrides(raw);
   return {
     raw,
     normalized,
     sources: candidates.map(([source]) => source),
+  };
+}
+
+function exactSourceOverrideField(row, snakeKey, camelKey, sourceLabel) {
+  const hasSnake = Object.hasOwn(row, snakeKey);
+  const hasCamel = Object.hasOwn(row, camelKey);
+  if (hasSnake && hasCamel) {
+    throw new Error(`${sourceLabel} Input current(1002323) row declares both ${snakeKey}/${camelKey}`);
+  }
+  return hasSnake ? row[snakeKey] : hasCamel ? row[camelKey] : undefined;
+}
+
+function normalizeExactSourceInputCurrentDeclaration(rawPreparation = {}, sourceLabel = 'exact source publishPreparation') {
+  const preparation = rawPreparation && typeof rawPreparation === 'object' && !Array.isArray(rawPreparation)
+    ? rawPreparation
+    : {};
+  const hasCamel = Object.hasOwn(preparation, 'attributeOverrides');
+  const hasSnake = Object.hasOwn(preparation, 'attribute_overrides');
+  if (hasCamel && hasSnake) {
+    throw new Error(`${sourceLabel} declares both attributeOverrides aliases`);
+  }
+  if (!hasCamel && !hasSnake) return {declared: false, rowCount: 0, override: null};
+  const rows = hasCamel ? preparation.attributeOverrides : preparation.attribute_overrides;
+  if (!Array.isArray(rows)) {
+    throw new Error(`${sourceLabel} attributeOverrides must be an array`);
+  }
+  if (rows.length > 1) {
+    throw new Error(`${sourceLabel} must contain at most one Input current(1002323) override`);
+  }
+  if (!rows.length) return {declared: true, rowCount: 0, override: null};
+  const row = rows[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    throw new Error(`${sourceLabel} Input current(1002323) override must be an object`);
+  }
+  const rawAttributeId = exactSourceOverrideField(row, 'attribute_id', 'attributeId', sourceLabel);
+  const attributeIdValid = (Number.isSafeInteger(rawAttributeId) && rawAttributeId > 0)
+    || (typeof rawAttributeId === 'string' && /^[1-9]\d*$/.test(rawAttributeId));
+  if (!attributeIdValid || Number(rawAttributeId) !== INPUT_CURRENT_ATTRIBUTE_ID) {
+    throw new Error(`${sourceLabel} may project only Input current(1002323)`);
+  }
+  const extraValue = exactSourceOverrideField(row, 'attribute_extra_value', 'attributeExtraValue', sourceLabel);
+  if (typeof extraValue !== 'string' || !/^[1-9]\d*$/.test(extraValue)) {
+    throw new Error(`${sourceLabel} Input current(1002323) must be a positive integer numeric string`);
+  }
+  const milliamps = Number(extraValue);
+  if (!Number.isSafeInteger(milliamps) || milliamps < 1 || milliamps > MAX_EXPLICIT_INPUT_CURRENT_MA) {
+    throw new Error(`${sourceLabel} Input current(1002323) must be within 1-${MAX_EXPLICIT_INPUT_CURRENT_MA} mA`);
+  }
+  const unit = exactSourceOverrideField(row, 'attribute_unit', 'attributeUnit', sourceLabel);
+  if (unit !== 'mA') {
+    throw new Error(`${sourceLabel} Input current(1002323) unit must be mA`);
+  }
+  if (row.source !== EXPLICIT_PREPARE_PUBLISH_SOURCE) {
+    throw new Error(`${sourceLabel} Input current(1002323) source must be ${EXPLICIT_PREPARE_PUBLISH_SOURCE}`);
+  }
+  return {
+    declared: true,
+    rowCount: 1,
+    override: {
+      attributeId: INPUT_CURRENT_ATTRIBUTE_ID,
+      attributeExtraValue: String(milliamps),
+      unit: 'mA',
+      label: safeString(row.label || '', 80),
+      source: EXPLICIT_PREPARE_PUBLISH_SOURCE,
+    },
   };
 }
 
@@ -995,6 +1094,7 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
     descriptionBinding,
     imageBinding,
     overrides,
+    rawPreparation: preparation.raw,
     preparationSources: preparation.sources,
     protectedFields: {
       targetStore: destinationStore,
@@ -1007,6 +1107,30 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
       standardGoodsSn: overrides.standardGoodsSn || '',
       supplierSku: expectedSupplierSku || '',
     },
+  };
+}
+
+function applyExactSourceLockedInputCurrentOverride(payload, rawPreparation = {}) {
+  const declaration = normalizeExactSourceInputCurrentDeclaration(rawPreparation);
+  if (declaration.rowCount === 0) return {payload, applied: [], override: null};
+  const milliamps = Number(declaration.override.attributeExtraValue);
+
+  const next = jsonClone(payload || {});
+  const list = asArray(next.product_attribute_list || next.productAttributeList)
+    .filter(item => item && typeof item === 'object' && !Array.isArray(item))
+    .filter(item => normalizeAttributeId(item.attribute_id ?? item.attributeId) !== INPUT_CURRENT_ATTRIBUTE_ID)
+    .map(item => ({...item}));
+  list.push({
+    attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
+    attribute_extra_value: String(milliamps),
+    __manual_attribute_unit: 'mA',
+  });
+  next.product_attribute_list = list;
+  if (next.productAttributeList) delete next.productAttributeList;
+  return {
+    payload: next,
+    applied: [`product_attribute_list.${INPUT_CURRENT_ATTRIBUTE_ID}.explicit_prepare_publish=${milliamps}mA`],
+    override: declaration.override,
   };
 }
 
@@ -1057,6 +1181,9 @@ function mergeExactSourceDestinationBindings(sourcePayload, task, existingPayloa
   const preparation = applyExplicitPublishPreparationOverrides(payload, projection.overrides);
   payload = preparation.payload;
   applied.push(...preparation.applied.map(value => `destination.publishPreparation.${value}`));
+  const inputCurrent = applyExactSourceLockedInputCurrentOverride(payload, projection.rawPreparation);
+  payload = inputCurrent.payload;
+  applied.push(...inputCurrent.applied.map(value => `destination.publishPreparation.${value}`));
   return {payload, applied, projection};
 }
 
@@ -5061,6 +5188,8 @@ export const __testHooks = {
   exactCopySourceLock,
   exactSourceRequiresHazardTemplateDerivation,
   shouldIssuePublishOrEdit,
+  applyExactSourceLockedInputCurrentOverride,
+  mergeExactSourceDestinationBindings,
   applySafeDefaults,
   applyManualAttributeOverrides,
   applyAttributeTemplateRules,
