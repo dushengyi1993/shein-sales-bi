@@ -77,11 +77,8 @@ assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['inventoryStock']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.deepEqual(
   liveAccountingQueuePlan({kind: 'order'}),
-  [
-    {section: 'profit', priority: 5},
-    {section: 'homeProfit', priority: 5},
-  ],
-  'a current-day order must advance profit without rebuilding rankings already covered by the live overlay',
+  [],
+  'a current-day order must stay on the live overlay instead of advancing a multi-minute durable queue revision',
 );
 assert.deepEqual(
   liveAccountingQueuePlan({kind: 'return', refreshHistoricalSections: true}),
@@ -218,6 +215,8 @@ assert.match(portalServer, /liveAccountingRefreshStopped[\s\S]*!liveAccountingEn
   'disabled live updates must not leave a startup accounting timer or generator behind');
 assert.match(portalServer, /enqueueHostLockedBiSection\(section, generatedAt,[\s\S]*live-accounting-/,
   'returns and historical mutations must queue canonical accounting behind the shared host lock');
+assert.match(portalServer, /persistHomepageAccountingCatchupOnce[\s\S]*persistHostLockedBiSectionPlan\(\[[\s\S]*section: 'profit'[\s\S]*section: 'homeProfit'[\s\S]*homepage-accounting-stale-/,
+  'the stale-homepage discriminator must retain a bounded canonical profit catch-up after ordinary orders leave the heavy queue');
 assert.match(portalServer, /await persistHostLockedBiSectionPlan\(accountingQueue, generatedAt,[\s\S]*live-accounting-/,
   'live accounting must wait for durable queue persistence before reporting that work is queued');
 assert.match(portalServer, /live accounting queue persistence failed/,
@@ -237,7 +236,7 @@ assert.match(portalServer, /refreshHistoricalSections:[\s\S]*eventNeedsHistorica
 assert.match(portalServer, /section === 'homeProfit'[\s\S]*deriveHomeProfitSectionFromProfitCache\(root, generatedAt\)[\s\S]*return derived/,
   'forced historical profit refreshes must derive homeProfit instead of calling a nonexistent SQL section');
 assert.match(portalServer, /accountingQueued: true/,
-  'clients must be told that canonical accounting was queued without delaying live sales');
+  'historical and return clients must be told that canonical accounting was queued without delaying live sales');
 assert.match(portalServer, /BI_INLINE_FAST_SECTIONS = new Set\(\['liveSalesToday', 'productState', 'inventoryStock'\]\)/,
   'only genuinely lightweight live sections may generate inside the Portal process');
 assert.match(portalServer, /x-shein-bi-host-locked-worker/,

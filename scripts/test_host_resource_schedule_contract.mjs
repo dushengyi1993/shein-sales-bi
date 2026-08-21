@@ -388,15 +388,44 @@ const currentDayOrder = {
   businessDate: '2026-08-18',
   occurredAt: '2026-08-18T12:00:00.000Z',
 };
-const canonicalAccountingPlan = liveAccountingQueuePlan(currentDayOrder);
+assert.deepEqual(liveAccountingQueuePlan(currentDayOrder), [],
+  'current-day orders must stay on the lightweight live lane instead of advancing a heavy queue revision');
+
+const currentDayCalls = [];
+const currentDayResult = await executeBiLiveAccountingRefreshAttempt({
+  sourceEvent: currentDayOrder,
+  allowGenerateSections: true,
+  readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
+  generateLiveProjection: async generatedAt => currentDayCalls.push(['generate-live', generatedAt]),
+  clearLiveProjectionFailure: () => currentDayCalls.push(['clear-live-failure']),
+  publish: event => currentDayCalls.push(['publish-live', event]),
+  persistAccountingPlan: async () => { throw new Error('current-day live lane must not persist heavy accounting'); },
+  now: () => new Date('2026-08-18T12:00:01.000Z'),
+});
+assert.equal(currentDayResult.accountingQueued, false);
+assert.deepEqual(currentDayCalls.map(call => call[0]), ['generate-live', 'clear-live-failure', 'publish-live']);
+
+const historicalOrder = {
+  ...currentDayOrder,
+  entityId: 'schedule-contract-historical-order',
+  businessDate: '2026-08-17',
+  refreshHistoricalSections: true,
+};
+const canonicalAccountingPlan = liveAccountingQueuePlan(historicalOrder);
 assert.deepEqual(canonicalAccountingPlan, [
   {section: 'profit', priority: 5},
+  {section: 'homeRankings', priority: 5},
   {section: 'homeProfit', priority: 5},
-], 'current-day orders must retain deferred profit accounting without per-order historical ranking rebuilds');
+  {section: 'orders', priority: 10},
+  {section: 'afterSales', priority: 10},
+  {section: 'productSalesDaily', priority: 50},
+  {section: 'inventoryTrend', priority: 50},
+  {section: 'rankings', priority: 50},
+], 'historical order mutations must retain the complete canonical accounting plan');
 
 const liveAccountingCalls = [];
-const executeCurrentDayOrder = persistAccountingPlan => executeBiLiveAccountingRefreshAttempt({
-  sourceEvent: currentDayOrder,
+const executeHistoricalOrder = persistAccountingPlan => executeBiLiveAccountingRefreshAttempt({
+  sourceEvent: historicalOrder,
   allowGenerateSections: true,
   readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
   generateLiveProjection: async generatedAt => liveAccountingCalls.push(['generate-live', generatedAt]),
@@ -409,7 +438,7 @@ const executeCurrentDayOrder = persistAccountingPlan => executeBiLiveAccountingR
 const queueFailure = new Error('host-locked accounting queue unavailable');
 let firstIdempotencyKey = '';
 let firstCoalesceKey = '';
-await assert.rejects(() => executeCurrentDayOrder(async (plan, generatedAt, options) => {
+await assert.rejects(() => executeHistoricalOrder(async (plan, generatedAt, options) => {
   liveAccountingCalls.push(['persist-accounting-failed', plan, generatedAt, options]);
   firstIdempotencyKey = options.idempotencyKey;
   firstCoalesceKey = options.coalesceKey;
@@ -426,7 +455,7 @@ assert.deepEqual(liveAccountingCalls.map(call => call[0]), [
 liveAccountingCalls.length = 0;
 let retryIdempotencyKey = '';
 let retryCoalesceKey = '';
-const retryResult = await executeCurrentDayOrder(async (plan, generatedAt, options) => {
+const retryResult = await executeHistoricalOrder(async (plan, generatedAt, options) => {
   liveAccountingCalls.push(['persist-accounting', plan, generatedAt, options]);
   retryIdempotencyKey = options.idempotencyKey;
   retryCoalesceKey = options.coalesceKey;

@@ -12259,7 +12259,13 @@ async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt
     await biAccountingCatchupTargets.get(key);
     return false;
   }
-  const pending = persistHostLockedBiSectionPlan(liveAccountingQueuePlan({kind: 'order'}), generatedAt, {
+  // Ordinary current-day orders are already projected through liveSalesToday.
+  // Only the stale-homepage discriminator owns this bounded canonical catch-up;
+  // otherwise every order would advance a multi-minute profit queue revision.
+  const pending = persistHostLockedBiSectionPlan([
+    {section: 'profit', priority: 5},
+    {section: 'homeProfit', priority: 5},
+  ], generatedAt, {
     reason: `homepage-accounting-stale-${generatedAt || 'current'}`,
     idempotencyKey,
     coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
@@ -13594,16 +13600,12 @@ export function liveAccountingQueuePlan(event = {}) {
   if (!hasOrder && !hasReturn) return [];
 
   // Current-day orders are immediately visible through liveSalesToday, whose
-  // browser overlay also replaces today's homepage ranking rows. They must
-  // still advance canonical profit before the date rolls over, but rebuilding
-  // the multi-minute historical homeRankings section for every order creates
-  // a perpetual chase under normal order traffic. Historical mutations and
-  // returns retain the full ranking invalidation set below.
-  const canonical = [
-    {section: 'profit', priority: 5},
-    {section: 'homeProfit', priority: 5},
-  ];
-  if (!hasReturn && event?.refreshHistoricalSections !== true) return canonical;
+  // browser overlay replaces today's order, ranking, scatter, and profit rows.
+  // Do not enqueue durable multi-minute accounting for every order: the
+  // stale-homepage discriminator schedules one bounded profit/homeProfit
+  // catch-up when the canonical baseline actually falls behind. Historical
+  // mutations and returns retain the full invalidation set below.
+  if (!hasReturn && event?.refreshHistoricalSections !== true) return [];
   return [
     {section: 'profit', priority: 5},
     {section: 'homeRankings', priority: 5},

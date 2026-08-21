@@ -78,7 +78,7 @@ for (const fixture of [
 {
   const calls = [];
   const result = await executeBiLiveAccountingRefreshAttempt({
-    sourceEvent: {kind: 'order', entityId: 'valid-order'},
+    sourceEvent: {kind: 'return', entityId: 'valid-return', refreshHistoricalSections: true},
     allowGenerateSections: true,
     readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
     generateLiveProjection: async generatedAt => calls.push(['generate', generatedAt]),
@@ -98,6 +98,25 @@ for (const fixture of [
   assert.match(calls[3][3].coalesceKey, /^portal-generation:sha256:/);
   assert.equal(calls[4][0], 'publish');
   assert.equal(calls[4][1].accountingQueued, true);
+}
+
+{
+  const calls = [];
+  const result = await executeBiLiveAccountingRefreshAttempt({
+    sourceEvent: {kind: 'order', entityId: 'current-day-order'},
+    allowGenerateSections: true,
+    readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
+    generateLiveProjection: async generatedAt => calls.push(['generate', generatedAt]),
+    clearLiveProjectionFailure: () => calls.push(['clear']),
+    persistAccountingPlan: async () => { throw new Error('ordinary current-day order must not persist heavy accounting'); },
+    publish: event => calls.push(['publish', event]),
+    now: fixedNow,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.accountingQueued, false);
+  assert.deepEqual(calls.map(call => call[0]), ['generate', 'clear', 'publish']);
+  assert.equal(calls[2][1].liveProjectionRefreshed, true);
+  assert.equal(calls[2][1].accountingQueued, undefined);
 }
 
 const bridge = createBiLiveUpdateBridge({
