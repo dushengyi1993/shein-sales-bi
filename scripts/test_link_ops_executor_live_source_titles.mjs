@@ -67,7 +67,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-live-source-title-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
-process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(testOutputDir, 'shein_openapi_products');
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -252,7 +252,7 @@ try {
     detailFallbackResults: [],
   }, {
     storeKey: SOURCE_STORE,
-    generatedAt: '2026-08-20T00:00:00+08:00',
+    generatedAt: SOURCE_DETAIL_AT,
   });
 
   const descriptionMaterial = {

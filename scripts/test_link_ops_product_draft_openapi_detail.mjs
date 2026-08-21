@@ -39,7 +39,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-product-detail-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
-process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(testOutputDir, 'shein_openapi_products');
 
 function check(checks, label, actual, expected) {
   const pass = typeof expected === 'function' ? expected(actual) : Object.is(actual, expected);
