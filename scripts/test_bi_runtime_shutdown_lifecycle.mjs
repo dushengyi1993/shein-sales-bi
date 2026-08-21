@@ -352,6 +352,37 @@ let childNeverClosesWallMs = 0;
   await portalHooks.stopWorkers();
 }
 
+// A canonical accounting freshness check that already started must drain
+// before runtime stores close; shutdown also flips its synchronous stop gate so
+// no post-stop queue persistence can begin.
+{
+  const accountingGate = deferred();
+  const accountingOrder = [];
+  const hooks = createPortalShutdownHooks({
+    enqueueMutationRequest: createSerialMutationQueue({}),
+    liveAccountingRefreshStop: () => accountingOrder.push('accounting-stopped'),
+    liveAccountingRefreshDrain: async () => {
+      accountingOrder.push('accounting-drain-started');
+      await accountingGate.promise;
+      accountingOrder.push('accounting-drained');
+    },
+    linkOpsStoreGateway: {async close() { accountingOrder.push('store-closed'); }},
+  });
+  hooks.onAdmissionClosed();
+  const workers = hooks.stopWorkers();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.deepEqual(accountingOrder, ['accounting-stopped', 'accounting-drain-started']);
+  accountingGate.resolve();
+  await workers;
+  await hooks.closeStores();
+  assert.deepEqual(accountingOrder, [
+    'accounting-stopped',
+    'accounting-drain-started',
+    'accounting-drained',
+    'store-closed',
+  ]);
+}
+
 // A shutdown that races an asynchronous startup phase must wait for that phase
 // before stopping workers/bridges and closing stores. Otherwise a late start()
 // continuation can reopen work after its store has already closed.

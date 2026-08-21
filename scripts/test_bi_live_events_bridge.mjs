@@ -10,9 +10,11 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {
   createBiLiveUpdateBridge,
+  isOrdinaryCurrentDayAccountingEvent,
   liveAccountingEnabled,
   liveAccountingQueuePlan,
   liveSectionsForBiUpdate,
+  mergeBiLiveAccountingRefreshEvent,
   normalizeBiLiveUpdatePayload,
 } from './serve_bi_portal.mjs';
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
@@ -45,8 +47,8 @@ const order = normalizeBiLiveUpdatePayload(JSON.stringify({
 }), fixedNow);
 assert.deepEqual(order, {
   kind: 'order', receiptId: '', storeKey: 'TZ', entityId: 'GSH18A51T000BED',
-  businessDate: '', orderStatus: '', orderStatusDesc: '', cancelledBeforePickup: false,
-  salesQuantity: 0, salesSar: 0, occurredAt: '2026-07-23T11:59:59.000Z',
+    businessDate: '', orderStatus: '', orderStatusDesc: '', cancelledBeforePickup: false,
+    salesQuantity: 0, salesSar: 0, occurredAt: '2026-07-23T11:59:59.000Z', receivedAt: fixedNow.toISOString(),
 });
 assert.deepEqual(liveSectionsForBiUpdate('return'), ['liveSalesToday', 'orders', 'afterSales']);
 assert.deepEqual(
@@ -76,7 +78,12 @@ assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
 assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['inventoryStock']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.deepEqual(
-  liveAccountingQueuePlan({kind: 'order', businessDate: '2026-08-18', occurredAt: '2026-08-18T12:00:00.000Z'}),
+  liveAccountingQueuePlan({
+    kind: 'order',
+    businessDate: '2026-08-18',
+    occurredAt: '2026-08-18T12:00:00.000Z',
+    receivedAt: '2026-08-18T12:00:01.000Z',
+  }),
   [],
   'a current-day order must stay on the live overlay instead of advancing a multi-minute durable queue revision',
 );
@@ -117,6 +124,26 @@ const cancelled = normalizeBiLiveUpdatePayload(JSON.stringify({
 }), fixedNow);
 assert.equal(cancelled.entityId, 'GSH18V0390000KF');
 assert.equal(cancelled.businessDate, '2026-07-27');
+const invalidDate = normalizeBiLiveUpdatePayload(JSON.stringify({
+  kind: 'order', businessDate: '2026-07-27garbage', occurredAt: '2026-07-27T10:00:00.000Z',
+}), fixedNow);
+assert.equal(invalidDate.businessDate, '', 'a valid-looking date prefix with trailing garbage must fail closed');
+const ordinaryAfterUncertain = normalizeBiLiveUpdatePayload(JSON.stringify({
+  kind: 'order', businessDate: '2026-07-23', occurredAt: '2026-07-23T12:00:01.000Z',
+}), fixedNow);
+const mergedUncertain = mergeBiLiveAccountingRefreshEvent(invalidDate, ordinaryAfterUncertain, fixedNow);
+assert.equal(mergedUncertain.refreshHistoricalSections, true,
+  'an uncertain date followed by an ordinary order in one debounce window must retain full historical scope');
+assert.deepEqual(liveAccountingQueuePlan(mergedUncertain), liveAccountingQueuePlan({kind: 'return'}));
+const delayedAcrossMidnight = {
+  kind: 'order',
+  businessDate: '2026-08-21',
+  occurredAt: '2026-08-21T23:59:59+08:00',
+  receivedAt: '2026-08-22T00:00:05+08:00',
+};
+assert.equal(isOrdinaryCurrentDayAccountingEvent(delayedAcrossMidnight), false,
+  'classification must use the processing date rather than the delayed event timestamp');
+assert.deepEqual(liveAccountingQueuePlan(delayedAcrossMidnight), liveAccountingQueuePlan({kind: 'return'}));
 assert.equal(cancelled.cancelledBeforePickup, true);
 
 const bridge = createBiLiveUpdateBridge({

@@ -393,6 +393,7 @@ const currentDayOrder = {
   entityId: 'schedule-contract-current-day-order',
   businessDate: '2026-08-18',
   occurredAt: '2026-08-18T12:00:00.000Z',
+  receivedAt: '2026-08-18T12:00:01.000Z',
 };
 assert.deepEqual(liveAccountingQueuePlan(currentDayOrder), [],
   'current-day orders must stay on the lightweight live lane instead of advancing a heavy queue revision');

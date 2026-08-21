@@ -109,6 +109,7 @@ for (const fixture of [
       entityId: 'current-day-order',
       businessDate: '2026-08-18',
       occurredAt: '2026-08-18T12:00:00.000Z',
+      receivedAt: '2026-08-18T12:00:01.000Z',
     },
     allowGenerateSections: true,
     readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
@@ -150,6 +151,28 @@ for (const fixture of [
   assert.equal(result.fresh, true);
   assert.equal(result.queued, false);
   assert.equal(persisted, false);
+}
+
+{
+  let resolveAccountingState;
+  let accountingReadStarted;
+  const started = new Promise(resolve => { accountingReadStarted = resolve; });
+  const accountingState = new Promise(resolve => { resolveAccountingState = resolve; });
+  let running = true;
+  let persisted = false;
+  const attempt = executeBiCanonicalAccountingCatchupAttempt({
+    allowGenerateSections: true,
+    readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
+    readAccountingState: async () => { accountingReadStarted(); return accountingState; },
+    persistCatchup: async () => { persisted = true; },
+    shouldContinue: () => running,
+  });
+  await started;
+  running = false;
+  resolveAccountingState({decision: {fresh: false}});
+  const result = await attempt;
+  assert.equal(result.skipped, 'stopped');
+  assert.equal(persisted, false, 'shutdown during freshness read must prevent later queue persistence');
 }
 
 const bridge = createBiLiveUpdateBridge({

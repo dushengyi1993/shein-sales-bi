@@ -422,7 +422,7 @@ function biPortalLiveAccountingIdempotencyKey(generatedAt, event = {}) {
   return biPortalQueueHashIdempotencyKey('live', generatedAt, ...eventIdentities);
 }
 
-export function isOrdinaryCurrentDayAccountingEvent(event = {}) {
+export function isOrdinaryCurrentDayAccountingEvent(event = {}, now = event?.receivedAt || new Date()) {
   const accountingKinds = new Set([
     event?.kind,
     ...(Array.isArray(event?.accountingKinds) ? event.accountingKinds : []),
@@ -431,7 +431,44 @@ export function isOrdinaryCurrentDayAccountingEvent(event = {}) {
   const businessDate = String(event?.businessDate || '');
   const occurredAt = String(event?.occurredAt || '');
   if (!/^\d{4}-\d{2}-\d{2}$/u.test(businessDate) || !Number.isFinite(Date.parse(occurredAt))) return false;
-  return businessDate === shanghaiDateKey(occurredAt);
+  return businessDate === shanghaiDateKey(now);
+}
+
+export function mergeBiLiveAccountingRefreshEvent(current, event, now = new Date()) {
+  const evaluatedEvent = {
+    ...event,
+    receivedAt: String(event?.receivedAt || now.toISOString()),
+  };
+  const kinds = new Set([
+    ...(Array.isArray(current?.accountingKinds) ? current.accountingKinds : []),
+    current?.kind,
+    ...(Array.isArray(evaluatedEvent?.accountingKinds) ? evaluatedEvent.accountingKinds : []),
+    evaluatedEvent?.kind,
+  ].map(value => String(value || '')).filter(value => ['order', 'return'].includes(value)));
+  const eventNeedsHistoricalRefresh = evaluatedEvent?.kind === 'return'
+    || (evaluatedEvent?.kind === 'order' && !isOrdinaryCurrentDayAccountingEvent(evaluatedEvent, evaluatedEvent.receivedAt));
+  const currentNeedsHistoricalRefresh = current?.kind === 'return'
+    || (current?.kind === 'order' && !isOrdinaryCurrentDayAccountingEvent(current, current?.receivedAt || now));
+  const accountingEventIdentities = [...new Set([
+    ...(Array.isArray(current?.accountingEventIdentities)
+      ? current.accountingEventIdentities
+      : (current ? [biPortalLiveAccountingEventIdentity(current)] : [])),
+    ...(Array.isArray(evaluatedEvent?.accountingEventIdentities)
+      ? evaluatedEvent.accountingEventIdentities
+      : [biPortalLiveAccountingEventIdentity(evaluatedEvent)]),
+  ].map(value => String(value || '')).filter(Boolean))].slice(-64);
+  return {
+    ...(current || {}),
+    ...evaluatedEvent,
+    accountingKinds: [...kinds],
+    accountingEventIdentities,
+    refreshHistoricalSections: Boolean(
+      current?.refreshHistoricalSections
+      || evaluatedEvent?.refreshHistoricalSections
+      || currentNeedsHistoricalRefresh
+      || eventNeedsHistoricalRefresh
+    ),
+  };
 }
 
 export function nextBiCanonicalAccountingCatchupDelay(
@@ -13549,6 +13586,13 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
   else if (/order|sales?/.test(kindText)) kind = 'order';
   else if (/authorization|quota|compliance|inventory|out.?of.?stock|invoice|logistics|purchase|delivery/.test(kindText)) kind = 'platform';
   if (!kind) return null;
+  const rawBusinessDate = String(record.businessDate || record.business_date || '').trim();
+  const businessDateMs = Date.parse(`${rawBusinessDate}T00:00:00.000Z`);
+  const businessDate = /^\d{4}-\d{2}-\d{2}$/u.test(rawBusinessDate)
+    && Number.isFinite(businessDateMs)
+    && new Date(businessDateMs).toISOString().slice(0, 10) === rawBusinessDate
+    ? rawBusinessDate
+    : '';
   return {
     kind,
     receiptId: boundedLiveText(record.receiptId || record.receipt_id || '', 32),
@@ -13559,7 +13603,7 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
       || record.businessKey || record.business_key || record.id || '',
       160
     ),
-    businessDate: boundedLiveText(record.businessDate || record.business_date || '', 10),
+    businessDate,
     orderStatus: boundedLiveText(record.orderStatus || record.order_status || '', 40),
     orderStatusDesc: boundedLiveText(record.orderStatusDesc || record.order_status_desc || '', 120),
     cancelledBeforePickup: record.cancelledBeforePickup === true
@@ -13568,6 +13612,7 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
     salesSar: Number.isFinite(Number(record.salesSar)) ? Number(record.salesSar) : 0,
     occurredAt: boundedLiveText(record.occurredAt || record.updatedAt || record.updated_at || record.processedAt || record.createdAt || '', 64)
       || now.toISOString(),
+    receivedAt: now.toISOString(),
   };
 }
 
@@ -13596,9 +13641,7 @@ export function liveSectionsForBiUpdate(kind, event = {}) {
     if (kind === 'inventory') return ['inventoryStock'];
     return [];
   }
-  const businessDate = String(event.businessDate || '').slice(0, 10);
-  const currentDate = shanghaiDateKey(event.occurredAt || new Date());
-  const historicalOrder = hasOrder && businessDate && currentDate && businessDate !== currentDate;
+  const historicalOrder = hasOrder && !isOrdinaryCurrentDayAccountingEvent({...event, kind});
   // liveSalesToday already carries current-day order rows and enough fields to
   // overlay the order list, rankings, and price scatter in the browser. Do not
   // regenerate the large orders/priceScatter sections for every tab or every
@@ -13715,9 +13758,11 @@ export async function executeBiCanonicalAccountingCatchupAttempt({
   readCoreMeta,
   readAccountingState,
   persistCatchup,
+  shouldContinue = () => true,
 } = {}) {
   if (!allowGenerateSections) return {ok: true, fresh: false, queued: false, skipped: 'generation-disabled'};
   const meta = await readCoreMeta();
+  if (!shouldContinue()) return {ok: true, fresh: false, queued: false, skipped: 'stopped'};
   const generatedAt = normalizeBiLiveAccountingGeneration(meta);
   if (!generatedAt) {
     throw biLiveAccountingGuardError(
@@ -13726,6 +13771,7 @@ export async function executeBiCanonicalAccountingCatchupAttempt({
     );
   }
   const accountingState = await readAccountingState(generatedAt);
+  if (!shouldContinue()) return {ok: true, generatedAt, fresh: false, queued: false, skipped: 'stopped'};
   if (accountingState?.decision?.fresh === true) {
     return {ok: true, generatedAt, fresh: true, queued: false};
   }
@@ -15639,6 +15685,7 @@ export function createPortalShutdownHooks({
   webhookTaskReconciler = null,
   waitForStartup = null,
   liveAccountingRefreshStop = () => {},
+  liveAccountingRefreshDrain = null,
   biCoreWarmupWatcher = null,
   ownerKnowledgeReconcileTimer = null,
   liveUpdateBridge = null,
@@ -15675,6 +15722,7 @@ export function createPortalShutdownHooks({
         linkOpsJobWorker?.stop(),
         webhookTaskReconciler?.stop(),
         liveUpdateBridge?.stop?.(),
+        liveAccountingRefreshDrain?.(),
       ]);
       const rejected = results.filter(result => result.status === 'rejected');
       if (startupFailure || rejected.length) {
@@ -16493,6 +16541,7 @@ async function main() {
   let liveCanonicalAccountingCatchupRunning = false;
   let liveCanonicalAccountingCatchupNeeded = false;
   let liveCanonicalAccountingCatchupRevision = 0;
+  let liveCanonicalAccountingCatchupPromise = null;
   let biLiveUpdateBridge;
 
   const scheduleNextCanonicalAccountingCatchup = () => {
@@ -16513,19 +16562,23 @@ async function main() {
     }
     const requestedRevision = liveCanonicalAccountingCatchupRevision;
     liveCanonicalAccountingCatchupRunning = true;
+    const operation = executeBiCanonicalAccountingCatchupAttempt({
+      allowGenerateSections,
+      readCoreMeta: () => readBiPortalCoreMeta(root),
+      readAccountingState: generatedAt => readProfitAccountingState(args, generatedAt, {forceFresh: true}),
+      persistCatchup: (accountingState, generatedAt) => persistHomepageAccountingCatchupOnce(accountingState, generatedAt),
+      shouldContinue: () => !liveAccountingRefreshStopped,
+    });
+    liveCanonicalAccountingCatchupPromise = operation;
     try {
-      await executeBiCanonicalAccountingCatchupAttempt({
-        allowGenerateSections,
-        readCoreMeta: () => readBiPortalCoreMeta(root),
-        readAccountingState: generatedAt => readProfitAccountingState(args, generatedAt, {forceFresh: true}),
-        persistCatchup: (accountingState, generatedAt) => persistHomepageAccountingCatchupOnce(accountingState, generatedAt),
-      });
+      await operation;
       if (requestedRevision === liveCanonicalAccountingCatchupRevision) {
         liveCanonicalAccountingCatchupNeeded = false;
       }
     } catch (error) {
       console.error(`[bi-live-accounting] periodic canonical catch-up failed: ${String(error?.message || error)}`);
     } finally {
+      if (liveCanonicalAccountingCatchupPromise === operation) liveCanonicalAccountingCatchupPromise = null;
       liveCanonicalAccountingCatchupRunning = false;
       scheduleNextCanonicalAccountingCatchup();
     }
@@ -16580,38 +16633,6 @@ async function main() {
     }
   };
 
-  const mergeLiveAccountingRefreshEvent = (current, event) => {
-    const kinds = new Set([
-      ...(Array.isArray(current?.accountingKinds) ? current.accountingKinds : []),
-      current?.kind,
-      ...(Array.isArray(event?.accountingKinds) ? event.accountingKinds : []),
-      event?.kind,
-    ].map(value => String(value || '')).filter(value => ['order', 'return'].includes(value)));
-    const businessDate = String(event?.businessDate || '').slice(0, 10);
-    const currentDate = shanghaiDateKey(event?.occurredAt || new Date());
-    const eventNeedsHistoricalRefresh = event?.kind === 'return'
-      || Boolean(businessDate && currentDate && businessDate !== currentDate);
-    const accountingEventIdentities = [...new Set([
-      ...(Array.isArray(current?.accountingEventIdentities)
-        ? current.accountingEventIdentities
-        : (current ? [biPortalLiveAccountingEventIdentity(current)] : [])),
-      ...(Array.isArray(event?.accountingEventIdentities)
-        ? event.accountingEventIdentities
-        : [biPortalLiveAccountingEventIdentity(event)]),
-    ].map(value => String(value || '')).filter(Boolean))].slice(-64);
-    return {
-      ...(current || {}),
-      ...event,
-      accountingKinds: [...kinds],
-      accountingEventIdentities,
-      refreshHistoricalSections: Boolean(
-        current?.refreshHistoricalSections
-        || event?.refreshHistoricalSections
-        || eventNeedsHistoricalRefresh
-      ),
-    };
-  };
-
   const scheduleLiveAccountingRefresh = event => {
     if (
       liveAccountingRefreshStopped
@@ -16630,9 +16651,10 @@ async function main() {
     // Preserve the widest invalidation scope across a burst. Otherwise a
     // current-day sale arriving after a prior-day cancellation could replace
     // its metadata and leave the historical page cache stale.
-    liveAccountingRefreshPendingEvent = mergeLiveAccountingRefreshEvent(
+    liveAccountingRefreshPendingEvent = mergeBiLiveAccountingRefreshEvent(
       liveAccountingRefreshPendingEvent,
       event,
+      new Date(),
     );
     if (liveAccountingRefreshRunning || liveAccountingRefreshTimer) return;
     liveAccountingRefreshTimer = setTimeout(runLiveAccountingRefresh, liveAccountingDebounceMs);
@@ -16647,6 +16669,7 @@ async function main() {
     if (liveCanonicalAccountingCatchupTimer) clearTimeout(liveCanonicalAccountingCatchupTimer);
     liveCanonicalAccountingCatchupTimer = null;
   };
+  const drainLiveAccountingRefresh = () => liveCanonicalAccountingCatchupPromise || Promise.resolve();
 
   if (liveAccountingEnabled(process.env) && allowGenerateSections) {
     scheduleNextCanonicalAccountingCatchup();
@@ -21506,6 +21529,7 @@ ${uploadCheckAnswer}` : `
         webhookTaskReconciler,
         waitForStartup: waitForPortalStartupPhase,
         liveAccountingRefreshStop: stopLiveAccountingRefresh,
+        liveAccountingRefreshDrain: drainLiveAccountingRefresh,
         biCoreWarmupWatcher,
         ownerKnowledgeReconcileTimer,
         liveUpdateBridge: biLiveUpdateBridge,
