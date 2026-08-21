@@ -16,6 +16,7 @@ import {
   liveSectionsForBiUpdate,
   mergeBiLiveAccountingRefreshEvent,
   normalizeBiLiveUpdatePayload,
+  reevaluateBiLiveAccountingRefreshEvent,
 } from './serve_bi_portal.mjs';
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
@@ -144,6 +145,20 @@ const delayedAcrossMidnight = {
 assert.equal(isOrdinaryCurrentDayAccountingEvent(delayedAcrossMidnight), false,
   'classification must use the processing date rather than the delayed event timestamp');
 assert.deepEqual(liveAccountingQueuePlan(delayedAcrossMidnight), liveAccountingQueuePlan({kind: 'return'}));
+const beforeMidnight = mergeBiLiveAccountingRefreshEvent(null, {
+  kind: 'order',
+  businessDate: '2026-08-21',
+  occurredAt: '2026-08-21T23:59:49+08:00',
+  receivedAt: '2026-08-21T23:59:50+08:00',
+}, new Date('2026-08-21T23:59:50+08:00'));
+assert.equal(beforeMidnight.refreshHistoricalSections, false);
+const executedAfterMidnight = reevaluateBiLiveAccountingRefreshEvent(
+  beforeMidnight,
+  new Date('2026-08-22T00:00:35+08:00'),
+);
+assert.equal(executedAfterMidnight.refreshHistoricalSections, true,
+  'a debounce that crosses midnight must upgrade the prior-day mutation to sticky historical scope');
+assert.deepEqual(liveAccountingQueuePlan(executedAfterMidnight), liveAccountingQueuePlan({kind: 'return'}));
 assert.equal(cancelled.cancelledBeforePickup, true);
 
 const bridge = createBiLiveUpdateBridge({

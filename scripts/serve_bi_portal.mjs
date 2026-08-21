@@ -471,6 +471,13 @@ export function mergeBiLiveAccountingRefreshEvent(current, event, now = new Date
   };
 }
 
+export function reevaluateBiLiveAccountingRefreshEvent(event, now = new Date()) {
+  return mergeBiLiveAccountingRefreshEvent(null, {
+    ...event,
+    receivedAt: now.toISOString(),
+  }, now);
+}
+
 export function nextBiCanonicalAccountingCatchupDelay(
   nowMs = Date.now(),
   intervalMs = 15 * 60_000,
@@ -16587,7 +16594,14 @@ async function main() {
   const runLiveAccountingRefresh = async () => {
     liveAccountingRefreshTimer = null;
     if (liveAccountingRefreshStopped || liveAccountingRefreshRunning || !liveAccountingRefreshPendingEvent) return;
-    const sourceEvent = liveAccountingRefreshPendingEvent;
+    // A 23:59 event may cross the business-date boundary during debounce. The
+    // execution-time recheck upgrades it to sticky historical scope before any
+    // section plan is selected; liveSalesToday has already advanced to the new
+    // current_date and cannot represent the prior-day mutation by itself.
+    const sourceEvent = reevaluateBiLiveAccountingRefreshEvent(
+      liveAccountingRefreshPendingEvent,
+      new Date(),
+    );
     liveAccountingRefreshPendingEvent = null;
     liveAccountingRefreshRunning = true;
     let liveProjectionRefreshed = false;
