@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 
 import {__testHooks} from './serve_bi_portal.mjs';
 
-const {evaluateBiPortalCoreWarmupHealth} = __testHooks;
+const {BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS, evaluateBiPortalCoreWarmupHealth} = __testHooks;
 const nowMs = Date.parse('2026-08-19T15:00:00.000Z');
 const stalledAfterMs = 45 * 60_000;
+
+assert.equal(BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS, 105 * 60_000,
+  'default stall threshold must exceed the scheduled 90-minute reserved-hour gap');
 
 assert.deepEqual(
   evaluateBiPortalCoreWarmupHealth({status: 'idle', owner: '', startedAt: 0, inFlight: null}, {nowMs, stalledAfterMs}),

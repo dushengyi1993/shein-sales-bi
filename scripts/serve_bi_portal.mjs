@@ -482,7 +482,11 @@ const BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS = Math.max(
 );
 const BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS = boundedBiPortalWarmupMs(
   'SHEIN_BI_CORE_WARMUP_STALLED_AFTER_MS',
-  45 * 60_000,
+  // The external section queue normally runs at :14/:44 but deliberately
+  // skips the reserved 01/06/08 hours.  Its longest planned gap is therefore
+  // 90 minutes; keep a small scheduling tolerance without hiding a genuinely
+  // abandoned queue indefinitely.
+  105 * 60_000,
   5 * 60_000,
   6 * 60 * 60_000,
 );
