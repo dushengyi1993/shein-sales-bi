@@ -18,12 +18,17 @@ import {
 } from '../lib/cloud_watchdog_recovery.mjs';
 import {
   applyWatchdogMaintenanceTransition,
+  assessPortalAndEtFreshness,
+  assessEtFetchFreshness,
+  buildEtFetchFreshnessSql,
   bindWatchdogMaintenanceRecoveryDelivery,
   detachMaintenanceHeldAlertState,
   markWatchdogMaintenanceRecoverySent,
   mergeMaintenanceRecoveryNotification,
   partitionWatchdogMaintenanceChecks,
   persistWatchdogMaintenanceState,
+  ET_FETCH_CANONICAL_MODES,
+  ET_FETCH_MAX_FUTURE_SKEW_MINUTES,
   sourceIntegrityIssueFor,
   summarizeWatchdogMaintenanceStatus,
   watchdogIssueMaintenanceClass,
@@ -41,6 +46,282 @@ import {spawn} from 'node:child_process';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nowMs = Date.parse('2026-07-11T12:30:00+08:00');
 const stores = ['DL', 'DX', 'QY'];
+
+const etFreshnessSql = buildEtFetchFreshnessSql();
+assert.match(etFreshnessSql, /FROM raw\.et_fetch_batch b/);
+assert.match(etFreshnessSql, /b\.ok IS TRUE/, 'failed ET batches must be excluded by the authoritative query');
+assert.match(etFreshnessSql, /b\.mode IN \('daily', 'backfill'\)/,
+  'only canonical daily/backfill ET batches may be authoritative');
+assert.doesNotMatch(etFreshnessSql, /coalesce\(b\.mode,\s*''\) <> 'smoke'/,
+  'the authoritative query must not accept every non-smoke mode');
+assert.match(etFreshnessSql, /b\.fetched_at IS NOT NULL/,
+  'rows without a usable warehouse timestamp must not be selected as fresh');
+assert.match(etFreshnessSql, /ORDER BY b\.fetched_at DESC NULLS LAST, b\.batch_id DESC/);
+assert.deepEqual([...ET_FETCH_CANONICAL_MODES], ['daily', 'backfill']);
+assert.equal(ET_FETCH_MAX_FUTURE_SKEW_MINUTES, 5);
+
+const etNow = new Date('2026-08-22T10:00:00+08:00');
+const freshWarehouseStalePortal = assessEtFetchFreshness({
+  dbResult: {
+    ok: true,
+    data: {
+      found: true,
+      batchId: 'et-20260822-0412',
+      targetDate: '2026-08-22',
+      fetchedAt: '2026-08-22T04:12:00+08:00',
+      mode: 'daily',
+      ok: true,
+    },
+  },
+  portalTimestamp: '2026-08-19T04:12:00+08:00',
+  now: etNow,
+});
+assert.equal(freshWarehouseStalePortal.healthy, true,
+  'a fresh warehouse batch must stay green even when Portal data.json is stale');
+assert.equal(freshWarehouseStalePortal.reason, 'ok');
+assert.equal(freshWarehouseStalePortal.source, 'raw.et_fetch_batch');
+assert.equal(freshWarehouseStalePortal.batchId, 'et-20260822-0412');
+assert.ok(freshWarehouseStalePortal.ageHours < 36);
+assert.ok(freshWarehouseStalePortal.portalAgeHours > 36,
+  'the fixture must prove the Portal timestamp is older than the warehouse batch');
+
+const staleWarehouseFreshPortal = assessEtFetchFreshness({
+  dbResult: {
+    ok: true,
+    data: {
+      found: true,
+      batchId: 'et-20260819-0412',
+      targetDate: '2026-08-19',
+      fetchedAt: '2026-08-19T04:12:00+08:00',
+      mode: 'backfill',
+      ok: true,
+    },
+  },
+  portalTimestamp: '2026-08-22T09:50:00+08:00',
+  now: etNow,
+});
+assert.equal(staleWarehouseFreshPortal.healthy, false,
+  'an old warehouse batch must alert even when Portal data.json is current');
+assert.equal(staleWarehouseFreshPortal.reason, 'warehouse_stale');
+assert.match(staleWarehouseFreshPortal.issue, /raw\.et_fetch_batch/);
+assert.match(staleWarehouseFreshPortal.issue, /Portal etUpdatedAt=.*仅作诊断/);
+
+const etFutureBoundary = assessEtFetchFreshness({
+  dbResult: {
+    ok: true,
+    data: {
+      found: true,
+      batchId: 'et-future-boundary',
+      targetDate: '2026-08-22',
+      fetchedAt: '2026-08-22T10:05:00+08:00',
+      mode: 'daily',
+      ok: true,
+    },
+  },
+  now: etNow,
+});
+assert.equal(etFutureBoundary.healthy, true,
+  'the exact five-minute future-skew boundary remains within the explicit tolerance');
+assert.equal(etFutureBoundary.ageHours, -5 / 60);
+
+const etFutureBeyondBoundary = assessEtFetchFreshness({
+  dbResult: {
+    ok: true,
+    data: {
+      found: true,
+      batchId: 'et-future-plus-one-second',
+      targetDate: '2026-08-22',
+      fetchedAt: '2026-08-22T10:05:01+08:00',
+      mode: 'daily',
+      ok: true,
+    },
+  },
+  now: etNow,
+});
+assert.equal(etFutureBeyondBoundary.healthy, false,
+  'a fetchedAt beyond the five-minute future tolerance must fail closed');
+assert.equal(etFutureBeyondBoundary.reason, 'future_timestamp');
+
+const etFuture2099 = assessEtFetchFreshness({
+  dbResult: {
+    ok: true,
+    data: {
+      found: true,
+      batchId: 'et-2099',
+      targetDate: '2099-01-01',
+      fetchedAt: '2099-01-01T00:00:00+08:00',
+      mode: 'backfill',
+      ok: true,
+    },
+  },
+  now: etNow,
+});
+assert.equal(etFuture2099.healthy, false,
+  'a 2099 warehouse timestamp must never produce a false green');
+assert.equal(etFuture2099.reason, 'future_timestamp');
+
+const etDatabaseFailure = assessEtFetchFreshness({
+  dbResult: {ok: false, error: 'connection refused'},
+  portalTimestamp: '2026-08-22T09:50:00+08:00',
+  now: etNow,
+});
+assert.equal(etDatabaseFailure.healthy, false,
+  'a direct warehouse query failure must fail closed');
+assert.equal(etDatabaseFailure.reason, 'database_query_failed');
+assert.match(etDatabaseFailure.issue, /查询失败/);
+
+const etNoValidBatch = assessEtFetchFreshness({
+  dbResult: {ok: true, data: {found: false}},
+  portalTimestamp: '2026-08-22T09:50:00+08:00',
+  now: etNow,
+});
+assert.equal(etNoValidBatch.healthy, false,
+  'no successful canonical daily/backfill ET batch must fail closed');
+assert.equal(etNoValidBatch.reason, 'no_valid_batch');
+assert.match(etNoValidBatch.issue, /成功且 canonical daily\/backfill/);
+
+const assessEtFixture = (overrides = {}) => assessEtFetchFreshness({
+  dbResult: {
+    ok: true,
+    data: {
+      found: true,
+      batchId: 'et-fixture',
+      targetDate: '2026-08-22',
+      fetchedAt: '2026-08-22T09:55:00+08:00',
+      mode: 'daily',
+      ok: true,
+      ...overrides,
+    },
+  },
+  portalTimestamp: '2026-08-22T09:50:00+08:00',
+  now: etNow,
+});
+
+const etFailedBatchResult = assessEtFixture({batchId: 'et-failed', mode: 'daily', ok: false});
+assert.equal(etFailedBatchResult.healthy, false,
+  'a failed daily batch must remain fail closed even if the SQL contract is bypassed');
+assert.equal(etFailedBatchResult.reason, 'failed_batch');
+
+const etSmokeBatchResult = assessEtFixture({batchId: 'et-smoke', mode: 'smoke'});
+assert.equal(etSmokeBatchResult.healthy, false, 'smoke must not be authoritative');
+assert.equal(etSmokeBatchResult.reason, 'invalid_canonical_mode');
+
+for (const [label, mode] of [
+  ['uppercase', 'DAILY'],
+  ['empty', ''],
+  ['unknown', 'hourly'],
+]) {
+  const result = assessEtFixture({batchId: `et-${label}`, mode});
+  assert.equal(result.healthy, false, `${label} mode must fail closed`);
+  assert.equal(result.reason, 'invalid_canonical_mode', `${label} mode must be rejected as non-canonical`);
+}
+
+const etUnreadableResult = assessEtFetchFreshness({
+  dbResult: {
+    ok: true,
+    data: {
+      found: true,
+      batchId: 'et-bad',
+      fetchedAt: 'not-a-date',
+      mode: 'daily',
+      ok: true,
+    },
+  },
+  portalTimestamp: '2026-08-22T09:50:00+08:00',
+  now: etNow,
+});
+assert.equal(etUnreadableResult.healthy, false,
+  'an unreadable authoritative warehouse result must fail closed');
+assert.equal(etUnreadableResult.reason, 'database_result_unreadable');
+
+const integrationNow = new Date('2026-08-22T10:00:00+08:00');
+const integrationPortalRuntime = {liveUpdates: {enabled: false}};
+const integrationPortalData = etUpdatedAt => ({
+  generatedAt: '2026-08-22T09:30:00+08:00',
+  dates: {
+    salesUpdatedAt: '2026-08-22T09:30:00+08:00',
+    businessUpdatedAt: '2026-08-22T09:30:00+08:00',
+    linkUpdatedAt: '2026-08-22T09:30:00+08:00',
+    etUpdatedAt,
+  },
+});
+
+let integrationDbQueryCount = 0;
+const freshWarehouseThroughOrchestration = await assessPortalAndEtFreshness({
+  portalData: integrationPortalData('2026-08-19T04:12:00+08:00'),
+  portalRuntime: integrationPortalRuntime,
+  now: integrationNow,
+  queryDb: async sql => {
+    integrationDbQueryCount += 1;
+    assert.match(sql, /b\.mode IN \('daily', 'backfill'\)/);
+    return {
+      ok: true,
+      data: {
+        found: true,
+        batchId: 'et-integration-daily',
+        targetDate: '2026-08-22',
+        fetchedAt: '2026-08-22T04:12:00+08:00',
+        mode: 'daily',
+        ok: true,
+      },
+    };
+  },
+});
+assert.equal(integrationDbQueryCount, 1, 'active freshness must query the authoritative warehouse exactly once');
+assert.equal(freshWarehouseThroughOrchestration.etFreshness.healthy, true,
+  'orchestration must keep stale Portal ET time green when warehouse is fresh');
+assert.equal(freshWarehouseThroughOrchestration.issues.some(issue => issue.startsWith('ET 货代仓')), false,
+  'stale Portal ET time must not create an ET alert through orchestration');
+
+integrationDbQueryCount = 0;
+const staleWarehouseThroughOrchestration = await assessPortalAndEtFreshness({
+  portalData: integrationPortalData('2026-08-22T09:50:00+08:00'),
+  portalRuntime: integrationPortalRuntime,
+  now: integrationNow,
+  queryDb: async () => {
+    integrationDbQueryCount += 1;
+    return {
+      ok: true,
+      data: {
+        found: true,
+        batchId: 'et-integration-backfill-old',
+        targetDate: '2026-08-19',
+        fetchedAt: '2026-08-19T04:12:00+08:00',
+        mode: 'backfill',
+        ok: true,
+      },
+    };
+  },
+});
+assert.equal(integrationDbQueryCount, 1);
+assert.equal(staleWarehouseThroughOrchestration.etFreshness.healthy, false);
+assert.equal(staleWarehouseThroughOrchestration.issues.some(issue => issue.startsWith('ET 货代仓过期')), true,
+  'fresh Portal ET time must not hide a stale warehouse batch');
+
+const failedWarehouseThroughOrchestration = await assessPortalAndEtFreshness({
+  portalData: integrationPortalData('2026-08-22T09:50:00+08:00'),
+  portalRuntime: integrationPortalRuntime,
+  now: integrationNow,
+  queryDb: async () => ({ok: false, error: 'stub connection refused'}),
+});
+assert.equal(failedWarehouseThroughOrchestration.etFreshness.healthy, false);
+assert.equal(failedWarehouseThroughOrchestration.issues.some(issue => issue.includes('ET 货代仓新鲜度查询失败')), true,
+  'a warehouse query failure must alert through orchestration');
+
+integrationDbQueryCount = 0;
+const suppressedPortalAndEt = await assessPortalAndEtFreshness({
+  portalData: integrationPortalData('2026-08-22T09:50:00+08:00'),
+  portalRuntime: integrationPortalRuntime,
+  portalFreshnessSuppressed: true,
+  now: integrationNow,
+  queryDb: async () => {
+    integrationDbQueryCount += 1;
+    throw new Error('suppressed query must not run');
+  },
+});
+assert.equal(integrationDbQueryCount, 0, 'maintenance suppression must skip the ET database query');
+assert.equal(suppressedPortalAndEt.etFreshness.suppressed, true);
+assert.equal(suppressedPortalAndEt.issues.some(issue => issue.startsWith('ET 货代仓')), false);
 
 const businessMaintenance = summarizeWatchdogMaintenanceStatus({
   schemaVersion: 'cloud-maintenance-mode/v1',
@@ -586,6 +867,26 @@ assert.equal(assessDailyOpenapiProductRecovery({
 }).reason, 'openapi_product_recovery_store_coverage_incomplete');
 
 const watchdogSource = fs.readFileSync(path.join(root, 'scripts', 'cloud_ops_watchdog.mjs'), 'utf8');
+const runWatchdogStart = watchdogSource.indexOf('async function runWatchdog(');
+const runWatchdogEnd = watchdogSource.indexOf('async function main()', runWatchdogStart);
+assert.ok(runWatchdogStart >= 0 && runWatchdogEnd > runWatchdogStart,
+  'watchdog source must expose a bounded runWatchdog body for wiring protection');
+const runWatchdogSource = watchdogSource.slice(runWatchdogStart, runWatchdogEnd);
+assert.match(watchdogSource, /export async function assessPortalAndEtFreshness\(/,
+  'portal/ET freshness orchestration must remain exported for deterministic tests');
+assert.match(runWatchdogSource, /const portalFreshnessResult = await assessPortalAndEtFreshness\(/,
+  'runWatchdog must call the portal/ET freshness orchestration');
+assert.equal(
+  (runWatchdogSource.match(/await assessPortalAndEtFreshness\(/g) || []).length,
+  1,
+  'runWatchdog must have exactly one portal/ET freshness orchestration call',
+);
+assert.match(runWatchdogSource, /issues\.push\(\.\.\.portalFreshnessResult\.issues\)/,
+  'runWatchdog must publish orchestration issues');
+assert.match(runWatchdogSource, /const \{portal, etFreshness\} = portalFreshnessResult/,
+  'runWatchdog must consume the orchestration ET result');
+assert.doesNotMatch(runWatchdogSource, /psqlJson\(buildEtFetchFreshnessSql\(\)\)/,
+  'runWatchdog must not bypass the tested orchestration with a direct ET query');
 assert.equal(
   (watchdogSource.match(/await readCloudMaintenanceStatus\(/g) || []).length,
   1,
@@ -902,6 +1203,13 @@ assert.doesNotMatch(notifySource, /!res\.ok && \/field validation failed\//,
 console.log(JSON.stringify({
   ok: true,
   checks: [
+    'et_freshness_sql_authoritative_filters',
+    'et_future_skew_and_canonical_modes',
+    'et_fresh_warehouse_over_stale_portal',
+    'et_stale_warehouse_over_fresh_portal',
+    'et_database_failure_and_no_valid_batch_fail_closed',
+    'et_portal_orchestration_db_stub',
+    'et_runwatchdog_orchestration_wiring',
     'existing_business_recovery_contracts',
     'maintenance_business_suppression',
     'maintenance_all_suppression',

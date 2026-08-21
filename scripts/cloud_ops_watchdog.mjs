@@ -412,6 +412,173 @@ function hoursSince(value) {
   return (Date.now() - d.getTime()) / 36e5;
 }
 
+function hoursSinceAt(value, nowMs) {
+  const d = parseDate(value);
+  if (!d || !Number.isFinite(nowMs)) return null;
+  return (nowMs - d.getTime()) / 36e5;
+}
+
+export const ET_FETCH_FRESHNESS_MAX_AGE_HOURS = 36;
+export const ET_FETCH_MAX_FUTURE_SKEW_MINUTES = 5;
+export const ET_FETCH_CANONICAL_MODES = Object.freeze(['daily', 'backfill']);
+
+export function buildEtFetchFreshnessSql() {
+  return `
+WITH latest AS (
+  SELECT
+    b.batch_id,
+    b.target_date,
+    b.fetched_at,
+    b.mode,
+    b.ok
+  FROM raw.et_fetch_batch b
+  WHERE b.ok IS TRUE
+    AND b.mode IN ('daily', 'backfill')
+    AND b.fetched_at IS NOT NULL
+  ORDER BY b.fetched_at DESC NULLS LAST, b.batch_id DESC
+  LIMIT 1
+)
+SELECT coalesce(
+  (
+    SELECT json_build_object(
+      'found', true,
+      'batchId', batch_id,
+      'targetDate', target_date,
+      'fetchedAt', fetched_at,
+      'mode', mode,
+      'ok', ok
+    )
+    FROM latest
+  ),
+  json_build_object('found', false)
+)::text;
+`;
+}
+
+export function assessEtFetchFreshness({
+  dbResult,
+  portalTimestamp = '',
+  now = new Date(),
+  maxAgeHours = ET_FETCH_FRESHNESS_MAX_AGE_HOURS,
+  maxFutureSkewMinutes = ET_FETCH_MAX_FUTURE_SKEW_MINUTES,
+} = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const threshold = Number(maxAgeHours);
+  const futureSkewMinutes = Number(maxFutureSkewMinutes);
+  const futureSkewHours = futureSkewMinutes / 60;
+  const portalEtUpdatedAt = String(portalTimestamp || '');
+  const portalAgeHours = hoursSinceAt(portalEtUpdatedAt, nowMs);
+  const base = {
+    source: 'raw.et_fetch_batch',
+    portalEtUpdatedAt,
+    portalAgeHours,
+    batchId: null,
+    targetDate: null,
+    fetchedAt: null,
+    ageHours: null,
+    issue: '',
+  };
+  if (!Number.isFinite(nowMs)
+    || !Number.isFinite(threshold)
+    || threshold < 0
+    || !Number.isFinite(futureSkewMinutes)
+    || futureSkewMinutes < 0) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'freshness_inputs_unreadable',
+      issue: `ET 货代仓新鲜度无法判断：参考时间或阈值不可读；raw.et_fetch_batch 是唯一事实源，Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 仅作诊断`,
+    };
+  }
+  if (dbResult?.ok !== true) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'database_query_failed',
+      issue: `ET 货代仓新鲜度查询失败：raw.et_fetch_batch 不可读取：${String(dbResult?.error || 'unknown database error')}; Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 不能替代数据库事实`,
+    };
+  }
+  const data = dbResult.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'database_result_unreadable',
+      issue: `ET 货代仓新鲜度结果不可读：raw.et_fetch_batch 返回了非对象结果；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 仅作诊断`,
+    };
+  }
+  if (data.found !== true) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'no_valid_batch',
+      issue: `ET 货代仓没有成功且 canonical daily/backfill 的有效批次：raw.et_fetch_batch 无可用 fetched_at；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 不能使本项变绿`,
+    };
+  }
+  if (data.ok === false) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'failed_batch',
+      issue: `ET 货代仓批次失败：raw.et_fetch_batch batch=${String(data.batchId ?? data.batch_id ?? '-')} ok=false；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 不能使本项变绿`,
+    };
+  }
+  if (data.ok !== true) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'database_result_unreadable',
+      issue: `ET 货代仓新鲜度结果不可读：raw.et_fetch_batch latest batch 缺少有效 ok 字段；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 仅作诊断`,
+    };
+  }
+  if (!ET_FETCH_CANONICAL_MODES.includes(data.mode)) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'invalid_canonical_mode',
+      issue: `ET 货代仓批次 mode 非 canonical daily/backfill：raw.et_fetch_batch mode=${String(data.mode ?? '-')}；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 不能使本项变绿`,
+    };
+  }
+  const batchId = String(data.batchId ?? data.batch_id ?? '').trim();
+  const targetDate = data.targetDate ?? data.target_date ?? null;
+  const fetchedAt = String(data.fetchedAt ?? data.fetched_at ?? '').trim();
+  const fetchedDate = parseDate(fetchedAt);
+  if (!batchId || !fetchedAt || !fetchedDate) {
+    return {
+      ...base,
+      healthy: false,
+      reason: 'database_result_unreadable',
+      issue: `ET 货代仓新鲜度结果不可读：raw.et_fetch_batch latest batch/fetched_at 无效（batch=${batchId || '-'} fetchedAt=${fetchedAt || '-'}）；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 仅作诊断`,
+    };
+  }
+  const ageHours = (nowMs - fetchedDate.getTime()) / 36e5;
+  if (ageHours < -futureSkewHours) {
+    return {
+      ...base,
+      batchId,
+      targetDate,
+      fetchedAt,
+      ageHours,
+      healthy: false,
+      reason: 'future_timestamp',
+      issue: `ET 货代仓 fetchedAt 超过当前时间容差：raw.et_fetch_batch batch=${batchId} fetchedAt=${fetchedAt} age=${fmtHours(ageHours)}，允许未来偏差=${futureSkewMinutes}m；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 仅作诊断`,
+    };
+  }
+  const result = {
+    ...base,
+    batchId,
+    targetDate,
+    fetchedAt,
+    ageHours,
+    healthy: ageHours <= threshold,
+    reason: ageHours <= threshold ? 'ok' : 'warehouse_stale',
+  };
+  if (!result.healthy) {
+    result.issue = `ET 货代仓过期：raw.et_fetch_batch batch=${batchId} fetchedAt=${fetchedAt} age=${fmtHours(ageHours)}，阈值=${threshold}h；Portal etUpdatedAt=${portalEtUpdatedAt || '-'} 仅作诊断`;
+  }
+  return result;
+}
+
 function bjDateKey(now = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -741,6 +908,69 @@ async function psqlJson(sql, timeoutMs = Number(process.env.SHEIN_CLOUD_WATCHDOG
   } catch (err) {
     return {ok: false, error: `psql JSON parse failed: ${String(err?.message || err)}; stdout=${String(res.stdout || '').slice(-1200)}`};
   }
+}
+
+export async function assessPortalAndEtFreshness({
+  portalData = {dates: {}},
+  portalRuntime = null,
+  portalFreshnessSuppressed = false,
+  queryDb = psqlJson,
+  now = new Date(),
+} = {}) {
+  const data = portalData && typeof portalData === 'object' ? portalData : {error: 'portal data is not an object', dates: {}};
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const issues = [];
+  let etFreshness = {suppressed: true, class: 'scheduled'};
+  let portal = data;
+  if (data.error) {
+    issues.push(`BI 数据文件不可读：${data.error}`);
+  }
+  if (!portalRuntime) {
+    issues.push('BI 实时运行状态不可读：Portal /api/health 无响应');
+  }
+  if (portalRuntime?.liveUpdates?.enabled === true && portalRuntime.liveUpdates.connected !== true) {
+    issues.push(`BI 实时更新通道未连接：channel=${portalRuntime.liveUpdates.channel || '-'} error=${portalRuntime.liveUpdates.lastError || '-'}`);
+  }
+  if (!data.error && !portalFreshnessSuppressed) {
+    const generatedAge = hoursSinceAt(data.generatedAt, nowMs);
+    const salesTimestamp = newerTimestamp(
+      data.dates?.salesUpdatedAt,
+      portalRuntime?.liveUpdates?.lastOrderAt,
+    );
+    const salesAge = hoursSinceAt(salesTimestamp, nowMs);
+    const businessAge = hoursSinceAt(data.dates?.businessUpdatedAt, nowMs);
+    const linkAge = hoursSinceAt(data.dates?.linkUpdatedAt, nowMs);
+    if (generatedAge === null || generatedAge > 30) issues.push(`BI 页面底稿过期：${data.generatedAt || '-'} age=${fmtHours(generatedAge)}，阈值=30h`);
+    if (salesAge === null || salesAge > 30) issues.push(`SHEIN 销售数据过期：${salesTimestamp || '-'} age=${fmtHours(salesAge)}，阈值=30h`);
+    // 业务域/链接表现是低频日更，不按销售高频阈值判断。
+    if (businessAge === null || businessAge > 48) issues.push(`SHEIN 业务域日更过期：${data.dates?.businessUpdatedAt || '-'} age=${fmtHours(businessAge)}，阈值=48h`);
+    if (linkAge === null || linkAge > 48) issues.push(`SHEIN 链接表现日更过期：${data.dates?.linkUpdatedAt || '-'} age=${fmtHours(linkAge)}，阈值=48h`);
+  } else if (!data.error) {
+    portal = {
+      suppressed: true,
+      class: 'scheduled',
+      dataReadable: true,
+      portalRuntimeChecked: true,
+    };
+  }
+  if (!portalFreshnessSuppressed) {
+    let dbResult;
+    try {
+      dbResult = await queryDb(buildEtFetchFreshnessSql());
+    } catch (error) {
+      dbResult = {
+        ok: false,
+        error: `database query threw: ${String(error?.message || error)}`,
+      };
+    }
+    etFreshness = assessEtFetchFreshness({
+      dbResult,
+      portalTimestamp: data.dates?.etUpdatedAt,
+      now,
+    });
+    if (!etFreshness.healthy) issues.push(etFreshness.issue);
+  }
+  return {issues, portal, etFreshness};
 }
 
 async function auditOrderClosure(args) {
@@ -1245,40 +1475,13 @@ async function runWatchdog(args) {
     'scheduled',
     {kind: 'freshness'},
   );
-  let portal = portalData;
-  if (portalData.error) {
-    issues.push(`BI 数据文件不可读：${portalData.error}`);
-  }
-  if (!portalRuntime) {
-    issues.push('BI 实时运行状态不可读：Portal /api/health 无响应');
-  }
-  if (portalRuntime?.liveUpdates?.enabled === true && portalRuntime.liveUpdates.connected !== true) {
-    issues.push(`BI 实时更新通道未连接：channel=${portalRuntime.liveUpdates.channel || '-'} error=${portalRuntime.liveUpdates.lastError || '-'}`);
-  }
-  if (!portalData.error && !portalFreshnessSuppressed) {
-    const generatedAge = hoursSince(portalData.generatedAt);
-    const salesTimestamp = newerTimestamp(
-      portalData.dates?.salesUpdatedAt,
-      portalRuntime?.liveUpdates?.lastOrderAt,
-    );
-    const salesAge = hoursSince(salesTimestamp);
-    const businessAge = hoursSince(portalData.dates?.businessUpdatedAt);
-    const linkAge = hoursSince(portalData.dates?.linkUpdatedAt);
-    const etAge = hoursSince(portalData.dates?.etUpdatedAt);
-    if (generatedAge === null || generatedAge > 30) issues.push(`BI 页面底稿过期：${portalData.generatedAt || '-'} age=${fmtHours(generatedAge)}，阈值=30h`);
-    if (salesAge === null || salesAge > 30) issues.push(`SHEIN 销售数据过期：${salesTimestamp || '-'} age=${fmtHours(salesAge)}，阈值=30h`);
-    // 业务域/链接表现是低频日更，不按销售高频阈值判断。
-    if (businessAge === null || businessAge > 48) issues.push(`SHEIN 业务域日更过期：${portalData.dates?.businessUpdatedAt || '-'} age=${fmtHours(businessAge)}，阈值=48h`);
-    if (linkAge === null || linkAge > 48) issues.push(`SHEIN 链接表现日更过期：${portalData.dates?.linkUpdatedAt || '-'} age=${fmtHours(linkAge)}，阈值=48h`);
-    if (etAge === null || etAge > 36) issues.push(`ET 货代仓过期：${portalData.dates?.etUpdatedAt || '-'} age=${fmtHours(etAge)}，阈值=36h`);
-  } else if (!portalData.error) {
-    portal = {
-      suppressed: true,
-      class: 'scheduled',
-      dataReadable: true,
-      portalRuntimeChecked: true,
-    };
-  }
+  const portalFreshnessResult = await assessPortalAndEtFreshness({
+    portalData,
+    portalRuntime,
+    portalFreshnessSuppressed,
+  });
+  issues.push(...portalFreshnessResult.issues);
+  const {portal, etFreshness} = portalFreshnessResult;
 
   let coverage = {suppressed: true, class: 'scheduled'};
   if (!suppressCheck('business:data-coverage', 'scheduled', {kind: 'business'})) {
@@ -1484,6 +1687,7 @@ async function runWatchdog(args) {
     marketingRepairHealth,
     morningChainLatest,
     portal,
+    etFreshness,
     coverage,
     orphanStoreBrowsers,
     rootDisk,
