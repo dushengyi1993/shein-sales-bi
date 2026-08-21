@@ -17,6 +17,15 @@ yield_to_daily_coordinator() {
   fi
 }
 
+yield_to_rtv_verify_timer() {
+  if (( HOUR == 4 && MINUTE >= 43 && MINUTE <= 46 )); then
+    if systemctl is-active --quiet shein-bi-cloud-rtv-verify.timer; then
+      echo "[portal-section-slot] defer reason=rtv_verify_timer_active hour=$HOUR minute=$MINUTE" >&2
+      exit 75
+    fi
+  fi
+}
+
 is_et_hour() {
   case "$HOUR" in
     1|4|7|10|13|14|17|20|23) return 0 ;;
@@ -40,6 +49,7 @@ else
   exit 75
 fi
 
+yield_to_rtv_verify_timer
 yield_to_daily_coordinator
 
 export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1

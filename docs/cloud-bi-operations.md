@@ -112,7 +112,7 @@ sudo node scripts/manage_cloud_maintenance_mode.mjs resume \
 
 | `shein-bi-db-backup.timer` | 北京时间 `01:45`，宿主 deadline `02:37` | 备份业务库、Metabase 元数据库和生产登记；Profile + WebAPI session 加密归档为保留但默认关闭的独立可选项；COS 内容级校验完成前不删本地 |
 
-| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:12/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
+| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
 
 | `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:20` | 只读同步 ET 仓储费最终账单与 SKU 明细，14:27 前完成利润 cache 与对账 |
 | 每日经营 run 内库存阶段 | `07:10` 统一 coordinator 的末段 | 19店慢变数据及补充域完整发布后，先刷新当前 OpenAPI 库存，再生成当天计划并按常驻授权自动执行；不再另建主/重试 timer |
@@ -149,7 +149,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | `07:10` | 每日经营统一协调器 `shein-bi-cloud-morning-chain.service` | wrapper 持久化 active run；同日失败恢复同一日期与绝对 deadline；跨日不执行旧 child，留存失败证据后推进当天；生产 unit 前序阶段不得侵占最后2700秒库存窗口 | 不重复抓当天销售；内部最多两个受门禁的只读浏览器 worker | 单 timer；终态非零且禁止无限重启。 |
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 来源/对账层 | 写链接/业务域、SBN 营销概览线索、RTV 复核等慢变数据；其中的销售步骤不直接写正式事实 | 不再重复执行 MBRs 全店营销价格栈扫描；该实时扫描只属于独立 guard。商品四档状态、SBN 经营/流量等仍需 WebAPI/headless。 |
 | 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 更新 `fact.openapi_*` 和 `mart.openapi_*_reconciliation`，不直接对正式事实表做原始 DML | 销售最终日晋升只属于 `03:00` 的 19/19 深度匹配门禁；退货/商品继续按各自隔离对账和切源门禁处理。 |
-| `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
+| `01:12/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
 | `14:10` | ET 仓储费 `shein-bi-cloud-et-storage-fee.service` | ET headless/API，只读 `IncomeBill(sort=2)` + `ExportStoreFee` | 写仓储费事实、canonical 账单与利润 cache | 与通用 ET 共用 profile 锁但隔离输出；只预热利润，不刷新无关库存趋势。 |
 | `00:45–01:27` | 登录态管家 `shein-bi-cloud-session-manager.service` | 单一 coordinator 按共享锁/pressure 门禁取得短生命周期 headless browser，再执行 WebAPI/SBN 探针 | 不写销售事实 | 外层 defer(75) 在同一 run 内持续退避到 deadline；只有当日 `done` marker 与同日启用店铺19/19报告同时成立才完成，到截止仍不可运行则写 marker/alert 并返回真实失败。 |
 | `06:52` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 一个 coordinator 完成当天整轮，只更新订单生命周期状态，不重写历史销售事实 | 瞬时资源压力在同一 run 内每60秒重试，最晚07:27前启动；不再因一次门禁延期整天漏跑，也不再因店铺后台 Cookie 过期整批失败。 |
@@ -200,7 +200,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 当天人工灾备入口：`scripts/cloud_bi_refresh.sh today intraday`。日常当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实，不安装每小时 timer；只有实时链路故障并明确决定灾备时才手动运行。
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday final`。切换日以后直接收齐19店 OpenAPI 完整日切片；逐店 fetch/load/每日行门禁通过后才调用 `ops.promote_openapi_sales_slice` 原子晋升。
 
-- Portal section 已改为一条 host-locked 队列：core、页面或 SSE 只把 `orders/profit/linksData` 等重 section 合并入队，不再 `nohup` 扇出 16 个后台生成任务。`shein-bi-cloud-portal-section-queue.service` 持 `/run/lock/shein-host-heavy.lock` 后逐个同步生成；旧 JSON 在新结果原子发布前继续可读。队列按请求序号而不是 section 名排序，同批 `profit,homeProfit` 必须先生成利润源；运行中再次入队会提高请求修订号，旧租约不能删除新请求；失败带退避，但人工/页面重新入队会立即解除旧退避。worker 只有在 HTTP `200`、无 stale/refresh-failed 响应头，且落盘 section 与当前 core 同代并通过终态校验后才完成租约，`202` 绝不能当成功。只有 `liveSalesToday`、`productState`、`inventoryStock` 可在 Portal 轻量快车道直接生成。首页精简流量和成交价散点随每日 core 一起按首页优先级入队；页面“强制刷新”使用最高优先级。后台项等待越久会逐步提升有效优先级，防止被持续到来的订单/利润刷新永久饿死。完整边界见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)。
+- Portal section 已改为一条 host-locked 队列：core、页面或 SSE 只把 `orders/profit/linksData` 等重 section 合并入队，不再 `nohup` 扇出 16 个后台生成任务。`shein-bi-cloud-portal-section-queue.service` 持 `/run/lock/shein-host-heavy.lock` 后逐个同步生成；旧 JSON 在新结果原子发布前继续可读。队列按请求序号而不是 section 名排序，同批 `profit,homeProfit` 必须先生成利润源；运行中再次入队会提高请求修订号，旧租约不能删除新请求；失败带退避，但人工/页面重新入队会立即解除旧退避。worker 只有在 HTTP `200`、无 stale/refresh-failed 响应头，且落盘 section 与当前 core 同代并通过终态校验后才完成租约，`202` 绝不能当成功。Portal timer 保持每小时 `:14/:44`；04 点第二窗口（`:43–:46`）若 `shein-bi-cloud-rtv-verify.timer` 为 active，materializer 打印 `rtv_verify_timer_active` 并以 75 退出让路，保护 `04:50` RTV，非 active 时保留原窗口。只有 `liveSalesToday`、`productState`、`inventoryStock` 可在 Portal 轻量快车道直接生成。首页精简流量和成交价散点随每日 core 一起按首页优先级入队；页面“强制刷新”使用最高优先级。后台项等待越久会逐步提升有效优先级，防止被持续到来的订单/利润刷新永久饿死。完整边界见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)。
 - Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。普通当天订单只刷新 `liveSalesToday`，不会等待移动加权成本；退货和历史订单变动把 `orders/afterSales/profit/homeProfit` 等 canonical accounting section 加入 host-locked 队列，并在页面标注利润待同步。Portal 进程本身不得直接启动成本台账重算。
 - 营销修复队列必须区分“系统失败”和“业务条件不满足”。库存不足、平台明确拒绝且旧活动保护仍完整的链接，在当天不可变 manifest 内记为 `blocked`，不得每个窗口重复执行或把 worker 标成 `failed`；下一天的新 guard/fingerprint 会自动重新评估。网络、浏览器、鉴权、读回失败仍记为 `failed` 并重试/告警。某阶段存在安全业务阻塞时，worker 仍应继续处理后续互不重叠的修复阶段，最后以人话报告未执行原因。
 - 实时销售直接查询当天 `fact.order_item`，利润只读取同一次原子发布的 `mart.profit_order_item_cache` 与仓储费 cache。新订单尚未进入 cache，或已有订单行的金额/数量与 cache 不一致时，API 都返回 `accountingPending=true`，实时销售先采用正式事实行，页面显示利润正在补成本；相同内容的幂等 Webhook 重放不会误报待补账。禁止用静态单位成本、旧利润或零值掩盖这个时间差。

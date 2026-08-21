@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 import {
   calculateCpuBusyRatio,
@@ -23,6 +27,11 @@ import {
 const read = relative => fs.readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8');
 const unit = name => read(`infra/systemd/${name}`);
 const calendars = value => [...value.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
+const calendarMinutes = entries => entries.flatMap(entry => {
+  const [, clock] = entry.split(/\s+/);
+  const [hours, minute] = clock.split(':');
+  return hours.split(',').map(hour => Number(hour) * 60 + Number(minute));
+});
 
 assert.equal(parseUptimeSeconds('1200.5 20\n'), 1200.5);
 assert.equal(parseLoadAverage('1.25 1.0 0.5 1/10 20\n'), 1.25);
@@ -213,8 +222,8 @@ assert.deepEqual(calendars(unit('shein-bi-cloud-session-manager.timer')), ['*-*-
 assert.match(unit('shein-bi-cloud-session-manager.timer'), /^Persistent=true$/m,
   'the single daily session timer must catch up through the marker-idempotent coordinator');
 assert.deepEqual(calendars(unit('shein-bi-cloud-et-forwarder.timer')), [
-  '*-*-* 01,04:12:00',
-  '*-*-* 07,10,13,17,20,23:20:00',
+  '*-*-* 01:12:00',
+  '*-*-* 04,07,10,13,17,20,23:20:00',
 ]);
 assert.deepEqual(calendars(unit('shein-bi-et-low-inventory-recheck.timer')), [
   '*-*-* 00,02,05,06,08,09,11,12,15,16,18,19,22:20:00',
@@ -345,6 +354,159 @@ assert.match(portalQueueSlot, /DEADLINE_MINUTE=27/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=57/);
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
 assert.match(portalQueueSlot, /daily_operating_refresh_active/);
+const portalEtWindow = portalQueueSlot.match(
+  /if \(\( MINUTE >= 13 && MINUTE <= 16 \)\); then\s+if is_et_hour; then\s+DEADLINE_MINUTE=(\d+)/,
+);
+assert.ok(portalEtWindow, 'the ET-hour Portal :14 branch must set an explicit early deadline');
+const etCalendarMinutes = calendarMinutes(calendars(unit('shein-bi-cloud-et-forwarder.timer')));
+assert.ok(etCalendarMinutes.includes(4 * 60 + 20),
+  'the ET calendar must include the 04:20 checkpoint');
+assert.ok(4 * 60 + Number(portalEtWindow[1]) < 4 * 60 + 20,
+  'the 04:14 Portal deadline must precede the 04:20 ET checkpoint');
+assert.match(portalQueueSlot,
+  /if \(\( HOUR == 4 && MINUTE >= 43 && MINUTE <= 46 \)\); then\s+if systemctl is-active --quiet shein-bi-cloud-rtv-verify\.timer; then\s+echo "\[portal-section-slot\] defer reason=rtv_verify_timer_active hour=\$HOUR minute=\$MINUTE" >&2\s+exit 75\s+fi\s+fi/,
+  'the 04:43-04:46 Portal slot must yield explicitly while the RTV timer is active');
+assert.match(portalQueueSlot, /--lock-wait-sec 0/,
+  'the RTV yield must not add lock waiting to the Portal slot');
+const slotClassification = portalQueueSlot.indexOf('if (( MINUTE >= 13 && MINUTE <= 16 )); then');
+const rtvGuardCall = portalQueueSlot.search(/\r?\nyield_to_rtv_verify_timer\r?\n/);
+const hostWrapperExec = portalQueueSlot.indexOf('exec "$ROOT/scripts/run_host_heavy_job.sh"');
+assert.ok(
+  slotClassification >= 0 && rtvGuardCall > slotClassification && hostWrapperExec > rtvGuardCall,
+  'the RTV guard call must follow slot classification and precede the host wrapper',
+);
+
+const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+const toPosixPath = value => {
+  const normalized = path.resolve(value).replaceAll('\\', '/');
+  return /^[A-Za-z]:\//.test(normalized)
+    ? `/mnt/${normalized[0].toLowerCase()}${normalized.slice(2)}`
+    : normalized;
+};
+
+// Execute the actual slot script with deterministic date/systemctl/host-wrapper
+// stubs. This catches a guard that is only present in an unused function, a
+// missing ET hour, and an active-path defer that happens after host execution.
+const bashProbe = spawnSync('bash', ['--version'], {encoding: 'utf8'});
+assert.equal(bashProbe.error, undefined,
+  'slot behavior contract requires bash to execute the shell entrypoint');
+const slotBehaviorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-slot-behavior-'));
+try {
+const slotBehaviorBin = path.join(slotBehaviorRoot, 'bin');
+const slotBehaviorScripts = path.join(slotBehaviorRoot, 'scripts');
+const slotBehaviorHostLog = path.join(slotBehaviorRoot, 'host-wrapper.log');
+const slotBehaviorSystemctlLog = path.join(slotBehaviorRoot, 'systemctl.log');
+const slotScript = path.join(path.dirname(fileURLToPath(import.meta.url)), 'run_cloud_portal_section_queue_slot.sh');
+fs.mkdirSync(slotBehaviorBin, {recursive: true});
+fs.mkdirSync(slotBehaviorScripts, {recursive: true});
+fs.writeFileSync(path.join(slotBehaviorBin, 'date'), `#!/usr/bin/env bash
+set -Eeuo pipefail
+case "\${1:-}" in
+  +%H) printf '%s\\n' "\${SHEIN_TEST_SLOT_HOUR:?}" ;;
+  +%M) printf '%s\\n' "\${SHEIN_TEST_SLOT_MINUTE:?}" ;;
+  *) exit 64 ;;
+esac
+`);
+fs.writeFileSync(path.join(slotBehaviorBin, 'systemctl'), `#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\\n' "$*" >> "\${SHEIN_TEST_SYSTEMCTL_LOG:?}"
+if [[ "\${1:-}" != is-active || "\${2:-}" != --quiet ]]; then exit 64; fi
+case "\${3:-}" in
+  shein-bi-cloud-rtv-verify.timer) [[ "\${SHEIN_TEST_RTV_ACTIVE:-0}" == 1 ]] ;;
+  shein-bi-cloud-morning-chain.service) exit 1 ;;
+  *) exit 1 ;;
+esac
+`);
+const slotBehaviorHostWrapper = path.join(slotBehaviorScripts, 'run_host_heavy_job.sh');
+fs.writeFileSync(slotBehaviorHostWrapper, `#!/usr/bin/env bash
+set -Eeuo pipefail
+{
+  printf 'args='
+  printf '%q ' "$@"
+  printf '\\n'
+  printf 'deadline=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE:-}"
+  printf 'max=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-}"
+  printf 'scheduled=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-}"
+} > "\${SHEIN_TEST_HOST_LOG:?}"
+`);
+
+const runSlotBehaviorCase = ({label, hour, minute, rtvActive, expectedExit, expectedHost, expectedDeadline, expectedMax, expectRtvCheck, expectRtvDefer = false}) => {
+  fs.rmSync(slotBehaviorHostLog, {force: true});
+  fs.writeFileSync(slotBehaviorSystemctlLog, '');
+  const command = [
+    'set -Eeuo pipefail',
+    `chmod +x ${shellQuote(toPosixPath(path.join(slotBehaviorBin, 'date')))} ${shellQuote(toPosixPath(path.join(slotBehaviorBin, 'systemctl')))} ${shellQuote(toPosixPath(slotBehaviorHostWrapper))}`,
+    `export PATH=${shellQuote(toPosixPath(slotBehaviorBin))}:"$PATH"`,
+    `export SHEIN_BI_ROOT=${shellQuote(toPosixPath(slotBehaviorRoot))}`,
+    `export SHEIN_TEST_SLOT_HOUR=${shellQuote(hour)}`,
+    `export SHEIN_TEST_SLOT_MINUTE=${shellQuote(minute)}`,
+    `export SHEIN_TEST_RTV_ACTIVE=${shellQuote(rtvActive ? 1 : 0)}`,
+    `export SHEIN_TEST_HOST_LOG=${shellQuote(toPosixPath(slotBehaviorHostLog))}`,
+    `export SHEIN_TEST_SYSTEMCTL_LOG=${shellQuote(toPosixPath(slotBehaviorSystemctlLog))}`,
+    `exec bash ${shellQuote(toPosixPath(slotScript))}`,
+  ].join('; ');
+  const result = spawnSync('bash', ['-c', command], {
+    cwd: path.dirname(slotScript),
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.equal(result.error, undefined, `${label}: bash failed to start: ${result.error?.message || ''}`);
+  assert.equal(result.status, expectedExit,
+    `${label}: unexpected exit=${result.status} stdout=${result.stdout} stderr=${result.stderr}`);
+
+  const output = `${result.stdout}\n${result.stderr}`;
+  const systemctlLog = fs.readFileSync(slotBehaviorSystemctlLog, 'utf8');
+  if (expectRtvCheck) {
+    assert.match(systemctlLog, /shein-bi-cloud-rtv-verify\.timer/, `${label}: RTV status must be checked`);
+  } else {
+    assert.doesNotMatch(systemctlLog, /shein-bi-cloud-rtv-verify\.timer/, `${label}: RTV guard must not run`);
+  }
+  if (expectedHost) {
+    assert.equal(fs.existsSync(slotBehaviorHostLog), true, `${label}: host wrapper must run`);
+    const hostLog = fs.readFileSync(slotBehaviorHostLog, 'utf8');
+    assert.match(hostLog, /--domain portal-sections/);
+    assert.match(hostLog, /--class materializer/);
+    assert.match(hostLog, /--lock-wait-sec 0/);
+    assert.match(hostLog, new RegExp(`--deadline-minute ${expectedDeadline}`));
+    assert.match(hostLog, new RegExp(`deadline=${expectedDeadline}`));
+    assert.match(hostLog, new RegExp(`max=${expectedMax}`));
+    assert.match(hostLog, /scheduled=1/);
+  } else {
+    assert.equal(fs.existsSync(slotBehaviorHostLog), false, `${label}: host wrapper must not run`);
+  }
+  if (expectRtvDefer) {
+    assert.match(output, /defer reason=rtv_verify_timer_active/,
+      `${label}: active RTV timer must produce the recognizable defer reason`);
+  } else {
+    assert.doesNotMatch(output, /defer reason=rtv_verify_timer_active/,
+      `${label}: inactive/non-04 slot must not produce the RTV defer reason`);
+  }
+};
+
+  runSlotBehaviorCase({
+    label: '04:14 ET hour', hour: 4, minute: 14, rtvActive: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 17, expectedMax: 1, expectRtvCheck: false,
+  });
+  runSlotBehaviorCase({
+    label: '04:44 RTV active', hour: 4, minute: 44, rtvActive: true,
+    expectedExit: 75, expectedHost: false, expectRtvCheck: true, expectRtvDefer: true,
+  });
+  runSlotBehaviorCase({
+    label: '04:44 RTV inactive', hour: 4, minute: 44, rtvActive: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 2, expectRtvCheck: true,
+  });
+  runSlotBehaviorCase({
+    label: '01:44 non-RTV hour', hour: 1, minute: 44, rtvActive: true,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 2, expectRtvCheck: false,
+  });
+  runSlotBehaviorCase({
+    label: '05:44 non-04 hour', hour: 5, minute: 44, rtvActive: true,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 2, expectRtvCheck: false,
+  });
+} finally {
+  fs.rmSync(slotBehaviorRoot, {recursive: true, force: true});
+}
+
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 13/);
 assert.match(portalQueueWorker, /10#\$START_MINUTE >= 43/);
