@@ -11957,6 +11957,75 @@ function terminateBiSectionEnqueueChild(child, signal) {
   try { return child?.kill?.(signal) === true; } catch { return false; }
 }
 
+function biPortalSectionQueueFile() {
+  const configured = String(process.env.SHEIN_BI_PORTAL_SECTION_QUEUE_FILE || '').trim();
+  return path.resolve(ROOT, configured || path.join('state', 'portal-section-queue', 'queue.json'));
+}
+
+function readBiPortalSectionQueueEntries() {
+  try {
+    const queue = JSON.parse(fssync.readFileSync(biPortalSectionQueueFile(), 'utf8'));
+    if (!queue || typeof queue !== 'object' || Array.isArray(queue) || !Array.isArray(queue.entries)) return null;
+    return queue.entries;
+  } catch {
+    // The queue is an optimization for coalescing only. Missing, corrupt or
+    // temporarily unreadable state must preserve the existing enqueue path.
+    return null;
+  }
+}
+
+function biPortalQueueEntryMatchesCurrentGeneration(entry, section, generatedAt, expectedReason = '', idempotencyKey = '') {
+  if (!entry || entry.section !== section || !['pending', 'running'].includes(entry.status)) return false;
+  const generation = String(generatedAt || '');
+  const generationToken = sanitizeBiQueueReason(generation || 'current');
+  const reasons = Array.isArray(entry.reasons) ? entry.reasons.map(value => String(value || '')) : [];
+  const normalizedReason = sanitizeBiQueueReason(expectedReason);
+  if (idempotencyKey && String(entry.idempotencyKey || '') === `${idempotencyKey}::${section}`) return true;
+  if (normalizedReason && reasons.includes(normalizedReason)) return true;
+  if (generation && [entry.generatedAt, entry.coreGeneratedAt, entry.generation]
+    .map(value => String(value || ''))
+    .includes(generation)) return true;
+
+  // Queue-owned core warmup entries already carry a durable per-generation
+  // key. Reuse that existing key without changing the queue schema.
+  if (generation && String(entry.idempotencyKey || '') === `${biPortalCoreWarmupIdempotencyKey(generation)}::${section}`) {
+    return true;
+  }
+
+  // Ordinary page/SSE/cache-miss requests do not pass an idempotency key to
+  // the external manager. Their existing reason is the durable generation
+  // binding, so recognize the current generation across the established
+  // Portal enqueue reason families.
+  const reasonPrefixes = [
+    'portal-cache-miss-',
+    'portal-force-',
+    'productProfit-cache-miss-',
+    'homeProfit-async-needs-profit-',
+    'homeProfit-needs-profit-',
+    'homepage-accounting-stale-',
+    'core-warmup-',
+  ];
+  return reasonPrefixes.some(prefix => reasons.includes(`${prefix}${generationToken}`));
+}
+
+function queueHasCurrentPendingBiSection(section, generatedAt, expectedReason = '', idempotencyKey = '') {
+  const entries = readBiPortalSectionQueueEntries();
+  if (!entries) return false;
+  return entries.some(entry => biPortalQueueEntryMatchesCurrentGeneration(
+    entry,
+    section,
+    generatedAt,
+    expectedReason,
+    idempotencyKey,
+  ));
+}
+
+function rememberBiExternalSectionQueuePending(key) {
+  biExternalSectionQueuePending.add(key);
+  const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
+  timer.unref?.();
+}
+
 function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
   if (!BI_EXTERNAL_SECTION_QUEUE_ENABLED || BI_INLINE_FAST_SECTIONS.has(section)) return false;
   const refreshToken = String(options.refreshToken || '').trim().slice(0, 160);
@@ -11975,6 +12044,14 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
   ));
   const key = `${section}|${generatedAt || ''}|${idempotencyKey}`;
   if (biExternalSectionQueuePending.has(key)) return true;
+  const reason = sanitizeBiQueueReason(options.reason || `portal-${generatedAt || 'current'}`);
+  // An explicit force refresh must still reach the manager so it can retain
+  // the existing priority-0/revision semantics. Ordinary cache misses alone
+  // use durable queue state for cross-process coalescing.
+  if (!options.force && queueHasCurrentPendingBiSection(section, generatedAt, reason, idempotencyKey)) {
+    rememberBiExternalSectionQueuePending(key);
+    return true;
+  }
   biExternalSectionQueuePending.add(key);
   // A user pressing "force refresh" must not sit behind background rebuilds.
   // Normal first-screen sections share the same priority as the other home
@@ -11984,7 +12061,6 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
     : (options.force === true
       ? '0'
       : (BI_OWNER_VISIBLE_PRIORITY_SECTIONS.has(section) ? '10' : '50'));
-  const reason = sanitizeBiQueueReason(options.reason || `portal-${generatedAt || 'current'}`);
   const spec = biSectionEnqueueChildSpec();
   const child = spawn(spec.command, [
     ...spec.args,
@@ -21473,6 +21549,10 @@ export const __testHooks = {
   enqueueHostLockedBiSection,
   biExternalSectionQueuePendingSize() {
     return biExternalSectionQueuePending.size;
+  },
+  scheduleBiSectionBackgroundGeneration,
+  resetBiExternalSectionQueuePending() {
+    biExternalSectionQueuePending.clear();
   },
   biPortalHomepageAccountingIdempotencyKey,
   biPortalLiveAccountingEventIdentity,
