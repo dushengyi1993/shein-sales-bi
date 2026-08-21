@@ -76,9 +76,14 @@ assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
 assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['inventoryStock']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.deepEqual(
-  liveAccountingQueuePlan({kind: 'order'}),
+  liveAccountingQueuePlan({kind: 'order', businessDate: '2026-08-18', occurredAt: '2026-08-18T12:00:00.000Z'}),
   [],
   'a current-day order must stay on the live overlay instead of advancing a multi-minute durable queue revision',
+);
+assert.deepEqual(
+  liveAccountingQueuePlan({kind: 'order'}),
+  liveAccountingQueuePlan({kind: 'return', refreshHistoricalSections: true}),
+  'an order with missing date evidence must fail closed into the full historical invalidation plan',
 );
 assert.deepEqual(
   liveAccountingQueuePlan({kind: 'return', refreshHistoricalSections: true}),
@@ -217,6 +222,12 @@ assert.match(portalServer, /enqueueHostLockedBiSection\(section, generatedAt,[\s
   'returns and historical mutations must queue canonical accounting behind the shared host lock');
 assert.match(portalServer, /persistHomepageAccountingCatchupOnce[\s\S]*persistHostLockedBiSectionPlan\(\[[\s\S]*section: 'profit'[\s\S]*section: 'homeProfit'[\s\S]*homepage-accounting-stale-/,
   'the stale-homepage discriminator must retain a bounded canonical profit catch-up after ordinary orders leave the heavy queue');
+assert.match(portalServer, /SHEIN_BI_CANONICAL_ACCOUNTING_CATCHUP_MS \|\| 15 \* 60_000/,
+  'ordinary orders must receive a browser-independent bounded canonical accounting catch-up');
+assert.match(portalServer, /liveCanonicalAccountingCatchupNeeded = true;[\s\S]*liveCanonicalAccountingCatchupRevision \+= 1/,
+  'every ordinary order must preserve eventual accounting intent without directly advancing the heavy queue');
+assert.match(portalServer, /runCanonicalAccountingCatchup[\s\S]*readProfitAccountingState\(args, generatedAt, \{forceFresh: true\}\)[\s\S]*persistHomepageAccountingCatchupOnce/,
+  'the bounded catch-up must check authoritative accounting freshness and persist the existing durable plan');
 assert.match(portalServer, /await persistHostLockedBiSectionPlan\(accountingQueue, generatedAt,[\s\S]*live-accounting-/,
   'live accounting must wait for durable queue persistence before reporting that work is queued');
 assert.match(portalServer, /live accounting queue persistence failed/,

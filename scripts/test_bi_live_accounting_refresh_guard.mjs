@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 
 import {
   createBiLiveUpdateBridge,
+  executeBiCanonicalAccountingCatchupAttempt,
   executeBiLiveAccountingRefreshAttempt,
   normalizeBiLiveAccountingGeneration,
 } from './serve_bi_portal.mjs';
@@ -103,7 +104,12 @@ for (const fixture of [
 {
   const calls = [];
   const result = await executeBiLiveAccountingRefreshAttempt({
-    sourceEvent: {kind: 'order', entityId: 'current-day-order'},
+    sourceEvent: {
+      kind: 'order',
+      entityId: 'current-day-order',
+      businessDate: '2026-08-18',
+      occurredAt: '2026-08-18T12:00:00.000Z',
+    },
     allowGenerateSections: true,
     readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
     generateLiveProjection: async generatedAt => calls.push(['generate', generatedAt]),
@@ -117,6 +123,33 @@ for (const fixture of [
   assert.deepEqual(calls.map(call => call[0]), ['generate', 'clear', 'publish']);
   assert.equal(calls[2][1].liveProjectionRefreshed, true);
   assert.equal(calls[2][1].accountingQueued, undefined);
+}
+
+{
+  const calls = [];
+  const staleState = {decision: {fresh: false}, minimumPublishedAt: '2026-08-18T11:59:00.000Z'};
+  const result = await executeBiCanonicalAccountingCatchupAttempt({
+    allowGenerateSections: true,
+    readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
+    readAccountingState: async generatedAt => { calls.push(['read', generatedAt]); return staleState; },
+    persistCatchup: async (state, generatedAt) => { calls.push(['persist', state, generatedAt]); return true; },
+  });
+  assert.equal(result.queued, true);
+  assert.deepEqual(calls.map(call => call[0]), ['read', 'persist']);
+  assert.equal(calls[1][1], staleState);
+}
+
+{
+  let persisted = false;
+  const result = await executeBiCanonicalAccountingCatchupAttempt({
+    allowGenerateSections: true,
+    readCoreMeta: async () => ({mode: 'api', generatedAt: '2026-08-18T19:59:00.000+08:00'}),
+    readAccountingState: async () => ({decision: {fresh: true}}),
+    persistCatchup: async () => { persisted = true; },
+  });
+  assert.equal(result.fresh, true);
+  assert.equal(result.queued, false);
+  assert.equal(persisted, false);
 }
 
 const bridge = createBiLiveUpdateBridge({

@@ -17,6 +17,7 @@ import {
 import {
   executeBiLiveAccountingRefreshAttempt,
   liveAccountingQueuePlan,
+  nextBiCanonicalAccountingCatchupDelay,
 } from './serve_bi_portal.mjs';
 
 const read = relative => fs.readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8');
@@ -382,6 +383,11 @@ assert.match(cloudWriteGate, /cloud_marketing_write_requires_shared_host_wrapper
 assert.match(cloudWriteGate, /cloud_marketing_write_wrapper_ancestor_missing/);
 
 const portal = read('scripts/serve_bi_portal.mjs');
+assert.equal(
+  nextBiCanonicalAccountingCatchupDelay(Date.parse('2026-08-18T12:31:00.000Z')),
+  11 * 60_000,
+  'the canonical accounting stale check must align to :42 before the :44 external queue slot',
+);
 const currentDayOrder = {
   kind: 'order',
   entityId: 'schedule-contract-current-day-order',

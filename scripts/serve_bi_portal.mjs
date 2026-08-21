@@ -422,6 +422,31 @@ function biPortalLiveAccountingIdempotencyKey(generatedAt, event = {}) {
   return biPortalQueueHashIdempotencyKey('live', generatedAt, ...eventIdentities);
 }
 
+export function isOrdinaryCurrentDayAccountingEvent(event = {}) {
+  const accountingKinds = new Set([
+    event?.kind,
+    ...(Array.isArray(event?.accountingKinds) ? event.accountingKinds : []),
+  ].map(value => String(value || '')));
+  if (!accountingKinds.has('order') || accountingKinds.has('return') || event?.refreshHistoricalSections === true) return false;
+  const businessDate = String(event?.businessDate || '');
+  const occurredAt = String(event?.occurredAt || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(businessDate) || !Number.isFinite(Date.parse(occurredAt))) return false;
+  return businessDate === shanghaiDateKey(occurredAt);
+}
+
+export function nextBiCanonicalAccountingCatchupDelay(
+  nowMs = Date.now(),
+  intervalMs = 15 * 60_000,
+) {
+  const interval = Math.max(60_000, Number(intervalMs) || 15 * 60_000);
+  // The external section worker runs at :14 and :44. A :12/:27/:42/:57
+  // phase puts every stale intent no more than 17 minutes from a worker slot,
+  // without creating a second systemd scheduler.
+  const phase = (12 * 60_000) % interval;
+  const remainder = ((Number(nowMs) - phase) % interval + interval) % interval;
+  return Math.max(1_000, interval - remainder);
+}
+
 function biPortalGenerationCoalesceKey(generatedAt) {
   // Core warmup, homepage accounting catch-up and live events for one API
   // core generation share a pending/running group. A pending materialization
@@ -13605,7 +13630,7 @@ export function liveAccountingQueuePlan(event = {}) {
   // stale-homepage discriminator schedules one bounded profit/homeProfit
   // catch-up when the canonical baseline actually falls behind. Historical
   // mutations and returns retain the full invalidation set below.
-  if (!hasReturn && event?.refreshHistoricalSections !== true) return [];
+  if (isOrdinaryCurrentDayAccountingEvent(event)) return [];
   return [
     {section: 'profit', priority: 5},
     {section: 'homeRankings', priority: 5},
@@ -13683,6 +13708,29 @@ export async function executeBiLiveAccountingRefreshAttempt({
     accountingQueued: true,
   });
   return {ok: true, generatedAt, liveProjectionRefreshed: true, accountingQueued: true};
+}
+
+export async function executeBiCanonicalAccountingCatchupAttempt({
+  allowGenerateSections = false,
+  readCoreMeta,
+  readAccountingState,
+  persistCatchup,
+} = {}) {
+  if (!allowGenerateSections) return {ok: true, fresh: false, queued: false, skipped: 'generation-disabled'};
+  const meta = await readCoreMeta();
+  const generatedAt = normalizeBiLiveAccountingGeneration(meta);
+  if (!generatedAt) {
+    throw biLiveAccountingGuardError(
+      'BI_LIVE_ACCOUNTING_GENERATION_MISSING',
+      'canonical accounting catch-up requires a valid API core generation',
+    );
+  }
+  const accountingState = await readAccountingState(generatedAt);
+  if (accountingState?.decision?.fresh === true) {
+    return {ok: true, generatedAt, fresh: true, queued: false};
+  }
+  const queued = await persistCatchup(accountingState, generatedAt);
+  return {ok: true, generatedAt, fresh: false, queued: Boolean(queued)};
 }
 
 function livePgClientConfig(env = process.env) {
@@ -16429,11 +16477,59 @@ async function main() {
     liveAccountingDebounceMs,
     Number(process.env.SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS || 5 * 60_000),
   );
+  // Webhook projection remains immediate. Canonical profit accounting gets one
+  // lightweight stale check per bounded interval, independent of whether a
+  // browser stays open, so continuous orders cannot advance the heavy queue on
+  // every event and an idle browser cannot suppress eventual accounting.
+  const liveCanonicalAccountingCatchupIntervalMs = Math.max(
+    60_000,
+    Number(process.env.SHEIN_BI_CANONICAL_ACCOUNTING_CATCHUP_MS || 15 * 60_000) || 15 * 60_000,
+  );
   let liveAccountingRefreshTimer = null;
   let liveAccountingRefreshRunning = false;
   let liveAccountingRefreshPendingEvent = null;
   let liveAccountingRefreshStopped = false;
+  let liveCanonicalAccountingCatchupTimer = null;
+  let liveCanonicalAccountingCatchupRunning = false;
+  let liveCanonicalAccountingCatchupNeeded = false;
+  let liveCanonicalAccountingCatchupRevision = 0;
   let biLiveUpdateBridge;
+
+  const scheduleNextCanonicalAccountingCatchup = () => {
+    if (liveAccountingRefreshStopped || liveCanonicalAccountingCatchupTimer) return;
+    liveCanonicalAccountingCatchupTimer = setTimeout(
+      runCanonicalAccountingCatchup,
+      nextBiCanonicalAccountingCatchupDelay(Date.now(), liveCanonicalAccountingCatchupIntervalMs),
+    );
+    liveCanonicalAccountingCatchupTimer.unref?.();
+  };
+
+  const runCanonicalAccountingCatchup = async () => {
+    liveCanonicalAccountingCatchupTimer = null;
+    if (liveAccountingRefreshStopped) return;
+    if (!liveCanonicalAccountingCatchupNeeded || liveCanonicalAccountingCatchupRunning) {
+      scheduleNextCanonicalAccountingCatchup();
+      return;
+    }
+    const requestedRevision = liveCanonicalAccountingCatchupRevision;
+    liveCanonicalAccountingCatchupRunning = true;
+    try {
+      await executeBiCanonicalAccountingCatchupAttempt({
+        allowGenerateSections,
+        readCoreMeta: () => readBiPortalCoreMeta(root),
+        readAccountingState: generatedAt => readProfitAccountingState(args, generatedAt, {forceFresh: true}),
+        persistCatchup: (accountingState, generatedAt) => persistHomepageAccountingCatchupOnce(accountingState, generatedAt),
+      });
+      if (requestedRevision === liveCanonicalAccountingCatchupRevision) {
+        liveCanonicalAccountingCatchupNeeded = false;
+      }
+    } catch (error) {
+      console.error(`[bi-live-accounting] periodic canonical catch-up failed: ${String(error?.message || error)}`);
+    } finally {
+      liveCanonicalAccountingCatchupRunning = false;
+      scheduleNextCanonicalAccountingCatchup();
+    }
+  };
 
   const runLiveAccountingRefresh = async () => {
     liveAccountingRefreshTimer = null;
@@ -16523,6 +16619,10 @@ async function main() {
       || !allowGenerateSections
       || !['order','return'].includes(String(event?.kind || ''))
     ) return;
+    if (isOrdinaryCurrentDayAccountingEvent(event)) {
+      liveCanonicalAccountingCatchupNeeded = true;
+      liveCanonicalAccountingCatchupRevision += 1;
+    }
     // New order/return facts invalidate the short read cache immediately. The
     // 30s TTL protects polling tabs when nothing changed; live facts never wait
     // for TTL expiry before the next accounting decision.
@@ -16544,7 +16644,13 @@ async function main() {
     liveAccountingRefreshPendingEvent = null;
     if (liveAccountingRefreshTimer) clearTimeout(liveAccountingRefreshTimer);
     liveAccountingRefreshTimer = null;
+    if (liveCanonicalAccountingCatchupTimer) clearTimeout(liveCanonicalAccountingCatchupTimer);
+    liveCanonicalAccountingCatchupTimer = null;
   };
+
+  if (liveAccountingEnabled(process.env) && allowGenerateSections) {
+    scheduleNextCanonicalAccountingCatchup();
+  }
 
   biLiveUpdateBridge = createBiLiveUpdateBridge({
     onUpdate: event => {
