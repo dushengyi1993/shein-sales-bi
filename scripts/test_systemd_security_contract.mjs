@@ -230,6 +230,8 @@ assert.equal(property(dbBackup, 'NoNewPrivileges'), 'true');
 assert.equal(property(dbBackup, 'PrivateTmp'), 'true');
 assertCommonHardening(dbBackup, 'db backup');
 assert.match(dbBackup, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
+assert.match(dbBackup, /^Environment=SHEIN_BI_BACKUP_OFFSITE_ENABLED=0$/m,
+  'production database backup must pin local-only mode');
 assert.match(dbBackup, /SHEIN_BI_BROWSER_STATE_BACKUP_ENABLED=0/);
 assert.match(dbBackup, /SHEIN_BI_BROWSER_STATE_BACKUP_KEY_FILE=\/srv\/shein-bi\/secrets\/browser-state-backup\.key/);
 assert.match(dbBackup, /SHEIN_BI_BROWSER_PROFILE_ROOT=\/data\/shein-bi\/profiles/);
@@ -240,31 +242,28 @@ assert.match(dbBackup, /--stage nightly-backup --require nightly-session/);
 assert.match(dbBackup, /flock -w 120/);
 assert.equal(property(dbBackup, 'TimeoutStartSec'), '10800',
   'backup timeout must cover the longest lock wait plus the backup execution budget');
-assert.match(dbBackup, /^Wants=.*network-online\.target/m, 'backup must order network-online before the COS verifier runs');
-assert.match(property(dbBackup, 'After'), /network-online\.target/, 'network-online.target must be an After dependency');
-assert.match(dbBackup, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=\/opt\/shein-bi\/app\/scripts\/verify_cos_backup_remote\.sh/,
-  'the production unit must wire the repository verifier launcher');
-assert.match(dbBackup, /^Environment=SHEIN_BI_COS_VERIFY_AUTH_MODE=anonymous-public$/m,
-  'the public COS mount must use the explicit no-secret verifier mode');
-assert.equal((dbBackup.match(/^LoadCredential=/gm) || []).length, 2,
-  'anonymous verification needs exactly the locked target and its hash');
-assert.doesNotMatch(dbBackup, /^LoadCredential=shein-bi-cos-verify-secret:.*$/m, 'anonymous mode must not require a nonexistent signing secret');
-assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-target:.*$/m, 'verifier target credential is injected by systemd');
-assert.match(dbBackup, /^LoadCredential=shein-bi-cos-verify-target-sha:.*$/m, 'verifier target SHA lock credential is injected by systemd');
+assert.doesNotMatch(dbBackup, /network-online\.target/,
+  'local-only database backup must not retain a COS-only network dependency');
+assert.doesNotMatch(dbBackup, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=/,
+  'local-only database backup must not configure a remote verifier');
+assert.doesNotMatch(dbBackup, /^Environment=SHEIN_BI_COS_VERIFY_AUTH_MODE=/m,
+  'local-only database backup must not configure COS verifier auth');
+assert.equal((dbBackup.match(/^LoadCredential=/gm) || []).length, 0,
+  'local-only database backup must not load COS credentials');
 assert.doesNotMatch(dbBackup, /^Environment=.*SHEIN_BI_COS_VERIFY_(SECRET|TARGET)/m,
-  'credential values and paths must never enter the unit environment');
+  'COS credential values and paths must not enter the local-only unit');
 assert.doesNotMatch(dbBackup, /^Environment=.*(SECRET|TOKEN|KEY)=.*/i,
   'no secret-looking Environment assignment may exist in the backup unit');
-assert.match(dbBackup, /ExecStartPre=.*verify_cos_backup_remote\.sh --check-config/,
-  'the unit must preflight the verifier credentials before starting the backup');
+assert.doesNotMatch(dbBackup, /verify_cos_backup_remote\.sh --check-config/,
+  'the local-only unit must not force a COS verifier precheck');
 assert.match(remoteVerifierLauncher, /^#!\/usr\/bin\/env bash\r?$/m,
   'the directly executed COS verifier launcher must have a valid bash shebang');
 assert.match(remoteVerifierLauncher, /^exec node "\$VERIFIER" "\$@"\r?$/m,
   'the COS verifier launcher must replace itself with the bounded Node verifier');
 assert.match(systemdReadme, /^chmod \+x .*scripts\/verify_cos_backup_remote\.sh\r?$/m,
   'the production install checklist must preserve launcher executable permission');
-assert.match(systemdReadme, /^systemd-analyze verify .*\/shein-bi-db-backup\.service\r?$/m,
-  'the production parser check must cover the modified database backup service');
+assert.match(systemdReadme, /^systemd-analyze verify .*\/shein-bi-db-backup\.service .*\/shein-bi-cloud-disk-maintenance\.service\r?$/m,
+  'the production parser check must cover both modified local-only services');
 assert.doesNotMatch(dbBackup, /^Environment=\TrueSHEIN_BI_COS_VERIFY_(SECRET|TARGET)/i,
   'the launcher resolves credential paths, never Environment values');
 assert.match(property(dbBackup, 'After'), /shein-bi-cloud-session-manager\.service/);
@@ -294,6 +293,10 @@ assert.equal(property(diskMaintenance, 'PrivateTmp'), 'true');
 assertCommonHardening(diskMaintenance, 'disk maintenance');
 assert.match(diskMaintenance, /SHEIN_BI_PROFILE_CACHE_THRESHOLD_PERCENT=75/);
 assert.match(diskMaintenance, /SHEIN_BI_OUTPUT_RETENTION_DAYS=30/);
+assert.match(diskMaintenance, /^Environment=SHEIN_BI_BACKUP_OFFSITE_ENABLED=0$/m,
+  'production disk maintenance must pin local-only mode');
+assert.doesNotMatch(diskMaintenance, /SHEIN_BI_COS_(?:MOUNT|ARCHIVE_ROOT)=/,
+  'local-only disk maintenance must not configure COS paths');
 assert.doesNotMatch(diskMaintenance, /restore_shein_store_session|bootstrap_shein_browser_session/,
   'root-run disk maintenance must never launch a SHEIN browser');
 const diskMaintenanceTimer = readUnit('shein-bi-cloud-disk-maintenance.timer');
@@ -463,6 +466,7 @@ if (systemdAnalyze?.status === 0) {
     'shein-bi-cloud-session-manager.service',
     'shein-bi-cloud-session-manager.timer',
     'shein-bi-db-backup.service',
+    'shein-bi-cloud-disk-maintenance.service',
   ];
   let fixtureRoot = null;
   try {
