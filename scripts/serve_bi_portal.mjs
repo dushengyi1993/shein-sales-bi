@@ -6892,7 +6892,7 @@ function projectOpenApiExecutorAbortEvidence(result = {}, run = {}) {
   };
 }
 
-const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v3';
+const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v4';
 
 function payloadHashForStoreFromTaskExecution(task, storeKey = '') {
   const target = String(storeKey || '').trim().toUpperCase();

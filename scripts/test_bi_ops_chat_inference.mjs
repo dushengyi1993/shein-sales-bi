@@ -400,7 +400,7 @@ try {
           mode: 'dry-run',
           payload: {
             payloadHash: 'a'.repeat(64),
-            payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+            payloadHashAlgorithm: 'sha256-stable-json-scope-v4',
           },
         },
       ],

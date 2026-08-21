@@ -533,7 +533,7 @@ try {
   });
   const baseExecutionHash = executorHooks.sha256Stable(baseExecutionScope);
   check('scope-v3 schema is hash-domain separated', baseExecutionScope.schema, executorHooks.PRODUCT_EXECUTION_HASH_SCHEMA);
-  check('scope-v3 algorithm constant', executorHooks.PRODUCT_EXECUTION_HASH_ALGORITHM, 'sha256-stable-json-scope-v3');
+  check('scope-v4 algorithm constant', executorHooks.PRODUCT_EXECUTION_HASH_ALGORITHM, 'sha256-stable-json-scope-v4');
   const portalHashTask = algorithm => ({
     execution: {
       openApiProductExecutors: [{
@@ -542,19 +542,19 @@ try {
       }],
     },
   });
-  check('portal accepts current scope-v3 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v3'), 'HL'), 'a'.repeat(64));
+  check('portal accepts current scope-v4 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v4'), 'HL'), 'a'.repeat(64));
   check('portal rejects legacy scope-v2 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v2'), 'HL'), '');
   check('portal rejects missing hash algorithm', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask(''), 'HL'), '');
-  const portalMissingStoreTask = portalHashTask('sha256-stable-json-scope-v3');
+  const portalMissingStoreTask = portalHashTask('sha256-stable-json-scope-v4');
   delete portalMissingStoreTask.execution.openApiProductExecutors[0].storeKey;
   check('portal rejects unique executor row missing storeKey', portalHooks.payloadHashForStoreFromTaskExecution(portalMissingStoreTask, 'HL'), '');
   for (const [label, mutate] of [
     ['payload hash array', task => { task.execution.openApiProductExecutors[0].payload.payloadHash = ['a'.repeat(64)]; }],
     ['payload hash object', task => { task.execution.openApiProductExecutors[0].payload.payloadHash = {value: 'a'.repeat(64)}; }],
-    ['payload hash algorithm array', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }],
-    ['payload hash algorithm object', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }],
+    ['payload hash algorithm array', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v4']; }],
+    ['payload hash algorithm object', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v4'}; }],
   ]) {
-    const pollutedTask = portalHashTask('sha256-stable-json-scope-v3');
+    const pollutedTask = portalHashTask('sha256-stable-json-scope-v4');
     mutate(pollutedTask);
     check(`portal rejects ${label}`, portalHooks.payloadHashForStoreFromTaskExecution(pollutedTask, 'HL'), '');
   }
@@ -567,12 +567,12 @@ try {
       payload: {
         found: true,
         payloadHash: 'a'.repeat(64),
-        payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+        payloadHashAlgorithm: 'sha256-stable-json-scope-v4',
         sourceDetailLock: baseLock,
       },
     },
   });
-  check('portal history projection preserves scope-v3 algorithm', projectedHistoryEvidence.payloadHashAlgorithm, 'sha256-stable-json-scope-v3');
+  check('portal history projection preserves scope-v4 algorithm', projectedHistoryEvidence.payloadHashAlgorithm, 'sha256-stable-json-scope-v4');
   check('portal history projection preserves exact source store', projectedHistoryEvidence.sourceStore, SOURCE_STORE);
   check('portal history projection preserves exact source SKC', projectedHistoryEvidence.sourceSkc, SOURCE_SKC);
   check('portal history projection preserves full source lock', projectedHistoryEvidence.payload?.sourceDetailLock, value => value?.detailFetchedAt === baseLock.detailFetchedAt
@@ -629,7 +629,7 @@ try {
   check('preflight ready for submit', preflightOutput?.state || '', 'ready_for_submit');
   check('preflight no blockers', preflightOutput?.blockers?.length || 0, 0);
   check('preflight locks scope-v3 hash', preflightOutput?.payload?.payloadHash || '', value => /^[a-f0-9]{64}$/.test(String(value)));
-  check('preflight declares scope-v3 algorithm', preflightOutput?.payload?.payloadHashAlgorithm || '', 'sha256-stable-json-scope-v3');
+  check('preflight declares scope-v4 algorithm', preflightOutput?.payload?.payloadHashAlgorithm || '', 'sha256-stable-json-scope-v4');
   check('preflight payload carries sourceDetailLock', Boolean(preflightOutput?.payload?.sourceDetailLock), true);
   check('preflight lock matched SKC', preflightOutput?.payload?.sourceDetailLock?.matchedSkcName, SOURCE_SKC);
   check('preflight lock content hash is sha256', preflightOutput?.payload?.sourceDetailLock?.detailContentSha256 || '', value => /^[a-f0-9]{64}$/.test(String(value)));
@@ -658,7 +658,7 @@ try {
   const resolvedCurrentLock = executorHooks.resolvePreflightProductLock(executeTask(), 'HL', {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
   });
-  check('current execution resolver restores v3 lock', resolvedCurrentLock, value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+  check('current execution resolver restores v4 lock', resolvedCurrentLock, value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v4'
     && value?.sourceDetailLock?.detailContentSha256 === preflightOutput.payload.sourceDetailLock.detailContentSha256);
   check('resolver rejects array expectedPayloadHash', executorHooks.resolvePreflightProductLock(executeTask(), 'HL', {
     expectedPayloadHash: [preflightOutput.payload.payloadHash],
@@ -796,7 +796,7 @@ try {
   }];
   check('history writeAudit resolver restores v3 lock', executorHooks.resolvePreflightProductLock(historyWriteAuditTask, 'HL', {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
-  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v4'
     && value?.sourceStore === SOURCE_STORE
     && value?.sourceSkc === SOURCE_SKC);
   const historyExecutorTask = baseTask();
@@ -806,7 +806,7 @@ try {
   }];
   check('history executor resolver restores v3 lock', executorHooks.resolvePreflightProductLock(historyExecutorTask, 'HL', {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
-  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v4'
     && value?.sourceStore === SOURCE_STORE
     && value?.sourceSkc === SOURCE_SKC);
   const historyEventArrayTask = JSON.parse(JSON.stringify(historyWriteAuditTask));
@@ -871,8 +871,8 @@ try {
       {label: 'source lock expired timestamp', apply: row => { row.payload.sourceDetailLock.detailFetchedAt = EXPIRED_AT; }},
       {label: 'payloadHash array', apply: row => { row.payloadHash = [preflightOutput.payload.payloadHash]; }},
       {label: 'payloadHash object', apply: row => { row.payloadHash = {value: preflightOutput.payload.payloadHash}; }},
-      {label: 'payloadHashAlgorithm array', apply: row => { row.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }},
-      {label: 'payloadHashAlgorithm object', apply: row => { row.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }},
+      {label: 'payloadHashAlgorithm array', apply: row => { row.payloadHashAlgorithm = ['sha256-stable-json-scope-v4']; }},
+      {label: 'payloadHashAlgorithm object', apply: row => { row.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v4'}; }},
     ]) {
       const tamperedTask = taskFactory();
       const row = historyKind === 'writeAudit'
@@ -910,8 +910,8 @@ try {
   for (const [label, mutate] of [
     ['current payloadHash array', output => { output.payload.payloadHash = [preflightOutput.payload.payloadHash]; }],
     ['current payloadHash object', output => { output.payload.payloadHash = {value: preflightOutput.payload.payloadHash}; }],
-    ['current payloadHashAlgorithm array', output => { output.payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }],
-    ['current payloadHashAlgorithm object', output => { output.payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }],
+    ['current payloadHashAlgorithm array', output => { output.payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v4']; }],
+    ['current payloadHashAlgorithm object', output => { output.payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v4'}; }],
   ]) {
     const pollutedOutput = JSON.parse(JSON.stringify(preflightOutput));
     mutate(pollutedOutput);
