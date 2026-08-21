@@ -755,6 +755,7 @@ async function attachFullPayload(taskId, {skipDescription = false} = {}) {
       note: `${TARGET_STORE} 待绑定缺失白名单商品属性`,
       openapiPublishPayload: JSON.parse(JSON.stringify(payload)),
       publishAssetBinding: assetBinding,
+      publishPreparation: JSON.parse(JSON.stringify(assetBinding.publishPreparation)),
       ...(skipDescription ? {} : {
         descriptionMaterialBinding: descriptionBindingFor(
           taskId,
@@ -808,6 +809,7 @@ async function attachFullPayloadWithRow(taskId, {valueId = DONOR_VALUE_ID, skipD
       note: `${TARGET_STORE} 待 adopt 既有白名单商品属性`,
       openapiPublishPayload: JSON.parse(JSON.stringify(payload)),
       publishAssetBinding: assetBinding,
+      publishPreparation: JSON.parse(JSON.stringify(assetBinding.publishPreparation)),
       ...(skipDescription ? {} : {
         descriptionMaterialBinding: descriptionBindingFor(
           taskId,

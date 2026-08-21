@@ -1203,6 +1203,7 @@ async function buildExactSourceLockedPayload(task, {targetStore, source, existin
       exactSourceLock: true,
       generatedDraft: summarizeDraftForExecutor(generated),
       mappingBlockers: generated?.blockers || [],
+      structuredMappingBlockers: generated?.mappingBlockers || [],
       generationError: readiness.reason,
     };
   }
@@ -1231,6 +1232,7 @@ async function buildExactSourceLockedPayload(task, {targetStore, source, existin
     generatedDraft: summarizeDraftForExecutor(generated),
     canonicalDraft: generated.canonicalDraft,
     mappingBlockers: generated.blockers,
+    structuredMappingBlockers: generated.mappingBlockers,
     mappingWarnings: generated.warnings,
     destinationBindingsApplied: merged.applied,
     destinationProjection: merged.projection.protectedFields,

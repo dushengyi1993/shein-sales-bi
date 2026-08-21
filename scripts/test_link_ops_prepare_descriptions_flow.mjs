@@ -40,6 +40,7 @@ import {
   sha256Utf8,
   validateDescriptionBindingLock,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
@@ -51,6 +52,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-prepare-descriptions-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(testOutputDir, 'shein_openapi_products');
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const SOURCE_STORE = 'NM';
 const SOURCE_SPU = 'v20990101999999';
@@ -131,7 +133,7 @@ async function writeDescSourceFixtures() {
     inventoryRows: [],
     performanceRows: [],
   }, null, 2)}\n`, 'utf8');
-  await fs.writeFile(path.join(descSourceOpenApiDir, 'latest.json'), `${JSON.stringify({
+  await writeOpenApiProductCacheAtomically(path.join(descSourceOpenApiDir, 'latest.json'), {
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: SOURCE_STORE,
     fetchedAt: SOURCE_DETAIL_AT,
@@ -175,7 +177,7 @@ async function writeDescSourceFixtures() {
       },
     }],
     detailFallbackResults: [],
-  }, null, 2)}\n`, 'utf8');
+  }, {storeKey: SOURCE_STORE, generatedAt: SOURCE_DETAIL_AT});
 }
 async function removeDescSourceFixtures() {
   await fs.rm(descSourceLinkDir, {recursive: true, force: true});
@@ -265,6 +267,60 @@ function publishPayloadFor(supplierCode) {
       }],
     }],
   };
+}
+
+function validPublishAssetBindingFixture(task, supplierCode) {
+  const images = [
+    {name: 'desc-main.jpg', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/main.jpg', width: 1000, height: 1000, sha256: crypto.createHash('sha256').update('desc-main-image').digest('hex')},
+    {name: 'desc-square.jpg', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/square.jpg', width: 800, height: 800, sha256: crypto.createHash('sha256').update('desc-square-image').digest('hex')},
+  ];
+  const binding = {
+    schemaVersion: 1,
+    kind: 'copy_product_draft',
+    sourceApproved: true,
+    authority: 'human_reviewed_source',
+    targetStore: 'NM',
+    boundAt: '2026-08-15T00:00:00.000Z',
+    boundByUser: 'owner_desc_bind',
+    imageCount: images.length,
+    images,
+    evidence: {payloadSource: 'task', preflightInvalidated: true},
+    publishPreparation: {
+      standardGoodsSn: supplierCode,
+      supplierSku: `${supplierCode}-SKU`,
+      supplyPrice: 99,
+      inventory: 100,
+      categoryId: 123456,
+      titles: {en: 'Desc bind smoke product', ar: 'منتج تجريبي'},
+      attributeOverrides: [],
+    },
+  };
+  binding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {
+    binding,
+    images: binding.images,
+    publishPreparation: binding.publishPreparation,
+  });
+  return binding;
+}
+
+function updatedPublishAssetBindingFixture(task, payload, {supplyPrice, mainImageUrl = '', boundAt = new Date().toISOString()} = {}) {
+  const binding = JSON.parse(JSON.stringify(task?.publishAssetBinding || {}));
+  binding.boundAt = boundAt;
+  binding.publishPreparation = {
+    ...(binding.publishPreparation || {}),
+    ...(supplyPrice === undefined ? {} : {supplyPrice}),
+  };
+  if (mainImageUrl) {
+    const main = asArray(binding.images).find(row => Number(row?.imageType) === 1);
+    if (main) main.imageUrl = mainImageUrl;
+  }
+  const nextTask = {...task, openapiPublishPayload: payload, publishAssetBinding: binding};
+  binding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(nextTask, {
+    binding,
+    images: binding.images,
+    publishPreparation: binding.publishPreparation,
+  });
+  return binding;
 }
 
 const checks = [];
@@ -777,10 +833,13 @@ async function attachPayload(taskId, payload) {
   const tasks = asArray(data.tasks);
   const index = tasks.findIndex(task => String(task?.id || '') === String(taskId || ''));
   if (index < 0) throw new Error(`task not found for attach: ${taskId}`);
+  const task = tasks[index];
+  const supplierCode = String(payload?.skc_list?.[0]?.supplier_code || '');
   tasks[index] = {
-    ...tasks[index],
+    ...task,
     note: 'NM 待绑定描述',
     openapiPublishPayload: JSON.parse(JSON.stringify(payload)),
+    publishAssetBinding: validPublishAssetBindingFixture(task, supplierCode),
   };
   await fs.writeFile(taskFile, JSON.stringify({...data, tasks}, null, 2), 'utf8');
 }
@@ -998,7 +1057,10 @@ try {
   check('tampered post-bind top-level blockers equal execution blockers', JSON.stringify(asArray(blockedRaw.preflight?.blockers).sort()), JSON.stringify(asArray(blockedRaw.execution?.preflight?.blockers).sort()));
   check('tampered post-bind top-level warnings equal execution warnings', JSON.stringify(asArray(blockedRaw.preflight?.warnings).sort()), JSON.stringify(asArray(blockedRaw.execution?.preflight?.warnings).sort()));
   check('tampered post-bind drops stale binding invalidation', JSON.stringify(asArray(blockedRaw.preflight?.blockers)), text => !text.includes('需要基于新 payload 重新预演'));
-  check('tampered post-bind carries description lock blocker', JSON.stringify(asArray(blockedRaw.preflight?.blockers)), text => text.includes('hash 与审核资料绑定不一致'));
+  check('tampered post-bind carries description lock blocker', JSON.stringify(asArray(blockedRaw.preflight?.blockers)), text => (
+    text.includes('hash 与审核资料绑定不一致')
+      || text.includes('destination descriptions without a valid descriptionMaterialBinding lock')
+  ));
   check('tampered post-bind projected preflight equals execution', JSON.stringify(blockedDryRun.json?.task?.preflight || null), JSON.stringify(blockedDryRun.json?.task?.execution?.preflight || null));
 
   // execute success requires code=0 AND explicit info.success===true
@@ -1868,17 +1930,20 @@ try {
   const rebindMutatedPayload = JSON.parse(JSON.stringify(rebindRawInitial.openapiPublishPayload));
   rebindMutatedPayload.skc_list[0].sku_list[0].cost_info.cost_price = '129.00';
   rebindMutatedPayload.skc_list[0].image_info.image_info_list[0].image_url = 'https://img.shein.com/main-rebind-v2.jpg';
-  const rebindNewFingerprint = crypto.createHash('sha256').update(`rebind-approved-images-${rebindTaskId}`).digest('hex');
-  await updateRawTaskById(rebindTaskId, task => ({
-    ...task,
-    repositoryRevision: rebindMutatedRevision,
-    openapiPublishPayload: rebindMutatedPayload,
-    publishAssetBinding: {
-      ...(task.publishAssetBinding && typeof task.publishAssetBinding === 'object' ? task.publishAssetBinding : {}),
-      bindingFingerprint: rebindNewFingerprint,
-      boundAt: new Date().toISOString(),
-    },
-  }));
+  let rebindNewFingerprint = '';
+  await updateRawTaskById(rebindTaskId, task => {
+    const publishAssetBinding = updatedPublishAssetBindingFixture(task, rebindMutatedPayload, {
+      supplyPrice: 129,
+      mainImageUrl: 'https://img.shein.com/main-rebind-v2.jpg',
+    });
+    rebindNewFingerprint = publishAssetBinding.bindingFingerprint;
+    return {
+      ...task,
+      repositoryRevision: rebindMutatedRevision,
+      openapiPublishPayload: rebindMutatedPayload,
+      publishAssetBinding,
+    };
+  });
   check('rebind flow mutation keeps old material identity', (await rawTaskById(rebindTaskId))?.descriptionMaterialBinding?.bindingRequestKey, rebindInitialRequestKey);
   const rebindLockStale = await rebindProjected();
   check('rebind flow projection reports stale lock after mutation', rebindLockStale.descriptionBindingLock?.ok, false);
@@ -2104,10 +2169,10 @@ try {
     ...task,
     repositoryRevision: matrixStaleMutatedRevision,
     openapiPublishPayload: matrixStalePayload,
-    publishAssetBinding: {
-      ...(task.publishAssetBinding && typeof task.publishAssetBinding === 'object' ? task.publishAssetBinding : {}),
-      bindingFingerprint: crypto.createHash('sha256').update(`lock-matrix-images-${matrixTaskId}`).digest('hex'),
-    },
+    publishAssetBinding: updatedPublishAssetBindingFixture(task, matrixStalePayload, {
+      supplyPrice: 159,
+      mainImageUrl: 'https://img.shein.com/main-lock-matrix-v2.jpg',
+    }),
   }));
   matrixInject(() => ({ok: true}));
   const matrixExplicitLive = await runCli([
@@ -2165,10 +2230,7 @@ try {
     ...task,
     repositoryRevision: matrixStaleControlMutatedRevision,
     openapiPublishPayload: matrixStaleControlPayload,
-    publishAssetBinding: {
-      ...(task.publishAssetBinding && typeof task.publishAssetBinding === 'object' ? task.publishAssetBinding : {}),
-      bindingFingerprint: crypto.createHash('sha256').update(`lock-matrix-stale-images-${matrixTaskId}`).digest('hex'),
-    },
+    publishAssetBinding: updatedPublishAssetBindingFixture(task, matrixStaleControlPayload, {supplyPrice: 169}),
   }));
   matrixInject(({base, live}) => ({ok: false, stale: true, baseTaskRevision: base, currentRevision: live}));
   const matrixStaleControl = await runCli([

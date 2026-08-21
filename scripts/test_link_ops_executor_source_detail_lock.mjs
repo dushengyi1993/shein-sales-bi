@@ -46,6 +46,7 @@ import {
   sha256StableJson,
   sha256Utf8,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 
 process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
 const {__testHooks: executorHooks} = await import('../scripts/link_ops_hl_openapi_executor.mjs');
@@ -66,11 +67,13 @@ const DESCRIPTION_LINES = Object.freeze({
 });
 const DESCRIPTION_SOURCE_BYTES = Buffer.from('reviewed source-detail-lock smoke fixture', 'utf8');
 const DESCRIPTION_SOURCE_LABEL = 'source-detail-lock-reviewed-fixture.html';
+const IMAGE_BINDING_FINGERPRINT = sha256Utf8('source-detail-lock-smoke-images');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-source-detail-lock-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(testOutputDir, 'shein_openapi_products');
 const sourceLinkDir = path.join(testOutputDir, 'shein_links', SOURCE_STORE);
 const sourceOpenApiDir = path.join(testOutputDir, 'shein_openapi_products', SOURCE_STORE);
 
@@ -135,9 +138,9 @@ function detailInfo({titleSuffix = ''} = {}) {
       skcName: SOURCE_SKC,
       supplierCode: 'SRC-LKD-CODE',
       skcImageInfoList: [
-        {imageType: 1, imageUrl: 'https://example.invalid/lock-main.jpg'},
-        {imageType: 2, imageUrl: 'https://example.invalid/lock-detail.jpg'},
-        {imageType: 5, imageUrl: 'https://example.invalid/lock-square.jpg'},
+        {imageType: 1, imageUrl: 'https://img.shein.com/lock-main.jpg'},
+        {imageType: 2, imageUrl: 'https://img.shein.com/lock-detail.jpg'},
+        {imageType: 5, imageUrl: 'https://img.shein.com/lock-square.jpg'},
       ],
       saleAttributeList: [{attributeId: 301, attributeValueId: 401}],
       skuInfoList: [{
@@ -172,16 +175,16 @@ function publishPayload() {
     shelf_way: 2,
     hope_on_sale_date: '2036-06-27 10:00:00',
     skc_list: [{
-      supplier_code: 'HL-LOCK-SMOKE-SKC',
+      supplier_code: STANDARD_GOODS_SN,
       image_info: {
         image_info_list: [
-          {image_type: 1, image_sort: 1, image_url: 'https://example.invalid/smoke-main.jpg'},
-          {image_type: 5, image_sort: 2, image_url: 'https://example.invalid/smoke-square.jpg'},
+          {image_type: 1, image_sort: 1, image_url: 'https://img.shein.com/smoke-main.jpg'},
+          {image_type: 5, image_sort: 2, image_url: 'https://img.shein.com/smoke-square.jpg'},
         ],
       },
       sale_attribute: {attribute_id: 301, attribute_value_id: 401},
       sku_list: [{
-        supplier_sku: 'HL-LOCK-SMOKE-SKU-001',
+        supplier_sku: `${STANDARD_GOODS_SN}-SKU`,
         mall_state: 1,
         height: 10,
         length: 20,
@@ -227,6 +230,7 @@ const descriptionMaterialBinding = {
   lineCounts: descriptionSummary.lineCounts,
   newPayloadHash: sha256StableJson(boundPayload),
   payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+  imageBindingFingerprint: IMAGE_BINDING_FINGERPRINT,
   publishLanguages: descriptionSummary.publishLanguages,
   schemaVersion: descriptionSummary.schemaVersion,
   sourceApproved: true,
@@ -327,14 +331,14 @@ function runNode(args) {
 }
 
 async function writeDetail({detailFetchedAt = FRESH_AT, info = detailInfo(), detailResults = undefined} = {}) {
-  await writeJson(path.join(sourceOpenApiDir, 'latest.json'), {
+  await writeOpenApiProductCacheAtomically(path.join(sourceOpenApiDir, 'latest.json'), {
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: SOURCE_STORE,
     fetchedAt: detailFetchedAt,
     normalizedRows: [{spu: SOURCE_SPU, skc: SOURCE_SKC}],
     detailResults: detailResults === undefined ? [{ok: true, detailFetchedAt, info}] : detailResults,
     detailFallbackResults: [],
-  });
+  }, {storeKey: SOURCE_STORE, generatedAt: FRESH_AT});
 }
 
 function baseTask() {
@@ -348,6 +352,29 @@ function baseTask() {
     sourceSkc: SOURCE_SKC,
     openapiPublishPayload: JSON.parse(JSON.stringify(boundPayload)),
     descriptionMaterialBinding,
+    publishAssetBinding: {
+      schemaVersion: 1,
+      kind: 'copy_product_draft',
+      sourceApproved: true,
+      authority: 'human_reviewed_source',
+      targetStore: 'HL',
+      boundAt: '2026-08-11T00:00:00.000Z',
+      bindingFingerprint: IMAGE_BINDING_FINGERPRINT,
+      imageCount: 2,
+      images: [
+        {name: 'smoke-main.jpg', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/smoke-main.jpg', width: 1000, height: 1000, sha256: sha256Utf8('source-detail-lock-main')},
+        {name: 'smoke-square.jpg', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/smoke-square.jpg', width: 800, height: 800, sha256: sha256Utf8('source-detail-lock-square')},
+      ],
+      publishPreparation: {
+        standardGoodsSn: STANDARD_GOODS_SN,
+        supplierSku: `${STANDARD_GOODS_SN}-SKU`,
+        supplyPrice: 99,
+        inventory: 100,
+        categoryId: 123456,
+        titles: {en: EN_TITLE, ar: AR_TITLE},
+        attributeOverrides: [],
+      },
+    },
     targets: {
       stores: ['HL'],
       writeStores: ['HL'],
@@ -637,6 +664,16 @@ try {
   check('preflight lock content hash is sha256', preflightOutput?.payload?.sourceDetailLock?.detailContentSha256 || '', value => /^[a-f0-9]{64}$/.test(String(value)));
   check('preflight structured mapping blockers empty', preflightOutput?.payload?.mappingBlockers?.length || 0, 0);
   check('publish not called in dry-run', publishAttemptCount, 0);
+  if (!preflightOutput?.payload?.sourceDetailLock) {
+    result.debug = {
+      preflightState: preflightOutput?.state || null,
+      blockers: preflightOutput?.blockers || [],
+      payload: preflightOutput?.payload || null,
+      stderr: preflight.run.stderr.slice(0, 4000),
+    };
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
 
   const executeContext = {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
@@ -1241,7 +1278,7 @@ try {
   const hydrationFail = await runExecutor({label: 'dry-run-hydration-fail', mode: 'dry-run', task: baseTask()});
   check('hydration-fail dry-run state blocked', hydrationFail.output?.state || '', 'blocked');
   check('hydration-fail gate code', hydrationFail.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_MISSING'));
-  check('hydration-fail warning recorded but not passed', hydrationFail.output?.warnings || [], rows => rows.some(row => /无法从当前详情快照还原只读元数据/.test(String(row))));
+  check('hydration-fail warning recorded but not passed', hydrationFail.output?.warnings || [], rows => rows.some(row => /无法从当前详情快照还原只读元数据|当前 BI 数据不足以还原完整发布 payload/.test(String(row))));
   check('hydration-fail dry-run does not publish', publishAttemptCount, beforeHydrationFail);
 
   result.stdout = fresh.run.stdout.slice(0, 1000);
