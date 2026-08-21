@@ -26,7 +26,9 @@ import {buildProductDisplayName} from '../lib/product_display_name.mjs';
 import {
   applyApprovedImageBindingsToPublishPayload,
   applyExplicitPublishPreparationOverrides,
+  normalizeApprovedImageBindingProjection,
   normalizeApprovedImageBindings,
+  normalizePublishPayloadImageProjection,
   normalizePublishPreparationOverrides,
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
@@ -774,13 +776,14 @@ function destinationStoreCandidates(task, targetStore) {
 }
 
 function structuredDestinationPreparation(task) {
-  const candidates = [
-    ['task.publishPreparation', task?.publishPreparation],
-    ['metadata.publishPreparation', task?.metadata?.publishPreparation],
-    ['targets.publishPreparation', task?.targets?.publishPreparation],
-    ['publishAssetBinding.publishPreparation', task?.publishAssetBinding?.publishPreparation],
-    ['metadata.publishAssetBinding.publishPreparation', task?.metadata?.publishAssetBinding?.publishPreparation],
-  ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+  const bindingPreparation = task?.publishAssetBinding?.publishPreparation
+    || task?.metadata?.publishAssetBinding?.publishPreparation;
+  const candidates = bindingPreparation && typeof bindingPreparation === 'object' && !Array.isArray(bindingPreparation)
+    ? [['publishAssetBinding.publishPreparation', bindingPreparation]]
+    : [
+      ['task.publishPreparation', task?.publishPreparation],
+      ['targets.publishPreparation', task?.targets?.publishPreparation],
+    ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
   const raw = {};
   for (const [, value] of candidates) {
     for (const [key, item] of Object.entries(value)) {
@@ -818,27 +821,6 @@ function targetDescriptionRows(payload) {
       productDesc: safeString(row.product_desc || row.productDesc || row.description || row.name || row.value || '', 10000),
     }))
     .filter(row => row.language && row.productDesc);
-}
-
-function targetImageRows(payload) {
-  return asArray(payload?.skc_list || payload?.skcList).flatMap(skc => {
-    const imageInfo = skc?.image_info || skc?.imageInfo || {};
-    return asArray(imageInfo?.image_info_list || imageInfo?.imageInfoList)
-      .filter(row => row && typeof row === 'object')
-      .map(row => ({
-        imageUrl: safeString(row.image_url || row.imageUrl || row.url || '', 3000),
-        imageType: Number(row.image_type ?? row.imageType ?? 0),
-        imageSort: Number(row.image_sort ?? row.imageSort ?? 0),
-      }))
-      .filter(row => row.imageUrl);
-  });
-}
-
-function normalizeImageProjection(rows) {
-  return asArray(rows).map(row => ({
-    imageUrl: safeString(row.imageUrl || row.image_url || row.url || '', 3000),
-    imageType: Number(row.imageType ?? row.image_type ?? 0),
-  })).filter(row => row.imageUrl).sort((a, b) => `${a.imageType}|${a.imageUrl}`.localeCompare(`${b.imageType}|${b.imageUrl}`));
 }
 
 function payloadSkuRows(payload) {
@@ -913,8 +895,10 @@ function validateStructuredImageBinding(task, targetStore, existingPayload) {
   if (binding.imageCount !== undefined && Number(binding.imageCount) !== images.length) {
     throw new Error('destination image binding imageCount does not match its normalized images');
   }
-  const existingImages = normalizeImageProjection(targetImageRows(existingPayload));
-  if (existingImages.length && JSON.stringify(existingImages) !== JSON.stringify(normalizeImageProjection(images))) {
+  const existingImages = normalizePublishPayloadImageProjection(existingPayload);
+  const bindingImages = normalizeApprovedImageBindingProjection(images, {sourceApproved: true});
+  const hasExistingPayload = Boolean(existingPayload && typeof existingPayload === 'object' && !Array.isArray(existingPayload));
+  if (hasExistingPayload && JSON.stringify(existingImages) !== JSON.stringify(bindingImages)) {
     throw new Error('existing task payload images do not match the locked destination image binding');
   }
   return {binding, images};
@@ -966,7 +950,7 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
   }
 
   const imageBinding = validateStructuredImageBinding(task, destinationStore, existingPayload);
-  if (targetImageRows(existingPayload).length && !imageBinding) {
+  if (normalizePublishPayloadImageProjection(existingPayload).length && !imageBinding) {
     throw new Error('existing task payload contains destination images without a locked publishAssetBinding');
   }
 
@@ -1021,6 +1005,33 @@ function mergeExactSourceDestinationBindings(sourcePayload, task, existingPayloa
   if (descriptionBinding && typeof descriptionBinding === 'object') {
     payload.multi_language_desc_list = jsonClone(existingPayload.multi_language_desc_list);
     applied.push('destination.descriptionMaterialBinding.multi_language_desc_list');
+  }
+
+  // A separately signed productAttributeBinding is destination-owned state.
+  // Exact-source hydration must not discard the one row that the binding pins,
+  // but it must also never copy the whole task attribute list. The downstream
+  // binding gate revalidates the donor evidence, hashes and payload row before
+  // submit; malformed, missing or duplicate rows remain blocked.
+  const attributeBinding = task?.productAttributeBinding;
+  const boundAttributeId = Number(attributeBinding?.attributeId);
+  const boundAttributeValueId = Number(attributeBinding?.attributeValueId);
+  if (Number.isSafeInteger(boundAttributeId) && boundAttributeId > 0
+    && Number.isSafeInteger(boundAttributeValueId) && boundAttributeValueId > 0) {
+    const existingRows = asArray(existingPayload?.product_attribute_list || existingPayload?.productAttributeList)
+      .filter(row => row && typeof row === 'object' && !Array.isArray(row));
+    const matchingRows = existingRows.filter(row => {
+      return Number(row.attribute_id ?? row.attributeId) === boundAttributeId
+        && Number(row.attribute_value_id ?? row.attributeValueId) === boundAttributeValueId;
+    });
+    if (matchingRows.length === 1) {
+      const sourceRows = asArray(payload?.product_attribute_list || payload?.productAttributeList)
+        .filter(row => row && typeof row === 'object' && !Array.isArray(row))
+        .filter(row => Number(row.attribute_id ?? row.attributeId) !== boundAttributeId)
+        .map(row => jsonClone(row));
+      payload.product_attribute_list = [...sourceRows, jsonClone(matchingRows[0])];
+      delete payload.productAttributeList;
+      applied.push(`destination.productAttributeBinding.${boundAttributeId}`);
+    }
   }
 
   const preparation = applyExplicitPublishPreparationOverrides(payload, projection.overrides);
@@ -4694,7 +4705,11 @@ async function main() {
     appendUnique(blockers, descriptionBindingLock.blockers);
   } else {
     appendUnique(blockers, payloadValidation.blockers);
-    if (payloadFound?.generationError) appendUnique(warnings, `自动生成源商品草稿失败：${payloadFound.generationError}`);
+    if (payloadFound?.generationError) {
+      const message = `自动生成源商品草稿失败：${payloadFound.generationError}`;
+      if (payloadFound?.exactSourceLock) appendUnique(blockers, message);
+      else appendUnique(warnings, message);
+    }
   }
 
   if (productRefs.length && !payloadFound?.payload) {

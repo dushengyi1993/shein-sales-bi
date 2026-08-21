@@ -20,6 +20,11 @@ import {
   sha256StableJson,
   sha256Utf8,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {
+  applyApprovedImageBindingsToPublishPayload,
+  normalizeApprovedImageBindingProjection,
+  normalizePublishPayloadImageProjection,
+} from '../lib/link_ops_publish_asset_binding.mjs';
 
 process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
 const {findOrBuildPublishPayload} = await import('./link_ops_hl_openapi_executor.mjs');
@@ -150,6 +155,110 @@ function withApprovedImages(task) {
   return {...task, openapiPublishPayload: payload, publishAssetBinding: binding};
 }
 
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function fullApprovedImages() {
+  const detailRows = Array.from({length: 10}, (_, index) => ({
+    name: `qh-detail-${String(index + 1).padStart(2, '0')}.png`,
+    role: 'detail',
+    imageType: 2,
+    imageUrl: `https://img.shein.com/destination/qh-detail-${String(index + 1).padStart(2, '0')}.png`,
+    width: 900,
+    height: 1200,
+    order: index + 3,
+  }));
+  return [
+    {name: 'qh-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/destination/qh-main.png', width: 900, height: 1200, order: 1},
+    {name: 'qh-carousel.png', role: 'carouselSecondCover', imageType: 1, imageUrl: 'https://img.shein.com/destination/qh-carousel.png', width: 900, height: 1200, order: 2},
+    ...detailRows,
+    {name: 'qh-square.png', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/destination/qh-square.png', width: 1254, height: 1254, order: 13},
+    {name: 'qh-sku.png', role: 'skuImage', imageType: 1, imageUrl: 'https://img.shein.com/destination/qh-sku.png', width: 900, height: 1200, order: 14},
+  ];
+}
+
+function camelizeImageInfo(container) {
+  const imageInfo = container?.image_info;
+  if (!imageInfo || typeof imageInfo !== 'object') return container;
+  return {
+    imageInfo: {
+      imageInfoList: (imageInfo.image_info_list || []).map(row => ({
+        imageType: row.image_type,
+        imageSort: row.image_sort,
+        imageUrl: row.image_url,
+      })),
+    },
+  };
+}
+
+function camelizeImagePayload(payload) {
+  const next = cloneJson(payload);
+  next.skcList = (next.skc_list || []).map(skc => {
+    const converted = {...skc, ...camelizeImageInfo(skc)};
+    delete converted.image_info;
+    converted.skuList = (skc.sku_list || []).map(sku => {
+      const skuConverted = {...sku, ...camelizeImageInfo(sku)};
+      delete skuConverted.image_info;
+      return skuConverted;
+    });
+    delete converted.sku_list;
+    return converted;
+  });
+  delete next.skc_list;
+  if (next.image_info) {
+    next.imageInfo = camelizeImageInfo(next).imageInfo;
+    delete next.image_info;
+  }
+  if (Object.hasOwn(next, 'is_spu_pic')) {
+    next.isSpuPic = next.is_spu_pic;
+    delete next.is_spu_pic;
+  }
+  return next;
+}
+
+function withFullApprovedImages(task, {camelCase = false, reorderPayload = false, targetStore = 'HL'} = {}) {
+  const images = fullApprovedImages();
+  const payload = cloneJson(task.openapiPublishPayload);
+  payload.skc_list = [{
+    supplier_code: 'DEST-SN-001',
+    image_info: {image_info_list: []},
+    sku_list: [{
+      supplier_sku: 'DEST-SN-001',
+      cost_info: {currency: 'SAR', cost_price: '222.22'},
+      stock_info_list: [{inventory_num: 77}],
+    }],
+  }];
+  const applied = applyApprovedImageBindingsToPublishPayload(payload, images, {sourceApproved: true});
+  let nextPayload = applied.payload;
+  if (reorderPayload) {
+    const rows = nextPayload.skc_list[0].image_info.image_info_list;
+    nextPayload.skc_list[0].image_info.image_info_list = [...rows].reverse();
+  }
+  if (camelCase) nextPayload = camelizeImagePayload(nextPayload);
+  const binding = {
+    schemaVersion: 1,
+    sourceApproved: true,
+    authority: 'human_reviewed_source',
+    targetStore,
+    boundAt: '2026-08-21T10:00:00.000Z',
+    bindingFingerprint: 'c'.repeat(64),
+    imageCount: images.length,
+    images: cloneJson(images),
+    publishPreparation: cloneJson(task.targets.publishPreparation),
+  };
+  return {
+    ...task,
+    targets: {
+      ...task.targets,
+      writeStores: [targetStore],
+      stores: [targetStore],
+    },
+    openapiPublishPayload: nextPayload,
+    publishAssetBinding: binding,
+  };
+}
+
 function withApprovedDescriptions(task) {
   const rows = {
     ar: ['AR one', 'AR two', 'AR three', 'AR four', 'AR five'],
@@ -198,6 +307,40 @@ function withApprovedDescriptions(task) {
     imageBindingFingerprint: task.publishAssetBinding?.bindingFingerprint || '',
   };
   return {...task, openapiPublishPayload: payload, descriptionMaterialBinding: binding};
+}
+
+function clearStructuredTitleLocks(task) {
+  const next = cloneJson(task);
+  for (const preparation of [
+    next.publishPreparation,
+    next.metadata?.publishPreparation,
+    next.targets?.publishPreparation,
+    next.publishAssetBinding?.publishPreparation,
+    next.metadata?.publishAssetBinding?.publishPreparation,
+  ]) {
+    if (!preparation || typeof preparation !== 'object') continue;
+    for (const key of ['titleGroup', 'titleAr', 'titleEn', 'titles']) delete preparation[key];
+  }
+  return next;
+}
+
+function withTargetStore(task, targetStore) {
+  const next = cloneJson(task);
+  next.targets = {
+    ...next.targets,
+    writeStores: [targetStore],
+    stores: [targetStore],
+  };
+  return next;
+}
+
+function setPayloadTitles(task, {ar, en}) {
+  const next = cloneJson(task);
+  next.openapiPublishPayload.multi_language_name_list = [
+    {language: 'ar', name: ar},
+    {language: 'en', name: en},
+  ];
+  return next;
 }
 
 async function setup() {
@@ -250,12 +393,127 @@ try {
   check('destination title group is preserved as structured projection', result.destinationProjection?.titleGroup, 'title1');
   check('destination title is preserved from structured preparation', payload.multi_language_name_list?.find(row => row.language === 'en')?.name, 'Destination title EN');
 
+  // FY legacy tasks may already carry titles in the old payload while their
+  // structured title lock is absent. Payload text is evidence of drift, not
+  // approval; the same task only becomes eligible after prepare-publish
+  // explicitly supplies the destination titles and materializes the lock.
+  const fyLegacy = withTargetStore(clearStructuredTitleLocks(taskWithPayload()), 'FY');
+  const fyWithoutTitleLock = await findOrBuildPublishPayload(fyLegacy, {targetStore: 'FY'});
+  check('FY legacy payload title without structured lock fails closed', fyWithoutTitleLock.payload, null);
+  check('FY legacy payload title is not trusted automatically', fyWithoutTitleLock.generationError, value => /title|structured|lock/i.test(String(value)));
+
+  const fyPrepared = withTargetStore(clearStructuredTitleLocks(taskWithPayload()), 'FY');
+  fyPrepared.targets.publishPreparation = {
+    ...fyPrepared.targets.publishPreparation,
+    targetStore: 'FY',
+    titleGroup: 'title3',
+    titleAr: 'FY explicit Arabic title',
+    titleEn: 'FY explicit English title',
+  };
+  const fyPreparedPayload = setPayloadTitles(fyPrepared, {
+    ar: 'FY explicit Arabic title',
+    en: 'FY explicit English title',
+  });
+  const fyPreparedResult = await findOrBuildPublishPayload(fyPreparedPayload, {targetStore: 'FY'});
+  check('FY explicit prepare-publish title fills the same task lock', fyPreparedResult.payload?.multi_language_name_list?.find(row => row.language === 'en')?.name, 'FY explicit English title');
+  check('FY explicit title lock is projected structurally', fyPreparedResult.destinationProjection?.titleGroup, 'title3');
+
+  // An old approved binding can retain an earlier preparation snapshot. Root
+  // task/targets fields must not silently outrank that historical binding: the
+  // portal must materialize the current explicit prepare-publish input into the
+  // binding before the executor can trust it.
+  const fyBound = setPayloadTitles(withFullApprovedImages(fyPrepared, {targetStore: 'FY'}), {
+    ar: 'FY explicit Arabic title',
+    en: 'FY explicit English title',
+  });
+  fyBound.publishAssetBinding.publishPreparation = {
+    standardGoodsSn: 'DEST-SN-001',
+    supplyPrice: 222.22,
+    inventory: 77,
+    titleGroup: 'title1',
+    titleAr: 'old binding Arabic title',
+    titleEn: 'old binding English title',
+  };
+  const fyBoundResult = await findOrBuildPublishPayload(fyBound, {targetStore: 'FY'});
+  check('FY root preparation cannot outrank old binding evidence', fyBoundResult.payload, null);
+  check('FY old binding conflict fails closed', fyBoundResult.generationError, value => /title|structured|lock/i.test(String(value)));
+  fyBound.publishAssetBinding.publishPreparation = cloneJson(fyBound.targets.publishPreparation);
+  const fyReboundResult = await findOrBuildPublishPayload(fyBound, {targetStore: 'FY'});
+  check('FY same-task explicit prepare-publish materialized in binding passes', fyReboundResult.payload?.multi_language_name_list?.find(row => row.language === 'en')?.name, 'FY explicit English title');
+
   const protectedTask = withApprovedDescriptions(withApprovedImages(taskWithPayload()));
   const protectedResult = await findOrBuildPublishPayload(protectedTask, {targetStore: 'HL'});
   const protectedPayload = protectedResult.payload;
   check('approved destination image binding is preserved', protectedPayload.skc_list?.[0]?.image_info?.image_info_list?.map(row => row.image_url).join('|'), 'https://img.shein.com/destination/main.png|https://img.shein.com/destination/square.png');
   check('approved destination descriptions are preserved', protectedPayload.multi_language_desc_list?.find(row => row.language === 'en')?.name, 'EN one\nEN two\nEN three\nEN four\nEN five');
   check('approved destination supplierSku is preserved', protectedPayload.skc_list?.[0]?.sku_list?.[0]?.supplier_sku, 'DEST-SN-001');
+
+  // QH's legal 14-image layout is split across three payload locations:
+  // twelve SKC images, one top-level carousel image, and one nested SKU image.
+  // The protected comparison must preserve all three locations, including a
+  // camelCase payload read from a legacy task snapshot.
+  const qhTask = withFullApprovedImages(taskWithPayload(), {targetStore: 'QH', camelCase: true});
+  const qhResult = await findOrBuildPublishPayload(qhTask, {targetStore: 'QH'});
+  const qhBindingProjection = normalizeApprovedImageBindingProjection(qhTask.publishAssetBinding.images, {sourceApproved: true});
+  const qhPayloadProjection = normalizePublishPayloadImageProjection(qhTask.openapiPublishPayload);
+  check('QH legal 14-image protected projection passes', qhResult.payload !== null, true);
+  check('QH approved image projection contains 14 rows', qhBindingProjection.length, 14);
+  check('QH payload projection contains 14 rows', qhPayloadProjection.length, 14);
+  check('QH payload projection matches approved binding', JSON.stringify(qhPayloadProjection), JSON.stringify(qhBindingProjection));
+  check('QH top carousel remains outside SKC projection', qhPayloadProjection.some(row => row.role === 'carouselSecondCover'), true);
+  check('QH nested SKU image remains in SKU projection', qhPayloadProjection.some(row => row.role === 'skuImage'), true);
+
+  async function expectProtectedImageDrift(label, mutate) {
+    const driftedTask = withFullApprovedImages(taskWithPayload(), {targetStore: 'QH'});
+    mutate(driftedTask.openapiPublishPayload);
+    const driftedResult = await findOrBuildPublishPayload(driftedTask, {targetStore: 'QH'});
+    check(`${label} protected image drift fails closed`, driftedResult.payload, null);
+    check(`${label} protected image drift names binding mismatch`, driftedResult.generationError, value => /image|binding/i.test(String(value)));
+  }
+
+  await expectProtectedImageDrift('QH URL', payload => {
+    payload.image_info.image_info_list[0].image_url = 'https://img.shein.com/destination/qh-carousel-drift.png';
+  });
+  await expectProtectedImageDrift('QH role', payload => {
+    payload.skc_list[0].image_info.image_info_list[0].image_type = 2;
+  });
+  await expectProtectedImageDrift('QH count', payload => {
+    payload.skc_list[0].sku_list[0].image_info = {image_info_list: []};
+  });
+  await expectProtectedImageDrift('QH order', payload => {
+    payload.skc_list[0].image_info.image_info_list[1].image_sort = 0;
+  });
+  await expectProtectedImageDrift('QH missing order', payload => {
+    delete payload.skc_list[0].image_info.image_info_list[1].image_sort;
+  });
+  await expectProtectedImageDrift('QH boolean type', payload => {
+    payload.skc_list[0].image_info.image_info_list[0].image_type = true;
+  });
+  await expectProtectedImageDrift('QH boolean order', payload => {
+    payload.skc_list[0].image_info.image_info_list[0].image_sort = true;
+  });
+  await expectProtectedImageDrift('QH dual type aliases', payload => {
+    payload.skc_list[0].image_info.image_info_list[0].imageType = 1;
+  });
+  await expectProtectedImageDrift('QH dual image containers', payload => {
+    payload.skc_list[0].imageInfo = cloneJson(payload.skc_list[0].image_info);
+  });
+  await expectProtectedImageDrift('QH missing URL', payload => {
+    delete payload.skc_list[0].image_info.image_info_list[0].image_url;
+  });
+  await expectProtectedImageDrift('QH non-object image row', payload => {
+    payload.skc_list[0].image_info.image_info_list.push(null);
+  });
+
+  const qhMultiSku = withFullApprovedImages(taskWithPayload(), {targetStore: 'QH'});
+  const firstSku = qhMultiSku.openapiPublishPayload.skc_list[0].sku_list[0];
+  qhMultiSku.openapiPublishPayload.skc_list[0].sku_list.push(cloneJson(firstSku));
+  const qhMultiSkuResult = await findOrBuildPublishPayload(qhMultiSku, {targetStore: 'QH'});
+  check('QH legal repeated SKU image across multiple SKUs passes', qhMultiSkuResult.payload !== null, true);
+  const qhMultiSkuDrift = cloneJson(qhMultiSku);
+  qhMultiSkuDrift.openapiPublishPayload.skc_list[0].sku_list[1].image_info.image_info_list[0].image_url = 'https://img.shein.com/destination/qh-sku-drift.png';
+  const qhMultiSkuDriftResult = await findOrBuildPublishPayload(qhMultiSkuDrift, {targetStore: 'QH'});
+  check('QH one-of-many SKU image drift fails closed', qhMultiSkuDriftResult.payload, null);
 
   const unboundTargetPayload = taskWithPayload();
   delete unboundTargetPayload.targets.publishPreparation;

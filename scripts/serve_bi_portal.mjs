@@ -8546,7 +8546,11 @@ function validateExistingPublishAssetBindingForAdopt(task) {
     });
   }
   const storedFingerprint = String(binding.bindingFingerprint || '');
-  const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {binding, images: binding.images});
+  const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {
+    binding,
+    images: binding.images,
+    publishPreparation: binding.publishPreparation || {},
+  });
   if (!storedFingerprint || storedFingerprint !== recomputedFingerprint) {
     blockers.push({
       code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
@@ -9833,7 +9837,11 @@ function validateReusedApprovedTaskBinding(task, {targetStore, expectedKind = 'c
     const imageCount = Number(binding.imageCount);
     if (!Number.isSafeInteger(imageCount) || imageCount !== images.length) blockers.push({code: 'REUSE_APPROVED_BINDING_IMAGE_COUNT_INVALID', message: `imageCount=${binding.imageCount ?? '(missing)'} does not match images=${images.length}`});
     const storedFingerprint = String(binding.bindingFingerprint || '');
-    const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {binding, images: binding.images});
+    const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {
+      binding,
+      images: binding.images,
+      publishPreparation: binding.publishPreparation || {},
+    });
     if (!storedFingerprint || storedFingerprint !== recomputedFingerprint) blockers.push({code: 'REUSE_APPROVED_BINDING_FINGERPRINT_INVALID', message: `bindingFingerprint does not match canonical recomputation`});
   }
   const canonicalImages = canonicalPublishAssetBindingImages(binding.images);
@@ -10029,6 +10037,9 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       publishPreparation,
     },
     publishPreparation,
+    ...(task?.publishAssetBinding && typeof task.publishAssetBinding === 'object' && !Array.isArray(task.publishAssetBinding)
+      ? {publishAssetBinding: {...task.publishAssetBinding, publishPreparation}}
+      : {}),
   };
   const captureTask = {
     ...taskForCapture,

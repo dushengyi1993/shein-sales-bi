@@ -68,6 +68,7 @@ import {
   sha256StableJson,
   sha256Utf8,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {readOpenApiProductCache, writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
@@ -77,6 +78,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-prepare-product-attribute-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(testOutputDir, 'shein_openapi_products');
 
 const TARGET_STORE = 'FY';
 const DONOR_STORE = 'YJ';
@@ -178,7 +180,7 @@ async function writeSourceFixtures() {
     inventoryRows: [],
     performanceRows: [],
   }, null, 2)}\n`, 'utf8');
-  await fs.writeFile(path.join(sourceOpenApiDir, 'latest.json'), `${JSON.stringify({
+  await writeOpenApiProductCacheAtomically(path.join(sourceOpenApiDir, 'latest.json'), {
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: 'DL',
     fetchedAt: SOURCE_DETAIL_AT,
@@ -196,6 +198,7 @@ async function writeSourceFixtures() {
           {language: 'ar', productName: 'منتج مصدر'},
         ],
         productAttributeInfoList: [
+          {attributeId: 101, attributeValueId: 202},
           {attributeId: 1000546, attributeValueId: 0, attributeValue: STANDARD_GOODS_SN},
         ],
         skcInfoList: [{
@@ -230,7 +233,7 @@ async function writeSourceFixtures() {
       },
     }],
     detailFallbackResults: [],
-  }, null, 2)}\n`, 'utf8');
+  }, {storeKey: 'DL', generatedAt: SOURCE_DETAIL_AT});
 }
 async function removeSourceFixtures() {
   await fs.rm(sourceLinkDir, {recursive: true, force: true});
@@ -709,8 +712,8 @@ function descriptionBindingFor(taskId, payload, baseTaskRevision = 1, imageBindi
 
 function validPublishAssetBindingFixture(task) {
   const images = [
-    {name: 'attr-main.jpg', role: 'main', imageType: 1, imageUrl: 'https://img.shein.com/main.jpg', width: 1000, height: 1000, sha256: crypto.createHash('sha256').update('attr-main-image').digest('hex')},
-    {name: 'attr-square.jpg', role: 'square', imageType: 5, imageUrl: 'https://img.shein.com/square.jpg', width: 800, height: 800, sha256: crypto.createHash('sha256').update('attr-square-image').digest('hex')},
+    {name: 'attr-main.jpg', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/main.jpg', width: 1000, height: 1000, sha256: crypto.createHash('sha256').update('attr-main-image').digest('hex')},
+    {name: 'attr-square.jpg', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/square.jpg', width: 800, height: 800, sha256: crypto.createHash('sha256').update('attr-square-image').digest('hex')},
   ];
   const binding = {
     schemaVersion: 1,
@@ -724,36 +727,44 @@ function validPublishAssetBindingFixture(task) {
     evidence: {payloadSource: 'task', preflightInvalidated: true},
     publishPreparation: {
       standardGoodsSn: STANDARD_GOODS_SN,
-      supplyPrice: null,
-      inventory: null,
-      categoryId: null,
-      titles: {},
+      supplierSku: `${STANDARD_GOODS_SN}-SKU`,
+      supplyPrice: 99,
+      inventory: 100,
+      categoryId: 123456,
+      titles: {
+        en: 'Attr bind smoke product',
+        ar: 'منتج تجريبي',
+      },
       attributeOverrides: [],
     },
   };
   binding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {
     binding,
     images: binding.images,
+    publishPreparation: binding.publishPreparation,
   });
   return binding;
 }
 
 async function attachFullPayload(taskId, {skipDescription = false} = {}) {
   const payload = publishPayloadFor();
-  await updateRawTaskById(taskId, task => ({
-    ...task,
-    note: `${TARGET_STORE} 待绑定缺失白名单商品属性`,
-    openapiPublishPayload: JSON.parse(JSON.stringify(payload)),
-    publishAssetBinding: {
-      bindingFingerprint: IMAGE_FINGERPRINT,
-      boundAt: '2026-08-15T00:00:00.000Z',
-      payloadSource: 'task',
-      imageCount: 2,
-    },
-    ...(skipDescription ? {} : {
-      descriptionMaterialBinding: descriptionBindingFor(taskId, payload, Number(task?.repositoryRevision || 1)),
-    }),
-  }));
+  await updateRawTaskById(taskId, task => {
+    const assetBinding = validPublishAssetBindingFixture(task);
+    return {
+      ...task,
+      note: `${TARGET_STORE} 待绑定缺失白名单商品属性`,
+      openapiPublishPayload: JSON.parse(JSON.stringify(payload)),
+      publishAssetBinding: assetBinding,
+      ...(skipDescription ? {} : {
+        descriptionMaterialBinding: descriptionBindingFor(
+          taskId,
+          payload,
+          Number(task?.repositoryRevision || 1),
+          String(assetBinding.bindingFingerprint || ''),
+        ),
+      }),
+    };
+  });
 }
 
 async function bindProductAttribute(cookie, taskId, {
@@ -910,6 +921,8 @@ async function closeServer(server, label, {graceMs = 2_000, forceMs = 2_000} = {
 let cleanupOnExit = false;
 try {
   await writeSourceFixtures();
+  const sourceFixtureReadback = await readOpenApiProductCache(path.join(sourceOpenApiDir, 'latest.json'), {expectedStore: 'DL'});
+  check('source OpenAPI fixture readback is valid', sourceFixtureReadback.data?.detailResults?.length, 1);
   await fs.writeFile(descSourceFile, descSourceBytes, 'utf8');
   await waitReady();
   const cookie = await login();
@@ -1166,7 +1179,7 @@ try {
   });
   check('step-1 dry-run blocked by stale description lock', String(step1DryRun.json?.execution?.state || ''), 'blocked');
   check('step-1 dry-run blocker mentions description drift', asArray(step1DryRun.json?.execution?.preflight?.blockers)
-    .some(row => /newPayloadHash 与任务当前 openapiPublishPayload 不一致|hash 与审核资料绑定不一致/.test(String(row))), true);
+    .some(row => /descriptionMaterialBinding|destination descriptions|newPayloadHash 与任务当前 openapiPublishPayload 不一致|hash 与审核资料绑定不一致/.test(String(row))), true);
   check('step-1 dry-run carries no attribute gate blocker', asArray(step1DryRun.json?.execution?.preflight?.blockers)
     .some(row => /PRODUCT_ATTRIBUTE/.test(String(row))), false);
 
@@ -1330,12 +1343,15 @@ try {
     newPayloadHash: resignAppendRaw.productAttributeBinding?.newPayloadHash,
     resignSanitization: expectedResignSanitization,
   }));
+  const resignSanitizationEvidence = resignAppendRaw.productAttributeBinding?.resignSanitization;
+  check('stale append re-sign sanitation evidence exists before tamper checks', Boolean(resignSanitizationEvidence), true);
   for (const [label, mutate] of [
     ['removedCount', evidence => { evidence.removedCount += 1; }],
     ['beforeHash', evidence => { evidence.currentPayloadHashBeforeSanitization = 'a'.repeat(64); }],
     ['afterHash', evidence => { evidence.currentPayloadHashAfterSanitization = 'b'.repeat(64); }],
     ['removedPathSummary', evidence => { evidence.removedPathSummary[0] = '$.saleAttributeList[99]'; }],
   ]) {
+    if (!resignSanitizationEvidence) continue;
     const tampered = JSON.parse(JSON.stringify(resignAppendRaw));
     mutate(tampered.productAttributeBinding.resignSanitization);
     check(`stale append sanitation tamper ${label} invalidates lock`, validateProductAttributeBindingLock(tampered, tampered.openapiPublishPayload).ok, false);
@@ -1372,7 +1388,7 @@ try {
     method: 'POST', cookie, body: {id: resignAppendTaskId, mode: 'dry-run', source: 'test'},
   });
   check('stale append dry-run requires description rebind', asArray(resignAppendDryRun.json?.execution?.preflight?.blockers)
-    .some(row => /newPayloadHash 与任务当前 openapiPublishPayload 不一致|hash 与审核资料绑定不一致/.test(String(row))), true);
+    .some(row => /descriptionMaterialBinding|destination descriptions|newPayloadHash 与任务当前 openapiPublishPayload 不一致|hash 与审核资料绑定不一致/.test(String(row))), true);
   const resignAppendBindingKey = String(resignAppendRaw.productAttributeBinding?.bindingRequestKey || '');
   const resignAppendAfterStaleDryRun = await rawTaskById(resignAppendTaskId);
   const resignAppendRebind = await req('/api/link-ops-prepare-descriptions', {
@@ -1484,7 +1500,7 @@ try {
       sha256: crypto.createHash('sha256').update(`resign-adopt-image-${index}`).digest('hex'),
     }));
     assetBinding.imageCount = assetBinding.images.length;
-    assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {binding: assetBinding, images: assetBinding.images});
+    assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {binding: assetBinding, images: assetBinding.images, publishPreparation: assetBinding.publishPreparation || {}});
     const description = JSON.parse(JSON.stringify(task.descriptionMaterialBinding));
     description.imageBindingFingerprint = assetBinding.bindingFingerprint;
     return {
@@ -1564,7 +1580,7 @@ try {
       sha256: crypto.createHash('sha256').update(`negative-resign-image-${index}`).digest('hex'),
     }));
     assetBinding.imageCount = assetBinding.images.length;
-    assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {binding: assetBinding, images: assetBinding.images});
+    assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {binding: assetBinding, images: assetBinding.images, publishPreparation: assetBinding.publishPreparation || {}});
     const description = JSON.parse(JSON.stringify(task.descriptionMaterialBinding));
     description.imageBindingFingerprint = assetBinding.bindingFingerprint;
     return {...task, publishAssetBinding: assetBinding, descriptionMaterialBinding: description};
@@ -2394,6 +2410,7 @@ try {
     assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {
       binding: assetBinding,
       images: assetBinding.images,
+      publishPreparation: assetBinding.publishPreparation || {},
     });
     const nextRevision = Number(task.repositoryRevision || 0) + 1;
     return {
@@ -2550,6 +2567,7 @@ try {
     assetBinding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {
       binding: assetBinding,
       images: assetBinding.images,
+      publishPreparation: assetBinding.publishPreparation || {},
     });
     const attrBinding = JSON.parse(JSON.stringify(task.productAttributeBinding));
     attrBinding.imageBindingFingerprint = assetBinding.bindingFingerprint;
@@ -3189,7 +3207,7 @@ try {
   for (const [label, operation] of [
     ['stop isolated attribute portal', () => stopChild(portal, 'isolated attribute portal')],
     ['close fake OpenAPI server', () => closeServer(fakeOpenApi, 'fake OpenAPI server')],
-    ['remove source detail fixtures', () => removeSourceFixtures()],
+    ['remove source detail fixtures', async () => { if (cleanupOnExit) await removeSourceFixtures(); }],
     ['remove isolated attribute files', async () => {
       await sleep(250);
       if (cleanupOnExit) await fs.rm(tmpRoot, {recursive: true, force: true});
