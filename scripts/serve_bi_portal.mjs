@@ -422,12 +422,13 @@ function biPortalLiveAccountingIdempotencyKey(generatedAt, event = {}) {
   return biPortalQueueHashIdempotencyKey('live', generatedAt, ...eventIdentities);
 }
 
-function biPortalLiveAccountingCoalesceKey(generatedAt) {
-  // All events for one API core generation share a pending/running group.
-  // A pending materialization reads the latest database state, while a
-  // running materialization needs at most one rerun for events that may land
-  // after its snapshot. A new core generation gets a different group.
-  return biPortalQueueHashIdempotencyKey('livegen', generatedAt);
+function biPortalGenerationCoalesceKey(generatedAt) {
+  // Core warmup, homepage accounting catch-up and live events for one API
+  // core generation share a pending/running group. A pending materialization
+  // reads the latest database state, while a running materialization needs at
+  // most one rerun for facts that may land after its snapshot. A new core
+  // generation gets a different group; force refreshes bypass this group.
+  return biPortalQueueHashIdempotencyKey('generation', generatedAt);
 }
 // Queue reason sanitizer: every C0 control character (including NUL), DEL
 // and C1 range byte is %HH-encoded so a reason can never corrupt exec argv
@@ -12050,7 +12051,10 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
       ? biPortalForceRefreshIdempotencyKey(generatedAt, refreshToken)
       : biPortalCoreWarmupIdempotencyKey(generatedAt)
   ));
-  const key = `${section}|${generatedAt || ''}|${idempotencyKey}`;
+  const coalesceKey = String(options.coalesceKey || (
+    options.force === true ? '' : biPortalGenerationCoalesceKey(generatedAt)
+  ));
+  const key = `${section}|${generatedAt || ''}|${idempotencyKey}|${coalesceKey}`;
   if (biExternalSectionQueuePending.has(key)) return true;
   const reason = sanitizeBiQueueReason(options.reason || `portal-${generatedAt || 'current'}`);
   // An explicit force refresh must still reach the manager so it can retain
@@ -12076,6 +12080,7 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
     '--priority', priority,
     '--reason', reason,
     '--idempotency-key', idempotencyKey,
+    ...(coalesceKey ? ['--coalesce-key', coalesceKey] : []),
   ], {
     cwd: ROOT,
     env: process.env,
@@ -12253,6 +12258,7 @@ async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt
   const pending = persistHostLockedBiSectionPlan(liveAccountingQueuePlan({kind: 'order'}), generatedAt, {
     reason: `homepage-accounting-stale-${generatedAt || 'current'}`,
     idempotencyKey,
+    coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
   });
   biAccountingCatchupTargets.set(key, pending);
   try {
@@ -13656,7 +13662,7 @@ export async function executeBiLiveAccountingRefreshAttempt({
     await persistAccountingPlan(accountingQueue, generatedAt, {
       reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
       idempotencyKey: biPortalLiveAccountingIdempotencyKey(generatedAt, sourceEvent),
-      coalesceKey: biPortalLiveAccountingCoalesceKey(generatedAt),
+      coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
     });
   } catch (error) {
     if (error && typeof error === 'object') error.liveProjectionRefreshed = true;
@@ -21568,7 +21574,7 @@ export const __testHooks = {
   biPortalHomepageAccountingIdempotencyKey,
   biPortalLiveAccountingEventIdentity,
   biPortalLiveAccountingIdempotencyKey,
-  biPortalLiveAccountingCoalesceKey,
+  biPortalGenerationCoalesceKey,
   resetBiPortalCoreWarmupEnqueueBackoff,
   scheduleBiPortalCoreWarmup,
   startBiPortalCoreWarmupWatcher,

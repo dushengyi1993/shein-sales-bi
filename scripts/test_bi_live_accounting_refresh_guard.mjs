@@ -95,7 +95,7 @@ for (const fixture of [
   assert.equal(calls[2][1].liveProjectionRefreshed, true);
   assert.equal(calls[3][0], 'persist');
   assert.match(calls[3][3].idempotencyKey, /^portal-live:sha256:/);
-  assert.match(calls[3][3].coalesceKey, /^portal-livegen:sha256:/);
+  assert.match(calls[3][3].coalesceKey, /^portal-generation:sha256:/);
   assert.equal(calls[4][0], 'publish');
   assert.equal(calls[4][1].accountingQueued, true);
 }

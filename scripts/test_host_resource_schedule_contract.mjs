@@ -444,7 +444,7 @@ assert.equal(retryResult.accountingQueued, true);
 assert.match(firstIdempotencyKey, /^portal-live:sha256:/);
 assert.equal(retryIdempotencyKey, firstIdempotencyKey,
   'a retry of the same event and generation must reuse one queue identity');
-assert.match(firstCoalesceKey, /^portal-livegen:sha256:/);
+assert.match(firstCoalesceKey, /^portal-generation:sha256:/);
 assert.equal(retryCoalesceKey, firstCoalesceKey,
   'all retries in the same core generation must reuse one pending/running coalesce group');
 assert.match(portal, /liveAccountingRefreshStopped \|\| liveAccountingRefreshRunning \|\| !liveAccountingRefreshPendingEvent/,

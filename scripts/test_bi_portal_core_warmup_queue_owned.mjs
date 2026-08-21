@@ -1211,6 +1211,8 @@ assert.match(source, /\['--coalesce-key', coalesceKey\]/,
   'live accounting persistence must pass its generation coalesce key to the queue manager');
 assert.match(source, /function enqueueHostLockedBiSection[\s\S]*biPortalCoreWarmupIdempotencyKey\(generatedAt\)[\s\S]*'--idempotency-key', idempotencyKey/,
   'ordinary cache misses must enqueue with the warmup-compatible generation key');
+assert.match(source, /function enqueueHostLockedBiSection[\s\S]*biPortalGenerationCoalesceKey\(generatedAt\)[\s\S]*'--coalesce-key', coalesceKey/,
+  'ordinary core warmup/cache-miss work must share the generation coalesce group');
 assert.match(source, /detached: process\.platform !== 'win32'/,
   'the production enqueue child must own a process group so descendants can be terminated together');
 assert.match(source, /process\.kill\(-pid, signal\)/,
@@ -1228,9 +1230,11 @@ assert.match(source, /refusing force enqueue without refreshToken/,
   'the host-locked enqueue must fail closed when a force request has no refresh token');
 assert.match(source, /persistHomepageAccountingCatchupOnce[\s\S]*const idempotencyKey = biPortalHomepageAccountingIdempotencyKey\(accountingState, generatedAt\);[\s\S]*const key = idempotencyKey;[\s\S]*idempotencyKey,/,
   'homepage accounting catch-up must persist its generatedAt/minimum/target identity');
+assert.match(source, /persistHomepageAccountingCatchupOnce[\s\S]*coalesceKey: biPortalGenerationCoalesceKey\(generatedAt\)/,
+  'homepage accounting catch-up must share the core generation coalesce group');
 assert.match(source, /export async function executeBiLiveAccountingRefreshAttempt\(\{[\s\S]*?persistAccountingPlan,[\s\S]*?await persistAccountingPlan\(accountingQueue, generatedAt, \{[\s\S]*?idempotencyKey: biPortalLiveAccountingIdempotencyKey\(generatedAt, sourceEvent\),[\s\S]*?\}\);/,
   'live order/return accounting helper must carry a stable event-derived queue identity');
-assert.match(source, /coalesceKey: biPortalLiveAccountingCoalesceKey\(generatedAt\)/,
+assert.match(source, /coalesceKey: biPortalGenerationCoalesceKey\(generatedAt\)/,
   'live order/return accounting must also carry one stable core-generation coalesce group');
 assert.match(source, /persistAccountingPlan: async \(accountingQueue, generatedAt, options\) => \{[\s\S]*?persistHostLockedBiSectionPlan\(accountingQueue, generatedAt, \{[\s\S]*?\.\.\.options,/,
   'live order/return accounting must adapt the guarded helper to the host-locked queue');
@@ -1307,10 +1311,10 @@ const liveOrder = {
   orderStatus: 'paid', salesQuantity: 1, salesSar: 42, occurredAt: '2026-08-17T05:03:00.000Z',
 };
 const liveKey = portalIdempotencyHooks.biPortalLiveAccountingIdempotencyKey('G1', liveOrder);
-const liveCoalesceKey = portalIdempotencyHooks.biPortalLiveAccountingCoalesceKey('G1');
-assert.equal(liveCoalesceKey, portalIdempotencyHooks.biPortalLiveAccountingCoalesceKey('G1'),
+const liveCoalesceKey = portalIdempotencyHooks.biPortalGenerationCoalesceKey('G1');
+assert.equal(liveCoalesceKey, portalIdempotencyHooks.biPortalGenerationCoalesceKey('G1'),
   'one core generation must have one stable live-accounting coalesce group');
-assert.notEqual(liveCoalesceKey, portalIdempotencyHooks.biPortalLiveAccountingCoalesceKey('G2'),
+assert.notEqual(liveCoalesceKey, portalIdempotencyHooks.biPortalGenerationCoalesceKey('G2'),
   'a new core generation must not coalesce into the previous generation');
 assert.equal(liveKey, portalIdempotencyHooks.biPortalLiveAccountingIdempotencyKey('G1', {...liveOrder}),
   'replaying the same live fact must be a no-op identity');
