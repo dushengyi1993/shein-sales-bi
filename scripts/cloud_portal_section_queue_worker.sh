@@ -9,6 +9,7 @@ LOCK_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE:-$ROOT/state/locks/shein-bi
 MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-3}"
 SECTION_TIMEOUT="${SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC:-900}"
 PROFIT_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC:-480}"
+HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC:-540}"
 LEASE_SECONDS="${SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC:-1200}"
 SCHEDULED_ENTRY="${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-0}"
 DEADLINE_MINUTE="${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE:-}"
@@ -21,6 +22,7 @@ trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 [[ "$MAX_SECTIONS" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$SECTION_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$PROFIT_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
+[[ "$HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$DEADLINE_MINUTE" =~ ^[0-9]+$ ]] && (( DEADLINE_MINUTE >= 0 && DEADLINE_MINUTE <= 59 )) || exit 64
 if [[ "$SCHEDULED_ENTRY" != "1" ]]; then
   echo "[portal-section-worker] defer reason=unscheduled_direct_entry; use shein-bi-cloud-portal-section-queue.service" >&2
@@ -74,6 +76,11 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     EXCLUDED_SECTIONS+=(profit)
     HEAVY_SECTION_DEFERRED=1
     echo "[portal-section-worker] defer heavy section=profit remainingSec=$REMAINING_SEC requiredSec=$PROFIT_MIN_RUNTIME_SEC"
+  fi
+  if (( REMAINING_SEC < HOME_RANKINGS_MIN_RUNTIME_SEC )); then
+    EXCLUDED_SECTIONS+=(homeRankings)
+    HEAVY_SECTION_DEFERRED=1
+    echo "[portal-section-worker] defer heavy section=homeRankings remainingSec=$REMAINING_SEC requiredSec=$HOME_RANKINGS_MIN_RUNTIME_SEC"
   fi
   if [[ "${#EXCLUDED_SECTIONS[@]}" -gt 0 ]]; then
     CLAIM_ARGS+=(--exclude-sections "$(IFS=,; echo "${EXCLUDED_SECTIONS[*]}")")

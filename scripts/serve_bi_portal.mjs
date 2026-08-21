@@ -13589,19 +13589,21 @@ export function liveAccountingQueuePlan(event = {}) {
   const hasReturn = accountingKinds.has('return');
   if (!hasOrder && !hasReturn) return [];
 
-  // Current-day orders are immediately visible through liveSalesToday, but
-  // they must still advance the canonical profit cache before the date rolls
-  // over and that live overlay moves to the next day. Keep the accounting
-  // dependency lane ahead of ordinary section work so one safe worker slot can
-  // publish profit first and the historical homepage baseline second.
+  // Current-day orders are immediately visible through liveSalesToday, whose
+  // browser overlay also replaces today's homepage ranking rows. They must
+  // still advance canonical profit before the date rolls over, but rebuilding
+  // the multi-minute historical homeRankings section for every order creates
+  // a perpetual chase under normal order traffic. Historical mutations and
+  // returns retain the full ranking invalidation set below.
   const canonical = [
     {section: 'profit', priority: 5},
-    {section: 'homeRankings', priority: 5},
     {section: 'homeProfit', priority: 5},
   ];
   if (!hasReturn && event?.refreshHistoricalSections !== true) return canonical;
   return [
-    ...canonical,
+    {section: 'profit', priority: 5},
+    {section: 'homeRankings', priority: 5},
+    {section: 'homeProfit', priority: 5},
     {section: 'orders', priority: 10},
     {section: 'afterSales', priority: 10},
     {section: 'productSalesDaily', priority: 50},

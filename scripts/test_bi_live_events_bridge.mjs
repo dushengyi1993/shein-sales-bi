@@ -79,10 +79,9 @@ assert.deepEqual(
   liveAccountingQueuePlan({kind: 'order'}),
   [
     {section: 'profit', priority: 5},
-    {section: 'homeRankings', priority: 5},
     {section: 'homeProfit', priority: 5},
   ],
-  'a current-day order must advance canonical accounting before its live overlay rolls into history',
+  'a current-day order must advance profit without rebuilding rankings already covered by the live overlay',
 );
 assert.deepEqual(
   liveAccountingQueuePlan({kind: 'return', refreshHistoricalSections: true}),

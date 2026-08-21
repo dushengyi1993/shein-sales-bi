@@ -391,9 +391,8 @@ const currentDayOrder = {
 const canonicalAccountingPlan = liveAccountingQueuePlan(currentDayOrder);
 assert.deepEqual(canonicalAccountingPlan, [
   {section: 'profit', priority: 5},
-  {section: 'homeRankings', priority: 5},
   {section: 'homeProfit', priority: 5},
-], 'current-day orders must retain the deferred canonical accounting plan');
+], 'current-day orders must retain deferred profit accounting without per-order historical ranking rebuilds');
 
 const liveAccountingCalls = [];
 const executeCurrentDayOrder = persistAccountingPlan => executeBiLiveAccountingRefreshAttempt({
