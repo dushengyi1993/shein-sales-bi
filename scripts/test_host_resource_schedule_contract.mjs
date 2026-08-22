@@ -595,12 +595,17 @@ esac
 fs.writeFileSync(path.join(slotBehaviorBin, 'systemctl'), `#!/usr/bin/env bash
 set -Eeuo pipefail
 printf '%s\\n' "$*" >> "\${SHEIN_TEST_SYSTEMCTL_LOG:?}"
-if [[ "\${1:-}" != is-active || "\${2:-}" != --quiet ]]; then exit 64; fi
-case "\${3:-}" in
-  shein-bi-cloud-rtv-verify.timer) [[ "\${SHEIN_TEST_RTV_ACTIVE:-0}" == 1 ]] ;;
-  shein-bi-cloud-morning-chain.service) [[ "\${SHEIN_TEST_MORNING_ACTIVE:-0}" == 1 ]] ;;
-  *) exit 1 ;;
-esac
+if [[ "\${1:-}" == is-active && "\${2:-}" == --quiet ]]; then
+  case "\${3:-}" in
+    shein-bi-cloud-rtv-verify.timer) [[ "\${SHEIN_TEST_RTV_ACTIVE:-0}" == 1 ]] ;;
+    *) exit 1 ;;
+  esac
+elif [[ "\${1:-}" == show && "\${2:-}" == --no-pager && "\${3:-}" == --property=ActiveState && "\${4:-}" == --value && "\${5:-}" == shein-bi-cloud-morning-chain.service ]]; then
+  if [[ "\${SHEIN_TEST_MORNING_SHOW_FAILURE:-0}" == 1 ]]; then exit 1; fi
+  printf '%s\\n' "\${SHEIN_TEST_MORNING_STATE-inactive}"
+else
+  exit 64
+fi
 `);
 const slotBehaviorHostWrapper = path.join(slotBehaviorScripts, 'run_host_heavy_job.sh');
 fs.writeFileSync(slotBehaviorHostWrapper, `#!/usr/bin/env bash
@@ -620,7 +625,8 @@ const runSlotBehaviorCase = ({
   hour,
   minute,
   rtvActive,
-  morningActive = false,
+  morningState = 'inactive',
+  morningShowFailure = false,
   expectedExit,
   expectedHost,
   expectedDeadline,
@@ -628,6 +634,7 @@ const runSlotBehaviorCase = ({
   expectRtvCheck,
   expectRtvDefer = false,
   expectMorningDefer = false,
+  expectMorningUnknownDefer = false,
 }) => {
   fs.rmSync(slotBehaviorHostLog, {force: true});
   fs.writeFileSync(slotBehaviorSystemctlLog, '');
@@ -639,7 +646,8 @@ const runSlotBehaviorCase = ({
     `export SHEIN_TEST_SLOT_HOUR=${shellQuote(hour)}`,
     `export SHEIN_TEST_SLOT_MINUTE=${shellQuote(minute)}`,
     `export SHEIN_TEST_RTV_ACTIVE=${shellQuote(rtvActive ? 1 : 0)}`,
-    `export SHEIN_TEST_MORNING_ACTIVE=${shellQuote(morningActive ? 1 : 0)}`,
+    `export SHEIN_TEST_MORNING_STATE=${shellQuote(morningState)}`,
+    `export SHEIN_TEST_MORNING_SHOW_FAILURE=${shellQuote(morningShowFailure ? 1 : 0)}`,
     `export SHEIN_TEST_HOST_LOG=${shellQuote(toPosixPath(slotBehaviorHostLog))}`,
     `export SHEIN_TEST_SYSTEMCTL_LOG=${shellQuote(toPosixPath(slotBehaviorSystemctlLog))}`,
     `exec bash ${shellQuote(toPosixPath(slotScript))}`,
@@ -687,6 +695,13 @@ const runSlotBehaviorCase = ({
     assert.doesNotMatch(output, /defer reason=daily_operating_refresh_active/,
       `${label}: inactive morning chain must not produce the morning defer reason`);
   }
+  if (expectMorningUnknownDefer) {
+    assert.match(result.stderr, /defer reason=daily_operating_refresh_state_unknown/,
+      `${label}: unknown or failed morning state must produce the fail-closed defer reason`);
+  } else {
+    assert.doesNotMatch(output, /defer reason=daily_operating_refresh_state_unknown/,
+      `${label}: known morning state must not produce the unknown-state defer reason`);
+  }
 };
 
   runSlotBehaviorCase({
@@ -694,11 +709,35 @@ const runSlotBehaviorCase = ({
     expectedExit: 0, expectedHost: true, expectedDeadline: 17, expectedMax: 1, expectRtvCheck: false,
   });
   runSlotBehaviorCase({
-    label: '08:14 morning active', hour: 8, minute: 14, rtvActive: false, morningActive: true,
+    label: '08:14 morning active', hour: 8, minute: 14, rtvActive: false, morningState: 'active',
     expectedExit: 75, expectedHost: false, expectRtvCheck: false, expectMorningDefer: true,
   });
   runSlotBehaviorCase({
+    label: '08:14 morning activating', hour: 8, minute: 14, rtvActive: false, morningState: 'activating',
+    expectedExit: 75, expectedHost: false, expectRtvCheck: false, expectMorningDefer: true,
+  });
+  runSlotBehaviorCase({
+    label: '08:14 morning reloading', hour: 8, minute: 14, rtvActive: false, morningState: 'reloading',
+    expectedExit: 75, expectedHost: false, expectRtvCheck: false, expectMorningDefer: true,
+  });
+  runSlotBehaviorCase({
+    label: '08:14 morning unknown state', hour: 8, minute: 14, rtvActive: false, morningState: 'deactivating',
+    expectedExit: 75, expectedHost: false, expectRtvCheck: false, expectMorningUnknownDefer: true,
+  });
+  runSlotBehaviorCase({
+    label: '08:14 morning empty state', hour: 8, minute: 14, rtvActive: false, morningState: '',
+    expectedExit: 75, expectedHost: false, expectRtvCheck: false, expectMorningUnknownDefer: true,
+  });
+  runSlotBehaviorCase({
+    label: '08:14 morning state query failure', hour: 8, minute: 14, rtvActive: false, morningShowFailure: true,
+    expectedExit: 75, expectedHost: false, expectRtvCheck: false, expectMorningUnknownDefer: true,
+  });
+  runSlotBehaviorCase({
     label: '08:14 morning inactive', hour: 8, minute: 14, rtvActive: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 2, expectRtvCheck: false,
+  });
+  runSlotBehaviorCase({
+    label: '08:14 morning failed', hour: 8, minute: 14, rtvActive: false, morningState: 'failed',
     expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 2, expectRtvCheck: false,
   });
   runSlotBehaviorCase({

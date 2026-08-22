@@ -11,10 +11,21 @@ yield_to_daily_coordinator() {
   # Portal materialization is cache maintenance. The daily business refresh is
   # now one coordinator rather than several timer slots, so only yield while
   # that single run is active. The previous complete cache remains available.
-  if systemctl is-active --quiet shein-bi-cloud-morning-chain.service; then
-    echo "[portal-section-slot] defer reason=daily_operating_refresh_active hour=$HOUR minute=$MINUTE" >&2
-    exit 75
-  fi
+  local active_state
+  active_state="$(systemctl show --no-pager --property=ActiveState --value shein-bi-cloud-morning-chain.service 2>/dev/null || true)"
+  case "$active_state" in
+    active|activating|reloading)
+      echo "[portal-section-slot] defer reason=daily_operating_refresh_active state=$active_state hour=$HOUR minute=$MINUTE" >&2
+      exit 75
+      ;;
+    inactive|failed)
+      return 0
+      ;;
+    *)
+      echo "[portal-section-slot] defer reason=daily_operating_refresh_state_unknown state=${active_state:-unknown} hour=$HOUR minute=$MINUTE" >&2
+      exit 75
+      ;;
+  esac
 }
 
 yield_to_rtv_verify_timer() {
