@@ -106,6 +106,50 @@ export function portalCoreRunIdentityDecision(payload, identity) {
     : {action: 'conflict', reason: 'same_source_run_key_core_not_terminal'};
 }
 
+const PORTAL_SERIALIZED_OVERLAY_KEYS = Object.freeze([
+  'audit',
+  'pipeline',
+  'briefing',
+  'firstRunCheck',
+]);
+
+function isPortalRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Keep the formal core identity at the bounded scanner's front door. The
+ * Portal core can be hundreds of MiB, so cloud_bi_refresh.sh is intentionally
+ * allowed to read only the first 64 KiB. Rebuilding the top-level object here
+ * makes generatedAt the first field and binds __sections.generatedAt to that
+ * exact value without parsing or reserializing the file in the refresh path.
+ */
+export function serializePortalData(data, overlays = {}) {
+  if (!isPortalRecord(data)) throw new Error('PORTAL_DATA_OBJECT_REQUIRED');
+  const sourceSections = isPortalRecord(data.__sections) ? data.__sections : {};
+  const generatedAt = String(
+    data.generatedAt || sourceSections.generatedAt || overlays.generatedAt || '',
+  ).trim();
+  if (!generatedAt) throw new Error('PORTAL_GENERATED_AT_REQUIRED');
+
+  const serialized = {
+    generatedAt,
+    __sections: {
+      ...sourceSections,
+      generatedAt,
+    },
+  };
+  for (const [key, value] of Object.entries(data)) {
+    if (key === 'generatedAt' || key === '__sections' || PORTAL_SERIALIZED_OVERLAY_KEYS.includes(key)) continue;
+    serialized[key] = value;
+  }
+  for (const key of PORTAL_SERIALIZED_OVERLAY_KEYS) {
+    if (Object.hasOwn(overlays, key)) serialized[key] = overlays[key];
+    else if (Object.hasOwn(data, key)) serialized[key] = data[key];
+  }
+  return serialized;
+}
+
 function parseArgs(argv) {
   const envDataMode = String(process.env.SHEIN_BI_PORTAL_DATA_MODE || '').trim();
   const args = {
@@ -17624,15 +17668,26 @@ async function main() {
   const safePipeline = deepSanitize(pipeline);
   const safeBriefing = deepSanitize(briefing);
   const safeFirstRunCheck = deepSanitize(firstRunCheck);
-  const publishedData = args.sourceIdentity ? {
+  const coreGeneratedAt = String(
+    data.generatedAt || data.__sections?.generatedAt || '',
+  ).trim();
+  const dataWithCanonicalGeneration = {
     ...data,
+    generatedAt: coreGeneratedAt,
+    __sections: {
+      ...(isPortalRecord(data.__sections) ? data.__sections : {}),
+      generatedAt: coreGeneratedAt,
+    },
+  };
+  const publishedData = args.sourceIdentity ? {
+    ...dataWithCanonicalGeneration,
     sourceCommit: {
       status: 'terminal',
       sourceRunKey: args.sourceIdentity.sourceRunKey,
       inputFingerprint: args.sourceIdentity.inputFingerprint,
-      generatedAt: String(data.generatedAt || ''),
+      generatedAt: coreGeneratedAt,
     },
-  } : data;
+  } : dataWithCanonicalGeneration;
   let noGroupsPreviewFile = '';
   if (shouldWriteNoGroupsPreview(args)) {
     noGroupsPreviewFile = noGroupsPreviewHtmlFile(args);
@@ -17644,7 +17699,13 @@ async function main() {
   await fs.mkdir(args.outDir, {recursive: true});
   const jsonFile = path.join(args.outDir, 'data.json');
   markStage('write:data');
-  await writeFileWithRetry(jsonFile, JSON.stringify({...publishedData, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
+  const serializedPortalData = serializePortalData(publishedData, {
+    audit: safeAudit,
+    pipeline: safePipeline,
+    briefing: safeBriefing,
+    firstRunCheck: safeFirstRunCheck,
+  });
+  await writeFileWithRetry(jsonFile, JSON.stringify(serializedPortalData, null, 2), 'utf8');
   if (args.sourceIdentity) {
     const written = JSON.parse(await fs.readFile(jsonFile, 'utf8'));
     const decision = portalCoreRunIdentityDecision(written, args.sourceIdentity);

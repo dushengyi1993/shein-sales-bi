@@ -601,6 +601,8 @@ try {
   assert.equal(supersededPayload.published, true);
   assert.equal(supersededPayload.followUpPending, true);
   assert.equal(supersededPayload.publishedRevision, 1);
+  assert.equal(supersededPayload.desiredRevision, 2,
+    'complete must expose the scalar desired revision instead of the status map');
   assert.equal(supersededPayload.entries[0].status, 'pending');
   assert.equal(supersededPayload.entries[0].requestRevision, 2);
   assert.equal(supersededPayload.entries[0].claimedRevision, 0);

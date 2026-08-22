@@ -2,7 +2,7 @@
 Description=Give deferred Portal sections two bounded opportunities between core home lanes
 
 [Timer]
-OnCalendar=*-*-* *:14,44:00
+OnCalendar=*-*-* *:02,32:00
 AccuracySec=15s
 Persistent=false
 Unit=shein-bi-cloud-portal-section-queue.service

@@ -106,7 +106,7 @@ sudo node scripts/manage_cloud_maintenance_mode.mjs resume \
 | --- | --- | --- |
 
 | 半托订单 Webhook + OpenAPI 按单同步 | 实时事件触发 | 更新当天正式销售事实并通过 SSE 通知在线 BI；旧 `shein-bi-cloud-today.timer` 已停用并删除 |
-| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:12/:45` | 轻量刷新19店当前商品库存；`07:12` 主轮另按每店32条有界轮转补齐商品详情，其余轮复用缓存；每轮成功后发布库存守卫依赖 marker |
+| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:18/:48` | 轻量刷新19店当前商品库存，避开 `:00/:15/:30/:45` 销售 reconciliation 同刻启动；`07:18` 主轮另按每店32条有界轮转补齐商品详情，其余轮复用缓存；每轮成功后发布库存守卫依赖 marker |
 | `shein-bi-cloud-today-sales-reconcile.timer` | 每 15 分钟 | 在 Webhook 之外用19店 OpenAPI 纠偏当天销售，只刷新 `liveSalesToday`；属于轻量快车道 |
 | `shein-bi-cloud-yesterday.timer` | 北京时间 `02:45` | 依赖 session/backup marker，刷新前一天最终销售并复核稳定日 |
 
@@ -177,6 +177,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - `daily-refresh`、ET、登录态管家、销售刷新、昨日销售、订单闭环、RTV 校验均有 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` 护栏；如果单个任务越界，应失败并告警，不能把整台服务器拖到 OOM。
 - 销售、日更、ET、营销巡检、晨间链路、日报、Portal 刷新和预热锁统一放在 `/opt/shein-bi/app/state/locks`，所有脚本在 `flock` 前调用 `scripts/lib/shared_lock.sh` 的 `prepare_shared_lock_file`。目录必须是 `2770`，锁文件必须是 `0660` 且 group 为 `sheinops`；禁止恢复 `chmod 0666`、`umask 000` 或可预测的 `/tmp/*.lock`。历史 `/tmp` 残留曾导致任务权限冲突，修复后应 `systemctl daemon-reload`、`systemctl reset-failed`，并确认 app 内 `worldWritableNonSymlinks=0`。
+- Pipeline marker 的跨服务目录由 `scripts/pipeline_marker.mjs` 只维护 marker root/日期两级 `02770`，不递归改任意 state 路径。canonical marker root 是 `/data/shein-bi/state/pipeline-markers`，属主保持 `sheinops:sheinops`；`/opt/shein-bi/app/state` 是只读 bind/兼容路径，禁止从那里写入。仅在 canonical root 模式不是 `2770` 时精确执行一次 `sudo -n chmod 2770 /data/shein-bi/state/pipeline-markers`；现有 `2026-08-23` 日期目录已经是 `sheinops:sheinops 2770`，无需改动。禁止 `chmod -R`、任何 `chown` 或盲目递归修权限，marker 文件内容/哈希契约保持不变。
 - 2026-06-20 已确认旧 `financeData` section 下线：线上 `/api/bi/section/financeData` 应返回 `404`；`/v1/` 应返回 `410`，`/v2/` 只跳转到根路径。不要为 V1/旧财务页面恢复预热、缓存或 timer。
 
 - `inventoryTrend` 不是 ET 实盘库存，而是 SHEIN 前台展示库存趋势。2026-06-20 云端实测 `inventoryTrend.json` 约 `242KB`、gzip 约 `20KB`；若后续怀疑 21MB 大 section，先查线上 `outputs/bi-portal/sections/` 真实体积，不按旧印象处理。
@@ -200,7 +201,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 当天人工灾备入口：`scripts/cloud_bi_refresh.sh today intraday`。日常当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实，不安装每小时 timer；只有实时链路故障并明确决定灾备时才手动运行。
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday final`。切换日以后直接收齐19店 OpenAPI 完整日切片；逐店 fetch/load/每日行门禁通过后才调用 `ops.promote_openapi_sales_slice` 原子晋升。
 
-- Portal section 的静态起跑门由 unit 与 worker 保持一致：`01` 整小时拒绝，`06` 仅拒绝 `:43–:46` 后半槽，`08` 不做静态禁跑；08 时若晨链 active，仍由 slot wrapper 的既有动态 guard 让路。该门不改变 timer、锁、section 优先级或 deadline。
+- Portal section 队列只有一个 `:02/:32` timer：`:02` 为 `HEAVY_ALLOWED=0` 的 light-only 槽，deadline `:14`、最多一个轻 section；`:32` 为 heavy 槽，deadline `:44`。unit、slot、worker 三层均拒绝 `01:*`，并静态拒绝 `02:02/03:02/07:02` 特殊维护窗口；其余小时只接受 `:01–04/:31–34` 起跑。晨链 active/activating/reloading 或状态未知时，slot wrapper 继续动态让路并 fail-closed；这只是调度优化，不改变数据库 promotion 根修、锁、section 优先级或队列语义。
 - Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。普通当天订单只刷新 `liveSalesToday`，不会等待移动加权成本；退货和历史订单变动把 `orders/afterSales/profit/homeProfit` 等 canonical accounting section 加入 host-locked 队列，并在页面标注利润待同步。Portal 进程本身不得直接启动成本台账重算。
 - 营销修复队列必须区分“系统失败”和“业务条件不满足”。库存不足、平台明确拒绝且旧活动保护仍完整的链接，在当天不可变 manifest 内记为 `blocked`，不得每个窗口重复执行或把 worker 标成 `failed`；下一天的新 guard/fingerprint 会自动重新评估。网络、浏览器、鉴权、读回失败仍记为 `failed` 并重试/告警。某阶段存在安全业务阻塞时，worker 仍应继续处理后续互不重叠的修复阶段，最后以人话报告未执行原因。
 - 实时销售直接查询当天 `fact.order_item`，利润只读取同一次原子发布的 `mart.profit_order_item_cache` 与仓储费 cache。新订单尚未进入 cache，或已有订单行的金额/数量与 cache 不一致时，API 都返回 `accountingPending=true`，实时销售先采用正式事实行，页面显示利润正在补成本；相同内容的幂等 Webhook 重放不会误报待补账。禁止用静态单位成本、旧利润或零值掩盖这个时间差。

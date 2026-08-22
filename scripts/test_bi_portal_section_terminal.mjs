@@ -318,6 +318,8 @@ async function makePortal(dir, {core = true, section, sectionGeneratedAt = gener
     'a short reserved slot must exclude both heavy sections before claiming');
   assert.match(worker, /publishedRevision=\$PUBLISHED_REVISION follow-up pending/,
     'a successful claim with a newer request must report the published snapshot and follow-up');
+  assert.match(worker, /Number\.isSafeInteger\(published\)[\s\S]*Number\.isSafeInteger\(desired\)[\s\S]*follow===true \? desired>published : follow===false && desired<=published/,
+    'completion acceptance must validate both revisions and the exact follow-up relation');
   assert.match(worker, /if \[\[ "\$\{#FAILED_SECTIONS\[@\]\}" -gt 0 \]\]; then[\s\S]*failed sections=[\s\S]*exit 1/,
     'any failed lease must remain alert-worthy; an older terminal artifact cannot prove the requested revision recovered');
   assert.match(worker, /trap '\[\[ -n "\$\{HEADERS_FILE:-\}" \]\] && rm -f "\$HEADERS_FILE"' EXIT/,
@@ -421,8 +423,8 @@ async function runWorkerRefreshFailureHeaderTest(repoRoot) {
         coalesceKey: 'portal-generation:G1',
         coreGeneratedAt: 'G1',
         status: 'pending',
-        requestedAt: '2026-08-22T07:43:00.000+08:00',
-        updatedAt: '2026-08-22T07:43:00.000+08:00',
+        requestedAt: '2026-08-22T07:31:00.000+08:00',
+        updatedAt: '2026-08-22T07:31:00.000+08:00',
         reasons: ['core-warmup-G1'],
         attempts: 0,
         leaseId: '',
@@ -437,11 +439,11 @@ async function runWorkerRefreshFailureHeaderTest(repoRoot) {
 set -euo pipefail
 case "\${1:-}" in
   +%H) printf '07' ;;
-  +%M) printf '44' ;;
+  +%M) printf '32' ;;
   +%s) printf '1000' ;;
   +%Y-%m-%dT%H) printf '2026-08-22T07' ;;
   -d) printf '${deadlineEpoch}' ;;
-  *) printf '2026-08-22T07:44:00+08:00' ;;
+  *) printf '2026-08-22T07:32:00+08:00' ;;
 esac
 `);
     writeDate(2000);
@@ -456,7 +458,7 @@ esac
     assert.ok(encodedError.length > 12_288, 'fixture must exceed the bounded encoded-header input');
     assert.match(encodedError.slice(0, 12_288), /%(?:[0-9A-F])?$/u,
       'fixture must cut through a percent escape to guard against decode-all fallback loss');
-    const failedAt = '2026-08-22T07:44:31.125+08:00';
+    const failedAt = '2026-08-22T07:32:31.125+08:00';
     const writeCurl = encoded => fs.writeFileSync(path.join(binDir, 'curl'), `#!/usr/bin/env bash
 set -euo pipefail
 headers=''

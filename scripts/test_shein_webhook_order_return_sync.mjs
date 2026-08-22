@@ -55,6 +55,10 @@ const salesFactRows = buildSalesFactRows(salesArtifact, 'webhook://full-sales-te
 const fullSalesSql = buildOpenApiSalesAtomicSql({...salesFactRows, reconciliations: [], pairs: [{date: salesFactRows.date, store: 'HL', sourceSnapshotAt: salesFactRows.sourceSnapshotAt}]}).script;
 assert.match(fullSalesSql, /header\.source_snapshot_at > slice\.source_snapshot_at/, 'daily sales cleanup must preserve a newer targeted order');
 assert.match(fullSalesSql, /freshness_parent\."source_snapshot_at" > "stage_fact_openapi_order_item_[^"]+"\."source_snapshot_at"/, 'daily item insert must reject an older snapshot under a newer header');
+assert.match(fullSalesSql, /BEGIN;[\s\S]*pg_advisory_xact_lock[\s\S]*SET LOCAL shein_bi\.bulk_openapi_sales_reconcile = 'on';[\s\S]*COMMIT;/,
+  'bulk OpenAPI loading must set the transaction-local mirror bypass after its sorted locks');
+assert.doesNotMatch(sales.script, /shein_bi\.bulk_openapi_sales_reconcile/,
+  'targeted Webhook replacement must never set the bulk mirror bypass');
 
 const returnArtifact = {
   storeKey: 'DL', groupKey: 'g', shopName: 'shop', start: '2026-07-19', fetchTime: '2026-07-19T01:02:03.000Z',

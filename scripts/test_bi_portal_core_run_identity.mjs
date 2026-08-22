@@ -9,10 +9,18 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
+import {serializePortalData} from './generate_bi_portal.mjs';
+
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const script = path.join(repo, 'scripts', 'generate_bi_portal.mjs');
 const runKey = '2026-08-22:2026-08-21:portal-core';
 const fingerprint = 'a'.repeat(64);
+const toPosixPath = value => {
+  const text = String(value).replace(/\\/g, '/');
+  return /^[A-Za-z]:\//u.test(text)
+    ? `/mnt/${text[0].toLowerCase()}${text.slice(2)}`
+    : text;
+};
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const run = (outDir, extra = []) => spawnSync(process.execPath, [
   script,
@@ -21,11 +29,84 @@ const run = (outDir, extra = []) => spawnSync(process.execPath, [
   '--input-fingerprint', fingerprint,
   ...extra,
 ], {cwd: repo, encoding: 'utf8', timeout: 20_000});
+const generatorSource = fs.readFileSync(script, 'utf8');
+assert.match(generatorSource, /const coreGeneratedAt = String\(\s*data\.generatedAt \|\| data\.__sections\?\.generatedAt \|\| ''/u,
+  'the generator must bind core identity only from existing root/section generatedAt');
+assert.doesNotMatch(generatorSource, /const coreGeneratedAt = String\([\s\S]*?new Date\(\)\.toISOString\(\)/u,
+  'the generator must not invent a new core generation when identity is missing');
+assert.throws(
+  () => serializePortalData({kpi: {}}),
+  /PORTAL_GENERATED_AT_REQUIRED/,
+  'missing root and section identity must fail instead of creating a new generation',
+);
 
 const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'portal-core-identity-'));
 try {
   const file = path.join(root, 'data.json');
   const generatedAt = '2026-08-22T07:31:22.123456+08:00';
+  const largeOrderedPayload = serializePortalData({
+    kpi: 'x'.repeat(128 * 1024),
+    generatedAt,
+    __sections: {mode: 'api', generatedAt: 'stale-value'},
+  }, {
+    audit: {ok: true},
+  });
+  assert.equal(Object.keys(largeOrderedPayload)[0], 'generatedAt',
+    'formal Portal data must serialize generatedAt as the first top-level field');
+  assert.equal(largeOrderedPayload.__sections.generatedAt, generatedAt,
+    'formal Portal data must bind __sections.generatedAt to root generatedAt');
+  const largeSerialized = `${JSON.stringify(largeOrderedPayload, null, 2)}\n`;
+  assert.ok(Buffer.byteLength(largeSerialized, 'utf8') > 64 * 1024,
+    'the bounded identity regression must use a payload larger than 64 KiB');
+  assert.match(largeSerialized, /^\{\s*"generatedAt"\s*:/u,
+    'the formal JSON must begin with the root generatedAt property');
+  fs.writeFileSync(path.join(root, 'large-data.json'), largeSerialized, 'utf8');
+  const refreshShell = await fsp.readFile(path.join(repo, 'scripts', 'cloud_bi_refresh.sh'), 'utf8');
+  const identityStart = refreshShell.indexOf('portal_queue_identity() {');
+  const identityEnd = refreshShell.indexOf('\n}\n\nDATE="$(resolve_date', identityStart);
+  assert.ok(identityStart >= 0 && identityEnd > identityStart,
+    'the bounded identity function must remain extractable for deterministic testing');
+  const identityFunction = refreshShell.slice(identityStart, identityEnd + 2);
+  // Do not interpolate this function into `bash -c`: its Node heredoc and
+  // shell-looking text contain backticks and ${...} which an outer shell can
+  // expand before the actual scanner runs. A temporary script preserves the
+  // production function byte-for-byte and passes only the data path as argv.
+  const identityScriptFile = path.join(root, 'run-portal-identity.sh');
+  await fsp.writeFile(identityScriptFile, [
+    '#!/usr/bin/env bash',
+    'set -Eeuo pipefail',
+    'PORTAL_DATA_PATH="$1"',
+    identityFunction,
+    'portal_queue_identity',
+    '',
+  ].join('\n'), 'utf8');
+  const runBoundedIdentity = file => spawnSync('bash', [toPosixPath(identityScriptFile), toPosixPath(file)], {
+    cwd: repo,
+    encoding: 'utf8',
+  });
+  const boundedScanAfterWrite = runBoundedIdentity(path.join(root, 'large-data.json'));
+  assert.equal(boundedScanAfterWrite.status, 0,
+    `the existing 64 KiB identity scan must recognize the ordered payload: ${boundedScanAfterWrite.stdout}\n${boundedScanAfterWrite.stderr}`);
+  assert.equal(boundedScanAfterWrite.stdout.split('\t')[0], generatedAt);
+  assert.match(refreshShell, /Buffer\.alloc\(64 \* 1024\)/,
+    'the regression must retain the existing bounded scanner rather than widening it');
+  assert.ok(refreshShell.includes('const match = /^\\s*\\{\\s*"generatedAt"'),
+    'the consumer must anchor generatedAt to the first root property');
+  for (const [name, payload] of [
+    ['second-root-field', {other: 1, generatedAt}],
+    ['nested-only', {nested: {generatedAt}}],
+    ['non-string', {generatedAt: 123}],
+  ]) {
+    const badFile = path.join(root, `${name}.json`);
+    await fsp.writeFile(badFile, `${JSON.stringify(payload)}\n`);
+    const result = runBoundedIdentity(badFile);
+    assert.equal(result.status, 64, `${name} must fail the bounded identity scan: ${result.stdout}\n${result.stderr}`);
+  }
+  const truncatedFile = path.join(root, 'truncated-generated-at.json');
+  await fsp.writeFile(truncatedFile, '{"generatedAt":"2026-08-22T07:31:22.123456+08:00');
+  const truncated = runBoundedIdentity(truncatedFile);
+  assert.equal(truncated.status, 64,
+    `a truncated root generatedAt string must fail closed: ${truncated.stdout}\n${truncated.stderr}`);
   await fsp.writeFile(file, `${JSON.stringify({
     generatedAt,
     __sections: {mode: 'api', generatedAt},

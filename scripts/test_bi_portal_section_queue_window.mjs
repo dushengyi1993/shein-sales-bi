@@ -136,12 +136,37 @@ while [[ "$#" -gt 0 ]]; do
 done
 section="\${url#*/api/bi/section/}"
 section="\${section%%\\?*}"
+if [[ "$section" == "profit" && "\${SHEIN_TEST_PROFIT_HTTP:-200}" != "200" ]]; then
+  status="\${SHEIN_TEST_PROFIT_HTTP:-500}"
+  {
+    printf 'HTTP/1.1 %s Test Failure\\r\\n' "$status"
+    printf '\\r\\n'
+  } > "\${headers:?}"
+  printf '%s\\n' "\${section}" >> "\${SHEIN_TEST_CURL_LOG:?}"
+  printf '%s' "$status"
+  exit 0
+fi
 {
   printf 'HTTP/1.1 200 OK\\r\\n'
   printf 'X-BI-Section-Cache-Hit: true\\r\\n'
   printf '\\r\\n'
 } > "\${headers:?}"
 printf '%s\\n' "\${section}" >> "\${SHEIN_TEST_CURL_LOG:?}"
+if [[ "$section" == "profit" && "\${SHEIN_TEST_REQUEUE_PROFIT:-0}" == "1" ]]; then
+  node "\${SHEIN_BI_ROOT:?}/scripts/manage_bi_portal_section_queue.mjs" enqueue \\
+    --sections profit --priority 5 --reason test-follow-up \\
+    --idempotency-key test-follow-up --coalesce-key window:G1 \\
+    --core-generated-at G1 --file "\${SHEIN_BI_PORTAL_SECTION_QUEUE_FILE:?}" >/dev/null
+fi
+if [[ "$section" == "profit" && "\${SHEIN_TEST_REMOVE_PROFIT_BEFORE_COMPLETE:-0}" == "1" ]]; then
+  node - "\${SHEIN_BI_PORTAL_SECTION_QUEUE_FILE:?}" <<'NODE'
+const fs = require('node:fs');
+const file = process.argv[2];
+const queue = JSON.parse(fs.readFileSync(file, 'utf8'));
+queue.entries = (queue.entries || []).filter(entry => entry.section !== 'profit');
+ fs.writeFileSync(file, JSON.stringify(queue, null, 2) + '\\n');
+NODE
+fi
 printf '200'
 `);
 }
@@ -157,6 +182,11 @@ async function runWindowCase({
   sections,
   maxSections,
   expectedStatus,
+  profitHttp = '200',
+  requeueProfit = false,
+  removeProfitBeforeComplete = false,
+  artifactSections = sections,
+  queueSetup = null,
 }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bi-portal-section-window-${name}-`));
   const lockDir = `/tmp/bi-portal-section-window-${process.pid}-${Date.now()}-${name}`;
@@ -166,9 +196,14 @@ async function runWindowCase({
   const queueFile = path.join(dir, 'queue.json');
   const curlLog = path.join(dir, 'curl.log');
   fs.mkdirSync(binDir, {recursive: true});
-  makePortal(portalRoot, sections);
-  await seedStrictPortalArtifacts(portalRoot, binDir, sections);
+  makePortal(portalRoot, artifactSections);
+  await seedStrictPortalArtifacts(portalRoot, binDir, artifactSections);
   makeQueue(queueFile, sections, new Date('2026-08-22T00:00:00.000Z'));
+  if (queueSetup) {
+    const queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    queueSetup(queue);
+    fs.writeFileSync(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
+  }
   makeDateStub(binDir, {hour, minute, nowEpoch, deadlineEpoch});
   makeCurlStub(binDir);
 
@@ -181,11 +216,15 @@ async function runWindowCase({
     SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC: '10',
     SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC: '480',
     SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC: '540',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC: '60',
     SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC: '120',
     SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC: '60',
     SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED: '1',
     SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE: String(deadlineMinute),
     SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED: String(heavyAllowed),
+    SHEIN_TEST_PROFIT_HTTP: String(profitHttp),
+    SHEIN_TEST_REQUEUE_PROFIT: requeueProfit ? '1' : '0',
+    SHEIN_TEST_REMOVE_PROFIT_BEFORE_COMPLETE: removeProfitBeforeComplete ? '1' : '0',
     SHEIN_TEST_CURL_LOG: toPosixPath(curlLog),
   };
   const assignments = Object.entries(env)
@@ -222,49 +261,161 @@ const tools = spawnSync('bash', ['-lc', 'command -v flock >/dev/null && command 
 if (tools.status !== 0) {
   console.log('SKIP bi_portal_section_queue_window: worker integration needs bash+flock+mktemp+node');
 } else {
-  const shortWindow = await runWindowCase({
-    name: 'et-short',
-    hour: '04',
-    minute: '14',
+  const lightWindow = await runWindowCase({
+    name: 'light-02',
+    hour: '06',
+    minute: '02',
     nowEpoch: 1_000,
-    deadlineEpoch: 1_180,
-    deadlineMinute: 17,
+    deadlineEpoch: 1_600,
+    deadlineMinute: 14,
     heavyAllowed: 0,
     sections: ['profit', 'orders'],
     maxSections: 1,
     expectedStatus: 75,
   });
-  assert.deepEqual(shortWindow.calls, ['orders'],
-    'the ET :14 short window may claim the light section but never profit');
-  assert.equal(shortWindow.queue.entries.some(entry => entry.section === 'profit' && entry.status === 'pending'), true,
-    'the ET :14 short window must leave heavy profit pending');
-  assert.equal(shortWindow.queue.entries.some(entry => entry.section === 'orders'), false,
-    'the ET :14 short window must complete the light section it claimed');
-  assert.equal(shortWindow.queue.publishedSnapshots.some(snapshot => snapshot.section === 'orders'), true,
-    'the light section completion must still publish a durable snapshot');
-  assert.match(`${shortWindow.run.stdout}\n${shortWindow.run.stderr}`,
+  assert.deepEqual(lightWindow.calls, ['orders'],
+    'the :02 light window may claim a light section but never profit');
+  assert.equal(lightWindow.queue.entries.some(entry => entry.section === 'profit' && entry.status === 'pending'), true,
+    'the :02 light window must leave heavy profit pending');
+  assert.equal(lightWindow.queue.entries.some(entry => entry.section === 'orders'), false,
+    'the :02 light window must complete the light section it claimed');
+  assert.match(`${lightWindow.run.stdout}\n${lightWindow.run.stderr}`,
     /reason=short_reserved_window/,
-    'the ET :14 worker must report the explicit short-window heavy deferral');
+    'the :02 worker must report the explicit light-only heavy deferral');
 
-  const longWindow = await runWindowCase({
-    name: 'dedicated-long',
-    hour: '04',
-    minute: '44',
+  const heavyWindow = await runWindowCase({
+    name: 'heavy-32',
+    hour: '06',
+    minute: '32',
     nowEpoch: 1_000,
     deadlineEpoch: 2_000,
-    deadlineMinute: 57,
+    deadlineMinute: 44,
     heavyAllowed: 1,
     sections: ['profit'],
     maxSections: 1,
     expectedStatus: 0,
   });
-  assert.deepEqual(longWindow.calls, ['profit'],
-    'a dedicated :44 window with sufficient remaining time may claim profit');
-  assert.equal(longWindow.queue.entries.some(entry => entry.section === 'profit'), false,
+  assert.deepEqual(heavyWindow.calls, ['profit'],
+    'a dedicated :32 window with sufficient remaining time may claim profit');
+  assert.equal(heavyWindow.queue.entries.some(entry => entry.section === 'profit'), false,
     'the heavy profit claim must complete in the sufficient window');
-  assert.equal(longWindow.queue.publishedSnapshots.some(snapshot => (
-    snapshot.section === 'profit' && snapshot.publishedRevision === 1
-  )), true, 'the heavy completion must record its publication revision');
 
-  console.log('bi_portal_section_queue_window: ET short-window exclusion and sufficient-window heavy claim passed');
+  const quietSuccess = await runWindowCase({
+    name: 'quiet-success-post-profit',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    sections: ['profit', 'homeRankings'],
+    maxSections: 2,
+    expectedStatus: 0,
+  });
+  assert.deepEqual(quietSuccess.calls, ['profit', 'homeRankings'],
+    'quiet same-run profit success may schedule homeRankings');
+  assert.match(`${quietSuccess.run.stdout}\n${quietSuccess.run.stderr}`,
+    /same-run completion eligible for post-profit homeRankings budgetSec=60/,
+    'quiet same-run profit success must enable the explicit short budget');
+  assert.equal(quietSuccess.queue.publishedSnapshots.some(snapshot => snapshot.section === 'homeRankings'), true);
+
+  const followUp = await runWindowCase({
+    name: 'follow-up-normal-budget',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    sections: ['profit', 'homeRankings'],
+    maxSections: 2,
+    expectedStatus: 75,
+    requeueProfit: true,
+  });
+  assert.deepEqual(followUp.calls, ['profit'],
+    'a superseded successful profit claim must not run homeRankings in the same worker run');
+  assert.match(`${followUp.run.stdout}\n${followUp.run.stderr}`,
+    /follow-up pending/,
+    'the superseded profit completion must remain visible as follow-up pending');
+  assert.doesNotMatch(`${followUp.run.stdout}\n${followUp.run.stderr}`,
+    /same-run completion eligible for post-profit homeRankings budgetSec=60/,
+    'follow-up pending must not enable the short budget');
+  const followUpProfit = followUp.queue.entries.find(entry => entry.section === 'profit');
+  assert.equal(followUpProfit?.dependencyYield, true,
+    'superseded profit must retain the manager dependencyYield contract');
+  assert.equal(followUp.queue.entries.some(entry => entry.section === 'homeRankings' && entry.status === 'pending'), true,
+    'follow-up pending must leave homeRankings pending for a later run');
+
+  const followUpFreshRun = await runWindowCase({
+    name: 'follow-up-fresh-run-normal-540-budget',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 1_545,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    sections: ['profit', 'homeRankings'],
+    maxSections: 1,
+    expectedStatus: 0,
+    queueSetup: queue => {
+      const profit = queue.entries.find(entry => entry.section === 'profit');
+      const homeRankings = queue.entries.find(entry => entry.section === 'homeRankings');
+      profit.status = 'pending';
+      profit.dependencyYield = true;
+      profit.priority = 5;
+      profit.sequence = 2;
+      profit.requestRevision = 2;
+      profit.lastPublishedRevision = 1;
+      homeRankings.status = 'pending';
+      homeRankings.priority = 5;
+      homeRankings.sequence = 1;
+    },
+  });
+  assert.deepEqual(followUpFreshRun.calls, ['homeRankings'],
+    'a later run may claim homeRankings after dependencyYield, before the queued profit follow-up');
+  assert.doesNotMatch(`${followUpFreshRun.run.stdout}\n${followUpFreshRun.run.stderr}`,
+    /post-profit homeRankings budgetSec=60/,
+    'the later dependency-yield run must retain the normal 540-second budget');
+
+  for (const failure of [
+    {
+      name: 'refresh-failure-blocks-home-rankings',
+      profitHttp: '500',
+      artifactSections: ['profit', 'homeRankings'],
+    },
+    {
+      name: 'terminal-failure-blocks-home-rankings',
+      profitHttp: '200',
+      artifactSections: ['homeRankings'],
+    },
+    {
+      name: 'completion-report-failure-blocks-home-rankings',
+      profitHttp: '200',
+      artifactSections: ['profit', 'homeRankings'],
+      removeProfitBeforeComplete: true,
+    },
+  ]) {
+    const failed = await runWindowCase({
+      name: failure.name,
+      hour: '06',
+      minute: '32',
+      nowEpoch: 1_000,
+      deadlineEpoch: 2_000,
+      deadlineMinute: 44,
+      heavyAllowed: 1,
+      sections: ['profit', 'homeRankings'],
+      maxSections: 2,
+      expectedStatus: 1,
+      profitHttp: failure.profitHttp,
+      removeProfitBeforeComplete: failure.removeProfitBeforeComplete || false,
+      artifactSections: failure.artifactSections,
+    });
+    assert.deepEqual(failed.calls, ['profit'], `${failure.name}: failed profit must be the only refresh attempt`);
+    assert.match(`${failed.run.stdout}\n${failed.run.stderr}`, /profit_attempt_incomplete|completion report was not accepted|terminal evidence mismatch/,
+      `${failure.name}: the worker must record the local profit failure barrier`);
+    assert.equal(failed.queue.entries.some(entry => entry.section === 'homeRankings'), true,
+      `${failure.name}: homeRankings must remain pending`);
+  }
+
+  console.log('bi_portal_section_queue_window: :02/:32 scheduling, quiet-success budget, follow-up normal budget, and failed-profit HR barriers passed');
 }

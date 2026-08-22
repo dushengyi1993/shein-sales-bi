@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 const DEFAULT_ROOT = process.env.SHEIN_BI_PIPELINE_MARKER_ROOT
   || path.join(process.cwd(), 'state', 'pipeline-markers');
 const VALID_STATUS = new Set(['done', 'warning', 'failed', 'deferred', 'partial']);
+const MARKER_DIRECTORY_MODE = 0o2770;
 export const PIPELINE_MARKER_SCHEMA = 4;
 export const ORDER_CLOSURE_MARKER_SEMANTIC_VERSION = 'order-closure/v5-zero-zero-done-candidates-v1-portal-queue-v1';
 const WORK_FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/i;
@@ -239,8 +240,75 @@ export function markerPath(root, date, stage) {
   return path.join(path.resolve(root), validateDate(date), `${validateStage(stage)}.json`);
 }
 
+function markerDirectoryError(code, label, directory, cause = '') {
+  const suffix = cause ? ` cause=${cause}` : '';
+  return new Error(`${code} label=${label} path=${directory}${suffix}`);
+}
+
+function ensureMarkerDirectory(directory, label) {
+  const resolved = path.resolve(directory);
+  try {
+    fs.mkdirSync(resolved, {recursive: true, mode: MARKER_DIRECTORY_MODE});
+  } catch (error) {
+    throw markerDirectoryError(
+      'PIPELINE_MARKER_DIRECTORY_CREATE_FAILED',
+      label,
+      resolved,
+      error?.code || error?.message || 'unknown',
+    );
+  }
+  let stats;
+  try {
+    stats = fs.lstatSync(resolved);
+  } catch (error) {
+    throw markerDirectoryError(
+      'PIPELINE_MARKER_DIRECTORY_STAT_FAILED',
+      label,
+      resolved,
+      error?.code || error?.message || 'unknown',
+    );
+  }
+  if (!stats.isDirectory()) {
+    throw markerDirectoryError('PIPELINE_MARKER_DIRECTORY_NOT_DIRECTORY', label, resolved);
+  }
+  // Windows has no POSIX setgid/group-write mode bits. Production runs on
+  // Linux; keep local Windows tests useful without pretending ACLs are modes.
+  if (process.platform === 'win32') return;
+  const actual = stats.mode & 0o7777;
+  if (actual === MARKER_DIRECTORY_MODE) return;
+  try {
+    fs.chmodSync(resolved, MARKER_DIRECTORY_MODE);
+  } catch (error) {
+    throw markerDirectoryError(
+      'PIPELINE_MARKER_DIRECTORY_MODE_FIX_FAILED',
+      label,
+      resolved,
+      error?.code || error?.message || 'unknown',
+    );
+  }
+  let repaired;
+  try {
+    repaired = fs.lstatSync(resolved);
+  } catch (error) {
+    throw markerDirectoryError(
+      'PIPELINE_MARKER_DIRECTORY_MODE_VERIFY_FAILED',
+      label,
+      resolved,
+      error?.code || error?.message || 'unknown',
+    );
+  }
+  const repairedMode = repaired.mode & 0o7777;
+  if (repairedMode !== MARKER_DIRECTORY_MODE) {
+    throw markerDirectoryError(
+      'PIPELINE_MARKER_DIRECTORY_MODE_INVALID',
+      label,
+      resolved,
+      `expected=${MARKER_DIRECTORY_MODE.toString(8)} actual=${repairedMode.toString(8)}`,
+    );
+  }
+}
+
 function atomicWriteJson(file, value) {
-  fs.mkdirSync(path.dirname(file), {recursive: true, mode: 0o770});
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, {
     encoding: 'utf8',
@@ -485,9 +553,13 @@ export async function writeMarker({
     date: normalizedDate,
   });
   if (intrinsicFailure) throw new TypeError(`PIPELINE_MARKER_INTRINSIC_${intrinsicFailure.toUpperCase()}`);
+  const markerRoot = path.resolve(root);
+  const markerDateDirectory = path.join(markerRoot, normalizedDate);
+  ensureMarkerDirectory(markerRoot, 'root');
+  ensureMarkerDirectory(markerDateDirectory, 'date');
   const file = markerPath(root, normalizedDate, normalizedStage);
   atomicWriteJson(file, payload);
-  atomicWriteJson(path.join(path.resolve(root), `${normalizedStage}.latest.json`), payload);
+  atomicWriteJson(path.join(markerRoot, `${normalizedStage}.latest.json`), payload);
   return {...payload, file};
 }
 

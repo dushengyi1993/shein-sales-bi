@@ -6,7 +6,12 @@ HOUR=$((10#$(date +%H)))
 MINUTE=$((10#$(date +%M)))
 DEADLINE_MINUTE=""
 MAX_SECTIONS=1
-HEAVY_ALLOWED=1
+HEAVY_ALLOWED=0
+
+if (( HOUR == 1 )); then
+  echo "[portal-section-slot] defer reason=full_hour_reserved hour=$HOUR minute=$MINUTE" >&2
+  exit 75
+fi
 
 yield_to_daily_coordinator() {
   # Portal materialization is cache maintenance. The daily business refresh is
@@ -29,40 +34,25 @@ yield_to_daily_coordinator() {
   esac
 }
 
-yield_to_rtv_verify_timer() {
-  if (( HOUR == 4 && MINUTE >= 43 && MINUTE <= 46 )); then
-    if systemctl is-active --quiet shein-bi-cloud-rtv-verify.timer; then
-      echo "[portal-section-slot] defer reason=rtv_verify_timer_active hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-    fi
-  fi
-}
-
-is_et_hour() {
+if (( MINUTE >= 1 && MINUTE <= 4 )); then
   case "$HOUR" in
-    1|4|7|10|13|14|17|20|23) return 0 ;;
-    *) return 1 ;;
+    2|3|7)
+      echo "[portal-section-slot] defer reason=special_reserved_window hour=$HOUR minute=$MINUTE" >&2
+      exit 75
+      ;;
   esac
-}
-
-if (( MINUTE >= 13 && MINUTE <= 16 )); then
-  if is_et_hour; then
-    DEADLINE_MINUTE=17
-    MAX_SECTIONS=1
-    HEAVY_ALLOWED=0
-  else
-    DEADLINE_MINUTE=27
-    MAX_SECTIONS=8
-  fi
-elif (( MINUTE >= 43 && MINUTE <= 46 )); then
-  DEADLINE_MINUTE=57
+  DEADLINE_MINUTE=14
+  MAX_SECTIONS=1
+  HEAVY_ALLOWED=0
+elif (( MINUTE >= 31 && MINUTE <= 34 )); then
+  DEADLINE_MINUTE=44
   MAX_SECTIONS=8
+  HEAVY_ALLOWED=1
 else
   echo "[portal-section-slot] defer reason=outside_portal_slot hour=$HOUR minute=$MINUTE" >&2
   exit 75
 fi
 
-yield_to_rtv_verify_timer
 yield_to_daily_coordinator
 
 export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1

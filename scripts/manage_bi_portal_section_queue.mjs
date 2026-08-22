@@ -1535,13 +1535,13 @@ export function main(argv = process.argv.slice(2)) {
         && Number(after.requestRevision || 0) > publishedRevision,
     );
     console.log(JSON.stringify({
+      ...statusPayload(saved, options.file),
       ok: true,
       completed,
       published: publishedRevision >= claimedRevision && claimedRevision > 0,
       publishedRevision,
       desiredRevision: Number(after?.requestRevision || publishedRevision || 0),
       followUpPending,
-      ...statusPayload(saved, options.file),
     }));
     return 0;
   }

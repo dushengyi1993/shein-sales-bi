@@ -271,6 +271,7 @@ const TEST_ESTIMATES_MS = {
   'scripts/test_bi_query_surface_isolation.mjs': 120_000,
   'scripts/test_bi_section_streaming.mjs': 120_000,
   'scripts/test_bi_section_portal_streaming.mjs': 120_000,
+  'scripts/test_bi_portal_section_queue_window.mjs': 60_000,
   'scripts/test_bi_portal_core_warmup_queue_owned.mjs': 120_000,
   'scripts/test_bi_portal_external_queue_reconciliation.mjs': 60_000,
   'scripts/test_bi_portal_core_run_identity.mjs': 30_000,
@@ -444,6 +445,8 @@ for (const file of selectedTests) {
             ? 150_000
             : file === 'scripts/test_bi_portal_core_run_identity.mjs'
               ? 60_000
+            : file === 'scripts/test_bi_portal_section_queue_window.mjs'
+              ? 120_000
           : file === 'scripts/test_bi_section_streaming.mjs'
             ? 120_000
             : file === 'scripts/test_bi_section_portal_streaming.mjs'

@@ -19,7 +19,7 @@
 | 逻辑任务 | 入口 | 完整边界 | 目标 |
 | --- | --- | --- | --- |
 | 实时销售 | Webhook + 每15分钟 reconciliation | 只更新受影响订单/当天事实与轻量投影 | 分钟级 |
-| 当前库存 | 每小时 `:12/:45` OpenAPI | 19店本轮全部成功后切换 `inventoryStock` | 15分钟内 |
+| 当前库存 | 每小时 `:18/:48` OpenAPI | 与 `:00/:15/:30/:45` 销售 reconciliation 错峰；19店本轮全部成功后切换 `inventoryStock` | 当前实测约1分钟；分别在 `:20` ET、`:50` watchdog/RTV 前收口 |
 | 登录态维护 | 每天仅一个 `00:45` `shein-bi-cloud-session-manager.timer` | 只有同日 `done` marker + 同日启用店铺19/19报告才幂等跳过；共享 browser-read lane defer(75) 在同一 service/run 内重试到 `01:27`，失败写 marker/alert 并返回非成功 | 晨间链路前完成；无证据 warning 不算完成；不创建第二 timer/queue |
 | 每日经营刷新 | 每天 `07:10` 一个 `shein-bi-cloud-morning-chain.service` | wrapper 保存 active run（含 first-start 绝对 deadline）；同日失败自动重启恢复同一 runDate/businessDate；跨日不再执行旧 child，只保留旧失败证据后推进当天；19店链接/业务域与补充阶段不得越过库存前置截止，生产 unit 的库存独占最后2700秒窗口 | 单 timer；`daily-operating-refresh` done marker 直接绑定19店结果、库存 marker、plan 与 result；deadline 到期以 restart-prevented exit 76 保持 systemd failed，不假成功 |
 | 昨日销售定稿 | 每天 `02:45` | 19店OpenAPI完整门禁后一次晋升 | 03:30前 |
@@ -53,7 +53,8 @@
 - `browser-read`：全机最多2个不同 Profile。第2槽仅在 `MemAvailable >= 4GiB` 且负载/PSI门禁通过时准入。
 - `browser-write`：写 repair worker 使用的全机排他 lane，最多1个；事务中不中杀，店铺终态后才释放。营销只读 guard 不进入此 lane。
 - `db-projection`：全机1个，只覆盖最终成本/利润/Portal投影阶段。
-- Portal section 队列的静态起跑门由 systemd unit 与 worker 保持一致：仅允许 timer `:14/:44` 对应的 `:13–16` / `:43–46` 窗口；`01` 整小时拒绝，`06:43–46` 后半槽拒绝，`08` 不做静态禁跑。08 时若晨链正在运行，仍由既有 slot wrapper 动态 guard 让路；timer、锁、section 优先级与 deadline 不因该静态门改变。
+- Portal section 队列只保留一个 timer，错峰在每小时 `:02/:32` 触发：`:02` 是 `HEAVY_ALLOWED=0` 的 light-only 槽，deadline `:14`、最多一个轻 section；`:32` 是 heavy 槽，deadline `:44`。unit、slot wrapper 与 worker 都拒绝 `01:*`，并静态拒绝 `02:02`、`03:02`、`07:02` 的维护/昨日重试/晨链前窗口；其它小时只接受 `:01–04` / `:31–34` 起跑。08 时若晨链正在运行或状态未知，仍由既有 slot wrapper 动态 guard 让路并 fail-closed；timer、锁、section 优先级与 deadline 不因该静态门改变。
+- Pipeline marker 跨服务目录只允许 `scripts/pipeline_marker.mjs` 维护 root/日期两级 `02770`，不递归改任意 state 路径。canonical root 为 `/data/shein-bi/state/pipeline-markers`，保持 `sheinops:sheinops`；`/opt/shein-bi/app/state` 是只读 bind/兼容路径，禁止写入。仅当 canonical root 不是 `2770` 时按需执行一次 `sudo -n chmod 2770 /data/shein-bi/state/pipeline-markers`；`2026-08-23` 日期目录已是 `sheinops:sheinops 2770`，无需改动。禁止 `chmod -R`、任何 `chown` 或递归修权限。
 - `io-heavy`：全机1个，备份、恢复测试、大归档不与大物化并行。
 - coordinator 按阶段拿取并释放令牌，禁止在HTTP等待、平台未ready或整个多店循环期间长期占有不需要的重令牌。
 - 登录态 coordinator 每次重试都重新取得共享 lane，让路全托优先级；正常 timer run 只传 `--deadline-at 01:27`，受控 catch-up 显式传未来 epoch 时只传 `--deadline-epoch`，不得叠加 stale clock deadline。

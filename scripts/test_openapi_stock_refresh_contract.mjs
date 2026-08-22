@@ -46,7 +46,7 @@ assert.match(reconcile, /flock -w 900 9/,
 
 assert.match(refresh, /DETAIL_MODE="\$\{SHEIN_OPENAPI_STOCK_REFRESH_DETAILS_MODE:-auto\}"/,
   'the frequent inventory refresh must default to an explicit automatic detail policy');
-assert.match(refresh, /DETAIL_REFRESH_CLOCK="\$\{SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_CLOCK:-07:12\}"/,
+assert.match(refresh, /DETAIL_REFRESH_CLOCK="\$\{SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_CLOCK:-07:18\}"/,
   'one daily stock pass must also advance product detail coverage');
 assert.match(refresh, /DETAIL_BUDGET="\$\{SHEIN_OPENAPI_STOCK_REFRESH_DETAIL_BUDGET:-32\}"/,
   'the daily detail pass must remain bounded per store');
@@ -79,7 +79,7 @@ assert.match(service, /User=sheinops/,
   'the inventory refresh must not run as root');
 assert.match(service, /TimeoutStartSec=900/,
   'the oneshot must have a bounded runtime');
-assert.match(timer, /OnCalendar=\*-\*-\* \*:12,45:00/,
+assert.match(timer, /OnCalendar=\*-\*-\* \*:18,48:00/,
   'current virtual stock must refresh twice per hour');
 assert.match(timer, /RandomizedDelaySec=15/,
   'stock refresh jitter must stay bounded while the :12 run feeds the inventory marker');

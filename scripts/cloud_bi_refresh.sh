@@ -99,7 +99,10 @@ try {
   const buffer = Buffer.alloc(64 * 1024);
   const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, 0);
   const text = buffer.subarray(0, bytesRead).toString('utf8');
-  const match = /"generatedAt"\s*:\s*"([^"\\]+)"/.exec(text);
+  // The generator's contract is stronger than "generatedAt exists": it must
+  // be the first property of the root object.  Keep this anchored and bounded
+  // so a nested/second-field value or a truncated string fails closed.
+  const match = /^\s*\{\s*"generatedAt"\s*:\s*"([^"\\\r\n]{1,1024})"/.exec(text);
   const generatedAt = String(match?.[1] || '').trim();
   if (!generatedAt) {
     console.error(`[cloud_bi_refresh] portal core generatedAt missing in ${file}`);

@@ -10,11 +10,12 @@ MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-3}"
 SECTION_TIMEOUT="${SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC:-900}"
 PROFIT_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC:-480}"
 HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC:-540}"
+POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC:-60}"
 MIN_REMAINING_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC:-120}"
 LEASE_SECONDS="${SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC:-1200}"
 SCHEDULED_ENTRY="${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-0}"
 DEADLINE_MINUTE="${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE:-}"
-# The ET :14 slot has only a short reserved window. Its caller explicitly
+# The :02 slot has only a short reserved window. Its caller explicitly
 # disables heavy sections; the worker still keeps the time-budget checks below
 # as a second fail-closed guard for every other slot.
 HEAVY_ALLOWED="${SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-1}"
@@ -31,6 +32,7 @@ trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 [[ "$SECTION_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$PROFIT_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
+[[ "$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$MIN_REMAINING_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$DEADLINE_MINUTE" =~ ^[0-9]+$ ]] && (( DEADLINE_MINUTE >= 0 && DEADLINE_MINUTE <= 59 )) || exit 64
 [[ "$HEAVY_ALLOWED" == 0 || "$HEAVY_ALLOWED" == 1 ]] || exit 64
@@ -40,8 +42,11 @@ if [[ "$SCHEDULED_ENTRY" != "1" ]]; then
 fi
 SAFE_START=0
 case "$START_HOUR:$START_MINUTE" in
-  01:*|06:4[3-6]) ;;
-  *:1[3-6]|*:4[3-6]) SAFE_START=1 ;;
+  01:*|02:0[1-4]|03:0[1-4]|07:0[1-4])
+    echo "[portal-section-worker] defer reason=special_reserved_window hour=$START_HOUR minute=$START_MINUTE" >&2
+    exit 75
+    ;;
+  *:0[1-4]|*:3[1-4]) SAFE_START=1 ;;
 esac
 if (( SAFE_START == 0 )); then
   echo "[portal-section-worker] defer reason=outside_safe_start_window hour=$START_HOUR minute=$START_MINUTE" >&2
@@ -184,6 +189,9 @@ echo "[portal-section-worker] start maxSections=$MAX_SECTIONS"
 FAILED_SECTIONS=()
 CLAIMED_SECTIONS=()
 HEAVY_SECTION_DEFERRED=0
+PROFIT_ATTEMPTED_THIS_RUN=0
+PROFIT_COMPLETED_THIS_RUN=0
+PROFIT_FOLLOW_UP_PENDING=0
 for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   NOW_EPOCH="$(date +%s)"
   CURRENT_HOUR="$(date +%Y-%m-%dT%H)"
@@ -195,6 +203,15 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   fi
   CLAIM_ARGS=(claim --lease-seconds "$LEASE_SECONDS")
   EXCLUDED_SECTIONS=("${CLAIMED_SECTIONS[@]}")
+  if (( PROFIT_COMPLETED_THIS_RUN == 1 )); then
+    PROFIT_QUEUE_STATUS="$(queue_command status)"
+    PROFIT_QUEUE_PENDING="$(node -e 'const x=JSON.parse(process.argv[1]); const e=(x.entries||[]).find(row=>row.section==="profit"); process.stdout.write(e && ["pending","running"].includes(e.status) ? "1" : "0")' "$PROFIT_QUEUE_STATUS")"
+    if [[ "$PROFIT_QUEUE_PENDING" == "1" ]]; then
+      PROFIT_COMPLETED_THIS_RUN=0
+      PROFIT_FOLLOW_UP_PENDING=1
+      echo "[portal-section-worker] defer heavy section=homeRankings reason=profit_new_revision_pending"
+    fi
+  fi
   if [[ "$HEAVY_ALLOWED" == 0 ]]; then
     EXCLUDED_SECTIONS+=(profit homeRankings)
     HEAVY_SECTION_DEFERRED=1
@@ -204,10 +221,24 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     HEAVY_SECTION_DEFERRED=1
     echo "[portal-section-worker] defer heavy section=profit remainingSec=$REMAINING_SEC requiredSec=$PROFIT_MIN_RUNTIME_SEC"
   fi
-  if (( REMAINING_SEC < HOME_RANKINGS_MIN_RUNTIME_SEC )); then
+  # Any profit claim that is not a quiet, fully accepted completion is a
+  # same-run dependency barrier. This includes a superseded publication and a
+  # newly observed profit revision: manager dependencyYield remains the
+  # liveness mechanism for a later run, not permission to run HR now.
+  if (( PROFIT_ATTEMPTED_THIS_RUN == 1
+    && PROFIT_COMPLETED_THIS_RUN != 1 )); then
     EXCLUDED_SECTIONS+=(homeRankings)
     HEAVY_SECTION_DEFERRED=1
-    echo "[portal-section-worker] defer heavy section=homeRankings remainingSec=$REMAINING_SEC requiredSec=$HOME_RANKINGS_MIN_RUNTIME_SEC"
+    echo "[portal-section-worker] defer heavy section=homeRankings reason=profit_attempt_incomplete"
+  fi
+  HOME_RANKINGS_REQUIRED_RUNTIME_SEC="$HOME_RANKINGS_MIN_RUNTIME_SEC"
+  if (( PROFIT_COMPLETED_THIS_RUN == 1 && PROFIT_FOLLOW_UP_PENDING == 0 )); then
+    HOME_RANKINGS_REQUIRED_RUNTIME_SEC="$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC"
+  fi
+  if (( REMAINING_SEC < HOME_RANKINGS_REQUIRED_RUNTIME_SEC )); then
+    EXCLUDED_SECTIONS+=(homeRankings)
+    HEAVY_SECTION_DEFERRED=1
+    echo "[portal-section-worker] defer heavy section=homeRankings remainingSec=$REMAINING_SEC requiredSec=$HOME_RANKINGS_REQUIRED_RUNTIME_SEC"
   fi
   if [[ "${#EXCLUDED_SECTIONS[@]}" -gt 0 ]]; then
     CLAIM_ARGS+=(--exclude-sections "$(IFS=,; echo "${EXCLUDED_SECTIONS[*]}")")
@@ -226,7 +257,11 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
       PENDING_COUNT="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.counts?.pending||0))' "$QUEUE_STATUS")"
       if (( PENDING_COUNT > 0 )); then
         echo "[portal-section-worker] defer pending sections=$PENDING_COUNT reason=insufficient_heavy_budget"
-        exit 75
+        # Preserve a real section failure for systemd/watchdog. A failed
+        # profit lease may leave pending work, but that is not a clean defer.
+        if [[ "${#FAILED_SECTIONS[@]}" -eq 0 ]]; then
+          exit 75
+        fi
       fi
     fi
     echo "[portal-section-worker] queue empty"
@@ -244,6 +279,11 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     echo "[portal-section-worker] invalid claim: $CLAIM" >&2
     exit 1
   }
+  if [[ "$SECTION" == "profit" ]]; then
+    PROFIT_ATTEMPTED_THIS_RUN=1
+    PROFIT_COMPLETED_THIS_RUN=0
+    PROFIT_FOLLOW_UP_PENDING=0
+  fi
   CLAIMED_SECTIONS+=("$SECTION")
   echo "[portal-section-worker] section=$SECTION attempt=$index"
   CURL_TIMEOUT="$SECTION_TIMEOUT"
@@ -341,14 +381,39 @@ NODE
         --terminal-section-generated-at "$TERMINAL_SECTION_GENERATED_AT" \
         --terminal-generation-identity "$TERMINAL_GENERATION_IDENTITY")"
       COMPLETED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.completed===true))' "$COMPLETE_REPORT")"
+      PUBLISHED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.published===true))' "$COMPLETE_REPORT")"
       PUBLISHED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.publishedRevision||""))' "$COMPLETE_REPORT")"
+      DESIRED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.desiredRevision||""))' "$COMPLETE_REPORT")"
       FOLLOW_UP_PENDING="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.followUpPending===true))' "$COMPLETE_REPORT")"
-      if [[ "$COMPLETED" != "true" ]]; then
-        echo "[portal-section-worker] section=$SECTION completion report was not accepted" >&2
+      COMPLETE_REPORT_VALID="$(node -e '
+const x=JSON.parse(process.argv[1]);
+const published=x.publishedRevision;
+const desired=x.desiredRevision;
+const follow=x.followUpPending;
+const revisionsValid=Number.isSafeInteger(published) && published>0
+  && Number.isSafeInteger(desired) && desired>0;
+const relationValid=follow===true ? desired>published : follow===false && desired<=published;
+process.stdout.write(String(x.completed===true && x.published===true && revisionsValid && relationValid));
+' "$COMPLETE_REPORT")"
+      if [[ "$COMPLETE_REPORT_VALID" != "true" ]]; then
+        if [[ "$SECTION" == "profit" ]]; then
+          PROFIT_COMPLETED_THIS_RUN=0
+          PROFIT_FOLLOW_UP_PENDING=0
+        fi
+        echo "[portal-section-worker] section=$SECTION completion report was not accepted completed=$COMPLETED published=$PUBLISHED publishedRevision=$PUBLISHED_REVISION desiredRevision=$DESIRED_REVISION followUpPending=$FOLLOW_UP_PENDING" >&2
         FAILED_SECTIONS+=("$SECTION:complete")
       elif [[ "$FOLLOW_UP_PENDING" == "true" ]]; then
+        if [[ "$SECTION" == "profit" ]]; then
+          PROFIT_COMPLETED_THIS_RUN=0
+          PROFIT_FOLLOW_UP_PENDING=1
+        fi
         echo "[portal-section-worker] section=$SECTION publishedRevision=$PUBLISHED_REVISION follow-up pending"
       else
+        if [[ "$SECTION" == "profit" ]]; then
+          PROFIT_COMPLETED_THIS_RUN=1
+          PROFIT_FOLLOW_UP_PENDING=0
+          echo "[portal-section-worker] section=profit same-run completion eligible for post-profit homeRankings budgetSec=$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC"
+        fi
         echo "[portal-section-worker] section=$SECTION publishedRevision=$PUBLISHED_REVISION"
       fi
     else
