@@ -33,6 +33,8 @@ const calendarMinutes = entries => entries.flatMap(entry => {
   return hours.split(',').map(hour => Number(hour) * 60 + Number(minute));
 });
 
+const TEMP_ROOT_CLEANUP_OPTIONS = {recursive: true, force: true, maxRetries: 10, retryDelay: 50};
+
 const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const conditionalCapturesStatus = (source, {command, statusVariable}) => {
   // Shell line continuations do not change command structure. Normalize them
@@ -187,7 +189,7 @@ if (hostDeadlineBash.status === 0) {
       'expired deadline must not execute the child command');
     console.log('PASS deadline-before-lock dynamic regression');
   } finally {
-    fs.rmSync(deadlineProbeRoot, {recursive: true, force: true});
+    fs.rmSync(deadlineProbeRoot, TEMP_ROOT_CLEANUP_OPTIONS);
   }
 } else {
   console.log('SKIP deadline-before-lock dynamic regression (bash/flock unavailable)');
@@ -286,7 +288,7 @@ if (hostFdBash.status === 0) {
         'the second instance must run immediately instead of waiting for the detached descendant');
       console.log(`PASS child-fd-inheritance dynamic regression (${withTimeout ? 'timeout' : 'no-timeout'})`);
     } finally {
-      fs.rmSync(fdProbeRoot, {recursive: true, force: true, maxRetries: 15, retryDelay: 200});
+      fs.rmSync(fdProbeRoot, TEMP_ROOT_CLEANUP_OPTIONS);
     }
   }
 } else {
