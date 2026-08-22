@@ -12,6 +12,9 @@ import {spawn, spawnSync} from 'node:child_process';
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
+  readJsonFileSync,
+  writeJsonFileAtomicSync,
+  writeTextFileAtomicSync,
 } from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,14 +38,20 @@ function chromeExecutablePath() {
 }
 
 function loadJson(file) {
-  if (!fs.existsSync(file)) return {};
-  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
-  return text.trim() ? JSON.parse(text) : {};
+  return readJsonFileSync(file, {allowMissing: true}) || {};
 }
 
 function saveJson(file, obj) {
   fs.mkdirSync(path.dirname(file), {recursive: true});
-  fs.writeFileSync(file, JSON.stringify(obj, null, 2), 'utf8');
+  return writeJsonFileAtomicSync(file, obj);
+}
+
+function childObject(parent, key, label) {
+  if (parent[key] === undefined) parent[key] = {};
+  if (!parent[key] || typeof parent[key] !== 'object' || Array.isArray(parent[key])) {
+    throw new Error(`Chrome profile metadata ${label} must be an object`);
+  }
+  return parent[key];
 }
 
 function ensureProfileName(profileDir) {
@@ -51,22 +60,22 @@ function ensureProfileName(profileDir) {
 
   const prefsPath = path.join(chromeProfileDir, 'Preferences');
   const prefs = loadJson(prefsPath);
-  prefs.profile ||= {};
-  prefs.profile.name = PROFILE_NAME;
-  prefs.profile.is_using_default_name = false;
+  const prefsProfile = childObject(prefs, 'profile', 'Preferences.profile');
+  prefsProfile.name = PROFILE_NAME;
+  prefsProfile.is_using_default_name = false;
   saveJson(prefsPath, prefs);
 
   const localStatePath = path.join(profileDir, 'Local State');
   const localState = loadJson(localStatePath);
-  localState.profile ||= {};
-  localState.profile.info_cache ||= {};
-  localState.profile.info_cache['Profile 1'] ||= {};
-  localState.profile.info_cache['Profile 1'].name = PROFILE_NAME;
-  localState.profile.info_cache['Profile 1'].is_using_default_name = false;
-  localState.profile.info_cache['Profile 1'].avatar_icon ||= 'chrome://theme/IDR_PROFILE_AVATAR_26';
+  const profile = childObject(localState, 'profile', 'Local State.profile');
+  const infoCache = childObject(profile, 'info_cache', 'Local State.profile.info_cache');
+  const profileInfo = childObject(infoCache, 'Profile 1', 'Local State.profile.info_cache[Profile 1]');
+  profileInfo.name = PROFILE_NAME;
+  profileInfo.is_using_default_name = false;
+  profileInfo.avatar_icon ||= 'chrome://theme/IDR_PROFILE_AVATAR_26';
   saveJson(localStatePath, localState);
 
-  fs.writeFileSync(path.join(profileDir, 'PROFILE_NAME.txt'), `${PROFILE_NAME}\n`, 'utf8');
+  writeTextFileAtomicSync(path.join(profileDir, 'PROFILE_NAME.txt'), `${PROFILE_NAME}\n`);
 }
 
 function parseArgs(argv) {
