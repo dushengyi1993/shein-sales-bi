@@ -10,7 +10,7 @@ import {
 function usage() {
   return [
     'usage:',
-    '  manage_emergency_local_release_receipt.mjs create --bundle <file> --commit <40-hex> --baseline-commit <40-hex> --reason <text> [--receipt-file <file>] [--created-at <ISO>] [--max-bundle-bytes <n>]',
+    '  manage_emergency_local_release_receipt.mjs create --bundle <file> --commit <40-hex> --baseline-commit <40-hex> --reason <text> [--cwd <checkout>] [--receipt-file <file>] [--created-at <ISO>] [--max-bundle-bytes <n>]',
     '  manage_emergency_local_release_receipt.mjs verify [--receipt-file <file>] [--bundle <file>] [--cwd <checkout>]',
   ].join('\n');
 }
@@ -36,7 +36,7 @@ function parseArgs(argv) {
     maxBundleBytes: undefined,
   };
   const allowed = new Set(command === 'create'
-    ? ['--receipt-file', '--bundle', '--commit', '--baseline-commit', '--reason', '--created-at', '--max-bundle-bytes']
+    ? ['--receipt-file', '--bundle', '--commit', '--baseline-commit', '--reason', '--created-at', '--cwd', '--max-bundle-bytes']
     : ['--receipt-file', '--bundle', '--cwd', '--max-bundle-bytes']);
   const seen = new Set();
   const withValue = new Set([
@@ -81,6 +81,7 @@ async function main(argv) {
       baselineCommit: args.baselineCommit,
       reason: args.reason,
       createdAt: args.createdAt,
+      cwd: args.cwd,
       maxBundleBytes: args.maxBundleBytes,
     });
     console.log(JSON.stringify({
@@ -88,6 +89,7 @@ async function main(argv) {
       mode: 'create',
       receiptFile: created.receiptFile,
       bundle: created.bundle,
+      source: created.source,
       receipt: created.receipt,
       readback: {ok: created.readback.ok, bytesSha256: created.readback.bytesSha256},
     }, null, 2));
@@ -108,6 +110,8 @@ async function main(argv) {
     issues: verified.issues,
     receipt: verified.receipt,
     bundle: verified.bundle,
+    bundleVerified: verified.bundleVerified,
+    bundleVerification: verified.bundleVerification,
     source: verified.source,
   }, null, 2));
   if (!verified.ok) process.exitCode = 1;
