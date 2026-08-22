@@ -126,8 +126,173 @@ assert.match(hostWrapper, /--deadline-epoch/,
   'the morning inventory lane needs an immutable absolute deadline');
 assert.equal((hostWrapper.match(/CURRENT_LOCK_WAIT="\$\(lock_wait_for_current_deadline\)"/g) || []).length, 3,
   'host, project and domain lock waits must each recompute the absolute deadline');
-assert.match(hostWrapper, /if \(\( LOCK_WAIT_SEC > REMAINING_SEC \)\); then LOCK_WAIT_SEC="\$REMAINING_SEC"/,
-  'lock wait must be clamped so it cannot consume the inventory window');
+assert.match(hostWrapper, /if \(\( wait > remaining \)\); then wait="\$remaining"/,
+  'lock wait must be clamped so it cannot consume the remaining deadline');
+assert.match(hostWrapper, /resolve_effective_deadline\(\)/,
+  'all deadline forms must be resolved before any lock is opened');
+assert.match(hostWrapper, /DEADLINE_LABEL="epoch=\$DEADLINE_EPOCH_INPUT"/,
+  'the explicit epoch must participate in the earliest-deadline selection');
+assert.match(hostWrapper, /if \[\[ -n "\$DEADLINE_EPOCH" \]\] && \(\( now_epoch >= DEADLINE_EPOCH \)\); then/,
+  'an already expired absolute deadline must defer before lock preparation');
+assert.ok(
+  hostWrapper.indexOf('resolve_effective_deadline') < hostWrapper.indexOf('prepare_shared_lock_file'),
+  'deadline resolution must precede project/domain lock preparation');
+assert.ok(
+  hostWrapper.indexOf('resolve_effective_deadline') < hostWrapper.indexOf('exec 9<>"$HOST_LOCK"'),
+  'deadline resolution must precede host lock acquisition');
+assert.match(hostWrapper, /defer_lock_busy\(\)/,
+  'lock contention must report deadline elapsed when the clamped wait reaches the cutoff');
+assert.match(hostWrapper, /CHILD_FD_CLEAN_COMMAND=\(/,
+  'the child must run through one descriptor-sanitizing command path');
+assert.match(hostWrapper, /exec 7>&- 8>&- 9>&-/,
+  'the child copy of all shared lock descriptors must be closed');
+assert.match(hostWrapper, /"\$\{TIMEOUT_ARGS\[@\]\}" "\$\{CHILD_FD_CLEAN_COMMAND\[@\]\}" "\$@"/,
+  'the timeout path must sanitize descriptors before executing the child');
+assert.match(hostWrapper, /"\$\{CHILD_FD_CLEAN_COMMAND\[@\]\}" "\$@"/,
+  'the no-timeout path must sanitize descriptors before executing the child');
+
+// Dynamic regression: an already elapsed epoch must return 75 before the
+// wrapper opens the neutral host lock or executes the child command. Skip only
+// when this machine has no Bash runtime capable of running the shell wrapper.
+const hostDeadlineBash = spawnSync('bash', ['-lc', 'command -v flock'], {encoding: 'utf8'});
+if (hostDeadlineBash.status === 0) {
+  const deadlineProbeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-host-heavy-deadline-probe-'));
+  try {
+    const hostLock = path.join(deadlineProbeRoot, 'host.lock');
+    const ranMarker = path.join(deadlineProbeRoot, 'child-ran');
+    fs.writeFileSync(hostLock, '');
+    const bashPath = value => process.platform === 'win32'
+      ? value.replace(/^([A-Za-z]):[\\/]/, (_, drive) => `/mnt/${drive.toLowerCase()}/`).replaceAll('\\', '/')
+      : value;
+    const expiredEpoch = Math.floor(Date.now() / 1000) - 60;
+    const deadlineRun = spawnSync('bash', [bashPath(path.join(path.dirname(fileURLToPath(import.meta.url)), 'run_host_heavy_job.sh')),
+      '--domain', 'deadline-before-lock',
+      '--lock-wait-sec', '60',
+      '--deadline-epoch', String(expiredEpoch),
+      '--', 'bash', '-c', `touch ${bashPath(ranMarker)}`,
+    ], {
+      cwd: deadlineProbeRoot,
+      env: {
+        ...process.env,
+        SHEIN_BI_ROOT: bashPath(deadlineProbeRoot),
+        SHEIN_HOST_HEAVY_LOCK_FILE: bashPath(hostLock),
+      },
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    assert.equal(deadlineRun.error, undefined, deadlineRun.stderr || deadlineRun.stdout);
+    assert.equal(deadlineRun.status, HOST_RESOURCE_DEFER_EXIT_CODE,
+      `expired deadline must defer before lock acquisition: ${deadlineRun.stderr || deadlineRun.stdout}`);
+    assert.equal(fs.existsSync(ranMarker), false,
+      'expired deadline must not execute the child command');
+    console.log('PASS deadline-before-lock dynamic regression');
+  } finally {
+    fs.rmSync(deadlineProbeRoot, {recursive: true, force: true});
+  }
+} else {
+  console.log('SKIP deadline-before-lock dynamic regression (bash/flock unavailable)');
+}
+
+// Dynamic regression: a child that starts a background descendant and exits
+// must not leak the wrapper's 7/8/9 lock descriptors into that descendant.
+// The second instance must acquire the same lock immediately after the first
+// wrapper reaches its terminal child status, for both execution paths.
+const hostFdBash = spawnSync('bash', ['-lc', 'command -v flock && command -v timeout'], {encoding: 'utf8'});
+if (hostFdBash.status === 0) {
+  const fdWrapperPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'run_host_heavy_job.sh');
+  const bashPath = value => process.platform === 'win32'
+    ? value.replace(/^([A-Za-z]):[\\/]/, (_, drive) => `/mnt/${drive.toLowerCase()}/`).replaceAll('\\', '/')
+    : value;
+  for (const withTimeout of [false, true]) {
+    const fdProbeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-host-heavy-fd-inheritance-'));
+    try {
+      const scriptsLib = path.join(fdProbeRoot, 'scripts', 'lib');
+      const hostLock = path.join(fdProbeRoot, 'host.lock');
+      const childStarted = path.join(fdProbeRoot, 'child-started');
+      const childPid = path.join(fdProbeRoot, 'child-pid');
+      const secondStarted = path.join(fdProbeRoot, 'second-started');
+      fs.mkdirSync(scriptsLib, {recursive: true});
+      fs.writeFileSync(hostLock, '');
+      fs.writeFileSync(path.join(scriptsLib, 'shared_lock.sh'), [
+        '#!/usr/bin/env bash',
+        'prepare_shared_lock_file() {',
+        '  mkdir -p "$(dirname -- "$1")"',
+        '  [[ -e "$1" ]] || : > "$1"',
+        '}',
+        '',
+      ].join('\n'));
+      fs.writeFileSync(path.join(fdProbeRoot, 'scripts', 'check_host_resource_pressure.mjs'), 'process.exit(0);\n');
+      const probeEnv = {
+        SHEIN_BI_ROOT: bashPath(fdProbeRoot),
+        SHEIN_HOST_HEAVY_LOCK_FILE: bashPath(hostLock),
+      };
+      const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+      const runWithProbeEnv = (args, timeout) => {
+        const exports = Object.entries(probeEnv).map(([name, value]) => `export ${name}=${shellQuote(value)}`);
+        const command = [
+          'set -Eeuo pipefail',
+          ...exports,
+          `exec bash ${shellQuote(args[0])} ${args.slice(1).map(shellQuote).join(' ')}`,
+        ].join('; ');
+        return spawnSync('bash', ['-c', command], {
+          cwd: os.tmpdir(),
+          encoding: 'utf8',
+          timeout,
+        });
+      };
+      const backgroundChildPath = path.join(fdProbeRoot, 'background-child.sh');
+      fs.writeFileSync(backgroundChildPath, [
+        '#!/usr/bin/env bash',
+        'set -Eeuo pipefail',
+        `printf "started\\n" > ${shellQuote(bashPath(childStarted))}`,
+        'sleep 2 &',
+        'background_pid=$!',
+        `printf "%s\\n" "$background_pid" > ${shellQuote(bashPath(childPid))}`,
+        'exit 0',
+      ].join('\n'));
+      const secondChildPath = path.join(fdProbeRoot, 'second-child.sh');
+      fs.writeFileSync(secondChildPath, [
+        '#!/usr/bin/env bash',
+        'set -Eeuo pipefail',
+        `printf "second\\n" > ${shellQuote(bashPath(secondStarted))}`,
+      ].join('\n'));
+      const firstArgs = [
+        bashPath(fdWrapperPath),
+        '--domain',
+        withTimeout ? 'fd-descendant-timeout' : 'fd-descendant-no-timeout',
+        '--lock-wait-sec', '1',
+      ];
+      if (withTimeout) firstArgs.push('--deadline-epoch', String(Math.floor(Date.now() / 1000) + 30));
+      firstArgs.push('--', 'bash', bashPath(backgroundChildPath));
+      const first = runWithProbeEnv(firstArgs, 5_000);
+      assert.equal(first.error, undefined, first.stderr || first.stdout);
+      assert.equal(first.status, 0,
+        `background-child ${withTimeout ? 'timeout' : 'no-timeout'} first run failed: ${first.stderr || first.stdout}`);
+      assert.equal(fs.existsSync(childStarted), true, 'the background-child probe must start its child');
+      assert.match(fs.readFileSync(childPid, 'utf8').trim(), /^\d+$/,
+        'the child must have started a real background descendant');
+
+      const second = runWithProbeEnv([
+        bashPath(fdWrapperPath),
+        '--domain',
+        withTimeout ? 'fd-descendant-timeout' : 'fd-descendant-no-timeout',
+        '--lock-wait-sec', '1',
+        '--', 'bash', bashPath(secondChildPath),
+      ], 5_000);
+      assert.equal(second.error, undefined, second.stderr || second.stdout);
+      assert.equal(second.status, 0,
+        `second instance must acquire locks after ${withTimeout ? 'timeout' : 'no-timeout'} child terminal state: ${second.stderr || second.stdout}`);
+      assert.equal(fs.existsSync(secondStarted), true,
+        'the second instance must run immediately instead of waiting for the detached descendant');
+      console.log(`PASS child-fd-inheritance dynamic regression (${withTimeout ? 'timeout' : 'no-timeout'})`);
+    } finally {
+      fs.rmSync(fdProbeRoot, {recursive: true, force: true, maxRetries: 15, retryDelay: 200});
+    }
+  }
+} else {
+  console.log('SKIP child-fd-inheritance dynamic regression (bash/flock/timeout unavailable)');
+}
+
 assert.match(hostWrapper, /status="deferred_to_local"/);
 assert.doesNotMatch(hostWrapper, /touch -- "\$HOST_LOCK"/,
   'the half-managed project consumes the neutral host lock and must not recreate it');
@@ -141,7 +306,6 @@ const heavyUnits = [
   'shein-bi-cloud-et-forwarder.service',
   'shein-bi-et-low-inventory-guard.service',
   'shein-bi-et-low-inventory-recheck.service',
-  'shein-bi-cloud-marketing-live-guard.service',
   'shein-bi-cloud-marketing-repair.service',
   'shein-bi-daily-inventory-replenishment-guard.service',
   'shein-bi-cloud-portal-section-queue.service',
@@ -151,9 +315,11 @@ for (const name of heavyUnits) {
   const content = unit(name);
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
   assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh|run_cloud_session_manager_job\.sh|cloud_order_closure_coordinator\.sh/, name);
-  if (name === 'shein-bi-cloud-session-manager.service') {
+  if (name === 'shein-bi-cloud-session-manager.service'
+    || name === 'shein-bi-db-backup.service'
+    || name === 'shein-bi-cloud-yesterday.service') {
     assert.doesNotMatch(content, /^SuccessExitStatus=75$/m,
-      'session-manager coordinator must convert terminal deferral to a real failed unit result');
+      'session-manager, database backup, and yesterday deferrals must remain real failed unit results');
   } else {
     assert.match(content, /^SuccessExitStatus=75$/m, name);
   }
@@ -243,10 +409,20 @@ assert.deepEqual(calendars(unit('shein-bi-et-low-inventory-recheck.timer')), [
   '*-*-* 00,02,05,06,08,09,11,12,15,16,18,19,22:20:00',
 ]);
 assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
-assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), ['*-*-* 01:45:00']);
+assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), [
+  '*-*-* 01:45:00',
+  '*-*-* 02:05:00',
+  '*-*-* 02:25:00',
+]);
+assert.match(unit('shein-bi-db-backup.timer'), /^Persistent=true$/m,
+  'the single database backup timer must catch up through its same-day marker contract');
 assert.match(unit('shein-bi-db-backup.service'), /--deadline-at 02:37/,
   'database backup must retain a measured window and stop before the 02:45 yesterday-final lane');
-assert.deepEqual(calendars(unit('shein-bi-cloud-yesterday.timer')), ['*-*-* 02:45:00']);
+assert.deepEqual(calendars(unit('shein-bi-cloud-yesterday.timer')), [
+  '*-*-* 02:45:00',
+  '*-*-* 03:05:00',
+  '*-*-* 03:20:00',
+]);
 assert.deepEqual(calendars(unit('shein-bi-cloud-rtv-verify.timer')), ['*-*-* 04:50:00']);
 assert.deepEqual(calendars(unit('shein-bi-cloud-morning-chain.timer')), ['*-*-* 07:10:00']);
 assert.match(unit('shein-bi-cloud-morning-chain.timer'), /^Persistent=true$/m,

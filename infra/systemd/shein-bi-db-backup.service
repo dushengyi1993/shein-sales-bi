@@ -1,7 +1,7 @@
 [Unit]
-Description=SHEIN BI database and encrypted browser-state backup (local retention only)
+Description=SHEIN BI database backup local only
 Wants=docker.service
-After=docker.service shein-bi-cloud-session-manager.service systemd-tmpfiles-setup.service
+After=docker.service systemd-tmpfiles-setup.service
 Before=shein-bi-cloud-yesterday.service
 
 [Service]
@@ -46,5 +46,4 @@ LockPersonality=true
 RestrictRealtime=true
 ExecStartPre=/usr/bin/install -d -o sheinops -g sheinops -m 2770 /opt/shein-bi/app/state/locks
 ExecStartPre=/usr/bin/install -o sheinops -g sheinops -m 0660 /dev/null /opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain db-backup --class materializer --lock-wait-sec 120 --deadline-at 02:37 --defer-state /srv/shein-bi/runtime/host-scheduler/db-backup.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage nightly-backup --require nightly-session --message "PostgreSQL backup completed" -- /usr/bin/flock -w 120 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_db_backup.sh
-SuccessExitStatus=75
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain db-backup --class materializer --lock-wait-sec 120 --deadline-at 02:37 --defer-state /srv/shein-bi/runtime/host-scheduler/db-backup.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/run_pipeline_stage.sh --stage nightly-backup --run-date today --business-date today --skip-if-done --work-fingerprint-scope nightly-backup --work-semantic-version nightly-backup/v1-local-dump --workset-digest-program /usr/bin/printf --workset-digest-arg '{"ok":true,"worksetDigest":"0000000000000000000000000000000000000000000000000000000000000000","candidateCount":0,"pairCount":0}' --message "PostgreSQL backup completed" -- /usr/bin/flock -w 120 ${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE} /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_db_backup.sh

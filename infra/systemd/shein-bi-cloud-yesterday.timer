@@ -3,6 +3,8 @@ Description=Run SHEIN BI cloud yesterday final refresh
 
 [Timer]
 OnCalendar=*-*-* 02:45:00
+OnCalendar=*-*-* 03:05:00
+OnCalendar=*-*-* 03:20:00
 AccuracySec=5s
 Persistent=false
 Unit=shein-bi-cloud-yesterday.service

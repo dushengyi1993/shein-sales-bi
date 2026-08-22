@@ -220,6 +220,7 @@ assert.match(property(sessionManager, 'Before'), /shein-bi-db-backup\.service/);
 assert.match(property(sessionManager, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
 const dbBackup = readUnit('shein-bi-db-backup.service');
+const dbBackupTimer = readUnit('shein-bi-db-backup.timer');
 const remoteVerifierLauncherPath = 'scripts/verify_cos_backup_remote.sh';
 const remoteVerifierLauncher = fs.readFileSync(new URL(`../${remoteVerifierLauncherPath}`, import.meta.url), 'utf8');
 const systemdReadme = fs.readFileSync(new URL('../infra/systemd/README.md', import.meta.url), 'utf8');
@@ -229,6 +230,7 @@ assert.equal(property(dbBackup, 'UMask'), '0027');
 assert.equal(property(dbBackup, 'NoNewPrivileges'), 'true');
 assert.equal(property(dbBackup, 'PrivateTmp'), 'true');
 assertCommonHardening(dbBackup, 'db backup');
+assert.equal(property(dbBackup, 'Description'), 'SHEIN BI database backup local only');
 assert.match(dbBackup, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
 assert.match(dbBackup, /^Environment=SHEIN_BI_BACKUP_OFFSITE_ENABLED=0$/m,
   'production database backup must pin local-only mode');
@@ -238,8 +240,16 @@ assert.match(dbBackup, /SHEIN_BI_BROWSER_PROFILE_ROOT=\/data\/shein-bi\/profiles
 assert.match(dbBackup, /SHEIN_BI_BROWSER_SESSION_ROOT=\/data\/shein-bi\/state\/shein_webapi_sessions/);
 assert.match(dbBackup, /--deadline-at 02:37/,
   'the 01:45 database backup needs a real window while retaining an eight-minute handoff before 02:45 yesterday-final');
-assert.match(dbBackup, /--stage nightly-backup --require nightly-session/);
+assert.match(dbBackup, /--stage nightly-backup --run-date today --business-date today --skip-if-done/,
+  'database backup must be an independent same-day marker stage, not a session-manager dependency');
+assert.match(dbBackup, /--work-fingerprint-scope nightly-backup/);
+assert.match(dbBackup, /--work-semantic-version nightly-backup\/v1-local-dump/);
+assert.match(dbBackup, /--workset-digest-program \/usr\/bin\/printf/);
+assert.doesNotMatch(dbBackup, /--stage nightly-backup --require nightly-session/,
+  'database backup must not be coupled to the nightly session marker');
 assert.match(dbBackup, /flock -w 120/);
+assert.doesNotMatch(dbBackup, /^SuccessExitStatus=75$/m,
+  'resource/deadline deferral must remain a failed database-backup unit result');
 assert.equal(property(dbBackup, 'TimeoutStartSec'), '10800',
   'backup timeout must cover the longest lock wait plus the backup execution budget');
 assert.doesNotMatch(dbBackup, /network-online\.target/,
@@ -266,13 +276,36 @@ assert.match(systemdReadme, /^systemd-analyze verify .*\/shein-bi-db-backup\.ser
   'the production parser check must cover both modified local-only services');
 assert.doesNotMatch(dbBackup, /^Environment=\TrueSHEIN_BI_COS_VERIFY_(SECRET|TARGET)/i,
   'the launcher resolves credential paths, never Environment values');
-assert.match(property(dbBackup, 'After'), /shein-bi-cloud-session-manager\.service/);
+assert.doesNotMatch(property(dbBackup, 'After'), /shein-bi-cloud-session-manager\.service/,
+  'database backup must not be ordered after session-manager');
+assert.match(property(dbBackup, 'After'), /docker\.service/,
+  'database backup must retain Docker ordering');
+assert.match(property(dbBackup, 'After'), /systemd-tmpfiles-setup\.service/,
+  'database backup must retain tmpfiles ordering');
 assert.match(property(dbBackup, 'Before'), /shein-bi-cloud-yesterday\.service/);
 
 const yesterday = readUnit('shein-bi-cloud-yesterday.service');
+const yesterdayTimer = readUnit('shein-bi-cloud-yesterday.timer');
 assert.match(yesterday, /flock -w 120/, 'yesterday final refresh waits briefly for the shared nightly maintenance lock');
 assert.match(yesterday, /--deadline-at 03:27/);
-assert.match(yesterday, /--stage yesterday-final --business-date yesterday --require nightly-session --require nightly-backup/);
+assert.match(yesterday, /--stage yesterday-final --run-date today --business-date yesterday --require nightly-session --require nightly-backup --skip-if-done/);
+assert.match(yesterday, /--work-fingerprint-scope yesterday-final/);
+assert.match(yesterday, /--work-semantic-version yesterday-final\/v1-openapi-finalization/);
+assert.match(yesterday, /--workset-digest-program \/usr\/bin\/printf/);
+assert.doesNotMatch(yesterday, /^SuccessExitStatus=75$/m,
+  'missing nightly-backup must remain a failed yesterday-final unit result');
+assert.deepEqual(
+  [...dbBackupTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim()),
+  ['*-*-* 01:45:00', '*-*-* 02:05:00', '*-*-* 02:25:00'],
+  'database backup retries must remain inside its one timer',
+);
+assert.equal(property(dbBackupTimer, 'Persistent'), 'true');
+assert.deepEqual(
+  [...yesterdayTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim()),
+  ['*-*-* 02:45:00', '*-*-* 03:05:00', '*-*-* 03:20:00'],
+  'yesterday retries must remain inside its one existing timer',
+);
+assert.equal(property(yesterdayTimer, 'Persistent'), 'false');
 assert.match(yesterday, /SHEIN_SALES_TRANSPORT=openapi/, 'final-day sales must not depend on expiring Seller Center sessions');
 assert.match(property(yesterday, 'After'), /shein-bi-cloud-session-manager\.service/);
 assert.match(property(yesterday, 'After'), /shein-bi-db-backup\.service/);
@@ -466,6 +499,9 @@ if (systemdAnalyze?.status === 0) {
     'shein-bi-cloud-session-manager.service',
     'shein-bi-cloud-session-manager.timer',
     'shein-bi-db-backup.service',
+    'shein-bi-db-backup.timer',
+    'shein-bi-cloud-yesterday.service',
+    'shein-bi-cloud-yesterday.timer',
     'shein-bi-cloud-disk-maintenance.service',
   ];
   let fixtureRoot = null;
@@ -501,8 +537,9 @@ for (const timerName of [
   'shein-bi-db-backup.timer',
   'shein-bi-cloud-rtv-verify.timer',
 ]) {
-  assert.equal(property(readUnit(timerName), 'Persistent'), 'false',
-    `${timerName} must not replay at an arbitrary minute and collide with the reserved home lane`);
+  const expectedPersistent = timerName === 'shein-bi-db-backup.timer' ? 'true' : 'false';
+  assert.equal(property(readUnit(timerName), 'Persistent'), expectedPersistent,
+    `${timerName} must retain its explicit persistence contract`);
 }
 
 console.log(JSON.stringify({

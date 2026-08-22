@@ -3,8 +3,10 @@ Description=Run SHEIN BI PostgreSQL backup daily
 
 [Timer]
 OnCalendar=*-*-* 01:45:00
+OnCalendar=*-*-* 02:05:00
+OnCalendar=*-*-* 02:25:00
 AccuracySec=5s
-Persistent=false
+Persistent=true
 Unit=shein-bi-db-backup.service
 
 [Install]

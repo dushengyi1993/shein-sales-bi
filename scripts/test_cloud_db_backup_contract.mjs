@@ -9,12 +9,13 @@ import { fileURLToPath } from 'node:url';
 
 const script = fs.readFileSync(new URL('./cloud_db_backup.sh', import.meta.url), 'utf8');
 const service = fs.readFileSync(new URL('../infra/systemd/shein-bi-db-backup.service', import.meta.url), 'utf8');
+const timer = fs.readFileSync(new URL('../infra/systemd/shein-bi-db-backup.timer', import.meta.url), 'utf8');
 const scriptPath = fileURLToPath(new URL('./cloud_db_backup.sh', import.meta.url));
 
 assert.match(script, /BACKUP_RETENTION_DAYS:-7/);
 assert.match(script, /--prune-only/);
-assert.match(script, /SHEIN_BI_BACKUP_OFFSITE_ENABLED:-1/,
-  'offsite mode must remain enabled by default for compatible manual/offsite runs');
+assert.match(script, /SHEIN_BI_BACKUP_OFFSITE_ENABLED:-0/,
+  'offsite mode must remain local-only by default; COS requires explicit opt-in');
 assert.match(script, /invalid SHEIN_BI_BACKUP_OFFSITE_ENABLED=.*expected 0 or 1/,
   'offsite mode must fail closed for any value other than strict 0/1');
 assert.match(script, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY:-\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
@@ -81,6 +82,8 @@ assert.match(script, /same-day offsite terminal=exhausted.*reason=cos-unavailabl
 assert.match(script, /retention warning=legacy-local-backup-preserved current-backup-valid=1/,
   'a verified current backup must survive non-terminal legacy retention warnings');
 assert.match(service, /SHEIN_BI_BACKUP_RETENTION_DAYS=7/);
+assert.match(service, /^Description=SHEIN BI database backup local only$/m,
+  'the database backup unit description must retain the local-only contract');
 assert.match(service, /SHEIN_BI_BACKUP_OFFSITE_ENABLED=0/,
   'production database backup must pin local-only mode');
 assert.match(script, /SHEIN_BI_REMOTE_VERIFY_CMD/);
@@ -196,15 +199,32 @@ assert.ok(script.includes('SHEIN_BI_BACKUP_TEST_SWAP_AFTER_FINAL_IDENTITY'),
   'the path-swap hook trigger must be explicit and test-scoped');
 assert.ok(script.includes('SHEIN_BI_BACKUP_TEST_MODE:-0'),
   'the path-swap hook must be gated behind the existing test mode');
-// The existing unit treats 75 as successful, so every terminal remote failure
-// from this script must be 74/78 (or another ordinary failure), never 75.
+// The backup script itself must never self-defer with service-success status;
+// the host wrapper and systemd unit now expose 75 as a real failure too.
 assert.doesNotMatch(script, /\b(?:exit|return)\s+75\b/,
   'cloud_db_backup.sh must never self-defer with service-success status 75');
 assert.match(script, /set -Eeuo pipefail/, 'any stage failure must be a real non-zero exit');
-assert.match(service, /SuccessExitStatus=75/, 'the unchanged unit still makes status selection security-relevant');
+assert.doesNotMatch(service, /^SuccessExitStatus=75$/m,
+  'database backup resource/deadline deferral must remain a visible systemd failure');
 assert.doesNotMatch(service, /SuccessExitStatus=.*(?:74|78)/, '74 and 78 must remain service failures');
 assert.match(service, /run_host_heavy_job\.sh --domain db-backup[\s\S]*flock[\s\S]*cloud_db_backup\.sh/,
   'the one foreground script invocation must remain under host/project/domain and maintenance locks');
+assert.doesNotMatch(service, /After=.*shein-bi-cloud-session-manager\.service/,
+  'database backup must not be ordered after the session-manager service');
+assert.match(service, /--stage nightly-backup --run-date today --business-date today --skip-if-done/,
+  'database backup must retain a same-day marker stage');
+assert.match(service, /--work-fingerprint-scope nightly-backup/);
+assert.match(service, /--work-semantic-version nightly-backup\/v1-local-dump/);
+assert.match(service, /--workset-digest-program \/usr\/bin\/printf/);
+assert.doesNotMatch(service, /--stage nightly-backup --require nightly-session/,
+  'database backup must not require the nightly session marker');
+assert.deepEqual(
+  [...timer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim()),
+  ['*-*-* 01:45:00', '*-*-* 02:05:00', '*-*-* 02:25:00'],
+  'the single database backup timer must expose only the bounded same-day retry window',
+);
+assert.match(timer, /^Persistent=true$/m,
+  'the single database backup timer must catch up through the same-day marker contract');
 assert.doesNotMatch(service, /Environment=SHEIN_BI_REMOTE_VERIFY_CMD=/,
   'local-only production service must not configure a remote verifier');
 assert.doesNotMatch(service, /SHEIN_BI_BACKUP_COS_(?:MOUNT|ARCHIVE_ROOT)=/,
@@ -563,6 +583,18 @@ try {
     'browser-state.sheinenc': Buffer.from('encrypted browser state fixture'),
     'shein_bi.dump': Buffer.from('database dump fixture'),
   };
+
+  // The absence of the environment variable itself must select local-only
+  // mode. Explicit 1 remains covered by the offsite scenarios below.
+  const defaultLocalSource = createSource('20260817-default-local-only', healthyEntries);
+  const defaultLocalEnv = envFor({offsite: false, pruneMountOkay: true});
+  delete defaultLocalEnv.SHEIN_BI_BACKUP_OFFSITE_ENABLED;
+  const defaultLocalVerify = runArchiveVerification(defaultLocalSource, '0', {env: defaultLocalEnv});
+  assert.equal(defaultLocalVerify.status, 0, defaultLocalVerify.stderr);
+  assert.match(defaultLocalVerify.stdout, /local-only verified=.*local-preserved=/);
+  assert.equal(fs.readdirSync(cosRoot).length, 0,
+    'the omitted offsite switch must not create a COS archive');
+  dynamicScenarios.push('default-offsite-disabled-unless-explicitly-enabled');
 
   // 0) Local-only mode verifies a local candidate without probing the COS
   // mount or invoking the configured verifier.  The mountpoint wrapper and
