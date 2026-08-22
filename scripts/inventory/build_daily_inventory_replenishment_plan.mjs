@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -11,6 +12,7 @@ import {
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
+import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 import {resolveOpenApiProductCacheDir, resolveOpenApiProductCacheFile} from '../../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -25,6 +27,10 @@ function parseArgs(argv) {
     linksData: path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
     operationMode: 'daily',
     requiredDetailTargets: '',
+    etManifest: '',
+    etBatchId: '',
+    etManifestHash: '',
+    etMaxAgeSeconds: null,
     out: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -37,6 +43,10 @@ function parseArgs(argv) {
     else if (a === '--links-data') args.linksData = path.resolve(argv[++i] || '');
     else if (a === '--operation-mode') args.operationMode = String(argv[++i] || '');
     else if (a === '--required-detail-targets') args.requiredDetailTargets = path.resolve(argv[++i] || '');
+    else if (a === '--et-manifest') args.etManifest = path.resolve(argv[++i] || '');
+    else if (a === '--et-batch-id') args.etBatchId = String(argv[++i] || '').trim();
+    else if (a === '--et-manifest-hash') args.etManifestHash = String(argv[++i] || '').trim().toLowerCase();
+    else if (a === '--et-max-age-seconds') args.etMaxAgeSeconds = String(argv[++i] ?? '').trim();
     else if (a === '--out') args.out = path.resolve(argv[++i] || '');
     else throw new Error(`Unknown argument: ${a}`);
   }
@@ -47,7 +57,20 @@ function parseArgs(argv) {
 }
 
 const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
+const readBiDocument = async file => {
+  if (!args?.etManifest) return readJson(file);
+  try {
+    return await readJson(file);
+  } catch (error) {
+    // A same-run ET manifest is authoritative for low-ET facts. A queued or
+    // unavailable Portal projection is diagnostic only and must not make the
+    // direct ET fact path depend on an old/missing cache.
+    return {__readError: error.message};
+  }
+};
 const ageHours = value => (Date.now() - new Date(value || '').getTime()) / 3_600_000;
+const ET_LOW_INVENTORY_MAX_AGE_HARD_LIMIT_SECONDS = 6 * 60 * 60;
+const ET_LOW_INVENTORY_MAX_FUTURE_SKEW_SECONDS = 5 * 60;
 const dateText = value => String(value || '').slice(0, 10);
 const enabledStoreKeys = config => {
   const rows = Array.isArray(config?.stores)
@@ -56,15 +79,467 @@ const enabledStoreKeys = config => {
   return rows.filter(row => row.enabled !== false).map(row => String(row.storeKey || row.key || '').trim().toUpperCase()).filter(Boolean);
 };
 
+const finiteNumber = value => {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(String(value).replace(/,/g, '').replace(/%$/, ''));
+  return Number.isFinite(n) ? n : null;
+};
+
+const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const relativeEvidencePath = file => path.relative(ROOT, file).replace(/\\/g, '/');
+const etText = value => String(value ?? '').trim();
+const etBeijingDate = value => {
+  const timestamp = new Date(value || '').getTime();
+  if (!Number.isFinite(timestamp)) return '';
+  return new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(timestamp));
+};
+const etDateOnly = value => {
+  const match = etText(value).match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}/);
+  if (!match) return '';
+  return match[0].split(/[-/]/).map((part, index) => index === 0 ? part.padStart(4, '0') : part.padStart(2, '0')).join('-');
+};
+const isNonNegativeInteger = value => value !== null
+  && value !== undefined
+  && value !== ''
+  && Number.isInteger(Number(value))
+  && Number(value) >= 0;
+const roundedSeconds = value => Number.isFinite(value) ? Number(value.toFixed(3)) : null;
+
+function etInventoryEvidenceHash({manifestHash, batchId, targetDate, files = {}} = {}) {
+  return stableInventoryHash({
+    schemaVersion: 'et-low-inventory-evidence/v1',
+    manifestHash: etText(manifestHash).toLowerCase(),
+    batchId: etText(batchId),
+    targetDate: etText(targetDate),
+    endpoints: ['store_stock', 'box_stock'].map(endpoint => {
+      const file = files?.[endpoint] || {};
+      return {
+        endpoint,
+        path: etText(file.path),
+        hash: etText(file.hash).toLowerCase(),
+        rowCount: isNonNegativeInteger(file.rowCount) ? Number(file.rowCount) : null,
+        count: isNonNegativeInteger(file.count) ? Number(file.count) : null,
+        rawRowCount: isNonNegativeInteger(file.rawRowCount) ? Number(file.rawRowCount) : null,
+        pageCount: isNonNegativeInteger(file.pageCount) ? Number(file.pageCount) : null,
+        fetchedAt: etText(file.fetchedAt),
+        complete: file.complete === true,
+      };
+    }),
+  });
+}
+
+function assessEtTimestampFreshness(label, value, maxAgeSeconds, nowMs, blockers) {
+  const timestampMs = new Date(value || '').getTime();
+  if (!Number.isFinite(timestampMs)) return null;
+  const ageSeconds = (nowMs - timestampMs) / 1_000;
+  if (ageSeconds < -ET_LOW_INVENTORY_MAX_FUTURE_SKEW_SECONDS) {
+    blockers.push(`${label} is too far in the future: ageSeconds=${roundedSeconds(ageSeconds)}`);
+  } else if (ageSeconds > maxAgeSeconds) {
+    blockers.push(`${label} exceeds max age: ageSeconds=${roundedSeconds(ageSeconds)} maxAgeSeconds=${maxAgeSeconds}`);
+  }
+  return roundedSeconds(ageSeconds);
+}
+
+// Match the ET loader's store-prefix handling locally so a same-run manifest
+// can be consumed without waiting for the Portal projection. The warehouse
+// loader remains the canonical implementation for persistence; this bounded
+// read path mirrors only the two stock endpoints used by the low-ET guard.
+const ET_STORE_PREFIX_RE = /^(DL|DX|FY|LQ|NM|HL|JY|ZL|TS|MZ|CX|YJ|XL|QY|QH)[-_]?0*/i;
+const stripEtStorePrefix = value => {
+  const raw = etText(value);
+  const stripped = raw.replace(ET_STORE_PREFIX_RE, '');
+  return stripped && stripped !== raw ? stripped : raw;
+};
+
+function normalizeEtManifestProduct(row = {}) {
+  const candidates = [
+    row.standard_goods_sn,
+    row.standardGoodsSn,
+    row.ModelNumber,
+    row.model_number,
+    row.Barcode,
+    row.barcode,
+    row.SkuCode,
+    row.sku_code,
+    row.match_key,
+    row.matchKey,
+  ].filter(value => etText(value));
+  const expanded = [];
+  for (const candidate of candidates) {
+    const stripped = stripEtStorePrefix(candidate);
+    if (stripped && stripped !== candidate) expanded.push(stripped);
+    expanded.push(candidate);
+  }
+  let fallback = null;
+  const context = {
+    goodsTitle: row.TitleCn || row.title_cn || row.GoodsTitle || row.goods_title || row.TitleEn || row.title_en || '',
+  };
+  for (const candidate of expanded) {
+    const detail = normalizeGoodsSnDetailed(candidate, context);
+    if (!fallback) fallback = detail;
+    if (!detail.needsReview) {
+      const canonical = etText(detail.canonical);
+      return {
+        standardGoodsSn: canonical,
+        matchKey: resolveInventoryIdentityKey(canonical) || canonicalInventoryKey(canonical),
+        title: etText(context.goodsTitle),
+      };
+    }
+  }
+  const detail = fallback || normalizeGoodsSnDetailed('', context);
+  const canonical = etText(detail?.canonical);
+  return {
+    standardGoodsSn: canonical,
+    matchKey: resolveInventoryIdentityKey(canonical) || canonicalInventoryKey(canonical),
+    title: etText(context.goodsTitle),
+  };
+}
+
+const etRowQuantity = row => finiteNumber(
+  row.Quantity
+    ?? row.quantity
+    ?? row.available_quantity
+    ?? row.availableQuantity,
+);
+const etRowWarehouse = row => etText(
+  row.StoreroomName
+    ?? row.storeroom_name
+    ?? row.WarehouseName
+    ?? row.warehouse_name
+    ?? row.storeroom
+    ?? row.warehouse,
+);
+const isEtLooseWarehouse = name => /09|散件/i.test(String(name || ''));
+const isEtFullCartonWarehouse = name => /01|整箱/i.test(String(name || ''));
+const isSk03038 = value => canonicalInventoryKey(value) === 'SK03038';
+
+async function readJsonBytes(file) {
+  const bytes = await fs.readFile(file);
+  return {
+    bytes,
+    text: bytes.toString('utf8').replace(/^\uFEFF/, ''),
+    hash: sha256(bytes),
+  };
+}
+
+async function readEtManifestDocument(inputPath) {
+  const input = path.resolve(inputPath);
+  const pointer = await readJsonBytes(input);
+  const pointerDoc = JSON.parse(pointer.text);
+  const pointerRef = etText(pointerDoc?.manifestPath);
+  if (!pointerRef) return {manifest: pointerDoc, manifestPath: input, manifestHash: pointer.hash, pointerPath: input};
+
+  const candidates = path.isAbsolute(pointerRef)
+    ? [pointerRef]
+    : [path.resolve(ROOT, pointerRef), path.resolve(path.dirname(input), pointerRef)];
+  let lastError = null;
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      const actual = await readJsonBytes(candidate);
+      return {manifest: JSON.parse(actual.text), manifestPath: candidate, manifestHash: actual.hash, pointerPath: input};
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`ET manifest pointer target is unavailable: ${pointerRef}; ${lastError?.message || 'read failed'}`);
+}
+
+function aggregateEtStockRows(rows, endpoint, aggregates, diagnostics) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const product = normalizeEtManifestProduct(row);
+    const warehouse = etRowWarehouse(row);
+    const quantity = etRowQuantity(row);
+    if (!product.matchKey || !product.standardGoodsSn || !warehouse || quantity === null) {
+      diagnostics.invalidRows += 1;
+      continue;
+    }
+    const isRelevantWarehouse = endpoint === 'store_stock'
+      ? isEtLooseWarehouse(warehouse)
+      : isEtFullCartonWarehouse(warehouse);
+    if (!isRelevantWarehouse) continue;
+    const target = aggregates.get(product.matchKey) || {
+      matchKey: product.matchKey,
+      standardGoodsSn: product.standardGoodsSn,
+      title: product.title,
+      looseSellableQty: 0,
+      fullCartonQty: 0,
+      storeRowCount: 0,
+      boxRowCount: 0,
+    };
+    if (product.standardGoodsSn.localeCompare(target.standardGoodsSn) < 0) target.standardGoodsSn = product.standardGoodsSn;
+    if (!target.title && product.title) target.title = product.title;
+    if (endpoint === 'store_stock') {
+      target.looseSellableQty += quantity;
+      target.storeRowCount += 1;
+    } else {
+      target.fullCartonQty += quantity;
+      target.boxRowCount += 1;
+    }
+    aggregates.set(product.matchKey, target);
+  }
+}
+
+function buildEtRowsFromAggregates(aggregates, targetDate) {
+  return [...aggregates.values()]
+    .map(item => {
+      const cartonException = isSk03038(item.standardGoodsSn) || isSk03038(item.matchKey);
+      const operationalDate = item.storeRowCount > 0 ? targetDate : '';
+      const boxDate = item.boxRowCount > 0 ? targetDate : '';
+      const inventoryMatchStatus = cartonException
+        ? (boxDate ? 'matched' : 'not_matched')
+        : (operationalDate ? 'matched' : 'not_matched');
+      const operationalQuantity = cartonException
+        ? item.looseSellableQty + item.fullCartonQty
+        : item.looseSellableQty;
+      const knownQuantity = inventoryMatchStatus === 'matched' ? operationalQuantity : null;
+      return {
+        standard_goods_sn: item.standardGoodsSn,
+        match_key: item.matchKey,
+        goods_title: item.title,
+        inventory_match_status: inventoryMatchStatus,
+        current_sellable_quantity: knownQuantity,
+        et_estimated_available_qty: knownQuantity,
+        et_loose_sellable_qty: item.looseSellableQty,
+        et_full_carton_qty: item.fullCartonQty,
+        et_store_snapshot_date: operationalDate,
+        et_box_snapshot_date: boxDate,
+        et_operational_stock_policy: cartonException
+          ? '09_loose_plus_01_full_carton_exception'
+          : '09_loose_only',
+      };
+    })
+    .sort((a, b) => String(a.match_key).localeCompare(String(b.match_key)));
+}
+
+async function loadEtManifestSource(inputPath, {
+  expectedDate,
+  expectedBatchId,
+  expectedManifestHash,
+  expectedMaxAgeSeconds,
+} = {}) {
+  const blockers = [];
+  const nowMs = Date.now();
+  const maxAgeSeconds = Number(expectedMaxAgeSeconds);
+  const maxAgeValid = expectedMaxAgeSeconds !== null
+    && expectedMaxAgeSeconds !== undefined
+    && String(expectedMaxAgeSeconds).trim() !== ''
+    && Number.isInteger(maxAgeSeconds)
+    && maxAgeSeconds > 0
+    && maxAgeSeconds <= ET_LOW_INVENTORY_MAX_AGE_HARD_LIMIT_SECONDS;
+  if (!maxAgeValid) {
+    blockers.push(`ET manifest max-age threshold is missing or invalid: value=${String(expectedMaxAgeSeconds ?? '') || '(missing)'}`);
+  }
+  let loaded;
+  try {
+    loaded = await readEtManifestDocument(inputPath);
+  } catch (error) {
+    return {ok: false, blockers: [`ET manifest cannot be read: ${error.message}`], rows: [], factSource: null, evidence: null};
+  }
+  const {manifest, manifestPath, manifestHash, pointerPath} = loaded;
+  const batchId = etText(manifest?.batchId);
+  const targetDate = etText(manifest?.targetDate);
+  if (!/^[a-f0-9]{64}$/i.test(manifestHash)) blockers.push('ET manifest hash is unreadable');
+  if (expectedManifestHash && (!/^[a-f0-9]{64}$/i.test(expectedManifestHash) || expectedManifestHash !== manifestHash)) {
+    blockers.push(`ET manifest hash mismatch: expected=${expectedManifestHash || '(missing)'} actual=${manifestHash || '(unreadable)'}`);
+  }
+  if (manifest?.ok !== true) blockers.push(`ET manifest is not completed: batch=${batchId || '(missing)'}`);
+  if (String(manifest?.mode || '') !== 'daily') blockers.push(`ET manifest mode is not daily: mode=${String(manifest?.mode || '')}`);
+  if (!batchId || (expectedBatchId && batchId !== expectedBatchId)) {
+    blockers.push(`ET manifest batch mismatch: expected=${expectedBatchId || '(missing)'} actual=${batchId || '(missing)'}`);
+  }
+  if (!targetDate || targetDate !== expectedDate) {
+    blockers.push(`ET manifest date mismatch: expected=${expectedDate || '(missing)'} actual=${targetDate || '(missing)'}`);
+  }
+  const createdAt = etText(manifest?.createdAt);
+  let manifestAgeSeconds = null;
+  if (!createdAt || !Number.isFinite(new Date(createdAt).getTime())) {
+    blockers.push('ET manifest createdAt is unreadable');
+  } else if (expectedDate && etBeijingDate(createdAt) !== expectedDate) {
+    blockers.push(`ET manifest createdAt date is stale: expected=${expectedDate} actual=${etBeijingDate(createdAt)}`);
+  } else if (maxAgeValid) {
+    manifestAgeSeconds = assessEtTimestampFreshness('ET manifest createdAt', createdAt, maxAgeSeconds, nowMs, blockers);
+  }
+
+  const sourceFiles = {};
+  const aggregates = new Map();
+  const diagnostics = {
+    invalidRows: 0,
+    endpointRows: {store_stock: 0, box_stock: 0},
+    endpointAgeSeconds: {store_stock: null, box_stock: null},
+  };
+  // Embedded inventory projections are never authoritative here. They can omit
+  // products without carrying any proof of snapshot completeness. The direct
+  // low-ET fact path therefore always binds both raw stock endpoint files and
+  // requires their API count/page contract to prove a complete snapshot.
+  const files = manifest?.files && typeof manifest.files === 'object' ? manifest.files : {};
+  for (const endpoint of ['store_stock', 'box_stock']) {
+    const endpointBlockerOffset = blockers.length;
+    const relativeFile = etText(files[endpoint]);
+    const endpointMeta = manifest?.endpoints?.[endpoint];
+    if (!relativeFile) {
+      blockers.push(`ET manifest is missing ${endpoint} file`);
+      continue;
+    }
+    if (path.isAbsolute(relativeFile)) {
+      blockers.push(`ET manifest ${endpoint} file path must be relative`);
+      continue;
+    }
+    const manifestDir = path.resolve(path.dirname(manifestPath));
+    const fullFile = path.resolve(manifestDir, relativeFile);
+    if (fullFile !== manifestDir && !fullFile.startsWith(`${manifestDir}${path.sep}`)) {
+      blockers.push(`ET manifest ${endpoint} file escapes the batch directory`);
+      continue;
+    }
+    if (!endpointMeta || etText(endpointMeta.kind) !== 'snapshot') {
+      blockers.push(`ET manifest ${endpoint} completeness kind is invalid`);
+    }
+    for (const field of ['count', 'rawRowCount', 'rowCount', 'pages']) {
+      if (!isNonNegativeInteger(endpointMeta?.[field])) {
+        blockers.push(`ET manifest ${endpoint} completeness ${field} is missing or invalid`);
+      }
+    }
+    if (endpointMeta?.stoppedByOverlap !== false || endpointMeta?.stoppedByDailyInitialCap !== false) {
+      blockers.push(`ET manifest ${endpoint} snapshot stopped before completeness was proven`);
+    }
+    try {
+      const content = await readJsonBytes(fullFile);
+      const document = JSON.parse(content.text);
+      const rows = Array.isArray(document?.rows) ? document.rows : null;
+      if (!rows) {
+        blockers.push(`ET manifest ${endpoint} file rows are unavailable`);
+        continue;
+      }
+      if (etText(document?.endpoint) !== endpoint) {
+        blockers.push(`ET manifest ${endpoint} file endpoint identity mismatch: actual=${etText(document?.endpoint) || '(missing)'}`);
+      }
+      const endpointFetchedAt = etText(document?.fetchedAt);
+      let endpointAgeSeconds = null;
+      if (!endpointFetchedAt || !Number.isFinite(new Date(endpointFetchedAt).getTime())) {
+        blockers.push(`ET manifest ${endpoint} file fetchedAt is unreadable`);
+      } else if (expectedDate && etBeijingDate(endpointFetchedAt) !== expectedDate) {
+        blockers.push(`ET manifest ${endpoint} file fetchedAt is stale: expected=${expectedDate} actual=${etBeijingDate(endpointFetchedAt)}`);
+      } else if (maxAgeValid) {
+        endpointAgeSeconds = assessEtTimestampFreshness(`ET manifest ${endpoint} file fetchedAt`, endpointFetchedAt, maxAgeSeconds, nowMs, blockers);
+      }
+      diagnostics.endpointAgeSeconds[endpoint] = endpointAgeSeconds;
+      const pageRows = Array.isArray(document?.pages) ? document.pages : null;
+      if (!isNonNegativeInteger(document?.count)
+        || !isNonNegativeInteger(document?.rawRowCount)
+        || !pageRows
+        || pageRows.length < 1) {
+        blockers.push(`ET manifest ${endpoint} file completeness metadata is missing or invalid`);
+      }
+      const pageContractValid = pageRows && pageRows.every(page => isNonNegativeInteger(page?.count)
+        && Number(page.count) === Number(endpointMeta?.count)
+        && isNonNegativeInteger(page?.rows));
+      if (!pageContractValid) {
+        blockers.push(`ET manifest ${endpoint} API page-count contract is incomplete`);
+      }
+      const pageRowTotal = pageRows
+        ? pageRows.reduce((sum, page) => sum + (isNonNegativeInteger(page?.rows) ? Number(page.rows) : 0), 0)
+        : -1;
+      diagnostics.endpointRows[endpoint] = rows.length;
+      const countValues = [
+        endpointMeta?.count,
+        endpointMeta?.rawRowCount,
+        endpointMeta?.rowCount,
+        endpointMeta?.pages,
+        document?.count,
+        document?.rawRowCount,
+        rows.length,
+        pageRows?.length,
+        pageRowTotal,
+      ].map(Number);
+      const expectedValues = [
+        rows.length,
+        rows.length,
+        rows.length,
+        pageRows?.length,
+        rows.length,
+        rows.length,
+        rows.length,
+        pageRows?.length,
+        rows.length,
+      ];
+      if (countValues.some((value, index) => !Number.isFinite(value) || value !== expectedValues[index])) {
+        blockers.push(`ET manifest ${endpoint} completeness counts do not bind the full endpoint snapshot`);
+      }
+      const complete = blockers.length === endpointBlockerOffset;
+      sourceFiles[endpoint] = {
+        path: relativeEvidencePath(fullFile),
+        hash: content.hash,
+        rowCount: rows.length,
+        count: isNonNegativeInteger(endpointMeta?.count) ? Number(endpointMeta.count) : null,
+        rawRowCount: isNonNegativeInteger(endpointMeta?.rawRowCount) ? Number(endpointMeta.rawRowCount) : null,
+        pageCount: pageRows?.length ?? null,
+        fetchedAt: endpointFetchedAt,
+        complete,
+      };
+      aggregateEtStockRows(rows, endpoint, aggregates, diagnostics);
+    } catch (error) {
+      blockers.push(`ET manifest ${endpoint} file is unreadable: ${error.message}`);
+    }
+  }
+
+  const rows = buildEtRowsFromAggregates(aggregates, targetDate);
+  if (diagnostics.invalidRows > 0) blockers.push(`ET manifest contains invalid stock rows: count=${diagnostics.invalidRows}`);
+  const completeInventoryEvidence = ['store_stock', 'box_stock'].every(endpoint => sourceFiles[endpoint]?.complete === true)
+    && diagnostics.invalidRows === 0;
+  const inventoryEvidenceHash = etInventoryEvidenceHash({manifestHash, batchId, targetDate, files: sourceFiles});
+  const factSource = {
+    schemaVersion: 'et-low-inventory-fact-source/v1',
+    kind: 'et_forwarder_manifest',
+    manifestPath: relativeEvidencePath(manifestPath),
+    pointerPath: relativeEvidencePath(pointerPath),
+    manifestHash,
+    batchId,
+    targetDate,
+    createdAt,
+    maxAgeSeconds: maxAgeValid ? maxAgeSeconds : null,
+    files: sourceFiles,
+    endpointRows: diagnostics.endpointRows,
+    invalidRows: diagnostics.invalidRows,
+    completeInventoryEvidence,
+    inventoryEvidenceHash,
+  };
+  const evidence = {
+    store: 'ET',
+    source: 'et_forwarder_manifest',
+    authoritative: true,
+    file: relativeEvidencePath(manifestPath),
+    fetchedAt: createdAt,
+    ageHours: Number.isFinite(ageHours(createdAt)) ? Number(ageHours(createdAt).toFixed(4)) : null,
+    batchId,
+    targetDate,
+    manifestHash,
+    maxAgeSeconds: maxAgeValid ? maxAgeSeconds : null,
+    manifestAgeSeconds,
+    endpointAgeSeconds: diagnostics.endpointAgeSeconds,
+    completeInventoryEvidence,
+    inventoryEvidenceHash,
+    sourceFiles,
+    endpointRows: diagnostics.endpointRows,
+  };
+  return {ok: blockers.length === 0, blockers, rows, factSource, evidence};
+}
+
 const args = parseArgs(process.argv.slice(2));
 const [policy, storeConfig, biDocument, linksDocument] = await Promise.all([
   readJson(args.policy),
   readJson(args.stores),
-  readJson(args.biData),
+  readBiDocument(args.biData),
   readJson(args.linksData),
 ]);
 const requiredDetailTargets = args.requiredDetailTargets
   ? await readJson(args.requiredDetailTargets)
+  : null;
+const etSource = args.etManifest
+  ? await loadEtManifestSource(args.etManifest, {
+    expectedDate: args.date,
+    expectedBatchId: args.etBatchId,
+    expectedManifestHash: args.etManifestHash,
+    expectedMaxAgeSeconds: args.etMaxAgeSeconds,
+  })
   : null;
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
 const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
@@ -78,14 +553,31 @@ const maximumLinksAgeHours = args.operationMode === 'et_low_inventory_safety'
   : Number(policy.maxLinksSnapshotAgeHours || 4);
 const blockers = [];
 const sourceEvidence = [];
-sourceEvidence.push({
-  store: 'ET',
-  file: 'outputs/bi-portal/sections/inventoryTrend.json',
-  fetchedAt: biGeneratedAt || '',
-  ageHours: Number.isFinite(biAge) ? Number(biAge.toFixed(4)) : null,
-});
-if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4)) {
-  blockers.push(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
+if (etSource) {
+  if (etSource.evidence) sourceEvidence.push(etSource.evidence);
+  blockers.push(...etSource.blockers);
+  // Keep the Portal timestamp for diagnostics only. It is deliberately not
+  // marked authoritative and can never make a stale Portal cache look like
+  // the current ET batch.
+  sourceEvidence.push({
+    store: 'ET_PORTAL_PROJECTION_DIAGNOSTIC',
+    source: 'portal_projection_diagnostic_only',
+    authoritative: false,
+    file: 'outputs/bi-portal/sections/inventoryTrend.json',
+    fetchedAt: biGeneratedAt || '',
+    ageHours: Number.isFinite(biAge) ? Number(biAge.toFixed(4)) : null,
+    readError: etSource ? String(biDocument?.__readError || '') : '',
+  });
+} else {
+  sourceEvidence.push({
+    store: 'ET',
+    file: 'outputs/bi-portal/sections/inventoryTrend.json',
+    fetchedAt: biGeneratedAt || '',
+    ageHours: Number.isFinite(biAge) ? Number(biAge.toFixed(4)) : null,
+  });
+  if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4)) {
+    blockers.push(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
+  }
 }
 sourceEvidence.push({
   store: 'BI_LINKS',
@@ -97,7 +589,8 @@ if (!Number.isFinite(linksAge) || linksAge < -0.25 || linksAge > maximumLinksAge
   blockers.push(`BI links data is stale: generatedAt=${linksGeneratedAt || ''} ageHours=${linksAge}`);
 }
 
-const etRows = Array.isArray(bi?.inventoryDepletion?.products) ? bi.inventoryDepletion.products : [];
+const etRows = etSource?.rows
+  || (Array.isArray(bi?.inventoryDepletion?.products) ? bi.inventoryDepletion.products : []);
 // ET rows are indexed by the alias-aware identity key (resolveInventoryIdentityKey
 // honors config/product_aliases.json, so explicitly separate products such as
 // KJ-102S三明治机和早餐机 vs KJ-102三明治机和早餐机 NEVER collapse into one
@@ -129,7 +622,7 @@ const etMatchedCurrentDayRows = etRows.filter(row => {
 // empty executable plan. Mixed old/new stays per-row: safe current-day rows
 // execute and old rows keep their per-row blockers.
 if (policy.requireCurrentDayEtSnapshot === true && etMatchedCurrentDayRows === 0) {
-  blockers.push(`BI/ET projection has no matched current-day operational rows: matched=${etMatchedCurrentDayRows} total=${etRows.length}`);
+  blockers.push(`${etSource ? 'ET manifest' : 'BI/ET projection'} has no matched current-day operational rows: matched=${etMatchedCurrentDayRows} total=${etRows.length}`);
 }
 const etEvidence = sourceEvidence.find(item => item.store === 'ET');
 if (etEvidence) Object.assign(etEvidence, {totalEtRows: etRows.length, matchedCurrentDayEtRows: etMatchedCurrentDayRows});
@@ -640,6 +1133,7 @@ const payload = {
   date: args.date,
   policyVersion: policy.policyVersion,
   generatedAt: new Date().toISOString(),
+  etFactSource: etSource?.factSource || null,
   sourceEvidence,
   blockers: [...new Set(blockers)],
   actionable,
@@ -657,7 +1151,13 @@ const payloadHash = stableInventoryHash({
   actionable,
   lowEtAllocations,
   detailRefreshTargets,
-  sourceEvidence: sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence),
+  etFactSource: payload.etFactSource,
+  sourceEvidence: sourceEvidence.map(({
+    ageHours: _ageHours,
+    manifestAgeSeconds: _manifestAgeSeconds,
+    endpointAgeSeconds: _endpointAgeSeconds,
+    ...evidence
+  }) => evidence),
 });
 const report = {
   ...payload,
@@ -697,6 +1197,7 @@ const report = {
     etAlertsExcludedNoRelevantLinks,
     etTotalRows: etRows.length,
     etMatchedCurrentDayRows,
+    etFactSource: etSource?.factSource ? 'et_forwarder_manifest' : 'portal_projection',
   },
 };
 await fs.mkdir(path.dirname(args.out), {recursive: true});
