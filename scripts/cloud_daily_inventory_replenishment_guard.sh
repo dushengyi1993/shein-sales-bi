@@ -141,25 +141,26 @@ result_is_readback_pending_only() {
 
 JOURNAL="$RESULT.journal.ndjson"
 RECONCILE_PENDING_ONLY=0
-if [[ -s "$PLAN" && -s "$RESULT" && -s "$JOURNAL" ]]; then
-  EXISTING_HASH="$(jq -r '.payloadHash // empty' "$PLAN")"
-  EXISTING_TOTAL="$(jq -r '.actionable | length' "$PLAN")"
-  if [[ "$EXISTING_HASH" =~ ^[a-f0-9]{64}$ && "$EXISTING_TOTAL" =~ ^[0-9]+$ ]] \
-    && jq -e --arg date "$DATE" '.date == $date and .executable == true and ((.blockers // []) | length) == 0' "$PLAN" >/dev/null \
-    && jq -e --arg hash "$EXISTING_HASH" --argjson total "$EXISTING_TOTAL" '
-      .planHash == $hash
-      and .execute == true
-      and .executionMode == "automatic"
-      and (.results | length) == $total
-      and any(.results[];
-        .state == "needs_manual_resolve"
-        or .state == "submitted_but_readback_pending"
-        or .state == "suspicious_write_attempted"
-        or .state == "submitted_readback_failed")
-    ' "$RESULT" >/dev/null; then
-    RECONCILE_PENDING_ONLY=1
-    echo "[daily_inventory_guard] durable inventory lifecycle is unresolved; preserve the immutable plan and run readback-only reconciliation"
+PENDING_INTENT_COUNT=0
+if [[ -s "$JOURNAL" ]]; then
+  PENDING_INTENT_COUNT="$(node --input-type=module - "$JOURNAL" <<'NODE'
+import {readPendingInventoryIntents} from './lib/durable_inventory_write.mjs';
+const pending = await readPendingInventoryIntents(process.argv[2]);
+process.stdout.write(String(pending.size));
+NODE
+)"
+  [[ "$PENDING_INTENT_COUNT" =~ ^[0-9]+$ ]] || {
+    echo "[daily_inventory_guard] durable inventory journal pending count is invalid" >&2
+    exit 65
+  }
+fi
+if (( PENDING_INTENT_COUNT > 0 )); then
+  if [[ ! -s "$PLAN" ]]; then
+    echo "[daily_inventory_guard] durable inventory intent exists but its immutable plan is missing; refuse refresh, rebuild and every inventory write" >&2
+    exit 76
   fi
+  RECONCILE_PENDING_ONLY=1
+  echo "[daily_inventory_guard] durable inventory journal has pending intent(s) count=$PENDING_INTENT_COUNT; preserve the immutable plan and run readback-only reconciliation"
 fi
 
 if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true" ]]; then
