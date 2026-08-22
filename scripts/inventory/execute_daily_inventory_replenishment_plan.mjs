@@ -320,6 +320,8 @@ const journalFile = `${args.out}.journal.ndjson`;
 await fs.mkdir(path.dirname(args.out), {recursive: true});
 const results = [];
 const pendingIntents = new Map();
+const inventoryIntents = new Map();
+const terminalIntentOutcomes = new Map();
 try {
   const journal = await fs.readFile(journalFile, 'utf8');
   if (journal && !journal.endsWith('\n')) throw new Error('INVENTORY_JOURNAL_TORN_TAIL');
@@ -330,11 +332,16 @@ try {
       const entry = JSON.parse(line);
       if (entry?.kind === 'intent' && entry?.logicalActionKey) {
         const intentId = entry.intentId || `legacy-${index}-${entry.logicalActionKey}`;
-        pendingIntents.set(intentId, {...entry, intentId});
+        const intent = {...entry, intentId};
+        inventoryIntents.set(intentId, intent);
+        pendingIntents.set(intentId, intent);
         continue;
       }
       if (entry?.kind === 'write_outcome' && entry?.intentId) {
-        if (['rejected', 'readback_matched'].includes(entry.disposition)) pendingIntents.delete(entry.intentId);
+        if (['rejected', 'readback_matched'].includes(entry.disposition)) {
+          pendingIntents.delete(entry.intentId);
+          terminalIntentOutcomes.set(entry.intentId, entry);
+        }
         continue;
       }
       // Historical result rows are audit evidence only.  They are never
@@ -413,15 +420,26 @@ for (const intent of pendingIntents.values()) {
   if (!pendingIntentsByScope.has(scopeKey)) pendingIntentsByScope.set(scopeKey, []);
   pendingIntentsByScope.get(scopeKey).push(intent);
 }
+const inventoryIntentsByScope = new Map();
+for (const intent of inventoryIntents.values()) {
+  const scopeKey = intent?.recoveryScopeKey || inventoryRecoveryScopeKey({
+    runDate: intent?.runDate,
+    storeKey: intent?.storeKey,
+    skc: intent?.skc,
+    skuCode: intent?.skuCode,
+  });
+  if (!inventoryIntentsByScope.has(scopeKey)) inventoryIntentsByScope.set(scopeKey, []);
+  inventoryIntentsByScope.get(scopeKey).push(intent);
+}
 const currentPlanScopeSet = new Set(planRecoveryScopes);
 if (args.reconcilePendingOnly) {
   const failures = [];
-  if (pendingIntents.size !== rows.length) {
-    failures.push(`pending_count=${pendingIntents.size},plan_count=${rows.length}`);
+  if (inventoryIntents.size !== rows.length) {
+    failures.push(`intent_count=${inventoryIntents.size},plan_count=${rows.length}`);
   }
   for (const row of rows) {
     const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
-    const scopeIntents = pendingIntentsByScope.get(recoveryScopeKey) || [];
+    const scopeIntents = inventoryIntentsByScope.get(recoveryScopeKey) || [];
     if (scopeIntents.length !== 1) {
       failures.push(`scope_count=${scopeIntents.length}:${row.storeKey}:${row.skc}:${row.skuCode}`);
       continue;
@@ -445,9 +463,14 @@ if (args.reconcilePendingOnly) {
       authorizationId: executionAuthorization?.authorizationId || null,
     });
     if (mismatch) failures.push(`intent_mismatch=${mismatch}:${row.storeKey}:${row.skc}:${row.skuCode}`);
+    const intentId = scopeIntents[0].intentId;
+    const terminalOutcome = terminalIntentOutcomes.get(intentId);
+    if (!pendingIntents.has(intentId) && terminalOutcome?.disposition !== 'readback_matched') {
+      failures.push(`intent_lifecycle=${terminalOutcome?.disposition || 'missing'}:${row.storeKey}:${row.skc}:${row.skuCode}`);
+    }
   }
-  for (const scopeKey of pendingIntentsByScope.keys()) {
-    if (!currentPlanScopeSet.has(scopeKey)) failures.push(`extra_pending_scope=${scopeKey}`);
+  for (const scopeKey of inventoryIntentsByScope.keys()) {
+    if (!currentPlanScopeSet.has(scopeKey)) failures.push(`extra_intent_scope=${scopeKey}`);
   }
   if (failures.length) {
     throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED:${failures.join('|')}`);
@@ -655,7 +678,16 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         continue;
       }
       if (args.reconcilePendingOnly) {
-        throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_SCOPE_MISSING:${recoveryScopeKey}`);
+        const [lifecycleIntent] = inventoryIntentsByScope.get(recoveryScopeKey) || [];
+        const lifecycleOutcome = lifecycleIntent && terminalIntentOutcomes.get(lifecycleIntent.intentId);
+        if (lifecycleOutcome?.disposition !== 'readback_matched') {
+          throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_MISSING:${recoveryScopeKey}`);
+        }
+        if (before.totalUsableInventory !== approvedTarget) {
+          throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_CLOSED_INTENT_DRIFT:${before.totalUsableInventory}->${approvedTarget}:${recoveryScopeKey}`);
+        }
+        await recordResult({...result, state: 'skipped_target_already_matched', before});
+        continue;
       }
       if (before.totalUsableInventory === approvedTarget) {
         await recordResult({...result, state: 'skipped_target_already_matched', before});

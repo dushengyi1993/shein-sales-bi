@@ -369,6 +369,20 @@ try {
   assert.match(runB2.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
   assert.equal(serverState.requestCount, 0, 'scope-set mismatch must fail before every OpenAPI request');
   assert.equal(serverState.postCount, 0, 'scope-set mismatch must never create a new inventory write');
+
+  // A later recovery pass must accept the full immutable lifecycle: one scope
+  // is already closed by readback_matched and one remains pending. It freshly
+  // reads both, never submits, and closes only the remaining intent.
+  serverState = {mode: 'recovery-matched', postCount: 0, requestCount: 0};
+  const runB3 = await runExecutor(outA, {reconcilePendingOnly: true});
+  assert.equal(runB3.status, 0, `run B3 must complete mixed lifecycle recovery, got ${runB3.status}\nstdout:\n${runB3.stdout}\nstderr:\n${runB3.stderr}`);
+  assert.equal(serverState.postCount, 0, 'mixed closed/pending lifecycle recovery must never POST');
+  const resultB3 = await readJson(outA);
+  assert.deepEqual(
+    resultB3.results.map(row => row.state).sort(),
+    ['skipped_target_already_matched', 'updated_readback_matched'],
+  );
+  assert.equal(pendingIntentCount(await journalEntries(`${outA}.journal.ndjson`)), 0);
   await fs.writeFile(biFile, `${JSON.stringify(originalBiDocument, null, 2)}\n`);
   await fs.writeFile(linksFile, `${JSON.stringify(originalLinksDocument, null, 2)}\n`);
 
