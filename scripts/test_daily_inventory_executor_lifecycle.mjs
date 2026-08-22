@@ -25,6 +25,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 
 import {
+  buildDailyInventoryPlanHashPayload,
   computeInventoryOverwriteQuantity,
   resolveInventoryIdentityKey,
   stableInventoryHash,
@@ -180,6 +181,7 @@ async function buildPlanFixture(dir, {etProducts}) {
     date: TODAY,
     policyVersion: policy.policyVersion,
     generatedAt: nowIso,
+    etFactSource: null,
     sourceEvidence,
     blockers: [],
     actionable: [row],
@@ -190,15 +192,7 @@ async function buildPlanFixture(dir, {etProducts}) {
     crossStoreSoldOutFindings: [],
     etAlerts: [],
   };
-  plan.payloadHash = stableInventoryHash({
-    schemaVersion: plan.schemaVersion,
-    date: plan.date,
-    policyVersion: plan.policyVersion,
-    actionable: plan.actionable,
-    lowEtAllocations: plan.lowEtAllocations,
-    detailRefreshTargets: plan.detailRefreshTargets,
-    sourceEvidence: sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence),
-  });
+  plan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
   plan.executable = true;
   await fs.writeFile(path.join(dir, 'plan.json'), `${JSON.stringify(plan, null, 2)}\n`, 'utf8');
   await fs.writeFile(path.join(dir, 'policy.json'), `${JSON.stringify(policy, null, 2)}\n`, 'utf8');

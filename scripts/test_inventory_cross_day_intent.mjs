@@ -9,6 +9,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 import {
+  buildDailyInventoryPlanHashPayload,
   computeInventoryOverwriteQuantity,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
@@ -94,14 +95,7 @@ function makePlan(date, rows, sourceEvidence = []) {
   };
   return {
     ...body,
-    payloadHash: stableInventoryHash({
-      schemaVersion: body.schemaVersion,
-      date: body.date,
-      policyVersion: body.policyVersion,
-      actionable: body.actionable,
-      lowEtAllocations: body.lowEtAllocations,
-      sourceEvidence: body.sourceEvidence,
-    }),
+    payloadHash: stableInventoryHash(buildDailyInventoryPlanHashPayload(body)),
   };
 }
 

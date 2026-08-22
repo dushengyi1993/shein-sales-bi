@@ -9,6 +9,7 @@ import {
   discoverInventoryJournalFiles,
   readInventoryIntentJournals,
 } from '../lib/durable_inventory_write.mjs';
+import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 
 const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DOMAINS = Object.freeze(['shein_business_domains', 'shein_links']);
@@ -53,12 +54,6 @@ function parseArgs(argv) {
 }
 
 const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
-const stable = input => {
-  if (Array.isArray(input)) return input.map(stable);
-  if (!input || typeof input !== 'object') return input;
-  return Object.fromEntries(Object.keys(input).sort().map(key => [key, stable(input[key])]));
-};
-const stableHash = value => crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 const rowKey = row => `${String(row?.storeKey || '').toUpperCase()}::${String(row?.skc || '')}::${String(row?.skuCode || '')}`;
 
@@ -118,18 +113,7 @@ async function validateMorningEvidence({root, businessDate, file, enabledStores}
 }
 
 function expectedPlanHash(plan) {
-  return stableHash({
-    schemaVersion: plan.schemaVersion,
-    date: plan.date,
-    policyVersion: plan.policyVersion,
-    actionable: plan.actionable,
-    lowEtAllocations: plan.lowEtAllocations,
-    ...(plan.detailRefreshTargets ? {detailRefreshTargets: plan.detailRefreshTargets} : {}),
-    sourceEvidence: Array.isArray(plan.sourceEvidence)
-      ? plan.sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence)
-      : [],
-    ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
-  });
+  return stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 }
 
 function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now()) {
@@ -166,7 +150,7 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
   const before = Number(row?.before?.totalUsableInventory);
   if (row.state === 'updated_readback_matched') {
     const writes = Array.isArray(row.writes) ? row.writes : [];
-    const logicalActionKey = stableHash({
+    const logicalActionKey = stableInventoryHash({
       runDate: plan.date,
       store: planRow.storeKey,
       skc: planRow.skc,
@@ -180,7 +164,7 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
       && row.logicalActionKey === logicalActionKey
       && writes.length > 0
       && writes.every(write => write?.idempotencyKey === `bi-inv-${logicalActionKey.slice(0, 42)}`
-        && write?.requestPayloadHash === stableHash(write?.request)
+        && write?.requestPayloadHash === stableInventoryHash(write?.request)
         && write?.request?.pathname === '/open-api/stock/change-inventory/v2'
         && write?.request?.method === 'POST'
         && write?.request?.body?.updateSkuInventoryQuantityRequests?.length === 1

@@ -6,7 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-import {computeInventoryOverwriteQuantity, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {
+  buildDailyInventoryPlanHashPayload,
+  computeInventoryOverwriteQuantity,
+  stableInventoryHash,
+} from '../lib/inventory_replenishment_policy.mjs';
 import {writeMorningResumeEvidence} from '../lib/morning_resume_evidence.mjs';
 import {writeMarker} from './pipeline_marker.mjs';
 import {validateDailyOperatingRefresh, validateInventoryArtifacts} from './validate_daily_operating_refresh.mjs';
@@ -60,6 +64,8 @@ try {
     blockers: [],
     actionable,
     lowEtAllocations: [],
+    detailRefreshTargets: [],
+    etFactSource: {kind: 'portal_projection', fixture: 'validator-hash-contract'},
     sourceEvidence: [
       {store: 'ET', file: 'outputs/bi-portal/sections/inventoryTrend.json', fetchedAt: new Date().toISOString(), totalEtRows: 1, matchedCurrentDayEtRows: 1},
       {store: 'BI_LINKS', file: 'outputs/bi-portal/sections/linksData.json', fetchedAt: new Date().toISOString()},
@@ -67,14 +73,7 @@ try {
     ],
     counts: {enabledStores: 19},
   };
-  plan.payloadHash = stableInventoryHash({
-    schemaVersion: plan.schemaVersion,
-    date: plan.date,
-    policyVersion: plan.policyVersion,
-    actionable: plan.actionable,
-    lowEtAllocations: plan.lowEtAllocations,
-    sourceEvidence: plan.sourceEvidence,
-  });
+  plan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
   await writeJson(planFile, plan);
   const goodResult = {
     schemaVersion: 'daily-inventory-replenishment-result/v1',
@@ -99,6 +98,39 @@ try {
   assert.equal(valid.ok, true);
   assert.equal(valid.storeCount, 19);
   assert.equal(valid.artifactCount, 38);
+
+  const volatileAgePlan = {
+    ...plan,
+    sourceEvidence: plan.sourceEvidence.map((row, index) => index === 0
+      ? {
+          ...row,
+          ageHours: 99,
+          manifestAgeSeconds: 999,
+          endpointAgeSeconds: {store_stock: 888, box_stock: 777},
+        }
+      : row),
+  };
+  assert.equal(
+    stableInventoryHash(buildDailyInventoryPlanHashPayload(volatileAgePlan)),
+    plan.payloadHash,
+    'all volatile sourceEvidence age fields must stay outside the canonical hash',
+  );
+  await writeJson(planFile, volatileAgePlan);
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true);
+
+  const etFactSourceDriftPlan = {
+    ...plan,
+    etFactSource: {...plan.etFactSource, fixture: 'validator-hash-drift'},
+  };
+  await writeJson(planFile, etFactSourceDriftPlan);
+  await writeJson(resultFile, {...goodResult, planHash: plan.payloadHash});
+  await writeMarkers();
+  await assert.rejects(validateDailyOperatingRefresh(options), /inventory plan payloadHash mismatch/);
+  await writeJson(planFile, plan);
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
 
   const terminalBefore = {
     totalInventoryQuantity: 20,
@@ -184,14 +216,7 @@ try {
   await writeJson(resultFile, goodResult);
 
   const emptyPlan = {...plan, actionable: [], sourceEvidence: [], counts: {enabledStores: 19}};
-  emptyPlan.payloadHash = stableInventoryHash({
-    schemaVersion: emptyPlan.schemaVersion,
-    date: emptyPlan.date,
-    policyVersion: emptyPlan.policyVersion,
-    actionable: emptyPlan.actionable,
-    lowEtAllocations: emptyPlan.lowEtAllocations,
-    sourceEvidence: emptyPlan.sourceEvidence,
-  });
+  emptyPlan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(emptyPlan));
   await writeJson(planFile, emptyPlan);
   await writeJson(resultFile, {...goodResult, planHash: emptyPlan.payloadHash, results: []});
   await writeMarkers();
@@ -206,14 +231,7 @@ try {
     ...plan,
     sourceEvidence: plan.sourceEvidence.map(row => ({...row, fetchedAt: oldFetchedAt})),
   };
-  historicalPlan.payloadHash = stableInventoryHash({
-    schemaVersion: historicalPlan.schemaVersion,
-    date: historicalPlan.date,
-    policyVersion: historicalPlan.policyVersion,
-    actionable: historicalPlan.actionable,
-    lowEtAllocations: historicalPlan.lowEtAllocations,
-    sourceEvidence: historicalPlan.sourceEvidence,
-  });
+  historicalPlan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(historicalPlan));
   await writeJson(planFile, historicalPlan);
   await writeJson(resultFile, {...goodResult, planHash: historicalPlan.payloadHash});
   await writeMarkers(completionAt);

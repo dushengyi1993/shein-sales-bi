@@ -37,7 +37,10 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {
+  buildDailyInventoryPlanHashPayload,
+  stableInventoryHash,
+} from '../lib/inventory_replenishment_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'execute-inventory-durable-'));
@@ -101,14 +104,7 @@ const planBody = {
   lowEtAllocations: [],
   sourceEvidence,
 };
-const payloadHash = stableInventoryHash({
-  schemaVersion: planBody.schemaVersion,
-  date: planBody.date,
-  policyVersion: planBody.policyVersion,
-  actionable: planBody.actionable,
-  lowEtAllocations: planBody.lowEtAllocations,
-  sourceEvidence: sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence),
-});
+const payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(planBody));
 const plan = {...planBody, payloadHash};
 
 const planFile = path.join(temp, 'plan.json');

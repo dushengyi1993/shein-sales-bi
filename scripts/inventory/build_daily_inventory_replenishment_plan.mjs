@@ -5,6 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {
   allocateLowEtInventory,
+  buildDailyInventoryPlanHashPayload,
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   decideDailyInventoryReplenishment,
@@ -1144,21 +1145,7 @@ const payload = {
   crossStoreSoldOutFindings,
   etAlerts,
 };
-const payloadHash = stableInventoryHash({
-  schemaVersion: payload.schemaVersion,
-  date: payload.date,
-  policyVersion: payload.policyVersion,
-  actionable,
-  lowEtAllocations,
-  detailRefreshTargets,
-  etFactSource: payload.etFactSource,
-  sourceEvidence: sourceEvidence.map(({
-    ageHours: _ageHours,
-    manifestAgeSeconds: _manifestAgeSeconds,
-    endpointAgeSeconds: _endpointAgeSeconds,
-    ...evidence
-  }) => evidence),
-});
+const payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(payload));
 const report = {
   ...payload,
   payloadHash,

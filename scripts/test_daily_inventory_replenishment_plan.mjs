@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'daily-inventory-plan-'));
@@ -192,6 +192,26 @@ assert.deepEqual(plan.crossStoreSoldOutFindings.map(row => row.skc), ['skc-cross
 assert.deepEqual(plan.actionable.filter(row => row.matchKey === 'ALLSOLD-1产品').map(row => [row.storeKey, row.targetUsableInventory]), [['A', 100], ['B', 10]]);
 assert.equal(plan.ignored.some(row => row.matchKey === 'ALLSOLD-1产品'), false);
 assert.match(plan.payloadHash, /^[a-f0-9]{64}$/);
+assert.equal(plan.payloadHash, stableInventoryHash(buildDailyInventoryPlanHashPayload(plan)));
+const builderVolatileAgePlan = {
+  ...plan,
+  sourceEvidence: plan.sourceEvidence.map(evidence => ({
+    ...evidence,
+    ageHours: 99,
+    manifestAgeSeconds: 999,
+    endpointAgeSeconds: {store_stock: 888, box_stock: 777},
+  })),
+};
+assert.equal(
+  stableInventoryHash(buildDailyInventoryPlanHashPayload(builderVolatileAgePlan)),
+  plan.payloadHash,
+  'builder hash must exclude all three volatile sourceEvidence age fields',
+);
+assert.notEqual(
+  stableInventoryHash(buildDailyInventoryPlanHashPayload({...plan, etFactSource: {kind: 'builder-hash-drift'}})),
+  plan.payloadHash,
+  'builder hash must bind etFactSource',
+);
 
 const conflictingLinksFile = path.join(tmp, 'linksData-conflict.json');
 const conflictingLinks = JSON.parse(await fs.readFile(path.join(tmp, 'linksData.json'), 'utf8'));
@@ -334,21 +354,7 @@ const executorPlan = {
   etAlerts: [],
   counts: {actionable: executorActions.length},
 };
-executorPlan.payloadHash = stableInventoryHash({
-  schemaVersion: executorPlan.schemaVersion,
-  date: executorPlan.date,
-  policyVersion: executorPlan.policyVersion,
-  actionable: executorPlan.actionable,
-  lowEtAllocations: executorPlan.lowEtAllocations,
-  detailRefreshTargets: executorPlan.detailRefreshTargets,
-  etFactSource: executorPlan.etFactSource,
-  sourceEvidence: executorPlan.sourceEvidence.map(({
-    ageHours: _ageHours,
-    manifestAgeSeconds: _manifestAgeSeconds,
-    endpointAgeSeconds: _endpointAgeSeconds,
-    ...evidence
-  }) => evidence),
-});
+executorPlan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(executorPlan));
 await fs.writeFile(executorPlanFile, JSON.stringify(executorPlan));
 await fs.writeFile(path.join(tmp, 'executor-bi.json'), JSON.stringify({cachedAt: now, data: {}}));
 await fs.writeFile(path.join(tmp, 'executor-links.json'), JSON.stringify({cachedAt: now, data: {}}));
@@ -381,4 +387,67 @@ assert.match(String(executorError?.message || ''), /exceed the per-run row ceili
 await assert.rejects(fs.access(executorOut), 'no result file may be written for a ceiling failure');
 await assert.rejects(fs.access(`${executorOut}.journal.ndjson`), 'no journal may be written for a ceiling failure');
 
-console.log(JSON.stringify({ok: true, checks: 59}, null, 2));
+const volatileAgeExecutorPlan = {
+  ...executorPlan,
+  sourceEvidence: executorPlan.sourceEvidence.map(evidence => ({
+    ...evidence,
+    ageHours: 99,
+    manifestAgeSeconds: 999,
+    endpointAgeSeconds: {store_stock: 888, box_stock: 777},
+  })),
+};
+await fs.writeFile(executorPlanFile, JSON.stringify(volatileAgeExecutorPlan));
+let volatileAgeExecutorError = null;
+process.argv = [
+  process.execPath,
+  path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'),
+  '--plan', executorPlanFile,
+  '--config', path.join(tmp, 'executor-config.json'),
+  '--bi-data', path.join(tmp, 'executor-bi.json'),
+  '--links-data', path.join(tmp, 'executor-links.json'),
+  '--out', executorOut,
+  '--dry-run',
+  '--max-rows', '1000',
+];
+try {
+  await import(`./inventory/execute_daily_inventory_replenishment_plan.mjs?volatileAges=${Date.now()}`);
+} catch (error) {
+  volatileAgeExecutorError = error;
+} finally {
+  process.exitCode = 0;
+  process.argv = originalArgv;
+}
+assert.ok(volatileAgeExecutorError);
+assert.doesNotMatch(String(volatileAgeExecutorError?.message || ''), /Plan payload hash mismatch/,
+  'executor must use the same canonical exclusions for all three volatile age fields');
+assert.match(String(volatileAgeExecutorError?.message || ''), /exceed the per-run row ceiling/);
+
+const etFactSourceDriftExecutorPlan = {
+  ...executorPlan,
+  etFactSource: {...executorPlan.etFactSource, fixture: 'executor-hash-drift'},
+};
+await fs.writeFile(executorPlanFile, JSON.stringify(etFactSourceDriftExecutorPlan));
+let etFactSourceExecutorError = null;
+process.argv = [
+  process.execPath,
+  path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'),
+  '--plan', executorPlanFile,
+  '--config', path.join(tmp, 'executor-config.json'),
+  '--bi-data', path.join(tmp, 'executor-bi.json'),
+  '--links-data', path.join(tmp, 'executor-links.json'),
+  '--out', executorOut,
+  '--dry-run',
+  '--max-rows', '1000',
+];
+try {
+  await import(`./inventory/execute_daily_inventory_replenishment_plan.mjs?etFactSourceDrift=${Date.now()}`);
+} catch (error) {
+  etFactSourceExecutorError = error;
+} finally {
+  process.exitCode = 0;
+  process.argv = originalArgv;
+}
+assert.match(String(etFactSourceExecutorError?.message || ''), /Plan payload hash mismatch/,
+  'executor must bind etFactSource through the shared daily hash helper');
+
+console.log(JSON.stringify({ok: true, checks: 62}, null, 2));

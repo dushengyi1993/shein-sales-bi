@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {
   assertDailyInventoryExecutionAuthorization,
   assertCurrentInventoryListingIdentity,
+  buildDailyInventoryPlanHashPayload,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
   resolveInventoryIdentityKey,
@@ -227,28 +228,23 @@ if (!args.reconcilePendingOnly && (!Number.isFinite(biAge) || biAge < -0.25 || b
 }
 if (plan.policyVersion !== policy.policyVersion) throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
 const isEtLowInventorySafetyPlan = plan.schemaVersion === 'et-low-inventory-safety-plan/v1';
-const expectedHash = stableInventoryHash({
-  schemaVersion: plan.schemaVersion,
-  date: plan.date,
-  policyVersion: plan.policyVersion,
-  actionable: plan.actionable,
-  lowEtAllocations: plan.lowEtAllocations,
-  ...(isEtLowInventorySafetyPlan
-    ? {
-        etFactSource: plan.etFactSource,
-        ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
-      }
-    : {
-        detailRefreshTargets: plan.detailRefreshTargets,
-        etFactSource: plan.etFactSource,
-      }),
-  sourceEvidence: asArray(plan.sourceEvidence).map(({
-    ageHours: _ageHours,
-    manifestAgeSeconds: _manifestAgeSeconds,
-    endpointAgeSeconds: _endpointAgeSeconds,
-    ...evidence
-  }) => evidence),
-});
+const expectedHash = isEtLowInventorySafetyPlan
+  ? stableInventoryHash({
+      schemaVersion: plan.schemaVersion,
+      date: plan.date,
+      policyVersion: plan.policyVersion,
+      actionable: plan.actionable,
+      lowEtAllocations: plan.lowEtAllocations,
+      etFactSource: plan.etFactSource,
+      sourceEvidence: asArray(plan.sourceEvidence).map(({
+        ageHours: _ageHours,
+        manifestAgeSeconds: _manifestAgeSeconds,
+        endpointAgeSeconds: _endpointAgeSeconds,
+        ...evidence
+      }) => evidence),
+      ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
+    })
+  : stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
