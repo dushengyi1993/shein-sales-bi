@@ -313,7 +313,16 @@ const executorPlan = {
   date,
   policyVersion: executorPolicyVersion,
   generatedAt: now,
-  sourceEvidence: [],
+  etFactSource: {kind: 'portal_projection', fixture: 'daily-plan-hash-contract'},
+  sourceEvidence: [{
+    store: 'ET',
+    file: 'outputs/bi-portal/sections/inventoryTrend.json',
+    fetchedAt: now,
+    ageHours: 0.125,
+    manifestAgeSeconds: 12,
+    endpointAgeSeconds: {store_stock: 11, box_stock: 12},
+  }],
+  executionConstraints: {mode: 'daily', decreaseOnly: false},
   blockers: [],
   executable: true,
   actionable: executorActions,
@@ -332,7 +341,13 @@ executorPlan.payloadHash = stableInventoryHash({
   actionable: executorPlan.actionable,
   lowEtAllocations: executorPlan.lowEtAllocations,
   detailRefreshTargets: executorPlan.detailRefreshTargets,
-  sourceEvidence: [],
+  etFactSource: executorPlan.etFactSource,
+  sourceEvidence: executorPlan.sourceEvidence.map(({
+    ageHours: _ageHours,
+    manifestAgeSeconds: _manifestAgeSeconds,
+    endpointAgeSeconds: _endpointAgeSeconds,
+    ...evidence
+  }) => evidence),
 });
 await fs.writeFile(executorPlanFile, JSON.stringify(executorPlan));
 await fs.writeFile(path.join(tmp, 'executor-bi.json'), JSON.stringify({cachedAt: now, data: {}}));
@@ -360,6 +375,8 @@ try {
   process.argv = originalArgv;
 }
 assert.ok(executorError, 'the executor must fail when actionable rows exceed --max-rows');
+assert.doesNotMatch(String(executorError?.message || ''), /Plan payload hash mismatch/,
+  'the executor must accept the builder-compatible hash before enforcing the row ceiling');
 assert.match(String(executorError?.message || ''), /exceed the per-run row ceiling/);
 await assert.rejects(fs.access(executorOut), 'no result file may be written for a ceiling failure');
 await assert.rejects(fs.access(`${executorOut}.journal.ndjson`), 'no journal may be written for a ceiling failure');

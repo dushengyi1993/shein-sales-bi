@@ -209,15 +209,28 @@ if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnaps
   throw new Error(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
 }
 if (plan.policyVersion !== policy.policyVersion) throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
+const isEtLowInventorySafetyPlan = plan.schemaVersion === 'et-low-inventory-safety-plan/v1';
 const expectedHash = stableInventoryHash({
   schemaVersion: plan.schemaVersion,
   date: plan.date,
   policyVersion: plan.policyVersion,
   actionable: plan.actionable,
   lowEtAllocations: plan.lowEtAllocations,
-  ...(plan.detailRefreshTargets ? {detailRefreshTargets: plan.detailRefreshTargets} : {}),
-  sourceEvidence: asArray(plan.sourceEvidence).map(({ageHours: _ageHours, ...evidence}) => evidence),
-  ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
+  ...(isEtLowInventorySafetyPlan
+    ? {
+        etFactSource: plan.etFactSource,
+        ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
+      }
+    : {
+        detailRefreshTargets: plan.detailRefreshTargets,
+        etFactSource: plan.etFactSource,
+      }),
+  sourceEvidence: asArray(plan.sourceEvidence).map(({
+    ageHours: _ageHours,
+    manifestAgeSeconds: _manifestAgeSeconds,
+    endpointAgeSeconds: _endpointAgeSeconds,
+    ...evidence
+  }) => evidence),
 });
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
