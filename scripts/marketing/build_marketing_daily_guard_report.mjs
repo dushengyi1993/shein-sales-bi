@@ -12,6 +12,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {writeFileAtomic} from '../../lib/atomic_file_publish.mjs';
 import {
   DEFAULT_CLOUD_BI_ROOT as SHARED_DEFAULT_CLOUD_BI_ROOT,
   DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS as SHARED_DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS,
@@ -4981,8 +4982,8 @@ async function main() {
   await fs.mkdir(args.outDir, {recursive: true});
   const jsonPath = path.join(args.outDir, `marketing-daily-guard-${args.date}.json`);
   const mdPath = path.join(args.outDir, `marketing-daily-guard-${args.date}.md`);
-  await fs.writeFile(jsonPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-  await fs.writeFile(mdPath, buildMarkdown(report), 'utf8');
+  await writeFileAtomic(jsonPath, `${JSON.stringify(report, null, 2)}\n`, {encoding: 'utf8'});
+  await writeFileAtomic(mdPath, buildMarkdown(report), {encoding: 'utf8'});
   console.log(JSON.stringify({ok: true, mode: report.mode, json: rel(jsonPath), md: rel(mdPath), blockers: report.blockers.length}, null, 2));
 }
 

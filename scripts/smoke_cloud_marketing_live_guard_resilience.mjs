@@ -7,6 +7,8 @@ import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const guard = fs.readFileSync(path.join(root, 'scripts', 'cloud_marketing_live_guard.sh'), 'utf8');
+const marketingGuardUnit = fs.readFileSync(path.join(root, 'infra/systemd/shein-bi-cloud-marketing-live-guard.service'), 'utf8');
+const marketingGuardTimer = fs.readFileSync(path.join(root, 'infra/systemd/shein-bi-cloud-marketing-live-guard.timer'), 'utf8');
 const biPublishHelper = fs.readFileSync(path.join(root, 'scripts', 'publish_marketing_price_leads_to_bi.sh'), 'utf8');
 const cleanup = fs.readFileSync(path.join(root, 'scripts', 'cleanup_shein_store_browsers.mjs'), 'utf8');
 const cleanupTimer = fs.readFileSync(path.join(root, 'infra/systemd/shein-bi-cloud-browser-cleanup.timer'), 'utf8');
@@ -32,8 +34,32 @@ for (const script of ['scripts/cloud_daily_refresh.sh','scripts/cloud_link_busin
 assert.match(guard, /RUN_ID=.*randomUUID/);
 assert.match(guard, /browserless inspection via session HTTP/);
 assert.match(guard, /--session-http/);
+assert.match(marketingGuardUnit, /^Environment=SHEIN_BI_HOST_RESOURCE_LANE=api-light$/m);
+assert.match(marketingGuardUnit, /^ExecStart=\/usr\/bin\/env bash \/opt\/shein-bi\/app\/scripts\/cloud_marketing_live_guard\.sh$/m);
+assert.doesNotMatch(marketingGuardUnit, /^Slice=/m);
+assert.doesNotMatch(marketingGuardUnit, /run_host_heavy_job\.sh/);
+assert.doesNotMatch(marketingGuardUnit, /^SuccessExitStatus=75$/m);
+assert.match(marketingGuardUnit, /^CPUWeight=40$/m);
+assert.match(marketingGuardUnit, /^MemoryHigh=1000M$/m);
+assert.match(marketingGuardUnit, /^MemoryMax=1400M$/m);
+assert.match(marketingGuardUnit, /^IOSchedulingClass=best-effort$/m);
+assert.match(marketingGuardUnit, /^Environment=SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_RETRY_INTERVAL_SEC=15$/m);
+assert.match(marketingGuardUnit, /^Environment=SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_MAX_WAIT_SEC=600$/m);
+assert.deepEqual(
+  [...marketingGuardTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim()),
+  ['*-*-* 11:00:00'],
+);
+assert.match(marketingGuardTimer, /^Persistent=false$/m);
 assert.doesNotMatch(guard, /manage_browser_task_leases\.mjs/);
 assert.doesNotMatch(guard, /cleanup_shein_store_browsers/);
+assert.doesNotMatch(guard, /\bsystemctl\b/);
+assert.doesNotMatch(guard, /BUSY_SERVICES|active_busy_services|skipped_busy/);
+assert.doesNotMatch(guard, /skipped_low_memory/);
+assert.match(guard, /wait_for_low_memory_capacity/);
+assert.match(guard, /blocked_low_memory/);
+assert.match(guard, /LOW_MEMORY_RETRY_INTERVAL_SEC="\$\{SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_RETRY_INTERVAL_SEC:-15\}"/);
+assert.match(guard, /LOW_MEMORY_MAX_WAIT_SEC="\$\{SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_MAX_WAIT_SEC:-600\}"/);
+assert.match(guard, /max_wait >= 1800/);
 assert.match(guard, /build_repair_queue/);
 assert.match(guard, /IGNORE_RESERVED_WINDOW="\$\{SHEIN_BI_MARKETING_LIVE_IGNORE_RESERVED_WINDOW:-1\}"/);
 assert.match(guard, /refresh_marketing_cost_map/);

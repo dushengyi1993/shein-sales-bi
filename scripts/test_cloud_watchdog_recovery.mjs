@@ -588,6 +588,26 @@ assert.equal(guardRetryPending.healthy, true);
 assert.equal(guardRetryPending.pending, true);
 assert.equal(guardRetryPending.reason, 'retry_window_open');
 
+const guardBlockedLowMemoryAt1150 = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', generatedAt: '2026-07-18T03:50:00.000Z', status: 'blocked_low_memory'},
+  lastOkState: null,
+  guardRunning: false,
+  nowMs: Date.parse('2026-07-18T11:50:00+08:00'),
+});
+assert.equal(guardBlockedLowMemoryAt1150.healthy, false);
+assert.equal(guardBlockedLowMemoryAt1150.pending, false);
+assert.equal(guardBlockedLowMemoryAt1150.reason, 'today_terminal_failure');
+
+const guardFailedAt1150 = assessDailyMarketingGuardHealth({
+  guardState: {date: '2026-07-18', generatedAt: '2026-07-18T03:50:00.000Z', status: 'failed'},
+  lastOkState: {date: '2026-07-17', generatedAt: '2026-07-17T08:45:00.000Z', status: 'ok'},
+  guardRunning: false,
+  nowMs: Date.parse('2026-07-18T11:50:00+08:00'),
+});
+assert.equal(guardFailedAt1150.healthy, false);
+assert.equal(guardFailedAt1150.pending, false);
+assert.equal(guardFailedAt1150.reason, 'today_terminal_failure');
+
 const guardFinalFailure = assessDailyMarketingGuardHealth({
   guardState: {date: '2026-07-18', generatedAt: '2026-07-18T08:45:00.000Z', status: 'warning'},
   lastOkState: {date: '2026-07-17', generatedAt: '2026-07-17T08:45:00.000Z', status: 'ok'},

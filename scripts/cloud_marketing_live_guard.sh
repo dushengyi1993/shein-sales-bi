@@ -8,6 +8,8 @@ LOG_DIR="${SHEIN_BI_MARKETING_LIVE_LOG_DIR:-/srv/shein-bi/logs/cloud-marketing-l
 STATE_DIR="${SHEIN_BI_MARKETING_LIVE_STATE_DIR:-$ROOT/state/cloud_marketing_live_guard}"
 ALERT_DIR="$ROOT/state/cloud_ops_alerts"
 LOCK_FILE="${SHEIN_BI_MARKETING_LIVE_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-marketing-live-guard.lock}"
+ARTIFACT_PUBLICATION_LOCK_FILE="${SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-marketing-artifact-publication.lock}"
+ARTIFACT_PUBLICATION_LOCK_WAIT_SEC="${SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_WAIT_SEC:-30}"
 GROUP="${SHEIN_BI_MARKETING_LIVE_GROUP:-ALL}"
 PAGE_SIZE="${SHEIN_BI_MARKETING_LIVE_PAGE_SIZE:-500}"
 STORE_ATTEMPTS="${SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS:-3}"
@@ -21,22 +23,18 @@ GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
 GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
 GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
 MIN_AVAILABLE_MEM_MIB="${SHEIN_BI_MARKETING_LIVE_MIN_AVAILABLE_MEM_MIB:-2200}"
+LOW_MEMORY_RETRY_INTERVAL_SEC="${SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_RETRY_INTERVAL_SEC:-15}"
+LOW_MEMORY_MAX_WAIT_SEC="${SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_MAX_WAIT_SEC:-600}"
+MEMINFO_FILE="${SHEIN_BI_MARKETING_LIVE_MEMINFO_FILE:-/proc/meminfo}"
 BUILD_REPAIR_QUEUE="${SHEIN_BI_MARKETING_LIVE_BUILD_REPAIR_QUEUE:-${SHEIN_BI_MARKETING_LIVE_AUTO_REPAIR:-0}}"
 RESERVED_WINDOW_MINUTES="${SHEIN_BI_MARKETING_LIVE_RESERVED_WINDOW_MINUTES:-6}"
-# The managed live guard is session-HTTP/OpenAPI only. Resource tokens and the
-# host pressure gate already isolate it; the old minute table caused the 11:00
-# run to reject itself and is opt-in only for legacy/manual browser scans.
+# The managed live guard is session-HTTP/OpenAPI only. Its service cgroup and
+# bounded memory gate constrain it; this lane does not add a cross-project API
+# semaphore. The old minute table caused the 11:00 run to reject itself and is
+# opt-in only for legacy/manual browser scans.
 IGNORE_RESERVED_WINDOW="${SHEIN_BI_MARKETING_LIVE_IGNORE_RESERVED_WINDOW:-1}"
 FORCE_RERUN="${SHEIN_BI_MARKETING_LIVE_FORCE_RERUN:-0}"
-# P3-#9: load busy services from config file, fallback to env var or hardcoded default
-BUSY_SERVICES_CONFIG="$ROOT/config/cloud_marketing_busy_services.json"
-BUSY_SERVICES="${SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES:-}"
-if [[ -z "${SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES:-}" ]] && [[ -f "$BUSY_SERVICES_CONFIG" ]]; then
-  BUSY_SERVICES="$(python3 -c "import json; print(' '.join(json.load(open('$BUSY_SERVICES_CONFIG')).get('busyServices',[])))" 2>/dev/null)"
-fi
-if [[ -z "$BUSY_SERVICES" ]]; then
-  BUSY_SERVICES="${SHEIN_BI_MARKETING_LIVE_BUSY_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-refresh.service shein-bi-cloud-session-manager.service shein-bi-cloud-morning-chain.service shein-bi-cloud-order-closure.service shein-bi-db-backup.service shein-bi-cloud-marketing-repair.service}"
-fi
+ARTIFACT_PUBLICATION_LOCK_ACQUIRED=0
 
 resolve_today() {
   TZ="$TZ_NAME" date +%F
@@ -47,13 +45,76 @@ now_iso() {
 }
 
 available_mem_mib() {
-  awk '/MemAvailable:/ { printf "%d\n", $2 / 1024; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || echo 0
+  awk '/MemAvailable:/ { printf "%d\n", $2 / 1024; found=1 } END { if (!found) print 0 }' "$MEMINFO_FILE" 2>/dev/null || echo 0
+}
+
+wait_for_low_memory_capacity() {
+  local interval="$LOW_MEMORY_RETRY_INTERVAL_SEC"
+  local max_wait="$LOW_MEMORY_MAX_WAIT_SEC"
+  local elapsed=0
+  local available remaining sleep_for
+
+  if ! [[ "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 )); then
+    echo "[cloud_marketing_live_guard] ERROR invalid low-memory retry interval: $interval" >&2
+    return 2
+  fi
+  if ! [[ "$max_wait" =~ ^[0-9]+$ ]] || (( max_wait < 0 || max_wait >= 1800 )); then
+    echo "[cloud_marketing_live_guard] ERROR invalid low-memory max wait: $max_wait (must be < 1800s)" >&2
+    return 2
+  fi
+
+  while :; do
+    available="$(available_mem_mib)"
+    AVAILABLE_MEM="$available"
+    # Only an explicit value at or above the threshold is capacity readiness;
+    # zero or an unreadable meminfo source must not silently pass the gate.
+    if [[ "$available" =~ ^[0-9]+$ ]] && (( available >= MIN_AVAILABLE_MEM_MIB )); then
+      LOW_MEMORY_WAIT_ELAPSED_SEC="$elapsed"
+      return 0
+    fi
+    if (( elapsed >= max_wait )); then
+      LOW_MEMORY_WAIT_ELAPSED_SEC="$elapsed"
+      return 1
+    fi
+
+    remaining=$((max_wait - elapsed))
+    sleep_for="$interval"
+    if (( sleep_for > remaining )); then
+      sleep_for="$remaining"
+    fi
+    echo "[cloud_marketing_live_guard] low memory wait elapsed=${elapsed}s MemAvailable=${available}MiB threshold=${MIN_AVAILABLE_MEM_MIB}MiB; recheck in ${sleep_for}s"
+    sleep "$sleep_for"
+    elapsed=$((elapsed + sleep_for))
+  done
+}
+
+release_marketing_artifact_publication_lock() {
+  if [[ "$ARTIFACT_PUBLICATION_LOCK_ACQUIRED" == "1" ]]; then
+    flock -u 8 2>/dev/null || true
+    exec 8>&-
+    ARTIFACT_PUBLICATION_LOCK_ACQUIRED=0
+  fi
+}
+
+acquire_marketing_artifact_publication_lock() {
+  if ! [[ "$ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" =~ ^[0-9]+$ ]] || (( ARTIFACT_PUBLICATION_LOCK_WAIT_SEC >= 1800 )); then
+    echo "[cloud_marketing_live_guard] ERROR invalid artifact publication lock wait: $ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" >&2
+    return 64
+  fi
+  prepare_shared_lock_file "$ARTIFACT_PUBLICATION_LOCK_FILE"
+  exec 8<>"$ARTIFACT_PUBLICATION_LOCK_FILE"
+  if ! flock -w "$ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" 8; then
+    echo "[cloud_marketing_live_guard] artifact publication lock busy: $ARTIFACT_PUBLICATION_LOCK_FILE" >&2
+    exec 8>&-
+    return 75
+  fi
+  ARTIFACT_PUBLICATION_LOCK_ACQUIRED=1
 }
 
 guard_json_value() {
   local expression="$1"
   local default_value="${2:-0}"
-  GUARD_FILE="$GUARD_OUT" GUARD_EXPR="$expression" GUARD_DEFAULT="$default_value" node <<'NODE'
+  GUARD_FILE="$GUARD_INPUT_OUT" GUARD_EXPR="$expression" GUARD_DEFAULT="$default_value" node <<'NODE'
 const fs = require('node:fs');
 try {
   const j = JSON.parse(fs.readFileSync(process.env.GUARD_FILE, 'utf8'));
@@ -63,6 +124,24 @@ try {
 } catch {
   console.log(process.env.GUARD_DEFAULT || '0');
 }
+NODE
+}
+
+publish_staged_guard_report() {
+  local staged_json="$GUARD_INPUT_OUT"
+  local staged_md="$GUARD_STAGE_DIR/marketing-daily-guard-${DATE}.md"
+  if [[ ! -f "$staged_json" || ! -f "$staged_md" ]]; then
+    echo "[cloud_marketing_live_guard] ERROR staged guard report is incomplete: dir=$GUARD_STAGE_DIR" >&2
+    return 66
+  fi
+  STAGED_JSON="$staged_json" STAGED_MD="$staged_md" TARGET_JSON="$GUARD_OUT" TARGET_MD="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.md" node --input-type=module <<'NODE'
+import fs from 'node:fs/promises';
+import {writeFileAtomic} from './lib/atomic_file_publish.mjs';
+
+const json = await fs.readFile(process.env.STAGED_JSON);
+const md = await fs.readFile(process.env.STAGED_MD);
+await writeFileAtomic(process.env.TARGET_JSON, json, {encoding: 'utf8'});
+await writeFileAtomic(process.env.TARGET_MD, md, {encoding: 'utf8'});
 NODE
 }
 
@@ -111,6 +190,7 @@ run_stage_with_retry() {
 run_guard_report() {
   node scripts/marketing/build_marketing_daily_guard_report.mjs \
     --date "$DATE" \
+    --out-dir "$GUARD_STAGE_DIR" \
     --max-age-hours "$GUARD_MAX_AGE_HOURS" \
     --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
     --cloud-bi-root "$GUARD_CLOUD_BI_ROOT"
@@ -171,6 +251,11 @@ build_repair_queue() {
     --queue "$REPAIR_QUEUE_FILE"
 }
 
+prepare_marketing_price_leads() {
+  node scripts/marketing/export_marketing_price_leads_for_bi.mjs \
+    --require-fresh --out "$PRICE_LEADS_STAGE_FILE"
+}
+
 queue_json_value() {
   local expression="$1"
   local default_value="${2:-0}"
@@ -212,20 +297,6 @@ try {
   console.log('0');
 }
 NODE
-}
-
-active_busy_services() {
-  local active=()
-  local service
-  if ! command -v systemctl >/dev/null 2>&1; then
-    return 0
-  fi
-  for service in $BUSY_SERVICES; do
-    if systemctl is-active --quiet "$service"; then
-      active+=("$service")
-    fi
-  done
-  printf '%s\n' "${active[*]}"
 }
 
 upcoming_reserved_window() {
@@ -290,8 +361,12 @@ write_state() {
   STATE_GUARD_FILE="${GUARD_OUT:-}" \
   STATE_REPAIR_QUEUE_FILE="${REPAIR_QUEUE_FILE:-}" \
   STATE_OK_FLAG="$ok_flag" \
-  node <<'NODE'
-const fs = require('node:fs');
+  ROOT_DIR="$ROOT" \
+  node --input-type=module <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+const {writeJsonFileAtomic} = await import(pathToFileURL(path.join(process.env.ROOT_DIR, 'lib', 'atomic_file_publish.mjs')).href);
 const state = {
   date: process.env.STATE_DATE,
   generatedAt: new Date().toISOString(),
@@ -307,9 +382,9 @@ try {
   state.repairQueueStatus = queue.status || null;
   state.repairQueueCounts = queue.counts || null;
 } catch {}
-fs.writeFileSync(process.env.STATE_FILE, JSON.stringify(state, null, 2));
+await writeJsonFileAtomic(process.env.STATE_FILE, state);
 if (process.env.STATE_OK_FLAG === '1') {
-  fs.writeFileSync(process.env.OK_STATE_FILE, JSON.stringify(state, null, 2));
+  await writeJsonFileAtomic(process.env.OK_STATE_FILE, state);
 }
 NODE
   write_immutable_run_report "$status" "$message"
@@ -342,6 +417,7 @@ on_error() {
   local line="$1"
   local status="$2"
   set +e
+  release_marketing_artifact_publication_lock
   write_state "failed" "marketing live guard aborted at line=$line exit=$status" 0
   echo "[cloud_marketing_live_guard] ERROR aborted at line=$line exit=$status log=$LOG_FILE" >&2
   exit "$status"
@@ -356,6 +432,7 @@ on_signal() {
     HUP) status=129 ;;
   esac
   set +e
+  release_marketing_artifact_publication_lock
   write_state "interrupted" "marketing live guard interrupted by signal=$signal" 0
   echo "[cloud_marketing_live_guard] INTERRUPTED signal=$signal log=$LOG_FILE" >&2
   trap - ERR INT TERM HUP
@@ -369,8 +446,14 @@ RUN_ID="${SHEIN_BI_MARKETING_LIVE_RUN_ID:-$(node -e 'console.log(require("node:c
 LOG_FILE="$LOG_DIR/marketing-live-guard-${DATE}-${STAMP}.log"
 SCAN_OUT="$ROOT/tmp/marketing-signup/current-price-live/current-marketing-price-live-${DATE}-${STAMP}.json"
 GUARD_OUT="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
+GUARD_STAGE_DIR="$STATE_DIR/report-staging/${DATE}/${RUN_ID}"
+GUARD_INPUT_OUT="$GUARD_OUT"
+PRICE_LEADS_FILE="${SHEIN_BI_MARKETING_PRICE_LEADS_FILE:-$ROOT/outputs/bi-portal/marketing-price-leads.json}"
+PRICE_LEADS_STAGE_FILE="$GUARD_STAGE_DIR/marketing-price-leads.json"
 RUN_REPORT_FILE="$STATE_DIR/reports/marketing-live-guard-${DATE}-${RUN_ID}.json"
 REPAIR_QUEUE_FILE="$STATE_DIR/repair-queues/marketing-repair-${DATE}.json"
+
+trap release_marketing_artifact_publication_lock EXIT
 
 prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
@@ -394,13 +477,6 @@ if [[ "$FORCE_RERUN" != "1" && "$(today_guard_already_ok)" == "1" ]]; then
   exit 0
 fi
 
-ACTIVE_BUSY="$(active_busy_services)"
-if [[ -n "$ACTIVE_BUSY" ]]; then
-  write_state "skipped_busy" "busy services active: $ACTIVE_BUSY" 0
-  echo "[cloud_marketing_live_guard] SKIP busy services active: $ACTIVE_BUSY"
-  exit 0
-fi
-
 if [[ "$GROUP" == "ALL" && "$IGNORE_RESERVED_WINDOW" != "1" ]]; then
   read -r NEXT_RESERVED_DELTA NEXT_RESERVED_NAME < <(upcoming_reserved_window)
   if [[ "$NEXT_RESERVED_DELTA" =~ ^[0-9]+$ && "$RESERVED_WINDOW_MINUTES" =~ ^[0-9]+$ && "$NEXT_RESERVED_DELTA" -le "$RESERVED_WINDOW_MINUTES" ]]; then
@@ -410,11 +486,23 @@ if [[ "$GROUP" == "ALL" && "$IGNORE_RESERVED_WINDOW" != "1" ]]; then
   fi
 fi
 
-AVAILABLE_MEM="$(available_mem_mib)"
-if [[ "$AVAILABLE_MEM" =~ ^[0-9]+$ ]] && (( AVAILABLE_MEM > 0 && AVAILABLE_MEM < MIN_AVAILABLE_MEM_MIB )); then
-  write_state "skipped_low_memory" "MemAvailable=${AVAILABLE_MEM}MiB below ${MIN_AVAILABLE_MEM_MIB}MiB" 0
-  echo "[cloud_marketing_live_guard] SKIP low memory MemAvailable=${AVAILABLE_MEM}MiB threshold=${MIN_AVAILABLE_MEM_MIB}MiB"
-  exit 0
+echo "[cloud_marketing_live_guard] resource lane=${SHEIN_BI_HOST_RESOURCE_LANE:-api-light} (browserless; no heavy/browser lock)"
+if wait_for_low_memory_capacity; then
+  if [[ "$LOW_MEMORY_WAIT_ELAPSED_SEC" -gt 0 ]]; then
+    echo "[cloud_marketing_live_guard] low memory recovered in ${LOW_MEMORY_WAIT_ELAPSED_SEC}s MemAvailable=${AVAILABLE_MEM}MiB threshold=${MIN_AVAILABLE_MEM_MIB}MiB; continuing same run"
+  else
+    echo "[cloud_marketing_live_guard] memory capacity ready MemAvailable=${AVAILABLE_MEM}MiB threshold=${MIN_AVAILABLE_MEM_MIB}MiB"
+  fi
+else
+  LOW_MEMORY_WAIT_STATUS=$?
+  if [[ "$LOW_MEMORY_WAIT_STATUS" -eq 1 ]]; then
+    write_state "blocked_low_memory" "MemAvailable=${AVAILABLE_MEM}MiB remained below ${MIN_AVAILABLE_MEM_MIB}MiB after ${LOW_MEMORY_WAIT_ELAPSED_SEC:-$LOW_MEMORY_MAX_WAIT_SEC}s bounded wait" 0
+    echo "[cloud_marketing_live_guard] BLOCKED low memory MemAvailable=${AVAILABLE_MEM}MiB threshold=${MIN_AVAILABLE_MEM_MIB}MiB wait=${LOW_MEMORY_MAX_WAIT_SEC}s; no scan was run" >&2
+    exit 1
+  fi
+  write_state "failed" "low-memory capacity wait configuration failed status=${LOW_MEMORY_WAIT_STATUS}" 0
+  echo "[cloud_marketing_live_guard] ERROR low-memory capacity wait failed status=$LOW_MEMORY_WAIT_STATUS" >&2
+  exit "$LOW_MEMORY_WAIT_STATUS"
 fi
 
 # Both evidence collectors use session-manager cookie snapshots. Inspection is
@@ -456,6 +544,7 @@ BI_PUBLISH_STATUS=0
 
 GUARD_STATUS=0
 if run_stage_with_retry "guard-report" run_guard_report; then
+  GUARD_INPUT_OUT="$GUARD_STAGE_DIR/marketing-daily-guard-${DATE}.json"
   echo "[cloud_marketing_live_guard] guard report done guard=$GUARD_OUT"
 else
   GUARD_STATUS=$?
@@ -472,90 +561,136 @@ REPAIR_TOTAL_ROWS=0
 REPAIR_TOTAL_GROUPS=0
 ORDINARY_LIVE_READY="$(guard_json_value '(j.marketingStackReviewCoverage?.coverageComplete === true && Number(j.marketingStackReviewFreshness?.activityAgeHours ?? 999999) <= Number(j.marketingStackReviewFreshness?.activityFreshnessThresholdHours ?? 48)) ? 1 : 0' 0)"
 echo "[cloud_marketing_live_guard] ordinary live evidence ready=$ORDINARY_LIVE_READY stackReviewStatus=$STACK_REVIEW_STATUS"
-if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]]; then
-  echo "[cloud_marketing_live_guard] publish complete marketing live snapshot to BI portal queue"
-  if bash scripts/publish_marketing_price_leads_to_bi.sh; then
-    echo "[cloud_marketing_live_guard] BI portal publish done"
+GUARD_PUBLICATION_STATUS=0
+PRICE_LEADS_PREP_STATUS=75
+if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 ]]; then
+  PRICE_LEADS_PREP_STATUS=0
+  echo "[cloud_marketing_live_guard] prepare marketing price leads before shared publication lock"
+  if prepare_marketing_price_leads; then
+    echo "[cloud_marketing_live_guard] marketing price leads prepared stage=$PRICE_LEADS_STAGE_FILE"
   else
-    BI_PUBLISH_STATUS=$?
-    echo "[cloud_marketing_live_guard] WARN BI portal publish returned status=$BI_PUBLISH_STATUS" >&2
+    PRICE_LEADS_PREP_STATUS=$?
+    echo "[cloud_marketing_live_guard] WARN marketing price leads preparation returned status=$PRICE_LEADS_PREP_STATUS" >&2
   fi
-else
-  BI_PUBLISH_STATUS=75
-  echo "[cloud_marketing_live_guard] BI portal publish skipped because evidence is incomplete stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS" >&2
 fi
-if [[ "$BUILD_REPAIR_QUEUE" == "1" && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 ]]; then
-  HIGH_CLICK_ACTION_COUNT="$(guard_json_value 'Number(j.highClickLowConversionSpecial?.actionCount || 0)' 0)"
-  echo "[cloud_marketing_live_guard] build high-click low-conversion protected special-discount plan"
-  if run_high_click_special_plan; then
-    echo "[cloud_marketing_live_guard] high-click special plan ready actions=$HIGH_CLICK_ACTION_COUNT"
-  else
-    HIGH_CLICK_PLAN_STATUS=$?
-    REPAIR_QUEUE_BUILD_STATUS=90
-    echo "[cloud_marketing_live_guard] WARN high-click special plan returned status=$HIGH_CLICK_PLAN_STATUS" >&2
-  fi
-  DRIFT_BELOW_COUNT="$(guard_json_value '(j.limitedDiscountTargetPriceDrift?.belowRows || []).length' 0)"
-  GUARD_NEW_LISTING_EXEC_COUNT="$(guard_json_value '(j.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.executableActionCount || 0)' 0)"
-  NEW_LISTING_EXEC_COUNT="$GUARD_NEW_LISTING_EXEC_COUNT"
-  echo "[cloud_marketing_live_guard] build complete-live-scan diff for all on-shelf limited-discount gaps"
-  if run_on_shelf_limited_discount_plan; then
-    ON_SHELF_PLAN_COUNT="$(on_shelf_limited_discount_plan_count)"
-    if [[ "$ON_SHELF_PLAN_COUNT" =~ ^[0-9]+$ && "$ON_SHELF_PLAN_COUNT" -gt "$NEW_LISTING_EXEC_COUNT" ]]; then
-      NEW_LISTING_EXEC_COUNT="$ON_SHELF_PLAN_COUNT"
-    fi
-    echo "[cloud_marketing_live_guard] all-on-shelf limited-discount plan actionable=$ON_SHELF_PLAN_COUNT"
-  else
-    ON_SHELF_PLAN_STATUS=$?
-    echo "[cloud_marketing_live_guard] WARN all-on-shelf limited-discount plan returned status=$ON_SHELF_PLAN_STATUS" >&2
-  fi
-  MANUAL_SPECIAL_RESTORE_COUNT="$(guard_json_value 'Number(j.manualSpecialLimitedDiscount?.actionCount || 0)' 0)"
-  if [[ "$MANUAL_SPECIAL_RESTORE_COUNT" =~ ^[0-9]+$ && "$MANUAL_SPECIAL_RESTORE_COUNT" -gt 0 ]]; then
-    echo "[cloud_marketing_live_guard] build exact current-run manual-special restore manifest"
-    if run_manual_special_restore_plan; then
-      echo "[cloud_marketing_live_guard] exact manual-special restore manifest ready"
-    else
-      MANUAL_PLAN_STATUS=$?
-      REPAIR_QUEUE_BUILD_STATUS=91
-      echo "[cloud_marketing_live_guard] WARN manual-special restore plan returned status=$MANUAL_PLAN_STATUS" >&2
-    fi
-  fi
-  if [[ "$ON_SHELF_PLAN_STATUS" -eq 0 && "$DRIFT_BELOW_COUNT" =~ ^[0-9]+$ && "$DRIFT_BELOW_COUNT" -gt 0 ]]; then
-    echo "[cloud_marketing_live_guard] build exact current-run drift repair manifest"
-    if run_drift_repair_plan; then
-      echo "[cloud_marketing_live_guard] exact drift repair manifest ready"
-    else
-      DRIFT_PLAN_STATUS=$?
-      REPAIR_QUEUE_BUILD_STATUS=92
-      echo "[cloud_marketing_live_guard] WARN drift repair plan returned status=$DRIFT_PLAN_STATUS" >&2
-    fi
-  fi
-  if [[ "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 ]]; then
-    if build_repair_queue; then
-      REPAIR_TOTAL_ROWS="$(queue_json_value 'Number(j.counts?.totalRows || 0)' 0)"
-      REPAIR_TOTAL_GROUPS="$(queue_json_value 'Number(j.counts?.totalGroups || 0)' 0)"
-      if [[ "$REPAIR_TOTAL_ROWS" =~ ^[0-9]+$ && "$REPAIR_TOTAL_ROWS" -gt 0 ]]; then
-        REPAIR_DEFERRED=1
-        node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
-          --queue "$REPAIR_QUEUE_FILE" \
-          --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"
-        echo "[cloud_marketing_live_guard] repair workload queued rows=$REPAIR_TOTAL_ROWS groups=$REPAIR_TOTAL_GROUPS; cloud inspection is complete and all writes are handed to local controlled execution"
+if [[ "$GUARD_STATUS" -eq 0 ]]; then
+  if acquire_marketing_artifact_publication_lock; then
+    if publish_staged_guard_report; then
+      GUARD_INPUT_OUT="$GUARD_OUT"
+      if [[ "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 ]]; then
+        if [[ "$BUILD_REPAIR_QUEUE" == "1" ]]; then
+          HIGH_CLICK_ACTION_COUNT="$(guard_json_value 'Number(j.highClickLowConversionSpecial?.actionCount || 0)' 0)"
+          echo "[cloud_marketing_live_guard] build high-click low-conversion protected special-discount plan"
+          if run_high_click_special_plan; then
+            echo "[cloud_marketing_live_guard] high-click special plan ready actions=$HIGH_CLICK_ACTION_COUNT"
+          else
+            HIGH_CLICK_PLAN_STATUS=$?
+            REPAIR_QUEUE_BUILD_STATUS=90
+            echo "[cloud_marketing_live_guard] WARN high-click special plan returned status=$HIGH_CLICK_PLAN_STATUS" >&2
+          fi
+          DRIFT_BELOW_COUNT="$(guard_json_value '(j.limitedDiscountTargetPriceDrift?.belowRows || []).length' 0)"
+          GUARD_NEW_LISTING_EXEC_COUNT="$(guard_json_value '(j.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.executableActionCount || 0)' 0)"
+          NEW_LISTING_EXEC_COUNT="$GUARD_NEW_LISTING_EXEC_COUNT"
+          echo "[cloud_marketing_live_guard] build complete-live-scan diff for all on-shelf limited-discount gaps"
+          if run_on_shelf_limited_discount_plan; then
+            ON_SHELF_PLAN_COUNT="$(on_shelf_limited_discount_plan_count)"
+            if [[ "$ON_SHELF_PLAN_COUNT" =~ ^[0-9]+$ && "$ON_SHELF_PLAN_COUNT" -gt "$NEW_LISTING_EXEC_COUNT" ]]; then
+              NEW_LISTING_EXEC_COUNT="$ON_SHELF_PLAN_COUNT"
+            fi
+            echo "[cloud_marketing_live_guard] all-on-shelf limited-discount plan actionable=$ON_SHELF_PLAN_COUNT"
+          else
+            ON_SHELF_PLAN_STATUS=$?
+            echo "[cloud_marketing_live_guard] WARN all-on-shelf limited-discount plan returned status=$ON_SHELF_PLAN_STATUS" >&2
+          fi
+          MANUAL_SPECIAL_RESTORE_COUNT="$(guard_json_value 'Number(j.manualSpecialLimitedDiscount?.actionCount || 0)' 0)"
+          if [[ "$MANUAL_SPECIAL_RESTORE_COUNT" =~ ^[0-9]+$ && "$MANUAL_SPECIAL_RESTORE_COUNT" -gt 0 ]]; then
+            echo "[cloud_marketing_live_guard] build exact current-run manual-special restore manifest"
+            if run_manual_special_restore_plan; then
+              echo "[cloud_marketing_live_guard] exact manual-special restore manifest ready"
+            else
+              MANUAL_PLAN_STATUS=$?
+              REPAIR_QUEUE_BUILD_STATUS=91
+              echo "[cloud_marketing_live_guard] WARN manual-special restore plan returned status=$MANUAL_PLAN_STATUS" >&2
+            fi
+          fi
+          if [[ "$ON_SHELF_PLAN_STATUS" -eq 0 && "$DRIFT_BELOW_COUNT" =~ ^[0-9]+$ && "$DRIFT_BELOW_COUNT" -gt 0 ]]; then
+            echo "[cloud_marketing_live_guard] build exact current-run drift repair manifest"
+            if run_drift_repair_plan; then
+              echo "[cloud_marketing_live_guard] exact drift repair manifest ready"
+            else
+              DRIFT_PLAN_STATUS=$?
+              REPAIR_QUEUE_BUILD_STATUS=92
+              echo "[cloud_marketing_live_guard] WARN drift repair plan returned status=$DRIFT_PLAN_STATUS" >&2
+            fi
+          fi
+        else
+          echo "[cloud_marketing_live_guard] repair queue build disabled"
+        fi
+        if [[ "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 ]]; then
+          if [[ "$BUILD_REPAIR_QUEUE" != "1" ]]; then
+            :
+          elif build_repair_queue; then
+            REPAIR_TOTAL_ROWS="$(queue_json_value 'Number(j.counts?.totalRows || 0)' 0)"
+            REPAIR_TOTAL_GROUPS="$(queue_json_value 'Number(j.counts?.totalGroups || 0)' 0)"
+            if [[ "$REPAIR_TOTAL_ROWS" =~ ^[0-9]+$ && "$REPAIR_TOTAL_ROWS" -gt 0 ]]; then
+              REPAIR_DEFERRED=1
+              node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
+                --queue "$REPAIR_QUEUE_FILE" \
+                --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"
+              echo "[cloud_marketing_live_guard] repair workload queued rows=$REPAIR_TOTAL_ROWS groups=$REPAIR_TOTAL_GROUPS; cloud inspection is complete and all writes are handed to local controlled execution"
+            fi
+          else
+            REPAIR_QUEUE_BUILD_STATUS=$?
+            echo "[cloud_marketing_live_guard] WARN repair queue build returned status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+          fi
+        fi
+        echo "[cloud_marketing_live_guard] action check highClickSpecial=$HIGH_CLICK_ACTION_COUNT manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_COUNT driftBelow=$DRIFT_BELOW_COUNT limitedFallbackExecutable=$NEW_LISTING_EXEC_COUNT deferred=$REPAIR_DEFERRED"
+        echo "[cloud_marketing_live_guard] inspection phase complete; no SHEIN mutation is executed in this service. The exact hashed queue is consumed only by shein-bi-cloud-marketing-repair.service."
+        if [[ "$BUILD_REPAIR_QUEUE" == "1" && "$REPAIR_QUEUE_BUILD_STATUS" -ne 0 ]]; then
+          BI_PUBLISH_STATUS=75
+          echo "[cloud_marketing_live_guard] BI portal publish skipped because repair queue preparation failed status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+        elif [[ "$PRICE_LEADS_PREP_STATUS" -ne 0 ]]; then
+          BI_PUBLISH_STATUS=75
+          echo "[cloud_marketing_live_guard] BI portal publish skipped because marketing price leads preparation failed status=$PRICE_LEADS_PREP_STATUS" >&2
+        else
+          echo "[cloud_marketing_live_guard] publish complete marketing live snapshot to BI portal queue"
+          if SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_HELD=1 \
+            SHEIN_BI_MARKETING_BI_PUBLISH_DATE="$DATE" \
+            SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE="$ARTIFACT_PUBLICATION_LOCK_FILE" \
+            SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_WAIT_SEC="$ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" \
+            SHEIN_BI_MARKETING_PRICE_LEADS_FILE="$PRICE_LEADS_FILE" \
+            SHEIN_BI_MARKETING_PRICE_LEADS_STAGE_FILE="$PRICE_LEADS_STAGE_FILE" \
+            SHEIN_BI_MARKETING_PRICE_LEADS_PREPARED=1 \
+            bash scripts/publish_marketing_price_leads_to_bi.sh; then
+            echo "[cloud_marketing_live_guard] BI portal publish done"
+          else
+            BI_PUBLISH_STATUS=$?
+            echo "[cloud_marketing_live_guard] WARN BI portal publish returned status=$BI_PUBLISH_STATUS" >&2
+          fi
+        fi
+      else
+        BI_PUBLISH_STATUS=75
+        echo "[cloud_marketing_live_guard] BI portal publish skipped because evidence is incomplete stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScanStatus=$SCAN_STATUS" >&2
       fi
     else
-      REPAIR_QUEUE_BUILD_STATUS=$?
-      echo "[cloud_marketing_live_guard] WARN repair queue build returned status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+      GUARD_PUBLICATION_STATUS=$?
+      echo "[cloud_marketing_live_guard] WARN staged guard report publication returned status=$GUARD_PUBLICATION_STATUS" >&2
     fi
-  fi
-  echo "[cloud_marketing_live_guard] action check highClickSpecial=$HIGH_CLICK_ACTION_COUNT manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_COUNT driftBelow=$DRIFT_BELOW_COUNT limitedFallbackExecutable=$NEW_LISTING_EXEC_COUNT deferred=$REPAIR_DEFERRED"
-  echo "[cloud_marketing_live_guard] inspection phase complete; no SHEIN mutation is executed in this service. The exact hashed queue is consumed only by shein-bi-cloud-marketing-repair.service."
-else
-  if [[ "$BUILD_REPAIR_QUEUE" != "1" ]]; then
-    echo "[cloud_marketing_live_guard] repair queue build disabled"
+    release_marketing_artifact_publication_lock
   else
-    echo "[cloud_marketing_live_guard] skip auto repair because stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS"
+    GUARD_PUBLICATION_STATUS=$?
+    BI_PUBLISH_STATUS=75
+    REPAIR_QUEUE_BUILD_STATUS=75
+    echo "[cloud_marketing_live_guard] WARN artifact publication lock unavailable status=$GUARD_PUBLICATION_STATUS" >&2
   fi
+else
+  GUARD_PUBLICATION_STATUS="$GUARD_STATUS"
+  BI_PUBLISH_STATUS=75
+  REPAIR_QUEUE_BUILD_STATUS=75
+  echo "[cloud_marketing_live_guard] WARN fixed guard report publication skipped because guard report status=$GUARD_STATUS" >&2
 fi
 
-if [[ "$COST_MAP_STATUS" -eq 0 && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 && "$BI_PUBLISH_STATUS" -eq 0 ]]; then
+if [[ "$COST_MAP_STATUS" -eq 0 && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIVE_READY" -eq 1 && "$SCAN_STATUS" -eq 0 && "$GUARD_STATUS" -eq 0 && "$GUARD_PUBLICATION_STATUS" -eq 0 && "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 && "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 && "$BI_PUBLISH_STATUS" -eq 0 ]]; then
   write_state "ok" "marketing inspection completed; repairDeferred=$REPAIR_DEFERRED" 1
   if [[ "$REPAIR_TOTAL_ROWS" -eq 0 ]]; then
     node scripts/marketing/send_marketing_daily_group_report.mjs \
@@ -566,7 +701,7 @@ if [[ "$COST_MAP_STATUS" -eq 0 && "$STACK_REVIEW_STATUS" -eq 0 && "$ORDINARY_LIV
   fi
   echo "[cloud_marketing_live_guard] done ok date=$DATE log=$LOG_FILE"
 else
-  write_state "warning" "costMap=$COST_MAP_STATUS stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS highClickPlan=$HIGH_CLICK_PLAN_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS biPublish=$BI_PUBLISH_STATUS" 0
-  echo "[cloud_marketing_live_guard] done warning costMapStatus=$COST_MAP_STATUS stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS highClickPlanStatus=$HIGH_CLICK_PLAN_STATUS onShelfPlanStatus=$ON_SHELF_PLAN_STATUS manualPlanStatus=$MANUAL_PLAN_STATUS driftPlanStatus=$DRIFT_PLAN_STATUS repairQueueStatus=$REPAIR_QUEUE_BUILD_STATUS biPublishStatus=$BI_PUBLISH_STATUS log=$LOG_FILE" >&2
+  write_state "warning" "costMap=$COST_MAP_STATUS stackReview=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY liveScan=$SCAN_STATUS guard=$GUARD_STATUS guardPublication=$GUARD_PUBLICATION_STATUS highClickPlan=$HIGH_CLICK_PLAN_STATUS onShelfPlan=$ON_SHELF_PLAN_STATUS manualPlan=$MANUAL_PLAN_STATUS driftPlan=$DRIFT_PLAN_STATUS repairQueue=$REPAIR_QUEUE_BUILD_STATUS biPublish=$BI_PUBLISH_STATUS" 0
+  echo "[cloud_marketing_live_guard] done warning costMapStatus=$COST_MAP_STATUS stackReviewStatus=$STACK_REVIEW_STATUS ordinaryLiveReady=$ORDINARY_LIVE_READY scanStatus=$SCAN_STATUS guardStatus=$GUARD_STATUS guardPublicationStatus=$GUARD_PUBLICATION_STATUS highClickPlanStatus=$HIGH_CLICK_PLAN_STATUS onShelfPlanStatus=$ON_SHELF_PLAN_STATUS manualPlanStatus=$MANUAL_PLAN_STATUS driftPlanStatus=$DRIFT_PLAN_STATUS repairQueueStatus=$REPAIR_QUEUE_BUILD_STATUS biPublishStatus=$BI_PUBLISH_STATUS log=$LOG_FILE" >&2
   exit 1
 fi

@@ -10,6 +10,11 @@ STATE_DIR="${SHEIN_BI_MARKETING_LIVE_STATE_DIR:-$ROOT/state/cloud_marketing_live
 ALERT_DIR="$ROOT/state/cloud_ops_alerts"
 QUEUE_FILE="$STATE_DIR/repair-queues/marketing-repair-${DATE}.json"
 LOCK_FILE="${SHEIN_BI_MARKETING_REPAIR_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-marketing-repair.lock}"
+ARTIFACT_PUBLICATION_LOCK_FILE="${SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-marketing-artifact-publication.lock}"
+ARTIFACT_PUBLICATION_LOCK_WAIT_SEC="${SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_WAIT_SEC:-30}"
+GUARD_OUT="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
+GUARD_INPUT_OUT="$GUARD_OUT"
+GUARD_STAGE_DIR=""
 LEASE_TASK="${SHEIN_BI_MARKETING_REPAIR_LEASE_TASK:-cloud-marketing-repair}"
 LEASE_TTL_SEC="${SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC:-3000}"
 LEASE_ACQUIRED=0
@@ -32,6 +37,48 @@ GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
 GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
 GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
 BUSY_SERVICES="${SHEIN_BI_MARKETING_REPAIR_BUSY_SERVICES:-shein-bi-cloud-marketing-live-guard.service shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-refresh.service shein-bi-cloud-session-manager.service shein-bi-cloud-morning-chain.service shein-bi-cloud-order-closure.service shein-bi-db-backup.service}"
+ARTIFACT_PUBLICATION_LOCK_ACQUIRED=0
+
+release_marketing_artifact_publication_lock() {
+  if [[ "$ARTIFACT_PUBLICATION_LOCK_ACQUIRED" == "1" ]]; then
+    flock -u 8 2>/dev/null || true
+    exec 8>&-
+    ARTIFACT_PUBLICATION_LOCK_ACQUIRED=0
+  fi
+}
+
+acquire_marketing_artifact_publication_lock() {
+  if ! [[ "$ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" =~ ^[0-9]+$ ]] || (( ARTIFACT_PUBLICATION_LOCK_WAIT_SEC >= 1800 )); then
+    echo "[cloud_marketing_repair] ERROR invalid artifact publication lock wait: $ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" >&2
+    return 64
+  fi
+  prepare_shared_lock_file "$ARTIFACT_PUBLICATION_LOCK_FILE"
+  exec 8<>"$ARTIFACT_PUBLICATION_LOCK_FILE"
+  if ! flock -w "$ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" 8; then
+    echo "[cloud_marketing_repair] artifact publication lock busy: $ARTIFACT_PUBLICATION_LOCK_FILE" >&2
+    exec 8>&-
+    return 75
+  fi
+  ARTIFACT_PUBLICATION_LOCK_ACQUIRED=1
+}
+
+publish_staged_guard_report() {
+  local staged_json="$GUARD_INPUT_OUT"
+  local staged_md="$GUARD_STAGE_DIR/marketing-daily-guard-${DATE}.md"
+  if [[ ! -f "$staged_json" || ! -f "$staged_md" ]]; then
+    echo "[cloud_marketing_repair] ERROR staged guard report is incomplete: dir=$GUARD_STAGE_DIR" >&2
+    return 66
+  fi
+  STAGED_JSON="$staged_json" STAGED_MD="$staged_md" TARGET_JSON="$GUARD_OUT" TARGET_MD="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.md" node --input-type=module <<'NODE'
+import fs from 'node:fs/promises';
+import {writeFileAtomic} from './lib/atomic_file_publish.mjs';
+
+const json = await fs.readFile(process.env.STAGED_JSON);
+const md = await fs.readFile(process.env.STAGED_MD);
+await writeFileAtomic(process.env.TARGET_JSON, json, {encoding: 'utf8'});
+await writeFileAtomic(process.env.TARGET_MD, md, {encoding: 'utf8'});
+NODE
+}
 
 queue_value() {
   local expression="$1"
@@ -117,16 +164,27 @@ lease_action() {
 
 update_stage() {
   local stage="$1" status="$2" readback_ok="$3" detail="$4" result_path="${5:-}"
-  node scripts/marketing/manage_marketing_repair_queue.mjs update-stage \
-    --queue "$QUEUE_FILE" --stage "$stage" --status "$status" \
-    --readback-ok "$readback_ok" --detail "$detail" --result-path "$result_path"
+  acquire_marketing_artifact_publication_lock
+  local command_status=0
+  if node scripts/marketing/manage_marketing_repair_queue.mjs update-stage \
+      --queue "$QUEUE_FILE" --stage "$stage" --status "$status" \
+      --readback-ok "$readback_ok" --detail "$detail" --result-path "$result_path"; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  release_marketing_artifact_publication_lock
+  return "$command_status"
 }
 
 write_state() {
   local status="$1" message="$2"
   mkdir -p "$ALERT_DIR"
-  STATE_FILE="$ALERT_DIR/marketing-repair-last.json" STATE_DATE="$DATE" STATE_STATUS="$status" STATE_MESSAGE="$message" STATE_LOG="$LOG_FILE" STATE_QUEUE="$QUEUE_FILE" node <<'NODE'
-const fs = require('node:fs');
+  STATE_FILE="$ALERT_DIR/marketing-repair-last.json" STATE_DATE="$DATE" STATE_STATUS="$status" STATE_MESSAGE="$message" STATE_LOG="$LOG_FILE" STATE_QUEUE="$QUEUE_FILE" ROOT_DIR="$ROOT" node --input-type=module <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+const {writeJsonFileAtomic} = await import(pathToFileURL(path.join(process.env.ROOT_DIR, 'lib', 'atomic_file_publish.mjs')).href);
 const state = {
   date: process.env.STATE_DATE,
   generatedAt: new Date().toISOString(),
@@ -141,7 +199,7 @@ try {
   state.queueCounts = queue.counts;
   state.queueFingerprint = queue.queueFingerprint;
 } catch {}
-fs.writeFileSync(process.env.STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
+await writeJsonFileAtomic(process.env.STATE_FILE, state);
 NODE
 }
 
@@ -189,6 +247,20 @@ validate_cloud_fallback_window() {
   fi
 }
 
+handoff_local_queue() {
+  acquire_marketing_artifact_publication_lock
+  local command_status=0
+  if node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
+      --queue "$QUEUE_FILE" \
+      --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  release_marketing_artifact_publication_lock
+  return "$command_status"
+}
+
 send_daily_group_report() {
   node scripts/marketing/send_marketing_daily_group_report.mjs \
     --date "$DATE" --queue "$QUEUE_FILE" \
@@ -221,16 +293,46 @@ run_terminal_final_snapshot() {
   lease_action heartbeat || return $?
   node scripts/marketing/build_marketing_daily_guard_report.mjs \
     --date "$DATE" --max-age-hours "$GUARD_MAX_AGE_HOURS" \
+    --out-dir "$GUARD_STAGE_DIR" \
     --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" --cloud-bi-root "$GUARD_CLOUD_BI_ROOT" || return $?
+  GUARD_INPUT_OUT="$GUARD_STAGE_DIR/marketing-daily-guard-${DATE}.json"
   FINAL_SCAN_OUT="$scan_out"
-  echo "[cloud_marketing_repair] publish terminal marketing live snapshot to BI portal queue"
-  bash scripts/publish_marketing_price_leads_to_bi.sh || return $?
 }
 
 run_final_readback() {
   run_terminal_final_snapshot || return $?
-  build_current_repair_plans || return $?
-  rebuild_repair_queue || return $?
+  prepare_marketing_price_leads || return $?
+  acquire_marketing_artifact_publication_lock || return $?
+  local publication_status=0
+  if publish_staged_guard_report; then
+    GUARD_INPUT_OUT="$GUARD_OUT"
+    if build_current_repair_plans && rebuild_repair_queue_locked; then
+      echo "[cloud_marketing_repair] publish terminal marketing live snapshot to BI portal queue"
+      if SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_HELD=1 \
+        SHEIN_BI_MARKETING_BI_PUBLISH_DATE="$DATE" \
+        SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE="$ARTIFACT_PUBLICATION_LOCK_FILE" \
+        SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_WAIT_SEC="$ARTIFACT_PUBLICATION_LOCK_WAIT_SEC" \
+        SHEIN_BI_MARKETING_PRICE_LEADS_FILE="$PRICE_LEADS_FILE" \
+        SHEIN_BI_MARKETING_PRICE_LEADS_STAGE_FILE="$PRICE_LEADS_STAGE_FILE" \
+        SHEIN_BI_MARKETING_PRICE_LEADS_PREPARED=1 \
+        bash scripts/publish_marketing_price_leads_to_bi.sh; then
+        publication_status=0
+      else
+        publication_status=$?
+      fi
+    else
+      publication_status=$?
+    fi
+  else
+    publication_status=$?
+  fi
+  release_marketing_artifact_publication_lock
+  return "$publication_status"
+}
+
+prepare_marketing_price_leads() {
+  node scripts/marketing/export_marketing_price_leads_for_bi.mjs \
+    --require-fresh --out "$PRICE_LEADS_STAGE_FILE"
 }
 
 build_current_repair_plans() {
@@ -263,9 +365,9 @@ build_current_repair_plans() {
   return 0
 }
 
-rebuild_repair_queue() {
+rebuild_repair_queue_locked() {
   local guard_out manual_plan
-  guard_out="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
+  guard_out="$GUARD_OUT"
   manual_plan="$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-plan.json"
   node scripts/marketing/manage_marketing_repair_queue.mjs build \
     --date "$DATE" --guard "$guard_out" \
@@ -274,6 +376,18 @@ rebuild_repair_queue() {
     --drift-plan-dir "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}" \
     --fallback-plan "$ROOT/outputs/reports/new-listing-7d-limited-discount-plan-${DATE}.json" \
     --queue "$QUEUE_FILE" || return $?
+}
+
+rebuild_repair_queue() {
+  acquire_marketing_artifact_publication_lock
+  local command_status=0
+  if rebuild_repair_queue_locked; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+  release_marketing_artifact_publication_lock
+  return "$command_status"
 }
 
 terminal_report_ready() {
@@ -298,6 +412,7 @@ on_exit() {
     lease_action release >/dev/null 2>&1
     LEASE_ACQUIRED=0
   fi
+  release_marketing_artifact_publication_lock
   exit "$status"
 }
 
@@ -305,6 +420,11 @@ mkdir -p "$LOG_DIR" "$STATE_DIR/repair-queues" "$ALERT_DIR"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 RUN_ID="${SHEIN_BI_MARKETING_REPAIR_RUN_ID:-$(node -e 'console.log(require("node:crypto").randomUUID())')}"
 LOG_FILE="$LOG_DIR/marketing-repair-${DATE}-${STAMP}.log"
+GUARD_STAGE_DIR="$STATE_DIR/report-staging/${DATE}/${RUN_ID}"
+GUARD_INPUT_OUT="$GUARD_OUT"
+PRICE_LEADS_FILE="${SHEIN_BI_MARKETING_PRICE_LEADS_FILE:-$ROOT/outputs/bi-portal/marketing-price-leads.json}"
+PRICE_LEADS_STAGE_FILE="$GUARD_STAGE_DIR/marketing-price-leads.json"
+trap release_marketing_artifact_publication_lock EXIT
 prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -322,10 +442,14 @@ fi
 QUEUE_STATUS="$(queue_value 'j.status' missing)"
 if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   if [[ "$QUEUE_STATUS" == "blocked" ]]; then
-    run_terminal_final_snapshot
-    build_current_repair_plans
+    if run_final_readback; then
+      :
+    else
+      status=$?
+      write_state failed "final terminal snapshot/publication failed status=$status"
+      exit "$status"
+    fi
     if ! terminal_report_ready; then
-      rebuild_repair_queue
       write_state pending "final snapshot found new authorized repair work; final report delivery deferred"
       echo "[cloud_marketing_repair] final report deferred because final snapshot added unhandled repair work"
       exit 0
@@ -340,8 +464,13 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   set -e
   if [[ "$REPORT_STATUS" -eq 3 ]]; then
     echo "[cloud_marketing_repair] terminal queue has no post-execution final guard; refreshing final evidence"
-    run_terminal_final_snapshot
-    send_daily_group_report
+    if run_final_readback; then
+      send_daily_group_report
+    else
+      status=$?
+      write_state failed "terminal final guard refresh/publication failed status=$status"
+      exit "$status"
+    fi
   elif [[ "$REPORT_STATUS" -ne 0 ]]; then
     echo "[cloud_marketing_repair] WARN complete group report delivery failed status=$REPORT_STATUS" >&2
   fi
@@ -349,9 +478,7 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   exit 0
 fi
 if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" != "true" ]]; then
-  node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
-    --queue "$QUEUE_FILE" \
-    --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"
+  handoff_local_queue
   write_state deferred_to_local "cloud marketing writes are disabled; exact queue preserved for local controlled execution"
   echo "[cloud_marketing_repair] DEFER TO LOCAL before browser lease or SHEIN mutation; the final report waits for local execution and terminal readback"
   exit 75
@@ -390,9 +517,7 @@ REMAINING_GROUPS="$MAX_GROUPS"
 # browserless 19-store snapshot before it is allowed to open any cloud Chrome.
 # This prevents replaying work already completed on the owner's computer.
 if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; then
-  run_terminal_final_snapshot
-  build_current_repair_plans
-  rebuild_repair_queue
+  run_final_readback
   QUEUE_STATUS="$(queue_value 'j.status' pending)"
   if [[ "$QUEUE_STATUS" == "completed" ]]; then
     write_state ok "local execution already covered all authorized repairs; cloud fallback only performed final readback"
@@ -548,8 +673,20 @@ fi
 QUEUE_STATUS="$(queue_value 'j.status' pending)"
 if [[ "$QUEUE_STATUS" == "blocked" ]]; then
   write_state blocked "all executable repairs were processed; remaining links are safely blocked by current inventory/platform conditions"
-  run_terminal_final_snapshot
-  send_daily_group_report
+  if run_final_readback; then
+    QUEUE_STATUS="$(queue_value 'j.status' pending)"
+    if [[ "$QUEUE_STATUS" == "blocked" ]]; then
+      send_daily_group_report
+    else
+      write_state pending "final snapshot produced a non-terminal repair queue"
+      echo "[cloud_marketing_repair] final snapshot produced a non-terminal repair queue"
+      exit 0
+    fi
+  else
+    status=$?
+    write_state failed "terminal final snapshot/publication failed status=$status"
+    exit "$status"
+  fi
   echo "[cloud_marketing_repair] done with terminal business blockers after final live snapshot date=$DATE"
   exit 0
 fi

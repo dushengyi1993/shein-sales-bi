@@ -27,7 +27,7 @@
 | 订单闭环 | 每天一次独立业务run | 只重查未终态订单，完成后一次刷新订单投影 | 上班前 |
 | ET | 8个经营检查点 | 每个检查点是一次完整增量；HTTP优先，不为读请求预留Chrome | 对应检查点后及时 |
 | 仓储费 | 每天账单ready后一次 | canonical明细、利润cache和四层对账完整后发布 | 当日账单ready后 |
-| 营销 | 只读guard与受控write分开 | 日常只读优先session HTTP；普通活动和需要大量浏览器的工作默认本机；写事务单店终态后回读 | 不阻塞实时/日结 |
+| 营销 | 只读guard与受控write分开 | `cloud_marketing_live_guard.service` 属于 `api-light`，直接运行 session HTTP/OpenAPI 只读检查，不等待 heavy/browser 锁；普通活动和需要大量浏览器的工作默认本机；写事务单店终态后回读 | 不阻塞实时/日结 |
 
 半托每日经营刷新允许同一个 coordinator 内最多两个不同店铺的只读浏览器 worker。第二个槽只有在主机可用内存和负载门禁通过时才启动；任一店完成立即关闭自己的 Profile 并释放槽位。并行 worker 不是独立业务任务，最终仍只有一份19店 manifest 和一次发布。
 
@@ -48,9 +48,10 @@
 
 ## 4. 共机资源令牌
 
-- `api-light`：全机并发2；内部OpenAPI全局建议不超过3，同主体/同应用并发1。实时销售、Webhook和库存轻量流不等待浏览器锁。
+- `api-light`：轻量只读流的资源分类与观测标签。营销只读 guard 直接在此 lane 运行，不等待 `shein-host-heavy-bi.slice` 或 browser-read/browser-write 锁；实时销售、Webhook和库存轻量流也不等待浏览器锁。本条不表示已经实现覆盖全项目、全主机的 API semaphore；现有任务各自的并发/容量边界仍以其 unit、脚本和云端事实为准。
+- 营销 guard 与 repair 都先持有各自的 service lock，再按需短暂获取同一把 `/opt/shein-bi/app/state/locks/shein-bi-cloud-marketing-artifact-publication.lock`（默认等待 30 秒）。该窄锁只保护同日固定 guard JSON/Markdown、repair queue 和 `linksData` Portal intent 的共享发布；session HTTP/OpenAPI 采集、价格扫描和最终快照均在锁外完成。锁忙必须以非零状态返回，不得伪报成功；guard 仍保持 `api-light`，不恢复全局 host-heavy slice/wrapper/busy-service skip。
 - `browser-read`：全机最多2个不同 Profile。第2槽仅在 `MemAvailable >= 4GiB` 且负载/PSI门禁通过时准入。
-- `browser-write`：全机1个，排他；事务中不中杀，店铺终态后才释放。
+- `browser-write`：写 repair worker 使用的全机排他 lane，最多1个；事务中不中杀，店铺终态后才释放。营销只读 guard 不进入此 lane。
 - `db-projection`：全机1个，只覆盖最终成本/利润/Portal投影阶段。
 - Portal section 队列的静态起跑门由 systemd unit 与 worker 保持一致：仅允许 timer `:14/:44` 对应的 `:13–16` / `:43–46` 窗口；`01` 整小时拒绝，`06:43–46` 后半槽拒绝，`08` 不做静态禁跑。08 时若晨链正在运行，仍由既有 slot wrapper 动态 guard 让路；timer、锁、section 优先级与 deadline 不因该静态门改变。
 - `io-heavy`：全机1个，备份、恢复测试、大归档不与大物化并行。
