@@ -139,7 +139,30 @@ result_is_readback_pending_only() {
   ' "$RESULT" >/dev/null
 }
 
-if [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true" ]]; then
+JOURNAL="$RESULT.journal.ndjson"
+RECONCILE_PENDING_ONLY=0
+if [[ -s "$PLAN" && -s "$RESULT" && -s "$JOURNAL" ]]; then
+  EXISTING_HASH="$(jq -r '.payloadHash // empty' "$PLAN")"
+  EXISTING_TOTAL="$(jq -r '.actionable | length' "$PLAN")"
+  if [[ "$EXISTING_HASH" =~ ^[a-f0-9]{64}$ && "$EXISTING_TOTAL" =~ ^[0-9]+$ ]] \
+    && jq -e --arg date "$DATE" '.date == $date and .executable == true and ((.blockers // []) | length) == 0' "$PLAN" >/dev/null \
+    && jq -e --arg hash "$EXISTING_HASH" --argjson total "$EXISTING_TOTAL" '
+      .planHash == $hash
+      and .execute == true
+      and .executionMode == "automatic"
+      and (.results | length) == $total
+      and any(.results[];
+        .state == "needs_manual_resolve"
+        or .state == "submitted_but_readback_pending"
+        or .state == "suspicious_write_attempted"
+        or .state == "submitted_readback_failed")
+    ' "$RESULT" >/dev/null; then
+    RECONCILE_PENDING_ONLY=1
+    echo "[daily_inventory_guard] durable inventory lifecycle is unresolved; preserve the immutable plan and run readback-only reconciliation"
+  fi
+fi
+
+if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true" ]]; then
   node scripts/pipeline_marker.mjs require \
     --stage morning-links-ready \
     --date "$DATE" \
@@ -376,25 +399,26 @@ plan_blocked_with_budget_failure() {
 # HTTP failure, a cachedAt that did not advance, or zero matched current-day
 # ET rows aborts the guard before the plan build. The error is not swallowed
 # and the write interface is never retried.
-ensure_links_data_fresh || true
-ensure_inventory_trend_fresh 1
-PLAN_STATUS=0
-build_plan || PLAN_STATUS=$?
-
-if [[ ! -s "$PLAN" ]]; then
-  echo "daily inventory planner did not produce a plan status=$PLAN_STATUS" >&2
-  if (( PLAN_STATUS != 0 )); then
-    exit "$PLAN_STATUS"
-  fi
-  exit 1
-fi
-
-if jq -e '(.blockers // []) | any(. == "BI links data is stale" or startswith("BI links data is stale:"))' "$PLAN" >/dev/null; then
-  echo "[daily_inventory_guard] retry once after forced linksData refresh"
-  ensure_links_data_fresh 1 || true
+if (( RECONCILE_PENDING_ONLY == 0 )); then
+  ensure_links_data_fresh || true
+  ensure_inventory_trend_fresh 1
   PLAN_STATUS=0
   build_plan || PLAN_STATUS=$?
-fi
+
+  if [[ ! -s "$PLAN" ]]; then
+    echo "daily inventory planner did not produce a plan status=$PLAN_STATUS" >&2
+    if (( PLAN_STATUS != 0 )); then
+      exit "$PLAN_STATUS"
+    fi
+    exit 1
+  fi
+
+  if jq -e '(.blockers // []) | any(. == "BI links data is stale" or startswith("BI links data is stale:"))' "$PLAN" >/dev/null; then
+    echo "[daily_inventory_guard] retry once after forced linksData refresh"
+    ensure_links_data_fresh 1 || true
+    PLAN_STATUS=0
+    build_plan || PLAN_STATUS=$?
+  fi
 
 # A single targeted-refresh decision per run. Stale/failed/unavailable OpenAPI
 # sources OR recoverable current-detail/canonical blockers (only when the
@@ -425,20 +449,23 @@ elif [[ "$REFRESH_DETAIL_TARGETS_ON_BLOCKED" == "1" ]] \
   ' "$PLAN" >/dev/null; then
   REFRESH_REASON="current_detail_blocked"
 fi
-if [[ -n "$REFRESH_REASON" ]]; then
-  echo "[daily_inventory_guard] refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=$REFRESH_REASON"
-  REFRESH_STATUS=0
-  refresh_targeted_openapi_sources || REFRESH_STATUS=$?
-  if (( REFRESH_STATUS == 0 )); then
-    PLAN_STATUS=0
-    build_plan "$DETAIL_TARGETS" || PLAN_STATUS=$?
-  elif (( REFRESH_STATUS == 2 )); then
-    echo "[daily_inventory_guard] daily current-detail target budget exceeded; fail closed" >&2
-    plan_blocked_with_budget_failure
-    exit 2
-  else
-    echo "[daily_inventory_guard] targeted OpenAPI refresh failed status=$REFRESH_STATUS; retain exact blockers; no second targeted refresh this run" >&2
+  if [[ -n "$REFRESH_REASON" ]]; then
+    echo "[daily_inventory_guard] refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=$REFRESH_REASON"
+    REFRESH_STATUS=0
+    refresh_targeted_openapi_sources || REFRESH_STATUS=$?
+    if (( REFRESH_STATUS == 0 )); then
+      PLAN_STATUS=0
+      build_plan "$DETAIL_TARGETS" || PLAN_STATUS=$?
+    elif (( REFRESH_STATUS == 2 )); then
+      echo "[daily_inventory_guard] daily current-detail target budget exceeded; fail closed" >&2
+      plan_blocked_with_budget_failure
+      exit 2
+    else
+      echo "[daily_inventory_guard] targeted OpenAPI refresh failed status=$REFRESH_STATUS; retain exact blockers; no second targeted refresh this run" >&2
+    fi
   fi
+else
+  PLAN_STATUS=0
 fi
 
 HASH="$(jq -r '.payloadHash // empty' "$PLAN")"
@@ -484,19 +511,24 @@ if [[ -f "$RESULT" ]] && jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   echo "[daily_inventory_guard] prior result is not a safe current terminal readback; re-run read-only guards and executor recovery (durable intents forbid duplicate writes)" >&2
 fi
 
-if [[ "$RUN_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]] && (( $(date +%s) >= RUN_DEADLINE_EPOCH )); then
+if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$RUN_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]] && (( $(date +%s) >= RUN_DEADLINE_EPOCH )); then
   echo "[daily_inventory_guard] run deadline reached before executor dispatch; no inventory request was submitted" >&2
   write_inventory_marker failed "run deadline reached before executor dispatch"
   exit 76
 fi
 
 set +e
+EXECUTOR_RECOVERY_ARGS=()
+if (( RECONCILE_PENDING_ONLY == 1 )); then
+  EXECUTOR_RECOVERY_ARGS+=(--reconcile-pending-only)
+fi
 node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
   --plan "$PLAN" \
   --execute \
   --execution-mode automatic \
   --confirm-hash "$HASH" \
   --max-rows "$MAX_ROWS" \
+  "${EXECUTOR_RECOVERY_ARGS[@]}" \
   --out "$RESULT"
 EXECUTOR_STATUS=$?
 set -e

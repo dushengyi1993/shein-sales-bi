@@ -197,7 +197,7 @@ check('inventoryTrend refresh runs before the first plan build', () => {
 });
 match('inventoryTrend refresh is always forced once per daily run',
   guard,
-  /^ensure_inventory_trend_fresh 1$/m,
+  /^\s*ensure_inventory_trend_fresh 1$/m,
   'a fresh cachedAt can still hide an old ET business day, so the daily refresh must bypass the age skip');
 noMatch('inventoryTrend refresh failure is never swallowed',
   guard,
@@ -374,7 +374,7 @@ match('refresh decision branches are mutually exclusive via if/elif',
   /REFRESH_REASON="openapi_sources_stale"[\s\S]*elif \[\[ "\$REFRESH_DETAIL_TARGETS_ON_BLOCKED" == "1" \]\] \\\n\s*&& \[\[ "\$\(jq -r '\.executable' "\$PLAN"\)" != "true" \]\]/,
   'stale-sources and current-detail branches must never both fire');
 check('exactly one targeted reconciliation call point per run', () => {
-  assert.equal((guard.match(/^  refresh_targeted_openapi_sources \|\| REFRESH_STATUS=\$\?$/gm) || []).length, 1,
+    assert.equal((guard.match(/^\s+refresh_targeted_openapi_sources \|\| REFRESH_STATUS=\$\?$/gm) || []).length, 1,
     'the merged refresh decision exposes a single call point, so at most one reconciliation runs per guard run');
 });
 match('reconciliation is gated by the single-run reason',
@@ -491,6 +491,18 @@ match('guard and final marker share semantic inventory validator', guard,
 match('exact pending readback remains retryable in same run', guard,
   /result_is_readback_pending_only[\s\S]*submitted_but_readback_pending[\s\S]*exit 75/,
   'an exact durable intent waiting only for propagation must not become restart-prevented exit 2');
+match('unresolved durable lifecycle selects immutable readback-only recovery', guard,
+  /durable inventory lifecycle is unresolved; preserve the immutable plan and run readback-only reconciliation/,
+  'an existing ambiguous or pending lifecycle must not rebuild its plan');
+match('readback-only recovery skips mutable source refresh and pipeline marker gates', guard,
+  /if \(\( RECONCILE_PENDING_ONLY == 0 \)\) && \[\[ "\$REQUIRE_PIPELINE_MARKERS"[\s\S]*if \(\( RECONCILE_PENDING_ONLY == 0 \)\); then\s*ensure_links_data_fresh/,
+  'already-submitted intent reconciliation depends on immutable intent plus live readback, not mutable planning sources');
+match('guard passes the dedicated no-write recovery flag', guard,
+  /EXECUTOR_RECOVERY_ARGS\+\=\(--reconcile-pending-only\)[\s\S]*"\$\{EXECUTOR_RECOVERY_ARGS\[@\]\}"/,
+  'normal guard retries must make the executor write branch unreachable');
+match('expired new-write deadline does not block pure readback', guard,
+  /if \(\( RECONCILE_PENDING_ONLY == 0 \)\) && \[\[ "\$RUN_DEADLINE_EPOCH"/,
+  'a durable ambiguous outcome must remain reconcilable after the write window closes');
 match('deadline prevents executor dispatch', guard,
   /run deadline reached before executor dispatch; no inventory request was submitted[\s\S]*exit 76/,
   'no new inventory batch may start after the reserved window expires');
