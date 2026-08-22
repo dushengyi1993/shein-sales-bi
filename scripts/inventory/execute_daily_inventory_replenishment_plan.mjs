@@ -348,12 +348,55 @@ const journalBundle = await readInventoryIntentJournals(journalFiles, {maxRunDat
 const pendingIntents = new Map(journalBundle.pending);
 const inventoryIntents = new Map(journalBundle.intents);
 const terminalIntentOutcomes = new Map(journalBundle.terminalOutcomes);
-const currentInventoryIntents = new Map([...inventoryIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
-const currentPendingIntents = new Map([...pendingIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
-const currentTerminalIntentOutcomes = new Map([...terminalIntentOutcomes].filter(([, outcome]) => outcome.journalFile === path.resolve(journalFile)));
+const journalIntentKey = intent => `${path.resolve(intent?.journalFile || journalFile)}\u0000${intent?.intentId || ''}`;
 const appendJournalRecord = async (entry, targetJournalFile = journalFile) => {
   await appendDurableJournalRecord(targetJournalFile, entry);
 };
+const inventoryIntentEntriesByScope = new Map();
+for (const [intentKey, intent] of inventoryIntents.entries()) {
+  const scopeKey = inventoryIntentScopeKey(intent);
+  if (!inventoryIntentEntriesByScope.has(scopeKey)) inventoryIntentEntriesByScope.set(scopeKey, []);
+  inventoryIntentEntriesByScope.get(scopeKey).push({intentKey, intent});
+}
+// An older pending intent may be released without stock inference only when
+// the complete journal set proves one unambiguous later intent in the same
+// date-independent item scope and that exact later intent already has a
+// terminal readback_matched outcome. The supersede outcome is append-only in
+// the older intent's original journal and records the exact later evidence.
+if (args.execute) {
+  for (const [pendingKey, olderIntent] of [...pendingIntents.entries()]) {
+    const scopeKey = inventoryIntentScopeKey(olderIntent);
+    const strictlyLater = (inventoryIntentEntriesByScope.get(scopeKey) || [])
+      .filter(({intent}) => intent.runDate > olderIntent.runDate);
+    if (strictlyLater.length !== 1) continue;
+    const [{intentKey: laterKey, intent: laterIntent}] = strictlyLater;
+    const laterOutcome = terminalIntentOutcomes.get(laterKey);
+    const laterRecordedAt = String(laterOutcome?.recordedAt || '');
+    if (laterOutcome?.disposition !== 'readback_matched' || !Number.isFinite(new Date(laterRecordedAt).getTime())) continue;
+    const supersedeRecordedAt = new Date().toISOString();
+    if (new Date(supersedeRecordedAt).getTime() < new Date(laterRecordedAt).getTime()) continue;
+    const supersedeOutcome = {
+      kind: 'write_outcome',
+      intentId: olderIntent.intentId,
+      logicalActionKey: olderIntent.logicalActionKey,
+      disposition: 'superseded_by_later_readback',
+      recordedAt: supersedeRecordedAt,
+      supersededByIntentId: laterIntent.intentId,
+      supersededByRunDate: laterIntent.runDate,
+      supersededByRecordedAt: laterRecordedAt,
+    };
+    await appendJournalRecord(supersedeOutcome, olderIntent.journalFile);
+    pendingIntents.delete(pendingKey);
+    terminalIntentOutcomes.set(pendingKey, {
+      ...supersedeOutcome,
+      journalFile: olderIntent.journalFile,
+      journalDate: olderIntent.journalDate || olderIntent.runDate,
+    });
+  }
+}
+const currentInventoryIntents = new Map([...inventoryIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
+const currentPendingIntents = new Map([...pendingIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
+const currentTerminalIntentOutcomes = new Map([...terminalIntentOutcomes].filter(([, outcome]) => outcome.journalFile === path.resolve(journalFile)));
 if (!results.length) {
   const handle = await fs.open(journalFile, 'a', 0o600);
   await handle.close();
@@ -439,7 +482,6 @@ for (const intent of currentPendingIntents.values()) {
   currentPendingIntentsByScope.get(scopeKey).push(intent);
 }
 const currentPlanScopeSet = new Set(planRecoveryScopes);
-const journalIntentKey = intent => `${path.resolve(intent?.journalFile || journalFile)}\u0000${intent?.intentId || ''}`;
 if (args.reconcilePendingOnly) {
   const failures = [];
   if (currentInventoryIntents.size !== rows.length) {
@@ -747,10 +789,16 @@ for (const row of rows) {
         if (lifecycleOutcome?.disposition !== 'readback_matched') {
           throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_MISSING:${recoveryScopeKey}`);
         }
-        if (before.totalUsableInventory !== approvedTarget) {
-          throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_CLOSED_INTENT_DRIFT:${before.totalUsableInventory}->${approvedTarget}:${recoveryScopeKey}`);
-        }
-        await recordResult({...result, state: 'skipped_target_already_matched', before});
+        await recordResult({
+          ...result,
+          state: 'skipped_terminal_readback_recorded',
+          terminalIntentId: lifecycleIntent.intentId,
+          terminalRunDate: lifecycleIntent.runDate,
+          terminalDisposition: lifecycleOutcome.disposition,
+          terminalRecordedAt: lifecycleOutcome.recordedAt,
+          currentLiveUsableInventory: before.totalUsableInventory,
+          before,
+        }, lifecycleIntent.logicalActionKey);
         continue;
       }
       if (before.totalUsableInventory === approvedTarget) {

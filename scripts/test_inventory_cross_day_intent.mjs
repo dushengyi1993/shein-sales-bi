@@ -149,6 +149,35 @@ function makeIntent({runDate, row, planHash, intentId, target = row.targetUsable
   };
 }
 
+function makeWriteOutcome(intent, {
+  disposition = 'readback_matched',
+  recordedAt = new Date(Date.now() - 60_000).toISOString(),
+  code,
+} = {}) {
+  return {
+    kind: 'write_outcome',
+    intentId: intent.intentId,
+    logicalActionKey: intent.logicalActionKey,
+    disposition,
+    recordedAt,
+    ...(code === undefined ? {} : {code}),
+  };
+}
+
+function makeSupersedeOutcome(olderIntent, laterIntent, laterOutcome, overrides = {}) {
+  return {
+    kind: 'write_outcome',
+    intentId: olderIntent.intentId,
+    logicalActionKey: olderIntent.logicalActionKey,
+    disposition: 'superseded_by_later_readback',
+    recordedAt: new Date().toISOString(),
+    supersededByIntentId: laterIntent.intentId,
+    supersededByRunDate: laterIntent.runDate,
+    supersededByRecordedAt: laterOutcome.recordedAt,
+    ...overrides,
+  };
+}
+
 function makeLegacyAuditRows({planHash = 'b'.repeat(64), sequenceGap = false, conflictingPlanHash = false} = {}) {
   return [
     {
@@ -462,6 +491,136 @@ try {
   assert.deepEqual(secondJournal.filter(row => row.kind === 'write_outcome').map(row => row.disposition), ['readback_matched']);
   assert.equal((await journalEntries(second.currentIntentFile)).filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 0, 'historical close must not create a current corrective intent');
 
+  // 3b) A single strictly later intent with terminal readback evidence
+  // supersedes the older pending intent before scope selection. Natural live
+  // drift after the later terminal readback remains safe in reconcile-only.
+  const supersedeRoot = path.join(temp, 'historical-superseded-by-later-readback');
+  const supersededIntent = makeIntent({runDate: priorDate, row: ROWS[0], planHash: '8'.repeat(64), intentId: 'superseded-old-1'});
+  const supersede = await writeFixture(supersedeRoot, {rows: [ROWS[0]], oldIntent: supersededIntent});
+  const laterMatchedIntent = makeIntent({
+    runDate: today,
+    row: ROWS[0],
+    planHash: supersede.plan.payloadHash,
+    intentId: 'superseding-current-1',
+  });
+  const laterMatchedOutcome = makeWriteOutcome(laterMatchedIntent);
+  await writeJournalRows(supersede.currentIntentFile, [laterMatchedIntent, laterMatchedOutcome]);
+  state.postCount = 0;
+  state.postSkus = [];
+  state.requestCount = 0;
+  state.stock = new Map([[ROWS[0].skuCode, 9]]);
+  const supersedeRun = await runExecutor(supersede, {reconcilePendingOnly: true});
+  assert.equal(supersedeRun.code, 0, `later terminal readback must make reconcile safe despite natural drift\nstdout=${supersedeRun.stdout}\nstderr=${supersedeRun.stderr}`);
+  assert.equal(state.postCount, 0, 'supersession and closed-intent drift reconciliation must never POST');
+  const supersedeResult = await readJson(supersede.resultFile);
+  assert.equal(supersedeResult.results.length, 1);
+  assert.equal(supersedeResult.results[0].state, 'skipped_terminal_readback_recorded');
+  assert.equal(supersedeResult.results[0].terminalIntentId, laterMatchedIntent.intentId);
+  assert.equal(supersedeResult.results[0].terminalDisposition, 'readback_matched');
+  assert.equal(supersedeResult.results[0].terminalRecordedAt, laterMatchedOutcome.recordedAt);
+  assert.equal(supersedeResult.results[0].currentLiveUsableInventory, 9);
+  const supersededJournalFile = path.join(supersedeRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`);
+  const supersededJournal = await journalEntries(supersededJournalFile);
+  const supersedeOutcomes = supersededJournal.filter(row => row.disposition === 'superseded_by_later_readback');
+  assert.equal(supersedeOutcomes.length, 1);
+  assert.equal(supersedeOutcomes[0].intentId, supersededIntent.intentId);
+  assert.equal(supersedeOutcomes[0].supersededByIntentId, laterMatchedIntent.intentId);
+  assert.equal(supersedeOutcomes[0].supersededByRunDate, laterMatchedIntent.runDate);
+  assert.equal(supersedeOutcomes[0].supersededByRecordedAt, laterMatchedOutcome.recordedAt);
+  assert.equal((await journalEntries(supersede.currentIntentFile)).filter(row => row.disposition === 'superseded_by_later_readback').length, 0, 'supersede outcome must be appended only to the original older journal');
+
+  // Re-reading the exact appended supersede shape must pass strict discovery
+  // and stay idempotent: no duplicate supersede outcome and no POST.
+  state.postCount = 0;
+  state.requestCount = 0;
+  const supersedeRerun = await runExecutor(supersede, {reconcilePendingOnly: true});
+  assert.equal(supersedeRerun.code, 0, `strict parser must accept the exact valid supersede reference\nstderr=${supersedeRerun.stderr}`);
+  assert.equal(state.postCount, 0);
+  assert.equal((await journalEntries(supersededJournalFile)).filter(row => row.disposition === 'superseded_by_later_readback').length, 1);
+
+  // A rejected later intent is not readback evidence and must not supersede.
+  const rejectedLaterRoot = path.join(temp, 'historical-not-superseded-by-rejection');
+  const rejectedOlderIntent = makeIntent({runDate: priorDate, row: ROWS[0], planHash: '7'.repeat(64), intentId: 'rejected-older-1'});
+  const rejectedLater = await writeFixture(rejectedLaterRoot, {rows: [ROWS[0]], oldIntent: rejectedOlderIntent});
+  const rejectedLaterIntent = makeIntent({runDate: today, row: ROWS[0], planHash: rejectedLater.plan.payloadHash, intentId: 'rejected-later-1'});
+  await writeJournalRows(rejectedLater.currentIntentFile, [
+    rejectedLaterIntent,
+    makeWriteOutcome(rejectedLaterIntent, {disposition: 'rejected', code: '400'}),
+  ]);
+  state.postCount = 0;
+  state.requestCount = 0;
+  const rejectedLaterRun = await runExecutor(rejectedLater, {reconcilePendingOnly: true});
+  assert.notEqual(rejectedLaterRun.code, 0);
+  assert.match(rejectedLaterRun.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+  assert.equal(state.requestCount, 0, 'rejected later lifecycle must fail before API');
+  assert.equal((await journalEntries(path.join(rejectedLaterRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`))).filter(row => row.disposition === 'superseded_by_later_readback').length, 0);
+
+  // A same-date terminal sibling is not strictly later and must not release
+  // the pending intent in that date's journal.
+  const sameDateRoot = path.join(temp, 'same-date-does-not-supersede');
+  const sameDate = await writeFixture(sameDateRoot, {rows: [ROWS[0]]});
+  const sameDatePending = makeIntent({runDate: today, row: ROWS[0], planHash: sameDate.plan.payloadHash, intentId: 'same-date-pending-1'});
+  const sameDateMatched = makeIntent({runDate: today, row: ROWS[0], planHash: sameDate.plan.payloadHash, intentId: 'same-date-matched-1'});
+  await writeJournalRows(sameDate.currentIntentFile, [sameDatePending, sameDateMatched, makeWriteOutcome(sameDateMatched)]);
+  state.postCount = 0;
+  state.requestCount = 0;
+  const sameDateRun = await runExecutor(sameDate, {reconcilePendingOnly: true});
+  assert.notEqual(sameDateRun.code, 0);
+  assert.match(sameDateRun.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+  assert.equal(state.requestCount, 0);
+  assert.equal((await journalEntries(sameDate.currentIntentFile)).filter(row => row.disposition === 'superseded_by_later_readback').length, 0);
+
+  // A current pending intent with no later terminal remains readback-only and
+  // blocks only its own row with zero inventory POST.
+  const currentPendingRoot = path.join(temp, 'current-pending-without-later-terminal');
+  const currentPending = await writeFixture(currentPendingRoot, {rows: [ROWS[0]]});
+  const currentPendingIntent = makeIntent({runDate: today, row: ROWS[0], planHash: currentPending.plan.payloadHash, intentId: 'current-pending-1'});
+  await writeJournalRows(currentPending.currentIntentFile, [currentPendingIntent]);
+  state.postCount = 0;
+  state.postSkus = [];
+  state.requestCount = 0;
+  state.stock = new Map([[ROWS[0].skuCode, 2]]);
+  const currentPendingRun = await runExecutor(currentPending, {reconcilePendingOnly: true});
+  assert.equal(currentPendingRun.code, 1);
+  assert.equal(state.postCount, 0);
+  assert.equal((await readJson(currentPending.resultFile)).results[0].state, 'submitted_but_readback_pending');
+
+  // Exact supersede shape is mandatory and references are proven across the
+  // complete journal set before any identity or stock request.
+  const forgedRoot = path.join(temp, 'forged-supersede-reference');
+  const forgedOlder = makeIntent({runDate: priorDate, row: ROWS[0], planHash: '6'.repeat(64), intentId: 'forged-older-1'});
+  const forged = await writeFixture(forgedRoot, {rows: [ROWS[0]], oldIntent: forgedOlder});
+  const forgedLater = makeIntent({runDate: today, row: ROWS[0], planHash: forged.plan.payloadHash, intentId: 'real-later-1'});
+  const forgedLaterOutcome = makeWriteOutcome(forgedLater);
+  await writeJournalRows(forged.currentIntentFile, [forgedLater, forgedLaterOutcome]);
+  await writeJournalRows(
+    path.join(forgedRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`),
+    [forgedOlder, makeSupersedeOutcome(forgedOlder, forgedLater, forgedLaterOutcome, {supersededByIntentId: 'missing-forged-intent'})],
+  );
+  state.postCount = 0;
+  state.requestCount = 0;
+  const forgedRun = await runExecutor(forged, {reconcilePendingOnly: true});
+  assert.notEqual(forgedRun.code, 0);
+  assert.match(forgedRun.stderr, /INVENTORY_JOURNAL_SUPERSEDE_INVALID:.*:referencedIntentMissing/);
+  assert.equal(state.requestCount, 0);
+
+  const supersedeShapeRoot = path.join(temp, 'supersede-extra-key');
+  const shapeOlder = makeIntent({runDate: priorDate, row: ROWS[0], planHash: '5'.repeat(64), intentId: 'shape-older-1'});
+  const supersedeShape = await writeFixture(supersedeShapeRoot, {rows: [ROWS[0]], oldIntent: shapeOlder});
+  const shapeLater = makeIntent({runDate: today, row: ROWS[0], planHash: supersedeShape.plan.payloadHash, intentId: 'shape-later-1'});
+  const shapeLaterOutcome = makeWriteOutcome(shapeLater);
+  await writeJournalRows(supersedeShape.currentIntentFile, [shapeLater, shapeLaterOutcome]);
+  await writeJournalRows(
+    path.join(supersedeShapeRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`),
+    [shapeOlder, makeSupersedeOutcome(shapeOlder, shapeLater, shapeLaterOutcome, {unexpected: true})],
+  );
+  state.postCount = 0;
+  state.requestCount = 0;
+  const supersedeShapeRun = await runExecutor(supersedeShape, {reconcilePendingOnly: true});
+  assert.notEqual(supersedeShapeRun.code, 0);
+  assert.match(supersedeShapeRun.stderr, /INVENTORY_JOURNAL_SUPERSEDE_INVALID:.*:outcomeShape/);
+  assert.equal(state.requestCount, 0);
+
   // 4) Malformed immutable request/hash data fails closed before any API call.
   const immutableRoot = path.join(temp, 'immutable-corruption');
   const immutable = await writeFixture(immutableRoot, {
@@ -609,6 +768,11 @@ try {
     'non_daily_prefix_historical_pending_intercepts_scope',
     'absent_historical_scope_is_audit_only_without_duplicate_rows',
     'historical_readback_match_closes_original_journal_and_defers_current_scope',
+    'older_pending_superseded_by_one_later_readback_in_original_journal',
+    'closed_current_intent_natural_drift_is_terminal_safe',
+    'rejected_and_same_date_lifecycles_do_not_supersede',
+    'current_pending_without_later_terminal_remains_zero_post',
+    'strict_supersede_shape_and_reference_validation',
     'immutable_request_hash_corruption_fails_before_api',
     'malformed_and_conflicting_historical_journals_fail_before_api',
     'legacy_audit_extra_key_sequence_and_plan_hash_corruption_fail_before_api',
