@@ -322,9 +322,10 @@ try {
   state.stock = new Map([[ROWS[0].skuCode, 2], [ROWS[1].skuCode, 2]]);
   const firstRun = await runExecutor(first);
   assert.equal(firstRun.code, 1, `historical mismatch must remain blocked\nstdout=${firstRun.stdout}\nstderr=${firstRun.stderr}`);
-  assert.equal(state.postCount, 1, 'independent current scope must issue exactly one POST');
-  assert.deepEqual(state.postSkus, [ROWS[1].skuCode], 'historical ZX scope must receive zero POSTs');
   const firstResult = await readJson(first.resultFile);
+  assert.equal(state.postCount, 1,
+    `independent current scope must issue exactly one POST\nresult=${JSON.stringify(firstResult)}\nstdout=${firstRun.stdout}\nstderr=${firstRun.stderr}`);
+  assert.deepEqual(state.postSkus, [ROWS[1].skuCode], 'historical ZX scope must receive zero POSTs');
   const historicalResult = firstResult.results.find(row => row.storeKey === ROWS[0].storeKey);
   const independentResult = firstResult.results.find(row => row.storeKey === ROWS[1].storeKey);
   assert.equal(historicalResult.state, 'submitted_but_readback_pending');
