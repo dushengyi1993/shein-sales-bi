@@ -33,6 +33,20 @@ const calendarMinutes = entries => entries.flatMap(entry => {
   return hours.split(',').map(hour => Number(hour) * 60 + Number(minute));
 });
 
+const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const conditionalCapturesStatus = (source, {command, statusVariable}) => {
+  // Shell line continuations do not change command structure. Normalize them
+  // so both a direct command and an env-prefixed continued command are checked
+  // by the same strict conditional contract.
+  const normalized = String(source).replace(/\\\r?\n[ \t]*/g, ' ');
+  const assignment = String.raw`[A-Za-z_][A-Za-z0-9_]*=(?:"[^"\n]*"|'[^'\n]*'|[^\s;]+)`;
+  const commandPattern = escapeRegExp(command);
+  const statusPattern = escapeRegExp(statusVariable);
+  return new RegExp(
+    String.raw`\bif\s+(?:${assignment}\s+)*${commandPattern}\s*;\s*then\s+${statusPattern}=0\b[\s\S]*?\belse\b\s+${statusPattern}=\$\?[\s\S]*?\bfi\b`,
+  ).test(normalized);
+};
+
 assert.equal(parseUptimeSeconds('1200.5 20\n'), 1200.5);
 assert.equal(parseLoadAverage('1.25 1.0 0.5 1/10 20\n'), 1.25);
 assert.equal(parseMemAvailableMiB('MemAvailable: 3145728 kB\n'), 3072);
@@ -295,8 +309,72 @@ assert.doesNotMatch(linkBusinessSync, /^\s*wait\s*(?:\|\|\s*true)?\s*$/m,
 const dailyRefresh = read('scripts/cloud_daily_refresh.sh');
 assert.match(dailyRefresh, /SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS/);
 assert.match(dailyRefresh, /prior complete Portal snapshot retained/);
-assert.match(dailyRefresh, /if bash scripts\/refresh_inventory_cost_ledger\.sh; then[\s\S]*COST_LEDGER_STATUS=0[\s\S]*COST_LEDGER_STATUS=\$\?/,
+const safeCostLedgerConditional = `
+if SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY="\${RUN_KEY}:inventory-cost" \\
+  bash scripts/refresh_inventory_cost_ledger.sh; then
+  COST_LEDGER_STATUS=0
+else
+  COST_LEDGER_STATUS=$?
+fi`;
+const unsafeCostLedgerInvocation = `
+SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY="\${RUN_KEY}:inventory-cost" \\
+  bash scripts/refresh_inventory_cost_ledger.sh
+COST_LEDGER_STATUS=$?`;
+assert.equal(conditionalCapturesStatus(safeCostLedgerConditional, {
+  command: 'bash scripts/refresh_inventory_cost_ledger.sh', statusVariable: 'COST_LEDGER_STATUS',
+}), true, 'the contract detector must accept a per-invocation env prefix inside the if condition');
+assert.equal(conditionalCapturesStatus(unsafeCostLedgerInvocation, {
+  command: 'bash scripts/refresh_inventory_cost_ledger.sh', statusVariable: 'COST_LEDGER_STATUS',
+}), false, 'the contract detector must reject an uncaptured cost-ledger invocation');
+assert.equal(conditionalCapturesStatus(dailyRefresh, {
+  command: 'bash scripts/refresh_inventory_cost_ledger.sh', statusVariable: 'COST_LEDGER_STATUS',
+}), true,
   'an expected cost-ledger retry must be captured by a conditional instead of tripping the ERR trap');
+assert.doesNotMatch(dailyRefresh, /^\s*export\s+SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY=/m,
+  'the stable logical run key must remain scoped to the single ledger invocation');
+const safeCostLedgerProbeScript = [
+  'set -Eeuo pipefail',
+  'unset SCHEDULE_CONTRACT_PROBE_KEY',
+  "trap 'exit 97' ERR",
+  'COST_LEDGER_STATUS=0',
+  'ledger_probe() { [[ "$SCHEDULE_CONTRACT_PROBE_KEY" == expected ]] && return 37; return 41; }',
+  'if SCHEDULE_CONTRACT_PROBE_KEY=expected ledger_probe; then',
+  '  COST_LEDGER_STATUS=0',
+  'else',
+  '  COST_LEDGER_STATUS=$?',
+  'fi',
+  'printf \'%s|%s\' "$COST_LEDGER_STATUS" "${SCHEDULE_CONTRACT_PROBE_KEY-unset}"',
+].join('\n');
+const unsafeCostLedgerProbeScript = [
+  'set -Eeuo pipefail',
+  "trap 'exit 97' ERR",
+  'ledger_probe() { return 37; }',
+  'SCHEDULE_CONTRACT_PROBE_KEY=expected ledger_probe',
+  'COST_LEDGER_STATUS=$?',
+].join('\n');
+const costLedgerProbeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cost-ledger-conditional-probe-'));
+try {
+  // Windows' legacy bash.exe launcher can pre-expand shell variables passed in
+  // a `-c` argument. Execute files instead so $? and env scoping are measured
+  // by the target Bash process exactly as they are in the scheduled script.
+  const bashProbePath = value => process.platform === 'win32'
+    ? value.replace(/^([A-Za-z]):[\\/]/, (_, drive) => `/mnt/${drive.toLowerCase()}/`).replaceAll('\\', '/')
+    : value;
+  const safeCostLedgerProbePath = path.join(costLedgerProbeRoot, 'safe.sh');
+  fs.writeFileSync(safeCostLedgerProbePath, safeCostLedgerProbeScript);
+  const safeCostLedgerProbe = spawnSync('bash', [bashProbePath(safeCostLedgerProbePath)], {encoding: 'utf8'});
+  assert.equal(safeCostLedgerProbe.status, 0, safeCostLedgerProbe.stderr);
+  assert.equal(safeCostLedgerProbe.stdout, '37|unset',
+    'conditional failure must enter else, preserve the exact status, avoid ERR trap, and not leak the env prefix');
+
+  const unsafeCostLedgerProbePath = path.join(costLedgerProbeRoot, 'unsafe.sh');
+  fs.writeFileSync(unsafeCostLedgerProbePath, unsafeCostLedgerProbeScript);
+  const unsafeCostLedgerProbe = spawnSync('bash', [bashProbePath(unsafeCostLedgerProbePath)], {encoding: 'utf8'});
+  assert.equal(unsafeCostLedgerProbe.status, 97,
+    'the uncaptured counterexample must trip ERR handling before status assignment');
+} finally {
+  fs.rmSync(costLedgerProbeRoot, {recursive: true, force: true});
+}
 assert.match(dailyRefresh, /if bash scripts\/refresh_profit_marts\.sh; then[\s\S]*PROFIT_MART_STATUS=0[\s\S]*PROFIT_MART_STATUS=\$\?/,
   'a retained prior profit mart must remain a warning rather than aborting the daily publish');
 assert.match(dailyRefresh, /if node scripts\/audit_bi_warehouse\.mjs; then[\s\S]*AUDIT_STATUS=0[\s\S]*AUDIT_STATUS=\$\?/,

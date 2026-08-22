@@ -66,6 +66,38 @@ async function writeFileWithRetry(file, data, encoding = 'utf8', attempts = 8) {
   }
 }
 
+export function normalizePortalCoreSourceIdentity(sourceRunKey, inputFingerprint) {
+  const runKey = String(sourceRunKey || '').trim();
+  const fingerprint = String(inputFingerprint || '').trim().toLowerCase();
+  if (!runKey && !fingerprint) return null;
+  if (!runKey || runKey.length > 200 || /[\u0000-\u001f\u007f]/.test(runKey)) {
+    throw new Error('Portal core source run key must be 1-200 printable characters');
+  }
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
+    throw new Error('Portal core input fingerprint must be sha256');
+  }
+  return {sourceRunKey: runKey, inputFingerprint: fingerprint};
+}
+
+export function portalCoreRunIdentityDecision(payload, identity) {
+  if (!identity) return {action: 'generate'};
+  if (!payload || typeof payload !== 'object') return {action: 'generate'};
+  const commit = payload.sourceCommit;
+  if (!commit || typeof commit !== 'object') return {action: 'generate'};
+  if (String(commit.sourceRunKey || '') !== identity.sourceRunKey) return {action: 'generate'};
+  if (String(commit.inputFingerprint || '').toLowerCase() !== identity.inputFingerprint) {
+    return {action: 'conflict', reason: 'same_source_run_key_input_fingerprint_mismatch'};
+  }
+  const generatedAt = String(payload.generatedAt || '');
+  const terminal = commit.status === 'terminal'
+    && generatedAt
+    && String(commit.generatedAt || '') === generatedAt
+    && (!payload.__sections || String(payload.__sections.generatedAt || '') === generatedAt);
+  return terminal
+    ? {action: 'reuse_terminal', generatedAt}
+    : {action: 'conflict', reason: 'same_source_run_key_core_not_terminal'};
+}
+
 function parseArgs(argv) {
   const envDataMode = String(process.env.SHEIN_BI_PORTAL_DATA_MODE || '').trim();
   const args = {
@@ -84,6 +116,8 @@ function parseArgs(argv) {
     previewVariant: '',
     htmlOnlyFromData: '',
     htmlFile: '',
+    sourceRunKey: process.env.SHEIN_BI_PORTAL_SOURCE_RUN_KEY || '',
+    inputFingerprint: process.env.SHEIN_BI_PORTAL_INPUT_FINGERPRINT || '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -101,6 +135,8 @@ function parseArgs(argv) {
     else if (a === '--preview-variant') args.previewVariant = argv[++i];
     else if (a === '--html-only-from-data') args.htmlOnlyFromData = path.resolve(argv[++i]);
     else if (a === '--html-file') args.htmlFile = path.resolve(argv[++i]);
+    else if (a === '--source-run-key') args.sourceRunKey = argv[++i];
+    else if (a === '--input-fingerprint') args.inputFingerprint = argv[++i];
   }
   const resolvedDataMode = resolveBiPortalDataMode({
     cliMode: args.cliDataMode,
@@ -111,6 +147,10 @@ function parseArgs(argv) {
   args.dataMode = resolvedDataMode.mode;
   args.dataModeSource = resolvedDataMode.source;
   args.section = String(args.section || '').trim();
+  args.sourceIdentity = normalizePortalCoreSourceIdentity(args.sourceRunKey, args.inputFingerprint);
+  if (args.section && args.sourceIdentity) {
+    throw new Error('Portal core source identity is only valid for full core generation');
+  }
   args.homeVariant = String(args.homeVariant || '').trim().toLowerCase();
   if (args.homeVariant === 'legacy') args.homeVariant = 'classic';
   if (!['classic', 'no-groups'].includes(args.homeVariant)) throw new Error(`Invalid --home-variant: ${args.homeVariant}`);
@@ -17107,6 +17147,33 @@ async function main() {
     console.log(JSON.stringify({ok: true, section: args.section, data: sectionData}, null, 2));
     return;
   }
+  if (args.sourceIdentity) {
+    const existingFile = path.join(args.outDir, 'data.json');
+    let existing = null;
+    try {
+      existing = JSON.parse(await fs.readFile(existingFile, 'utf8'));
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw new Error(`Portal core identity readback failed: ${error?.message || error}`);
+      }
+    }
+    const decision = portalCoreRunIdentityDecision(existing, args.sourceIdentity);
+    if (decision.action === 'conflict') {
+      throw new Error(`PORTAL_CORE_SOURCE_IDENTITY_CONFLICT: ${decision.reason}`);
+    }
+    if (decision.action === 'reuse_terminal') {
+      clearTimeout(portalGenerateTimer);
+      console.log(JSON.stringify({
+        ok: true,
+        reused: true,
+        sourceRunKey: args.sourceIdentity.sourceRunKey,
+        inputFingerprint: args.sourceIdentity.inputFingerprint,
+        generatedAt: decision.generatedAt,
+        data: existingFile,
+      }, null, 2));
+      return;
+    }
+  }
   markStage('metabase:url');
   const metabaseUrl = (args.metabaseUrl || await readMetabaseUrl() || 'http://localhost:3000').replace(/\/$/, '');
   if (args.htmlOnlyFromData) {
@@ -17173,6 +17240,15 @@ async function main() {
   const safePipeline = deepSanitize(pipeline);
   const safeBriefing = deepSanitize(briefing);
   const safeFirstRunCheck = deepSanitize(firstRunCheck);
+  const publishedData = args.sourceIdentity ? {
+    ...data,
+    sourceCommit: {
+      status: 'terminal',
+      sourceRunKey: args.sourceIdentity.sourceRunKey,
+      inputFingerprint: args.sourceIdentity.inputFingerprint,
+      generatedAt: String(data.generatedAt || ''),
+    },
+  } : data;
   let noGroupsPreviewFile = '';
   if (shouldWriteNoGroupsPreview(args)) {
     noGroupsPreviewFile = noGroupsPreviewHtmlFile(args);
@@ -17184,10 +17260,17 @@ async function main() {
   await fs.mkdir(args.outDir, {recursive: true});
   const jsonFile = path.join(args.outDir, 'data.json');
   markStage('write:data');
-  await writeFileWithRetry(jsonFile, JSON.stringify({...data, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
+  await writeFileWithRetry(jsonFile, JSON.stringify({...publishedData, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
+  if (args.sourceIdentity) {
+    const written = JSON.parse(await fs.readFile(jsonFile, 'utf8'));
+    const decision = portalCoreRunIdentityDecision(written, args.sourceIdentity);
+    if (decision.action !== 'reuse_terminal') {
+      throw new Error(`Portal core terminal identity readback failed: ${JSON.stringify(decision)}`);
+    }
+  }
   if (noGroupsPreviewFile) {
     markStage('build:preview:no-groups');
-    const noGroupsPreviewHtml = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: 'no-groups', previewVariant: 'no-groups'});
+    const noGroupsPreviewHtml = buildHtml(publishedData, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: 'no-groups', previewVariant: 'no-groups'});
     markStage('write:preview:no-groups');
     await writeFileWithRetry(noGroupsPreviewFile, noGroupsPreviewHtml, 'utf8');
   }
@@ -17195,6 +17278,9 @@ async function main() {
   clearTimeout(portalGenerateTimer);
   console.log(JSON.stringify({
     ok: true,
+    reused: false,
+    sourceRunKey: args.sourceIdentity?.sourceRunKey || '',
+    inputFingerprint: args.sourceIdentity?.inputFingerprint || '',
     dataMode: args.dataMode,
     homeVariant: args.homeVariant,
     html: null,
@@ -17264,7 +17350,10 @@ async function main() {
   }, null, 2));
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+const direct = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (direct) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

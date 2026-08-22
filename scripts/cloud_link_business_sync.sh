@@ -25,11 +25,837 @@ LINK_PARTIAL_LOCK_FILE="${SHEIN_LINK_BUSINESS_PARTIAL_LOCK_FILE:-$ROOT/state/loc
 LINK_PARTIAL_LOCK_WAIT_SEC="${SHEIN_LINK_BUSINESS_PARTIAL_LOCK_WAIT_SEC:-60}"
 LINK_RUN_LOCK_FILE="${SHEIN_LINK_BUSINESS_RUN_LOCK_FILE:-$ROOT/state/locks/link-business-run.lock}"
 LINK_RUN_LOCK_WAIT_SEC="${SHEIN_LINK_BUSINESS_RUN_LOCK_WAIT_SEC:-1800}"
+# A finalize-only call normally remains a read/merge gate.  The morning chain
+# may opt it into a bounded, metric-only recovery when all exact-date store
+# artifacts exist but the platform has returned an all-zero readiness shape.
+# The state file is keyed by the business date/run key so a service restart or
+# the next five-minute coordinator pass cannot reset the retry budget/deadline.
+METRIC_REFETCH_ON_NOT_READY="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_ON_NOT_READY:-0}"
+METRIC_REFETCH_MAX_ATTEMPTS="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_MAX_ATTEMPTS:-12}"
+METRIC_REFETCH_RETRY_SLEEP_SEC="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_RETRY_SLEEP_SEC:-300}"
+METRIC_REFETCH_BUDGET_SEC="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_BUDGET_SEC:-900}"
+METRIC_REFETCH_DEADLINE_EPOCH="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_DEADLINE_EPOCH:-0}"
+METRIC_REFETCH_RUN_KEY="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_RUN_KEY:-}"
+METRIC_REFETCH_STATE_FILE="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_STATE_FILE:-$ROOT/state/cloud_ops_alerts/link-business-metric-refetch.json}"
+METRIC_REFETCH_MAX_ALLOWED=24
+METRIC_REFETCH_SLEEP_MAX_SEC=900
+METRIC_REFETCH_BATCH_COMMITTED=0
+METRIC_REFETCH_TRANSACTION_ROOT=""
+METRIC_REFETCH_COMMITTED_STORES=()
+METRIC_REFETCH_REPLACED_STORES=()
+METRIC_REFETCH_FAILED_STORES=()
+METRIC_REFETCH_DEFERRED_STORES=()
+METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT=""
+METRIC_REFETCH_SKIP_PUBLISH=0
+METRIC_REFETCH_SOURCE_STATUS=""
+METRIC_REFETCH_SOURCE_FINGERPRINT=""
+CANONICAL_METRIC_STORES="CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL"
 
 source "$ROOT/scripts/lib/shared_lock.sh"
 
 is_true() {
   [[ "$1" == "1" || "$1" == "true" ]]
+}
+
+validate_metric_refetch_config() {
+  is_true "$METRIC_REFETCH_ON_NOT_READY" || return 0
+  [[ "$METRIC_REFETCH_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "SHEIN_LINK_BUSINESS_METRIC_REFETCH_MAX_ATTEMPTS must be a positive integer" >&2
+    exit 64
+  }
+  [[ "$METRIC_REFETCH_RETRY_SLEEP_SEC" =~ ^[0-9]+$ ]] || {
+    echo "SHEIN_LINK_BUSINESS_METRIC_REFETCH_RETRY_SLEEP_SEC must be a non-negative integer" >&2
+    exit 64
+  }
+  [[ "$METRIC_REFETCH_BUDGET_SEC" =~ ^[1-9][0-9]*$ ]] || {
+    echo "SHEIN_LINK_BUSINESS_METRIC_REFETCH_BUDGET_SEC must be a positive integer" >&2
+    exit 64
+  }
+  [[ "$METRIC_REFETCH_DEADLINE_EPOCH" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    echo "SHEIN_LINK_BUSINESS_METRIC_REFETCH_DEADLINE_EPOCH must be an epoch or 0" >&2
+    exit 64
+  }
+  if (( METRIC_REFETCH_MAX_ATTEMPTS > METRIC_REFETCH_MAX_ALLOWED )); then
+    echo "[cloud_link_business_sync] metric refetch attempts capped at $METRIC_REFETCH_MAX_ALLOWED (requested=$METRIC_REFETCH_MAX_ATTEMPTS)" >&2
+    METRIC_REFETCH_MAX_ATTEMPTS="$METRIC_REFETCH_MAX_ALLOWED"
+  fi
+  if (( METRIC_REFETCH_RETRY_SLEEP_SEC > METRIC_REFETCH_SLEEP_MAX_SEC )); then
+    echo "[cloud_link_business_sync] metric refetch interval capped at ${METRIC_REFETCH_SLEEP_MAX_SEC}s (requested=$METRIC_REFETCH_RETRY_SLEEP_SEC)" >&2
+    METRIC_REFETCH_RETRY_SLEEP_SEC="$METRIC_REFETCH_SLEEP_MAX_SEC"
+  fi
+}
+
+validate_metric_refetch_paths_and_stores() {
+  is_true "$METRIC_REFETCH_ON_NOT_READY" || return 0
+  ROOT="$ROOT" STATE_FILE="$METRIC_REFETCH_STATE_FILE" CANONICAL_STORES="$CANONICAL_METRIC_STORES" node - <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const root = fs.realpathSync(process.env.ROOT || '');
+const canonical = String(process.env.CANONICAL_STORES || '').split(/\s+/).filter(Boolean);
+const canonicalSet = new Set(canonical);
+const stateFile = path.resolve(process.env.STATE_FILE || '');
+const allowedState = path.join(root, 'state', 'cloud_ops_alerts');
+const contained = (parent, child) => child === parent || child.startsWith(`${parent}${path.sep}`);
+const rejectSymlinkAncestors = target => {
+  let current = path.parse(target).root;
+  for (const part of path.relative(path.parse(target).root, target).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    if (!fs.existsSync(current)) break;
+    if (fs.lstatSync(current).isSymbolicLink()) throw new Error(`symlink path component rejected: ${current}`);
+  }
+};
+rejectSymlinkAncestors(root);
+rejectSymlinkAncestors(allowedState);
+fs.mkdirSync(allowedState, {recursive: true});
+rejectSymlinkAncestors(allowedState);
+rejectSymlinkAncestors(path.dirname(stateFile));
+if (fs.existsSync(stateFile) && fs.lstatSync(stateFile).isSymbolicLink()) throw new Error(`state file symlink rejected: ${stateFile}`);
+const stateParentReal = fs.realpathSync(path.dirname(stateFile));
+if (!contained(allowedState, stateParentReal) || !contained(root, stateFile)) {
+  throw new Error(`metric refetch state must remain under ${allowedState}: ${stateFile}`);
+}
+const config = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
+const configured = (config.stores || []).map(row => ({
+  key: String(row?.storeKey || '').trim().toUpperCase(), enabled: row?.enabled !== false,
+}));
+if (configured.some(row => !/^[A-Z][A-Z0-9]{1,7}$/.test(row.key))) throw new Error('illegal store key in config');
+const enabled = configured.filter(row => row.enabled).map(row => row.key);
+if (enabled.length !== canonical.length || new Set(enabled).size !== canonical.length
+  || enabled.some(key => !canonicalSet.has(key)) || canonical.some(key => !enabled.includes(key))) {
+  throw new Error(`store config drift: require exact canonical ${canonical.length} unique enabled keys; actual=${enabled.join(',')}`);
+}
+if (configured.length !== canonical.length) throw new Error(`store config drift: disabled/extra rows are not legal for metric source commit`);
+NODE
+}
+
+metric_refetch_deadline_reached() {
+  [[ "$METRIC_REFETCH_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]] \
+    && (( $(date +%s) >= METRIC_REFETCH_DEADLINE_EPOCH ))
+}
+
+metric_refetch_load_state() {
+  is_true "$METRIC_REFETCH_ON_NOT_READY" || return 0
+  mkdir -p "$(dirname "$METRIC_REFETCH_STATE_FILE")"
+  local fields persisted_attempts persisted_deadline persisted_status persisted_transaction_root persisted_source_status persisted_source_fingerprint
+  fields="$({
+    DATE="$DATE" RUN_KEY="$METRIC_REFETCH_RUN_KEY" STATE_FILE="$METRIC_REFETCH_STATE_FILE" node - <<'NODE'
+const fs = require('node:fs');
+let state = null;
+let raw = '';
+try {
+  raw = fs.readFileSync(process.env.STATE_FILE, 'utf8');
+} catch (error) {
+  if (error?.code !== 'ENOENT') {
+    console.error(`metric refetch state read failed: ${error?.message || error}`);
+    process.exit(75);
+  }
+}
+if (raw) {
+  try { state = JSON.parse(raw); } catch (error) {
+    console.error(`metric refetch state is invalid JSON: ${error?.message || error}`);
+    process.exit(75);
+  }
+}
+if (!state || String(state.date || '') !== String(process.env.DATE || '')
+  || String(state.runKey || '') !== String(process.env.RUN_KEY || '')) {
+  process.stdout.write('0|0||||');
+} else {
+  process.stdout.write(`${Number(state.attempts) || 0}|${Number(state.deadlineEpoch) || 0}|${String(state.status || '')}|${String(state.transactionRoot || state.source?.transactionRoot || '')}|${String(state.source?.status || '')}|${String(state.source?.fingerprint || '')}`);
+}
+NODE
+  })"
+  IFS='|' read -r persisted_attempts persisted_deadline persisted_status persisted_transaction_root persisted_source_status persisted_source_fingerprint <<< "$fields"
+  METRIC_REFETCH_ATTEMPTS="${persisted_attempts:-0}"
+  METRIC_REFETCH_STATE_STATUS="${persisted_status:-}"
+  METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT="${persisted_transaction_root:-}"
+  METRIC_REFETCH_SOURCE_STATUS="${persisted_source_status:-}"
+  METRIC_REFETCH_SOURCE_FINGERPRINT="${persisted_source_fingerprint:-}"
+  if [[ "$METRIC_REFETCH_STATE_STATUS" == "publish_completed" || "$METRIC_REFETCH_STATE_STATUS" == "ready" ]]; then
+    METRIC_REFETCH_SKIP_PUBLISH=1
+  fi
+  if [[ "${persisted_deadline:-0}" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ "$METRIC_REFETCH_DEADLINE_EPOCH" == "0" || "$persisted_deadline" -lt "$METRIC_REFETCH_DEADLINE_EPOCH" ]]; then
+      METRIC_REFETCH_DEADLINE_EPOCH="$persisted_deadline"
+    fi
+  fi
+  if [[ "$METRIC_REFETCH_DEADLINE_EPOCH" == "0" ]]; then
+    if [[ "${SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH:-}" =~ ^[1-9][0-9]*$ ]]; then
+      METRIC_REFETCH_DEADLINE_EPOCH="$SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH"
+    else
+      METRIC_REFETCH_DEADLINE_EPOCH=$(( $(date +%s) + METRIC_REFETCH_BUDGET_SEC ))
+    fi
+  fi
+}
+
+write_metric_refetch_state() {
+  is_true "$METRIC_REFETCH_ON_NOT_READY" || return 0
+  local status="$1"
+  local target_stores="${2:-}"
+  local replaced_stores="${3:-}"
+  local failed_stores="${4:-}"
+  local deferred_stores="${5:-}"
+  DATE="$DATE" \
+  RUN_KEY="$METRIC_REFETCH_RUN_KEY" \
+  STATE_FILE="$METRIC_REFETCH_STATE_FILE" \
+  STATUS="$status" \
+  ATTEMPTS="$METRIC_REFETCH_ATTEMPTS" \
+  MAX_ATTEMPTS="$METRIC_REFETCH_MAX_ATTEMPTS" \
+  DEADLINE_EPOCH="$METRIC_REFETCH_DEADLINE_EPOCH" \
+  TARGET_STORES="$target_stores" \
+  REPLACED_STORES="$replaced_stores" \
+  FAILED_STORES="$failed_stores" \
+  DEFERRED_STORES="$deferred_stores" \
+  LOG_FILE="$LOG_FILE" \
+  TRANSACTION_ROOT="${METRIC_REFETCH_TRANSACTION_ROOT:-${METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT:-}}" \
+  node - <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const file = process.env.STATE_FILE;
+const split = value => String(value || '').split(/[\s,]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
+let prior = null;
+try { prior = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+const sameRun = prior?.date === process.env.DATE && prior?.runKey === process.env.RUN_KEY;
+const payload = {
+  ...(sameRun ? prior : {}),
+  schemaVersion: 'cloud-link-business-metric-refetch/v2',
+  date: process.env.DATE,
+  runKey: process.env.RUN_KEY,
+  status: process.env.STATUS,
+  attempts: Number(process.env.ATTEMPTS) || 0,
+  maxAttempts: Number(process.env.MAX_ATTEMPTS) || 0,
+  deadlineEpoch: Number(process.env.DEADLINE_EPOCH) || 0,
+  targetStores: split(process.env.TARGET_STORES),
+  replacedStores: split(process.env.REPLACED_STORES),
+  failedStores: split(process.env.FAILED_STORES),
+  deferredStores: split(process.env.DEFERRED_STORES),
+  failedDomains: split(process.env.FAILED_STORES).length ? ['shein_links'] : [],
+  startedAt: sameRun
+    ? (prior.startedAt || new Date().toISOString()) : new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+  logFile: process.env.LOG_FILE,
+  transactionRoot: process.env.TRANSACTION_ROOT || (sameRun ? prior?.transactionRoot : '') || '',
+  source: sameRun ? (prior?.source || {}) : {},
+  phases: sameRun ? (prior?.phases || {}) : {},
+};
+fs.mkdirSync(path.dirname(file), {recursive: true});
+const temporary = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(temporary, file);
+NODE
+}
+
+update_metric_refetch_source() {
+  local source_status="$1"
+  local source_fingerprint="${2:-}"
+  local transaction_root="${3:-${METRIC_REFETCH_TRANSACTION_ROOT:-${METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT:-}}}"
+  SOURCE_STATUS="$source_status" SOURCE_FINGERPRINT="$source_fingerprint" TRANSACTION_ROOT="$transaction_root" \
+    STATE_FILE="$METRIC_REFETCH_STATE_FILE" DATE="$DATE" RUN_KEY="$METRIC_REFETCH_RUN_KEY" node - <<'NODE'
+const fs = require('node:fs');
+const file = process.env.STATE_FILE;
+const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (state.date !== process.env.DATE || state.runKey !== process.env.RUN_KEY) throw new Error('metric state run mismatch');
+const clearTransaction = process.env.SOURCE_STATUS === 'rolled_back';
+state.source = {
+  ...(state.source || {}), status: process.env.SOURCE_STATUS,
+  fingerprint: process.env.SOURCE_FINGERPRINT || state.source?.fingerprint || '',
+  transactionRoot: clearTransaction ? '' : (process.env.TRANSACTION_ROOT || state.source?.transactionRoot || ''),
+  updatedAt: new Date().toISOString(),
+};
+state.transactionRoot = state.source.transactionRoot;
+const preserveDownstreamStatus = process.env.SOURCE_STATUS === 'source_committed'
+  && ['publish_completed', 'ready', 'downstream_link_completed', 'downstream_incomplete'].includes(String(state.status || ''));
+state.status = preserveDownstreamStatus ? state.status
+  : (process.env.SOURCE_STATUS === 'source_committed' ? 'source_committed' : process.env.SOURCE_STATUS);
+state.updatedAt = new Date().toISOString();
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(tmp, file);
+NODE
+  METRIC_REFETCH_SOURCE_STATUS="$source_status"
+  METRIC_REFETCH_SOURCE_FINGERPRINT="$source_fingerprint"
+  METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT="$transaction_root"
+}
+
+metric_refetch_phase_status() {
+  local phase="$1"
+  STATE_FILE="$METRIC_REFETCH_STATE_FILE" PHASE="$phase" node - <<'NODE'
+const fs = require('node:fs');
+let state = {};
+try { state = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8')); } catch {}
+process.stdout.write(String(state?.phases?.[process.env.PHASE]?.status || ''));
+NODE
+}
+
+update_metric_refetch_phase() {
+  local phase="$1" status="$2" detail="${3:-}"
+  STATE_FILE="$METRIC_REFETCH_STATE_FILE" PHASE="$phase" PHASE_STATUS="$status" PHASE_DETAIL="$detail" \
+    DATE="$DATE" RUN_KEY="$METRIC_REFETCH_RUN_KEY" node - <<'NODE'
+const fs = require('node:fs');
+const file = process.env.STATE_FILE;
+const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (state.date !== process.env.DATE || state.runKey !== process.env.RUN_KEY
+  || state.source?.status !== 'source_committed') throw new Error('phase update requires matching source_committed state');
+state.phases ||= {};
+const prior = state.phases[process.env.PHASE] || {};
+state.phases[process.env.PHASE] = {
+  ...prior, status: process.env.PHASE_STATUS, detail: process.env.PHASE_DETAIL || '',
+  attempts: process.env.PHASE_STATUS === 'running' ? Number(prior.attempts || 0) + 1 : Number(prior.attempts || 0),
+  updatedAt: new Date().toISOString(),
+};
+state.status = process.env.PHASE_STATUS === 'failed' ? 'downstream_incomplete' : state.status;
+state.updatedAt = new Date().toISOString();
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(tmp, file);
+NODE
+}
+
+metric_refetch_sleep_before_next_attempt() {
+  local remaining delay
+  remaining=$((METRIC_REFETCH_DEADLINE_EPOCH - $(date +%s)))
+  (( remaining > 0 )) || return 1
+  delay="$METRIC_REFETCH_RETRY_SLEEP_SEC"
+  if (( delay > remaining )); then delay="$remaining"; fi
+  if (( delay > 0 )); then sleep "$delay"; fi
+  return 0
+}
+
+metric_fetch_inner() {
+  local root="$1"
+  local store="$2"
+  local date="$3"
+  local output_root="$4"
+  cd "$root"
+  node scripts/restore_shein_store_session.mjs \
+    --store "$store" \
+    --date "$date" \
+    --headless \
+    --fast-start \
+    --timeout-ms "${SHEIN_SESSION_RESTORE_TIMEOUT_MS:-180000}" \
+    && node scripts/fetch_shein_links.mjs \
+      --stores "$store" \
+      --date "$date" \
+      --page-size "${SHEIN_LINK_PAGE_SIZE:-100}" \
+      --out-dir "$output_root" \
+      --no-raw
+}
+
+run_metric_refetch_store() {
+  local store="$1"
+  local output_root="$2"
+  local status=0
+  close_one_store_browser "$store"
+  if is_true "$PER_STORE_BROWSER_WRAPPER"; then
+    local deadline_args=()
+    if [[ "$METRIC_REFETCH_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]]; then
+      deadline_args+=(--deadline-epoch "$METRIC_REFETCH_DEADLINE_EPOCH")
+    fi
+    set +e
+    bash scripts/run_host_browser_read_job.sh \
+      --domain "daily-link-metrics-${store,,}" \
+      --lock-wait-sec "${SHEIN_LINK_BUSINESS_BROWSER_LOCK_WAIT_SEC:-600}" \
+      --defer-state "$ROOT/state/cloud_ops_alerts/metric-refetch-${DATE}-${store}.json" \
+      --defer-reason "link_metric_refetch" \
+      "${deadline_args[@]}" \
+      -- bash -c '
+        set -Eeuo pipefail
+        root="$1"
+        store="$2"
+        date="$3"
+        output_root="$4"
+        metric_restore_timeout="$5"
+        link_page_size="$6"
+        cd "$root"
+        node scripts/restore_shein_store_session.mjs \
+          --store "$store" --date "$date" --headless --fast-start \
+          --timeout-ms "$metric_restore_timeout"
+        node scripts/fetch_shein_links.mjs \
+          --stores "$store" --date "$date" --page-size "$link_page_size" \
+          --out-dir "$output_root" --no-raw
+      ' _ "$ROOT" "$store" "$DATE" "$output_root" \
+        "${SHEIN_SESSION_RESTORE_TIMEOUT_MS:-180000}" \
+        "${SHEIN_LINK_PAGE_SIZE:-100}"
+    status=$?
+    set -e
+  else
+    set +e
+    metric_fetch_inner "$ROOT" "$store" "$DATE" "$output_root"
+    status=$?
+    set -e
+  fi
+  close_one_store_browser "$store"
+  return "$status"
+}
+
+metric_candidate_is_ready() {
+  local candidate="$1"
+  local store="$2"
+  CANDIDATE="$candidate" STORE="$store" DATE="$DATE" node - <<'NODE'
+const fs = require('node:fs');
+let payload;
+try { payload = JSON.parse(fs.readFileSync(process.env.CANDIDATE, 'utf8')); } catch { process.exit(1); }
+const store = String(process.env.STORE || '').trim().toUpperCase();
+const date = String(process.env.DATE || '');
+if (payload?.ok !== true || String(payload?.date || '') !== date
+  || String(payload?.store?.storeKey || '').trim().toUpperCase() !== store) process.exit(1);
+
+const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
+const finiteMetric = (object, names) => {
+  const key = names.find(name => own(object, name));
+  if (!key) return null;
+  const value = object[key];
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+};
+const rows = Array.isArray(payload.performanceRows) ? payload.performanceRows : [];
+const diagnoseDay = finiteMetric(payload.counts, ['diagnoseDay']);
+const performanceCount = finiteMetric(payload.counts, ['performanceRows']);
+const requiredFields = [
+  ['epsUv', 'eps_uv'],
+  ['goodsUv', 'goods_uv'],
+  ['saleCnt', 'sale_cnt'],
+  ['payOrderCnt', 'pay_order_cnt'],
+];
+const fieldsComplete = rows.every(row => requiredFields.every(names => finiteMetric(row, names) !== null));
+
+// A numeric zero in a required metric field is legitimate only after the
+// normal fetch contract proves the daily diagnose source succeeded: ok=true,
+// exact identity, a positive diagnoseDay count, and a matching row count.
+const sourceProven = Number.isInteger(diagnoseDay) && diagnoseDay > 0
+  && Number.isInteger(performanceCount) && performanceCount === rows.length
+  && rows.length > 0;
+process.exit(sourceProven && fieldsComplete ? 0 : 2);
+NODE
+}
+
+run_metric_refetch_round() {
+  local target_stores="$1"
+  local output_root="$2"
+  METRIC_REFETCH_FAILED_STORES=()
+  METRIC_REFETCH_DEFERRED_STORES=()
+  local store candidate
+  for store in $target_stores; do
+    if metric_refetch_deadline_reached; then
+      METRIC_REFETCH_DEFERRED_STORES+=("$store")
+      continue
+    fi
+    candidate="$output_root/$store/$DATE.json"
+    if ! run_metric_refetch_store "$store" "$output_root"; then
+      METRIC_REFETCH_FAILED_STORES+=("$store")
+      continue
+    fi
+    if ! metric_candidate_is_ready "$candidate" "$store"; then
+      METRIC_REFETCH_FAILED_STORES+=("$store")
+      continue
+    fi
+  done
+}
+
+metric_refetch_pending_candidates() {
+  local batch_stores="$1"
+  local output_root="$2"
+  local store candidate
+  local pending=()
+  for store in $batch_stores; do
+    candidate="$output_root/$store/$DATE.json"
+    if ! metric_candidate_is_ready "$candidate" "$store"; then
+      pending+=("$store")
+    fi
+  done
+  printf '%s' "${pending[*]}"
+}
+
+append_metric_refetch_journal() {
+  local event="$1"
+  local store="${2:-}"
+  local detail="${3:-}"
+  [[ -n "${METRIC_REFETCH_TRANSACTION_ROOT:-}" ]] || return 0
+  JOURNAL_FILE="$METRIC_REFETCH_TRANSACTION_ROOT/journal.ndjson" \
+  JOURNAL_EVENT="$event" \
+  JOURNAL_STORE="$store" \
+  JOURNAL_DETAIL="$detail" \
+  node - <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const file = process.env.JOURNAL_FILE;
+fs.mkdirSync(path.dirname(file), {recursive: true});
+fs.appendFileSync(file, `${JSON.stringify({
+  at: new Date().toISOString(),
+  event: process.env.JOURNAL_EVENT || '',
+  store: process.env.JOURNAL_STORE || '',
+  detail: process.env.JOURNAL_DETAIL || '',
+})}\n`, {mode: 0o660});
+NODE
+}
+
+metric_refetch_transaction() {
+  local action="$1"
+  local transaction_root="$2"
+  local candidate_root="${3:-}"
+  local batch_stores="${4:-$CANONICAL_METRIC_STORES}"
+  ROOT="$ROOT" DATE="$DATE" ACTION="$action" TRANSACTION_ROOT="$transaction_root" \
+    CANDIDATE_ROOT="$candidate_root" BATCH_STORES="$batch_stores" \
+    CANONICAL_STORES="$CANONICAL_METRIC_STORES" \
+    TEST_COMMIT_FAIL_AFTER="${SHEIN_LINK_BUSINESS_TEST_COMMIT_FAIL_AFTER:-}" \
+    TEST_ROLLBACK_FAIL_STORE="${SHEIN_LINK_BUSINESS_TEST_ROLLBACK_FAIL_STORE:-}" \
+    TEST_REMOVE_BACKUP_STORE="${SHEIN_LINK_BUSINESS_TEST_REMOVE_BACKUP_STORE:-}" node - <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const root = fs.realpathSync(process.env.ROOT || '');
+const stateRoot = fs.realpathSync(path.join(root, 'state'));
+const date = String(process.env.DATE || '');
+const action = String(process.env.ACTION || '');
+const canonical = String(process.env.CANONICAL_STORES || '').split(/\s+/).filter(Boolean);
+const batch = String(process.env.BATCH_STORES || '').split(/\s+/).filter(Boolean);
+const transactionInput = path.resolve(process.env.TRANSACTION_ROOT || '');
+const contained = (parent, child) => child === parent || child.startsWith(`${parent}${path.sep}`);
+const rejectSymlinkAncestors = target => {
+  let current = path.parse(target).root;
+  for (const part of path.relative(path.parse(target).root, target).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    if (!fs.existsSync(current)) break;
+    if (fs.lstatSync(current).isSymbolicLink()) throw new Error(`symlink path component rejected: ${current}`);
+  }
+};
+rejectSymlinkAncestors(transactionInput);
+if (!fs.existsSync(transactionInput) || fs.lstatSync(transactionInput).isSymbolicLink()
+  || !fs.lstatSync(transactionInput).isDirectory()) throw new Error(`unsafe transaction root: ${transactionInput}`);
+const transactionRoot = fs.realpathSync(transactionInput);
+if (path.dirname(transactionRoot) !== stateRoot
+  || !path.basename(transactionRoot).startsWith('.link-business-metric-refetch.')) {
+  throw new Error(`transaction root escapes state root: ${transactionRoot}`);
+}
+if (!contained(root, transactionRoot)) throw new Error(`transaction root escapes application root: ${transactionRoot}`);
+const manifestFile = path.join(transactionRoot, 'manifest.json');
+const journalFile = path.join(transactionRoot, 'journal.ndjson');
+const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const atomicJson = payload => {
+  const tmp = `${manifestFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, {mode: 0o660});
+  fs.renameSync(tmp, manifestFile);
+};
+const event = (name, detail = {}) => fs.appendFileSync(journalFile,
+  `${JSON.stringify({at: new Date().toISOString(), event: name, ...detail})}\n`, {mode: 0o660});
+const regular = file => fs.existsSync(file) && fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink();
+const batchFingerprint = records => crypto.createHash('sha256')
+  .update(records.map(row => `${row.store}:${row.posthash}`).sort().join('\n')).digest('hex');
+const saveStatus = (manifest, status, error = '') => {
+  manifest.status = status;
+  manifest.error = error;
+  manifest.updatedAt = new Date().toISOString();
+  atomicJson(manifest);
+  event(status, error ? {error} : {});
+};
+const validateManifestRecords = manifest => {
+  const records = Array.isArray(manifest?.records) ? manifest.records : [];
+  if (records.length !== canonical.length) throw new Error(`manifest requires exactly ${canonical.length} records`);
+  const seen = new Set();
+  for (const [index, row] of records.entries()) {
+    const store = canonical[index];
+    if (!row || row.store !== store || seen.has(row.store)) throw new Error(`manifest canonical store mapping invalid at index=${index}`);
+    seen.add(row.store);
+    const expectedTarget = path.join(root, 'outputs', 'shein_links', store, `${date}.json`);
+    const expectedBackup = path.join(transactionRoot, 'backups', store, `${date}.json`);
+    if (row.target !== expectedTarget) throw new Error(`manifest target path mismatch for ${store}`);
+    if (row.backup !== expectedBackup) throw new Error(`manifest backup path mismatch for ${store}`);
+    rejectSymlinkAncestors(path.dirname(expectedTarget));
+    rejectSymlinkAncestors(path.dirname(expectedBackup));
+  }
+  if (seen.size !== canonical.length) throw new Error('manifest store mapping has missing or duplicate rows');
+  return records;
+};
+const rollback = manifest => {
+  const records = validateManifestRecords(manifest);
+  if (process.env.TEST_REMOVE_BACKUP_STORE) {
+    const row = records.find(item => item.store === process.env.TEST_REMOVE_BACKUP_STORE);
+    if (row && fs.existsSync(row.backup)) fs.unlinkSync(row.backup);
+  }
+  for (const row of records) {
+    if (!regular(row.backup) || hashFile(row.backup) !== row.prehash) {
+      throw new Error(`missing or invalid expected backup for ${row.store}`);
+    }
+  }
+  for (const [index, row] of records.entries()) {
+    if (process.env.TEST_ROLLBACK_FAIL_STORE === row.store) throw new Error(`injected rollback write failure for ${row.store}`);
+    const tmp = path.join(path.dirname(row.target), `.${date}.metric-rollback-${process.pid}-${index}`);
+    if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    fs.copyFileSync(row.backup, tmp, fs.constants.COPYFILE_EXCL);
+    fs.renameSync(tmp, row.target);
+    if (hashFile(row.target) !== row.prehash) throw new Error(`restored hash mismatch for ${row.store}`);
+    event('rolled_back', {store: row.store, target: row.target, prehash: row.prehash});
+  }
+  for (const row of records) if (hashFile(row.target) !== row.prehash) throw new Error(`rollback verification failed for ${row.store}`);
+};
+
+if (action === 'commit') {
+  if (batch.length !== canonical.length || new Set(batch).size !== canonical.length
+    || canonical.some((store, index) => batch[index] !== store)) {
+    throw new Error(`source commit requires canonical ordered ${canonical.length}-store batch`);
+  }
+  const candidateRoot = fs.realpathSync(process.env.CANDIDATE_ROOT || '');
+  if (!contained(transactionRoot, candidateRoot)) throw new Error('candidate root escapes transaction root');
+  const records = canonical.map(store => {
+    const candidate = path.join(candidateRoot, store, `${date}.json`);
+    const target = path.join(root, 'outputs', 'shein_links', store, `${date}.json`);
+    const backup = path.join(transactionRoot, 'backups', store, `${date}.json`);
+    rejectSymlinkAncestors(path.dirname(candidate));
+    rejectSymlinkAncestors(path.dirname(target));
+    if (!regular(candidate) || !regular(target)) throw new Error(`candidate/formal artifact invalid for ${store}`);
+    return {store, candidate, target, backup, prehash: hashFile(target), posthash: hashFile(candidate)};
+  });
+  const manifest = {
+    schemaVersion: 'metric-source-transaction/v2', date, status: 'preparing',
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    records, committed: [], fingerprint: batchFingerprint(records),
+  };
+  atomicJson(manifest);
+  try {
+    for (const row of records) {
+      fs.mkdirSync(path.dirname(row.backup), {recursive: true});
+      rejectSymlinkAncestors(path.dirname(row.backup));
+      fs.copyFileSync(row.target, row.backup, fs.constants.COPYFILE_EXCL);
+      if (hashFile(row.backup) !== row.prehash) throw new Error(`backup hash mismatch for ${row.store}`);
+      event('backed_up', {store: row.store, target: row.target, backup: row.backup, prehash: row.prehash, posthash: row.posthash});
+    }
+    saveStatus(manifest, 'backups_verified');
+    for (const [index, row] of records.entries()) {
+      if (process.env.TEST_COMMIT_FAIL_AFTER !== '' && index >= Number(process.env.TEST_COMMIT_FAIL_AFTER)) {
+        throw new Error(`injected commit failure after ${index} targets`);
+      }
+      const tmp = path.join(path.dirname(row.target), `.${date}.metric-commit-${process.pid}-${index}`);
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+      fs.copyFileSync(row.candidate, tmp, fs.constants.COPYFILE_EXCL);
+      if (hashFile(tmp) !== row.posthash) throw new Error(`staged copy hash mismatch for ${row.store}`);
+      fs.renameSync(tmp, row.target);
+      if (hashFile(row.target) !== row.posthash) throw new Error(`committed hash mismatch for ${row.store}`);
+      manifest.committed.push(row.store);
+      atomicJson(manifest);
+      event('committed', {store: row.store, target: row.target, backup: row.backup, prehash: row.prehash, posthash: row.posthash});
+    }
+    for (const row of records) if (hashFile(row.target) !== row.posthash) throw new Error(`full posthash verification failed for ${row.store}`);
+    saveStatus(manifest, 'source_committed');
+    process.stdout.write(manifest.fingerprint);
+  } catch (error) {
+    try {
+      saveStatus(manifest, 'rollback_started', String(error?.message || error));
+      rollback(manifest);
+      saveStatus(manifest, 'rolled_back', String(error?.message || error));
+      console.error(`source commit failed and verified rollback completed: ${error?.message || error}`);
+      process.exit(75);
+    } catch (rollbackError) {
+      saveStatus(manifest, 'rollback_failed', `${error?.message || error}; rollback=${rollbackError?.message || rollbackError}`);
+      console.error(`source commit rollback_failed: ${rollbackError?.message || rollbackError}`);
+      process.exit(70);
+    }
+  }
+} else {
+  if (!regular(manifestFile)) {
+    if (action === 'recover') {
+      event('rolled_back', {detail: 'no manifest; no formal commit evidence'});
+      process.stdout.write('rolled_back');
+      process.exit(0);
+    }
+    throw new Error(`transaction manifest missing: ${manifestFile}`);
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  if (manifest.date !== date) throw new Error('transaction manifest date invalid');
+  const manifestRecords = validateManifestRecords(manifest);
+  if (manifest.status === 'source_committed') {
+    for (const row of manifestRecords) {
+      if (!regular(row.target) || hashFile(row.target) !== row.posthash) throw new Error(`source_committed target drift for ${row.store}`);
+    }
+    const fingerprint = batchFingerprint(manifestRecords);
+    if (fingerprint !== manifest.fingerprint) throw new Error('source_committed fingerprint mismatch');
+    process.stdout.write(`source_committed|${fingerprint}`);
+  } else if (action === 'recover') {
+    try {
+      saveStatus(manifest, 'rollback_started', `restart recovery from ${manifest.status}`);
+      rollback(manifest);
+      saveStatus(manifest, 'rolled_back');
+      process.stdout.write('rolled_back');
+    } catch (error) {
+      saveStatus(manifest, 'rollback_failed', String(error?.message || error));
+      console.error(`restart rollback_failed: ${error?.message || error}`);
+      process.exit(70);
+    }
+  } else {
+    throw new Error(`source is not committed: ${manifest.status}`);
+  }
+}
+NODE
+}
+
+recover_interrupted_metric_refetch_transaction() {
+  local transaction_root="$METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT"
+  [[ -n "$transaction_root" ]] || return 0
+  local outcome status recovery_action="recover"
+  if [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" || "$METRIC_REFETCH_SOURCE_STATUS" == "source_revalidation_required" ]]; then
+    recovery_action="verify"
+  fi
+  set +e
+  outcome="$(metric_refetch_transaction "$recovery_action" "$transaction_root")"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    if [[ "$recovery_action" == "verify" ]]; then
+      invalidate_metric_refetch_source "restart source fingerprint verification failed"
+      return 70
+    else
+      write_metric_refetch_state "rollback_failed" "$CANONICAL_METRIC_STORES" "" "$CANONICAL_METRIC_STORES" ""
+      update_metric_refetch_source "rollback_failed" "$METRIC_REFETCH_SOURCE_FINGERPRINT" "$transaction_root"
+      return "$status"
+    fi
+  fi
+  if [[ "$outcome" == source_committed\|* ]]; then
+    METRIC_REFETCH_SOURCE_STATUS="source_committed"
+    METRIC_REFETCH_SOURCE_FINGERPRINT="${outcome#source_committed|}"
+    METRIC_REFETCH_SKIP_PUBLISH=0
+    update_metric_refetch_source "source_committed" "$METRIC_REFETCH_SOURCE_FINGERPRINT" "$transaction_root"
+    if [[ "$METRIC_REFETCH_STATE_STATUS" == "source_revalidation_required" ]]; then
+      write_metric_refetch_state "source_committed" "$CANONICAL_METRIC_STORES" "$CANONICAL_METRIC_STORES" "" ""
+      METRIC_REFETCH_STATE_STATUS="source_committed"
+    fi
+    echo "[cloud_link_business_sync] verified prior source_committed transaction=$transaction_root"
+  else
+    METRIC_REFETCH_SKIP_PUBLISH=0
+    write_metric_refetch_state "rolled_back" "$CANONICAL_METRIC_STORES" "" "" ""
+    update_metric_refetch_source "rolled_back" "" "$transaction_root"
+    METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT=""
+    METRIC_REFETCH_TRANSACTION_ROOT=""
+    echo "[cloud_link_business_sync] verified interrupted source rollback transaction=$transaction_root"
+  fi
+}
+
+rollback_metric_refetch_batch() {
+  echo "[cloud_link_business_sync] source rollback is only legal inside pre-source-commit transaction manager" >&2
+  return 70
+}
+
+commit_metric_refetch_batch() {
+  local batch_stores="$1"
+  local candidate_root="$2"
+  local fingerprint status
+  set +e
+  fingerprint="$(metric_refetch_transaction commit "$METRIC_REFETCH_TRANSACTION_ROOT" "$candidate_root" "$batch_stores")"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    if (( status == 70 )); then
+      update_metric_refetch_source "rollback_failed" "" "$METRIC_REFETCH_TRANSACTION_ROOT"
+    else
+      update_metric_refetch_source "rolled_back" "" "$METRIC_REFETCH_TRANSACTION_ROOT"
+    fi
+    return "$status"
+  fi
+  METRIC_REFETCH_BATCH_COMMITTED=1
+  METRIC_REFETCH_REPLACED_STORES=($CANONICAL_METRIC_STORES)
+  METRIC_REFETCH_SOURCE_FINGERPRINT="$fingerprint"
+  update_metric_refetch_source "source_committed" "$fingerprint" "$METRIC_REFETCH_TRANSACTION_ROOT"
+  printf '%s' "$fingerprint" >/dev/null
+}
+
+invalidate_metric_refetch_source() {
+  local reason="$1"
+  STATE_FILE="$METRIC_REFETCH_STATE_FILE" DATE="$DATE" RUN_KEY="$METRIC_REFETCH_RUN_KEY" REASON="$reason" node - <<'NODE'
+const fs = require('node:fs');
+const file = process.env.STATE_FILE;
+const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (state.date !== process.env.DATE || state.runKey !== process.env.RUN_KEY) throw new Error('source invalidation run mismatch');
+state.status = 'source_revalidation_required';
+state.ready = false;
+state.source = {...(state.source || {}), status: 'source_revalidation_required', invalidatedAt: new Date().toISOString(), invalidationReason: process.env.REASON};
+state.phases = {};
+state.updatedAt = new Date().toISOString();
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(tmp, file);
+NODE
+  METRIC_REFETCH_SOURCE_STATUS="source_revalidation_required"
+  METRIC_REFETCH_STATE_STATUS="source_revalidation_required"
+  METRIC_REFETCH_SKIP_PUBLISH=0
+}
+
+verify_metric_refetch_source_fingerprint() {
+  [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]] || return 70
+  local transaction_root="${METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT:-${METRIC_REFETCH_TRANSACTION_ROOT:-}}"
+  local outcome status fingerprint
+  if [[ -z "$transaction_root" ]]; then
+    invalidate_metric_refetch_source "source_committed transaction root missing"
+    return 70
+  fi
+  set +e
+  outcome="$(metric_refetch_transaction verify "$transaction_root")"
+  status=$?
+  set -e
+  if (( status != 0 )) || [[ "$outcome" != source_committed\|* ]]; then
+    invalidate_metric_refetch_source "canonical formal artifact hash/readback drift"
+    return 70
+  fi
+  fingerprint="${outcome#source_committed|}"
+  if [[ ! "$fingerprint" =~ ^[a-f0-9]{64}$ || "$fingerprint" != "$METRIC_REFETCH_SOURCE_FINGERPRINT" ]]; then
+    invalidate_metric_refetch_source "aggregate source fingerprint mismatch"
+    return 70
+  fi
+  return 0
+}
+
+metric_refetch_target_stores() {
+  METRIC_READY_JSON="$1" node - <<'NODE'
+let payload = {};
+try { payload = JSON.parse(process.env.METRIC_READY_JSON || '{}'); } catch {}
+const values = payload?.metrics?.refetchStores || [];
+process.stdout.write([...new Set(values.map(x => String(x || '').trim().toUpperCase()).filter(Boolean))].join(' '));
+NODE
+}
+
+write_metric_not_ready_alert() {
+  local readiness_json="$1"
+  local target_stores="${2:-}"
+  local refetch_status="${3:-disabled}"
+  mkdir -p "$ROOT/state/cloud_ops_alerts"
+  DATE="$DATE" \
+  LOG_FILE="$LOG_FILE" \
+  METRIC_READY_JSON="$readiness_json" \
+  METRIC_REFETCH_ENABLED="$METRIC_REFETCH_ON_NOT_READY" \
+  METRIC_REFETCH_STATUS="$refetch_status" \
+  METRIC_REFETCH_ATTEMPTS="${METRIC_REFETCH_ATTEMPTS:-0}" \
+  METRIC_REFETCH_MAX_ATTEMPTS="$METRIC_REFETCH_MAX_ATTEMPTS" \
+  METRIC_REFETCH_DEADLINE_EPOCH="$METRIC_REFETCH_DEADLINE_EPOCH" \
+  METRIC_REFETCH_TARGET_STORES="$target_stores" \
+  METRIC_REFETCH_REPLACED_STORES="${METRIC_REFETCH_REPLACED_STORES[*]:-}" \
+  METRIC_REFETCH_FAILED_STORES="${METRIC_REFETCH_FAILED_STORES[*]:-}" \
+  METRIC_REFETCH_DEFERRED_STORES="${METRIC_REFETCH_DEFERRED_STORES[*]:-}" \
+  node - <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.cwd();
+let readiness = {};
+try { readiness = JSON.parse(process.env.METRIC_READY_JSON || '{}'); } catch {}
+const split = value => String(value || '').split(/[\s,]+/).map(x => x.trim().toUpperCase()).filter(Boolean);
+const failedStores = split(process.env.METRIC_REFETCH_FAILED_STORES);
+const payload = {
+  date: process.env.DATE,
+  generatedAt: new Date().toISOString(),
+  logFile: process.env.LOG_FILE,
+  readiness,
+  refetch: {
+    enabled: ['1', 'true'].includes(String(process.env.METRIC_REFETCH_ENABLED || '').toLowerCase()),
+    status: process.env.METRIC_REFETCH_STATUS || 'disabled',
+    attempts: Number(process.env.METRIC_REFETCH_ATTEMPTS) || 0,
+    maxAttempts: Number(process.env.METRIC_REFETCH_MAX_ATTEMPTS) || 0,
+    deadlineEpoch: Number(process.env.METRIC_REFETCH_DEADLINE_EPOCH) || 0,
+    targetStores: split(process.env.METRIC_REFETCH_TARGET_STORES),
+    replacedStores: split(process.env.METRIC_REFETCH_REPLACED_STORES),
+    failedStores,
+    deferredStores: split(process.env.METRIC_REFETCH_DEFERRED_STORES),
+    failedDomains: failedStores.length ? ['shein_links'] : [],
+  },
+};
+const file = path.join(root, 'state', 'cloud_ops_alerts', 'link-business-last-metric-not-ready.json');
+const temporary = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(temporary, file);
+NODE
 }
 
 if is_true "$FETCH_ONLY" && is_true "$FINALIZE_ONLY"; then
@@ -95,6 +921,7 @@ lease_action() {
 }
 
 on_exit() {
+  local exit_status=$?
   set +e
   if [[ "$LEASE_ACTIVE" == "1" ]]; then
     close_store_browsers
@@ -304,6 +1131,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[cloud_link_business_sync] start target=$TARGET date=$DATE root=$ROOT"
 cd "$ROOT"
+validate_metric_refetch_config
 prepare_shared_lock_file "$LINK_PARTIAL_LOCK_FILE"
 prepare_shared_lock_file "$LINK_RUN_LOCK_FILE"
 if ! is_true "$FETCH_ONLY"; then
@@ -312,6 +1140,13 @@ if ! is_true "$FETCH_ONLY"; then
     echo "[cloud_link_business_sync] could not acquire full-run/publish lifecycle lock" >&2
     exit 75
   }
+fi
+if is_true "$METRIC_REFETCH_ON_NOT_READY"; then
+  METRIC_REFETCH_RUN_KEY="${METRIC_REFETCH_RUN_KEY:-$DATE}"
+  validate_metric_refetch_paths_and_stores
+  metric_refetch_load_state
+  recover_interrupted_metric_refetch_transaction
+  echo "[cloud_link_business_sync] metric refetch guard enabled runKey=$METRIC_REFETCH_RUN_KEY attempts=$METRIC_REFETCH_ATTEMPTS/$METRIC_REFETCH_MAX_ATTEMPTS deadline=$METRIC_REFETCH_DEADLINE_EPOCH"
 fi
 
 export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
@@ -757,95 +1592,372 @@ NODE
   fi
 fi
 
-set +e
-METRIC_READY_JSON="$(
-  DATE="$DATE" SUCCESS_STORES="${SUCCESS_STORES[*]}" node - <<'NODE'
+calculate_metric_readiness() {
+  local staging_root="${1:-}"
+  local staging_stores="${2:-}"
+  DATE="$DATE" \
+  SUCCESS_STORES="${SUCCESS_STORES[*]}" \
+  METRIC_STAGING_ROOT="$staging_root" \
+  METRIC_STAGING_STORES="$staging_stores" \
+  node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
 
 const date = process.env.DATE;
 const successStores = String(process.env.SUCCESS_STORES || '')
   .split(/\s+/)
-  .map(s => s.trim())
+  .map(s => s.trim().toUpperCase())
   .filter(Boolean);
-
-function num(value) {
-  if (value === null || value === undefined || value === '') return 0;
-  const n = Number(String(value).replace(/,/g, '').replace(/%$/, ''));
-  return Number.isFinite(n) ? n : 0;
-}
+const successSet = new Set(successStores);
+const stagingRoot = String(process.env.METRIC_STAGING_ROOT || '');
+const stagingStores = new Set(String(process.env.METRIC_STAGING_STORES || '')
+  .split(/[\s,]+/).map(s => s.trim().toUpperCase()).filter(Boolean));
+  const expectedStores = 'CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL'.split(' ');
+const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
+  const finiteMetric = (object, names) => {
+    const key = names.find(name => own(object, name));
+    if (!key) {
+      return {ok: false, value: null, reason: 'missing'};
+    }
+    const value = object[key];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return {ok: false, value: null, reason: 'not_finite_json_number'};
+    }
+    return {ok: true, value, reason: ''};
+};
+const requiredFields = [
+  {name: 'epsUv', aliases: ['epsUv', 'eps_uv']},
+  {name: 'goodsUv', aliases: ['goodsUv', 'goods_uv']},
+  {name: 'saleCnt', aliases: ['saleCnt', 'sale_cnt']},
+  {name: 'payOrderCnt', aliases: ['payOrderCnt', 'pay_order_cnt']},
+];
 
 const metrics = {
   date,
   successStores,
+  expectedStores,
+  expectedStoreCount: expectedStores.length,
   files: 0,
   performanceRows: 0,
   diagnoseDayRows: 0,
-  zeroDiagnoseDayStores: [],
+  readyStores: [],
+  unavailableStores: [],
+  unavailableByStore: {},
+  refetchStores: [],
   epsUv: 0,
   goodsUv: 0,
   saleCnt: 0,
   payOrderCnt: 0,
+  sourceContract: {
+    identity: 'ok=true and exact date/store',
+    diagnoseDay: 'present finite positive integer',
+    performanceRows: 'present array with counts.performanceRows equal to array length and length > 0',
+    requiredFields: ['epsUv', 'goodsUv', 'saleCnt', 'payOrderCnt'],
+    zeroSemantics: 'finite JSON number zero is valid only when identity and source-count contract are proven; strings/null/arrays/objects/missing are unavailable',
+  },
 };
+const evidenceIssues = [];
 
-for (const store of successStores) {
-  const file = path.join(process.cwd(), 'outputs', 'shein_links', store, `${date}.json`);
-  if (!fs.existsSync(file)) continue;
-  const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const rows = Array.isArray(payload.performanceRows) ? payload.performanceRows : [];
-  const diagnoseDay = num(payload.counts?.diagnoseDay);
+for (const store of expectedStores) {
+  if (!successSet.has(store)) {
+    evidenceIssues.push(`${store}:not_in_exact_success_set`);
+    continue;
+  }
+  const file = stagingRoot && stagingStores.has(store)
+    ? path.join(stagingRoot, store, `${date}.json`)
+    : path.join(process.cwd(), 'outputs', 'shein_links', store, `${date}.json`);
+  if (!fs.existsSync(file) || fs.lstatSync(file).isSymbolicLink()) {
+    evidenceIssues.push(`${store}:artifact_missing_or_symlink`);
+    continue;
+  }
+  let payload;
+  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {
+    evidenceIssues.push(`${store}:artifact_invalid_json`);
+    continue;
+  }
+  if (payload?.ok !== true || String(payload?.date || '') !== date
+    || String(payload?.store?.storeKey || '').trim().toUpperCase() !== store) {
+    evidenceIssues.push(`${store}:artifact_identity_invalid`);
+    continue;
+  }
   metrics.files += 1;
-  metrics.performanceRows += rows.length;
-  metrics.diagnoseDayRows += diagnoseDay;
-  if (diagnoseDay === 0) metrics.zeroDiagnoseDayStores.push(store);
-  for (const row of rows) {
-    metrics.epsUv += num(row.epsUv ?? row.eps_uv);
-    metrics.goodsUv += num(row.goodsUv ?? row.goods_uv);
-    metrics.saleCnt += num(row.saleCnt ?? row.sale_cnt);
-    metrics.payOrderCnt += num(row.payOrderCnt ?? row.pay_order_cnt);
+  const storeIssues = [];
+  const rows = Array.isArray(payload.performanceRows) ? payload.performanceRows : null;
+  if (!rows) storeIssues.push('performanceRows:not_array');
+  const diagnoseDay = finiteMetric(payload.counts, ['diagnoseDay']);
+  const performanceCount = finiteMetric(payload.counts, ['performanceRows']);
+  if (!diagnoseDay.ok) storeIssues.push(`counts.diagnoseDay:${diagnoseDay.reason}`);
+  else if (!Number.isInteger(diagnoseDay.value) || diagnoseDay.value <= 0) {
+    storeIssues.push('counts.diagnoseDay:source_unavailable');
+  }
+  if (!performanceCount.ok) storeIssues.push(`counts.performanceRows:${performanceCount.reason}`);
+  else if (!Number.isInteger(performanceCount.value)) storeIssues.push('counts.performanceRows:not_integer');
+  if (rows && rows.length === 0) storeIssues.push('performanceRows:empty');
+  if (rows && performanceCount.ok && performanceCount.value !== rows.length) {
+    storeIssues.push('counts.performanceRows:row_count_mismatch');
+  }
+
+  for (const [index, row] of (rows || []).entries()) {
+    for (const field of requiredFields) {
+      const parsed = finiteMetric(row, field.aliases);
+      if (!parsed.ok) storeIssues.push(`performanceRows[${index}].${field.name}:${parsed.reason}`);
+      else metrics[field.name] += parsed.value;
+    }
+  }
+
+  metrics.performanceRows += (rows || []).length;
+  if (diagnoseDay.ok) metrics.diagnoseDayRows += diagnoseDay.value;
+  if (storeIssues.length) {
+    metrics.unavailableStores.push(store);
+    metrics.unavailableByStore[store] = storeIssues;
+  } else {
+    metrics.readyStores.push(store);
   }
 }
 
-const metricSum = metrics.epsUv + metrics.goodsUv + metrics.saleCnt + metrics.payOrderCnt;
-const enoughStoresForGuard = successStores.length >= 10;
-const notReady = enoughStoresForGuard && metrics.performanceRows > 0 && (metrics.diagnoseDayRows === 0 || metricSum === 0);
-const ok = !notReady || ['1', 'true'].includes(String(process.env.SHEIN_LINK_BUSINESS_ALLOW_ALL_ZERO || '').toLowerCase());
+metrics.refetchStores = [...metrics.unavailableStores];
+const ok = evidenceIssues.length === 0 && metrics.refetchStores.length === 0
+  && metrics.readyStores.length === expectedStores.length;
+const status = evidenceIssues.length ? 3 : (ok ? 0 : 2);
 console.log(JSON.stringify({
   ok,
-  reason: notReady ? 'daily_link_metrics_all_zero_or_not_ready' : '',
+  reason: evidenceIssues.length ? 'exact_store_evidence_incomplete'
+    : (ok ? '' : 'daily_link_metrics_unavailable'),
+  evidenceIssues,
   metrics,
 }));
-process.exit(ok ? 0 : 2);
+process.exit(status);
 NODE
-)"
+}
+
+set +e
+METRIC_READY_JSON="$(calculate_metric_readiness)"
 METRIC_READY_STATUS=$?
 set -e
 echo "[cloud_link_business_sync] link metric readiness: $METRIC_READY_JSON"
+if [[ "$METRIC_READY_STATUS" != "0" && "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]]; then
+  write_metric_refetch_state "source_committed_readiness_mismatch" "$CANONICAL_METRIC_STORES" \
+    "$CANONICAL_METRIC_STORES" "$CANONICAL_METRIC_STORES" ""
+  write_metric_not_ready_alert "$METRIC_READY_JSON" "$CANONICAL_METRIC_STORES" "source-committed-readiness-mismatch"
+  echo "[cloud_link_business_sync] CRITICAL verified source_committed state disagrees with readiness; block downstream and never refetch/promote this run" >&2
+  exit 70
+fi
 if [[ "$METRIC_READY_STATUS" != "0" ]]; then
-  mkdir -p "$ROOT/state/cloud_ops_alerts"
-  cat > "$ROOT/state/cloud_ops_alerts/link-business-last-metric-not-ready.json" <<JSON
-{"date":"$DATE","generatedAt":"$(TZ="$TZ_NAME" date --iso-8601=seconds)","logFile":"$LOG_FILE","readiness":$METRIC_READY_JSON}
-JSON
-  echo "[cloud_link_business_sync] link daily metrics are not ready; skip BI warehouse/portal refresh to avoid writing all-zero traffic date" >&2
-  check_portal_health
-  echo "[cloud_link_business_sync] done with metric-not-ready date=$DATE log=$LOG_FILE"
-  exit 0
+  METRIC_REFETCH_SKIP_PUBLISH=0
+  if [[ "$METRIC_READY_STATUS" == "2" ]] && is_true "$METRIC_REFETCH_ON_NOT_READY"; then
+    METRIC_PRE_REFETCH_READY_JSON="$METRIC_READY_JSON"
+    METRIC_REFETCH_TARGET_STORES="$(metric_refetch_target_stores "$METRIC_READY_JSON")"
+    METRIC_REFETCH_BATCH_TARGET_STORES="$CANONICAL_METRIC_STORES"
+    METRIC_REFETCH_TRANSACTION_ROOT="$(mktemp -d "$ROOT/state/.link-business-metric-refetch.XXXXXX")"
+    METRIC_REFETCH_CANDIDATE_ROOT="$METRIC_REFETCH_TRANSACTION_ROOT/candidates"
+    mkdir -p "$METRIC_REFETCH_CANDIDATE_ROOT"
+    for store in $CANONICAL_METRIC_STORES; do
+      mkdir -p "$METRIC_REFETCH_CANDIDATE_ROOT/$store"
+      cp -p -- "$ROOT/outputs/shein_links/$store/$DATE.json" "$METRIC_REFETCH_CANDIDATE_ROOT/$store/$DATE.json"
+    done
+    append_metric_refetch_journal "transaction_created" "" "$METRIC_REFETCH_BATCH_TARGET_STORES"
+    while true; do
+      if metric_refetch_deadline_reached; then
+        write_metric_refetch_state "deadline" "$METRIC_REFETCH_BATCH_TARGET_STORES" \
+          "${METRIC_REFETCH_REPLACED_STORES[*]:-}" \
+          "${METRIC_REFETCH_FAILED_STORES[*]:-}" \
+          "${METRIC_REFETCH_DEFERRED_STORES[*]:-}"
+        write_metric_not_ready_alert "$METRIC_READY_JSON" "$METRIC_REFETCH_BATCH_TARGET_STORES" "deadline"
+        echo "[cloud_link_business_sync] metric refetch deadline reached; retain prior complete link artifacts" >&2
+        check_portal_health
+        exit 75
+      fi
+      if (( METRIC_REFETCH_ATTEMPTS >= METRIC_REFETCH_MAX_ATTEMPTS )); then
+        write_metric_refetch_state "exhausted" "$METRIC_REFETCH_BATCH_TARGET_STORES" \
+          "${METRIC_REFETCH_REPLACED_STORES[*]:-}" \
+          "${METRIC_REFETCH_FAILED_STORES[*]:-}" \
+          "${METRIC_REFETCH_DEFERRED_STORES[*]:-}"
+        write_metric_not_ready_alert "$METRIC_READY_JSON" "$METRIC_REFETCH_BATCH_TARGET_STORES" "exhausted"
+        echo "[cloud_link_business_sync] metric refetch attempt bound reached; retain prior complete link artifacts" >&2
+        check_portal_health
+        exit 75
+      fi
+      if [[ -z "$METRIC_REFETCH_TARGET_STORES" ]]; then
+        write_metric_refetch_state "failed" "" "" "" ""
+        write_metric_not_ready_alert "$METRIC_READY_JSON" "" "no-targets"
+        echo "[cloud_link_business_sync] metric readiness was not refetchable; retain prior complete link artifacts" >&2
+        check_portal_health
+        exit 75
+      fi
+
+      METRIC_REFETCH_ATTEMPTS=$((METRIC_REFETCH_ATTEMPTS + 1))
+      write_metric_refetch_state "running" "$METRIC_REFETCH_BATCH_TARGET_STORES" "" "$METRIC_REFETCH_TARGET_STORES" ""
+      run_metric_refetch_round "$METRIC_REFETCH_TARGET_STORES" "$METRIC_REFETCH_CANDIDATE_ROOT"
+      METRIC_REFETCH_TARGET_STORES="$(metric_refetch_pending_candidates \
+        "$METRIC_REFETCH_TARGET_STORES" "$METRIC_REFETCH_CANDIDATE_ROOT")"
+      METRIC_REFETCH_FAILED_STORES=($METRIC_REFETCH_TARGET_STORES)
+
+      if [[ -n "$METRIC_REFETCH_TARGET_STORES" ]]; then
+        write_metric_refetch_state "waiting" "$METRIC_REFETCH_BATCH_TARGET_STORES" "" \
+          "${METRIC_REFETCH_FAILED_STORES[*]:-}" \
+          "${METRIC_REFETCH_DEFERRED_STORES[*]:-}"
+        write_metric_not_ready_alert "$METRIC_READY_JSON" "$METRIC_REFETCH_BATCH_TARGET_STORES" "waiting"
+        if ! metric_refetch_sleep_before_next_attempt; then
+          continue
+        fi
+        continue
+      fi
+
+      set +e
+      METRIC_READY_JSON="$(calculate_metric_readiness \
+        "$METRIC_REFETCH_CANDIDATE_ROOT" "$METRIC_REFETCH_BATCH_TARGET_STORES")"
+      METRIC_READY_STATUS=$?
+      set -e
+      echo "[cloud_link_business_sync] staged link metric readiness after refetch attempt=$METRIC_REFETCH_ATTEMPTS: $METRIC_READY_JSON"
+      if [[ "$METRIC_READY_STATUS" != "0" ]]; then
+        write_metric_refetch_state "staging_invalid" "$METRIC_REFETCH_BATCH_TARGET_STORES" "" \
+          "$METRIC_REFETCH_BATCH_TARGET_STORES" ""
+        write_metric_not_ready_alert "$METRIC_READY_JSON" "$METRIC_REFETCH_BATCH_TARGET_STORES" "staging-invalid"
+        check_portal_health
+        exit 75
+      fi
+
+      if metric_refetch_deadline_reached; then
+        continue
+      fi
+      set +e
+      commit_metric_refetch_batch "$METRIC_REFETCH_BATCH_TARGET_STORES" "$METRIC_REFETCH_CANDIDATE_ROOT"
+      METRIC_COMMIT_STATUS=$?
+      set -e
+      if (( METRIC_COMMIT_STATUS != 0 )); then
+        if [[ "$METRIC_REFETCH_SOURCE_STATUS" == "rollback_failed" ]]; then
+          write_metric_refetch_state "rollback_failed" "$METRIC_REFETCH_BATCH_TARGET_STORES" "" \
+            "$METRIC_REFETCH_BATCH_TARGET_STORES" ""
+        else
+          write_metric_refetch_state "commit_failed_rolled_back" "$METRIC_REFETCH_BATCH_TARGET_STORES" "" \
+            "$METRIC_REFETCH_BATCH_TARGET_STORES" ""
+        fi
+        write_metric_not_ready_alert "$METRIC_PRE_REFETCH_READY_JSON" \
+          "$METRIC_REFETCH_BATCH_TARGET_STORES" "commit-failed"
+        echo "[cloud_link_business_sync] metric batch commit failed; pre-run formal artifacts restored or retained" >&2
+        exit "$METRIC_COMMIT_STATUS"
+      fi
+
+      set +e
+      METRIC_READY_JSON="$(calculate_metric_readiness)"
+      METRIC_READY_STATUS=$?
+      set -e
+      if [[ "$METRIC_READY_STATUS" != "0" ]]; then
+        write_metric_refetch_state "source_committed_posthash_readiness_mismatch" \
+          "$METRIC_REFETCH_BATCH_TARGET_STORES" "${METRIC_REFETCH_REPLACED_STORES[*]:-}" \
+          "$METRIC_REFETCH_BATCH_TARGET_STORES" ""
+        write_metric_not_ready_alert "$METRIC_PRE_REFETCH_READY_JSON" \
+          "$METRIC_REFETCH_BATCH_TARGET_STORES" "source-committed-posthash-readiness-mismatch"
+        echo "[cloud_link_business_sync] CRITICAL source_committed hashes verified but readiness revalidation disagreed; source is retained and downstream is blocked" >&2
+        exit 75
+      fi
+      write_metric_refetch_state "source_committed" "$METRIC_REFETCH_BATCH_TARGET_STORES" \
+        "${METRIC_REFETCH_REPLACED_STORES[*]:-}" "" ""
+      break
+    done
+  else
+    write_metric_not_ready_alert "$METRIC_READY_JSON" "" "disabled"
+    echo "[cloud_link_business_sync] link daily metrics are not ready; skip BI warehouse/portal refresh to avoid writing all-zero traffic date" >&2
+    check_portal_health
+    echo "[cloud_link_business_sync] done with metric-not-ready date=$DATE log=$LOG_FILE"
+    exit 0
+  fi
+fi
+
+PUBLISH_FAILURE_STEP=""
+PUBLISH_FAILURE_STATUS=0
+run_link_publish_step() {
+  local step="$1"
+  shift
+  local status=0
+  if is_true "$METRIC_REFETCH_ON_NOT_READY" && [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]]; then
+    if ! verify_metric_refetch_source_fingerprint; then
+      PUBLISH_FAILURE_STEP="source-revalidation-before-$step"
+      PUBLISH_FAILURE_STATUS=70
+      return 1
+    fi
+    if [[ "$(metric_refetch_phase_status "$step")" == "completed" ]]; then
+      echo "[cloud_link_business_sync] phase=$step already completed for runKey=$METRIC_REFETCH_RUN_KEY; reuse receipt"
+      return 0
+    fi
+    update_metric_refetch_phase "$step" "running" "deterministic same-date invocation"
+  fi
+  set +e
+  "$@"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    if is_true "$METRIC_REFETCH_ON_NOT_READY" && [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]]; then
+      update_metric_refetch_phase "$step" "failed" "exit=$status"
+    fi
+    PUBLISH_FAILURE_STEP="$step"
+    PUBLISH_FAILURE_STATUS="$status"
+    return 1
+  fi
+  if [[ "${SHEIN_LINK_BUSINESS_TEST_CRASH_AFTER_PHASE:-}" == "$step" ]]; then
+    echo "[cloud_link_business_sync] injected crash after phase=$step before receipt" >&2
+    exit 75
+  fi
+  if is_true "$METRIC_REFETCH_ON_NOT_READY" && [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]]; then
+    update_metric_refetch_phase "$step" "completed" "exit=0; deterministic same-date operation"
+  fi
+}
+
+handle_link_publish_failure() {
+  echo "[cloud_link_business_sync] publish step failed step=$PUBLISH_FAILURE_STEP status=$PUBLISH_FAILURE_STATUS" >&2
+  if [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]]; then
+    write_metric_refetch_state "downstream_incomplete" "$CANONICAL_METRIC_STORES" \
+      "${METRIC_REFETCH_REPLACED_STORES[*]:-$CANONICAL_METRIC_STORES}" "" ""
+    echo "[cloud_link_business_sync] source_committed retained; next same-run invocation resumes phase=$PUBLISH_FAILURE_STEP" >&2
+    exit 75
+  fi
+  exit "$PUBLISH_FAILURE_STATUS"
+}
+
+if [[ "$METRIC_REFETCH_SKIP_PUBLISH" == "1" && "$METRIC_REFETCH_BATCH_COMMITTED" != "1" ]]; then
+  echo "[cloud_link_business_sync] same-run metric publish already complete; skip duplicate dashboard/warehouse/load/export"
+else
+  if ! run_link_publish_step "dashboard" node scripts/generate_link_ops_web_dashboard.mjs \
+    --date "$DATE" \
+    --group ALL; then
+    handle_link_publish_failure
+  fi
+
+  if ! run_link_publish_step "warehouse" node scripts/load_bi_warehouse.mjs \
+    --sales-date 2099-01-01 \
+    --link-date "$DATE" \
+    --dashboard-json "outputs/link-dashboard/link-ops-dashboard-${DATE}.json"; then
+    handle_link_publish_failure
+  fi
+
+  if ! run_link_publish_step "business-domain-load" node scripts/load_bi_business_domains.mjs \
+    --date "$DATE"; then
+    handle_link_publish_failure
+  fi
+
+  if ! run_link_publish_step "marketing-export" node scripts/marketing/export_marketing_price_leads_for_bi.mjs; then
+    if [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]]; then
+      handle_link_publish_failure
+    fi
+    echo "[cloud_link_business_sync] WARN marketing export failed status=$PUBLISH_FAILURE_STATUS" >&2
+  fi
+fi
+
+if [[ "$METRIC_REFETCH_SOURCE_STATUS" == "source_committed" ]]; then
+  if ! verify_metric_refetch_source_fingerprint; then
+    echo "[cloud_link_business_sync] source fingerprint drift before downstream-link completion; ready is forbidden" >&2
+    exit 70
+  fi
+  if [[ "$METRIC_REFETCH_STATE_STATUS" == "publish_completed" || "$METRIC_REFETCH_STATE_STATUS" == "ready" ]]; then
+    echo "[cloud_link_business_sync] preserve terminal same-run status=$METRIC_REFETCH_STATE_STATUS"
+  else
+    append_metric_refetch_journal "downstream_link_completed" "" "dashboard warehouse business-domain-load marketing-export"
+    write_metric_refetch_state "downstream_link_completed" "$CANONICAL_METRIC_STORES" \
+      "${METRIC_REFETCH_REPLACED_STORES[*]:-}" "" ""
+  fi
+  METRIC_REFETCH_BATCH_COMMITTED=0
 fi
 rm -f "$ROOT/state/cloud_ops_alerts/link-business-last-metric-not-ready.json" 2>/dev/null || true
-
-node scripts/generate_link_ops_web_dashboard.mjs \
-  --date "$DATE" \
-  --group ALL
-
-node scripts/load_bi_warehouse.mjs \
-  --sales-date 2099-01-01 \
-  --link-date "$DATE" \
-  --dashboard-json "outputs/link-dashboard/link-ops-dashboard-${DATE}.json"
-
-node scripts/load_bi_business_domains.mjs \
-  --date "$DATE"
-
-node scripts/marketing/export_marketing_price_leads_for_bi.mjs || true
 
 if [[ "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "true" ]]; then
   echo "[cloud_link_business_sync] warehouse load done; skip portal refresh because SHEIN_LINK_BUSINESS_REFRESH_PORTAL=${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-}"

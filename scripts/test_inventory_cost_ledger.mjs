@@ -2,6 +2,36 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {buildInventoryCostLedger} from '../lib/inventory_cost_ledger.mjs';
+import {
+  inventoryCostExistingRunDecision,
+  inventoryCostRunIdentity,
+  normalizeInventoryCostLogicalRunKey,
+} from './rebuild_inventory_cost_ledger.mjs';
+
+const logicalFingerprintA = 'a'.repeat(64);
+const logicalFingerprintB = 'b'.repeat(64);
+const logicalIdentityA = inventoryCostRunIdentity('2026-08-22:2026-08-21:cost-ledger', logicalFingerprintA);
+const logicalIdentityAReplay = inventoryCostRunIdentity('2026-08-22:2026-08-21:cost-ledger', logicalFingerprintA);
+const logicalIdentityB = inventoryCostRunIdentity('2026-08-22:2026-08-21:cost-ledger', logicalFingerprintB);
+assert.deepEqual(logicalIdentityAReplay, logicalIdentityA);
+assert.notEqual(logicalIdentityB.runId, logicalIdentityA.runId, 'changed source fingerprint must create a deterministic revision');
+assert.equal(logicalIdentityB.logicalRunKeyHash, logicalIdentityA.logicalRunKeyHash);
+assert.deepEqual(inventoryCostExistingRunDecision({
+  runId: logicalIdentityA.runId,
+  sourceHash: logicalFingerprintA,
+  status: 'completed',
+}, logicalIdentityA), {action: 'verify_completed'}, 'crash after DB commit must select authoritative no-op readback');
+assert.deepEqual(inventoryCostExistingRunDecision({
+  runId: logicalIdentityA.runId,
+  sourceHash: logicalFingerprintA,
+  status: 'running',
+}, logicalIdentityA), {action: 'resume_same_identity', status: 'running'});
+assert.equal(inventoryCostExistingRunDecision({
+  runId: logicalIdentityA.runId,
+  sourceHash: logicalFingerprintB,
+  status: 'completed',
+}, logicalIdentityA).action, 'conflict');
+assert.throws(() => normalizeInventoryCostLogicalRunKey('bad\nkey'), /printable/);
 
 const events = [
   {eventKey:'r1',matchKey:'P1',effectiveAt:'2026-01-01 00:00:00',eventType:'receipt',quantity:10,costAmountSar:100,sourceKey:'r1'},
@@ -154,6 +184,9 @@ assert.match(rebuildScript, /source_state\.row_count <> \$\{expectedCount\}/);
 assert.match(rebuildScript, /sourceCutoffAt: source\?\.sourceSnapshotAt \|\| startedAt/);
 assert.match(rebuildScript, /sourceSnapshot: source\?\.sourceSnapshot \|\| ''/);
 assert.match(rebuildScript, /sourceCounts: source\?\.sourceCounts \|\| \{\}/);
+assert.match(rebuildScript, /SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY/);
+assert.match(rebuildScript, /completed_same_logical_run_and_source_fingerprint/);
+assert.match(rebuildScript, /authoritativeInventoryCostRunReadback/);
 assert.match(rebuildScript, /openingStates: \[\.\.\.openingStateMap\(source\?\.openingStates\)\.entries\(\)\]/);
 assert.match(rebuildScript, /AND completed_at > \$\{sqlLiteral\(run\.startedAt\)\}::timestamptz/);
 assert.doesNotMatch(rebuildScript, /product_unit_cost_by_match_key/);
@@ -168,4 +201,4 @@ const seedScript = await fs.readFile(new URL('./seed_inventory_cost_opening_from
 assert.match(periodScript, /\\\\pset tuples_only on/);
 assert.match(seedScript, /\\\\pset tuples_only on/);
 
-console.log(JSON.stringify({ok:true, tests:['moving-average','future-receipt-isolation','rtv-reentry','manual-rtv-verification-source','missing-opening-receipt-settlement','known-cost-negative-inventory-estimate','negative-inventory-receipt-variance-settlement','inventory-value-conservation','in-transit-shortfall-estimate','past-arrival-missing-opening-estimate','inventory-count-reset','negative-rtv-shortfall','frozen-boundary','concurrent-rebuild-stale-write-guard','source-snapshot-lock','psql-readback-meta-command']}, null, 2));
+console.log(JSON.stringify({ok:true, tests:['logical-run-stable-identity','completed-run-authoritative-noop','running-run-same-identity-resume','source-fingerprint-revision','moving-average','future-receipt-isolation','rtv-reentry','manual-rtv-verification-source','missing-opening-receipt-settlement','known-cost-negative-inventory-estimate','negative-inventory-receipt-variance-settlement','inventory-value-conservation','in-transit-shortfall-estimate','past-arrival-missing-opening-estimate','inventory-count-reset','negative-rtv-shortfall','frozen-boundary','concurrent-rebuild-stale-write-guard','source-snapshot-lock','psql-readback-meta-command']}, null, 2));
