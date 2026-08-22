@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,26 @@ const enqueueSections = (queue, options = {}) => enqueueSectionsWithGeneration(q
   coreGeneratedAt: 'G1',
   ...options,
 });
+const terminalEvidenceArgs = (generatedAt, identity = 'a'.repeat(64)) => [
+  '--expected-generated-at', generatedAt,
+  '--terminal-generated-at', generatedAt,
+  '--terminal-section-generated-at', generatedAt,
+  '--terminal-generation-identity', identity,
+];
+
+function queueFileSnapshot(file) {
+  const bytes = fs.readFileSync(file);
+  return {
+    bytes,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
+}
+
+function assertQueueFileUnchanged(file, before, label) {
+  const after = queueFileSnapshot(file);
+  assert.deepEqual(after.bytes, before.bytes, `${label}: queue bytes changed`);
+  assert.equal(after.sha256, before.sha256, `${label}: queue hash changed`);
+}
 
 // ---- Same-priority batches are ordered by sequence (enqueue order), not by
 // section name: a profit,homeProfit batch must always claim profit first so
@@ -540,9 +561,40 @@ try {
   assert.match(claimPayload.entry.leaseId, /^[0-9a-f-]{36}$/i);
   const leaseId = claimPayload.entry.leaseId;
 
-  const reenqueue = run('enqueue', '--sections', 'orders', '--priority', '0', '--core-generated-at', 'G1');
+  const reenqueue = run('enqueue', '--sections', 'orders', '--priority', '0', '--core-generated-at', 'G2');
   assert.equal(reenqueue.status, 0, reenqueue.stderr);
-  const superseded = run('complete', '--section', 'orders', '--lease-id', leaseId);
+  const beforeRejectedComplete = queueFileSnapshot(queueFile);
+  const evidencePairs = [
+    ['--expected-generated-at', 'G1'],
+    ['--terminal-generated-at', 'G1'],
+    ['--terminal-section-generated-at', 'G1'],
+    ['--terminal-generation-identity', 'a'.repeat(64)],
+  ];
+  for (const [missingFlag] of evidencePairs) {
+    const incompleteEvidence = evidencePairs
+      .filter(([flag]) => flag !== missingFlag)
+      .flat();
+    const missing = run('complete', '--section', 'orders', '--lease-id', leaseId, ...incompleteEvidence);
+    assert.notEqual(missing.status, 0, `${missingFlag} omission must fail`);
+    assert.match(missing.stderr, /QUEUE_TERMINAL_EVIDENCE_REQUIRED/);
+    assertQueueFileUnchanged(queueFile, beforeRejectedComplete, `${missingFlag} omission`);
+  }
+
+  const newerEvidence = run(
+    'complete', '--section', 'orders', '--lease-id', leaseId,
+    '--expected-generated-at', 'G1',
+    '--terminal-generated-at', 'G2',
+    '--terminal-section-generated-at', 'G2',
+    '--terminal-generation-identity', 'b'.repeat(64),
+  );
+  assert.notEqual(newerEvidence.status, 0, 'G2 terminal evidence must not complete a G1 claim');
+  assert.match(newerEvidence.stderr, /QUEUE_TERMINAL_GENERATION_MISMATCH/);
+  assertQueueFileUnchanged(queueFile, beforeRejectedComplete, 'G1 claim with G2 terminal evidence');
+
+  const superseded = run(
+    'complete', '--section', 'orders', '--lease-id', leaseId,
+    ...terminalEvidenceArgs('G1', 'c'.repeat(64)),
+  );
   assert.equal(superseded.status, 0, superseded.stderr);
   const supersededPayload = JSON.parse(superseded.stdout);
   assert.equal(supersededPayload.completed, true, 'CLI complete must report the successful claimed publication');
@@ -587,6 +639,36 @@ try {
   assert.equal(repaired.entries[0].leaseExpiresAt, '');
 } finally {
   fs.rmSync(temp, {recursive: true, force: true});
+}
+
+// ---- Production CLI completion cannot fall back to mutable coreGeneratedAt
+// when the immutable claim generation is unknown.
+{
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'queue-complete-unknown-cli-'));
+  const queueFile = path.join(temp, 'queue.json');
+  const run = (...args) => spawnSync(process.execPath, [
+    path.join(process.cwd(), 'scripts', 'manage_bi_portal_section_queue.mjs'),
+    ...args,
+    '--file', queueFile,
+  ], {cwd: process.cwd(), encoding: 'utf8'});
+  try {
+    let result = run('enqueue', '--sections', 'orders', '--core-generated-at', 'unknown');
+    assert.equal(result.status, 0, result.stderr);
+    result = run('claim', '--lease-seconds', '60');
+    assert.equal(result.status, 0, result.stderr);
+    const claim = JSON.parse(result.stdout).entry;
+    assert.equal(claim.claimedCoreGeneratedAt, 'unknown');
+    const before = queueFileSnapshot(queueFile);
+    result = run(
+      'complete', '--section', claim.section, '--lease-id', claim.leaseId,
+      ...terminalEvidenceArgs('G1', 'd'.repeat(64)),
+    );
+    assert.notEqual(result.status, 0, 'unknown immutable claim generation must fail CLI completion');
+    assert.match(result.stderr, /QUEUE_CLAIMED_GENERATION_UNKNOWN/);
+    assertQueueFileUnchanged(queueFile, before, 'unknown immutable claim generation');
+  } finally {
+    fs.rmSync(temp, {recursive: true, force: true});
+  }
 }
 
 // ---- Durable per-section idempotency: same key preserves queue semantics,
@@ -687,6 +769,47 @@ try {
   completeClaim(aged, {section: 'profit', leaseId: 'lease-new', now: at(31 * day + 2_000)});
   assert.equal(aged.completedIdempotency.some(r => r.idempotencyKey === 'old:key::profit'), false, '>30d tombstones must be dropped');
   assert.equal(aged.completedIdempotency.some(r => r.idempotencyKey === 'new:key::profit'), true);
+}
+
+// ---- G1 -> G2 race: a running G1 claim keeps immutable claimedCoreGeneratedAt
+// even after the queue entry adopts G2. Terminal evidence for G2 must reject
+// completion of the G1 lease; only the existing follow-up claim may publish G2.
+{
+  const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['profit'], idempotencyKey: 'core:G1', coreGeneratedAt: 'G1', now: at(0)});
+  const g1 = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-race-g1', now: at(1_000)});
+  assert.equal(g1.claimedCoreGeneratedAt, 'G1');
+  enqueueSections(queue, {sections: ['profit'], idempotencyKey: 'core:G2', coreGeneratedAt: 'G2', now: at(2_000)});
+  const running = queue.entries.find(entry => entry.section === 'profit');
+  assert.equal(running.coreGeneratedAt, 'G2');
+  assert.equal(running.claimedCoreGeneratedAt, 'G1', 'a newer request must not rewrite the immutable claim generation');
+  assert.throws(
+    () => completeClaim(queue, {
+      section: 'profit',
+      leaseId: g1.leaseId,
+      expectedGeneratedAt: 'G1',
+      terminalGeneratedAt: 'G2',
+      terminalSectionGeneratedAt: 'G2',
+      terminalGenerationIdentity: 'a'.repeat(64),
+      now: at(3_000),
+    }),
+    /QUEUE_TERMINAL_GENERATION_MISMATCH/,
+    'G2 terminal evidence must never be recorded as a G1 publication',
+  );
+  assert.equal(queue.publishedSnapshots.length, 0);
+  failClaim(queue, {section: 'profit', leaseId: g1.leaseId, error: 'G1 superseded by G2', now: at(4_000), backoffSeconds: 0});
+  const g2 = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-race-g2', now: at(5_000)});
+  assert.equal(g2.claimedCoreGeneratedAt, 'G2');
+  assert.equal(completeClaim(queue, {
+    section: 'profit',
+    leaseId: g2.leaseId,
+    expectedGeneratedAt: 'G2',
+    terminalGeneratedAt: 'G2',
+    terminalSectionGeneratedAt: 'G2',
+    terminalGenerationIdentity: 'b'.repeat(64),
+    now: at(6_000),
+  }), true);
+  assert.deepEqual(queue.publishedSnapshots.map(snapshot => snapshot.coreGeneratedAt), ['G2']);
 }
 
 // ---- Structured outcomes + tombstone-first precedence: replaying a
@@ -883,7 +1006,10 @@ try {
 
     // Complete the running claim, then a FRESH process re-enqueues: tombstone
     // no-op, the entry is not recreated.
-    r = run('complete', '--section', claim.entry.section, '--lease-id', claim.entry.leaseId);
+    r = run(
+      'complete', '--section', claim.entry.section, '--lease-id', claim.entry.leaseId,
+      ...terminalEvidenceArgs(claim.entry.claimedCoreGeneratedAt, 'e'.repeat(64)),
+    );
     assert.equal(r.status, 0, r.stderr);
     r = run('enqueue', '--sections', claim.entry.section, '--priority', '10', '--idempotency-key', key, '--core-generated-at', 'G1');
     assert.equal(r.status, 0, r.stderr);

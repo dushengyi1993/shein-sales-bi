@@ -43,11 +43,14 @@ import {
 } from '../lib/shein_store_identity.mjs';
 import {
   acceptsGzip,
+  readBiSectionArtifactCache,
+  readBiSectionIntegrityMetadata,
   readBiSectionCache,
   readBiSectionCacheAnyGeneratedAt,
   readBiSectionMetadata,
   readBiSectionCacheRaw,
   readBiSectionStaleRaw,
+  readBiProfitBundleManifest,
   writeBiSectionCache,
 } from '../lib/bi_section_cache.mjs';
 import {
@@ -281,6 +284,10 @@ const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL'
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'inventoryStock', 'productState', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'liveSalesToday', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
+const BI_DIRECT_RECEIPT_MAX_BYTES = 64 * 1024;
+const BI_DIRECT_STDOUT_MAX_BYTES = 64 * 1024;
+const BI_DIRECT_STDERR_MAX_BYTES = 64 * 1024;
+const BI_PROFIT_FULL_FALLBACK_MAX_BYTES = 64 * 1024 * 1024;
 const BI_LIVE_UPDATE_CHANNEL = 'shein_bi_live_update';
 const BI_LIVE_UPDATE_RECONNECT_MS = Math.max(1_000, Number(process.env.SHEIN_BI_LIVE_UPDATE_RECONNECT_MS || 5_000));
 const BI_LIVE_UPDATE_HEARTBEAT_MS = Math.max(10_000, Number(process.env.SHEIN_BI_LIVE_UPDATE_HEARTBEAT_MS || 25_000));
@@ -11488,6 +11495,14 @@ function runChildProcess(command, args, options = {}) {
   const finalSettleGraceMs = Number.isFinite(settleGraceValue)
     ? Math.max(50, Math.min(2_000, Math.floor(settleGraceValue)))
     : RUN_CHILD_PROCESS_FINAL_SETTLE_GRACE_MS;
+  const normalizeOutputCap = value => {
+    if (value === undefined || value === null) return Infinity;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : Infinity;
+  };
+  const maxStdoutBytes = normalizeOutputCap(options.maxStdoutBytes);
+  const maxStderrBytes = normalizeOutputCap(options.maxStderrBytes);
+  const failOnOutputOverflow = options.failOnOutputOverflow === true;
   // Internal-only test seam used by the shutdown-lifecycle suite to inject a
   // fake child whose kill() never produces close. Production callers never
   // pass it, and no external input can reach this option.
@@ -11507,6 +11522,10 @@ function runChildProcess(command, args, options = {}) {
       closeNeverObserved: false,
       stdout: '',
       stderr: '',
+      outputOverflow: false,
+      overflowStream: '',
+      stdoutBytes: 0,
+      stderrBytes: 0,
       wallMs: Date.now() - startedAt,
     });
   }
@@ -11514,6 +11533,12 @@ function runChildProcess(command, args, options = {}) {
     let child = null;
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutCapturedBytes = 0;
+    let stderrCapturedBytes = 0;
+    let outputOverflow = false;
+    let overflowStream = '';
     let timedOut = false;
     let aborted = false;
     let abortReason = '';
@@ -11526,9 +11551,36 @@ function runChildProcess(command, args, options = {}) {
     let abortListener = null;
     let childErrorListener = null;
     let childCloseListener = null;
-    const onStdout = chunk => { stdout += chunk; };
-    const onStderr = chunk => { stderr += chunk; };
-    const onStdinError = error => { stderr += `\nstdin error: ${error?.message || error}`; };
+    const appendOutput = (stream, chunk) => {
+      const text = String(chunk ?? '');
+      const bytes = Buffer.byteLength(text, 'utf8');
+      const isStdout = stream === 'stdout';
+      const cap = isStdout ? maxStdoutBytes : maxStderrBytes;
+      if (isStdout) stdoutBytes += bytes;
+      else stderrBytes += bytes;
+      let current = isStdout ? stdout : stderr;
+      const currentBytes = isStdout ? stdoutCapturedBytes : stderrCapturedBytes;
+      const remaining = Number.isFinite(cap) ? Math.max(0, cap - currentBytes) : bytes;
+      if (remaining > 0) {
+        const appended = Number.isFinite(cap) && bytes > remaining
+          ? Buffer.from(text, 'utf8').subarray(0, remaining).toString('utf8')
+          : text;
+        current += appended;
+        const appendedBytes = Buffer.byteLength(appended, 'utf8');
+        if (isStdout) stdoutCapturedBytes += appendedBytes;
+        else stderrCapturedBytes += appendedBytes;
+      }
+      if (isStdout) stdout = current;
+      else stderr = current;
+      if (Number.isFinite(cap) && bytes > remaining && failOnOutputOverflow && !outputOverflow) {
+        outputOverflow = true;
+        overflowStream = stream;
+        terminate('output-overflow');
+      }
+    };
+    const onStdout = chunk => appendOutput('stdout', chunk);
+    const onStderr = chunk => appendOutput('stderr', chunk);
+    const onStdinError = error => appendOutput('stderr', `\nstdin error: ${error?.message || error}`);
 
     const cleanup = () => {
       clearTimeout(timeoutTimer);
@@ -11545,9 +11597,9 @@ function runChildProcess(command, args, options = {}) {
       if (settled) return;
       settled = true;
       cleanup();
-      if (spawnError) stderr += `${stderr ? '\n' : ''}${String(spawnError?.stack || spawnError)}`;
+      if (spawnError) appendOutput('stderr', `${stderr ? '\n' : ''}${String(spawnError?.stack || spawnError)}`);
       resolve({
-        ok: code === 0 && !timedOut && !aborted && !spawnError && !closeNeverObserved,
+        ok: code === 0 && !timedOut && !aborted && !spawnError && !closeNeverObserved && !outputOverflow,
         code: spawnError ? -1 : code,
         timedOut,
         aborted,
@@ -11559,6 +11611,10 @@ function runChildProcess(command, args, options = {}) {
         closeNeverObserved,
         stdout,
         stderr,
+        outputOverflow,
+        overflowStream,
+        stdoutBytes,
+        stderrBytes,
         wallMs: Date.now() - startedAt,
       });
     };
@@ -11569,18 +11625,20 @@ function runChildProcess(command, args, options = {}) {
         abortReason = childAbortReason(signal);
       } else if (cause === 'timeout') {
         timedOut = true;
+      } else if (cause === 'output-overflow') {
+        outputOverflow = true;
       }
       if (!child || terminationRequested) return;
       terminationRequested = true;
       terminationSignals.push('SIGTERM');
       try { child.kill('SIGTERM'); } catch (error) {
-        stderr += `\nSIGTERM failed: ${error?.message || error}`;
+        appendOutput('stderr', `\nSIGTERM failed: ${error?.message || error}`);
       }
       killTimer = setTimeout(() => {
         if (settled) return;
         terminationSignals.push('SIGKILL');
         try { child.kill('SIGKILL'); } catch (error) {
-          stderr += `\nSIGKILL failed: ${error?.message || error}`;
+          appendOutput('stderr', `\nSIGKILL failed: ${error?.message || error}`);
         }
         // Bounded final settle grace after SIGKILL. If the child still never
         // emits close (unkillable process / zombie), destroy the local stdio so
@@ -11634,7 +11692,7 @@ function runChildProcess(command, args, options = {}) {
         child.stdin.write(String(options.stdin));
         child.stdin.end();
       } catch (error) {
-        stderr += `\nstdin write failed: ${error?.message || error}`;
+        appendOutput('stderr', `\nstdin write failed: ${error?.message || error}`);
         terminate('stdin-error');
       }
     }
@@ -12469,22 +12527,18 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
 
 async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
   if (!String(generatedAt || '')) return null;
-  const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+  const currentProfitCache = await readCurrentProfitSource(root, generatedAt);
   // homeProfit must derive only from the profit cache of the exact current
   // core generation. An older profit cache is never a valid homeProfit source:
   // serving it would let an outdated profit summary masquerade as current.
   if (!isCurrentProfitSectionCache(currentProfitCache, generatedAt)) return null;
-  const sourceGeneratedAt = String(currentProfitCache.generatedAt || '');
-  const data = buildHomeProfitSummaryFromProfitData(currentProfitCache.data, {
-    sourceGeneratedAt,
-    sourceCachedAt: String(currentProfitCache.cachedAt || ''),
-    staleSource: Boolean(generatedAt && sourceGeneratedAt && sourceGeneratedAt !== String(generatedAt || '')),
-  });
-  return writeBiSectionCache(root, 'homeProfit', generatedAt, data, {
-    code: 0,
-    timedOut: false,
-    stderr: '',
-  });
+  // homeProfit is a member of the profit bundle. A request-time derivation
+  // must never publish it alone, because that would make the three artifacts
+  // observe different cachedAt/generation identities after a crash.
+  const currentHomeProfit = await readBiSectionCache(root, 'homeProfit', generatedAt).catch(() => null);
+  return isCurrentHomeProfitSectionCache(currentHomeProfit, generatedAt)
+    ? currentHomeProfit
+    : null;
 }
 
 // Request-state productProfit section: never persisted, never prewarmed,
@@ -12512,16 +12566,71 @@ function isCurrentProfitSectionCache(cache, generatedAt, minCachedAt = '') {
   );
 }
 
+async function readCurrentProfitSource(root, generatedAt) {
+  const expected = String(generatedAt || '');
+  if (!expected) return null;
+  if (!await readBiProfitBundleManifest(root, expected).catch(() => null)) return null;
+  const compact = await readBiSectionArtifactCache(
+    root,
+    'profit.query',
+    'profit.query',
+    expected,
+    {requireIntegrity: true},
+  ).catch(() => null);
+  if (isCurrentProfitSectionCache(compact, expected)) return compact;
+
+  // A legacy/full artifact is only an allowed fallback when its bounded
+  // metadata proves it is below the 64 MiB per-section ceiling. In particular,
+  // the normal ~104 MiB profit Portal cache is never parsed by this path.
+  const fullMeta = await readBiSectionMetadata(root, 'profit');
+  if (!fullMeta || fullMeta.generatedAt !== expected || Number(fullMeta.size || 0) > BI_PROFIT_FULL_FALLBACK_MAX_BYTES) return null;
+  const full = await readBiSectionCache(root, 'profit', expected).catch(() => null);
+  return isCurrentProfitSectionCache(full, expected) ? full : null;
+}
+
+function isCurrentHomeProfitSectionCache(cache, generatedAt, minSourceCachedAt = '') {
+  const expected = String(generatedAt || '');
+  const minimum = Date.parse(String(minSourceCachedAt || ''));
+  const summary = cache?.data?.homeProfitSummary;
+  const sourceCachedAt = Date.parse(String(summary?.sourceCachedAt || ''));
+  return Boolean(
+    expected
+    && String(cache?.generatedAt || '') === expected
+    && summary
+    && summary.staleSource !== true
+    && String(summary.sourceGeneratedAt || '') === expected
+    && Array.isArray(summary.dailyScopes),
+  ) && (
+    Number.isNaN(minimum)
+    || (!Number.isNaN(sourceCachedAt) && sourceCachedAt >= minimum)
+  );
+}
+
 async function readBiSectionArtifactIdentity(root, section) {
   const meta = await readBiSectionMetadata(root, section);
   if (!meta) return null;
   return {
+    artifact: section,
     generatedAt: meta.generatedAt,
     cachedAt: meta.cachedAt,
     size: meta.size,
     mtimeMs: meta.mtimeMs,
     cacheKey: meta.cacheKey,
   };
+}
+
+async function readCurrentProfitSourceIdentity(root, generatedAt) {
+  const expected = String(generatedAt || '');
+  if (!expected) return null;
+  if (!await readBiProfitBundleManifest(root, expected).catch(() => null)) return null;
+  const compactIntegrity = await readBiSectionIntegrityMetadata(root, 'profit.query', expected).catch(() => null);
+  if (compactIntegrity) {
+    const compact = await readBiSectionArtifactIdentity(root, 'profit.query');
+    if (compact?.generatedAt === expected) return compact;
+  }
+  const full = await readBiSectionArtifactIdentity(root, 'profit');
+  if (!full || full.generatedAt !== expected || Number(full.size || 0) > BI_PROFIT_FULL_FALLBACK_MAX_BYTES) return null;
+  return full;
 }
 
 function buildBiProductProfitIndex(profitCache, cacheKey = '', productDisplayNames = {}) {
@@ -12554,7 +12663,7 @@ function buildBiProductProfitIndex(profitCache, cacheKey = '', productDisplayNam
 
 async function loadCurrentBiProductProfitIndex(root, generatedAt, retry = 0) {
   if (!String(generatedAt || '')) return null;
-  const before = await readBiSectionArtifactIdentity(root, 'profit');
+  const before = await readCurrentProfitSourceIdentity(root, generatedAt);
   if (!before || before.generatedAt !== String(generatedAt || '')) return null;
   const cacheKey = before.cacheKey;
   if (biProductProfitIndex?.cacheKey === cacheKey) return biProductProfitIndex;
@@ -12568,15 +12677,15 @@ async function loadCurrentBiProductProfitIndex(root, generatedAt, retry = 0) {
     const holder = {cacheKey, promise: null};
     holder.promise = (async () => {
       if (previous) await previous;
-      const profitCache = await readBiSectionCache(root, 'profit', generatedAt).catch(() => null);
+      const profitCache = await readCurrentProfitSource(root, generatedAt);
       if (!isCurrentProfitSectionCache(profitCache, generatedAt) || String(profitCache.cachedAt || '') !== before.cachedAt) return null;
       const core = await readJsonFile(path.join(root, 'data.json'), {});
       const productDisplayNames = core?.productDisplayNames && typeof core.productDisplayNames === 'object'
         ? core.productDisplayNames
         : {};
       const index = buildBiProductProfitIndex(profitCache, cacheKey, productDisplayNames);
-      const after = await readBiSectionArtifactIdentity(root, 'profit');
-      if (!after || after.cacheKey !== cacheKey) return null;
+      const after = await readCurrentProfitSourceIdentity(root, generatedAt);
+      if (!after || after.cacheKey !== cacheKey || after.artifact !== before.artifact) return null;
       biProductProfitIndex = index;
       return index;
     })().finally(() => {
@@ -12668,7 +12777,7 @@ async function loadBiProductProfitSection(args, root, options = {}) {
   }
   const [latestMeta, latestArtifact] = await Promise.all([
     readBiPortalCoreMeta(root).catch(() => null),
-    readBiSectionArtifactIdentity(root, 'profit'),
+    readCurrentProfitSourceIdentity(root, generatedAt),
   ]);
   if (String(latestMeta?.generatedAt || '') !== generatedAt || latestArtifact?.cacheKey !== index.cacheKey) {
     if (options.generationRetry !== true) {
@@ -12968,6 +13077,151 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
   return biProfitMartFreshnessPromise;
 }
 
+function directReceiptExactKeys(value, keys, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const expected = new Set(keys);
+  const actual = Object.keys(value);
+  if (actual.length !== expected.size || actual.some(key => !expected.has(key))) {
+    throw new Error(`${label} has unexpected fields`);
+  }
+  return value;
+}
+
+function directReceiptSha(value, label) {
+  const text = String(value || '');
+  if (!/^[a-f0-9]{64}$/.test(text)) throw new Error(`${label} must be a sha256 digest`);
+  return text;
+}
+
+function directReceiptByteSize(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive safe byte size`);
+  return value;
+}
+
+function validateDirectReceiptArtifact(value, expectedArtifact, expectedGeneratedAt) {
+  const artifact = directReceiptExactKeys(value, [
+    'artifact',
+    'file',
+    'section',
+    'generatedAt',
+    'cachedAt',
+    'publishedAt',
+    'generationIdentity',
+    'bindingSha256',
+    'raw',
+    'gzip',
+  ], `receipt artifact ${expectedArtifact}`);
+  if (String(artifact.artifact || '') !== expectedArtifact
+    || String(artifact.section || '') !== expectedArtifact
+    || String(artifact.generatedAt || '') !== expectedGeneratedAt) {
+    throw new Error(`receipt artifact ${expectedArtifact} identity mismatch`);
+  }
+  for (const [field, value] of [['file', artifact.file], ['cachedAt', artifact.cachedAt], ['publishedAt', artifact.publishedAt], ['generationIdentity', artifact.generationIdentity], ['bindingSha256', artifact.bindingSha256]]) {
+    if (typeof value !== 'string' || !value) throw new Error(`receipt artifact ${expectedArtifact}.${field} is missing`);
+  }
+  directReceiptSha(artifact.generationIdentity, `receipt artifact ${expectedArtifact}.generationIdentity`);
+  directReceiptSha(artifact.bindingSha256, `receipt artifact ${expectedArtifact}.bindingSha256`);
+  const raw = directReceiptExactKeys(artifact.raw, ['file', 'sha256', 'byteSize'], `receipt artifact ${expectedArtifact}.raw`);
+  const gzip = directReceiptExactKeys(artifact.gzip, ['file', 'sha256', 'byteSize', 'sourceRawSha256', 'sourceGenerationIdentity'], `receipt artifact ${expectedArtifact}.gzip`);
+  if (typeof raw.file !== 'string' || !raw.file || typeof gzip.file !== 'string' || !gzip.file) {
+    throw new Error(`receipt artifact ${expectedArtifact} file metadata is missing`);
+  }
+  directReceiptSha(raw.sha256, `receipt artifact ${expectedArtifact}.raw.sha256`);
+  directReceiptSha(gzip.sha256, `receipt artifact ${expectedArtifact}.gzip.sha256`);
+  directReceiptByteSize(raw.byteSize, `receipt artifact ${expectedArtifact}.raw.byteSize`);
+  directReceiptByteSize(gzip.byteSize, `receipt artifact ${expectedArtifact}.gzip.byteSize`);
+  if (gzip.sourceRawSha256 !== raw.sha256 || gzip.sourceGenerationIdentity !== artifact.generationIdentity) {
+    throw new Error(`receipt artifact ${expectedArtifact} gzip source binding mismatch`);
+  }
+  return artifact;
+}
+
+export function parseDirectCacheReceipt(stdout, expectedSection, expectedGeneratedAt) {
+  const text = String(stdout || '').trim();
+  if (!text) throw new Error('BI direct-cache receipt is empty');
+  if (Buffer.byteLength(text, 'utf8') > BI_DIRECT_RECEIPT_MAX_BYTES) {
+    throw new Error('BI direct-cache receipt exceeds bounded stdout limit');
+  }
+  let receipt;
+  try {
+    receipt = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`BI direct-cache receipt is invalid JSON: ${error?.message || error}`);
+  }
+  const section = String(expectedSection || '');
+  const generatedAt = String(expectedGeneratedAt || '');
+  if (!section || !generatedAt) throw new Error('BI direct-cache receipt verification requires section and generatedAt');
+  directReceiptExactKeys(receipt, ['ok', 'mode', 'section', 'generatedAt', 'coreGeneratedAt', 'artifacts'], 'BI direct-cache receipt');
+  if (receipt.ok !== true || receipt.mode !== 'direct-cache-publish'
+    || String(receipt.section || '') !== section
+    || String(receipt.generatedAt || '') !== generatedAt
+    || String(receipt.coreGeneratedAt || '') !== generatedAt) {
+    throw new Error('BI direct-cache receipt core identity mismatch');
+  }
+  const expectedArtifacts = section === 'profit' ? ['profit', 'profit.query', 'homeProfit'] : [section];
+  if (!Array.isArray(receipt.artifacts) || receipt.artifacts.length !== expectedArtifacts.length) {
+    throw new Error(`BI direct-cache receipt artifact count mismatch for ${section}`);
+  }
+  receipt.artifacts.forEach((artifact, index) => validateDirectReceiptArtifact(artifact, expectedArtifacts[index], generatedAt));
+  return receipt;
+}
+
+function directReceiptMatchesIntegrity(receiptArtifact, integrity) {
+  if (!integrity?.ok || !receiptArtifact) return false;
+  return receiptArtifact.artifact === integrity.artifact
+    && receiptArtifact.file === integrity.file
+    && receiptArtifact.section === integrity.section
+    && receiptArtifact.generatedAt === integrity.generatedAt
+    && receiptArtifact.cachedAt === integrity.cachedAt
+    && receiptArtifact.publishedAt === integrity.publishedAt
+    && receiptArtifact.generationIdentity === integrity.generationIdentity
+    && receiptArtifact.bindingSha256 === integrity.bindingSha256
+    && receiptArtifact.raw?.file === integrity.raw?.file
+    && receiptArtifact.raw?.sha256 === integrity.raw?.sha256
+    && receiptArtifact.raw?.byteSize === integrity.raw?.byteSize
+    && receiptArtifact.gzip?.file === integrity.gzip?.file
+    && receiptArtifact.gzip?.sha256 === integrity.gzip?.sha256
+    && receiptArtifact.gzip?.byteSize === integrity.gzip?.byteSize
+    && receiptArtifact.gzip?.sourceRawSha256 === integrity.gzip?.sourceRawSha256
+    && receiptArtifact.gzip?.sourceGenerationIdentity === integrity.gzip?.sourceGenerationIdentity;
+}
+
+export async function verifyDirectCacheReceipt(root, receipt, expectedSection, expectedGeneratedAt) {
+  const parsed = parseDirectCacheReceipt(JSON.stringify(receipt), expectedSection, expectedGeneratedAt);
+  const bundle = ['profit', 'homeProfit'].includes(String(expectedSection || ''))
+    ? await readBiProfitBundleManifest(root, expectedGeneratedAt).catch(() => null)
+    : null;
+  if (['profit', 'homeProfit'].includes(String(expectedSection || '')) && !bundle) {
+    throw new Error(`BI direct-cache ${expectedSection} profit bundle manifest readback mismatch`);
+  }
+  const verified = [];
+  for (const receiptArtifact of parsed.artifacts) {
+    const integrity = await readBiSectionIntegrityMetadata(root, receiptArtifact.artifact, expectedGeneratedAt);
+    if (!directReceiptMatchesIntegrity(receiptArtifact, integrity)) {
+      throw new Error(`BI direct-cache artifact ${receiptArtifact.artifact} integrity readback mismatch`);
+    }
+    const metadata = await readBiSectionMetadata(root, receiptArtifact.artifact);
+    if (!metadata || metadata.section !== receiptArtifact.artifact
+      || metadata.generatedAt !== expectedGeneratedAt || metadata.hasData !== true) {
+      throw new Error(`BI direct-cache artifact ${receiptArtifact.artifact} metadata readback mismatch`);
+    }
+    if (bundle) {
+      const record = bundle.artifacts[receiptArtifact.artifact];
+      if (!record
+        || record.cachedAt !== receiptArtifact.cachedAt
+        || record.generationIdentity !== receiptArtifact.generationIdentity
+        || record.rawSha256 !== receiptArtifact.raw.sha256
+        || record.rawByteSize !== receiptArtifact.raw.byteSize) {
+        throw new Error(`BI direct-cache bundle artifact ${receiptArtifact.artifact} mismatch`);
+      }
+    }
+    verified.push({artifact: receiptArtifact.artifact, metadata, integrity});
+  }
+  return {receipt: parsed, verified};
+}
+
 async function generateBiSection(args, root, section, generatedAt) {
   // inventoryTrend consumes historical sales/profit rows too. Using the
   // published cache avoids expanding mart.profit_order_item on every trend
@@ -12980,36 +13234,43 @@ async function generateBiSection(args, root, section, generatedAt) {
   const accountingFreshnessRequiredSections = new Set(['profit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend']);
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
-  const refreshRun = sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)
-    ? await ensureProfitMartCacheFresh(args, generatedAt)
-    : null;
+  if (sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)) {
+    await ensureProfitMartCacheFresh(args, generatedAt);
+  }
   if (sourceMode === 'cache' && section === 'homeProfit') {
     const accountingState = await readProfitAccountingState(args, generatedAt, {forceFresh: true});
-    let currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+    let currentProfitCache = await readCurrentProfitSource(root, generatedAt);
+    let currentHomeProfitCache = await readBiSectionCache(root, 'homeProfit', generatedAt);
     if (
       !accountingState.decision.fresh
       || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, accountingState.minimumPublishedAt)
+      || !isCurrentHomeProfitSectionCache(currentHomeProfitCache, generatedAt, accountingState.minimumPublishedAt)
     ) {
       const generated = await generateBiSection(args, root, 'profit', generatedAt);
-      if (!generated?.data?.profit) {
-        throw new Error('homeProfit requires a fresh profit section cache');
+      if (!generated?.directCache || !generated?.receipt) {
+        throw new Error('homeProfit requires a direct-cache profit publication receipt');
       }
-      currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+      currentProfitCache = await readCurrentProfitSource(root, generatedAt);
       const after = await readProfitAccountingState(args, generatedAt, {forceFresh: true});
       if (!after.decision.fresh || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
         throw new Error('homeProfit profit source remained stale after canonical refresh');
       }
+      currentHomeProfitCache = await readBiSectionCache(root, 'homeProfit', generatedAt);
+      if (!isCurrentHomeProfitSectionCache(currentHomeProfitCache, generatedAt, after.minimumPublishedAt)) {
+        throw new Error('homeProfit direct publication remained stale after canonical refresh');
+      }
     }
-    const derived = await deriveHomeProfitSectionFromProfitCache(root, generatedAt);
-    if (!derived?.data?.homeProfitSummary) {
-      throw new Error('homeProfit could not be derived from the current profit section cache');
-    }
-    return derived;
+    return currentHomeProfitCache;
+  }
+  const coreMeta = await readBiPortalCoreMeta(root);
+  if (!generatedAt || String(coreMeta.generatedAt || '') !== String(generatedAt || '')) {
+    throw new Error(`BI section ${section} generation requires exact core generatedAt: expected=${generatedAt || ''} actual=${coreMeta.generatedAt || ''}`);
   }
   const run = await runChildProcess(process.execPath, [
     path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),
     '--section', section,
-    '--json-only',
+    '--direct-cache-publish',
+    '--generated-at', generatedAt,
     '--out-dir', root,
     '--distro', args.distro,
     '--container', args.container,
@@ -13018,6 +13279,9 @@ async function generateBiSection(args, root, section, generatedAt) {
   ], {
     cwd: ROOT,
     timeoutMs: BI_PORTAL_SECTION_TIMEOUT_MS,
+    maxStdoutBytes: BI_DIRECT_STDOUT_MAX_BYTES,
+    maxStderrBytes: BI_DIRECT_STDERR_MAX_BYTES,
+    failOnOutputOverflow: true,
     env: {
       SHEIN_BI_PORTAL_TIMEOUT_MS: String(Math.max(BI_PORTAL_SECTION_TIMEOUT_MS + 60_000, Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 0) || 0)),
       SHEIN_BI_PROFIT_MART_SOURCE: sourceMode,
@@ -13025,55 +13289,21 @@ async function generateBiSection(args, root, section, generatedAt) {
   });
   if (!run.ok) {
     const tail = String(run.stderr || run.stdout || '').slice(-2000);
-    throw new Error(`BI section ${section} generation failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
+    throw new Error(`BI section ${section} generation failed: code=${run.code} timedOut=${run.timedOut} outputOverflow=${Boolean(run.outputOverflow)} ${tail}`);
   }
-  let data;
-  try {
-    data = JSON.parse(run.stdout || '{}');
-  } catch (err) {
-    throw new Error(`BI section ${section} returned invalid JSON: ${err?.message || err}`);
+  const postGenerationCoreMeta = await readBiPortalCoreMeta(root);
+  if (String(postGenerationCoreMeta.generatedAt || '') !== String(generatedAt || '')) {
+    throw new Error(`BI section ${section} core generatedAt changed during child publication: expected=${generatedAt || ''} actual=${postGenerationCoreMeta.generatedAt || ''}`);
   }
-  if (section === 'homeRankings') {
-    data = compactHomeRankingsSectionData(data);
-  }
-  const written = await writeBiSectionCache(root, section, generatedAt, data, refreshRun ? {
-    ...run,
-    stderr: `${run.stderr || ''}\n${refreshRun.stdout || ''}\n${refreshRun.stderr || ''}`,
-  } : run);
-  if (section === 'profit') {
-    // A newer accounting revision may arrive while the multi-minute profit
-    // build is running. The queue must preserve that newer revision, but the
-    // exact-generation profit artifact we just published is still a safe
-    // homepage fallback while the next revision catches up. Derive it here so
-    // homeProfit can return 200 + accountingPending instead of remaining 202
-    // behind a superseded profit lease forever.
-    const derived = await deriveHomeProfitSectionFromProfitCache(root, generatedAt);
-    if (!derived?.data?.homeProfitSummary) {
-      throw new Error('profit refresh could not publish its exact-generation homeProfit fallback');
-    }
-  }
-  return written;
-}
-
-function compactHomeRankingsSectionData(data) {
-  if (!data?.rankings || typeof data.rankings !== 'object') return data;
-  const compact = {...data, rankings: {...data.rankings}};
-  for (const key of ['dailyProducts', 'dailyStoreProducts']) {
-    const rows = Array.isArray(compact.rankings[key]) ? compact.rankings[key] : null;
-    if (!rows) continue;
-    compact.rankings[key] = rows.map(row => {
-      if (!row || typeof row !== 'object') return row;
-      const {
-        goods_title: _goodsTitle,
-        skc_list: _skcList,
-        product_display_name: _productDisplayName,
-        product_display_name_source: _productDisplayNameSource,
-        ...rest
-      } = row;
-      return rest;
-    });
-  }
-  return compact;
+  const receipt = parseDirectCacheReceipt(run.stdout, section, generatedAt);
+  await verifyDirectCacheReceipt(root, receipt, section, generatedAt);
+  return {
+    ok: true,
+    directCache: true,
+    section,
+    generatedAt,
+    receipt,
+  };
 }
 
 async function loadBiSection(args, root, section, options = {}) {
@@ -13116,6 +13346,20 @@ async function loadBiSection(args, root, section, options = {}) {
     return {status: 404, payload: {ok: false, error: 'Unknown BI section', section}};
   }
   const meta = await readBiPortalCoreMeta(root);
+  const expectedGeneratedAt = String(options.expectedGeneratedAt || '').trim();
+  if (expectedGeneratedAt && String(meta.generatedAt || '') !== expectedGeneratedAt) {
+    return {
+      status: 409,
+      payload: {
+        ok: false,
+        section,
+        code: 'BI_SECTION_CORE_GENERATION_MISMATCH',
+        expectedGeneratedAt,
+        generatedAt: String(meta.generatedAt || ''),
+        error: 'section refresh claim generation is no longer current',
+      },
+    };
+  }
   if (meta.mode !== 'api' && !force) {
     return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
   }
@@ -13256,7 +13500,7 @@ async function loadBiSection(args, root, section, options = {}) {
       // summary is never valid data. Derive inline from the current-generation
       // profit cache when present; otherwise enqueue profit at dependency
       // priority and fail with 503 (this branch is force-only).
-      const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt).catch(() => null);
+      const currentProfitCache = await readCurrentProfitSource(root, meta.generatedAt);
       if (!isCurrentProfitSectionCache(currentProfitCache, meta.generatedAt)) {
         const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, 'profit', meta.generatedAt, {
           priority: '5',
@@ -13365,7 +13609,7 @@ async function loadBiSection(args, root, section, options = {}) {
     // A stale-source homeProfit cache is never a valid 200: only the current
     // core generation's profit cache may back homeProfit. Without it, enqueue
     // profit at dependency priority (merged by key) and fail closed.
-    const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt).catch(() => null);
+    const currentProfitCache = await readCurrentProfitSource(root, meta.generatedAt);
     if (!isCurrentProfitSectionCache(currentProfitCache, meta.generatedAt)) {
       if (!allowGenerate) {
         return {
@@ -17394,6 +17638,7 @@ async function main() {
             sections,
             stores,
             allowGenerate: allowGenerateSections,
+            signal: streamController.signal,
           });
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
@@ -17867,6 +18112,7 @@ async function main() {
           const force = url.searchParams.get('refresh') === '1';
           const asyncRefresh = force && ['1', 'true', 'yes'].includes(String(url.searchParams.get('async') || '').toLowerCase());
           const refreshToken = String(url.searchParams.get('refreshToken') || '').slice(0, 160);
+          const expectedGeneratedAt = String(url.searchParams.get('expectedGeneratedAt') || '').trim().slice(0, 1024);
           const q = String(url.searchParams.get('q') || '').trim();
           const hostLockedWorker = isTrustedInternalRequest(req)
             && String(req.headers['x-shein-bi-host-locked-worker'] || '') === '1';
@@ -17879,6 +18125,7 @@ async function main() {
               force,
               asyncRefresh,
               refreshToken,
+              expectedGeneratedAt,
               hostLockedWorker,
               allowGenerate,
               gzip: acceptsGzip(req.headers['accept-encoding']),
@@ -21838,6 +22085,12 @@ export const __testHooks = {
   classifyLinkOpsLifecycle,
   persistClaimedLinkOpsExecutionResult,
   runChildProcess,
+  parseDirectCacheReceipt,
+  verifyDirectCacheReceipt,
+  BI_DIRECT_RECEIPT_MAX_BYTES,
+  BI_DIRECT_STDOUT_MAX_BYTES,
+  BI_DIRECT_STDERR_MAX_BYTES,
+  generateBiSection,
   createProfitAccountingStateReader,
   profitAccountingStateCacheKey,
   OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,

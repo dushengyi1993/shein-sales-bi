@@ -67,6 +67,33 @@ function makePortal(portalRoot, sections) {
   }
 }
 
+async function seedStrictPortalArtifacts(portalRoot, binDir, sections) {
+  // The worker itself runs under bash/WSL in this focused integration test;
+  // publish the raw/gzip/sidecar fixture in that same runtime so stat
+  // bindings are comparable to the terminal validator.
+  const seedFile = path.join(binDir, 'seed-portal.mjs');
+  const cacheModule = toPosixPath(path.join(root, 'lib', 'bi_section_cache.mjs'));
+  fs.writeFileSync(seedFile, `import {publishBiProfitBundleManifest, writeBiSectionArtifact, writeBiSectionCache} from ${JSON.stringify(cacheModule)};
+const root = ${JSON.stringify(toPosixPath(portalRoot))};
+const sections = ${JSON.stringify(sections)};
+const generatedAt = ${JSON.stringify(generatedAt)};
+const run = {code: 0, timedOut: false, stderr: ''};
+if (sections.includes('profit')) {
+  const profitData = {profit: {dailyStoreProducts: []}};
+  await writeBiSectionCache(root, 'profit', generatedAt, profitData, run, {requireIntegrity: true});
+  await writeBiSectionArtifact(root, 'profit.query', 'profit.query', generatedAt, profitData, run, {requireIntegrity: true});
+  await writeBiSectionCache(root, 'homeProfit', generatedAt, {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: false}}, run, {requireIntegrity: true});
+  await publishBiProfitBundleManifest(root, generatedAt);
+}
+for (const section of sections) {
+  if (section === 'profit') continue;
+  await writeBiSectionCache(root, section, generatedAt, section === 'orders' ? {} : {}, run, {requireIntegrity: true});
+}
+`);
+  const seeded = await spawnCapture('bash', ['-c', `node ${shellQuote(toPosixPath(seedFile))}`], {timeout: 60_000});
+  assert.equal(seeded.status, 0, `strict portal fixture seed failed: ${seeded.stderr}`);
+}
+
 function makeQueue(queueFile, sections, now) {
   const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: []};
   enqueueSections(queue, {
@@ -140,6 +167,7 @@ async function runWindowCase({
   const curlLog = path.join(dir, 'curl.log');
   fs.mkdirSync(binDir, {recursive: true});
   makePortal(portalRoot, sections);
+  await seedStrictPortalArtifacts(portalRoot, binDir, sections);
   makeQueue(queueFile, sections, new Date('2026-08-22T00:00:00.000Z'));
   makeDateStub(binDir, {hour, minute, nowEpoch, deadlineEpoch});
   makeCurlStub(binDir);

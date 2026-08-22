@@ -87,6 +87,10 @@ response_header_value() {
   ' "$HEADERS_FILE"
 }
 
+urlencode_query_value() {
+  node -e 'process.stdout.write(encodeURIComponent(process.argv[1] || ""))' "$1"
+}
+
 bounded_refresh_failure_reason() {
   local encoded_error="${1:0:$REFRESH_ERROR_MAX_ENCODED}"
   local failed_at="$2"
@@ -231,6 +235,11 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   [[ "$CLAIM_STATUS" -eq 0 ]] || exit "$CLAIM_STATUS"
   SECTION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.entry?.section||""))' "$CLAIM")"
   LEASE_ID="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.entry?.leaseId||""))' "$CLAIM")"
+  CLAIMED_CORE_GENERATED_AT="$(node -e 'const x=JSON.parse(process.argv[1]); const value=String(x.entry?.claimedCoreGeneratedAt||""); if(!/^[\x21-\x7E]{1,1024}$/.test(value)||value==="unknown") process.exit(2); process.stdout.write(value)' "$CLAIM")" || {
+    queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" --error "claim missing immutable claimedCoreGeneratedAt" >/dev/null || true
+    echo "[portal-section-worker] invalid claim generation: $CLAIM" >&2
+    exit 1
+  }
   [[ -n "$SECTION" && -n "$LEASE_ID" ]] || {
     echo "[portal-section-worker] invalid claim: $CLAIM" >&2
     exit 1
@@ -240,13 +249,14 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   CURL_TIMEOUT="$SECTION_TIMEOUT"
   if (( CURL_TIMEOUT > REMAINING_SEC - 5 )); then CURL_TIMEOUT=$((REMAINING_SEC - 5)); fi
   HEADERS_FILE="$(mktemp)"
+  EXPECTED_GENERATED_AT_QUERY="$(urlencode_query_value "$CLAIMED_CORE_GENERATED_AT")"
   # -f is deliberately not used: 202/403/503 responses must be classified
   # explicitly. Only a real HTTP 200 may even be considered for completion.
   set +e
   HTTP_CODE="$(curl -sS --max-time "$CURL_TIMEOUT" \
     -D "$HEADERS_FILE" -o /dev/null -w '%{http_code}' \
     -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
-    "$PORTAL_URL/api/bi/section/$SECTION?refresh=1")"
+    "$PORTAL_URL/api/bi/section/$SECTION?refresh=1&expectedGeneratedAt=$EXPECTED_GENERATED_AT_QUERY")"
   CURL_STATUS=$?
   set -e
   if [[ "$CURL_STATUS" -ne 0 ]]; then
@@ -293,11 +303,43 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     # current core generation. Verify the exact section file readback.
     set +e
     TERMINAL_REPORT="$(node scripts/check_bi_portal_section_terminal.mjs \
-      --root "$PORTAL_ROOT" --section "$SECTION" 2>&1)"
+      --root "$PORTAL_ROOT" --section "$SECTION" \
+      --expected-generated-at "$CLAIMED_CORE_GENERATED_AT" 2>&1)"
     TERMINAL_STATUS=$?
     set -e
     if [[ "$TERMINAL_STATUS" -eq 0 ]]; then
-      COMPLETE_REPORT="$(queue_command complete --section "$SECTION" --lease-id "$LEASE_ID")"
+      set +e
+      TERMINAL_EVIDENCE="$(node - "$TERMINAL_REPORT" "$SECTION" "$CLAIMED_CORE_GENERATED_AT" <<'NODE'
+const reportText = String(process.argv[2] || '').trim();
+const section = String(process.argv[3] || '');
+const expected = String(process.argv[4] || '');
+let report = null;
+try {
+  const line = reportText.split(/\r?\n/u).filter(Boolean).at(-1) || '';
+  report = JSON.parse(line);
+} catch {}
+if (!report || report.ok !== true || report.section !== section
+  || report.coreGeneratedAt !== expected || report.sectionGeneratedAt !== expected
+  || report.generatedAt !== expected || !/^[a-f0-9]{64}$/u.test(String(report.generationIdentity || ''))) process.exit(2);
+process.stdout.write([report.generatedAt, report.sectionGeneratedAt, report.generationIdentity].join('\t'));
+NODE
+      )"
+      TERMINAL_EVIDENCE_STATUS=$?
+      set -e
+      if [[ "$TERMINAL_EVIDENCE_STATUS" -ne 0 ]]; then
+        queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
+          --error "terminal evidence generation or identity mismatch" >/dev/null
+        echo "[portal-section-worker] section=$SECTION failed terminal evidence mismatch" >&2
+        FAILED_SECTIONS+=("$SECTION:terminal-evidence")
+        rm -f "$HEADERS_FILE"
+        continue
+      fi
+      IFS=$'\t' read -r TERMINAL_GENERATED_AT TERMINAL_SECTION_GENERATED_AT TERMINAL_GENERATION_IDENTITY <<< "$TERMINAL_EVIDENCE"
+      COMPLETE_REPORT="$(queue_command complete --section "$SECTION" --lease-id "$LEASE_ID" \
+        --expected-generated-at "$CLAIMED_CORE_GENERATED_AT" \
+        --terminal-generated-at "$TERMINAL_GENERATED_AT" \
+        --terminal-section-generated-at "$TERMINAL_SECTION_GENERATED_AT" \
+        --terminal-generation-identity "$TERMINAL_GENERATION_IDENTITY")"
       COMPLETED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.completed===true))' "$COMPLETE_REPORT")"
       PUBLISHED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.publishedRevision||""))' "$COMPLETE_REPORT")"
       FOLLOW_UP_PENDING="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.followUpPending===true))' "$COMPLETE_REPORT")"

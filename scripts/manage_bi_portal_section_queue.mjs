@@ -32,7 +32,7 @@ function usage(message = '') {
   manage_bi_portal_section_queue.mjs enqueue --sections CSV --core-generated-at TOKEN [--priority N] [--reason TEXT] [--idempotency-key KEY] [--coalesce-key KEY] [--requeue-completed-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs reconcile-generation --phase snapshot|validate|commit --sections CSV --core-generated-at TOKEN [--snapshot-hash SHA256] [--validation-result BASE64URL] [--terminal-root PATH] [--terminal-validator PATH] [--file PATH]
   manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--file PATH]
-  manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID [--file PATH]
+  manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID --expected-generated-at TOKEN --terminal-generated-at TOKEN --terminal-section-generated-at TOKEN --terminal-generation-identity SHA256 [--file PATH]
   manage_bi_portal_section_queue.mjs fail --section NAME --lease-id ID [--error TEXT] [--backoff-seconds N] [--file PATH]
   manage_bi_portal_section_queue.mjs status [--file PATH]`);
   return 64;
@@ -80,6 +80,10 @@ function parseArgs(argv) {
     validationResult: '',
     section: '',
     leaseId: undefined,
+    expectedGeneratedAt: '',
+    terminalGeneratedAt: '',
+    terminalSectionGeneratedAt: '',
+    terminalGenerationIdentity: '',
     leaseSeconds: 2_700,
     excludeSections: [],
     error: '',
@@ -110,6 +114,13 @@ function parseArgs(argv) {
     }
     else if (token === '--section') options.section = normalizeSection(next());
     else if (token === '--lease-id') options.leaseId = next();
+    else if (token === '--expected-generated-at') options.expectedGeneratedAt = validateCoreGeneratedAt(next());
+    else if (token === '--terminal-generated-at') options.terminalGeneratedAt = validateCoreGeneratedAt(next());
+    else if (token === '--terminal-section-generated-at') options.terminalSectionGeneratedAt = validateCoreGeneratedAt(next());
+    else if (token === '--terminal-generation-identity') {
+      options.terminalGenerationIdentity = String(next() || '').trim();
+      if (!/^[a-f0-9]{64}$/u.test(options.terminalGenerationIdentity)) throw new TypeError('QUEUE_TERMINAL_GENERATION_IDENTITY_INVALID');
+    }
     else if (token === '--lease-seconds') options.leaseSeconds = Number(next());
     else if (token === '--exclude-sections') {
       options.excludeSections.push(...next().split(',').map(normalizeSection));
@@ -156,6 +167,14 @@ function parseArgs(argv) {
   }
   if (['complete', 'fail'].includes(command) && (!options.section || !options.leaseId)) {
     throw new TypeError('QUEUE_LEASE_TARGET_REQUIRED');
+  }
+  if (command === 'complete' && (
+    !options.expectedGeneratedAt
+    || !options.terminalGeneratedAt
+    || !options.terminalSectionGeneratedAt
+    || !options.terminalGenerationIdentity
+  )) {
+    throw new TypeError('QUEUE_TERMINAL_EVIDENCE_REQUIRED');
   }
   return options;
 }
@@ -813,7 +832,16 @@ export function claimNext(queue, {
   };
 }
 
-export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) {
+export function completeClaim(queue, {
+  section,
+  leaseId,
+  expectedGeneratedAt = '',
+  terminalGeneratedAt = '',
+  terminalSectionGeneratedAt = '',
+  terminalGenerationIdentity = '',
+  requireTerminalEvidence = false,
+  now = new Date(),
+} = {}) {
   ensureQueueState(queue);
   const normalizedSection = normalizeSection(section);
   const index = queue.entries.findIndex(entry => entry.section === normalizedSection);
@@ -824,12 +852,36 @@ export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) 
   }
   const claimedRevision = normalizeRevision(entry.claimedRevision, 0);
   const desiredRevision = normalizeRevision(entry.requestRevision, 0);
+  const immutableClaimedCoreGeneratedAt = validateCoreGeneratedAt(entry.claimedCoreGeneratedAt);
+  const claimedCoreGeneratedAt = immutableClaimedCoreGeneratedAt
+    || validateCoreGeneratedAt(entry.coreGeneratedAt)
+    || 'unknown';
+  const expected = validateCoreGeneratedAt(expectedGeneratedAt);
+  const terminalCore = validateCoreGeneratedAt(terminalGeneratedAt);
+  const terminalSection = validateCoreGeneratedAt(terminalSectionGeneratedAt);
+  if (requireTerminalEvidence) {
+    if (!immutableClaimedCoreGeneratedAt || immutableClaimedCoreGeneratedAt === 'unknown') {
+      throw new Error('QUEUE_CLAIMED_GENERATION_UNKNOWN');
+    }
+    if (!expected || !terminalCore || !terminalSection || !terminalGenerationIdentity) {
+      throw new Error('QUEUE_TERMINAL_EVIDENCE_REQUIRED');
+    }
+    if (!/^[a-f0-9]{64}$/u.test(String(terminalGenerationIdentity))) {
+      throw new Error('QUEUE_TERMINAL_GENERATION_IDENTITY_INVALID');
+    }
+  }
+  if (expected && expected !== claimedCoreGeneratedAt) throw new Error('QUEUE_CLAIMED_GENERATION_MISMATCH');
+  if (terminalCore && terminalCore !== claimedCoreGeneratedAt) throw new Error('QUEUE_TERMINAL_GENERATION_MISMATCH');
+  if (terminalSection && terminalSection !== claimedCoreGeneratedAt) throw new Error('QUEUE_TERMINAL_SECTION_GENERATION_MISMATCH');
+  if (terminalGenerationIdentity && !/^[a-f0-9]{64}$/u.test(String(terminalGenerationIdentity))) {
+    throw new Error('QUEUE_TERMINAL_GENERATION_IDENTITY_INVALID');
+  }
   // The entry may adopt a newer request's key/generation while this lease is
   // running. Bind the publication evidence to the immutable claim fields.
   const claimedEntry = {
     ...entry,
     idempotencyKey: entry.claimedIdempotencyKey || entry.idempotencyKey || '',
-    coreGeneratedAt: entry.claimedCoreGeneratedAt || entry.coreGeneratedAt || 'unknown',
+    coreGeneratedAt: claimedCoreGeneratedAt,
   };
   const publishedSnapshot = recordPublishedSnapshot(queue, claimedEntry, now);
   if (publishedSnapshot) {
@@ -913,8 +965,14 @@ function runTerminalValidator({terminalValidator, terminalRoot, section, coreGen
       && report?.ok === true
       && report?.section === section
       && report?.coreGeneratedAt === coreGeneratedAt
-      && report?.sectionGeneratedAt === coreGeneratedAt,
+      && report?.sectionGeneratedAt === coreGeneratedAt
+      && report?.generatedAt === coreGeneratedAt
+      && /^[a-f0-9]{64}$/u.test(String(report?.generationIdentity || '')),
     section,
+    generatedAt: String(report?.generatedAt || ''),
+    sectionGeneratedAt: String(report?.sectionGeneratedAt || ''),
+    generationIdentity: String(report?.generationIdentity || ''),
+    bundleIdentity: String(report?.bundleIdentity || ''),
     reason: String(report?.reason || result.error?.code || `validator_exit_${result.status ?? 'unknown'}`),
   };
 }
@@ -1111,6 +1169,10 @@ export function validateGenerationSnapshot({
       section: result.section,
       ok: result.ok === true,
       reason: String(result.reason || '').slice(0, 300),
+      generatedAt: String(result.generatedAt || result.coreGeneratedAt || '').slice(0, 1024),
+      sectionGeneratedAt: String(result.sectionGeneratedAt || '').slice(0, 1024),
+      generationIdentity: String(result.generationIdentity || '').slice(0, 64),
+      ...(result.bundleIdentity ? {bundleIdentity: String(result.bundleIdentity).slice(0, 64)} : {}),
     })),
   };
   return {
@@ -1145,6 +1207,10 @@ function parseGenerationValidationResult(encoded, generation, requestedSections,
     section: String(result.section || ''),
     ok: result.ok === true,
     reason: String(result.reason || '').slice(0, 300),
+    generatedAt: String(result.generatedAt || '').slice(0, 1024),
+    sectionGeneratedAt: String(result.sectionGeneratedAt || '').slice(0, 1024),
+    generationIdentity: String(result.generationIdentity || '').slice(0, 64),
+    bundleIdentity: String(result.bundleIdentity || '').slice(0, 64),
   }));
 }
 
@@ -1457,7 +1523,7 @@ export function main(argv = process.argv.slice(2)) {
   if (options.command === 'complete') {
     const before = queue.entries.find(entry => entry.section === options.section);
     const claimedRevision = normalizeRevision(before?.claimedRevision, 0);
-    const completed = completeClaim(queue, options);
+    const completed = completeClaim(queue, {...options, requireTerminalEvidence: true});
     const saved = writeQueue(options.file, queue);
     const published = latestPublishedBySection(saved).get(options.section);
     const after = saved.entries.find(entry => entry.section === options.section);

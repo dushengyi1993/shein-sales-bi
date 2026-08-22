@@ -8,11 +8,12 @@ import {spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 import {validateTerminalArtifact} from './check_bi_portal_section_terminal.mjs';
+import {publishBiProfitBundleManifest, writeBiSectionArtifact, writeBiSectionCache} from '../lib/bi_section_cache.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const generatedAt = '2026-08-11T08:36:30.27274+08:00';
 
-function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt, extra = {}} = {}) {
+async function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt, extra = {}} = {}) {
   fs.mkdirSync(path.join(dir, 'sections'), {recursive: true});
   if (core) {
     fs.writeFileSync(path.join(dir, 'data.json'), JSON.stringify({
@@ -21,14 +22,21 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     }));
   }
   if (section) {
-    fs.writeFileSync(path.join(dir, 'sections', `${section}.json`), JSON.stringify({
-      ok: true,
-      section,
-      generatedAt: sectionGeneratedAt,
-      cachedAt: '2026-08-11T02:56:46.613Z',
-      data: extra.data ?? {},
-      run: {code: 0, timedOut: false, stderrTail: ''},
-    }));
+    const run = {code: 0, timedOut: false, stderr: ''};
+    if (['profit', 'homeProfit'].includes(section) && sectionGeneratedAt === generatedAt) {
+      const profitData = section === 'profit'
+        ? (extra.data ?? {})
+        : {profit: {dailyStoreProducts: []}};
+      await writeBiSectionCache(dir, 'profit', generatedAt, profitData, run, {requireIntegrity: true});
+      await writeBiSectionArtifact(dir, 'profit.query', 'profit.query', generatedAt, profitData, run, {requireIntegrity: true});
+      const homeProfitData = section === 'homeProfit'
+        ? (extra.data ?? {})
+        : {homeProfitSummary: {dailyScopes: [], source: 'profit_section_cache', sourceGeneratedAt: generatedAt, staleSource: false}};
+      await writeBiSectionCache(dir, 'homeProfit', generatedAt, homeProfitData, run, {requireIntegrity: true});
+      await publishBiProfitBundleManifest(dir, generatedAt);
+      return;
+    }
+    await writeBiSectionCache(dir, section, sectionGeneratedAt, extra.data ?? {}, run, {requireIntegrity: true});
   }
 }
 
@@ -36,20 +44,27 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-current-'));
   try {
-    makePortal(dir, {section: 'orders', extra: {data: {rows: []}}});
+    await makePortal(dir, {section: 'orders', extra: {data: {rows: []}}});
     const result = await validateTerminalArtifact({root: dir, section: 'orders'});
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.coreGeneratedAt, generatedAt);
     assert.equal(result.sectionGeneratedAt, generatedAt);
 
-    makePortal(dir, {section: 'profit', extra: {data: {profit: {dailyStoreProducts: []}}}});
+    await makePortal(dir, {section: 'profit', extra: {data: {profit: {dailyStoreProducts: []}}}});
     assert.equal((await validateTerminalArtifact({root: dir, section: 'profit'})).ok, true, 'profit with dailyStoreProducts must be terminal');
 
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], source: 'profit_section_cache', sourceGeneratedAt: generatedAt, staleSource: false}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).ok, true, 'fresh homeProfit must be terminal');
+
+    const ordersFile = path.join(dir, 'sections', 'orders.json');
+    const ordersRaw = fs.readFileSync(ordersFile);
+    fs.writeFileSync(ordersFile, ordersRaw.subarray(0, Math.max(1, ordersRaw.length - 8)));
+    const truncated = await validateTerminalArtifact({root: dir, section: 'orders'});
+    assert.equal(truncated.ok, false, 'a truncated file with a valid metadata head must fail strict integrity');
+    assert.equal(truncated.reason, 'section_integrity_unverified');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -59,7 +74,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-stale-'));
   try {
-    makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T08:36:30.27274+08:00'});
+    await makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T08:36:30.27274+08:00'});
     const result = await validateTerminalArtifact({root: dir, section: 'orders'});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'section_generated_at_mismatch');
@@ -73,7 +88,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-expected-'));
   const otherGeneration = '2026-08-10T00:00:00.000Z';
   try {
-    makePortal(dir, {section: 'orders'});
+    await makePortal(dir, {section: 'orders'});
     const exact = await validateTerminalArtifact({
       root: dir,
       section: 'orders',
@@ -132,25 +147,25 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-home-profit-'));
   try {
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: '2026-08-10T19:09:04.52205+08:00', staleSource: false}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_source_mismatch');
 
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: true}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_stale_source');
 
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {sourceGeneratedAt: generatedAt, staleSource: false}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_daily_scopes_missing');
 
-    makePortal(dir, {section: 'homeProfit', extra: {data: {other: true}}});
+    await makePortal(dir, {section: 'homeProfit', extra: {data: {other: true}}});
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_summary_missing');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
@@ -162,7 +177,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-profit-'));
   try {
-    makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: []}}}});
+    await makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: []}}}});
     const result = await validateTerminalArtifact({root: dir, section: 'profit'});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'profit_daily_store_products_missing');
@@ -176,7 +191,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
       standard_goods_sn: `ABC-${String(index).padStart(6, '0')}`,
       net_revenue_sar: index,
     }));
-    makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: rows, dailyStoreProducts: []}}}});
+    await makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: rows, dailyStoreProducts: []}}}});
     const reordered = await validateTerminalArtifact({root: dir, section: 'profit'});
     assert.equal(reordered.ok, true, 'large reordered profit must validate via streaming key scan');
     assert.ok(reordered.profitScanBytes > 1024 * 1024,
@@ -199,7 +214,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     assert.equal((await validateTerminalArtifact({root: dir, section: 'orders'})).reason, 'section_file_missing');
     assert.equal((await validateTerminalArtifact({root: dir, section: '../escape'})).reason, 'section_invalid');
 
-    makePortal(dir, {core: false, section: 'orders'});
+    await makePortal(dir, {core: false, section: 'orders'});
     fs.writeFileSync(path.join(dir, 'data.json'), `{"generatedAt":"${generatedAt}","corrupt":truX}`);
     assert.equal((await validateTerminalArtifact({root: dir, section: 'orders'})).reason, 'core_file_missing',
       'a structurally invalid unrequested core field must fail closed');
@@ -212,13 +227,13 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-cli-'));
   try {
-    makePortal(dir, {section: 'orders'});
+    await makePortal(dir, {section: 'orders'});
     const script = path.join(root, 'scripts', 'check_bi_portal_section_terminal.mjs');
     const okRun = spawnSync(process.execPath, [script, '--root', dir, '--section', 'orders'], {encoding: 'utf8'});
     assert.equal(okRun.status, 0, okRun.stderr);
     assert.equal(JSON.parse(okRun.stdout).ok, true);
 
-    makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T00:00:00.000Z'});
+    await makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T00:00:00.000Z'});
     const staleRun = spawnSync(process.execPath, [script, '--root', dir, '--section', 'orders'], {encoding: 'utf8'});
     assert.equal(staleRun.status, 1, 'a non-terminal artifact must exit non-zero');
     assert.equal(JSON.parse(staleRun.stdout).ok, false);
@@ -246,7 +261,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     fs.writeSync(handle, `","generatedAt":"${generatedAt}","__sections":{"mode":"api","generatedAt":"${generatedAt}"}}`);
     fs.closeSync(handle);
     handle = undefined;
-    makePortal(dir, {core: false, section: 'orders'});
+    await makePortal(dir, {core: false, section: 'orders'});
 
     const script = path.join(root, 'scripts', 'check_bi_portal_section_terminal.mjs');
     const boundedRun = spawnSync(process.execPath, [
@@ -633,6 +648,13 @@ async function runPrewarmCase(repoRoot, {section, expectedExit, marker}) {
     fs.mkdirSync(path.join(portalRoot, 'sections'), {recursive: true});
     fs.mkdirSync(logDir, {recursive: true});
     fs.mkdirSync(binDir, {recursive: true});
+    const posixPath = value => {
+      const text = String(value).replace(/\\/g, '/');
+      return /^[A-Za-z]:\//.test(text)
+        ? `/mnt/${text[0].toLowerCase()}${text.slice(2)}`
+        : text;
+    };
+    const shellQuotePath = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
     fs.writeFileSync(path.join(binDir, 'curl'), `#!/usr/bin/env bash
 set -euo pipefail
 headers=''
@@ -667,13 +689,44 @@ printf '%s' "$code"
       : section === 'homeProfit'
         ? {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: false}}
         : {};
-    fs.writeFileSync(path.join(portalRoot, 'sections', `${section}.json`), JSON.stringify({
-      ok: true,
-      section,
-      generatedAt: section === 'linksData' ? '2026-08-10T00:00:00.000Z' : generatedAt,
-      cachedAt: '2026-08-11T02:56:46.613Z',
-      data: terminalData,
-    }));
+    const publishRun = {code: 0, timedOut: false, stderr: ''};
+    const artifactGeneratedAt = section === 'linksData' ? '2026-08-10T00:00:00.000Z' : generatedAt;
+    if (['profit', 'homeProfit'].includes(section) && artifactGeneratedAt === generatedAt) {
+      const profitData = {profit: {dailyStoreProducts: []}};
+      await writeBiSectionCache(portalRoot, 'profit', generatedAt, profitData, publishRun, {requireIntegrity: true});
+      await writeBiSectionArtifact(portalRoot, 'profit.query', 'profit.query', generatedAt, profitData, publishRun, {requireIntegrity: true});
+      await writeBiSectionCache(portalRoot, 'homeProfit', generatedAt, terminalData, publishRun, {requireIntegrity: true});
+      await publishBiProfitBundleManifest(portalRoot, generatedAt);
+    } else {
+      await writeBiSectionCache(portalRoot, section, artifactGeneratedAt, terminalData, publishRun, {requireIntegrity: true});
+    }
+    if (process.platform === 'win32') {
+      // The prewarm contract runs under WSL. Re-publish the fixture there so
+      // Linux-side stat/inode bindings in the strict sidecar match the
+      // validator; native Windows and WSL report different bindings for the
+      // same drvfs file.
+      const seedFile = path.join(binDir, 'seed_terminal_artifact.mjs');
+      const cacheModule = posixPath(path.join(repoRoot, 'lib', 'bi_section_cache.mjs'));
+      fs.writeFileSync(seedFile, `import {publishBiProfitBundleManifest, writeBiSectionArtifact, writeBiSectionCache} from ${JSON.stringify(cacheModule)};
+const root = ${JSON.stringify(posixPath(portalRoot))};
+const section = ${JSON.stringify(section)};
+const generatedAt = ${JSON.stringify(generatedAt)};
+const artifactGeneratedAt = ${JSON.stringify(artifactGeneratedAt)};
+const data = ${JSON.stringify(terminalData)};
+const run = {code: 0, timedOut: false, stderr: ''};
+if (section === 'profit' || section === 'homeProfit') {
+  const profitData = {profit: {dailyStoreProducts: []}};
+  await writeBiSectionCache(root, 'profit', generatedAt, profitData, run, {requireIntegrity: true});
+  await writeBiSectionArtifact(root, 'profit.query', 'profit.query', generatedAt, profitData, run, {requireIntegrity: true});
+  await writeBiSectionCache(root, 'homeProfit', generatedAt, data, run, {requireIntegrity: true});
+  await publishBiProfitBundleManifest(root, generatedAt);
+} else {
+  await writeBiSectionCache(root, section, artifactGeneratedAt, data, run, {requireIntegrity: true});
+}
+`);
+      const seeded = await spawnCapture('bash', ['-c', `node ${shellQuotePath(posixPath(seedFile))}`], {timeout: 60_000});
+      assert.equal(seeded.status, 0, `WSL strict-sidecar fixture seed failed: ${seeded.stderr}`);
+    }
     // The prewarm runs under the host bash (WSL2 here, Linux on the cloud).
     // Windows drive paths must become /mnt/<drive>/... inside WSL; plain
     // POSIX paths (cloud checkout) pass through unchanged. WSL interop does
@@ -684,33 +737,26 @@ printf '%s' "$code"
     // dedicated 2770 lock directory is created first.
     const lockDir = `/tmp/bi-terminal-prewarm-${Date.now()}-${section}`;
     const lockFile = `${lockDir}/prewarm.lock`;
-    const posix = value => {
-      const text = String(value).replace(/\\/g, '/');
-      return /^[A-Za-z]:\//.test(text)
-        ? `/mnt/${text[0].toLowerCase()}${text.slice(2)}`
-        : text;
-    };
-    const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
     const overrides = [
-      ['SHEIN_BI_ROOT', posix(repoRoot)],
+      ['SHEIN_BI_ROOT', posixPath(repoRoot)],
       ['SHEIN_BI_PORTAL_URL', 'http://127.0.0.1:9'],
-      ['SHEIN_BI_PORTAL_ROOT', posix(portalRoot)],
-      ['SHEIN_BI_PREWARM_LOG_DIR', posix(logDir)],
+      ['SHEIN_BI_PORTAL_ROOT', posixPath(portalRoot)],
+      ['SHEIN_BI_PREWARM_LOG_DIR', posixPath(logDir)],
       ['SHEIN_BI_PORTAL_PREWARM_LOCK_FILE', lockFile],
       ['SHEIN_BI_PORTAL_PREWARM_SECTIONS', section],
       ['SHEIN_BI_PORTAL_PREWARM_ASYNC', '0'],
       ['SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED', '1'],
       ['SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS', '15'],
-    ].map(([key, value]) => `export ${key}=${shellQuote(value)}`).join('; ');
-    const scriptPath = posix(path.join(repoRoot, 'scripts', 'prewarm_bi_portal_sections.sh'));
-    const stubPath = posix(path.join(binDir, 'curl'));
-    const stubBin = posix(binDir);
+    ].map(([key, value]) => `export ${key}=${shellQuotePath(value)}`).join('; ');
+    const scriptPath = posixPath(path.join(repoRoot, 'scripts', 'prewarm_bi_portal_sections.sh'));
+    const stubPath = posixPath(path.join(binDir, 'curl'));
+    const stubBin = posixPath(binDir);
     const run = await spawnCapture('bash', ['-c',
-      `mkdir -p ${shellQuote(lockDir)} && chmod 2770 ${shellQuote(lockDir)}; ` +
-      `chmod +x ${shellQuote(stubPath)}; ${overrides}; PATH=${shellQuote(stubBin)}:"$PATH"; export PATH; ` +
-      `exec ${shellQuote(scriptPath)}`], {timeout: 60_000});
+      `mkdir -p ${shellQuotePath(lockDir)} && chmod 2770 ${shellQuotePath(lockDir)}; ` +
+      `chmod +x ${shellQuotePath(stubPath)}; ${overrides}; PATH=${shellQuotePath(stubBin)}:"$PATH"; export PATH; ` +
+      `exec ${shellQuotePath(scriptPath)}`], {timeout: 60_000});
     await spawnCapture('bash', ['-c',
-      `rm -f ${shellQuote(lockFile)}; rmdir ${shellQuote(lockDir)} 2>/dev/null || true`], {timeout: 10_000});
+      `rm -f ${shellQuotePath(lockFile)}; rmdir ${shellQuotePath(lockDir)} 2>/dev/null || true`], {timeout: 10_000});
     assert.equal(run.timedOut, false, `${section}: prewarm timed out (stdout=${run.stdout} stderr=${run.stderr})`);
     const logs = fs.readdirSync(logDir).filter(name => name.endsWith('.log'));
     const log = logs.map(name => fs.readFileSync(path.join(logDir, name), 'utf8')).join('\n');
