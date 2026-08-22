@@ -328,6 +328,11 @@ try {
   assert.equal(journalA.filter(entry => entry.kind === 'write_outcome').length, 0, 'ambiguous responses must not write any write_outcome');
   assert.equal(finalStdoutJson(runA.stdout)?.counts?.blocked, 2);
 
+  const originalBiDocument = await readJson(biFile);
+  const originalLinksDocument = await readJson(linksFile);
+  await fs.writeFile(biFile, `${JSON.stringify({...originalBiDocument, cachedAt: new Date(Date.now() + 1000).toISOString()}, null, 2)}\n`);
+  await fs.writeFile(linksFile, `${JSON.stringify({...originalLinksDocument, cachedAt: new Date(Date.now() + 1000).toISOString()}, null, 2)}\n`);
+
   // -------------------------------------------------------------------------
   // B) rerun of A: readback-only recovery, no second POST
   // -------------------------------------------------------------------------
@@ -364,6 +369,8 @@ try {
   assert.match(runB2.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
   assert.equal(serverState.requestCount, 0, 'scope-set mismatch must fail before every OpenAPI request');
   assert.equal(serverState.postCount, 0, 'scope-set mismatch must never create a new inventory write');
+  await fs.writeFile(biFile, `${JSON.stringify(originalBiDocument, null, 2)}\n`);
+  await fs.writeFile(linksFile, `${JSON.stringify(originalLinksDocument, null, 2)}\n`);
 
   // -------------------------------------------------------------------------
   // C) fresh run: transport error while POSTing must not be masked by

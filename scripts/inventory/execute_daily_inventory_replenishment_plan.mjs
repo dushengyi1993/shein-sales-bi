@@ -197,18 +197,23 @@ async function assertStillListed(client, row) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+// Recovery-only adjudicates a write that already crossed the transport
+// boundary. Requiring mutable ET/links decision snapshots here can strand the
+// durable intent forever; the immutable plan/intent and fresh live identity +
+// stock readback below are the only relevant evidence, and no new write path
+// is reachable in this mode.
 const [plan, policy, config, biDocument, linksDocument] = await Promise.all([
   readJson(args.plan),
   readJson(args.policy),
   readJson(args.config),
-  readJson(args.biData),
-  readJson(args.linksData),
+  args.reconcilePendingOnly ? Promise.resolve({}) : readJson(args.biData),
+  args.reconcilePendingOnly ? Promise.resolve({}) : readJson(args.linksData),
 ]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
 const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
 const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.generatedAt || bi.createdAt;
 const biAge = ageHours(biGeneratedAt);
-if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4)) {
+if (!args.reconcilePendingOnly && (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4))) {
   throw new Error(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
 }
 if (plan.policyVersion !== policy.policyVersion) throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
@@ -239,7 +244,7 @@ if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismat
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 if (plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
-for (const evidence of asArray(plan.sourceEvidence)) {
+for (const evidence of args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence)) {
   const evidenceStore = String(evidence.store || '');
   const maximumAge = evidenceStore === 'ET'
     ? Number(policy.maxBiSnapshotAgeHours || 4)
@@ -257,7 +262,7 @@ const currentSourceTimes = new Map([
   ['ET', biGeneratedAt],
   ['BI_LINKS', linksDocument.cachedAt || linksDocument.generatedAt || links.generatedAt || links.createdAt],
 ]);
-for (const evidence of asArray(plan.sourceEvidence).filter(row => currentSourceTimes.has(String(row.store || '')))) {
+for (const evidence of (args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence)).filter(row => currentSourceTimes.has(String(row.store || '')))) {
   if (String(currentSourceTimes.get(String(evidence.store || '')) || '') !== String(evidence.fetchedAt || '')) {
     throw new Error(`Plan source changed after hash generation: ${evidence.store}`);
   }
@@ -496,74 +501,76 @@ for (const row of unresolvedIntents.length ? [] : rows) {
   // `blocked` (production 2026.08.16.10 regression).
   let activeIntent = null;
   try {
-    const et = etByKey.get(String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase());
-    const etQty = Number(et?.current_sellable_quantity ?? et?.et_estimated_available_qty);
-    const etDate = String(
-      String(et?.et_operational_stock_policy || '').includes('01_full_carton_exception')
-        ? et?.et_box_snapshot_date
-        : et?.et_store_snapshot_date,
-    ).slice(0, 10);
-    if (etDate !== today || String(et?.inventory_match_status || '') !== 'matched') throw new Error('ET inventory is not a current-day matched fact');
-    if (Number(row.etSellableInventory) !== etQty) throw new Error(`ET sellable inventory changed after plan: ${row.etSellableInventory} -> ${etQty}`);
     const approvedTarget = Number(row.targetUsableInventory);
     if (!Number.isInteger(approvedTarget) || approvedTarget < 0 || approvedTarget > Number(policy.targetUsableInventory || 100)) {
       throw new Error(`Invalid approved target usable inventory: ${row.targetUsableInventory}`);
     }
-    const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
-    if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
-    const metricsIdentityKey = resolveInventoryIdentityKey(
-      metrics.standard_goods_sn
-      ?? metrics.standardGoodsSn
-      ?? metrics.raw_goods_sn
-      ?? metrics.rawGoodsSn,
-    );
-    const expectedIdentityKey = resolveInventoryIdentityKey(row.canonical || row.supplierCode);
-    if (!metricsIdentityKey || !expectedIdentityKey || metricsIdentityKey !== expectedIdentityKey) {
-      throw new Error('linksData canonical identity changed or is unavailable');
-    }
-    const currentShelfStatus = resolveInventoryShelfStatus(metrics, row.openApiShelfStatusCode || row.shelfStatusCode);
-    if (currentShelfStatus.code !== String(row.shelfStatusCode || '')) {
-      throw new Error(`Four-state shelf status changed after plan: ${row.shelfStatusName || row.shelfStatusCode} -> ${currentShelfStatus.name}`);
-    }
-    if (!new Set((policy.eligibleShelfStatusCodes || ['1', '3']).map(String)).has(currentShelfStatus.code)) {
-      throw new Error(`Link is not inventory-relevant: ${currentShelfStatus.name}`);
-    }
-    const currentSameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
-      `${String(row.storeKey || '').toUpperCase()}::${String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase()}`,
-    ) || [])]
-      .filter(skc => skc && skc !== String(row.skc || ''))
-      .sort();
-    if (
-      currentShelfStatus.code === String(policy.soldOutShelfStatusCode || '3')
-      && policy.ignoreSoldOutWhenSameStoreHasOnShelfCanonical !== false
-      && currentSameStoreOnShelfSkcs.length > 0
-    ) {
-      throw new Error(`Sold-out link is superseded by same-store on-shelf link(s): ${currentSameStoreOnShelfSkcs.join(',')}`);
-    }
-    if (JSON.stringify(currentSameStoreOnShelfSkcs) !== JSON.stringify([...asArray(row.sameStoreOnShelfSkcs)].sort())) {
-      throw new Error('Same-store on-shelf link evidence changed after plan');
-    }
-    if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
-      throw new Error('7-day sales/exposure evidence changed after plan');
-    }
-    if (row.ruleClass === 'low_et_top_exposure_allocation') {
-      if (etQty > Number(policy.lowEtAllocationAtOrBelow ?? 10)) throw new Error(`ET no longer requires physical allocation: ${etQty}`);
-      if (etQty < Number(row.plannedAllocationTotal || 0)) {
-        throw new Error(`ET sellable inventory dropped below planned allocation total: ${etQty} < ${row.plannedAllocationTotal}`);
+    if (!args.reconcilePendingOnly) {
+      const et = etByKey.get(String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase());
+      const etQty = Number(et?.current_sellable_quantity ?? et?.et_estimated_available_qty);
+      const etDate = String(
+        String(et?.et_operational_stock_policy || '').includes('01_full_carton_exception')
+          ? et?.et_box_snapshot_date
+          : et?.et_store_snapshot_date,
+      ).slice(0, 10);
+      if (etDate !== today || String(et?.inventory_match_status || '') !== 'matched') throw new Error('ET inventory is not a current-day matched fact');
+      if (Number(row.etSellableInventory) !== etQty) throw new Error(`ET sellable inventory changed after plan: ${row.etSellableInventory} -> ${etQty}`);
+      const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
+      if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
+      const metricsIdentityKey = resolveInventoryIdentityKey(
+        metrics.standard_goods_sn
+        ?? metrics.standardGoodsSn
+        ?? metrics.raw_goods_sn
+        ?? metrics.rawGoodsSn,
+      );
+      const expectedIdentityKey = resolveInventoryIdentityKey(row.canonical || row.supplierCode);
+      if (!metricsIdentityKey || !expectedIdentityKey || metricsIdentityKey !== expectedIdentityKey) {
+        throw new Error('linksData canonical identity changed or is unavailable');
       }
-    } else {
-      if (etQty < Number(policy.minimumEtSellableForVirtualTopUp || 11)) throw new Error(`ET sellable inventory requires physical allocation: ${etQty}`);
-      if (etQty < approvedTarget) throw new Error(`ET sellable inventory dropped below approved target: ${etQty} < ${approvedTarget}`);
-      if (row.ruleClass === 'recent_sale_scarcity' && Number(metrics.c7_sale_cnt) < Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
-        throw new Error('Link no longer qualifies for recent-sale scarcity inventory');
+      const currentShelfStatus = resolveInventoryShelfStatus(metrics, row.openApiShelfStatusCode || row.shelfStatusCode);
+      if (currentShelfStatus.code !== String(row.shelfStatusCode || '')) {
+        throw new Error(`Four-state shelf status changed after plan: ${row.shelfStatusName || row.shelfStatusCode} -> ${currentShelfStatus.name}`);
       }
-      if (row.ruleClass === 'legacy_virtual_inventory_top_up' && Number(metrics.c7_sale_cnt) >= Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
-        throw new Error('Link now qualifies for recent-sale scarcity inventory; rebuild plan');
+      if (!new Set((policy.eligibleShelfStatusCodes || ['1', '3']).map(String)).has(currentShelfStatus.code)) {
+        throw new Error(`Link is not inventory-relevant: ${currentShelfStatus.name}`);
       }
-    }
-    if (!args.execute) {
-      await recordResult({...result, state: 'dry_run_ready', etSellableInventory: etQty});
-      continue;
+      const currentSameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
+        `${String(row.storeKey || '').toUpperCase()}::${String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase()}`,
+      ) || [])]
+        .filter(skc => skc && skc !== String(row.skc || ''))
+        .sort();
+      if (
+        currentShelfStatus.code === String(policy.soldOutShelfStatusCode || '3')
+        && policy.ignoreSoldOutWhenSameStoreHasOnShelfCanonical !== false
+        && currentSameStoreOnShelfSkcs.length > 0
+      ) {
+        throw new Error(`Sold-out link is superseded by same-store on-shelf link(s): ${currentSameStoreOnShelfSkcs.join(',')}`);
+      }
+      if (JSON.stringify(currentSameStoreOnShelfSkcs) !== JSON.stringify([...asArray(row.sameStoreOnShelfSkcs)].sort())) {
+        throw new Error('Same-store on-shelf link evidence changed after plan');
+      }
+      if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
+        throw new Error('7-day sales/exposure evidence changed after plan');
+      }
+      if (row.ruleClass === 'low_et_top_exposure_allocation') {
+        if (etQty > Number(policy.lowEtAllocationAtOrBelow ?? 10)) throw new Error(`ET no longer requires physical allocation: ${etQty}`);
+        if (etQty < Number(row.plannedAllocationTotal || 0)) {
+          throw new Error(`ET sellable inventory dropped below planned allocation total: ${etQty} < ${row.plannedAllocationTotal}`);
+        }
+      } else {
+        if (etQty < Number(policy.minimumEtSellableForVirtualTopUp || 11)) throw new Error(`ET sellable inventory requires physical allocation: ${etQty}`);
+        if (etQty < approvedTarget) throw new Error(`ET sellable inventory dropped below approved target: ${etQty} < ${approvedTarget}`);
+        if (row.ruleClass === 'recent_sale_scarcity' && Number(metrics.c7_sale_cnt) < Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
+          throw new Error('Link no longer qualifies for recent-sale scarcity inventory');
+        }
+        if (row.ruleClass === 'legacy_virtual_inventory_top_up' && Number(metrics.c7_sale_cnt) >= Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
+          throw new Error('Link now qualifies for recent-sale scarcity inventory; rebuild plan');
+        }
+      }
+      if (!args.execute) {
+        await recordResult({...result, state: 'dry_run_ready', etSellableInventory: etQty});
+        continue;
+      }
     }
     const logicalActionKey = stableInventoryHash({
       runDate: plan.date,
