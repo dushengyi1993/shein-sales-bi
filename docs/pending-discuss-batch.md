@@ -86,7 +86,23 @@ SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1 node scripts/pending_discuss_batch.mjs exe
 }
 ```
 
-- 每条 decision 会覆盖 fresh scan 中该标准货号的全部当前待确认行；未命中的规则阻断，未列入 decisions 的其它待议价只报告、不执行。
+旧格式的全局规则仍然有效：每条 `{canonicalGoodsSn, action}` 覆盖 fresh scan 中该标准货号、所有店铺的全部当前待确认行。也可以按店铺指定规则，例如：
+
+```json
+{
+  "schemaVersion": 1,
+  "businessDate": "<YYYY-MM-DD>",
+  "decisions": [
+    {"canonicalGoodsSn": "SK-13014杆式吸尘器", "storeKey": "DX", "action": "accept"},
+    {"canonicalGoodsSn": "SK-13014杆式吸尘器", "storeKey": "LQ", "action": "reject"}
+  ]
+}
+```
+
+- `storeKey` 会 trim 后规范化为大写标准店码，并且必须命中本次 fresh scan 的 enabled 店铺集合；显式空值、未知店码或无该店当前待议价行都会 fail closed。
+- 同一标准货号禁止全局规则与分店规则混用；同一标准货号同一店铺禁止重复或冲突规则；同一标准货号可以在不同店铺使用不同动作。每条规则都必须精确命中当前 `discussStatus=1` 行，未命中会阻断 preflight。
+- 未列入 decisions 的其它待议价只报告、不执行；`unmatchedPendingCount` 是 fresh scan 中未被任一精确规则覆盖的当前待议价行数。
+- canonical decisions 按标准货号、作用域（全局优先）、店码确定性排序；规范化后的店码进入 `decisionsHash`。items 按店码和 `discussSn` 排序并绑定店码，店 payload hash 与 `batchHash` 同样绑定店码。旧全局规则生成的 decision 结构仍不增加 `storeKey` 字段。
 - `<RUN_ID>-preflight/preflight.json`：逐项 `itemHash`、逐店 `payloadHash`、整批 `batchHash` 与过期时间；同目录保留 fresh `scan.json` 和 manifest。
 - `<RUN_ID>-execute/execution.json`：逐项执行/失败/不确定/未尝试结果；`final-scan.json` 是最终全店待确认复扫；manifest 记录两者 SHA-256。
 - 测试：`scripts/test_pending_discuss_batch.mjs`（本地确定性测试，无网络、无真实写）。

@@ -138,6 +138,131 @@ assert.throws(() => buildPreflightDocument({
   decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [{canonicalGoodsSn: 'NO-SUCH-GOODS', action: 'reject'}]},
   sourceHashes: {source: 'x'},
 }), /matched no current/);
+
+const scopedDxRow = normalizePendingDiscussRow('dx', row({
+  discussSn: 'DX-13014', supplierCode: '(全)SK-13014杆式吸尘器', price: 12,
+}));
+const scopedLqRow = normalizePendingDiscussRow('lq', row({
+  discussSn: 'LQ-13014', supplierCode: '(全)SK-13014杆式吸尘器', price: 13,
+}));
+const scopedCanonical = scopedDxRow.canonicalGoodsSn;
+assert.equal(scopedCanonical, scopedLqRow.canonicalGoodsSn);
+const scopedScan = buildScanDocument({
+  businessDate: '2026-08-11', expectedStores: ['LQ', 'DX'], generatedAt: '2026-08-11T00:00:00.000Z',
+  storeResults: [
+    {storeKey: 'lq', ok: true, identity: {ok: true}, rows: [scopedLqRow]},
+    {storeKey: 'dx', ok: true, identity: {ok: true}, rows: [scopedDxRow]},
+  ],
+});
+const scopedPreflight = buildPreflightDocument({
+  scan: scopedScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: 'SK-13014杆式吸尘器', storeKey: ' lq ', action: 'reject'},
+    {canonicalGoodsSn: '(全)SK-13014杆式吸尘器', storeKey: 'dx', action: 'accept'},
+  ]},
+  sourceHashes: {source: 'x'}, generatedAt: '2026-08-11T00:00:00.000Z', expiresAt: '2026-08-11T00:15:00.000Z',
+});
+assert.deepEqual(scopedPreflight.decisions, [
+  {canonicalGoodsSn: scopedCanonical, storeKey: 'DX', action: 'accept'},
+  {canonicalGoodsSn: scopedCanonical, storeKey: 'LQ', action: 'reject'},
+]);
+assert.equal(scopedPreflight.itemCount, 2);
+assert.equal(scopedPreflight.unmatchedPendingCount, 0);
+assert.equal(scopedPreflight.stores.find(store => store.storeKey === 'DX').items[0].action, 'accept');
+assert.equal(scopedPreflight.stores.find(store => store.storeKey === 'LQ').items[0].action, 'reject');
+assert.equal(Object.hasOwn(scopedPreflight.decisions[0], 'storeKey'), true);
+assert.equal(verifyPreflightDocument(scopedPreflight, {
+  businessDate: '2026-08-11', now: '2026-08-11T00:01:00.000Z', sourceHashes: {source: 'x'},
+  batchHash: scopedPreflight.batchHash,
+}).ok, true);
+const partialScopedPreflight = buildPreflightDocument({
+  scan: scopedScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: scopedCanonical, storeKey: 'DX', action: 'accept'},
+  ]},
+  sourceHashes: {source: 'x'}, generatedAt: '2026-08-11T00:00:00.000Z', expiresAt: '2026-08-11T00:15:00.000Z',
+});
+assert.equal(partialScopedPreflight.itemCount, 1);
+assert.equal(partialScopedPreflight.unmatchedPendingCount, 1);
+
+const reorderedScopedScan = buildScanDocument({
+  businessDate: '2026-08-11', expectedStores: ['DX', 'LQ'], generatedAt: '2026-08-11T00:00:00.000Z',
+  storeResults: [
+    {storeKey: 'DX', ok: true, identity: {ok: true}, rows: [scopedDxRow]},
+    {storeKey: 'LQ', ok: true, identity: {ok: true}, rows: [scopedLqRow]},
+  ],
+});
+const reorderedScopedPreflight = buildPreflightDocument({
+  scan: reorderedScopedScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: scopedCanonical, storeKey: 'LQ', action: 'reject'},
+    {canonicalGoodsSn: scopedCanonical, storeKey: 'DX', action: 'accept'},
+  ]},
+  sourceHashes: {source: 'x'}, generatedAt: '2026-08-11T00:00:00.000Z', expiresAt: '2026-08-11T00:15:00.000Z',
+});
+assert.equal(scopedScan.scanHash, reorderedScopedScan.scanHash);
+assert.equal(scopedPreflight.decisionsHash, reorderedScopedPreflight.decisionsHash);
+assert.deepEqual(scopedPreflight.stores, reorderedScopedPreflight.stores);
+assert.equal(scopedPreflight.batchHash, reorderedScopedPreflight.batchHash);
+
+const legacyGlobalPreflight = buildPreflightDocument({
+  scan: scopedScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: scopedCanonical, action: 'reject'},
+  ]},
+  sourceHashes: {source: 'x'}, generatedAt: '2026-08-11T00:00:00.000Z', expiresAt: '2026-08-11T00:15:00.000Z',
+});
+assert.deepEqual(legacyGlobalPreflight.decisions, [{canonicalGoodsSn: scopedCanonical, action: 'reject'}]);
+assert.equal(legacyGlobalPreflight.itemCount, 2);
+assert.ok(legacyGlobalPreflight.stores.every(store => store.items.every(item => item.action === 'reject')));
+assert.equal(Object.hasOwn(legacyGlobalPreflight.decisions[0], 'storeKey'), false);
+
+assert.throws(() => buildPreflightDocument({
+  scan: scopedScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: scopedCanonical, action: 'accept'},
+    {canonicalGoodsSn: scopedCanonical, storeKey: 'DX', action: 'reject'},
+  ]},
+  sourceHashes: {source: 'x'},
+}), /global and store-scoped decisions cannot be mixed/);
+for (const duplicateActions of [['accept', 'accept'], ['accept', 'reject']]) {
+  assert.throws(() => buildPreflightDocument({
+    scan: scopedScan,
+    decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+      {canonicalGoodsSn: scopedCanonical, storeKey: 'dx', action: duplicateActions[0]},
+      {canonicalGoodsSn: scopedCanonical, storeKey: 'DX', action: duplicateActions[1]},
+    ]},
+    sourceHashes: {source: 'x'},
+  }), new RegExp(`duplicate or conflicting decision for ${scopedCanonical} storeKey=DX`));
+}
+const noLqPendingScan = buildScanDocument({
+  businessDate: '2026-08-11', expectedStores: ['DX', 'LQ'],
+  storeResults: [
+    {storeKey: 'DX', ok: true, identity: {ok: true}, rows: [scopedDxRow]},
+    {storeKey: 'LQ', ok: true, identity: {ok: true}, rows: []},
+  ],
+});
+assert.throws(() => buildPreflightDocument({
+  scan: noLqPendingScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: scopedCanonical, storeKey: 'lq', action: 'reject'},
+  ]},
+  sourceHashes: {source: 'x'},
+}), new RegExp(`decision matched no current pending rows: ${scopedCanonical} storeKey=LQ`));
+assert.throws(() => buildPreflightDocument({
+  scan: scopedScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: scopedCanonical, storeKey: ' ', action: 'reject'},
+  ]},
+  sourceHashes: {source: 'x'},
+}), /decision storeKey is empty/);
+assert.throws(() => buildPreflightDocument({
+  scan: scopedScan,
+  decisions: {schemaVersion: 1, businessDate: '2026-08-11', decisions: [
+    {canonicalGoodsSn: scopedCanonical, storeKey: 'ZZ', action: 'reject'},
+  ]},
+  sourceHashes: {source: 'x'},
+}), /decision storeKey is invalid or not in fresh scan/);
 const emptyPriceRow = normalizePendingDiscussRow('A', {...row({discussSn: 'EMPTY-PRICE', supplierCode: 'ZZ-EMPTY-PRICE测试'}), skuCostPrices: []});
 const emptyPriceScan = buildScanDocument({
   businessDate: '2026-08-11', expectedStores: ['A'],
