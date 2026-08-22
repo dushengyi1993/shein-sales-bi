@@ -145,7 +145,7 @@ await Promise.all([
 ]);
 
 let server;
-let serverState = {mode: 'ambiguous', postCount: 0};
+let serverState = {mode: 'ambiguous', postCount: 0, requestCount: 0};
 
 function sendJson(response, payload, status = 200) {
   response.writeHead(status, {'content-type': 'application/json'});
@@ -170,6 +170,7 @@ const serverReady = new Promise((resolve, reject) => {
     let raw = '';
     request.on('data', chunk => { raw += chunk; });
     request.on('end', () => {
+      serverState.requestCount += 1;
       let body = null;
       try { body = raw ? JSON.parse(raw) : null; } catch {}
       const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
@@ -242,7 +243,7 @@ await fs.writeFile(configFile, `${JSON.stringify({
   stores: ROWS.map(row => ({storeKey: row.storeKey, enabled: true, openKeyId: `${row.storeKey}-key`, secretKey: `${row.storeKey}-secret`})),
 }, null, 2)}\n`);
 
-async function runExecutor(outFile) {
+async function runExecutor(outFile, {reconcilePendingOnly = false} = {}) {
   const child = spawn(process.execPath, [
     'scripts/inventory/execute_daily_inventory_replenishment_plan.mjs',
     '--plan', planFile,
@@ -255,6 +256,7 @@ async function runExecutor(outFile) {
     '--execution-mode', 'automatic',
     '--confirm-hash', payloadHash,
     '--max-rows', '10',
+    ...(reconcilePendingOnly ? ['--reconcile-pending-only'] : []),
   ], {
     cwd: ROOT,
     env: {
@@ -308,7 +310,7 @@ try {
   // -------------------------------------------------------------------------
   // A) first run: responses missing explicit code=0 / info.success=true
   // -------------------------------------------------------------------------
-  serverState = {mode: 'ambiguous', postCount: 0};
+  serverState = {mode: 'ambiguous', postCount: 0, requestCount: 0};
   const outA = path.join(temp, 'a-result.json');
   const runA = await runExecutor(outA);
   assert.equal(runA.status, 1, `run A must exit 1 (blocked), got ${runA.status}\nstdout:\n${runA.stdout}\nstderr:\n${runA.stderr}`);
@@ -329,8 +331,8 @@ try {
   // -------------------------------------------------------------------------
   // B) rerun of A: readback-only recovery, no second POST
   // -------------------------------------------------------------------------
-  serverState = {mode: 'recovery-mixed', postCount: 0};
-  const runB = await runExecutor(outA);
+  serverState = {mode: 'recovery-mixed', postCount: 0, requestCount: 0};
+  const runB = await runExecutor(outA, {reconcilePendingOnly: true});
   assert.equal(runB.status, 1, `run B must exit 1 (one pending readback), got ${runB.status}\nstdout:\n${runB.stdout}\nstderr:\n${runB.stderr}`);
   assert.doesNotMatch(runB.stderr, /ReferenceError/, 'run B must not crash with ReferenceError');
   assert.equal(serverState.postCount, 0, 'rerun must never POST a second write');
@@ -350,10 +352,24 @@ try {
   assert.equal(finalStdoutJson(runB.stdout)?.counts?.updated, 1);
 
   // -------------------------------------------------------------------------
+  // B2) recovery-only must reject a plan that is a strict superset of the
+  //     pending scopes before any OpenAPI request, not merely before a write.
+  // -------------------------------------------------------------------------
+  const outB2 = path.join(temp, 'b2-result.json');
+  const firstIntent = journalA.find(entry => entry.kind === 'intent');
+  await fs.writeFile(`${outB2}.journal.ndjson`, `${JSON.stringify(firstIntent)}\n`);
+  serverState = {mode: 'recovery-matched', postCount: 0, requestCount: 0};
+  const runB2 = await runExecutor(outB2, {reconcilePendingOnly: true});
+  assert.equal(runB2.status, 1, `run B2 must fail closed, got ${runB2.status}\nstdout:\n${runB2.stdout}\nstderr:\n${runB2.stderr}`);
+  assert.match(runB2.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+  assert.equal(serverState.requestCount, 0, 'scope-set mismatch must fail before every OpenAPI request');
+  assert.equal(serverState.postCount, 0, 'scope-set mismatch must never create a new inventory write');
+
+  // -------------------------------------------------------------------------
   // C) fresh run: transport error while POSTing must not be masked by
   //    ReferenceError; durable intent is retained as suspicious
   // -------------------------------------------------------------------------
-  serverState = {mode: 'transport-error', postCount: 0};
+  serverState = {mode: 'transport-error', postCount: 0, requestCount: 0};
   const outC = path.join(temp, 'c-result.json');
   const runC = await runExecutor(outC);
   assert.equal(runC.status, 1, `run C must exit 1 (suspicious write), got ${runC.status}\nstdout:\n${runC.stdout}\nstderr:\n${runC.stderr}`);
@@ -373,8 +389,8 @@ try {
   // -------------------------------------------------------------------------
   // D) rerun of C: readback-only recovery with matched target
   // -------------------------------------------------------------------------
-  serverState = {mode: 'recovery-matched', postCount: 0};
-  const runD = await runExecutor(outC);
+  serverState = {mode: 'recovery-matched', postCount: 0, requestCount: 0};
+  const runD = await runExecutor(outC, {reconcilePendingOnly: true});
   assert.equal(runD.status, 0, `run D must exit 0 (recovered matched), got ${runD.status}\nstdout:\n${runD.stdout}\nstderr:\n${runD.stderr}`);
   assert.doesNotMatch(runD.stderr, /ReferenceError/);
   assert.equal(serverState.postCount, 0, 'rerun must never POST a second write');

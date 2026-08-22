@@ -44,6 +44,7 @@ function parseArgs(argv) {
     executionMode: 'manual_review',
     confirmHash: '',
     maxRows: 500,
+    reconcilePendingOnly: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -58,10 +59,12 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.execute = false;
     else if (a === '--execution-mode') args.executionMode = String(argv[++i] || '');
     else if (a === '--confirm-hash') args.confirmHash = String(argv[++i] || '');
+    else if (a === '--reconcile-pending-only') args.reconcilePendingOnly = true;
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!args.plan) throw new Error('--plan is required');
   if (!Number.isInteger(args.maxRows) || args.maxRows < 1 || args.maxRows > 1000) throw new Error('Invalid --max-rows');
+  if (args.reconcilePendingOnly && !args.execute) throw new Error('--reconcile-pending-only requires --execute');
   if (!args.out) args.out = path.join(ROOT, 'outputs', 'reports', `daily-inventory-replenishment-result-${Date.now()}.json`);
   return args;
 }
@@ -294,6 +297,7 @@ const resultEnvelope = currentResults => ({
   planHash: plan.payloadHash,
   policyVersion: plan.policyVersion,
   execute: args.execute,
+  reconcilePendingOnly: args.reconcilePendingOnly,
   executionMode: args.execute ? executionAuthorization?.mode : 'dry_run',
   authorizationId: executionAuthorization?.authorizationId || null,
   authorizationContext: executionAuthorization?.context || null,
@@ -405,6 +409,45 @@ for (const intent of pendingIntents.values()) {
   pendingIntentsByScope.get(scopeKey).push(intent);
 }
 const currentPlanScopeSet = new Set(planRecoveryScopes);
+if (args.reconcilePendingOnly) {
+  const failures = [];
+  if (pendingIntents.size !== rows.length) {
+    failures.push(`pending_count=${pendingIntents.size},plan_count=${rows.length}`);
+  }
+  for (const row of rows) {
+    const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
+    const scopeIntents = pendingIntentsByScope.get(recoveryScopeKey) || [];
+    if (scopeIntents.length !== 1) {
+      failures.push(`scope_count=${scopeIntents.length}:${row.storeKey}:${row.skc}:${row.skuCode}`);
+      continue;
+    }
+    const approvedTarget = Number(row.targetUsableInventory);
+    const logicalActionKey = stableInventoryHash({
+      runDate: plan.date,
+      store: row.storeKey,
+      skc: row.skc,
+      sku: row.skuCode,
+      target: approvedTarget,
+      actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+      policyVersion: plan.policyVersion,
+      authorizationId: executionAuthorization?.authorizationId || '',
+    });
+    const mismatch = recoveredInventoryIntentMismatch(scopeIntents[0], {
+      logicalActionKey,
+      plan,
+      row,
+      approvedTarget,
+      authorizationId: executionAuthorization?.authorizationId || null,
+    });
+    if (mismatch) failures.push(`intent_mismatch=${mismatch}:${row.storeKey}:${row.skc}:${row.skuCode}`);
+  }
+  for (const scopeKey of pendingIntentsByScope.keys()) {
+    if (!currentPlanScopeSet.has(scopeKey)) failures.push(`extra_pending_scope=${scopeKey}`);
+  }
+  if (failures.length) {
+    throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED:${failures.join('|')}`);
+  }
+}
 unresolvedIntents = [...pendingIntentsByScope.entries()]
   .filter(([scopeKey]) => !currentPlanScopeSet.has(scopeKey))
   .flatMap(([scopeKey, intents]) => intents.map(intent => ({
@@ -603,6 +646,9 @@ for (const row of unresolvedIntents.length ? [] : rows) {
           }, logicalActionKey);
         }
         continue;
+      }
+      if (args.reconcilePendingOnly) {
+        throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_SCOPE_MISSING:${recoveryScopeKey}`);
       }
       if (before.totalUsableInventory === approvedTarget) {
         await recordResult({...result, state: 'skipped_target_already_matched', before});
