@@ -386,8 +386,11 @@ try {
   const resultB3 = await readJson(outA);
   assert.deepEqual(
     resultB3.results.map(row => row.state).sort(),
-    ['skipped_target_already_matched', 'updated_readback_matched'],
+    ['skipped_terminal_readback_recorded', 'updated_readback_matched'],
   );
+  const alreadyTerminalB3 = resultB3.results.find(row => row.state === 'skipped_terminal_readback_recorded');
+  assert.equal(alreadyTerminalB3.terminalDisposition, 'readback_matched');
+  assert.equal(alreadyTerminalB3.currentLiveUsableInventory, alreadyTerminalB3.before.totalUsableInventory);
   assert.equal(pendingIntentCount(await journalEntries(`${outA}.journal.ndjson`)), 0);
   await fs.writeFile(biFile, `${JSON.stringify(originalBiDocument, null, 2)}\n`);
   await fs.writeFile(linksFile, `${JSON.stringify(originalLinksDocument, null, 2)}\n`);

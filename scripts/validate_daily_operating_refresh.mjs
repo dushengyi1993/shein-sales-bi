@@ -5,6 +5,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
+import {
+  discoverInventoryJournalFiles,
+  readInventoryIntentJournals,
+} from '../lib/durable_inventory_write.mjs';
+
 const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DOMAINS = Object.freeze(['shein_business_domains', 'shein_links']);
 
@@ -154,7 +159,7 @@ function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime =
   assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
 }
 
-function resultRowIsSafe(row, planRow, plan, result, policy) {
+function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAuditByIntentId) {
   if (!row || !planRow || rowKey(row) !== rowKey(planRow)) return false;
   const target = Number(planRow.targetUsableInventory);
   if (!Number.isInteger(target) || Number(row.targetUsableInventory) !== target || row.ruleClass !== planRow.ruleClass) return false;
@@ -188,6 +193,24 @@ function resultRowIsSafe(row, planRow, plan, result, policy) {
         && write?.success === true);
   }
   if (row.state === 'skipped_target_already_matched') return before === target;
+  if (row.state === 'skipped_terminal_readback_recorded') {
+    const audit = currentTerminalAuditByIntentId.get(String(row.terminalIntentId || ''));
+    return result.reconcilePendingOnly === true
+      && audit?.outcome?.disposition === 'readback_matched'
+      && audit.outcome.recordedAt === row.terminalRecordedAt
+      && audit.intent.runDate === plan.date
+      && audit.intent.runDate === row.terminalRunDate
+      && audit.intent.planHash === result.planHash
+      && audit.intent.storeKey === planRow.storeKey
+      && audit.intent.skc === planRow.skc
+      && audit.intent.skuCode === planRow.skuCode
+      && Number(audit.intent.targetUsableInventory) === target
+      && row.logicalActionKey === audit.intent.logicalActionKey
+      && row.terminalDisposition === 'readback_matched'
+      && Number.isFinite(before)
+      && Number(row.currentLiveUsableInventory) === before
+      && (!Array.isArray(row.writes) || row.writes.length === 0);
+  }
   if (row.state === 'skipped_safety_no_increase') return plan?.executionConstraints?.decreaseOnly === true && Number.isFinite(before) && before < target;
   if (row.state === 'skipped_within_scarcity_band') {
     return row.ruleClass === 'recent_sale_scarcity'
@@ -239,6 +262,17 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   assert(expectedAuthorization && result.authorizationId === expectedAuthorization, 'inventory authorization id mismatch');
   const actionable = Array.isArray(plan.actionable) ? plan.actionable : [];
   const rows = Array.isArray(result.results) ? result.results : [];
+  const currentTerminalAuditByIntentId = new Map();
+  if (rows.some(row => row?.state === 'skipped_terminal_readback_recorded')) {
+    const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
+    const journalFiles = await discoverInventoryJournalFiles(currentJournal);
+    const lifecycle = await readInventoryIntentJournals(journalFiles, {maxRunDate: runDate});
+    for (const [intentKey, intent] of lifecycle.intents.entries()) {
+      if (intent.journalFile !== currentJournal) continue;
+      const outcome = lifecycle.terminalOutcomes.get(intentKey);
+      if (outcome) currentTerminalAuditByIntentId.set(intent.intentId, {intent, outcome});
+    }
+  }
   assert(rows.length === actionable.length, 'inventory result row count mismatch');
   const planByKey = new Map();
   for (const row of actionable) {
@@ -252,7 +286,7 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     const key = rowKey(row);
     assert(!seen.has(key), `inventory result row identity duplicate: ${key}`);
     seen.add(key);
-    assert(resultRowIsSafe(row, planByKey.get(key), plan, result, policy), `inventory result lacks exact terminal readback: ${key}`);
+    assert(resultRowIsSafe(row, planByKey.get(key), plan, result, policy, currentTerminalAuditByIntentId), `inventory result lacks exact terminal readback: ${key}`);
   }
   assert(seen.size === planByKey.size && [...planByKey.keys()].every(key => seen.has(key)), 'inventory plan/result identity set mismatch');
   return {planFile, resultFile, inventoryMarkerFile, planHash: plan.payloadHash, resultCount: rows.length};

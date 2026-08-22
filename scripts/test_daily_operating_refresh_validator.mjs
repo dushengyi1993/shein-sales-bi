@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {computeInventoryOverwriteQuantity, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 import {writeMorningResumeEvidence} from '../lib/morning_resume_evidence.mjs';
 import {writeMarker} from './pipeline_marker.mjs';
 import {validateDailyOperatingRefresh, validateInventoryArtifacts} from './validate_daily_operating_refresh.mjs';
@@ -100,6 +100,89 @@ try {
   assert.equal(valid.storeCount, 19);
   assert.equal(valid.artifactCount, 38);
 
+  const terminalBefore = {
+    totalInventoryQuantity: 20,
+    totalUsableInventory: 20,
+    totalLockedQuantity: 0,
+    stockRowMissing: false,
+  };
+  const terminalLogicalActionKey = stableInventoryHash({
+    runDate,
+    store: actionable[0].storeKey,
+    skc: actionable[0].skc,
+    sku: actionable[0].skuCode,
+    target: actionable[0].targetUsableInventory,
+    actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+    policyVersion: plan.policyVersion,
+    authorizationId: goodResult.authorizationId,
+  });
+  const terminalRequest = {
+    pathname: '/open-api/stock/change-inventory/v2',
+    method: 'POST',
+    body: {updateSkuInventoryQuantityRequests: [{
+      idempotencyKey: `bi-inv-${terminalLogicalActionKey.slice(0, 42)}`,
+      skuCode: actionable[0].skuCode,
+      invType: 'VI',
+      changeType: 'OVERWRITE',
+      changeQuantity: computeInventoryOverwriteQuantity(actionable[0].targetUsableInventory, terminalBefore),
+      changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
+    }]},
+    headers: {language: 'en'},
+  };
+  const terminalIntent = {
+    kind: 'intent',
+    intentId: 'validator-terminal-intent-1',
+    logicalActionKey: terminalLogicalActionKey,
+    planHash: plan.payloadHash,
+    runDate,
+    storeKey: actionable[0].storeKey,
+    skc: actionable[0].skc,
+    skuCode: actionable[0].skuCode,
+    targetUsableInventory: actionable[0].targetUsableInventory,
+    policyVersion: plan.policyVersion,
+    authorizationId: goodResult.authorizationId,
+    idempotencyKey: terminalRequest.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
+    requestPayloadHash: stableInventoryHash(terminalRequest),
+    request: terminalRequest,
+    before: terminalBefore,
+    recordedAt: '2026-08-16T07:55:00.000Z',
+  };
+  const terminalOutcome = {
+    kind: 'write_outcome',
+    intentId: terminalIntent.intentId,
+    logicalActionKey: terminalIntent.logicalActionKey,
+    disposition: 'readback_matched',
+    recordedAt: '2026-08-16T08:00:00.000Z',
+  };
+  await fs.writeFile(`${resultFile}.journal.ndjson`, `${JSON.stringify(terminalIntent)}\n${JSON.stringify(terminalOutcome)}\n`);
+  const terminalDriftResult = {
+    ...goodResult,
+    reconcilePendingOnly: true,
+    results: [{
+      ...actionable[0],
+      logicalActionKey: terminalIntent.logicalActionKey,
+      state: 'skipped_terminal_readback_recorded',
+      terminalIntentId: terminalIntent.intentId,
+      terminalRunDate: terminalIntent.runDate,
+      terminalDisposition: terminalOutcome.disposition,
+      terminalRecordedAt: terminalOutcome.recordedAt,
+      currentLiveUsableInventory: 99,
+      before: {totalUsableInventory: 99},
+    }],
+  };
+  await writeJson(resultFile, terminalDriftResult);
+  assert.equal((await validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false})).resultCount, 1, 'closed intent natural drift must be journal-proven and safe');
+  await writeJson(resultFile, {
+    ...terminalDriftResult,
+    results: terminalDriftResult.results.map(row => ({...row, terminalRecordedAt: '2026-08-16T08:01:00.000Z'})),
+  });
+  await assert.rejects(
+    validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false}),
+    /lacks exact terminal readback/,
+    'result metadata must not forge a terminal journal timestamp',
+  );
+  await writeJson(resultFile, goodResult);
+
   const emptyPlan = {...plan, actionable: [], sourceEvidence: [], counts: {enabledStores: 19}};
   emptyPlan.payloadHash = stableInventoryHash({
     schemaVersion: emptyPlan.schemaVersion,
@@ -158,7 +241,7 @@ try {
   await fs.appendFile(path.join(tempRoot, 'outputs', 'shein_links', 'DL', `${businessDate}.json`), ' ');
   await assert.rejects(validateDailyOperatingRefresh(options), /artifact size mismatch|artifact hash mismatch/);
 
-  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected']}, null, 2));
+  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected']}, null, 2));
 } finally {
   await fs.rm(tempRoot, {recursive: true, force: true});
 }

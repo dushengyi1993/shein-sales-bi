@@ -484,6 +484,9 @@ match('done marker binds plan and result evidence', guard,
 match('terminal result states are explicit allowlist', guard,
   /skipped_target_already_matched[\s\S]*skipped_safety_no_increase[\s\S]*skipped_within_scarcity_band[\s\S]*skipped_recovered[\s\S]*else false end/,
   'unknown skipped states must not promote the run to done');
+match('closed terminal readback remains safe after natural inventory drift', guard,
+  /skipped_terminal_readback_recorded[\s\S]*reconcilePendingOnly == true[\s\S]*terminalDisposition == "readback_matched"[\s\S]*currentLiveUsableInventory/,
+  'reconcile-only must trust the strict terminal journal lifecycle instead of requiring live stock to stay frozen');
 match('updated readback equals target', guard,
   /after\.totalUsableInventory == \.targetUsableInventory/,
   'a status string alone is not enough without exact after inventory');

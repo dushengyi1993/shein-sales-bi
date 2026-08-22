@@ -105,6 +105,15 @@ result_is_complete_and_safe() {
         (.after.totalUsableInventory == .targetUsableInventory) and ((.writes // []) | length > 0)
       elif .state == "skipped_target_already_matched" then
         .before.totalUsableInventory == .targetUsableInventory
+      elif .state == "skipped_terminal_readback_recorded" then
+        $result.reconcilePendingOnly == true
+        and .terminalDisposition == "readback_matched"
+        and ((.terminalIntentId // "") | length) > 0
+        and ((.terminalRunDate // "") | length) == 10
+        and ((.terminalRecordedAt // "") | length) > 0
+        and (.currentLiveUsableInventory | type) == "number"
+        and .before.totalUsableInventory == .currentLiveUsableInventory
+        and ((.writes // []) | length) == 0
       elif .state == "skipped_safety_no_increase" then
         ($result.executionConstraints.decreaseOnly == true)
         and (.before.totalUsableInventory | type) == "number"
