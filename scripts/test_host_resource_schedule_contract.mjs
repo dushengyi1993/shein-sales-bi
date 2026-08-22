@@ -617,6 +617,7 @@ set -Eeuo pipefail
   printf 'deadline=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE:-}"
   printf 'max=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-}"
   printf 'scheduled=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-}"
+  printf 'heavy=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-}"
 } > "\${SHEIN_TEST_HOST_LOG:?}"
 `);
 
@@ -631,6 +632,7 @@ const runSlotBehaviorCase = ({
   expectedHost,
   expectedDeadline,
   expectedMax,
+  expectedHeavy,
   expectRtvCheck,
   expectRtvDefer = false,
   expectMorningDefer = false,
@@ -678,6 +680,7 @@ const runSlotBehaviorCase = ({
     assert.match(hostLog, new RegExp(`deadline=${expectedDeadline}`));
     assert.match(hostLog, new RegExp(`max=${expectedMax}`));
     assert.match(hostLog, /scheduled=1/);
+    if (expectedHeavy !== undefined) assert.match(hostLog, new RegExp(`heavy=${expectedHeavy}`));
   } else {
     assert.equal(fs.existsSync(slotBehaviorHostLog), false, `${label}: host wrapper must not run`);
   }
@@ -706,7 +709,7 @@ const runSlotBehaviorCase = ({
 
   runSlotBehaviorCase({
     label: '04:14 ET hour', hour: 4, minute: 14, rtvActive: false,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 17, expectedMax: 1, expectRtvCheck: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 17, expectedMax: 1, expectedHeavy: 0, expectRtvCheck: false,
   });
   runSlotBehaviorCase({
     label: '08:14 morning active', hour: 8, minute: 14, rtvActive: false, morningState: 'active',
@@ -734,7 +737,7 @@ const runSlotBehaviorCase = ({
   });
   runSlotBehaviorCase({
     label: '08:14 morning inactive', hour: 8, minute: 14, rtvActive: false,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 8, expectRtvCheck: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 8, expectedHeavy: 1, expectRtvCheck: false,
   });
   runSlotBehaviorCase({
     label: '08:14 morning failed', hour: 8, minute: 14, rtvActive: false, morningState: 'failed',
@@ -746,7 +749,7 @@ const runSlotBehaviorCase = ({
   });
   runSlotBehaviorCase({
     label: '04:44 RTV inactive', hour: 4, minute: 44, rtvActive: false,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 8, expectRtvCheck: true,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 8, expectedHeavy: 1, expectRtvCheck: true,
   });
   runSlotBehaviorCase({
     label: '01:44 non-RTV hour', hour: 1, minute: 44, rtvActive: true,

@@ -6,6 +6,7 @@ HOUR=$((10#$(date +%H)))
 MINUTE=$((10#$(date +%M)))
 DEADLINE_MINUTE=""
 MAX_SECTIONS=1
+HEAVY_ALLOWED=1
 
 yield_to_daily_coordinator() {
   # Portal materialization is cache maintenance. The daily business refresh is
@@ -48,6 +49,7 @@ if (( MINUTE >= 13 && MINUTE <= 16 )); then
   if is_et_hour; then
     DEADLINE_MINUTE=17
     MAX_SECTIONS=1
+    HEAVY_ALLOWED=0
   else
     DEADLINE_MINUTE=27
     MAX_SECTIONS=8
@@ -66,6 +68,7 @@ yield_to_daily_coordinator
 export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1
 export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE="$DEADLINE_MINUTE"
 export SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS="$MAX_SECTIONS"
+export SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED="$HEAVY_ALLOWED"
 
 exec "$ROOT/scripts/run_host_heavy_job.sh" \
   --domain portal-sections \

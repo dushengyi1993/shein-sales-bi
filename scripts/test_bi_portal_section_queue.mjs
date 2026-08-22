@@ -103,8 +103,8 @@ const enqueueSections = (queue, options = {}) => enqueueSectionsWithGeneration(q
 }
 
 // ---- A re-enqueue while running bumps requestRevision, keeps the lease, and
-// complete for the old revision must release back to pending instead of
-// deleting the newer request.
+// a successful old revision is published while exactly one newer follow-up
+// remains pending instead of being discarded as "complete superseded".
 {
   const queue = {version: 1, updatedAt: '', entries: []};
   enqueueSections(queue, {sections: ['orders'], priority: 50, now: at(0)});
@@ -121,18 +121,129 @@ const enqueueSections = (queue, options = {}) => enqueueSectionsWithGeneration(q
   assert.equal(running.reasons.length, 21, 'coalesced events retain audit reasons without creating more rerun revisions');
   assert.equal(running.status, 'running', 'running re-enqueue must keep the active lease');
   const completed = completeClaim(queue, {section: 'orders', leaseId: 'lease-orders-1', now: at(3_000)});
-  assert.equal(completed, false, 'complete of a superseded revision must not delete the entry');
+  assert.equal(completed, true, 'a successful superseded revision must still be recorded as published');
   const afterComplete = queue.entries.find(entry => entry.section === 'orders');
-  assert.ok(afterComplete, 'the entry must survive a superseded complete');
-  assert.equal(afterComplete.status, 'pending', 'superseded complete must clear the lease back to pending');
+  assert.ok(afterComplete, 'the newer follow-up entry must survive the published complete');
+  assert.equal(afterComplete.status, 'pending', 'published complete must clear the lease back to pending');
   assert.equal(afterComplete.leaseId, '');
-  assert.equal(afterComplete.nextAttemptAt, '', 'superseded complete must allow an immediate rerun');
+  assert.equal(afterComplete.leaseExpiresAt, '');
+  assert.equal(afterComplete.claimedRevision, 0, 'a pending follow-up must not retain the completed claim revision');
+  assert.equal(afterComplete.claimedIdempotencyKey, '', 'a pending follow-up must not retain the completed claim key');
+  assert.equal(afterComplete.claimedCoreGeneratedAt, '', 'a pending follow-up must not retain the completed claim generation');
+  assert.equal(afterComplete.nextAttemptAt, '', 'published complete must allow an immediate rerun');
+  assert.equal(afterComplete.lastPublishedRevision, 1, 'the claimed revision must be the last published snapshot');
+  assert.equal(afterComplete.requestRevision, 2, 'the newer request remains the desired revision');
+  assert.equal(queue.publishedSnapshots.some(snapshot => (
+    snapshot.section === 'orders' && snapshot.publishedRevision === 1
+  )), true, 'the successful claimed revision must be durable publication evidence');
+  assert.equal(queue.completedIdempotency.length, 0, 'an unkeyed published snapshot must not invent an idempotency tombstone');
   const rerun = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-orders-2', now: at(4_000)});
   assert.equal(rerun.requestRevision, 2, 'the rerun claim must process the newest revision');
   assert.equal(rerun.attempts, 2);
   assert.equal(rerun.rerun, false, 'claim of the newest revision must clear the rerun marker');
+  assert.equal(rerun.lastPublishedRevision, 1);
   assert.equal(completeClaim(queue, {section: 'orders', leaseId: 'lease-orders-2', now: at(5_000)}), true);
   assert.equal(queue.entries.some(entry => entry.section === 'orders'), false);
+  assert.equal(queue.publishedSnapshots.find(snapshot => snapshot.section === 'orders')?.publishedRevision, 2);
+}
+
+// ---- A changed request key during a running claim must tombstone only the
+// claimed request, preserve one coalesced follow-up, and expose the published
+// versus desired revision split in status/health.
+{
+  const queue = {version: 1, updatedAt: '', entries: [], completedIdempotency: []};
+  enqueueSections(queue, {
+    sections: ['orders'], priority: 10, idempotencyKey: 'run:A', coalesceKey: 'live:G1', now: at(0),
+  });
+  const claim = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-publish-A', now: at(1_000)});
+  enqueueSections(queue, {
+    sections: ['orders'], priority: 10, idempotencyKey: 'run:B', coalesceKey: 'live:G1', now: at(2_000),
+  });
+  const published = completeClaim(queue, {section: 'orders', leaseId: claim.leaseId, now: at(3_000)});
+  assert.equal(published, true);
+  assert.equal(queue.entries.length, 1, 'publication must leave one, not multiple, follow-up entries');
+  const followUp = queue.entries[0];
+  assert.equal(followUp.requestRevision, 2);
+  assert.equal(followUp.lastPublishedRevision, 1);
+  assert.equal(followUp.status, 'pending');
+  assert.equal(followUp.leaseId, '');
+  assert.equal(followUp.leaseExpiresAt, '');
+  assert.equal(followUp.claimedRevision, 0);
+  assert.equal(followUp.claimedIdempotencyKey, '');
+  assert.equal(followUp.claimedCoreGeneratedAt, '');
+  assert.equal(followUp.idempotencyKey, 'run:B::orders', 'the follow-up retains its own idempotency identity');
+  assert.equal(queue.completedIdempotency.some(record => record.idempotencyKey === 'run:A::orders'), true,
+    'the successfully claimed request must be tombstoned independently');
+  assert.equal(queue.completedIdempotency.some(record => record.idempotencyKey === 'run:B::orders'), false,
+    'the pending follow-up must not be tombstoned before it runs');
+  const coalesced = enqueueSections(queue, {
+    sections: ['orders'], priority: 5, idempotencyKey: 'run:C', coalesceKey: 'live:G1', now: at(4_000),
+  });
+  assert.deepEqual(coalesced.deduplicatedPending, ['orders']);
+  assert.equal(queue.entries.length, 1);
+  assert.equal(queue.entries[0].requestRevision, 2, 'a pending follow-up must coalesce further same-generation events');
+
+  const statusTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-section-status-'));
+  try {
+    const statusFile = path.join(statusTemp, 'queue.json');
+    fs.writeFileSync(statusFile, `${JSON.stringify(queue, null, 2)}\n`);
+    const status = spawnSync(process.execPath, [
+      path.join(process.cwd(), 'scripts', 'manage_bi_portal_section_queue.mjs'),
+      'status', '--file', statusFile,
+    ], {cwd: process.cwd(), encoding: 'utf8'});
+    assert.equal(status.status, 0, status.stderr);
+    const payload = JSON.parse(status.stdout);
+    const health = payload.health.sections.find(section => section.section === 'orders');
+    assert.equal(payload.lastPublishedRevisions.orders, 1);
+    assert.equal(payload.desiredRevisions.orders, 2);
+    assert.equal(health.lastPublishedRevision, 1);
+    assert.equal(health.requestRevision, 2);
+    assert.equal(health.desiredRevision, 2);
+    assert.equal(health.claimedRevision, 0, 'pending follow-up health must show no active claimed revision');
+    assert.ok(health.desiredRevision > health.lastPublishedRevision,
+      'pending follow-up health must distinguish desired from last published revision');
+    assert.equal(health.pendingFollowUp, true);
+    assert.equal(payload.entries[0].claimedRevision, 0);
+    assert.equal(payload.entries[0].claimedIdempotencyKey, '');
+    assert.equal(payload.entries[0].claimedCoreGeneratedAt, '');
+    assert.equal(payload.entries[0].lastPublishedRevision, 1);
+    assert.equal(payload.entries[0].desiredRevision, 2);
+  } finally {
+    fs.rmSync(statusTemp, {recursive: true, force: true});
+  }
+}
+
+// ---- A newer generation starts a fresh revision epoch. Historical snapshots
+// remain available for audit, but must not make requestRevision=1 appear
+// already published in status/health.
+{
+  const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['orders'], coreGeneratedAt: 'G1', now: at(0)});
+  const first = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-generation-1', now: at(1_000)});
+  completeClaim(queue, {section: 'orders', leaseId: first.leaseId, now: at(2_000)});
+  enqueueSections(queue, {sections: ['orders'], coreGeneratedAt: 'G2', now: at(3_000)});
+  const statusTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-section-generation-status-'));
+  try {
+    const statusFile = path.join(statusTemp, 'queue.json');
+    fs.writeFileSync(statusFile, `${JSON.stringify(queue, null, 2)}\n`);
+    const status = spawnSync(process.execPath, [
+      path.join(process.cwd(), 'scripts', 'manage_bi_portal_section_queue.mjs'),
+      'status', '--file', statusFile,
+    ], {cwd: process.cwd(), encoding: 'utf8'});
+    assert.equal(status.status, 0, status.stderr);
+    const payload = JSON.parse(status.stdout);
+    const health = payload.health.sections.find(section => section.section === 'orders');
+    assert.equal(payload.lastPublishedRevisions.orders, 0,
+      'a new generation must not inherit the old generation numeric revision');
+    assert.equal(payload.desiredRevisions.orders, 1);
+    assert.equal(health.lastPublishedRevision, 0);
+    assert.equal(health.desiredRevision, 1);
+    assert.equal(health.pendingFollowUp, true);
+    assert.equal(payload.publishedSnapshots.length, 1,
+      'the historical published snapshot remains auditable');
+  } finally {
+    fs.rmSync(statusTemp, {recursive: true, force: true});
+  }
 }
 
 // ---- A re-enqueue while running also overrides fail backoff: the rerun is
@@ -291,8 +402,9 @@ const enqueueSections = (queue, options = {}) => enqueueSectionsWithGeneration(q
 }
 
 // ---- Continuous order bursts cannot keep claiming only profit forever. A
-// superseded successful lease moves behind homeRankings, whose own freshness
-// guard can safely publish the latest completed accounting snapshot.
+// successful claimed revision moves behind homeRankings while its one
+// follow-up remains pending; the dependency-safe published snapshot prevents
+// a revision livelock.
 {
   const queue = {version: 1, updatedAt: '', entries: []};
   enqueueSections(queue, {sections: ['profit', 'homeRankings', 'homeProfit'], priority: 5, reason: 'live-order', now: at(0)});
@@ -307,7 +419,7 @@ const enqueueSections = (queue, options = {}) => enqueueSectionsWithGeneration(q
       reason: `live-order-${round}`,
       now: at(1_500 + round * 2_000),
     });
-    assert.equal(completeClaim(queue, {section: claimed.section, leaseId, now: at(2_000 + round * 2_000)}), false);
+    assert.equal(completeClaim(queue, {section: claimed.section, leaseId, now: at(2_000 + round * 2_000)}), true);
   }
   assert.deepEqual(claims, ['profit', 'homeRankings', 'profit'],
     'superseded canonical work must yield round-robin instead of livelocking on profit');
@@ -317,18 +429,25 @@ const enqueueSections = (queue, options = {}) => enqueueSectionsWithGeneration(q
     'a coalesced rerun keeps only the priority of requests that actually arrived during its lease');
 }
 
-// ---- A superseded failure is not a completed accounting snapshot. It must
-// keep homeRankings behind profit even though a newer revision is waiting.
+// ---- A failed claim is not a completed accounting snapshot. It must keep
+// homeRankings behind profit even though a newer revision is waiting.
 {
   const queue = {version: 1, updatedAt: '', entries: []};
   enqueueSections(queue, {sections: ['profit', 'homeRankings', 'homeProfit'], priority: 5, now: at(0)});
   const profit = claimNext(queue, {leaseSeconds: 60, leaseId: 'failed-profit', now: at(1_000)});
   enqueueSections(queue, {sections: ['profit', 'homeRankings', 'homeProfit'], priority: 5, now: at(1_500)});
   failClaim(queue, {section: 'profit', leaseId: 'failed-profit', error: 'refresh failed', now: at(2_000), backoffSeconds: 60});
-  assert.equal(queue.entries.find(entry => entry.section === 'profit').dependencyYield, false,
+  const failedProfit = queue.entries.find(entry => entry.section === 'profit');
+  assert.equal(failedProfit.dependencyYield, false,
     'a failed profit lease must never advertise a successful dependency snapshot');
+  assert.equal(failedProfit.claimedRevision, 0, 'a failed lease must not leave a claimed revision on pending work');
+  assert.equal(failedProfit.claimedIdempotencyKey, '');
+  assert.equal(failedProfit.claimedCoreGeneratedAt, '');
+  assert.equal(failedProfit.lastPublishedRevision, 0,
+    'a failed claim must not advance lastPublishedRevision');
+  assert.equal(queue.publishedSnapshots.length, 0, 'a failed claim must not create publication evidence');
   assert.equal(claimNext(queue, {leaseSeconds: 60, leaseId: 'failed-profit-retry', now: at(2_500)}).section, 'profit',
-    'profit must retry before either homepage dependent after a superseded failure');
+    'profit must retry before either homepage dependent after a failed claim');
 }
 
 // A one-time operator force request must not poison a continuously coalesced
@@ -402,8 +521,8 @@ const enqueueSections = (queue, options = {}) => enqueueSectionsWithGeneration(q
   assert.throws(() => enqueueSections(queue, {sections: ['../escape']}), /SECTION_INVALID/);
 }
 
-// ---- CLI round trip: enqueue, claim, superseded complete, fail with
-// backoff, status repair of a broken lease.
+// ---- CLI round trip: enqueue, claim, published old revision with a pending
+// follow-up, fail with backoff, status repair of a broken lease.
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-section-queue-'));
 try {
   const queueFile = path.join(temp, 'queue.json');
@@ -426,9 +545,20 @@ try {
   const superseded = run('complete', '--section', 'orders', '--lease-id', leaseId);
   assert.equal(superseded.status, 0, superseded.stderr);
   const supersededPayload = JSON.parse(superseded.stdout);
-  assert.equal(supersededPayload.completed, false, 'CLI complete of a superseded revision must report not completed');
+  assert.equal(supersededPayload.completed, true, 'CLI complete must report the successful claimed publication');
+  assert.equal(supersededPayload.published, true);
+  assert.equal(supersededPayload.followUpPending, true);
+  assert.equal(supersededPayload.publishedRevision, 1);
   assert.equal(supersededPayload.entries[0].status, 'pending');
   assert.equal(supersededPayload.entries[0].requestRevision, 2);
+  assert.equal(supersededPayload.entries[0].claimedRevision, 0);
+  assert.equal(supersededPayload.entries[0].claimedIdempotencyKey, '');
+  assert.equal(supersededPayload.entries[0].claimedCoreGeneratedAt, '');
+  assert.equal(supersededPayload.entries[0].lastPublishedRevision, 1);
+  assert.equal(
+    supersededPayload.health.sections.find(section => section.section === 'orders').claimedRevision,
+    0,
+  );
 
   const claimAgain = run('claim', '--lease-seconds', '60');
   assert.equal(claimAgain.status, 0, claimAgain.stderr);

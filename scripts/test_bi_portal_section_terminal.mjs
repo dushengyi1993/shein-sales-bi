@@ -297,6 +297,12 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     'a short queue slot must not claim the profit section that cannot finish before its deadline');
   assert.match(worker, /HEAVY_SECTION_DEFERRED[\s\S]*queue_command status[\s\S]*PENDING_COUNT > 0[\s\S]*exit 75/,
     'a short slot that leaves heavy work pending must report a defer, never a false empty success');
+  assert.match(worker, /HEAVY_ALLOWED="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-1\}"/,
+    'the worker must receive an explicit heavy-section budget from the slot');
+  assert.match(worker, /HEAVY_ALLOWED.*0[\s\S]*EXCLUDED_SECTIONS\+=\(profit homeRankings\)/,
+    'a short reserved slot must exclude both heavy sections before claiming');
+  assert.match(worker, /publishedRevision=\$PUBLISHED_REVISION follow-up pending/,
+    'a successful claim with a newer request must report the published snapshot and follow-up');
   assert.match(worker, /if \[\[ "\$\{#FAILED_SECTIONS\[@\]\}" -gt 0 \]\]; then[\s\S]*failed sections=[\s\S]*exit 1/,
     'any failed lease must remain alert-worthy; an older terminal artifact cannot prove the requested revision recovered');
   assert.match(worker, /trap '\[\[ -n "\$\{HEADERS_FILE:-\}" \]\] && rm -f "\$HEADERS_FILE"' EXIT/,

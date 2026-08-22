@@ -16,6 +16,8 @@ const DEFAULT_FAIL_BACKOFF_SECONDS = 60;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,120}$/;
 const COMPLETED_LEDGER_MAX_ENTRIES = 2_048;
 const COMPLETED_LEDGER_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+const PUBLISHED_SNAPSHOT_MAX_ENTRIES = 2_048;
+const PUBLISHED_SNAPSHOT_MAX_AGE_MS = COMPLETED_LEDGER_MAX_AGE_MS;
 const CORE_GENERATED_AT_PATTERN = /^[\x21-\x7E]{1,1024}$/;
 const GENERATION_COMPLETION_VERSION = 1;
 const GENERATION_COMPLETION_SECTION_COUNT = 7;
@@ -167,14 +169,93 @@ function emptyQueue() {
     sectionIntentRevisions: {},
     entries: [],
     completedIdempotency: [],
+    publishedSnapshots: [],
     generationCompletion: null,
   };
+}
+
+function normalizeRevision(value, fallback = 0) {
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : fallback;
+}
+
+function normalizePublishedSnapshot(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+  const section = String(record.section || '');
+  const publishedRevision = normalizeRevision(record.publishedRevision ?? record.revision, 0);
+  const publishedAt = String(record.publishedAt || record.completedAt || '');
+  if (!SECTION_PATTERN.test(section) || publishedRevision <= 0 || !publishedAt) return null;
+  return {
+    section,
+    publishedRevision,
+    coreGeneratedAt: validateCoreGeneratedAt(record.coreGeneratedAt) || 'unknown',
+    publishedAt,
+    ...(typeof record.idempotencyKey === 'string' && record.idempotencyKey
+      ? {idempotencyKey: record.idempotencyKey}
+      : {}),
+  };
+}
+
+function latestPublishedBySection(queue) {
+  const latest = new Map();
+  const consider = record => {
+    const normalized = normalizePublishedSnapshot(record);
+    if (!normalized) return;
+    const prior = latest.get(normalized.section);
+    const normalizedAt = Date.parse(normalized.publishedAt);
+    const priorAt = Date.parse(String(prior?.publishedAt || ''));
+    const bothTimestampsInvalid = !Number.isFinite(normalizedAt) && !Number.isFinite(priorAt);
+    if (!prior
+      || (Number.isFinite(normalizedAt) && (!Number.isFinite(priorAt) || normalizedAt > priorAt))
+      || ((normalizedAt === priorAt || bothTimestampsInvalid)
+        && normalized.publishedRevision >= prior.publishedRevision)) {
+      latest.set(normalized.section, normalized);
+    }
+  };
+  for (const record of Array.isArray(queue?.publishedSnapshots) ? queue.publishedSnapshots : []) consider(record);
+  // A completed keyed request is also a published snapshot. This fallback
+  // keeps status truthful for queues written by an older manager that did not
+  // yet have the dedicated snapshot ledger.
+  for (const record of Array.isArray(queue?.completedIdempotency) ? queue.completedIdempotency : []) consider({
+    ...record,
+    publishedRevision: record?.publishedRevision,
+    publishedAt: record?.publishedAt || record?.completedAt,
+  });
+  return latest;
+}
+
+function trimPublishedSnapshots(queue, now = new Date()) {
+  const nowMillis = now.getTime();
+  const records = Array.isArray(queue.publishedSnapshots) ? queue.publishedSnapshots : [];
+  const current = records
+    .map(normalizePublishedSnapshot)
+    .filter(record => record && (() => {
+      const publishedAt = Date.parse(record.publishedAt);
+      return Number.isFinite(publishedAt) && nowMillis - publishedAt <= PUBLISHED_SNAPSHOT_MAX_AGE_MS;
+    })())
+    .sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt));
+  queue.publishedSnapshots = current.slice(0, PUBLISHED_SNAPSHOT_MAX_ENTRIES);
+  return queue.publishedSnapshots.length !== records.length;
 }
 
 // Old queue.json files predate sequence/requestRevision/claimedRevision/
 // nextAttemptAt. Normalize deterministically on every read so legacy entries
 // keep working and repeated reads of the same file stay stable.
 function normalizeQueue(queue) {
+  queue.entries = Array.isArray(queue.entries) ? queue.entries : [];
+  queue.completedIdempotency = Array.isArray(queue.completedIdempotency)
+    ? queue.completedIdempotency
+      .map(record => ({
+        ...record,
+        publishedRevision: normalizeRevision(record?.publishedRevision, 0),
+        publishedAt: String(record?.publishedAt || record?.completedAt || ''),
+        coreGeneratedAt: validateCoreGeneratedAt(record?.coreGeneratedAt) || 'unknown',
+      }))
+      .filter(record => typeof record.idempotencyKey === 'string' && record.idempotencyKey)
+    : [];
+  queue.publishedSnapshots = (Array.isArray(queue.publishedSnapshots) ? queue.publishedSnapshots : [])
+    .map(normalizePublishedSnapshot)
+    .filter(Boolean);
   let nextSequence = Number.isSafeInteger(queue.nextSequence) && queue.nextSequence >= 0
     ? queue.nextSequence
     : 0;
@@ -196,17 +277,31 @@ function normalizeQueue(queue) {
     } else {
       entry.claimedRevision = 0;
     }
+    entry.claimedIdempotencyKey = typeof entry.claimedIdempotencyKey === 'string'
+      ? entry.claimedIdempotencyKey
+      : '';
+    entry.claimedCoreGeneratedAt = validateCoreGeneratedAt(entry.claimedCoreGeneratedAt) || '';
+    entry.lastPublishedRevision = normalizeRevision(entry.lastPublishedRevision, 0);
+    entry.lastPublishedAt = typeof entry.lastPublishedAt === 'string' ? entry.lastPublishedAt : '';
     entry.nextAttemptAt = typeof entry.nextAttemptAt === 'string' ? entry.nextAttemptAt : '';
     entry.rerun = Boolean(entry.rerun);
     const rerunPriority = Number(entry.rerunPriority ?? NaN);
     entry.rerunPriority = Number.isSafeInteger(rerunPriority) && rerunPriority >= 0 ? rerunPriority : null;
     entry.dependencyYield = Boolean(entry.dependencyYield);
-    entry.idempotencyKey = typeof entry.idempotencyKey === 'string' ? entry.idempotencyKey : '';
-    entry.coalesceKey = typeof entry.coalesceKey === 'string' ? entry.coalesceKey : '';
+    if (Object.prototype.hasOwnProperty.call(entry, 'idempotencyKey')) {
+      entry.idempotencyKey = typeof entry.idempotencyKey === 'string' ? entry.idempotencyKey : '';
+    }
+    if (Object.prototype.hasOwnProperty.call(entry, 'coalesceKey')) {
+      entry.coalesceKey = typeof entry.coalesceKey === 'string' ? entry.coalesceKey : '';
+    }
     entry.coreGeneratedAt = validateCoreGeneratedAt(entry.coreGeneratedAt) || 'unknown';
     const priority = Number(entry.priority ?? 50);
     entry.priority = Number.isSafeInteger(priority) && priority >= 0 ? priority : 50;
     if (!['pending', 'running'].includes(entry.status)) entry.status = 'pending';
+    if (entry.status === 'running') {
+      if (!entry.claimedIdempotencyKey) entry.claimedIdempotencyKey = entry.idempotencyKey;
+      if (!entry.claimedCoreGeneratedAt) entry.claimedCoreGeneratedAt = entry.coreGeneratedAt;
+    }
   }
   queue.nextSequence = nextSequence;
   const revisions = queue.sectionIntentRevisions && typeof queue.sectionIntentRevisions === 'object'
@@ -245,9 +340,12 @@ function readQueue(file) {
       completedIdempotency: Array.isArray(value?.completedIdempotency)
         ? value.completedIdempotency.map(record => ({
           ...record,
+          publishedRevision: normalizeRevision(record?.publishedRevision, 0),
+          publishedAt: String(record?.publishedAt || record?.completedAt || ''),
           coreGeneratedAt: validateCoreGeneratedAt(record?.coreGeneratedAt) || 'unknown',
         }))
         : [],
+      publishedSnapshots: Array.isArray(value?.publishedSnapshots) ? value.publishedSnapshots : [],
       generationCompletion: value?.generationCompletion || null,
     });
   } catch (error) {
@@ -272,6 +370,59 @@ function writeQueue(file, queue) {
   return payload;
 }
 
+function ensureQueueState(queue) {
+  if (!queue || typeof queue !== 'object' || Array.isArray(queue)) {
+    throw new TypeError('QUEUE_STATE_INVALID');
+  }
+  return normalizeQueue(queue);
+}
+
+function recordPublishedSnapshot(queue, entry, now = new Date()) {
+  const claimedRevision = normalizeRevision(entry?.claimedRevision, 0);
+  if (claimedRevision <= 0) return null;
+  const publishedAt = now.toISOString();
+  const snapshot = {
+    section: entry.section,
+    publishedRevision: claimedRevision,
+    coreGeneratedAt: entry.coreGeneratedAt || 'unknown',
+    publishedAt,
+    ...(entry.idempotencyKey ? {idempotencyKey: entry.idempotencyKey} : {}),
+  };
+  const existingSnapshot = queue.publishedSnapshots.find(record => (
+    record.section === snapshot.section
+      && Number(record.publishedRevision) === snapshot.publishedRevision
+      && String(record.coreGeneratedAt || '') === snapshot.coreGeneratedAt
+  ));
+  if (existingSnapshot) {
+    existingSnapshot.publishedAt = publishedAt;
+    if (snapshot.idempotencyKey) existingSnapshot.idempotencyKey = snapshot.idempotencyKey;
+  } else {
+    queue.publishedSnapshots.push(snapshot);
+  }
+
+  // Keep the durable keyed idempotency tombstone for every successful claim,
+  // including a claim that leaves one newer revision pending. The old request
+  // really did publish; only its follow-up remains outstanding.
+  if (entry.idempotencyKey) {
+    const existingCompletion = queue.completedIdempotency.find(record => (
+      record.idempotencyKey === entry.idempotencyKey
+    ));
+    if (!existingCompletion) {
+      queue.completedIdempotency.push({
+        idempotencyKey: entry.idempotencyKey,
+        section: entry.section,
+        publishedRevision: claimedRevision,
+        publishedAt,
+        coreGeneratedAt: entry.coreGeneratedAt || 'unknown',
+        completedAt: now.toISOString(),
+      });
+    }
+    trimCompletedIdempotency(queue, now);
+  }
+  trimPublishedSnapshots(queue, now);
+  return snapshot;
+}
+
 function recoverExpired(queue, nowMillis) {
   for (const entry of queue.entries) {
     if (entry.status !== 'running') continue;
@@ -280,6 +431,9 @@ function recoverExpired(queue, nowMillis) {
       entry.status = 'pending';
       entry.leaseId = '';
       entry.leaseExpiresAt = '';
+      entry.claimedRevision = 0;
+      entry.claimedIdempotencyKey = '';
+      entry.claimedCoreGeneratedAt = '';
       entry.lastError = entry.lastError || 'worker lease expired';
     }
   }
@@ -331,6 +485,7 @@ export function enqueueSections(queue, {
   requeueCompletedSections = [],
   now = new Date(),
 } = {}) {
+  ensureQueueState(queue);
   const nowIso = now.toISOString();
   const key = validateIdempotencyKey(idempotencyKey);
   const groupKey = validateIdempotencyKey(coalesceKey);
@@ -454,6 +609,10 @@ export function enqueueSections(queue, {
         priority,
         requestRevision: 1,
         claimedRevision: 0,
+        claimedIdempotencyKey: '',
+        claimedCoreGeneratedAt: '',
+        lastPublishedRevision: 0,
+        lastPublishedAt: '',
         rerun: false,
         rerunPriority: null,
         dependencyYield: false,
@@ -579,6 +738,7 @@ export function claimNext(queue, {
   leaseId = crypto.randomUUID(),
   excludeSections = [],
 } = {}) {
+  ensureQueueState(queue);
   const nowMillis = now.getTime();
   recoverExpired(queue, nowMillis);
   // A dependent homepage artifact must never publish from the old profit
@@ -641,13 +801,20 @@ export function claimNext(queue, {
   entry.leaseId = leaseId;
   entry.leaseExpiresAt = new Date(nowMillis + leaseSeconds * 1_000).toISOString();
   entry.claimedRevision = Number(entry.requestRevision || 0);
+  entry.claimedIdempotencyKey = entry.idempotencyKey || '';
+  entry.claimedCoreGeneratedAt = entry.coreGeneratedAt || 'unknown';
   entry.rerun = false;
   entry.dependencyYield = false;
   entry.updatedAt = now.toISOString();
-  return {...entry};
+  return {
+    ...entry,
+    desiredRevision: Number(entry.requestRevision || 0),
+    lastPublishedRevision: Number(entry.lastPublishedRevision || 0),
+  };
 }
 
 export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) {
+  ensureQueueState(queue);
   const normalizedSection = normalizeSection(section);
   const index = queue.entries.findIndex(entry => entry.section === normalizedSection);
   if (index < 0) return false;
@@ -655,38 +822,56 @@ export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) 
   if (entry.status !== 'running' || entry.leaseId !== leaseId) {
     throw new Error('QUEUE_LEASE_MISMATCH');
   }
-  if (Number(entry.requestRevision) !== Number(entry.claimedRevision)) {
-    // The entry was re-enqueued while this lease ran. A complete for the old
-    // revision must not delete the newer request: release the lease back to
-    // pending with no backoff so the new revision can be claimed immediately.
+  const claimedRevision = normalizeRevision(entry.claimedRevision, 0);
+  const desiredRevision = normalizeRevision(entry.requestRevision, 0);
+  // The entry may adopt a newer request's key/generation while this lease is
+  // running. Bind the publication evidence to the immutable claim fields.
+  const claimedEntry = {
+    ...entry,
+    idempotencyKey: entry.claimedIdempotencyKey || entry.idempotencyKey || '',
+    coreGeneratedAt: entry.claimedCoreGeneratedAt || entry.coreGeneratedAt || 'unknown',
+  };
+  const publishedSnapshot = recordPublishedSnapshot(queue, claimedEntry, now);
+  if (publishedSnapshot) {
+    entry.lastPublishedRevision = Math.max(
+      normalizeRevision(entry.lastPublishedRevision, 0),
+      claimedRevision,
+    );
+    entry.lastPublishedAt = publishedSnapshot.publishedAt;
+  }
+  if (desiredRevision > claimedRevision) {
+    // The entry was re-enqueued while this lease ran. The claimed revision has
+    // already produced a safe terminal artifact, so publish that snapshot and
+    // retain exactly this one queue entry for the newer desired revision.
+    // Never describe the successful claim as "complete superseded": doing so
+    // loses the dependency-safe publication and can livelock profit behind a
+    // continuous event stream.
     entry.status = 'pending';
     entry.leaseId = '';
     entry.leaseExpiresAt = '';
+    // The successful claim no longer owns an active lease. Keep its durable
+    // publication in lastPublishedRevision/publishedSnapshots, but clear the
+    // claim identity so status/health cannot report a stale in-flight claim
+    // while the newer revision waits for its follow-up run.
+    entry.claimedRevision = 0;
+    entry.claimedIdempotencyKey = '';
+    entry.claimedCoreGeneratedAt = '';
     entry.nextAttemptAt = '';
     entry.dependencyYield = entry.section === 'profit';
     if (Number.isSafeInteger(Number(entry.rerunPriority))) entry.priority = Number(entry.rerunPriority);
     entry.rerunPriority = null;
+    entry.rerun = false;
     queue.nextSequence = Math.max(Number(queue.nextSequence || 0), ...queue.entries.map(item => Number(item.sequence || 0))) + 1;
     entry.sequence = queue.nextSequence;
-    entry.lastError = `complete superseded by requestRevision=${Number(entry.requestRevision)}`;
+    entry.lastError = '';
     entry.updatedAt = now.toISOString();
-    return false;
+    return true;
   }
   queue.entries.splice(index, 1);
-  if (entry.idempotencyKey) {
-    // Final completion tombstones the durable idempotency key so a later
-    // Portal restart with the same request is a no-op instead of a
-    // re-enqueue of a fresh revision.
-    queue.completedIdempotency = Array.isArray(queue.completedIdempotency) ? queue.completedIdempotency : [];
-    queue.completedIdempotency.push({
-      idempotencyKey: entry.idempotencyKey,
-      section: entry.section,
-      coreGeneratedAt: entry.coreGeneratedAt || 'unknown',
-      completedAt: now.toISOString(),
-    });
-    trimCompletedIdempotency(queue, now);
-  }
-  return true;
+  // recordPublishedSnapshot already wrote the keyed tombstone and durable
+  // publication ledger before the entry was removed. It intentionally uses
+  // claimedCoreGeneratedAt/claimedIdempotencyKey, not a later request's fields.
+  return Boolean(publishedSnapshot || claimedRevision > 0);
 }
 
 function trimCompletedIdempotency(queue, now = new Date()) {
@@ -761,6 +946,7 @@ function generationSnapshotHash(queue, generation, requestedSections) {
       status: entry.status,
       requestRevision: entry.requestRevision,
       claimedRevision: entry.claimedRevision,
+      lastPublishedRevision: entry.lastPublishedRevision,
       rerun: entry.rerun,
       idempotencyKey: entry.idempotencyKey || '',
       coreGeneratedAt: entry.coreGeneratedAt || 'unknown',
@@ -772,6 +958,7 @@ function generationSnapshotHash(queue, generation, requestedSections) {
       section: String(record.section || ''),
       idempotencyKey: String(record.idempotencyKey || ''),
       coreGeneratedAt: String(record.coreGeneratedAt || 'unknown'),
+      publishedRevision: normalizeRevision(record.publishedRevision, 0),
       completedAt: String(record.completedAt || ''),
     }))
     .sort((left, right) => (
@@ -788,6 +975,19 @@ function generationSnapshotHash(queue, generation, requestedSections) {
     ]),
     entries,
     completedIdempotency,
+    publishedSnapshots: (queue.publishedSnapshots || [])
+      .filter(record => requestedSet.has(String(record?.section || '')))
+      .map(record => ({
+        section: String(record.section || ''),
+        publishedRevision: normalizeRevision(record.publishedRevision, 0),
+        coreGeneratedAt: String(record.coreGeneratedAt || 'unknown'),
+        publishedAt: String(record.publishedAt || ''),
+      }))
+      .sort((left, right) => (
+        left.section.localeCompare(right.section)
+          || left.publishedRevision - right.publishedRevision
+          || left.publishedAt.localeCompare(right.publishedAt)
+      )),
     generationCompletion: queue.generationCompletion || null,
   })).digest('hex');
 }
@@ -797,6 +997,7 @@ export function snapshotGenerationCompletion(queue, {
   coreGeneratedAt,
   now = new Date(),
 } = {}) {
+  ensureQueueState(queue);
   const {generation, requestedSections} = generationReconcileRequest({sections, coreGeneratedAt});
 
   let mutated = trimCompletedIdempotency(queue, now);
@@ -1067,6 +1268,7 @@ export function failClaim(queue, {
   now = new Date(),
   backoffSeconds = DEFAULT_FAIL_BACKOFF_SECONDS,
 } = {}) {
+  ensureQueueState(queue);
   const normalizedSection = normalizeSection(section);
   const entry = queue.entries.find(candidate => candidate.section === normalizedSection);
   if (!entry) return false;
@@ -1085,6 +1287,11 @@ export function failClaim(queue, {
   entry.nextAttemptAt = newerRevisionPending
     ? ''
     : new Date(now.getTime() + delaySeconds * 1_000).toISOString();
+  // A failed lease is no longer active. The revision remains desired for a
+  // retry, but its old claim identity must not be reported as in flight.
+  entry.claimedRevision = 0;
+  entry.claimedIdempotencyKey = '';
+  entry.claimedCoreGeneratedAt = '';
   entry.dependencyYield = false;
   if (newerRevisionPending) {
     if (Number.isSafeInteger(Number(entry.rerunPriority))) entry.priority = Number(entry.rerunPriority);
@@ -1092,23 +1299,92 @@ export function failClaim(queue, {
     queue.nextSequence = Math.max(Number(queue.nextSequence || 0), ...queue.entries.map(item => Number(item.sequence || 0))) + 1;
     entry.sequence = queue.nextSequence;
   }
+  entry.rerun = false;
   entry.lastError = String(error || 'section refresh failed').slice(0, 1_000);
   entry.updatedAt = now.toISOString();
   return true;
 }
 
 function statusPayload(queue, file) {
+  ensureQueueState(queue);
   const counts = queue.entries.reduce((accumulator, entry) => {
     const status = String(entry.status || 'unknown');
     accumulator[status] = (accumulator[status] || 0) + 1;
     return accumulator;
   }, {});
+  const latestPublished = latestPublishedBySection(queue);
+  const lastPublishedRevisions = Object.fromEntries([...latestPublished.entries()]
+    .map(([section, record]) => [section, Number(record.publishedRevision || 0)]));
+  const lastPublishedAt = Object.fromEntries([...latestPublished.entries()]
+    .map(([section, record]) => [section, String(record.publishedAt || '')]));
+  const desiredRevisions = {};
+  const healthSections = new Map();
+  for (const [section, record] of latestPublished.entries()) {
+    const lastPublishedRevision = Number(record.publishedRevision || 0);
+    desiredRevisions[section] = lastPublishedRevision;
+    healthSections.set(section, {
+      section,
+      status: 'published',
+      requestRevision: lastPublishedRevision,
+      desiredRevision: lastPublishedRevision,
+      claimedRevision: 0,
+      lastPublishedRevision,
+      lastPublishedAt: String(record.publishedAt || ''),
+      pendingFollowUp: false,
+    });
+  }
+  const entries = queue.entries.map(entry => {
+    // An active entry owns its revision epoch. A new core generation may start
+    // at requestRevision=1 after an older generation published revision 2;
+    // using the historical ledger's numeric maximum here would falsely mark
+    // the new request as already published. completeClaim updates these
+    // entry-local fields atomically with the publication ledger.
+    const lastPublishedRevision = Number(entry.lastPublishedRevision || 0);
+    const desiredRevision = Number(entry.requestRevision || 0);
+    const lastPublishedAtForEntry = String(entry.lastPublishedAt || '');
+    lastPublishedRevisions[entry.section] = lastPublishedRevision;
+    lastPublishedAt[entry.section] = lastPublishedAtForEntry;
+    desiredRevisions[entry.section] = desiredRevision;
+    const pendingFollowUp = desiredRevision > lastPublishedRevision;
+    healthSections.set(entry.section, {
+      section: entry.section,
+      status: entry.status,
+      requestRevision: desiredRevision,
+      desiredRevision,
+      claimedRevision: Number(entry.claimedRevision || 0),
+      lastPublishedRevision,
+      lastPublishedAt: lastPublishedAtForEntry,
+      pendingFollowUp,
+    });
+    return {
+      ...entry,
+      desiredRevision,
+      lastPublishedRevision,
+      pendingFollowUp,
+    };
+  });
+  const sectionHealth = [...healthSections.values()].sort((left, right) => left.section.localeCompare(right.section));
+  const health = {
+    lastPublishedRevision: lastPublishedRevisions,
+    lastPublishedRevisions,
+    lastPublishedAt,
+    desiredRevision: desiredRevisions,
+    desiredRevisions,
+    sections: sectionHealth,
+  };
   return {
     ok: true,
     file,
     updatedAt: queue.updatedAt,
     counts,
-    entries: queue.entries,
+    entries,
+    lastPublishedRevision: lastPublishedRevisions,
+    lastPublishedRevisions,
+    lastPublishedAt,
+    desiredRevision: desiredRevisions,
+    desiredRevisions,
+    publishedSnapshots: queue.publishedSnapshots,
+    health,
     generationCompletion: queue.generationCompletion || null,
   };
 }
@@ -1179,9 +1455,28 @@ export function main(argv = process.argv.slice(2)) {
     return entry ? 0 : 75;
   }
   if (options.command === 'complete') {
+    const before = queue.entries.find(entry => entry.section === options.section);
+    const claimedRevision = normalizeRevision(before?.claimedRevision, 0);
     const completed = completeClaim(queue, options);
     const saved = writeQueue(options.file, queue);
-    console.log(JSON.stringify({ok: true, completed, ...statusPayload(saved, options.file)}));
+    const published = latestPublishedBySection(saved).get(options.section);
+    const after = saved.entries.find(entry => entry.section === options.section);
+    const publishedRevision = Number(published?.publishedRevision || 0);
+    const followUpPending = Boolean(
+      after
+        && after.status === 'pending'
+        && publishedRevision >= claimedRevision
+        && Number(after.requestRevision || 0) > publishedRevision,
+    );
+    console.log(JSON.stringify({
+      ok: true,
+      completed,
+      published: publishedRevision >= claimedRevision && claimedRevision > 0,
+      publishedRevision,
+      desiredRevision: Number(after?.requestRevision || publishedRevision || 0),
+      followUpPending,
+      ...statusPayload(saved, options.file),
+    }));
     return 0;
   }
   if (options.command === 'fail') {
