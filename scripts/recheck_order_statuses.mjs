@@ -18,6 +18,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'order_status_recheck');
@@ -25,6 +26,8 @@ const DEFAULT_STATE_FILE = path.join(ROOT, 'state', 'order_status_recheck_last.j
 const DEFAULT_CONTAINER = 'shein-warehouse-db';
 const DEFAULT_DATABASE = 'shein_bi';
 const DEFAULT_USER = 'shein';
+export const ORDER_CANDIDATE_DIGEST_SCHEMA = 1;
+export const ORDER_CANDIDATE_SEMANTIC_VERSION = 'order-closure-candidates/v1';
 
 const RECHECK_TABLE_SQL = `
 CREATE SCHEMA IF NOT EXISTS ops;
@@ -156,6 +159,7 @@ function parseArgs(argv) {
     ignoreCooldown: false,
     transport: process.env.SHEIN_SALES_TRANSPORT || 'openapi',
     dryRun: false,
+    candidateDigest: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -173,6 +177,7 @@ function parseArgs(argv) {
     else if (a === '--ignore-cooldown') args.ignoreCooldown = true;
     else if (a === '--transport') args.transport = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--candidate-digest') args.candidateDigest = true;
     else if (a === '--stores') args.stores = String(argv[++i] || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
     else if (a === '--date') args.date = argv[++i];
     else if (a === '--start') args.start = argv[++i];
@@ -187,6 +192,9 @@ function parseArgs(argv) {
     args.end = args.date;
   }
   if (args.start && !args.end) args.end = args.start;
+  if (args.candidateDigest && args.start) {
+    throw new Error('--candidate-digest is only supported for the automatic database candidate set');
+  }
   return args;
 }
 
@@ -278,7 +286,7 @@ async function manualPairs(args) {
   return pairs.slice(0, args.maxPairs);
 }
 
-function candidateSql(args) {
+export function candidateSnapshotSql(args) {
   const storeFilter = args.stores?.length
     ? `AND oi.store_key IN (${args.stores.map(s => `'${s.replace(/'/g, "''")}'`).join(', ')})`
     : '';
@@ -340,38 +348,101 @@ base AS (
       )
     )
     ${storeFilter}
+), candidate_workset AS (
+  SELECT
+    store_key,
+    created_date,
+    order_item_key,
+    last_checked_at
+  FROM base
+  WHERE NOT is_terminal
+    AND effective_group NOT IN ('done','cancelled','returning')
+    AND ${cooldownFilter}
 ), candidates AS (
   SELECT
     store_key AS "storeKey",
     created_date::text AS "createdDate",
     count(*) AS "itemCount",
-    count(*) FILTER (WHERE NOT is_terminal AND effective_group NOT IN ('done','cancelled','returning')) AS "openItemCount",
+    count(*) AS "openItemCount",
     min(last_checked_at) AS "oldestCheckedAt",
     max(last_checked_at) AS "latestCheckedAt"
-  FROM base
-  WHERE NOT is_terminal
-    AND effective_group NOT IN ('done','cancelled','returning')
-    AND ${cooldownFilter}
+  FROM candidate_workset
   GROUP BY store_key, created_date
-  HAVING count(*) FILTER (WHERE NOT is_terminal AND effective_group NOT IN ('done','cancelled','returning')) > 0
   ORDER BY created_date ASC, "openItemCount" DESC, store_key ASC
   LIMIT ${Number(args.maxPairs)}
 )
-SELECT coalesce(json_agg(candidates), '[]'::json)::text FROM candidates;
+SELECT json_build_object(
+  'pairs', (
+    SELECT coalesce(json_agg(row_to_json(pair_rows)), '[]'::json)
+    FROM (
+      SELECT *
+      FROM candidates
+      ORDER BY "createdDate" ASC, "openItemCount" DESC, "storeKey" ASC
+    ) pair_rows
+  ),
+  'workset', (
+    SELECT coalesce(json_agg(row_to_json(workset_rows)), '[]'::json)
+    FROM (
+      SELECT
+        store_key AS "storeKey",
+        created_date::text AS "createdDate",
+        order_item_key AS "orderItemKey",
+        CASE
+          WHEN last_checked_at IS NULL THEN NULL
+          ELSE to_char(last_checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+        END AS "lastCheckedAt"
+      FROM candidate_workset
+      ORDER BY store_key ASC, created_date ASC, order_item_key ASC, last_checked_at ASC NULLS FIRST
+    ) workset_rows
+  )
+)::text;
 `;
 }
 
-async function dbCandidatePairs(args) {
-  const stdout = await runPsql(args, candidateSql(args));
-  const text = stdout.trim() || '[]';
+function normalizeCandidateWorkset(rows) {
+  return (Array.isArray(rows) ? rows : []).map(row => ({
+    storeKey: String(row?.storeKey || '').toUpperCase(),
+    createdDate: String(row?.createdDate || ''),
+    orderItemKey: String(row?.orderItemKey || ''),
+    lastCheckedAt: row?.lastCheckedAt == null ? null : String(row.lastCheckedAt),
+  })).sort((left, right) => {
+    for (const key of ['storeKey', 'createdDate', 'orderItemKey']) {
+      const compared = left[key] < right[key] ? -1 : left[key] > right[key] ? 1 : 0;
+      if (compared) return compared;
+    }
+    const leftChecked = String(left.lastCheckedAt || '');
+    const rightChecked = String(right.lastCheckedAt || '');
+    return leftChecked < rightChecked ? -1 : leftChecked > rightChecked ? 1 : 0;
+  });
+}
+
+export function computeCandidateWorksetDigest(rows) {
+  const payload = {
+    schema: ORDER_CANDIDATE_DIGEST_SCHEMA,
+    fields: ['store_key', 'created_date', 'order_item_key', 'last_checked_at'],
+    workset: normalizeCandidateWorkset(rows),
+  };
+  return createHash('sha256').update(JSON.stringify(payload), 'utf8').digest('hex');
+}
+
+async function dbCandidateSnapshot(args) {
+  const stdout = await runPsql(args, candidateSnapshotSql(args));
+  const text = stdout.trim() || '{}';
   const parsed = JSON.parse(text);
-  return parsed.map(x => ({...x, storeKey: String(x.storeKey || '').toUpperCase(), createdDate: x.createdDate, reason: 'db-backlog'}));
+  const pairs = (Array.isArray(parsed.pairs) ? parsed.pairs : []).map(x => ({
+    ...x,
+    storeKey: String(x.storeKey || '').toUpperCase(),
+    createdDate: x.createdDate,
+    reason: 'db-backlog',
+  }));
+  const workset = normalizeCandidateWorkset(parsed.workset);
+  return {pairs, workset};
 }
 
 async function getCandidatePairs(args) {
   const manual = await manualPairs(args);
   if (manual) return manual;
-  return await dbCandidatePairs(args);
+  return (await dbCandidateSnapshot(args)).pairs;
 }
 
 async function openFactRowsForPair(args, pair) {
@@ -763,6 +834,24 @@ async function writeState(args, report) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.candidateDigest) {
+    // Read-only identity probe for the coordinator.  It deliberately skips
+    // schema creation, output directories, state files, API calls and upserts.
+    // The normal automatic run below consumes pairs from this same snapshot
+    // query, so candidate selection cannot drift into a second SQL definition.
+    const snapshot = await dbCandidateSnapshot(args);
+    console.log(JSON.stringify({
+      ok: true,
+      mode: 'candidate-digest',
+      semanticVersion: ORDER_CANDIDATE_SEMANTIC_VERSION,
+      digestSchema: ORDER_CANDIDATE_DIGEST_SCHEMA,
+      fields: ['store_key', 'created_date', 'order_item_key', 'last_checked_at'],
+      worksetDigest: computeCandidateWorksetDigest(snapshot.workset),
+      candidateCount: snapshot.workset.length,
+      pairCount: snapshot.pairs.length,
+    }));
+    return;
+  }
   const startedAt = new Date().toISOString();
   const runId = startedAt.replace(/[-:.TZ]/g, '').slice(0, 14);
   const runDir = path.join(args.outDir, runId);
@@ -853,7 +942,9 @@ async function main() {
   if (!report.ok) process.exitCode = 1;
 }
 
-main().catch(err => {
-  console.error(err?.stack || String(err));
-  process.exitCode = 1;
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch(err => {
+    console.error(err?.stack || String(err));
+    process.exitCode = 1;
+  });
+}
