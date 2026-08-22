@@ -608,6 +608,13 @@ case "$STAGE" in
     node scripts/build_morning_resume_evidence.mjs --date "$DATA_DATE" --out "$RESULT_FILE"
 
     if pipeline_marker_done "morning-supplements"; then
+      # RESULT_FILE was rebuilt above from the exact-date store evidence.  A
+      # restart may therefore invalidate the previous links-ready evidence
+      # hash even though supplements/Portal are already complete.  Re-sign
+      # only this marker with the current bundle before entering inventory;
+      # the exact-store gate above still forbids incomplete data here.
+      write_marker "morning-links-ready" "done" "all 19 stores merged and published in the unified daily run" \
+        "$RESULT_FILE" >/dev/null
       echo "[cloud_morning_chain] resume-skip completed supplements/Portal checkpoint; continuing with inventory in the same logical daily run"
     else
       SUPPLEMENT_RETRY_ROUND=0
