@@ -21,6 +21,7 @@ const policyFile = path.join(ROOT, 'config', 'inventory_replenishment_policy.jso
 const policy = JSON.parse(await fs.readFile(policyFile, 'utf8'));
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 const priorDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(Date.now() - 86_400_000));
+const twoDaysAgo = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(Date.now() - 2 * 86_400_000));
 const futureDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(Date.now() + 86_400_000));
 const authContext = 'cloud_daily_inventory_replenishment_guard';
 const authorizationId = 'owner-automatic-inventory-20260803-v1';
@@ -146,6 +147,43 @@ function makeIntent({runDate, row, planHash, intentId, target = row.targetUsable
     before,
     recordedAt: new Date().toISOString(),
   };
+}
+
+function makeLegacyAuditRows({planHash = 'b'.repeat(64), sequenceGap = false, conflictingPlanHash = false} = {}) {
+  return [
+    {
+      planHash,
+      recordedAt: `${twoDaysAgo}T10:00:00.000Z`,
+      row: {
+        after: {totalUsableInventory: 10},
+        before: {totalUsableInventory: 2},
+        canonical: 'SK-LEGACY-UPDATED',
+        skc: 'LEGACY-UPDATED-SKC',
+        skuCode: 'LEGACY-UPDATED-SKU',
+        state: 'updated_readback_matched',
+        storeKey: 'LU',
+        writes: [{code: '0'}],
+      },
+      sequence: 1,
+    },
+    {
+      planHash: conflictingPlanHash ? 'a'.repeat(64) : planHash,
+      recordedAt: `${twoDaysAgo}T10:01:00.000Z`,
+      row: {
+        canonical: 'SK-LEGACY-BLOCKED',
+        error: 'legacy blocked audit row',
+        skc: 'LEGACY-BLOCKED-SKC',
+        skuCode: 'LEGACY-BLOCKED-SKU',
+        state: 'blocked',
+        storeKey: 'LB',
+      },
+      sequence: sequenceGap ? 3 : 2,
+    },
+  ];
+}
+
+async function writeJournalRows(file, rows) {
+  await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
 }
 
 async function writeFixture(root, {date = today, rows = ROWS, oldIntent = null, oldIntentDate = priorDate, extraOldIntent = null, futureJournal = false} = {}) {
@@ -315,6 +353,8 @@ try {
   const firstRoot = path.join(temp, 'historical-pending');
   const historicalIntent = makeIntent({runDate: priorDate, row: ROWS[0], planHash: 'd'.repeat(64), intentId: 'historical-pending-1'});
   const first = await writeFixture(firstRoot, {oldIntent: historicalIntent});
+  const legacyAuditFile = path.join(firstRoot, 'runtime', 'results', `daily-inventory-replenishment-${twoDaysAgo}.json.journal.ndjson`);
+  await writeJournalRows(legacyAuditFile, makeLegacyAuditRows());
   state.mode = 'historical_pending';
   state.postCount = 0;
   state.postSkus = [];
@@ -332,6 +372,7 @@ try {
   assert.equal(historicalResult.historicalPending, true);
   assert.equal(historicalResult.disposition, 'skipped');
   assert.equal(independentResult.state, 'updated_readback_matched');
+  assert.equal(firstResult.deferredHistorical.length, 0, 'legacy audit rows must not create lifecycle intents or warnings');
   assert.equal((await journalEntries(first.currentIntentFile)).filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 0, 'historical reappearance must not create a current intent');
   assert.equal((await journalEntries(path.join(firstRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`))).filter(row => row.kind === 'write_outcome').length, 0);
 
@@ -453,7 +494,6 @@ try {
   assert.equal(state.requestCount, 0);
 
   const conflictRoot = path.join(temp, 'conflicting');
-  const twoDaysAgo = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(Date.now() - 2 * 86_400_000));
   const conflict = await writeFixture(conflictRoot, {
     oldIntent: {...historicalIntent, intentId: 'conflict-1'},
     extraOldIntent: makeIntent({runDate: twoDaysAgo, row: ROWS[0], planHash: 'f'.repeat(64), intentId: 'conflict-2'}),
@@ -466,6 +506,55 @@ try {
   assert.match(conflictRun.stderr, /INVENTORY_JOURNAL_PENDING_SCOPE_CONFLICT/);
   assert.equal(state.postCount, 0);
   assert.equal(state.requestCount, 0);
+
+  // 5b) Exact legacy audit rows are audit-only, while extra keys, sequence
+  // gaps, and per-file planHash drift fail closed before identity/readback API.
+  const legacyExtraRoot = path.join(temp, 'legacy-extra-key');
+  const legacyExtra = await writeFixture(legacyExtraRoot);
+  const legacyExtraRows = makeLegacyAuditRows();
+  legacyExtraRows[0].unexpected = true;
+  await writeJournalRows(
+    path.join(legacyExtraRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`),
+    legacyExtraRows,
+  );
+  state.postCount = 0;
+  state.postSkus = [];
+  state.requestCount = 0;
+  const legacyExtraRun = await runExecutor(legacyExtra);
+  assert.notEqual(legacyExtraRun.code, 0);
+  assert.match(legacyExtraRun.stderr, /INVENTORY_JOURNAL_LEGACY_AUDIT_INVALID:.*:topLevelKeys/);
+  assert.equal(state.postCount, 0);
+  assert.equal(state.requestCount, 0, 'legacy extra-key corruption must abort before any API call');
+
+  const legacySequenceRoot = path.join(temp, 'legacy-sequence-gap');
+  const legacySequence = await writeFixture(legacySequenceRoot);
+  await writeJournalRows(
+    path.join(legacySequenceRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`),
+    makeLegacyAuditRows({sequenceGap: true}),
+  );
+  state.postCount = 0;
+  state.postSkus = [];
+  state.requestCount = 0;
+  const legacySequenceRun = await runExecutor(legacySequence);
+  assert.notEqual(legacySequenceRun.code, 0);
+  assert.match(legacySequenceRun.stderr, /INVENTORY_JOURNAL_LEGACY_AUDIT_INVALID:.*:sequence/);
+  assert.equal(state.postCount, 0);
+  assert.equal(state.requestCount, 0, 'legacy sequence corruption must abort before any API call');
+
+  const legacyHashRoot = path.join(temp, 'legacy-plan-hash-conflict');
+  const legacyHash = await writeFixture(legacyHashRoot);
+  await writeJournalRows(
+    path.join(legacyHashRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`),
+    makeLegacyAuditRows({conflictingPlanHash: true}),
+  );
+  state.postCount = 0;
+  state.postSkus = [];
+  state.requestCount = 0;
+  const legacyHashRun = await runExecutor(legacyHash);
+  assert.notEqual(legacyHashRun.code, 0);
+  assert.match(legacyHashRun.stderr, /INVENTORY_JOURNAL_LEGACY_AUDIT_INVALID:.*:planHashConflict/);
+  assert.equal(state.postCount, 0);
+  assert.equal(state.requestCount, 0, 'legacy planHash conflict must abort before any API call');
 
   // 6) A future-dated journal is invalid before any API call, just like a
   // future plan. The journal filename itself is part of the date proof.
@@ -516,11 +605,13 @@ try {
 
   console.log(JSON.stringify({ok: true, checks: [
     'historical_pending_freezes_one_scope_independent_current_posts',
+    'valid_legacy_audit_rows_are_ignored_alongside_durable_journals',
     'non_daily_prefix_historical_pending_intercepts_scope',
     'absent_historical_scope_is_audit_only_without_duplicate_rows',
     'historical_readback_match_closes_original_journal_and_defers_current_scope',
     'immutable_request_hash_corruption_fails_before_api',
     'malformed_and_conflicting_historical_journals_fail_before_api',
+    'legacy_audit_extra_key_sequence_and_plan_hash_corruption_fail_before_api',
     'future_journal_rejected',
     'prior_date_reconcile_only_has_zero_posts',
     'future_plan_rejected',
