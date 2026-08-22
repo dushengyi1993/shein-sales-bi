@@ -197,6 +197,53 @@ assert.equal(manual.applied, false); checks += 1;
 assert.equal(manual.manualReview, true); checks += 1;
 assert.equal(manual.reason, 'active_manual_special_requires_user_review'); checks += 1;
 
+const explicitCurrentPrice = applyLowEtFastSellerPricePullback({
+  row: {
+    ...baseline.items[5],
+    activityId: 45589,
+    targetPrice: 72,
+    finalTargetPrice: 72,
+    userExplicitCurrentPriceOverride: true,
+  },
+  context: context(),
+  costDoc,
+  currentLockedPriceKeys: new Set(['ZL:45589:normal-1']),
+});
+assert.equal(explicitCurrentPrice.applied, false); checks += 1;
+assert.equal(explicitCurrentPrice.blocked, false); checks += 1;
+assert.equal(explicitCurrentPrice.reason, 'user_explicit_current_price_override'); checks += 1;
+assert.equal(explicitCurrentPrice.row.finalTargetPrice, 72); checks += 1;
+
+const historicalDirtyMarker = applyLowEtFastSellerPricePullback({
+  row: {
+    ...baseline.items[5],
+    activityId: 45589,
+    targetPrice: 95,
+    finalTargetPrice: 95,
+    userExplicitCurrentPriceOverride: true,
+  },
+  context: context(),
+  costDoc,
+});
+assert.equal(historicalDirtyMarker.applied, true); checks += 1;
+assert.equal(historicalDirtyMarker.row.finalTargetPrice, 107.7); checks += 1;
+
+const explicitPriceMismatch = applyLowEtFastSellerPricePullback({
+  row: {
+    ...baseline.items[5],
+    activityId: 45589,
+    targetPrice: 72,
+    finalTargetPrice: 80,
+    userExplicitCurrentPriceOverride: true,
+  },
+  context: context(),
+  costDoc,
+  currentLockedPriceKeys: new Set(['ZL:45589:normal-1']),
+});
+assert.equal(explicitPriceMismatch.applied, false); checks += 1;
+assert.equal(explicitPriceMismatch.blocked, true); checks += 1;
+assert.equal(explicitPriceMismatch.reason, 'user_explicit_current_price_override_invalid_target'); checks += 1;
+
 const revalidated = revalidateLowEtFastSellerPricePullback({
   row: ordinary.row,
   context: context(),

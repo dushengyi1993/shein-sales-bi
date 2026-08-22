@@ -151,10 +151,15 @@ try {
   const mergedPrices = JSON.parse(await fs.readFile(mergedPricesFile, 'utf8'));
   assert.equal(mergedPrices.items.length, 3);
 
+  const historicalContradictoryPriceEvidence = {
+    ...readbackRow(mainRows[0]),
+    priceUnavailableButFillVerified: true,
+    priceUnavailableNoFillEvidence: true,
+  };
   const baseReadback = {
     summary: {stores: ['DL', 'DX'], plannedRows: 2, checkedRows: 2},
     stores: [
-      {storeKey: 'DL', ok: true, rows: [readbackRow(mainRows[0])], activities: []},
+      {storeKey: 'DL', ok: true, rows: [historicalContradictoryPriceEvidence], activities: []},
       {storeKey: 'DX', ok: true, rows: [readbackRow(mainRows[1])], activities: []},
     ],
   };
@@ -187,6 +192,8 @@ try {
   assert.equal(mergedReadbackDoc.summary.plannedRows, 3);
   assert.equal(mergedReadbackDoc.summary.checkedRows, 3);
   assert.equal(mergedReadbackDoc.summary.planAlignment.ok, true);
+  assert.equal(mergedReadbackDoc.stores[0].rows[0].priceUnavailableButFillVerified, false);
+  assert.equal(mergedReadbackDoc.stores[0].rows[0].priceUnavailableNoFillEvidence, true);
 
   const incompletePatch = structuredClone(patchReadback);
   incompletePatch.stores[0].rows.pop();

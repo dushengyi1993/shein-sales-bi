@@ -10,6 +10,10 @@ import {
 } from '../../lib/marketing_ordinary_campaign_approval.mjs';
 import {activityExecutionTransactionHash} from '../../lib/marketing_activity_inventory_integration.mjs';
 import {executeOrdinaryActivityWithInventoryTransaction} from '../../lib/marketing_ordinary_activity_transaction_runner.mjs';
+import {
+  scopeOrdinaryEnrollmentReadbackToApprovedRows,
+  wrapOrdinaryEnrollmentReadbackForTransaction,
+} from '../../lib/marketing_ordinary_enrollment_scope.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -24,7 +28,7 @@ function rowKey(row) {
 function parseArgs(argv) {
   const args = {
     stores: [], activities: [], selection: '', prices: '', approvalManifest: '', outDir: '',
-    excludeTargets: [], resumeDirs: [], chunkSize: 20, concurrency: 3, visible: false,
+    bi: '', inventoryTrend: '', excludeTargets: [], resumeDirs: [], chunkSize: 500, concurrency: 3, visible: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -34,9 +38,11 @@ function parseArgs(argv) {
     else if (key === '--prices') args.prices = path.resolve(argv[++i] || '');
     else if (key === '--approval-manifest') args.approvalManifest = path.resolve(argv[++i] || '');
     else if (key === '--out-dir') args.outDir = path.resolve(argv[++i] || '');
+    else if (key === '--bi') args.bi = path.resolve(argv[++i] || '');
+    else if (key === '--inventory-trend') args.inventoryTrend = path.resolve(argv[++i] || '');
     else if (key === '--exclude-targets') args.excludeTargets = split(argv[++i]).map(file => path.resolve(file));
     else if (key === '--resume-from') args.resumeDirs = split(argv[++i]).map(dir => path.resolve(dir));
-    else if (key === '--chunk-size') args.chunkSize = Number(argv[++i] || 20);
+    else if (key === '--chunk-size') args.chunkSize = Number(argv[++i] || 500);
     else if (key === '--concurrency') args.concurrency = Number(argv[++i] || 3);
     else if (key === '--visible') args.visible = true;
     else throw new Error(`Unknown argument: ${key}`);
@@ -44,7 +50,7 @@ function parseArgs(argv) {
   if (!args.stores.length || !args.activities.length || !args.selection || !args.prices || !args.approvalManifest || !args.outDir) {
     throw new Error('Required: --stores --activities --selection --prices --approval-manifest --out-dir');
   }
-  if (!Number.isInteger(args.chunkSize) || args.chunkSize < 1 || args.chunkSize > 25) throw new Error('Invalid --chunk-size (1-25)');
+  if (!Number.isInteger(args.chunkSize) || args.chunkSize < 1 || args.chunkSize > 500) throw new Error('Invalid --chunk-size (1-500)');
   if (!Number.isInteger(args.concurrency) || args.concurrency < 1 || args.concurrency > 5) throw new Error('Invalid --concurrency (1-5)');
   return args;
 }
@@ -224,7 +230,10 @@ async function worker() {
         '--price-overrides', priceFile,
         '--approval-manifest', approval.manifestPath,
         '--execution-work-fingerprint', approval.workFingerprint,
+        ...(args.bi ? ['--bi', args.bi] : []),
+        ...(args.inventoryTrend ? ['--inventory-trend', args.inventoryTrend] : []),
         ...(args.visible ? [] : ['--headless']),
+        '--no-close',
         ...runtimePort,
       ];
       console.log(`\n[CHUNK] DRY-RUN ${label} rows=${task.rows.length}`);
@@ -278,9 +287,15 @@ async function worker() {
             '--activity', String(task.activityId),
             '--selection-plan', selectionFile,
             '--price-overrides', priceFile,
+            '--fill-results-dir', taskDir,
             '--wait-ms', '30000',
+            '--no-close',
           ], `${label}:verify:${phase}`);
-          return lastJson(verify.stdout)?.summary || {ok: false, reason: verify.stderr || 'verify output missing'};
+          const summary = lastJson(verify.stdout)?.summary;
+          const scoped = summary
+            ? scopeOrdinaryEnrollmentReadbackToApprovedRows(summary)
+            : {ok: false, reason: verify.stderr || 'verify output missing'};
+          return wrapOrdinaryEnrollmentReadbackForTransaction(scoped);
         },
       });
       result.inventoryTransaction = transaction;
@@ -298,7 +313,31 @@ async function worker() {
   }
 }
 
-await Promise.all(Array.from({length: Math.min(args.concurrency, stores.length)}, () => worker()));
+let finalVerifyProcess = null;
+let finalReadback = null;
+let browserCleanup = null;
+try {
+  await Promise.all(Array.from({length: Math.min(args.concurrency, stores.length)}, () => worker()));
+  finalVerifyProcess = await runNode([
+    path.join(ROOT, 'scripts', 'marketing', 'verify_ordinary_activity_enrollment.mjs'),
+    '--stores', args.stores.join(','),
+    '--activity', args.activities.join(','),
+    '--selection-plan', args.selection,
+    '--price-overrides', args.prices,
+    '--fill-results-dir', args.outDir,
+    '--wait-ms', '30000',
+    '--no-close',
+  ], 'final-verify');
+  finalReadback = lastJson(finalVerifyProcess.stdout);
+} finally {
+  browserCleanup = await runNode([
+    path.join(ROOT, 'scripts', 'cleanup_shein_store_browsers.mjs'),
+    '--stores', args.stores.join(','),
+    '--kill-after-sec', '5',
+    '--json',
+  ], 'browser-cleanup');
+}
+const finalApprovedPlanReadback = scopeOrdinaryEnrollmentReadbackToApprovedRows(finalReadback?.summary);
 const summary = {
   createdAt: new Date().toISOString(),
   approvalManifest: path.relative(ROOT, approval.manifestPath),
@@ -316,9 +355,17 @@ const summary = {
   submittedRows: results.filter(row => row.status === 'submitted').reduce((sum, row) => sum + row.rowCount, 0),
   dryRunFailedChunks: results.filter(row => row.status === 'dry_run_failed').length,
   executeFailedChunks: results.filter(row => row.status === 'execute_failed').length,
+  finalVerifyProcess,
+  finalReadback,
+  finalApprovedPlanReadback,
+  browserCleanup,
   results,
 };
 const summaryFile = path.join(args.outDir, 'chunk-submission-summary.json');
 await fs.writeFile(summaryFile, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
 console.log(`\n[CHUNK] SUMMARY ${path.relative(ROOT, summaryFile)} submittedRows=${summary.submittedRows}/${summary.plannedRows} submittedChunks=${summary.submittedChunks}/${summary.chunks}`);
-process.exitCode = summary.submittedRows === summary.plannedRows ? 0 : 2;
+process.exitCode = summary.submittedRows === summary.plannedRows
+  && finalApprovedPlanReadback.ok
+  && browserCleanup?.code === 0
+  ? 0
+  : 2;

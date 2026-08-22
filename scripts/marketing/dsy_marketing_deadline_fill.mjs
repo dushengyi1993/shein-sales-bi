@@ -200,10 +200,14 @@ function modelCode(s) {
 async function loadPriceOverrides() {
   if (!args.priceOverrides) return;
   const doc = JSON.parse(await fs.readFile(args.priceOverrides, 'utf8'));
+  const evidenceBaselineDoc = EXECUTION_APPROVAL?.prices || doc;
+  const currentLockedPriceKeys = EXECUTION_APPROVAL?.priceByKey instanceof Map
+    ? new Set(EXECUTION_APPROVAL.priceByKey.keys())
+    : null;
   const lowEtContext = buildLowEtFastSellerPricingContext({
     inventoryTrendDoc: INVENTORY_TREND,
     linksDataDoc: PRICING_BI,
-    baselineDoc: doc,
+    baselineDoc: evidenceBaselineDoc,
     costDoc: COST_DOC,
     marketingPolicy: PRICING_POLICY,
     reportDate: formatShanghaiDate(now),
@@ -213,6 +217,7 @@ async function loadPriceOverrides() {
     context: lowEtContext,
     costDoc: COST_DOC,
     isManualSpecial: item => item?.manualSpecialLimitedDiscount === true,
+    currentLockedPriceKeys,
   });
   LOW_ET_PRICE_PULLBACK = {
     enabled: lowEtContext.policy.enabled !== false,
@@ -454,6 +459,15 @@ async function waitForDebugPort(store, timeoutMs = 20_000) {
     }
   }
   throw new Error(`Chrome debug port not ready for ${store.storeKey} on ${store.port}: ${lastError?.message || 'timeout'}`);
+}
+
+async function isDebugPortOpen(store) {
+  try {
+    await httpJson(`http://127.0.0.1:${store.port}/json/version`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function bringStoreWindowToFront(store) {
@@ -2059,14 +2073,38 @@ async function scrollTo(cdp, sessionId, top) {
 async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = null) {
   const ready = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
   if (!ready) return {ok: false, reason: '编辑页未加载'};
-  const rowEditorReady = await waitFor(cdp, sessionId, `
+  const rowEditorPredicate = `
     [...document.querySelectorAll('tr')].some(tr => {
       const cells = tr.querySelectorAll('td');
       const textInputs = [...tr.querySelectorAll('input')].filter(x => /^(text|number)$/.test(x.type || 'text'));
       return cells.length >= 6 && textInputs.length >= 1;
     })
-  `, 60_000);
-  if (!rowEditorReady) return {ok: false, reason: '编辑表格未加载'};
+  `;
+  let rowEditorReady = await waitFor(cdp, sessionId, rowEditorPredicate, 30_000);
+  const editorRenderRecovery = {needed: !rowEditorReady, ok: rowEditorReady, attempts: []};
+  if (!rowEditorReady) {
+    await cdp.call('Page.reload', {ignoreCache: true}, sessionId).catch(() => {});
+    await sleep(1800);
+    const headingReady = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
+    rowEditorReady = headingReady && await waitFor(cdp, sessionId, rowEditorPredicate, 60_000);
+    editorRenderRecovery.attempts.push({attempt: 1, headingReady, rowEditorReady});
+    editorRenderRecovery.ok = Boolean(rowEditorReady);
+  }
+  if (!rowEditorReady) return {ok: false, editorRenderRecovery, reason: '编辑表格未加载'};
+  let editPageSize = null;
+  const editPageSizeAttempts = [];
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await cdp.call('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}, sessionId).catch(() => {});
+    await cdp.call('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27}, sessionId).catch(() => {});
+    editPageSize = await setPageSize500(cdp, sessionId);
+    editPageSizeAttempts.push({attempt, ...editPageSize});
+    if (editPageSize?.ok) break;
+    await sleep(800);
+  }
+  editPageSize = {...editPageSize, attempts: editPageSizeAttempts};
+  await sleep(500);
+  rowEditorReady = await waitFor(cdp, sessionId, rowEditorPredicate, 30_000);
+  if (!rowEditorReady) return {ok: false, editorRenderRecovery, editPageSize, reason: '编辑表格未加载'};
   await sleep(1500);
 
   const expectedTotal = await evalJs(cdp, sessionId, `
@@ -2298,6 +2336,8 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
   const coverageOk = !expectedPlanTotal || coverageCount >= expectedPlanTotal;
   return {
     ok: missingCost.size === 0 && priceStackBlockers.size === 0 && mismatches.length === 0 && coverageOk && outOfPlanRows.size === 0,
+    editorRenderRecovery,
+    editPageSize,
     expectedTotal,
     expectedPlanTotal,
     coverageCount,
@@ -2445,6 +2485,8 @@ async function processActivity(cdp, store, activity) {
   }
   const url = `${LIST_URL.replace('/list', `/sign-up/config/${activity.activityId}`)}`;
   const {targetId, sessionId} = await newPage(cdp, url);
+  await cdp.call('Page.reload', {ignoreCache: true}, sessionId).catch(() => {});
+  await sleep(1200);
   let firstState = await waitForActivityOrLogin(cdp, sessionId, 35_000);
   const renderRecovery = {needed: Boolean(firstState.renderError), ok: !firstState.renderError, attempts: []};
   for (let attempt = 1; firstState.renderError && attempt <= 3; attempt += 1) {
@@ -2494,6 +2536,19 @@ async function processActivity(cdp, store, activity) {
 
   const selection = await selectAllGoodsAndNext(cdp, sessionId, allowSkcs);
   if (!selection.ok) return {ok: false, store: store.storeKey, activity, targetId, selection, reason: selection.reason || '选择商品失败'};
+  const inventoryTransactionRows = (selection.activityInventoryTransactionPlan?.rows || [])
+    .filter(row => row?.requiresTemporaryRaise === true);
+  if (args.submit && inventoryTransactionRows.length) {
+    return {
+      ok: false,
+      store: store.storeKey,
+      activity,
+      targetId,
+      selection,
+      inventoryTransactionRows,
+      reason: `需要报名库存事务，禁止直接提交：${inventoryTransactionRows.length} 行`,
+    };
+  }
 
   if (args.fillDebugSkc) {
     const ready = await waitFor(cdp, sessionId, `document.body && document.body.innerText.includes('提报的活动价格')`, 30_000);
@@ -2595,6 +2650,10 @@ for (const store of selectedStores) {
       await sleep(2500);
       launchVisible(store);
       await sleep(3500);
+    } else if (!(await isDebugPortOpen(store))) {
+      launchVisible(store);
+      await waitForDebugPort(store);
+      await sleep(1200);
     }
     bringStoreWindowToFront(store);
     await sleep(800);
