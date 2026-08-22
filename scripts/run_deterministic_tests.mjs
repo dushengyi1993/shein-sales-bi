@@ -76,6 +76,8 @@ const tests = [
   'scripts/test_bi_section_portal_streaming.mjs',
   'scripts/test_bi_portal_section_queue.mjs',
   'scripts/test_bi_portal_core_warmup_queue_owned.mjs',
+  'scripts/test_bi_portal_external_queue_reconciliation.mjs',
+  'scripts/test_bi_portal_core_run_identity.mjs',
   'scripts/test_bi_core_warmup_health.mjs',
   'scripts/test_bi_portal_section_terminal.mjs',
   'scripts/test_bi_portal_data_mode.mjs',
@@ -161,6 +163,7 @@ const tests = [
   'scripts/test_shared_lock_security.mjs',
   'scripts/test_pipeline_marker.mjs',
   'scripts/test_morning_resume_evidence.mjs',
+  'scripts/test_morning_metric_refetch.mjs',
   'scripts/test_systemd_unit_snapshot.mjs',
   'scripts/test_systemd_unit_inventory_contract.mjs',
   'scripts/test_install_cloud_maintenance_guards.mjs',
@@ -199,6 +202,7 @@ const tests = [
   'scripts/test_read_transport_policy.mjs',
   'scripts/test_warehouse_business_logic_contract.mjs',
   'scripts/test_order_status_effective_evidence_contract.mjs',
+  'scripts/test_order_closure_idempotency.mjs',
   'scripts/smoke_browser_task_lease.mjs',
   'scripts/smoke_cloud_marketing_live_guard_resilience.mjs',
   'scripts/test_openapi_sales_loader_validity.mjs',
@@ -251,11 +255,14 @@ const TEST_ESTIMATES_MS = {
   'scripts/test_link_ops_update_description_flow.mjs': 240_000,
   'scripts/test_morning_chain_reliability.mjs': 120_000,
   'scripts/test_morning_chain_wrapper_reliability.mjs': 120_000,
+  'scripts/test_morning_metric_refetch.mjs': 120_000,
   'scripts/test_cloud_session_manager_reliability.mjs': 120_000,
   'scripts/test_bi_query_surface_isolation.mjs': 120_000,
   'scripts/test_bi_section_streaming.mjs': 120_000,
   'scripts/test_bi_section_portal_streaming.mjs': 120_000,
   'scripts/test_bi_portal_core_warmup_queue_owned.mjs': 120_000,
+  'scripts/test_bi_portal_external_queue_reconciliation.mjs': 60_000,
+  'scripts/test_bi_portal_core_run_identity.mjs': 30_000,
   'scripts/test_morning_coordinator_portal_async.mjs': 120_000,
   'scripts/test_bi_ops_cli_flow.mjs': 90_000,
   'scripts/test_partner_cli_version_change.mjs': 30_000,
@@ -265,6 +272,7 @@ const TEST_ESTIMATES_MS = {
   'scripts/test_cloud_db_backup_contract.mjs': 120_000,
   'scripts/test_cos_backup_remote_verifier.mjs': 60_000,
   'scripts/test_bi_portal_mutation_queue.mjs': 60_000,
+  'scripts/test_order_closure_idempotency.mjs': 60_000,
 };
 
 function parseRunnerArgs(argv) {
@@ -356,6 +364,10 @@ for (const file of selectedTests) {
         ? 240_000
         : file === 'scripts/test_bi_portal_core_warmup_queue_owned.mjs'
           ? 120_000
+          : file === 'scripts/test_bi_portal_external_queue_reconciliation.mjs'
+            ? 150_000
+            : file === 'scripts/test_bi_portal_core_run_identity.mjs'
+              ? 60_000
           : file === 'scripts/test_bi_section_streaming.mjs'
             ? 120_000
             : file === 'scripts/test_bi_section_portal_streaming.mjs'
@@ -378,9 +390,13 @@ for (const file of selectedTests) {
                       ? 1_800_000
                       : file === 'scripts/test_cos_backup_remote_verifier.mjs'
                         ? 60_000
-                        : file === 'scripts/test_bi_portal_mutation_queue.mjs'
-                          ? 120_000
-                          : ['scripts/test_morning_chain_reliability.mjs',
+                    : file === 'scripts/test_bi_portal_mutation_queue.mjs'
+                      ? 120_000
+                      : file === 'scripts/test_order_closure_idempotency.mjs'
+                        ? 120_000
+                      : file === 'scripts/test_morning_metric_refetch.mjs'
+                        ? 180_000
+                      : ['scripts/test_morning_chain_reliability.mjs',
                             'scripts/test_morning_chain_wrapper_reliability.mjs',
                             'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
                             ? 120_000

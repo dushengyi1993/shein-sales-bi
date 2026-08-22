@@ -1,18 +1,38 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
+import {fileURLToPath} from 'node:url';
 
-const runner = fs.readFileSync(new URL('./run_deterministic_tests.mjs', import.meta.url), 'utf8');
+const runnerUrl = new URL('./run_deterministic_tests.mjs', import.meta.url);
+const runnerFile = fileURLToPath(runnerUrl);
+const repoRoot = fileURLToPath(new URL('../', import.meta.url));
+const runner = fs.readFileSync(runnerUrl, 'utf8');
 const releaseGate = fs.readFileSync(new URL('./test_bi_ops_release_gate.mjs', import.meta.url), 'utf8');
 const ciWorkflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
 const productAttributeFlowTest = 'scripts/test_link_ops_prepare_product_attribute_flow.mjs';
 const releaseGateTest = 'scripts/test_bi_ops_release_gate.mjs';
 const ownershipBaseline = Object.freeze({
-  deterministicUnique: 184,
   directCalls: 49,
   directUnique: 41,
   intersection: 19,
-  union: 184 + 41 - 19,
+});
+const requiredPortalTests = [
+  'scripts/test_bi_portal_external_queue_reconciliation.mjs',
+  'scripts/test_bi_portal_core_run_identity.mjs',
+];
+const requiredRunnerTests = [
+  ...requiredPortalTests,
+  'scripts/test_order_closure_idempotency.mjs',
+  'scripts/test_morning_metric_refetch.mjs',
+];
+const intentionalManualTests = Object.freeze({
+  'scripts/test_bi_portal_section_enqueue_coalescing.mjs': 'manual: queue coalescing requires an isolated Portal fixture.',
+  'scripts/test_link_ops_docx_ingestion.mjs': 'manual: DOCX ingestion depends on operator-provided document fixtures.',
+  'scripts/test_link_ops_exact_source_hazard_gate.mjs': 'manual: hazard-gate validation requires a reviewed source fixture.',
+  'scripts/test_link_ops_exact_source_input_current_projection.mjs': 'manual: current-source projection requires a live reviewed input.',
+  'scripts/test_link_ops_job_worker_shutdown.mjs': 'manual: worker shutdown owns process teardown outside deterministic shards.',
+  'scripts/test_sk270_cloud_handoff_plan.mjs': 'manual: cloud handoff planning is approval-gated and non-automated.',
 });
 const directTestsTransferredToDeterministicShards = [
   'scripts/test_bi_ops_chat_action_matrix.mjs',
@@ -39,6 +59,37 @@ const directTestsTransferredToDeterministicShards = [
 function extractDeterministicRunnerTests(source) {
   const block = String(source || '').match(/const tests = \[([\s\S]*?)\r?\n\];/u)?.[1] || '';
   return [...block.matchAll(/['"](scripts\/test_[^'"]+\.mjs)['"]/gu)].map(match => match[1]);
+}
+
+function extractAllRunnerRegistrations(source) {
+  const block = String(source || '').match(/const tests = \[([\s\S]*?)\r?\n\];/u)?.[1] || '';
+  return [...block.matchAll(/['"](scripts\/[^'"]+\.mjs)['"]/gu)].map(match => match[1]);
+}
+
+function enumerateDiskTestFiles() {
+  const scriptsDirectory = fileURLToPath(new URL('./', import.meta.url));
+  return fs.readdirSync(scriptsDirectory, {withFileTypes: true})
+    .filter(entry => entry.isFile() && /^test_.*\.mjs$/u.test(entry.name))
+    .map(entry => `scripts/${entry.name}`)
+    .sort();
+}
+
+function readRunnerManifest(shard = '1/1') {
+  const result = spawnSync(process.execPath, [runnerFile, '--list', '--shard', shard], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 10_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  assert.equal(result.status, 0,
+    `deterministic runner manifest ${shard} must be readable: ${result.stderr || result.error?.message || ''}`);
+  let manifest;
+  assert.doesNotThrow(() => { manifest = JSON.parse(result.stdout); },
+    `deterministic runner manifest ${shard} must be valid JSON`);
+  assert.equal(manifest?.ok, true, `deterministic runner manifest ${shard} must report ok=true`);
+  assert.equal(manifest?.shard, shard, `deterministic runner manifest ${shard} must preserve shard identity`);
+  assert.ok(Array.isArray(manifest?.tests), `deterministic runner manifest ${shard} must list tests`);
+  return manifest;
 }
 
 function extractDirectReleaseGateTestInvocations(source) {
@@ -87,11 +138,27 @@ const registrationGuardPasses = source => productAttributeRegistrationCount === 
   && productAttributeTimeoutRegistered
   && countDirectProductAttributeFlowInvocations(source) === 0;
 const deterministicTests = extractDeterministicRunnerTests(runner);
+const allRunnerRegistrations = extractAllRunnerRegistrations(runner);
+const diskTestFiles = enumerateDiskTestFiles();
+const diskTestSet = new Set(diskTestFiles);
+const manualTestFiles = Object.keys(intentionalManualTests);
+const manualTestSet = new Set(manualTestFiles);
+const canonicalManifest = readRunnerManifest();
+const canonicalDeterministicTests = canonicalManifest.tests.filter(file => /^scripts\/test_/u.test(file));
+const shardManifests = [1, 2, 3, 4].map(index => readRunnerManifest(`${index}/4`));
+const shardedTests = shardManifests.flatMap(manifest => manifest.tests);
 const directInvocations = extractDirectReleaseGateTestInvocations(releaseGate);
 const deterministicSet = new Set(deterministicTests);
 const directSet = new Set(directInvocations);
 const ownershipIntersection = [...deterministicSet].filter(file => directSet.has(file)).sort();
 const ownershipUnion = new Set([...deterministicSet, ...directSet, releaseGateTest]);
+const coverageOwners = [
+  ['canonical deterministic runner', deterministicSet],
+  ['direct release-gate invocation', directSet],
+  ['dedicated release-gate job', new Set([releaseGateTest])],
+  ['intentional manual allowlist', manualTestSet],
+];
+const coverageUnion = new Set(coverageOwners.flatMap(([, files]) => [...files]));
 const releaseGateJob = extractWorkflowJobBlock(ciWorkflow, 'release-gate');
 const ciTerminalJob = extractWorkflowJobBlock(ciWorkflow, 'ci-terminal');
 const releaseGateCiCommand = 'node ' + releaseGateTest;
@@ -200,10 +267,79 @@ assert.match(runner,
   /file === 'scripts\/test_bi_portal_mutation_queue\.mjs'\s*\? 120_000/,
   'Portal mutation-queue must keep an explicit bounded 120s CI tier');
 assert.match(runner, /'scripts\/test_bi_portal_mutation_queue\.mjs':\s*60_000/, 'Portal mutation-queue shard estimate must be synced to its bounded tier headroom');
+assert.match(runner,
+  /file === 'scripts\/test_order_closure_idempotency\.mjs'\s*\? 120_000/,
+  'order-closure idempotency must have a focused bounded 120s outer tier');
+assert.match(runner,
+  /file === 'scripts\/test_morning_metric_refetch\.mjs'\s*\? 180_000/,
+  'morning metric refetch must keep its measured-safe focused 180s outer tier');
+assert.match(runner,
+  /'scripts\/test_order_closure_idempotency\.mjs':\s*60_000/,
+  'order-closure idempotency shard estimate must stay at its focused 60s bound');
+assert.match(runner,
+  /'scripts\/test_morning_metric_refetch\.mjs':\s*120_000/,
+  'morning metric refetch shard estimate must stay at its measured-safe 120s bound');
 assert.equal(deterministicTests.length, deterministicSet.size,
   'deterministic runner test registrations must be unique');
-assert.equal(deterministicSet.size, ownershipBaseline.deterministicUnique - 1,
-  'moving the release gate to its dedicated job must remove exactly one deterministic registration');
+assert.equal(allRunnerRegistrations.length, new Set(allRunnerRegistrations).size,
+  'all canonical runner registrations, including smoke tests, must be unique');
+assert.deepEqual(canonicalManifest.tests, allRunnerRegistrations,
+  'runtime canonical manifest must exactly match the source registration order with no missing tests');
+assert.deepEqual(canonicalDeterministicTests, deterministicTests,
+  'the derived test_* registration count must match the canonical runtime manifest');
+assert.equal(shardedTests.length, canonicalManifest.tests.length,
+  'four canonical shards must preserve the exact registration count');
+assert.equal(new Set(shardedTests).size, canonicalManifest.tests.length,
+  'four canonical shards must contain every registration exactly once');
+assert.deepEqual([...shardedTests].sort(), [...canonicalManifest.tests].sort(),
+  'four canonical shards must have no missing or unexpected registrations');
+for (const file of canonicalManifest.tests) {
+  assert.equal(fs.existsSync(new URL(`../${file}`, import.meta.url)), true,
+    `canonical deterministic registration must resolve to an existing file: ${file}`);
+  for (const platform of ['win32', 'linux']) {
+    const timeout = evaluateRunnerTimeout(runner, file, platform);
+    assert.ok(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 2_400_000,
+      `${file} must have a finite positive timeout no wider than 2,400,000ms on ${platform}`);
+  }
+}
+for (const file of requiredRunnerTests) {
+  assert.equal(allRunnerRegistrations.filter(candidate => candidate === file).length, 1,
+    `required deterministic regression must be registered exactly once in runner source: ${file}`);
+  assert.equal(canonicalManifest.tests.filter(candidate => candidate === file).length, 1,
+    `required deterministic regression must appear exactly once in the canonical manifest: ${file}`);
+  assert.equal(shardedTests.filter(candidate => candidate === file).length, 1,
+    `required deterministic regression must be owned by exactly one deterministic shard: ${file}`);
+}
+assert.equal(manualTestFiles.length, manualTestSet.size,
+  'intentional manual allowlist entries must be unique');
+for (const [file, rationale] of Object.entries(intentionalManualTests)) {
+  assert.ok(diskTestSet.has(file), `manual allowlist file must exist on disk: ${file}`);
+  assert.match(rationale, /\S/u, `manual allowlist file must have a one-line rationale: ${file}`);
+}
+for (const [ownerName, files] of coverageOwners) {
+  for (const file of files) {
+    assert.ok(diskTestSet.has(file), `${ownerName} owns a non-disk test file: ${file}`);
+  }
+}
+for (let left = 0; left < coverageOwners.length; left += 1) {
+  for (let right = left + 1; right < coverageOwners.length; right += 1) {
+    const [leftName, leftFiles] = coverageOwners[left];
+    const [rightName, rightFiles] = coverageOwners[right];
+    assert.deepEqual([...leftFiles].filter(file => rightFiles.has(file)).sort(), [],
+      `${leftName} and ${rightName} ownership must not overlap`);
+  }
+}
+assert.deepEqual([...coverageUnion].sort(), diskTestFiles,
+  'all scripts/test_*.mjs files must be covered exactly by runner, release-gate ownership, or the explicit manual allowlist');
+assert.equal(coverageUnion.size, diskTestFiles.length,
+  'all disk test files must have exactly one owner');
+for (const [file, expected] of [
+  ['scripts/test_order_closure_idempotency.mjs', 120_000],
+  ['scripts/test_morning_metric_refetch.mjs', 180_000],
+]) {
+  assert.equal(evaluateRunnerTimeout(runner, file, 'win32'), expected, `${file} must keep its focused Windows timeout`);
+  assert.equal(evaluateRunnerTimeout(runner, file, 'linux'), expected, `${file} must keep its focused Linux timeout`);
+}
 assert.equal(directInvocations.length, ownershipBaseline.directCalls - directTestsTransferredToDeterministicShards.length,
   'release gate direct call sites must drop only the 19 tests transferred to deterministic shards');
 assert.equal(directSet.size, ownershipBaseline.directUnique - directTestsTransferredToDeterministicShards.length,
@@ -218,8 +354,8 @@ for (const file of directTestsTransferredToDeterministicShards) {
   assert.equal(directInvocations.filter(candidate => candidate === file).length, 0,
     `transferred test must not remain a direct release-gate invocation: ` + file);
 }
-assert.equal(ownershipUnion.size, ownershipBaseline.union,
-  'deterministic tests, unique release-gate smokes and the dedicated gate must preserve the 206-test owner union');
+assert.equal(ownershipUnion.size, deterministicSet.size + directSet.size + 1,
+  'disjoint deterministic tests, direct release-gate smokes, and the dedicated gate must preserve their derived owner union');
 assert.match(releaseGateJob, /^  release-gate:$/mu,
   'CI must declare a dedicated release-gate job');
 assert.match(releaseGateJob, /^    needs: source-checks$/mu,
@@ -281,12 +417,18 @@ for (const evidence of ['PR #99', 'attempt 1', '30042ms', 'attempt 2', '26012ms'
 
 console.log(JSON.stringify({
   ok: true,
-  checks: ['source_detail_60s', 'query_surface_240s', 'warmup_120s', 'morning_coordinator_120s', 'cli_flow_90s', 'partner_cli_version_change_60s', 'et_forwarder_60s', 'runtime_layout_migration_win32_2400s_margin', 'runtime_layout_migration_nonwin32_1800s_gate', 'runtime_layout_migration_estimate_1800s', 'other_tiers_platform_invariant', 'cloud_db_backup_180s', 'mutation_queue_120s', 'description_300s', 'attribute_1800s', 'default_30s', 'timeout_wired', 'estimate_tier_sync', 'ci_evidence_documented', 'release_gate_absent_from_deterministic_runner', 'release_gate_absent_from_deterministic_estimates_and_tiers', 'repository_crud_registered_once', 'mutation_queue_registered_once', 'ownership_intersection_zero', 'transferred_tests_owned_once', 'ownership_union_preserved_206', 'dedicated_ci_release_gate_once', 'ci_terminal_three_dependency_exact', 'ci_terminal_release_gate_required_fail_closed', 'release_gate_direct_invocation_zero', 'direct_invocation_injection_rejected', 'direct_invocation_options_rejected', 'direct_invocation_extra_args_rejected', 'node_check_near_miss_ignored'],
+  checks: ['source_detail_60s', 'query_surface_240s', 'warmup_120s', 'morning_coordinator_120s', 'cli_flow_90s', 'partner_cli_version_change_60s', 'et_forwarder_60s', 'runtime_layout_migration_win32_2400s_margin', 'runtime_layout_migration_nonwin32_1800s_gate', 'runtime_layout_migration_estimate_1800s', 'other_tiers_platform_invariant', 'cloud_db_backup_180s', 'mutation_queue_120s', 'description_300s', 'attribute_1800s', 'order_closure_idempotency_120s', 'morning_metric_refetch_180s', 'default_30s', 'timeout_wired', 'estimate_tier_sync', 'ci_evidence_documented', 'release_gate_absent_from_deterministic_runner', 'release_gate_absent_from_deterministic_estimates_and_tiers', 'repository_crud_registered_once', 'mutation_queue_registered_once', 'canonical_manifest_matches_source', 'four_shards_exact_union', 'all_registered_files_exist', 'all_entries_have_bounded_timeout', 'new_portal_tests_registered_once', 'required_runner_tests_registered_once', 'exact_disk_test_coverage', 'manual_allowlist_rationales', 'ownership_intersection_zero', 'transferred_tests_owned_once', 'ownership_union_derived', 'dedicated_ci_release_gate_once', 'ci_terminal_three_dependency_exact', 'ci_terminal_release_gate_required_fail_closed', 'release_gate_direct_invocation_zero', 'direct_invocation_injection_rejected', 'direct_invocation_options_rejected', 'direct_invocation_extra_args_rejected', 'node_check_near_miss_ignored'],
   ownership: {
     before: ownershipBaseline,
     after: {
       deterministicEntries: deterministicTests.length,
       deterministicUnique: deterministicSet.size,
+      allRunnerRegistrations: allRunnerRegistrations.length,
+      canonicalManifestEntries: canonicalManifest.tests.length,
+      fourShardEntries: shardedTests.length,
+      diskTestFiles: diskTestFiles.length,
+      exactCoverageOwners: coverageUnion.size,
+      intentionalManualTests: manualTestFiles.length,
       directCalls: directInvocations.length,
       directUnique: directSet.size,
       intersection: ownershipIntersection.length,

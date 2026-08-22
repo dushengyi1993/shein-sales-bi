@@ -4,15 +4,100 @@ set -Eeuo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 QUEUE_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_FILE:-$ROOT/state/portal-section-queue/queue.json}"
 LOCK_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-section-queue.lock}"
+PORTAL_DATA_PATH="${SHEIN_BI_PORTAL_DATA_PATH:-$ROOT/outputs/bi-portal/data.json}"
+
+COMMAND="enqueue"
+if [[ "${1:-}" == "reconcile-generation" ]]; then
+  COMMAND="$1"
+  shift
+fi
+
+has_core_generated_at=0
+for argument in "$@"; do
+  if [[ "$argument" == "--core-generated-at" ]]; then
+    has_core_generated_at=1
+    break
+  fi
+done
 
 source "$ROOT/scripts/lib/shared_lock.sh"
 prepare_shared_lock_file "$LOCK_FILE"
+
+locked_manager() {
+  local output
+  local status
+  exec 9<>"$LOCK_FILE"
+  if ! flock -w 10 9; then
+    echo "[portal-section-queue] $COMMAND lock busy" >&2
+    exec 9>&-
+    return 75
+  fi
+  set +e
+  output="$(node "$ROOT/scripts/manage_bi_portal_section_queue.mjs" "$@" --file "$QUEUE_FILE")"
+  status=$?
+  set -e
+  flock -u 9
+  exec 9>&-
+  printf '%s\n' "$output"
+  return "$status"
+}
+
+if [[ "$COMMAND" == "reconcile-generation" ]]; then
+  if [[ "$has_core_generated_at" -eq 0 ]]; then
+    echo "[portal-section-queue] reconcile-generation requires --core-generated-at" >&2
+    exit 64
+  fi
+  SNAPSHOT="$(locked_manager reconcile-generation --phase snapshot "$@")" || exit $?
+  READY="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(x.readyForValidation === true ? "1" : "0")' "$SNAPSHOT")" || exit 70
+  if [[ "$READY" != "1" ]]; then
+    printf '%s\n' "$SNAPSHOT"
+    exit 0
+  fi
+  SNAPSHOT_HASH="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.snapshotHash || ""))' "$SNAPSHOT")" || exit 70
+  VALIDATION="$(node "$ROOT/scripts/manage_bi_portal_section_queue.mjs" reconcile-generation \
+    --phase validate --snapshot-hash "$SNAPSHOT_HASH" --file "$QUEUE_FILE" "$@")" || exit $?
+  VALIDATION_RESULT="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.validationResult || ""))' "$VALIDATION")" || exit 70
+  locked_manager reconcile-generation --phase commit \
+    --snapshot-hash "$SNAPSHOT_HASH" --validation-result "$VALIDATION_RESULT" "$@"
+  exit $?
+fi
+
 exec 9<>"$LOCK_FILE"
 if ! flock -w 10 9; then
-  echo "[portal-section-queue] enqueue lock busy" >&2
+  echo "[portal-section-queue] $COMMAND lock busy" >&2
   exit 75
 fi
 
-exec node "$ROOT/scripts/manage_bi_portal_section_queue.mjs" enqueue \
+if [[ "$COMMAND" == "enqueue" && "$has_core_generated_at" -eq 0 ]]; then
+  CORE_GENERATED_AT="$(node - "$PORTAL_DATA_PATH" <<'NODE'
+const fs = require('fs');
+const file = process.argv[2];
+let handle;
+try {
+  handle = fs.openSync(file, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, 0);
+  const match = /"generatedAt"\s*:\s*"([^"\\]+)"/.exec(buffer.subarray(0, bytesRead).toString('utf8'));
+  const generatedAt = String(match?.[1] || '').trim();
+  if (!generatedAt || !/^[\x21-\x7E]{1,1024}$/.test(generatedAt)) process.exit(64);
+  process.stdout.write(generatedAt);
+} catch {
+  process.exit(64);
+} finally {
+  if (handle !== undefined) fs.closeSync(handle);
+}
+NODE
+)" || {
+    echo "[portal-section-queue] current core generatedAt unavailable: $PORTAL_DATA_PATH" >&2
+    exit 64
+  }
+  if [[ -z "$CORE_GENERATED_AT" ]]; then
+    echo "[portal-section-queue] current core generatedAt unavailable: $PORTAL_DATA_PATH" >&2
+    exit 64
+  fi
+  set -- "$@" --core-generated-at "$CORE_GENERATED_AT"
+fi
+
+exec node "$ROOT/scripts/manage_bi_portal_section_queue.mjs" "$COMMAND" \
   --file "$QUEUE_FILE" \
   "$@"

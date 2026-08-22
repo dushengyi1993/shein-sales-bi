@@ -84,6 +84,39 @@ try {
 NODE
 }
 
+portal_queue_identity() {
+  # Read only the bounded JSON head: the Portal core can be hundreds of MiB,
+  # so this refresh path must never JSON.parse the whole data.json just to
+  # derive queue identity.  generate_bi_portal.mjs writes the root
+  # generatedAt field first.
+  node - "$PORTAL_DATA_PATH" <<'NODE'
+const crypto = require('crypto');
+const fs = require('fs');
+
+const file = process.argv[2];
+const handle = fs.openSync(file, 'r');
+try {
+  const buffer = Buffer.alloc(64 * 1024);
+  const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, 0);
+  const text = buffer.subarray(0, bytesRead).toString('utf8');
+  const match = /"generatedAt"\s*:\s*"([^"\\]+)"/.exec(text);
+  const generatedAt = String(match?.[1] || '').trim();
+  if (!generatedAt) {
+    console.error(`[cloud_bi_refresh] portal core generatedAt missing in ${file}`);
+    process.exit(64);
+  }
+  const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+  const idempotencyKey = /^[A-Za-z0-9._:-]{1,64}$/.test(generatedAt)
+    ? `core-warmup:${generatedAt}`
+    : `core-warmup:sha256:${sha256(generatedAt)}`;
+  const coalesceKey = `portal-generation:sha256:${sha256(JSON.stringify([generatedAt]))}`;
+  process.stdout.write(`${generatedAt}\t${idempotencyKey}\t${coalesceKey}\n`);
+} finally {
+  fs.closeSync(handle);
+}
+NODE
+}
+
 DATE="$(resolve_date "$TARGET")"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOG_DIR"
@@ -232,6 +265,11 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
       --data-mode "$SHEIN_BI_PORTAL_DATA_MODE"
     node scripts/generate_bi_portal_shell.mjs
 
+    PORTAL_QUEUE_IDENTITY="$(portal_queue_identity)"
+    IFS=$'\t' read -r PORTAL_CORE_GENERATION PORTAL_QUEUE_IDEMPOTENCY_KEY PORTAL_QUEUE_COALESCE_KEY <<< "$PORTAL_QUEUE_IDENTITY"
+    PORTAL_QUEUE_REASON="sales-$MODE-$DATE core-warmup-$PORTAL_CORE_GENERATION"
+    echo "[cloud_bi_refresh] portal queue identity generation=$PORTAL_CORE_GENERATION idempotency=$PORTAL_QUEUE_IDEMPOTENCY_KEY coalesce=$PORTAL_QUEUE_COALESCE_KEY"
+
     if command -v systemctl >/dev/null 2>&1; then
       systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
     fi
@@ -240,19 +278,31 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
       bash scripts/enqueue_bi_portal_sections.sh \
         --sections homeRankings,afterSales,orders \
         --priority 4 \
-        --reason "sales-$MODE-$DATE"
+        --reason "$PORTAL_QUEUE_REASON" \
+        --core-generated-at "$PORTAL_CORE_GENERATION" \
+        --idempotency-key "$PORTAL_QUEUE_IDEMPOTENCY_KEY" \
+        --coalesce-key "$PORTAL_QUEUE_COALESCE_KEY"
       bash scripts/enqueue_bi_portal_sections.sh \
         --sections profit \
         --priority 5 \
-        --reason "sales-$MODE-$DATE"
+        --reason "$PORTAL_QUEUE_REASON" \
+        --core-generated-at "$PORTAL_CORE_GENERATION" \
+        --idempotency-key "$PORTAL_QUEUE_IDEMPOTENCY_KEY" \
+        --coalesce-key "$PORTAL_QUEUE_COALESCE_KEY"
       bash scripts/enqueue_bi_portal_sections.sh \
         --sections homeProfit,homeTrafficDaily,priceScatter \
         --priority 10 \
-        --reason "sales-$MODE-$DATE"
+        --reason "$PORTAL_QUEUE_REASON" \
+        --core-generated-at "$PORTAL_CORE_GENERATION" \
+        --idempotency-key "$PORTAL_QUEUE_IDEMPOTENCY_KEY" \
+        --coalesce-key "$PORTAL_QUEUE_COALESCE_KEY"
       bash scripts/enqueue_bi_portal_sections.sh \
         --sections actions,linksData,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings \
         --priority 50 \
-        --reason "sales-$MODE-$DATE"
+        --reason "$PORTAL_QUEUE_REASON" \
+        --core-generated-at "$PORTAL_CORE_GENERATION" \
+        --idempotency-key "$PORTAL_QUEUE_IDEMPOTENCY_KEY" \
+        --coalesce-key "$PORTAL_QUEUE_COALESCE_KEY"
       echo "[cloud_bi_refresh] portal sections queued for bounded host-locked refresh"
     fi
   fi

@@ -12044,16 +12044,27 @@ function biPortalSectionQueueFile() {
   return path.resolve(ROOT, configured || path.join('state', 'portal-section-queue', 'queue.json'));
 }
 
-function readBiPortalSectionQueueEntries() {
+function readBiPortalSectionQueueState() {
   try {
     const queue = JSON.parse(fssync.readFileSync(biPortalSectionQueueFile(), 'utf8'));
     if (!queue || typeof queue !== 'object' || Array.isArray(queue) || !Array.isArray(queue.entries)) return null;
-    return queue.entries;
+    return {
+      entries: queue.entries,
+      completedIdempotency: Array.isArray(queue.completedIdempotency) ? queue.completedIdempotency : [],
+      generationCompletion: queue.generationCompletion && typeof queue.generationCompletion === 'object'
+        ? queue.generationCompletion
+        : null,
+    };
   } catch {
-    // The queue is an optimization for coalescing only. Missing, corrupt or
-    // temporarily unreadable state must preserve the existing enqueue path.
+    // Reconciliation is fail-closed. A missing/corrupt queue cannot prove
+    // either completion or the absence of a newer request; the normal enqueue
+    // path remains responsible for recovering the durable queue state.
     return null;
   }
+}
+
+function readBiPortalSectionQueueEntries() {
+  return readBiPortalSectionQueueState()?.entries || null;
 }
 
 function biPortalQueueEntryMatchesCurrentGeneration(entry, section, generatedAt, expectedReason = '', idempotencyKey = '') {
@@ -12152,6 +12163,7 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
     '--sections', section,
     '--priority', priority,
     '--reason', reason,
+    '--core-generated-at', String(generatedAt || ''),
     '--idempotency-key', idempotencyKey,
     ...(coalesceKey ? ['--coalesce-key', coalesceKey] : []),
   ], {
@@ -12245,6 +12257,7 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
       '--sections', group.sections.join(','),
       '--priority', String(group.priority),
       '--reason', reason,
+      '--core-generated-at', String(generatedAt || ''),
       ...(idempotencyKey ? ['--idempotency-key', idempotencyKey] : []),
       ...(coalesceKey ? ['--coalesce-key', coalesceKey] : []),
       ...(requeueCompleted.length ? ['--requeue-completed-sections', requeueCompleted.join(',')] : []),
@@ -13994,10 +14007,6 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       runningGeneratedAt: biPortalCoreWarmupState.generatedAt,
     };
   }
-  if (biPortalCoreWarmupState.generatedAt === generatedAt && biPortalCoreWarmupState.status === 'done') {
-    return {scheduled: false, reason: 'already-warm', generatedAt};
-  }
-
   const sections = configuredBiPortalCoreWarmupSections();
   if (!sections.length) return {scheduled: false, reason: 'no-sections', generatedAt};
 
@@ -14034,145 +14043,97 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
         nextAttemptAt: new Date(biPortalCoreWarmupState.nextAttemptAt).toISOString(),
       };
     }
-    if (biPortalCoreWarmupState.status === 'queued' && biPortalCoreWarmupState.generatedAt === generatedAt) {
-      return {scheduled: false, reason: 'already-queued', generatedAt};
-    }
-    if (biPortalCoreWarmupState.status === 'done' && biPortalCoreWarmupState.generatedAt === generatedAt) {
-      return {scheduled: false, reason: 'already-completed', generatedAt};
-    }
+    const queueOwnedRun = {owner: 'external-section-queue', generatedAt};
+    biPortalCoreWarmupState.inFlight = queueOwnedRun;
     try {
-      const plan = sections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY}));
-      // Durable per-generation idempotency key for the whole warmup set: after
-      // a Portal restart the same core generation deduplicates in the managed
-      // queue instead of enqueueing a fresh revision.  A new generatedAt
-      // produces a new key and a normal new revision.
-      const warmupIdempotencyKey = biPortalCoreWarmupIdempotencyKey(generatedAt);
-      // Serialize concurrent watcher/index triggers: only one enqueue per
-      // generation may be in flight (the shared inFlight slot also makes the
-      // earlier already-running guard apply to queue-owned scheduling).
-      const enqueueRun = persistHostLockedBiSectionPlan(plan, generatedAt, {
-        reason: biPortalCoreWarmupReason(generatedAt),
-        idempotencyKey: warmupIdempotencyKey,
-        coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
-      }).finally(() => {
-        if (biPortalCoreWarmupState.inFlight === enqueueRun) biPortalCoreWarmupState.inFlight = null;
-      });
-      biPortalCoreWarmupState.inFlight = enqueueRun;
-      const enqueued = await enqueueRun;
-      resetBiPortalCoreWarmupEnqueueBackoff();
-      const requestedCount = sections.length;
-      const completedCount = (enqueued.deduplicatedCompleted || []).length;
-      const activeCount = (enqueued.newlyQueued || []).length
-        + (enqueued.updatedRevision || []).length
-        + (enqueued.deduplicatedPending || []).length
-        + (enqueued.coalescedRerun || []).length;
-      // Truthful terminal state: when EVERY requested section was already
-      // completed (tombstones, queue entries 0) the generation is done, never
-      // queued.  Any active/queued section keeps the state queued.
-      const allCompleted = completedCount === requestedCount && activeCount === 0;
-      biPortalCoreWarmupState.owner = 'external-section-queue';
-      biPortalCoreWarmupState.generatedAt = generatedAt;
-      biPortalCoreWarmupState.startedAt = Date.now();
-      biPortalCoreWarmupState.lastError = '';
-      if (allCompleted) {
-        // Tombstones are historical receipts only: before claiming done,
-        // verify EVERY configured section against the authoritative terminal
-        // artifact validator for the exact current core generation.  Only all
-        // exit 0 => done; missing/corrupt/stale/validator-error => requeue.
-        const terminal = await verifyWarmupSectionsTerminal(root, sections, generatedAt);
-        // Cross-generation guard: the core can flip between this watch tick
-        // and the last of the 7 validators.  Re-read the authoritative core
-        // BEFORE either claiming done or mutating tombstones.  A changed
-        // generation is a truthful stale/superseded state with zero queue or
-        // tombstone mutation; the next tick processes the new generation.
-        const stillCurrent = await warmupCoreStillCurrent(root, generatedAt);
-        if (!stillCurrent.current) {
-          biPortalCoreWarmupState.status = 'stale';
-          biPortalCoreWarmupState.generatedAt = stillCurrent.latest || generatedAt;
-          biPortalCoreWarmupState.finishedAt = 0;
-          biPortalCoreWarmupState.lastError = `core generation changed during terminal verification: ${generatedAt} -> ${stillCurrent.latest || '(unreadable)'}`;
-          logBiPortalCoreWarmup('core-generation-changed', {
-            generatedAt,
-            latestGeneratedAt: stillCurrent.latest || '',
-            terminal: terminal.ok ? 'all-pass' : `invalid=${terminal.invalid.join(',')}`,
-          });
-          return {
-            scheduled: false,
-            reason: 'core-generation-changed',
-            generatedAt: stillCurrent.latest || generatedAt,
-            previousGeneratedAt: generatedAt,
-          };
-        }
-        if (terminal.ok) {
-          biPortalCoreWarmupState.status = 'done';
-          biPortalCoreWarmupState.finishedAt = Date.now();
-          logBiPortalCoreWarmup('already-completed', {generatedAt});
-          return {scheduled: false, reason: 'already-completed', generatedAt, sections, queued: false};
-        }
-        // Atomic requeue of exactly the invalid sections: the matching
-        // tombstones are removed under the queue lock and their entries are
-        // recreated; valid tombstones stay.  Failures stay visible and the
-        // next tick retries.
-        const requeued = await persistHostLockedBiSectionPlan(
-          sections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY})),
-          generatedAt,
-          {
-            reason: biPortalCoreWarmupReason(generatedAt),
-            idempotencyKey: warmupIdempotencyKey,
-            coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
-            requeueCompletedSections: terminal.invalid,
-          },
-        );
+      // A watcher tick must reconcile durable queue state after Portal
+      // restart and after the worker completes.  In particular, do not let an
+      // in-memory queued/done shortcut hide a newer request revision or a
+      // missing/mismatched terminal artifact.
+      const reconciliation = await reconcileBiPortalCoreWarmupQueueOwned(root, sections, generatedAt);
+      if (reconciliation.status === 'done') {
+        const finishedAt = Date.parse(String(reconciliation.generationCompletion?.completedAt || '')) || Date.now();
+        biPortalCoreWarmupState.owner = 'external-section-queue';
+        biPortalCoreWarmupState.generatedAt = generatedAt;
+        biPortalCoreWarmupState.status = 'done';
+        biPortalCoreWarmupState.startedAt = biPortalCoreWarmupState.startedAt || finishedAt;
+        biPortalCoreWarmupState.finishedAt = finishedAt;
+        biPortalCoreWarmupState.lastError = '';
         resetBiPortalCoreWarmupEnqueueBackoff();
-        // A requeue can be superseded by a newer-generation entry that already
-        // owns one or more section slots in the queue: this generation must
-        // never claim queued/done.  Re-read live state and defer to the newer
-        // generation; the next tick handles it.
-        const superseded = requeued.supersededByExisting || [];
-        if (superseded.length) {
-          const latestNow = await warmupCoreStillCurrent(root, generatedAt);
-          biPortalCoreWarmupState.status = 'stale';
-          biPortalCoreWarmupState.generatedAt = latestNow.latest || generatedAt;
-          biPortalCoreWarmupState.finishedAt = 0;
-          biPortalCoreWarmupState.lastError = `warmup requeue superseded by existing newer-generation entry: sections=${superseded.join(',')}`;
-          logBiPortalCoreWarmup('superseded', {generatedAt, sections: superseded.join(',')});
-          return {
-            scheduled: false,
-            reason: 'core-generation-superseded',
-            generatedAt: latestNow.latest || generatedAt,
-            previousGeneratedAt: generatedAt,
-            supersededSections: superseded,
-          };
-        }
-        biPortalCoreWarmupState.status = 'queued';
+        logBiPortalCoreWarmup('reconciled-done', {generatedAt, sections: sections.join(',')});
+        return {scheduled: false, reason: 'already-completed', generatedAt, sections, queued: false};
+      }
+      if (reconciliation.status === 'stale') {
+        biPortalCoreWarmupState.owner = 'external-section-queue';
+        biPortalCoreWarmupState.status = 'stale';
+        biPortalCoreWarmupState.generatedAt = reconciliation.latestGeneratedAt || generatedAt;
         biPortalCoreWarmupState.finishedAt = 0;
-        biPortalCoreWarmupState.lastError = `terminal verification failed for sections: ${terminal.invalid.join(',')}; invalid tombstones requeued`;
-        logBiPortalCoreWarmup('requeued', {
+        biPortalCoreWarmupState.lastError = `core generation changed during terminal verification: ${generatedAt} -> ${reconciliation.latestGeneratedAt || '(unreadable)'}`;
+        logBiPortalCoreWarmup('core-generation-changed', {
           generatedAt,
-          sections: terminal.invalid.join(','),
-          requeuedCompleted: (requeued.requeuedCompleted || []).join(','),
+          latestGeneratedAt: reconciliation.latestGeneratedAt || '',
+          reconciliation: reconciliation.reason,
         });
         return {
-          scheduled: true,
-          reason: 'queued',
-          generatedAt,
-          sections,
-          queued: requeued.queued,
-          requeuedSections: terminal.invalid,
+          scheduled: false,
+          reason: 'core-generation-changed',
+          generatedAt: reconciliation.latestGeneratedAt || generatedAt,
+          previousGeneratedAt: generatedAt,
         };
       }
-      biPortalCoreWarmupState.status = 'queued';
-      biPortalCoreWarmupState.finishedAt = 0;
-      logBiPortalCoreWarmup('queued', {
-        generatedAt,
-        sections: sections.join(','),
-        reason: biPortalCoreWarmupReason(generatedAt),
-        newlyQueued: (enqueued.newlyQueued || []).join(','),
-        updatedRevision: (enqueued.updatedRevision || []).join(','),
-        deduplicatedPending: (enqueued.deduplicatedPending || []).join(','),
-        deduplicatedCompleted: (enqueued.deduplicatedCompleted || []).join(','),
-      });
-      return {scheduled: true, reason: 'queued', generatedAt, sections, queued: enqueued.queued};
+      if (reconciliation.status === 'queued') {
+        const wasQueued = biPortalCoreWarmupState.status === 'queued'
+          && biPortalCoreWarmupState.generatedAt === generatedAt;
+        const repairSections = [...new Set([
+          ...(reconciliation.missingCompletedSections || []),
+          ...(reconciliation.conflictingCompletedSections || []),
+          ...(reconciliation.invalidSections || []),
+        ])];
+        let persisted = null;
+        if (reconciliation.reason !== 'queue-active' && repairSections.length) {
+          persisted = await persistHostLockedBiSectionPlan(
+            repairSections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY})),
+            generatedAt,
+            {
+              reason: biPortalCoreWarmupReason(generatedAt),
+              idempotencyKey: biPortalCoreWarmupIdempotencyKey(generatedAt),
+              coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
+              requeueCompletedSections: repairSections,
+            },
+          );
+        }
+        biPortalCoreWarmupState.owner = 'external-section-queue';
+        biPortalCoreWarmupState.generatedAt = generatedAt;
+        biPortalCoreWarmupState.status = 'queued';
+        biPortalCoreWarmupState.startedAt = wasQueued && biPortalCoreWarmupState.startedAt
+          ? biPortalCoreWarmupState.startedAt
+          : Date.now();
+        biPortalCoreWarmupState.finishedAt = 0;
+        biPortalCoreWarmupState.lastError = reconciliation.reason === 'terminal-mismatch'
+          ? `terminal verification failed for sections: ${repairSections.join(',')}`
+          : '';
+        resetBiPortalCoreWarmupEnqueueBackoff();
+        logBiPortalCoreWarmup('queued', {
+          generatedAt,
+          reason: reconciliation.reason,
+          activeSections: (reconciliation.activeSections || []).join(','),
+          conflictingGenerationSections: (reconciliation.conflictingGenerationSections || []).join(','),
+          repairSections: repairSections.join(','),
+        });
+        return {
+          scheduled: Boolean(persisted),
+          reason: wasQueued && reconciliation.reason === 'queue-active' ? 'already-queued' : 'queued',
+          reconciliationReason: reconciliation.reason,
+          generatedAt,
+          sections,
+          queued: true,
+          activeSections: reconciliation.activeSections || [],
+          newerRevisionSections: reconciliation.newerRevisionSections || [],
+          conflictingGenerationSections: reconciliation.conflictingGenerationSections || [],
+          requeuedSections: repairSections,
+        };
+      }
+      throw new Error(`unexpected warmup reconciliation status: ${String(reconciliation.status || 'missing')}`);
     } catch (error) {
       const message = error?.message || String(error || 'warmup enqueue failed');
       const failedAt = Number.isFinite(Number(options.nowMs)) ? attemptNow : Date.now();
@@ -14191,6 +14152,10 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
         consecutiveFailures: failure.consecutiveFailures,
         nextAttemptAt: new Date(failure.nextAttemptAt).toISOString(),
       };
+    } finally {
+      if (biPortalCoreWarmupState.inFlight === queueOwnedRun) {
+        biPortalCoreWarmupState.inFlight = null;
+      }
     }
   }
 
@@ -14317,44 +14282,147 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
   return {ok: failures.length === 0, generatedAt, results, failures};
 }
 
-async function warmupCoreStillCurrent(root, expectedGeneratedAt) {
-  // Authoritative re-read used to gate cross-generation races: after the
-  // terminal checks (and before done or any tombstone mutation) the core must
-  // still carry the exact generation this warmup was pinned to.  An unreadable
-  // core is fail-closed: not current.
-  let latest = '';
-  try {
-    latest = String((await readBiPortalCoreMeta(root))?.generatedAt || '');
-  } catch {}
+// Queue-owned completion is reconciled only by the lock-owning manager.
+function biPortalGenerationCompletionMatches(receipt, generatedAt, sections) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  const requested = [...new Set((sections || []).map(section => String(section || '')).filter(Boolean))].sort();
+  const completed = [...new Set((receipt.sections || []).map(section => String(section || '')).filter(Boolean))].sort();
+  const evidenceRecords = Array.isArray(receipt.completedIdempotency) ? receipt.completedIdempotency : [];
+  const evidenceSections = [...new Set(evidenceRecords
+    .map(record => String(record?.section || ''))
+    .filter(Boolean))].sort();
+  return receipt.version === 1
+    && String(receipt.coreGeneratedAt || '') === String(generatedAt || '')
+    && requested.length === 7
+    && completed.length === requested.length
+    && requested.every((section, index) => section === completed[index])
+    && evidenceRecords.length === requested.length
+    && evidenceSections.length === requested.length
+    && requested.every((section, index) => section === evidenceSections[index])
+    && evidenceRecords.every(record => String(record?.idempotencyKey || '')
+      && Number.isFinite(Date.parse(String(record?.completedAt || ''))))
+    && /^[a-f0-9]{64}$/u.test(String(receipt.evidenceHash || ''))
+    && Number.isFinite(Date.parse(String(receipt.completedAt || '')));
+}
+
+function parseBiPortalQueueManagerReport(stdout) {
+  const lines = String(stdout || '').trim().split(/\r?\n/u).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const report = JSON.parse(lines.slice(index).join('\n'));
+      if (report && typeof report === 'object' && !Array.isArray(report)) return report;
+    } catch {}
+  }
+  return null;
+}
+
+async function reconcileBiPortalCoreWarmupQueueOwned(root, sections, generatedAt) {
+  const requestedSections = [...new Set((sections || []).map(section => String(section || '')).filter(Boolean))];
+  const run = await runChildProcess('/usr/bin/env', [
+    'bash',
+    path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
+    'reconcile-generation',
+    '--sections', requestedSections.join(','),
+    '--core-generated-at', String(generatedAt || ''),
+    '--terminal-root', root,
+  ], {
+    cwd: ROOT,
+    timeoutMs: 240_000,
+  });
+  if (!run.ok) {
+    throw new Error(`warmup generation reconciliation failed: code=${run.code} timedOut=${run.timedOut}`);
+  }
+  const report = parseBiPortalQueueManagerReport(run.stdout);
+  if (!report || report.ok !== true || String(report.coreGeneratedAt || '') !== String(generatedAt || '')) {
+    throw new Error('warmup generation reconciliation returned an invalid manager receipt');
+  }
+  const currentMeta = await readBiPortalCoreMeta(root).catch(() => null);
+  const currentGeneratedAt = String(currentMeta?.generatedAt || '');
+  if (currentGeneratedAt !== String(generatedAt || '')) {
+    return {
+      status: 'stale',
+      reason: 'core-generation-changed',
+      generatedAt,
+      latestGeneratedAt: currentGeneratedAt,
+    };
+  }
+  if (report.completed === true
+    && biPortalGenerationCompletionMatches(report.generationCompletion, generatedAt, requestedSections)) {
+    return {
+      status: 'done',
+      reason: report.reason,
+      generatedAt,
+      completedSections: requestedSections,
+      generationCompletion: report.generationCompletion,
+    };
+  }
   return {
-    current: Boolean(latest) && latest === String(expectedGeneratedAt || ''),
-    latest,
+    status: 'queued',
+    reason: String(report.reason || 'generation-completion-missing'),
+    generatedAt,
+    activeSections: Array.isArray(report.activeSections) ? report.activeSections : [],
+    newerRevisionSections: Array.isArray(report.newerRevisionSections) ? report.newerRevisionSections : [],
+    conflictingGenerationSections: Array.isArray(report.conflictingGenerationSections)
+      ? report.conflictingGenerationSections
+      : [],
+    missingCompletedSections: Array.isArray(report.missingCompletedSections) ? report.missingCompletedSections : [],
+    conflictingCompletedSections: Array.isArray(report.conflictingCompletedSections)
+      ? report.conflictingCompletedSections
+      : [],
+    invalidSections: Array.isArray(report.invalidTerminalSections) ? report.invalidTerminalSections : [],
   };
 }
 
-async function verifyWarmupSectionsTerminal(root, sections, expectedGeneratedAt) {
-  // Authoritative read-only terminal verification pinned to the exact core
-  // generation under warmup.  Bounded and deterministic: each section gets one
-  // child validator invocation with a hard timeout; any error/timeout/non-zero
-  // is treated as NON-terminal so the scheduler requeues instead of claiming
-  // done.  The expected-generation pin makes a mid-verification core flip fail
-  // every later check instead of silently validating against a newer core.
-  const validatorScript = process.env.SHEIN_BI_TERMINAL_VALIDATOR
-    || path.join(ROOT, 'scripts', 'check_bi_portal_section_terminal.mjs');
-  const invalid = [];
-  for (const section of sections) {
-    const probe = await runChildProcess(process.execPath, [
-      validatorScript,
-      '--root', root,
-      '--section', section,
-      '--expected-generated-at', expectedGeneratedAt,
-    ], {
-      cwd: root,
-      timeoutMs: 10_000,
-    });
-    if (probe.code !== 0 || probe.timedOut) invalid.push(section);
+async function resolveBiPortalCoreWarmupReceiptHealth(root, sections = configuredBiPortalCoreWarmupSections()) {
+  const meta = await readBiPortalCoreMeta(root).catch(() => null);
+  const currentGeneratedAt = String(meta?.generatedAt || '');
+  const receipt = readBiPortalSectionQueueState()?.generationCompletion || null;
+  const done = Boolean(currentGeneratedAt
+    && biPortalGenerationCompletionMatches(receipt, currentGeneratedAt, sections));
+  if (done) {
+    return {
+      done: true,
+      generatedAt: currentGeneratedAt,
+      finishedAt: Date.parse(receipt.completedAt),
+      receipt,
+    };
   }
-  return {ok: invalid.length === 0, invalid};
+  return {
+    done: false,
+    generatedAt: currentGeneratedAt,
+    finishedAt: 0,
+    receipt: null,
+  };
+}
+
+function effectiveBiPortalCoreWarmupStateFromReceipt(
+  receiptHealth,
+  state = biPortalCoreWarmupState,
+) {
+  if (!BI_CORE_WARMUP_QUEUE_OWNED || !BI_EXTERNAL_SECTION_QUEUE_ENABLED) return state;
+  if (receiptHealth?.done) {
+    return {
+      ...state,
+      generatedAt: receiptHealth.generatedAt,
+      status: 'done',
+      owner: 'external-section-queue',
+      finishedAt: receiptHealth.finishedAt,
+      inFlight: null,
+      lastError: '',
+    };
+  }
+  return {
+    ...state,
+    generatedAt: receiptHealth?.generatedAt || state.generatedAt,
+    status: 'queued',
+    owner: 'external-section-queue',
+    startedAt: state.status === 'queued'
+      && state.generatedAt === receiptHealth?.generatedAt
+      ? state.startedAt
+      : 0,
+    finishedAt: 0,
+    inFlight: null,
+  };
 }
 
 function startBiPortalCoreWarmupWatcher(args, root, options = {}) {
@@ -17727,7 +17795,11 @@ async function main() {
       }
       if (url.pathname === '/api/health') {
         const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
-        const warmupHealth = evaluateBiPortalCoreWarmupHealth();
+        const receiptHealth = BI_CORE_WARMUP_QUEUE_OWNED
+          ? await resolveBiPortalCoreWarmupReceiptHealth(root)
+          : null;
+        const effectiveWarmupState = effectiveBiPortalCoreWarmupStateFromReceipt(receiptHealth);
+        const warmupHealth = evaluateBiPortalCoreWarmupHealth(effectiveWarmupState);
         return sendJson(res, 200, {
           ok: warmupHealth.ok,
           service: 'shein-bi-portal',
@@ -17763,13 +17835,13 @@ async function main() {
           runtime: httpLifecycle.status(),
           mutationQueue: enqueueMutationRequest.status(),
          biCoreWarmup: {
-            generatedAt: biPortalCoreWarmupState.generatedAt,
-            status: biPortalCoreWarmupState.status,
-            owner: biPortalCoreWarmupState.owner || '',
-            startedAt: biPortalCoreWarmupState.startedAt ? new Date(biPortalCoreWarmupState.startedAt).toISOString() : null,
-            finishedAt: biPortalCoreWarmupState.finishedAt ? new Date(biPortalCoreWarmupState.finishedAt).toISOString() : null,
-            inFlight: Boolean(biPortalCoreWarmupState.inFlight),
-            lastError: biPortalCoreWarmupState.lastError,
+            generatedAt: effectiveWarmupState.generatedAt,
+            status: effectiveWarmupState.status,
+            owner: effectiveWarmupState.owner || '',
+            startedAt: effectiveWarmupState.startedAt ? new Date(effectiveWarmupState.startedAt).toISOString() : null,
+            finishedAt: effectiveWarmupState.finishedAt ? new Date(effectiveWarmupState.finishedAt).toISOString() : null,
+            inFlight: Boolean(effectiveWarmupState.inFlight),
+            lastError: effectiveWarmupState.lastError,
             consecutiveFailures: biPortalCoreWarmupState.consecutiveFailures,
             nextAttemptAt: biPortalCoreWarmupState.nextAttemptAt ? new Date(biPortalCoreWarmupState.nextAttemptAt).toISOString() : null,
             lastFailureAt: biPortalCoreWarmupState.lastFailureAt ? new Date(biPortalCoreWarmupState.lastFailureAt).toISOString() : null,
@@ -21730,6 +21802,10 @@ export const __testHooks = {
   biPortalLiveAccountingIdempotencyKey,
   biPortalGenerationCoalesceKey,
   resetBiPortalCoreWarmupEnqueueBackoff,
+  biPortalGenerationCompletionMatches,
+  resolveBiPortalCoreWarmupReceiptHealth,
+  effectiveBiPortalCoreWarmupStateFromReceipt,
+  reconcileBiPortalCoreWarmupQueueOwned,
   scheduleBiPortalCoreWarmup,
   startBiPortalCoreWarmupWatcher,
   biPortalCoreFileIdentity,

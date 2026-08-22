@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import crypto from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -15,11 +16,19 @@ const DEFAULT_FAIL_BACKOFF_SECONDS = 60;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,120}$/;
 const COMPLETED_LEDGER_MAX_ENTRIES = 2_048;
 const COMPLETED_LEDGER_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+const CORE_GENERATED_AT_PATTERN = /^[\x21-\x7E]{1,1024}$/;
+const GENERATION_COMPLETION_VERSION = 1;
+const GENERATION_COMPLETION_SECTION_COUNT = 7;
+const SOURCE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const DEFAULT_TERMINAL_ROOT = path.join(SOURCE_ROOT, 'outputs', 'bi-portal');
+const DEFAULT_TERMINAL_VALIDATOR = process.env.SHEIN_BI_TERMINAL_VALIDATOR
+  || path.join(SOURCE_ROOT, 'scripts', 'check_bi_portal_section_terminal.mjs');
 
 function usage(message = '') {
   if (message) console.error(message);
   console.error(`Usage:
-  manage_bi_portal_section_queue.mjs enqueue --sections CSV [--priority N] [--reason TEXT] [--idempotency-key KEY] [--coalesce-key KEY] [--requeue-completed-sections CSV] [--file PATH]
+  manage_bi_portal_section_queue.mjs enqueue --sections CSV --core-generated-at TOKEN [--priority N] [--reason TEXT] [--idempotency-key KEY] [--coalesce-key KEY] [--requeue-completed-sections CSV] [--file PATH]
+  manage_bi_portal_section_queue.mjs reconcile-generation --phase snapshot|validate|commit --sections CSV --core-generated-at TOKEN [--snapshot-hash SHA256] [--validation-result BASE64URL] [--terminal-root PATH] [--terminal-validator PATH] [--file PATH]
   manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID [--file PATH]
   manage_bi_portal_section_queue.mjs fail --section NAME --lease-id ID [--error TEXT] [--backoff-seconds N] [--file PATH]
@@ -34,6 +43,13 @@ function validateIdempotencyKey(value) {
   return key;
 }
 
+function validateCoreGeneratedAt(value) {
+  const generatedAt = String(value || '').trim();
+  if (!generatedAt) return '';
+  if (!CORE_GENERATED_AT_PATTERN.test(generatedAt)) throw new TypeError('QUEUE_CORE_GENERATED_AT_INVALID');
+  return generatedAt;
+}
+
 function normalizeSection(value) {
   const section = String(value || '').trim();
   if (!SECTION_PATTERN.test(section)) throw new TypeError(`SECTION_INVALID_${section}`);
@@ -42,7 +58,7 @@ function normalizeSection(value) {
 
 function parseArgs(argv) {
   const [command, ...tokens] = argv;
-  if (!['enqueue', 'claim', 'complete', 'fail', 'status'].includes(command)) {
+  if (!['enqueue', 'reconcile-generation', 'claim', 'complete', 'fail', 'status'].includes(command)) {
     throw new TypeError('QUEUE_COMMAND_INVALID');
   }
   const options = {
@@ -54,6 +70,12 @@ function parseArgs(argv) {
     reason: '',
     idempotencyKey: '',
     coalesceKey: '',
+    coreGeneratedAt: '',
+    terminalRoot: DEFAULT_TERMINAL_ROOT,
+    terminalValidator: DEFAULT_TERMINAL_VALIDATOR,
+    phase: '',
+    snapshotHash: '',
+    validationResult: '',
     section: '',
     leaseId: undefined,
     leaseSeconds: 2_700,
@@ -75,6 +97,12 @@ function parseArgs(argv) {
     else if (token === '--reason') options.reason = next();
     else if (token === '--idempotency-key') options.idempotencyKey = validateIdempotencyKey(next());
     else if (token === '--coalesce-key') options.coalesceKey = validateIdempotencyKey(next());
+    else if (token === '--core-generated-at') options.coreGeneratedAt = validateCoreGeneratedAt(next());
+    else if (token === '--terminal-root') options.terminalRoot = path.resolve(next());
+    else if (token === '--terminal-validator') options.terminalValidator = path.resolve(next());
+    else if (token === '--phase') options.phase = next();
+    else if (token === '--snapshot-hash') options.snapshotHash = next();
+    else if (token === '--validation-result') options.validationResult = next();
     else if (token === '--requeue-completed-sections') {
       options.requeueCompletedSections.push(...next().split(',').map(normalizeSection));
     }
@@ -98,6 +126,25 @@ function parseArgs(argv) {
     throw new TypeError('QUEUE_BACKOFF_SECONDS_INVALID');
   }
   if (command === 'enqueue' && !options.sections.length) throw new TypeError('QUEUE_SECTIONS_REQUIRED');
+  if (command === 'enqueue' && !options.coreGeneratedAt) throw new TypeError('QUEUE_CORE_GENERATED_AT_REQUIRED');
+  if (command === 'reconcile-generation') {
+    const uniqueSections = new Set(options.sections);
+    if (!options.coreGeneratedAt) throw new TypeError('QUEUE_CORE_GENERATED_AT_REQUIRED');
+    if (options.sections.length !== GENERATION_COMPLETION_SECTION_COUNT
+      || uniqueSections.size !== GENERATION_COMPLETION_SECTION_COUNT) {
+      throw new TypeError('QUEUE_GENERATION_COMPLETION_SECTIONS_INVALID');
+    }
+    if (!['snapshot', 'validate', 'commit'].includes(options.phase)) {
+      throw new TypeError('QUEUE_RECONCILE_PHASE_INVALID');
+    }
+    if (['validate', 'commit'].includes(options.phase)
+      && !/^[a-f0-9]{64}$/u.test(options.snapshotHash)) {
+      throw new TypeError('QUEUE_RECONCILE_SNAPSHOT_HASH_INVALID');
+    }
+    if (options.phase === 'commit' && !/^[A-Za-z0-9_-]{1,32768}$/u.test(options.validationResult)) {
+      throw new TypeError('QUEUE_RECONCILE_VALIDATION_RESULT_INVALID');
+    }
+  }
   if (options.requeueCompletedSections.length) {
     if (!options.idempotencyKey) throw new TypeError('QUEUE_REQUEUE_REQUIRES_IDEMPOTENCY_KEY');
     const requested = new Set(options.sections);
@@ -116,8 +163,11 @@ function emptyQueue() {
     version: 1,
     updatedAt: '',
     nextSequence: 0,
+    nextIntentRevision: 0,
+    sectionIntentRevisions: {},
     entries: [],
     completedIdempotency: [],
+    generationCompletion: null,
   };
 }
 
@@ -153,11 +203,32 @@ function normalizeQueue(queue) {
     entry.dependencyYield = Boolean(entry.dependencyYield);
     entry.idempotencyKey = typeof entry.idempotencyKey === 'string' ? entry.idempotencyKey : '';
     entry.coalesceKey = typeof entry.coalesceKey === 'string' ? entry.coalesceKey : '';
+    entry.coreGeneratedAt = validateCoreGeneratedAt(entry.coreGeneratedAt) || 'unknown';
     const priority = Number(entry.priority ?? 50);
     entry.priority = Number.isSafeInteger(priority) && priority >= 0 ? priority : 50;
     if (!['pending', 'running'].includes(entry.status)) entry.status = 'pending';
   }
   queue.nextSequence = nextSequence;
+  const revisions = queue.sectionIntentRevisions && typeof queue.sectionIntentRevisions === 'object'
+    && !Array.isArray(queue.sectionIntentRevisions)
+    ? queue.sectionIntentRevisions
+    : {};
+  queue.sectionIntentRevisions = {};
+  let nextIntentRevision = Number.isSafeInteger(Number(queue.nextIntentRevision))
+    && Number(queue.nextIntentRevision) >= 0
+    ? Number(queue.nextIntentRevision)
+    : 0;
+  for (const [section, rawRevision] of Object.entries(revisions)) {
+    if (!SECTION_PATTERN.test(section)) continue;
+    const revision = Number(rawRevision);
+    if (!Number.isSafeInteger(revision) || revision < 0) continue;
+    queue.sectionIntentRevisions[section] = revision;
+    nextIntentRevision = Math.max(nextIntentRevision, revision);
+  }
+  queue.nextIntentRevision = nextIntentRevision;
+  if (!queue.generationCompletion || typeof queue.generationCompletion !== 'object' || Array.isArray(queue.generationCompletion)) {
+    queue.generationCompletion = null;
+  }
   return queue;
 }
 
@@ -168,8 +239,16 @@ function readQueue(file) {
       version: 1,
       updatedAt: String(value?.updatedAt || ''),
       nextSequence: Number(value?.nextSequence || 0),
+      nextIntentRevision: Number(value?.nextIntentRevision || 0),
+      sectionIntentRevisions: value?.sectionIntentRevisions || {},
       entries: Array.isArray(value?.entries) ? value.entries : [],
-      completedIdempotency: Array.isArray(value?.completedIdempotency) ? value.completedIdempotency : [],
+      completedIdempotency: Array.isArray(value?.completedIdempotency)
+        ? value.completedIdempotency.map(record => ({
+          ...record,
+          coreGeneratedAt: validateCoreGeneratedAt(record?.coreGeneratedAt) || 'unknown',
+        }))
+        : [],
+      generationCompletion: value?.generationCompletion || null,
     });
   } catch (error) {
     if (error?.code === 'ENOENT') return emptyQueue();
@@ -206,18 +285,57 @@ function recoverExpired(queue, nowMillis) {
   }
 }
 
+function generationCompletionSections(receipt) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return [];
+  if (!Array.isArray(receipt.sections)) return [];
+  return [...new Set(receipt.sections.map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+function invalidateGenerationCompletion(queue, sections) {
+  if (!queue.generationCompletion || typeof queue.generationCompletion !== 'object') return false;
+  const receiptSections = new Set(generationCompletionSections(queue.generationCompletion));
+  if (!receiptSections.size) {
+    queue.generationCompletion = null;
+    return true;
+  }
+  const intersects = (sections || []).some(section => receiptSections.has(String(section || '')));
+  if (!intersects) return false;
+  queue.generationCompletion = null;
+  return true;
+}
+
+function recordEnqueueIntent(queue, sections) {
+  queue.sectionIntentRevisions = queue.sectionIntentRevisions
+    && typeof queue.sectionIntentRevisions === 'object'
+    && !Array.isArray(queue.sectionIntentRevisions)
+    ? queue.sectionIntentRevisions
+    : {};
+  let revision = Number.isSafeInteger(Number(queue.nextIntentRevision))
+    && Number(queue.nextIntentRevision) >= 0
+    ? Number(queue.nextIntentRevision)
+    : 0;
+  for (const section of [...new Set((sections || []).map(normalizeSection))]) {
+    revision += 1;
+    queue.sectionIntentRevisions[section] = revision;
+  }
+  queue.nextIntentRevision = revision;
+}
+
 export function enqueueSections(queue, {
   sections,
   priority = 50,
   reason = '',
   idempotencyKey = '',
   coalesceKey = '',
+  coreGeneratedAt = '',
   requeueCompletedSections = [],
   now = new Date(),
 } = {}) {
   const nowIso = now.toISOString();
   const key = validateIdempotencyKey(idempotencyKey);
   const groupKey = validateIdempotencyKey(coalesceKey);
+  const generation = validateCoreGeneratedAt(coreGeneratedAt);
+  if (!generation) throw new TypeError('QUEUE_CORE_GENERATED_AT_REQUIRED');
   if (requeueCompletedSections.length && !key) {
     throw new TypeError('QUEUE_REQUEUE_REQUIRES_IDEMPOTENCY_KEY');
   }
@@ -230,6 +348,13 @@ export function enqueueSections(queue, {
   // caller-provided now; the trimmed ledger must be persisted even when no
   // entry changes (trim reports whether it mutated the document).
   let mutated = trimCompletedIdempotency(queue, now);
+  // Every enqueue call is an intent, including a completed-key replay. Record
+  // a durable per-section revision and invalidate a matching completion
+  // receipt before any deduplication return. Optimistic reconciliation uses
+  // these revisions to detect an enqueue that landed during artifact checks.
+  recordEnqueueIntent(queue, [...requestedSet]);
+  mutated = true;
+  const invalidatedByIntent = invalidateGenerationCompletion(queue, [...requestedSet]);
   let nextSequence = Number.isSafeInteger(queue.nextSequence) && queue.nextSequence >= 0
     ? queue.nextSequence
     : 0;
@@ -245,7 +370,9 @@ export function enqueueSections(queue, {
     deduplicatedCompleted: [],
     coalescedRerun: [],
     requeuedCompleted: [],
+    retiredLegacyCompleted: [],
     supersededByExisting: [],
+    invalidatedGenerationCompletion: invalidatedByIntent,
   };
   for (const rawSection of sections || []) {
     const section = normalizeSection(rawSection);
@@ -259,7 +386,9 @@ export function enqueueSections(queue, {
     // re-reads live state and defers to the newer generation instead of
     // claiming this generation queued/done.  Same key or no entry requeue
     // normally below.
-    if (requeueSet.has(section) && entryKey && entry?.idempotencyKey && entry.idempotencyKey !== entryKey) {
+    if (requeueSet.has(section) && entry
+      && (entry.coreGeneratedAt !== generation
+        || (entryKey && entry.idempotencyKey && entry.idempotencyKey !== entryKey))) {
       outcome.supersededByExisting.push(section);
       continue;
     }
@@ -269,7 +398,9 @@ export function enqueueSections(queue, {
     // valid tombstones stay untouched.  No manual deletes.
     if (requeueSet.has(section) && entryKey && Array.isArray(queue.completedIdempotency)) {
       const before = queue.completedIdempotency.length;
-      queue.completedIdempotency = queue.completedIdempotency.filter(record => record.idempotencyKey !== entryKey);
+      queue.completedIdempotency = queue.completedIdempotency.filter(record => (
+        record.idempotencyKey !== entryKey || record.coreGeneratedAt !== generation
+      ));
       if (queue.completedIdempotency.length !== before) {
         outcome.requeuedCompleted.push(section);
         mutated = true;
@@ -280,14 +411,37 @@ export function enqueueSections(queue, {
     // entry is a newer G2 request -- G2's key/revision/status stay untouched
     // and the old key is never adopted.  Only an expired/trimmed tombstone
     // (declared 30d semantics) makes the request eligible again.
-    if (entryKey && Array.isArray(queue.completedIdempotency)
-      && queue.completedIdempotency.some(record => record.idempotencyKey === entryKey)) {
+    let matchingCompleted = entryKey && Array.isArray(queue.completedIdempotency)
+      ? queue.completedIdempotency.find(record => record.idempotencyKey === entryKey)
+      : null;
+    if (matchingCompleted && matchingCompleted.coreGeneratedAt === 'unknown') {
+      // A pre-generation tombstone is not evidence for any current core. An
+      // explicit generation request with the exact compatible key retires it
+      // under the same lock and creates fresh work; it is never promoted into
+      // a current-generation completion receipt.
+      queue.completedIdempotency = queue.completedIdempotency.filter(record => !(
+        record.idempotencyKey === entryKey
+          && String(record.section || '') === section
+          && record.coreGeneratedAt === 'unknown'
+      ));
+      outcome.retiredLegacyCompleted.push(section);
+      matchingCompleted = null;
+      mutated = true;
+    }
+    if (matchingCompleted && matchingCompleted.coreGeneratedAt !== generation) {
+      throw new Error('QUEUE_IDEMPOTENCY_GENERATION_CONFLICT');
+    }
+    if (matchingCompleted) {
       outcome.deduplicatedCompleted.push(section);
       continue;
     }
     // Durable per-section idempotency: an existing pending/running entry with
     // the exact same key is a strict no-op (no revision bump, no rerun, no
     // lease/backoff reset).
+    if (entry && entryKey && entry.idempotencyKey === entryKey
+      && entry.coreGeneratedAt !== generation) {
+      throw new Error('QUEUE_IDEMPOTENCY_GENERATION_CONFLICT');
+    }
     if (entry && entryKey && entry.idempotencyKey === entryKey) {
       outcome.deduplicatedPending.push(section);
       continue;
@@ -305,6 +459,7 @@ export function enqueueSections(queue, {
         dependencyYield: false,
         ...(entryKey ? {idempotencyKey: entryKey} : {}),
         ...(groupKey ? {coalesceKey: groupKey} : {}),
+        coreGeneratedAt: generation,
         status: 'pending',
         requestedAt: nowIso,
         updatedAt: nowIso,
@@ -319,7 +474,9 @@ export function enqueueSections(queue, {
       outcome.newlyQueued.push(section);
       mutated = true;
     } else {
-      const sameCoalesceGroup = Boolean(groupKey && entry.coalesceKey === groupKey);
+      const sameCoalesceGroup = Boolean(
+        groupKey && entry.coalesceKey === groupKey && entry.coreGeneratedAt === generation,
+      );
       // A pending build has not taken its database snapshot yet, so every
       // event in the same generation/group is already covered by that future
       // build. Do not turn a steady webhook stream into an unbounded numeric
@@ -365,6 +522,10 @@ export function enqueueSections(queue, {
       }
       if (entry.coalesceKey !== groupKey) {
         entry.coalesceKey = groupKey;
+        mutated = true;
+      }
+      if (entry.coreGeneratedAt !== generation) {
+        entry.coreGeneratedAt = generation;
         mutated = true;
       }
       entry.priority = Math.min(Number(entry.priority ?? priority), priority);
@@ -520,6 +681,7 @@ export function completeClaim(queue, {section, leaseId, now = new Date()} = {}) 
     queue.completedIdempotency.push({
       idempotencyKey: entry.idempotencyKey,
       section: entry.section,
+      coreGeneratedAt: entry.coreGeneratedAt || 'unknown',
       completedAt: now.toISOString(),
     });
     trimCompletedIdempotency(queue, now);
@@ -540,6 +702,362 @@ function trimCompletedIdempotency(queue, now = new Date()) {
   // bound); a caller that persisted nothing else must still write the trimmed
   // ledger so expired tombstones are durably removed.
   return queue.completedIdempotency.length !== (records || []).length;
+}
+
+function runTerminalValidator({terminalValidator, terminalRoot, section, coreGeneratedAt}) {
+  const result = spawnSync(process.execPath, [
+    terminalValidator,
+    '--root', terminalRoot,
+    '--section', section,
+    '--expected-generated-at', coreGeneratedAt,
+  ], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30_000,
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  let report = null;
+  try {
+    const output = String(result.stdout || '').trim().split(/\r?\n/u).filter(Boolean).at(-1) || '';
+    report = output ? JSON.parse(output) : null;
+  } catch {
+    report = null;
+  }
+  return {
+    ok: result.status === 0
+      && report?.ok === true
+      && report?.section === section
+      && report?.coreGeneratedAt === coreGeneratedAt
+      && report?.sectionGeneratedAt === coreGeneratedAt,
+    section,
+    reason: String(report?.reason || result.error?.code || `validator_exit_${result.status ?? 'unknown'}`),
+  };
+}
+
+function sameSectionSet(left, right) {
+  const leftSections = [...new Set((left || []).map(value => String(value || '')).filter(Boolean))].sort();
+  const rightSections = [...new Set((right || []).map(value => String(value || '')).filter(Boolean))].sort();
+  return leftSections.length === rightSections.length
+    && leftSections.every((section, index) => section === rightSections[index]);
+}
+
+function generationReconcileRequest({sections, coreGeneratedAt} = {}) {
+  const generation = validateCoreGeneratedAt(coreGeneratedAt);
+  if (!generation) throw new TypeError('QUEUE_CORE_GENERATED_AT_REQUIRED');
+  const requestedSections = [...new Set((sections || []).map(normalizeSection))];
+  if (requestedSections.length !== GENERATION_COMPLETION_SECTION_COUNT) {
+    throw new TypeError('QUEUE_GENERATION_COMPLETION_SECTIONS_INVALID');
+  }
+  return {generation, requestedSections};
+}
+
+function generationSnapshotHash(queue, generation, requestedSections) {
+  const requestedSet = new Set(requestedSections);
+  const entries = queue.entries
+    .filter(entry => requestedSet.has(String(entry?.section || '')))
+    .map(entry => ({
+      section: entry.section,
+      sequence: entry.sequence,
+      status: entry.status,
+      requestRevision: entry.requestRevision,
+      claimedRevision: entry.claimedRevision,
+      rerun: entry.rerun,
+      idempotencyKey: entry.idempotencyKey || '',
+      coreGeneratedAt: entry.coreGeneratedAt || 'unknown',
+    }))
+    .sort((left, right) => left.section.localeCompare(right.section) || left.sequence - right.sequence);
+  const completedIdempotency = (queue.completedIdempotency || [])
+    .filter(record => requestedSet.has(String(record?.section || '')))
+    .map(record => ({
+      section: String(record.section || ''),
+      idempotencyKey: String(record.idempotencyKey || ''),
+      coreGeneratedAt: String(record.coreGeneratedAt || 'unknown'),
+      completedAt: String(record.completedAt || ''),
+    }))
+    .sort((left, right) => (
+      left.section.localeCompare(right.section)
+        || left.idempotencyKey.localeCompare(right.idempotencyKey)
+        || left.completedAt.localeCompare(right.completedAt)
+    ));
+  return crypto.createHash('sha256').update(JSON.stringify({
+    coreGeneratedAt: generation,
+    sections: requestedSections,
+    sectionIntentRevisions: requestedSections.map(section => [
+      section,
+      Number(queue.sectionIntentRevisions?.[section] || 0),
+    ]),
+    entries,
+    completedIdempotency,
+    generationCompletion: queue.generationCompletion || null,
+  })).digest('hex');
+}
+
+export function snapshotGenerationCompletion(queue, {
+  sections,
+  coreGeneratedAt,
+  now = new Date(),
+} = {}) {
+  const {generation, requestedSections} = generationReconcileRequest({sections, coreGeneratedAt});
+
+  let mutated = trimCompletedIdempotency(queue, now);
+  const requestedSet = new Set(requestedSections);
+  const activeEntries = queue.entries.filter(entry => (
+    requestedSet.has(String(entry?.section || ''))
+      && ['pending', 'running'].includes(String(entry?.status || ''))
+  ));
+  const activeSections = [...new Set(activeEntries.map(entry => entry.section))].sort();
+  const newerRevisionSections = [...new Set(activeEntries
+    .filter(entry => entry.status === 'running' && (
+      entry.rerun === true
+      || !Number.isSafeInteger(Number(entry.requestRevision))
+      || !Number.isSafeInteger(Number(entry.claimedRevision))
+      || Number(entry.requestRevision) > Number(entry.claimedRevision)
+    ))
+    .map(entry => entry.section))].sort();
+  const conflictingGenerationSections = [...new Set(activeEntries
+    .filter(entry => entry.coreGeneratedAt !== generation)
+    .map(entry => entry.section))].sort();
+  if (activeEntries.length) {
+    const invalidatedGenerationCompletion = invalidateGenerationCompletion(queue, activeSections);
+    mutated ||= invalidatedGenerationCompletion;
+    return {
+      queue,
+      mutated,
+      completed: false,
+      reason: 'queue-active',
+      coreGeneratedAt: generation,
+      activeSections,
+      newerRevisionSections,
+      conflictingGenerationSections,
+      invalidatedGenerationCompletion,
+    };
+  }
+
+  const completedBySection = new Map();
+  for (const record of queue.completedIdempotency || []) {
+    const section = String(record?.section || '');
+    if (!requestedSet.has(section)) continue;
+    const prior = completedBySection.get(section);
+    if (!prior || Date.parse(String(record?.completedAt || '')) > Date.parse(String(prior?.completedAt || ''))) {
+      completedBySection.set(section, record);
+    }
+  }
+  const missingCompletedSections = requestedSections.filter(section => !completedBySection.has(section));
+  const conflictingCompletedSections = requestedSections.filter(section => (
+    completedBySection.has(section)
+      && completedBySection.get(section)?.coreGeneratedAt !== generation
+  ));
+  if (missingCompletedSections.length || conflictingCompletedSections.length) {
+    const invalidatedGenerationCompletion = invalidateGenerationCompletion(queue, requestedSections);
+    mutated ||= invalidatedGenerationCompletion;
+    return {
+      queue,
+      mutated,
+      completed: false,
+      reason: 'terminal-receipt-missing',
+      coreGeneratedAt: generation,
+      missingCompletedSections,
+      conflictingCompletedSections,
+      invalidatedGenerationCompletion,
+    };
+  }
+
+  return {
+    queue,
+    mutated,
+    completed: false,
+    readyForValidation: true,
+    reason: 'terminal-validation-required',
+    coreGeneratedAt: generation,
+    snapshotHash: generationSnapshotHash(queue, generation, requestedSections),
+  };
+}
+
+export function validateGenerationSnapshot({
+  sections,
+  coreGeneratedAt,
+  snapshotHash,
+  terminalRoot = DEFAULT_TERMINAL_ROOT,
+  terminalValidator = DEFAULT_TERMINAL_VALIDATOR,
+  validateTerminal = null,
+} = {}) {
+  const {generation, requestedSections} = generationReconcileRequest({sections, coreGeneratedAt});
+  if (!/^[a-f0-9]{64}$/u.test(String(snapshotHash || ''))) {
+    throw new TypeError('QUEUE_RECONCILE_SNAPSHOT_HASH_INVALID');
+  }
+
+  const terminalResults = requestedSections.map(section => {
+    if (typeof validateTerminal === 'function') {
+      const result = validateTerminal({
+        terminalValidator,
+        terminalRoot,
+        section,
+        coreGeneratedAt: generation,
+      });
+      return typeof result === 'object' && result !== null
+        ? {section, ...result, ok: result.ok === true}
+        : {section, ok: result === true, reason: result === true ? '' : 'terminal_mismatch'};
+    }
+    return runTerminalValidator({terminalValidator, terminalRoot, section, coreGeneratedAt: generation});
+  });
+  const invalidTerminalSections = terminalResults.filter(result => !result.ok).map(result => result.section);
+  const validationPayload = {
+    version: 1,
+    snapshotHash,
+    coreGeneratedAt: generation,
+    sections: requestedSections,
+    terminalResults: terminalResults.map(result => ({
+      section: result.section,
+      ok: result.ok === true,
+      reason: String(result.reason || '').slice(0, 300),
+    })),
+  };
+  return {
+    completed: false,
+    validated: invalidTerminalSections.length === 0,
+    reason: invalidTerminalSections.length ? 'terminal-mismatch' : 'terminal-validation-passed',
+    coreGeneratedAt: generation,
+    snapshotHash,
+    invalidTerminalSections,
+    terminalResults,
+    validationResult: Buffer.from(JSON.stringify(validationPayload), 'utf8').toString('base64url'),
+  };
+}
+
+function parseGenerationValidationResult(encoded, generation, requestedSections, snapshotHash) {
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(String(encoded || ''), 'base64url').toString('utf8'));
+  } catch {
+    throw new TypeError('QUEUE_RECONCILE_VALIDATION_RESULT_INVALID');
+  }
+  const terminalResults = Array.isArray(payload?.terminalResults) ? payload.terminalResults : [];
+  if (payload?.version !== 1
+    || payload?.snapshotHash !== snapshotHash
+    || payload?.coreGeneratedAt !== generation
+    || !sameSectionSet(payload?.sections, requestedSections)
+    || terminalResults.length !== requestedSections.length
+    || !sameSectionSet(terminalResults.map(result => result?.section), requestedSections)) {
+    throw new TypeError('QUEUE_RECONCILE_VALIDATION_RESULT_INVALID');
+  }
+  return terminalResults.map(result => ({
+    section: String(result.section || ''),
+    ok: result.ok === true,
+    reason: String(result.reason || '').slice(0, 300),
+  }));
+}
+
+export function commitGenerationCompletion(queue, {
+  sections,
+  coreGeneratedAt,
+  snapshotHash,
+  validationResult,
+  now = new Date(),
+} = {}) {
+  const {generation, requestedSections} = generationReconcileRequest({sections, coreGeneratedAt});
+  const terminalResults = parseGenerationValidationResult(
+    validationResult,
+    generation,
+    requestedSections,
+    snapshotHash,
+  );
+  const current = snapshotGenerationCompletion(queue, {sections: requestedSections, coreGeneratedAt: generation, now});
+  if (!current.readyForValidation) return current;
+  if (current.snapshotHash !== snapshotHash) {
+    const invalidatedGenerationCompletion = invalidateGenerationCompletion(queue, requestedSections);
+    return {
+      queue,
+      mutated: current.mutated || invalidatedGenerationCompletion,
+      completed: false,
+      reason: 'snapshot-changed',
+      coreGeneratedAt: generation,
+      snapshotHash: current.snapshotHash,
+      invalidatedGenerationCompletion,
+    };
+  }
+  const invalidTerminalSections = terminalResults.filter(result => !result.ok).map(result => result.section);
+  if (invalidTerminalSections.length) {
+    const invalidatedGenerationCompletion = invalidateGenerationCompletion(queue, requestedSections);
+    return {
+      queue,
+      mutated: current.mutated || invalidatedGenerationCompletion,
+      completed: false,
+      reason: 'terminal-mismatch',
+      coreGeneratedAt: generation,
+      invalidTerminalSections,
+      terminalResults,
+      invalidatedGenerationCompletion,
+    };
+  }
+
+  const requestedSet = new Set(requestedSections);
+  const completedBySection = new Map();
+  for (const record of queue.completedIdempotency || []) {
+    const section = String(record?.section || '');
+    if (!requestedSet.has(section)) continue;
+    const prior = completedBySection.get(section);
+    if (!prior || Date.parse(String(record?.completedAt || '')) > Date.parse(String(prior?.completedAt || ''))) {
+      completedBySection.set(section, record);
+    }
+  }
+  const completionRecords = requestedSections.map(section => completedBySection.get(section));
+  const evidenceHash = crypto.createHash('sha256').update(JSON.stringify({
+    coreGeneratedAt: generation,
+    sections: requestedSections,
+    completedIdempotency: completionRecords.map(record => ({
+      section: record.section,
+      idempotencyKey: record.idempotencyKey,
+      coreGeneratedAt: record.coreGeneratedAt,
+      completedAt: record.completedAt,
+    })),
+  })).digest('hex');
+  const existing = queue.generationCompletion;
+  if (existing?.version === GENERATION_COMPLETION_VERSION
+    && existing.coreGeneratedAt === generation
+    && existing.evidenceHash === evidenceHash
+    && sameSectionSet(existing.sections, requestedSections)) {
+    return {
+      queue,
+      mutated: current.mutated,
+      completed: true,
+      reason: 'generation-completion-current',
+      coreGeneratedAt: generation,
+      generationCompletion: existing,
+      terminalResults,
+    };
+  }
+  queue.generationCompletion = {
+    version: GENERATION_COMPLETION_VERSION,
+    coreGeneratedAt: generation,
+    sections: requestedSections,
+    completedAt: now.toISOString(),
+    evidenceHash,
+    completedIdempotency: completionRecords.map(record => ({
+      section: record.section,
+      idempotencyKey: record.idempotencyKey,
+      completedAt: record.completedAt,
+    })),
+  };
+  return {
+    queue,
+    mutated: true,
+    completed: true,
+    reason: 'generation-completion-written',
+    coreGeneratedAt: generation,
+    generationCompletion: queue.generationCompletion,
+    terminalResults,
+  };
+}
+
+export function reconcileGenerationCompletion(queue, options = {}) {
+  const snapshot = snapshotGenerationCompletion(queue, options);
+  if (!snapshot.readyForValidation) return snapshot;
+  const validation = validateGenerationSnapshot({...options, snapshotHash: snapshot.snapshotHash});
+  return commitGenerationCompletion(queue, {
+    ...options,
+    snapshotHash: snapshot.snapshotHash,
+    validationResult: validation.validationResult,
+  });
 }
 
 export function failClaim(queue, {
@@ -591,6 +1109,7 @@ function statusPayload(queue, file) {
     updatedAt: queue.updatedAt,
     counts,
     entries: queue.entries,
+    generationCompletion: queue.generationCompletion || null,
   };
 }
 
@@ -601,6 +1120,11 @@ export function main(argv = process.argv.slice(2)) {
   } catch (error) {
     console.error(JSON.stringify({ok: false, errorCode: error?.message || 'QUEUE_ARGUMENT_INVALID'}));
     return usage();
+  }
+  if (options.command === 'reconcile-generation' && options.phase === 'validate') {
+    const outcome = validateGenerationSnapshot(options);
+    console.log(JSON.stringify({ok: true, ...outcome}));
+    return 0;
   }
   const queue = readQueue(options.file);
   if (options.command === 'enqueue') {
@@ -614,8 +1138,32 @@ export function main(argv = process.argv.slice(2)) {
       deduplicatedCompleted: outcome.deduplicatedCompleted,
       coalescedRerun: outcome.coalescedRerun,
       requeuedCompleted: outcome.requeuedCompleted,
+      retiredLegacyCompleted: outcome.retiredLegacyCompleted,
       supersededByExisting: outcome.supersededByExisting,
+      invalidatedGenerationCompletion: outcome.invalidatedGenerationCompletion,
       deduplicated: outcome.deduplicated,
+    }));
+    return 0;
+  }
+  if (options.command === 'reconcile-generation') {
+    const outcome = options.phase === 'snapshot'
+      ? snapshotGenerationCompletion(queue, options)
+      : commitGenerationCompletion(queue, options);
+    const saved = outcome.mutated ? writeQueue(options.file, outcome.queue) : outcome.queue;
+    console.log(JSON.stringify({
+      ...statusPayload(saved, options.file),
+      completed: outcome.completed,
+      readyForValidation: outcome.readyForValidation || false,
+      reason: outcome.reason,
+      coreGeneratedAt: outcome.coreGeneratedAt,
+      snapshotHash: outcome.snapshotHash || '',
+      activeSections: outcome.activeSections || [],
+      newerRevisionSections: outcome.newerRevisionSections || [],
+      conflictingGenerationSections: outcome.conflictingGenerationSections || [],
+      missingCompletedSections: outcome.missingCompletedSections || [],
+      conflictingCompletedSections: outcome.conflictingCompletedSections || [],
+      invalidTerminalSections: outcome.invalidTerminalSections || [],
+      invalidatedGenerationCompletion: outcome.invalidatedGenerationCompletion || false,
     }));
     return 0;
   }

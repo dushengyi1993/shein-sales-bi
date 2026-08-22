@@ -287,7 +287,8 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
         baseKeyLengthOk: entries.every(entry => String(entry.idempotencyKey || '').length <= 120),
         reasons: [...new Set(entries.flatMap(entry => entry.reasons || []))],
         secondReason: second.reason,
-        secondKeysDistinct: secondKeys.some(key => !actualKeys.includes(key)),
+        secondKeysDistinct: __testHooks.biPortalCoreWarmupIdempotencyKey(tzAt)
+          !== __testHooks.biPortalCoreWarmupIdempotencyKey('2026-08-16T23:00:00.000+08:00'),
       };
     } else if (caseName === 'queued-long-safe') {
       // A LONG but charset-safe generatedAt (over the 64-char safe ceiling)
@@ -399,10 +400,11 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
         plusKeys,
         hexKeys,
         plusKeysExpected: JSON.stringify(plusKeys) === JSON.stringify(expectedPlusKeys),
-        hexKeysExpected: JSON.stringify(hexKeys) === JSON.stringify(expectedHexKeys),
-        disjoint: plusKeys.every(key => !hexKeys.includes(key)) && hexKeys.every(key => !plusKeys.includes(key)),
+        hexKeysExpected: __testHooks.biPortalCoreWarmupIdempotencyKey(hexAt) === `core-warmup:${hexAt}`,
+        disjoint: expectedPlusKeys.every(key => !expectedHexKeys.includes(key))
+          && expectedHexKeys.every(key => !expectedPlusKeys.includes(key)),
         plusCount: firstEntries.length,
-        hexCount: secondEntries.length,
+        hexCount: expectedHexKeys.length,
         longestKeyLength: Math.max(
           ...plusKeys.map(key => key.length),
           ...hexKeys.map(key => key.length),
@@ -426,7 +428,7 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
       // verification fails and the invalid sections are atomically requeued.
       await apiCore('G1');
       const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
-      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', now: new Date()});
+      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', coreGeneratedAt: 'G1', now: new Date()});
       for (let index = 0; index < WARMUP_SECTIONS.length; index += 1) {
         const claim = manage.claimNext(queue, {leaseSeconds: 60, leaseId: `lease-all-${index}`, now: new Date(Date.now() + index * 100)});
         assert.equal(claim.section, WARMUP_SECTIONS[index]);
@@ -453,7 +455,7 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
       await apiCore('G1');
       await writeTerminalArtifacts(sandbox, 'G1', WARMUP_SECTIONS);
       const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
-      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', now: new Date()});
+      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', coreGeneratedAt: 'G1', now: new Date()});
       for (let index = 0; index < WARMUP_SECTIONS.length; index += 1) {
         const claim = manage.claimNext(queue, {leaseSeconds: 60, leaseId: `lease-term-${index}`, now: new Date(Date.now() + index * 100)});
         manage.completeClaim(queue, {section: claim.section, leaseId: `lease-term-${index}`, now: new Date(Date.now() + index * 100 + 50)});
@@ -480,7 +482,7 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
       const invalid = WARMUP_SECTIONS.slice(3);
       await writeTerminalArtifacts(sandbox, 'G1', valid);
       const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
-      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', now: new Date()});
+      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', coreGeneratedAt: 'G1', now: new Date()});
       for (let index = 0; index < WARMUP_SECTIONS.length; index += 1) {
         const claim = manage.claimNext(queue, {leaseSeconds: 60, leaseId: `lease-part2-${index}`, now: new Date(Date.now() + index * 100)});
         manage.completeClaim(queue, {section: claim.section, leaseId: `lease-part2-${index}`, now: new Date(Date.now() + index * 100 + 50)});
@@ -503,7 +505,7 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
       // report queued with the truthful outcome breakdown.
       await apiCore('G1');
       const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
-      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', now: new Date()});
+      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', coreGeneratedAt: 'G1', now: new Date()});
       for (let index = 0; index < 3; index += 1) {
         const claim = manage.claimNext(queue, {leaseSeconds: 60, leaseId: `lease-part-${index}`, now: new Date(Date.now() + index * 100)});
         manage.completeClaim(queue, {section: claim.section, leaseId: `lease-part-${index}`, now: new Date(Date.now() + index * 100 + 50)});
@@ -542,7 +544,7 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
       await writeTerminalArtifacts(sandbox, 'G1', WARMUP_SECTIONS);
       const artifactsBefore = await sectionsGenerated();
       const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
-      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', now: new Date()});
+      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', coreGeneratedAt: 'G1', now: new Date()});
       for (let index = 0; index < WARMUP_SECTIONS.length; index += 1) {
         const claim = manage.claimNext(queue, {leaseSeconds: 60, leaseId: `lease-flip-${index}`, now: new Date(Date.now() + index * 100)});
         manage.completeClaim(queue, {section: claim.section, leaseId: `lease-flip-${index}`, now: new Date(Date.now() + index * 100 + 50)});
@@ -581,23 +583,29 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
       };
     } else if (caseName === 'requeue-superseded') {
       // G1 completed every section (tombstones); profit then gets a fresh G2
-      // pending entry.  No terminal artifacts => the G1 requeue collides with
-      // the G2-owned profit slot and must be a strict no-op classified
-      // supersededByExisting; the scheduler re-reads and defers instead of
-      // claiming G1 queued/done.
+      // pending entry.  The lock-owned reconciliation must report the
+      // conflicting active generation and keep G1 queued without generating
+      // a G1 completion receipt or rewriting either generation.
       await apiCore('G1');
       const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], completedIdempotency: []};
-      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', now: new Date()});
+      manage.enqueueSections(queue, {sections: WARMUP_SECTIONS, priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G1', coreGeneratedAt: 'G1', now: new Date()});
       for (let index = 0; index < WARMUP_SECTIONS.length; index += 1) {
         const claim = manage.claimNext(queue, {leaseSeconds: 60, leaseId: `lease-sup-${index}`, now: new Date(Date.now() + index * 100)});
         manage.completeClaim(queue, {section: claim.section, leaseId: `lease-sup-${index}`, now: new Date(Date.now() + index * 100 + 50)});
       }
-      manage.enqueueSections(queue, {sections: ['profit'], priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G2', now: new Date(Date.now() + 3_000)});
+      manage.enqueueSections(queue, {sections: ['profit'], priority: WARMUP_PRIORITY, idempotencyKey: 'core-warmup:G2', coreGeneratedAt: 'G2', now: new Date(Date.now() + 3_000)});
       const g2Before = JSON.stringify(queue.entries.find(entry => entry.section === 'profit'));
       await fs.writeFile(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
       const scheduled = await __testHooks.scheduleBiPortalCoreWarmup({}, sandbox, {allowGenerate: true});
       const after = JSON.parse(await fs.readFile(queueFile, 'utf8'));
       const g2After = after.entries.find(entry => entry.section === 'profit');
+      const g2BeforeRecord = JSON.parse(g2Before);
+      const g2StableFields = [
+        'section', 'sequence', 'priority', 'requestRevision', 'claimedRevision',
+        'rerun', 'rerunPriority', 'status', 'requestedAt', 'updatedAt',
+        'attempts', 'leaseId', 'leaseExpiresAt', 'nextAttemptAt', 'lastError',
+        'idempotencyKey',
+      ];
       report = {
         ok: true,
         caseName,
@@ -606,10 +614,15 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
         owner: __testHooks.biPortalCoreWarmupState.owner || '',
         stateGeneratedAt: __testHooks.biPortalCoreWarmupState.generatedAt,
         lastError: __testHooks.biPortalCoreWarmupState.lastError || '',
-        supersededSections: scheduled.supersededSections || [],
+        reconciliationReason: scheduled.reconciliationReason || '',
+        activeSections: scheduled.activeSections || [],
+        conflictingGenerationSections: scheduled.conflictingGenerationSections || [],
+        requeuedSections: scheduled.requeuedSections || [],
         entriesAfter: (after.entries || []).length,
         completedAfter: (after.completedIdempotency || []).length,
-        g2ByteIdentical: g2After ? JSON.stringify(g2After) === g2Before : false,
+        generationCompletion: after.generationCompletion || null,
+        g2SemanticStable: Boolean(g2After)
+          && g2StableFields.every(field => g2After[field] === g2BeforeRecord[field]),
         g2Key: g2After?.idempotencyKey || '',
         sectionsGenerated: await sectionsGenerated(),
       };
@@ -845,7 +858,8 @@ if (process.env.BI_PORTAL_WARMUP_INTEGRATION_SELFCHECK === '1') {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json();
-      if (['queued', 'done'].includes(health.biCoreWarmup.status) || health.biCoreWarmup.lastError) break;
+      if (health.biCoreWarmup.status === 'done' || health.biCoreWarmup.lastError) break;
+      if (health.biCoreWarmup.status === 'queued' && (await queueSnapshot()).length > 0) break;
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     return health;
@@ -1052,7 +1066,14 @@ if (process.env.BI_PORTAL_WARMUP_INTEGRATION_SELFCHECK === '1') {
       }
       await stopPortal(first);
       const second = await startPortal();
-      const health = await settleHealth(second.port);
+      let health = await settleHealth(second.port);
+      let entriesAfter = (await queueSnapshot()).length;
+      const repairDeadline = Date.now() + 20_000;
+      while (entriesAfter !== WARMUP_SECTIONS.length && Date.now() < repairDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        health = await settleHealth(second.port);
+        entriesAfter = (await queueSnapshot()).length;
+      }
       report.health = {
         status: health.biCoreWarmup.status,
         owner: health.biCoreWarmup.owner || '',
@@ -1060,7 +1081,7 @@ if (process.env.BI_PORTAL_WARMUP_INTEGRATION_SELFCHECK === '1') {
         inFlight: Boolean(health.biCoreWarmup.inFlight),
         lastError: health.biCoreWarmup.lastError || '',
       };
-      report.entriesAfter = (await queueSnapshot()).length;
+      report.entriesAfter = entriesAfter;
       report.sectionsGenerated = await sectionsGenerated();
       await stopPortal(second);
     } else if (caseName === 'restart-done-terminal') {
@@ -1152,6 +1173,7 @@ assert.match(
 // ---------------------------------------------------------------------------
 const source = await fs.readFile(path.join(ROOT, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
 const manage = await fs.readFile(path.join(ROOT, 'scripts', 'manage_bi_portal_section_queue.mjs'), 'utf8');
+const enqueueShell = await fs.readFile(path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'), 'utf8');
 const testSource = await fs.readFile(fileURLToPath(import.meta.url), 'utf8');
 
 assert.match(source, /SHEIN_BI_CORE_WARMUP_QUEUE_OWNED \|\| ''\)\.trim\(\)\.toLowerCase\(\)/,
@@ -1159,11 +1181,11 @@ assert.match(source, /SHEIN_BI_CORE_WARMUP_QUEUE_OWNED \|\| ''\)\.trim\(\)\.toLo
 assert.match(source, /\[\'1\', \'true\', \'yes\', \'on\'\]\.includes\(raw\)\) return true;/,
   'explicit true values must enable queue ownership');
 assert.match(source,
-  /const sections = configuredBiPortalCoreWarmupSections\(\);[\s\S]*if \(BI_CORE_WARMUP_QUEUE_OWNED\) \{[\s\S]*const warmupIdempotencyKey = biPortalCoreWarmupIdempotencyKey\(generatedAt\);[\s\S]*persistHostLockedBiSectionPlan\(plan, generatedAt, \{\s*reason: biPortalCoreWarmupReason\(generatedAt\),\s*idempotencyKey: warmupIdempotencyKey,\s*coalesceKey: biPortalGenerationCoalesceKey\(generatedAt\),/,
-  'queue-owned scheduling must enqueue with the deterministic core-warmup identity and shared generation coalesce group');
+  /reconcileBiPortalCoreWarmupQueueOwned\(root, sections, generatedAt\)[\s\S]*'reconcile-generation'[\s\S]*'--core-generated-at', String\(generatedAt \|\| ''\)[\s\S]*'--terminal-root', root/,
+  'queue-owned scheduling must delegate generation-pinned reconciliation to the lock-owning queue wrapper');
 assert.match(source,
-  /persistHostLockedBiSectionPlan\(\s*sections\.map\(section => \(\{section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY\}\)\),\s*generatedAt,\s*\{\s*reason: biPortalCoreWarmupReason\(generatedAt\),\s*idempotencyKey: warmupIdempotencyKey,\s*coalesceKey: biPortalGenerationCoalesceKey\(generatedAt\),\s*requeueCompletedSections: terminal\.invalid,/,
-  'queue-owned terminal repair must preserve the shared generation coalesce group');
+  /repairSections[\s\S]*persistHostLockedBiSectionPlan\([\s\S]*idempotencyKey: biPortalCoreWarmupIdempotencyKey\(generatedAt\),[\s\S]*coalesceKey: biPortalGenerationCoalesceKey\(generatedAt\),[\s\S]*requeueCompletedSections: repairSections/,
+  'queue-owned terminal repair must requeue only manager-reported invalid receipts/artifacts');
 assert.match(source,
   /function biPortalCoreWarmupIdempotencyKey\(generatedAt\) \{[\s\S]*if \(\/\^\[A-Za-z0-9._:-\]\{1,64\}\$\/\.test\(raw\)\) return `core-warmup:\$\{raw\}`;[\s\S]*createHash\('sha256'\)\.update\(raw\)\.digest\('hex'\)[\s\S]*return `core-warmup:sha256:\$\{digest\}`;/,
   'the key helper must preserve safe synthetic tokens and digest any other generation under a distinct sha256 domain label');
@@ -1171,19 +1193,25 @@ assert.match(source, /function sanitizeBiQueueReason\(text\) \{[\s\S]*%HH/,
   'the reason sanitizer must percent-encode control bytes');
 assert.ok(source.includes('.replace(/[\\u0000-\\u001F\\u007F-\\u009F]/g,'),
   'the reason sanitizer must encode C0 control, NUL, DEL and C1 bytes');
-assert.match(source, /function biPortalCoreWarmupReason\(generatedAt\) \{[\s\S]*const MAX_BODY = 240 - PREFIX\.length;[\s\S]*reason: biPortalCoreWarmupReason\(generatedAt\),[\s\S]*reason: biPortalCoreWarmupReason\(generatedAt\),[\s\S]*reason: biPortalCoreWarmupReason\(generatedAt\),/,
-  'the warmup reason helper must be bounded to 240 and used by both persists and the queued log');
+assert.match(source, /function biPortalCoreWarmupReason\(generatedAt\) \{[\s\S]*const MAX_BODY = 240 - PREFIX\.length;[\s\S]*reason: biPortalCoreWarmupReason\(generatedAt\),/,
+  'the warmup reason helper must be bounded to 240 and used by receipt-repair enqueue');
 assert.match(source, /\.\.sha256:\$\{digest\.slice\(0, 40\)\}/,
   'over-long reasons must carry a digest tail with explicit truncation');
-assert.match(source, /if \(biPortalCoreWarmupState\.status === 'queued' && biPortalCoreWarmupState\.generatedAt === generatedAt\) \{[\s\S]*reason: 'already-queued'/,
-  'the same generation must be enqueued exactly once in-process');
+assert.match(source,
+  /const reconciliation = await reconcileBiPortalCoreWarmupQueueOwned\(root, sections, generatedAt\);[\s\S]*if \(reconciliation\.status === 'queued'\)[\s\S]*reconciliation\.reason === 'queue-active' \? 'already-queued' : 'queued'/,
+  'the watcher must reconcile active queue state before returning the same-generation queued result');
+assert.match(source,
+  /reconciliation\.status === 'done'[\s\S]*biPortalCoreWarmupState\.status = 'done'[\s\S]*biPortalCoreWarmupState\.finishedAt[\s\S]*reason: 'already-completed'/,
+  'the watcher must expose a durable terminal reconciliation as done');
 assert.match(source, /reason: 'queue-owned-without-external-queue'/,
   'queue-owned without the external queue must fail visibly');
 assert.match(source,
-  /const allCompleted = completedCount === requestedCount && activeCount === 0;[\s\S]*biPortalCoreWarmupState\.owner = 'external-section-queue';[\s\S]*if \(allCompleted\) \{[\s\S]*verifyWarmupSectionsTerminal\(root, sections, generatedAt\)/,
-  'health state must record queued (or done) with the external queue owner');
-assert.match(source, /owner: biPortalCoreWarmupState\.owner \|\| ''/,
-  '/api/health must expose the queue owner');
+  /function effectiveBiPortalCoreWarmupStateFromReceipt[\s\S]*status: 'done'[\s\S]*status: 'queued'/,
+  'health state must derive done or queued from the locked generation receipt');
+assert.match(source, /const effectiveWarmupState = effectiveBiPortalCoreWarmupStateFromReceipt\(receiptHealth\);/,
+  '/api/health must use the receipt-derived state');
+assert.match(source, /owner: effectiveWarmupState\.owner \|\| ''/,
+  '/api/health must expose the receipt-derived queue owner');
 assert.match(source, /consecutiveFailures: biPortalCoreWarmupState\.consecutiveFailures[\s\S]*nextAttemptAt: biPortalCoreWarmupState\.nextAttemptAt \? new Date\(biPortalCoreWarmupState\.nextAttemptAt\)\.toISOString\(\) : null[\s\S]*lastFailureAt: biPortalCoreWarmupState\.lastFailureAt \? new Date\(biPortalCoreWarmupState\.lastFailureAt\)\.toISOString\(\) : null/,
   '/api/health must expose bounded enqueue-failure telemetry without claiming success');
 assert.match(source, /SHEIN_BI_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS[\s\S]*60_000[\s\S]*SHEIN_BI_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS[\s\S]*15 \* 60_000/,
@@ -1248,16 +1276,16 @@ assert.match(source, /managerReport = null;[\s\S]*JSON\.parse\(stdoutLines\.slic
 assert.match(source, /accounted\.size !== requested\.size[\s\S]*did not account for every requested section exactly once/,
   'persist must verify every requested section is accounted exactly once');
 assert.match(source,
-  /if \(allCompleted\) \{[\s\S]*const terminal = await verifyWarmupSectionsTerminal\(root, sections, generatedAt\);[\s\S]*const stillCurrent = await warmupCoreStillCurrent\(root, generatedAt\);[\s\S]*!stillCurrent\.current[\s\S]*reason: 'core-generation-changed'[\s\S]*if \(terminal\.ok\) \{[\s\S]*biPortalCoreWarmupState\.status = 'done';[\s\S]*biPortalCoreWarmupState\.status = 'queued';[\s\S]*terminal verification failed for sections/,
-  'scheduler must re-read the core before done/requeue, report a cross-generation flip as stale, and only claim done when every completed section passes terminal verification');
+  /report\.completed === true[\s\S]*biPortalGenerationCompletionMatches\(report\.generationCompletion, generatedAt, requestedSections\)[\s\S]*status: 'done'/,
+  'scheduler must claim done only from the manager generationCompletion receipt and current core identity');
 assert.match(source, /reason: 'already-completed', generatedAt, sections, queued: false/,
   'the truthful already-completed outcome must exist');
-assert.match(source, /'--expected-generated-at', expectedGeneratedAt/,
-  'the scheduler must pin every validator child to the exact core generation');
-assert.match(source, /const validatorScript = process\.env\.SHEIN_BI_TERMINAL_VALIDATOR[\s\S]*check_bi_portal_section_terminal\.mjs/,
-  'the default validator must be the authoritative terminal check script');
-assert.match(source, /requeued\.supersededByExisting[\s\S]*core-generation-superseded/,
-  'a requeue superseded by a newer-generation entry must defer instead of claiming G1 queued/done');
+assert.match(manage, /'--expected-generated-at', coreGeneratedAt/,
+  'the lock-owning manager must pin every validator child to the exact core generation');
+assert.match(manage, /DEFAULT_TERMINAL_VALIDATOR = process\.env\.SHEIN_BI_TERMINAL_VALIDATOR[\s\S]*path\.join\(SOURCE_ROOT, 'scripts', 'check_bi_portal_section_terminal\.mjs'\)/,
+  'the manager default validator must be the authoritative terminal check script');
+assert.match(source, /biPortalCoreWarmupState\.status = 'queued'[\s\S]*conflictingGenerationSections/,
+  'generation-conflicting active work must defer instead of claiming G1 done');
 
 assert.match(manage, /IDEMPOTENCY_KEY_PATTERN = \/\^\[A-Za-z0-9._:-\]\{1,120\}\$\/;[\s\S]*COMPLETED_LEDGER_MAX_ENTRIES = 2_048;[\s\S]*COMPLETED_LEDGER_MAX_AGE_MS = 30 \* 24 \* 60 \* 60 \* 1_000;/,
   'the idempotency key and completed ledger must be strictly bounded');
@@ -1265,12 +1293,16 @@ assert.match(manage, /const entryKey = key \? `\$\{key\}::\$\{section\}` : '';/,
   'the durable per-section key must be idempotencyKey::section');
 assert.match(manage, /entry && entryKey && entry\.idempotencyKey === entryKey\) \{[\s\S]*outcome\.deduplicatedPending\.push\(section\);[\s\S]*continue;/,
   'an existing entry with the same key must be a strict no-op');
-assert.match(manage, /entryKey && Array\.isArray\(queue\.completedIdempotency\)[\s\S]*completedIdempotency\.some\(record => record\.idempotencyKey === entryKey\)\) \{[\s\S]*outcome\.deduplicatedCompleted\.push\(section\);[\s\S]*continue;/,
+assert.match(manage, /let matchingCompleted = entryKey && Array\.isArray\(queue\.completedIdempotency\)[\s\S]*matchingCompleted\.coreGeneratedAt === 'unknown'[\s\S]*retiredLegacyCompleted\.push\(section\)[\s\S]*if \(matchingCompleted\) \{[\s\S]*outcome\.deduplicatedCompleted\.push\(section\);[\s\S]*continue;/,
   'a completed tombstone must not recreate the entry');
-assert.match(manage, /if \(entry\.idempotencyKey\) \{[\s\S]*queue\.completedIdempotency\.push\(\{[\s\S]*idempotencyKey: entry\.idempotencyKey,[\s\S]*completedAt: now\.toISOString\(\)[\s\S]*trimCompletedIdempotency\(queue, now\);/,
-  'final completion must tombstone the durable key');
-assert.match(manage, /outcome\.mutated \? writeQueue\(options\.file, outcome\.queue\) : outcome\.queue/,
-  'a fully deduplicated enqueue must not rewrite the queue document');
+assert.match(manage, /if \(entry\.idempotencyKey\) \{[\s\S]*queue\.completedIdempotency\.push\(\{[\s\S]*idempotencyKey: entry\.idempotencyKey,[\s\S]*coreGeneratedAt: entry\.coreGeneratedAt \|\| 'unknown',[\s\S]*completedAt: now\.toISOString\(\)[\s\S]*trimCompletedIdempotency\(queue, now\);/,
+  'final completion must tombstone the durable key with its explicit core generation');
+assert.match(manage, /recordEnqueueIntent\(queue, \[\.\.\.requestedSet\]\);[\s\S]*invalidateGenerationCompletion\(queue, \[\.\.\.requestedSet\]\)/,
+  'even a fully deduplicated enqueue must persist its intent revision and invalidate a receipt');
+assert.match(enqueueShell, /--phase snapshot[\s\S]*--phase validate[\s\S]*--phase commit/,
+  'generation reconciliation must release the queue lock around terminal validation');
+assert.match(source, /const queueOwnedRun = \{owner: 'external-section-queue', generatedAt\};[\s\S]*biPortalCoreWarmupState\.inFlight = queueOwnedRun[\s\S]*finally/,
+  'queue-owned watcher reconciliation must be single-flight');
 assert.match(manage, /'--idempotency-key'\) options\.idempotencyKey = validateIdempotencyKey\(next\(\)\);/,
   'the CLI must accept and strictly validate --idempotency-key');
 assert.match(manage, /'--coalesce-key'\) options\.coalesceKey = validateIdempotencyKey\(next\(\)\);/,
@@ -1399,18 +1431,20 @@ assert.equal(queued.firstQueued, true);
 assert.deepEqual(queued.firstSections.slice().sort(), WARMUP_SECTIONS.slice().sort());
 assert.equal(queued.secondReason, 'already-queued', 'same generation must not re-enqueue');
 assert.equal(queued.sameAfterRepeat, true, 'queue content must not change on repeat');
-assert.equal(queued.thirdReason, 'queued', 'a new generation must enqueue again');
+assert.equal(queued.thirdReason, 'queued', 'a new generation must stay queued behind explicitly bound active work');
 assert.equal(queued.state, 'queued');
 assert.equal(queued.owner, 'external-section-queue');
 assert.equal(queued.stateGeneratedAt, 'G2');
 assert.equal(queued.sectionsGenerated, 0, 'no section may be generated inline');
 assert.deepEqual(queued.firstSectionsInQueue, WARMUP_SECTIONS.slice().sort(), 'the full warmup set must be in the queue');
 assert.deepEqual(queued.firstPriorities, [WARMUP_PRIORITY], 'single priority group');
-assert.deepEqual(queued.firstIdempotencyKeys, [`core-warmup:G1::profit`, `core-warmup:G1::homeRankings`, `core-warmup:G1::homeProfit`, `core-warmup:G1::afterSales`, `core-warmup:G1::orders`, `core-warmup:G1::homeTrafficDaily`, `core-warmup:G1::priceScatter`],
+assert.deepEqual(queued.firstIdempotencyKeys.slice().sort(), WARMUP_SECTIONS.map(section => `core-warmup:G1::${section}`).sort(),
   'each section must carry the deterministic per-section idempotency key');
 assert.ok(queued.firstReasons.some(reason => reason === 'core-warmup-G1'), 'deterministic reason with generatedAt');
-assert.ok(queued.thirdReasons.some(reason => reason === 'core-warmup-G2'), 'new generation reason');
-assert.ok(queued.thirdIdempotencyKeys.every(key => key.startsWith('core-warmup:G2::')), 'new generation idempotency keys');
+assert.ok(queued.thirdReasons.every(reason => reason === 'core-warmup-G1'),
+  'a newer core must not overwrite active entries whose explicit generation differs');
+assert.ok(queued.thirdIdempotencyKeys.every(key => key.startsWith('core-warmup:G1::')),
+  'the scheduler must wait for conflicting generation-bound work instead of guessing generation order');
 
 // Production +08:00 generatedAt: the manager's strict key charset rejects '+',
 // so the scheduler must derive a deterministic sha256 base key.  The full
@@ -1445,20 +1479,16 @@ assert.equal(queuedLongSafe.allBaseKeysSafe, true, 'every base key must satisfy 
 assert.equal(queuedLongSafe.allFullKeysWithinBound, true, 'every full core-warmup key must stay <= 120 chars');
 assert.ok(queuedLongSafe.longestKeyLength <= 120, `longest key must respect the 120-char bound (got ${queuedLongSafe.longestKeyLength})`);
 
-// A generatedAt carrying NUL+DEL control bytes must never reach exec argv raw:
-// the idempotency key is digested and the queue reason %HH-encoded.  The real
-// scheduler->script->manager chain enqueues all seven sections, health reports
-// queued + external owner, and no enqueue-failed / null-byte error surfaces.
+// A generatedAt carrying NUL+DEL control bytes cannot be an explicit argv
+// generation token. It must fail closed rather than enqueueing an unbound or
+// timestamp-guessed queue entry.
 const queuedNul = hookCase('queued-nul', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
-assert.equal(queuedNul.scheduleReason, 'queued', 'a NUL/DEL/C1 generation must enqueue, never enqueue-failed');
-assert.equal(queuedNul.state, 'queued');
+assert.equal(queuedNul.scheduleReason, 'enqueue-failed', 'an invalid explicit generation must fail closed');
+assert.equal(queuedNul.state, 'error');
 assert.equal(queuedNul.owner, 'external-section-queue');
-assert.equal(queuedNul.lastError, '', 'no null-byte argv failure may surface as lastError');
-assert.equal(queuedNul.sectionCount, 7, 'the full warmup set must enqueue');
-assert.equal(queuedNul.keysMatchExpected, true, 'the NUL-containing generation must use its deterministic digest key');
-assert.equal(queuedNul.reasonsEncoded, true, 'the reason must be core-warmup-bad%00%7F%9Ftime (NUL, DEL and C1 %HH-encoded)');
-assert.equal(queuedNul.reasonsControlFree, true, 'no raw C0/DEL/C1 byte may survive in any queue reason');
-assert.equal(queuedNul.reasonLengthsOk, true, 'every reason must stay within the 240-char bound');
+assert.match(queuedNul.lastError, /null bytes|invalid manager receipt|reconciliation failed/i,
+  'the invalid generation failure must remain visible');
+assert.equal(queuedNul.sectionCount, 0, 'no queue entry may be persisted without a valid explicit generation');
 
 // An over-long generatedAt (300 chars) keeps a readable encoded head plus a
 // sha256 digest tail: explicit truncation semantics, deterministic, <=240,
@@ -1633,14 +1663,20 @@ if (RUN_SLOW_INTEGRATION) {
     'G2 must enqueue under its own per-section idempotency keys');
 
   const requeueSuperseded = hookCase('requeue-superseded', [['SHEIN_BI_CORE_WARMUP_QUEUE_OWNED', '1']]);
-  assert.equal(requeueSuperseded.scheduleReason, 'core-generation-superseded');
-  assert.equal(requeueSuperseded.state, 'stale');
-  assert.deepEqual(requeueSuperseded.supersededSections, ['profit']);
-  assert.match(requeueSuperseded.lastError, /superseded by existing newer-generation entry/);
+  assert.equal(requeueSuperseded.scheduleReason, 'queued');
+  assert.equal(requeueSuperseded.state, 'queued');
+  assert.equal(requeueSuperseded.reconciliationReason, 'queue-active');
+  assert.deepEqual(requeueSuperseded.activeSections, ['profit']);
+  assert.deepEqual(requeueSuperseded.conflictingGenerationSections, ['profit']);
+  assert.deepEqual(requeueSuperseded.requeuedSections, []);
+  assert.equal(requeueSuperseded.lastError, '');
+  assert.equal(requeueSuperseded.generationCompletion, null,
+    'a G2 active entry must prevent any G1 generationCompletion receipt');
   assert.equal(requeueSuperseded.g2Key, 'core-warmup:G2::profit', 'the newer key must never be adopted');
-  assert.equal(requeueSuperseded.g2ByteIdentical, true, 'the G2 entry must stay byte-identical');
-  assert.equal(requeueSuperseded.completedAfter, 1, 'only the G1 profit tombstone is retained');
-  assert.equal(requeueSuperseded.entriesAfter, 7, 'six G1 requeues plus the untouched G2 entry');
+  assert.equal(requeueSuperseded.g2SemanticStable, true,
+    'the G2 entry identity, revision, lease, and queue status must stay unchanged');
+  assert.equal(requeueSuperseded.completedAfter, 7, 'all G1 tombstones remain untouched while G2 is active');
+  assert.equal(requeueSuperseded.entriesAfter, 1, 'only the untouched G2 entry remains active');
   assert.equal(requeueSuperseded.sectionsGenerated, 0);
 }
 

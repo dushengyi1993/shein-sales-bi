@@ -275,8 +275,18 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   assert.match(worker, /\[\[ "\$HTTP_CODE" != "200" \]\]/, 'worker must reject every non-200 response');
   assert.match(worker, /queue_command fail --section "\$SECTION" --lease-id "\$LEASE_ID"[\s\S]*non-200 never completes/,
     'a 202/403/503/500 must fail the lease instead of completing it');
-  assert.match(worker, /X-BI-Section-\(Stale\|Refresh-Failed\):\[\[:space:\]\]\*true/,
-    'worker must treat a stale or failed-refresh 2xx as a failed section');
+  assert.match(worker, /X-BI-Section-Refresh-Failed:\[\[:space:\]\]\*true/,
+    'worker must detect a failed-refresh 2xx before generic non-200 handling');
+  assert.match(worker, /response_header_value 'X-BI-Section-Refresh-Error' "\$REFRESH_ERROR_MAX_ENCODED"[\s\S]*response_header_value 'X-BI-Section-Refresh-Failed-At' 64/,
+    'worker must extract the URL-encoded primary error and failure timestamp headers with bounded reads');
+  assert.match(worker, /REFRESH_ERROR_MAX_ENCODED=12288[\s\S]*bounded_refresh_failure_reason[\s\S]*completeEncoded[\s\S]*TextDecoder[\s\S]*Array\.from\(safeError\)/,
+    'worker must decode bounded complete escapes, preserve Unicode code points, sanitize to one line, and cap the persisted reason');
+  for (const pattern of [/Authorization/u, /Basic\|Bearer/u, /Cookie\|Set-Cookie/u, /sensitiveKeys/u, /session_id/u, /access_token/u, /redactKeyValues/u, /consumeValue/u, /:\\\/\\\//u, /\[redacted\]/u]) {
+    assert.match(worker, pattern,
+      'worker must redact authorization, cookie/session/token/password, and URL/DSN credentials');
+  }
+  assert.match(worker, /queue_command fail --section "\$SECTION" --lease-id "\$LEASE_ID"[\s\S]*--error "\$REFRESH_FAILURE_REASON"/,
+    'worker must persist the exact bounded decoded reason in the queue failure');
   assert.match(worker, /check_bi_portal_section_terminal\.mjs[\s\S]*--root "\$PORTAL_ROOT" --section "\$SECTION"/,
     'worker must verify the terminal artifact before completing');
   assert.match(worker, /TERMINAL_STATUS" -eq 0[\s\S]*queue_command complete --section "\$SECTION" --lease-id "\$LEASE_ID"/,
@@ -339,6 +349,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     console.log('SKIP bi_portal_section_terminal: prewarm integration needs bash+flock+mktemp+node');
   } else {
     await runPrewarmStubTests(root);
+    await runWorkerRefreshFailureHeaderTest(root);
   }
 }
 
@@ -354,6 +365,222 @@ async function runPrewarmStubTests(repoRoot) {
   ];
   for (const testCase of cases) {
     await runPrewarmCase(repoRoot, testCase);
+  }
+}
+
+async function runWorkerRefreshFailureHeaderTest(repoRoot) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-worker-refresh-error-'));
+  const lockDir = `/tmp/bi-terminal-worker-${Date.now()}`;
+  const lockFile = `${lockDir}/queue.lock`;
+  const posix = value => {
+    const text = String(value).replace(/\\/g, '/');
+    return /^[A-Za-z]:\//.test(text)
+      ? `/mnt/${text[0].toLowerCase()}${text.slice(2)}`
+      : text;
+  };
+  const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
+  try {
+    const binDir = path.join(dir, 'bin');
+    const queueFile = path.join(dir, 'queue.json');
+    fs.mkdirSync(binDir, {recursive: true});
+    fs.writeFileSync(queueFile, `${JSON.stringify({
+      version: 1,
+      updatedAt: '',
+      nextSequence: 1,
+      entries: [{
+        section: 'profit',
+        sequence: 1,
+        priority: 10,
+        requestRevision: 1,
+        claimedRevision: 0,
+        rerun: false,
+        rerunPriority: null,
+        dependencyYield: false,
+        idempotencyKey: 'core-warmup:G1::profit',
+        coalesceKey: 'portal-generation:G1',
+        coreGeneratedAt: 'G1',
+        status: 'pending',
+        requestedAt: '2026-08-22T07:43:00.000+08:00',
+        updatedAt: '2026-08-22T07:43:00.000+08:00',
+        reasons: ['core-warmup-G1'],
+        attempts: 0,
+        leaseId: '',
+        leaseExpiresAt: '',
+        nextAttemptAt: '',
+        lastError: '',
+      }],
+      completedIdempotency: [],
+      generationCompletion: null,
+    }, null, 2)}\n`);
+    fs.writeFileSync(path.join(binDir, 'date'), `#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  +%H) printf '07' ;;
+  +%M) printf '44' ;;
+  +%s) printf '1000' ;;
+  +%Y-%m-%dT%H) printf '2026-08-22T07' ;;
+  -d) printf '2000' ;;
+  *) printf '2026-08-22T07:44:00+08:00' ;;
+esac
+`);
+    const usefulError = '利润查询失败：字段 sku/day 缺失 🔥 Authorization: Bearer abc123 password=hunter postgres://dbuser:dbpass@db.example/profit ';
+    let rawError = '';
+    let encodedError = '';
+    for (let pad = 0; pad < 12; pad += 1) {
+      rawError = `${usefulError}${'x'.repeat(pad)}${'界'.repeat(2000)}`;
+      encodedError = encodeURIComponent(rawError);
+      if (/%(?:[0-9A-F])?$/u.test(encodedError.slice(0, 12_288))) break;
+    }
+    assert.ok(encodedError.length > 12_288, 'fixture must exceed the bounded encoded-header input');
+    assert.match(encodedError.slice(0, 12_288), /%(?:[0-9A-F])?$/u,
+      'fixture must cut through a percent escape to guard against decode-all fallback loss');
+    const failedAt = '2026-08-22T07:44:31.125+08:00';
+    const writeCurl = encoded => fs.writeFileSync(path.join(binDir, 'curl'), `#!/usr/bin/env bash
+set -euo pipefail
+headers=''
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -D) headers="$2"; shift 2 ;;
+    -o|-w|--max-time|-H) shift 2 ;;
+    -sS) shift ;;
+    *) shift ;;
+  esac
+done
+{
+  printf 'HTTP/1.1 200 OK\\r\\n'
+  printf 'X-BI-Section-Refresh-Failed: true\\r\\n'
+  printf 'X-BI-Section-Refresh-Failed-At: ${failedAt}\\r\\n'
+  printf '%s\\r\\n' 'X-BI-Section-Refresh-Error: ${encoded}'
+  printf '\\r\\n'
+} > "$headers"
+printf '200'
+`);
+    writeCurl(encodedError);
+    const overrides = [
+      ['SHEIN_BI_ROOT', posix(repoRoot)],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_FILE', posix(queueFile)],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE', lockFile],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC', '10'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC', '60'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE', '59'],
+    ].map(([key, value]) => `export ${key}=${shellQuote(value)}`).join('; ');
+    const worker = posix(path.join(repoRoot, 'scripts', 'cloud_portal_section_queue_worker.sh'));
+    const fakeBin = posix(binDir);
+    const runWorker = () => spawnCapture('bash', ['-c',
+      `mkdir -p ${shellQuote(lockDir)} && chmod 2770 ${shellQuote(lockDir)}; `
+      + `chmod +x ${shellQuote(posix(path.join(binDir, 'date')))} ${shellQuote(posix(path.join(binDir, 'curl')))}; `
+      + `${overrides}; PATH=${shellQuote(fakeBin)}:"$PATH"; export PATH; exec ${shellQuote(worker)}`],
+    {timeout: 30_000});
+    const run = await runWorker();
+    const sanitizedError = rawError
+      .replace(/Authorization: Bearer abc123/u, 'Authorization=[redacted]')
+      .replace(/password=hunter/u, 'password=[redacted]')
+      .replace(/postgres:\/\/dbuser:dbpass@/u, 'postgres://[redacted]@');
+    const reasonPrefix = `portal refresh failed at=${failedAt} error=`;
+    const expectedReason = reasonPrefix
+      + Array.from(sanitizedError).slice(0, 900 - Array.from(reasonPrefix).length).join('');
+    assert.equal(run.timedOut, false, `worker refresh-error case timed out: ${run.stderr}`);
+    assert.equal(run.status, 1, `worker refresh-error case must remain alert-worthy: ${run.stdout}\n${run.stderr}`);
+    const queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    assert.equal(queue.entries[0].lastError, expectedReason,
+      `queue_command fail must preserve the exact bounded decoded primary error and timestamp; stdout=${run.stdout}; stderr=${run.stderr}`);
+    const expectedJournalReason = expectedReason.slice(0, 240);
+    assert.match(run.stderr, new RegExp(expectedJournalReason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      'journal output must carry the exact concise prefix of the primary reason');
+    assert.doesNotMatch(`${queue.entries[0].lastError}\n${run.stderr}`, /abc123|topsecret|hunter|dbuser|dbpass/u,
+      'queue and journal diagnostics must redact credentials');
+    assert.doesNotMatch(`${run.stdout}\n${run.stderr}`, /response-body-secret/,
+      'worker diagnostics must never include response body data');
+
+    const secretError = 'Basic QWxhZGRpbjpvcGVu Authorization: Bearer bearer-value password=pw-value session_id=session-value token=token-value mysql://dbuser:dbpass@db.example/profit Cookie: sid=cookie-value';
+    writeCurl(encodeURIComponent(secretError));
+    queue.entries[0].status = 'pending';
+    queue.entries[0].claimedRevision = 0;
+    queue.entries[0].attempts = 0;
+    queue.entries[0].leaseId = '';
+    queue.entries[0].leaseExpiresAt = '';
+    queue.entries[0].nextAttemptAt = '';
+    queue.entries[0].lastError = '';
+    fs.writeFileSync(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
+    const secretRun = await runWorker();
+    assert.equal(secretRun.status, 1, secretRun.stderr);
+    const secretQueue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    const expectedSecretError = 'Basic [redacted] Authorization=[redacted] password=[redacted] session_id=[redacted] token=[redacted] mysql://[redacted]@db.example/profit Cookie=[redacted]';
+    assert.equal(secretQueue.entries[0].lastError, `${reasonPrefix}${expectedSecretError}`,
+      'all supported credential families must be redacted while preserving useful context');
+    assert.doesNotMatch(`${secretQueue.entries[0].lastError}\n${secretRun.stderr}`,
+      /QWxhZGRpb|bearer-value|pw-value|session-value|token-value|dbuser|dbpass|cookie-value/u,
+      'credential values must not reach queue state or journal output');
+
+    const resetQueue = () => {
+      const current = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+      current.entries[0].status = 'pending';
+      current.entries[0].claimedRevision = 0;
+      current.entries[0].attempts = 0;
+      current.entries[0].leaseId = '';
+      current.entries[0].leaseExpiresAt = '';
+      current.entries[0].nextAttemptAt = '';
+      current.entries[0].lastError = '';
+      fs.writeFileSync(queueFile, `${JSON.stringify(current, null, 2)}\n`);
+    };
+    const reviewerJsonFixture = '{"password":"review-password","passwd":"review-passwd","pwd":"review-pwd","token":"review-token","access_token":"review-access","refresh_token":"review-refresh","session":"review-session","session_id":"review-session-id","cookie":"review-cookie","authorization":"Bearer review-auth","api_key":"review-api","secret":"review-secret","message":"利润查询失败：保留中文"}';
+    const sanitizerCases = [
+      {
+        name: 'reviewer-json',
+        raw: reviewerJsonFixture,
+        useful: '利润查询失败：保留中文',
+        secrets: ['review-password', 'review-passwd', 'review-pwd', 'review-token', 'review-access', 'review-refresh', 'review-session', 'review-session-id', 'review-cookie', 'review-auth', 'review-api', 'review-secret'],
+      },
+      {
+        name: 'nested-spacing-and-bare-values',
+        raw: '{ "outer" : { "PaSsWoRd" : 4815162342, "TOKEN" : bare-token-value, "SESSION_ID" = nested-session-value }, "API_KEY" : 123456789, "message" : "利润嵌套错误仍可读" }',
+        useful: '利润嵌套错误仍可读',
+        secrets: ['4815162342', 'bare-token-value', 'nested-session-value', '123456789'],
+      },
+      {
+        name: 'escaped-json',
+        raw: '{\\"ACCESS_TOKEN\\":\\"escaped-access-value\\",\\"nested\\":{\\"refresh_token\\" : 987654321,\\"Authorization\\":\\"Basic escaped-auth-value\\",\\"cookie\\":\\"escaped-cookie-value\\"},\\"message\\":\\"中文转义原因保留\\"}',
+        useful: '中文转义原因保留',
+        secrets: ['escaped-access-value', '987654321', 'escaped-auth-value', 'escaped-cookie-value'],
+      },
+      {
+        name: 'object-log-keys',
+        raw: '中文日志上下文保留 PWD = log-pwd-value SECRET:log-secret-value session = 246813579 api_key: bare-api-value authorization: Bearer log-auth-value cookie: sid=log-cookie-value',
+        useful: '中文日志上下文保留',
+        secrets: ['log-pwd-value', 'log-secret-value', '246813579', 'bare-api-value', 'log-auth-value', 'log-cookie-value'],
+      },
+    ];
+    for (const testCase of sanitizerCases) {
+      writeCurl(encodeURIComponent(testCase.raw));
+      resetQueue();
+      const sanitizedRun = await runWorker();
+      assert.equal(sanitizedRun.timedOut, false, `${testCase.name} timed out: ${sanitizedRun.stderr}`);
+      assert.equal(sanitizedRun.status, 1, `${testCase.name} must fail the queue lease: ${sanitizedRun.stderr}`);
+      const sanitizedQueue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+      const persistedReason = sanitizedQueue.entries[0].lastError;
+      assert.match(persistedReason, new RegExp(testCase.useful, 'u'),
+        `${testCase.name} must preserve useful nonsecret Unicode`);
+      for (const secret of testCase.secrets) {
+        for (const [surface, diagnostic] of [
+          ['queue', persistedReason],
+          ['journal', sanitizedRun.stderr],
+          ['log', sanitizedRun.stdout],
+        ]) {
+          assert.equal(diagnostic.includes(secret), false,
+            `${testCase.name} leaked a secret fixture to ${surface}`);
+        }
+      }
+      assert.doesNotMatch(`${sanitizedRun.stdout}\n${sanitizedRun.stderr}`, /response-body-secret/u,
+        `${testCase.name} must not log response body data`);
+    }
+  } finally {
+    await spawnCapture('bash', ['-c',
+      `rm -f ${shellQuote(lockFile)}; rmdir ${shellQuote(lockDir)} 2>/dev/null || true`], {timeout: 10_000});
+    fs.rmSync(dir, {recursive: true, force: true});
   }
 }
 
