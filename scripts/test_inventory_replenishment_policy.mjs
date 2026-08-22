@@ -100,6 +100,8 @@ assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', sameSt
 assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 1, policy}).targetUsableInventory, 10);
 assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1}), 101);
 assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 100, totalUsableInventory: 100, totalLockedQuantity: 0}), 10);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 0}), 10);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 2}), 12);
 assert.equal(computeInventoryOverwriteQuantity(0, {totalInventoryQuantity: 12, totalUsableInventory: 10, totalLockedQuantity: 2}), 2);
 assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8}), 100);
 const allocations = allocateLowEtInventory([
