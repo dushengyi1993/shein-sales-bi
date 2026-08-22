@@ -412,17 +412,18 @@ async function runWorkerRefreshFailureHeaderTest(repoRoot) {
       completedIdempotency: [],
       generationCompletion: null,
     }, null, 2)}\n`);
-    fs.writeFileSync(path.join(binDir, 'date'), `#!/usr/bin/env bash
+    const writeDate = deadlineEpoch => fs.writeFileSync(path.join(binDir, 'date'), `#!/usr/bin/env bash
 set -euo pipefail
 case "\${1:-}" in
   +%H) printf '07' ;;
   +%M) printf '44' ;;
   +%s) printf '1000' ;;
   +%Y-%m-%dT%H) printf '2026-08-22T07' ;;
-  -d) printf '2000' ;;
+  -d) printf '${deadlineEpoch}' ;;
   *) printf '2026-08-22T07:44:00+08:00' ;;
 esac
 `);
+    writeDate(2000);
     const usefulError = '利润查询失败：字段 sku/day 缺失 🔥 Authorization: Bearer abc123 password=hunter postgres://dbuser:dbpass@db.example/profit ';
     let rawError = '';
     let encodedError = '';
@@ -475,6 +476,16 @@ printf '200'
       + `chmod +x ${shellQuote(posix(path.join(binDir, 'date')))} ${shellQuote(posix(path.join(binDir, 'curl')))}; `
       + `${overrides}; PATH=${shellQuote(fakeBin)}:"$PATH"; export PATH; exec ${shellQuote(worker)}`],
     {timeout: 30_000});
+    writeDate(1100);
+    const guardRun = await runWorker();
+    assert.equal(guardRun.status, 0,
+      `worker must stop cleanly before a new claim below 120 seconds: ${guardRun.stderr}`);
+    assert.match(`${guardRun.stdout}\n${guardRun.stderr}`,
+      /stop before next section remainingSec=100 requiredSec=120/,
+      'worker must report the generic minimum remaining-time guard');
+    assert.equal(JSON.parse(fs.readFileSync(queueFile, 'utf8')).entries[0].status, 'pending',
+      'the minimum remaining-time guard must leave the queue claimable');
+    writeDate(2000);
     const run = await runWorker();
     const sanitizedError = rawError
       .replace(/Authorization: Bearer abc123/u, 'Authorization=[redacted]')

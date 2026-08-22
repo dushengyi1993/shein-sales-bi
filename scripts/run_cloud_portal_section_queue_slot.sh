@@ -50,11 +50,11 @@ if (( MINUTE >= 13 && MINUTE <= 16 )); then
     MAX_SECTIONS=1
   else
     DEADLINE_MINUTE=27
-    MAX_SECTIONS=2
+    MAX_SECTIONS=8
   fi
 elif (( MINUTE >= 43 && MINUTE <= 46 )); then
   DEADLINE_MINUTE=57
-  MAX_SECTIONS=2
+  MAX_SECTIONS=8
 else
   echo "[portal-section-slot] defer reason=outside_portal_slot hour=$HOUR minute=$MINUTE" >&2
   exit 75

@@ -734,11 +734,11 @@ const runSlotBehaviorCase = ({
   });
   runSlotBehaviorCase({
     label: '08:14 morning inactive', hour: 8, minute: 14, rtvActive: false,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 2, expectRtvCheck: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 8, expectRtvCheck: false,
   });
   runSlotBehaviorCase({
     label: '08:14 morning failed', hour: 8, minute: 14, rtvActive: false, morningState: 'failed',
-    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 2, expectRtvCheck: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 27, expectedMax: 8, expectRtvCheck: false,
   });
   runSlotBehaviorCase({
     label: '04:44 RTV active', hour: 4, minute: 44, rtvActive: true,
@@ -746,15 +746,15 @@ const runSlotBehaviorCase = ({
   });
   runSlotBehaviorCase({
     label: '04:44 RTV inactive', hour: 4, minute: 44, rtvActive: false,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 2, expectRtvCheck: true,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 8, expectRtvCheck: true,
   });
   runSlotBehaviorCase({
     label: '01:44 non-RTV hour', hour: 1, minute: 44, rtvActive: true,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 2, expectRtvCheck: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 8, expectRtvCheck: false,
   });
   runSlotBehaviorCase({
     label: '05:44 non-04 hour', hour: 5, minute: 44, rtvActive: true,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 2, expectRtvCheck: false,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 57, expectedMax: 8, expectRtvCheck: false,
   });
 } finally {
   fs.rmSync(slotBehaviorRoot, {recursive: true, force: true});
@@ -766,6 +766,17 @@ assert.match(portalQueueWorker, /01:\*\|06:4\[3-6\]\)/);
 assert.match(portalQueueWorker, /\*:1\[3-6\]\|\*:4\[3-6\]\) SAFE_START=1/);
 assert.match(portalQueueWorker, /outside_safe_start_window/);
 assert.match(portalQueueWorker, /stop before next core lane/);
+assert.match(portalQueueWorker,
+  /MIN_REMAINING_RUNTIME_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC:-120\}"/,
+  'the worker must default the generic remaining-time guard to 120 seconds');
+assert.match(portalQueueWorker,
+  /\[\[ "\$MIN_REMAINING_RUNTIME_SEC" =~ \^\[1-9\]\[0-9\]\*\$ \]\] \|\| exit 64/,
+  'the generic remaining-time guard must reject invalid configuration');
+assert.match(portalQueueWorker,
+  /if \(\( REMAINING_SEC < MIN_REMAINING_RUNTIME_SEC \)\); then[\s\S]*stop before next section[\s\S]*break/,
+  'the worker must stop before a new claim below the generic 120-second budget');
+assert.match(portalQueueWorker, /if \(\( REMAINING_SEC <= 10 \)\); then/,
+  'the hard deadline guard must remain in place');
 
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
 const repairSlot = read('scripts/run_cloud_marketing_fallback_slot.sh');
