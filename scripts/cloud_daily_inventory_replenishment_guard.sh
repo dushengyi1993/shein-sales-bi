@@ -141,26 +141,53 @@ result_is_readback_pending_only() {
 
 JOURNAL="$RESULT.journal.ndjson"
 RECONCILE_PENDING_ONLY=0
+if [[ -s "$PLAN" && -s "$RESULT" ]]; then
+  HASH="$(jq -r '.payloadHash // empty' "$PLAN")"
+  TOTAL="$(jq -r '.actionable | length' "$PLAN")"
+  if [[ "$HASH" =~ ^[a-f0-9]{64}$ && "$TOTAL" =~ ^[0-9]+$ ]] && result_is_complete_and_safe; then
+    write_inventory_marker done "automatic inventory execution completed with plan/result hash and terminal readback evidence"
+    jq '{ok:true,state:"already_completed",planHash,executionMode,generatedAt,counts:{
+      total:(.results|length),
+      updated:([.results[]|select(.state=="updated_readback_matched")]|length),
+      skipped:([.results[]|select(.state|startswith("skipped_"))]|length),
+      blocked:0
+    }}' "$RESULT"
+    exit 0
+  fi
+fi
 PENDING_INTENT_COUNT=0
+READBACK_MATCHED_INTENT_COUNT=0
 if [[ -s "$JOURNAL" ]]; then
-  PENDING_INTENT_COUNT="$(node --input-type=module - "$JOURNAL" <<'NODE'
-import {readPendingInventoryIntents} from './lib/durable_inventory_write.mjs';
-const pending = await readPendingInventoryIntents(process.argv[2]);
-process.stdout.write(String(pending.size));
+  LIFECYCLE_JSON="$(node --input-type=module - "$JOURNAL" <<'NODE'
+import {readInventoryIntentLifecycle} from './lib/durable_inventory_write.mjs';
+const lifecycle = await readInventoryIntentLifecycle(process.argv[2]);
+const outcomes = [...lifecycle.terminalOutcomes.values()];
+process.stdout.write(JSON.stringify({
+  intents: lifecycle.intents.size,
+  pending: lifecycle.pending.size,
+  readbackMatched: outcomes.filter(row => row.disposition === 'readback_matched').length,
+  rejected: outcomes.filter(row => row.disposition === 'rejected').length,
+}));
 NODE
 )"
+  PENDING_INTENT_COUNT="$(jq -r '.pending // -1' <<<"$LIFECYCLE_JSON")"
+  READBACK_MATCHED_INTENT_COUNT="$(jq -r '.readbackMatched // -1' <<<"$LIFECYCLE_JSON")"
   [[ "$PENDING_INTENT_COUNT" =~ ^[0-9]+$ ]] || {
     echo "[daily_inventory_guard] durable inventory journal pending count is invalid" >&2
     exit 65
   }
+  [[ "$READBACK_MATCHED_INTENT_COUNT" =~ ^[0-9]+$ ]] || {
+    echo "[daily_inventory_guard] durable inventory journal readback-matched count is invalid" >&2
+    exit 65
+  }
 fi
-if (( PENDING_INTENT_COUNT > 0 )); then
+if (( PENDING_INTENT_COUNT > 0 || READBACK_MATCHED_INTENT_COUNT > 0 )); then
   if [[ ! -s "$PLAN" ]]; then
     echo "[daily_inventory_guard] durable inventory intent exists but its immutable plan is missing; refuse refresh, rebuild and every inventory write" >&2
     exit 76
   fi
   RECONCILE_PENDING_ONLY=1
-  echo "[daily_inventory_guard] durable inventory journal has pending intent(s) count=$PENDING_INTENT_COUNT; preserve the immutable plan and run readback-only reconciliation"
+  echo "[daily_inventory_guard] durable inventory journal requires lifecycle recovery pending=$PENDING_INTENT_COUNT readbackMatched=$READBACK_MATCHED_INTENT_COUNT; preserve the immutable plan and run readback-only reconciliation"
 fi
 
 if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$REQUIRE_PIPELINE_MARKERS" == "1" || "$REQUIRE_PIPELINE_MARKERS" == "true" ]]; then

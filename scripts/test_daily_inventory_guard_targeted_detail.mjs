@@ -494,16 +494,26 @@ match('exact pending readback remains retryable in same run', guard,
   /result_is_readback_pending_only[\s\S]*submitted_but_readback_pending[\s\S]*exit 75/,
   'an exact durable intent waiting only for propagation must not become restart-prevented exit 2');
 match('unresolved durable lifecycle selects immutable readback-only recovery', guard,
-  /durable inventory journal has pending intent\(s\) count=\$PENDING_INTENT_COUNT; preserve the immutable plan and run readback-only reconciliation/,
+  /durable inventory journal requires lifecycle recovery pending=\$PENDING_INTENT_COUNT readbackMatched=\$READBACK_MATCHED_INTENT_COUNT; preserve the immutable plan and run readback-only reconciliation/,
   'an existing ambiguous or pending lifecycle must not rebuild its plan');
 match('journal is the recovery fact source even when result publication crashed', guard,
-  /readPendingInventoryIntents[\s\S]*PENDING_INTENT_COUNT > 0[\s\S]*RECONCILE_PENDING_ONLY=1/,
+  /readInventoryIntentLifecycle[\s\S]*PENDING_INTENT_COUNT > 0 \|\| READBACK_MATCHED_INTENT_COUNT > 0[\s\S]*RECONCILE_PENDING_ONLY=1/,
   'intent fsync precedes result publication, so RESULT must not gate recovery selection');
+match('all-readback-matched crash still selects recovery', guard,
+  /READBACK_MATCHED_INTENT_COUNT > 0/,
+  'all closed outcomes without a published result must never be mistaken for an unexecuted plan');
+check('same-day completed result short-circuits before journal and source refresh', () => {
+  const completedAt = guard.indexOf('state:"already_completed"');
+  const journalAt = guard.indexOf('readInventoryIntentLifecycle');
+  const refreshAt = guard.indexOf('ensure_links_data_fresh || true');
+  assert.ok(completedAt >= 0 && completedAt < journalAt && journalAt < refreshAt,
+    'a fully validated same-day result must not be replanned or re-executed');
+});
 match('journal-only recovery refuses a missing immutable plan', guard,
   /durable inventory intent exists but its immutable plan is missing; refuse refresh, rebuild and every inventory write[\s\S]*exit 76/,
   'a crash that loses the plan cannot fall through to a rebuilt write plan');
 check('journal recovery selection occurs before result inspection and source refresh', () => {
-  const journalAt = guard.indexOf('readPendingInventoryIntents');
+  const journalAt = guard.indexOf('readInventoryIntentLifecycle');
   const priorResultAt = guard.indexOf('prior result is not a safe current terminal readback');
   const refreshAt = guard.indexOf('ensure_links_data_fresh || true');
   assert.ok(journalAt >= 0 && priorResultAt > journalAt && refreshAt > journalAt,
@@ -604,14 +614,18 @@ check('journal-only crash recovery bypasses result and planning', () => {
     fs.writeFileSync(path.join(temp, 'scripts', 'lib', 'shared_lock.sh'), 'prepare_shared_lock_file(){ mkdir -p "$(dirname "$1")"; touch "$1"; }\n');
     fs.writeFileSync(path.join(temp, 'lib', 'durable_inventory_write.mjs'), `
 import fs from 'node:fs/promises';
-export async function readPendingInventoryIntents(file) {
+export async function readInventoryIntentLifecycle(file) {
+  const intents = new Map();
   const pending = new Map();
+  const terminalOutcomes = new Map();
   for (const line of (await fs.readFile(file, 'utf8')).split(/\\r?\\n/).filter(Boolean)) {
     const entry = JSON.parse(line);
-    if (entry.kind === 'intent') pending.set(entry.intentId, entry);
-    if (entry.kind === 'write_outcome' && ['rejected','readback_matched'].includes(entry.disposition)) pending.delete(entry.intentId);
+    if (entry.kind === 'intent') { intents.set(entry.intentId, entry); pending.set(entry.intentId, entry); }
+    if (entry.kind === 'write_outcome' && ['rejected','readback_matched'].includes(entry.disposition)) {
+      pending.delete(entry.intentId); terminalOutcomes.set(entry.intentId, entry);
+    }
   }
-  return pending;
+  return {intents, pending, terminalOutcomes};
 }
 `);
     fs.writeFileSync(path.join(temp, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'), `
@@ -620,12 +634,17 @@ const args = process.argv.slice(2);
 fs.writeFileSync('executor-args.json', JSON.stringify(args));
 const value = flag => args[args.indexOf(flag) + 1];
 const plan = JSON.parse(fs.readFileSync(value('--plan'), 'utf8'));
-fs.writeFileSync(value('--out'), JSON.stringify({planHash:plan.payloadHash,execute:true,executionMode:'automatic',results:[{state:'submitted_but_readback_pending'}]}));
+const journal = fs.readFileSync(value('--out')+'.journal.ndjson', 'utf8');
+const closed = journal.includes('readback_matched');
+fs.writeFileSync(value('--out'), JSON.stringify({planHash:plan.payloadHash,execute:true,executionMode:'automatic',results:[closed
+  ? {state:'skipped_target_already_matched',before:{totalUsableInventory:10},targetUsableInventory:10}
+  : {state:'submitted_but_readback_pending'}]}));
 `);
     fs.writeFileSync(path.join(temp, 'scripts', 'pipeline_marker.mjs'), `
 import fs from 'node:fs';
 fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\\n');
 `);
+    fs.writeFileSync(path.join(temp, 'scripts', 'validate_daily_operating_refresh.mjs'), 'process.exit(0);\n');
     fs.writeFileSync(planFile, JSON.stringify({
       schemaVersion: 'daily-inventory-replenishment-plan/v1',
       date: runDate,
@@ -653,12 +672,36 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
       encoding: 'utf8',
     });
     assert.equal(run.status, 75, `journal-only recovery must remain retryable\nstdout=${run.stdout}\nstderr=${run.stderr}`);
-    assert.match(run.stdout, /durable inventory journal has pending intent\(s\) count=1/);
+    assert.match(run.stdout, /durable inventory journal requires lifecycle recovery pending=1 readbackMatched=0/);
     const executorArgs = JSON.parse(fs.readFileSync(executorArgsFile, 'utf8'));
     assert.ok(executorArgs.includes('--reconcile-pending-only'));
     assert.equal(executorArgs[executorArgs.indexOf('--plan') + 1], `runtime/plans/daily-inventory-replenishment-${runDate}.json`);
     const markerCalls = fs.readFileSync(markerArgsFile, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
     assert.ok(markerCalls.every(args => args[0] !== 'require'), 'pipeline markers must not gate already-submitted intent readback');
+
+    fs.rmSync(resultFile, {force: true});
+    fs.writeFileSync(journalFile, [
+      JSON.stringify({kind:'intent',intentId:'intent-1',logicalActionKey:'logical-1'}),
+      JSON.stringify({kind:'write_outcome',intentId:'intent-1',disposition:'readback_matched'}),
+      '',
+    ].join('\n'));
+    fs.rmSync(executorArgsFile, {force: true});
+    const closedRun = spawnSync('bash', ['-lc', [
+      `cd '${wslTemp}' &&`,
+      'env',
+      'SHEIN_BI_ROOT=.',
+      'SHEIN_BI_INVENTORY_RUNTIME_ROOT=runtime',
+      `SHEIN_BI_INVENTORY_RUN_DATE=${runDate}`,
+      `SHEIN_BI_INVENTORY_BUSINESS_DATE=${businessDate}`,
+      'SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH=1',
+      'SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1',
+      'SHEIN_BI_INVENTORY_MAX_ROWS=10',
+      'bash scripts/cloud_daily_inventory_replenishment_guard.sh',
+    ].join(' ')], {encoding: 'utf8'});
+    assert.equal(closedRun.status, 0, `all-closed crash recovery must reconstruct a terminal result\nstdout=${closedRun.stdout}\nstderr=${closedRun.stderr}`);
+    assert.match(closedRun.stdout, /lifecycle recovery pending=0 readbackMatched=1/);
+    const closedArgs = JSON.parse(fs.readFileSync(executorArgsFile, 'utf8'));
+    assert.ok(closedArgs.includes('--reconcile-pending-only'), 'all-closed crash recovery must still make the write branch unreachable');
   } finally {
     fs.rmSync(temp, {recursive: true, force: true});
   }
