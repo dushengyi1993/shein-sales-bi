@@ -59,6 +59,7 @@ const queueLock = path.join(temp, 'queue.lock');
 await fs.mkdir(path.join(portalRoot, 'sections'), {recursive: true});
 process.env.SHEIN_BI_PORTAL_SECTION_QUEUE_FILE = queueFile;
 process.env.SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE = queueLock;
+process.env.SHEIN_BI_PORTAL_DATA_PATH = path.join(portalRoot, 'data.json');
 
 const {__testHooks} = await import('./serve_bi_portal.mjs');
 const manage = await import('./manage_bi_portal_section_queue.mjs');
@@ -119,6 +120,16 @@ const completedQueue = () => ({
 });
 
 try {
+  await fs.writeFile(
+    path.join(portalRoot, 'data.json'),
+    `${JSON.stringify({padding: 'x'.repeat(128 * 1024), generatedAt: 'G-PADDED', __sections: {generatedAt: 'G-PADDED'}})}\n`,
+  );
+  const implicitGeneration = runQueueShell('--sections', 'orders', '--priority', '10', '--reason', 'padded-core');
+  assert.equal(implicitGeneration.status, 0, implicitGeneration.stderr || implicitGeneration.stdout);
+  assert.equal((await readQueue()).entries.find(entry => entry.section === 'orders')?.coreGeneratedAt, 'G-PADDED',
+    'implicit enqueue must scan the bounded top-level generatedAt even when it appears after the first 64 KiB');
+  await fs.rm(queueFile, {force: true});
+
   await writeCore('G1');
   await writeArtifacts('G1');
 

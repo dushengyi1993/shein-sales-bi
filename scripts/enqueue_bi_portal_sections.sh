@@ -69,22 +69,31 @@ if ! flock -w 10 9; then
 fi
 
 if [[ "$COMMAND" == "enqueue" && "$has_core_generated_at" -eq 0 ]]; then
-  CORE_GENERATED_AT="$(node - "$PORTAL_DATA_PATH" <<'NODE'
-const fs = require('fs');
-const file = process.argv[2];
+  CORE_GENERATED_AT="$(node --input-type=module - "$ROOT" "$PORTAL_DATA_PATH" <<'NODE'
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+
+const root = path.resolve(process.argv[2]);
+const file = path.resolve(process.argv[3]);
 let handle;
 try {
-  handle = fs.openSync(file, 'r');
-  const buffer = Buffer.alloc(64 * 1024);
-  const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, 0);
-  const match = /"generatedAt"\s*:\s*"([^"\\]+)"/.exec(buffer.subarray(0, bytesRead).toString('utf8'));
-  const generatedAt = String(match?.[1] || '').trim();
+  const scannerUrl = pathToFileURL(path.join(root, 'lib', 'bounded_top_level_json.mjs')).href;
+  const {scanBoundedTopLevelJson} = await import(scannerUrl);
+  handle = await fs.open(file, 'r');
+  const stat = await handle.stat();
+  if (Number(stat.size || 0) <= 0) process.exit(64);
+  const scan = await scanBoundedTopLevelJson(
+    handle.createReadStream({start: 0, autoClose: false}),
+    {generatedAt: 4 * 1024},
+  );
+  const generatedAt = String(scan.fields.generatedAt?.value || '').trim();
   if (!generatedAt || !/^[\x21-\x7E]{1,1024}$/.test(generatedAt)) process.exit(64);
   process.stdout.write(generatedAt);
 } catch {
   process.exit(64);
 } finally {
-  if (handle !== undefined) fs.closeSync(handle);
+  if (handle !== undefined) await handle.close();
 }
 NODE
 )" || {
