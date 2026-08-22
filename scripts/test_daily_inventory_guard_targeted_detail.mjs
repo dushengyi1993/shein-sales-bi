@@ -538,8 +538,17 @@ match('recovery lookup cannot be bypassed by target or authorization drift', exe
   /pendingIntentsByScope\.get\(recoveryScopeKey\)/,
   'all non-rejected intents for the same run/store/SKC/SKU scope must block a new POST');
 match('rebuilt plan cannot delete an unresolved intent', executor,
-  /unresolvedIntents = \[\.\.\.pendingIntentsByScope\.entries\(\)\][\s\S]*absent from the rebuilt current plan[\s\S]*for \(const row of unresolvedIntents\.length \? \[\] : rows\)/,
-  'an intent scope omitted by a rebuilt plan must block all current-plan writes and final success');
+  /deferredHistoricalIntents = \[\.\.\.pendingIntentsByScope\.entries\(\)\][\s\S]*absent from the rebuilt current plan[\s\S]*for \(const row of rows\)/,
+  'an intent scope omitted by a rebuilt plan must remain unresolved while independent current rows continue');
+match('shared executor discovers every journal prefix in its result directory', executor,
+  /discoverInventoryJournalFiles\(journalFile, \{includeAll: true\}\)/,
+  'daily and ET low-inventory sidecars must share cross-day durable recovery');
+match('daily guard keeps its daily-prefix discovery boundary', guard,
+  /discoverInventoryJournalFiles\(currentJournal\)/,
+  'the daily guard may retain default daily-prefix discovery while the shared executor is comprehensive');
+match('historical omission is a warning, not a current-run blocker', executor,
+  /deferredHistorical: deferredHistoricalIntents[\s\S]*unresolvedIntents: \[\][\s\S]*blocked: unsafeResultCount/,
+  'an absent historical scope stays in the result audit without failing an otherwise safe current run');
 noMatch('idempotency excludes mutable attempt and overwrite', executor,
   /logicalActionKey = stableInventoryHash\(\{[^}]*\b(?:attempt|overwrite)\b[^}]*\}\)/s,
   'attempt number and observed overwrite quantity must not change the platform key');
@@ -569,21 +578,21 @@ match('midnight and deadline checked before every POST', executor,
 match('catch classifies durable vs pre-durable errors', executor,
   /if \(activeIntent && error\?\.inventoryIntentDurable === true\)[\s\S]*state: 'suspicious_write_attempted'[\s\S]*state: 'blocked'/,
   'pre-durable failures record blocked; durable failures record suspicious_write_attempted in the same catch');
-match('in-run intent insert uses the intentId key', executor,
-  /pendingIntents\.set\(activeIntent\.intentId, activeIntent\)/,
-  'the live map must share the journal load/delete intentId key');
+match('in-run intent insert uses the journal-plus-intentId key', executor,
+  /pendingIntents\.set\(journalIntentKey\(activeIntent\), activeIntent\)/,
+  'the live map must share the journal load/delete composite key');
 noMatch('in-run intent map never keyed by logicalActionKey', executor,
   /pendingIntents\.set\(logicalActionKey, activeIntent\)/,
   'keying the live map by logicalActionKey makes the intentId deletes no-ops');
 check('activeIntent is declared outside the per-row try block', () => {
-  const loopAt = executor.indexOf('for (const row of unresolvedIntents.length ? [] : rows) {');
+  const loopAt = executor.indexOf('for (const row of rows) {');
   const outerTryAt = executor.indexOf('\n  try {', loopAt);
   const declarationAt = executor.indexOf('let activeIntent = null;', loopAt);
   assert.ok(loopAt >= 0 && outerTryAt > loopAt && declarationAt > loopAt,
     'the execution loop, per-row try and declaration must exist');
   assert.ok(declarationAt < outerTryAt,
     'activeIntent must be declared before the per-row try: a catch block cannot see let bindings from its try block');
-  const insertAt = executor.indexOf('pendingIntents.set(activeIntent.intentId, activeIntent)');
+  const insertAt = executor.indexOf('pendingIntents.set(journalIntentKey(activeIntent), activeIntent)');
   assert.ok(insertAt > declarationAt && insertAt < executor.indexOf('} catch (error) {', outerTryAt),
     'the map insert stays inside the same per-row scope as the declaration');
 });
@@ -626,6 +635,29 @@ export async function readInventoryIntentLifecycle(file) {
     }
   }
   return {intents, pending, terminalOutcomes};
+}
+export async function discoverInventoryJournalFiles(file) { return [file]; }
+export async function readInventoryIntentJournals(files) {
+  const records = [];
+  const intents = new Map();
+  const pending = new Map();
+  const terminalOutcomes = new Map();
+  for (const file of files) {
+    let lifecycle;
+    try { lifecycle = await readInventoryIntentLifecycle(file); } catch (error) {
+      if (error?.code === 'ENOENT') lifecycle = {intents:new Map(), pending:new Map(), terminalOutcomes:new Map()};
+      else throw error;
+    }
+    records.push({journalFile:file, ...lifecycle});
+    for (const [intentId, intent] of lifecycle.intents) {
+      const key = file + '\\u0000' + intentId;
+      intents.set(key, {...intent, intentId, journalFile:file});
+      if (lifecycle.pending.has(intentId)) pending.set(key, {...intent, intentId, journalFile:file});
+      const outcome = lifecycle.terminalOutcomes.get(intentId);
+      if (outcome) terminalOutcomes.set(key, {...outcome, journalFile:file});
+    }
+  }
+  return {files, records, intents, pending, terminalOutcomes};
 }
 `);
     fs.writeFileSync(path.join(temp, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'), `

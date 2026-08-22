@@ -190,6 +190,7 @@ const tests = [
   'scripts/test_durable_inventory_write.mjs',
   'scripts/test_daily_inventory_executor_lifecycle.mjs',
   'scripts/test_execute_inventory_durable_recovery.mjs',
+  'scripts/test_inventory_cross_day_intent.mjs',
   'scripts/test_et_low_inventory_safety_guard.mjs',
   'scripts/test_et_low_inventory_detail_evidence.mjs',
   'scripts/test_inventory_cost_ledger.mjs',

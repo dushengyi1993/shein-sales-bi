@@ -25,6 +25,7 @@ import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 
 import {
+  computeInventoryOverwriteQuantity,
   resolveInventoryIdentityKey,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
@@ -676,14 +677,63 @@ try {
     SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION: AUTOMATION_AUTHORIZATION,
   };
   try {
-    await fs.writeFile(journalJ, `${JSON.stringify({kind: 'intent', intentId: 'i-1', logicalActionKey: 'x'.repeat(64)})}\n{torn`, 'utf8');
+    const journalTarget = 10;
+    const journalBefore = {
+      skuCode: SKU_CODE,
+      totalInventoryQuantity: 10,
+      totalUsableInventory: 10,
+      totalLockedQuantity: 0,
+      stockRowMissing: false,
+      warehouseCodes: [],
+    };
+    const journalLogicalActionKey = stableInventoryHash({
+      runDate: TODAY,
+      store: STORE_KEY,
+      skc: SKC,
+      sku: SKU_CODE,
+      target: journalTarget,
+      actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+      policyVersion: planJ.policyVersion,
+      authorizationId: AUTOMATION_AUTHORIZATION,
+    });
+    const journalRequest = {
+      pathname: '/open-api/stock/change-inventory/v2',
+      method: 'POST',
+      body: {updateSkuInventoryQuantityRequests: [{
+        idempotencyKey: `bi-inv-${journalLogicalActionKey.slice(0, 42)}`,
+        skuCode: SKU_CODE,
+        invType: 'VI',
+        changeType: 'OVERWRITE',
+        changeQuantity: computeInventoryOverwriteQuantity(journalTarget, journalBefore),
+        changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
+      }]},
+      headers: {language: 'en'},
+    };
+    const validJournalIntent = {
+      kind: 'intent',
+      intentId: 'i-1',
+      logicalActionKey: journalLogicalActionKey,
+      planHash: planJ.payloadHash,
+      runDate: TODAY,
+      storeKey: STORE_KEY,
+      skc: SKC,
+      skuCode: SKU_CODE,
+      targetUsableInventory: journalTarget,
+      policyVersion: planJ.policyVersion,
+      authorizationId: AUTOMATION_AUTHORIZATION,
+      idempotencyKey: journalRequest.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
+      requestPayloadHash: stableInventoryHash(journalRequest),
+      request: journalRequest,
+      before: journalBefore,
+    };
+    await fs.writeFile(journalJ, `${JSON.stringify(validJournalIntent)}\n{torn`, 'utf8');
     const tornRun = await runExecutor(argsJ, envJ);
     assert.notEqual(tornRun.code, 0, `torn tail must fail closed, stderr=${tornRun.stderr}`);
     assert.match(tornRun.stderr, /INVENTORY_JOURNAL_TORN_TAIL/);
     assert.equal(Object.values(mockJ.counts).reduce((sum, value) => sum + value, 0), 0,
       'a torn journal tail must abort before any OpenAPI request');
 
-    await fs.writeFile(journalJ, `${JSON.stringify({kind: 'intent', intentId: 'i-1', logicalActionKey: 'x'.repeat(64)})}\n{oops\n`, 'utf8');
+    await fs.writeFile(journalJ, `${JSON.stringify(validJournalIntent)}\n{oops\n`, 'utf8');
     const corruptRun = await runExecutor(argsJ, envJ);
     assert.notEqual(corruptRun.code, 0, `mid-file corruption must fail closed, stderr=${corruptRun.stderr}`);
     assert.match(corruptRun.stderr, /INVENTORY_JOURNAL_INVALID_LINE:2/);

@@ -24,7 +24,10 @@ import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock
 import {
   appendDurableJournalRecord,
   classifyRecoveredInventoryIntent,
+  discoverInventoryJournalFiles,
+  inventoryIntentScopeKey,
   inventoryRecoveryScopeKey,
+  readInventoryIntentJournals,
   recoveredInventoryIntentMismatch,
   submitDurableInventoryWriteOnce,
 } from '../../lib/durable_inventory_write.mjs';
@@ -74,6 +77,12 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const asArray = value => value == null ? [] : Array.isArray(value) ? value : [value];
 const ageHours = value => (Date.now() - new Date(value || '').getTime()) / 3_600_000;
 const runDeadlineEpoch = Number(process.env.SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH || 0);
+
+function isValidCalendarDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 
 function assertInventoryWriteWindow(runDate) {
   const currentDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
@@ -243,7 +252,9 @@ const expectedHash = stableInventoryHash({
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
-if (plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
+if (!isValidCalendarDate(plan.date)) throw new Error(`Plan date is invalid: ${plan.date}`);
+if (plan.date > today) throw new Error(`Plan date is in the future: ${plan.date} vs ${today}`);
+if (!args.reconcilePendingOnly && plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
 for (const evidence of args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence)) {
   const evidenceStore = String(evidence.store || '');
   const maximumAge = evidenceStore === 'ET'
@@ -295,7 +306,7 @@ if (args.execute) {
     confirmHash: args.confirmHash,
   });
 }
-let unresolvedIntents = [];
+let deferredHistoricalIntents = [];
 const resultEnvelope = currentResults => ({
   schemaVersion: 'daily-inventory-replenishment-result/v1',
   generatedAt: new Date().toISOString(),
@@ -307,7 +318,14 @@ const resultEnvelope = currentResults => ({
   authorizationId: executionAuthorization?.authorizationId || null,
   authorizationContext: executionAuthorization?.context || null,
   executionConstraints: plan.executionConstraints || null,
-  unresolvedIntents,
+  // A historical intent omitted from today's rebuilt plan has no current
+  // write to suppress. Keep the unresolved warning visible for audit and
+  // future reappearance interception, but do not turn it into a run blocker.
+  deferredHistorical: deferredHistoricalIntents,
+  // Keep the established validator contract: only a current-plan unresolved
+  // intent belongs here. Historical scopes absent from this plan are warnings
+  // in deferredHistorical and must not fail the morning chain.
+  unresolvedIntents: [],
   results: currentResults,
 });
 const writeResultFile = async currentResults => {
@@ -319,43 +337,22 @@ const writeResultFile = async currentResults => {
 const journalFile = `${args.out}.journal.ndjson`;
 await fs.mkdir(path.dirname(args.out), {recursive: true});
 const results = [];
-const pendingIntents = new Map();
-const inventoryIntents = new Map();
-const terminalIntentOutcomes = new Map();
-try {
-  const journal = await fs.readFile(journalFile, 'utf8');
-  if (journal && !journal.endsWith('\n')) throw new Error('INVENTORY_JOURNAL_TORN_TAIL');
-  const lines = journal.split(/\r?\n/).filter(Boolean);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    try {
-      const entry = JSON.parse(line);
-      if (entry?.kind === 'intent' && entry?.logicalActionKey) {
-        const intentId = entry.intentId || `legacy-${index}-${entry.logicalActionKey}`;
-        const intent = {...entry, intentId};
-        inventoryIntents.set(intentId, intent);
-        pendingIntents.set(intentId, intent);
-        continue;
-      }
-      if (entry?.kind === 'write_outcome' && entry?.intentId) {
-        if (['rejected', 'readback_matched'].includes(entry.disposition)) {
-          pendingIntents.delete(entry.intentId);
-          terminalIntentOutcomes.set(entry.intentId, entry);
-        }
-        continue;
-      }
-      // Historical result rows are audit evidence only.  They are never
-      // restored as current terminal state: every restart re-runs read-only
-      // guards and performs a fresh stock readback under the SKU lock.
-    } catch (error) {
-      throw new Error(`INVENTORY_JOURNAL_INVALID_LINE:${index + 1}:${error.message}`);
-    }
-  }
-} catch (error) {
-  if (error?.code !== 'ENOENT') throw error;
-}
-const appendJournalRecord = async entry => {
-  await appendDurableJournalRecord(journalFile, entry);
+// A current result keeps its sidecar for compatibility. This executor is
+// shared by daily replenishment and ET low-inventory runs; their journals use
+// different prefixes but are isolated in their own result directories. Every
+// sidecar in this directory therefore belongs to the same inventory write
+// domain and must participate in cross-day recovery without moving or
+// rewriting the original append-only journal.
+const journalFiles = await discoverInventoryJournalFiles(journalFile, {includeAll: true});
+const journalBundle = await readInventoryIntentJournals(journalFiles, {maxRunDate: today});
+const pendingIntents = new Map(journalBundle.pending);
+const inventoryIntents = new Map(journalBundle.intents);
+const terminalIntentOutcomes = new Map(journalBundle.terminalOutcomes);
+const currentInventoryIntents = new Map([...inventoryIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
+const currentPendingIntents = new Map([...pendingIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
+const currentTerminalIntentOutcomes = new Map([...terminalIntentOutcomes].filter(([, outcome]) => outcome.journalFile === path.resolve(journalFile)));
+const appendJournalRecord = async (entry, targetJournalFile = journalFile) => {
+  await appendDurableJournalRecord(targetJournalFile, entry);
 };
 if (!results.length) {
   const handle = await fs.open(journalFile, 'a', 0o600);
@@ -411,8 +408,7 @@ for (const metrics of linkMetricRows) {
 const clients = new Map();
 const pendingIntentsByScope = new Map();
 for (const intent of pendingIntents.values()) {
-  const scopeKey = intent?.recoveryScopeKey || inventoryRecoveryScopeKey({
-    runDate: intent?.runDate,
+  const scopeKey = inventoryIntentScopeKey({
     storeKey: intent?.storeKey,
     skc: intent?.skc,
     skuCode: intent?.skuCode,
@@ -422,8 +418,7 @@ for (const intent of pendingIntents.values()) {
 }
 const inventoryIntentsByScope = new Map();
 for (const intent of inventoryIntents.values()) {
-  const scopeKey = intent?.recoveryScopeKey || inventoryRecoveryScopeKey({
-    runDate: intent?.runDate,
+  const scopeKey = inventoryIntentScopeKey({
     storeKey: intent?.storeKey,
     skc: intent?.skc,
     skuCode: intent?.skuCode,
@@ -431,15 +426,28 @@ for (const intent of inventoryIntents.values()) {
   if (!inventoryIntentsByScope.has(scopeKey)) inventoryIntentsByScope.set(scopeKey, []);
   inventoryIntentsByScope.get(scopeKey).push(intent);
 }
+const currentInventoryIntentsByScope = new Map();
+for (const intent of currentInventoryIntents.values()) {
+  const scopeKey = inventoryIntentScopeKey({storeKey: intent?.storeKey, skc: intent?.skc, skuCode: intent?.skuCode});
+  if (!currentInventoryIntentsByScope.has(scopeKey)) currentInventoryIntentsByScope.set(scopeKey, []);
+  currentInventoryIntentsByScope.get(scopeKey).push(intent);
+}
+const currentPendingIntentsByScope = new Map();
+for (const intent of currentPendingIntents.values()) {
+  const scopeKey = inventoryIntentScopeKey({storeKey: intent?.storeKey, skc: intent?.skc, skuCode: intent?.skuCode});
+  if (!currentPendingIntentsByScope.has(scopeKey)) currentPendingIntentsByScope.set(scopeKey, []);
+  currentPendingIntentsByScope.get(scopeKey).push(intent);
+}
 const currentPlanScopeSet = new Set(planRecoveryScopes);
+const journalIntentKey = intent => `${path.resolve(intent?.journalFile || journalFile)}\u0000${intent?.intentId || ''}`;
 if (args.reconcilePendingOnly) {
   const failures = [];
-  if (inventoryIntents.size !== rows.length) {
-    failures.push(`intent_count=${inventoryIntents.size},plan_count=${rows.length}`);
+  if (currentInventoryIntents.size !== rows.length) {
+    failures.push(`intent_count=${currentInventoryIntents.size},plan_count=${rows.length}`);
   }
   for (const row of rows) {
     const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
-    const scopeIntents = inventoryIntentsByScope.get(recoveryScopeKey) || [];
+    const scopeIntents = currentInventoryIntentsByScope.get(recoveryScopeKey) || [];
     if (scopeIntents.length !== 1) {
       failures.push(`scope_count=${scopeIntents.length}:${row.storeKey}:${row.skc}:${row.skuCode}`);
       continue;
@@ -464,19 +472,20 @@ if (args.reconcilePendingOnly) {
     });
     if (mismatch) failures.push(`intent_mismatch=${mismatch}:${row.storeKey}:${row.skc}:${row.skuCode}`);
     const intentId = scopeIntents[0].intentId;
-    const terminalOutcome = terminalIntentOutcomes.get(intentId);
-    if (!pendingIntents.has(intentId) && terminalOutcome?.disposition !== 'readback_matched') {
+    const currentIntentKey = [...currentInventoryIntents.entries()].find(([, intent]) => intent.intentId === intentId)?.[0];
+    const terminalOutcome = currentIntentKey ? currentTerminalIntentOutcomes.get(currentIntentKey) : null;
+    if (currentIntentKey && !pendingIntents.has(currentIntentKey) && terminalOutcome?.disposition !== 'readback_matched') {
       failures.push(`intent_lifecycle=${terminalOutcome?.disposition || 'missing'}:${row.storeKey}:${row.skc}:${row.skuCode}`);
     }
   }
-  for (const scopeKey of inventoryIntentsByScope.keys()) {
+  for (const scopeKey of currentInventoryIntentsByScope.keys()) {
     if (!currentPlanScopeSet.has(scopeKey)) failures.push(`extra_intent_scope=${scopeKey}`);
   }
   if (failures.length) {
     throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED:${failures.join('|')}`);
   }
 }
-unresolvedIntents = [...pendingIntentsByScope.entries()]
+deferredHistoricalIntents = [...pendingIntentsByScope.entries()]
   .filter(([scopeKey]) => !currentPlanScopeSet.has(scopeKey))
   .flatMap(([scopeKey, intents]) => intents.map(intent => ({
     intentId: intent.intentId,
@@ -490,24 +499,15 @@ unresolvedIntents = [...pendingIntentsByScope.entries()]
     planHash: intent.planHash,
     policyVersion: intent.policyVersion,
     authorizationId: intent.authorizationId,
-    state: 'needs_manual_resolve',
-    reason: 'durable intent scope is absent from the rebuilt current plan; duplicate submission and final success are forbidden',
+    state: 'deferred_historical',
+    warning: 'durable intent scope is absent from the rebuilt current plan; retained for audit and intercepted if the scope reappears',
   })));
-if (unresolvedIntents.length) {
-  for (const row of rows) {
-    await recordResult({
-      storeKey: row.storeKey,
-      skc: row.skc,
-      skuCode: row.skuCode,
-      canonical: row.canonical,
-      ruleClass: row.ruleClass,
-      targetUsableInventory: Number(row.targetUsableInventory),
-      state: 'needs_manual_resolve',
-      error: `${unresolvedIntents.length} durable inventory intent(s) are absent from the rebuilt plan; no current-plan POST was attempted`,
-    });
-  }
-}
-for (const row of unresolvedIntents.length ? [] : rows) {
+// Historical pending scopes that are absent from today's rebuilt plan remain
+// visible in the envelope-level audit field.  They must not be projected onto
+// every current row: doing so duplicates result rows and blocks unrelated
+// item scopes.  A current row is blocked only when its own scope is reached
+// in the serial loop below.
+for (const row of rows) {
   const result = {
     storeKey: row.storeKey,
     skc: row.skc,
@@ -623,6 +623,69 @@ for (const row of unresolvedIntents.length ? [] : rows) {
           continue;
         }
         const [recoveredIntent] = scopeIntents;
+        const historicalScopeMismatch = [
+          [String(recoveredIntent?.storeKey || '').trim().toUpperCase() === String(row.storeKey || '').trim().toUpperCase(), 'storeKey'],
+          [String(recoveredIntent?.skc || '').trim() === String(row.skc || '').trim(), 'skc'],
+          [String(recoveredIntent?.skuCode || '').trim() === String(row.skuCode || '').trim(), 'skuCode'],
+          [String(recoveredIntent?.logicalActionKey || '').trim() !== '', 'logicalActionKey'],
+        ].find(([ok]) => !ok)?.[1] || '';
+        if (recoveredIntent.runDate !== plan.date) {
+          if (historicalScopeMismatch) {
+            await recordResult({
+              ...result,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              state: 'needs_manual_resolve',
+              historicalPending: true,
+              before,
+              historicalIntentId: recoveredIntent.intentId,
+              historicalRunDate: recoveredIntent.runDate,
+              error: `historical durable inventory intent scope cannot be proven: ${historicalScopeMismatch}; duplicate submission forbidden`,
+            }, recoveredIntent.logicalActionKey);
+            continue;
+          }
+          const historicalTarget = Number(recoveredIntent.targetUsableInventory);
+          if (Number(before.totalUsableInventory) === historicalTarget) {
+            await appendJournalRecord({
+              kind: 'write_outcome',
+              intentId: recoveredIntent.intentId,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              disposition: 'readback_matched',
+              recordedAt: new Date().toISOString(),
+            }, recoveredIntent.journalFile);
+            pendingIntents.delete(journalIntentKey(recoveredIntent));
+            const sameCurrentTarget = Number(before.totalUsableInventory) === approvedTarget;
+            await recordResult({
+              ...result,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              state: sameCurrentTarget ? 'skipped_target_already_matched' : 'historical_readback_matched',
+              disposition: 'readback_matched',
+              historicalIntentClosed: true,
+              historicalIntentId: recoveredIntent.intentId,
+              historicalRunDate: recoveredIntent.runDate,
+              historicalTargetUsableInventory: historicalTarget,
+              deferred: true,
+              before,
+              after: before,
+              error: 'historical durable inventory intent matched by fresh identity and stock readback; current corrective action deferred to a future plan',
+            }, recoveredIntent.logicalActionKey);
+          } else {
+            await recordResult({
+              ...result,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              state: 'submitted_but_readback_pending',
+              disposition: 'skipped',
+              historicalPending: true,
+              historicalIntentId: recoveredIntent.intentId,
+              historicalRunDate: recoveredIntent.runDate,
+              historicalTargetUsableInventory: historicalTarget,
+              before,
+              idempotencyKey: recoveredIntent.idempotencyKey || null,
+              requestPayloadHash: recoveredIntent.requestPayloadHash || null,
+              error: `historical durable inventory intent remains pending: live usable inventory ${before?.totalUsableInventory ?? 'unavailable'} does not match historical target ${historicalTarget}; current scope skipped and duplicate submission forbidden`,
+            }, recoveredIntent.logicalActionKey);
+          }
+          continue;
+        }
         const mismatch = recoveredInventoryIntentMismatch(recoveredIntent, {
           logicalActionKey,
           plan,
@@ -661,8 +724,8 @@ for (const row of unresolvedIntents.length ? [] : rows) {
             logicalActionKey,
             disposition: 'readback_matched',
             recordedAt: new Date().toISOString(),
-          });
-          pendingIntents.delete(recoveredIntent.intentId);
+          }, recoveredIntent.journalFile);
+          pendingIntents.delete(journalIntentKey(recoveredIntent));
           await recordResult({...result, logicalActionKey, state: 'updated_readback_matched', before: recoveredIntent.before, after: before, writes: [recoveredWrite]}, logicalActionKey);
         } else {
           await recordResult({
@@ -678,8 +741,9 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         continue;
       }
       if (args.reconcilePendingOnly) {
-        const [lifecycleIntent] = inventoryIntentsByScope.get(recoveryScopeKey) || [];
-        const lifecycleOutcome = lifecycleIntent && terminalIntentOutcomes.get(lifecycleIntent.intentId);
+        const [lifecycleIntent] = currentInventoryIntentsByScope.get(recoveryScopeKey) || [];
+        const lifecycleKey = lifecycleIntent && journalIntentKey(lifecycleIntent);
+        const lifecycleOutcome = lifecycleIntent && currentTerminalIntentOutcomes.get(lifecycleKey);
         if (lifecycleOutcome?.disposition !== 'readback_matched') {
           throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_MISSING:${recoveryScopeKey}`);
         }
@@ -758,10 +822,10 @@ for (const row of unresolvedIntents.length ? [] : rows) {
       // durable lock which recovery must read back; it can never invent a new
       // key or submit a second overwrite.
       assertInventoryWriteWindow(plan.date);
-      // The live map shares the journal's intentId key (load and every delete
-      // path use intentId), so terminal outcomes below actually release the
+      // The live map uses a composite journal+intentId key (load and every
+      // delete path use it), so terminal outcomes below actually release the
       // entry instead of leaving a stale pending record behind.
-      pendingIntents.set(activeIntent.intentId, activeIntent);
+      pendingIntents.set(journalIntentKey(activeIntent), activeIntent);
       const submission = await submitDurableInventoryWriteOnce({
         journalFile,
         intent: activeIntent,
@@ -796,7 +860,7 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         success: response?.data?.info?.success ?? null,
       });
       if (submission.state === 'rejected') {
-        pendingIntents.delete(activeIntent.intentId);
+        pendingIntents.delete(journalIntentKey(activeIntent));
         activeIntent = null;
         throw new Error(`inventory write failed: ${response?.data?.code} ${response?.data?.msg || ''}`);
       }
@@ -811,7 +875,7 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         activeIntent = null;
         continue;
       }
-      pendingIntents.delete(activeIntent.intentId);
+      pendingIntents.delete(journalIntentKey(activeIntent));
       activeIntent = null;
       await recordResult({...result, logicalActionKey, state: 'updated_readback_matched', before, after, writes}, logicalActionKey);
     } finally {
@@ -832,13 +896,14 @@ for (const row of unresolvedIntents.length ? [] : rows) {
     }
   }
 }
-const unsafeResultCount = results.filter(row => ['blocked', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve'].includes(row.state)).length;
+const unsafeResultCount = results.filter(row => ['blocked', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve', 'historical_readback_matched'].includes(row.state)).length;
 const counts = {
   total: results.length,
   updated: results.filter(row => row.state === 'updated_readback_matched').length,
   dryRunReady: results.filter(row => row.state === 'dry_run_ready').length,
   skipped: results.filter(row => row.state.startsWith('skipped_')).length,
-  blocked: Math.max(unsafeResultCount, unresolvedIntents.length),
+  deferredHistorical: deferredHistoricalIntents.length,
+  blocked: unsafeResultCount,
 };
 // Per-row progress is append-only in the journal. Publish the complete JSON
 // envelope exactly once so result-file IO stays O(N), not O(N²).

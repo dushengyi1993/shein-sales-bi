@@ -360,7 +360,13 @@ try {
   // B2) recovery-only must reject a plan that is a strict superset of the
   //     pending scopes before any OpenAPI request, not merely before a write.
   // -------------------------------------------------------------------------
-  const outB2 = path.join(temp, 'b2-result.json');
+  // This is an independent fixture, so isolate its result directory. The
+  // production executor now discovers every journal sidecar in one result
+  // directory; copying an intentId beside A would correctly be treated as a
+  // conflicting journal instead of this intended scope-set precondition case.
+  const b2Dir = path.join(temp, 'b2');
+  await fs.mkdir(b2Dir);
+  const outB2 = path.join(b2Dir, 'result.json');
   const firstIntent = journalA.find(entry => entry.kind === 'intent');
   await fs.writeFile(`${outB2}.journal.ndjson`, `${JSON.stringify(firstIntent)}\n`);
   serverState = {mode: 'recovery-matched', postCount: 0, requestCount: 0};
