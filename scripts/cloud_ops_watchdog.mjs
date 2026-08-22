@@ -42,6 +42,7 @@ import {
 import {collectSystemdUnitSnapshot} from '../lib/systemd_unit_snapshot.mjs';
 import {validateCloudRuntimeEffectiveControls} from '../lib/cloud_runtime_snapshot.mjs';
 import {validateDeployedReleaseMarker} from '../lib/source_release_attestation.mjs';
+import {readEmergencyLocalReleaseReceipt} from '../lib/emergency_local_release_receipt.mjs';
 import {
   applyWatchdogAlertState,
   markWatchdogDispatchAttempt,
@@ -86,6 +87,94 @@ export function sourceIntegrityIssueFor(state = {}) {
   const broken = state.ok === false || !commitClean || dirty > 0 || hidden > 0 || missing > 0;
   if (!broken) return null;
   return `云端源码不一致：commitMatch=${state.commitMatches ?? 'unknown'} dirty=${dirty} hidden=${hidden} missing=${missing}`;
+}
+
+const RELEASE_AUDIT_ISSUE_PATTERNS = Object.freeze([
+  /^生产部署证明无效/u,
+  /^生产部署证明缺少/u,
+  /^release[_ -]?audit(?: advisory| issue|:)/iu,
+  /^formal[_ -]?release[_ -]?audit/iu,
+  /^formal[_ -]?(?:marker|attestation|commit)[_ -]?invalid/iu,
+  /^emergency[_ -]?local(?:[_ -]?release)?[_ -]?receipt/iu,
+]);
+
+export function isWatchdogReleaseAuditIssue(issue) {
+  const raw = String(issue || '').trim();
+  return RELEASE_AUDIT_ISSUE_PATTERNS.some(pattern => pattern.test(raw));
+}
+
+export function filterWatchdogReleaseAuditIssues(issues = []) {
+  return issues.map(String).filter(issue => !isWatchdogReleaseAuditIssue(issue));
+}
+
+// Older watchdog versions put formal release failures in the normal alert
+// state. Remove those legacy episodes/outbox entries before applying the new
+// separation, otherwise a clean run could emit a misleading recovery for a
+// release-only advisory that is no longer part of `issues`.
+export function detachWatchdogReleaseAuditState(state) {
+  if (!state || typeof state !== 'object') return state;
+  const next = structuredClone(state);
+  const removedFamilies = new Set();
+  for (const [family, episode] of Object.entries(next.episodes || {})) {
+    if (isWatchdogReleaseAuditIssue(episode?.lastRaw)) {
+      removedFamilies.add(family);
+      delete next.episodes[family];
+    }
+  }
+  for (const [id, intent] of Object.entries(next.outbox || {})) {
+    if (removedFamilies.has(intent?.family) || isWatchdogReleaseAuditIssue(intent?.raw)) {
+      removedFamilies.add(String(intent?.family || ''));
+      delete next.outbox[id];
+    }
+  }
+  for (const family of removedFamilies) {
+    if (family) delete next.episodes[family];
+  }
+  for (const [id, dispatch] of Object.entries(next.dispatches || {})) {
+    const intentIds = (dispatch.intentIds || []).filter(intentId => Object.hasOwn(next.outbox || {}, intentId));
+    if (intentIds.length) next.dispatches[id] = {...dispatch, intentIds};
+    else delete next.dispatches[id];
+  }
+  return next;
+}
+
+export function resolveWatchdogReleaseAudit({
+  deployedReleaseValidation = {},
+  deploymentEvidence = {},
+  emergencyLocalRelease = {},
+} = {}) {
+  const issueText = (value, fallback) => Array.isArray(value) && value.length
+    ? value.map(String).filter(Boolean).join(',') || fallback
+    : fallback;
+  const formalMarkerReady = deployedReleaseValidation.ok === true;
+  const formalEvidenceReady = deploymentEvidence.ok === true;
+  const formalCommit = String(deploymentEvidence.commit || '').trim();
+  const formalCommitValid = /^[0-9a-f]{40}$/u.test(formalCommit);
+  const formalReady = formalMarkerReady && formalEvidenceReady && formalCommitValid;
+  const emergencyValid = emergencyLocalRelease.ok === true
+    && /^[0-9a-f]{40}$/u.test(String(emergencyLocalRelease.receipt?.commit || ''));
+  const releaseAuditIssues = [];
+  if (!formalMarkerReady) {
+    releaseAuditIssues.push(`formal_marker_invalid:${issueText(deployedReleaseValidation.issues, 'marker_invalid')}`);
+  }
+  if (!formalEvidenceReady) {
+    releaseAuditIssues.push(`formal_attestation_invalid:${issueText(deploymentEvidence.issues, deploymentEvidence.errorCode || 'evidence_invalid')}`);
+  }
+  if (formalMarkerReady && formalEvidenceReady && !formalCommitValid) {
+    releaseAuditIssues.push('formal_commit_invalid');
+  }
+  if (!formalReady && emergencyLocalRelease.exists === true && !emergencyValid) {
+    releaseAuditIssues.push(`emergency_local_receipt_invalid:${issueText(emergencyLocalRelease.issues, 'receipt_invalid')}`);
+  }
+  return Object.freeze({
+    releaseAuditReady: formalReady,
+    releaseAuditIssues: Object.freeze(releaseAuditIssues),
+    expectedCommit: formalReady
+      ? formalCommit
+      : emergencyValid ? String(emergencyLocalRelease.receipt.commit) : '',
+    sourceBinding: formalReady ? 'formal-v3' : emergencyValid ? 'emergency-local-receipt-v1' : 'none',
+    emergencyValid,
+  });
 }
 
 export function summarizeWatchdogMaintenanceStatus(status) {
@@ -294,12 +383,12 @@ export function mergeMaintenanceRecoveryNotification(issues, maintenanceRecovery
 
 export function watchdogIssueMaintenanceClass(issue) {
   const raw = String(issue || '').trim();
+  if (isWatchdogReleaseAuditIssue(raw)) return 'release-audit';
   const service = /^(?:服务异常|常驻服务未运行)：(\S+)/.exec(raw)?.[1] || '';
   if (service) return CLOUD_MAINTENANCE_POLICY_BY_SERVICE[service] || 'unknown';
   const timer = /^定时器未运行：(\S+)/.exec(raw)?.[1] || '';
   if (timer) return CLOUD_TIMER_MAINTENANCE_POLICY[timer] || 'unknown';
   if (/^服务器硬盘(?:检查失败|即将写满|快满了|空间偏紧)/.test(raw)) return 'infrastructure';
-  if (/^生产部署证明/.test(raw)) return 'infrastructure';
   if (/^(?:云端源码|维护模式配置故障|systemd 批量快照不完整|BI 数据文件不可读|BI 实时运行状态不可读|BI 实时更新通道未连接)/.test(raw)) return 'always';
   return 'scheduled';
 }
@@ -344,6 +433,7 @@ function parseArgs(argv) {
     logDir: DEFAULT_LOG_DIR,
     portalData: path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
     maintenanceFile: process.env.SHEIN_CLOUD_MAINTENANCE_FILE || DEFAULT_CLOUD_MAINTENANCE_FILE,
+    emergencyReleaseFile: process.env.SHEIN_BI_EMERGENCY_LOCAL_RELEASE_FILE || '/srv/shein-bi/runtime/emergency_local_release.json',
     dryRun: false,
     force: false,
     lockTimeoutMs: SINGLE_INSTANCE_LOCK_TIMEOUT_MS,
@@ -354,6 +444,7 @@ function parseArgs(argv) {
     else if (a === '--log-dir') args.logDir = path.resolve(argv[++i]);
     else if (a === '--portal-data') args.portalData = path.resolve(argv[++i]);
     else if (a === '--maintenance-file') args.maintenanceFile = path.resolve(argv[++i]);
+    else if (a === '--emergency-release-file') args.emergencyReleaseFile = path.resolve(argv[++i]);
     else if (a === '--dry-run') args.dryRun = true;
     else if (a === '--force') args.force = true;
     else if (a === '--lock-timeout-ms') {
@@ -1115,23 +1206,25 @@ async function runWatchdog(args) {
     process.env.SHEIN_BI_DEPLOYED_RELEASE_FILE || '/srv/shein-bi/runtime/deployed_release.json',
   );
   const deployedReleaseValidation = validateDeployedReleaseMarker(deployedRelease, {requireV3: true});
-  if (!deployedReleaseValidation.ok) {
-    issues.push(`生产部署证明无效（生产健康必须绑定 source release v3 回执）：${deployedReleaseValidation.issues.join(',') || 'marker_missing'}`);
-  }
   const deploymentEvidence = inspectRecordedDeploymentReleaseEvidence({
     cwd: ROOT,
     marker: deployedRelease,
     releaseAttestationRoot: process.env.SHEIN_BI_RELEASE_ATTESTATION_ROOT
       || '/srv/shein-bi/runtime/release-attestations',
   });
-  if (!deploymentEvidence.ok) {
-    issues.push(`生产部署证明缺少 attestation/tag 实证：${deploymentEvidence.issues.join(',') || deploymentEvidence.errorCode || 'evidence_missing'}`);
-  }
+  const emergencyLocalRelease = readEmergencyLocalReleaseReceipt(args.emergencyReleaseFile);
+  const releaseAudit = resolveWatchdogReleaseAudit({
+    deployedReleaseValidation,
+    deploymentEvidence,
+    emergencyLocalRelease,
+  });
+  const releaseAuditReady = releaseAudit.releaseAuditReady;
+  const releaseAuditIssues = releaseAudit.releaseAuditIssues;
   let releaseSourceState;
   try {
     releaseSourceState = inspectReleaseSourceState({
       cwd: ROOT,
-      expectedCommit: deploymentEvidence.commit || '',
+      expectedCommit: releaseAudit.expectedCommit,
     });
     const sourceIntegrityIssue = sourceIntegrityIssueFor(releaseSourceState);
     if (sourceIntegrityIssue) issues.push(sourceIntegrityIssue);
@@ -1582,6 +1675,9 @@ async function runWatchdog(args) {
 
   const alertStateFile = path.join(args.stateDir, 'alert-state.json');
   const previousWatchdogReport = await readLatestWatchdogReport(args.logDir);
+  const previousNormalIssues = filterWatchdogReleaseAuditIssues(
+    Array.isArray(previousWatchdogReport?.issues) ? previousWatchdogReport.issues : [],
+  );
   let alertState = await readJsonIfExists(alertStateFile);
   let alertStateMigration = null;
   if (!alertState || alertState.error || alertState.schemaVersion !== 'cloud-watchdog-alert-state/v1') {
@@ -1590,14 +1686,15 @@ async function runWatchdog(args) {
     try { legacyKey = (await fs.readFile(legacyStateFile, 'utf8')).trim(); } catch {}
     alertState = migrateLegacyWatchdogState({
       legacyKey,
-      previousIssues: Array.isArray(previousWatchdogReport?.issues) ? previousWatchdogReport.issues : [],
+      previousIssues: previousNormalIssues,
     });
     alertStateMigration = {
       legacyKeyPresent: Boolean(legacyKey),
-      previousIssueCount: Array.isArray(previousWatchdogReport?.issues) ? previousWatchdogReport.issues.length : 0,
+      previousIssueCount: previousNormalIssues.length,
       migratedEpisodeCount: Object.keys(alertState.episodes || {}).length,
     };
   }
+  alertState = detachWatchdogReleaseAuditState(alertState);
   const maintenanceAlertHold = detachMaintenanceHeldAlertState(alertState, maintenance);
   const maintenanceConfigurationFirstObservation = Boolean(maintenanceConfigurationIssue)
     && !Object.values(maintenanceAlertHold.activeState.episodes || {}).some(episode =>
@@ -1625,6 +1722,15 @@ async function runWatchdog(args) {
 
   const report = {
     ok: issues.length === 0,
+    releaseAuditReady,
+    releaseAuditIssues,
+    releaseAudit: {
+      sourceBinding: releaseAudit.sourceBinding,
+      formalMarkerValid: deployedReleaseValidation.ok === true,
+      formalEvidenceValid: deploymentEvidence.ok === true,
+      emergencyLocalReceiptValid: releaseAudit.emergencyValid,
+      emergencyLocalReceiptFile: emergencyLocalRelease.file,
+    },
     generatedAt: new Date().toISOString(),
     issues,
     maintenanceNotes,
@@ -1661,6 +1767,7 @@ async function runWatchdog(args) {
     deployedRelease,
     deployedReleaseValidation,
     deploymentEvidence,
+    emergencyLocalRelease,
     releaseSourceState,
     dailyRefresh,
     linkBusinessSuccess,

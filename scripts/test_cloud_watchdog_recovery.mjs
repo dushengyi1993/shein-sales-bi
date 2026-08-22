@@ -397,7 +397,7 @@ assert.equal(watchdogIssueMaintenanceClass(maintenanceChecks[0].issue), 'schedul
 assert.equal(watchdogIssueMaintenanceClass(maintenanceChecks[1].issue), 'infrastructure');
 assert.equal(watchdogIssueMaintenanceClass(maintenanceChecks[2].issue), 'always');
 assert.equal(watchdogIssueMaintenanceClass(maintenanceChecks[3].issue), 'always');
-assert.equal(watchdogIssueMaintenanceClass('生产部署证明无效：schema_version_invalid'), 'infrastructure');
+assert.equal(watchdogIssueMaintenanceClass('生产部署证明无效：schema_version_invalid'), 'release-audit');
 const heldAlertState = detachMaintenanceHeldAlertState({
   schemaVersion: 'cloud-watchdog-alert-state/v1',
   episodes: {
