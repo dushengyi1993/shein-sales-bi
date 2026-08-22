@@ -60,6 +60,7 @@ const tests = [
   'scripts/test_cloud_watchdog_recovery.mjs',
   'scripts/test_cloud_watchdog_alert_state.mjs',
   'scripts/test_cloud_watchdog_issue_collapse.mjs',
+  'scripts/test_cloud_watchdog_release_audit.mjs',
   'scripts/test_cloud_maintenance_mode.mjs',
   'scripts/test_cloud_data_coverage_policy.mjs',
   'scripts/test_cloud_manual_login_recovery.mjs',
@@ -175,6 +176,7 @@ const tests = [
   'scripts/test_cloud_disk_maintenance_contract.mjs',
   'scripts/test_host_resource_schedule_contract.mjs',
   'scripts/test_release_source_state.mjs',
+  'scripts/test_emergency_local_release_receipt.mjs',
   'scripts/test_source_release_workflow_contract.mjs',
   'scripts/test_systemd_security_contract.mjs',
   'scripts/test_bi_product_section_contract.mjs',
@@ -239,6 +241,7 @@ const tests = [
   'scripts/test_pending_discuss_daily.mjs',
   'scripts/test_deterministic_timeout_contract.mjs',
   'scripts/test_deterministic_test_shards.mjs',
+  'scripts/test_deterministic_focused_selection.mjs',
   'scripts/test_cloud_db_backup_contract.mjs',
   'scripts/test_cos_backup_remote_verifier.mjs',
   'scripts/test_encrypted_browser_state_backup.mjs',
@@ -277,23 +280,88 @@ const TEST_ESTIMATES_MS = {
 };
 
 function parseRunnerArgs(argv) {
-  const args = {shard: '', list: false};
+  const args = {shard: '', shardProvided: false, files: null, list: false};
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--shard') args.shard = argv[++i] || '';
-    else if (argv[i] === '--list') args.list = true;
+    if (argv[i] === '--shard') {
+      args.shardProvided = true;
+      // Preserve the existing --shard parser/default semantics. The
+      // --files conflict is checked separately after all options are read.
+      args.shard = argv[++i] || '';
+    } else if (argv[i] === '--files') {
+      if (args.files !== null) throw new Error('--files may be specified only once');
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--')) {
+        throw new Error('--files requires a non-empty comma-separated value');
+      }
+      args.files = value;
+    } else if (argv[i] === '--list') args.list = true;
     else throw new Error(`Unknown deterministic test runner argument: ${argv[i]}`);
+  }
+  if (args.files !== null && args.shardProvided) {
+    throw new Error('--files cannot be combined with --shard');
   }
   return args;
 }
 
+function parseFocusedFiles(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('--files requires a non-empty comma-separated value');
+  }
+  const requestedFiles = value.split(',').map(file => file.trim());
+  const emptyEntry = requestedFiles.find(file => !file);
+  if (emptyEntry !== undefined) {
+    throw new Error('--files cannot contain empty file paths');
+  }
+  const traversalEntry = requestedFiles.find(file => file.split(/[\\/]/u).includes('..'));
+  if (traversalEntry !== undefined) {
+    throw new Error(`--files rejects path traversal: ${traversalEntry}`);
+  }
+  const registered = new Set(tests);
+  const unknownEntry = requestedFiles.find(file => !registered.has(file));
+  if (unknownEntry !== undefined) {
+    throw new Error(`--files path is not registered: ${unknownEntry}`);
+  }
+  return [...new Set(requestedFiles)];
+}
+
+function estimateFocusedTests(selectedTests) {
+  return selectedTests.reduce((total, file) => {
+    const configured = Number(TEST_ESTIMATES_MS[file]);
+    const estimateMs = Number.isFinite(configured) && configured > 0
+      ? Math.floor(configured)
+      : 2_000;
+    return total + estimateMs;
+  }, 0);
+}
+
 const runnerArgs = parseRunnerArgs(process.argv.slice(2));
-const shard = selectDeterministicTestShard(tests, runnerArgs.shard || '1/1', TEST_ESTIMATES_MS);
-const selectedTests = shard.tests;
+const shard = runnerArgs.files === null
+  ? selectDeterministicTestShard(tests, runnerArgs.shard || '1/1', TEST_ESTIMATES_MS)
+  : null;
+const focusedFiles = runnerArgs.files === null ? null : parseFocusedFiles(runnerArgs.files);
+const selectedTests = shard?.tests || tests.filter(file => focusedFiles.includes(file));
+const estimatedMs = shard?.estimatedMs || estimateFocusedTests(selectedTests);
 if (runnerArgs.list) {
-  console.log(JSON.stringify({ok: true, shard: `${shard.index}/${shard.count}`, estimatedMs: shard.estimatedMs, tests: selectedTests}, null, 2));
+  if (shard) {
+    console.log(JSON.stringify({ok: true, shard: `${shard.index}/${shard.count}`, estimatedMs, tests: selectedTests}, null, 2));
+  } else {
+    console.log(JSON.stringify({
+      ok: true,
+      mode: 'files',
+      order: 'registered',
+      requestedFiles: runnerArgs.files.split(',').map(file => file.trim()),
+      deduplicatedFiles: focusedFiles,
+      estimatedMs,
+      tests: selectedTests,
+    }, null, 2));
+  }
   process.exit(0);
 }
-console.error(`TEST_SHARD ${shard.index}/${shard.count} selected=${selectedTests.length} total=${tests.length} estimatedMs=${shard.estimatedMs}`);
+if (shard) {
+  console.error(`TEST_SHARD ${shard.index}/${shard.count} selected=${selectedTests.length} total=${tests.length} estimatedMs=${estimatedMs}`);
+} else {
+  console.error(`TEST_FILES order=registered selected=${selectedTests.length} requested=${runnerArgs.files.split(',').length} unique=${focusedFiles.length} total=${tests.length} estimatedMs=${estimatedMs}`);
+}
 
 const failures = [];
 for (const file of selectedTests) {
@@ -419,20 +487,37 @@ for (const file of selectedTests) {
 }
 
 if (failures.length) {
-  console.error(JSON.stringify({
+  const failureManifest = {
     ok: false,
-    shard: `${shard.index}/${shard.count}`,
     selected: selectedTests.length,
     passed: selectedTests.length - failures.length,
     failed: failures,
-  }, null, 2));
+  };
+  if (shard) failureManifest.shard = `${shard.index}/${shard.count}`;
+  else {
+    failureManifest.mode = 'files';
+    failureManifest.order = 'registered';
+    failureManifest.tests = selectedTests;
+  }
+  console.error(JSON.stringify(failureManifest, null, 2));
   process.exit(1);
 }
 
-console.log(JSON.stringify({
-  ok: true,
-  shard: `${shard.index}/${shard.count}`,
-  passed: selectedTests.length,
-  total: tests.length,
-  failed: 0,
-}, null, 2));
+if (shard) {
+  console.log(JSON.stringify({
+    ok: true,
+    shard: `${shard.index}/${shard.count}`,
+    passed: selectedTests.length,
+    total: tests.length,
+    failed: 0,
+  }, null, 2));
+} else {
+  console.log(JSON.stringify({
+    ok: true,
+    mode: 'files',
+    order: 'registered',
+    passed: selectedTests.length,
+    total: tests.length,
+    failed: 0,
+  }, null, 2));
+}
