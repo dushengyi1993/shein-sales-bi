@@ -304,8 +304,16 @@ async function makePortal(dir, {core = true, section, sectionGeneratedAt = gener
     'worker must persist the exact bounded decoded reason in the queue failure');
   assert.match(worker, /check_bi_portal_section_terminal\.mjs[\s\S]*--root "\$PORTAL_ROOT" --section "\$SECTION"/,
     'worker must verify the terminal artifact before completing');
+  assert.match(worker, /timeout --signal=TERM --kill-after=1s "\$\{remaining_sec\}s"[\s\S]*check_bi_portal_section_terminal\.mjs/,
+    'worker terminal validation must be bounded by the effective claim deadline');
   assert.match(worker, /TERMINAL_STATUS" -eq 0[\s\S]*queue_command complete --section "\$SECTION" --lease-id "\$LEASE_ID"/,
     'worker may only complete after a passing terminal readback');
+  assert.match(worker, /--not-after-epoch "\$CLAIM_DEADLINE_EPOCH"/,
+    'worker completion must pass the immutable slot/lease deadline to the manager');
+  assert.match(worker, /if \[\[ "\$CURL_STATUS" -ne 0 \]\]; then\s*fail_terminal_claim "\$CURL_STATUS"/,
+    'a transport failure must fail the lease without terminal reconciliation');
+  assert.doesNotMatch(worker, /TERMINAL_RECONCILIATION|pre_request_terminal_probe|classify_terminal_report|--identity-only/,
+    'worker must not retain transport reconciliation or a pre-request identity probe');
   assert.match(worker, /CLAIMED_SECTIONS=\(\)[\s\S]*--exclude-sections[\s\S]*CLAIMED_SECTIONS\+=\("\$SECTION"\)/,
     'one worker run must claim distinct sections so a hot entry cannot consume every bounded slot');
   assert.match(worker, /PROFIT_MIN_RUNTIME_SEC[\s\S]*REMAINING_SEC < PROFIT_MIN_RUNTIME_SEC[\s\S]*EXCLUDED_SECTIONS\+=\(profit\)/,

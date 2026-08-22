@@ -53,6 +53,14 @@ if (( SAFE_START == 0 )); then
   exit 75
 fi
 
+# Resolve the slot boundary once. A later wall-clock hour must not extend a
+# worker that started in the previous slot; every claim is capped again by its
+# own lease expiry below.
+START_CURRENT_HOUR="$(date +%Y-%m-%dT%H)"
+SLOT_DEADLINE_EPOCH="$(date -d "${START_CURRENT_HOUR}:${DEADLINE_MINUTE}:00" +%s)"
+[[ "$SLOT_DEADLINE_EPOCH" =~ ^[0-9]+$ ]] || exit 64
+readonly SLOT_DEADLINE_EPOCH
+
 source "$ROOT/scripts/lib/shared_lock.sh"
 prepare_shared_lock_file "$LOCK_FILE"
 cd "$ROOT"
@@ -185,6 +193,122 @@ process.stdout.write(prefix + Array.from(safeError).slice(0, available).join('')
 NODE
 }
 
+terminal_readback() {
+  TERMINAL_REPORT=''
+  TERMINAL_STATUS=124
+  local now_epoch
+  local remaining_sec
+  now_epoch="$(date +%s)"
+  remaining_sec=$((CLAIM_DEADLINE_EPOCH - now_epoch))
+  if (( remaining_sec <= 0 )); then
+    return 0
+  fi
+  if TERMINAL_REPORT="$(timeout --signal=TERM --kill-after=1s "${remaining_sec}s" \
+    node scripts/check_bi_portal_section_terminal.mjs \
+    --root "$PORTAL_ROOT" --section "$SECTION" \
+    --expected-generated-at "$CLAIMED_CORE_GENERATED_AT" 2>&1)"; then
+    TERMINAL_STATUS=0
+  else
+    TERMINAL_STATUS=$?
+  fi
+}
+
+fail_terminal_claim() {
+  local marker="$1"
+  local error="$2"
+  local journal="$3"
+  queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" --error "$error" >/dev/null
+  echo "[portal-section-worker] section=$SECTION failed status=$marker $journal" >&2
+  FAILED_SECTIONS+=("$SECTION:$marker")
+}
+
+complete_terminal_claim() {
+  local report_text="$1"
+  TERMINAL_STATUS="$2"
+
+  if [[ "$TERMINAL_STATUS" -eq 0 ]]; then
+    if TERMINAL_EVIDENCE="$(node - "$report_text" "$SECTION" "$CLAIMED_CORE_GENERATED_AT" <<'NODE'
+const reportText = String(process.argv[2] || '').trim();
+const section = String(process.argv[3] || '');
+const expected = String(process.argv[4] || '');
+let report = null;
+try {
+  const line = reportText.split(/\r?\n/u).filter(Boolean).at(-1) || '';
+  report = JSON.parse(line);
+} catch {}
+if (!report || report.ok !== true || report.section !== section
+  || report.coreGeneratedAt !== expected || report.sectionGeneratedAt !== expected
+  || report.generatedAt !== expected || !/^[a-f0-9]{64}$/u.test(String(report.generationIdentity || ''))) process.exit(2);
+process.stdout.write([report.generatedAt, report.sectionGeneratedAt, report.generationIdentity].join('\t'));
+NODE
+    )"; then
+      TERMINAL_EVIDENCE_STATUS=0
+    else
+      TERMINAL_EVIDENCE_STATUS=$?
+    fi
+    if [[ "$TERMINAL_EVIDENCE_STATUS" -ne 0 ]]; then
+      fail_terminal_claim "terminal-evidence" \
+        "terminal evidence generation or identity mismatch" \
+        "(terminal evidence mismatch)"
+      return 0
+    fi
+    IFS=$'\t' read -r TERMINAL_GENERATED_AT TERMINAL_SECTION_GENERATED_AT TERMINAL_GENERATION_IDENTITY <<< "$TERMINAL_EVIDENCE"
+    NOW_EPOCH="$(date +%s)"
+    if (( NOW_EPOCH >= CLAIM_DEADLINE_EPOCH )); then
+      fail_terminal_claim "completion-deadline" \
+        "terminal completion deadline elapsed" \
+        "(completion was not attempted after the effective deadline)"
+      return 0
+    fi
+    COMPLETE_REPORT="$(queue_command complete --section "$SECTION" --lease-id "$LEASE_ID" \
+      --expected-generated-at "$CLAIMED_CORE_GENERATED_AT" \
+      --terminal-generated-at "$TERMINAL_GENERATED_AT" \
+      --terminal-section-generated-at "$TERMINAL_SECTION_GENERATED_AT" \
+      --terminal-generation-identity "$TERMINAL_GENERATION_IDENTITY" \
+      --not-after-epoch "$CLAIM_DEADLINE_EPOCH")"
+    COMPLETED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.completed===true))' "$COMPLETE_REPORT")"
+    PUBLISHED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.published===true))' "$COMPLETE_REPORT")"
+    PUBLISHED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.publishedRevision||""))' "$COMPLETE_REPORT")"
+    DESIRED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.desiredRevision||""))' "$COMPLETE_REPORT")"
+    FOLLOW_UP_PENDING="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.followUpPending===true))' "$COMPLETE_REPORT")"
+    COMPLETE_REPORT_VALID="$(node -e '
+const x=JSON.parse(process.argv[1]);
+const published=x.publishedRevision;
+const desired=x.desiredRevision;
+const follow=x.followUpPending;
+const revisionsValid=Number.isSafeInteger(published) && published>0
+  && Number.isSafeInteger(desired) && desired>0;
+const relationValid=follow===true ? desired>published : follow===false && desired<=published;
+process.stdout.write(String(x.completed===true && x.published===true && revisionsValid && relationValid));
+' "$COMPLETE_REPORT")"
+    if [[ "$COMPLETE_REPORT_VALID" != "true" ]]; then
+      if [[ "$SECTION" == "profit" ]]; then
+        PROFIT_COMPLETED_THIS_RUN=0
+        PROFIT_FOLLOW_UP_PENDING=0
+      fi
+      echo "[portal-section-worker] section=$SECTION completion report was not accepted completed=$COMPLETED published=$PUBLISHED publishedRevision=$PUBLISHED_REVISION desiredRevision=$DESIRED_REVISION followUpPending=$FOLLOW_UP_PENDING" >&2
+      FAILED_SECTIONS+=("$SECTION:complete")
+    elif [[ "$FOLLOW_UP_PENDING" == "true" ]]; then
+      if [[ "$SECTION" == "profit" ]]; then
+        PROFIT_COMPLETED_THIS_RUN=0
+        PROFIT_FOLLOW_UP_PENDING=1
+      fi
+      echo "[portal-section-worker] section=$SECTION publishedRevision=$PUBLISHED_REVISION follow-up pending"
+    else
+      if [[ "$SECTION" == "profit" ]]; then
+        PROFIT_COMPLETED_THIS_RUN=1
+        PROFIT_FOLLOW_UP_PENDING=0
+        echo "[portal-section-worker] section=profit same-run completion eligible for post-profit homeRankings budgetSec=$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC"
+      fi
+      echo "[portal-section-worker] section=$SECTION publishedRevision=$PUBLISHED_REVISION"
+    fi
+  else
+    fail_terminal_claim "$TERMINAL_STATUS" \
+      "terminal readback failed code=$TERMINAL_STATUS" \
+      "(terminal readback: $(printf '%s' "$report_text" | tail -c 240))"
+  fi
+}
+
 echo "[portal-section-worker] start maxSections=$MAX_SECTIONS"
 FAILED_SECTIONS=()
 CLAIMED_SECTIONS=()
@@ -194,9 +318,7 @@ PROFIT_COMPLETED_THIS_RUN=0
 PROFIT_FOLLOW_UP_PENDING=0
 for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   NOW_EPOCH="$(date +%s)"
-  CURRENT_HOUR="$(date +%Y-%m-%dT%H)"
-  DEADLINE_EPOCH="$(date -d "${CURRENT_HOUR}:${DEADLINE_MINUTE}:00" +%s)"
-  REMAINING_SEC=$((DEADLINE_EPOCH - NOW_EPOCH))
+  REMAINING_SEC=$((SLOT_DEADLINE_EPOCH - NOW_EPOCH))
   if (( REMAINING_SEC <= 10 )); then
     echo "[portal-section-worker] stop before next core lane remainingSec=$REMAINING_SEC"
     break
@@ -270,13 +392,38 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   [[ "$CLAIM_STATUS" -eq 0 ]] || exit "$CLAIM_STATUS"
   SECTION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.entry?.section||""))' "$CLAIM")"
   LEASE_ID="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.entry?.leaseId||""))' "$CLAIM")"
+  [[ -n "$SECTION" && -n "$LEASE_ID" ]] || {
+    echo "[portal-section-worker] invalid claim: $CLAIM" >&2
+    exit 1
+  }
+  LEASE_DEADLINE_EPOCH="$(node -e '
+const x=JSON.parse(process.argv[1]);
+const raw=String(x.entry?.leaseExpiresAt||"");
+const millis=Date.parse(raw);
+const epoch=Math.floor(millis/1000);
+if (!raw || !Number.isFinite(millis) || !Number.isSafeInteger(epoch) || epoch <= 0) process.exit(2);
+process.stdout.write(String(epoch));
+' "$CLAIM")" || {
+    queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
+      --error "claim missing valid leaseExpiresAt" >/dev/null || true
+    echo "[portal-section-worker] section=$SECTION failed status=claim-lease (invalid leaseExpiresAt)" >&2
+    FAILED_SECTIONS+=("$SECTION:claim-lease")
+    continue
+  }
+  CLAIM_DEADLINE_EPOCH="$SLOT_DEADLINE_EPOCH"
+  if (( LEASE_DEADLINE_EPOCH < CLAIM_DEADLINE_EPOCH )); then
+    CLAIM_DEADLINE_EPOCH="$LEASE_DEADLINE_EPOCH"
+  fi
+  NOW_EPOCH="$(date +%s)"
+  if (( NOW_EPOCH >= CLAIM_DEADLINE_EPOCH )); then
+    fail_terminal_claim "claim-deadline" \
+      "claim effective deadline elapsed before refresh" \
+      "(slot/lease deadline reached)"
+    continue
+  fi
   CLAIMED_CORE_GENERATED_AT="$(node -e 'const x=JSON.parse(process.argv[1]); const value=String(x.entry?.claimedCoreGeneratedAt||""); if(!/^[\x21-\x7E]{1,1024}$/.test(value)||value==="unknown") process.exit(2); process.stdout.write(value)' "$CLAIM")" || {
     queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" --error "claim missing immutable claimedCoreGeneratedAt" >/dev/null || true
     echo "[portal-section-worker] invalid claim generation: $CLAIM" >&2
-    exit 1
-  }
-  [[ -n "$SECTION" && -n "$LEASE_ID" ]] || {
-    echo "[portal-section-worker] invalid claim: $CLAIM" >&2
     exit 1
   }
   if [[ "$SECTION" == "profit" ]]; then
@@ -286,8 +433,21 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   fi
   CLAIMED_SECTIONS+=("$SECTION")
   echo "[portal-section-worker] section=$SECTION attempt=$index"
+
+  # Re-read the immutable effective deadline before curl and reserve a small
+  # margin for the bounded strict terminal readback and completion command.
+  NOW_EPOCH="$(date +%s)"
+  REMAINING_SEC=$((CLAIM_DEADLINE_EPOCH - NOW_EPOCH))
+  MAX_CURL_RUNTIME=$((REMAINING_SEC - 5))
+  if (( MAX_CURL_RUNTIME < 1 )); then
+    queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
+      --error "insufficient deadline budget for bounded terminal readback" >/dev/null
+    echo "[portal-section-worker] section=$SECTION failed status=budget (no room for terminal readback)" >&2
+    FAILED_SECTIONS+=("$SECTION:budget")
+    continue
+  fi
   CURL_TIMEOUT="$SECTION_TIMEOUT"
-  if (( CURL_TIMEOUT > REMAINING_SEC - 5 )); then CURL_TIMEOUT=$((REMAINING_SEC - 5)); fi
+  if (( CURL_TIMEOUT > MAX_CURL_RUNTIME )); then CURL_TIMEOUT=$MAX_CURL_RUNTIME; fi
   HEADERS_FILE="$(mktemp)"
   EXPECTED_GENERATED_AT_QUERY="$(urlencode_query_value "$CLAIMED_CORE_GENERATED_AT")"
   # -f is deliberately not used: 202/403/503 responses must be classified
@@ -300,10 +460,9 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   CURL_STATUS=$?
   set -e
   if [[ "$CURL_STATUS" -ne 0 ]]; then
-    queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
-      --error "curl status=$CURL_STATUS" >/dev/null
-    echo "[portal-section-worker] section=$SECTION failed status=$CURL_STATUS" >&2
-    FAILED_SECTIONS+=("$SECTION:$CURL_STATUS")
+    fail_terminal_claim "$CURL_STATUS" \
+      "curl status=$CURL_STATUS" \
+      "(transport failure)"
   elif [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]] \
     && grep -qiE '^X-BI-Section-Refresh-Failed:[[:space:]]*true' "$HEADERS_FILE"; then
     # Both legacy marker families remain fail-closed:
@@ -340,88 +499,9 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     FAILED_SECTIONS+=("$SECTION:$STATUS")
   else
     # A clean 200 is still not terminal until the artifact on disk matches the
-    # current core generation. Verify the exact section file readback.
-    set +e
-    TERMINAL_REPORT="$(node scripts/check_bi_portal_section_terminal.mjs \
-      --root "$PORTAL_ROOT" --section "$SECTION" \
-      --expected-generated-at "$CLAIMED_CORE_GENERATED_AT" 2>&1)"
-    TERMINAL_STATUS=$?
-    set -e
-    if [[ "$TERMINAL_STATUS" -eq 0 ]]; then
-      set +e
-      TERMINAL_EVIDENCE="$(node - "$TERMINAL_REPORT" "$SECTION" "$CLAIMED_CORE_GENERATED_AT" <<'NODE'
-const reportText = String(process.argv[2] || '').trim();
-const section = String(process.argv[3] || '');
-const expected = String(process.argv[4] || '');
-let report = null;
-try {
-  const line = reportText.split(/\r?\n/u).filter(Boolean).at(-1) || '';
-  report = JSON.parse(line);
-} catch {}
-if (!report || report.ok !== true || report.section !== section
-  || report.coreGeneratedAt !== expected || report.sectionGeneratedAt !== expected
-  || report.generatedAt !== expected || !/^[a-f0-9]{64}$/u.test(String(report.generationIdentity || ''))) process.exit(2);
-process.stdout.write([report.generatedAt, report.sectionGeneratedAt, report.generationIdentity].join('\t'));
-NODE
-      )"
-      TERMINAL_EVIDENCE_STATUS=$?
-      set -e
-      if [[ "$TERMINAL_EVIDENCE_STATUS" -ne 0 ]]; then
-        queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
-          --error "terminal evidence generation or identity mismatch" >/dev/null
-        echo "[portal-section-worker] section=$SECTION failed terminal evidence mismatch" >&2
-        FAILED_SECTIONS+=("$SECTION:terminal-evidence")
-        rm -f "$HEADERS_FILE"
-        continue
-      fi
-      IFS=$'\t' read -r TERMINAL_GENERATED_AT TERMINAL_SECTION_GENERATED_AT TERMINAL_GENERATION_IDENTITY <<< "$TERMINAL_EVIDENCE"
-      COMPLETE_REPORT="$(queue_command complete --section "$SECTION" --lease-id "$LEASE_ID" \
-        --expected-generated-at "$CLAIMED_CORE_GENERATED_AT" \
-        --terminal-generated-at "$TERMINAL_GENERATED_AT" \
-        --terminal-section-generated-at "$TERMINAL_SECTION_GENERATED_AT" \
-        --terminal-generation-identity "$TERMINAL_GENERATION_IDENTITY")"
-      COMPLETED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.completed===true))' "$COMPLETE_REPORT")"
-      PUBLISHED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.published===true))' "$COMPLETE_REPORT")"
-      PUBLISHED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.publishedRevision||""))' "$COMPLETE_REPORT")"
-      DESIRED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.desiredRevision||""))' "$COMPLETE_REPORT")"
-      FOLLOW_UP_PENDING="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.followUpPending===true))' "$COMPLETE_REPORT")"
-      COMPLETE_REPORT_VALID="$(node -e '
-const x=JSON.parse(process.argv[1]);
-const published=x.publishedRevision;
-const desired=x.desiredRevision;
-const follow=x.followUpPending;
-const revisionsValid=Number.isSafeInteger(published) && published>0
-  && Number.isSafeInteger(desired) && desired>0;
-const relationValid=follow===true ? desired>published : follow===false && desired<=published;
-process.stdout.write(String(x.completed===true && x.published===true && revisionsValid && relationValid));
-' "$COMPLETE_REPORT")"
-      if [[ "$COMPLETE_REPORT_VALID" != "true" ]]; then
-        if [[ "$SECTION" == "profit" ]]; then
-          PROFIT_COMPLETED_THIS_RUN=0
-          PROFIT_FOLLOW_UP_PENDING=0
-        fi
-        echo "[portal-section-worker] section=$SECTION completion report was not accepted completed=$COMPLETED published=$PUBLISHED publishedRevision=$PUBLISHED_REVISION desiredRevision=$DESIRED_REVISION followUpPending=$FOLLOW_UP_PENDING" >&2
-        FAILED_SECTIONS+=("$SECTION:complete")
-      elif [[ "$FOLLOW_UP_PENDING" == "true" ]]; then
-        if [[ "$SECTION" == "profit" ]]; then
-          PROFIT_COMPLETED_THIS_RUN=0
-          PROFIT_FOLLOW_UP_PENDING=1
-        fi
-        echo "[portal-section-worker] section=$SECTION publishedRevision=$PUBLISHED_REVISION follow-up pending"
-      else
-        if [[ "$SECTION" == "profit" ]]; then
-          PROFIT_COMPLETED_THIS_RUN=1
-          PROFIT_FOLLOW_UP_PENDING=0
-          echo "[portal-section-worker] section=profit same-run completion eligible for post-profit homeRankings budgetSec=$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC"
-        fi
-        echo "[portal-section-worker] section=$SECTION publishedRevision=$PUBLISHED_REVISION"
-      fi
-    else
-      queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
-        --error "terminal readback failed code=$TERMINAL_STATUS" >/dev/null
-      echo "[portal-section-worker] section=$SECTION failed status=$TERMINAL_STATUS (terminal readback: $(printf '%s' "$TERMINAL_REPORT" | tail -c 240))" >&2
-      FAILED_SECTIONS+=("$SECTION:$TERMINAL_STATUS")
-    fi
+    # current core generation and the manager accepts the terminal evidence.
+    terminal_readback
+    complete_terminal_claim "$TERMINAL_REPORT" "$TERMINAL_STATUS"
   fi
   rm -f "$HEADERS_FILE"
 done

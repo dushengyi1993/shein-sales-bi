@@ -542,6 +542,95 @@ function assertQueueFileUnchanged(file, before, label) {
   assert.throws(() => enqueueSections(queue, {sections: ['../escape']}), /SECTION_INVALID/);
 }
 
+// ---- completeClaim owns publication only while its lease and caller deadline are valid.
+{
+  const evidence = {
+    expectedGeneratedAt: 'G1', terminalGeneratedAt: 'G1', terminalSectionGeneratedAt: 'G1',
+    terminalGenerationIdentity: 'f'.repeat(64), requireTerminalEvidence: true,
+  };
+  const fixture = leaseId => {
+    const queue = {version: 1, updatedAt: '', entries: []};
+    enqueueSections(queue, {sections: ['orders'], idempotencyKey: `lease:${leaseId}`, now: at(0)});
+    const claim = claimNext(queue, {leaseSeconds: 60, leaseId, now: at(1_000)});
+    return {queue, claim, expiresAt: Date.parse(claim.leaseExpiresAt)};
+  };
+  const complete = (state, now, options = {}) => completeClaim(state.queue, {
+    section: 'orders', leaseId: state.claim.leaseId, now, ...evidence, ...options,
+  });
+  const rejectUnchanged = (state, now, error, options = {}) => {
+    const before = structuredClone(state.queue);
+    assert.throws(() => complete(state, now, options), error);
+    assert.deepEqual(state.queue, before);
+  };
+
+  const valid = fixture('before-expiry');
+  assert.equal(complete(valid, new Date(valid.expiresAt - 1)), true);
+  assert.deepEqual([valid.queue.entries.length, valid.queue.publishedSnapshots.length,
+    valid.queue.completedIdempotency.length], [0, 1, 1]);
+  const expired = fixture('expired');
+  rejectUnchanged(expired, new Date(expired.expiresAt), /QUEUE_LEASE_EXPIRED/);
+  rejectUnchanged(expired, new Date(expired.expiresAt + 1), /QUEUE_LEASE_EXPIRED/);
+  const invalid = fixture('invalid');
+  invalid.queue.entries[0].leaseExpiresAt = 'invalid';
+  rejectUnchanged(invalid, at(2_000), /QUEUE_LEASE_INVALID/);
+
+  const deadlineEpoch = Math.floor(at(10_000).getTime() / 1_000);
+  assert.equal(complete(fixture('deadline-before'), new Date(deadlineEpoch * 1_000 - 1), {notAfterEpoch: deadlineEpoch}), true);
+  for (const offset of [0, 1]) {
+    rejectUnchanged(fixture(`deadline-${offset}`), new Date(deadlineEpoch * 1_000 + offset), /QUEUE_NOT_AFTER_EPOCH_EXPIRED/, {notAfterEpoch: deadlineEpoch});
+  }
+  rejectUnchanged(fixture('deadline-invalid'), at(2_000), /QUEUE_NOT_AFTER_EPOCH_INVALID/, {notAfterEpoch: 0});
+}
+
+// ---- CLI shares the guard; rejected calls must not rewrite queue bytes.
+{
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-section-lease-boundary-'));
+  try {
+    const manager = path.join(process.cwd(), 'scripts', 'manage_bi_portal_section_queue.mjs');
+    const fixture = (name, expiry) => {
+      const now = new Date();
+      const queue = {version: 1, updatedAt: '', entries: []};
+      enqueueSections(queue, {sections: ['orders'], idempotencyKey: `cli-lease:${name}`, now});
+      const claim = claimNext(queue, {leaseSeconds: 60, leaseId: `cli-${name}`, now});
+      queue.entries[0].leaseExpiresAt = expiry(now);
+      const file = path.join(temp, `${name}.json`);
+      fs.writeFileSync(file, `${JSON.stringify(queue, null, 2)}\n`);
+      return {file, claim};
+    };
+    const run = (state, ...extra) => spawnSync(process.execPath, [
+      manager, 'complete', '--section', 'orders', '--lease-id', state.claim.leaseId,
+      ...terminalEvidenceArgs('G1', 'e'.repeat(64)), ...extra, '--file', state.file,
+    ], {cwd: process.cwd(), encoding: 'utf8'});
+
+    const future = fixture('future', now => new Date(now.getTime() + 60_000).toISOString());
+    const success = run(future, '--not-after-epoch', String(Math.floor(Date.now() / 1_000) + 60));
+    assert.equal(success.status, 0, success.stderr);
+    const published = JSON.parse(fs.readFileSync(future.file, 'utf8'));
+    assert.deepEqual([published.entries.length, published.publishedSnapshots.length,
+      published.completedIdempotency.length], [0, 1, 1]);
+    for (const [name, expiry, error] of [['past', now => new Date(now.getTime() - 1_000).toISOString(), /QUEUE_LEASE_EXPIRED/],
+      ['invalid', () => 'invalid', /QUEUE_LEASE_INVALID/]]) {
+      const state = fixture(name, expiry);
+      const before = queueFileSnapshot(state.file);
+      const rejected = run(state);
+      assert.equal(rejected.status, 1);
+      assert.match(rejected.stderr, error);
+      assertQueueFileUnchanged(state.file, before, name);
+    }
+    for (const [name, deadline] of [['deadline-at', Math.floor(Date.now() / 1_000)],
+      ['deadline-past', Math.floor(Date.now() / 1_000) - 1]]) {
+      const state = fixture(name, now => new Date(now.getTime() + 60_000).toISOString());
+      const before = queueFileSnapshot(state.file);
+      const rejected = run(state, '--not-after-epoch', String(deadline));
+      assert.equal(rejected.status, 1);
+      assert.match(rejected.stderr, /QUEUE_NOT_AFTER_EPOCH_EXPIRED/);
+      assertQueueFileUnchanged(state.file, before, name);
+    }
+  } finally {
+    fs.rmSync(temp, {recursive: true, force: true});
+  }
+}
+
 // ---- CLI round trip: enqueue, claim, published old revision with a pending
 // follow-up, fail with backoff, status repair of a broken lease.
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-section-queue-'));

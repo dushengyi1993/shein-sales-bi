@@ -301,7 +301,7 @@ assert.match(portalServer, /'accountingInputUpdatedAt', greatest\([\s\S]*fact\.a
   'return and after-sales mutations must invalidate profit without masquerading as new sales');
 assert.match(portalServer, /refreshHistoricalSections:[\s\S]*eventNeedsHistoricalRefresh/,
   'a webhook burst must preserve prior-day cancellation and return invalidation scope');
-assert.match(portalServer, /section === 'homeProfit'[\s\S]*deriveHomeProfitSectionFromProfitCache\(root, generatedAt\)[\s\S]*return derived/,
+assert.match(portalServer, /section === 'homeProfit'[\s\S]*getOrCreateBiSectionInFlight\([\s\S]*ownerSignal => deriveHomeProfitSectionFromProfitCache\(root, meta\.generatedAt, ownerSignal\)[\s\S]*const derived = await biSectionInFlight\.get\(deriveKey\)/,
   'forced historical profit refreshes must derive homeProfit instead of calling a nonexistent SQL section');
 assert.match(portalServer, /accountingQueued: true/,
   'historical and return clients must be told that canonical accounting was queued without delaying live sales');

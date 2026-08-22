@@ -107,15 +107,51 @@ function makeQueue(queueFile, sections, now) {
   fs.writeFileSync(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
 }
 
-function makeDateStub(binDir, {hour, minute, nowEpoch, deadlineEpoch}) {
+function makeDateStub(binDir, {
+  hour,
+  minute,
+  nowEpoch,
+  nowEpochs = [nowEpoch],
+  deadlineEpoch,
+  rolloverHour = '',
+  rolloverDeadlineEpoch = deadlineEpoch,
+}) {
+  const epochValues = nowEpochs.map(value => Number(value));
+  const epochLiteral = epochValues.join(' ');
+  const secondState = toPosixPath(path.join(binDir, 'date-seconds.state'));
+  const hourState = toPosixPath(path.join(binDir, 'date-hours.state'));
   writeExecutable(path.join(binDir, 'date'), `#!/usr/bin/env bash
 set -euo pipefail
 case "\${1:-}" in
   +%H) printf '%s' '${hour}' ;;
   +%M) printf '%s' '${minute}' ;;
-  +%s) printf '%s' '${nowEpoch}' ;;
-  +%Y-%m-%dT%H) printf '%s' '2026-08-22T${hour}' ;;
-  -d) printf '%s' '${deadlineEpoch}' ;;
+  +%s)
+    index=0
+    if [[ -f '${secondState}' ]]; then index="$(< '${secondState}')"; fi
+    values=(${epochLiteral})
+    (( index < \${#values[@]} )) || index=\$((\${#values[@]} - 1))
+    printf '%s' \$((index + 1)) > '${secondState}'
+    printf '%s' "\${values[\$index]}"
+    ;;
+  +%Y-%m-%dT%H)
+    index=0
+    if [[ -f '${hourState}' ]]; then index="$(< '${hourState}')"; fi
+    printf '%s' \$((index + 1)) > '${hourState}'
+    if (( index == 0 )) || [[ -z '${rolloverHour}' ]]; then
+      printf '%s' '2026-08-22T${hour}'
+    else
+      printf '%s' '2026-08-22T${rolloverHour}'
+    fi
+    ;;
+  -d)
+    hourCalls=0
+    if [[ -f '${hourState}' ]]; then hourCalls="$(< '${hourState}')"; fi
+    if (( hourCalls > 1 )) && [[ -n '${rolloverHour}' ]]; then
+      printf '%s' '${rolloverDeadlineEpoch}'
+    else
+      printf '%s' '${deadlineEpoch}'
+    fi
+    ;;
   *) printf '%s' '2026-08-22T${hour}:${minute}:00+08:00' ;;
 esac
 `);
@@ -183,6 +219,10 @@ async function runWindowCase({
   maxSections,
   expectedStatus,
   profitHttp = '200',
+  leaseSeconds = 60,
+  nowEpochs = null,
+  rolloverHour = '',
+  rolloverDeadlineEpoch = deadlineEpoch,
   requeueProfit = false,
   removeProfitBeforeComplete = false,
   artifactSections = sections,
@@ -204,7 +244,18 @@ async function runWindowCase({
     queueSetup(queue);
     fs.writeFileSync(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
   }
-  makeDateStub(binDir, {hour, minute, nowEpoch, deadlineEpoch});
+  const epochOffset = deadlineEpoch < 1_000_000_000
+    ? Math.floor(Date.now() / 1_000) - nowEpoch
+    : 0;
+  makeDateStub(binDir, {
+    hour,
+    minute,
+    nowEpoch: nowEpoch + epochOffset,
+    nowEpochs: (nowEpochs || [nowEpoch]).map(value => value + epochOffset),
+    deadlineEpoch: deadlineEpoch + epochOffset,
+    rolloverHour,
+    rolloverDeadlineEpoch: rolloverDeadlineEpoch + epochOffset,
+  });
   makeCurlStub(binDir);
 
   const env = {
@@ -218,7 +269,7 @@ async function runWindowCase({
     SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC: '540',
     SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC: '60',
     SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC: '120',
-    SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC: '60',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC: String(leaseSeconds),
     SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED: '1',
     SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE: String(deadlineMinute),
     SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED: String(heavyAllowed),
@@ -257,7 +308,7 @@ async function runWindowCase({
   }
 }
 
-const tools = spawnSync('bash', ['-lc', 'command -v flock >/dev/null && command -v mktemp >/dev/null && command -v node >/dev/null'], {encoding: 'utf8'});
+const tools = spawnSync('bash', ['-lc', 'command -v flock >/dev/null && command -v mktemp >/dev/null && command -v node >/dev/null && command -v timeout >/dev/null'], {encoding: 'utf8'});
 if (tools.status !== 0) {
   console.log('SKIP bi_portal_section_queue_window: worker integration needs bash+flock+mktemp+node');
 } else {
@@ -299,6 +350,69 @@ if (tools.status !== 0) {
     'a dedicated :32 window with sufficient remaining time may claim profit');
   assert.equal(heavyWindow.queue.entries.some(entry => entry.section === 'profit'), false,
     'the heavy profit claim must complete in the sufficient window');
+
+  const rolloverWindow = await runWindowCase({
+    name: 'immutable-slot-rollover',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    nowEpochs: [1_000, 1_995, 1_995],
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    rolloverHour: '07',
+    rolloverDeadlineEpoch: 3_000,
+    leaseSeconds: 1_200,
+    heavyAllowed: 1,
+    sections: ['orders'],
+    artifactSections: ['orders'],
+    maxSections: 1,
+    expectedStatus: 1,
+  });
+  assert.deepEqual(rolloverWindow.calls, [],
+    'a later wall-clock hour must not extend the immutable startup slot');
+  assert.match(rolloverWindow.queue.entries.find(entry => entry.section === 'orders')?.lastError || '',
+    /insufficient deadline budget/,
+    'the rollover case must fail inside the original slot budget');
+
+  const leaseBase = Math.floor(Date.now() / 1_000);
+  const leaseCapped = await runWindowCase({
+    name: 'lease-capped-deadline',
+    hour: '06',
+    minute: '32',
+    nowEpoch: leaseBase,
+    nowEpochs: [leaseBase, leaseBase, leaseBase + 31],
+    deadlineEpoch: leaseBase + 200,
+    deadlineMinute: 44,
+    leaseSeconds: 30,
+    heavyAllowed: 1,
+    sections: ['orders'],
+    artifactSections: ['orders'],
+    maxSections: 1,
+    expectedStatus: 1,
+  });
+  assert.deepEqual(leaseCapped.calls, [],
+    'a lease deadline earlier than the slot must cap the refresh budget');
+  assert.match(leaseCapped.queue.entries.find(entry => entry.section === 'orders')?.lastError || '',
+    /insufficient deadline budget/,
+    'the lease-capped case must fail before starting work after lease expiry');
+
+  const clean200Unchanged = await runWindowCase({
+    name: 'clean-200-unchanged-terminal',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    sections: ['orders'],
+    artifactSections: ['orders'],
+    maxSections: 1,
+    expectedStatus: 0,
+  });
+  assert.deepEqual(clean200Unchanged.calls, ['orders'],
+    'a clean 200 must retain the ordinary single refresh path');
+  assert.equal(clean200Unchanged.queue.entries.some(entry => entry.section === 'orders'), false,
+    'a clean 200 with an unchanged pre-request terminal artifact must complete');
 
   const quietSuccess = await runWindowCase({
     name: 'quiet-success-post-profit',

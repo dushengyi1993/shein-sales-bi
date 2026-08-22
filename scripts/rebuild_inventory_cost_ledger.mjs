@@ -24,6 +24,17 @@ const SOURCE_TABLES = Object.freeze([
   'ops.accounting_period_close',
 ]);
 
+const BI_DB_APPLICATION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/;
+
+function validateBiDbApplicationName(value) {
+  const name = String(value ?? '');
+  if (!name) return '';
+  if (name !== name.trim() || Buffer.byteLength(name, 'utf8') > 63 || !BI_DB_APPLICATION_NAME_RE.test(name)) {
+    throw new Error('SHEIN_BI_DB_APPLICATION_NAME must be 1-63 safe ASCII characters');
+  }
+  return name;
+}
+
 export function normalizeInventoryCostLogicalRunKey(value) {
   const key = String(value || '').trim();
   if (!key) return '';
@@ -64,6 +75,7 @@ function parseArgs(argv) {
     database: 'shein_bi',
     user: 'shein',
     dryRun: false,
+    applicationName: validateBiDbApplicationName(process.env.SHEIN_BI_DB_APPLICATION_NAME || ''),
     logicalRunKey: normalizeInventoryCostLogicalRunKey(process.env.SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY || ''),
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -107,12 +119,14 @@ function copyBlock(table, columns, rows) {
 async function psql(args, sql, {readOnly = false} = {}) {
   const useWsl = process.platform === 'win32';
   const command = useWsl ? 'wsl' : (process.env.SHEIN_BI_DOCKER_COMMAND || 'sudo');
-  const base = `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`;
+  const applicationEnv = args.applicationName ? ` -e PGAPPNAME=${args.applicationName}` : '';
+  const base = `sudo docker exec -i${applicationEnv} ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`;
+  const dockerApplicationEnv = args.applicationName ? ['-e', `PGAPPNAME=${args.applicationName}`] : [];
   const commandArgs = useWsl
     ? ['-d', process.env.SHEIN_BI_WSL_DISTRO || 'Ubuntu-24.04', '--', 'bash', '-lc', base]
     : command === 'sudo'
-      ? ['-n','docker','exec','-i',args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1']
-      : ['exec','-i',args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1'];
+      ? ['-n','docker','exec','-i',...dockerApplicationEnv,args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1']
+      : ['exec','-i',...dockerApplicationEnv,args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1'];
   if (args.dryRun && !readOnly) return {stdout: '', dryRun: true, sqlBytes: Buffer.byteLength(sql)};
   const child = spawn(command, commandArgs, {stdio: ['pipe','pipe','pipe'], windowsHide: true});
   const stdout = [];

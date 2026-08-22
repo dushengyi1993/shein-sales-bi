@@ -34,6 +34,8 @@ import {spawnSync} from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {publishBiProfitBundleManifest, writeBiSectionArtifact, writeBiSectionCache} from '../lib/bi_section_cache.mjs';
+import {validateTerminalArtifact} from './check_bi_portal_section_terminal.mjs';
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -104,7 +106,8 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
   };
   const sectionsGenerated = async () => {
     try {
-      return (await fs.readdir(path.join(sandbox, 'sections'))).length;
+      const files = await fs.readdir(path.join(sandbox, 'sections'));
+      return WARMUP_SECTIONS.filter(section => files.includes(`${section}.json`)).length;
     } catch {
       return 0;
     }
@@ -119,13 +122,21 @@ if (process.env.BI_PORTAL_WARMUP_HOOK_SELFCHECK === '1') {
   };
   const writeTerminalArtifacts = async (rootDir, generatedAt, targetSections) => {
     await fs.mkdir(path.join(rootDir, 'sections'), {recursive: true});
+    const run = {code: 0, timedOut: false, stderr: ''};
+    const requested = new Set(targetSections);
+    const profitBundleNeeded = requested.has('profit') || requested.has('homeProfit');
+    if (profitBundleNeeded) {
+      const profitData = {profit: {dailyStoreProducts: []}};
+      await writeBiSectionCache(rootDir, 'profit', generatedAt, profitData, run, {requireIntegrity: true});
+      await writeBiSectionArtifact(rootDir, 'profit.query', 'profit.query', generatedAt, profitData, run, {requireIntegrity: true});
+      await writeBiSectionCache(rootDir, 'homeProfit', generatedAt, {
+        homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: false},
+      }, run, {requireIntegrity: true});
+      await publishBiProfitBundleManifest(rootDir, generatedAt);
+    }
     for (const section of targetSections) {
-      const payload = section === 'profit'
-        ? {section, generatedAt, ok: true, data: {dailyStoreProducts: []}}
-        : section === 'homeProfit'
-          ? {section, generatedAt, ok: true, data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: false}}}
-          : {section, generatedAt, ok: true, data: {}};
-      await fs.writeFile(path.join(rootDir, 'sections', `${section}.json`), `${JSON.stringify(payload)}\n`);
+      if (section === 'profit' || section === 'homeProfit') continue;
+      await writeBiSectionCache(rootDir, section, generatedAt, {}, run, {requireIntegrity: true});
     }
   };
   // Deterministic fake validator: on every invocation it counts up; once the
@@ -882,19 +893,52 @@ if (process.env.BI_PORTAL_WARMUP_INTEGRATION_SELFCHECK === '1') {
     }
   };
   const sectionsGenerated = async () => {
-    try { return (await fs.readdir(path.join(portalRoot, 'sections'))).length; } catch { return 0; }
+    try {
+      const files = await fs.readdir(path.join(portalRoot, 'sections'));
+      return WARMUP_SECTIONS.filter(section => files.includes(`${section}.json`)).length;
+    } catch { return 0; }
   };
   const writeTerminalArtifacts = async (targetSections) => {
     await fs.mkdir(path.join(portalRoot, 'sections'), {recursive: true});
+    const run = {code: 0, timedOut: false, stderr: ''};
+    const requested = new Set(targetSections);
+    const profitBundleNeeded = requested.has('profit') || requested.has('homeProfit');
+    if (profitBundleNeeded) {
+      const profitData = {profit: {dailyStoreProducts: []}};
+      await writeBiSectionCache(portalRoot, 'profit', 'G1', profitData, run, {requireIntegrity: true});
+      await writeBiSectionArtifact(portalRoot, 'profit.query', 'profit.query', 'G1', profitData, run, {requireIntegrity: true});
+      await writeBiSectionCache(portalRoot, 'homeProfit', 'G1', {
+        homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: 'G1', staleSource: false},
+      }, run, {requireIntegrity: true});
+      await publishBiProfitBundleManifest(portalRoot, 'G1');
+    }
     for (const section of targetSections) {
-      const payload = section === 'profit'
-        ? {section, generatedAt: 'G1', ok: true, data: {dailyStoreProducts: []}}
-        : section === 'homeProfit'
-          ? {section, generatedAt: 'G1', ok: true, data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: 'G1', staleSource: false}}}
-          : {section, generatedAt: 'G1', ok: true, data: {}};
-      await fs.writeFile(path.join(portalRoot, 'sections', `${section}.json`), `${JSON.stringify(payload)}\n`);
+      if (section === 'profit' || section === 'homeProfit') continue;
+      await writeBiSectionCache(portalRoot, section, 'G1', {}, run, {requireIntegrity: true});
     }
   };
+  const strictTerminalEvidence = async (section, generatedAt) => {
+    const evidence = await validateTerminalArtifact({root: portalRoot, section, expectedGeneratedAt: generatedAt});
+    assert.equal(evidence.ok, true, `strict terminal evidence failed for ${section}: ${JSON.stringify(evidence)}`);
+    assert.equal(evidence.expectedGeneratedAt, generatedAt);
+    assert.equal(evidence.generatedAt, generatedAt);
+    assert.equal(evidence.sectionGeneratedAt, generatedAt);
+    assert.match(evidence.generationIdentity, /^[a-f0-9]{64}$/u);
+    return evidence;
+  };
+  const completeWithTerminalEvidence = async claim => {
+    const evidence = await strictTerminalEvidence(claim.entry.section, claim.entry.coreGeneratedAt);
+    return spawnSync(process.execPath, [
+      'scripts/manage_bi_portal_section_queue.mjs', 'complete', '--section', claim.entry.section,
+      '--lease-id', claim.entry.leaseId,
+      '--expected-generated-at', evidence.expectedGeneratedAt,
+      '--terminal-generated-at', evidence.generatedAt,
+      '--terminal-section-generated-at', evidence.sectionGeneratedAt,
+      '--terminal-generation-identity', evidence.generationIdentity,
+      '--file', queueFile,
+    ], {cwd: ROOT, encoding: 'utf8'});
+  };
+  const manage = await import('./manage_bi_portal_section_queue.mjs');
   const queueContent = async () => {
     try { return await fs.readFile(queueFile, 'utf8'); } catch { return ''; }
   };
@@ -935,10 +979,7 @@ if (process.env.BI_PORTAL_WARMUP_INTEGRATION_SELFCHECK === '1') {
         await new Promise(resolve => setTimeout(resolve, 750));
         const after = (await queueSnapshot()).find(entry => entry.section === 'profit');
         await writeTerminalArtifacts(['profit']);
-        const completeRun = spawnSync(process.execPath, [
-          'scripts/manage_bi_portal_section_queue.mjs', 'complete', '--section', claim.entry.section,
-          '--lease-id', claim.entry.leaseId, '--file', queueFile,
-        ], {cwd: ROOT, encoding: 'utf8'});
+        const completeRun = await completeWithTerminalEvidence(claim);
         assert.equal(completeRun.status, 0, `profit complete failed: ${completeRun.stderr}`);
         const complete = JSON.parse(completeRun.stdout);
         const terminal = await queueDocument();
@@ -1054,16 +1095,21 @@ if (process.env.BI_PORTAL_WARMUP_INTEGRATION_SELFCHECK === '1') {
       // fresh Portal must requeue the invalid sections and report queued.
       const first = await startPortal();
       await settleHealth(first.port);
+      const queue = await queueDocument();
       for (let index = 0; index < WARMUP_SECTIONS.length; index += 1) {
-        const claimRun = spawnSync(process.execPath, [
-          'scripts/manage_bi_portal_section_queue.mjs', 'claim', '--lease-seconds', '60', '--file', queueFile,
-        ], {cwd: ROOT, encoding: 'utf8'});
-        const claim = JSON.parse(claimRun.stdout);
-        const completeRun = spawnSync(process.execPath, [
-          'scripts/manage_bi_portal_section_queue.mjs', 'complete', '--section', claim.entry.section, '--lease-id', claim.entry.leaseId, '--file', queueFile,
-        ], {cwd: ROOT, encoding: 'utf8'});
-        assert.equal(completeRun.status, 0, completeRun.stderr);
+        const claim = manage.claimNext(queue, {
+          leaseSeconds: 60,
+          leaseId: `historical-lease-${index}`,
+          now: new Date(Date.now() + index * 100),
+        });
+        assert.ok(claim);
+        assert.equal(manage.completeClaim(queue, {
+          section: claim.section,
+          leaseId: `historical-lease-${index}`,
+          now: new Date(Date.now() + index * 100 + 50),
+        }), true);
       }
+      await fs.writeFile(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
       await stopPortal(first);
       const second = await startPortal();
       let health = await settleHealth(second.port);
@@ -1096,9 +1142,7 @@ if (process.env.BI_PORTAL_WARMUP_INTEGRATION_SELFCHECK === '1') {
           'scripts/manage_bi_portal_section_queue.mjs', 'claim', '--lease-seconds', '60', '--file', queueFile,
         ], {cwd: ROOT, encoding: 'utf8'});
         const claim = JSON.parse(claimRun.stdout);
-        const completeRun = spawnSync(process.execPath, [
-          'scripts/manage_bi_portal_section_queue.mjs', 'complete', '--section', claim.entry.section, '--lease-id', claim.entry.leaseId, '--file', queueFile,
-        ], {cwd: ROOT, encoding: 'utf8'});
+        const completeRun = await completeWithTerminalEvidence(claim);
         assert.equal(completeRun.status, 0, completeRun.stderr);
       }
       await stopPortal(first);

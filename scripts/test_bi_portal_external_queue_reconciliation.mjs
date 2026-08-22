@@ -6,6 +6,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {publishBiProfitBundleManifest, writeBiSectionArtifact, writeBiSectionCache} from '../lib/bi_section_cache.mjs';
+import {validateTerminalArtifact} from './check_bi_portal_section_terminal.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter'];
@@ -68,17 +70,44 @@ const writeCore = async generatedAt => {
   await fs.writeFile(path.join(portalRoot, 'data.json'), `${JSON.stringify({generatedAt, __sections: {mode: 'api', generatedAt}})}\n`);
 };
 const writeArtifacts = async (generatedAt, sections = WARMUP_SECTIONS) => {
-  for (const section of sections) {
-    const data = section === 'profit'
-      ? {dailyStoreProducts: []}
-      : section === 'homeProfit'
-        ? {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: false}}
-        : {};
-    await fs.writeFile(
-      path.join(portalRoot, 'sections', `${section}.json`),
-      `${JSON.stringify({section, generatedAt, ok: true, data})}\n`,
-    );
+  const run = {code: 0, timedOut: false, stderr: ''};
+  const requested = new Set(sections);
+  const profitBundleNeeded = requested.has('profit') || requested.has('homeProfit');
+  if (profitBundleNeeded) {
+    const profitData = {profit: {dailyStoreProducts: []}};
+    await writeBiSectionCache(portalRoot, 'profit', generatedAt, profitData, run, {requireIntegrity: true});
+    await writeBiSectionArtifact(portalRoot, 'profit.query', 'profit.query', generatedAt, profitData, run, {requireIntegrity: true});
+    await writeBiSectionCache(portalRoot, 'homeProfit', generatedAt, {
+      homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: false},
+    }, run, {requireIntegrity: true});
+    await publishBiProfitBundleManifest(portalRoot, generatedAt);
   }
+  for (const section of sections) {
+    if (section === 'profit' || section === 'homeProfit') continue;
+    await writeBiSectionCache(portalRoot, section, generatedAt, {}, run, {requireIntegrity: true});
+  }
+};
+const strictTerminalEvidence = async (section, generatedAt) => {
+  const evidence = await validateTerminalArtifact({root: portalRoot, section, expectedGeneratedAt: generatedAt});
+  assert.equal(evidence.ok, true, `strict terminal evidence failed for ${section}: ${JSON.stringify(evidence)}`);
+  assert.equal(evidence.expectedGeneratedAt, generatedAt);
+  assert.equal(evidence.generatedAt, generatedAt);
+  assert.equal(evidence.sectionGeneratedAt, generatedAt);
+  assert.match(evidence.generationIdentity, /^[a-f0-9]{64}$/u);
+  return evidence;
+};
+const completeInMemoryWithTerminalEvidence = async (queue, claim, leaseId, now) => {
+  const evidence = await strictTerminalEvidence(claim.section, claim.coreGeneratedAt);
+  return manage.completeClaim(queue, {
+    section: claim.section,
+    leaseId,
+    expectedGeneratedAt: evidence.expectedGeneratedAt,
+    terminalGeneratedAt: evidence.generatedAt,
+    terminalSectionGeneratedAt: evidence.sectionGeneratedAt,
+    terminalGenerationIdentity: evidence.generationIdentity,
+    requireTerminalEvidence: true,
+    now,
+  });
 };
 const readQueue = async () => JSON.parse(await fs.readFile(queueFile, 'utf8'));
 const writeQueue = async queue => fs.writeFile(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
@@ -229,7 +258,7 @@ try {
   const mismatch = await __testHooks.reconcileBiPortalCoreWarmupQueueOwned(portalRoot, WARMUP_SECTIONS, 'G1');
   assert.equal(mismatch.status, 'queued', 'a terminal artifact mismatch must remain queued');
   assert.equal(mismatch.reason, 'terminal-mismatch');
-  assert.deepEqual(mismatch.invalidSections, ['profit']);
+  assert.deepEqual([...mismatch.invalidSections].sort(), ['homeProfit', 'profit']);
 
   const missingReceiptQueue = completedQueue();
   missingReceiptQueue.completedIdempotency = missingReceiptQueue.completedIdempotency.slice(1);
@@ -254,11 +283,12 @@ try {
       now: new Date(Date.now() + index * 100),
     });
     assert.ok(WARMUP_SECTIONS.includes(claim.section));
-    assert.equal(manage.completeClaim(queuedQueue, {
-      section: claim.section,
-      leaseId: `reconcile-lease-${index}`,
-      now: new Date(Date.now() + index * 100 + 50),
-    }), true);
+    assert.equal(await completeInMemoryWithTerminalEvidence(
+      queuedQueue,
+      claim,
+      `reconcile-lease-${index}`,
+      new Date(Date.now() + index * 100 + 50),
+    ), true);
   }
   await writeQueue(queuedQueue);
   const reconciled = await __testHooks.scheduleBiPortalCoreWarmup({}, portalRoot, {allowGenerate: true});
@@ -316,6 +346,8 @@ try {
   });
   assert.equal(unrelatedClaim.section, 'actions');
   await writeQueue(optimisticQueue);
+  await writeArtifacts('G1', ['actions']);
+  const actionsEvidence = await strictTerminalEvidence('actions', 'G1');
   const fakeValidator = path.join(temp, 'blocking-terminal-validator.mjs');
   const validatorMarker = path.join(temp, 'validator-started');
   const validatorRelease = path.join(temp, 'validator-release');
@@ -359,7 +391,12 @@ try {
     '-w', '10', queueLock,
     process.execPath,
     path.join(ROOT, 'scripts', 'manage_bi_portal_section_queue.mjs'),
-    'complete', '--section', 'actions', '--lease-id', 'lease-unrelated-actions', '--file', queueFile,
+    'complete', '--section', 'actions', '--lease-id', 'lease-unrelated-actions',
+    '--expected-generated-at', actionsEvidence.expectedGeneratedAt,
+    '--terminal-generated-at', actionsEvidence.generatedAt,
+    '--terminal-section-generated-at', actionsEvidence.sectionGeneratedAt,
+    '--terminal-generation-identity', actionsEvidence.generationIdentity,
+    '--file', queueFile,
   ], {cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe']});
   const concurrentCompletePromise = collectChild(concurrentCompleteChild);
   const [concurrentEnqueueResult, concurrentCompleteResult] = await Promise.all([

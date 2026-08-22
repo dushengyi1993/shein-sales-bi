@@ -312,6 +312,57 @@ const biSectionRefreshFailures = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
 let biSectionFastBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
+
+function biSectionAbortError(signal, fallback = 'BI section generation cancelled by request disconnect') {
+  const error = new Error(String(signal?.reason?.message || signal?.reason || fallback));
+  error.name = 'AbortError';
+  error.code = 'BI_SECTION_REQUEST_ABORTED';
+  return error;
+}
+
+function throwIfBiSectionAborted(signal) {
+  if (signal?.aborted) throw biSectionAbortError(signal);
+}
+
+function trackBiSectionInFlight(key, promise) {
+  biSectionInFlight.set(key, promise);
+  // A shared producer may outlive the request that started it. Attach a
+  // handling branch at registration time so a disconnected owner cannot
+  // create an unhandled rejection before another reader observes the result.
+  promise.catch(() => {});
+  promise.finally(() => {
+    if (biSectionInFlight.get(key) === promise) biSectionInFlight.delete(key);
+  }).catch(() => {});
+  return promise;
+}
+
+function getOrCreateBiSectionInFlight(key, factory, options = {}) {
+  const existing = biSectionInFlight.get(key);
+  if (existing) return existing;
+  const promise = Promise.resolve().then(() => factory(options.signal || null));
+  return trackBiSectionInFlight(key, promise);
+}
+
+function abortableBiSectionDelay(ms, signal) {
+  throwIfBiSectionAborted(signal);
+  const delayMs = Math.max(0, Number(ms) || 0);
+  if (!signal) return new Promise(resolve => setTimeout(resolve, delayMs));
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    const onAbort = () => {
+      if (timer !== null) clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(biSectionAbortError(signal));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener('abort', onAbort, {once: true});
+    if (signal.aborted) onAbort();
+  });
+}
+
 const PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS = Math.max(
   1_000,
   Math.min(5 * 60_000, Number(process.env.SHEIN_BI_PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS || 30_000)),
@@ -11485,6 +11536,18 @@ function childAbortReason(signal) {
 
 function runChildProcess(command, args, options = {}) {
   const signal = options.signal || null;
+  const onTerminationRequested = typeof options.onTerminationRequested === 'function'
+    ? options.onTerminationRequested
+    : null;
+  // The default remains direct-child termination for every existing caller.
+  // Only the bounded BI refresh/generator lane opts into a detached Unix
+  // process group so bash/docker/psql descendants inherit the same kill
+  // boundary. `platform` and `killProcessGroupImpl` are internal test seams.
+  const childPlatform = String(options.platform || process.platform);
+  const processGroup = options.processGroup === true;
+  const killProcessGroup = typeof options.killProcessGroupImpl === 'function'
+    ? options.killProcessGroupImpl
+    : (pid, signalName) => process.kill(-pid, signalName);
   const timeoutValue = Number(options.timeoutMs ?? 120_000);
   const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue > 0 ? Math.floor(timeoutValue) : 120_000;
   const killGraceValue = Number(options.killGraceMs ?? 2_000);
@@ -11548,6 +11611,8 @@ function runChildProcess(command, args, options = {}) {
     let timeoutTimer = null;
     let killTimer = null;
     let finalSettleTimer = null;
+    let groupKillIssued = false;
+    let deferredClose = null;
     let abortListener = null;
     let childErrorListener = null;
     let childCloseListener = null;
@@ -11630,16 +11695,39 @@ function runChildProcess(command, args, options = {}) {
       }
       if (!child || terminationRequested) return;
       terminationRequested = true;
-      terminationSignals.push('SIGTERM');
-      try { child.kill('SIGTERM'); } catch (error) {
-        appendOutput('stderr', `\nSIGTERM failed: ${error?.message || error}`);
+      if (onTerminationRequested) {
+        try {
+          Promise.resolve(onTerminationRequested(cause)).catch(error => {
+            appendOutput('stderr', `\ntermination hook failed: ${error?.message || error}`);
+          });
+        } catch (error) {
+          appendOutput('stderr', `\ntermination hook failed: ${error?.message || error}`);
+        }
       }
+      terminationSignals.push('SIGTERM');
+      const killChild = signalName => {
+        let groupTerminationAttempted = false;
+        if (processGroup && childPlatform !== 'win32' && Number.isInteger(child?.pid) && child.pid > 0) {
+          groupTerminationAttempted = true;
+          try {
+            killProcessGroup(child.pid, signalName);
+            return;
+          } catch (error) {
+            appendOutput('stderr', `\n${signalName} process-group failed: ${error?.message || error}`);
+          }
+        }
+        try {
+          child.kill(signalName);
+        } catch (error) {
+          appendOutput('stderr', `\n${signalName}${groupTerminationAttempted ? ' direct-child fallback' : ''} failed: ${error?.message || error}`);
+        }
+      };
+      killChild('SIGTERM');
       killTimer = setTimeout(() => {
         if (settled) return;
+        groupKillIssued = true;
         terminationSignals.push('SIGKILL');
-        try { child.kill('SIGKILL'); } catch (error) {
-          appendOutput('stderr', `\nSIGKILL failed: ${error?.message || error}`);
-        }
+        killChild('SIGKILL');
         // Bounded final settle grace after SIGKILL. If the child still never
         // emits close (unkillable process / zombie), destroy the local stdio so
         // no output is buffered against a dead pipe, unref the child so the
@@ -11654,7 +11742,7 @@ function runChildProcess(command, args, options = {}) {
           try { child?.stdout?.destroy?.(); } catch {}
           try { child?.stderr?.destroy?.(); } catch {}
           try { child?.unref?.(); } catch {}
-          settle({closeNeverObserved: true});
+          settle(deferredClose || {closeNeverObserved: true});
         }, finalSettleGraceMs);
       }, killGraceMs);
     };
@@ -11665,6 +11753,7 @@ function runChildProcess(command, args, options = {}) {
         env: {...process.env, ...(options.env || {})},
         windowsHide: true,
         stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        ...(processGroup && childPlatform !== 'win32' ? {detached: true} : {}),
       });
     } catch (error) {
       settle({spawnError: error});
@@ -11675,7 +11764,22 @@ function runChildProcess(command, args, options = {}) {
     child.stdout.on('data', onStdout);
     child.stderr.on('data', onStderr);
     childErrorListener = error => settle({spawnError: error});
-    childCloseListener = (code, exitSignal) => settle({code, exitSignal});
+    childCloseListener = (code, exitSignal) => {
+      if (
+        processGroup
+        && childPlatform !== 'win32'
+        && terminationRequested
+        && (aborted || timedOut || outputOverflow)
+        && !groupKillIssued
+      ) {
+        // A detached group leader may close while bash/docker/psql descendants
+        // are still alive. Keep the termination timer and defer cleanup until
+        // the scheduled group SIGKILL (or its final bounded settle grace).
+        deferredClose = {code, exitSignal};
+        return;
+      }
+      settle({code, exitSignal});
+    };
     child.once('error', childErrorListener);
     child.once('close', childCloseListener);
     if (signal) {
@@ -11709,8 +11813,40 @@ function dockerPrefix() {
   return 'sudo ';
 }
 
-function psqlSpawnCommand(args, extraFlags = '') {
-  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
+const BI_DB_APPLICATION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/;
+// Leave one second inside the five-second total cancellation envelope for
+// runChildProcess TERM/KILL/final-settle cleanup.
+const BI_DB_CANCEL_TIMEOUT_MS = 4_000;
+const BI_DB_CANCEL_WAIT_SECONDS = 0.25;
+const BI_DB_CANCEL_REMAINING_MARKER = 'SHEIN_BI_DB_CANCEL_REMAINING=';
+
+function validateBiDbApplicationName(value, options = {}) {
+  const name = String(value ?? '');
+  if (!name) {
+    if (options.required === true) throw new Error('BI database application_name is required');
+    return '';
+  }
+  if (name !== name.trim() || Buffer.byteLength(name, 'utf8') > 63 || !BI_DB_APPLICATION_NAME_RE.test(name)) {
+    throw new Error('BI database application_name must be 1-63 ASCII characters matching [A-Za-z0-9][A-Za-z0-9._:-]*');
+  }
+  return name;
+}
+
+function createBiDbApplicationName(section = 'section') {
+  const sectionSlug = String(section || 'section')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 20) || 'section';
+  return validateBiDbApplicationName(`shein-bi-${sectionSlug}-${crypto.randomBytes(12).toString('hex')}`, {required: true});
+}
+
+function psqlSpawnCommand(args, extraFlags = '', options = {}) {
+  const applicationName = validateBiDbApplicationName(options.applicationName || '');
+  const applicationEnv = applicationName
+    ? ` -e ${shellQuote(`PGAPPNAME=${applicationName}`)}`
+    : '';
+  const psql = `${dockerPrefix()}docker exec -i${applicationEnv} ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
   if (process.platform === 'win32') {
     return {
       command: 'wsl',
@@ -11721,6 +11857,135 @@ function psqlSpawnCommand(args, extraFlags = '') {
     command: 'bash',
     args: ['-lc', psql],
   };
+}
+
+async function cancelBiDbBackends(args, applicationName) {
+  const targetApplicationName = validateBiDbApplicationName(applicationName, {required: true});
+  let cancelApplicationName = createBiDbApplicationName('cancel');
+  while (cancelApplicationName === targetApplicationName) {
+    cancelApplicationName = createBiDbApplicationName('cancel');
+  }
+  const psql = psqlSpawnCommand(
+    args,
+    ` -q -t -A -v ${shellQuote(`target_application_name=${targetApplicationName}`)}`,
+    {applicationName: cancelApplicationName},
+  );
+  const sql = `
+SET statement_timeout='3000ms';
+SELECT 'SHEIN_BI_DB_CANCEL_SENT=' || count(*) FILTER (WHERE pg_cancel_backend(pid))::text
+FROM pg_stat_activity
+WHERE application_name = :'target_application_name'
+  AND datname = current_database()
+  AND pid <> pg_backend_pid();
+SELECT pg_sleep(${BI_DB_CANCEL_WAIT_SECONDS});
+SELECT 'SHEIN_BI_DB_TERMINATE_SENT=' || count(*) FILTER (WHERE pg_terminate_backend(pid, 1000))::text
+FROM pg_stat_activity
+WHERE application_name = :'target_application_name'
+  AND datname = current_database()
+  AND pid <> pg_backend_pid();
+SELECT '${BI_DB_CANCEL_REMAINING_MARKER}' || count(*)::text
+FROM pg_stat_activity
+WHERE application_name = :'target_application_name'
+  AND datname = current_database()
+  AND pid <> pg_backend_pid();
+`;
+  const run = await runChildProcess(psql.command, psql.args, {
+    cwd: ROOT,
+    timeoutMs: BI_DB_CANCEL_TIMEOUT_MS,
+    killGraceMs: 250,
+    settleGraceMs: 250,
+    stdin: sql,
+    processGroup: true,
+    maxStdoutBytes: 16 * 1024,
+    maxStderrBytes: 16 * 1024,
+    failOnOutputOverflow: true,
+  });
+  return evaluateBiDbCancellationRun(run);
+}
+
+function evaluateBiDbCancellationRun(run = {}) {
+  const diagnostic = detail => ({
+    ...run,
+    ok: false,
+    error: String(detail || 'PostgreSQL backend cancellation failed').slice(0, 1000),
+  });
+  if (run.ok !== true) {
+    const tail = String(run.stderr || run.stdout || '').slice(-600);
+    return diagnostic(`PostgreSQL cancellation command failed: code=${run.code ?? 'null'} timedOut=${Boolean(run.timedOut)} ${tail}`.trim());
+  }
+  const markerPattern = new RegExp(`^${BI_DB_CANCEL_REMAINING_MARKER}(\\d+)\\r?$`, 'gm');
+  const matches = [...String(run.stdout || '').matchAll(markerPattern)];
+  if (matches.length !== 1) {
+    return diagnostic(`PostgreSQL cancellation result requires exactly one ${BI_DB_CANCEL_REMAINING_MARKER}<count> marker; found=${matches.length}`);
+  }
+  const remainingBackendCount = Number(matches[0][1]);
+  if (!Number.isSafeInteger(remainingBackendCount) || remainingBackendCount !== 0) {
+    return {
+      ...diagnostic(`PostgreSQL cancellation left exact application_name backends remaining=${matches[0][1]}`),
+      remainingBackendCount,
+    };
+  }
+  return {...run, ok: true, remainingBackendCount: 0, error: ''};
+}
+
+async function runBiDbChildProcess(args, command, childArgs, options = {}) {
+  const {
+    dbApplicationName: rawApplicationName = '',
+    cancelBackendsImpl = cancelBiDbBackends,
+    ...childOptions
+  } = options;
+  const applicationName = validateBiDbApplicationName(rawApplicationName || '');
+  let cancellationPromise = null;
+  let cancellationCause = '';
+  const startCancellation = (phase, cause) => {
+    try {
+      return Promise.resolve(cancelBackendsImpl(args, applicationName, {cause, phase}))
+        .catch(error => ({ok: false, error: error?.message || String(error)}));
+    } catch (error) {
+      return Promise.resolve({ok: false, error: error?.message || String(error)});
+    }
+  };
+  const run = await runChildProcess(command, childArgs, {
+    ...childOptions,
+    ...(applicationName ? {
+      onTerminationRequested(cause) {
+        if (!cancellationPromise) {
+          cancellationCause = String(cause || 'unknown');
+          cancellationPromise = startCancellation('immediate', cause);
+        }
+        return cancellationPromise;
+      },
+    } : {}),
+  });
+  if (run.terminationRequested && applicationName) {
+    const immediateCancellation = cancellationPromise
+      ? await cancellationPromise
+      : {ok: false, error: 'Immediate PostgreSQL backend cancellation did not start'};
+    const finalCancellation = await startCancellation('final', cancellationCause || 'termination');
+    const failures = [
+      ['immediate', immediateCancellation],
+      ['final', finalCancellation],
+    ].filter(([, cancellation]) => cancellation?.ok !== true);
+    if (failures.length > 0) {
+      const detail = failures.map(([phase, cancellation]) => (
+        `${phase}: ${String(cancellation?.error || cancellation?.stderr || cancellation?.stdout || 'unknown failure').slice(-700)}`
+      )).join('; ').slice(-1000);
+      console.error(JSON.stringify({
+        ok: false,
+        event: 'bi-db-backend-cancel-failed',
+        applicationName,
+        cause: cancellationCause,
+        error: detail,
+      }));
+      return {
+        ...run,
+        ok: false,
+        stderr: `${run.stderr || ''}\nPostgreSQL backend cancellation failed for ${applicationName}: ${detail}`.trim(),
+      };
+    }
+    return {...run, ok: false};
+  }
+  return run;
 }
 
 const BI_PORTAL_CORE_FIELD_LIMITS = Object.freeze({
@@ -12515,19 +12780,21 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
   }).catch(err => {
     recordBiSectionRefreshFailure(root, section, err);
     console.warn('BI section background generation failed', section, err?.message || err);
-  }).finally(() => {
-    biSectionInFlight.delete(key);
-    biSectionActiveRefreshTokens.delete(key);
   });
-  biSectionInFlight.set(key, run);
+  trackBiSectionInFlight(key, run);
+  run.finally(() => {
+    biSectionActiveRefreshTokens.delete(key);
+  }).catch(() => {});
   if (fastLane) biSectionFastBackgroundQueue = run.catch(() => {});
   else biSectionBackgroundQueue = run.catch(() => {});
   return true;
 }
 
-async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
+async function deriveHomeProfitSectionFromProfitCache(root, generatedAt, signal = null) {
+  throwIfBiSectionAborted(signal);
   if (!String(generatedAt || '')) return null;
   const currentProfitCache = await readCurrentProfitSource(root, generatedAt);
+  throwIfBiSectionAborted(signal);
   // homeProfit must derive only from the profit cache of the exact current
   // core generation. An older profit cache is never a valid homeProfit source:
   // serving it would let an outdated profit summary masquerade as current.
@@ -12536,6 +12803,7 @@ async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
   // must never publish it alone, because that would make the three artifacts
   // observe different cachedAt/generation identities after a crash.
   const currentHomeProfit = await readBiSectionCache(root, 'homeProfit', generatedAt).catch(() => null);
+  throwIfBiSectionAborted(signal);
   return isCurrentHomeProfitSectionCache(currentHomeProfit, generatedAt)
     ? currentHomeProfit
     : null;
@@ -12804,7 +13072,8 @@ async function loadBiProductProfitSection(args, root, options = {}) {
   };
 }
 
-async function refreshProfitMarts(args) {
+async function refreshProfitMarts(args, options = {}) {
+  throwIfBiSectionAborted(options.signal);
   if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') {
     return {
       code: 0,
@@ -12813,18 +13082,24 @@ async function refreshProfitMarts(args) {
       stderr: '',
     };
   }
+  const dbApplicationName = validateBiDbApplicationName(options.dbApplicationName || '');
   const timeoutMs = Math.max(60_000, Number(process.env.SHEIN_BI_PROFIT_MART_REFRESH_TIMEOUT_MS || 600_000));
-  const run = await runChildProcess('bash', [
+  const run = await runBiDbChildProcess(args, 'bash', [
     path.join(ROOT, 'scripts', 'refresh_profit_marts.sh'),
   ], {
     cwd: ROOT,
     timeoutMs,
+    signal: options.signal || null,
+    processGroup: true,
+    dbApplicationName,
     env: {
       SHEIN_BI_DB_CONTAINER: args.container,
       SHEIN_BI_DB_DATABASE: args.database,
       SHEIN_BI_DB_USER: args.user,
+      SHEIN_BI_DB_APPLICATION_NAME: dbApplicationName,
     },
   });
+  throwIfBiSectionAborted(options.signal);
   if (!run.ok) {
     const tail = String(run.stderr || run.stdout || '').slice(-4000);
     throw new Error(`profit mart cache refresh failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
@@ -12833,24 +13108,31 @@ async function refreshProfitMarts(args) {
   return run;
 }
 
-async function refreshInventoryCostLedger(args) {
+async function refreshInventoryCostLedger(args, options = {}) {
+  throwIfBiSectionAborted(options.signal);
   if (process.env.SHEIN_BI_INVENTORY_COST_REFRESH === '0') {
     throw new Error('inventory cost ledger refresh is disabled; cannot safely rebuild stale profit marts');
   }
+  const dbApplicationName = validateBiDbApplicationName(options.dbApplicationName || '');
   const timeoutMs = Math.max(60_000, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_TIMEOUT_MS || 900_000));
   const runs = [];
   for (let attempt = 1; attempt <= INVENTORY_COST_REFRESH_MAX_ATTEMPTS; attempt += 1) {
-    const run = await runChildProcess('bash', [
+    const run = await runBiDbChildProcess(args, 'bash', [
       path.join(ROOT, 'scripts', 'refresh_inventory_cost_ledger.sh'),
     ], {
       cwd: ROOT,
       timeoutMs,
+      signal: options.signal || null,
+      processGroup: true,
+      dbApplicationName,
       env: {
         SHEIN_BI_DB_CONTAINER: args.container,
         SHEIN_BI_DB_DATABASE: args.database,
         SHEIN_BI_DB_USER: args.user,
+        SHEIN_BI_DB_APPLICATION_NAME: dbApplicationName,
       },
     });
+    throwIfBiSectionAborted(options.signal);
     runs.push(run);
     if (run.ok) {
       invalidateProfitAccountingStateCache();
@@ -12867,12 +13149,14 @@ async function refreshInventoryCostLedger(args) {
     // The source guard intentionally rejects a snapshot when orders arrive
     // during the build. Retry from a new database snapshot under the same
     // outer freshness single-flight; never publish the rejected ledger.
-    await new Promise(resolve => setTimeout(resolve, Math.min(5_000, attempt * 1_000)));
+    await abortableBiSectionDelay(Math.min(5_000, attempt * 1_000), options.signal);
   }
   throw new Error('inventory cost ledger refresh exhausted without a result');
 }
 
-async function readProfitMartCacheFreshness(args) {
+async function readProfitMartCacheFreshness(args, options = {}) {
+  throwIfBiSectionAborted(options.signal);
+  const dbApplicationName = validateBiDbApplicationName(options.dbApplicationName || '');
   const sql = `
 WITH primary_cutover AS (
   SELECT NULLIF(setting_value,'')::date AS cutover_date
@@ -12926,12 +13210,16 @@ SELECT jsonb_build_object(
   'costAssignmentPostCutoverMissingRows', (SELECT rows-assigned_rows FROM post_cutover_assignment)
 )::text;
 `;
-  const psql = psqlSpawnCommand(args, ' -q -t -A');
-  const run = await runChildProcess(psql.command, psql.args, {
+  const psql = psqlSpawnCommand(args, ' -q -t -A', {applicationName: dbApplicationName});
+  const run = await runBiDbChildProcess(args, psql.command, psql.args, {
     cwd: ROOT,
     timeoutMs: Math.max(30_000, Number(process.env.SHEIN_BI_PROFIT_MART_FRESHNESS_TIMEOUT_MS || 60_000)),
     stdin: sql,
+    signal: options.signal || null,
+    processGroup: true,
+    dbApplicationName,
   });
+  throwIfBiSectionAborted(options.signal);
   if (!run.ok) {
     const tail = String(run.stderr || run.stdout || '').slice(-1000);
     throw new Error(`profit mart freshness check failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
@@ -12967,7 +13255,10 @@ function createProfitAccountingStateReader(options = {}) {
     }
 
     const promise = (async () => {
-      const freshness = await loadFreshness(args);
+      const freshness = await loadFreshness(args, {
+        signal: readOptions.signal || null,
+        dbApplicationName: readOptions.dbApplicationName || '',
+      });
       const decision = evaluateProfitMartCacheFreshness(freshness, {
         coreGeneratedAt: generatedAt,
         allowedCoreSkewMs: Math.max(
@@ -12982,6 +13273,7 @@ function createProfitAccountingStateReader(options = {}) {
       };
     })();
     entry = {key, promise, value: null, expiresAt: 0};
+    promise.catch(() => {});
     try {
       const value = await promise;
       if (entry?.key === key && entry.promise === promise) {
@@ -13014,20 +13306,23 @@ async function readProfitAccountingState(args, generatedAt = '', options = {}) {
   return profitAccountingStateReader.read(args, generatedAt, options);
 }
 
-async function ensureProfitMartCacheFresh(args, generatedAt = '') {
+async function ensureProfitMartCacheFresh(args, generatedAt = '', options = {}) {
+  throwIfBiSectionAborted(options.signal);
   if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') return null;
   if (biProfitMartFreshnessPromise) return biProfitMartFreshnessPromise;
   biProfitMartFreshnessPromise = (async () => {
     let freshness;
     try {
-      freshness = await readProfitMartCacheFreshness(args);
+      freshness = await readProfitMartCacheFreshness(args, options);
     } catch (err) {
-      const refreshed = await refreshProfitMarts(args);
+      throwIfBiSectionAborted(options.signal);
+      const refreshed = await refreshProfitMarts(args, options);
       return {
         ...refreshed,
         stderr: `${refreshed.stderr || ''}\n[ensureProfitMartCacheFresh] freshness check failed; refreshed cache instead: ${err?.message || err}`,
       };
     }
+    throwIfBiSectionAborted(options.signal);
     const decision = evaluateProfitMartCacheFreshness(freshness, {
       coreGeneratedAt: generatedAt,
       allowedCoreSkewMs: Math.max(
@@ -13050,8 +13345,9 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
       || !decision.coversCostCutoff
       || !decision.coversCostAssignments;
     if (needsLedger) {
-      const ledgerRun = await refreshInventoryCostLedger(args);
-      const afterLedger = await readProfitMartCacheFreshness(args);
+      const ledgerRun = await refreshInventoryCostLedger(args, options);
+      const afterLedger = await readProfitMartCacheFreshness(args, options);
+      throwIfBiSectionAborted(options.signal);
       const afterDecision = evaluateProfitMartCacheFreshness(afterLedger, {
         coreGeneratedAt: generatedAt,
         allowedCoreSkewMs: decision.allowedCoreSkewMs,
@@ -13063,17 +13359,18 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
           + `missing=${afterDecision.costAssignmentPostCutoverMissingRows}`,
         );
       }
-      const profitRun = await refreshProfitMarts(args);
+      const profitRun = await refreshProfitMarts(args, options);
       return {
         ...profitRun,
         stdout: `${ledgerRun.stdout || ''}\n${profitRun.stdout || ''}`,
         stderr: `${ledgerRun.stderr || ''}\n${profitRun.stderr || ''}`,
       };
     }
-    return refreshProfitMarts(args);
+    return refreshProfitMarts(args, options);
   })().finally(() => {
     biProfitMartFreshnessPromise = null;
   });
+  biProfitMartFreshnessPromise.catch(() => {});
   return biProfitMartFreshnessPromise;
 }
 
@@ -13222,7 +13519,14 @@ export async function verifyDirectCacheReceipt(root, receipt, expectedSection, e
   return {receipt: parsed, verified};
 }
 
-async function generateBiSection(args, root, section, generatedAt) {
+async function generateBiSection(args, root, section, generatedAt, options = {}) {
+  const signal = options.signal || null;
+  throwIfBiSectionAborted(signal);
+  const dbApplicationName = options.dbApplicationName
+    ? validateBiDbApplicationName(options.dbApplicationName, {required: true})
+    : signal
+      ? createBiDbApplicationName(section)
+      : '';
   // inventoryTrend consumes historical sales/profit rows too. Using the
   // published cache avoids expanding mart.profit_order_item on every trend
   // request, which previously turned one portal warmup into a 10+ minute SQL.
@@ -13235,23 +13539,29 @@ async function generateBiSection(args, root, section, generatedAt) {
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
   if (sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)) {
-    await ensureProfitMartCacheFresh(args, generatedAt);
+    await ensureProfitMartCacheFresh(args, generatedAt, {signal, dbApplicationName});
+    throwIfBiSectionAborted(signal);
   }
   if (sourceMode === 'cache' && section === 'homeProfit') {
-    const accountingState = await readProfitAccountingState(args, generatedAt, {forceFresh: true});
+    const accountingState = await readProfitAccountingState(args, generatedAt, {forceFresh: true, signal, dbApplicationName});
     let currentProfitCache = await readCurrentProfitSource(root, generatedAt);
     let currentHomeProfitCache = await readBiSectionCache(root, 'homeProfit', generatedAt);
+    throwIfBiSectionAborted(signal);
     if (
       !accountingState.decision.fresh
       || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, accountingState.minimumPublishedAt)
       || !isCurrentHomeProfitSectionCache(currentHomeProfitCache, generatedAt, accountingState.minimumPublishedAt)
     ) {
-      const generated = await generateBiSection(args, root, 'profit', generatedAt);
+      const generated = await generateBiSection(args, root, 'profit', generatedAt, {
+        signal,
+        dbApplicationName,
+      });
       if (!generated?.directCache || !generated?.receipt) {
         throw new Error('homeProfit requires a direct-cache profit publication receipt');
       }
       currentProfitCache = await readCurrentProfitSource(root, generatedAt);
-      const after = await readProfitAccountingState(args, generatedAt, {forceFresh: true});
+      const after = await readProfitAccountingState(args, generatedAt, {forceFresh: true, signal, dbApplicationName});
+      throwIfBiSectionAborted(signal);
       if (!after.decision.fresh || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
         throw new Error('homeProfit profit source remained stale after canonical refresh');
       }
@@ -13263,10 +13573,11 @@ async function generateBiSection(args, root, section, generatedAt) {
     return currentHomeProfitCache;
   }
   const coreMeta = await readBiPortalCoreMeta(root);
+  throwIfBiSectionAborted(signal);
   if (!generatedAt || String(coreMeta.generatedAt || '') !== String(generatedAt || '')) {
     throw new Error(`BI section ${section} generation requires exact core generatedAt: expected=${generatedAt || ''} actual=${coreMeta.generatedAt || ''}`);
   }
-  const run = await runChildProcess(process.execPath, [
+  const run = await runBiDbChildProcess(args, process.execPath, [
     path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),
     '--section', section,
     '--direct-cache-publish',
@@ -13279,24 +13590,32 @@ async function generateBiSection(args, root, section, generatedAt) {
   ], {
     cwd: ROOT,
     timeoutMs: BI_PORTAL_SECTION_TIMEOUT_MS,
+    signal,
+    processGroup: true,
+    dbApplicationName,
     maxStdoutBytes: BI_DIRECT_STDOUT_MAX_BYTES,
     maxStderrBytes: BI_DIRECT_STDERR_MAX_BYTES,
     failOnOutputOverflow: true,
     env: {
       SHEIN_BI_PORTAL_TIMEOUT_MS: String(Math.max(BI_PORTAL_SECTION_TIMEOUT_MS + 60_000, Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 0) || 0)),
       SHEIN_BI_PROFIT_MART_SOURCE: sourceMode,
+      SHEIN_BI_DB_APPLICATION_NAME: dbApplicationName,
     },
   });
+  throwIfBiSectionAborted(signal);
   if (!run.ok) {
     const tail = String(run.stderr || run.stdout || '').slice(-2000);
     throw new Error(`BI section ${section} generation failed: code=${run.code} timedOut=${run.timedOut} outputOverflow=${Boolean(run.outputOverflow)} ${tail}`);
   }
+  throwIfBiSectionAborted(signal);
   const postGenerationCoreMeta = await readBiPortalCoreMeta(root);
+  throwIfBiSectionAborted(signal);
   if (String(postGenerationCoreMeta.generatedAt || '') !== String(generatedAt || '')) {
     throw new Error(`BI section ${section} core generatedAt changed during child publication: expected=${generatedAt || ''} actual=${postGenerationCoreMeta.generatedAt || ''}`);
   }
   const receipt = parseDirectCacheReceipt(run.stdout, section, generatedAt);
   await verifyDirectCacheReceipt(root, receipt, section, generatedAt);
+  throwIfBiSectionAborted(signal);
   return {
     ok: true,
     directCache: true,
@@ -13314,9 +13633,11 @@ async function loadBiSection(args, root, section, options = {}) {
       ...biSectionRefreshFailureFields(root, section),
     },
   };
- const force = !!options.force;
- const allowGenerate = options.allowGenerate !== false;
- const allowStale = options.allowStale !== false;
+  const signal = options.signal || null;
+  throwIfBiSectionAborted(signal);
+  const force = !!options.force;
+  const allowGenerate = options.allowGenerate !== false;
+  const allowStale = options.allowStale !== false;
   if (force && sectionRequiresHostLockedWorker(section, options) && !String(options.refreshToken || '').trim()) {
     // A force refresh of a host-locked section always flows through the
     // managed queue at some point. Without an explicit refresh token it would
@@ -13521,13 +13842,14 @@ async function loadBiSection(args, root, section, options = {}) {
         };
       }
       const deriveKey = `${root}|${section}|${meta.generatedAt || ''}|derive`;
-      if (!biSectionInFlight.has(deriveKey)) {
-        biSectionInFlight.set(deriveKey, deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt).finally(() => {
-          biSectionInFlight.delete(deriveKey);
-        }));
-      }
+      getOrCreateBiSectionInFlight(
+        deriveKey,
+        ownerSignal => deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt, ownerSignal),
+        {signal},
+      );
       try {
         const derived = await biSectionInFlight.get(deriveKey);
+        throwIfBiSectionAborted(signal);
         clearBiSectionRefreshFailure(root, section);
         if (derived) {
           const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, {
@@ -13541,6 +13863,7 @@ async function loadBiSection(args, root, section, options = {}) {
           return {status: 200, payload: {...derived, cacheHit: false, coreGeneratedAt: meta.generatedAt}};
         }
       } catch (error) {
+        if (signal?.aborted) throw error;
         recordBiSectionRefreshFailure(root, section, error);
         return {
           status: 503,
@@ -13669,21 +13992,25 @@ async function loadBiSection(args, root, section, options = {}) {
       };
     }
     const key = `${root}|${section}|${meta.generatedAt || ''}|derive`;
-    if (!biSectionInFlight.has(key)) {
-      biSectionInFlight.set(key, deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt).finally(() => {
-        biSectionInFlight.delete(key);
-      }));
-    }
+    getOrCreateBiSectionInFlight(
+      key,
+      ownerSignal => deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt, ownerSignal),
+      {signal},
+    );
     let payload;
     try {
       payload = await biSectionInFlight.get(key);
+      throwIfBiSectionAborted(signal);
       clearBiSectionRefreshFailure(root, section);
     } catch (error) {
+      if (signal?.aborted) throw error;
       recordBiSectionRefreshFailure(root, section, error);
       throw error;
     }
     if (payload) {
+      throwIfBiSectionAborted(signal);
       const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
+      throwIfBiSectionAborted(signal);
       if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
       return {status: 200, payload: {...payload, cacheHit: false}};
     }
@@ -13761,15 +14088,19 @@ async function loadBiSection(args, root, section, options = {}) {
     };
   }
   if (!biSectionInFlight.has(key)) {
-    biSectionInFlight.set(key, generateBiSection(args, root, section, meta.generatedAt).finally(() => {
-      biSectionInFlight.delete(key);
-    }));
+    getOrCreateBiSectionInFlight(
+      key,
+      ownerSignal => generateBiSection(args, root, section, meta.generatedAt, {signal: ownerSignal}),
+      {signal},
+    );
   }
   let payload;
   try {
     payload = await biSectionInFlight.get(key);
+    throwIfBiSectionAborted(signal);
     clearBiSectionRefreshFailure(root, section);
   } catch (error) {
+    if (signal?.aborted) throw error;
     recordBiSectionRefreshFailure(root, section, error);
     if (allowStale) {
       const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
@@ -13779,7 +14110,9 @@ async function loadBiSection(args, root, section, options = {}) {
     }
     throw error;
   }
+  throwIfBiSectionAborted(signal);
   const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
+  throwIfBiSectionAborted(signal);
   if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
   return {status: 200, payload: {...payload, cacheHit: false}};
 }
@@ -14796,6 +15129,62 @@ async function disposeBiSectionRawBody(rawBody) {
       finish();
     }
   });
+}
+
+function biHostLockedSectionAcknowledgement(section, result = {}, expectedGeneratedAt = '') {
+  const status = Number(result.status || 500);
+  const payload = result.payload && typeof result.payload === 'object' ? result.payload : {};
+  return {
+    ok: status >= 200 && status < 300 && payload.ok !== false,
+    section,
+    generatedAt: String(payload.generatedAt || payload.coreGeneratedAt || expectedGeneratedAt || ''),
+    terminal: status === 200
+      && payload.pendingSection !== true
+      && payload.staleSection !== true
+      && payload.cacheStale !== true,
+  };
+}
+
+function biHostLockedSectionAcknowledgementHeaders(headers = {}) {
+  return Object.fromEntries(
+    Object.entries(headers || {}).filter(([name]) => {
+      const lower = String(name).toLowerCase();
+      return lower.startsWith('x-bi-') || lower === 'cache-control' || lower === 'retry-after';
+    }),
+  );
+}
+
+function createBiHostLockedRequestCancellation(req, res) {
+  const controller = new AbortController();
+  let active = true;
+  const abort = reason => {
+    if (!active || controller.signal.aborted) return;
+    controller.abort(reason instanceof Error ? reason : new Error(String(reason || 'BI host-locked worker request disconnected')));
+  };
+  const onRequestAborted = () => abort('BI host-locked worker request aborted');
+  const onRequestClose = () => {
+    // IncomingMessage emits close for the underlying request stream. The
+    // explicit aborted/destroyed checks avoid treating a normally completed
+    // request parser close as a client cancellation.
+    if (req?.aborted === true || (req?.destroyed === true && req?.complete !== true)) {
+      abort('BI host-locked worker request closed');
+    }
+  };
+  const onResponseClose = () => {
+    if (!res?.writableEnded && !res?.writableFinished) abort('BI host-locked worker response closed');
+  };
+  req?.once?.('aborted', onRequestAborted);
+  req?.once?.('close', onRequestClose);
+  res?.once?.('close', onResponseClose);
+  return {
+    signal: controller.signal,
+    dispose() {
+      active = false;
+      req?.off?.('aborted', onRequestAborted);
+      req?.off?.('close', onRequestClose);
+      res?.off?.('close', onResponseClose);
+    },
+  };
 }
 
 async function loadDirectBiQuery(args, root, actor, question, options = {}) {
@@ -18120,6 +18509,9 @@ async function main() {
           if (force && !allowGenerate) {
             return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
           }
+          const requestCancellation = hostLockedWorker
+            ? createBiHostLockedRequestCancellation(req, res)
+            : null;
           try {
             const result = await loadBiSection(args, root, section, {
               force,
@@ -18128,17 +18520,36 @@ async function main() {
               expectedGeneratedAt,
               hostLockedWorker,
               allowGenerate,
+              signal: requestCancellation?.signal || null,
               gzip: acceptsGzip(req.headers['accept-encoding']),
               q,
               actor,
             });
+            if (hostLockedWorker) {
+              // The queue worker performs its own strict on-disk terminal
+              // readback and uses curl -o /dev/null. Never stream a newly
+              // generated multi-megabyte section to that internal caller.
+              if (result.rawBody && typeof result.rawBody.pipe === 'function') {
+                await disposeBiSectionRawBody(result.rawBody);
+              }
+              if (requestCancellation.signal.aborted || req.aborted || res.destroyed) return;
+              return sendJson(
+                res,
+                result.status,
+                biHostLockedSectionAcknowledgement(section, result, expectedGeneratedAt),
+                biHostLockedSectionAcknowledgementHeaders(result.headers),
+              );
+            }
             if (result.rawBody && typeof result.rawBody.pipe === 'function') {
               return await sendBiSectionRawStream(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             }
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {
+            if (requestCancellation?.signal.aborted || req.aborted || res.destroyed) return;
             return sendJson(res, 500, {ok: false, section, error: err?.message || String(err || 'BI section failed')});
+          } finally {
+            requestCancellation?.dispose();
           }
         }
       }
@@ -22024,6 +22435,10 @@ export const __testHooks = {
   streamJsonByteLength,
   sendLargeJson,
   disposeBiSectionRawBody,
+  biHostLockedSectionAcknowledgement,
+  biHostLockedSectionAcknowledgementHeaders,
+  createBiHostLockedRequestCancellation,
+  getOrCreateBiSectionInFlight,
   BI_CORE_WARMUP_QUEUE_OWNED,
   BI_CORE_WARMUP_QUEUE_PRIORITY,
   BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS,
@@ -22085,6 +22500,10 @@ export const __testHooks = {
   classifyLinkOpsLifecycle,
   persistClaimedLinkOpsExecutionResult,
   runChildProcess,
+  runBiDbChildProcess,
+  evaluateBiDbCancellationRun,
+  createBiDbApplicationName,
+  validateBiDbApplicationName,
   parseDirectCacheReceipt,
   verifyDirectCacheReceipt,
   BI_DIRECT_RECEIPT_MAX_BYTES,

@@ -32,7 +32,7 @@ function usage(message = '') {
   manage_bi_portal_section_queue.mjs enqueue --sections CSV --core-generated-at TOKEN [--priority N] [--reason TEXT] [--idempotency-key KEY] [--coalesce-key KEY] [--requeue-completed-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs reconcile-generation --phase snapshot|validate|commit --sections CSV --core-generated-at TOKEN [--snapshot-hash SHA256] [--validation-result BASE64URL] [--terminal-root PATH] [--terminal-validator PATH] [--file PATH]
   manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--file PATH]
-  manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID --expected-generated-at TOKEN --terminal-generated-at TOKEN --terminal-section-generated-at TOKEN --terminal-generation-identity SHA256 [--file PATH]
+  manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID --expected-generated-at TOKEN --terminal-generated-at TOKEN --terminal-section-generated-at TOKEN --terminal-generation-identity SHA256 [--not-after-epoch SECONDS] [--file PATH]
   manage_bi_portal_section_queue.mjs fail --section NAME --lease-id ID [--error TEXT] [--backoff-seconds N] [--file PATH]
   manage_bi_portal_section_queue.mjs status [--file PATH]`);
   return 64;
@@ -84,6 +84,7 @@ function parseArgs(argv) {
     terminalGeneratedAt: '',
     terminalSectionGeneratedAt: '',
     terminalGenerationIdentity: '',
+    notAfterEpoch: undefined,
     leaseSeconds: 2_700,
     excludeSections: [],
     error: '',
@@ -121,6 +122,7 @@ function parseArgs(argv) {
       options.terminalGenerationIdentity = String(next() || '').trim();
       if (!/^[a-f0-9]{64}$/u.test(options.terminalGenerationIdentity)) throw new TypeError('QUEUE_TERMINAL_GENERATION_IDENTITY_INVALID');
     }
+    else if (token === '--not-after-epoch') options.notAfterEpoch = Number(next());
     else if (token === '--lease-seconds') options.leaseSeconds = Number(next());
     else if (token === '--exclude-sections') {
       options.excludeSections.push(...next().split(',').map(normalizeSection));
@@ -137,6 +139,10 @@ function parseArgs(argv) {
   }
   if (!Number.isSafeInteger(options.backoffSeconds) || options.backoffSeconds < 0 || options.backoffSeconds > 3_600) {
     throw new TypeError('QUEUE_BACKOFF_SECONDS_INVALID');
+  }
+  if (options.notAfterEpoch !== undefined
+    && (!Number.isSafeInteger(options.notAfterEpoch) || options.notAfterEpoch <= 0)) {
+    throw new TypeError('QUEUE_NOT_AFTER_EPOCH_INVALID');
   }
   if (command === 'enqueue' && !options.sections.length) throw new TypeError('QUEUE_SECTIONS_REQUIRED');
   if (command === 'enqueue' && !options.coreGeneratedAt) throw new TypeError('QUEUE_CORE_GENERATED_AT_REQUIRED');
@@ -839,9 +845,21 @@ export function completeClaim(queue, {
   terminalGeneratedAt = '',
   terminalSectionGeneratedAt = '',
   terminalGenerationIdentity = '',
+  notAfterEpoch,
   requireTerminalEvidence = false,
   now = new Date(),
 } = {}) {
+  const nowMillis = now instanceof Date ? now.getTime() : Number.NaN;
+  if (notAfterEpoch !== undefined) {
+    const completionDeadlineEpoch = Number(notAfterEpoch);
+    if (!Number.isSafeInteger(completionDeadlineEpoch) || completionDeadlineEpoch <= 0) {
+      throw new Error('QUEUE_NOT_AFTER_EPOCH_INVALID');
+    }
+    if (!Number.isFinite(nowMillis)) throw new Error('QUEUE_LEASE_INVALID');
+    if (Math.floor(nowMillis / 1_000) >= completionDeadlineEpoch) {
+      throw new Error('QUEUE_NOT_AFTER_EPOCH_EXPIRED');
+    }
+  }
   ensureQueueState(queue);
   const normalizedSection = normalizeSection(section);
   const index = queue.entries.findIndex(entry => entry.section === normalizedSection);
@@ -849,6 +867,13 @@ export function completeClaim(queue, {
   const entry = queue.entries[index];
   if (entry.status !== 'running' || entry.leaseId !== leaseId) {
     throw new Error('QUEUE_LEASE_MISMATCH');
+  }
+  const leaseExpiresAtMillis = Date.parse(String(entry.leaseExpiresAt || ''));
+  if (!Number.isFinite(leaseExpiresAtMillis) || !Number.isFinite(nowMillis)) {
+    throw new Error('QUEUE_LEASE_INVALID');
+  }
+  if (nowMillis >= leaseExpiresAtMillis) {
+    throw new Error('QUEUE_LEASE_EXPIRED');
   }
   const claimedRevision = normalizeRevision(entry.claimedRevision, 0);
   const desiredRevision = normalizeRevision(entry.requestRevision, 0);

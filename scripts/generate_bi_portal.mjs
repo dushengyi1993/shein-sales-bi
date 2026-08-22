@@ -26,6 +26,18 @@ import {mergeRankedMarketingPriceLead} from '../lib/marketing_price_lead_merge.m
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
+const BI_DB_APPLICATION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/;
+
+function validateBiDbApplicationName(value) {
+  const name = String(value ?? '');
+  if (!name) return '';
+  if (name !== name.trim() || Buffer.byteLength(name, 'utf8') > 63 || !BI_DB_APPLICATION_NAME_RE.test(name)) {
+    throw new Error('SHEIN_BI_DB_APPLICATION_NAME must be 1-63 safe ASCII characters');
+  }
+  return name;
+}
+
+const BI_DB_APPLICATION_NAME = validateBiDbApplicationName(process.env.SHEIN_BI_DB_APPLICATION_NAME || '');
 // Canonical profit views are the calculation source for the cache refresh, not a
 // serving surface.  Falling back to them here silently recomputes the full
 // order/after-sales/storage dependency tree and turned a small portal refresh
@@ -1246,7 +1258,10 @@ function dockerPrefix() {
 }
 
 function psqlSpawnCommand(args, extraFlags = '') {
-  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
+  const applicationEnv = BI_DB_APPLICATION_NAME
+    ? ` -e ${shellQuote(`PGAPPNAME=${BI_DB_APPLICATION_NAME}`)}`
+    : '';
+  const psql = `${dockerPrefix()}docker exec -i${applicationEnv} ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
   if (process.platform === 'win32') {
     return {
       command: 'wsl',
