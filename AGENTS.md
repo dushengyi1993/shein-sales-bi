@@ -41,6 +41,14 @@ Preserve the selected title group as a structured per-store task fact and verify
 
 Real SHEIN writes still require cloud permissions, dry-run/preflight, an exact payload hash, explicit user confirmation, audit, and readback.
 
+## Operation risk tiers
+
+- A read-only business query does not create a payload hash, worktree, release, or repository test run. Use the deterministic query/read source and report unavailable data as unavailable.
+- A routine authorized business write uses exactly the business safety boundary: one fresh preflight, one exact payload hash, the existing authorization, narrow serial execution, and terminal live readback. It does not run `npm test`, create a Git release, or test unrelated product attributes merely because the business action is important.
+- If a routine task discovers a code defect, stop that business item at the write boundary and hand the defect to the V4 integration task. The business task must not silently become a second development/release lane.
+- A local code patch runs syntax/diff checks plus only the registered focused tests for the changed behavior. The full local suite is reserved for genuine cross-module integration or a formal release gate; GitHub CI is not a prerequisite for an already authorized business operation that changes no code.
+- `docs/operation-risk-tiers.md` is the human-readable runbook for these tiers. Task prompts and automation instructions must not broaden them.
+
 ## Release and production source discipline
 
 - Treat GitHub `main` plus the published release tag as the formal source baseline when the v3 release audit is valid, and treat `/opt/shein-bi/app` as a deployed checkout, not a second development workspace.
