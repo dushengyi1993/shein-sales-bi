@@ -82,18 +82,26 @@ try {
   const {scanBoundedTopLevelJson} = await import(scannerUrl);
   handle = await fs.open(file, 'r');
   const stat = await handle.stat();
-  if (Number(stat.size || 0) <= 0) process.exit(64);
+  if (Number(stat.size || 0) <= 0) throw new Error('BI core file is empty');
   const scan = await scanBoundedTopLevelJson(
     handle.createReadStream({start: 0, autoClose: false}),
     {generatedAt: 4 * 1024},
   );
-  const generatedAt = String(scan.fields.generatedAt?.value || '').trim();
-  if (!generatedAt || !/^[\x21-\x7E]{1,1024}$/.test(generatedAt)) process.exit(64);
+  const generatedAt = scan.fields.generatedAt?.value;
+  if (typeof generatedAt !== 'string' || !/^[\x21-\x7E]{1,1024}$/.test(generatedAt)) {
+    throw new Error('BI core generatedAt is not an exact bounded string');
+  }
   process.stdout.write(generatedAt);
 } catch {
-  process.exit(64);
+  process.exitCode = 64;
 } finally {
-  if (handle !== undefined) await handle.close();
+  if (handle !== undefined) {
+    try {
+      await handle.close();
+    } catch {
+      process.exitCode = 64;
+    }
+  }
 }
 NODE
 )" || {

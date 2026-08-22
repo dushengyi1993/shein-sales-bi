@@ -83,6 +83,9 @@ const writeArtifacts = async (generatedAt, sections = WARMUP_SECTIONS) => {
 const readQueue = async () => JSON.parse(await fs.readFile(queueFile, 'utf8'));
 const writeQueue = async queue => fs.writeFile(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
 const queueShell = path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh');
+const queueShellSource = await fs.readFile(queueShell, 'utf8');
+assert.doesNotMatch(queueShellSource, /process\.exit\(/,
+  'implicit generation scan must not bypass explicit async handle close with process.exit');
 const runQueueShell = (...args) => spawnSync('bash', [queueShell, ...args], {
   cwd: ROOT,
   env: process.env,
@@ -129,6 +132,18 @@ try {
   assert.equal((await readQueue()).entries.find(entry => entry.section === 'orders')?.coreGeneratedAt, 'G-PADDED',
     'implicit enqueue must scan the bounded top-level generatedAt even when it appears after the first 64 KiB');
   await fs.rm(queueFile, {force: true});
+
+  for (const invalidGeneratedAt of [true, 123, ['A', 'B'], ' G-PADDED ', 'G-PADDED\n']) {
+    await fs.writeFile(
+      path.join(portalRoot, 'data.json'),
+      `${JSON.stringify({padding: 'x'.repeat(128 * 1024), generatedAt: invalidGeneratedAt})}\n`,
+    );
+    const invalidGeneration = runQueueShell('--sections', 'orders', '--priority', '10', '--reason', 'invalid-core-generation');
+    assert.notEqual(invalidGeneration.status, 0,
+      `implicit enqueue must reject non-exact generatedAt=${JSON.stringify(invalidGeneratedAt)}`);
+    await assert.rejects(fs.access(queueFile),
+      'invalid generatedAt must fail before creating or mutating the queue');
+  }
 
   await writeCore('G1');
   await writeArtifacts('G1');
