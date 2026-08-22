@@ -18,6 +18,7 @@ import {
   DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR,
   ensurePartnerKnowledgeCurrent,
 } from '../lib/partner_knowledge_cache.mjs';
+import {validateOwnerKnowledgeDistribution} from '../lib/owner_knowledge_distribution.mjs';
 import {
   checkAndInstallPartnerCliUpdate,
   findManagedPartnerCliInstallRoot,
@@ -122,6 +123,7 @@ function parseArgs(argv) {
     outputFile: '',
     materialJsonFile: '',
     sourceFile: '',
+    section: '',
     expectedRevision: null,
     donorStore: '',
     donorSkc: '',
@@ -222,7 +224,6 @@ function parseArgs(argv) {
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--material-json') args.materialJsonFile = path.resolve(String(argv[++i] || '').trim());
     else if (a === '--source-file') args.sourceFile = path.resolve(String(argv[++i] || '').trim());
-    else if (a === '--section') args.section = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--expected-revision') args.expectedRevision = Number(argv[++i]);
     else if (a === '--donor-store') args.donorStore = String(argv[++i] || '').trim();
     else if (a === '--donor-skc') args.donorSkc = String(argv[++i] || '').trim();
@@ -257,7 +258,21 @@ function parseArgs(argv) {
     else if (a === '--knowledge-cache-dir') args.knowledgeCacheDir = path.resolve(String(argv[++i] || ''));
     else if (a === '--query-json') args.queryJson = String(argv[++i] || '');
     else if (a === '--query-file') args.queryFile = path.resolve(String(argv[++i] || ''));
-    else if (a === '--section' || a === '--sections') args.sections.push(...String(argv[++i] || '').split(/[,\s，、]+/).map(x => x.trim()).filter(Boolean));
+    else if (a === '--section' || a === '--sections') {
+      const rawValue = String(argv[++i] || '');
+      const values = rawValue
+        .split(/[,\s，、]+/)
+        .map(x => x.trim())
+        .filter(Boolean);
+      for (const value of values) {
+        if (!args.sections.includes(value)) args.sections.push(value);
+      }
+      // --section is also used by description preparation. Keep the
+      // singular compatibility value while treating both spellings as the
+      // same repeatable query-section input.
+      if (a === '--section') args.section = rawValue.trim().toLowerCase();
+      else if (!args.section && values.length === 1) args.section = values[0].toLowerCase();
+    }
     else if (a === '--help' || a === '-h') {
       args.command = 'help';
     } else if (!args.command) {
@@ -758,6 +773,119 @@ async function refreshPartnerKnowledge(args, {strict = false, force = false} = {
     process.stderr.write(`CLI 有推荐更新：当前 ${BI_OPS_CLI_VERSION}，推荐 ${result.recommendedCliVersion}\n`);
   }
   return result;
+}
+
+async function readJsonForQueryDiagnostic(file) {
+  try {
+    return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
+  } catch {
+    return null;
+  }
+}
+
+async function readVerifiedOwnerKnowledgeCacheDiagnostic(args) {
+  const cacheDir = path.resolve(args.knowledgeCacheDir || DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR);
+  const pointer = await readJsonForQueryDiagnostic(path.join(cacheDir, 'manifest.json'));
+  const data = pointer?.data && typeof pointer.data === 'object' ? pointer.data : null;
+  if (!data) {
+    return {
+      ok: false,
+      verified: false,
+      source: 'none',
+      errorCode: 'OWNER_KNOWLEDGE_CACHE_MISSING',
+    };
+  }
+  const generation = String(pointer.generation || data.bundleSha256 || '').trim().toLowerCase();
+  const bundleFiles = /^[a-f0-9]{64}$/u.test(generation)
+    ? [path.join(cacheDir, 'generations', generation, 'bundle.json'), path.join(cacheDir, 'bundle.json')]
+    : [path.join(cacheDir, 'bundle.json')];
+  let bundle = null;
+  for (const bundleFile of bundleFiles) {
+    bundle = await readJsonForQueryDiagnostic(bundleFile);
+    if (bundle) break;
+  }
+  if (!bundle) {
+    return {
+      ok: false,
+      verified: false,
+      source: 'invalid-cache',
+      errorCode: 'OWNER_KNOWLEDGE_CACHE_BUNDLE_MISSING',
+    };
+  }
+  try {
+    validateOwnerKnowledgeDistribution({
+      manifest: {
+        schemaVersion: Number(data.schemaVersion || 0),
+        authorityId: String(data.authorityId || ''),
+        fingerprint: String(data.fingerprint || ''),
+        publishedAt: data.publishedAt ? String(data.publishedAt) : null,
+        ruleCount: Number(data.ruleCount || 0),
+        bundlePath: String(data.bundlePath || ''),
+        bundleSha256: String(data.bundleSha256 || ''),
+      },
+      bundle,
+    });
+  } catch {
+    return {
+      ok: false,
+      verified: false,
+      source: 'invalid-cache',
+      errorCode: 'OWNER_KNOWLEDGE_CACHE_VALIDATION_FAILED',
+    };
+  }
+  return {
+    ok: true,
+    verified: true,
+    source: 'verified-cache',
+    current: data.current !== false,
+    fingerprint: String(data.fingerprint || ''),
+    sourceCommit: String(data.sourceCommit || ''),
+    checkedAt: String(pointer.checkedAt || ''),
+  };
+}
+
+async function readLocalPartnerCliDiagnostic() {
+  try {
+    const installRoot = await findManagedPartnerCliInstallRoot({entryRoot: ROOT});
+    if (!installRoot) {
+      return {managed: false, available: false, source: 'none', refreshAttempted: false};
+    }
+    const pointer = await readJsonForQueryDiagnostic(path.join(installRoot, 'current.json'));
+    const version = String(pointer?.version || '').trim();
+    return {
+      managed: true,
+      available: Boolean(version),
+      source: version ? 'managed-pointer' : 'invalid-pointer',
+      version,
+      refreshAttempted: false,
+    };
+  } catch (error) {
+    return {
+      managed: false,
+      available: false,
+      source: 'diagnostic-error',
+      refreshAttempted: false,
+      errorCode: String(error?.code || 'PARTNER_CLI_LOCAL_DIAGNOSTIC_FAILED'),
+    };
+  }
+}
+
+async function readReadOnlyPartnerDiagnostics(args) {
+  const [ownerKnowledge, partnerCli] = await Promise.all([
+    readVerifiedOwnerKnowledgeCacheDiagnostic(args).catch(error => ({
+      ok: false,
+      verified: false,
+      source: 'diagnostic-error',
+      errorCode: String(error?.code || 'OWNER_KNOWLEDGE_CACHE_DIAGNOSTIC_FAILED'),
+    })),
+    readLocalPartnerCliDiagnostic(),
+  ]);
+  return {
+    refreshAttempted: false,
+    refreshPolicy: 'read-only-verified-cache',
+    ownerKnowledge,
+    partnerCli,
+  };
 }
 
 function print(data, pretty = false) {
@@ -2616,6 +2744,7 @@ async function waitForLinkOpsJob(args, jobId) {
 async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
   if (!args.text) throw new Error(`${legacyAlias ? 'ask' : 'query'} requires --text`);
   const startedAt = new Date().toISOString();
+  const diagnostics = await readReadOnlyPartnerDiagnostics(args);
   const query = new URLSearchParams({q: args.text, source: 'codex_desktop_cli'});
   const stores = [...new Set([...(args.stores || []), ...(args.sourceStores || [])])];
   if (stores.length) query.set('stores', stores.join(','));
@@ -2669,6 +2798,7 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
         command: legacyAlias ? 'ask' : 'query',
         legacyAlias,
         note: '失败证据已原子覆盖输出文件，未沿用旧查询结果',
+        diagnostics,
       },
     };
     const finishedAt = new Date().toISOString();
@@ -2702,6 +2832,7 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
       note: legacyAlias
         ? 'ask 已改为 query 兼容别名；本次没有调用云端问数模型'
         : '当前 Codex 应直接分析 data，不得再转发给其他问数模型',
+      diagnostics,
     },
   };
   if (!args.outputFile) {
@@ -2828,11 +2959,12 @@ async function main() {
     print({ok: true, version: BI_OPS_CLI_VERSION, update: update.result});
     return;
   }
-  if (AUTO_UPDATE_COMMANDS.has(args.command)) {
+  const readOnlyQuery = args.command === 'query' || args.command === 'ask';
+  if (!readOnlyQuery && AUTO_UPDATE_COMMANDS.has(args.command)) {
     const update = await refreshPartnerCliAndRelaunchIfNeeded(args, {force: args.command === 'execute'});
     if (update.relaunched) return;
   }
-  if (KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
+  if (!readOnlyQuery && KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
     await refreshPartnerKnowledge(args, {strict: args.command === 'execute', force: args.command === 'execute'});
   }
   if (args.command === 'doctor') {

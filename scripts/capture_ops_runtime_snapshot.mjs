@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
 
 import {
@@ -23,6 +25,7 @@ import {
 import {auditCloudMaintenanceGuards} from './manage_cloud_maintenance_mode.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const execFileAsync = promisify(execFile);
 
 function parseArgs(argv) {
   const args = {
@@ -96,8 +99,29 @@ async function fetchHealth(url, kind) {
   }
 }
 
+async function assertCloudRuntimeProbeSupported() {
+  if (process.platform !== 'linux') {
+    const error = new Error('cloud runtime snapshot requires Linux with systemctl; refusing to create a cloud-shaped snapshot on this platform');
+    error.code = 'CLOUD_RUNTIME_SNAPSHOT_LINUX_REQUIRED';
+    throw error;
+  }
+  try {
+    await execFileAsync('systemctl', ['--version'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      windowsHide: true,
+    });
+  } catch (cause) {
+    const error = new Error(`cloud runtime snapshot requires an available systemctl command: ${String(cause?.message || cause).slice(0, 300)}`);
+    error.code = 'CLOUD_RUNTIME_SNAPSHOT_SYSTEMCTL_UNAVAILABLE';
+    error.cause = cause;
+    throw error;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  await assertCloudRuntimeProbeSupported();
   const startedAt = new Date().toISOString();
   try {
     await fs.mkdir(path.dirname(args.outDir), {recursive: true});
@@ -169,6 +193,9 @@ async function main() {
     summary: {
       releaseCommitMatches: snapshot.releaseSource.commitMatches,
       deploymentEvidenceOk: snapshot.deployedRelease.evidenceOk,
+      businessReady: snapshot.businessReady,
+      releaseAuditReady: snapshot.releaseAuditReady,
+      infrastructureReady: snapshot.infrastructureReady,
       trackedDirtyCount: snapshot.releaseSource.dirtyCount,
       requiredServicesInactive: snapshot.runtimeProbe.inactiveAlwaysRunning.length,
       requiredServicesRestarted: snapshot.runtimeProbe.restartedAlwaysRunning.length,
@@ -203,6 +230,12 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(JSON.stringify({ok: false, outcome: 'failed', exitCode: 1, error: String(error?.message || error)}, null, 2));
+  console.error(JSON.stringify({
+    ok: false,
+    outcome: 'failed',
+    exitCode: 1,
+    errorCode: String(error?.code || 'CLOUD_RUNTIME_SNAPSHOT_FAILED'),
+    error: String(error?.message || error),
+  }, null, 2));
   process.exitCode = 1;
 });

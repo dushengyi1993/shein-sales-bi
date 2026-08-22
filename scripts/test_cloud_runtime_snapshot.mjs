@@ -193,6 +193,12 @@ const base = {
 
 const healthy = buildCloudRuntimeSnapshot(base);
 assert.equal(healthy.ok, true, JSON.stringify(healthy.blockers, null, 2));
+assert.equal(healthy.businessReady, true);
+assert.equal(healthy.releaseAuditReady, true);
+assert.equal(healthy.infrastructureReady, true);
+assert.deepEqual(healthy.readiness.businessBlockers, []);
+assert.deepEqual(healthy.readiness.releaseAuditBlockers, []);
+assert.deepEqual(healthy.readiness.infrastructureBlockers, []);
 assert.equal(healthy.runtimeProbe.systemctlCommandCount, 2);
 assert.equal(healthy.runtimeProbe.requestedUnitCount, CLOUD_RUNTIME_SNAPSHOT_UNITS.length);
 assert.equal(healthy.runtimeProbe.inactiveTimers.length, 0);
@@ -237,6 +243,9 @@ const legacyDeploymentMarker = buildCloudRuntimeSnapshot({
   deployedRelease: {schemaVersion: 'shein-bi-deployed-release/v1', tag: '2026.08.11.5', commit: deployedCommit},
 });
 assert.equal(legacyDeploymentMarker.ok, false);
+assert.equal(legacyDeploymentMarker.businessReady, true);
+assert.equal(legacyDeploymentMarker.releaseAuditReady, false);
+assert.equal(legacyDeploymentMarker.infrastructureReady, true);
 assert.ok(legacyDeploymentMarker.blockers.some(row => row.code === 'DEPLOYMENT_MARKER_INVALID'));
 const runtimeRejectsV2 = buildCloudRuntimeSnapshot({
   ...base,
@@ -415,6 +424,10 @@ assert.equal(queryEmergencyFallback.health.query.ok, true,
   'a verified emergency fallback remains available for urgent CLI use');
 assert.equal(queryEmergencyFallback.ok, false,
   'an emergency fallback must not satisfy the formal managed-release gate');
+assert.equal(queryEmergencyFallback.businessReady, true,
+  'a verified emergency fallback must not make healthy business reads unavailable');
+assert.equal(queryEmergencyFallback.releaseAuditReady, false);
+assert.equal(queryEmergencyFallback.infrastructureReady, true);
 assert.ok(queryEmergencyFallback.blockers.some(row => row.code === 'PARTNER_CLI_RELEASE_UNMANAGED'
   && row.source === 'fallback' && row.version === '2026.08.17.1'));
 
@@ -462,6 +475,9 @@ const businessMaintenance = buildCloudRuntimeSnapshot({
   }),
 });
 assert.equal(businessMaintenance.ok, false);
+assert.equal(businessMaintenance.businessReady, false);
+assert.equal(businessMaintenance.infrastructureReady, false);
+assert.equal(businessMaintenance.releaseAuditReady, true);
 assert.ok(businessMaintenance.blockers.some(row => row.code === 'CLOUD_MAINTENANCE_ACTIVE'));
 assert.ok(!businessMaintenance.blockers.some(row => row.code === 'SCHEDULE_TIMER_INACTIVE'));
 assert.equal(
