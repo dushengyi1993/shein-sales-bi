@@ -1975,7 +1975,12 @@ if [[ "${SHEIN_LINK_BUSINESS_REFRESH_PORTAL:-1}" != "1" && "${SHEIN_LINK_BUSINES
   exit 0
 fi
 
-node scripts/audit_bi_warehouse.mjs
+if node scripts/audit_bi_warehouse.mjs; then
+  AUDIT_STATUS=0
+else
+  AUDIT_STATUS=$?
+  echo "[cloud_link_business_sync] WARN warehouse audit failed status=$AUDIT_STATUS; continuing Portal generation and enqueue" >&2
+fi
 
 node scripts/generate_bi_portal.mjs \
   --metabase-url "$METABASE_URL"
