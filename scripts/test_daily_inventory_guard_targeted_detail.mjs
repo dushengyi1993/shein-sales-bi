@@ -538,8 +538,8 @@ match('platform idempotency survives plan evidence refresh', executor,
   /logicalActionKey = stableInventoryHash\(\{[\s\S]*runDate: plan\.date[\s\S]*target: approvedTarget[\s\S]*actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET'[\s\S]*policyVersion: plan\.policyVersion[\s\S]*authorizationId:/,
   'the same logical daily action must reuse its SHEIN idempotency key after a crash');
 match('recovery lookup cannot be bypassed by target or authorization drift', executor,
-  /pendingIntentsByScope\.get\(recoveryScopeKey\)/,
-  'all non-rejected intents for the same run/store/SKC/SKU scope must block a new POST');
+  /acquireCrossProcessTicketLock\(lockFile[\s\S]*discoverInventoryJournalFiles\(journalFile, \{includeAll: true\}\)[\s\S]*readInventoryIntentJournals\(freshJournalFiles[\s\S]*pendingByScope\.get\(recoveryScopeKey\)[\s\S]*activeIntent = \{/,
+  'all non-rejected intents for the same store/SKC/SKU scope must be re-read under the SKU lock before a new POST');
 match('rebuilt plan cannot delete an unresolved intent', executor,
   /deferredHistoricalIntents = \[\.\.\.pendingIntentsByScope\.entries\(\)\][\s\S]*absent from the rebuilt current plan[\s\S]*for \(const row of rows\)/,
   'an intent scope omitted by a rebuilt plan must remain unresolved while independent current rows continue');

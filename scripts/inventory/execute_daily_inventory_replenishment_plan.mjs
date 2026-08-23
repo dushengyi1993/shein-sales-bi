@@ -9,6 +9,7 @@ import {
   buildDailyInventoryPlanHashPayload,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
+  INVENTORY_OVERWRITE_COMPUTATION_VERSION,
   resolveInventoryIdentityKey,
   resolveInventoryShelfStatus,
   stableInventoryHash,
@@ -226,7 +227,13 @@ const biAge = ageHours(biGeneratedAt);
 if (!args.reconcilePendingOnly && (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4))) {
   throw new Error(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
 }
-if (plan.policyVersion !== policy.policyVersion) throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
+const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
+if (!isValidCalendarDate(plan.date)) throw new Error(`Plan date is invalid: ${plan.date}`);
+if (plan.date > today) throw new Error(`Plan date is in the future: ${plan.date} vs ${today}`);
+const historicalReconcileOnly = args.reconcilePendingOnly && plan.date < today;
+if (plan.policyVersion !== policy.policyVersion && !historicalReconcileOnly) {
+  throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
+}
 const isEtLowInventorySafetyPlan = plan.schemaVersion === 'et-low-inventory-safety-plan/v1';
 const expectedHash = isEtLowInventorySafetyPlan
   ? stableInventoryHash({
@@ -247,9 +254,6 @@ const expectedHash = isEtLowInventorySafetyPlan
   : stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
-const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
-if (!isValidCalendarDate(plan.date)) throw new Error(`Plan date is invalid: ${plan.date}`);
-if (plan.date > today) throw new Error(`Plan date is in the future: ${plan.date} vs ${today}`);
 if (!args.reconcilePendingOnly && plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
 for (const evidence of args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence)) {
   const evidenceStore = String(evidence.store || '');
@@ -507,6 +511,11 @@ if (args.reconcilePendingOnly) {
       row,
       approvedTarget,
       authorizationId: executionAuthorization?.authorizationId || null,
+      // A prior-date reconcile-only plan is historical readback/supersede
+      // handling. Current-day recovery must prove the new explicit version;
+      // historical read-only reconciliation must remain compatible with
+      // unversioned legacy intents.
+      requireCurrentOverwriteComputationVersion: plan.date === today,
     });
     if (mismatch) failures.push(`intent_mismatch=${mismatch}:${row.storeKey}:${row.skc}:${row.skuCode}`);
     const intentId = scopeIntents[0].intentId;
@@ -652,9 +661,17 @@ for (const row of rows) {
     const lockFile = path.join(ROOT, 'state', 'locks', `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
     const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
     try {
+      // Another executor may have persisted this scope after our startup
+      // snapshot while we waited for the per-SKU ticket.  Re-read the full
+      // journal set after acquiring that ticket and before creating any new
+      // intent or issuing a POST; otherwise an empty startup cache can race
+      // into a second durable intent.
+      const freshJournalFiles = await discoverInventoryJournalFiles(journalFile, {includeAll: true});
+      const freshJournalBundle = await readInventoryIntentJournals(freshJournalFiles, {maxRunDate: today});
+      const freshScopeIntents = freshJournalBundle.pendingByScope.get(recoveryScopeKey) || [];
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
-      const scopeIntents = pendingIntentsByScope.get(recoveryScopeKey) || [];
+      const scopeIntents = freshScopeIntents;
       if (scopeIntents.length) {
         if (scopeIntents.length !== 1) {
           await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, error: `multiple durable inventory intents exist in recovery scope ${recoveryScopeKey}; duplicate submission forbidden`}, logicalActionKey);
@@ -730,6 +747,7 @@ for (const row of rows) {
           row,
           approvedTarget,
           authorizationId: executionAuthorization?.authorizationId || null,
+          requireCurrentOverwriteComputationVersion: plan.date === today,
         });
         if (mismatch) {
           await recordResult({
@@ -854,6 +872,7 @@ for (const row of rows) {
         skuCode: row.skuCode,
         targetUsableInventory: approvedTarget,
         policyVersion: plan.policyVersion,
+        overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
         authorizationId: executionAuthorization?.authorizationId || null,
         idempotencyKey,
         requestPayloadHash,

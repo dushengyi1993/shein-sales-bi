@@ -11,6 +11,7 @@ import {fileURLToPath} from 'node:url';
 import {
   buildDailyInventoryPlanHashPayload,
   computeInventoryOverwriteQuantity,
+  INVENTORY_OVERWRITE_COMPUTATION_VERSION,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
 import {
@@ -82,11 +83,11 @@ function actionKey(runDate, row, target = row.targetUsableInventory, policyVersi
   });
 }
 
-function makePlan(date, rows, sourceEvidence = []) {
+function makePlan(date, rows, sourceEvidence = [], policyVersion = policy.policyVersion) {
   const body = {
     schemaVersion: 'daily-inventory-replenishment-plan/v1',
     date,
-    policyVersion: policy.policyVersion,
+    policyVersion,
     executable: true,
     blockers: [],
     actionable: rows,
@@ -99,13 +100,25 @@ function makePlan(date, rows, sourceEvidence = []) {
   };
 }
 
-function makeIntent({runDate, row, planHash, intentId, target = row.targetUsableInventory, beforeUsable = 2}) {
-  const logicalActionKey = actionKey(runDate, row, target);
+function makeIntent({
+  runDate,
+  row,
+  planHash,
+  intentId,
+  target = row.targetUsableInventory,
+  beforeUsable = 2,
+  beforeTotal = beforeUsable,
+  beforeLocked = 0,
+  changeQuantity,
+  policyVersion = policy.policyVersion,
+  overwriteComputationVersion = runDate === today ? INVENTORY_OVERWRITE_COMPUTATION_VERSION : undefined,
+}) {
+  const logicalActionKey = actionKey(runDate, row, target, policyVersion);
   const before = {
     skuCode: row.skuCode,
-    totalInventoryQuantity: beforeUsable,
+    totalInventoryQuantity: beforeTotal,
     totalUsableInventory: beforeUsable,
-    totalLockedQuantity: 0,
+    totalLockedQuantity: beforeLocked,
     stockRowMissing: false,
     warehouseCodes: [],
   };
@@ -117,7 +130,7 @@ function makeIntent({runDate, row, planHash, intentId, target = row.targetUsable
       skuCode: row.skuCode,
       invType: 'VI',
       changeType: 'OVERWRITE',
-      changeQuantity: computeInventoryOverwriteQuantity(target, before),
+      changeQuantity: changeQuantity ?? computeInventoryOverwriteQuantity(target, before),
       changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
     }]},
     headers: {language: 'en'},
@@ -133,7 +146,8 @@ function makeIntent({runDate, row, planHash, intentId, target = row.targetUsable
     skc: row.skc,
     skuCode: row.skuCode,
     targetUsableInventory: target,
-    policyVersion: policy.policyVersion,
+    policyVersion,
+    ...(overwriteComputationVersion === undefined ? {} : {overwriteComputationVersion}),
     authorizationId,
     idempotencyKey: request.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
     requestPayloadHash: stableInventoryHash(request),
@@ -145,7 +159,7 @@ function makeIntent({runDate, row, planHash, intentId, target = row.targetUsable
 
 function makeWriteOutcome(intent, {
   disposition = 'readback_matched',
-  recordedAt = new Date(Date.now() - 60_000).toISOString(),
+  recordedAt = new Date().toISOString(),
   code,
 } = {}) {
   return {
@@ -154,7 +168,7 @@ function makeWriteOutcome(intent, {
     logicalActionKey: intent.logicalActionKey,
     disposition,
     recordedAt,
-    ...(code === undefined ? {} : {code}),
+    ...(disposition === 'rejected' ? {code: code ?? 'rejected', httpOk: true, httpStatus: 200, success: false} : {}),
   };
 }
 
@@ -172,11 +186,11 @@ function makeSupersedeOutcome(olderIntent, laterIntent, laterOutcome, overrides 
   };
 }
 
-function makeLegacyAuditRows({planHash = 'b'.repeat(64), sequenceGap = false, conflictingPlanHash = false} = {}) {
+function makeLegacyAuditRows({planHash = 'b'.repeat(64), sequenceGap = false, conflictingPlanHash = false, invalidRecordedAt = false} = {}) {
   return [
     {
       planHash,
-      recordedAt: `${twoDaysAgo}T10:00:00.000Z`,
+      recordedAt: invalidRecordedAt ? '2026-02-30T10:00:00.000Z' : `${twoDaysAgo}T10:00:00.000Z`,
       row: {
         after: {totalUsableInventory: 10},
         before: {totalUsableInventory: 2},
@@ -709,6 +723,21 @@ try {
   assert.equal(state.postCount, 0);
   assert.equal(state.requestCount, 0, 'legacy planHash conflict must abort before any API call');
 
+  const legacyTimestampRoot = path.join(temp, 'legacy-invalid-calendar-timestamp');
+  const legacyTimestamp = await writeFixture(legacyTimestampRoot);
+  await writeJournalRows(
+    path.join(legacyTimestampRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`),
+    makeLegacyAuditRows({invalidRecordedAt: true}),
+  );
+  state.postCount = 0;
+  state.postSkus = [];
+  state.requestCount = 0;
+  const legacyTimestampRun = await runExecutor(legacyTimestamp);
+  assert.notEqual(legacyTimestampRun.code, 0);
+  assert.match(legacyTimestampRun.stderr, /INVENTORY_JOURNAL_LEGACY_AUDIT_INVALID:.*:recordedAt/);
+  assert.equal(state.postCount, 0);
+  assert.equal(state.requestCount, 0, 'invalid legacy audit calendar timestamp must abort before any API call');
+
   // 6) A future-dated journal is invalid before any API call, just like a
   // future plan. The journal filename itself is part of the date proof.
   const futureJournalRoot = path.join(temp, 'future-journal');
@@ -731,11 +760,23 @@ try {
 
   // 7) A prior-date reconcile-only plan is valid, but it can only read back.
   const reconcileRoot = path.join(temp, 'reconcile-prior-date');
-  const reconcilePlan = makePlan(priorDate, [ROWS[0]]);
+  const historicalPolicyVersion = '2026-08-12.2';
+  const reconcilePlan = makePlan(priorDate, [ROWS[0]], [], historicalPolicyVersion);
   const reconcile = await writeFixture(reconcileRoot, {date: priorDate, rows: [ROWS[0]]});
   reconcile.plan = reconcilePlan;
   await fs.writeFile(reconcile.planFile, `${JSON.stringify(reconcilePlan, null, 2)}\n`);
-  const reconcileIntent = makeIntent({runDate: priorDate, row: ROWS[0], planHash: reconcilePlan.payloadHash, intentId: 'reconcile-prior-date-1'});
+  const reconcileIntent = makeIntent({
+    runDate: priorDate,
+    row: ROWS[0],
+    planHash: reconcilePlan.payloadHash,
+    intentId: 'reconcile-prior-date-1',
+    target: 10,
+    beforeTotal: 9,
+    beforeUsable: 8,
+    beforeLocked: 0,
+    changeQuantity: 11,
+    policyVersion: historicalPolicyVersion,
+  });
   await fs.writeFile(reconcile.currentIntentFile, `${JSON.stringify(reconcileIntent)}\n`);
   state.postCount = 0;
   state.requestCount = 0;

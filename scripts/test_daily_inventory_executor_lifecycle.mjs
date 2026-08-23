@@ -27,6 +27,7 @@ import {spawn} from 'node:child_process';
 import {
   buildDailyInventoryPlanHashPayload,
   computeInventoryOverwriteQuantity,
+  INVENTORY_OVERWRITE_COMPUTATION_VERSION,
   resolveInventoryIdentityKey,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
@@ -322,6 +323,7 @@ try {
     const intentRows = journalB.split(/\r?\n/).filter(Boolean).map(JSON.parse).filter(entry => entry.kind === 'intent');
     assert.equal(intentRows.length, 1, 'the durable intent must be journaled before the failed POST');
     assert.ok(intentRows[0].intentId && /^[A-Za-z0-9-]+$/.test(intentRows[0].intentId), 'journaled intent carries a stable intentId');
+    assert.equal(intentRows[0].overwriteComputationVersion, INVENTORY_OVERWRITE_COMPUTATION_VERSION, 'new executor intents carry the explicit overwrite computation version');
     assert.equal(intentRows[0].idempotencyKey, resultB.results[0].idempotencyKey);
     assert.equal(intentRows[0].logicalActionKey, resultB.results[0].logicalActionKey);
     assert.equal(mockB.getChangeInventoryPosts(), 1, 'exactly one POST attempt after the durable fsync');
@@ -528,6 +530,78 @@ try {
   }
 
   // ---------------------------------------------------------------------
+  // Scenario 5b: both processes may take their startup journal snapshot
+  // before either reaches the SKU ticket. The second process must refresh
+  // the journal while holding that ticket and recover the first intent;
+  // together they may issue only one inventory POST.
+  // ---------------------------------------------------------------------
+  const dirCon = path.join(temp, 'concurrent-stale-snapshot');
+  await fs.mkdir(dirCon);
+  const {plan: planCon} = await buildPlanFixture(dirCon, {etProducts: [etRow]});
+  let mockCon;
+  mockCon = createMockOpenApiServer({
+    onChangeInventory: ({json}) => {
+      const startedAt = Date.now();
+      const finishWhenBothExecutorsStarted = () => {
+        if (mockCon.counts.queryStoreInfo >= 2 || Date.now() - startedAt > 5000) {
+          // Explicit code=0 without info.success is intentionally ambiguous,
+          // so the first durable intent remains pending.
+          json({code: '0'});
+          return;
+        }
+        setTimeout(finishWhenBothExecutorsStarted, 10);
+      };
+      finishWhenBothExecutorsStarted();
+    },
+  });
+  mockCon.url = await new Promise(resolve => mockCon.server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${mockCon.server.address().port}`)));
+  await fs.writeFile(path.join(dirCon, 'config.json'), JSON.stringify({
+    stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+    apiBaseUrls: {prodSemiManaged: mockCon.url},
+  }), 'utf8');
+  const concurrentArgs = out => [
+    '--plan', path.join(dirCon, 'plan.json'),
+    '--policy', path.join(dirCon, 'policy.json'),
+    '--config', path.join(dirCon, 'config.json'),
+    '--bi-data', path.join(dirCon, 'bi.json'),
+    '--links-data', path.join(dirCon, 'links.json'),
+    '--out', out,
+    '--execute',
+    '--execution-mode', 'automatic',
+    '--confirm-hash', planCon.payloadHash,
+  ];
+  const envCon = {
+    SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT: AUTOMATION_CONTEXT,
+    SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION: AUTOMATION_AUTHORIZATION,
+  };
+  const outConA = path.join(dirCon, 'result-a.json');
+  const outConB = path.join(dirCon, 'result-b.json');
+  try {
+    const [runConA, runConB] = await Promise.all([
+      runExecutor(concurrentArgs(outConA), envCon),
+      runExecutor(concurrentArgs(outConB), envCon),
+    ]);
+    assert.equal(runConA.code, 1, `first concurrent executor must retain/read pending, stderr=${runConA.stderr}`);
+    assert.equal(runConB.code, 1, `second concurrent executor must retain/read pending, stderr=${runConB.stderr}`);
+    assert.equal(mockCon.getChangeInventoryPosts(), 1, 'two stale startup snapshots must still produce one inventory POST total');
+    const resultsCon = await Promise.all([outConA, outConB].map(async file => JSON.parse(await fs.readFile(file, 'utf8'))));
+    assert.deepEqual(
+      resultsCon.map(result => result.results[0].state).sort(),
+      ['needs_manual_resolve', 'submitted_but_readback_pending'].sort(),
+      'one executor owns the ambiguous submission and the other remains readback-only',
+    );
+    const journalNames = (await fs.readdir(dirCon)).filter(name => name.endsWith('.journal.ndjson'));
+    const journalEntries = (await Promise.all(journalNames.map(async name => (
+      (await fs.readFile(path.join(dirCon, name), 'utf8')).split(/\r?\n/).filter(Boolean).map(JSON.parse)
+    )))).flat();
+    assert.equal(journalEntries.filter(entry => entry.kind === 'intent').length, 1, 'concurrent executors must create one durable intent total');
+    assert.equal(journalEntries.filter(entry => entry.kind === 'write_outcome').length, 0, 'ambiguous concurrent submission must retain the one intent');
+  } finally {
+    mockCon.server.close();
+    await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
   // Scenario 6a: accepted response but ten readbacks never match -> intent
   // retained; re-run is readback-only, POST stays exactly 1.
   // ---------------------------------------------------------------------
@@ -714,11 +788,13 @@ try {
       skuCode: SKU_CODE,
       targetUsableInventory: journalTarget,
       policyVersion: planJ.policyVersion,
+      overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
       authorizationId: AUTOMATION_AUTHORIZATION,
       idempotencyKey: journalRequest.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
       requestPayloadHash: stableInventoryHash(journalRequest),
       request: journalRequest,
       before: journalBefore,
+      recordedAt: new Date().toISOString(),
     };
     await fs.writeFile(journalJ, `${JSON.stringify(validJournalIntent)}\n{torn`, 'utf8');
     const tornRun = await runExecutor(argsJ, envJ);
@@ -748,6 +824,7 @@ try {
       'idempotent_rerun_skips_on_fresh_readback_no_second_post',
       'definitive_rejection_journals_write_outcome_rejected_and_releases_intent',
       'ambiguous_response_retains_intent_rerun_readback_only',
+      'concurrent_stale_snapshots_refresh_under_sku_lock_one_post_total',
       'ten_readbacks_pending_retains_intent_rerun_readback_only',
       'readback_throw_retains_intent_rerun_readback_only',
       'torn_and_corrupt_journal_fail_closed_before_any_request',
