@@ -99,6 +99,32 @@ function buildStrictIntent({
 }
 
 try {
+  const mixedEtJournal = path.join(temp, 'mixed-et-run-and-inventory.journal.ndjson');
+  const mixedEtIntent = buildStrictIntent({
+    runDate: '2026-08-23',
+    policyVersion: '2026-08-23.1',
+    changeQuantity: 69,
+    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    intentId: 'mixed-et-inventory-intent',
+  });
+  await appendDurableJournalRecord(mixedEtJournal, {
+    kind: 'executor_run_intent',
+    intentId: 'mixed-et-run-intent',
+    phase: 'executing',
+    attemptId: 'attempt-1',
+    runDate: '2026-08-23',
+    batchId: 'batch-1',
+    manifestHash: 'd'.repeat(64),
+    planHash: mixedEtIntent.planHash,
+    actionCount: 1,
+    resultAttempt: '/tmp/result-attempt.json',
+    recordedAt: new Date().toISOString(),
+  });
+  await appendDurableJournalRecord(mixedEtJournal, mixedEtIntent);
+  const mixedEtLifecycle = await readInventoryIntentLifecycle(mixedEtJournal, {strict: true, maxRunDate: '2026-08-23'});
+  assert.equal(mixedEtLifecycle.intents.size, 1, 'outer ET run records must not become inventory intents');
+  assert.equal(mixedEtLifecycle.pending.has(mixedEtIntent.intentId), true, 'the co-located inventory intent must remain recoverable');
+
   let submitCalls = 0;
   let readbackCalls = 0;
   const delayed = await submitDurableInventoryWriteOnce({
@@ -515,6 +541,7 @@ try {
 
   console.log(JSON.stringify({ok: true, checks: [
     'one_post_only',
+    'mixed_et_executor_run_records_are_ignored_by_inventory_lifecycle',
     'ten_readbacks_then_pending',
     'pre_submit_intent_survives_unknown_submit',
     'recovery_never_resubmits',
