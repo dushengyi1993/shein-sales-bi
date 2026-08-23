@@ -937,6 +937,40 @@ assert.match(portalQueueWorker, /if \(\( REMAINING_SEC <= 10 \)\); then/,
 
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
 const repairSlot = read('scripts/run_cloud_marketing_fallback_slot.sh');
+const normalizedRepair = repair.replace(/\r\n/g, '\n');
+const leaseHelperStart = normalizedRepair.indexOf('ensure_browser_lease() {');
+const leaseHelperEnd = normalizedRepair.indexOf('\n}\n\nupdate_stage()', leaseHelperStart);
+assert.ok(leaseHelperStart >= 0 && leaseHelperEnd > leaseHelperStart,
+  'repair worker must keep a bounded browser lease helper');
+const leaseHelper = normalizedRepair.slice(leaseHelperStart, leaseHelperEnd);
+assert.match(leaseHelper, /if \[\[ "\$LEASE_ACQUIRED" == "1" \]\]; then[\s\S]*return 0/,
+  'browser lease helper must be idempotent after the first acquire');
+assert.match(leaseHelper, /lease_action acquire \|\| return \$\?/,
+  'browser lease helper must own the guarded acquire');
+assert.match(leaseHelper, /export SHEIN_BI_BROWSER_LEASE_TASK="\$LEASE_TASK"/);
+assert.match(leaseHelper, /export SHEIN_BI_BROWSER_LEASE_RUN_ID="\$RUN_ID"/);
+assert.match(leaseHelper, /cleanup_store_browsers/);
+const finalSnapshotStart = normalizedRepair.indexOf('run_terminal_final_snapshot() {');
+const finalSnapshotEnd = normalizedRepair.indexOf('\n}\n\nrun_final_readback()', finalSnapshotStart);
+assert.ok(finalSnapshotStart >= 0 && finalSnapshotEnd > finalSnapshotStart,
+  'repair worker must keep a bounded terminal snapshot function for lease ordering checks');
+const finalSnapshot = normalizedRepair.slice(finalSnapshotStart, finalSnapshotEnd);
+const firstHeartbeatAt = finalSnapshot.indexOf('lease_action heartbeat');
+assert.ok(
+  finalSnapshot.indexOf('ensure_browser_lease || return $?') >= 0
+    && finalSnapshot.indexOf('ensure_browser_lease || return $?') < firstHeartbeatAt,
+  'terminal final snapshot must ensure the browser lease before its first heartbeat',
+);
+assert.equal(
+  [...normalizedRepair.matchAll(/^[ \t]*lease_action acquire \|\| return \$\?[ \t]*$/gm)].length,
+  1,
+  'repair worker must keep acquire behind one idempotent lease helper',
+);
+assert.match(
+  normalizedRepair,
+  /\nensure_browser_lease\nREMAINING_GROUPS="\$MAX_GROUPS"/,
+  'the existing late lease path must reuse ensure_browser_lease',
+);
 assert.match(repair, /write_state deferred_to_local/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /run_cloud_marketing_fallback_slot\.sh/);
 assert.match(repairSlot, /--defer-reason deferred_to_local/);

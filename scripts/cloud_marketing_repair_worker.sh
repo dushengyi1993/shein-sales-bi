@@ -162,6 +162,18 @@ lease_action() {
   node scripts/manage_browser_task_leases.mjs "$1" --root "$ROOT" --task "$LEASE_TASK" --run-id "$RUN_ID" --owner-pid "$$" --ttl-sec "$LEASE_TTL_SEC" --group ALL
 }
 
+ensure_browser_lease() {
+  if [[ "$LEASE_ACQUIRED" == "1" ]]; then
+    return 0
+  fi
+  lease_action acquire || return $?
+  LEASE_ACQUIRED=1
+  export SHEIN_BI_BROWSER_LEASE_TASK="$LEASE_TASK"
+  export SHEIN_BI_BROWSER_LEASE_RUN_ID="$RUN_ID"
+  cleanup_store_browsers
+  return 0
+}
+
 update_stage() {
   local stage="$1" status="$2" readback_ok="$3" detail="$4" result_path="${5:-}"
   acquire_marketing_artifact_publication_lock
@@ -277,6 +289,7 @@ run_terminal_final_snapshot() {
   # Every terminal report is built after a fresh browserless ordinary/coupon
   # snapshot and a final 19-store price readback. A blocked queue is not a
   # report-ready state by itself.
+  ensure_browser_lease || return $?
   lease_action heartbeat || return $?
   timeout -k "$STACK_REVIEW_KILL_AFTER_SEC" "$STACK_REVIEW_TIMEOUT_SEC" \
     node scripts/marketing/export_marketing_stack_review.mjs \
@@ -505,11 +518,7 @@ if (( IS_CLOUD_EXECUTION == 1 )); then
   export SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1
 fi
 
-lease_action acquire
-LEASE_ACQUIRED=1
-export SHEIN_BI_BROWSER_LEASE_TASK="$LEASE_TASK"
-export SHEIN_BI_BROWSER_LEASE_RUN_ID="$RUN_ID"
-cleanup_store_browsers
+ensure_browser_lease
 REMAINING_GROUPS="$MAX_GROUPS"
 
 # A local runner may have completed writes without mutating the cloud queue.
