@@ -34,6 +34,18 @@ async function readJson(file, fallback = null) {
   catch { return fallback; }
 }
 
+async function readJsonWithSha256(file, fallback = null) {
+  try {
+    const raw = await fs.readFile(file);
+    return {
+      value: JSON.parse(raw.toString('utf8').replace(/^\uFEFF/, '')),
+      sha256: crypto.createHash('sha256').update(raw).digest('hex'),
+    };
+  } catch {
+    return {value: fallback, sha256: ''};
+  }
+}
+
 function extractBullets(markdown, heading) {
   const marker = `## ${heading}`;
   const start = markdown.indexOf(marker);
@@ -58,7 +70,12 @@ function latestTimestamp(...values) {
   return parsed.length ? Math.max(...parsed) : NaN;
 }
 
-export function assessMarketingDailyDeliveryReadiness({queue = null, guardReport = null, executionReport = null} = {}) {
+export function assessMarketingDailyDeliveryReadiness({
+  queue = null,
+  guardReport = null,
+  executionReport = null,
+  guardSha256 = '',
+} = {}) {
   const queueStatus = String(queue?.status || 'no_queue');
   if (!queue) {
     return {ready: false, reason: 'repair queue is missing; inspection cannot be called final'};
@@ -86,25 +103,36 @@ export function assessMarketingDailyDeliveryReadiness({queue = null, guardReport
     };
   }
 
-  const queueAt = latestTimestamp(queue?.updatedAt, queue?.createdAt);
   const executionAt = latestTimestamp(
     executionReport?.finishedAt,
     executionReport?.updatedAt,
     executionReport?.createdAt,
   );
+  const sourceGuardHash = queue?.sourceGuardHash || '';
+  if (sourceGuardHash && sourceGuardHash !== guardSha256) {
+    return {ready: false, reason: 'terminal queue source guard hash does not match final guard'};
+  }
+  const queueAt = latestTimestamp(queue?.updatedAt, queue?.createdAt);
   const requiredAt = Math.max(
-    Number.isFinite(queueAt) ? queueAt : 0,
+    sourceGuardHash ? 0 : (Number.isFinite(queueAt) ? queueAt : 0),
     Number.isFinite(executionAt) ? executionAt : 0,
   );
   if (guardAt < requiredAt) {
     return {
       ready: false,
-      reason: 'final guard predates the terminal queue or execution result',
+      reason: sourceGuardHash
+        ? 'final guard predates the execution result'
+        : 'final guard predates the terminal queue or execution result',
       guardAt: new Date(guardAt).toISOString(),
       requiredAt: new Date(requiredAt).toISOString(),
     };
   }
-  return {ready: true, reason: 'terminal queue has post-execution final guard'};
+  return {
+    ready: true,
+    reason: sourceGuardHash
+      ? 'terminal queue is bound to the post-execution final guard'
+      : 'terminal queue has post-execution final guard',
+  };
 }
 
 export function countOutstandingGuardRepairs(guardReport = null) {
@@ -298,11 +326,17 @@ async function main() {
   const queue = await readJson(queuePath, null);
   const guardMarkdown = await readText(guardMdPath);
   if (!guardMarkdown) throw new Error(`Missing marketing guard Markdown: ${guardMdPath}`);
-  const guardReport = await readJson(guardJsonPath, null);
+  const guardJson = await readJsonWithSha256(guardJsonPath, null);
+  const guardReport = guardJson.value;
   if (!guardReport) throw new Error(`Missing marketing guard JSON: ${guardJsonPath}`);
   const executionMarkdown = await readText(executionMdPath);
   const executionReport = await readJson(executionJsonPath, null);
-  const readiness = assessMarketingDailyDeliveryReadiness({queue, guardReport, executionReport});
+  const readiness = assessMarketingDailyDeliveryReadiness({
+    queue,
+    guardReport,
+    executionReport,
+    guardSha256: guardJson.sha256,
+  });
   if (!readiness.ready) {
     console.log(JSON.stringify({ok: true, skipped: true, finalReady: false, ...readiness}));
     process.exitCode = 3;

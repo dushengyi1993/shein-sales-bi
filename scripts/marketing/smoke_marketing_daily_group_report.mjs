@@ -93,6 +93,7 @@ const queue = {
   updatedAt: '2026-07-31T04:02:00.000Z',
   counts: {totalRows: 9},
 };
+const guardSha256 = 'a'.repeat(64);
 assert.equal(assessMarketingDailyDeliveryReadiness({
   queue,
   guardReport: {createdAt: '2026-07-31T04:01:00.000Z'},
@@ -103,6 +104,29 @@ assert.equal(assessMarketingDailyDeliveryReadiness({
   guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
   executionReport,
 }).ready, true, 'a post-terminal final guard is deliverable');
+const hashBoundQueue = {
+  ...queue,
+  updatedAt: '2026-07-31T04:06:00.000Z',
+  sourceGuardHash: guardSha256,
+};
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: hashBoundQueue,
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+  executionReport,
+  guardSha256,
+}).ready, true, 'a matching guard hash permits queue updates after guard creation');
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: {...hashBoundQueue, sourceGuardHash: 'b'.repeat(64)},
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+  executionReport,
+  guardSha256,
+}).ready, false, 'a mismatched guard hash must fail closed');
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: hashBoundQueue,
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+  executionReport: {...executionReport, finishedAt: '2026-07-31T04:06:00.000Z'},
+  guardSha256,
+}).ready, false, 'a matching guard hash cannot bypass a later execution result');
 
 assert.equal(assessMarketingDailyDeliveryReadiness({
   queue: null,
@@ -213,7 +237,7 @@ const workerSource = await fs.readFile(
 );
 assert.match(
   workerSource,
-  /if \[\[ "\$QUEUE_STATUS" == "blocked" \]\]; then[\s\S]*?run_terminal_final_snapshot[\s\S]*?send_daily_group_report/,
+  /if \[\[ "\$QUEUE_STATUS" == "blocked" \]\]; then[\s\S]*?run_final_readback[\s\S]*?send_daily_group_report/,
   'terminal blockers must refresh final evidence before delivery',
 );
 assert.match(workerSource, /DEFER TO LOCAL before browser lease or SHEIN mutation/);
