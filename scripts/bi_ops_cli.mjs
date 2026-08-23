@@ -26,6 +26,7 @@ import {
 } from '../lib/partner_cli_updater.mjs';
 import {planLinkOpsImageRoles} from '../lib/link_ops_image_role_planner.mjs';
 import {ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT} from '../lib/link_ops_duplicate_publish_override.mjs';
+import {isSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
   buildPrepareDescriptionsCliOutput,
   describeDescriptionMaterial,
@@ -353,7 +354,7 @@ Usage:
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
   node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--store JSH] [--out roles.json]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
-  node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV/SH-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --supply-price 210 --inventory 100 --input-current-ma 700
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --standard-goods-sn SK-999 --supply-price 210 --inventory 100 --allow-empty-description --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}
@@ -1950,8 +1951,8 @@ async function runPrepareProductAttribute(args) {
     throw new Error('prepare-product-attribute requires --donor-store <同货号 donor 店铺代码>');
   }
   const donorSkc = String(args.donorSkc || '').trim();
-  if (!donorSkc || donorSkc.length > 160 || !/^s[abv]\d{8,}$/i.test(donorSkc)) {
-    throw new Error('prepare-product-attribute --donor-skc 必须是区分大小写的 SHEIN SKC（s[abv] + 8 位以上数字）');
+  if (!donorSkc || donorSkc.length > 160 || !isSheinSkc(donorSkc) || !/\d{8,}$/.test(donorSkc)) {
+    throw new Error('prepare-product-attribute --donor-skc 必须是完整 SHEIN SKC（sv/sb/sh + 8 位以上数字，大小写不敏感）');
   }
   const attributeId = normalizeProductAttributeId(args.attributeId);
   if (attributeId === null || attributeId !== 1002328) {

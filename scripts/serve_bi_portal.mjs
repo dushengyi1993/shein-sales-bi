@@ -93,6 +93,7 @@ import {
   normalizePublishPreparationOverrides,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {buildPendingListingImageCorrection} from '../lib/link_ops_pending_listing_image_correction.mjs';
+import {isSheinSkc, normalizeSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
   buildDescriptionPayloadRows,
   buildEmptyDescriptionAuthorization,
@@ -3479,7 +3480,7 @@ function inferLinkOpsTargets(command, options = {}) {
     writeStores.push(storeMatches[0]);
   }
   const namedProductMatches = productInferenceText.match(/\b[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?[\u4e00-\u9fa5]{1,24}?(?=(?:补|复制|改|换|上架|下架|，|,|。|；|;|\s|$))/giu) || [];
-  const alnumMatches = productInferenceText.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [];
+  const alnumMatches = productInferenceText.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb|sh)\d{8,})\b/giu) || [];
   const numericProductMatches = (productInferenceText.match(/(?<!\d)(\d{3,6}[A-Z]?)(?=\s*(?:缝纫机|咖啡机|空气炸锅|热风梳|厨师机|脱毛仪|榨汁机|绞肉机|吸尘器|电磁炉|按摩器|链接|货号|产品|品))/giu) || [])
     .map(x => x.match(/\d{3,6}[A-Z]?/i)?.[0] || '');
   const skuMatches = [...new Set([...namedProductMatches, ...alnumMatches, ...numericProductMatches]
@@ -4570,7 +4571,7 @@ function projectLinkOpsTargetsForClient(targets, intents = []) {
   const rawProductRefs = asArray(normalized.productRefs)
     .map(x => compactChatLine(x, 120))
     .filter(Boolean);
-  const nonSourceProductRefs = rawProductRefs.filter(x => !/^(?:sv|sb)\d{8,}$/i.test(String(x || '').trim()));
+  const nonSourceProductRefs = rawProductRefs.filter(x => !/^(?:sv|sb|sh)\d{8,}$/i.test(String(x || '').trim()));
   const productRefs = hasCopyProduct && nonSourceProductRefs.length ? nonSourceProductRefs : rawProductRefs;
   return {
     stores: normalizeConcreteStoreKeys(normalized.stores),
@@ -5831,8 +5832,8 @@ function resolveApprovedMaintenanceImageIdentity(task, body, taskRows = [], {act
   const refs = asArray(task?.targets?.productRefs || task?.productRefs)
     .map(value => String(value || '').trim())
     .filter(Boolean);
-  const refSpus = refs.filter(value => /^[a-z]\d{10,}$/i.test(value) && !/^s(?:v|b)\d+$/i.test(value));
-  const refSkcs = refs.filter(value => /^s(?:v|b)\d+$/i.test(value));
+  const refSpus = refs.filter(value => /^[a-z]\d{10,}$/i.test(value) && !isSheinSkc(value));
+  const refSkcs = refs.map(normalizeSheinSkc).filter(Boolean);
   const candidateSpus = explicitSpu ? [explicitSpu] : (sourceIdentity.spuNames.length ? sourceIdentity.spuNames : refSpus);
   const candidateSkcs = explicitSkc ? [explicitSkc] : (sourceIdentity.skcNames.length ? sourceIdentity.skcNames : refSkcs);
   if (explicitSpu && sourceIdentity.spuNames.length && !sourceIdentity.spuNames.some(value => value.toLowerCase() === explicitSpu.toLowerCase())) {
@@ -5845,7 +5846,7 @@ function resolveApprovedMaintenanceImageIdentity(task, body, taskRows = [], {act
   const spuNames = uniqueInsensitive(candidateSpus);
   const skcNames = uniqueInsensitive(candidateSkcs);
   if (spuNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one SPU; received ${spuNames.length}`);
-  if (skcNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one sv/sb SKC; received ${skcNames.length}`);
+  if (skcNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one sv/sb/sh SKC; received ${skcNames.length}`);
   return {
     spuName: spuNames[0],
     skcName: skcNames[0],
@@ -6397,9 +6398,9 @@ function hasApprovedMaintenanceImageBinding(task) {
   if (!targetStore || !taskWriteStores(task).includes(targetStore)) return false;
   if (!payload || typeof payload !== 'object') return false;
   const spu = String(payload.spu_name || payload.spuName || '').trim();
-  if (!/^[a-z]\d{10,}$/i.test(spu) || /^s(?:v|b)\d+$/i.test(spu)) return false;
+  if (!/^[a-z]\d{10,}$/i.test(spu) || isSheinSkc(spu)) return false;
   const skcRows = asArray(payload.skc_list || payload.skcList);
-  if (!skcRows.length || skcRows.some(row => !/^s(?:v|b)\d+$/i.test(String(row?.skc_name || row?.skcName || '').trim()))) return false;
+  if (!skcRows.length || skcRows.some(row => !isSheinSkc(String(row?.skc_name || row?.skcName || '').trim()))) return false;
   const imageRows = [
     ...asArray(payload?.image_info?.image_info_list || payload?.imageInfo?.imageInfoList),
     ...skcRows.flatMap(row => asArray(row?.image_info?.image_info_list || row?.imageInfo?.imageInfoList)),
@@ -20213,10 +20214,10 @@ async function main() {
           });
         }
         const donorSkc = String(body.donorSkc || '').trim();
-        if (!donorSkc || donorSkc.length > 160 || !/^s[abv]\d{8,}$/i.test(donorSkc)) {
+        if (!donorSkc || donorSkc.length > 160 || !isSheinSkc(donorSkc) || !/\d{8,}$/.test(donorSkc)) {
           return sendJson(res, 400, {
             ok: false,
-            error: 'donorSkc 必须是一个区分大小写的 SHEIN SKC（s[abv] + 8 位以上数字）',
+            error: 'donorSkc 必须是完整 SHEIN SKC（sv/sb/sh + 8 位以上数字，大小写不敏感）',
             code: 'DONOR_SKC_INVALID',
           });
         }

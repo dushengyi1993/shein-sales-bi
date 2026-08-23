@@ -1503,7 +1503,7 @@ function validSourceSkc(value) {
   if (typeof value !== 'string') return false;
   if (hasControlCharacters(value)) return false;
   const raw = String(value ?? '');
-  return raw.length <= 160 && /^s[abv]\d{8,}$/i.test(raw);
+  return raw.length <= 160 && isSheinSkc(raw) && /\d{8,}$/.test(raw);
 }
 
 function validSourceSpu(value) {
@@ -1558,6 +1558,44 @@ function executionHashScalar(value, max = 160) {
 
 function sourceDetailLockBlocker(code, message) {
   return {code, message: safeString(message, 1000)};
+}
+
+// The OpenAPI product cache may move the same byte-identical detail between
+// the current snapshot and its short-lived fallback while a task is between
+// preflight and execute. Those two labels describe observation provenance,
+// not a different product. Treat them as equivalent only when the exact task
+// source scope, platform identities and content hash all still match.
+function sourceDetailLocksDifferOnlyByTrustedProvenance({
+  currentLock = null,
+  expectedLock = null,
+  sourceStore = '',
+  sourceSkc = '',
+} = {}) {
+  const current = currentLock && typeof currentLock === 'object' && !Array.isArray(currentLock) ? currentLock : null;
+  const expected = expectedLock && typeof expectedLock === 'object' && !Array.isArray(expectedLock) ? expectedLock : null;
+  if (!current || !expected) return false;
+  if (!validSourceStoreKey(sourceStore) || !validSourceSkc(sourceSkc)) return false;
+  if (!validSourceDetailSource(current.source) || !validSourceDetailSource(expected.source)) return false;
+  const currentSource = String(current.source);
+  const expectedSource = String(expected.source);
+  if (currentSource === expectedSource) return false;
+  const exactSkc = String(sourceSkc);
+  const currentSpu = safeString(current.matchedSpuName, 160);
+  const expectedSpu = safeString(expected.matchedSpuName, 160);
+  const currentSkc = safeString(current.matchedSkcName, 160);
+  const expectedSkc = safeString(expected.matchedSkcName, 160);
+  const currentHash = safeString(current.detailContentSha256, 120).toLowerCase();
+  const expectedHash = safeString(expected.detailContentSha256, 120).toLowerCase();
+  return validSourceSpu(currentSpu)
+    && validSourceSpu(expectedSpu)
+    && currentSpu === expectedSpu
+    && validSourceSkc(currentSkc)
+    && validSourceSkc(expectedSkc)
+    && currentSkc === exactSkc
+    && expectedSkc === exactSkc
+    && validLowerSha256(currentHash)
+    && validLowerSha256(expectedHash)
+    && currentHash === expectedHash;
 }
 
 // The execution-confirmation hash locks source identity and source content,
@@ -1659,6 +1697,12 @@ function validateSourceDetailLockForWrite({
   const exactSourceStore = normalizeStoreKey(sourceStore);
   const exactSourceSkc = safeString(sourceSkc, 160);
   const exactStandardGoodsSn = safeString(standardGoodsSn, 160);
+  const trustedProvenanceTransition = sourceDetailLocksDifferOnlyByTrustedProvenance({
+    currentLock: current,
+    expectedLock: expected,
+    sourceStore,
+    sourceSkc,
+  });
   if ((required || expected) && !validSourceStoreKey(sourceStore)) {
     blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_SCOPE_INVALID', `写前详情锁 sourceStore 格式无效（当前=${exactSourceStore || '空'}），禁止写入。`));
   }
@@ -1713,14 +1757,20 @@ function validateSourceDetailLockForWrite({
     } else if (checkedMs - expectedFetchedMs > SOURCE_DETAIL_LOCK_MAX_AGE_MS) {
       blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_PREFLIGHT_EXPIRED', `预检 sourceDetailLock 的 detailFetchedAt=${expectedFetchedText} 已超过 24 小时，必须重新 dry-run。`));
     }
-    if (expectedSource && currentSource && expectedSource !== currentSource) {
+    if (expectedSource && currentSource && expectedSource !== currentSource && !trustedProvenanceTransition) {
       blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁来源类型漂移：预检锁定 ${expectedSource}，当前详情 ${currentSource}，禁止写入。`));
     }
     if (!/^[a-f0-9]{64}$/.test(expectedHash) || !/^[a-f0-9]{64}$/.test(currentContentHash) || expectedHash !== currentContentHash) {
       blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_CONTENT_DRIFT', `写前详情内容 hash 漂移：预检锁定 ${expectedHash || '空'}，当前详情 ${currentContentHash || '空'}，禁止写入。`));
     }
   }
-  return {ok: blockers.length === 0, gateActive: true, blockers, checkedAt};
+  return {
+    ok: blockers.length === 0,
+    gateActive: true,
+    blockers,
+    checkedAt,
+    trustedProvenanceTransition,
+  };
 }
 
 function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
@@ -4979,13 +5029,28 @@ async function main() {
     // preflight and execute still changes the hash and blocks the write. The raw
     // body hash stays available separately for description binding and audit;
     // the two are never mixed.
+    const expectedSourceDetailLock = productDraftLock?.sourceDetailLock || null;
+    const trustedProvenanceTransition = args.mode === 'execute'
+      && sourceDetailLocksDifferOnlyByTrustedProvenance({
+        currentLock: currentSourceDetailLock,
+        expectedLock: expectedSourceDetailLock,
+        sourceStore: lockedSourceScope.sourceStore,
+        sourceSkc: lockedSourceScope.sourceSkc,
+      });
+    // Keep the established scope-v4 confirmation hash stable when the exact
+    // same source bytes merely move between the two trusted cache provenance
+    // labels. Audit and freshness validation continue to use the real current
+    // lock below; only the hash projection is pinned to the preflight label.
+    const executionHashSourceDetailLock = trustedProvenanceTransition
+      ? {...currentSourceDetailLock, source: expectedSourceDetailLock.source}
+      : currentSourceDetailLock;
     const executionScope = buildProductExecutionHashScope({
       payload: publishPayload,
       targetStore,
       sourceStore: lockedSourceScope.sourceStore,
       sourceSkc: lockedSourceScope.sourceSkc,
       standardGoodsSn: taskStandardGoodsSn(task, effectiveExecutionContext),
-      sourceDetailLock: currentSourceDetailLock,
+      sourceDetailLock: executionHashSourceDetailLock,
       productAliasRegistryFingerprint: PRODUCT_ALIAS_REGISTRY_FINGERPRINT,
       productCatalogFingerprint: PRODUCT_CATALOG_FINGERPRINT,
       emptyDescriptionAuthorization: task?.emptyDescriptionAuthorization || null,

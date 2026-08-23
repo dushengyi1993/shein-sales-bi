@@ -330,14 +330,15 @@ function runNode(args) {
   });
 }
 
-async function writeDetail({detailFetchedAt = FRESH_AT, info = detailInfo(), detailResults = undefined} = {}) {
+async function writeDetail({detailFetchedAt = FRESH_AT, info = detailInfo(), detailResults = undefined, useFallback = false} = {}) {
+  const selectedDetails = detailResults === undefined ? [{ok: true, detailFetchedAt, info}] : detailResults;
   await writeOpenApiProductCacheAtomically(path.join(sourceOpenApiDir, 'latest.json'), {
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: SOURCE_STORE,
     fetchedAt: detailFetchedAt,
     normalizedRows: [{spu: SOURCE_SPU, skc: SOURCE_SKC}],
-    detailResults: detailResults === undefined ? [{ok: true, detailFetchedAt, info}] : detailResults,
-    detailFallbackResults: [],
+    detailResults: useFallback ? [] : selectedDetails,
+    detailFallbackResults: useFallback ? selectedDetails : [],
   }, {storeKey: SOURCE_STORE, generatedAt: FRESH_AT});
 }
 
@@ -545,6 +546,13 @@ try {
   }
   check('gate invalid expected lock blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, source: ''}, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_INVALID'));
   check('gate source type drift blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, source: 'different_source'}, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT'));
+  const fallbackLock = {...baseLock, source: 'openapi_product_detail_cached_fallback'};
+  check('gate accepts trusted fallback to snapshot provenance-only transition', gate({currentLock: baseLock, expectedLock: fallbackLock, ...requiredGateScope}), value => value.ok === true && value.trustedProvenanceTransition === true);
+  check('gate accepts trusted snapshot to fallback provenance-only transition', gate({currentLock: fallbackLock, expectedLock: baseLock, ...requiredGateScope}), value => value.ok === true && value.trustedProvenanceTransition === true);
+  check('gate does not excuse content drift during provenance transition', gate({currentLock: {...baseLock, detailContentSha256: 'f'.repeat(64)}, expectedLock: fallbackLock, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_CONTENT_DRIFT'));
+  const shSourceSkc = 'sh20990101000000009';
+  const shLock = {...baseLock, matchedSkcName: shSourceSkc};
+  check('gate accepts authoritative SH source SKC', gate({currentLock: shLock, expectedLock: shLock, required: true, sourceStore: SOURCE_STORE, sourceSkc: shSourceSkc, standardGoodsSn: STANDARD_GOODS_SN}), value => value.ok === true);
   check('hash scope excludes observation timestamp', executorHooks.sourceDetailLockExecutionHashScope(baseLock), value => !Object.prototype.hasOwnProperty.call(value || {}, 'detailFetchedAt'));
   check('hash scope preserves source identity and content', executorHooks.sourceDetailLockExecutionHashScope(baseLock), value => value?.source === baseLock.source
     && value?.matchedSkcName === SOURCE_SKC
@@ -1255,6 +1263,41 @@ try {
   check('old preflight gate code', oldPreflight.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_MISSING'));
   check('old preflight message forces re-preflight', oldPreflight.output?.blockers || [], rows => rows.some(row => /重新 dry-run/.test(String(row))));
   checkNoPublishEvidence('old preflight execute', oldPreflight.output, beforeOldPreflight);
+
+  // The same source bytes may move from the short-lived fallback into the
+  // current snapshot between preflight and execute. This provenance-only
+  // transition must retain the preflight hash and reach exactly one fake
+  // publish while the real current lock remains visible in audit evidence.
+  const provenanceAt = new Date().toISOString();
+  await writeDetail({detailFetchedAt: provenanceAt, useFallback: true});
+  const provenancePreflight = await runExecutor({label: 'preflight-fallback-provenance', mode: 'dry-run'});
+  check('fallback provenance preflight ready', provenancePreflight.output?.state || '', 'ready_for_submit');
+  check('fallback provenance preflight locks fallback source', provenancePreflight.output?.payload?.sourceDetailLock?.source || '', 'openapi_product_detail_cached_fallback');
+  const provenanceHash = provenancePreflight.output?.payload?.payloadHash || '';
+  const provenanceTask = baseTask();
+  provenanceTask.execution = {
+    state: 'preflight_ready',
+    preflight: {ok: true, blockers: [], warnings: []},
+    openApiProductExecutors: [{
+      storeKey: 'HL',
+      state: 'preflight_ready',
+      runId: provenancePreflight.output?.runId || '',
+      result: provenancePreflight.output,
+    }],
+  };
+  await writeDetail({detailFetchedAt: new Date().toISOString()});
+  const beforeProvenancePublish = publishAttemptCount;
+  const provenanceExecute = await runExecutor({
+    label: 'execute-fallback-to-snapshot-provenance',
+    mode: 'execute',
+    executionContext: {expectedPayloadHash: provenanceHash, reusePreflightLock: true},
+    task: provenanceTask,
+  });
+  check('provenance-only execute keeps preflight hash', provenanceExecute.output?.payload?.payloadHash || '', provenanceHash);
+  check('provenance-only execute keeps real current snapshot evidence', provenanceExecute.output?.payload?.sourceDetailLock?.source || '', 'openapi_product_detail_snapshot');
+  check('provenance-only execute gate records trusted transition', provenanceExecute.output?.evidence?.sourceDetailLockGate?.trustedProvenanceTransition, true);
+  check('provenance-only execute reaches exactly one fake publish', publishAttemptCount, beforeProvenancePublish + 1);
+  check('provenance-only execute records publishResult', Boolean(provenanceExecute.output?.publishResult), true);
 
   // Mapper hydrates but produces no lock (empty detailResults): both dry-run
   // and execute must block; the fake publish endpoint sees no new calls.

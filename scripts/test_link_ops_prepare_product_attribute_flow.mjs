@@ -50,6 +50,7 @@ import {
   bindProductAttributeToPayload,
   buildProductAliasContext,
   evaluateDonorProductAttributeEvidence,
+  isValidProductAttributeDonorSkc,
   productAttributeAreaFingerprint,
   productAttributeBindingRequestKey,
   productAttributeBindingRequestKeyV2,
@@ -104,6 +105,9 @@ function check(label, actual, expected) {
   checks.push({label, actual, expected: typeof expected === 'function' ? (expected.name || 'predicate') : expected, pass});
   return pass;
 }
+check('product attribute accepts SH donor SKC', isValidProductAttributeDonorSkc('SH260607203410692590516'), true);
+check('product attribute still rejects unknown SR donor prefix', isValidProductAttributeDonorSkc('sr260607203410692590516'), false);
+check('product attribute still rejects short synthetic donor SKC', isValidProductAttributeDonorSkc('sh123'), false);
 function asArray(value) { return Array.isArray(value) ? value : []; }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
