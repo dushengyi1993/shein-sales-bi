@@ -87,7 +87,31 @@ if [[ -n "$PREVIOUS_BATCH_ID" && "$POST_BATCH_ID" == "$PREVIOUS_BATCH_ID" ]]; th
   exit 75
 fi
 
-SHEIN_ET_LATEST_MANIFEST="$MANIFEST" \
-SHEIN_ET_EXPECTED_BATCH_ID="$POST_BATCH_ID" \
-SHEIN_ET_EXPECTED_MANIFEST_HASH="$POST_MANIFEST_HASH" \
-  bash "$ROOT/scripts/cloud_et_low_inventory_guard.sh"
+GUARD_ENV=(
+  "HOME=/home/sheinops"
+  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  "TZ=${TZ:-Asia/Shanghai}"
+  "SHEIN_BI_ROOT=$ROOT"
+  "SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT=$RUNTIME_ROOT"
+  "SHEIN_OPENAPI_PRODUCT_CACHE_DIR=${SHEIN_OPENAPI_PRODUCT_CACHE_DIR:-/srv/shein-bi/runtime/openapi-product-cache}"
+  "SHEIN_BI_INVENTORY_JOURNAL_DIRS=${SHEIN_BI_INVENTORY_JOURNAL_DIRS:-/srv/shein-bi/runtime/daily-inventory-replenishment/results:/srv/shein-bi/runtime/et-low-inventory-guard/results}"
+  "SHEIN_BI_INVENTORY_SKU_LOCK_DIR=${SHEIN_BI_INVENTORY_SKU_LOCK_DIR:-/data/shein-bi/state/locks}"
+  "SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=${SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT:-cloud_et_low_inventory_guard}"
+  "SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=${SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION:-owner-automatic-et-low-inventory-20260806-v1}"
+  "SHEIN_ET_LATEST_MANIFEST=$MANIFEST"
+  "SHEIN_ET_EXPECTED_BATCH_ID=$POST_BATCH_ID"
+  "SHEIN_ET_EXPECTED_MANIFEST_HASH=$POST_MANIFEST_HASH"
+)
+if [[ -n "${SHEIN_OPENAPI_CONFIG_FILE:-}" ]]; then
+  GUARD_ENV+=("SHEIN_OPENAPI_CONFIG_FILE=$SHEIN_OPENAPI_CONFIG_FILE")
+fi
+if [[ "$(id -u)" -eq 0 ]]; then
+  /usr/sbin/runuser -u sheinops -- /usr/bin/env "${GUARD_ENV[@]}" \
+    bash "$ROOT/scripts/cloud_et_low_inventory_guard.sh"
+else
+  if [[ "$(id -un)" != "sheinops" ]]; then
+    echo "[et_low_inventory_recheck] guard must run as sheinops" >&2
+    exit 75
+  fi
+  /usr/bin/env "${GUARD_ENV[@]}" bash "$ROOT/scripts/cloud_et_low_inventory_guard.sh"
+fi

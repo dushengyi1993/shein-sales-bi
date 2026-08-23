@@ -17,8 +17,8 @@
 // payloadHash matches the executor's exact stable hash, real policy and real
 // durable journal semantics:
 //
-//   A. first run: change-inventory responses missing explicit code=0 /
-//      info.success=true -> two needs_manual_resolve rows, both durable
+//   A. first run: a missing code remains ambiguous while code=0 with missing
+//      info.success enters readback and remains pending when the target drifts
 //      intents retained, no ReferenceError crash;
 //   B. rerun of A: readback-only recovery, target matched -> write_outcome +
 //      updated_readback_matched, target not matched ->
@@ -27,7 +27,9 @@
 //      (durable intent retained), the catch must NOT crash with
 //      ReferenceError;
 //   D. rerun of C: readback-only recovery with matched target -> write_outcome
-//      + updated_readback_matched, zero second POST.
+//      + updated_readback_matched, zero second POST;
+//   E. code=0 with missing success performs a matching readback and writes the
+//      terminal outcome, while explicit success=false stays ambiguous.
 
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -151,6 +153,9 @@ function sendJson(response, payload, status = 200) {
 function stockUsableFor(skuCode) {
   const row = ROWS.find(candidate => candidate.skuCode === skuCode);
   if (!row) return 0;
+  if (serverState.mode === 'code0-readback-matrix' && serverState.readbackSkus?.has(skuCode)) {
+    return row.targetUsableInventory;
+  }
   if (serverState.mode === 'recovery-mixed') {
     return row.storeKey === 'ZZ' ? row.targetUsableInventory : 3;
   }
@@ -190,6 +195,10 @@ const serverReady = new Promise((resolve, reject) => {
       }
       if (request.method === 'POST' && pathname === '/open-api/stock/stock-query') {
         const skuCode = body?.skuCodeList?.[0] || '';
+        if (serverState.mode === 'code0-readback-matrix' && serverState.postedSkus?.has(skuCode)) {
+          if (!serverState.readbackSkus) serverState.readbackSkus = new Set();
+          serverState.readbackSkus.add(skuCode);
+        }
         const usable = stockUsableFor(skuCode);
         return sendJson(response, {
           code: '0',
@@ -208,6 +217,9 @@ const serverReady = new Promise((resolve, reject) => {
       }
       if (request.method === 'POST' && pathname === '/open-api/stock/change-inventory/v2') {
         serverState.postCount += 1;
+        const skuCode = body?.updateSkuInventoryQuantityRequests?.[0]?.skuCode;
+        if (!serverState.postedSkus) serverState.postedSkus = new Set();
+        serverState.postedSkus.add(skuCode);
         if (serverState.mode === 'transport-error') {
           request.socket.destroy();
           return;
@@ -220,6 +232,10 @@ const serverReady = new Promise((resolve, reject) => {
           }
           // explicit code missing entirely -> ambiguous
           return sendJson(response, {msg: 'ok'});
+        }
+        if (serverState.mode === 'code0-readback-matrix') {
+          if (skuCode === ROWS[0].skuCode) return sendJson(response, {code: '0', info: {}});
+          return sendJson(response, {code: '0', info: {success: false}});
         }
         return sendJson(response, {code: '0', info: {success: true}});
       }
@@ -304,7 +320,8 @@ const pendingIntentCount = entries => {
 
 try {
   // -------------------------------------------------------------------------
-  // A) first run: responses missing explicit code=0 / info.success=true
+  // A) first run: missing code remains ambiguous; code=0 with missing
+  //    info.success enters readback but this fixture keeps the target unequal.
   // -------------------------------------------------------------------------
   serverState = {mode: 'ambiguous', postCount: 0, requestCount: 0};
   const outA = path.join(temp, 'a-result.json');
@@ -316,8 +333,8 @@ try {
   assert.equal(resultA.results.length, 2);
   assert.deepEqual(
     resultA.results.map(row => row.state).sort(),
-    ['needs_manual_resolve', 'needs_manual_resolve'],
-    'missing explicit code/success must record needs_manual_resolve for every action',
+    ['needs_manual_resolve', 'submitted_but_readback_pending'],
+    'missing code stays manual while code=0 with missing success is readback-pending',
   );
   const journalA = await journalEntries(`${outA}.journal.ndjson`);
   assert.equal(journalA.filter(entry => entry.kind === 'intent').length, 2, 'both durable intents must be retained');
@@ -433,7 +450,33 @@ try {
   assert.equal(pendingIntentCount(journalD), 0, 'the recovered intent must be cleared by its readback_matched outcome');
   assert.equal(finalStdoutJson(runD.stdout)?.counts?.updated, 2);
 
-  console.log('execute_inventory_durable_recovery: ambiguous responses -> needs_manual_resolve, transport error -> suspicious_write_attempted, rerun is readback-only with zero second POST');
+  // -------------------------------------------------------------------------
+  // E) HTTP 2xx + code=0 with missing success enters readback; explicit
+  //    success=false remains ambiguous and never writes a terminal outcome.
+  // -------------------------------------------------------------------------
+  serverState = {mode: 'code0-readback-matrix', postCount: 0, requestCount: 0};
+  const outE = path.join(temp, 'e-code0-readback-matrix-result.json');
+  const runE = await runExecutor(outE);
+  assert.equal(runE.status, 1, `run E must retain the explicit-false intent as blocked, got ${runE.status}\nstdout:\n${runE.stdout}\nstderr:\n${runE.stderr}`);
+  assert.doesNotMatch(runE.stderr, /ReferenceError/);
+  assert.equal(serverState.postCount, 2, 'the matrix must issue exactly one POST per intent');
+  assert.ok(serverState.readbackSkus?.has(ROWS[0].skuCode), 'code=0 with missing success must issue a live stock readback');
+  assert.equal(serverState.readbackSkus?.has(ROWS[1].skuCode), false, 'explicit success=false must not enter readback');
+  const resultE = await readJson(outE);
+  assert.deepEqual(
+    resultE.results.map(row => row.state).sort(),
+    ['needs_manual_resolve', 'updated_readback_matched'],
+    'code=0 missing success can complete by exact readback while explicit false stays ambiguous',
+  );
+  const journalE = await journalEntries(`${outE}.journal.ndjson`);
+  const outcomesE = journalE.filter(entry => entry.kind === 'write_outcome');
+  assert.deepEqual(outcomesE.map(entry => entry.disposition), ['readback_matched']);
+  assert.equal(outcomesE[0].intentId, journalE.find(entry => entry.kind === 'intent' && entry.storeKey === ROWS[0].storeKey)?.intentId);
+  assert.equal(journalE.some(entry => entry.kind === 'write_outcome' && entry.intentId === journalE.find(intent => intent.kind === 'intent' && intent.storeKey === ROWS[1].storeKey)?.intentId), false,
+    'explicit success=false must not write a terminal readback outcome');
+  assert.equal(pendingIntentCount(journalE), 1);
+
+  console.log('execute_inventory_durable_recovery: ambiguous/transport outcomes stay durable, code=0 readback closes only exact matches, rerun is readback-only with zero second POST');
   console.log(JSON.stringify({ok: true}));
 } finally {
   server.close();

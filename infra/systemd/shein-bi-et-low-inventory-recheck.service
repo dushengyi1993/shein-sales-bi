@@ -15,6 +15,8 @@ Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_OPENAPI_PRODUCT_CACHE_DIR=/srv/shein-bi/runtime/openapi-product-cache
 Environment=SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT=/srv/shein-bi/runtime/et-low-inventory-guard
+Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=/srv/shein-bi/runtime/daily-inventory-replenishment/results:/srv/shein-bi/runtime/et-low-inventory-guard/results
+Environment=SHEIN_BI_INVENTORY_SKU_LOCK_DIR=/data/shein-bi/state/locks
 Environment=SHEIN_ET_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-et-forwarder.lock
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
 Environment=SHEIN_PYTHON=/srv/shein-bi/runtime/et-forwarder/current/bin/python

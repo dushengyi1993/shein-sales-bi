@@ -279,8 +279,18 @@ assert.match(guard, /pendingCanonical:\$blockedCanonical/);
 assert.doesNotMatch(guard, /BLOCKED > 0 \|\| BLOCKED_CANONICAL > 0/);
 assert.match(recheck, /SHEIN_ET_ENDPOINTS="store_stock,box_stock"/);
 assert.match(recheck, /SHEIN_ET_TRANSPORT="\$\{SHEIN_ET_TRANSPORT:-http\}"/);
-assert.match(recheck, /SHEIN_ET_EXPECTED_BATCH_ID="\$POST_BATCH_ID"/);
-assert.match(recheck, /SHEIN_ET_EXPECTED_MANIFEST_HASH="\$POST_MANIFEST_HASH"/);
+assert.match(recheck, /SHEIN_ET_EXPECTED_BATCH_ID="?\$POST_BATCH_ID"?/);
+assert.match(recheck, /SHEIN_ET_EXPECTED_MANIFEST_HASH="?\$POST_MANIFEST_HASH"?/);
+assert.match(
+  recheck,
+  /(?:^|\n)\s*(?:\/usr\/sbin\/)?runuser\s+(?:-u|--user)\s+sheinops\s+--[\s\S]*?bash\s+"\$ROOT\/scripts\/cloud_et_low_inventory_guard\.sh"/,
+  'the recheck entrypoint must invoke the guard through runuser as sheinops',
+);
+assert.match(
+  recheck,
+  /SHEIN_BI_INVENTORY_SKU_LOCK_DIR=\$\{SHEIN_BI_INVENTORY_SKU_LOCK_DIR:-\/data\/shein-bi\/state\/locks\}/,
+  'the root recheck wrapper must pass the writable canonical SKU lock directory to sheinops',
+);
 assert.match(recheck, /forwarder produced no new ET batch/);
 assert.match(recheckService, /^Environment=SHEIN_ET_TRANSPORT=http$/m);
 assert.doesNotMatch(recheckService, /run_host_browser_read_job\.sh|--class browser/);
@@ -758,4 +768,4 @@ try {
   fs.rmSync(harnessRoot, {recursive: true, force: true});
 }
 
-console.log(JSON.stringify({ok: true, checks: 154}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 155}, null, 2));

@@ -477,10 +477,11 @@ try {
   }
 
   // ---------------------------------------------------------------------
-  // Scenario 5: ambiguous response (explicit code=0 but no info.success) ->
-  // intent retained, re-run is readback-only, POST stays exactly 1.
+  // Scenario 5: HTTP 2xx code=0 without info.success -> readback is attempted;
+  // an unmatched target retains the intent, re-run is readback-only, and POST
+  // stays exactly 1.
   // ---------------------------------------------------------------------
-  const dirAm = path.join(temp, 'ambiguous');
+  const dirAm = path.join(temp, 'code-zero-missing-success');
   await fs.mkdir(dirAm);
   const {plan: planAm} = await buildPlanFixture(dirAm, {etProducts: [etRow]});
   const mockAm = createMockOpenApiServer({
@@ -509,21 +510,21 @@ try {
   };
   try {
     const runAm = await runExecutor(argsAm, envAm);
-    assert.equal(runAm.code, 1, `ambiguous response must exit blocked, stderr=${runAm.stderr}`);
+    assert.equal(runAm.code, 1, `unmatched code=0 readback must exit blocked, stderr=${runAm.stderr}`);
     const resultAm = JSON.parse(await fs.readFile(outAm, 'utf8'));
-    assert.equal(resultAm.results[0].state, 'needs_manual_resolve');
-    assert.match(resultAm.results[0].error, /did not contain explicit code=0 and info\.success=true; durable intent retained and duplicate submission forbidden/);
+    assert.equal(resultAm.results[0].state, 'submitted_but_readback_pending');
+    assert.match(resultAm.results[0].error, /readback usable inventory .* does not match target .*; duplicate submission forbidden/);
     assert.equal(mockAm.getChangeInventoryPosts(), 1);
     const entriesAm = (await fs.readFile(`${outAm}.journal.ndjson`, 'utf8')).split(/\r?\n/).filter(Boolean).map(JSON.parse);
-    assert.equal(entriesAm.filter(entry => entry.kind === 'intent').length, 1, 'ambiguous response must retain the intent');
+    assert.equal(entriesAm.filter(entry => entry.kind === 'intent').length, 1, 'unmatched code=0 readback must retain the intent');
     assert.equal(entriesAm.filter(entry => entry.kind === 'write_outcome').length, 0);
 
     const runAm2 = await runExecutor(argsAm, envAm);
-    assert.equal(runAm2.code, 1, `ambiguous recovery re-run stays pending, stderr=${runAm2.stderr}`);
+    assert.equal(runAm2.code, 1, `unmatched code=0 readback recovery re-run stays pending, stderr=${runAm2.stderr}`);
     const resultAm2 = JSON.parse(await fs.readFile(outAm, 'utf8'));
     assert.equal(resultAm2.results[0].state, 'submitted_but_readback_pending');
     assert.match(resultAm2.results[0].error, /durable pre-submit intent exists and exact target is not visible/);
-    assert.equal(mockAm.getChangeInventoryPosts(), 1, 'ambiguous recovery must never POST again');
+    assert.equal(mockAm.getChangeInventoryPosts(), 1, 'unmatched code=0 readback recovery must never POST again');
   } finally {
     mockAm.server.close();
     await cleanupLock();
@@ -544,8 +545,8 @@ try {
       const startedAt = Date.now();
       const finishWhenBothExecutorsStarted = () => {
         if (mockCon.counts.queryStoreInfo >= 2 || Date.now() - startedAt > 5000) {
-          // Explicit code=0 without info.success is intentionally ambiguous,
-          // so the first durable intent remains pending.
+          // Code=0 without info.success enters authoritative readback; the
+          // mock leaves the target unmatched so the durable intent remains pending.
           json({code: '0'});
           return;
         }
@@ -587,15 +588,15 @@ try {
     const resultsCon = await Promise.all([outConA, outConB].map(async file => JSON.parse(await fs.readFile(file, 'utf8'))));
     assert.deepEqual(
       resultsCon.map(result => result.results[0].state).sort(),
-      ['needs_manual_resolve', 'submitted_but_readback_pending'].sort(),
-      'one executor owns the ambiguous submission and the other remains readback-only',
+      ['submitted_but_readback_pending', 'submitted_but_readback_pending'].sort(),
+      'both executors retain the unmatched readback as pending without a second POST',
     );
     const journalNames = (await fs.readdir(dirCon)).filter(name => name.endsWith('.journal.ndjson'));
     const journalEntries = (await Promise.all(journalNames.map(async name => (
       (await fs.readFile(path.join(dirCon, name), 'utf8')).split(/\r?\n/).filter(Boolean).map(JSON.parse)
     )))).flat();
     assert.equal(journalEntries.filter(entry => entry.kind === 'intent').length, 1, 'concurrent executors must create one durable intent total');
-    assert.equal(journalEntries.filter(entry => entry.kind === 'write_outcome').length, 0, 'ambiguous concurrent submission must retain the one intent');
+    assert.equal(journalEntries.filter(entry => entry.kind === 'write_outcome').length, 0, 'unmatched concurrent readback must retain the one intent');
   } finally {
     mockCon.server.close();
     await cleanupLock();
@@ -823,7 +824,7 @@ try {
       'successful_write_readback_matched_one_post',
       'idempotent_rerun_skips_on_fresh_readback_no_second_post',
       'definitive_rejection_journals_write_outcome_rejected_and_releases_intent',
-      'ambiguous_response_retains_intent_rerun_readback_only',
+      'code_zero_missing_success_unmatched_readback_retains_intent_rerun_readback_only',
       'concurrent_stale_snapshots_refresh_under_sku_lock_one_post_total',
       'ten_readbacks_pending_retains_intent_rerun_readback_only',
       'readback_throw_retains_intent_rerun_readback_only',

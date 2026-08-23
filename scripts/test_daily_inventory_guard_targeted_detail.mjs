@@ -538,14 +538,20 @@ match('platform idempotency survives plan evidence refresh', executor,
   /logicalActionKey = stableInventoryHash\(\{[\s\S]*runDate: plan\.date[\s\S]*target: approvedTarget[\s\S]*actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET'[\s\S]*policyVersion: plan\.policyVersion[\s\S]*authorizationId:/,
   'the same logical daily action must reuse its SHEIN idempotency key after a crash');
 match('recovery lookup cannot be bypassed by target or authorization drift', executor,
-  /acquireCrossProcessTicketLock\(lockFile[\s\S]*discoverInventoryJournalFiles\(journalFile, \{includeAll: true\}\)[\s\S]*readInventoryIntentJournals\(freshJournalFiles[\s\S]*pendingByScope\.get\(recoveryScopeKey\)[\s\S]*activeIntent = \{/,
+  /acquireCrossProcessTicketLock\(lockFile[\s\S]*discoverInventoryJournalFiles\(journalFile,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories[\s\S]*?\}\)[\s\S]*readInventoryIntentJournals\(freshJournalFiles,\s*\{[\s\S]*?maxRunDate:\s*today[\s\S]*?allowMultiplePendingByScope:\s*true[\s\S]*?\}\)[\s\S]*pendingByScope\.get\(recoveryScopeKey\)[\s\S]*activeIntent\s*=\s*\{/,
   'all non-rejected intents for the same store/SKC/SKU scope must be re-read under the SKU lock before a new POST');
+match('multiple pending intents are blocked at item scope before any new POST', executor,
+  /if \(scopeIntents\.length > 1\)[\s\S]*state: 'needs_manual_resolve'[\s\S]*this SKU is blocked without changing other rows[\s\S]*continue;[\s\S]*const mismatch = recoveredInventoryIntentMismatch/,
+  'more than one pending intent must stop only this SKU and let independent rows continue');
+noMatch('generic executor never appends startup supersede outcomes', executor,
+  /superseded_by_later_readback/,
+  'supersede closures belong to the explicitly audited reconciliation path, not the generic executor startup scan');
 match('rebuilt plan cannot delete an unresolved intent', executor,
   /deferredHistoricalIntents = \[\.\.\.pendingIntentsByScope\.entries\(\)\][\s\S]*absent from the rebuilt current plan[\s\S]*for \(const row of rows\)/,
   'an intent scope omitted by a rebuilt plan must remain unresolved while independent current rows continue');
 match('shared executor discovers every journal prefix in its result directory', executor,
-  /discoverInventoryJournalFiles\(journalFile, \{includeAll: true\}\)/,
-  'daily and ET low-inventory sidecars must share cross-day durable recovery');
+  /discoverInventoryJournalFiles\(journalFile,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories[\s\S]*?\}\)/,
+  'daily and ET low-inventory sidecars must share cross-day durable recovery through configured journal directories');
 match('daily guard keeps its daily-prefix discovery boundary', guard,
   /discoverInventoryJournalFiles\(currentJournal\)/,
   'the daily guard may retain default daily-prefix discovery while the shared executor is comprehensive');

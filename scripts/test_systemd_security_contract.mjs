@@ -184,6 +184,25 @@ for (const unitName of [
   assert.doesNotMatch(salesRefresh, /^NoNewPrivileges=true$/m, `${unitName} uses audited sheinops NOPASSWD Docker helpers`);
 }
 
+const inventoryExecutor = fs.readFileSync(new URL('./inventory/execute_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
+for (const unitName of [
+  'shein-bi-daily-inventory-replenishment-guard.service',
+  'shein-bi-et-low-inventory-guard.service',
+  'shein-bi-et-low-inventory-recheck.service',
+]) {
+  const inventoryUnit = readUnit(unitName);
+  assert.match(
+    inventoryUnit,
+    /^Environment=SHEIN_BI_INVENTORY_SKU_LOCK_DIR=\/data\/shein-bi\/state\/locks$/m,
+    `${unitName} must use the writable runtime SKU lock directory`,
+  );
+}
+assert.match(
+  inventoryExecutor,
+  /process\.env\.SHEIN_BI_INVENTORY_SKU_LOCK_DIR/,
+  'inventory executor must support an explicit writable SKU lock directory',
+);
+
 const sessionManager = readUnit('shein-bi-cloud-session-manager.service');
 const sessionManagerTimer = readUnit('shein-bi-cloud-session-manager.timer');
 const sessionManagerCoordinator = fs.readFileSync(new URL('./run_cloud_session_manager_job.sh', import.meta.url), 'utf8');

@@ -507,15 +507,26 @@ try {
     assert.equal((await readPendingInventoryIntents(ambiguousRejectionJournal)).has(ambiguousIntentId), true, `${label} must retain the intent and forbid a second POST`);
   }
 
-  const ambiguousJournal = path.join(temp, 'ambiguous.journal.ndjson');
-  const ambiguous = await submitDurableInventoryWriteOnce({
-    journalFile: ambiguousJournal,
-    intent: {...intent, intentId: 'intent-ambiguous'},
+  const codeZeroMissingSuccessJournal = path.join(temp, 'code-zero-missing-success.journal.ndjson');
+  let codeZeroMissingSuccessReadbacks = 0;
+  const codeZeroMissingSuccess = await submitDurableInventoryWriteOnce({
+    journalFile: codeZeroMissingSuccessJournal,
+    intent: {...intent, intentId: 'intent-code-zero-missing-success'},
     submit: async () => ({ok: true, status: 200, data: {code: '0'}}),
-    readback: async () => ({totalUsableInventory: 100}),
+    readback: async () => {
+      codeZeroMissingSuccessReadbacks += 1;
+      return {totalUsableInventory: 100};
+    },
   });
-  assert.equal(ambiguous.state, 'ambiguous_response');
-  assert.equal((await readPendingInventoryIntents(ambiguousJournal)).has('intent-ambiguous'), true, 'missing explicit success=true must retain the intent');
+  assert.equal(codeZeroMissingSuccess.state, 'readback_matched');
+  assert.equal(codeZeroMissingSuccessReadbacks, 1, 'HTTP 2xx code=0 without info.success must perform authoritative readback');
+  assert.equal((await readPendingInventoryIntents(codeZeroMissingSuccessJournal)).has('intent-code-zero-missing-success'), false, 'an exact readback must terminalize code=0 without info.success');
+  const codeZeroMissingSuccessEntries = (await fs.readFile(codeZeroMissingSuccessJournal, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+  assert.deepEqual(
+    codeZeroMissingSuccessEntries.filter(entry => entry.kind === 'write_outcome').map(entry => entry.disposition),
+    ['readback_matched'],
+    'code=0 without info.success must write only the exact-match terminal outcome',
+  );
   const missingCodeJournal = path.join(temp, 'missing-code.journal.ndjson');
   const missingCode = await submitDurableInventoryWriteOnce({
     journalFile: missingCodeJournal,
@@ -568,7 +579,7 @@ try {
     'malformed_response_code_retains_intent',
     'code_zero_business_failure_retains_intent_without_terminal_outcome',
     'transport_and_business_conflicts_retain_intent',
-    'ambiguous_success_retains_intent',
+    'code_zero_missing_success_readback_matches_and_terminalizes',
     'missing_code_retains_intent',
     'torn_tail_blocks_future_post',
   ]}, null, 2));

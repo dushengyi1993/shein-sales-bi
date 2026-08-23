@@ -26,6 +26,7 @@ import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock
 import {
   appendDurableJournalRecord,
   classifyRecoveredInventoryIntent,
+  compareInventoryIntentChronology,
   discoverInventoryJournalFiles,
   inventoryIntentScopeKey,
   inventoryRecoveryScopeKey,
@@ -510,14 +511,27 @@ const writeResultFile = async currentResults => {
 const journalFile = `${args.out}.journal.ndjson`;
 await fs.mkdir(path.dirname(args.out), {recursive: true});
 const results = [];
+const inventoryJournalDirectories = String(process.env.SHEIN_BI_INVENTORY_JOURNAL_DIRS || '')
+  .split(path.delimiter)
+  .map(directory => directory.trim())
+  .filter(Boolean);
+const inventorySkuLockDirectory = path.resolve(String(
+  process.env.SHEIN_BI_INVENTORY_SKU_LOCK_DIR
+  || path.join(ROOT, 'state', 'locks'),
+));
 // A current result keeps its sidecar for compatibility. This executor is
-// shared by daily replenishment and ET low-inventory runs; their journals use
-// different prefixes but are isolated in their own result directories. Every
-// sidecar in this directory therefore belongs to the same inventory write
-// domain and must participate in cross-day recovery without moving or
-// rewriting the original append-only journal.
-const journalFiles = await discoverInventoryJournalFiles(journalFile, {includeAll: true});
-const journalBundle = await readInventoryIntentJournals(journalFiles, {maxRunDate: today});
+// shared by daily replenishment and ET low-inventory runs. Their journals use
+// different prefixes and result directories, but belong to one inventory
+// write domain and must participate in cross-lane/cross-day recovery without
+// moving or rewriting the original append-only journal.
+const journalFiles = await discoverInventoryJournalFiles(journalFile, {
+  includeAll: true,
+  additionalDirectories: inventoryJournalDirectories,
+});
+const journalBundle = await readInventoryIntentJournals(journalFiles, {
+  maxRunDate: today,
+  allowMultiplePendingByScope: true,
+});
 const pendingIntents = new Map(journalBundle.pending);
 const inventoryIntents = new Map(journalBundle.intents);
 const terminalIntentOutcomes = new Map(journalBundle.terminalOutcomes);
@@ -525,48 +539,6 @@ const journalIntentKey = intent => `${path.resolve(intent?.journalFile || journa
 const appendJournalRecord = async (entry, targetJournalFile = journalFile) => {
   await appendDurableJournalRecord(targetJournalFile, entry);
 };
-const inventoryIntentEntriesByScope = new Map();
-for (const [intentKey, intent] of inventoryIntents.entries()) {
-  const scopeKey = inventoryIntentScopeKey(intent);
-  if (!inventoryIntentEntriesByScope.has(scopeKey)) inventoryIntentEntriesByScope.set(scopeKey, []);
-  inventoryIntentEntriesByScope.get(scopeKey).push({intentKey, intent});
-}
-// An older pending intent may be released without stock inference only when
-// the complete journal set proves one unambiguous later intent in the same
-// date-independent item scope and that exact later intent already has a
-// terminal readback_matched outcome. The supersede outcome is append-only in
-// the older intent's original journal and records the exact later evidence.
-if (args.execute) {
-  for (const [pendingKey, olderIntent] of [...pendingIntents.entries()]) {
-    const scopeKey = inventoryIntentScopeKey(olderIntent);
-    const strictlyLater = (inventoryIntentEntriesByScope.get(scopeKey) || [])
-      .filter(({intent}) => intent.runDate > olderIntent.runDate);
-    if (strictlyLater.length !== 1) continue;
-    const [{intentKey: laterKey, intent: laterIntent}] = strictlyLater;
-    const laterOutcome = terminalIntentOutcomes.get(laterKey);
-    const laterRecordedAt = String(laterOutcome?.recordedAt || '');
-    if (laterOutcome?.disposition !== 'readback_matched' || !Number.isFinite(new Date(laterRecordedAt).getTime())) continue;
-    const supersedeRecordedAt = new Date().toISOString();
-    if (new Date(supersedeRecordedAt).getTime() < new Date(laterRecordedAt).getTime()) continue;
-    const supersedeOutcome = {
-      kind: 'write_outcome',
-      intentId: olderIntent.intentId,
-      logicalActionKey: olderIntent.logicalActionKey,
-      disposition: 'superseded_by_later_readback',
-      recordedAt: supersedeRecordedAt,
-      supersededByIntentId: laterIntent.intentId,
-      supersededByRunDate: laterIntent.runDate,
-      supersededByRecordedAt: laterRecordedAt,
-    };
-    await appendJournalRecord(supersedeOutcome, olderIntent.journalFile);
-    pendingIntents.delete(pendingKey);
-    terminalIntentOutcomes.set(pendingKey, {
-      ...supersedeOutcome,
-      journalFile: olderIntent.journalFile,
-      journalDate: olderIntent.journalDate || olderIntent.runDate,
-    });
-  }
-}
 const currentInventoryIntents = new Map([...inventoryIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
 const currentPendingIntents = new Map([...pendingIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
 const currentTerminalIntentOutcomes = new Map([...terminalIntentOutcomes].filter(([, outcome]) => outcome.journalFile === path.resolve(journalFile)));
@@ -659,16 +631,9 @@ for (const intent of currentPendingIntents.values()) {
 const currentPlanScopeSet = new Set(planRecoveryScopes);
 if (args.reconcilePendingOnly) {
   const failures = [];
-  if (currentInventoryIntents.size !== rows.length) {
-    failures.push(`intent_count=${currentInventoryIntents.size},plan_count=${rows.length}`);
-  }
   for (const row of rows) {
     const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
     const scopeIntents = currentInventoryIntentsByScope.get(recoveryScopeKey) || [];
-    if (scopeIntents.length !== 1) {
-      failures.push(`scope_count=${scopeIntents.length}:${row.storeKey}:${row.skc}:${row.skuCode}`);
-      continue;
-    }
     const approvedTarget = Number(row.targetUsableInventory);
     const logicalActionKey = stableInventoryHash({
       runDate: plan.date,
@@ -680,20 +645,42 @@ if (args.reconcilePendingOnly) {
       policyVersion: plan.policyVersion,
       authorizationId: executionAuthorization?.authorizationId || '',
     });
-    const mismatch = recoveredInventoryIntentMismatch(scopeIntents[0], {
-      logicalActionKey,
-      plan,
-      row,
-      approvedTarget,
-      authorizationId: executionAuthorization?.authorizationId || null,
-      // A prior-date reconcile-only plan is historical readback/supersede
-      // handling. Current-day recovery must prove the new explicit version;
-      // historical read-only reconciliation must remain compatible with
-      // unversioned legacy intents.
-      requireCurrentOverwriteComputationVersion: plan.date === today,
-    });
-    if (mismatch) failures.push(`intent_mismatch=${mismatch}:${row.storeKey}:${row.skc}:${row.skuCode}`);
-    const intentId = scopeIntents[0].intentId;
+    const mismatches = scopeIntents.map(intent => ({
+      intent,
+      mismatch: recoveredInventoryIntentMismatch(intent, {
+        logicalActionKey,
+        plan,
+        row,
+        approvedTarget,
+        authorizationId: executionAuthorization?.authorizationId || null,
+        // A prior-date reconcile-only plan is historical readback/supersede
+        // handling. Current-day recovery must prove the new explicit version;
+        // historical read-only reconciliation must remain compatible with
+        // unversioned legacy intents.
+        requireCurrentOverwriteComputationVersion: plan.date === today,
+      }),
+    }));
+    const matchingIntents = mismatches.filter(candidate => !candidate.mismatch).map(candidate => candidate.intent);
+    const latestMatchingIntent = matchingIntents.length
+      ? matchingIntents.reduce((candidate, intent) => (
+        compareInventoryIntentChronology(intent, candidate) > 0 ? intent : candidate
+      ))
+      : null;
+    const latestMatchingTies = latestMatchingIntent
+      ? matchingIntents.filter(intent => compareInventoryIntentChronology(intent, latestMatchingIntent) === 0)
+      : [];
+    if (!matchingIntents.length) {
+      const mismatchSummary = mismatches.map(candidate => candidate.mismatch || 'match').join(',');
+      failures.push(`scope_matches=${matchingIntents.length}:scope_count=${scopeIntents.length}:mismatches=${mismatchSummary}:${row.storeKey}:${row.skc}:${row.skuCode}`);
+      continue;
+    }
+    if (latestMatchingTies.length !== 1) {
+      // Ambiguous same-scope lifecycle is an item-level condition. The fresh
+      // lock-held branch below records needs_manual_resolve for that SKU while
+      // allowing independent rows to reconcile.
+      continue;
+    }
+    const intentId = latestMatchingIntent.intentId;
     const currentIntentKey = [...currentInventoryIntents.entries()].find(([, intent]) => intent.intentId === intentId)?.[0];
     const terminalOutcome = currentIntentKey ? currentTerminalIntentOutcomes.get(currentIntentKey) : null;
     if (currentIntentKey && !pendingIntents.has(currentIntentKey) && terminalOutcome?.disposition !== 'readback_matched') {
@@ -833,7 +820,7 @@ for (const row of rows) {
       client = await createStoreClient(config, row.storeKey);
       clients.set(row.storeKey, client);
     }
-    const lockFile = path.join(ROOT, 'state', 'locks', `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
+    const lockFile = path.join(inventorySkuLockDirectory, `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
     const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
     try {
       // Another executor may have persisted this scope after our startup
@@ -841,15 +828,27 @@ for (const row of rows) {
       // journal set after acquiring that ticket and before creating any new
       // intent or issuing a POST; otherwise an empty startup cache can race
       // into a second durable intent.
-      const freshJournalFiles = await discoverInventoryJournalFiles(journalFile, {includeAll: true});
-      const freshJournalBundle = await readInventoryIntentJournals(freshJournalFiles, {maxRunDate: today});
+      const freshJournalFiles = await discoverInventoryJournalFiles(journalFile, {
+        includeAll: true,
+        additionalDirectories: inventoryJournalDirectories,
+      });
+      const freshJournalBundle = await readInventoryIntentJournals(freshJournalFiles, {
+        maxRunDate: today,
+        allowMultiplePendingByScope: true,
+      });
       const freshScopeIntents = freshJournalBundle.pendingByScope.get(recoveryScopeKey) || [];
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
-      const scopeIntents = freshScopeIntents;
+      let scopeIntents = freshScopeIntents;
       if (scopeIntents.length) {
-        if (scopeIntents.length !== 1) {
-          await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, error: `multiple durable inventory intents exist in recovery scope ${recoveryScopeKey}; duplicate submission forbidden`}, logicalActionKey);
+        if (scopeIntents.length > 1) {
+          await recordResult({
+            ...result,
+            logicalActionKey,
+            state: 'needs_manual_resolve',
+            before,
+            error: `multiple durable inventory intents exist in recovery scope ${recoveryScopeKey}; this SKU is blocked without changing other rows`,
+          }, logicalActionKey);
           continue;
         }
         const [recoveredIntent] = scopeIntents;
@@ -972,7 +971,26 @@ for (const row of rows) {
         continue;
       }
       if (args.reconcilePendingOnly) {
-        const [lifecycleIntent] = currentInventoryIntentsByScope.get(recoveryScopeKey) || [];
+        const lifecycleCandidates = (currentInventoryIntentsByScope.get(recoveryScopeKey) || [])
+          .filter(intent => !recoveredInventoryIntentMismatch(intent, {
+            logicalActionKey,
+            plan,
+            row,
+            approvedTarget,
+            authorizationId: executionAuthorization?.authorizationId || null,
+            requireCurrentOverwriteComputationVersion: plan.date === today,
+          }));
+        const lifecycleIntent = lifecycleCandidates.length
+          ? lifecycleCandidates.reduce((candidate, intent) => (
+            compareInventoryIntentChronology(intent, candidate) > 0 ? intent : candidate
+          ))
+          : null;
+        const lifecycleTies = lifecycleIntent
+          ? lifecycleCandidates.filter(intent => compareInventoryIntentChronology(intent, lifecycleIntent) === 0)
+          : [];
+        if (lifecycleTies.length !== 1) {
+          throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_AMBIGUOUS:${recoveryScopeKey}`);
+        }
         const lifecycleKey = lifecycleIntent && journalIntentKey(lifecycleIntent);
         const lifecycleOutcome = lifecycleIntent && currentTerminalIntentOutcomes.get(lifecycleKey);
         if (lifecycleOutcome?.disposition !== 'readback_matched') {
@@ -1095,7 +1113,11 @@ for (const row of rows) {
         code: response?.data?.code,
         msg: response?.data?.msg || '',
         traceId: response?.data?.traceId || '',
-        success: response?.data?.info?.success ?? null,
+        // Exact stock readback is the terminal business proof. SHEIN's
+        // successful stock endpoint can omit info.success even when code=0.
+        success: submission.state === 'readback_matched'
+          ? true
+          : (response?.data?.info?.success ?? null),
       });
       if (submission.state === 'rejected') {
         pendingIntents.delete(journalIntentKey(activeIntent));
@@ -1103,7 +1125,7 @@ for (const row of rows) {
         throw new Error(`inventory write failed: ${response?.data?.code} ${response?.data?.msg || ''}`);
       }
       if (submission.state === 'ambiguous_response') {
-        await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, writes, error: 'inventory write response did not contain explicit code=0 and info.success=true; durable intent retained and duplicate submission forbidden'}, logicalActionKey);
+        await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, writes, error: 'inventory write response was not HTTP 2xx/code=0 or explicitly reported success=false; durable intent retained and duplicate submission forbidden'}, logicalActionKey);
         activeIntent = null;
         continue;
       }
