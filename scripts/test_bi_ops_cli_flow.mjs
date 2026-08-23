@@ -531,6 +531,7 @@ async function runCliExecutionOutcomeFixture() {
   const sourceCommit = 'f'.repeat(40);
   const etag = `\"${published.manifest.fingerprint}-${sourceCommit}\"`;
   const calls = [];
+  let lostResponseExecutePostCount = 0;
   const stub = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
     const body = await readJsonBody(req);
@@ -558,6 +559,14 @@ async function runCliExecutionOutcomeFixture() {
     }
     if (pathname === '/api/link-ops-execute') {
       const id = String(body?.id || '');
+      if (req.method === 'POST' && id === 'lost-response-task' && body?.mode === 'execute') {
+        // The request body has been fully consumed above: simulate a server
+        // that accepted the write but dropped the response before the client
+        // could receive it.
+        lostResponseExecutePostCount += 1;
+        req.socket.destroy();
+        return;
+      }
       const task = {id, status: id === 'ready-task' ? 'waiting_review' : 'submitted'};
       if (id === 'unconfirmed-task' && body?.mode === 'execute') {
         // Deliberately contradictory upstream body: the CLI must fail closed
@@ -637,11 +646,24 @@ async function runCliExecutionOutcomeFixture() {
     check('P1 CLI confirmed completed preserves outcome', completed.json?.outcome, 'completed');
     check('P1 CLI confirmed completed stays non-partial', completed.json?.partial, undefined);
     check('P1 CLI confirmed completed preserves committed evidence', completed.json?.committed, true);
+
+    const lostResponse = await runCli([
+      '--session-file', sessionFile,
+      'execute',
+      '--task-id', 'lost-response-task',
+      '--confirm', 'SHEIN_OPENAPI_SUBMIT',
+    ], options);
+    check('P1 CLI lost response execute posts exactly once', lostResponseExecutePostCount, 1);
+    check('P1 CLI lost response execute exits nonzero', lostResponse.code, code => code !== 0);
+    check('P1 CLI lost response execute cannot claim completed', lostResponse.json?.outcome, outcome => outcome !== 'completed');
+    check('P1 CLI lost response execute cannot claim top-level success', lostResponse.json?.ok, value => value !== true);
+
     check('P1 CLI fixture uses only local deterministic endpoints', calls.some(call => !['/api/owner-knowledge/manifest', '/api/owner-knowledge/bundle', '/api/link-ops-execute'].includes(call.path)), false);
     result.summary.p1Cli = {
       ready: {exit: ready.code, outcome: ready.json?.outcome},
       unconfirmed: {exit: unconfirmed.code, outcome: unconfirmed.json?.outcome, partial: unconfirmed.json?.partial},
       completed: {exit: completed.code, outcome: completed.json?.outcome},
+      lostResponse: {exit: lostResponse.code, outcome: lostResponse.json?.outcome, executePosts: lostResponseExecutePostCount},
     };
   } finally {
     await closeHttpServer(stub);

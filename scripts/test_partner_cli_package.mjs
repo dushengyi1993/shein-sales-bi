@@ -79,6 +79,20 @@ if (!cliText.includes("--sku-code') args.skuCodeList.push(...splitListPreserveCa
   || !cliText.includes("--supplier-sku') args.supplierSkuList.push(...splitListPreserveCase")) {
   throw new Error('partner CLI must preserve case-sensitive SKU and supplier SKU values');
 }
+const queryRetryText = await fs.readFile(path.join(ROOT, 'lib/bi_ops_query_retry.mjs'), 'utf8');
+const ownerKnowledgeCacheText = await fs.readFile(path.join(ROOT, 'lib/partner_knowledge_cache.mjs'), 'utf8');
+const partnerUpdaterText = await fs.readFile(path.join(ROOT, 'lib/partner_cli_updater.mjs'), 'utf8');
+if (!manifest.files.includes('lib/bi_ops_query_retry.mjs')
+  || !queryRetryText.includes('fetchWithIdempotentNetworkRetry')
+  || !cliText.includes('fetchWithIdempotentNetworkRetry(fetch,')
+  || !ownerKnowledgeCacheText.includes('fetchWithIdempotentNetworkRetry(fetchImpl,')
+  || !partnerUpdaterText.includes('fetchWithIdempotentNetworkRetry(fetchImpl,')) {
+  throw new Error('partner package must apply the shared idempotent network retry to CLI reads, owner knowledge and updater checks');
+}
+if (!queryRetryText.includes("const IDEMPOTENT_FETCH_METHODS = new Set(['GET', 'HEAD'])")
+  || !queryRetryText.includes("code = 'BI_TRANSIENT_NETWORK_RETRY_EXHAUSTED'")) {
+  throw new Error('partner package retry policy must remain GET/HEAD-only and report exhausted transient reads');
+}
 const ownerKnowledgeDistributionText = await fs.readFile(path.join(ROOT, 'lib/owner_knowledge_distribution.mjs'), 'utf8');
 if (!ownerKnowledgeDistributionText.includes('safeStructuralToken')
   || !/\.\(\?:ruleKey\|risk\|activation\)\$/.test(ownerKnowledgeDistributionText)) {

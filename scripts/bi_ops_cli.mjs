@@ -58,7 +58,12 @@ import {
   writeOpsJsonArtifactAtomic,
   writeOpsRunManifest,
 } from '../lib/ops_run_bundle.mjs';
-import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
+import {
+  biQueryRequestTimeoutMs,
+  fetchWithIdempotentNetworkRetry,
+  isIncompleteBiQueryError,
+  runBiQueryWithWait,
+} from '../lib/bi_ops_query_retry.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -610,7 +615,7 @@ async function request(args, pathname, {method = 'GET', body, auth = true, allow
     const session = await readSession(args.sessionFile);
     if (session.cookie) headers.cookie = session.cookie;
   }
-  const res = await fetch(`${args.baseUrl}${pathname}`, {
+  const res = await fetchWithIdempotentNetworkRetry(fetch, `${args.baseUrl}${pathname}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
