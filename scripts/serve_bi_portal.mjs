@@ -95,9 +95,12 @@ import {
 import {buildPendingListingImageCorrection} from '../lib/link_ops_pending_listing_image_correction.mjs';
 import {
   buildDescriptionPayloadRows,
+  buildEmptyDescriptionAuthorization,
   descriptionBindingRequestKey,
   describeDescriptionMaterial,
   sha256StableJson,
+  stripPublishPayloadDescriptions,
+  validateCopyProductDescriptionPolicy,
   validateDescriptionMaterialJson,
   validateDescriptionBindingLock,
   buildUpdateDescriptionPayload,
@@ -107,6 +110,7 @@ import {
   DESCRIPTION_SOURCE_PROOF,
   DESCRIPTION_SOURCE_PROOF_S9,
   DESCRIPTION_SOURCE_PROOF_DOCX,
+  EMPTY_DESCRIPTION_CONFIRM_TEXT,
   verifyDescriptionMaterialAgainstDocx,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
@@ -4705,6 +4709,27 @@ function describeDescriptionBindingLockForClient(task) {
   };
 }
 
+function projectEmptyDescriptionAuthorizationForClient(task) {
+  const authorization = task?.emptyDescriptionAuthorization;
+  if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization)) return null;
+  const gate = validateCopyProductDescriptionPolicy(task, task?.openapiPublishPayload);
+  return {
+    ok: gate.ok === true && gate.mode === 'explicit_empty',
+    stale: gate.ok !== true || gate.mode !== 'explicit_empty',
+    mode: String(authorization.mode || ''),
+    taskId: String(authorization.taskId || ''),
+    targetStore: String(authorization.targetStore || ''),
+    sourceStore: String(authorization.sourceStore || ''),
+    sourceSkc: String(authorization.sourceSkc || ''),
+    standardGoodsSn: String(authorization.standardGoodsSn || ''),
+    baseTaskRevision: Number(authorization.baseTaskRevision || 0),
+    imageBindingFingerprint: String(authorization.imageBindingFingerprint || ''),
+    payloadHash: String(authorization.payloadHash || ''),
+    authorizationRequestKey: String(authorization.authorizationRequestKey || ''),
+    authorizedAt: String(authorization.authorizedAt || ''),
+  };
+}
+
 function projectLinkOpsTaskForClient(task) {
   const execution = projectLinkOpsExecutionForClient(task?.execution);
   const preflight = projectLinkOpsPreflightForClient(task?.preflight) || execution?.preflight || null;
@@ -4736,6 +4761,7 @@ function projectLinkOpsTaskForClient(task) {
         : projectDescriptionBindingCommit(task))
       : null,
     descriptionBindingLock: describeDescriptionBindingLockForClient(task),
+    emptyDescriptionAuthorization: projectEmptyDescriptionAuthorizationForClient(task),
     productAttributeBinding: task?.productAttributeBinding && typeof task.productAttributeBinding === 'object'
       ? projectProductAttributeBindingCommit(task)
       : null,
@@ -8528,6 +8554,10 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
       : resetNote,
     updatedAt: now,
   };
+  // A task may use either reviewed descriptions or the explicit empty policy,
+  // never both. Binding reviewed material deterministically revokes the empty
+  // marker before the CAS commit.
+  delete nextTask.emptyDescriptionAuthorization;
   nextTask.history = appendTaskHistory(nextTask, 'approved_description_material_bound', actor, req, {
     targetStore,
     sourceLabel: material.sourceLabel,
@@ -9137,8 +9167,9 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       error.code = adoptImageGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID';
       throw error;
     }
-    if (!task?.descriptionMaterialBinding || !validateDescriptionBindingLock(task, originalPayload).ok) {
-      const error = new Error('adopt_existing 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效（无需重绑）；先修复描述绑定');
+    const descriptionPolicy = validateCopyProductDescriptionPolicy(task, originalPayload);
+    if (!descriptionPolicy.ok) {
+      const error = new Error(`adopt_existing 要求当前描述策略锁完全有效；先修复描述绑定或空描述授权：${descriptionPolicy.blockers.slice(0, 3).join('；')}`);
       error.status = 409;
       error.code = 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID';
       throw error;
@@ -9727,7 +9758,15 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
     throw error;
   }
   const payloadSource = String(captured?.result?.payload?.source || '');
-  const snapshotSource = ['webapi_snapshot', 'bi_portal_webapi_snapshot'].includes(payloadSource);
+  const snapshotSource = [
+    'webapi_snapshot',
+    'bi_portal_webapi_snapshot',
+    // The exact-source executor is stricter than the legacy snapshot path: it
+    // binds one source store/SKC plus the current source-detail hash. Treat its
+    // capture as the same trusted snapshot provenance instead of rejecting the
+    // current canonical source label as an unknown string.
+    'webapi_snapshot_exact_source_lock',
+  ].includes(payloadSource);
   const payloadAssetId = String(captured?.result?.payload?.assetId || '');
   const payloadAssetSha256 = String(captured?.result?.payload?.assetSha256 || '').toLowerCase();
   const approvedPayloadAsset = payloadSource === 'asset_json'
@@ -9873,6 +9912,7 @@ function projectPersistedPublishAssetBindingForResponse(task) {
     boundImageCount: images.length,
     boundNames: images.map(row => row.name),
     publishPreparation,
+    emptyDescriptionAuthorization: projectEmptyDescriptionAuthorizationForClient(task),
     preflightInvalidated: evidence.preflightInvalidated === true,
   };
 }
@@ -9907,6 +9947,9 @@ function injectPublishAssetsReadbackDriftForTest(task) {
       ? 'imageEditPayload'
       : 'openapiPublishPayload';
     drifted[payloadKey] = {...(drifted[payloadKey] || {}), __testReadbackDrift: true};
+  }
+  if (mode === 'empty_description_authorization' && drifted.emptyDescriptionAuthorization) {
+    drifted.emptyDescriptionAuthorization.payloadHash = 'f'.repeat(64);
   }
   return drifted;
 }
@@ -10022,6 +10065,18 @@ function verifyPersistedPublishAssetBindingReadback(freshTask, prepared) {
     || !preparedPayload || typeof preparedPayload !== 'object' || Array.isArray(preparedPayload)
     || sha256StableJson(freshPayload) !== sha256StableJson(preparedPayload)) {
     drift.push(`${payloadKey} canonical hash differs from prepared payload`);
+  }
+  const freshEmptyAuthorization = freshTask?.emptyDescriptionAuthorization;
+  const preparedEmptyAuthorization = preparedTask?.emptyDescriptionAuthorization;
+  if (Boolean(freshEmptyAuthorization) !== Boolean(preparedEmptyAuthorization)
+    || (freshEmptyAuthorization && sha256StableJson(freshEmptyAuthorization) !== sha256StableJson(preparedEmptyAuthorization))) {
+    drift.push('emptyDescriptionAuthorization canonical hash differs from prepared task');
+  }
+  if (preparedEmptyAuthorization) {
+    const policy = validateCopyProductDescriptionPolicy(freshTask, freshPayload);
+    if (!policy.ok || policy.mode !== 'explicit_empty') {
+      drift.push(`emptyDescriptionAuthorization policy readback invalid: ${policy.blockers.slice(0, 3).join('; ')}`);
+    }
   }
   return {ok: drift.length === 0, drift};
 }
@@ -10223,6 +10278,23 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       : [];
   const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
   const isMaintenanceImageBinding = intents.includes('update_images') && !intents.includes('copy_product_draft');
+  const allowEmptyDescriptionFieldPresent = Object.prototype.hasOwnProperty.call(body || {}, 'allowEmptyDescription');
+  const emptyDescriptionConfirmFieldPresent = Object.prototype.hasOwnProperty.call(body || {}, 'emptyDescriptionConfirm');
+  if (allowEmptyDescriptionFieldPresent && typeof body.allowEmptyDescription !== 'boolean') {
+    throw new Error('allowEmptyDescription 必须是原始 JSON boolean；禁止字符串或隐式真值');
+  }
+  const allowEmptyDescription = body.allowEmptyDescription === true;
+  const emptyDescriptionConfirm = String(body.emptyDescriptionConfirm || '');
+  if (allowEmptyDescription) {
+    if (emptyDescriptionConfirm !== EMPTY_DESCRIPTION_CONFIRM_TEXT) {
+      throw new Error(`空描述授权必须同时携带 --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}`);
+    }
+    if (intents.length !== 1 || intents[0] !== 'copy_product_draft' || isMaintenanceImageBinding) {
+      throw new Error('空描述授权只支持单独 copy_product_draft 发布准备');
+    }
+  } else if (emptyDescriptionConfirmFieldPresent && emptyDescriptionConfirm) {
+    throw new Error('emptyDescriptionConfirm 只能与 allowEmptyDescription=true 同时使用');
+  }
   if (isReuse && !isMaintenanceImageBinding) {
     if (!intents.includes('copy_product_draft')) {
       const error = new Error('reuseApprovedBinding only supports copy_product_draft tasks');
@@ -10378,6 +10450,15 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       ? {publishAssetBinding: {...task.publishAssetBinding, publishPreparation}}
       : {}),
   };
+  // Every publish preparation revokes a prior empty marker first. The caller
+  // must explicitly request and re-bind it to the newly prepared payload.
+  delete taskForCapture.emptyDescriptionAuthorization;
+  if (allowEmptyDescription) {
+    delete taskForCapture.descriptionMaterialBinding;
+    if (taskForCapture.openapiPublishPayload && typeof taskForCapture.openapiPublishPayload === 'object' && !Array.isArray(taskForCapture.openapiPublishPayload)) {
+      taskForCapture.openapiPublishPayload = stripPublishPayloadDescriptions(taskForCapture.openapiPublishPayload);
+    }
+  }
   if (isReuse && Object.keys(publishPreparation.titles || {}).length && taskForCapture.openapiPublishPayload) {
     const replaced = replaceExplicitPublishPreparationTitlesInCapturePayload(
       taskForCapture.openapiPublishPayload,
@@ -10426,6 +10507,9 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   }
   const explicit = applyExplicitPublishPreparationOverrides(captured.capturedPublishPayload, publishPreparation);
   const bound = applyApprovedImageBindingsToPublishPayload(explicit.payload, bindings, {sourceApproved: true});
+  const preparedPublishPayload = allowEmptyDescription
+    ? stripPublishPayloadDescriptions(bound.payload)
+    : bound.payload;
   const now = new Date().toISOString();
   const bindingFingerprint = canonicalPublishAssetBindingFingerprint(taskForCapture, {
     binding: {targetStore},
@@ -10435,7 +10519,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   });
   const nextTask = {
     ...taskForCapture,
-    openapiPublishPayload: bound.payload,
+    openapiPublishPayload: preparedPublishPayload,
     publishAssetBinding: {
       schemaVersion: 1,
       sourceApproved: true,
@@ -10480,12 +10564,34 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     note: '人工审核图片已上传并绑定到同一任务；旧预演锁已作废，必须重新预演后才能提交。',
     updatedAt: now,
   };
+  delete nextTask.emptyDescriptionAuthorization;
+  if (allowEmptyDescription) {
+    nextTask.emptyDescriptionAuthorization = buildEmptyDescriptionAuthorization({
+      task: nextTask,
+      payload: nextTask.openapiPublishPayload,
+      baseTaskRevision: Number(task?.repositoryRevision || 0),
+      authorizedAt: now,
+      authorizedByUser: actorUser(actor, req),
+    });
+  }
   nextTask.history = appendTaskHistory(nextTask, 'approved_publish_assets_bound', actor, req, {
     targetStore,
     bindingFingerprint,
     imageCount: bound.bindings.length,
     boundNames: bound.evidence.boundNames,
     publishPreparation: explicit.evidence,
+    emptyDescriptionAuthorized: allowEmptyDescription,
+    emptyDescriptionAuthorization: allowEmptyDescription ? {
+      taskId: nextTask.emptyDescriptionAuthorization.taskId,
+      targetStore: nextTask.emptyDescriptionAuthorization.targetStore,
+      sourceStore: nextTask.emptyDescriptionAuthorization.sourceStore,
+      sourceSkc: nextTask.emptyDescriptionAuthorization.sourceSkc,
+      standardGoodsSn: nextTask.emptyDescriptionAuthorization.standardGoodsSn,
+      baseTaskRevision: nextTask.emptyDescriptionAuthorization.baseTaskRevision,
+      imageBindingFingerprint: nextTask.emptyDescriptionAuthorization.imageBindingFingerprint,
+      payloadHash: nextTask.emptyDescriptionAuthorization.payloadHash,
+      authorizationRequestKey: nextTask.emptyDescriptionAuthorization.authorizationRequestKey,
+    } : null,
   });
   return {
     task: nextTask,
@@ -10495,6 +10601,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       payloadSource: 'task',
       ...bound.evidence,
       publishPreparation: explicit.evidence,
+      emptyDescriptionAuthorization: projectEmptyDescriptionAuthorizationForClient(nextTask),
       preflightInvalidated: true,
     },
   };
@@ -19675,10 +19782,11 @@ async function main() {
               code: 'PRODUCT_ATTRIBUTE_REFRESH_PAYLOAD_HASH_MISMATCH',
             });
           }
-          if (!refreshTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(refreshTask, refreshPayload).ok) {
+          const refreshDescriptionPolicy = validateCopyProductDescriptionPolicy(refreshTask, refreshPayload);
+          if (!refreshDescriptionPolicy.ok) {
             return sendJson(res, 409, {
               ok: false,
-              error: 'refresh_binding 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效',
+              error: `refresh_binding 要求当前描述策略锁对 payload 完全有效：${refreshDescriptionPolicy.blockers.slice(0, 3).join('；')}`,
               code: 'PRODUCT_ATTRIBUTE_REFRESH_DESCRIPTION_INVALID',
             });
           }
@@ -20431,7 +20539,8 @@ async function main() {
             && linkOpsPayloadHash(lockedTask?.openapiPublishPayload) === linkOpsPayloadHash(task?.openapiPublishPayload)
             && String(lockedTask?.publishAssetBinding?.bindingFingerprint || '') === String(task?.publishAssetBinding?.bindingFingerprint || '')
             && String(lockedTask?.descriptionMaterialBinding?.bindingRequestKey || '') === String(task?.descriptionMaterialBinding?.bindingRequestKey || '')
-            && String(lockedTask?.descriptionMaterialBinding?.newPayloadHash || '') === String(task?.descriptionMaterialBinding?.newPayloadHash || '');
+            && String(lockedTask?.descriptionMaterialBinding?.newPayloadHash || '') === String(task?.descriptionMaterialBinding?.newPayloadHash || '')
+            && sha256StableJson(lockedTask?.emptyDescriptionAuthorization || null) === sha256StableJson(task?.emptyDescriptionAuthorization || null);
           if (!lockedStateMatches) {
             return sendJson(res, 409, {
               ok: false,
@@ -20459,13 +20568,11 @@ async function main() {
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });
             }
-            const resignDescriptionGate = bindingTask?.descriptionMaterialBinding
-              ? validateDescriptionBindingLock(bindingTask, currentPayload)
-              : {ok: false, blockers: []};
+            const resignDescriptionGate = validateCopyProductDescriptionPolicy(bindingTask, currentPayload);
             if (!resignDescriptionGate.ok) {
               return sendJson(res, 409, {
                 ok: false,
-                error: '重签要求当前 descriptionMaterialBinding 存在且对净化前 payload 完全有效',
+                error: `重签要求当前描述策略锁对净化前 payload 完全有效：${resignDescriptionGate.blockers.slice(0, 3).join('；')}`,
                 code: 'PRODUCT_ATTRIBUTE_RESIGN_DESCRIPTION_INVALID',
                 blockers: asArray(resignDescriptionGate.blockers).map(row => row?.code || '').filter(Boolean).slice(0, 12),
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
@@ -20560,10 +20667,11 @@ async function main() {
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });
             }
-            if (!resignExistingBinding && (!operationTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(operationTask, payload).ok)) {
+            const adoptDescriptionPolicy = validateCopyProductDescriptionPolicy(operationTask, payload);
+            if (!resignExistingBinding && !adoptDescriptionPolicy.ok) {
               return sendJson(res, 409, {
                 ok: false,
-                error: 'adopt_existing 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效（无需重绑）；先修复描述绑定',
+                error: `adopt_existing 要求当前描述策略锁对 payload 完全有效：${adoptDescriptionPolicy.blockers.slice(0, 3).join('；')}`,
                 code: 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID',
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });

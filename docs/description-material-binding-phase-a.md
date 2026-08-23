@@ -36,6 +36,11 @@ Phase A 先实现“当前待发布 copy_product_draft 任务的审核资料描�
   exact-key schema、服务端 HTML 证明、目标店、base revision、bindingRequestKey、图片指纹、
   task 当前 `openapiPublishPayload` stable hash 及 ar/en 描述 hashes 全部锁定校验；仅行数通过
   不够，任何字节或 metadata 漂移即 blocker。
+- `validateCopyProductDescriptionPolicy`：上述审核描述仍是默认路径。只有用户当前明确要求
+  描述留空时，`prepare-publish` 才能建立默认关闭的 `emptyDescriptionAuthorization`；该标记
+  严格绑定 task、目标店、源店/SKC、货号、repository base revision、已审图片指纹与任务
+  payload hash。描述字段必须完全省略，任一身份/payload/图片漂移都会失效；缺资料或源描述
+  为空本身不得自动产生授权。
 - `evaluateDescriptionReadback`：spu-info `productMultiDescList` 的 live 回读门——ar/en 各恰好
   1 条且逐字 hash 等于绑定 hashes；返回 exact/missing/duplicate/mismatch 状态与
   hashes/lineCounts（无全文）。

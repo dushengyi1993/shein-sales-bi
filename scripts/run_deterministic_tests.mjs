@@ -115,6 +115,7 @@ const tests = [
   'scripts/test_partner_cli_release_pipeline.mjs',
   'scripts/test_link_ops_publish_asset_binding.mjs',
   'scripts/test_link_ops_product_descriptions.mjs',
+  'scripts/test_link_ops_empty_description_authorization.mjs',
   'scripts/test_link_ops_duplicate_publish_override.mjs',
   'scripts/test_link_ops_description_material_extract.mjs',
   'scripts/test_link_ops_extract_sk11004.mjs',

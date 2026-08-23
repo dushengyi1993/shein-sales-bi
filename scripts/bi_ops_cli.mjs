@@ -33,6 +33,7 @@ import {
   DESCRIPTION_SOURCE_PROOF,
   DESCRIPTION_SOURCE_PROOF_S9,
   DESCRIPTION_SOURCE_PROOF_DOCX,
+  EMPTY_DESCRIPTION_CONFIRM_TEXT,
   validateDescriptionMaterialJson,
   verifyDescriptionMaterialAgainstDocx,
 } from '../lib/link_ops_product_descriptions.mjs';
@@ -76,6 +77,8 @@ function parseArgs(argv) {
     taskId: '',
     sourceTaskId: '',
     reuseApprovedBinding: false,
+    allowEmptyDescription: false,
+    emptyDescriptionConfirm: '',
     jobId: '',
     chatSessionId: '',
     text: '',
@@ -171,6 +174,8 @@ function parseArgs(argv) {
     else if (a === '--task-id' || a === '--id') args.taskId = String(argv[++i] || '').trim();
     else if (a === '--source-task-id' || a === '--source-publish-task-id') args.sourceTaskId = String(argv[++i] || '').trim();
     else if (a === '--reuse-approved-binding' || a === '--reuse-binding') args.reuseApprovedBinding = true;
+    else if (a === '--allow-empty-description') args.allowEmptyDescription = true;
+    else if (a === '--empty-description-confirm') args.emptyDescriptionConfirm = String(argv[++i] || '').trim();
     else if (a === '--job-id') args.jobId = String(argv[++i] || '').trim();
     else if (a === '--chat-session' || a === '--chat-session-id') args.chatSessionId = String(argv[++i] || '').trim();
     else if (a === '--text' || a === '--command') args.text = String(argv[++i] || '').trim();
@@ -351,6 +356,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --supply-price 210 --inventory 100 --input-current-ma 700
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --standard-goods-sn SK-999 --supply-price 210 --inventory 100 --allow-empty-description --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML或普通OOXML DOCX> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --adopt-existing --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
@@ -415,6 +421,8 @@ Options:
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
   --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
+  --allow-empty-description prepare-publish 用；仅在用户当前明确要求描述留空时使用，默认关闭
+  --empty-description-confirm prepare-publish 空描述授权精确确认词：${EMPTY_DESCRIPTION_CONFIRM_TEXT}
   --reuse-approved-binding
                    prepare-publish 用；同一 copy_product_draft 任务已有服务端已审图片绑定时，仅复用该绑定并更新
                    publishPreparation（如 --input-current-ma），不扫描/读取/上传本地图片；与 --image-dir 互斥，
@@ -1388,6 +1396,13 @@ function preparedImageAssignments(plan) {
 
 async function runPreparePublish(args) {
   if (!args.taskId) throw new Error('prepare-publish requires --task-id <id>');
+  if (args.allowEmptyDescription) {
+    if (args.emptyDescriptionConfirm !== EMPTY_DESCRIPTION_CONFIRM_TEXT) {
+      throw new Error(`--allow-empty-description 必须同时携带 --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}`);
+    }
+  } else if (args.emptyDescriptionConfirm) {
+    throw new Error('--empty-description-confirm 只能与 --allow-empty-description 同时使用');
+  }
   if (args.reuseApprovedBinding) {
     if (args.imageDir) throw new Error('--reuse-approved-binding 与 --image-dir 互斥：复用服务端已审绑定时不扫描、不读取、不上传本地图片');
     if (args.sourceTaskId) throw new Error('--reuse-approved-binding 仅服务 copy_product_draft 发布准备；不能用于 update_images 维护任务的 --source-task-id 模式');
@@ -1410,6 +1425,10 @@ async function runPreparePublish(args) {
         reuseApprovedBinding: true,
         bindings: [],
         publishPreparation,
+        ...(args.allowEmptyDescription ? {
+          allowEmptyDescription: true,
+          emptyDescriptionConfirm: args.emptyDescriptionConfirm,
+        } : {}),
       },
     }));
   } else {
@@ -1452,6 +1471,10 @@ async function runPreparePublish(args) {
         sourceDirLabel: path.basename(args.imageDir),
         bindings: uploaded,
         publishPreparation,
+        ...(args.allowEmptyDescription ? {
+          allowEmptyDescription: true,
+          emptyDescriptionConfirm: args.emptyDescriptionConfirm,
+        } : {}),
         sourceTaskId: args.sourceTaskId || '',
         productIdentity: {
           spuName: args.spuList[0] || '',
@@ -1502,6 +1525,7 @@ async function runPreparePublish(args) {
       payloadSource: bindingJson.binding.payloadSource,
       realPublishOccurred: false,
       reusedApprovedBinding: reused,
+      emptyDescriptionAuthorized: bindingJson?.binding?.emptyDescriptionAuthorization?.ok === true,
       nextStep: '核对新预演的 payloadHash 和字段；只有用户明确确认后才调用 execute。',
     },
   });

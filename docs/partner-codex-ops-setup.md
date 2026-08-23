@@ -390,13 +390,21 @@ node scripts/bi_ops_cli.mjs tasks --pretty
 
 该命令读取实际尺寸、按角色上传、把返回 URL 与货号/供货价/库存等显式事实绑定到同一任务，然后基于新 payload 重新预演。返回结果必须看到 `payloadSource=task`、图片数量/名称、方形图尺寸和新的 payload hash；它本身不真实发布。
 
-新品描述必须继续绑定到同一个 `copy_product_draft` 任务：
+新品描述默认必须继续绑定到同一个 `copy_product_draft` 任务：
 
 ```powershell
 & "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-descriptions --task-id <任务ID> --store JSH --source-file '<审核资料HTML>' --section auto
 ```
 
 `auto` 只接受唯一新版 `section#s09`，或能够凭相邻标签/方向/字符脚本唯一映射的旧版 `section#s9`；服务端仍从实际 HTML 字节独立重算文件 SHA 与三语逐行 hash，存在歧义即拒绝。
+
+只有用户当前明确要求“描述留空”时，才使用同一 `prepare-publish` 入口绑定默认关闭的空描述授权；缺少资料或源链接描述为空本身不构成该授权：
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-publish --task-id <任务ID> --store <店铺> --reuse-approved-binding --standard-goods-sn '<精确货号>' --supply-price <SAR> --inventory <数量> --allow-empty-description --empty-description-confirm USER_EXPLICIT_EMPTY_DESCRIPTION
+```
+
+服务端必须把该授权精确锁到任务、目标店、源店/SKC、货号、已审图片绑定和 payload hash；任一漂移后必须重新准备并重新预演。未携带该精确授权时，原有三语审核资料门禁不变。
 - 真正提交 SHEIN 前，后台仍要把图片转成 SHEIN 可接受的图片 URL，先查官方图片方案，再把前端角色映射到 `partialEdit` / 发布 payload 的 SPU/SKC/SKU 层级。不同类目图片方案可能不同，不能把“轮播图/细节图/SKU 图”的前端叫法直接等同于固定 OpenAPI 字段。
 - CLI / 执行器会在 `update_images` 的 dry-run 阶段检查图片 payload：SPU 层 `image_info` 必须搭配 `is_spu_pic=true`，SKC 图类型只能是 `1/2/5/6` 且主图唯一，细节图总数最多 11 张，SKU 图只能用 `image_type=1` 的高清主图；疑似 `sku-80` / `80x80` 裁切图会被阻断。`partialEdit` 返回成功并生成版本号，或后台任务已进入流转 / 待审核 / 审核中 / 待终审，即代表 SHEIN 已接收提交；后续是平台审核生命周期，不要当作“没提交”反复执行。最终当前态仍以审核完成后的回读或后台可见态为准。
 

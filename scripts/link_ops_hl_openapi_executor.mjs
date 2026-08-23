@@ -36,7 +36,9 @@ import {evaluateAdditionalDuplicatePublishOverride} from '../lib/link_ops_duplic
 import {
   evaluateDescriptionReadback,
   describePublishPayloadDescription,
-  validateDescriptionBindingLock,
+  stripPublishPayloadDescriptions,
+  validateCopyProductDescriptionPolicy,
+  validateEmptyDescriptionAuthorization,
   validatePublishPayloadDescription,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {isSheinSkc, sameSheinSkc} from '../lib/shein_product_identifiers.mjs';
@@ -1061,11 +1063,12 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
   }
   const descriptions = targetDescriptionRows(existingPayload);
   const descriptionBinding = task?.descriptionMaterialBinding;
-  if (descriptions.length && (!descriptionBinding || !validatePublishPayloadDescription(existingPayload).ok || !validateDescriptionBindingLock(task, existingPayload).ok)) {
-    throw new Error('existing task payload contains destination descriptions without a valid descriptionMaterialBinding lock');
-  }
-  if (descriptionBinding && (!descriptions.length || !validatePublishPayloadDescription(existingPayload).ok || !validateDescriptionBindingLock(task, existingPayload).ok)) {
-    throw new Error('descriptionMaterialBinding cannot be verified against the existing task payload');
+  const emptyDescriptionAuthorization = task?.emptyDescriptionAuthorization;
+  if (descriptions.length || descriptionBinding || emptyDescriptionAuthorization) {
+    const descriptionPolicy = validateCopyProductDescriptionPolicy(task, existingPayload);
+    if (!descriptionPolicy.ok) {
+      throw new Error(`existing task payload description policy lock is invalid: ${descriptionPolicy.blockers.slice(0, 4).join('; ')}`);
+    }
   }
 
   const imageBinding = validateStructuredImageBinding(task, destinationStore, existingPayload);
@@ -1092,6 +1095,7 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
     titleGroup: overrides.titleGroup || '',
     titles: structuredTitles,
     descriptionBinding,
+    emptyDescriptionAuthorization,
     imageBinding,
     overrides,
     rawPreparation: preparation.raw,
@@ -1100,13 +1104,25 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
       targetStore: destinationStore,
       titleGroup: overrides.titleGroup || '',
       titleLanguages: Object.keys(structuredTitles),
-      descriptionsLocked: Boolean(descriptionBinding),
+      descriptionsLocked: Boolean(descriptionBinding || emptyDescriptionAuthorization),
       imagesLocked: Boolean(imageBinding),
       supplyPrice: overrides.supplyPrice,
       inventory: overrides.inventory,
       standardGoodsSn: overrides.standardGoodsSn || '',
       supplierSku: expectedSupplierSku || '',
     },
+  };
+}
+
+function applyExplicitEmptyDescriptionProjection(payload, task, existingPayload) {
+  if (!task?.emptyDescriptionAuthorization) return {payload, applied: []};
+  const gate = validateEmptyDescriptionAuthorization(task, existingPayload);
+  if (!gate.ok) {
+    throw new Error(`empty-description destination lock is invalid: ${gate.blockers.slice(0, 4).join('; ')}`);
+  }
+  return {
+    payload: stripPublishPayloadDescriptions(payload),
+    applied: ['destination.emptyDescriptionAuthorization.omit_descriptions'],
   };
 }
 
@@ -1138,6 +1154,9 @@ function mergeExactSourceDestinationBindings(sourcePayload, task, existingPayloa
   let payload = jsonClone(sourcePayload);
   const applied = [];
   const projection = buildProtectedDestinationProjection(task, existingPayload, targetStore);
+  const emptyDescriptionApplied = applyExplicitEmptyDescriptionProjection(payload, task, existingPayload);
+  payload = emptyDescriptionApplied.payload;
+  applied.push(...emptyDescriptionApplied.applied);
   const imageBinding = projection.imageBinding;
   if (imageBinding) {
     const bound = applyApprovedImageBindingsToPublishPayload(payload, imageBinding.images, {sourceApproved: true});
@@ -1566,8 +1585,9 @@ function buildProductExecutionHashScope({
   sourceDetailLock = null,
   productAliasRegistryFingerprint = '',
   productCatalogFingerprint = '',
+  emptyDescriptionAuthorization = null,
 } = {}) {
-  return {
+  const scope = {
     schema: PRODUCT_EXECUTION_HASH_SCHEMA,
     payload,
     targetStore: executionHashScalar(targetStore, 80),
@@ -1581,6 +1601,12 @@ function buildProductExecutionHashScope({
     productAliasRegistryFingerprint: executionHashScalar(productAliasRegistryFingerprint, 120),
     productCatalogFingerprint: executionHashScalar(productCatalogFingerprint, 120),
   };
+  // Preserve legacy v4 hashes for every ordinary task. Only an explicit marker
+  // adds a new hash member, so unrelated in-flight preflights do not drift.
+  if (emptyDescriptionAuthorization && typeof emptyDescriptionAuthorization === 'object' && !Array.isArray(emptyDescriptionAuthorization)) {
+    scope.emptyDescriptionAuthorization = emptyDescriptionAuthorization;
+  }
+  return scope;
 }
 
 // 写前详情锁门：把本次 hydration 得到的当前 sourceDetailLock 与预检锁定的锁
@@ -3589,7 +3615,7 @@ function applyTargetStandardGoodsSn(payload, standardGoodsSn, {preserveExplicitS
   return {payload: next, applied};
 }
 
-function validatePublishPayload(payload) {
+function validatePublishPayload(payload, task) {
   const blockers = [];
   const warnings = [];
   const has = (...keys) => keys.some(k => payload?.[k] !== undefined && payload?.[k] !== null && payload?.[k] !== '');
@@ -3602,7 +3628,13 @@ function validatePublishPayload(payload) {
   if (!has('source_system', 'sourceSystem')) blockers.push('缺 source_system=OpenAPI。');
   if (!arr('multi_language_name_list', 'multiLanguageNameList').length) blockers.push('缺 multi_language_name_list：至少需要商品标题/多语言名称。');
   if (!arr('product_attribute_list', 'productAttributeList').length) blockers.push('缺 product_attribute_list：需要类目属性模板和源商品参数。');
-  const descriptionGate = validatePublishPayloadDescription(payload);
+  // Preserve the legacy structural gate for every normal task. The stronger
+  // task/binding policy is applied below to the final execution payload. Only
+  // an explicit-empty task needs its authorization-aware policy at this early
+  // shape-validation stage because an omitted description is intentional.
+  const descriptionGate = task?.emptyDescriptionAuthorization
+    ? validateCopyProductDescriptionPolicy(task, payload)
+    : validatePublishPayloadDescription(payload);
   blockers.push(...descriptionGate.blockers);
   const siteList = arr('site_list', 'siteList');
   if (!siteList.length) {
@@ -4227,6 +4259,12 @@ function matchProductReadbackRows(rows, fingerprint) {
   };
 }
 
+function descriptionReadbackLanguageList(task) {
+  return task?.emptyDescriptionAuthorization
+    ? ['en', 'ar', 'zh-cn']
+    : ['en', 'ar'];
+}
+
 async function readbackPublishedProduct(client, fingerprint, {enabled = false, task = null} = {}) {
   const startedAt = new Date().toISOString();
   const calls = [];
@@ -4274,12 +4312,31 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
   const descriptionBinding = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
     ? task.descriptionMaterialBinding
     : null;
+  const emptyDescriptionAuthorization = task?.emptyDescriptionAuthorization && typeof task.emptyDescriptionAuthorization === 'object'
+    ? task.emptyDescriptionAuthorization
+    : null;
+  const emptyDescriptionAuthorizationGate = emptyDescriptionAuthorization
+    ? validateEmptyDescriptionAuthorization(task, task?.openapiPublishPayload)
+    : null;
+  const descriptionLanguages = descriptionReadbackLanguageList(task);
   const verifyMatchedRowsDescription = async (matchedRows, label) => {
-    if (!descriptionBinding) {
+    if (!descriptionBinding && !emptyDescriptionAuthorization) {
       return {
         ok: true,
         status: 'description_readback_not_required',
         descriptionReadback: {ok: true, status: 'description_readback_not_required', blockers: [], summary: {}},
+      };
+    }
+    if (emptyDescriptionAuthorization && emptyDescriptionAuthorizationGate?.ok !== true) {
+      return {
+        ok: false,
+        status: 'description_readback_unverifiable',
+        descriptionReadback: {
+          ok: false,
+          status: 'description_readback_unverifiable',
+          blockers: emptyDescriptionAuthorizationGate?.blockers || ['空描述授权在终态回读前已失效'],
+          summary: {},
+        },
       };
     }
     const spuNames = [...new Set(asArray(matchedRows).map(row => safeString(row?.spuName || '', 120)).filter(Boolean))];
@@ -4298,7 +4355,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
     const spuName = spuNames[0];
     const response = await client.request('/open-api/goods/spu-info', {
       method: 'POST',
-      body: {spuName, languageList: ['en', 'ar']},
+      body: {spuName, languageList: descriptionLanguages},
       headers: {language: 'en'},
     });
     calls.push(compactCallResult(`${label}-description-spu-info-${spuName}`, '/open-api/goods/spu-info', 'POST', response));
@@ -4346,7 +4403,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
     for (const spuName of publishSpuNames.slice(0, 5)) {
       const response = await client.request('/open-api/goods/spu-info', {
         method: 'POST',
-        body: {spuName, languageList: ['en', 'ar']},
+        body: {spuName, languageList: descriptionLanguages},
         headers: {language: 'en'},
       });
       calls.push(compactCallResult(`spu-info-readback-${spuName}`, '/open-api/goods/spu-info', 'POST', response));
@@ -4358,8 +4415,15 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
         // Phase A live description gate: identity strongly matched, but the
         // spu-info productMultiDescList must still carry ar/en exactly once
         // each with hashes equal to the task's descriptionMaterialBinding.
-        const descriptionReadback = task?.descriptionMaterialBinding
-          ? evaluateDescriptionReadback(task.descriptionMaterialBinding, info)
+        const descriptionReadback = task?.descriptionMaterialBinding || emptyDescriptionAuthorization
+          ? (emptyDescriptionAuthorization && emptyDescriptionAuthorizationGate?.ok !== true
+              ? {
+                  ok: false,
+                  status: 'description_readback_unverifiable',
+                  blockers: emptyDescriptionAuthorizationGate?.blockers || ['空描述授权在终态回读前已失效'],
+                  summary: {},
+                }
+              : evaluateDescriptionReadback(task?.descriptionMaterialBinding || null, info))
           : null;
         if (descriptionReadback && !descriptionReadback.ok) {
           return {
@@ -4904,7 +4968,7 @@ async function main() {
     appendUnique(blockers, templateApplied.blockers);
     appendUnique(warnings, targetDuplicateCheck.warnings);
     appendUnique(blockers, targetDuplicateCheck.blockers);
-    payloadValidation = validatePublishPayload(publishPayload);
+    payloadValidation = validatePublishPayload(publishPayload, task);
     payloadSummary = extractPayloadSummary(publishPayload);
     // Execution lock hash v4: the real expectedPayloadHash must cover the final
     // publish payload PLUS the locked source store/sourceSkc and the target
@@ -4924,6 +4988,7 @@ async function main() {
       sourceDetailLock: currentSourceDetailLock,
       productAliasRegistryFingerprint: PRODUCT_ALIAS_REGISTRY_FINGERPRINT,
       productCatalogFingerprint: PRODUCT_CATALOG_FINGERPRINT,
+      emptyDescriptionAuthorization: task?.emptyDescriptionAuthorization || null,
     });
     bodyHash = sha256Stable(publishPayload);
     payloadHash = sha256Stable(executionScope);
@@ -4932,10 +4997,10 @@ async function main() {
     // Reviewed-material binding lock: the final payload's ar/en description
     // hashes must equal the task's descriptionMaterialBinding hashes. Passing
     // the 5-line shape is not enough; any byte drift blocks dry-run/execute.
-    const finalDescriptionGate = validatePublishPayloadDescription(publishPayload);
-    const descriptionBindingLock = validateDescriptionBindingLock(task, publishPayload);
-    payloadSummary.descriptionBindingLocked = finalDescriptionGate.ok && descriptionBindingLock.ok;
-    appendUnique(blockers, descriptionBindingLock.blockers);
+    const finalDescriptionPolicy = validateCopyProductDescriptionPolicy(task, publishPayload);
+    payloadSummary.descriptionBindingLocked = finalDescriptionPolicy.ok;
+    payloadSummary.descriptionPolicyMode = finalDescriptionPolicy.mode;
+    appendUnique(blockers, finalDescriptionPolicy.blockers);
   } else {
     appendUnique(blockers, payloadValidation.blockers);
     if (payloadFound?.generationError) {
@@ -5191,6 +5256,7 @@ export const __testHooks = {
   exactSourceRequiresHazardTemplateDerivation,
   shouldIssuePublishOrEdit,
   applyExactSourceLockedInputCurrentOverride,
+  applyExplicitEmptyDescriptionProjection,
   mergeExactSourceDestinationBindings,
   applySafeDefaults,
   applyManualAttributeOverrides,
@@ -5214,6 +5280,7 @@ export const __testHooks = {
   publishPreValidMessages,
   compactPublishResultForStorage,
   matchProductReadbackRows,
+  descriptionReadbackLanguageList,
   readbackPublishedProduct,
   sha256Stable,
   buildProductExecutionHashScope,

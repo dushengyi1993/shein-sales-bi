@@ -20,7 +20,11 @@ import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {sha256Utf8} from '../lib/link_ops_product_descriptions.mjs';
+import {
+  EMPTY_DESCRIPTION_CONFIRM_TEXT,
+  sha256Utf8,
+} from '../lib/link_ops_product_descriptions.mjs';
+import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -40,6 +44,7 @@ await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-copy-success-smoke-'));
 const testOutputDir = path.join(tmpRoot, 'outputs');
 process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(testOutputDir, 'shein_openapi_products');
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function getFreePort() {
@@ -90,6 +95,9 @@ function expectedPersistedPublishAssetBindingResponse(task) {
     ? JSON.parse(JSON.stringify(binding.publishPreparation))
     : null;
   const images = canonicalImageFields(binding.images);
+  const emptyAuthorization = task?.emptyDescriptionAuthorization && typeof task.emptyDescriptionAuthorization === 'object'
+    ? task.emptyDescriptionAuthorization
+    : null;
   return {
     ...evidence,
     targetStore: String(binding.targetStore || '').trim().toUpperCase(),
@@ -99,6 +107,21 @@ function expectedPersistedPublishAssetBindingResponse(task) {
     boundImageCount: images.length,
     boundNames: images.map(row => row.name),
     publishPreparation,
+    emptyDescriptionAuthorization: emptyAuthorization ? {
+      ok: true,
+      stale: false,
+      mode: String(emptyAuthorization.mode || ''),
+      taskId: String(emptyAuthorization.taskId || ''),
+      targetStore: String(emptyAuthorization.targetStore || ''),
+      sourceStore: String(emptyAuthorization.sourceStore || ''),
+      sourceSkc: String(emptyAuthorization.sourceSkc || ''),
+      standardGoodsSn: String(emptyAuthorization.standardGoodsSn || ''),
+      baseTaskRevision: Number(emptyAuthorization.baseTaskRevision || 0),
+      imageBindingFingerprint: String(emptyAuthorization.imageBindingFingerprint || ''),
+      payloadHash: String(emptyAuthorization.payloadHash || ''),
+      authorizationRequestKey: String(emptyAuthorization.authorizationRequestKey || ''),
+      authorizedAt: String(emptyAuthorization.authorizedAt || ''),
+    } : null,
     preflightInvalidated: evidence.preflightInvalidated === true,
   };
 }
@@ -207,7 +230,7 @@ async function writeSourceDetailFixtures() {
     inventoryRows: [],
     performanceRows: [],
   }, null, 2)}\n`, 'utf8');
-  await fs.writeFile(path.join(sourceOpenApiFixtureDir, 'latest.json'), `${JSON.stringify({
+  await writeOpenApiProductCacheAtomically(path.join(sourceOpenApiFixtureDir, 'latest.json'), {
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: 'DL',
     fetchedAt: SOURCE_DETAIL_AT,
@@ -255,7 +278,7 @@ async function writeSourceDetailFixtures() {
       },
     }],
     detailFallbackResults: [],
-  }, null, 2)}\n`, 'utf8');
+  }, {storeKey: 'DL', generatedAt: SOURCE_DETAIL_AT});
 }
 async function removeSourceDetailFixtures() {
   await fs.rm(sourceLinkFixtureDir, {recursive: true, force: true});
@@ -845,10 +868,14 @@ const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
 await provisionBiSessionSecret(sessionSecretFile);
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
+const portalFixtureDir = path.join(tmpRoot, 'bi-portal');
+await fs.mkdir(portalFixtureDir, {recursive: true});
+await fs.writeFile(path.join(portalFixtureDir, 'index.html'), '<!doctype html><title>BI test fixture</title>', 'utf8');
 
 const portalPort = await getFreePort();
 const portal = spawn(process.execPath, [
   'scripts/serve_bi_portal.mjs',
+  '--dir', portalFixtureDir,
   '--host', '127.0.0.1',
   '--port', String(portalPort),
   '--auth-file', authFile,
@@ -867,6 +894,8 @@ const portal = spawn(process.execPath, [
     NODE_ENV: 'test',
     SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
     SHEIN_BI_CORE_WARMUP_DISABLED: '1',
+    SHEIN_BI_OUTPUT_DIR: testOutputDir,
+    SHEIN_OPENAPI_PRODUCT_CACHE_DIR: path.join(testOutputDir, 'shein_openapi_products'),
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
     SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
@@ -902,6 +931,7 @@ const req = (pathname, options = {}) => reqAt(base, pathname, options);
 function portalSpawnArgs(port) {
   return [
     'scripts/serve_bi_portal.mjs',
+    '--dir', portalFixtureDir,
     '--host', '127.0.0.1',
     '--port', String(port),
     '--auth-file', authFile,
@@ -922,6 +952,8 @@ function portalSpawnEnv(extra = {}) {
     NODE_ENV: 'test',
     SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
     SHEIN_BI_CORE_WARMUP_DISABLED: '1',
+    SHEIN_BI_OUTPUT_DIR: testOutputDir,
+    SHEIN_OPENAPI_PRODUCT_CACHE_DIR: path.join(testOutputDir, 'shein_openapi_products'),
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
     SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
@@ -1036,11 +1068,15 @@ async function runPublishAssetsCasScenario({cookie}) {
         type: 'application/json',
         sourceApproved: true,
         approvalKind: 'human_reviewed_publish_payload',
-        dataBase64: b64Json({publishPayload}),
+        // This upload exercises repository revision/CAS without pre-seeding
+        // any destination-owned title/image/price/description fields. The
+        // exact source snapshot supplies the base draft; the two competing
+        // binding endpoints own their respective reviewed projections.
+        dataBase64: b64Json({fixture: 'prebinding-metadata-only'}),
       }],
     },
   });
-  checkAt('race task payload upload status', casUpload.status, 200);
+  checkAt('race task metadata upload status', casUpload.status, 200);
   const casRevision = Number((await rawTaskById(casTaskId))?.repositoryRevision || 0);
   checkAt('race task has repository revision', casRevision > 0, true);
 
@@ -1120,6 +1156,13 @@ async function runPublishAssetsCasScenario({cookie}) {
   });
   await fs.writeFile(`${casMarker}.go`, `${new Date().toISOString()}\n`, 'utf8');
   const casPublishResult = await pausedPublish;
+  if (casDescBind.status !== 200 || casPublishResult.status !== 409) {
+    result.summary.publishAssetsCasFailure = {
+      descriptionBinding: {status: casDescBind.status, json: casDescBind.json},
+      publishAssets: {status: casPublishResult.status, json: casPublishResult.json},
+      pausePortalStderr: casPortalStderr.slice(-2_000),
+    };
+  }
   checkAt('competing description binding succeeds', casDescBind.status, 200);
   checkAt('competing description binding read back', casDescBind.json?.bindingCommitted === true && casDescBind.json?.readbackVerified === true, true);
   checkAt('paused publish-assets loses with 409', casPublishResult.status, 409);
@@ -1210,7 +1253,7 @@ async function runPublishAssetsCasScenario({cookie}) {
         type: 'application/json',
         sourceApproved: true,
         approvalKind: 'human_reviewed_publish_payload',
-        dataBase64: b64Json({publishPayload}),
+        dataBase64: b64Json({fixture: 'empty-description-prebinding-metadata-only'}),
       }],
     },
   });
@@ -1245,6 +1288,81 @@ async function runPublishAssetsCasScenario({cookie}) {
   const casOkTasks = await req('/api/link-ops-tasks?limit=50', {cookie});
   const casOkProjection = (casOkTasks.json?.data?.tasks || []).find(row => row?.id === casOkId) || {};
   checkAt('success CAS task has no description binding lock', casOkProjection.descriptionBindingLock, null);
+
+  // Explicit-empty exception on the same production endpoint. It must be
+  // opt-in, bind the exact task/store/source/goods/image/payload facts, persist
+  // through the repository CAS, and return only a hash-safe projection.
+  const emptyCreate = await req('/api/link-ops-tasks', {
+    method: 'POST',
+    cookie,
+    body: {
+      source: 'publish_assets_empty_description_smoke',
+      command: `空描述授权 CAS 冒烟：${productCase.command}`,
+      targets: {
+        stores: ['HL'],
+        sourceStores: ['DL'],
+        sourceSkc: SOURCE_SKC,
+        productRefs: productCase.productRefs,
+        standardGoodsSn: taskStandardGoodsSn,
+      },
+    },
+  });
+  const emptyTaskId = extractTaskId(emptyCreate.json);
+  checkAt('empty-description task create status', emptyCreate.status, 200);
+  checkAt('empty-description task id present', Boolean(emptyTaskId), true);
+  const emptyUpload = await req('/api/link-ops-assets', {
+    method: 'POST',
+    cookie,
+    body: {
+      taskId: emptyTaskId,
+      files: [{
+        name: 'publish-payload.json',
+        type: 'application/json',
+        sourceApproved: true,
+        approvalKind: 'human_reviewed_publish_payload',
+        dataBase64: b64Json({fixture: 'empty-description-prebinding-metadata-only'}),
+      }],
+    },
+  });
+  checkAt('empty-description metadata upload status', emptyUpload.status, 200);
+  const beforeRejectedEmpty = await rawTaskById(emptyTaskId);
+  const rejectedEmpty = await req('/api/link-ops-publish-assets', {
+    method: 'POST',
+    cookie,
+    body: {...casPublishBody, taskId: emptyTaskId, allowEmptyDescription: true, emptyDescriptionConfirm: 'WRONG_TOKEN'},
+  });
+  const afterRejectedEmpty = await rawTaskById(emptyTaskId);
+  checkAt('wrong empty-description token rejected', rejectedEmpty.status, 400);
+  checkAt('wrong token does not mutate revision', Number(afterRejectedEmpty?.repositoryRevision || 0), Number(beforeRejectedEmpty?.repositoryRevision || 0));
+  const emptyBind = await req('/api/link-ops-publish-assets', {
+    method: 'POST',
+    cookie,
+    body: {
+      ...casPublishBody,
+      taskId: emptyTaskId,
+      allowEmptyDescription: true,
+      emptyDescriptionConfirm: EMPTY_DESCRIPTION_CONFIRM_TEXT,
+    },
+  });
+  const emptyRaw = await rawTaskById(emptyTaskId);
+  if (emptyBind.status !== 200) {
+    result.summary.emptyDescriptionBindingFailure = {status: emptyBind.status, json: emptyBind.json};
+  }
+  checkAt('empty-description CAS status', emptyBind.status, 200);
+  checkAt('empty-description CAS readback verified', emptyBind.json?.readbackVerified, true);
+  checkAt('empty-description marker projected valid', emptyBind.json?.binding?.emptyDescriptionAuthorization?.ok, true);
+  checkAt('empty-description marker not stale', emptyBind.json?.binding?.emptyDescriptionAuthorization?.stale, false);
+  checkAt('empty-description marker task exact', emptyRaw?.emptyDescriptionAuthorization?.taskId || '', emptyTaskId);
+  checkAt('empty-description marker target exact', emptyRaw?.emptyDescriptionAuthorization?.targetStore || '', 'HL');
+  checkAt('empty-description marker source store exact', emptyRaw?.emptyDescriptionAuthorization?.sourceStore || '', 'DL');
+  checkAt('empty-description marker source SKC exact', emptyRaw?.emptyDescriptionAuthorization?.sourceSkc || '', SOURCE_SKC);
+  checkAt('empty-description marker goods exact', emptyRaw?.emptyDescriptionAuthorization?.standardGoodsSn || '', taskStandardGoodsSn);
+  checkAt('empty-description marker image exact', emptyRaw?.emptyDescriptionAuthorization?.imageBindingFingerprint || '', emptyRaw?.publishAssetBinding?.bindingFingerprint || '');
+  checkAt('empty-description marker payload hash present', emptyRaw?.emptyDescriptionAuthorization?.payloadHash || '', value => /^[a-f0-9]{64}$/.test(String(value || '')));
+  checkAt('empty-description payload omits canonical field', Object.hasOwn(emptyRaw?.openapiPublishPayload || {}, 'multi_language_desc_list'), false);
+  checkAt('empty-description payload omits aliases', ['multiLanguageDescList', 'productMultiDescList', 'product_multi_desc_list'].some(key => Object.hasOwn(emptyRaw?.openapiPublishPayload || {}, key)), false);
+  checkAt('empty-description task has no reviewed description binding', Boolean(emptyRaw?.descriptionMaterialBinding), false);
+  checkAt('empty-description response equals fresh persisted record', stableJson(emptyBind.json?.binding || {}), stableJson(expectedPersistedPublishAssetBindingResponse(emptyRaw)));
 
   // The deterministic CAS marker is test-only. A real production-mode portal
   // receives the same marker environment variable but must neither create the
@@ -1283,12 +1401,13 @@ async function runPublishAssetsCasScenario({cookie}) {
     'publish_preparation_missing',
     'publish_preparation_change',
     'payload_hash',
+    'empty_description_authorization',
   ];
   const driftPortal = await startAuxiliaryPortal({
     NODE_ENV: 'test',
     SHEIN_LINK_OPS_TEST_PUBLISH_ASSETS_READBACK_DRIFT_SEQUENCE: driftModes.join(','),
   });
-  for (const mode of driftModes) {
+  for (const mode of driftModes.slice(0, -1)) {
     const driftResponse = await reqAt(driftPortal.baseUrl, '/api/link-ops-publish-assets', {
       method: 'POST',
       cookie: driftPortal.cookie,
@@ -1299,6 +1418,20 @@ async function runPublishAssetsCasScenario({cookie}) {
     checkAt(`${mode} readback drift reports durable bind`, driftResponse.json?.bound, true);
     checkAt(`${mode} readback drift carries evidence`, driftResponse.json?.drift || [], rows => asArray(rows).length > 0);
   }
+  const emptyAuthorizationDrift = await reqAt(driftPortal.baseUrl, '/api/link-ops-publish-assets', {
+    method: 'POST',
+    cookie: driftPortal.cookie,
+    body: {
+      ...casPublishBody,
+      taskId: emptyTaskId,
+      allowEmptyDescription: true,
+      emptyDescriptionConfirm: EMPTY_DESCRIPTION_CONFIRM_TEXT,
+    },
+  });
+  checkAt('empty authorization readback drift status', emptyAuthorizationDrift.status, 409);
+  checkAt('empty authorization readback drift stable code', emptyAuthorizationDrift.json?.code || '', 'LINK_OPS_PUBLISH_ASSETS_READBACK_DRIFT');
+  checkAt('empty authorization readback drift reports durable bind', emptyAuthorizationDrift.json?.bound, true);
+  checkAt('empty authorization readback drift carries marker evidence', emptyAuthorizationDrift.json?.drift || [], rows => asArray(rows).some(row => String(row).includes('emptyDescriptionAuthorization')));
   const casOkAfterDrift = await rawTaskById(casOkId);
   checkAt('readback drift injection does not alter persisted image array', canonicalImageFields(casOkAfterDrift?.publishAssetBinding?.images), rows => JSON.stringify(rows) === JSON.stringify(canonicalImageFields(casOkRaw?.publishAssetBinding?.images)));
 
@@ -2018,7 +2151,7 @@ try {
       !text.includes(descriptionLines.en[0]) && !text.includes(descriptionLines.ar[0])
     ));
   }
-  check('task count', result.summary.taskCount, (ASSET_BINDING ? 3 : 1) + 2);
+  check('task count', result.summary.taskCount, (ASSET_BINDING ? 3 : 1) + 3);
   check('audit lines >= expected', result.summary.auditLines, n => n >= (WEAK_READBACK_ONLY ? 8 : 5));
 
   result.ok = result.checks.every(x => x.pass);
@@ -2029,7 +2162,7 @@ try {
   }
   await new Promise(resolve => fakeOpenApi.close(resolve));
   await sleep(300);
-  await removeSourceDetailFixtures().catch(() => {});
+  if (!KEEP_TEMP) await removeSourceDetailFixtures().catch(() => {});
 }
 
 console.log(JSON.stringify(result, null, 2));
