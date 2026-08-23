@@ -157,6 +157,97 @@ assert.throws(() => assertDailyInventoryExecutionAuthorization({
   confirmHash: plan.payloadHash,
 }), /authorization id mismatch/);
 
+// Executor regression: a production-shaped direct manifest (pointerPath ===
+// manifestPath) is authoritative even when the Portal ET projection is old.
+// The zero-action plan must complete before any OpenAPI client can be created.
+const executorFixtureRoot = path.join(ROOT, 'outputs', 'et-forwarder', `executor-regression-${process.pid}-${Date.now()}`);
+const executorReportRoot = path.join(ROOT, 'outputs', 'reports', `executor-regression-${process.pid}-${Date.now()}`);
+const executorConfig = path.join(executorReportRoot, 'no-credentials.json');
+const executorLinks = path.join(executorReportRoot, 'links.json');
+const executorOldPortal = path.join(executorReportRoot, 'old-inventoryTrend.json');
+const executorPlanFile = path.join(executorReportRoot, 'plan.json');
+const executorResultFile = path.join(executorReportRoot, 'result.json');
+fs.mkdirSync(executorFixtureRoot, {recursive: true});
+fs.mkdirSync(executorReportRoot, {recursive: true});
+const endpointFiles = {};
+for (const [endpoint, rows] of [['store_stock', [{id: 'current-et-row'}]], ['box_stock', []]]) {
+  const document = {endpoint, fetchedAt: boundNow, count: rows.length, rawRowCount: rows.length, rows, pages: [{page: 1, count: rows.length, rows: rows.length}]};
+  const file = path.join(executorFixtureRoot, `${endpoint}.json`);
+  fs.writeFileSync(file, JSON.stringify(document));
+  endpointFiles[endpoint] = {
+    path: path.relative(ROOT, file).replaceAll(path.sep, '/'),
+    hash: createHash('sha256').update(fs.readFileSync(file)).digest('hex'),
+    rowCount: rows.length, count: rows.length, rawRowCount: rows.length, pageCount: 1,
+    fetchedAt: boundNow, complete: true,
+  };
+}
+const executorManifest = {
+  ok: true, mode: 'daily', batchId: boundBatchId, targetDate: boundDate, createdAt: boundNow,
+  files: {store_stock: 'store_stock.json', box_stock: 'box_stock.json'},
+  endpoints: Object.fromEntries(['store_stock', 'box_stock'].map(endpoint => [endpoint, {
+    kind: 'snapshot', count: endpointFiles[endpoint].count, rawRowCount: endpointFiles[endpoint].rawRowCount,
+    rowCount: endpointFiles[endpoint].rowCount, pages: 1, stoppedByOverlap: false, stoppedByDailyInitialCap: false,
+  }])),
+};
+const executorManifestFile = path.join(executorFixtureRoot, 'manifest.json');
+fs.writeFileSync(executorManifestFile, JSON.stringify(executorManifest));
+const executorManifestRelative = path.relative(ROOT, executorManifestFile).replaceAll(path.sep, '/');
+const executorManifestHash = createHash('sha256').update(fs.readFileSync(executorManifestFile)).digest('hex');
+const executorFact = {
+  schemaVersion: 'et-low-inventory-fact-source/v1', kind: 'et_forwarder_manifest',
+  manifestPath: executorManifestRelative, pointerPath: executorManifestRelative,
+  manifestHash: executorManifestHash, batchId: boundBatchId, targetDate: boundDate, createdAt: boundNow,
+  maxAgeSeconds: 1800, files: endpointFiles,
+  endpointRows: {store_stock: 1, box_stock: 0}, invalidRows: 0, completeInventoryEvidence: true,
+};
+executorFact.inventoryEvidenceHash = stableInventoryHash({
+  schemaVersion: 'et-low-inventory-evidence/v1', manifestHash: executorManifestHash,
+  batchId: boundBatchId, targetDate: boundDate,
+  endpoints: ['store_stock', 'box_stock'].map(endpoint => ({endpoint, ...endpointFiles[endpoint]})),
+});
+const executorSourcePlan = {
+  schemaVersion: 'daily-inventory-replenishment-plan/v1', date: boundDate,
+  policyVersion: policy.policyVersion, payloadHash: 'f'.repeat(64), blockers: [], actionable: [], lowEtAllocations: [],
+  etFactSource: executorFact,
+  sourceEvidence: [
+    {store: 'ET', source: 'et_forwarder_manifest', authoritative: true, file: executorManifestRelative,
+      fetchedAt: boundNow, batchId: boundBatchId, targetDate: boundDate, manifestHash: executorManifestHash,
+      maxAgeSeconds: 1800, completeInventoryEvidence: true, inventoryEvidenceHash: executorFact.inventoryEvidenceHash,
+      sourceFiles: endpointFiles, endpointRows: executorFact.endpointRows},
+    {store: 'ET_PORTAL_PROJECTION_DIAGNOSTIC', source: 'portal_projection_diagnostic_only', authoritative: false,
+      file: 'outputs/bi-portal/sections/inventoryTrend.json', fetchedAt: '2026-08-01T00:00:00.000Z'},
+    {store: 'BI_LINKS', file: 'fixture-links.json', fetchedAt: boundNow},
+  ],
+  counts: {},
+};
+const executorSafetyPlan = buildEtLowInventorySafetyPlan(executorSourcePlan, {batchId: boundBatchId, manifestHash: executorManifestHash});
+assert.equal(executorSafetyPlan.executable, true);
+fs.writeFileSync(executorPlanFile, JSON.stringify(executorSafetyPlan));
+fs.writeFileSync(executorConfig, JSON.stringify({stores: []}));
+fs.writeFileSync(executorLinks, JSON.stringify({cachedAt: boundNow, data: {storeLinks: []}}));
+fs.writeFileSync(executorOldPortal, JSON.stringify({cachedAt: '2026-08-01T00:00:00.000Z', data: {inventoryDepletion: {products: []}}}));
+const runExecutorFixture = () => spawnSync(process.execPath, [
+  path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'),
+  '--plan', executorPlanFile, '--policy', path.join(ROOT, 'config', 'inventory_replenishment_policy.json'),
+  '--config', executorConfig, '--bi-data', executorOldPortal, '--links-data', executorLinks,
+  '--out', executorResultFile, '--execute', '--execution-mode', 'automatic', '--confirm-hash', executorSafetyPlan.payloadHash,
+], {cwd: ROOT, encoding: 'utf8', env: {...process.env,
+  SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT: 'cloud_et_low_inventory_guard',
+  SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION: 'owner-automatic-et-low-inventory-20260806-v1'}});
+try {
+  const directManifestRun = runExecutorFixture();
+  assert.equal(directManifestRun.status, 0, `${directManifestRun.stdout}\n${directManifestRun.stderr}`);
+  assert.deepEqual(JSON.parse(directManifestRun.stdout).counts, {total: 0, updated: 0, dryRunReady: 0, skipped: 0, deferredHistorical: 0, blocked: 0});
+  assert.deepEqual(JSON.parse(fs.readFileSync(executorResultFile)).results, []);
+  fs.appendFileSync(executorManifestFile, '\n');
+  const tamperedManifestRun = runExecutorFixture();
+  assert.notEqual(tamperedManifestRun.status, 0);
+  assert.match(tamperedManifestRun.stderr, /ET manifest hash changed after plan/);
+} finally {
+  fs.rmSync(executorFixtureRoot, {recursive: true, force: true});
+  fs.rmSync(executorReportRoot, {recursive: true, force: true});
+}
+
 const executor = fs.readFileSync(new URL('./inventory/execute_daily_inventory_replenishment_plan.mjs', import.meta.url), 'utf8');
 const forwarder = fs.readFileSync(new URL('./cloud_et_forwarder_sync.sh', import.meta.url), 'utf8');
 const guard = fs.readFileSync(new URL('./cloud_et_low_inventory_guard.sh', import.meta.url), 'utf8');
@@ -168,6 +259,12 @@ const recheckTimer = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-i
 const recheckService = fs.readFileSync(new URL('../infra/systemd/shein-bi-et-low-inventory-recheck.service', import.meta.url), 'utf8');
 assert.match(executor, /skipped_safety_no_increase/);
 assert.match(executor, /Decrease-only safety plan contains a non-decrease action/);
+assert.match(executor, /etRowsFromSafetyAllocations\(plan\)/);
+assert.match(executor, /ET actionable does not match its exact lowEtAllocation/);
+assert.match(executor, /const fields = \['matchKey', 'canonical', 'etSellableInventory', 'etSnapshotDate', 'plannedAllocationTotal', 'targetUsableInventory'\]/,
+  'nonzero ET safety rows must be reconstructed only after exact allocation evidence matching');
+assert.doesNotMatch(executor, /aggregateEtStockRows|normalizeEtManifestProduct/,
+  'the executor must not duplicate the builder ET normalization/aggregation loader');
 assert.match(forwarder, /orders,waybills,afterSales,inventoryTrend/);
 assert.match(forwarderService, /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
 assert.match(guardService, /SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard/);

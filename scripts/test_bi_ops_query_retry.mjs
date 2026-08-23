@@ -33,6 +33,7 @@ const completed = await runBiQueryWithWait(async () => {
 }, {
   waitSeconds: 5,
   intervalMs: 1_000,
+  requestTimeoutMs: 1_000,
   now: () => clock,
   sleep: async ms => { clock += ms; },
 });
@@ -55,6 +56,7 @@ const busyThenSuccess = await runBiQueryWithWait(async () => {
 }, {
   waitSeconds: 5,
   intervalMs: 1_000,
+  requestTimeoutMs: 1_000,
   now: () => clock,
   sleep: async ms => { clock += ms; },
 });
@@ -63,20 +65,47 @@ assert.equal(busyThenSuccess.attempts, 2);
 assert.equal(busyThenSuccess.waitedMs, 2_000);
 
 clock = 0;
+let lateAttempts = 0;
+const lateRequestTimeouts = [];
+const finalIncompleteResponse = {
+  code: 'BI_QUERY_DATA_INCOMPLETE',
+  sections: {issues: [{section: 'linksData', reason: 'still warming'}]},
+};
 await assert.rejects(
-  () => runBiQueryWithWait(async () => {
-    const error = new Error('still warming');
+  () => runBiQueryWithWait(async ({timeoutMs}) => {
+    lateAttempts += 1;
+    lateRequestTimeouts.push(timeoutMs);
+    if (lateAttempts === 1) {
+      clock = 297;
+      const error = new Error('warming');
+      error.status = 503;
+      error.response = {code: 'BI_QUERY_DATA_INCOMPLETE'};
+      throw error;
+    }
+    clock = 4_297;
+    const error = new Error('final incomplete');
     error.status = 503;
-    error.response = {code: 'BI_QUERY_DATA_INCOMPLETE'};
+    error.response = finalIncompleteResponse;
     throw error;
   }, {
-    waitSeconds: 1,
+    waitSeconds: 5,
     intervalMs: 1_000,
+    requestTimeoutMs: 3_000,
     now: () => clock,
     sleep: async ms => { clock += ms; },
   }),
-  error => error.queryAttempts === 2 && error.queryWaitedMs === 1_000,
+  error => {
+    assert.equal(error.code, undefined);
+    assert.equal(error.response, finalIncompleteResponse);
+    assert.deepEqual(error.response.sections.issues, finalIncompleteResponse.sections.issues);
+    assert.equal(error.queryAttempts, 2);
+    assert.equal(error.queryWaitedMs, 4_297);
+    assert.doesNotMatch(error.message, /after 703ms/);
+    return true;
+  },
 );
+assert.equal(lateAttempts, 2);
+assert.deepEqual(lateRequestTimeouts, [3_000, 3_000]);
 
 let timeoutRetryAttempts = 0;
 const timeoutThenSuccess = await runBiQueryWithWait(({signal}) => new Promise((resolve, reject) => {
@@ -127,4 +156,4 @@ await assert.rejects(
   error => error.code === 'BI_QUERY_REQUEST_TIMEOUT' && error.queryAttempts === 1,
 );
 
-console.log(JSON.stringify({ok: true, checks: ['bounded_retry', 'busy_retry_after', 'deadline_abort', 'timeout_retry', 'section_timeout_budget', 'non_target_503', 'non_retryable_error']}, null, 2));
+console.log(JSON.stringify({ok: true, checks: ['bounded_retry', 'busy_retry_after', 'retryable_error_boundary', 'timeout_retry', 'section_timeout_budget', 'non_target_503', 'non_retryable_error']}, null, 2));

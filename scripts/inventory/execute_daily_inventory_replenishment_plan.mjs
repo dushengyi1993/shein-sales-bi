@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {randomUUID} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {
   assertDailyInventoryExecutionAuthorization,
@@ -79,6 +79,175 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const asArray = value => value == null ? [] : Array.isArray(value) ? value : [value];
 const ageHours = value => (Date.now() - new Date(value || '').getTime()) / 3_600_000;
 const runDeadlineEpoch = Number(process.env.SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH || 0);
+const etText = value => String(value ?? '').trim();
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+const isCount = value => value !== '' && value != null && Number.isInteger(Number(value)) && Number(value) >= 0;
+
+async function readControlledEtFile(file, label) {
+  const relative = etText(file).replaceAll('\\', '/');
+  if (!relative || path.isAbsolute(relative) || !relative.startsWith('outputs/et-forwarder/')) {
+    throw new Error(`${label} path is outside outputs/et-forwarder`);
+  }
+  const root = await fs.realpath(path.join(ROOT, 'outputs', 'et-forwarder'));
+  const candidate = path.resolve(ROOT, relative);
+  const stat = await fs.lstat(candidate);
+  if (!stat.isFile()) throw new Error(`${label} is not a regular file`);
+  const real = await fs.realpath(candidate);
+  if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw new Error(`${label} realpath escapes outputs/et-forwarder`);
+  const bytes = await fs.readFile(real);
+  return {relative, real, bytes, hash: sha256(bytes), json: JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''))};
+}
+
+function etEvidenceHash(fact) {
+  return stableInventoryHash({
+    schemaVersion: 'et-low-inventory-evidence/v1',
+    manifestHash: etText(fact.manifestHash).toLowerCase(),
+    batchId: etText(fact.batchId),
+    targetDate: etText(fact.targetDate),
+    endpoints: ['store_stock', 'box_stock'].map(endpoint => {
+      const file = fact.files?.[endpoint] || {};
+      return {
+        endpoint,
+        path: etText(file.path),
+        hash: etText(file.hash).toLowerCase(),
+        rowCount: isCount(file.rowCount) ? Number(file.rowCount) : null,
+        count: isCount(file.count) ? Number(file.count) : null,
+        rawRowCount: isCount(file.rawRowCount) ? Number(file.rawRowCount) : null,
+        pageCount: isCount(file.pageCount) ? Number(file.pageCount) : null,
+        fetchedAt: etText(file.fetchedAt),
+        complete: file.complete === true,
+      };
+    }),
+  });
+}
+
+function assertFreshEtTimestamp(value, targetDate, maxAgeSeconds, label) {
+  const timestamp = new Date(value || '').getTime();
+  const date = Number.isFinite(timestamp)
+    ? new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(timestamp))
+    : '';
+  const ageSeconds = (Date.now() - timestamp) / 1000;
+  if (date !== targetDate || !Number.isFinite(ageSeconds) || ageSeconds < -300 || ageSeconds > maxAgeSeconds) {
+    throw new Error(`${label} freshness is invalid`);
+  }
+}
+
+async function validateEtSafetyFact(plan) {
+  const fact = plan.etFactSource;
+  const constraints = plan.executionConstraints;
+  const etEvidence = asArray(plan.sourceEvidence).filter(row => row.store === 'ET' && row.authoritative === true);
+  if (fact?.schemaVersion !== 'et-low-inventory-fact-source/v1' || fact?.kind !== 'et_forwarder_manifest') {
+    throw new Error('ET safety fact source schema/kind is invalid');
+  }
+  if (constraints?.mode !== 'et_low_inventory_safety' || constraints.decreaseOnly !== true
+    || etEvidence.length !== 1 || etEvidence[0].source !== 'et_forwarder_manifest') {
+    throw new Error('ET safety constraints/sourceEvidence binding is invalid');
+  }
+  const evidence = etEvidence[0];
+  const boundFields = ['batchId', 'targetDate', 'manifestHash', 'inventoryEvidenceHash', 'completeInventoryEvidence', 'maxAgeSeconds'];
+  if (boundFields.some(field => etText(evidence[field]) !== etText(fact[field]))) throw new Error('ET safety sourceEvidence differs from etFactSource');
+  if (etText(evidence.file) !== etText(fact.manifestPath)
+    || etText(evidence.fetchedAt) !== etText(fact.createdAt)
+    || stableInventoryHash(evidence.sourceFiles) !== stableInventoryHash(fact.files)
+    || stableInventoryHash(evidence.endpointRows) !== stableInventoryHash(fact.endpointRows)
+    || etText(constraints.triggerBatchId) !== etText(fact.batchId)
+    || etText(constraints.triggerTargetDate) !== etText(fact.targetDate)
+    || etText(constraints.triggerManifestHash).toLowerCase() !== etText(fact.manifestHash).toLowerCase()
+    || Number(constraints.maximumEtSellableInventory) !== 10
+    || fact.targetDate !== plan.date || fact.completeInventoryEvidence !== true || Number(fact.invalidRows) !== 0) {
+    throw new Error('ET safety immutable source binding is invalid');
+  }
+  const manifestFile = await readControlledEtFile(fact.manifestPath, 'ET manifest');
+  if (manifestFile.hash !== etText(fact.manifestHash).toLowerCase()) throw new Error('ET manifest hash changed after plan');
+  const pointerRef = etText(fact.pointerPath).replaceAll('\\', '/');
+  if (!pointerRef || path.isAbsolute(pointerRef) || !pointerRef.startsWith('outputs/et-forwarder/')) {
+    throw new Error('ET manifest pointer path is invalid');
+  }
+  if (path.resolve(ROOT, pointerRef) !== path.resolve(ROOT, manifestFile.relative)) {
+    const pointer = await readControlledEtFile(pointerRef, 'ET manifest pointer');
+    if (!etText(pointer.json?.manifestPath)) throw new Error('ET manifest pointer target is missing');
+    const target = await readControlledEtFile(pointer.json.manifestPath, 'ET manifest pointer target');
+    if (target.real !== manifestFile.real || ['batchId', 'targetDate', 'createdAt'].some(field => etText(pointer.json[field]) !== etText(fact[field]))
+      || pointer.json.ok !== true || pointer.json.mode !== 'daily') throw new Error('ET manifest pointer drifted after plan');
+  }
+  const manifest = manifestFile.json;
+  const maxAgeSeconds = Number(fact.maxAgeSeconds);
+  if (manifest.ok !== true || manifest.mode !== 'daily'
+    || ['batchId', 'targetDate', 'createdAt'].some(field => etText(manifest[field]) !== etText(fact[field]))
+    || !Number.isInteger(maxAgeSeconds) || maxAgeSeconds < 1 || maxAgeSeconds > 21600) {
+    throw new Error('ET manifest identity/freshness is invalid');
+  }
+  assertFreshEtTimestamp(fact.createdAt, fact.targetDate, maxAgeSeconds, 'ET manifest');
+  for (const endpoint of ['store_stock', 'box_stock']) {
+    const bound = fact.files?.[endpoint];
+    const meta = manifest.endpoints?.[endpoint];
+    const relative = etText(manifest.files?.[endpoint]);
+    if (!bound || !relative || meta?.kind !== 'snapshot' || bound.complete !== true
+      || meta.stoppedByOverlap !== false || meta.stoppedByDailyInitialCap !== false) {
+      throw new Error(`ET ${endpoint} completeness binding is invalid`);
+    }
+    const manifestDir = path.dirname(manifestFile.real);
+    const declaredPath = path.resolve(manifestDir, relative);
+    if (path.isAbsolute(relative) || (declaredPath !== manifestDir && !declaredPath.startsWith(`${manifestDir}${path.sep}`))) {
+      throw new Error(`ET ${endpoint} manifest path is invalid`);
+    }
+    const declaredFile = await readControlledEtFile(path.relative(ROOT, declaredPath), `ET manifest ${endpoint}`);
+    const endpointFile = await readControlledEtFile(bound.path, `ET ${endpoint}`);
+    if (endpointFile.real !== declaredFile.real || endpointFile.hash !== etText(bound.hash).toLowerCase()) {
+      throw new Error(`ET ${endpoint} file/hash differs from manifest binding`);
+    }
+    const doc = endpointFile.json;
+    const pages = Array.isArray(doc.pages) ? doc.pages : [];
+    const rows = Array.isArray(doc.rows) ? doc.rows : [];
+    const rowCounts = [bound.rowCount, bound.count, bound.rawRowCount, fact.endpointRows?.[endpoint],
+      meta.rowCount, meta.count, meta.rawRowCount, doc.count, doc.rawRowCount];
+    const pageCounts = [bound.pageCount, meta.pages];
+    if (doc.endpoint !== endpoint || etText(doc.fetchedAt) !== etText(bound.fetchedAt)
+      || !Array.isArray(doc.rows) || pages.length < 1
+      || rowCounts.some(value => !isCount(value) || Number(value) !== rows.length)
+      || pageCounts.some(value => !isCount(value) || Number(value) !== pages.length)
+      || pages.some(page => !isCount(page?.rows) || Number(page.count) !== Number(meta.count))
+      || pages.reduce((sum, page) => sum + Number(page.rows), 0) !== rows.length) {
+      throw new Error(`ET ${endpoint} endpoint completeness metadata drifted`);
+    }
+    assertFreshEtTimestamp(bound.fetchedAt, fact.targetDate, maxAgeSeconds, `ET ${endpoint}`);
+  }
+  if (etText(fact.inventoryEvidenceHash).toLowerCase() !== etEvidenceHash(fact)) throw new Error('ET inventoryEvidenceHash mismatch');
+}
+
+function etRowsFromSafetyAllocations(plan) {
+  const actionable = asArray(plan.actionable);
+  if (!actionable.length) return new Map();
+  const allocations = asArray(plan.lowEtAllocations);
+  const exact = new Map();
+  const facts = new Map();
+  for (const allocation of allocations) {
+    const exactKey = `${etText(allocation.storeKey).toUpperCase()}::${etText(allocation.skc)}::${etText(allocation.skuCode)}`;
+    if (!allocation.storeKey || !allocation.skc || !allocation.skuCode || exact.has(exactKey)) throw new Error('ET low allocation identity is missing or duplicated');
+    exact.set(exactKey, allocation);
+    const matchKey = etText(allocation.matchKey).toUpperCase();
+    const canonicalKey = etText(resolveInventoryIdentityKey(allocation.canonical) || canonicalInventoryKey(allocation.canonical)).toUpperCase();
+    const quantity = Number(allocation.etSellableInventory);
+    const snapshotDate = etText(allocation.etSnapshotDate).slice(0, 10);
+    const fact = `${quantity}::${snapshotDate}`;
+    if (!matchKey || canonicalKey !== matchKey || !Number.isInteger(quantity) || quantity < 0 || snapshotDate !== plan.date
+      || (facts.has(matchKey) && facts.get(matchKey) !== fact)) throw new Error(`ET low allocation fact conflicts for ${matchKey || '(missing)'}`);
+    facts.set(matchKey, fact);
+  }
+  const rows = new Map();
+  for (const row of actionable) {
+    const allocation = exact.get(`${etText(row.storeKey).toUpperCase()}::${etText(row.skc)}::${etText(row.skuCode)}`);
+    const fields = ['matchKey', 'canonical', 'etSellableInventory', 'etSnapshotDate', 'plannedAllocationTotal', 'targetUsableInventory'];
+    if (row.ruleClass !== 'low_et_top_exposure_allocation' || !allocation
+      || fields.some(field => etText(allocation[field]) !== etText(row[field]))) throw new Error('ET actionable does not match its exact lowEtAllocation');
+    rows.set(etText(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase(), {
+      current_sellable_quantity: Number(allocation.etSellableInventory),
+      et_store_snapshot_date: etText(allocation.etSnapshotDate).slice(0, 10),
+      inventory_match_status: 'matched',
+    });
+  }
+  return rows;
+}
 
 function isValidCalendarDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
@@ -213,18 +382,20 @@ const args = parseArgs(process.argv.slice(2));
 // durable intent forever; the immutable plan/intent and fresh live identity +
 // stock readback below are the only relevant evidence, and no new write path
 // is reachable in this mode.
-const [plan, policy, config, biDocument, linksDocument] = await Promise.all([
-  readJson(args.plan),
+const plan = await readJson(args.plan);
+const isEtLowInventorySafetyPlan = plan.schemaVersion === 'et-low-inventory-safety-plan/v1';
+const [policy, config, biDocument, linksDocument] = await Promise.all([
   readJson(args.policy),
   readJson(args.config),
-  args.reconcilePendingOnly ? Promise.resolve({}) : readJson(args.biData),
+  args.reconcilePendingOnly || isEtLowInventorySafetyPlan ? Promise.resolve({}) : readJson(args.biData),
   args.reconcilePendingOnly ? Promise.resolve({}) : readJson(args.linksData),
 ]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
 const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
 const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.generatedAt || bi.createdAt;
 const biAge = ageHours(biGeneratedAt);
-if (!args.reconcilePendingOnly && (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4))) {
+if (!args.reconcilePendingOnly && !isEtLowInventorySafetyPlan
+  && (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4))) {
   throw new Error(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
 }
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
@@ -234,7 +405,6 @@ const historicalReconcileOnly = args.reconcilePendingOnly && plan.date < today;
 if (plan.policyVersion !== policy.policyVersion && !historicalReconcileOnly) {
   throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
 }
-const isEtLowInventorySafetyPlan = plan.schemaVersion === 'et-low-inventory-safety-plan/v1';
 const expectedHash = isEtLowInventorySafetyPlan
   ? stableInventoryHash({
       schemaVersion: plan.schemaVersion,
@@ -255,10 +425,13 @@ const expectedHash = isEtLowInventorySafetyPlan
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
 if (!args.reconcilePendingOnly && plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
-for (const evidence of args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence)) {
+if (!args.reconcilePendingOnly && isEtLowInventorySafetyPlan) await validateEtSafetyFact(plan);
+const safetyEtRows = !args.reconcilePendingOnly && isEtLowInventorySafetyPlan ? etRowsFromSafetyAllocations(plan) : null;
+for (const evidence of (args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence))
+  .filter(row => !(isEtLowInventorySafetyPlan && row.store === 'ET_PORTAL_PROJECTION_DIAGNOSTIC'))) {
   const evidenceStore = String(evidence.store || '');
   const maximumAge = evidenceStore === 'ET'
-    ? Number(policy.maxBiSnapshotAgeHours || 4)
+    ? Number(isEtLowInventorySafetyPlan ? plan.etFactSource.maxAgeSeconds / 3600 : policy.maxBiSnapshotAgeHours || 4)
     : evidenceStore === 'BI_LINKS'
       ? Number(plan?.executionConstraints?.decreaseOnly
         ? policy?.lowEtFastGuard?.maxLinksSnapshotAgeHours || policy.maxLinksSnapshotAgeHours || 4
@@ -270,9 +443,9 @@ for (const evidence of args.reconcilePendingOnly ? [] : asArray(plan.sourceEvide
   }
 }
 const currentSourceTimes = new Map([
-  ['ET', biGeneratedAt],
   ['BI_LINKS', linksDocument.cachedAt || linksDocument.generatedAt || links.generatedAt || links.createdAt],
 ]);
+if (!isEtLowInventorySafetyPlan) currentSourceTimes.set('ET', biGeneratedAt);
 for (const evidence of (args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence)).filter(row => currentSourceTimes.has(String(row.store || '')))) {
   if (String(currentSourceTimes.get(String(evidence.store || '')) || '') !== String(evidence.fetchedAt || '')) {
     throw new Error(`Plan source changed after hash generation: ${evidence.store}`);
@@ -415,13 +588,15 @@ const recordResult = async (row, logicalActionKey = '') => {
 // ET rows are bound by the alias-aware identity (resolveInventoryIdentityKey)
 // exactly like the planner: explicitly separate products (KJ-102S vs KJ-102)
 // must never share an ET row through a collapsed canonicalInventoryKey.
-const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
-  String(
-    resolveInventoryIdentityKey(row.standard_goods_sn || row.match_key || '')
-    || canonicalInventoryKey(row.standard_goods_sn || row.match_key || ''),
-  ).toUpperCase(),
-  row,
-]));
+const etByKey = isEtLowInventorySafetyPlan
+  ? safetyEtRows || new Map()
+  : new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
+      String(
+        resolveInventoryIdentityKey(row.standard_goods_sn || row.match_key || '')
+        || canonicalInventoryKey(row.standard_goods_sn || row.match_key || ''),
+      ).toUpperCase(),
+      row,
+    ]));
 const linkMetricRows = Array.isArray(links?.storeLinks)
   ? links.storeLinks
   : Array.isArray(links?.links) ? links.links : [];

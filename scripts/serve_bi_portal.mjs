@@ -632,14 +632,40 @@ const biPortalCoreWarmupState = {
 };
 function evaluateBiPortalCoreWarmupHealth(
   state = biPortalCoreWarmupState,
-  {nowMs = Date.now(), stalledAfterMs = BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS} = {},
+  {
+    nowMs = Date.now(),
+    stalledAfterMs = BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS,
+    queueState = null,
+  } = {},
 ) {
   const queued = state?.status === 'queued' && state?.owner === 'external-section-queue';
+  const referenceNowMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
   const startedAt = Number(state?.startedAt || 0);
-  const queuedAgeMs = queued && startedAt > 0 ? Math.max(0, Number(nowMs) - startedAt) : 0;
+  const validStartedAt = Number.isFinite(startedAt) && startedAt > 0 && startedAt <= referenceNowMs
+    ? startedAt
+    : 0;
+  const parseQueueTimestamp = value => {
+    const parsed = typeof value === 'number' ? value : Date.parse(String(value || ''));
+    return Number.isFinite(parsed) && parsed > 0 && parsed <= referenceNowMs ? parsed : 0;
+  };
+  const latestPublishedSnapshotAt = (Array.isArray(queueState?.publishedSnapshots)
+    ? queueState.publishedSnapshots
+    : [])
+    .map(record => parseQueueTimestamp(record?.publishedAt))
+    .reduce((latest, atMs) => Math.max(latest, atMs), 0);
+  const latestCompletedAt = latestPublishedSnapshotAt > 0
+    ? 0
+    : (Array.isArray(queueState?.completedIdempotency) ? queueState.completedIdempotency : [])
+      .map(record => parseQueueTimestamp(record?.completedAt))
+      .reduce((latest, atMs) => Math.max(latest, atMs), 0);
+  const latestPublishedAt = Math.max(latestPublishedSnapshotAt, latestCompletedAt);
+  const lastProgressAt = Math.max(validStartedAt, latestPublishedAt);
+  const queuedAgeMs = queued && lastProgressAt > 0
+    ? Math.max(0, referenceNowMs - lastProgressAt)
+    : 0;
   const stalled = queued
     && !Boolean(state?.inFlight)
-    && startedAt > 0
+    && lastProgressAt > 0
     && queuedAgeMs >= Math.max(1, Number(stalledAfterMs) || BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS);
   return {ok: !stalled, stalled, queuedAgeMs, stalledAfterMs};
 }
@@ -12374,6 +12400,7 @@ function readBiPortalSectionQueueState() {
     return {
       entries: queue.entries,
       completedIdempotency: Array.isArray(queue.completedIdempotency) ? queue.completedIdempotency : [],
+      publishedSnapshots: Array.isArray(queue.publishedSnapshots) ? queue.publishedSnapshots : [],
       generationCompletion: queue.generationCompletion && typeof queue.generationCompletion === 'object'
         ? queue.generationCompletion
         : null,
@@ -18429,11 +18456,14 @@ async function main() {
       }
       if (url.pathname === '/api/health') {
         const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
+        const queueState = BI_CORE_WARMUP_QUEUE_OWNED
+          ? readBiPortalSectionQueueState()
+          : null;
         const receiptHealth = BI_CORE_WARMUP_QUEUE_OWNED
           ? await resolveBiPortalCoreWarmupReceiptHealth(root)
           : null;
         const effectiveWarmupState = effectiveBiPortalCoreWarmupStateFromReceipt(receiptHealth);
-        const warmupHealth = evaluateBiPortalCoreWarmupHealth(effectiveWarmupState);
+        const warmupHealth = evaluateBiPortalCoreWarmupHealth(effectiveWarmupState, {queueState});
         return sendJson(res, 200, {
           ok: warmupHealth.ok,
           service: 'shein-bi-portal',
