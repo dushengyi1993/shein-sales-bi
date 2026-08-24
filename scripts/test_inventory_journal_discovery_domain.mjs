@@ -168,13 +168,15 @@ try {
     'an unconfigured validator must remain local and fail closed rather than masking the missing reference',
   );
 
-  const [guardSource, validatorSource] = await Promise.all([
+  const [guardSource, validatorSource, morningUnit] = await Promise.all([
     fs.readFile(path.join(ROOT, 'scripts', 'cloud_daily_inventory_replenishment_guard.sh'), 'utf8'),
     fs.readFile(path.join(ROOT, 'scripts', 'validate_daily_operating_refresh.mjs'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-cloud-morning-chain.service'), 'utf8'),
   ]);
   assert.match(guardSource, /String\(process\.env\.SHEIN_BI_INVENTORY_JOURNAL_DIRS \|\| ''\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal, \{[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories: inventoryJournalDirectories/);
   assert.match(validatorSource, /discoverInventoryJournalAuditFiles\(currentJournal, environment = process\.env\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories/);
   assert.match(validatorSource, /skipped_terminal_readback_recorded[\s\S]*?discoverInventoryJournalAuditFiles\(currentJournal\)[\s\S]*?readInventoryIntentJournals/);
+  assert.match(morningUnit, /^Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results:\/srv\/shein-bi\/runtime\/et-low-inventory-guard\/results$/m);
 
   console.log(JSON.stringify({
     ok: true,
@@ -184,6 +186,7 @@ try {
       'validator_env_domain_discovers_et_terminal',
       'validator_without_env_stays_local_and_safe',
       'guard_and_validator_source_contracts',
+      'direct_morning_unit_configures_complete_journal_domain',
     ],
   }, null, 2));
 } finally {

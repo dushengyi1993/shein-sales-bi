@@ -133,17 +133,48 @@ const stable = value => Array.isArray(value)
   : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]))
     : value;
+let activeBytes;
 try {
-  const payload = JSON.parse(fs.readFileSync(process.env.ACTIVE_FILE, 'utf8'));
-  const recoveryKeys = ['recoveryGeneration', 'receiptHash', 'previousDeadline'];
-  if (!recoveryKeys.some(key => Object.hasOwn(payload || {}, key))) process.exit(0);
-  let valid = Number.isSafeInteger(payload.recoveryGeneration)
-    && payload.recoveryGeneration >= 1
-    && /^[a-f0-9]{64}$/.test(String(payload.receiptHash || ''))
-    && Number.isSafeInteger(payload.previousDeadline)
-    && payload.previousDeadline > 0;
-  if (valid) {
-    const receiptFile = path.join(path.dirname(process.env.ACTIVE_FILE), 'recovery', `${payload.runDate}.json`);
+  activeBytes = fs.readFileSync(process.env.ACTIVE_FILE, 'utf8');
+} catch (error) {
+  if (error && error.code === 'ENOENT') process.exit(0);
+  process.stderr.write('active recovery state is unreadable; refusing to start\n');
+  process.exit(78);
+}
+let payload;
+try {
+  payload = JSON.parse(activeBytes);
+} catch (error) {
+  let recoveryReceipts = [];
+  try {
+    recoveryReceipts = fs.readdirSync(path.join(path.dirname(process.env.ACTIVE_FILE), 'recovery'))
+      .filter(name => name.endsWith('.json'));
+  } catch (directoryError) {
+    if (directoryError && directoryError.code !== 'ENOENT') {
+      process.stderr.write('active recovery state is unreadable; refusing to start\n');
+      process.exit(78);
+    }
+  }
+  if (error instanceof SyntaxError && recoveryReceipts.length === 0) process.exit(0);
+  process.stderr.write('active recovery state is unreadable or conflicts with a durable receipt; refusing to start\n');
+  process.exit(78);
+}
+const recoveryKeys = ['recoveryGeneration', 'receiptHash', 'previousDeadline'];
+const receiptFile = path.join(path.dirname(process.env.ACTIVE_FILE), 'recovery', `${payload.runDate}.json`);
+if (!recoveryKeys.some(key => Object.hasOwn(payload || {}, key))) {
+  if (fs.existsSync(receiptFile)) {
+    process.stderr.write('orphan recovery receipt exists without an active binding; refusing to start\n');
+    process.exit(78);
+  }
+  process.exit(0);
+}
+let valid = Number.isSafeInteger(payload.recoveryGeneration)
+  && payload.recoveryGeneration >= 1
+  && /^[a-f0-9]{64}$/.test(String(payload.receiptHash || ''))
+  && Number.isSafeInteger(payload.previousDeadline)
+  && payload.previousDeadline > 0;
+if (valid) {
+  try {
     const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
     const body = {...receipt};
     delete body.canonicalHash;
@@ -156,20 +187,13 @@ try {
       && receipt.newDeadlineEpoch === payload.deadlineEpoch
       && receipt.runDate === payload.runDate
       && receipt.businessDate === payload.businessDate;
+  } catch {
+    valid = false;
   }
-  if (!valid) {
-    process.stderr.write('invalid or missing recovery receipt binding; refusing to start\n');
-    process.exit(78);
-  }
-} catch (error) {
-  try {
-    const payload = JSON.parse(fs.readFileSync(process.env.ACTIVE_FILE, 'utf8'));
-    const recoveryKeys = ['recoveryGeneration', 'receiptHash', 'previousDeadline'];
-    if (recoveryKeys.some(key => Object.hasOwn(payload || {}, key))) {
-      process.stderr.write('invalid or missing recovery receipt binding; refusing to start\n');
-      process.exit(78);
-    }
-  } catch {}
+}
+if (!valid) {
+  process.stderr.write('invalid or missing recovery receipt binding; refusing to start\n');
+  process.exit(78);
 }
 NODE
 }

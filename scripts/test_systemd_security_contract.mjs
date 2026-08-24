@@ -475,6 +475,8 @@ assert.equal(property(morningService, 'StartLimitBurst'), '200',
   'one-minute retries must remain possible across the full three-hour window');
 assert.match(morningService, /SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=2700/,
   'the production unit reserves the bounded stock-refresh plus inventory window');
+assert.match(morningService, /^Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results:\/srv\/shein-bi\/runtime\/et-low-inventory-guard\/results$/m,
+  'the direct morning-chain guard must scan the daily and ET durable journal domains');
 assert.doesNotMatch(morningService, /^SuccessExitStatus=.*75$/m,
   'the morning chain must surface real failures, never mask them');
 assert.match(morningScript, /daily_operating_refresh_done/);

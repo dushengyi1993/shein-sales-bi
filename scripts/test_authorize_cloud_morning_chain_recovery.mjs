@@ -62,6 +62,7 @@ async function makeFixture({
     attempt: 3,
     ...active,
   });
+  await fs.chmod(path.join(cloudState, 'active.json'), 0o600);
   await writeJson(path.join(cloudState, 'latest.json'), {
     date: RUN_DATE,
     businessDate: BUSINESS_DATE,
@@ -138,6 +139,8 @@ async function makeFixture({
     deps,
     readActive: () => fs.readFile(path.join(cloudState, 'active.json'), 'utf8'),
     readReceipt: () => fs.readFile(path.join(cloudState, 'recovery', `${RUN_DATE}.json`), 'utf8'),
+    readActiveStat: () => fs.stat(path.join(cloudState, 'active.json')),
+    readReceiptStat: () => fs.stat(path.join(cloudState, 'recovery', `${RUN_DATE}.json`)),
   };
 }
 
@@ -258,6 +261,7 @@ async function main() {
     {
       const fx = await makeFixture(); fixtures.push(fx);
       const before = await fx.readActive();
+      const beforeStat = await fx.readActiveStat();
       const result = await authorizeCloudMorningChainRecovery(fx.deps);
       const active = JSON.parse(await fx.readActive());
       const receipt = JSON.parse(await fx.readReceipt());
@@ -272,6 +276,13 @@ async function main() {
       assert.equal(active.previousDeadline, OLD_DEADLINE);
       assert.equal(active.recoveryGeneration, 1);
       assert.equal(active.receiptHash, receipt.canonicalHash);
+      const [activeStat, receiptStat] = await Promise.all([fx.readActiveStat(), fx.readReceiptStat()]);
+      assert.equal(activeStat.mode & 0o777, beforeStat.mode & 0o777);
+      assert.equal(receiptStat.mode & 0o777, beforeStat.mode & 0o777);
+      if (process.platform !== 'win32') {
+        assert.equal(receiptStat.uid, activeStat.uid);
+        assert.equal(receiptStat.gid, activeStat.gid);
+      }
       const replay = await authorizeCloudMorningChainRecovery(fx.deps);
       assert.equal(replay.status, 'already-authorized');
       assert.deepEqual(JSON.parse(await fx.readReceipt()), receipt);

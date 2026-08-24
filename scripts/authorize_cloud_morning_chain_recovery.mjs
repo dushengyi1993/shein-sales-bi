@@ -182,7 +182,7 @@ async function readRegularFile(file, label, {required = true} = {}) {
     });
   }
   try {
-    return await fs.readFile(file);
+    return {bytes: await fs.readFile(file), stat};
   } catch (error) {
     fail(`${label} could not be read: ${error?.code || error?.message || error}`, {
       code: 'MORNING_CHAIN_RECOVERY_EVIDENCE_UNREADABLE',
@@ -192,18 +192,77 @@ async function readRegularFile(file, label, {required = true} = {}) {
 }
 
 async function readJson(file, label, {required = true} = {}) {
-  const bytes = await readRegularFile(file, label, {required});
-  if (bytes === null) return null;
+  const artifact = await readRegularFile(file, label, {required});
+  if (artifact === null) return null;
+  const {bytes, stat} = artifact;
   try {
     return {
       value: JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/u, '')),
       bytes,
       hash: sha256(bytes),
+      stat,
     };
   } catch (error) {
     fail(`${label} is not valid JSON: ${error?.message || error}`, {
       code: 'MORNING_CHAIN_RECOVERY_EVIDENCE_INVALID_JSON',
       detail: {file, label},
+    });
+  }
+}
+
+function publishMetadataFromEvidence(evidence, label) {
+  const stat = evidence?.stat;
+  if (!stat || !Number.isSafeInteger(stat.mode)) {
+    fail(`${label} metadata is unavailable`, {
+      code: 'MORNING_CHAIN_RECOVERY_EVIDENCE_UNREADABLE',
+      detail: {label},
+    });
+  }
+  const mode = stat.mode & 0o777;
+  const writeOptions = {mode};
+  const expected = {mode};
+  if (process.platform !== 'win32') {
+    if (!Number.isSafeInteger(stat.uid) || stat.uid < 0
+      || !Number.isSafeInteger(stat.gid) || stat.gid < 0) {
+      fail(`${label} owner metadata is invalid`, {
+        code: 'MORNING_CHAIN_RECOVERY_EVIDENCE_UNREADABLE',
+        detail: {label},
+      });
+    }
+    expected.uid = stat.uid;
+    expected.gid = stat.gid;
+    const effectiveUid = process.getuid?.();
+    if (effectiveUid === 0) {
+      writeOptions.uid = stat.uid;
+      writeOptions.gid = stat.gid;
+    } else if (Number.isSafeInteger(effectiveUid) && effectiveUid !== stat.uid) {
+      fail(`${label} is not owned by the recovery authorizer`, {
+        code: 'MORNING_CHAIN_RECOVERY_OWNER_MISMATCH',
+        detail: {label, ownerUid: stat.uid, effectiveUid},
+      });
+    }
+  }
+  return {writeOptions, expected};
+}
+
+function assertPublishedMetadata(evidence, expected, label) {
+  if ((evidence.stat.mode & 0o777) !== expected.mode) {
+    fail(`${label} mode changed during atomic publication`, {
+      code: 'MORNING_CHAIN_RECOVERY_READBACK_DRIFT',
+      detail: {label, actualMode: evidence.stat.mode & 0o777, expectedMode: expected.mode},
+    });
+  }
+  if (process.platform !== 'win32'
+    && (evidence.stat.uid !== expected.uid || evidence.stat.gid !== expected.gid)) {
+    fail(`${label} owner changed during atomic publication`, {
+      code: 'MORNING_CHAIN_RECOVERY_READBACK_DRIFT',
+      detail: {
+        label,
+        actualUid: evidence.stat.uid,
+        actualGid: evidence.stat.gid,
+        expectedUid: expected.uid,
+        expectedGid: expected.gid,
+      },
     });
   }
 }
@@ -682,6 +741,7 @@ export async function authorizeCloudMorningChainRecovery({
     const evidence = await readFreshEvidence(paths);
     const active = validateActiveObject(evidence.active.value, paths.activeFile);
     const activeBeforeHash = evidence.active.hash;
+    const publishMetadata = publishMetadataFromEvidence(evidence.active, 'active context');
     const businessDate = String(active.businessDate);
     if (active.runDate !== normalizedRunDate) {
       fail('active context runDate does not match today/request', {
@@ -798,7 +858,7 @@ export async function authorizeCloudMorningChainRecovery({
     // interrupted, the old active bytes remain intact and the exact receipt
     // makes the next invocation a bounded idempotent replay.
     if (!existingReceipt) {
-      await writeJsonFileAtomic(paths.receiptFile, receipt, {mode: 0o660});
+      await writeJsonFileAtomic(paths.receiptFile, receipt, publishMetadata.writeOptions);
     }
     const updatedActive = {
       ...active,
@@ -808,14 +868,18 @@ export async function authorizeCloudMorningChainRecovery({
       receiptHash: receipt.canonicalHash,
       updatedAt: receipt.createdAt,
     };
-    await writeJsonFileAtomic(paths.activeFile, updatedActive, {mode: 0o660});
+    await writeJsonFileAtomic(paths.activeFile, updatedActive, publishMetadata.writeOptions);
 
+    const committedReceiptEvidence = await readJson(paths.receiptFile, 'published recovery receipt');
+    const committedActiveEvidence = await readJson(paths.activeFile, 'published active context');
+    assertPublishedMetadata(committedReceiptEvidence, publishMetadata.expected, 'published recovery receipt');
+    assertPublishedMetadata(committedActiveEvidence, publishMetadata.expected, 'published active context');
     const committedReceipt = validateReceiptShape(
-      (await readJson(paths.receiptFile, 'published recovery receipt')).value,
+      committedReceiptEvidence.value,
       paths.receiptFile,
     );
     const committedActive = validateActiveObject(
-      (await readJson(paths.activeFile, 'published active context')).value,
+      committedActiveEvidence.value,
       paths.activeFile,
     );
     assertActiveBoundToReceipt(committedActive, committedReceipt, paths.activeFile);

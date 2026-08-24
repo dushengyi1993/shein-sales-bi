@@ -562,6 +562,35 @@ check t18_rc 78 "\$?"
 check t18_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
 check t18_active_unchanged "\$MISSING_RECEIPT_ACTIVE_HASH" "\$(sha256sum "\$STATE/active.json" | cut -d' ' -f1)"
 
+# t19: a durable same-run receipt may not be silently orphaned by an active
+# context that lost its recovery fields.  This is the exact fail-closed gate
+# that prevents a fresh deadline from overwriting an authorized recovery.
+rm -f "\$CALLS_LOG"
+cp "\$STATE/recovery/\$TODAY.json" "\$STATE/recovery/\$TODAY.json.saved" 2>/dev/null || true
+RUN_DATE="\$TODAY" BUSINESS_DATE="\$YESTERDAY" OLD_DEADLINE="\$RECOVERY_PREVIOUS_DEADLINE" NEW_DEADLINE="\$FIXED_DEADLINE" RECEIPT_FILE="\$STATE/recovery/\$TODAY.json" node --input-type=module <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+const receipt = {
+  schemaVersion: 'morning-chain-recovery/v1', recoveryGeneration: 1,
+  runDate: process.env.RUN_DATE, businessDate: process.env.BUSINESS_DATE,
+  beforeHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  oldDeadlineEpoch: Number(process.env.OLD_DEADLINE), newDeadlineEpoch: Number(process.env.NEW_DEADLINE),
+  createdAt: '2026-08-24T12:00:00.000Z', reason: 'orphan receipt regression',
+};
+receipt.canonicalHash = crypto.createHash('sha256').update(JSON.stringify(stable(receipt))).digest('hex');
+fs.writeFileSync(process.env.RECEIPT_FILE, JSON.stringify(receipt) + '\\n');
+NODE
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$FIXED_DEADLINE,"startedAt":"x","pid":1,"attempt":1}
+JSON
+ORPHAN_ACTIVE_HASH="\$(sha256sum "\$STATE/active.json" | cut -d' ' -f1)"
+bash "\$WRAPPER" >/dev/null 2>&1
+check t19_rc 78 "\$?"
+check t19_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t19_active_unchanged "\$ORPHAN_ACTIVE_HASH" "\$(sha256sum "\$STATE/active.json" | cut -d' ' -f1)"
+
 # t15: the wrapper itself must never emit runDate == businessDate: every
 # recorded child call across the whole harness satisfies the -1 relation.
 touch "\$CALLS_LOG"
