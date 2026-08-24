@@ -8,6 +8,7 @@ import {PassThrough} from 'node:stream';
 import {
   CLOUD_TEAM_REPORT_CLOUD_HOST,
   interpretLarkResult,
+  parseJsonFromText,
   sha256Bytes,
 } from '../lib/cloud_team_report_common.mjs';
 import {
@@ -31,6 +32,17 @@ await fs.writeFile(summaryFile, '# team report\nnot a target\n', 'utf8');
 await fs.writeFile(attachmentFile, Buffer.from('attachment-v1\n', 'utf8'));
 const attachmentSha256 = sha256Bytes(await fs.readFile(attachmentFile));
 const config = {recipientChatId: 'oc_group123', defaultIdentity: 'bot'};
+
+const prefixedPrettyReceipt = parseJsonFromText(`uploading file: report.txt
+{
+  "ok": true,
+  "data": {
+    "message_id": "om_hidden"
+  }
+}
+`);
+assert.equal(prefixedPrettyReceipt?.ok, true);
+assert.equal(prefixedPrettyReceipt?.data?.message_id, 'om_hidden');
 
 function fakeSpawnFactory(responses, calls = []) {
   return (bin, args, options) => {
