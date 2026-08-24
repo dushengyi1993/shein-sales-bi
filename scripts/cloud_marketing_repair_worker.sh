@@ -30,6 +30,7 @@ CLOUD_FALLBACK_ENABLED="${SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED:-false}"
 FALLBACK_MIN_START_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC:-900}"
 FALLBACK_GRACEFUL_CUTOFF_EPOCH="${SHEIN_BI_MARKETING_REPAIR_GRACEFUL_CUTOFF_EPOCH:-}"
 FALLBACK_OUTER_HARD_DEADLINE_EPOCH="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_EPOCH:-}"
+RESUME_RECEIPT="${SHEIN_BI_MARKETING_REPAIR_RESUME_RECEIPT:-/srv/shein-bi/runtime/marketing-repair-resume/marketing-repair-${DATE}.json}"
 IS_CLOUD_EXECUTION=1
 if [[ "$EXECUTION_LOCATION" == "local" && "$ROOT" != "/opt/shein-bi/app" ]]; then
   IS_CLOUD_EXECUTION=0
@@ -1337,7 +1338,6 @@ if (( IS_CLOUD_EXECUTION == 1 )); then
   export SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1
 fi
 
-ensure_browser_lease
 REMAINING_GROUPS="$MAX_GROUPS"
 
 # A local runner may have completed writes without mutating the cloud queue.
@@ -1345,7 +1345,13 @@ REMAINING_GROUPS="$MAX_GROUPS"
 # browserless 19-store snapshot before it is allowed to open any cloud Chrome.
 # This prevents replaying work already completed on the owner's computer.
 if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; then
-  run_final_readback
+  if [[ -f "$RESUME_RECEIPT" ]]; then
+    echo "[cloud_marketing_repair] consuming exact no-rescan resume receipt=$RESUME_RECEIPT"
+    node scripts/marketing/manage_marketing_queue_resume_receipt.mjs consume \
+      --queue "$QUEUE_FILE" --receipt "$RESUME_RECEIPT"
+  else
+    run_final_readback
+  fi
   QUEUE_STATUS="$(queue_value 'j.status' pending)"
   if [[ "$QUEUE_STATUS" == "completed" ]]; then
     write_state ok "local execution already covered all authorized repairs; cloud fallback only performed final readback"
@@ -1362,8 +1368,10 @@ if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; t
   ensure_fallback_start_budget
 fi
 
+ensure_browser_lease
+
 HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
-if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "completed" ]]; then
+if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "completed" && "$HIGH_CLICK_STATUS" != "blocked" ]]; then
   ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.highClickSpecial?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
@@ -1469,39 +1477,50 @@ if (( REMAINING_GROUPS <= 0 )); then
 fi
 
 FALLBACK_STATUS="$(queue_value 'j.stages?.fallbackRepair?.status' not_required)"
-if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" ]]; then
+while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" && "$FALLBACK_STATUS" != "blocked" ]]; do
   ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.fallbackRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
   RESULT_PATH="outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
   begin_stage_critical_section fallbackRepair || { status=$?; exit "$status"; }
-  if node scripts/marketing/batch_apply_new_listing_limited_discount.mjs \
-      --date "$DATE" --guard "$GUARD_PATH" --skip-build --execute --max-groups "$REMAINING_GROUPS" \
-      --graceful-cutoff-epoch "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" \
-      --min-start-budget-sec "$FALLBACK_MIN_START_BUDGET_SEC" \
-      --expected-work-fingerprint "$WORK_FINGERPRINT"; then
+  set +e
+  node scripts/marketing/batch_apply_new_listing_limited_discount.mjs \
+    --date "$DATE" --guard "$GUARD_PATH" --skip-build --execute --max-groups 1 \
+    --graceful-cutoff-epoch "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" \
+    --min-start-budget-sec "$FALLBACK_MIN_START_BUDGET_SEC" \
+    --expected-work-fingerprint "$WORK_FINGERPRINT"
+  status=$?
+  set -e
+  PROCESSED_GROUPS="$(new_groups_in_result "$RESULT_PATH")"
+  if [[ ! "$PROCESSED_GROUPS" =~ ^[1-9][0-9]*$ ]] || (( PROCESSED_GROUPS != 1 )); then
+    update_stage fallbackRepair failed false "single-group executor produced no exact new group status=$status" "$RESULT_PATH"
+    write_state failed "fallback single-group executor made no durable progress status=$status"
+    exit 66
+  fi
+  consume_group_budget "$PROCESSED_GROUPS"
+  if [[ "$status" -eq 0 ]]; then
     BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blockedTargetCount)"
     FAILED_TARGETS="$(result_total "$RESULT_PATH" failedTargetCount)"
     if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
       update_stage fallbackRepair blocked false "preflight reached terminal inventory/platform blockers; no unsafe write attempted" "$RESULT_PATH"
       write_state blocked "fallback repair safely blocked by current inventory/platform conditions"
-      consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
       echo "[cloud_marketing_repair] terminal fallback blockers recorded; final snapshot still required date=$DATE rows=$BLOCKED_TARGETS"
     else
-      update_stage fallbackRepair completed true "bounded execute and per-group readback succeeded" "$RESULT_PATH"
-      consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
+      update_stage fallbackRepair completed true "serial single-group execute and per-group readback succeeded" "$RESULT_PATH"
     fi
+  elif [[ "$status" -eq 3 ]]; then
+    update_stage fallbackRepair pending false "one exact group completed; serial consumer continuing" "$RESULT_PATH"
   else
-    status=$?
-    if [[ "$status" -eq 3 ]]; then
-      update_stage fallbackRepair pending false "bounded chunk completed; more exact-plan groups remain" "$RESULT_PATH"
-      defer_remaining_work "fallback repair chunk completed without replaying successful groups"
-    fi
-    update_stage fallbackRepair failed false "execute/readback failed status=$status" "$RESULT_PATH"
+    update_stage fallbackRepair failed false "single-group execute/readback failed status=$status" "$RESULT_PATH"
     write_state failed "fallback repair failed status=$status"
     exit "$status"
   fi
+  FALLBACK_STATUS="$(queue_value 'j.stages?.fallbackRepair?.status' not_required)"
+done
+
+if (( REMAINING_GROUPS <= 0 )) && [[ "$FALLBACK_STATUS" == "pending" ]]; then
+  defer_remaining_work "bounded serial group budget consumed"
 fi
 
 QUEUE_STATUS="$(queue_value 'j.status' pending)"

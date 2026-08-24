@@ -280,7 +280,7 @@ const previousResults = previous.workFingerprint === exactPlan.workFingerprint
   ? previous.results
   : [];
 const successful = new Map(previousResults
-  .filter(row => row?.ok === true)
+  .filter(row => row?.ok === true || (row?.terminal === true && row?.classification === 'prewrite_blocked' && row?.writeAttempted === false))
   .map(row => [manualLimitedDiscountKey(row.storeKey, row.skc), row]));
 const pending = exactPlan.entries.filter(row => !successful.has(row.key));
 const selected = args.maxItems > 0 ? pending.slice(0, args.maxItems) : pending;
@@ -449,7 +449,9 @@ if (args.execute && restoreKeys.size > 0) {
 const merged = new Map(successful);
 for (const record of processedThisRun) merged.set(manualLimitedDiscountKey(record.storeKey, record.skc), record);
 const results = exactPlan.entries.map(row => merged.get(row.key)).filter(Boolean);
-const successfulKeys = new Set(results.filter(row => row.ok === true).map(row => manualLimitedDiscountKey(row.storeKey, row.skc)));
+const successfulKeys = new Set(results
+  .filter(row => row.ok === true || (row?.terminal === true && row?.classification === 'prewrite_blocked' && row?.writeAttempted === false))
+  .map(row => manualLimitedDiscountKey(row.storeKey, row.skc)));
 const remainingItems = exactPlan.entries.filter(row => !successfulKeys.has(row.key)).length;
 if (args.execute) await updateLedger(exactPlan, processedThisRun, immutablePlanArtifact);
 const totals = {
