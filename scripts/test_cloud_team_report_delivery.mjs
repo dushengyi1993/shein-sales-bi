@@ -40,6 +40,7 @@ const prefixedPrettyReceipt = parseJsonFromText(`uploading file: report.txt
     "message_id": "om_hidden"
   }
 }
+upload complete
 `);
 assert.equal(prefixedPrettyReceipt?.ok, true);
 assert.equal(prefixedPrettyReceipt?.data?.message_id, 'om_hidden');
