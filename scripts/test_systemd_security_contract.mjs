@@ -385,6 +385,13 @@ assert.doesNotMatch(marketingGuardScript, /batch_restore_manual_limited_discount
 assert.match(marketingGuardScript, /run_stage_with_retry/);
 assert.match(marketingGuardScript, /final group report waits for the same-day repair queue terminal state/);
 assert.equal(property(marketingGuard, 'TimeoutStartSec'), '1800');
+const marketingResumeEnvironment = /SHEIN_BI_MARKETING_(?:RESUME_|LIVE_RESUME_|LIVE_GUARD_RESUME_)/;
+assert.doesNotMatch(marketingGuard, new RegExp(`^PassEnvironment=.*${marketingResumeEnvironment.source}`, 'm'),
+  'live guard unit must not pass any resume environment into the service');
+assert.doesNotMatch(marketingGuard, new RegExp(`^ExecStopPost=.*${marketingResumeEnvironment.source}`, 'm'),
+  'live guard unit must not retain a resume environment cleanup hook');
+assert.match(marketingGuardScript, /trap release_marketing_artifact_publication_lock EXIT/,
+  'systemd cleanup must not remove the shell EXIT trap');
 
 const marketingRepairTimer = readUnit('shein-bi-cloud-marketing-repair.timer');
 const marketingRepairWindows = [...marketingRepairTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());

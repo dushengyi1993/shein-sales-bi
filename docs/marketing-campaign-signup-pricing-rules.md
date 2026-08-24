@@ -192,12 +192,18 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 2. 用户在本期审核表备注中确认的逐行覆盖价、指定固定价、指定利润率或临时例外。
 3. 长期全局规则（默认利润率、曝光前五、清货底线、新品保护等）。
 
+### 持久 current baseline registry
+
+生产 current baseline 的唯一精确指针是环境变量 `SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE` 指向的 registry；生产默认值固定为 `/srv/shein-bi/runtime/marketing-plans/current.json`。registry 必须指向 `/srv/shein-bi/runtime/marketing-plans/baselines/<baselineId>/selection-plan.json` 和 `price-overrides.json`，并绑定两份文件 SHA-256、pair 行数与 19 店覆盖、`storeKey + activityId + SKC` 对齐、payload hash、work fingerprint、`activityBatch`、`promotedAt`、完成态及 `planMetadata.status=current_baseline`。缺文件、解析/普通文件门禁、哈希漂移、任一 baseline flag 为 false、`executionStatus` 非 `completed`、或 `supersededBy` 非空都必须 fail closed。
+
+`tmp/marketing-signup` 只允许通过明确的 `discoverOfflineMarketingPlanPair` API 做非权威离线发现；受管 current 解析没有 registry 就 fail closed，绝不按 mtime 自动挑选。旧 `2026-06-03 ALL-ready` 不再是默认或 fallback。生产发布/核验使用受控 `scripts/marketing/manage_marketing_plan_registry.mjs publish|verify`；两种 baseline promotion 都必须把终态 readback 的计划路径、payload hash/work fingerprint 和逐行 `store + activity + SKC + target price` 绑定到同一 pair，再明确选择 `--registry-file <absolute-file>` 完成同命令发布回读，或用 `--no-registry-publish` 标成仅离线候选，禁止静默产生第二个 current。managed guard/repair 默认禁用目录 supplemental 价格扫描，并把实际 `marketing-cost-map` 路径与 SHA-256 同时写入 guard 和 fallback plan；repair worker 的单个业务 stage 按 `artifact publication lock -> registry .publish.lock -> queue mutation lock` 固定顺序持锁，覆盖最终校验、executor 内置 readback 和 queue stage 原子提交，并以完整 queue 文件 SHA-256 加 `queueFingerprint/sourceGuardHash` 做 CAS。受控复验如显式传计划，必须同时提供已完成且标记为 `current_baseline` 的 `--target-plan` 与 `--price-overrides`。日报异常时保留原 run report、source log、scan、stack-review、cost map 和 current registry 的精确 SHA-256 作为 warning 证据；不得从日志重建 queue 或重放旧 queue/hash，下一次 scheduled daily run 从 fresh、coherent 的 scan + plan + queue 开始。repair stage-level resume 仅适用于已创建的 exact queue，不等同于 guard-run resume。
+
 ### 方案基准和整数价微调
 
-- 后续每次做新一轮普通营销活动方案，必须以上一次用户确认并真实执行或等待执行的最终版 `selection-plan + price-overrides` 为基准，继承其中的用户备注、固定价、特殊利润率、低于默认红线但已确认可报的例外、货号归并和小数微调。
+- 后续每次做新一轮普通营销活动方案，规划阶段可参考用户已确认但待执行的候选；生产 current registry 只能以上一次已真实执行且终态回读完整的最终版 `selection-plan + price-overrides` 为基准。待执行方案不得晋升 current，也不得进入 managed guard/repair。新方案继续继承已完成基线中的用户备注、固定价、特殊利润率、低于默认红线但已确认可报的例外、货号归并和小数微调。
 - 新一轮云端 BI / 后台 live scan 只用于补充变化：新增链接、新增可报 SKC、曝光 Top5 变化、平台最低降幅、成本/库存变化、活动窗口变化和旧证据失效。不能因为重新扫描到新数据，就把已经确认过的上期策略回退为默认 `30%` 或旧草稿。
 - 执行方案和 source summary 必须写明本轮继承的 baseline 文件路径；找不到可靠最终版基准时，先报告 blocker，不能直接生成可提交方案。
-- 用户确认并提交完成后，必须把本轮最终全量 `selection-plan + price-overrides` 写成下一轮基准：文件里保留 `baselineForNextOrdinaryActivity=true` 和 `baselineForLimitedDiscountFallback=true`，后续普通活动方案、订单审计和限时折扣兜底都读取这对最终文件，而不是读取演示预填、单店 supplement、旧 `ALL-ready` 或未合并草稿。
+- 用户确认并提交完成后，必须把本轮最终全量 `selection-plan + price-overrides` 写成下一轮基准，并在同一 promotion 命令中发布、回读 durable registry：文件里保留 `baselineForNextOrdinaryActivity=true` 和 `baselineForLimitedDiscountFallback=true`，后续普通活动方案、订单审计和限时折扣兜底都只读取 registry 指向的不可变 pair，而不是读取演示预填、单店 supplement、旧 `ALL-ready`、未合并草稿或目录自动补价。
 - 订单审计 `audit_order_prices_against_plan.mjs` 支持 `--links-data`（默认 `outputs/bi-portal/sections/linksData.json`）精确目标价 overlay：先从 linksData 按 `storeKey + SKC` 取当前目标价，再按订单时间 + 活动/窗口选择生效计划行。普通活动报名完成但尚未到活动开始时间时，日报只检查后台已报/待生效、限时折扣兜底和旧活动重叠风险，不把窗口外订单按本期活动价判 blocker；重复计划不再自动报错，只在活跃目标歧义/冲突时报冲突。
 - 普通活动填报价不要批量使用整百/整数固定价。固定价或备注价可以在不越过平台价格上限、目标价底线和利润/成本安全线的前提下做几毛钱级别的小数微调，例如 `160` 可填成 `159.57` 或 `160.28`。
 - 真实预填/提交前必须检查 `price-overrides` 目标行没有整数价；若仍有整数价，先生成带 `jitter` 标记的修正版，并用修正版预填/提交，不能沿用未微调旧文件。

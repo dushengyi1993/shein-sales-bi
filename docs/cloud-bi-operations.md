@@ -22,6 +22,7 @@
 - GitHub `main` 和正式 release tag 是源码恢复基线；云端 `/opt/shein-bi/app` 是该 commit 的部署工作树，不再作为第二个开发分支。Portal 页面、section cache、profile、session、日志和可变运营登记属于运行态，必须在忽略目录、`/srv`、`/data` 或数据库中保存。
 - `outputs/bi-portal/index.html`、`data.json` 和 `sections/` 自 2026-07-30 起不再纳入 Git。部署代码后必须重新生成 Portal；禁止把历史静态快照覆盖到生产。
 - 人工特殊限时折扣生产登记为 `/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json`，systemd guard/repair 通过 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY` 读取。仓库同名 `config` 文件只作本地/首次迁移种子；数据库备份会把生产登记一并纳入校验和与 COS 保留链。
+- 营销 current baseline 是持久 registry，不是 `tmp` 文件名：生产 unit 固定通过 `SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE=/srv/shein-bi/runtime/marketing-plans/current.json` 读取。current pointer 必须指向 `/srv/shein-bi/runtime/marketing-plans/baselines/<baselineId>/` 下不可变的 `selection-plan.json` 与 `price-overrides.json`，并通过 SHA-256、19 店覆盖、pair key/row 对齐、payload hash、work fingerprint、完成态和 current-baseline 元数据校验；`tmp` 只保留本地无 registry 的兼容扫描，不是生产恢复材料。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 指向 `/home/sheinops/.ssh/shein_bi_deploy`。若出现源码热修，先备份并回填 GitHub；在完成清单、回滚点和 hash 核对前，不得 `git add -A`、`git reset --hard`、`git clean -fdx`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
 - 部署纪律：云端不得长期停在老 commit 上手动漂移。任何云端源码热修必须在同一事故内回填 GitHub；任何 GitHub release 必须写明“已部署云端”或“仅源码基线未部署”。交接前确认云端 `HEAD` 等于 release target SHA、tracked worktree 为空、关键服务和 BI health 已验证。完整规则见 [release-and-deployment-version-policy.md](release-and-deployment-version-policy.md)。
@@ -128,6 +129,8 @@ sudo node scripts/manage_cloud_maintenance_mode.mjs resume \
 
 | `shein-bi-lark-sales-qa.service` | **主动暂停** | 飞书只读问数机器人代码与 unit 保留，但生产必须保持 `disabled + inactive`；网页问数与 CLI 不依赖它 |
 
+- 每日库存与 ET 低库存 journal 共同构成由 `SHEIN_BI_INVENTORY_JOURNAL_DIRS` 配置的 durable 审计/恢复域；guard 与 validator 必须用 `includeAll` 跨该域发现 journal，缺失 referenced intent 直接 fail closed。若在 ET journal 中找到 successor，只做只读核验，不修正 journal，也不发送 inventory POST。
+
 
 
 ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启用并通过手动验证；飞书只读问数服务自 2026-07-11 起保持 `disabled + inactive`。2026-07-23 起，19 店半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实表，在线 BI 通过 SSE 实时刷新；旧每小时 `today` timer 已删除。2026-08-03 起每日 `03:00` 最终日收口也改为19店官方 OpenAPI 完整性门禁后原子晋升，不再依赖易过期的 Seller Center Cookie。晨间日更继续补齐链接/业务域、RTV、SBN 和商品流量等非订单数据；这些尚未 API 化的数据域仍可能使用 WebAPI/headless。
@@ -164,6 +167,8 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 仓储费回灌/补跑使用 `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`。完成标准不是“抓到文件”，而是 `check_storage_fee_profit.mjs` 四层守恒、`audit_bi_warehouse.mjs` 无 errors、timer/service success 和 profile Chrome 为 0。
 
 - 营销 live guard 临时补跑必须避开 ET `:20`、晨间/日更、登录态管家、备份和订单闭环。`2026-07-18 21:06` 的 19 店生产实测为 `157s`、Chrome `0 -> 0`；若正常巡检再次升到十几分钟或数小时，应视为重复抓取、浏览器回退或扫描夹带写入的故障。
+- `cloud_marketing_live_guard` 不支持也不启用 same-run resume：下游 fallback/drift planner 会读取可变的 `linksData`、`inventoryTrend` 和 raw history，而旧报告没有绑定完整不可变的 downstream-input manifest。任何 `SHEIN_BI_MARKETING_RESUME_*`、`SHEIN_BI_MARKETING_LIVE_RESUME_*` 或 `SHEIN_BI_MARKETING_LIVE_GUARD_RESUME_*` 请求，都必须在 collectors/builders/planners/queue 之前失败；旧 guard/report 只能保留为 warning，不能恢复。
+- 恢复规则是保留旧 run 的 warning 证据，绝不从日志重建 queue，也不重放旧 hash；下一次 scheduled daily run 必须从头开始一次 fresh、coherent 的 scan + plan + queue。已创建 exact queue 的 repair stage-level resume 仍然有效，但它只续跑该精确 queue，不能混同为 guard-run resume。
 - 本地和云端登录态是两套独立运行态：本地 Profile 只服务本机后台执行，云端 session manager 继续独立维护服务器 Profile/session HTTP。任一侧恢复成功都不能冒充另一侧已恢复；验证码或协议弹窗只在该侧自动恢复失败后才打开可见维护窗口。
 - 本机持久 Profile 只保留登录必需状态。`launch_store_browser.mjs` 把磁盘缓存放到 `%LOCALAPPDATA%/SheinBI/browser-cache` 并限制为 100MB，同时写入固定 disposable-root marker；批次结束且无本项目 Chrome 后运行 `cleanup_local_shein_browser_profile_cache.mjs --apply`。清理器只接受 basename 为 `browser-cache`、非文件系统根、非符号链接且 marker 内容精确匹配的缓存根；任一门禁不满足即 fail closed，永不删除 Cookies、Login Data、Local/Session Storage 或 IndexedDB。
 

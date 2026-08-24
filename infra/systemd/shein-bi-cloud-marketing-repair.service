@@ -15,6 +15,7 @@ Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-marketing-artifact-publication.lock
 Environment=SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_WAIT_SEC=30
 Environment=SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json
+Environment=SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE=/srv/shein-bi/runtime/marketing-plans/current.json
 Environment=SHEIN_BI_MARKETING_REPAIR_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-repair
 Environment=SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=1
 Environment=SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC=3000

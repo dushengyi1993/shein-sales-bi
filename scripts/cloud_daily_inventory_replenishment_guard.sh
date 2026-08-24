@@ -180,7 +180,14 @@ import {
 // directory helper aggregates its strict results without trusting RESULT files.
 const currentJournal = path.resolve(process.argv[2]);
 const maxRunDate = process.argv[3];
-const files = await discoverInventoryJournalFiles(currentJournal);
+const inventoryJournalDirectories = String(process.env.SHEIN_BI_INVENTORY_JOURNAL_DIRS || '')
+  .split(path.delimiter)
+  .map(directory => directory.trim())
+  .filter(Boolean);
+const files = await discoverInventoryJournalFiles(currentJournal, {
+  includeAll: true,
+  additionalDirectories: inventoryJournalDirectories,
+});
 const lifecycle = await readInventoryIntentJournals(files, {maxRunDate});
 let currentPending = 0;
 let currentReadbackMatched = 0;

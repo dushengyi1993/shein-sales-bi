@@ -9,6 +9,7 @@
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import {
   buildExposureTopLinkIndex,
@@ -40,6 +41,7 @@ import {
   applyLowEtFastSellerPricePullback,
   buildLowEtFastSellerPricingContext,
 } from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 
 const ROOT = process.cwd();
 const DEFAULT_LINKS_DATA = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
@@ -47,17 +49,44 @@ const DEFAULT_POLICY = path.join(ROOT, 'config', 'marketing_pricing_policy.json'
 const DEFAULT_STORES_CONFIG = path.join(ROOT, 'config', 'stores.json');
 const DEFAULT_COST_MAP = path.join(ROOT, 'tmp', 'mbrs', 'marketing-cost-map.json');
 const DEFAULT_INVENTORY_TREND = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json');
-const DEFAULT_PRICE_OVERRIDES = path.join(
-  ROOT,
-  'tmp',
-  'marketing-signup',
-  'price-overrides-2026-06-22-45579-45589-46479-no-coupon-baseline16-userremarks-sk999-14-19-jitter-gapfill-fy6810-lq2-all-safe.json',
-);
 
 const args = parseArgs(process.argv.slice(2));
 const reportDate = args.date || formatLocalDate(new Date());
 const linksDataPath = path.resolve(ROOT, args.linksData || DEFAULT_LINKS_DATA);
-const priceOverridesPath = path.resolve(ROOT, args.priceOverrides || DEFAULT_PRICE_OVERRIDES);
+const explicitPriceOverridesPath = String(args.priceOverrides || '').trim();
+const explicitExpectedPriceOverridesSha256 = String(args.expectedPriceOverridesSha256 || '').trim().toLowerCase();
+const explicitExpectedMarketingCostMapSha256 = String(
+  args.expectedMarketingCostMapSha256 || args.expectedCostMapSha256 || '',
+).trim().toLowerCase();
+if (explicitExpectedPriceOverridesSha256 && !explicitPriceOverridesPath) {
+  throw new Error('--expected-price-overrides-sha256 requires an explicit --price-overrides file');
+}
+if (explicitPriceOverridesPath && !explicitExpectedPriceOverridesSha256) {
+  throw new Error('--price-overrides requires --expected-price-overrides-sha256');
+}
+if (explicitExpectedPriceOverridesSha256 && !/^[a-f0-9]{64}$/.test(explicitExpectedPriceOverridesSha256)) {
+  throw new Error(`Invalid --expected-price-overrides-sha256: ${args.expectedPriceOverridesSha256}`);
+}
+if (explicitExpectedMarketingCostMapSha256 && !/^[a-f0-9]{64}$/.test(explicitExpectedMarketingCostMapSha256)) {
+  throw new Error(`Invalid --expected-marketing-cost-map-sha256: ${args.expectedMarketingCostMapSha256}`);
+}
+const pricePlanSelection = explicitPriceOverridesPath
+  ? null
+  : resolveCurrentMarketingPlanPair({root: ROOT});
+if (!explicitPriceOverridesPath && pricePlanSelection?.strategy !== 'registry_current_baseline') {
+  throw new Error(`Current marketing plan registry is required when --price-overrides is omitted; resolved strategy=${pricePlanSelection?.strategy || 'missing'}`);
+}
+const boundExpectedPriceOverridesSha256 = explicitExpectedPriceOverridesSha256
+  || String(pricePlanSelection?.priceOverridesHash || '').trim().toLowerCase();
+if (!/^[a-f0-9]{64}$/.test(boundExpectedPriceOverridesSha256)) {
+  throw new Error(
+    `Price overrides source requires a 64-hex SHA-256 binding: ${explicitPriceOverridesPath ? '--expected-price-overrides-sha256' : 'current marketing plan registry priceOverridesHash'}`,
+  );
+}
+const priceOverridesPath = path.resolve(
+  ROOT,
+  explicitPriceOverridesPath || pricePlanSelection.priceOverrides,
+);
 const policyPath = path.resolve(ROOT, args.pricingPolicy || DEFAULT_POLICY);
 const linkHistoryDir = path.resolve(ROOT, args.linkHistoryDir || path.join('outputs', 'shein_links'));
 const outDir = path.resolve(ROOT, args.outDir || path.join('tmp', 'marketing-signup', 'limited-discount-fallback', `new-listing-7d-${reportDate}`));
@@ -80,6 +109,8 @@ const manualLimitedDiscountIndex = buildManualLimitedDiscountIndex(
   effectiveNow,
 );
 const costMapPath = path.resolve(ROOT, args.costMap || policy?.topTreatmentCostFallback?.costMapPath || DEFAULT_COST_MAP);
+const costMapBinding = await readMarketingCostMap(costMapPath, explicitExpectedMarketingCostMapSha256);
+const costDoc = costMapBinding.data;
 const inventoryTrendPath = path.resolve(ROOT, args.inventoryTrend || DEFAULT_INVENTORY_TREND);
 const durationDays = positiveInt(
   policy?.newListingWithin7Days?.limitedDiscount?.durationDays ?? policy?.limitedDiscount?.defaultDurationDays,
@@ -98,8 +129,18 @@ const mandatoryOnShelfEndTime = args.mandatoryOnShelfEndTime || `${addDays(repor
 const linksDoc = await readJson(linksDataPath);
 const storesConfigPath = path.resolve(ROOT, args.storesConfig || DEFAULT_STORES_CONFIG);
 const storesConfig = await readJson(storesConfigPath);
-const priceDoc = await readJson(priceOverridesPath);
-const costDoc = fsSync.existsSync(costMapPath) ? await readJson(costMapPath) : {};
+const priceOverridesStat = await fs.lstat(priceOverridesPath);
+if (!priceOverridesStat.isFile() || priceOverridesStat.isSymbolicLink()) {
+  throw new Error(`Price overrides must be a regular non-symlink file: ${priceOverridesPath}`);
+}
+const priceOverridesBytes = await fs.readFile(priceOverridesPath);
+const actualPriceOverridesSha256 = crypto.createHash('sha256').update(priceOverridesBytes).digest('hex');
+if (actualPriceOverridesSha256 !== boundExpectedPriceOverridesSha256) {
+  throw new Error(
+    `Price overrides SHA-256 mismatch: expected=${boundExpectedPriceOverridesSha256} actual=${actualPriceOverridesSha256} file=${priceOverridesPath}`,
+  );
+}
+const priceDoc = JSON.parse(priceOverridesBytes.toString('utf8').replace(/^\uFEFF/, ''));
 const inventoryTrendDoc = await readJson(inventoryTrendPath);
 const liveScanPath = args.currentMarketingLiveScan
   ? path.resolve(ROOT, args.currentMarketingLiveScan)
@@ -136,9 +177,10 @@ if (storeLinks.length === 0) {
   throw new Error('No normalized store+SKC rows found in links data; refuse to report a false no-action result.');
 }
 const primaryPriceIndex = buildPriceIndex(priceDoc, priceOverridesPath, {isSupplemental: false});
-const supplementalPriceIndexes = args.noSupplementalPriceOverrides === 'true'
-  ? []
-  : await loadSupplementalNewListingPriceIndexes(priceOverridesPath, args.supplementalPriceOverridesDir);
+const supplementalPriceOverridesAllowed = args.allowSupplementalPriceOverrides === 'true';
+const supplementalPriceIndexes = supplementalPriceOverridesAllowed
+  ? await loadSupplementalNewListingPriceIndexes(priceOverridesPath, args.supplementalPriceOverridesDir)
+  : [];
 const priceIndexes = [primaryPriceIndex, ...supplementalPriceIndexes];
 const exposureIndex = buildExposureTopLinkIndex({storeLinks}, policy);
 const lowEtContext = buildLowEtFastSellerPricingContext({
@@ -474,8 +516,13 @@ for (const [, storeRows] of groupBy(rows, row => `${row.storeKey}::${row.endTime
     purpose: `new_listing_or_relisted_top_treatment_limited_discount_fallback_${reportDate}`,
     sourceLinksData: rel(linksDataPath),
     sourcePriceOverrides: rel(priceOverridesPath),
+    sourcePriceOverridesSha256: boundExpectedPriceOverridesSha256,
+    priceOverridesSha256: actualPriceOverridesSha256,
+    supplementalPriceOverridesEnabled: supplementalPriceOverridesAllowed,
+    supplementalPriceOverridesPolicy: supplementalPriceOverridesAllowed ? 'explicit_allow_flag' : 'disabled_by_default',
     sourceInventoryTrend: rel(inventoryTrendPath),
     sourceCostMap: rel(costMapPath),
+    marketingCostMapSource: costMapBinding.source,
     sourceGuard: sourceGuardPath ? rel(sourceGuardPath) : '',
     pricingPolicy: rel(policyPath),
     sourceRawLinkHistory: rel(linkHistoryDir),
@@ -538,8 +585,40 @@ const summary = {
   sourceLinksData: rel(linksDataPath),
   sourceLinksGeneratedAt: linksDoc.generatedAt || linksData.generatedAt || '',
   sourcePriceOverrides: rel(priceOverridesPath),
+  sourcePriceOverridesSha256: boundExpectedPriceOverridesSha256,
+  priceOverridesPath: rel(priceOverridesPath),
+  priceOverridesSha256: actualPriceOverridesSha256,
+  expectedPriceOverridesSha256: boundExpectedPriceOverridesSha256,
+  actualPriceOverridesSha256,
+  priceOverridesSha256Verified: Boolean(boundExpectedPriceOverridesSha256),
+  priceOverridesBinding: {
+    source: explicitPriceOverridesPath ? 'explicit_argument' : 'registry_current_baseline',
+    expectedSha256: boundExpectedPriceOverridesSha256,
+    actualSha256: actualPriceOverridesSha256,
+    verified: Boolean(boundExpectedPriceOverridesSha256),
+  },
+  pricePlanSelection: pricePlanSelection ? {
+    strategy: pricePlanSelection.strategy,
+    registryFile: pricePlanSelection.registryFile || '',
+    registryHash: pricePlanSelection.registryHash || '',
+    targetPlan: pricePlanSelection.targetPlan ? rel(pricePlanSelection.targetPlan) : '',
+    priceOverrides: pricePlanSelection.priceOverrides ? rel(pricePlanSelection.priceOverrides) : rel(priceOverridesPath),
+    selectionPlanHash: pricePlanSelection.selectionPlanHash || '',
+    priceOverridesHash: pricePlanSelection.priceOverridesHash || '',
+  } : {
+    strategy: 'explicit_argument',
+    registryFile: '',
+    registryHash: '',
+    targetPlan: '',
+    priceOverrides: rel(priceOverridesPath),
+    selectionPlanHash: '',
+    priceOverridesHash: actualPriceOverridesSha256,
+  },
+  supplementalPriceOverridesEnabled: supplementalPriceOverridesAllowed,
+  supplementalPriceOverridesPolicy: supplementalPriceOverridesAllowed ? 'explicit_allow_flag' : 'disabled_by_default',
   sourceInventoryTrend: rel(inventoryTrendPath),
   sourceCostMap: rel(costMapPath),
+  marketingCostMapSource: costMapBinding.source,
   sourceCurrentMarketingLiveScan: liveScanPath ? rel(liveScanPath) : '',
   sourceRelistedLinkHistory: rel(linkHistoryDir),
   latestRawLinkOverlay: {
@@ -938,6 +1017,7 @@ function buildMarkdown(summary) {
   lines.push('');
   lines.push(`- 需要处理：${summary.totals.actionable} 个链接；新上架7天 ${summary.totals.newListingWithin7Days} 个，重新上架且无生效营销活动 ${summary.totals.relistedWithoutActiveMarketing} 个，其他在售老链接漏限时折扣 ${summary.totals.existingOnShelfMissingLimitedDiscount || 0} 个；其中新建限时折扣 ${summary.totals.createLimitedDiscount} 个，已有旧限时折扣需取消/结束后重报 ${summary.totals.replaceExistingLimitedDiscount} 个。`);
   lines.push(`- 阻断：${summary.totals.blocked} 个；主要是缺最新最终版曝光前五目标价或货号归并证据。`);
+  lines.push(`- 价格来源：\`${summary.sourcePriceOverrides}\`；SHA-256：\`${summary.sourcePriceOverridesSha256}\`。`);
   lines.push(`- 限时折扣窗口：到 \`${summary.rule.endTime}\`；新链接活动名前缀：\`${summary.rule.activityNamePrefix}\`；重新上架活动名前缀：\`${summary.rule.relistedActivityNamePrefix}\`。`);
   lines.push('');
   lines.push('## 按店铺');
@@ -987,6 +1067,53 @@ function parseArgs(argv) {
 async function readJson(file) {
   const text = await fs.readFile(file, 'utf8');
   return JSON.parse(text.replace(/^\uFEFF/, ''));
+}
+
+async function readMarketingCostMap(file, expectedSha256 = '') {
+  const sourcePath = path.resolve(file);
+  const expected = String(expectedSha256 || '').trim().toLowerCase();
+  let stat;
+  try {
+    stat = fsSync.lstatSync(sourcePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT' && !expected) {
+      return {
+        data: {},
+        source: {
+          path: sourcePath,
+          sha256: '',
+          expectedSha256: '',
+          verified: false,
+          exists: false,
+        },
+      };
+    }
+    throw new Error(`Marketing cost map is missing: ${sourcePath}`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`Marketing cost map must be a regular non-symlink file: ${sourcePath}`);
+  }
+  const bytes = await fs.readFile(sourcePath);
+  const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (expected && actual !== expected) {
+    throw new Error(`Marketing cost map SHA-256 mismatch: expected=${expected} actual=${actual} file=${sourcePath}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+  } catch (error) {
+    throw new Error(`Marketing cost map JSON parse failed: ${sourcePath}: ${error.message}`);
+  }
+  return {
+    data,
+    source: {
+      path: sourcePath,
+      sha256: actual,
+      expectedSha256: expected,
+      verified: Boolean(expected && actual === expected),
+      exists: true,
+    },
+  };
 }
 
 function groupBy(rows, keyFn) {

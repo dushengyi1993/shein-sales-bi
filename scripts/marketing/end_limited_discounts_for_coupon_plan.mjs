@@ -14,9 +14,13 @@
  * non-target goods in each ended activity for auditability.
  */
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
+import {loadCouponTargetEligibilityPlan} from '../../lib/marketing_coupon_policy.mjs';
+import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 import {
   requireStoreIdentitySnapshot,
   storeIdentityEvalBody,
@@ -28,30 +32,163 @@ const STORES = STORES_CONFIG.stores || [];
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'limited-discount-end-results');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
-const DEFAULT_SCAN_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'low-price-overlap-risk');
+const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function splitStores(value) { return String(value || '').split(',').map(x => x.trim()).filter(Boolean); }
 function psSingleQuote(value) { return `'${String(value).replaceAll("'", "''")}'`; }
 
-async function latestScanPath() {
-  const files = await fs.readdir(DEFAULT_SCAN_DIR).catch(() => []);
-  const candidates = [];
-  for (const file of files) {
-    if (!/^coupon-low-price-overlap-live-.*\.json$/.test(file)) continue;
-    const full = path.join(DEFAULT_SCAN_DIR, file);
-    const stat = await fs.stat(full);
-    candidates.push({full, mtimeMs: stat.mtimeMs});
+function sha256Bytes(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function normalizedPath(file) {
+  return path.resolve(String(file || ''));
+}
+
+function relativeRootPath(file) {
+  return path.relative(ROOT, normalizedPath(file)).replaceAll(path.sep, '/');
+}
+
+function assertHash(value, label) {
+  const hash = String(value || '').trim().toLowerCase();
+  if (!SHA256_PATTERN.test(hash)) throw new Error(`${label} must be a 64-character SHA-256 hex digest`);
+  return hash;
+}
+
+async function readVerifiedRegularFile(file, expectedSha256, label) {
+  const absolute = normalizedPath(file);
+  let stat;
+  try {
+    stat = await fs.lstat(absolute);
+  } catch (error) {
+    throw new Error(`${label} is missing or unreadable: ${absolute}: ${error.message}`);
   }
-  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  if (!candidates.length) throw new Error(`No coupon-low-price-overlap-live json found in ${DEFAULT_SCAN_DIR}`);
-  return candidates[0].full;
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error(`${label} must be a regular non-symlink single-link file: ${absolute}`);
+  }
+  const bytes = await fs.readFile(absolute);
+  const actualSha256 = sha256Bytes(bytes);
+  const expected = assertHash(expectedSha256, `${label} expected SHA-256`);
+  if (actualSha256 !== expected) {
+    throw new Error(`${label} SHA-256 mismatch: expected=${expected} actual=${actualSha256}`);
+  }
+  return {absolute, bytes, sha256: actualSha256};
+}
+
+function readRegularSourceBinding(file, label) {
+  const absolute = normalizedPath(file);
+  let stat;
+  try {
+    stat = fsSync.lstatSync(absolute);
+  } catch (error) {
+    throw new Error(`${label} is missing or unreadable: ${absolute}: ${error.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error(`${label} must be a regular non-symlink single-link file: ${absolute}`);
+  }
+  const bytes = fsSync.readFileSync(absolute);
+  return {path: relativeRootPath(absolute), sha256: sha256Bytes(bytes), bytes: bytes.length};
+}
+
+function sourceBindingEntries(value, label) {
+  if (!Array.isArray(value) || !value.length) throw new Error(`${label} must be a non-empty array of path/hash bindings`);
+  return value.map((entry, index) => {
+    if (typeof entry === 'string') throw new Error(`${label}[${index}] is missing its SHA-256 binding`);
+    const sourcePath = String(entry?.path || '').trim();
+    if (!sourcePath) throw new Error(`${label}[${index}] path is missing`);
+    return {path: sourcePath, sha256: assertHash(entry?.sha256, `${label}[${index}] SHA-256`)};
+  });
+}
+
+function compareSourceBindings(actual, expected, label) {
+  if (actual.length !== expected.length) {
+    throw new Error(`${label} count mismatch: expected=${expected.length} actual=${actual.length}`);
+  }
+  for (let i = 0; i < expected.length; i += 1) {
+    const actualPath = normalizedPath(path.resolve(ROOT, actual[i].path));
+    const expectedPath = normalizedPath(path.resolve(ROOT, expected[i].path));
+    if (actualPath !== expectedPath) throw new Error(`${label}[${i}] path mismatch: expected=${expected[i].path} actual=${actual[i].path}`);
+    if (actual[i].sha256 !== expected[i].sha256) throw new Error(`${label}[${i}] SHA-256 mismatch: expected=${expected[i].sha256} actual=${actual[i].sha256}`);
+  }
+}
+
+function comparePlanSelection(actual, current, label) {
+  if (!actual || typeof actual !== 'object' || Array.isArray(actual)) throw new Error(`${label} planSelection binding is missing`);
+  const expected = {
+    strategy: 'registry_current_baseline',
+    registryFile: current.registryFile,
+    registryHash: current.registryHash,
+    selectionPlanPath: relativeRootPath(current.targetPlan),
+    priceOverridesPath: relativeRootPath(current.priceOverrides),
+    selectionPlanHash: current.selectionPlanHash,
+    priceOverridesHash: current.priceOverridesHash,
+    selectionPayloadHash: current.selectionPayloadHash,
+    pricePayloadHash: current.pricePayloadHash,
+    workFingerprint: current.workFingerprint,
+  };
+  for (const key of Object.keys(expected)) {
+    const actualRaw = String(actual[key] || '').trim();
+    const expectedRaw = String(expected[key] || '').trim();
+    const actualValue = key.endsWith('File') || key.endsWith('Path')
+      ? (actualRaw ? normalizedPath(key === 'registryFile' ? actualRaw : path.resolve(ROOT, actualRaw)) : '')
+      : actualRaw.toLowerCase();
+    const expectedValue = key.endsWith('File') || key.endsWith('Path')
+      ? (expectedRaw ? normalizedPath(key === 'registryFile' ? expectedRaw : path.resolve(ROOT, expectedRaw)) : '')
+      : expectedRaw.toLowerCase();
+    if (!actualValue || actualValue !== expectedValue) throw new Error(`${label} planSelection.${key} mismatch: expected=${expected[key]} actual=${actual[key]}`);
+  }
+}
+
+async function verifyScanBinding(scan) {
+  const current = resolveCurrentMarketingPlanPair({root: ROOT});
+  comparePlanSelection(scan?.planSelection, current, 'limited-discount scan artifact');
+  const currentPlan = await loadCouponTargetEligibilityPlan({
+    root: ROOT,
+    planPath: current.targetPlan,
+    priceOverridesPaths: [current.priceOverrides],
+    targetDiscountPct: 15,
+  });
+  const expectedPlanSources = currentPlan.planSources.map((file, index) => readRegularSourceBinding(file, `current ordinary plan source[${index}]`));
+  const expectedPriceSources = currentPlan.priceOverrideSources.map((file, index) => readRegularSourceBinding(file, `current price override source[${index}]`));
+  const actualPlanSources = sourceBindingEntries(scan?.planSources, 'limited-discount scan ordinary plan sources');
+  const actualPriceSources = sourceBindingEntries(scan?.priceOverrideSources, 'limited-discount scan price override sources');
+  compareSourceBindings(actualPlanSources, expectedPlanSources, 'limited-discount scan ordinary plan sources');
+  compareSourceBindings(actualPriceSources, expectedPriceSources, 'limited-discount scan price override sources');
+  if (scan?.ordinaryPlanPaths !== undefined) {
+    if (!Array.isArray(scan.ordinaryPlanPaths) || scan.ordinaryPlanPaths.length !== expectedPlanSources.length) {
+      throw new Error('limited-discount scan ordinaryPlanPaths does not match the bound source set');
+    }
+    for (let i = 0; i < expectedPlanSources.length; i += 1) {
+      if (normalizedPath(path.resolve(ROOT, scan.ordinaryPlanPaths[i])) !== normalizedPath(path.resolve(ROOT, expectedPlanSources[i].path))) {
+        throw new Error(`limited-discount scan ordinaryPlanPaths[${i}] does not match the bound source path`);
+      }
+    }
+  }
+  if (scan?.priceOverrideSourcePaths !== undefined) {
+    if (!Array.isArray(scan.priceOverrideSourcePaths) || scan.priceOverrideSourcePaths.length !== expectedPriceSources.length) {
+      throw new Error('limited-discount scan priceOverrideSourcePaths does not match the bound source set');
+    }
+    for (let i = 0; i < expectedPriceSources.length; i += 1) {
+      if (normalizedPath(path.resolve(ROOT, scan.priceOverrideSourcePaths[i])) !== normalizedPath(path.resolve(ROOT, expectedPriceSources[i].path))) {
+        throw new Error(`limited-discount scan priceOverrideSourcePaths[${i}] does not match the bound source path`);
+      }
+    }
+  }
+  return {
+    current,
+    currentPlan,
+    planSources: expectedPlanSources,
+    priceOverrideSources: expectedPriceSources,
+  };
 }
 
 function parseArgs(argv) {
   const out = {
     stores: [],
     scan: '',
+    scanExplicit: false,
+    expectedArtifactSha256: '',
     execute: false,
     noLaunch: false,
     noClose: false,
@@ -62,7 +199,11 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--stores') out.stores.push(...splitStores(argv[++i]));
-    else if (a === '--scan') out.scan = argv[++i];
+    else if (a === '--scan' || a === '--artifact') {
+      out.scan = argv[++i];
+      out.scanExplicit = true;
+    }
+    else if (a === '--expected-artifact-sha256' || a === '--expected-artifact-sha' || a === '--expected-artifact-hash' || a === '--expected-scan-sha256' || a === '--expected-source-sha256' || a === '--expected-source-artifact-sha256' || a === '--scan-sha256') out.expectedArtifactSha256 = argv[++i];
     else if (a === '--execute') out.execute = true;
     else if (a === '--dry-run') out.execute = false;
     else if (a === '--no-launch') out.noLaunch = true;
@@ -73,6 +214,10 @@ function parseArgs(argv) {
     else if (!a.startsWith('--')) out.stores.push(...splitStores(a));
   }
   out.stores = [...new Set(out.stores.map(s => s.toUpperCase()))];
+  if (!out.scanExplicit || !String(out.scan || '').trim()) {
+    throw new Error('Limited-discount end requires an explicit --scan artifact path; mtime/newest discovery is disabled');
+  }
+  assertHash(out.expectedArtifactSha256, 'Limited-discount end requires --expected-artifact-sha256');
   if (!Number.isFinite(out.pageSize) || out.pageSize < 100) out.pageSize = 1000;
   return out;
 }
@@ -503,10 +648,21 @@ async function processStore(store, storeTargets, args) {
   }
 }
 
-await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
-const scanFile = args.scan ? path.resolve(ROOT, args.scan) : await latestScanPath();
-const scan = JSON.parse(await fs.readFile(scanFile, 'utf8'));
+const scanArtifact = await readVerifiedRegularFile(
+  path.resolve(ROOT, args.scan),
+  args.expectedArtifactSha256,
+  'limited-discount scan artifact',
+);
+let scan;
+try {
+  scan = JSON.parse(scanArtifact.bytes.toString('utf8').replace(/^\uFEFF/, ''));
+} catch (error) {
+  throw new Error(`limited-discount scan artifact JSON parse failed: ${error.message}`);
+}
+const scanBinding = await verifyScanBinding(scan);
+await fs.mkdir(OUT_DIR, {recursive: true});
+const scanFile = scanArtifact.absolute;
 const targets = loadTargets(scan, args);
 const targetStores = args.stores.length ? args.stores : [...new Set(targets.map(t => t.storeKey))].sort();
 const selectedStores = targetStores.map(key => {
@@ -519,6 +675,10 @@ const summary = {
   createdAt: new Date().toISOString(),
   execute: args.execute,
   sourceScan: path.relative(ROOT, scanFile),
+  sourceScanSha256: scanArtifact.sha256,
+  planSelection: scan.planSelection,
+  planSources: scanBinding.planSources,
+  priceOverrideSources: scanBinding.priceOverrideSources,
   selectedStores: selectedStores.map(s => s.storeKey),
   targetActivityCount: targets.length,
   targetSkcCount: targets.reduce((n, t) => n + t.targetSkcs.length, 0),

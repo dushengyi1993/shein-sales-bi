@@ -12,6 +12,7 @@ import {
   buildDailyInventoryPlanHashPayload,
   computeInventoryOverwriteQuantity,
   INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+  INVENTORY_LEGACY_UNVERSIONED_CUTOFF_DATE,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
 import {
@@ -115,7 +116,9 @@ function makeIntent({
   changeQuantity,
   policyVersion = policy.policyVersion,
   recordedAt = new Date().toISOString(),
-  overwriteComputationVersion = runDate === today ? INVENTORY_OVERWRITE_COMPUTATION_VERSION : undefined,
+  overwriteComputationVersion = String(runDate || '') > INVENTORY_LEGACY_UNVERSIONED_CUTOFF_DATE
+    ? INVENTORY_OVERWRITE_COMPUTATION_VERSION
+    : undefined,
 }) {
   const logicalActionKey = actionKey(runDate, row, target, policyVersion);
   const before = {
@@ -1077,7 +1080,6 @@ try {
     beforeTotal: 9,
     beforeUsable: 8,
     beforeLocked: 0,
-    changeQuantity: 11,
     policyVersion: historicalPolicyVersion,
   });
   await fs.writeFile(reconcile.currentIntentFile, `${JSON.stringify(reconcileIntent)}\n`);

@@ -14,18 +14,19 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
 import {
   PRICE_GUARD_TOLERANCE_SAR,
   classifyLimitedDiscountCouponStack,
   loadCouponTargetEligibilityPlan,
 } from '../../lib/marketing_coupon_policy.mjs';
+import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
 const COUPON_DETAIL_URL = id => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/detail/${id}`;
 const COUPON_GOODS_URL = (activityId, levelRuleId) => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/rule/goods/${activityId}/${levelRuleId}`;
 const ACTIVITY_ID_DEFAULT = 34810;
-const PLAN_PATH_DEFAULT = path.join(ROOT, 'tmp', 'marketing-signup', 'selection-plan-2026-06-03-ALL-ready.json');
 const LEVEL_RULE_HINT_DEFAULT = path.join(ROOT, 'config', 'marketing_coupon_level_rules.json');
 const ALLOWED_OVERLAP_DEFAULT = path.join(ROOT, 'config', 'marketing_allowed_limited_coupon_overlaps.json');
 const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'low-price-overlap-risk');
@@ -33,6 +34,45 @@ const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'st
 const STORES = STORES_CONFIG.stores || [];
 const ACTIVE_COUPON_STATUSES = new Set(['0', '1']);
 const ACTIVE_OR_FUTURE_LIMITED_STATES = new Set(['2', '3']);
+
+function sha256Bytes(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function relativeRootPath(file) {
+  return path.relative(ROOT, path.resolve(file)).replaceAll(path.sep, '/');
+}
+
+function readRegularFileBinding(file, label) {
+  const absolute = path.resolve(file);
+  let stat;
+  try {
+    stat = fsSync.lstatSync(absolute);
+  } catch (error) {
+    throw new Error(`${label} is missing or unreadable: ${absolute}: ${error.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error(`${label} must be a regular non-symlink single-link file: ${absolute}`);
+  }
+  const bytes = fsSync.readFileSync(absolute);
+  return {
+    path: relativeRootPath(absolute),
+    sha256: sha256Bytes(bytes),
+    bytes: bytes.length,
+  };
+}
+
+function sourceBindings(paths, label) {
+  const seen = new Set();
+  return paths
+    .map(file => path.resolve(file))
+    .filter(file => {
+      if (seen.has(file)) return false;
+      seen.add(file);
+      return true;
+    })
+    .map((file, index) => readRegularFileBinding(file, `${label}[${index}]`));
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -46,8 +86,11 @@ function parseArgs(argv) {
   const out = {
     stores: [],
     activityId: ACTIVITY_ID_DEFAULT,
-    targetPlan: PLAN_PATH_DEFAULT,
+    targetPlan: '',
+    targetPlanExplicit: false,
     priceOverrides: [],
+    priceOverridesExplicit: false,
+    planSelection: null,
     levelRuleHints: LEVEL_RULE_HINT_DEFAULT,
     allowedOverlapList: ALLOWED_OVERLAP_DEFAULT,
     noLaunch: false,
@@ -58,8 +101,16 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--stores') out.stores.push(...splitStores(argv[++i]));
     else if (a === '--activity-id') out.activityId = Number(argv[++i]);
-    else if (a === '--target-plan') out.targetPlan = argv[++i];
-    else if (a === '--price-overrides' || a === '--coupon-price-overrides') out.priceOverrides.push(...splitStores(argv[++i]));
+    else if (a === '--target-plan') {
+      out.targetPlan = path.resolve(argv[++i]);
+      out.targetPlanExplicit = true;
+    } else if (a === '--price-overrides' || a === '--coupon-price-overrides') {
+      out.priceOverrides.push(...splitStores(argv[++i]).map(value => path.resolve(value)));
+      out.priceOverridesExplicit = true;
+      if (out.priceOverrides.length > 1) {
+        throw new Error('Multiple --price-overrides files are not supported; this scanner requires one exact current_baseline pair');
+      }
+    }
     else if (a === '--level-rule-hints') out.levelRuleHints = argv[++i];
     else if (a === '--allowed-overlap-list') out.allowedOverlapList = argv[++i];
     else if (a === '--no-allowed-overlap-list') out.allowedOverlapList = '';
@@ -70,6 +121,15 @@ function parseArgs(argv) {
   }
   out.stores = [...new Set(out.stores.map(s => s.toUpperCase()))];
   if (!out.stores.length) out.stores = STORES.filter(s => s.enabled !== false).map(s => String(s.storeKey).toUpperCase());
+  out.planSelection = resolveCurrentMarketingPlanPair({
+    root: ROOT,
+    targetPlan: out.targetPlan,
+    priceOverrides: out.priceOverrides[0] || '',
+    targetPlanExplicit: out.targetPlanExplicit,
+    priceOverridesExplicit: out.priceOverridesExplicit,
+  });
+  out.targetPlan = out.planSelection.targetPlan;
+  out.priceOverrides = [out.planSelection.priceOverrides];
   if (out.activityId !== ACTIVITY_ID_DEFAULT) throw new Error('Only coupon activity 34810 is verified for this scanner');
   if (!Number.isFinite(out.pageSize) || out.pageSize < 50) out.pageSize = 500;
   return out;
@@ -821,14 +881,30 @@ function toCsv(rows, headers) {
   ].join('\r\n') + '\r\n';
 }
 
-await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
+await fs.mkdir(OUT_DIR, {recursive: true});
 const plan = await loadCouponTargetEligibilityPlan({
   root: ROOT,
   planPath: args.targetPlan,
   priceOverridesPaths: args.priceOverrides,
   targetDiscountPct: 15,
 });
+const planSourceBindings = sourceBindings(plan.planSources, 'ordinary plan source');
+const priceOverrideSourceBindings = sourceBindings(plan.priceOverrideSources, 'price override source');
+const planSelection = {
+  strategy: args.planSelection.strategy,
+  registryFile: args.planSelection.registryFile || '',
+  registryHash: args.planSelection.registryHash || '',
+  targetPlan: relativeRootPath(args.planSelection.targetPlan),
+  priceOverrides: relativeRootPath(args.planSelection.priceOverrides),
+  selectionPlanPath: relativeRootPath(args.planSelection.targetPlan),
+  priceOverridesPath: relativeRootPath(args.planSelection.priceOverrides),
+  selectionPlanHash: args.planSelection.selectionPlanHash || '',
+  priceOverridesHash: args.planSelection.priceOverridesHash || '',
+  selectionPayloadHash: args.planSelection.selectionPayloadHash || '',
+  pricePayloadHash: args.planSelection.pricePayloadHash || '',
+  workFingerprint: args.planSelection.workFingerprint || '',
+};
 const levelHints = await loadLevelRuleHints(args.levelRuleHints);
 const allowedOverlaps = await loadAllowedOverlaps(args.allowedOverlapList);
 const selectedStores = args.stores.map(key => {
@@ -841,7 +917,11 @@ const summary = {
   createdAt: new Date().toISOString(),
   activityId: args.activityId,
   targetPlan: path.relative(ROOT, plan.path),
-  priceOverrideSources: plan.priceOverrideSources.map(p => path.relative(ROOT, p)),
+  ordinaryPlanPaths: planSourceBindings.map(source => source.path),
+  planSources: planSourceBindings,
+  priceOverrideSources: priceOverrideSourceBindings,
+  priceOverrideSourcePaths: priceOverrideSourceBindings.map(source => source.path),
+  planSelection,
   levelRuleHints: args.levelRuleHints ? path.relative(ROOT, path.resolve(ROOT, args.levelRuleHints)) : '',
   allowedOverlapList: args.allowedOverlapList ? path.relative(ROOT, path.resolve(ROOT, args.allowedOverlapList)) : '',
   allowedOverlapEntries: allowedOverlaps.size,
@@ -909,6 +989,7 @@ summary.cancelList = {
   rows: cancelRows.length,
 };
 await fs.writeFile(jsonFile, JSON.stringify(summary, null, 2), 'utf8');
+const sourceScanBinding = readRegularFileBinding(jsonFile, 'scanner JSON artifact');
 await fs.writeFile(csvFile, toCsv(riskRows, [
   'storeKey', 'skc', 'supplierNo', 'canonical', 'riskReason', 'hasActiveCoupon',
   'allowedOverlap', 'allowedOverlapReason', 'belowTargetApproved',
@@ -919,19 +1000,30 @@ await fs.writeFile(csvFile, toCsv(riskRows, [
   'ordinaryPlanTargetPrice', 'targetPrice', 'planFinalTargetPrice', 'planCouponFactor',
 ]), 'utf8');
 await fs.writeFile(cancelFile, JSON.stringify({
+  schemaVersion: 'shein-marketing-coupon-risk-cancel/v1',
   createdAt: summary.createdAt,
   mode: 'risk-cancel-price-below-target',
   riskCancel: true,
   purpose: 'cancel active 15pct coupon rows only when limitedDiscountPrice * couponFactor is below finalTargetPrice',
   priceGuardPolicy: summary.priceGuardPolicy,
   priceToleranceSar: PRICE_GUARD_TOLERANCE_SAR,
-  ordinaryPlanPaths: plan.planSources.map(p => path.relative(ROOT, p)),
-  priceOverrideSources: plan.priceOverrideSources.map(p => path.relative(ROOT, p)),
-  sourceScan: path.relative(ROOT, jsonFile),
+  sourceArtifact: {
+    type: 'coupon-low-price-overlap-scan',
+    path: sourceScanBinding.path,
+    sha256: sourceScanBinding.sha256,
+  },
+  sourceScan: sourceScanBinding.path,
+  sourceScanSha256: sourceScanBinding.sha256,
+  ordinaryPlanPaths: planSourceBindings.map(source => source.path),
+  planSources: planSourceBindings,
+  priceOverrideSources: priceOverrideSourceBindings,
+  priceOverrideSourcePaths: priceOverrideSourceBindings.map(source => source.path),
+  planSelection,
   rows: cancelRows,
 }, null, 2), 'utf8');
 
 console.log(`\nJSON ${jsonFile}`);
+console.log(`SCAN_SHA256 ${sourceScanBinding.sha256}`);
 console.log(`CSV ${csvFile}`);
 console.log(`CANCEL_LIST ${cancelFile}`);
 console.log(`RISK_ROWS ${riskRows.length}`);

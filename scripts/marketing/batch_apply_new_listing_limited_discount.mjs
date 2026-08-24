@@ -39,6 +39,7 @@ import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_e
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 
 function parseArgs(argv) {
   const args = {
@@ -102,6 +103,40 @@ function formatLocalDate(d) {
 
 function rel(file) {
   return path.relative(ROOT, file).replaceAll(path.sep, '/');
+}
+
+function normalizedAbsolute(file) {
+  return path.resolve(file).replace(/[\\/]+$/, '').toLowerCase();
+}
+
+async function loadGuardPriceOverridesBinding(guard) {
+  const rawPath = String(guard?.targetPlanSelection?.priceOverrides || '').trim();
+  if (!rawPath || /[\r\n]/.test(rawPath)) {
+    throw new Error('Guard targetPlanSelection.priceOverrides must be a non-empty single-line path');
+  }
+  const priceOverridesPath = path.isAbsolute(rawPath)
+    ? path.resolve(rawPath)
+    : path.resolve(ROOT, rawPath);
+  const expectedSha256 = String(guard?.targetPlanSelection?.priceOverridesHash || '').trim().toLowerCase();
+  if (!SHA256_PATTERN.test(expectedSha256)) {
+    throw new Error(`Guard targetPlanSelection.priceOverridesHash must be a 64-hex SHA-256; got=${expectedSha256 || 'missing'}`);
+  }
+  const stat = await fs.lstat(priceOverridesPath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`Guard price overrides must be a regular non-symlink file: ${priceOverridesPath}`);
+  }
+  const bytes = await fs.readFile(priceOverridesPath);
+  const actualSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(
+      `Price overrides SHA-256 mismatch: guard=${expectedSha256} actual=${actualSha256} file=${priceOverridesPath}`,
+    );
+  }
+  return {
+    path: priceOverridesPath,
+    relativePath: rel(priceOverridesPath),
+    sha256: expectedSha256,
+  };
 }
 
 async function readJson(file) {
@@ -273,8 +308,11 @@ async function writeInventoryExecutableSubset({storeKey, rescue, rescuePath, blo
   return {path: file, rescue: subset};
 }
 
-async function buildPlan(args, guard) {
-  const priceOverrides = args.priceOverrides || path.resolve(ROOT, guard?.targetPlanSelection?.priceOverrides || '');
+async function buildPlan(args, guard, guardPriceOverrides) {
+  const priceOverrides = args.priceOverrides || guardPriceOverrides.path;
+  if (normalizedAbsolute(priceOverrides) !== normalizedAbsolute(guardPriceOverrides.path)) {
+    throw new Error(`Explicit price-overrides path mismatch: guard=${guardPriceOverrides.relativePath} explicit=${rel(priceOverrides)}`);
+  }
   const liveScan = args.currentMarketingLiveScan
     || path.resolve(ROOT, guard?.newSkcCandidates?.newListingWithin7DaysLimitedDiscount?.liveLimitedDiscountSource || '');
   if (!priceOverrides || !fsSync.existsSync(priceOverrides)) throw new Error(`price-overrides file not found: ${priceOverrides || '(empty)'}`);
@@ -286,6 +324,8 @@ async function buildPlan(args, guard) {
     args.guard,
     '--price-overrides',
     priceOverrides,
+    '--expected-price-overrides-sha256',
+    guardPriceOverrides.sha256,
   ];
   if (liveScan && fsSync.existsSync(liveScan)) buildArgs.push('--current-marketing-live-scan', liveScan);
   const build = await runCommand(process.execPath, buildArgs, {timeoutMs: 300000});
@@ -607,6 +647,7 @@ function buildMarkdown(doc) {
   lines.push('');
   lines.push(`- 计划可处理 ${doc.totals.planActionable} 个链接；本次实际新建/重建 ${doc.totals.executedTargetCount} 个。`);
   lines.push(`- 平台/库存/混合旧活动阻断 ${doc.totals.blockedTargetCount} 个；异常失败 ${doc.totals.failedTargetCount} 个。`);
+  lines.push(`- 价格来源：\`${doc.sourcePriceOverrides}\`；SHA-256：\`${doc.sourcePriceOverridesSha256}\`。`);
   lines.push(`- dry-run-only=${doc.dryRunOnly ? '是' : '否'}；所有店铺执行后均调用浏览器清理。`);
   lines.push('');
   lines.push('## 已执行');
@@ -674,12 +715,13 @@ const args = parseArgs(process.argv.slice(2));
 let automationAuthorization = null;
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
-await fs.mkdir(args.outDir, {recursive: true});
-await fs.mkdir(path.join(ROOT, 'outputs', 'reports'), {recursive: true});
 if (!fsSync.existsSync(args.guard)) throw new Error(`Guard report does not exist: ${args.guard}`);
 const guard = await readJson(args.guard);
+const guardPriceOverrides = await loadGuardPriceOverridesBinding(guard);
+await fs.mkdir(args.outDir, {recursive: true});
+await fs.mkdir(path.join(ROOT, 'outputs', 'reports'), {recursive: true});
 let build = null;
-if (!args.skipBuild) build = await buildPlan(args, guard);
+if (!args.skipBuild) build = await buildPlan(args, guard, guardPriceOverrides);
 const planPath = build?.planPath || path.join(ROOT, 'outputs', 'reports', `new-listing-7d-limited-discount-plan-${args.date}.json`);
 if (!fsSync.existsSync(planPath)) throw new Error(`New-listing plan does not exist: ${planPath}`);
 const exactPlan = await loadExactFallbackRepairPlan({root: ROOT, planPath, guardPath: args.guard, date: args.date});
@@ -716,6 +758,17 @@ const common = {
   planPath: rel(planPath),
   planHash: exactPlan.planHash,
   workFingerprint: exactPlan.workFingerprint,
+  sourcePriceOverrides: exactPlan.priceOverridesRelativePath,
+  sourcePriceOverridesSha256: exactPlan.priceOverridesSha256,
+  priceOverridesPath: exactPlan.priceOverridesRelativePath,
+  priceOverridesSha256: exactPlan.priceOverridesSha256,
+  priceOverridesHash: exactPlan.priceOverridesSha256,
+  priceOverridesBinding: {
+    source: 'guard_target_plan_selection',
+    expectedSha256: exactPlan.priceOverridesSha256,
+    actualSha256: exactPlan.priceOverridesSha256,
+    verified: true,
+  },
   planTotals: plan.totals || null,
   rescueFiles: rescueFiles.map(entry => ({...entry, path: entry.relativePath, rescue: undefined})),
   resumedGroups: resumedResults.length,

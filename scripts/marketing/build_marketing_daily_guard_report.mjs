@@ -9,6 +9,7 @@
  */
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
@@ -89,8 +90,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const DEFAULT_MAX_AGE_HOURS = 72;
 const MARKETING_SIGNUP_DIR = path.join(ROOT, 'tmp', 'marketing-signup');
-const TARGET_PLAN_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'selection-plan-2026-06-03-ALL-ready.json');
-const PRICE_OVERRIDES_LEGACY_DEFAULT = path.join(MARKETING_SIGNUP_DIR, 'price-overrides-2026-06-03-ALL-ready.json');
 const BI_PORTAL_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'data.json');
 const BI_PORTAL_LINKS_DATA_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
 const BI_PORTAL_INVENTORY_TREND_DEFAULT = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'inventoryTrend.json');
@@ -151,8 +150,12 @@ function parseArgs(argv) {
     biPortalInventoryTrend: BI_PORTAL_INVENTORY_TREND_DEFAULT,
     targetPlan: '',
     priceOverrides: '',
+    marketingCostMap: MARKETING_COST_MAP_DEFAULT,
+    expectedMarketingCostMapSha256: '',
     targetPlanExplicit: false,
     priceOverridesExplicit: false,
+    currentMarketingLiveScan: '',
+    marketingStackReview: '',
     storesConfig: STORES_CONFIG_DEFAULT,
     cloudBiSsh: '',
     cloudBiRoot: DEFAULT_CLOUD_BI_ROOT,
@@ -174,7 +177,12 @@ function parseArgs(argv) {
     } else if (a === '--price-overrides') {
       args.priceOverrides = path.resolve(argv[++i]);
       args.priceOverridesExplicit = true;
-    }
+    } else if (a === '--marketing-cost-map') {
+      args.marketingCostMap = path.resolve(argv[++i]);
+    } else if (a === '--expected-marketing-cost-map-sha256') {
+      args.expectedMarketingCostMapSha256 = String(argv[++i] || '').trim().toLowerCase();
+    } else if (a === '--current-marketing-live-scan') args.currentMarketingLiveScan = path.resolve(argv[++i]);
+    else if (a === '--marketing-stack-review') args.marketingStackReview = path.resolve(argv[++i]);
     else if (a === '--stores-config') args.storesConfig = path.resolve(argv[++i]);
     else if (a === '--cloud-bi-ssh') args.cloudBiSsh = String(argv[++i] || '').trim();
     else if (a === '--cloud-bi-root') args.cloudBiRoot = String(argv[++i] || '').trim();
@@ -187,9 +195,13 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.maxAgeHours) || args.maxAgeHours <= 0) args.maxAgeHours = DEFAULT_MAX_AGE_HOURS;
   if (!Number.isFinite(args.cloudBiSshTimeoutMs) || args.cloudBiSshTimeoutMs <= 0) args.cloudBiSshTimeoutMs = DEFAULT_CLOUD_BI_SSH_TIMEOUT_MS;
   if (!Number.isFinite(args.cloudBiMaxBytes) || args.cloudBiMaxBytes <= 0) args.cloudBiMaxBytes = DEFAULT_CLOUD_BI_MAX_BYTES;
+  if (args.expectedMarketingCostMapSha256 && !/^[a-f0-9]{64}$/.test(args.expectedMarketingCostMapSha256)) {
+    throw new Error(`Invalid --expected-marketing-cost-map-sha256: ${args.expectedMarketingCostMapSha256}`);
+  }
   const parsedNow = args.now ? parseAnyDateTime(args.now) : null;
   if (args.now && !parsedNow) throw new Error(`Invalid --now ${args.now}; expected parseable local/ISO datetime`);
   args.planSelection = resolveCurrentMarketingPlanPair({
+    root: ROOT,
     targetPlan: args.targetPlan,
     priceOverrides: args.priceOverrides,
     targetPlanExplicit: args.targetPlanExplicit,
@@ -356,6 +368,53 @@ async function readJsonIfExists(file, fallback = null) {
   if (!exists(file)) return fallback;
   const text = await fs.readFile(file, 'utf8');
   return JSON.parse(text.replace(/^\uFEFF/, ''));
+}
+
+async function readMarketingCostMap(file, expectedSha256 = '') {
+  const sourcePath = path.resolve(file);
+  const expected = String(expectedSha256 || '').trim().toLowerCase();
+  let stat;
+  try {
+    stat = fsSync.lstatSync(sourcePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT' && !expected) {
+      return {
+        data: {},
+        source: {
+          path: sourcePath,
+          sha256: '',
+          expectedSha256: '',
+          verified: false,
+          exists: false,
+        },
+      };
+    }
+    throw new Error(`marketing cost map is missing: ${sourcePath}`);
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`marketing cost map must be a regular non-symlink file: ${sourcePath}`);
+  }
+  const bytes = await fs.readFile(sourcePath);
+  const actual = crypto.createHash('sha256').update(bytes).digest('hex');
+  if (expected && actual !== expected) {
+    throw new Error(`Marketing cost map SHA-256 mismatch: expected=${expected} actual=${actual} file=${sourcePath}`);
+  }
+  let data;
+  try {
+    data = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+  } catch (error) {
+    throw new Error(`marketing cost map JSON parse failed: ${sourcePath}: ${error.message}`);
+  }
+  return {
+    data,
+    source: {
+      path: sourcePath,
+      sha256: actual,
+      expectedSha256: expected,
+      verified: Boolean(expected && actual === expected),
+      exists: true,
+    },
+  };
 }
 
 async function readSource(label, file, now, maxAgeHours) {
@@ -1839,7 +1898,7 @@ function collectNewListingLimitedDiscountExecutionEvidence(reportDate) {
   return {source: rel(file), bySkc};
 }
 
-function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSource, selectionPlanDoc, priceOverridesDoc, priceOverridesSourcePath = '', storesConfigDoc, pricingPolicy, reportDate, currentMarketingLiveScanSource, manualLimitedDiscountRegistry, now}) {
+function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSource, selectionPlanDoc, priceOverridesDoc, priceOverridesSourcePath = '', storesConfigDoc, pricingPolicy, reportDate, currentMarketingLiveScanSource, manualLimitedDiscountRegistry, costMapDoc = {}, costMapSourcePath = '', now}) {
   const unwrappedLinksData = unwrapBiLinksData(linksDataDoc);
   const unwrappedBiDoc = unwrapBiLinksData(biDoc);
   const baseLinks = Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length
@@ -1882,7 +1941,6 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
   const newListingLimitedRows = [];
   const newListingPolicy = pricingPolicy || DEFAULT_MARKETING_PRICING_POLICY;
   const relistedPolicy = newListingPolicy?.relistedWithoutActiveMarketing || {};
-  const costMapDoc = readJsonSafe(MARKETING_COST_MAP_DEFAULT) || {};
   const liveLimitedEvidence = collectLiveLimitedDiscountEvidence(currentMarketingLiveScanSource);
   const manualIndex = buildManualLimitedDiscountIndex(manualLimitedDiscountRegistry, now);
   const executionLimitedEvidence = collectNewListingLimitedDiscountExecutionEvidence(reportDate);
@@ -1995,7 +2053,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
               ? 'product_cost_top_treatment_fallback'
               : '',
         topTierPriceSource: resolvedTopTier.source,
-        priceEvidenceSourcePath: priceEvidence?.priceOverridesSource || (costTopTier.available ? rel(MARKETING_COST_MAP_DEFAULT) : ''),
+        priceEvidenceSourcePath: priceEvidence?.priceOverridesSource || (costTopTier.available ? rel(costMapSourcePath || MARKETING_COST_MAP_DEFAULT) : ''),
         supplementalPriceEvidence: priceEvidence?.supplementalPriceEvidence === true,
         priceEvidenceAvailable: Boolean(priceEvidence) || costTopTier.available === true,
         productUnitCostSar: costTopTier.productUnitCostSar ?? null,
@@ -4142,6 +4200,10 @@ function num(value) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const now = args.now ? parseAnyDateTime(args.now) : new Date();
+  const marketingCostMap = await readMarketingCostMap(
+    args.marketingCostMap,
+    args.expectedMarketingCostMapSha256,
+  );
   const sources = [];
   const read = async (label, file) => {
     const item = await readSource(label, file, now, args.maxAgeHours);
@@ -4185,14 +4247,17 @@ async function main() {
   );
   const currentMarketingLiveScanSource = await readSource(
     'currentMarketingLiveScan',
-    latestCurrentMarketingLiveScanFile(
-      path.join(ROOT, 'tmp', 'marketing-signup', 'current-price-live'),
-      /^current-marketing-price-live-.*\.json$/,
-      storesConfig.data,
-    ),
+    args.currentMarketingLiveScan || latestCurrentMarketingLiveScanFile(
+        path.join(ROOT, 'tmp', 'marketing-signup', 'current-price-live'),
+        /^current-marketing-price-live-.*\.json$/,
+        storesConfig.data,
+      ),
     now,
     args.maxAgeHours,
   );
+  currentMarketingLiveScanSource.source.selectionSource = args.currentMarketingLiveScan ? 'explicit_argument' : 'auto_latest_qualified_scan';
+  currentMarketingLiveScanSource.source.explicit = Boolean(args.currentMarketingLiveScan);
+  sources.push(currentMarketingLiveScanSource.source);
   const mandatoryLimitedGapFinalSource = await readSource(
     'mandatoryLimitedGapFinalResult',
     latestReportFile(/^(?:mandatory-limited-gap-final-result-.*|new-listing-7d-limited-discount-execution-summary-\d{4}-\d{2}-\d{2}(?:-.*)?)\.json$/),
@@ -4211,8 +4276,19 @@ async function main() {
     'ordinaryDeadlineGapfillResult',
     latestReportFile(/^remaining-\d{4}-\d{2}-\d{2}-deadline-gapfill-result-.*\.json$/),
   );
-  const stackReviewSelection = selectMarketingStackReviewFile(storesConfig.data);
+  const stackReviewSelection = args.marketingStackReview
+    ? {
+        file: args.marketingStackReview,
+        selectedPath: rel(args.marketingStackReview),
+        selectionReason: 'explicit_argument',
+        explicit: true,
+        inspected: [],
+        skippedNewerIncomplete: [],
+      }
+    : selectMarketingStackReviewFile(storesConfig.data);
   const stackReview = await read('marketingStackReview', stackReviewSelection.file);
+  stackReview.source.selectionSource = args.marketingStackReview ? 'explicit_argument' : 'auto_latest_complete_store_coverage';
+  stackReview.source.explicit = Boolean(args.marketingStackReview);
   const marketingStackReviewContext = normalizeMarketingStackReviewSource(stackReview, now, args.maxAgeHours);
   const knownOrdinaryEvidenceDir = DEADLINE_FILL_RESULTS_DIR;
   const knownOrdinaryEvidenceSource = {
@@ -4385,6 +4461,8 @@ async function main() {
     reportDate: args.date,
     currentMarketingLiveScanSource,
     manualLimitedDiscountRegistry,
+    costMapDoc: marketingCostMap.data,
+    costMapSourcePath: marketingCostMap.source.path,
     now,
   });
   const highClickSpecialPolicy = getHighClickSpecialPolicy(marketingPricingPolicy);
@@ -4392,7 +4470,7 @@ async function main() {
     linksDataDoc: biPortalLinksData.data,
     inventoryTrendDoc: biPortalInventoryTrend.data,
     priceOverridesDoc: priceOverrides.data,
-    costDoc: readJsonSafe(MARKETING_COST_MAP_DEFAULT) || {},
+    costDoc: marketingCostMap.data,
     manualRegistry: manualLimitedDiscountRegistry,
     marketingPolicy: marketingPricingPolicy,
     reportDate: args.date,
@@ -4400,7 +4478,7 @@ async function main() {
     sourceLinksData: biPortalLinksData.source.path || rel(args.biPortalLinksData),
     sourceLinksDataStatus: biPortalLinksData.source.status || 'missing',
     sourcePriceOverrides: priceOverrides.source.path || rel(args.priceOverrides),
-    sourceCostMap: rel(MARKETING_COST_MAP_DEFAULT),
+    sourceCostMap: rel(marketingCostMap.source.path),
     sourceInventoryTrend: biPortalInventoryTrend.source.path || rel(args.biPortalInventoryTrend),
   });
   const highClickSpecialEffect = buildHighClickSpecialEffectAudit({
@@ -4887,6 +4965,7 @@ async function main() {
     orderPriceAudit,
     limitedDiscountTargetPriceDrift,
     manualSpecialLimitedDiscount,
+    marketingCostMapSource: marketingCostMap.source,
     biPortalFreshness,
     biPortalSourceSelection: {
       selectedPath: biPortal.source?.path || '',
@@ -4902,15 +4981,35 @@ async function main() {
     },
     targetPlanSelection: {
       strategy: args.planSelection?.strategy || '',
+      selectionSource: args.planSelection?.strategy === 'registry_current_baseline'
+        ? 'durable_current_baseline_registry'
+        : (args.planSelection?.strategy || ''),
+      registryFile: args.planSelection?.registryFile || '',
+      registryHash: args.planSelection?.registryHash || '',
       targetPlan: rel(args.targetPlan),
       priceOverrides: rel(args.priceOverrides),
       rowCount: args.planSelection?.rowCount ?? null,
+      priceRowCount: args.planSelection?.priceRowCount ?? null,
+      selectionPlanHash: args.planSelection?.selectionPlanHash || '',
+      priceOverridesHash: args.planSelection?.priceOverridesHash || '',
+      selectionPayloadHash: args.planSelection?.selectionPayloadHash || '',
+      pricePayloadHash: args.planSelection?.pricePayloadHash || '',
+      workFingerprint: args.planSelection?.workFingerprint || '',
+      activityBatch: args.planSelection?.activityBatch || '',
+      promotedAt: args.planSelection?.promotedAt || '',
+      storeCoverage: args.planSelection?.storeCoverage || [],
       score: args.planSelection?.score ?? null,
       scoreReasons: args.planSelection?.scoreReasons || [],
       rejectedCandidates: args.planSelection?.rejectedCandidates || [],
     },
     marketingStackReviewFreshness: marketingStackReviewContext || null,
     marketingStackReviewSourceSelection: stackReviewSelection,
+    currentMarketingLiveScanSourceSelection: {
+      path: currentMarketingLiveScanSource.source.path || '',
+      selectionSource: currentMarketingLiveScanSource.source.selectionSource || '',
+      explicit: currentMarketingLiveScanSource.source.explicit === true,
+      status: currentMarketingLiveScanSource.source.status || '',
+    },
     marketingStackReviewCoverage,
     t3MarketingCandidates,
     t3MarketingHandledRows,

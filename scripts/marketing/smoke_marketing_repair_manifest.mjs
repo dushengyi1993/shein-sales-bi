@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,10 +29,18 @@ try {
   await fs.mkdir(planDir, {recursive: true});
   const liveScan = `tmp/marketing-signup/current-price-live/current-marketing-price-live-${date}.json`;
   const priceOverrides = 'tmp/marketing-signup/price-overrides-current.json';
+  const priceOverridesPath = path.join(root, priceOverrides);
+  await fs.mkdir(path.dirname(priceOverridesPath), {recursive: true});
+  await fs.writeFile(priceOverridesPath, '{"items":[]}' + String.fromCharCode(10));
+  const priceOverridesHash = crypto.createHash('sha256').update(await fs.readFile(priceOverridesPath)).digest('hex');
   await fs.writeFile(guardPath, `${JSON.stringify({
     reportDate: date,
     limitedDiscountTargetPriceDrift: {source: liveScan},
-    targetPlanSelection: {priceOverrides},
+    targetPlanSelection: {
+      strategy: 'registry_current_baseline',
+      priceOverrides,
+      priceOverridesHash,
+    },
   })}\n`);
 
   const sourceGuard = `outputs/reports/marketing-daily-guard-${date}.json`;
@@ -70,6 +79,9 @@ try {
     storeKey: 'DL',
     purpose: `new_listing_or_relisted_top_treatment_limited_discount_fallback_${date}`,
     sourceGuard,
+    sourcePriceOverrides: priceOverrides,
+    sourcePriceOverridesSha256: priceOverridesHash,
+    priceOverridesSha256: priceOverridesHash,
     rows: [{storeKey: 'DL', skc: 'sv2', limitedDiscountPrice: 20, finalTargetPrice: 20}],
   };
   await fs.writeFile(path.join(fallbackDir, fallbackName), `${JSON.stringify(fallbackRescue)}\n`);
@@ -80,6 +92,8 @@ try {
     sourceGuard,
     sourceCurrentMarketingLiveScan: liveScan,
     sourcePriceOverrides: priceOverrides,
+    sourcePriceOverridesSha256: priceOverridesHash,
+    priceOverridesSha256: priceOverridesHash,
     rescueFiles: [{storeKey: 'DL', path: fallbackRelative, count: 1}],
   })}\n`);
   const loadedFallback = await loadExactFallbackRepairPlan({root, planPath: fallbackPlanPath, guardPath, date});

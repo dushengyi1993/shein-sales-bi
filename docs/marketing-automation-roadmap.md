@@ -62,14 +62,14 @@
 
 `finalTargetPrice` 必须来自当前有效策略，而不是历史默认值。若本期用户已经在审核表中确认某个货号按 `15%` 利润率、固定最终成交价或特殊券/活动组合执行，并且该确认已转换为当前 `selection-plan + price-overrides`，日报应将其视为 `expected`；不能再按旧 `30%` 默认利润率、旧 `ALL-ready` 覆盖文件或没有生效窗口的历史计划每天重复报警。若日报只能读到旧计划或同一 `storeKey + skc` 有冲突目标价，应报告“计划过期/冲突，需要刷新”，而不是直接把已批准的低利润策略判为错误。
 
-当前计划选择必须优先使用用户确认并已真实执行或等待执行的最终全量 `selection-plan + price-overrides`。这类最终文件应带 `baselineForNextOrdinaryActivity=true` 和 `baselineForLimitedDiscountFallback=true`，即使文件名包含 `all-safe` 也不得被当作旧安全子集丢弃；没有这些标记的演示、单店、repair、supplement 或旧 `ALL-ready` 文件只能作为证据线索，不能作为日报和限时折扣兜底基准。
+当前生产计划选择必须使用用户确认、已真实执行且终态回读完整的最终全量 `selection-plan + price-overrides`，并由 durable registry 精确指向其不可变副本。待执行方案只作候选，不能晋升 current。current 文件应带 `baselineForNextOrdinaryActivity=true`、`baselineForLimitedDiscountFallback=true`、`executionStatus=completed` 和 `planMetadata.status=current_baseline`；演示、单店、repair、supplement、待执行方案或旧 `ALL-ready` 文件只能作为证据线索，不能作为日报和限时折扣兜底基准。
 
 ## 3. 当前定时复扫
 
 已存在 Codex heartbeat 自动任务 `shein-2`：
 
 - 名称：`SHEIN 每日营销巡检`
-- 计划：Codex heartbeat 在本会话继续报告；完整巡检保持独立分钟级运行。大批修复改由队列 worker 在北京时间 `10:50/12:50/14:50/16:50/18:50/19:30` 取任务，单轮最多 `8` 个活动组、最长 `40` 分钟，不再由巡检同步等待。
+- 计划：完整巡检保持独立运行；本地 runner 优先消费精确队列。云端 emergency worker 仅在北京时间 `20:45/21:15` 两个既有窗口兜底，分别在 `20:57/21:27` 后停止派新组，单轮最多 `1` 个活动组；不再由巡检同步等待，也不新增 heartbeat 或第二套 timer。
 - 防撞车：全量 live scan 不是“看到空闲就硬跑”。每天 `11:00` 只启动一个云端只读 coordinator；普通活动、价格栈或 guard 报告失败时只在同一 run 内重试失败阶段，不再创建 13:00/16:00 的整套重跑。开跑前仍检查核心服务 active，并避开 ET、晨间日更、登录态维护、备份、订单闭环和 watchdog。当天销售由 Webhook 实时触发；浏览器清理只回收孤儿，不得中断有效任务。
 - 边界：先检查云端核心任务是否正在运行，再运行 `build_marketing_daily_guard_report.mjs` 和后台 live scan/readback；生成风险报告、精确 manifest/hash 和候选活动组并入队。巡检最长 `30` 分钟，不能等待无边界写入。未批准的新普通活动、优惠券、补预算仍不得自动真实提交/取消；已批准普通活动截止前新增可报差额、限时折扣价格漂移、新链接/新上架 7 天/重新上架及在售老链接兜底、高点击低转化专属折扣是已授权自动写入例外，worker 必须通过批准锁、身份校验、价格栈校验、dry-run 和执行后 live readback；继续禁止 `30%/50%` 券真实上线。
 - 限时折扣漂移自动修复：guard 报告中 `limitedDiscountTargetPriceDrift.belowRows` 非空时，生成精确 manifest/hash 后入队；worker 同店复用浏览器并按活动组 resume。价格漂移与兜底计划在 `storeKey + SKC` 上必须互斥。替换统一走“旧保护快照 → 删除 → 目标创建/readback → 失败自动补偿恢复”，平台阻断仍保留为待处理，不能把“旧保护已恢复”冒充修复成功。

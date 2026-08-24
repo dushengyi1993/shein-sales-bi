@@ -3,7 +3,7 @@
 > 适用工作区：`E:\Codex WorkSpace\Shein销售统计`
 > 生产目录：`/opt/shein-bi/app`
 > 时间口径：`Asia/Shanghai`
-> 当前自动化：分钟级完整巡检与大批修复已解耦。巡检独立完成当天 live 证据；修复 worker 在 `10:50/12:50/14:50/16:50/18:50/19:30` 取队列，不得拖住巡检。
+> 当前自动化：完整巡检与修复已解耦。巡检独立完成当天 live 证据；本地 runner 优先消费队列，云端 emergency worker 仅在 `20:45/21:15` 两个既有窗口兜底，不得拖住巡检。
 
 本文是日常运维入口和可复用流程；[pricing-rules](marketing-campaign-signup-pricing-rules.md) 是业务政策，`skills/shein-marketing-ops/SKILL.md` 是执行指令。运行批次记录已迁至 [2026-07-13-to-2026-07-16.md](archive/marketing-runs/2026-07-13-to-2026-07-16.md)。三者必须一起阅读，但不得互相替代。
 
@@ -78,7 +78,7 @@ guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结
 云端证据：`2026-07-17` 的全在售兜底差集产生 `74` 条；`2026-07-18` 基准切换产生 `61` 条、`32` 个活动组。旧流程把完整巡检与大批写入同步串行，曾在约一小时后被系统杀掉，不能再作为生产路径。
 
 - 完整巡检保持分钟级完成，最长 `30` 分钟；它生成精确 manifest/hash、活动组和可恢复队列，但不等待大批修复。
-- 修复 worker 在 `10:50/12:50/14:50/16:50/18:50/19:30` 运行，单轮按总预算最多处理 `8` 个活动组、最长 `40` 分钟；一个阶段提前完成时会用剩余预算继续下一阶段，不再空耗整个时间窗。同店复用浏览器，成功组可 resume，失败/阻断组不会被误记为完成。
+- 云端 emergency worker 在 `20:45/21:15` 运行，分别于 `20:57/21:27` 停止派新组，单轮最多处理 `1` 个活动组；本地 runner 仍按精确队列续跑。同店复用浏览器，成功组可 resume，失败/阻断组不会被误记为完成。
 - 每个替换组仍先 preflight/dry-run，再锁定旧活动完整快照和精确 hash。真实删除、目标活动创建、回读与补偿由事务执行器统一管理；目标创建失败时自动恢复旧保护。dry-run 不得进入删除或任何真实写路径。
 - 修复队列全部组完成后，最终闭环顺序固定为：先用 session HTTP 刷新 19 店普通活动/优惠券 stack review，再做 19 店价格栈 final live readback，最后重建 guard。价格栈必须最后扫，避免刚创建的待生效活动在 stack review 期间跨过开始时间后，又被旧价格快照误判为缺失。修复耗时超过同轮证据时差时，不得沿用巡检开始时的旧 stack review，让已被 live 证据替代的优惠券中间文件重新变成 stale blocker。巡检 watchdog 与修复 watchdog 分别验收，后者必须在 `20:00` 前确认修复闭环或明确剩余 blocker。
 - 最终日报必须双通道交付，二者缺一不可：飞书群固定只发“一段最终结论 + 一个 `marketing-daily-final-YYYY-MM-DD.md` 附件”；当前 Codex 本任务仍须正常输出有排版的人话日报，不能用飞书消息或附件代替本任务回复，也不能因为飞书已发送就在本任务静默。两边都只能在最终 19 店 stack review、价格栈 readback 和 guard 重建之后发送。队列刚进入 `blocked`、某个 worker 阶段结束或 execution summary 刚落盘都只是中间态；blocked 队列完成最终扫描后必须重建四类 repair plan，并用 `check_marketing_terminal_report_readiness.mjs` 按精确 `store+SKC` 核对：新出现且尚未执行/安全阻断的行必须重新入队。发送器仍须校验最终 guard 的时间晚于终态队列和执行结果；不得分别发送 guard/execution 两个附件，也不得把 guard 的只读“不能自动执行”标题当成整轮执行结论。
@@ -199,7 +199,7 @@ guard 的 `runId` 写入不可覆盖的 `state/cloud_marketing_live_guard/report
 ### 8.1 普通活动方案
 
 - 先读后台 live 活动页和当前最终版基准，不凭 BI 或旧 Excel 猜活动、可报数量和已报状态。
-- 当前活动窗口继续读取 `tmp/marketing-signup/selection-plan-2026-07-15-v48217-48215-48925-final-executed-all-1063.json` 及同名 paired `price-overrides`。`2026-07-21` 已执行的 `v48732-48733-49565-final-executed-all-991` 及 paired `price-overrides` 是下一活动窗口基准；选择器只能在对应活动窗口启用它，不能因文件更新就提前覆盖仍生效的上一期目标。
+- 当前活动窗口只读取 durable current baseline registry 指向的不可变 `selection-plan + price-overrides` pair。历史 `tmp/marketing-signup` 文件、文件名日期和 mtime 均不得自动成为生产 current；新基准只有在真实执行和终态回读完整后才能通过 promotion 原子切换 registry。
 - 基准只继承用户备注、固定价、特殊利润率、货号归并和已批准例外；新一期价格仍按最新 7 天链接曝光重新分层，不能简单继承同店同 SKC 上一期执行价。
 - 新活动方案必须是人话版 Excel，至少包括 `说明`、`按货号汇总`、`店铺差异明细`、`报名明细`、`剔除项/阻塞项`、`低价补救/风险项`；除说明页外保留 `备注/修改意见` 列。
 - `本期曝光前五/新链接前五行数` 表示命中两种待遇规则的报名明细行数，不代表有那么多个不同链接；展示时同时给出唯一链接数，避免把行数误读成链接数。

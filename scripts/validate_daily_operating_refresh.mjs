@@ -61,6 +61,17 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+export async function discoverInventoryJournalAuditFiles(currentJournal, environment = process.env) {
+  const additionalDirectories = String(environment.SHEIN_BI_INVENTORY_JOURNAL_DIRS || '')
+    .split(path.delimiter)
+    .map(directory => directory.trim())
+    .filter(Boolean);
+  return discoverInventoryJournalFiles(currentJournal, {
+    includeAll: true,
+    additionalDirectories,
+  });
+}
+
 function storedPath(root, value) {
   const candidate = String(value || '');
   return path.resolve(path.isAbsolute(candidate) ? candidate : path.join(root, candidate));
@@ -249,7 +260,7 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   const currentTerminalAuditByIntentId = new Map();
   if (rows.some(row => row?.state === 'skipped_terminal_readback_recorded')) {
     const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
-    const journalFiles = await discoverInventoryJournalFiles(currentJournal);
+    const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);
     const lifecycle = await readInventoryIntentJournals(journalFiles, {maxRunDate: runDate});
     for (const [intentKey, intent] of lifecycle.intents.entries()) {
       if (intent.journalFile !== currentJournal) continue;

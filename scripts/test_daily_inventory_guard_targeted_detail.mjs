@@ -552,9 +552,9 @@ match('rebuilt plan cannot delete an unresolved intent', executor,
 match('shared executor discovers every journal prefix in its result directory', executor,
   /discoverInventoryJournalFiles\(journalFile,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories[\s\S]*?\}\)/,
   'daily and ET low-inventory sidecars must share cross-day durable recovery through configured journal directories');
-match('daily guard keeps its daily-prefix discovery boundary', guard,
-  /discoverInventoryJournalFiles\(currentJournal\)/,
-  'the daily guard may retain default daily-prefix discovery while the shared executor is comprehensive');
+match('daily guard shares the executor journal discovery domain', guard,
+  /SHEIN_BI_INVENTORY_JOURNAL_DIRS[\s\S]*?split\(path\.delimiter\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories/,
+  'daily and ET low-inventory journals must share the configured durable recovery domain');
 match('historical omission is a warning, not a current-run blocker', executor,
   /deferredHistorical: deferredHistoricalIntents[\s\S]*unresolvedIntents: \[\][\s\S]*blocked: unsafeResultCount/,
   'an absent historical scope stays in the result audit without failing an otherwise safe current run');

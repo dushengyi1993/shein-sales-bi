@@ -11,7 +11,7 @@
 - 半托当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；前一天最终收口由19店 OpenAPI 完整性门禁通过后原子晋升日切片。订单生命周期复查也优先使用 OpenAPI，并结合 Webhook、售后和 ET 证据；Chrome profile 只保留给商品流量、营销与编辑级资料等尚未完成 API 化的数据域。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数、异常通知或后续手动日报入口。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
-- 营销折扣自动化仍按“只读巡检 / 精确队列 / 受控修复 / live 回读”分层；长期路线图见 `docs/marketing-automation-roadmap.md`。guard 使用 session HTTP，一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，不启动浏览器、不持有租约或写授权。`2026-07-18` 生产实测完整巡检 `157s`、1516 行、19/19 店成功、Chrome `0 -> 0`。repair worker 于 `10:50/12:50/14:50/16:50/18:50/19:30` 每轮最多处理 8 个活动组，强制精确 hash、旧保护快照、事务 journal、失败补偿和最终全店 readback。
+- 营销折扣自动化仍按“只读巡检 / 精确队列 / 受控修复 / live 回读”分层；长期路线图见 `docs/marketing-automation-roadmap.md`。guard 使用 session HTTP，一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，不启动浏览器、不持有租约或写授权。`2026-07-18` 生产实测完整巡检 `157s`、1516 行、19/19 店成功、Chrome `0 -> 0`。本地 runner 优先消费精确队列；云端 emergency worker 仅在 `20:45/21:15` 两个既有窗口兜底、单轮最多 1 个活动组，继续强制精确 hash、旧保护快照、事务 journal、失败补偿和最终全店 readback。
 
 ## 2. 日常入口
 

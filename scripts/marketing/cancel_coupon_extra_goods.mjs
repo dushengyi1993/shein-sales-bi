@@ -16,14 +16,17 @@
  * - Verifies active extra SKCs are gone or no longer active after cancellation.
  */
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import crypto from 'node:crypto';
 import {
   PRICE_GUARD_TOLERANCE_SAR,
   loadCouponTargetEligibilityPlan,
   summarizeCouponTargetEligibilityPlan,
 } from '../../lib/marketing_coupon_policy.mjs';
+import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 import {
   requireStoreIdentitySnapshot,
   storeIdentityEvalBody,
@@ -32,7 +35,6 @@ import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const ACTIVITY_ID_DEFAULT = 34810;
-const DEFAULT_EXTRA_LIST = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-submit-results', 'coupon-extra-vs-ordinary-plan-2026-06-03.json');
 const OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'coupon-cancel-results');
 const COUPON_GOODS_URL = (activityId, levelRuleId) => `https://sso.geiwohuo.com/#/mbrs/marketing/coupon/rule/goods/${activityId}/${levelRuleId}`;
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
@@ -50,6 +52,7 @@ const PLAN_PRICE_CANCEL_DECISIONS = new Set([
   'coupon_not_guaranteed_final_above_target',
   'coupon_non_guaranteed_base_above_target',
 ]);
+const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -67,6 +70,87 @@ function numberOrNull(value) {
 
 function round2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function sha256Bytes(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function normalizedPath(file) {
+  return path.resolve(String(file || ''));
+}
+
+function relativeRootPath(file) {
+  return path.relative(ROOT, normalizedPath(file)).replaceAll(path.sep, '/');
+}
+
+function assertHash(value, label) {
+  const hash = String(value || '').trim().toLowerCase();
+  if (!SHA256_PATTERN.test(hash)) throw new Error(`${label} must be a 64-character SHA-256 hex digest`);
+  return hash;
+}
+
+async function readVerifiedRegularFile(file, expectedSha256, label) {
+  const absolute = normalizedPath(file);
+  let stat;
+  try {
+    stat = await fs.lstat(absolute);
+  } catch (error) {
+    throw new Error(`${label} is missing or unreadable: ${absolute}: ${error.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error(`${label} must be a regular non-symlink single-link file: ${absolute}`);
+  }
+  const bytes = await fs.readFile(absolute);
+  const actualSha256 = sha256Bytes(bytes);
+  const expected = assertHash(expectedSha256, `${label} expected SHA-256`);
+  if (actualSha256 !== expected) {
+    throw new Error(`${label} SHA-256 mismatch: expected=${expected} actual=${actualSha256}`);
+  }
+  return {absolute, bytes, sha256: actualSha256};
+}
+
+function readRegularSourceBinding(file, label) {
+  const absolute = normalizedPath(file);
+  let stat;
+  try {
+    stat = fsSync.lstatSync(absolute);
+  } catch (error) {
+    throw new Error(`${label} is missing or unreadable: ${absolute}: ${error.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    throw new Error(`${label} must be a regular non-symlink single-link file: ${absolute}`);
+  }
+  const bytes = fsSync.readFileSync(absolute);
+  return {path: relativeRootPath(absolute), sha256: sha256Bytes(bytes), bytes: bytes.length};
+}
+
+function sourceBindingEntries(value, label) {
+  if (!Array.isArray(value) || !value.length) throw new Error(`${label} must be a non-empty array of path/hash bindings`);
+  return value.map((entry, index) => {
+    if (typeof entry === 'string') {
+      throw new Error(`${label}[${index}] is missing its SHA-256 binding`);
+    }
+    const sourcePath = String(entry?.path || '').trim();
+    if (!sourcePath) throw new Error(`${label}[${index}] path is missing`);
+    return {path: sourcePath, sha256: assertHash(entry?.sha256, `${label}[${index}] SHA-256`)};
+  });
+}
+
+function compareSourceBindings(actual, expected, label) {
+  if (actual.length !== expected.length) {
+    throw new Error(`${label} count mismatch: expected=${expected.length} actual=${actual.length}`);
+  }
+  for (let i = 0; i < expected.length; i += 1) {
+    const actualPath = normalizedPath(path.resolve(ROOT, actual[i].path));
+    const expectedPath = normalizedPath(path.resolve(ROOT, expected[i].path));
+    if (actualPath !== expectedPath) {
+      throw new Error(`${label}[${i}] path mismatch: expected=${expected[i].path} actual=${actual[i].path}`);
+    }
+    if (actual[i].sha256 !== expected[i].sha256) {
+      throw new Error(`${label}[${i}] SHA-256 mismatch: expected=${expected[i].sha256} actual=${actual[i].sha256}`);
+    }
+  }
 }
 
 function hasPlanPriceCancelEvidence(row) {
@@ -111,7 +195,9 @@ function parseArgs(argv) {
   const out = {
     stores: [],
     activityId: ACTIVITY_ID_DEFAULT,
-    extraList: DEFAULT_EXTRA_LIST,
+    extraList: '',
+    extraListExplicit: false,
+    expectedArtifactSha256: '',
     execute: false,
     noClose: false,
     noLaunch: false,
@@ -124,7 +210,13 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--stores') out.stores.push(...splitStores(argv[++i]));
     else if (a === '--activity-id') out.activityId = Number(argv[++i]);
-    else if (a === '--extra-list') out.extraList = argv[++i];
+    else if (a === '--extra-list' || a === '--artifact') {
+      out.extraList = argv[++i];
+      out.extraListExplicit = true;
+    }
+    else if (a === '--expected-artifact-sha256' || a === '--expected-artifact-sha' || a === '--expected-artifact-hash' || a === '--expected-extra-list-sha256' || a === '--expected-source-sha256' || a === '--expected-source-artifact-sha256' || a === '--artifact-sha256') {
+      out.expectedArtifactSha256 = argv[++i];
+    }
     else if (a === '--price-overrides' || a === '--coupon-price-overrides') out.priceOverrides.push(...splitStores(argv[++i]));
     else if (a === '--execute') out.execute = true;
     else if (a === '--dry-run' || a === '--no-execute') out.execute = false;
@@ -137,6 +229,10 @@ function parseArgs(argv) {
   }
   out.stores = [...new Set(out.stores.map(s => s.toUpperCase()))];
   if (!out.stores.length) throw new Error('Missing stores, e.g. --stores TZ or DL,DX,FY');
+  if (!out.extraListExplicit || !String(out.extraList || '').trim()) {
+    throw new Error('Coupon cancel requires an explicit --extra-list artifact path; the retired June default is disabled');
+  }
+  assertHash(out.expectedArtifactSha256, 'Coupon cancel requires --expected-artifact-sha256');
   if (out.activityId !== ACTIVITY_ID_DEFAULT) throw new Error('This cancel workflow is only verified for coupon activity 34810');
   if (!Number.isFinite(out.waitMs) || out.waitMs < 10_000) out.waitMs = 45_000;
   if (!Number.isFinite(out.pageSize) || out.pageSize < 20) out.pageSize = 200;
@@ -625,27 +721,149 @@ async function waitForExtrasInactive(cdp, activityId, levelRuleId, targetSkcs, w
   return {ok: false, enrolled: latest, polls, activeRemaining};
 }
 
-async function loadJson(file) {
-  const absolute = path.resolve(ROOT, file);
-  return JSON.parse(await fs.readFile(absolute, 'utf8'));
+function comparePlanSelection(actual, current, label) {
+  if (!actual || typeof actual !== 'object' || Array.isArray(actual)) {
+    throw new Error(`${label} planSelection binding is missing`);
+  }
+  const expected = {
+    strategy: 'registry_current_baseline',
+    registryFile: current.registryFile,
+    registryHash: current.registryHash,
+    selectionPlanPath: relativeRootPath(current.targetPlan),
+    priceOverridesPath: relativeRootPath(current.priceOverrides),
+    selectionPlanHash: current.selectionPlanHash,
+    priceOverridesHash: current.priceOverridesHash,
+    selectionPayloadHash: current.selectionPayloadHash,
+    pricePayloadHash: current.pricePayloadHash,
+    workFingerprint: current.workFingerprint,
+  };
+  for (const key of Object.keys(expected)) {
+    const actualRaw = String(actual[key] || '').trim();
+    const expectedRaw = String(expected[key] || '').trim();
+    const actualValue = key.endsWith('File') || key.endsWith('Path')
+      ? (actualRaw ? normalizedPath(key === 'registryFile' ? actualRaw : path.resolve(ROOT, actualRaw)) : '')
+      : actualRaw.toLowerCase();
+    const expectedValue = key.endsWith('File') || key.endsWith('Path')
+      ? (expectedRaw ? normalizedPath(key === 'registryFile' ? expectedRaw : path.resolve(ROOT, expectedRaw)) : '')
+      : expectedRaw.toLowerCase();
+    if (!actualValue || actualValue !== expectedValue) {
+      throw new Error(`${label} planSelection.${key} mismatch: expected=${expected[key]} actual=${actual[key]}`);
+    }
+  }
 }
 
-async function loadExtraAndPlans(extraListPath, args) {
-  const absolute = path.resolve(ROOT, extraListPath);
-  const extraDoc = await loadJson(absolute);
+function comparePathList(actual, expected, label) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) {
+    throw new Error(`${label} count mismatch: expected=${expected.length} actual=${Array.isArray(actual) ? actual.length : 'missing'}`);
+  }
+  for (let i = 0; i < expected.length; i += 1) {
+    const actualPath = normalizedPath(path.resolve(ROOT, actual[i]));
+    const expectedPath = normalizedPath(path.resolve(ROOT, expected[i]));
+    if (actualPath !== expectedPath) {
+      throw new Error(`${label}[${i}] mismatch: expected=${expected[i]} actual=${actual[i]}`);
+    }
+  }
+}
+
+async function verifyRiskArtifactBinding(extraDoc, artifactPath) {
+  const requestedRisk = extraDoc?.riskCancel === true || String(extraDoc?.mode || '').toLowerCase().includes('risk');
+  if (!requestedRisk) return null;
+  if (extraDoc?.riskCancel !== true || extraDoc?.mode !== 'risk-cancel-price-below-target') {
+    throw new Error('coupon cancel safety stop: riskCancel artifact mode/flag is not the scanner-generated bound form');
+  }
+
+  const current = resolveCurrentMarketingPlanPair({root: ROOT});
+  comparePlanSelection(extraDoc.planSelection, current, 'coupon cancel artifact');
+
+  const currentPlan = await loadCouponTargetEligibilityPlan({
+    root: ROOT,
+    planPath: current.targetPlan,
+    priceOverridesPaths: [current.priceOverrides],
+    targetDiscountPct: 15,
+  });
+  const expectedPlanSources = currentPlan.planSources.map((file, index) => readRegularSourceBinding(file, `current ordinary plan source[${index}]`));
+  const expectedPriceSources = currentPlan.priceOverrideSources.map((file, index) => readRegularSourceBinding(file, `current price override source[${index}]`));
+  const actualPlanSources = sourceBindingEntries(extraDoc.planSources, 'coupon cancel ordinary plan sources');
+  const actualPriceSources = sourceBindingEntries(extraDoc.priceOverrideSources, 'coupon cancel price override sources');
+  compareSourceBindings(actualPlanSources, expectedPlanSources, 'coupon cancel ordinary plan sources');
+  compareSourceBindings(actualPriceSources, expectedPriceSources, 'coupon cancel price override sources');
+  comparePathList(extraDoc.ordinaryPlanPaths, expectedPlanSources.map(source => source.path), 'coupon cancel ordinaryPlanPaths');
+  if (extraDoc.priceOverrideSourcePaths !== undefined) {
+    comparePathList(extraDoc.priceOverrideSourcePaths, expectedPriceSources.map(source => source.path), 'coupon cancel priceOverrideSourcePaths');
+  }
+
+  const sourceArtifact = extraDoc.sourceArtifact && typeof extraDoc.sourceArtifact === 'object'
+    ? extraDoc.sourceArtifact
+    : {path: extraDoc.sourceScan, sha256: extraDoc.sourceScanSha256};
+  if (!sourceArtifact?.path || !sourceArtifact?.sha256) {
+    throw new Error('coupon cancel safety stop: riskCancel artifact must bind a source scan path and SHA-256');
+  }
+  if (extraDoc.sourceScan !== undefined && normalizedPath(path.resolve(ROOT, extraDoc.sourceScan)) !== normalizedPath(path.resolve(ROOT, sourceArtifact.path))) {
+    throw new Error('coupon cancel safety stop: sourceScan does not match sourceArtifact.path');
+  }
+  if (extraDoc.sourceScanSha256 !== undefined && assertHash(extraDoc.sourceScanSha256, 'coupon cancel sourceScanSha256') !== assertHash(sourceArtifact.sha256, 'coupon cancel sourceArtifact.sha256')) {
+    throw new Error('coupon cancel safety stop: sourceScanSha256 does not match sourceArtifact.sha256');
+  }
+  const sourceScan = await readVerifiedRegularFile(
+    path.resolve(ROOT, sourceArtifact.path),
+    sourceArtifact.sha256,
+    'coupon cancel source scan artifact',
+  );
+  let sourceScanDoc;
+  try {
+    sourceScanDoc = JSON.parse(sourceScan.bytes.toString('utf8').replace(/^\uFEFF/, ''));
+  } catch (error) {
+    throw new Error(`coupon cancel source scan artifact JSON parse failed: ${error.message}`);
+  }
+  comparePlanSelection(sourceScanDoc.planSelection, current, 'coupon cancel source scan');
+  const sourceScanPlanSources = sourceBindingEntries(sourceScanDoc.planSources, 'coupon cancel source scan ordinary plan sources');
+  const sourceScanPriceSources = sourceBindingEntries(sourceScanDoc.priceOverrideSources, 'coupon cancel source scan price override sources');
+  compareSourceBindings(sourceScanPlanSources, expectedPlanSources, 'coupon cancel source scan ordinary plan sources');
+  compareSourceBindings(sourceScanPriceSources, expectedPriceSources, 'coupon cancel source scan price override sources');
+
+  return {
+    current,
+    currentPlan,
+    sourceScan: {
+      path: relativeRootPath(sourceScan.absolute),
+      sha256: sourceScan.sha256,
+    },
+    planSources: expectedPlanSources,
+    priceOverrideSources: expectedPriceSources,
+    artifactPath,
+  };
+}
+
+async function loadExtraAndPlans(extraListPath, args, expectedArtifactSha256) {
+  const artifact = await readVerifiedRegularFile(
+    path.resolve(ROOT, extraListPath),
+    expectedArtifactSha256,
+    'coupon cancel artifact',
+  );
+  let extraDoc;
+  try {
+    extraDoc = JSON.parse(artifact.bytes.toString('utf8').replace(/^\uFEFF/, ''));
+  } catch (error) {
+    throw new Error(`coupon cancel artifact JSON parse failed: ${error.message}`);
+  }
   const rows = Array.isArray(extraDoc) ? extraDoc : (extraDoc.rows || []);
   const ordinaryPlanPaths = Array.isArray(extraDoc.ordinaryPlanPaths) ? extraDoc.ordinaryPlanPaths : [];
-  const riskCancel = extraDoc.riskCancel === true || String(extraDoc.mode || '').includes('risk');
+  const riskCancel = extraDoc?.riskCancel === true || String(extraDoc?.mode || '').toLowerCase().includes('risk');
+  const riskBinding = await verifyRiskArtifactBinding(extraDoc, artifact.absolute);
   const planByStore = new Map();
   let couponPlan = null;
-  if (rows.length && !ordinaryPlanPaths.length) {
+  if (rows.length && !ordinaryPlanPaths.length && !riskBinding) {
     throw new Error('coupon cancel safety stop: extra list has rows but no ordinaryPlanPaths to derive allowed15 protection set');
   }
-  if (ordinaryPlanPaths.length) {
+  const planPath = riskBinding?.current.targetPlan || artifact.absolute;
+  const priceOverridesPaths = riskBinding
+    ? [riskBinding.current.priceOverrides]
+    : args.priceOverrides;
+  if (ordinaryPlanPaths.length || riskBinding) {
     couponPlan = await loadCouponTargetEligibilityPlan({
       root: ROOT,
-      planPath: absolute,
-      priceOverridesPaths: args.priceOverrides,
+      planPath,
+      priceOverridesPaths,
       targetDiscountPct: 15,
     });
     for (const [storeKey, allowedSet] of couponPlan.allowed15ByStore.entries()) {
@@ -656,7 +874,8 @@ async function loadExtraAndPlans(extraListPath, args) {
     throw new Error('coupon cancel safety stop: allowed15 protection set could not load paired price-overrides');
   }
   return {
-    path: absolute,
+    path: artifact.absolute,
+    sha256: artifact.sha256,
     rows,
     ordinaryPlanPaths,
     planByStore,
@@ -667,6 +886,8 @@ async function loadExtraAndPlans(extraListPath, args) {
       stores: summarizeCouponTargetEligibilityPlan(couponPlan),
     } : null,
     riskCancel,
+    riskBinding,
+    planSelection: extraDoc.planSelection || null,
     purpose: extraDoc.purpose || '',
   };
 }
@@ -947,10 +1168,9 @@ async function processStore(store, args, rows, planByStore, extraListPath) {
   }
 }
 
-await fs.mkdir(OUT_DIR, {recursive: true});
 const args = parseArgs(process.argv.slice(2));
-const extra = await loadExtraAndPlans(args.extraList, args);
-if (extra.riskCancel) args.allowPlanRiskCancel = true;
+const extra = await loadExtraAndPlans(args.extraList, args, args.expectedArtifactSha256);
+await fs.mkdir(OUT_DIR, {recursive: true});
 const selectedStores = args.stores.map(key => {
   const store = STORES.find(s => String(s.storeKey).toUpperCase() === key.toUpperCase());
   if (!store) throw new Error(`Unknown store ${key}`);
@@ -962,10 +1182,17 @@ const summary = {
   activityId: args.activityId,
   mode: args.execute ? 'execute' : 'dry-run',
   extraList: extra.path,
+  extraListSha256: extra.sha256,
   ordinaryPlanPaths: extra.ordinaryPlanPaths,
+  planSelection: extra.planSelection,
   protectionPolicy: 'allowed15_from_price_overrides_not_plain_ordinary_plan',
   couponPlan: extra.couponPlan,
   riskCancel: extra.riskCancel,
+  riskBinding: extra.riskBinding ? {
+    sourceScan: extra.riskBinding.sourceScan,
+    planSources: extra.riskBinding.planSources,
+    priceOverrideSources: extra.riskBinding.priceOverrideSources,
+  } : null,
   purpose: extra.purpose,
   stores: [],
 };

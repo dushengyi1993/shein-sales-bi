@@ -15,6 +15,10 @@ function rel(file) {
   return path.relative(root, file).replaceAll(path.sep, '/');
 }
 
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
 function run(...args) {
   const result = spawnSync(process.execPath, ['scripts/marketing/manage_marketing_repair_queue.mjs', ...args], {
     cwd: root,
@@ -33,6 +37,16 @@ function runFailure(...args) {
   return result;
 }
 
+async function expectedQueueCas(queuePath) {
+  const bytes = await fs.readFile(queuePath);
+  const queue = JSON.parse(bytes.toString('utf8'));
+  return [
+    '--expected-queue-fingerprint', queue.queueFingerprint,
+    '--expected-source-guard-hash', queue.sourceGuardHash,
+    '--expected-queue-state-sha256', sha256(bytes),
+  ];
+}
+
 try {
   const guardPath = path.join(fixtureRoot, `marketing-daily-guard-${date}.json`);
   const driftDir = path.join(fixtureRoot, `target-price-drift-${date}`);
@@ -43,7 +57,11 @@ try {
   await fs.mkdir(driftDir, {recursive: true});
   await fs.mkdir(fallbackDir, {recursive: true});
   const liveScan = rel(path.join(fixtureRoot, `live-${date}.json`));
-  const priceOverrides = rel(path.join(fixtureRoot, 'price-overrides.json'));
+  const priceOverridesPath = path.join(fixtureRoot, 'price-overrides.json');
+  const priceOverrides = rel(priceOverridesPath);
+  const priceOverridesText = `${JSON.stringify({items: []})}\n`;
+  await fs.writeFile(priceOverridesPath, priceOverridesText);
+  const priceOverridesSha256 = sha256(priceOverridesText);
   let guard = {
     reportDate: date,
     highClickLowConversionSpecial: {
@@ -55,7 +73,7 @@ try {
       belowRows: [{storeKey: 'DL', skc: 'sv1'}],
     },
     manualSpecialLimitedDiscount: {actionCount: 0},
-    targetPlanSelection: {priceOverrides},
+    targetPlanSelection: {priceOverrides, priceOverridesHash: priceOverridesSha256},
   };
   const writeGuardAndHighClickPlan = async () => {
     const guardText = `${JSON.stringify(guard)}\n`;
@@ -99,6 +117,9 @@ try {
     storeKey: 'DL',
     purpose: `new_listing_or_relisted_top_treatment_limited_discount_fallback_${date}`,
     sourceGuard,
+    sourcePriceOverrides: priceOverrides,
+    sourcePriceOverridesSha256: priceOverridesSha256,
+    priceOverridesSha256,
     rows: [{storeKey: 'DL', skc: 'sv2'}],
   })}\n`);
   await fs.writeFile(fallbackPlanPath, `${JSON.stringify({
@@ -106,6 +127,8 @@ try {
     sourceGuard,
     sourceCurrentMarketingLiveScan: liveScan,
     sourcePriceOverrides: priceOverrides,
+    sourcePriceOverridesSha256: priceOverridesSha256,
+    priceOverridesSha256,
     rescueFiles: [{storeKey: 'DL', path: rel(fallbackPath), count: 1}],
   })}\n`);
 
@@ -129,13 +152,14 @@ try {
   });
   assert.equal(queue.status, 'pending');
 
-  run('update-stage', '--queue', queuePath, '--stage', 'highClickSpecial', '--status', 'completed', '--readback-ok', 'true');
-  run('update-stage', '--queue', queuePath, '--stage', 'driftRepair', '--status', 'completed', '--readback-ok', 'true');
+  run('update-stage', '--queue', queuePath, '--stage', 'highClickSpecial', '--status', 'completed', '--readback-ok', 'true', ...await expectedQueueCas(queuePath));
+  queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
+  run('update-stage', '--queue', queuePath, '--stage', 'driftRepair', '--status', 'completed', '--readback-ok', 'true', ...await expectedQueueCas(queuePath));
   run(...buildArgs);
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
   assert.equal(queue.stages.driftRepair.status, 'completed', 'same exact work fingerprint must preserve completed progress');
 
-  run('update-stage', '--queue', queuePath, '--stage', 'fallbackRepair', '--status', 'blocked', '--readback-ok', 'false');
+  run('update-stage', '--queue', queuePath, '--stage', 'fallbackRepair', '--status', 'blocked', '--readback-ok', 'false', ...await expectedQueueCas(queuePath));
   run(...buildArgs);
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
   assert.equal(queue.stages.fallbackRepair.status, 'blocked', 'same exact work fingerprint must preserve terminal business blockers');
@@ -151,6 +175,9 @@ try {
     storeKey: 'DL',
     purpose: `new_listing_or_relisted_top_treatment_limited_discount_fallback_${date}`,
     sourceGuard,
+    sourcePriceOverrides: priceOverrides,
+    sourcePriceOverridesSha256: priceOverridesSha256,
+    priceOverridesSha256,
     rows: [{storeKey: 'DL', skc: 'sv1'}],
   })}\n`);
   const overlap = runFailure(...buildArgs);
@@ -164,7 +191,11 @@ try {
   const overlapQueuePath = path.join(overlapRoot, `marketing-repair-${overlapDate}.json`);
   await fs.mkdir(overlapDriftDir, {recursive: true});
   const overlapLiveScan = rel(path.join(overlapRoot, `live-${overlapDate}.json`));
-  const overlapPriceOverrides = rel(path.join(overlapRoot, 'price-overrides.json'));
+  const overlapPriceOverridesPath = path.join(overlapRoot, 'price-overrides.json');
+  const overlapPriceOverrides = rel(overlapPriceOverridesPath);
+  const overlapPriceOverridesText = `${JSON.stringify({items: []})}\n`;
+  await fs.writeFile(overlapPriceOverridesPath, overlapPriceOverridesText);
+  const overlapPriceOverridesSha256 = sha256(overlapPriceOverridesText);
   const overlapGuard = {
     reportDate: overlapDate,
     highClickLowConversionSpecial: {
@@ -179,7 +210,10 @@ try {
       ],
     },
     manualSpecialLimitedDiscount: {actionCount: 0},
-    targetPlanSelection: {priceOverrides: overlapPriceOverrides},
+    targetPlanSelection: {
+      priceOverrides: overlapPriceOverrides,
+      priceOverridesHash: overlapPriceOverridesSha256,
+    },
   };
   const overlapGuardText = `${JSON.stringify(overlapGuard)}\n`;
   await fs.writeFile(overlapGuardPath, overlapGuardText);
@@ -209,6 +243,8 @@ try {
     sourceGuard: overlapSourceGuard,
     sourceCurrentMarketingLiveScan: overlapLiveScan,
     sourcePriceOverrides: overlapPriceOverrides,
+    sourcePriceOverridesSha256: overlapPriceOverridesSha256,
+    priceOverridesSha256: overlapPriceOverridesSha256,
     rescueFiles: [],
   })}\n`);
   const overlapBuildArgs = ['build', '--date', overlapDate, '--guard', overlapGuardPath, '--high-click-plan', overlapHighClickPlanPath, '--drift-plan-dir', overlapDriftDir, '--fallback-plan', overlapFallbackPlanPath, '--queue', overlapQueuePath];

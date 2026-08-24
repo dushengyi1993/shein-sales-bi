@@ -12,6 +12,27 @@ import {
 } from '../../lib/marketing_repair_manifest.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const QUEUE_CAS_CONFLICT_CODE = 'QUEUE_CAS_CONFLICT';
+const QUEUE_MUTATION_LOCK_BUSY_CODE = 'QUEUE_MUTATION_LOCK_BUSY';
+const QUEUE_MUTATION_LOCK_FAILED_CODE = 'QUEUE_MUTATION_LOCK_FAILED';
+const QUEUE_MUTATION_LOCK_SUFFIX = '.mutation.lock';
+const QUEUE_MUTATION_LOCK_OWNER = 'owner';
+
+class QueueCasConflictError extends Error {
+  constructor(message) {
+    super(`[${QUEUE_CAS_CONFLICT_CODE}] ${message}`);
+    this.name = 'QueueCasConflictError';
+    this.code = QUEUE_CAS_CONFLICT_CODE;
+  }
+}
+
+class QueueMutationLockError extends Error {
+  constructor(message, code = QUEUE_MUTATION_LOCK_FAILED_CODE) {
+    super(`[${code}] ${message}`);
+    this.name = 'QueueMutationLockError';
+    this.code = code;
+  }
+}
 
 function parseArgs(argv) {
   const command = argv[0] && !argv[0].startsWith('--') ? argv[0] : 'build';
@@ -36,6 +57,165 @@ function hashJson(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+function hashBytes(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function requiredSha256Arg(args, key, flag) {
+  const value = String(args[key] || '').trim().toLowerCase();
+  if (!value) throw new Error(`Missing ${flag}`);
+  if (!/^[a-f0-9]{64}$/.test(value)) throw new Error(`Invalid ${flag}: expected a 64-hex SHA-256`);
+  return value;
+}
+
+function assertExpectedQueuePair(queue, expected) {
+  const actualQueueFingerprint = String(queue?.queueFingerprint || '').trim().toLowerCase();
+  const actualSourceGuardHash = String(queue?.sourceGuardHash || '').trim().toLowerCase();
+  if (actualQueueFingerprint !== expected.queueFingerprint || actualSourceGuardHash !== expected.sourceGuardHash) {
+    throw new QueueCasConflictError(
+      `Queue CAS conflict: expected queueFingerprint=${expected.queueFingerprint} sourceGuardHash=${expected.sourceGuardHash} `
+      + `actual queueFingerprint=${actualQueueFingerprint || 'missing'} sourceGuardHash=${actualSourceGuardHash || 'missing'}; queue unchanged`,
+    );
+  }
+}
+
+function expectedQueuePair(args) {
+  return {
+    queueFingerprint: requiredSha256Arg(args, 'expectedQueueFingerprint', '--expected-queue-fingerprint'),
+    sourceGuardHash: requiredSha256Arg(args, 'expectedSourceGuardHash', '--expected-source-guard-hash'),
+  };
+}
+
+function expectedQueueStateSha256(args) {
+  const value = String(args.expectedQueueStateSha256 || args.expectedStateSha256 || args.expectedQueueFileSha256 || '').trim().toLowerCase();
+  if (!value) throw new Error('Missing --expected-queue-state-sha256');
+  if (!/^[a-f0-9]{64}$/.test(value)) throw new Error('Invalid --expected-queue-state-sha256: expected a 64-hex SHA-256');
+  return value;
+}
+
+function queueMutationLockPath(queuePath) {
+  return `${queuePath}${QUEUE_MUTATION_LOCK_SUFFIX}`;
+}
+
+function queueLockToken(value, flag = '--queue-lock-token') {
+  const token = String(value || '').trim();
+  if (!token || /[\r\n]/.test(token) || token.length > 256) {
+    throw new Error(`Invalid ${flag}: expected a non-empty single-line token`);
+  }
+  return token;
+}
+
+async function readQueueSnapshot(file) {
+  const stat = await fs.lstat(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`Queue file must be a regular non-symlink file: ${file}`);
+  }
+  const bytes = await fs.readFile(file);
+  const queue = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+  return {
+    bytes,
+    queue,
+    queueStateSha256: hashBytes(bytes),
+  };
+}
+
+async function assertQueueMutationLockOwner(queuePath, token) {
+  const lockPath = queueMutationLockPath(queuePath);
+  let stat;
+  try {
+    stat = await fs.lstat(lockPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new QueueMutationLockError(`queue mutation lock is not held: ${lockPath}`, QUEUE_MUTATION_LOCK_BUSY_CODE);
+    }
+    throw new QueueMutationLockError(`queue mutation lock could not be inspected: ${lockPath}: ${error.message}`);
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new QueueMutationLockError(`queue mutation lock must be a real directory: ${lockPath}`);
+  }
+  let actualToken;
+  try {
+    actualToken = (await fs.readFile(path.join(lockPath, QUEUE_MUTATION_LOCK_OWNER), 'utf8')).trim();
+  } catch (error) {
+    throw new QueueMutationLockError(`queue mutation lock owner could not be read: ${lockPath}: ${error.message}`);
+  }
+  if (actualToken !== token) {
+    throw new QueueMutationLockError(`queue mutation lock owner mismatch: ${lockPath}`, QUEUE_MUTATION_LOCK_BUSY_CODE);
+  }
+}
+
+async function createQueueMutationLock(queuePath, token) {
+  const lockPath = queueMutationLockPath(queuePath);
+  await fs.mkdir(path.dirname(lockPath), {recursive: true});
+  try {
+    // The lock is deliberately a non-reclaimable directory. A process that
+    // dies leaves an operator-visible lock and the next mutation fails closed.
+    await fs.mkdir(lockPath, {mode: 0o700});
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw new QueueMutationLockError(`queue mutation lock is already held: ${lockPath}`, QUEUE_MUTATION_LOCK_BUSY_CODE);
+    }
+    throw new QueueMutationLockError(`queue mutation lock could not be acquired: ${lockPath}: ${error.message}`);
+  }
+  try {
+    await fs.writeFile(path.join(lockPath, QUEUE_MUTATION_LOCK_OWNER), `${token}\n`, {encoding: 'utf8', flag: 'wx', mode: 0o600});
+  } catch (error) {
+    try {
+      await fs.rmdir(lockPath);
+    } catch {
+      // Do not broaden cleanup into recursive deletion. The lock remains a
+      // visible recovery decision if this process cannot prove it is empty.
+    }
+    throw new QueueMutationLockError(`queue mutation lock owner could not be written: ${lockPath}: ${error.message}`);
+  }
+  return lockPath;
+}
+
+async function releaseQueueMutationLock(queuePath, token, {allowMissing = false} = {}) {
+  const lockPath = queueMutationLockPath(queuePath);
+  try {
+    await assertQueueMutationLockOwner(queuePath, token);
+    await fs.unlink(path.join(lockPath, QUEUE_MUTATION_LOCK_OWNER));
+    await fs.rmdir(lockPath);
+  } catch (error) {
+    if (allowMissing && error?.code === QUEUE_MUTATION_LOCK_BUSY_CODE && /not held/.test(error.message)) return false;
+    if (error instanceof QueueMutationLockError) throw error;
+    throw new QueueMutationLockError(`queue mutation lock could not be released: ${lockPath}: ${error.message}`);
+  }
+  return true;
+}
+
+async function acquireQueueMutationLock(queuePath, requestedToken = '') {
+  const token = requestedToken ? queueLockToken(requestedToken) : crypto.randomUUID();
+  if (requestedToken) {
+    await assertQueueMutationLockOwner(queuePath, token);
+    return {token, ownedByCaller: true, release: async () => {}};
+  }
+  await createQueueMutationLock(queuePath, token);
+  let released = false;
+  return {
+    token,
+    ownedByCaller: false,
+    release: async () => {
+      if (released) return;
+      await releaseQueueMutationLock(queuePath, token);
+      released = true;
+    },
+  };
+}
+
+async function maybePauseBeforeQueueRename() {
+  if (process.env.NODE_ENV !== 'test') return;
+  const holdMs = Number(process.env.SHEIN_MARKETING_REPAIR_QUEUE_TEST_HOLD_BEFORE_RENAME_MS || 0);
+  if (!Number.isSafeInteger(holdMs) || holdMs <= 0) return;
+  const marker = String(process.env.SHEIN_MARKETING_REPAIR_QUEUE_TEST_BEFORE_RENAME_MARKER || '').trim();
+  if (marker) {
+    await fs.mkdir(path.dirname(marker), {recursive: true});
+    await fs.writeFile(marker, `${process.pid}\n`, 'utf8');
+  }
+  await new Promise(resolve => setTimeout(resolve, holdMs));
+}
+
 function exactStageKey(storeKey, skc) {
   return `${String(storeKey || '').trim().toUpperCase()}::${String(skc || '').trim()}`;
 }
@@ -44,11 +224,30 @@ async function readJson(file) {
   return JSON.parse(await fs.readFile(file, 'utf8'));
 }
 
-async function writeJsonAtomic(file, value) {
+async function writeJsonAtomic(file, value, {expectedQueueStateSha256 = ''} = {}) {
   await fs.mkdir(path.dirname(file), {recursive: true});
-  const temp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await fs.rename(temp, file);
+  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  await fs.writeFile(temp, bytes);
+  try {
+    await maybePauseBeforeQueueRename();
+    if (expectedQueueStateSha256) {
+      const current = await readQueueSnapshot(file);
+      assertExpectedQueueState(current, expectedQueueStateSha256);
+    }
+    await fs.rename(temp, file);
+  } finally {
+    await fs.rm(temp, {force: true}).catch(() => {});
+  }
+  return hashBytes(bytes);
+}
+
+function assertExpectedQueueState(snapshot, expectedStateSha256) {
+  if (snapshot.queueStateSha256 !== expectedStateSha256) {
+    throw new QueueCasConflictError(
+      `Queue CAS conflict: expected queueStateSha256=${expectedStateSha256} actual queueStateSha256=${snapshot.queueStateSha256}; queue unchanged`,
+    );
+  }
 }
 
 function preserveStage(existing, next) {
@@ -155,9 +354,14 @@ async function buildQueue(args) {
   if (overlappingWorkKeys.length) {
     throw new Error(`Repair stages overlap on ${overlappingWorkKeys.length} exact store+SKC keys: ${overlappingWorkKeys.slice(0, 20).join(',')}`);
   }
-  const existing = await readJson(queuePath).catch(() => null);
-  const now = new Date().toISOString();
-  const stageDefinitions = {
+  const mutationLock = await acquireQueueMutationLock(queuePath, args.queueLockToken || '');
+  try {
+    const existing = await readJson(queuePath).catch(error => {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    });
+    const now = new Date().toISOString();
+    const stageDefinitions = {
     highClickSpecial: {
       status: highClickRows > 0 ? 'pending' : 'not_required',
       rows: highClickRows,
@@ -198,14 +402,14 @@ async function buildQueue(args) {
       workFingerprint: fallback.workFingerprint,
       updatedAt: now,
     },
-  };
-  const stages = Object.fromEntries(Object.entries(stageDefinitions).map(([name, stage]) => [
-    name,
-    preserveStage(existing?.stages?.[name], stage),
-  ]));
-  const totalRows = highClickRows + manualRows + executableDriftRows + fallbackRows;
-  const totalGroups = stageDefinitions.highClickSpecial.groups + stageDefinitions.manualSpecialRestore.groups + stageDefinitions.driftRepair.groups + stageDefinitions.fallbackRepair.groups;
-  const queue = {
+    };
+    const stages = Object.fromEntries(Object.entries(stageDefinitions).map(([name, stage]) => [
+      name,
+      preserveStage(existing?.stages?.[name], stage),
+    ]));
+    const totalRows = highClickRows + manualRows + executableDriftRows + fallbackRows;
+    const totalGroups = stageDefinitions.highClickSpecial.groups + stageDefinitions.manualSpecialRestore.groups + stageDefinitions.driftRepair.groups + stageDefinitions.fallbackRepair.groups;
+    const queue = {
     schemaVersion: 1,
     date,
     createdAt: existing?.createdAt || now,
@@ -238,9 +442,20 @@ async function buildQueue(args) {
       highClickPriorityExcludedDriftKeys: driftKeysHandledByHighClickSpecialUnique,
     },
     stages,
-  };
-  await writeJsonAtomic(queuePath, queue);
-  console.log(JSON.stringify({ok: true, queue: rel(queuePath), status: queue.status, counts: queue.counts, queueFingerprint: queue.queueFingerprint}, null, 2));
+    };
+    const queueStateSha256 = await writeJsonAtomic(queuePath, queue);
+    console.log(JSON.stringify({
+      ok: true,
+      queue: rel(queuePath),
+      status: queue.status,
+      counts: queue.counts,
+      queueFingerprint: queue.queueFingerprint,
+      sourceGuardHash: queue.sourceGuardHash,
+      queueStateSha256,
+    }, null, 2));
+  } finally {
+    await mutationLock.release();
+  }
 }
 
 async function updateStage(args) {
@@ -249,46 +464,118 @@ async function updateStage(args) {
   const stageName = String(args.stage || '');
   const status = String(args.status || '');
   if (!stageName || !status) throw new Error('Missing --stage or --status');
-  const queue = await readJson(queuePath);
-  if (!queue.stages?.[stageName]) throw new Error(`Unknown queue stage: ${stageName}`);
-  queue.stages[stageName] = {
-    ...queue.stages[stageName],
-    status,
-    readbackOk: String(args.readbackOk || 'false') === 'true',
-    detail: String(args.detail || ''),
-    resultPath: String(args.resultPath || ''),
-    updatedAt: new Date().toISOString(),
-  };
-  queue.status = queueStatusFromStages(queue.stages, {afterUpdate: true});
-  queue.updatedAt = new Date().toISOString();
-  await writeJsonAtomic(queuePath, queue);
-  console.log(JSON.stringify({ok: true, queue: rel(queuePath), stage: stageName, status, queueStatus: queue.status}, null, 2));
+  const expected = expectedQueuePair(args);
+  const expectedStateSha256 = expectedQueueStateSha256(args);
+  const mutationLock = await acquireQueueMutationLock(queuePath, args.queueLockToken || '');
+  try {
+    const snapshot = await readQueueSnapshot(queuePath);
+    assertExpectedQueuePair(snapshot.queue, expected);
+    assertExpectedQueueState(snapshot, expectedStateSha256);
+    if (!snapshot.queue.stages?.[stageName]) throw new Error(`Unknown queue stage: ${stageName}`);
+    const currentQueue = snapshot.queue;
+    currentQueue.stages[stageName] = {
+      ...currentQueue.stages[stageName],
+      status,
+      readbackOk: String(args.readbackOk || 'false') === 'true',
+      detail: String(args.detail || ''),
+      resultPath: String(args.resultPath || ''),
+      updatedAt: new Date().toISOString(),
+    };
+    currentQueue.status = queueStatusFromStages(currentQueue.stages, {afterUpdate: true});
+    currentQueue.updatedAt = new Date().toISOString();
+    const queueStateSha256 = await writeJsonAtomic(queuePath, currentQueue, {expectedQueueStateSha256: expectedStateSha256});
+    console.log(JSON.stringify({
+      ok: true,
+      queue: rel(queuePath),
+      stage: stageName,
+      status,
+      queueStatus: currentQueue.status,
+      queueFingerprint: currentQueue.queueFingerprint,
+      sourceGuardHash: currentQueue.sourceGuardHash,
+      queueStateSha256,
+    }, null, 2));
+  } finally {
+    if (!mutationLock.ownedByCaller) await mutationLock.release();
+  }
 }
 
 async function handoffLocal(args) {
   const queuePath = path.resolve(ROOT, args.queue || '');
   if (!args.queue) throw new Error('Missing --queue');
-  const queue = await readJson(queuePath);
-  if (['completed', 'blocked'].includes(String(queue.status || ''))) {
-    console.log(JSON.stringify({ok: true, queue: rel(queuePath), status: queue.status, unchanged: true}, null, 2));
-    return;
+  const expected = expectedQueuePair(args);
+  const expectedStateSha256 = expectedQueueStateSha256(args);
+  const mutationLock = await acquireQueueMutationLock(queuePath, args.queueLockToken || '');
+  try {
+    const snapshot = await readQueueSnapshot(queuePath);
+    assertExpectedQueuePair(snapshot.queue, expected);
+    assertExpectedQueueState(snapshot, expectedStateSha256);
+    const currentQueue = snapshot.queue;
+    if (['completed', 'blocked'].includes(String(currentQueue.status || ''))) {
+      console.log(JSON.stringify({
+        ok: true,
+        queue: rel(queuePath),
+        status: currentQueue.status,
+        unchanged: true,
+        queueFingerprint: currentQueue.queueFingerprint,
+        sourceGuardHash: currentQueue.sourceGuardHash,
+        queueStateSha256: snapshot.queueStateSha256,
+      }, null, 2));
+      return;
+    }
+    if (Object.values(currentQueue.stages || {}).some(stage => String(stage?.status || '') === 'failed')) {
+      throw new Error('Cannot hand off a queue with failed stages; rebuild the exact queue first');
+    }
+    currentQueue.status = 'deferred_to_local';
+    currentQueue.handoff = {
+      location: 'local',
+      reason: String(args.reason || 'cloud marketing writes are disabled'),
+      handedOffAt: new Date().toISOString(),
+    };
+    currentQueue.updatedAt = new Date().toISOString();
+    const queueStateSha256 = await writeJsonAtomic(queuePath, currentQueue, {expectedQueueStateSha256: expectedStateSha256});
+    console.log(JSON.stringify({
+      ok: true,
+      queue: rel(queuePath),
+      status: currentQueue.status,
+      counts: currentQueue.counts,
+      queueFingerprint: currentQueue.queueFingerprint,
+      sourceGuardHash: currentQueue.sourceGuardHash,
+      queueStateSha256,
+    }, null, 2));
+  } finally {
+    if (!mutationLock.ownedByCaller) await mutationLock.release();
   }
-  if (Object.values(queue.stages || {}).some(stage => String(stage?.status || '') === 'failed')) {
-    throw new Error('Cannot hand off a queue with failed stages; rebuild the exact queue first');
-  }
-  queue.status = 'deferred_to_local';
-  queue.handoff = {
-    location: 'local',
-    reason: String(args.reason || 'cloud marketing writes are disabled'),
-    handedOffAt: new Date().toISOString(),
-  };
-  queue.updatedAt = new Date().toISOString();
-  await writeJsonAtomic(queuePath, queue);
-  console.log(JSON.stringify({ok: true, queue: rel(queuePath), status: queue.status, counts: queue.counts}, null, 2));
 }
 
-const args = parseArgs(process.argv.slice(2));
-if (args.command === 'build') await buildQueue(args);
-else if (args.command === 'update-stage') await updateStage(args);
-else if (args.command === 'handoff-local') await handoffLocal(args);
-else throw new Error(`Unknown command: ${args.command}`);
+async function acquireQueueLockCommand(args) {
+  if (!args.queue) throw new Error('Missing --queue');
+  const queuePath = path.resolve(ROOT, args.queue);
+  const token = queueLockToken(args.queueLockToken);
+  const lockPath = await createQueueMutationLock(queuePath, token);
+  console.log(JSON.stringify({ok: true, queue: rel(queuePath), queueLockPath: lockPath, queueLockToken: token}, null, 2));
+}
+
+async function releaseQueueLockCommand(args) {
+  if (!args.queue) throw new Error('Missing --queue');
+  const queuePath = path.resolve(ROOT, args.queue);
+  const token = queueLockToken(args.queueLockToken);
+  const released = await releaseQueueMutationLock(queuePath, token, {allowMissing: true});
+  console.log(JSON.stringify({ok: true, queue: rel(queuePath), released}, null, 2));
+}
+
+try {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.command === 'build') await buildQueue(args);
+  else if (args.command === 'update-stage') await updateStage(args);
+  else if (args.command === 'handoff-local') await handoffLocal(args);
+  else if (args.command === 'acquire-lock') await acquireQueueLockCommand(args);
+  else if (args.command === 'release-lock') await releaseQueueLockCommand(args);
+  else throw new Error(`Unknown command: ${args.command}`);
+} catch (error) {
+  console.error(error?.stack || error?.message || String(error));
+  process.exitCode = error?.code === QUEUE_CAS_CONFLICT_CODE
+    ? 73
+    : [QUEUE_MUTATION_LOCK_BUSY_CODE, QUEUE_MUTATION_LOCK_FAILED_CODE].includes(error?.code)
+      ? 75
+      : 1;
+}

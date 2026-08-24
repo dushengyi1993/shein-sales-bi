@@ -22,10 +22,9 @@ import {
   groupOrdinaryEvidenceBySkc,
   loadKnownOrdinaryPriceEvidence,
 } from '../../lib/marketing_ordinary_price_evidence.mjs';
+import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const DEFAULT_TARGET_PLAN = path.join(ROOT, 'tmp', 'marketing-signup', 'selection-plan-2026-06-03-ALL-ready.json');
-const DEFAULT_PRICE_OVERRIDES = path.join(ROOT, 'tmp', 'marketing-signup', 'price-overrides-2026-06-03-ALL-ready.json');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'outputs', 'reports');
 const RATES = [30, 50];
 const PRICE_TOLERANCE_SAR = 1;
@@ -34,21 +33,38 @@ const FLOOR_MARGIN = 0.15;
 function parseArgs(argv) {
   const args = {
     date: formatLocalDate(new Date()),
-    targetPlan: DEFAULT_TARGET_PLAN,
-    priceOverrides: DEFAULT_PRICE_OVERRIDES,
+    targetPlan: '',
+    priceOverrides: '',
+    targetPlanExplicit: false,
+    priceOverridesExplicit: false,
+    planSelection: null,
     stackReview: '',
     outDir: DEFAULT_OUT_DIR,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--date') args.date = String(argv[++i] || '').trim();
-    else if (a === '--target-plan') args.targetPlan = path.resolve(argv[++i]);
-    else if (a === '--price-overrides') args.priceOverrides = path.resolve(argv[++i]);
+    else if (a === '--target-plan') {
+      args.targetPlan = path.resolve(argv[++i]);
+      args.targetPlanExplicit = true;
+    } else if (a === '--price-overrides') {
+      args.priceOverrides = path.resolve(argv[++i]);
+      args.priceOverridesExplicit = true;
+    }
     else if (a === '--stack-review') args.stackReview = path.resolve(argv[++i]);
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) throw new Error(`Invalid --date ${args.date}; expected YYYY-MM-DD`);
   if (!args.stackReview) args.stackReview = latestFile(path.join(ROOT, 'outputs', 'reports'), /^marketing-stack-review-\d{4}-\d{2}-\d{2}\.json$/);
+  args.planSelection = resolveCurrentMarketingPlanPair({
+    root: ROOT,
+    targetPlan: args.targetPlan,
+    priceOverrides: args.priceOverrides,
+    targetPlanExplicit: args.targetPlanExplicit,
+    priceOverridesExplicit: args.priceOverridesExplicit,
+  });
+  args.targetPlan = args.planSelection.targetPlan;
+  args.priceOverrides = args.planSelection.priceOverrides;
   return args;
 }
 
@@ -333,6 +349,16 @@ async function main() {
     sources: {
       targetPlan: rel(args.targetPlan),
       priceOverrides: rel(args.priceOverrides),
+      planSelection: {
+        strategy: args.planSelection.strategy,
+        registryFile: args.planSelection.registryFile || '',
+        registryHash: args.planSelection.registryHash || '',
+        selectionPlanHash: args.planSelection.selectionPlanHash || '',
+        priceOverridesHash: args.planSelection.priceOverridesHash || '',
+        selectionPayloadHash: args.planSelection.selectionPayloadHash || '',
+        pricePayloadHash: args.planSelection.pricePayloadHash || '',
+        workFingerprint: args.planSelection.workFingerprint || '',
+      },
       stackReview: rel(args.stackReview),
     },
     ratesPct: RATES,
