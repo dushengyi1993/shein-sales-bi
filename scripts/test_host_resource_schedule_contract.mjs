@@ -974,11 +974,16 @@ assert.match(
 assert.match(repair, /write_state deferred_to_local/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /run_cloud_marketing_fallback_slot\.sh/);
 assert.match(repairSlot, /--defer-reason deferred_to_local/);
-assert.match(repairSlot, /HARD_DEADLINE_MINUTE=57/);
-assert.match(repairSlot, /HARD_DEADLINE_MINUTE=27/);
+assert.match(repairSlot, /GRACEFUL_CUTOFF_EPOCH/);
+assert.match(repairSlot, /OUTER_HARD_DEADLINE_EPOCH/);
+assert.match(repairSlot, /date -d .*22:55:00/);
+assert.match(repairSlot, /date -d .*23:10:00/);
+assert.match(repairSlot, /--deadline-epoch/);
 assert.match(repairSlot, /HOUR == 20/);
 assert.match(repairSlot, /HOUR == 21/);
-assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=1/);
+assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=32/);
+assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC=900/);
+assert.match(unit('shein-bi-cloud-marketing-repair.service'), /^TimeoutStartSec=9000$/m);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true/);
 assert.match(repair, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
@@ -988,7 +993,34 @@ assert.doesNotMatch(repair, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
 assert.match(repair, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
 assert.match(repair, /fallback readback found no remaining work/);
 assert.match(repair, /refuse to start another transaction/);
-assert.match(repair, /outside 20:45-20:57 \/ 21:15-21:27/);
+assert.match(repair, /outside 20:45-22:55 same-day window/);
+
+const fallbackBatch = read('scripts/marketing/batch_apply_new_listing_limited_discount.mjs');
+assert.match(fallbackBatch, /DEFAULT_MIN_START_BUDGET_SEC = 15 \* 60/);
+assert.match(fallbackBatch, /--graceful-cutoff-epoch|--deadline-epoch/);
+assert.match(fallbackBatch, /Absolute graceful cutoff epoch must be a future safe integer/);
+const groupGateAt = fallbackBatch.indexOf('const startBudget = groupStartBudget(args);');
+const groupLaunchAt = fallbackBatch.indexOf('launchSummary = summarizeRaw(await launchStore(storeKey));');
+const groupProcessAt = fallbackBatch.indexOf('const result = await processStore({');
+assert.ok(groupGateAt >= 0 && groupGateAt < groupLaunchAt && groupGateAt < groupProcessAt,
+  'graceful cutoff must gate every group before browser launch and transaction entry');
+assert.match(fallbackBatch, /processedSelectedKeys/);
+assert.match(fallbackBatch, /selectedEntries\.filter\(entry => \{[\s\S]*!processedSelectedKeys\.has\(key\)/,
+  'groups skipped by the graceful cutoff must be selected by explicit unprocessed keys');
+assert.doesNotMatch(fallbackBatch, /selectedEntries\.slice\(selectedCursor\)/,
+  'deferred accounting must not depend on a store-group cursor');
+assert.match(fallbackBatch, /for \(const file of storeEntries\)[\s\S]*await processStore/,
+  'multiple groups must remain serial through one awaited processStore path');
+const processStoreStart = fallbackBatch.indexOf('async function processStore(');
+const processStoreEnd = fallbackBatch.indexOf('\n}\n\nfunction summarizeTotals', processStoreStart);
+const processStoreSource = fallbackBatch.slice(processStoreStart, processStoreEnd);
+assert.match(processStoreSource, /executeLimitedDiscountWithInventoryTransaction/);
+assert.match(processStoreSource, /finally \{[\s\S]*closeStore\(storeKey\)/,
+  'an in-progress group must retain its terminal inventory transaction and cleanup path');
+assert.deepEqual(calendars(unit('shein-bi-cloud-marketing-repair.timer')), [
+  '*-*-* 20:45:00',
+  '*-*-* 21:15:00',
+]);
 
 const nodeWrapper = read('infra/bin/shein-bi-node');
 const cloudWriteGate = read('lib/cloud_marketing_write_gate.mjs');

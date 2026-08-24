@@ -401,15 +401,18 @@ const marketingRepair = readUnit('shein-bi-cloud-marketing-repair.service');
 const marketingRepairScript = fs.readFileSync(new URL('./cloud_marketing_repair_worker.sh', import.meta.url), 'utf8');
 assert.doesNotMatch(marketingRepair, /^ExecStart(?:Pre|Post)=.*cleanup_shein_store_browsers/m,
   'marketing repair must not stack unit-level cleanup around its lease-owned script cleanup');
-assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=1/);
+assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=32/);
+assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC=900/);
+assert.match(marketingRepair, /^TimeoutStartSec=9000$/m);
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud/);
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true/);
 assert.match(marketingRepair, /run_cloud_marketing_fallback_slot\.sh/);
 assert.match(marketingRepair, /SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=\/srv\/shein-bi\/runtime\/marketing_manual_limited_discount_overrides\.json/);
 assert.match(marketingRepair, /SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION=owner-standing-cloud-marketing-v1/);
 assert.match(marketingRepairScript, /--max-groups "\$REMAINING_GROUPS"/);
+assert.match(marketingRepairScript, /--graceful-cutoff-epoch "\$FALLBACK_GRACEFUL_CUTOFF_EPOCH"/);
 assert.match(marketingRepairScript, /new_groups_in_result/);
-assert.match(marketingRepairScript, /cap cloud repair batch groups=.* -> 1/);
+assert.match(marketingRepairScript, /cloud repair batch max groups=\$MAX_GROUPS; group writes remain serial/);
 assert.match(marketingRepairScript, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
 assert.match(marketingRepairScript, /defer_remaining_work/);
 assert.match(marketingRepairScript, /IS_CLOUD_EXECUTION=1/);
@@ -418,7 +421,7 @@ assert.doesNotMatch(marketingRepairScript, /AUTOMATION_CONTEXT.*== "cloud_timer"
 assert.match(marketingRepairScript, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
 assert.match(marketingRepairScript, /local execution already covered all authorized repairs/);
 assert.match(marketingRepairScript, /the final report waits for local execution and terminal readback/);
-assert.equal(property(marketingRepair, 'TimeoutStartSec'), '2400');
+assert.equal(property(marketingRepair, 'TimeoutStartSec'), '9000');
 
 const storageFeeTimer = readUnit('shein-bi-cloud-et-storage-fee.timer');
 assert.equal(property(storageFeeTimer, 'OnCalendar'), '*-*-* 14:20:00 Asia/Shanghai');

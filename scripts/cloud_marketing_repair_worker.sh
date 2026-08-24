@@ -23,16 +23,23 @@ GUARD_STAGE_DIR=""
 LEASE_TASK="${SHEIN_BI_MARKETING_REPAIR_LEASE_TASK:-cloud-marketing-repair}"
 LEASE_TTL_SEC="${SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC:-3000}"
 LEASE_ACQUIRED=0
-MAX_GROUPS="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-8}"
+MAX_GROUPS="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-32}"
 AUTOMATION_CONTEXT="${SHEIN_BI_MARKETING_AUTOMATION_CONTEXT:-}"
 EXECUTION_LOCATION="${SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION:-cloud}"
 CLOUD_FALLBACK_ENABLED="${SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED:-false}"
-FALLBACK_MIN_START_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC:-360}"
-FALLBACK_HARD_DEADLINE_MINUTE="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_MINUTE:-}"
-FALLBACK_HARD_DEADLINE_NEXT_HOUR="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_NEXT_HOUR:-0}"
+FALLBACK_MIN_START_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC:-900}"
+FALLBACK_GRACEFUL_CUTOFF_EPOCH="${SHEIN_BI_MARKETING_REPAIR_GRACEFUL_CUTOFF_EPOCH:-}"
+FALLBACK_OUTER_HARD_DEADLINE_EPOCH="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_EPOCH:-}"
 IS_CLOUD_EXECUTION=1
 if [[ "$EXECUTION_LOCATION" == "local" && "$ROOT" != "/opt/shein-bi/app" ]]; then
   IS_CLOUD_EXECUTION=0
+fi
+
+if (( IS_CLOUD_EXECUTION == 1 )); then
+  if [[ ! "$MAX_GROUPS" =~ ^[1-9][0-9]*$ ]] || (( MAX_GROUPS > 32 )); then
+    echo "[cloud_marketing_repair] ERROR cloud max groups must be an integer from 1 through 32: $MAX_GROUPS" >&2
+    exit 64
+  fi
 fi
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
 SCAN_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC:-60}"
@@ -913,15 +920,8 @@ defer_remaining_work() {
 }
 
 fallback_remaining_seconds() {
-  [[ -n "$FALLBACK_HARD_DEADLINE_MINUTE" ]] || { echo 999999; return 0; }
-  local now_epoch current_hour deadline_epoch
-  now_epoch="$(date +%s)"
-  current_hour="$(date +%Y-%m-%dT%H)"
-  deadline_epoch="$(date -d "${current_hour}:${FALLBACK_HARD_DEADLINE_MINUTE}:00" +%s)"
-  if [[ "$FALLBACK_HARD_DEADLINE_NEXT_HOUR" == "1" ]]; then
-    deadline_epoch=$((deadline_epoch + 3600))
-  fi
-  echo $((deadline_epoch - now_epoch))
+  [[ -n "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" ]] || { echo -1; return 0; }
+  echo $((FALLBACK_GRACEFUL_CUTOFF_EPOCH - $(date +%s)))
 }
 
 ensure_fallback_start_budget() {
@@ -937,11 +937,37 @@ ensure_fallback_start_budget() {
 validate_cloud_fallback_window() {
   (( IS_CLOUD_EXECUTION == 1 )) || return 0
   [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]] || return 0
-  local hour minute
+  local hour minute now_epoch remaining
+  if [[ ! "$FALLBACK_MIN_START_BUDGET_SEC" =~ ^[1-9][0-9]*$ ]] || (( FALLBACK_MIN_START_BUDGET_SEC < 900 )); then
+    echo "[cloud_marketing_repair] ERROR minimum group start budget must be at least 900 seconds: $FALLBACK_MIN_START_BUDGET_SEC" >&2
+    exit 64
+  fi
+  if [[ ! "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" =~ ^[1-9][0-9]*$ ]] || [[ ! "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[cloud_marketing_repair] ERROR cloud fallback requires absolute graceful and outer deadlines" >&2
+    exit 64
+  fi
+  now_epoch="$(date +%s)"
+  if (( FALLBACK_OUTER_HARD_DEADLINE_EPOCH <= FALLBACK_GRACEFUL_CUTOFF_EPOCH )); then
+    echo "[cloud_marketing_repair] ERROR outer deadline must be later than graceful cutoff" >&2
+    exit 64
+  fi
+  if (( FALLBACK_OUTER_HARD_DEADLINE_EPOCH - FALLBACK_GRACEFUL_CUTOFF_EPOCH < FALLBACK_MIN_START_BUDGET_SEC )); then
+    echo "[cloud_marketing_repair] ERROR outer deadline has less than the minimum group safety margin" >&2
+    exit 64
+  fi
+  remaining=$((FALLBACK_GRACEFUL_CUTOFF_EPOCH - now_epoch))
+  if (( remaining < FALLBACK_MIN_START_BUDGET_SEC )); then
+    write_state deferred_to_local "cloud emergency fallback has ${remaining}s before the graceful no-new-group cutoff; preserve the exact queue"
+    exit 75
+  fi
   hour=$((10#$(TZ="$TZ_NAME" date +%H)))
   minute=$((10#$(TZ="$TZ_NAME" date +%M)))
-  if ! (( (hour == 20 && minute >= 45 && minute < 57) || (hour == 21 && minute >= 15 && minute < 27) )); then
-    write_state deferred_to_local "cloud emergency fallback is outside 20:45-20:57 / 21:15-21:27"
+  if ! ((
+    (hour == 20 && minute >= 45)
+    || (hour == 21 && minute >= 15)
+    || hour == 22
+  )); then
+    write_state deferred_to_local "cloud emergency fallback is outside 20:45-22:55 same-day window"
     exit 75
   fi
 }
@@ -1307,10 +1333,7 @@ if (( IS_CLOUD_EXECUTION == 1 )); then
     echo "[cloud_marketing_repair] DEFER TO LOCAL outside safe start window minute=$CURRENT_MINUTE context=${AUTOMATION_CONTEXT:-unknown}"
     exit 75
   fi
-  if (( MAX_GROUPS > 1 )); then
-    echo "[cloud_marketing_repair] cap cloud repair batch groups=$MAX_GROUPS -> 1 context=${AUTOMATION_CONTEXT:-unknown}"
-    MAX_GROUPS=1
-  fi
+  echo "[cloud_marketing_repair] cloud repair batch max groups=$MAX_GROUPS; group writes remain serial context=${AUTOMATION_CONTEXT:-unknown}"
   export SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1
 fi
 
@@ -1455,6 +1478,8 @@ if [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" 
   begin_stage_critical_section fallbackRepair || { status=$?; exit "$status"; }
   if node scripts/marketing/batch_apply_new_listing_limited_discount.mjs \
       --date "$DATE" --guard "$GUARD_PATH" --skip-build --execute --max-groups "$REMAINING_GROUPS" \
+      --graceful-cutoff-epoch "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" \
+      --min-start-budget-sec "$FALLBACK_MIN_START_BUDGET_SEC" \
       --expected-work-fingerprint "$WORK_FINGERPRINT"; then
     BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blockedTargetCount)"
     FAILED_TARGETS="$(result_total "$RESULT_PATH" failedTargetCount)"

@@ -40,6 +40,7 @@ import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_e
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const DEFAULT_MIN_START_BUDGET_SEC = 15 * 60;
 
 function parseArgs(argv) {
   const args = {
@@ -54,6 +55,9 @@ function parseArgs(argv) {
     maxGroups: 0,
     resume: true,
     expectedWorkFingerprint: '',
+    gracefulCutoffEpochRaw: '',
+    gracefulCutoffEpoch: null,
+    minStartBudgetSec: DEFAULT_MIN_START_BUDGET_SEC,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -77,11 +81,28 @@ function parseArgs(argv) {
     else if (arg === '--no-resume') args.resume = false;
     else if (arg === '--expected-work-fingerprint') args.expectedWorkFingerprint = String(argv[++i] || '').trim().toLowerCase();
     else if (arg.startsWith('--expected-work-fingerprint=')) args.expectedWorkFingerprint = String(arg.slice('--expected-work-fingerprint='.length)).trim().toLowerCase();
+    else if (arg === '--graceful-cutoff-epoch' || arg === '--deadline-epoch') args.gracefulCutoffEpochRaw = String(argv[++i] || '').trim();
+    else if (arg.startsWith('--graceful-cutoff-epoch=') || arg.startsWith('--deadline-epoch=')) args.gracefulCutoffEpochRaw = String(arg.slice(arg.indexOf('=') + 1)).trim();
+    else if (arg === '--min-start-budget-sec') args.minStartBudgetSec = Number(argv[++i] || 0);
+    else if (arg.startsWith('--min-start-budget-sec=')) args.minStartBudgetSec = Number(arg.slice('--min-start-budget-sec='.length));
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.date) args.date = inferDateFromPath(args.guard) || formatLocalDate(new Date());
   if (!args.guard) args.guard = path.join(ROOT, 'outputs', 'reports', `marketing-daily-guard-${args.date}.json`);
   if (!Number.isInteger(args.maxGroups) || args.maxGroups < 0) throw new Error(`Invalid --max-groups: ${args.maxGroups}`);
+  if (!Number.isInteger(args.minStartBudgetSec) || args.minStartBudgetSec < DEFAULT_MIN_START_BUDGET_SEC) {
+    throw new Error(`Invalid --min-start-budget-sec: must be an integer >= ${DEFAULT_MIN_START_BUDGET_SEC}`);
+  }
+  if (args.gracefulCutoffEpochRaw) {
+    if (!/^[1-9][0-9]*$/.test(args.gracefulCutoffEpochRaw)) {
+      throw new Error(`Invalid absolute graceful cutoff epoch: ${args.gracefulCutoffEpochRaw}`);
+    }
+    const epoch = Number(args.gracefulCutoffEpochRaw);
+    if (!Number.isSafeInteger(epoch) || epoch <= Math.floor(Date.now() / 1000)) {
+      throw new Error(`Absolute graceful cutoff epoch must be a future safe integer: ${args.gracefulCutoffEpochRaw}`);
+    }
+    args.gracefulCutoffEpoch = epoch;
+  }
   if (args.expectedWorkFingerprint && !/^[a-f0-9]{64}$/.test(args.expectedWorkFingerprint)) {
     throw new Error(`Invalid --expected-work-fingerprint: ${args.expectedWorkFingerprint}`);
   }
@@ -90,6 +111,15 @@ function parseArgs(argv) {
 
 function splitCsv(value) {
   return String(value || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function groupStartBudget(args) {
+  if (args.gracefulCutoffEpoch === null) return {ok: true, remainingSec: null};
+  const remainingSec = args.gracefulCutoffEpoch - Math.floor(Date.now() / 1000);
+  return {
+    ok: remainingSec >= args.minStartBudgetSec,
+    remainingSec,
+  };
 }
 
 function inferDateFromPath(value) {
@@ -746,7 +776,7 @@ const resumedResults = args.resume
 const completedKeys = new Set(resumedResults.map(resultKey));
 const pendingEntries = rescueFiles.filter(entry => !completedKeys.has(entry.relativePath.toLowerCase()));
 const selectedEntries = args.maxGroups > 0 ? pendingEntries.slice(0, args.maxGroups) : pendingEntries;
-const deferredEntries = args.maxGroups > 0 ? pendingEntries.slice(args.maxGroups) : [];
+let deferredEntries = args.maxGroups > 0 ? pendingEntries.slice(args.maxGroups) : [];
 const results = [...resumedResults];
 const common = {
   createdAt: new Date().toISOString(),
@@ -774,6 +804,8 @@ const common = {
   resumedGroups: resumedResults.length,
   outputJson: rel(outputJson),
   outputMd: rel(outputMd),
+  gracefulCutoffEpoch: args.gracefulCutoffEpoch,
+  minStartBudgetSec: args.minStartBudgetSec,
 };
 
 const entriesByStore = new Map();
@@ -781,12 +813,37 @@ for (const entry of selectedEntries) {
   if (!entriesByStore.has(entry.storeKey)) entriesByStore.set(entry.storeKey, []);
   entriesByStore.get(entry.storeKey).push(entry);
 }
+const processedSelectedKeys = new Set();
+const entryKey = entry => String(entry?.relativePath || entry?.path || '').replaceAll('\\', '/').toLowerCase();
+function mergeUnprocessedSelectedEntriesIntoDeferred() {
+  const existingDeferredKeys = new Set(deferredEntries.map(entryKey));
+  const unprocessed = selectedEntries.filter(entry => {
+    const key = entryKey(entry);
+    return key && !processedSelectedKeys.has(key) && !existingDeferredKeys.has(key);
+  });
+  deferredEntries = [...unprocessed, ...deferredEntries];
+}
+let stoppedBeforeNextGroup = false;
+let stoppedReason = '';
 for (const [storeKey, storeEntries] of entriesByStore.entries()) {
   let launchSummary = null;
+  let processedInStore = 0;
   try {
-    launchSummary = summarizeRaw(await launchStore(storeKey));
-    if (!launchSummary.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${launchSummary.stderr || launchSummary.stdout || launchSummary.error}`);
     for (const file of storeEntries) {
+      // This is the only graceful-stop boundary: once a group has started,
+      // processStore owns its complete transaction, inventory restore and
+      // terminal readback. No deadline timer is allowed inside that path.
+      const startBudget = groupStartBudget(args);
+      if (!startBudget.ok) {
+        stoppedBeforeNextGroup = true;
+        stoppedReason = `graceful cutoff reached with ${startBudget.remainingSec}s remaining; no new group started`;
+        mergeUnprocessedSelectedEntriesIntoDeferred();
+        break;
+      }
+      if (!launchSummary) {
+        launchSummary = summarizeRaw(await launchStore(storeKey));
+        if (!launchSummary.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${launchSummary.stderr || launchSummary.stdout || launchSummary.error}`);
+      }
       const result = await processStore({
         file: {...file, path: file.path},
         storeMap,
@@ -796,10 +853,12 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
       });
       result.sourceRescuePath = file.relativePath;
       results.push(result);
+      processedSelectedKeys.add(entryKey(file));
+      processedInStore += 1;
       await writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries});
     }
   } catch (error) {
-    for (const file of storeEntries) {
+    for (const file of storeEntries.slice(processedInStore)) {
       if (results.some(result => resultKey(result) === file.relativePath.toLowerCase())) continue;
       results.push({
         storeKey,
@@ -812,12 +871,23 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
         status: 'browser_launch_failed',
         error: error.message,
       });
+      processedSelectedKeys.add(entryKey(file));
     }
     await writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries});
   } finally {
     common.storeBrowserSessions = common.storeBrowserSessions || [];
-    common.storeBrowserSessions.push({storeKey, launch: launchSummary, close: summarizeRaw(await closeStore(storeKey)), groupCount: storeEntries.length});
+    common.storeBrowserSessions.push({
+      storeKey,
+      launch: launchSummary,
+      close: launchSummary ? summarizeRaw(await closeStore(storeKey)) : null,
+      groupCount: processedInStore,
+    });
   }
+  if (stoppedBeforeNextGroup) break;
+}
+if (stoppedBeforeNextGroup) {
+  common.gracefulStopReason = stoppedReason;
+  await writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries});
 }
 const doc = await writeExecutionProgress({
   outputJson,
@@ -826,7 +896,7 @@ const doc = await writeExecutionProgress({
   results,
   plan,
   deferredEntries,
-  processingComplete: true,
+  processingComplete: !stoppedBeforeNextGroup,
 });
 const fullyClear = doc.totals.storesFailed === 0 && doc.totals.storesBlocked === 0 && deferredEntries.length === 0;
 console.log(JSON.stringify({

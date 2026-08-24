@@ -158,7 +158,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 | `06:52` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 一个 coordinator 完成当天整轮，只更新订单生命周期状态，不重写历史销售事实 | 瞬时资源压力在同一 run 内每60秒重试，最晚07:27前启动；不再因一次门禁延期整天漏跑，也不再因店铺后台 Cookie 过期整批失败。 |
 | `11:00` | 每日营销检查 `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 单一 coordinator 读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成待处理营销清单；不持有写授权 | 不启动浏览器；瞬时失败只在同一 run 内重试失败阶段，不再于 13:00/16:00 重跑整套。 |
 | 本机 `11:10/13:10/16:10` | 本地后台营销执行 | Windows headless Chrome，默认 4 店一批、负载较高时 3 店一批 | 只执行负责人长期授权内的限时折扣修复；批内跨店并行、同店 dry-run→hash→事务→库存恢复→定点回读严格串行；整批终态后关闭本批 Profile 再开下一批 | `11:10` 主执行；后两次只续跑未终态队列。本机离线时保留队列，不把 WAITING 报成故障。 |
-| `20:45/21:15` | 云端营销应急兜底 `shein-bi-cloud-marketing-repair.service` | 受控浏览器写入 | 先做全店只读重扫，只有本机当天未闭环的长期授权缺口才执行 | 两段分别在 `20:57/21:27` 停止派新组，每段最多 1 店/1组；`21:02–21:13` 全托核心首页车道绝不占用。 |
+| `20:45/21:15` | 云端营销应急兜底 `shein-bi-cloud-marketing-repair.service` | 受控浏览器写入 | 先做全店只读重扫，只有本机当天未闭环的长期授权缺口才执行 | 首次运行按 exact queue 串行处理最多 32 组，`22:55` 停止派新组；外层 hard deadline 为 `23:10`，为当前组的库存恢复/终态回读保留 15 分钟；第二次 timer 仅做幂等 catch-up。 |
 | `03:45/09:50/21:00` | 浏览器残留清理 `shein-bi-cloud-browser-cleanup.service` | 本机进程清理 | 不写业务数据 | 避开日更和营销窗口，只回收无有效租约保护的孤儿浏览器。 |
 | 每小时 `:50` | watchdog `shein-bi-cloud-watchdog.service` | 只读巡检 | 不写业务数据 | 检查服务、timer、BI 新鲜度、销售/页面过期、浏览器残留并发提醒。 |
 | `02:40` | 数据库备份 `shein-bi-db-backup.service` | PostgreSQL dump/备份 | 备份 | 默认保留 14 天。 |
@@ -217,7 +217,12 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today` 仅保留为手动临时发送；正式自动发送当前关闭，`scripts/cloud_morning_chain.sh` 默认跳过日报后直接启动慢变日更。
 
+- 统一自动化团队报告投递入口：本地自动化只能调用 `node scripts/send_cloud_team_report.mjs --automation-id <id> --business-date <YYYY-MM-DD> --summary-file <outputs-file> --attachment <outputs-file> --expected-attachment-sha256 <sha256> --cloud-ssh shein-bi-tencent`。该入口只把固定 bundle 经 SSH stdin 交给云端 `scripts/cloud_team_report_delivery.mjs deliver-stdin`，本机不读取群目标、不接受 `recipientChatId`，也不调用本机 `lark-cli`；本地文件必须是 `outputs/` 下的普通非软链文件。
+
+- 云端投递脚本自行读取 `/opt/shein-bi/app/config/lark_report.json`，只接受 `recipientChatId=oc_...` 群目标和 `defaultIdentity=bot`，再以 `lark-cli im +messages-send --as bot` 串行发送摘要与附件。落点固定为 `/srv/shein-bi/runtime/automation-delivery/<automation>/<date>/<fingerprint>/`；附件 SHA、自动化 ID、业务日期和状态原子保存。幂等键由三者绑定，部分回执只补未接受项；只有 `ok=true` 且存在非空 `message_id` 才接受。状态和输出不保存群 ID、消息 ID、token 或 app secret；`230002` 只分类为 `caller_identity_not_in_chat`，未独立验证执行身份时不得推断云端 bot 的群成员关系。
+
 - 晨间生产入口是 `run_cloud_morning_chain_job.sh`，其 child 为 `cloud_morning_chain.sh all`。wrapper 负责 mutex、active context 与 first-start 绝对 deadline；exit 0 只表示 `daily-operating-refresh` final marker 的日期和所有直接 evidence hash 均通过，deadline/数据/配置终态使用非零码并由 `RestartPreventExitStatus` 停止循环。19店抓取与 supplements 在库存前置截止前完成；生产 unit 的库存阶段拥有最后2700秒（脚本直跑保守默认4500秒），`inventory-started` checkpoint 允许同日重启直接续跑库存。final marker 直接绑定19店结果、库存 marker、plan 与 result；watchdog 在 service 成功后仍持续回验这些证据。跨日旧 child 不执行，只保留旧失败后启动当天独立窗口。
+- 同日恢复只能由显式一次性 `scripts/authorize_cloud_morning_chain_recovery.mjs --run-date ... --new-deadline-epoch ... --reason ... --confirm AUTHORIZE_MORNING_CHAIN_RECOVERY` 授权；工具在既有 morning-chain 锁内重新读取维护状态、service/timer 的 `systemctl show`、active/latest、marker 与库存 plan/result/journal，要求维护 inactive、服务无运行/排队 job、旧 deadline 已过期且 inventory 尚未落盘。它只先原子写同日 recovery receipt，再原子更新现有 `active.json`，不会删除旧证据、启动 service、运行 child、创建 timer/queue 或发库存请求；同一精确 receipt 可幂等重放，任何 deadline/reason/文件漂移都拒绝。
 
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。晨间链路失败 service 的退出只有同日 `done` 的 `morning-links-ready` marker（`ok=true`）且完成时间晚于单元退出时，才在 `recoveries` 中记为业务恢复；`warning` 状态（即使管线层 `ok=true`）或 done 但 `ok=false` 一律不算恢复。当日晨链已收敛为 failed/partial/deferred 终态且单元已退出时，watchdog 直接以“晨链当日失败”告警。
 

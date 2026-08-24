@@ -21,6 +21,11 @@
 //    runDate == businessDate or any other mismatched pair fails closed and is
 //    replaced by a correctly derived fresh pair;
 //  - idempotent-skip completion and malformed/future context handling.
+//  - recovery binding fields survive active-context rewrites/restarts, while a
+//    malformed partial binding fails closed before child invocation or write.
+//  The copied validator is intentionally a deterministic wrapper-only stub: it
+//  accepts only the exact daily-operating-refresh marker contract below and
+//  does not import the full inventory/journal validator dependency graph.
 
 import assert from 'node:assert/strict';
 import {execFileSync, spawnSync} from 'node:child_process';
@@ -101,7 +106,32 @@ exit 0
 STUB
 chmod +x "\$SB/scripts/cloud_morning_chain.sh"
 cp "\$REPO/scripts/pipeline_marker.mjs" "\$SB/scripts/pipeline_marker.mjs"
-cp "\$REPO/scripts/validate_daily_operating_refresh.mjs" "\$SB/scripts/validate_daily_operating_refresh.mjs"
+cat > "\$SB/scripts/validate_daily_operating_refresh.mjs" <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+
+const argument = name => {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? String(process.argv[index + 1] || '') : '';
+};
+const markerRoot = path.resolve(argument('--marker-root'));
+const runDate = argument('--run-date');
+const businessDate = argument('--business-date');
+try {
+  const marker = JSON.parse(fs.readFileSync(
+    path.join(markerRoot, runDate, 'daily-operating-refresh.json'),
+    'utf8',
+  ));
+  const valid = marker?.ok === true
+    && marker?.status === 'done'
+    && marker?.stage === 'daily-operating-refresh'
+    && marker?.runDate === runDate
+    && marker?.businessDate === businessDate;
+  if (!valid) process.exit(78);
+} catch {
+  process.exit(78);
+}
+NODE
 cp "\$REPO/config/inventory_replenishment_policy.json" "\$SB/config/inventory_replenishment_policy.json"
 cat > "\$SB/scripts/write_valid_bundle.mjs" <<'NODE'
 import crypto from 'node:crypto';
@@ -212,15 +242,15 @@ check t2_latest_ok "ok" "\$(latest_status)"
 check t2_latest_date "\$TODAY" "\$(json_field "\$STATE/latest.json" date)"
 check t2_latest_business_date "\$YESTERDAY" "\$(json_field "\$STATE/latest.json" businessDate)"
 
-# t2b: a metadata-correct marker with one arbitrary evidence file is not a
-# completion record.  The child is invoked, its resume-skip cannot repair the
-# invalid bundle, and wrapper exit remains non-zero with context retained.
+# t2b: a failed daily-operating-refresh marker is not completion evidence.  The
+# child is invoked, its resume-skip cannot repair the invalid marker, and
+# wrapper exit remains non-zero with context retained.
 rm -f "\$CALLS_LOG"
 rm -rf "\$SB/state/pipeline-markers"
 mkdir -p "\$SB/state/pipeline-markers"
 printf '{"ok":true}\n' > "\$SB/arbitrary.json"
 node "\$SB/scripts/pipeline_marker.mjs" write --root "\$MARKER_ROOT" --stage daily-operating-refresh \
-  --date "\$TODAY" --business-date "\$YESTERDAY" --status done --message fake --evidence "\$SB/arbitrary.json" >/dev/null
+  --date "\$TODAY" --business-date "\$YESTERDAY" --status failed --message fake --evidence "\$SB/arbitrary.json" >/dev/null
 cat > "\$STATE/active.json" <<JSON
 {"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$CTX_DEADLINE,"startedAt":"x","pid":1,"attempt":1}
 JSON
@@ -457,6 +487,81 @@ check t14_marker_run_date "\$YESTERDAY" "\$(morning_all_marker_field "\$YESTERDA
 check t14_marker_business_date "\$PREV_YESTERDAY" "\$(morning_all_marker_field "\$YESTERDAY" businessDate)"
 [[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t14 today context cleared]' || { echo 'FAIL[t14 today context not cleared]'; FAIL=1; }
 
+# t16: a valid recovery binding must survive write_active_context on the first
+# failed attempt and on the next service restart, including the original
+# deadline injected into both child invocations.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+rm -rf "\$SB/state/pipeline-markers"
+mkdir -p "\$SB/state/pipeline-markers"
+RECOVERY_PREVIOUS_DEADLINE=\$(( FIXED_DEADLINE - 123 ))
+mkdir -p "\$STATE/recovery"
+RUN_DATE="\$TODAY" BUSINESS_DATE="\$YESTERDAY" OLD_DEADLINE="\$RECOVERY_PREVIOUS_DEADLINE" NEW_DEADLINE="\$FIXED_DEADLINE" RECEIPT_FILE="\$STATE/recovery/\$TODAY.json" node --input-type=module <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+const receipt = {
+  schemaVersion: 'morning-chain-recovery/v1',
+  runDate: process.env.RUN_DATE,
+  businessDate: process.env.BUSINESS_DATE,
+  oldDeadlineEpoch: Number(process.env.OLD_DEADLINE),
+  newDeadlineEpoch: Number(process.env.NEW_DEADLINE),
+  beforeHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  recoveryGeneration: 1,
+  createdAt: '2026-08-24T12:00:00.000Z',
+  reason: 'focused wrapper recovery binding test',
+};
+receipt.canonicalHash = crypto.createHash('sha256').update(JSON.stringify(stable(receipt))).digest('hex');
+fs.writeFileSync(process.env.RECEIPT_FILE, JSON.stringify(receipt) + '\\n');
+NODE
+RECOVERY_HASH="\$(json_field "\$STATE/recovery/\$TODAY.json" canonicalHash)"
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$FIXED_DEADLINE,"startedAt":"x","pid":1,"attempt":1,"recoveryGeneration":1,"receiptHash":"\$RECOVERY_HASH","previousDeadline":\$RECOVERY_PREVIOUS_DEADLINE}
+JSON
+export STUB_MODE=fail_all
+bash "\$WRAPPER" >/dev/null 2>&1
+check t16_first_rc 23 "\$?"
+check t16_first_child "1" "\$(wc -l < "\$CALLS_LOG")"
+check t16_first_deadline "\$FIXED_DEADLINE" "\$(cut -d' ' -f3 "\$CALLS_LOG")"
+check t16_first_recovery_generation "1" "\$(json_field "\$STATE/active.json" recoveryGeneration)"
+check t16_first_receipt_hash "\$RECOVERY_HASH" "\$(json_field "\$STATE/active.json" receiptHash)"
+check t16_first_previous_deadline "\$RECOVERY_PREVIOUS_DEADLINE" "\$(json_field "\$STATE/active.json" previousDeadline)"
+bash "\$WRAPPER" >/dev/null 2>&1
+check t16_restart_rc 23 "\$?"
+check t16_restart_child "2" "\$(wc -l < "\$CALLS_LOG")"
+check t16_restart_deadline "\$FIXED_DEADLINE" "\$(sed -n 2p "\$CALLS_LOG" | cut -d' ' -f3)"
+check t16_restart_recovery_generation "1" "\$(json_field "\$STATE/active.json" recoveryGeneration)"
+check t16_restart_receipt_hash "\$RECOVERY_HASH" "\$(json_field "\$STATE/active.json" receiptHash)"
+check t16_restart_previous_deadline "\$RECOVERY_PREVIOUS_DEADLINE" "\$(json_field "\$STATE/active.json" previousDeadline)"
+
+# t17: a partial recovery binding is rejected before write_active_context can
+# replace active.json and before the child can run.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+rm -rf "\$SB/state/pipeline-markers"
+mkdir -p "\$SB/state/pipeline-markers"
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$FIXED_DEADLINE,"startedAt":"x","pid":1,"attempt":1,"recoveryGeneration":1}
+JSON
+MALFORMED_ACTIVE_HASH="\$(sha256sum "\$STATE/active.json" | cut -d' ' -f1)"
+export STUB_MODE=success
+bash "\$WRAPPER" >/dev/null 2>&1
+check t17_rc 78 "\$?"
+check t17_no_child "0" "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t17_active_unchanged "\$MALFORMED_ACTIVE_HASH" "\$(sha256sum "\$STATE/active.json" | cut -d' ' -f1)"
+check t17_recovery_generation "1" "\$(json_field "\$STATE/active.json" recoveryGeneration)"
+
+# t18: complete-looking active fields without the exact durable receipt are
+# also rejected before child launch; field shape alone is not authorization.
+rm -f "\$CALLS_LOG" "\$STATE/recovery/\$TODAY.json"
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$FIXED_DEADLINE,"startedAt":"x","pid":1,"attempt":1,"recoveryGeneration":1,"receiptHash":"\$RECOVERY_HASH","previousDeadline":\$RECOVERY_PREVIOUS_DEADLINE}
+JSON
+MISSING_RECEIPT_ACTIVE_HASH="\$(sha256sum "\$STATE/active.json" | cut -d' ' -f1)"
+bash "\$WRAPPER" >/dev/null 2>&1
+check t18_rc 78 "\$?"
+check t18_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t18_active_unchanged "\$MISSING_RECEIPT_ACTIVE_HASH" "\$(sha256sum "\$STATE/active.json" | cut -d' ' -f1)"
+
 # t15: the wrapper itself must never emit runDate == businessDate: every
 # recorded child call across the whole harness satisfies the -1 relation.
 touch "\$CALLS_LOG"
@@ -499,5 +604,8 @@ console.log(JSON.stringify({
     'no_runDate_equals_businessDate',
     'fake_completion_rejected',
     'malformed_context_ignored',
+    'recovery_binding_preserved_across_restart',
+    'malformed_recovery_binding_rejected_without_child_or_write',
+    'missing_recovery_receipt_rejected_without_child_or_write',
   ],
 }, null, 2));
