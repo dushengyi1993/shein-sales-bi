@@ -440,6 +440,19 @@ if (args.execute && restoreKeys.size > 0) {
     record.ok = restored?.ok === true;
     record.reason = restored?.error || (record.ok ? 'live_readback_exact' : 'restore_failed');
     record.currentActivityId = restored?.readback?.activityId || null;
+    const invalid = Array.isArray(restored?.dryRun?.validation?.invalid) ? restored.dryRun.validation.invalid : [];
+    const provenPrewriteBlocker = restored?.ok !== true
+      && restored?.transaction == null
+      && restored?.inventoryTransaction == null
+      && restored?.readback == null
+      && (restored?.status === 'dry_run_blocked'
+        || (invalid.length > 0 && /before every write|pre-validation/i.test(String(restored?.dryRun?.reason || ''))));
+    if (provenPrewriteBlocker) {
+      record.status = 'prewrite_blocked';
+      record.terminal = true;
+      record.writeAttempted = false;
+      record.classification = 'prewrite_blocked';
+    }
   }
   if (!restore.ok && !processedThisRun.some(record => record.ok === false)) {
     throw new Error(`High-click restore batch failed without item-level evidence: ${restore.stderr || restore.stdout}`);

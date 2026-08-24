@@ -1371,7 +1371,7 @@ fi
 ensure_browser_lease
 
 HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
-if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "completed" && "$HIGH_CLICK_STATUS" != "blocked" ]]; then
+while (( REMAINING_GROUPS > 0 )) && [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "completed" && "$HIGH_CLICK_STATUS" != "blocked" ]]; do
   ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.highClickSpecial?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
@@ -1379,31 +1379,45 @@ if [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "complet
   HIGH_CLICK_PLAN_PATH="$ROOT/$(queue_value 'j.stages?.highClickSpecial?.planPath' '')"
   RESULT_PATH="outputs/reports/high-click-low-conversion-special-execution-${DATE}.json"
   begin_stage_critical_section highClickSpecial || { status=$?; exit "$status"; }
-  if node scripts/marketing/batch_apply_high_click_special_discounts.mjs \
-      --date "$DATE" --guard "$GUARD_PATH" --plan "$HIGH_CLICK_PLAN_PATH" \
-      --execute --max-items "$REMAINING_GROUPS" --result "$ROOT/$RESULT_PATH" \
-      --expected-work-fingerprint "$WORK_FINGERPRINT"; then
-    update_stage highClickSpecial completed true "protected registration, execute and per-item live readback succeeded" "$RESULT_PATH"
-    consume_group_budget "$(processed_items_this_run "$RESULT_PATH")"
-  else
-    status=$?
-    if [[ "$status" -eq 3 ]]; then
-      update_stage highClickSpecial pending false "bounded chunk completed; more exact-plan items remain" "$RESULT_PATH"
-      defer_remaining_work "high-click special chunk completed without replaying successful items"
-    fi
-    BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blocked)"
-    FAILED_TARGETS="$(result_total "$RESULT_PATH" failed)"
-    if (( BLOCKED_TARGETS > 0 && FAILED_TARGETS == 0 )); then
-      update_stage highClickSpecial blocked false "ET/platform preflight safely blocked one or more protected specials" "$RESULT_PATH"
-      write_state blocked "high-click special repair safely blocked by current ET inventory/platform conditions"
-      consume_group_budget "$(processed_items_this_run "$RESULT_PATH")"
-    else
-      update_stage highClickSpecial failed false "execute/readback failed status=$status" "$RESULT_PATH"
+  set +e
+  node scripts/marketing/batch_apply_high_click_special_discounts.mjs \
+    --date "$DATE" --guard "$GUARD_PATH" --plan "$HIGH_CLICK_PLAN_PATH" \
+    --execute --max-items 1 --result "$ROOT/$RESULT_PATH" \
+    --expected-work-fingerprint "$WORK_FINGERPRINT"
+  status=$?
+  set -e
+  PROCESSED_ITEMS="$(processed_items_this_run "$RESULT_PATH")"
+  if [[ ! "$PROCESSED_ITEMS" =~ ^[1-9][0-9]*$ ]] || (( PROCESSED_ITEMS != 1 )); then
+    update_stage highClickSpecial failed false "single-item executor produced no exact new item status=$status" "$RESULT_PATH"
+    write_state failed "high-click single-item executor made no durable progress status=$status"
+    exit 66
+  fi
+  consume_group_budget "$PROCESSED_ITEMS"
+  BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blocked)"
+  FAILED_TARGETS="$(result_total "$RESULT_PATH" failed)"
+  REMAINING_ITEMS="$(result_total "$RESULT_PATH" remainingItems)"
+  if (( FAILED_TARGETS > 0 )); then
+    update_stage highClickSpecial failed false "single-item execute/readback failed status=$status" "$RESULT_PATH"
+    write_state failed "high-click special execute failed status=$status"
+    exit "$status"
+  fi
+  if (( REMAINING_ITEMS > 0 )); then
+    if [[ "$status" -ne 0 && "$status" -ne 2 && "$status" -ne 3 ]]; then
+      update_stage highClickSpecial failed false "unexpected single-item executor status=$status" "$RESULT_PATH"
       write_state failed "high-click special execute failed status=$status"
       exit "$status"
     fi
+    update_stage highClickSpecial pending false "one exact item reached terminal readback or prewrite blocker; serial consumer continuing" "$RESULT_PATH"
+  else
+    if (( BLOCKED_TARGETS > 0 )); then
+      update_stage highClickSpecial blocked false "all items accounted; one or more exact items are terminal prewrite blockers" "$RESULT_PATH"
+      write_state blocked "high-click special has terminal prewrite blockers after independent items completed"
+    else
+      update_stage highClickSpecial completed true "serial single-item execute and per-item live readback succeeded" "$RESULT_PATH"
+    fi
   fi
-fi
+  HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
+done
 
 if (( REMAINING_GROUPS <= 0 )); then
   defer_remaining_work "bounded group budget consumed"
