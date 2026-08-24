@@ -16,6 +16,11 @@ import {
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
 import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {
+  classifyUnifiedLoginRecovery,
+  hasConcreteStoreIdentityConflict,
+  isMarketingLoginRedirect,
+} from '../../lib/marketing_unified_login_recovery_contract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -126,6 +131,55 @@ async function applyRescue(storeKey, port, rescuePath, execute) {
   ], execute ? 1200000 : 900000));
 }
 
+function reportPathFromOutput(text, field) {
+  const summary = lastJson(text);
+  const value = String(summary?.[field] || '').trim();
+  return value ? path.resolve(ROOT, value) : '';
+}
+
+async function recoverMarketingLogin(storeKey, date) {
+  const reloginRun = await run(process.execPath, [
+    'scripts/auto_relogin_shein_store.mjs',
+    storeKey,
+    '--date', date,
+    '--headless',
+  ], 240000);
+  const reloginPath = reportPathFromOutput(reloginRun.stdout, 'reportFile');
+  const reloginReport = await readJsonIfExists(reloginPath);
+  const relogin = reloginReport?.results?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey)
+    || {ok: reloginRun.ok, blocker: '', blockerReason: reloginRun.stderr || ''};
+  if (relogin.ok !== true) {
+    return {
+      ok: false,
+      relogin: {ok: false, blocker: relogin.blocker || '', reason: relogin.blockerReason || relogin.reason || ''},
+      identity: null,
+      assessment: classifyUnifiedLoginRecovery({relogin}),
+    };
+  }
+
+  const identityRun = await run(process.execPath, [
+    'scripts/marketing/check_store_profile_identity.mjs',
+    '--stores', storeKey,
+    '--no-launch',
+    '--no-close',
+    '--no-login-recovery',
+  ], 180000);
+  const identityMatch = String(identityRun.stdout || '').match(/^JSON\s+(.+)$/m);
+  const identityReport = await readJsonIfExists(identityMatch?.[1] ? path.resolve(identityMatch[1].trim()) : '');
+  const identityRow = identityReport?.rows?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey) || null;
+  const identity = {
+    ok: identityRun.ok && identityRow?.ok === true,
+    mismatch: hasConcreteStoreIdentityConflict(identityRow),
+    reason: identityRow?.reason || identityRun.stderr || 'identity audit did not return an exact store match',
+  };
+  return {
+    ok: identity.ok,
+    relogin: {ok: true, blocker: '', reason: ''},
+    identity,
+    assessment: classifyUnifiedLoginRecovery({relogin, identity}),
+  };
+}
+
 async function replaceTransactionally(storeKey, port, rescuePath, execute) {
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescuePath)).digest('hex');
   return await loadCommandOutput(await run(process.execPath, [
@@ -220,6 +274,40 @@ async function processOne(file, storeMap, args) {
     const launch = await launchStore(storeKey);
     if (!launch.ok) throw new Error(`launch failed: ${launch.stderr || launch.stdout}`);
     let dry = await applyRescue(storeKey, store.port, rescuePath, false);
+    if (isMarketingLoginRedirect(dry)) {
+      const date = String(args.guard).match(/20\d{2}-\d{2}-\d{2}/)?.[0] || new Date().toISOString().slice(0, 10);
+      const recovery = await recoverMarketingLogin(storeKey, date);
+      record.loginRecovery = recovery;
+      if (recovery.assessment.terminal) {
+        record.status = 'login_terminal_blocker';
+        record.classification = 'login_terminal_blocker';
+        record.terminal = true;
+        record.writeAttempted = false;
+        record.error = recovery.assessment.blocker;
+        return record;
+      }
+      if (!recovery.ok) {
+        record.status = 'recoverable_login_pending';
+        record.classification = 'recoverable_pending';
+        record.writeAttempted = false;
+        record.error = recovery.assessment.blocker || 'login recovery incomplete';
+        return record;
+      }
+      dry = await applyRescue(storeKey, store.port, rescuePath, false);
+      const retryAssessment = classifyUnifiedLoginRecovery({
+        relogin: recovery.relogin,
+        identity: recovery.identity,
+        retry: dry,
+      });
+      record.loginRecovery = {...recovery, retryAssessment};
+      if (isMarketingLoginRedirect(dry)) {
+        record.status = 'recoverable_login_pending';
+        record.classification = 'recoverable_pending';
+        record.writeAttempted = false;
+        record.error = retryAssessment.blocker || 'login redirect remained after one controlled recovery';
+        return record;
+      }
+    }
     record.dryRun = summarizeDryRun(dry.full, dry.outPath);
     if (!dry.full) throw new Error('dry-run produced no readable output');
     let dryAssessment = assessRecoverableDryRun(dry.full);

@@ -26,6 +26,12 @@ import {
   loadExactHighClickSpecialPlan,
   loadExactManualRepairPlan,
 } from '../../lib/marketing_repair_manifest.mjs';
+import {
+  classifyHighClickRestoreResult,
+  highClickItemKey,
+  isHighClickResultSettled,
+  planHighClickStageResume,
+} from '../../lib/marketing_high_click_stage_resume.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const POLICY_PATH = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
@@ -279,11 +285,9 @@ const previousResults = previous.workFingerprint === exactPlan.workFingerprint
   && Array.isArray(previous.results)
   ? previous.results
   : [];
-const successful = new Map(previousResults
-  .filter(row => row?.ok === true || (row?.terminal === true && row?.classification === 'prewrite_blocked' && row?.writeAttempted === false))
-  .map(row => [manualLimitedDiscountKey(row.storeKey, row.skc), row]));
-const pending = exactPlan.entries.filter(row => !successful.has(row.key));
-const selected = args.maxItems > 0 ? pending.slice(0, args.maxItems) : pending;
+const currentRunId = String(process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID || process.env.SHEIN_BI_MARKETING_RUN_ID || '').trim();
+const resume = planHighClickStageResume({entries: exactPlan.entries, previousResults, currentRunId});
+const selected = args.maxItems > 0 ? resume.eligible.slice(0, args.maxItems) : resume.eligible;
 const processedThisRun = [];
 const restoreKeys = new Set();
 
@@ -302,6 +306,7 @@ for (const row of selected) {
     reason: '',
     currentActivityId: null,
     restoreResult: null,
+    attemptRunId: currentRunId || null,
   };
   let active = null;
   let sameAutomatedRegistration = false;
@@ -428,6 +433,10 @@ if (args.execute && restoreKeys.size > 0) {
     record.restoreResult = restored ? {
       status: restored.status,
       ok: restored.ok === true,
+      terminal: restored.terminal === true,
+      classification: restored.classification || '',
+      writeAttempted: restored.writeAttempted === true,
+      loginRecovery: restored.loginRecovery || null,
       dryRun: restored.dryRun,
       inventoryTransactionPlan: restored.inventoryTransactionPlan || null,
       inventoryTransaction: restored.inventoryTransaction || null,
@@ -440,45 +449,45 @@ if (args.execute && restoreKeys.size > 0) {
     record.ok = restored?.ok === true;
     record.reason = restored?.error || (record.ok ? 'live_readback_exact' : 'restore_failed');
     record.currentActivityId = restored?.readback?.activityId || null;
-    const invalid = Array.isArray(restored?.dryRun?.validation?.invalid) ? restored.dryRun.validation.invalid : [];
-    const provenPrewriteBlocker = restored?.ok !== true
-      && restored?.transaction == null
-      && restored?.inventoryTransaction == null
-      && restored?.readback == null
-      && (restored?.status === 'dry_run_blocked'
-        || (invalid.length > 0 && /before every write|pre-validation/i.test(String(restored?.dryRun?.reason || ''))));
-    if (provenPrewriteBlocker) {
-      record.status = 'prewrite_blocked';
-      record.terminal = true;
-      record.writeAttempted = false;
-      record.classification = 'prewrite_blocked';
-    }
+    const disposition = classifyHighClickRestoreResult(restored || {});
+    record.terminal = disposition.terminal;
+    record.writeAttempted = disposition.writeAttempted;
+    record.classification = disposition.classification;
+    if (!disposition.settled) record.status = 'recoverable_pending';
   }
   if (!restore.ok && !processedThisRun.some(record => record.ok === false)) {
     throw new Error(`High-click restore batch failed without item-level evidence: ${restore.stderr || restore.stdout}`);
   }
 }
 
-const merged = new Map(successful);
-for (const record of processedThisRun) merged.set(manualLimitedDiscountKey(record.storeKey, record.skc), record);
-const results = exactPlan.entries.map(row => merged.get(row.key)).filter(Boolean);
+for (const record of processedThisRun) {
+  if (record.ok !== true && !record.classification) {
+    record.classification = 'recoverable_pending';
+    record.terminal = false;
+    record.writeAttempted = false;
+  }
+}
+const merged = new Map(resume.priorByKey);
+for (const record of processedThisRun) merged.set(highClickItemKey(record), record);
+const results = exactPlan.entries.map(row => merged.get(highClickItemKey(row))).filter(Boolean);
 const successfulKeys = new Set(results
-  .filter(row => row.ok === true || (row?.terminal === true && row?.classification === 'prewrite_blocked' && row?.writeAttempted === false))
-  .map(row => manualLimitedDiscountKey(row.storeKey, row.skc)));
-const remainingItems = exactPlan.entries.filter(row => !successfulKeys.has(row.key)).length;
+  .filter(isHighClickResultSettled)
+  .map(highClickItemKey));
+const remainingItems = exactPlan.entries.filter(row => !successfulKeys.has(highClickItemKey(row))).length;
 if (args.execute) await updateLedger(exactPlan, processedThisRun, immutablePlanArtifact);
 const totals = {
   planned: exactPlan.entries.length,
   processed: results.length,
   processedThisRun: processedThisRun.length,
-  resumedItems: successful.size,
+  resumedItems: resume.settledByKey.size,
   remainingItems,
   restored: results.filter(row => row.status === 'restored').length,
   alreadyCovered: results.filter(row => row.status === 'already_covered_exact').length,
   skippedNoLongerQualifies: results.filter(row => row.status === 'no_longer_qualifies').length,
   protectedByConcurrentManualSpecial: results.filter(row => row.status === 'protected_by_concurrent_manual_special').length,
-  blocked: results.filter(row => row.ok === false && /blocked|inventory|platform/i.test(`${row.status} ${row.reason}`)).length,
-  failed: results.filter(row => row.ok === false && !/blocked|inventory|platform/i.test(`${row.status} ${row.reason}`)).length,
+  recoverablePending: results.filter(row => row.classification === 'recoverable_pending').length,
+  blocked: results.filter(row => row.terminal === true).length,
+  failed: results.filter(row => row.ok === false && row.terminal !== true && row.classification !== 'recoverable_pending').length,
 };
 const output = {
   createdAt: new Date().toISOString(),
@@ -493,8 +502,9 @@ const output = {
   results,
 };
 await writeJsonAtomic(args.result, output);
-const attemptedFailure = processedThisRun.some(row => row.ok === false);
+const attemptedFailure = processedThisRun.some(row => row.ok === false && row.terminal !== true && row.classification !== 'recoverable_pending');
 const ok = !attemptedFailure && remainingItems === 0;
 console.log(JSON.stringify({ok, out: rel(args.result), workFingerprint: exactPlan.workFingerprint, totals}, null, 2));
 if (attemptedFailure) process.exitCode = 2;
+else if (resume.deferredSameRun && processedThisRun.length === 0 && remainingItems > 0) process.exitCode = 4;
 else if (remainingItems > 0) process.exitCode = 3;

@@ -5,6 +5,11 @@ ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 source "$ROOT/scripts/lib/shared_lock.sh"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 DATE="${SHEIN_BI_MARKETING_REPAIR_DATE:-$(TZ="$TZ_NAME" date +%F)}"
+CURRENT_DATE="$(TZ="$TZ_NAME" date +%F)"
+if [[ "$DATE" != "$CURRENT_DATE" ]]; then
+  echo "[cloud_marketing_repair] refusing non-current repair queue date=$DATE current=$CURRENT_DATE" >&2
+  exit 75
+fi
 LOG_DIR="${SHEIN_BI_MARKETING_REPAIR_LOG_DIR:-/srv/shein-bi/logs/cloud-marketing-repair}"
 STATE_DIR="${SHEIN_BI_MARKETING_LIVE_STATE_DIR:-$ROOT/state/cloud_marketing_live_guard}"
 ALERT_DIR="$ROOT/state/cloud_ops_alerts"
@@ -1387,6 +1392,11 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$HIGH_CLICK_STATUS" != "not_required" &&
   status=$?
   set -e
   PROCESSED_ITEMS="$(processed_items_this_run "$RESULT_PATH")"
+  if [[ "$status" -eq 4 && "$PROCESSED_ITEMS" == "0" ]]; then
+    update_stage highClickSpecial pending false "recoverable items were attempted once in this service run; deferred without replay while independent stages continue" "$RESULT_PATH"
+    write_state pending "high-click recoverable items deferred to the next fresh service run; continuing independent repair stages"
+    break
+  fi
   if [[ ! "$PROCESSED_ITEMS" =~ ^[1-9][0-9]*$ ]] || (( PROCESSED_ITEMS != 1 )); then
     update_stage highClickSpecial failed false "single-item executor produced no exact new item status=$status" "$RESULT_PATH"
     write_state failed "high-click single-item executor made no durable progress status=$status"

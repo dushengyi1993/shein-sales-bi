@@ -15,7 +15,12 @@ import {
 } from '../lib/marketing_plan_registry.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const date = '2026-08-24';
+const date = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+}).format(new Date());
 const stores = Array.from({length: 19}, (_, index) => `S${String(index + 1).padStart(2, '0')}`);
 const fixtureRoot = fs.mkdtempSync(path.join(repoRoot, 'tmp', `marketing-repair-worker-registry-${process.pid}-`));
 const stateDir = path.join(fixtureRoot, 'state', 'cloud_marketing_live_guard');
