@@ -280,6 +280,42 @@ function runWorker({pointerBytes, missingRegistry = false, switchDuringExecutor 
   });
 }
 
+function restoreFixturePermissions(root) {
+  let rootStat;
+  try {
+    rootStat = fs.lstatSync(root);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`fixture cleanup root must be a real directory: ${root}`);
+  }
+
+  const restoreOwnerAccess = current => {
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      fs.chmodSync(current, (stat.mode & 0o777) | 0o700);
+      for (const entry of fs.readdirSync(current, {withFileTypes: true})) {
+        restoreOwnerAccess(path.join(current, entry.name));
+      }
+      return;
+    }
+    if (stat.isFile()) fs.chmodSync(current, (stat.mode & 0o777) | 0o600);
+  };
+
+  restoreOwnerAccess(root);
+}
+
+let repairWorkerRegistryTestError = null;
+let repairWorkerRegistryCleanupError = null;
 try {
   fs.mkdirSync(path.dirname(costMapPath), {recursive: true});
   fs.writeFileSync(costMapPath, '{"costMap":{}}\n', 'utf8');
@@ -330,6 +366,22 @@ try {
     registryA: publishedA.registryHash,
     registryB: publishedB.registryHash,
   }));
+} catch (error) {
+  repairWorkerRegistryTestError = error;
 } finally {
-  fs.rmSync(fixtureRoot, {recursive: true, force: true});
+  try {
+    restoreFixturePermissions(fixtureRoot);
+    fs.rmSync(fixtureRoot, {recursive: true, force: true});
+  } catch (error) {
+    repairWorkerRegistryCleanupError = error;
+  }
 }
+
+if (repairWorkerRegistryTestError && repairWorkerRegistryCleanupError) {
+  throw new AggregateError(
+    [repairWorkerRegistryTestError, repairWorkerRegistryCleanupError],
+    'marketing repair worker registry test and cleanup both failed',
+  );
+}
+if (repairWorkerRegistryTestError) throw repairWorkerRegistryTestError;
+if (repairWorkerRegistryCleanupError) throw repairWorkerRegistryCleanupError;

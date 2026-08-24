@@ -15,6 +15,7 @@ import {
 import {resolveCurrentMarketingPlanPair} from '../lib/marketing_plan_selector.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marketing-plan-registry-'));
+const testTmpRoots = new Set([root]);
 const registryRoot = path.join(root, 'runtime', 'marketing-plans');
 const registryFile = path.join(registryRoot, 'current.json');
 const stores = Array.from({length: 19}, (_, index) => `S${String(index + 1).padStart(2, '0')}`);
@@ -24,6 +25,54 @@ const selectionPath = path.join(sourceDir, 'selection-plan-source.json');
 const pricePath = path.join(sourceDir, 'price-overrides-source.json');
 const manager = path.resolve('scripts/marketing/manage_marketing_plan_registry.mjs');
 const baselineId = 'fixture-baseline-001';
+
+function cleanupTestTmpRoot(tmpRoot) {
+  if (!testTmpRoots.has(tmpRoot)) {
+    throw new Error(`refusing to clean up an unregistered test tmp root: ${tmpRoot}`);
+  }
+
+  let rootStat;
+  try {
+    rootStat = fs.lstatSync(tmpRoot);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`refusing to clean up a non-directory test tmp root: ${tmpRoot}`);
+  }
+
+  const restoreOwnerAccess = current => {
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) return;
+
+    if (stat.isDirectory()) {
+      fs.chmodSync(current, (stat.mode & 0o777) | 0o700);
+      for (const entry of fs.readdirSync(current, {withFileTypes: true})) {
+        restoreOwnerAccess(path.join(current, entry.name));
+      }
+      return;
+    }
+    if (stat.isFile()) fs.chmodSync(current, (stat.mode & 0o777) | 0o600);
+  };
+
+  restoreOwnerAccess(tmpRoot);
+  fs.rmSync(tmpRoot, {recursive: true, force: true});
+}
+
+function throwTestAndCleanupErrors(testError, cleanupError, label) {
+  if (testError && cleanupError) {
+    throw new AggregateError([testError, cleanupError], `${label} and cleanup both failed`);
+  }
+  if (testError) throw testError;
+  if (cleanupError) throw cleanupError;
+}
 
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -98,6 +147,8 @@ function publish(selection = selectionPath, price = pricePath, id = baselineId) 
   return JSON.parse(result.stdout);
 }
 
+let registryTestError = null;
+let registryCleanupError = null;
 try {
   fs.mkdirSync(path.dirname(storesConfig), {recursive: true});
   fs.writeFileSync(storesConfig, JSON.stringify({stores: stores.map(storeKey => ({storeKey}))}));
@@ -187,8 +238,26 @@ try {
 
   const originalRegistryText = fs.readFileSync(registryFile, 'utf8');
   const nestedRegistry = JSON.parse(originalRegistryText);
-  const nestedBaselineDir = path.join(registryRoot, 'baselines', baselineId, 'nested');
-  fs.mkdirSync(nestedBaselineDir, {recursive: true});
+  const immutableBaselineDir = path.join(registryRoot, 'baselines', baselineId);
+  const nestedBaselineDir = path.join(immutableBaselineDir, 'nested');
+  const immutableBaselineMode = fs.lstatSync(immutableBaselineDir).mode & 0o777;
+  let nestedFixtureError = null;
+  let immutableModeRestoreError = null;
+  try {
+    fs.chmodSync(immutableBaselineDir, immutableBaselineMode | 0o700);
+    fs.mkdirSync(nestedBaselineDir);
+  } catch (error) {
+    nestedFixtureError = error;
+  } finally {
+    try {
+      fs.chmodSync(immutableBaselineDir, immutableBaselineMode);
+    } catch (error) {
+      immutableModeRestoreError = error;
+    }
+  }
+  throwTestAndCleanupErrors(nestedFixtureError, immutableModeRestoreError, 'nested baseline fixture');
+  assert.equal(fs.lstatSync(immutableBaselineDir).mode & 0o777, immutableBaselineMode,
+    'nested-path fixture must restore the immutable baseline directory mode before verify');
   nestedRegistry.manifestPath = `baselines/${baselineId}/nested/manifest.json`;
   const nestedRegistryBase = {...nestedRegistry};
   delete nestedRegistryBase.canonicalRegistryHash;
@@ -198,6 +267,8 @@ try {
   fs.writeFileSync(registryFile, `${JSON.stringify(nestedRegistry, null, 2)}\n`);
   const nestedVerify = spawnSync(process.execPath, [manager, 'verify', '--registry-root', registryRoot, '--registry-file', registryFile], {encoding: 'utf8'});
   assert.notEqual(nestedVerify.status, 0, 'nested manifest paths must be rejected');
+  assert.equal(fs.lstatSync(immutableBaselineDir).mode & 0o777, immutableBaselineMode,
+    'nested-path verification must leave the immutable baseline directory mode unchanged');
   fs.writeFileSync(registryFile, originalRegistryText);
 
   const otherBaselineDir = path.join(registryRoot, 'baselines', `other-${baselineId}`);
@@ -285,11 +356,21 @@ try {
     root,
     registryFile: path.join(root, 'missing', 'current.json'),
   }), /missing|registry/i);
+} catch (error) {
+  registryTestError = error;
 } finally {
-  fs.rmSync(root, {recursive: true, force: true});
+  try {
+    cleanupTestTmpRoot(root);
+  } catch (error) {
+    registryCleanupError = error;
+  }
 }
+throwTestAndCleanupErrors(registryTestError, registryCleanupError, 'marketing plan registry fixture');
 
 const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'marketing-plan-legacy-'));
+testTmpRoots.add(legacyRoot);
+let legacyTestError = null;
+let legacyCleanupError = null;
 try {
   const legacyDir = path.join(legacyRoot, 'tmp', 'marketing-signup');
   fs.mkdirSync(legacyDir, {recursive: true});
@@ -297,9 +378,16 @@ try {
   fs.writeFileSync(path.join(legacyDir, 'selection-plan-2026-06-03-ALL-ready.json'), JSON.stringify({items: legacy, baselineForNextOrdinaryActivity: true, baselineForLimitedDiscountFallback: true, executionStatus: 'completed', planMetadata: {status: 'current_baseline'}}));
   fs.writeFileSync(path.join(legacyDir, 'price-overrides-2026-06-03-ALL-ready.json'), JSON.stringify({items: legacy, baselineForNextOrdinaryActivity: true, baselineForLimitedDiscountFallback: true, executionStatus: 'completed', planMetadata: {status: 'current_baseline'}}));
   assert.throws(() => resolveCurrentMarketingPlanPair({root: legacyRoot}), /verified durable registry.*current\.json|registry is not configured/i);
+} catch (error) {
+  legacyTestError = error;
 } finally {
-  fs.rmSync(legacyRoot, {recursive: true, force: true});
+  try {
+    cleanupTestTmpRoot(legacyRoot);
+  } catch (error) {
+    legacyCleanupError = error;
+  }
 }
+throwTestAndCleanupErrors(legacyTestError, legacyCleanupError, 'legacy marketing plan fixture');
 
 console.log(JSON.stringify({ok: true, checks: [
   'valid_registry_selection',
