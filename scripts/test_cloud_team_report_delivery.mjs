@@ -136,6 +136,7 @@ const botPaths = buildCloudLandingPaths({
   automationId: botBundle.automationId,
   businessDate: botBundle.businessDate,
   fingerprint: botBundle.fingerprint,
+  attachmentName: botBundle.attachmentName,
 });
 const summaryCall = botCalls.find(call => call.args.includes('--markdown'));
 const attachmentCall = botCalls.find(call => call.args.includes('--file'));
