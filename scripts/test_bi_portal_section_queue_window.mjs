@@ -320,16 +320,22 @@ if (tools.status !== 0) {
     deadlineEpoch: 1_600,
     deadlineMinute: 14,
     heavyAllowed: 0,
-    sections: ['profit', 'orders'],
-    maxSections: 1,
+    sections: ['profit', 'homeRankings', 'orders', 'waybills', 'afterSales', 'inventoryTrend'],
+    maxSections: 8,
     expectedStatus: 75,
   });
-  assert.deepEqual(lightWindow.calls, ['orders'],
-    'the :02 light window may claim a light section but never profit');
+  assert.deepEqual(lightWindow.calls, ['orders', 'waybills', 'afterSales', 'inventoryTrend'],
+    'the :02 light window may claim multiple light sections serially but never heavy sections');
+  assert.equal(new Set(lightWindow.calls).size, lightWindow.calls.length,
+    'the :02 batch must not claim any section twice or run parallel duplicate work');
   assert.equal(lightWindow.queue.entries.some(entry => entry.section === 'profit' && entry.status === 'pending'), true,
     'the :02 light window must leave heavy profit pending');
-  assert.equal(lightWindow.queue.entries.some(entry => entry.section === 'orders'), false,
-    'the :02 light window must complete the light section it claimed');
+  assert.equal(lightWindow.queue.entries.some(entry => entry.section === 'homeRankings' && entry.status === 'pending'), true,
+    'the :02 light window must leave heavy homeRankings pending');
+  for (const section of ['orders', 'waybills', 'afterSales', 'inventoryTrend']) {
+    assert.equal(lightWindow.queue.entries.some(entry => entry.section === section), false,
+      `the :02 light window must complete the light section it claimed: ${section}`);
+  }
   assert.match(`${lightWindow.run.stdout}\n${lightWindow.run.stderr}`,
     /reason=short_reserved_window/,
     'the :02 worker must report the explicit light-only heavy deferral');

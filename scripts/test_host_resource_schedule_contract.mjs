@@ -618,6 +618,10 @@ assert.match(portalQueueSlot, /DEADLINE_MINUTE=14/);
 assert.match(portalQueueSlot, /DEADLINE_MINUTE=44/);
 assert.match(portalQueueSlot, /HEAVY_ALLOWED=0/);
 assert.match(portalQueueSlot, /HEAVY_ALLOWED=1/);
+assert.doesNotMatch(portalQueueSlot, /MAX_SECTIONS=1/,
+  'the managed slot must not retain the old one-section throughput cap');
+assert.match(portalQueueSlot, /DEADLINE_MINUTE=14[\s\S]*MAX_SECTIONS=8[\s\S]*HEAVY_ALLOWED=0/,
+  'the :02 slot must allow a bounded serial batch while remaining light-only');
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
 assert.match(portalQueueSlot, /daily_operating_refresh_active/);
 assert.match(portalQueueSlot, /case "\$HOUR" in\s+2\|3\|7\)/,
@@ -628,6 +632,10 @@ assert.match(portalQueueSlot, /reason=special_reserved_window/);
 assert.match(portalQueueSlot, /MINUTE >= 1 && MINUTE <= 4/);
 assert.match(portalQueueSlot, /MINUTE >= 31 && MINUTE <= 34/);
 assert.match(portalQueueSlot, /--lock-wait-sec 0/);
+assert.match(portalQueueWorker, /for \(\(index=1; index<=MAX_SECTIONS; index\+=1\)\);/,
+  'the section worker must consume the bounded batch serially');
+assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings\)/,
+  'the light slot must keep profit and homeRankings excluded');
 const hostWrapperExec = portalQueueSlot.indexOf('exec "$ROOT/scripts/run_host_heavy_job.sh"');
 assert.ok(
   hostWrapperExec > portalQueueSlot.indexOf('yield_to_daily_coordinator'),
@@ -865,7 +873,7 @@ const runSlotBehaviorCase = ({
 
   runSlotBehaviorCase({
     label: '06:02 light-only', hour: 6, minute: 2,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 14, expectedMax: 1, expectedHeavy: 0,
+    expectedExit: 0, expectedHost: true, expectedDeadline: 14, expectedMax: 8, expectedHeavy: 0,
   });
   runSlotBehaviorCase({
     label: '08:32 morning active', hour: 8, minute: 32, morningState: 'active',

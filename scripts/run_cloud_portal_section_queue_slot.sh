@@ -5,7 +5,7 @@ ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 HOUR=$((10#$(date +%H)))
 MINUTE=$((10#$(date +%M)))
 DEADLINE_MINUTE=""
-MAX_SECTIONS=1
+MAX_SECTIONS=8
 HEAVY_ALLOWED=0
 
 if (( HOUR == 1 )); then
@@ -42,7 +42,7 @@ if (( MINUTE >= 1 && MINUTE <= 4 )); then
       ;;
   esac
   DEADLINE_MINUTE=14
-  MAX_SECTIONS=1
+  MAX_SECTIONS=8
   HEAVY_ALLOWED=0
 elif (( MINUTE >= 31 && MINUTE <= 34 )); then
   DEADLINE_MINUTE=44

@@ -496,6 +496,18 @@ match('guard and final marker share semantic inventory validator', guard,
 match('exact pending readback remains retryable in same run', guard,
   /result_is_readback_pending_only[\s\S]*submitted_but_readback_pending[\s\S]*exit 75/,
   'an exact durable intent waiting only for propagation must not become restart-prevented exit 2');
+match('executor result freshness uses atomic identity and content evidence', guard,
+  /result_fingerprint\(\)[\s\S]*sha256[\s\S]*stat\.mtimeNs[\s\S]*stat\.dev[\s\S]*stat\.ino/,
+  'freshness must distinguish an atomic replacement from an old result that merely still exists');
+check('only a fresh complete result may enter the pending classifier', () => {
+  const beforeAt = guard.indexOf('RESULT_BEFORE_FINGERPRINT=');
+  const afterAt = guard.indexOf('RESULT_AFTER_FINGERPRINT=');
+  const pendingAt = guard.indexOf('if result_is_readback_pending_only; then');
+  assert.ok(beforeAt >= 0 && afterAt > beforeAt && pendingAt > afterAt,
+    'the guard must snapshot before dispatch and validate freshness before exit 75 classification');
+  assert.match(guard.slice(afterAt, pendingAt), /RESULT_AFTER_FINGERPRINT.*RESULT_BEFORE_FINGERPRINT/,
+    'the post-executor gate must reject an unchanged result before pending classification');
+});
 match('unresolved durable lifecycle selects immutable readback-only recovery', guard,
   /durable inventory journal requires lifecycle recovery pending=\$PENDING_INTENT_COUNT readbackMatched=\$READBACK_MATCHED_INTENT_COUNT; preserve the immutable plan and run readback-only reconciliation/,
   'an existing ambiguous or pending lifecycle must not rebuild its plan');
@@ -672,14 +684,24 @@ export async function readInventoryIntentJournals(files) {
     fs.writeFileSync(path.join(temp, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'), `
 import fs from 'node:fs';
 const args = process.argv.slice(2);
+const mode = process.env.SHEIN_TEST_INVENTORY_EXECUTOR_MODE || 'default';
+if (mode === 'fatal-no-result' || mode === 'fatal-no-result-75') {
+  console.error('INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED:fixture');
+  process.exit(mode === 'fatal-no-result-75' ? 75 : 42);
+}
 fs.writeFileSync('executor-args.json', JSON.stringify(args));
 const value = flag => args[args.indexOf(flag) + 1];
 const plan = JSON.parse(fs.readFileSync(value('--plan'), 'utf8'));
 const journal = fs.readFileSync(value('--out')+'.journal.ndjson', 'utf8');
 const closed = journal.includes('readback_matched');
-fs.writeFileSync(value('--out'), JSON.stringify({planHash:plan.payloadHash,execute:true,executionMode:'automatic',results:[closed
+const result = {planHash:plan.payloadHash,execute:true,executionMode:'automatic',results:[closed
   ? {state:'skipped_target_already_matched',before:{totalUsableInventory:10},targetUsableInventory:10}
-  : {state:'submitted_but_readback_pending'}]}));
+  : {state:'submitted_but_readback_pending'}]};
+const output = value('--out');
+const temporary = output + '.tmp';
+fs.writeFileSync(temporary, JSON.stringify(result) + '\\n');
+fs.renameSync(temporary, output);
+if (mode === 'fresh-pending') process.exit(1);
 `);
     fs.writeFileSync(path.join(temp, 'scripts', 'pipeline_marker.mjs'), `
 import fs from 'node:fs';
@@ -698,7 +720,7 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
     const wslTemp = temp
       .replace(/^([A-Za-z]):/, (_match, drive) => `/mnt/${drive.toLowerCase()}`)
       .replaceAll('\\', '/');
-    const run = spawnSync('bash', ['-lc', [
+    const runGuard = mode => spawnSync('bash', ['-lc', [
       `cd '${wslTemp}' &&`,
       'env',
       'SHEIN_BI_ROOT=.',
@@ -708,10 +730,12 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
       'SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH=1',
       'SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1',
       'SHEIN_BI_INVENTORY_MAX_ROWS=10',
+      `SHEIN_TEST_INVENTORY_EXECUTOR_MODE=${mode}`,
       'bash scripts/cloud_daily_inventory_replenishment_guard.sh',
     ].join(' ')], {
       encoding: 'utf8',
     });
+    const run = runGuard('default');
     assert.equal(run.status, 75, `journal-only recovery must remain retryable\nstdout=${run.stdout}\nstderr=${run.stderr}`);
     assert.match(run.stdout, /durable inventory journal requires lifecycle recovery pending=1 readbackMatched=0/);
     const executorArgs = JSON.parse(fs.readFileSync(executorArgsFile, 'utf8'));
@@ -727,22 +751,55 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
       '',
     ].join('\n'));
     fs.rmSync(executorArgsFile, {force: true});
-    const closedRun = spawnSync('bash', ['-lc', [
-      `cd '${wslTemp}' &&`,
-      'env',
-      'SHEIN_BI_ROOT=.',
-      'SHEIN_BI_INVENTORY_RUNTIME_ROOT=runtime',
-      `SHEIN_BI_INVENTORY_RUN_DATE=${runDate}`,
-      `SHEIN_BI_INVENTORY_BUSINESS_DATE=${businessDate}`,
-      'SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH=1',
-      'SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1',
-      'SHEIN_BI_INVENTORY_MAX_ROWS=10',
-      'bash scripts/cloud_daily_inventory_replenishment_guard.sh',
-    ].join(' ')], {encoding: 'utf8'});
+    const closedRun = runGuard('default');
     assert.equal(closedRun.status, 0, `all-closed crash recovery must reconstruct a terminal result\nstdout=${closedRun.stdout}\nstderr=${closedRun.stderr}`);
     assert.match(closedRun.stdout, /lifecycle recovery pending=0 readbackMatched=1/);
     const closedArgs = JSON.parse(fs.readFileSync(executorArgsFile, 'utf8'));
     assert.ok(closedArgs.includes('--reconcile-pending-only'), 'all-closed crash recovery must still make the write branch unreachable');
+
+    // A stale pending RESULT must not be promoted to exit 75 when the
+    // recovery executor fails before publishing this invocation's result.
+    const pendingResult = {
+      planHash: 'a'.repeat(64),
+      execute: true,
+      executionMode: 'automatic',
+      generatedAt: '2026-08-25T00:00:00.000Z',
+      results: [{state: 'submitted_but_readback_pending'}],
+    };
+    const pendingJournal = `${JSON.stringify({kind:'intent',intentId:'intent-1',logicalActionKey:'logical-1'})}\n`;
+    fs.writeFileSync(journalFile, pendingJournal);
+    fs.writeFileSync(resultFile, `${JSON.stringify(pendingResult)}\n`);
+    const priorResultBytes = fs.readFileSync(resultFile);
+    const priorJournalBytes = fs.readFileSync(journalFile);
+    const fatalRun = runGuard('fatal-no-result');
+    assert.equal(fatalRun.status, 42,
+      `executor fatal without a fresh result must be a real failure\nstdout=${fatalRun.stdout}\nstderr=${fatalRun.stderr}`);
+    assert.doesNotMatch(`${fatalRun.stdout}\n${fatalRun.stderr}`, /submitted_but_readback_pending|capacity|exit75/u,
+      'a stale pending result must not be reported as capacity/readback-pending');
+    assert.deepEqual(fs.readFileSync(resultFile), priorResultBytes,
+      'executor fatal must preserve the old RESULT bytes');
+    assert.deepEqual(fs.readFileSync(journalFile), priorJournalBytes,
+      'executor fatal must preserve the append-only journal');
+    const fatal75Run = runGuard('fatal-no-result-75');
+    assert.equal(fatal75Run.status, 1,
+      `executor 75 without a fresh result must be remapped to a real failure\nstdout=${fatal75Run.stdout}\nstderr=${fatal75Run.stderr}`);
+    assert.doesNotMatch(`${fatal75Run.stdout}\n${fatal75Run.stderr}`, /submitted_but_readback_pending|capacity|exit75/u,
+      'executor 75 without a fresh result must not be reported as capacity/readback-pending');
+    assert.deepEqual(fs.readFileSync(resultFile), priorResultBytes,
+      'executor 75 fatal must preserve the old RESULT bytes');
+
+    // A new complete pending RESULT, even with executor status 1, retains the
+    // established readback-only retry contract.
+    const freshRun = runGuard('fresh-pending');
+    assert.equal(freshRun.status, 75,
+      `a fresh complete pending result must remain retryable\nstdout=${freshRun.stdout}\nstderr=${freshRun.stderr}`);
+    assert.match(freshRun.stdout, /submitted_but_readback_pending/);
+    assert.notDeepEqual(fs.readFileSync(resultFile), priorResultBytes,
+      'the fresh executor result must replace the old pending RESULT');
+    assert.deepEqual(fs.readFileSync(journalFile), priorJournalBytes,
+      'readback-only classification must not rewrite the journal fixture');
+    assert.equal(fs.existsSync(path.join(temp, 'inventory-write.log')), false,
+      'all guard freshness cases must use a no-inventory-write fixture');
   } finally {
     fs.rmSync(temp, {recursive: true, force: true});
   }

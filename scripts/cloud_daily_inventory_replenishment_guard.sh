@@ -148,6 +148,39 @@ result_is_readback_pending_only() {
   ' "$RESULT" >/dev/null
 }
 
+# The executor publishes RESULT with a tmp-file + atomic rename. Capture the
+# published file identity before dispatch and require a changed identity after
+# dispatch, so an old pending result can never be reclassified as this run's
+# readback-pending output after a fatal executor exit. The fingerprint combines
+# device/inode (atomic replacement), size, nanosecond mtime, and content hash;
+# an absent file is a deliberate stable fingerprint too.
+result_fingerprint() {
+  node --input-type=module - "$RESULT" <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+
+const file = process.argv[2];
+try {
+  const stat = fs.statSync(file, {bigint: true});
+  const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const mtime = typeof stat.mtimeNs === 'bigint' ? stat.mtimeNs : stat.mtimeMs;
+  process.stdout.write([
+    stat.dev,
+    stat.ino,
+    stat.size,
+    mtime,
+    hash,
+  ].map(String).join(':'));
+} catch (error) {
+  if (error?.code === 'ENOENT') {
+    process.stdout.write('absent');
+  } else {
+    throw error;
+  }
+}
+NODE
+}
+
 JOURNAL="$RESULT.journal.ndjson"
 RECONCILE_PENDING_ONLY=0
 if [[ -s "$PLAN" && -s "$RESULT" ]]; then
@@ -591,6 +624,11 @@ if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$RUN_DEADLINE_EPOCH" =~ ^[1-9][0-9]*
   exit 76
 fi
 
+if ! RESULT_BEFORE_FINGERPRINT="$(result_fingerprint)"; then
+  echo "[daily_inventory_guard] cannot fingerprint the prior inventory result; refusing executor classification" >&2
+  exit 1
+fi
+
 set +e
 EXECUTOR_RECOVERY_ARGS=()
 if (( RECONCILE_PENDING_ONLY == 1 )); then
@@ -606,13 +644,28 @@ node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
   --out "$RESULT"
 EXECUTOR_STATUS=$?
 set -e
+# Exit 75 is the guard's capacity/readback-only contract. An executor 75
+# without a fresh complete publication is a real executor failure, not a
+# capacity defer that the morning coordinator may retry indefinitely.
+EXECUTOR_FAILURE_STATUS="$EXECUTOR_STATUS"
+if (( EXECUTOR_FAILURE_STATUS == 75 )); then
+  EXECUTOR_FAILURE_STATUS=1
+fi
 
-if [[ ! -f "$RESULT" ]] || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
+if ! RESULT_AFTER_FINGERPRINT="$(result_fingerprint)"; then
+  echo "[daily_inventory_guard] cannot fingerprint the inventory result after executor exit" >&2
+  if (( EXECUTOR_STATUS != 0 )); then
+    exit "$EXECUTOR_FAILURE_STATUS"
+  fi
+  exit 1
+fi
+
+if [[ "$RESULT_AFTER_FINGERPRINT" == "$RESULT_BEFORE_FINGERPRINT" ]] || [[ ! -f "$RESULT" ]] || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
   .planHash == $hash and .execute == true and .executionMode == "automatic" and (.results | length) == $total
 ' "$RESULT" >/dev/null; then
-  echo "automatic inventory executor did not produce a complete result" >&2
+  echo "automatic inventory executor did not produce a fresh complete result" >&2
   if (( EXECUTOR_STATUS != 0 )); then
-    exit "$EXECUTOR_STATUS"
+    exit "$EXECUTOR_FAILURE_STATUS"
   fi
   exit 1
 fi
