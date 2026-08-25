@@ -12153,7 +12153,7 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
       BI_PORTAL_CORE_FIELD_LIMITS,
     );
     const generatedAt = String(scan.fields.generatedAt?.value || scan.fields.__sections?.value?.generatedAt || '');
-    const generatedAtValid = Boolean(generatedAt) && Number.isFinite(Date.parse(generatedAt));
+    const generatedAtValid = homepageTimestampNs(generatedAt) !== null;
     const sections = scan.fields.__sections?.value;
     if (sections !== undefined && (!sections || typeof sections !== 'object' || Array.isArray(sections))) {
       const error = new Error('BI core __sections must be an object');
@@ -12899,15 +12899,46 @@ function homepageDateIsValid(date) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
 }
 
-function homepageTimestampMs(value) {
+function homepageTimestampNs(value) {
   const text = String(value || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}(?::\d{2})?)$/.test(text)) return NaN;
-  const normalized = /[+-]\d{2}$/.test(text) ? `${text}:00` : text;
-  return homepageDateIsValid(text.slice(0, 10)) ? Date.parse(normalized) : NaN;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}(?::\d{2})?)$/.exec(text);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  const zone = match[8];
+  let offsetMinutes = 0;
+  if (zone !== 'Z') {
+    const offsetHours = Number(zone.slice(1, 3));
+    const zoneMinutes = zone.length === 6 ? Number(zone.slice(4, 6)) : 0;
+    if (offsetHours > 14
+      || zoneMinutes > 59
+      || (offsetHours === 14 && zoneMinutes !== 0)
+      || (zone[0] === '-' && offsetHours === 0 && zoneMinutes === 0)) return null;
+    offsetMinutes = (zone[0] === '-' ? -1 : 1) * (offsetHours * 60 + zoneMinutes);
+  }
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  calendar.setUTCHours(hour, minute, second, 0);
+  if (!Number.isFinite(calendar.getTime())
+    || calendar.getUTCFullYear() !== year
+    || calendar.getUTCMonth() !== month - 1
+    || calendar.getUTCDate() !== day
+    || calendar.getUTCHours() !== hour
+    || calendar.getUTCMinutes() !== minute
+    || calendar.getUTCSeconds() !== second) return null;
+  const fractionalNs = BigInt((match[7] || '').padEnd(9, '0') || '0');
+  return BigInt(calendar.getTime()) * 1_000_000n
+    - BigInt(offsetMinutes) * 60n * 1_000_000_000n
+    + fractionalNs;
 }
 
 function homepageTimestampIsValid(value) {
-  return Number.isFinite(homepageTimestampMs(value));
+  return homepageTimestampNs(value) !== null;
 }
 
 function homepageRowHasDate(row) {
@@ -12948,13 +12979,15 @@ function homepageProfitSummaryIsUsable(summary) {
   const rows = summary.dailyScopes;
   if (!Array.isArray(rows) || !rows.length || rows.some(row => !row || typeof row !== 'object' || Array.isArray(row))) return false;
   if (rows.some(row => (
-    !homepageRowHasDate(row)
+      !homepageRowHasDate(row)
       || !Object.prototype.hasOwnProperty.call(row, 'scope_value')
       || !Object.prototype.hasOwnProperty.call(row, 'scope_order')
-      || !String(row.scope_value || '').trim()
       || typeof row.scope_order !== 'number'
       || !Number.isSafeInteger(row.scope_order)
       || row.scope_order < 0
+      || typeof row.scope_value !== 'string'
+      || (row.scope_value !== '' && !row.scope_value.trim())
+      || (row.scope_order > 0 && !row.scope_value.trim())
   ))) return false;
   return rows.some(row => homepageRowHasNonZeroValue(row, HOMEPAGE_PROFIT_BUSINESS_VALUE_FIELDS));
 }
@@ -13190,15 +13223,15 @@ let biProductProfitIndexPromise = null;
 
 function isCurrentProfitSectionCache(cache, generatedAt, minCachedAt = '') {
   const expected = String(generatedAt || '');
-  const minimum = Date.parse(String(minCachedAt || ''));
-  const cached = Date.parse(String(cache?.cachedAt || ''));
+  const minimum = homepageTimestampNs(minCachedAt);
+  const cached = homepageTimestampNs(cache?.cachedAt);
   return Boolean(
     expected
     && String(cache?.generatedAt || '') === expected
     && Array.isArray(cache?.data?.profit?.dailyStoreProducts),
   ) && (
-    Number.isNaN(minimum)
-    || (!Number.isNaN(cached) && cached >= minimum)
+    minimum === null
+    || (cached !== null && cached >= minimum)
   );
 }
 
@@ -13226,9 +13259,9 @@ async function readCurrentProfitSource(root, generatedAt) {
 
 function isCurrentHomeProfitSectionCache(cache, generatedAt, minSourceCachedAt = '') {
   const expected = String(generatedAt || '');
-  const minimum = Date.parse(String(minSourceCachedAt || ''));
+  const minimum = homepageTimestampNs(minSourceCachedAt);
   const summary = cache?.data?.homeProfitSummary;
-  const sourceCachedAt = Date.parse(String(summary?.sourceCachedAt || ''));
+  const sourceCachedAt = homepageTimestampNs(summary?.sourceCachedAt);
   return Boolean(
     expected
     && String(cache?.generatedAt || '') === expected
@@ -13237,8 +13270,8 @@ function isCurrentHomeProfitSectionCache(cache, generatedAt, minSourceCachedAt =
     && String(summary.sourceGeneratedAt || '') === expected
     && Array.isArray(summary.dailyScopes),
   ) && (
-    Number.isNaN(minimum)
-    || (!Number.isNaN(sourceCachedAt) && sourceCachedAt >= minimum)
+    minimum === null
+    || (sourceCachedAt !== null && sourceCachedAt >= minimum)
   );
 }
 
@@ -14083,12 +14116,12 @@ async function loadBiSection(args, root, section, options = {}) {
     }
     const fallbackCache = await readVerifiedHomepageAccountingFallback(root, section);
     const sourcePublishedAt = String(fallbackCache?.sourceCachedAt || '');
-    const minimum = homepageTimestampMs(accountingState?.minimumPublishedAt);
-    const source = homepageTimestampMs(sourcePublishedAt);
+    const minimum = homepageTimestampNs(accountingState?.minimumPublishedAt);
+    const source = homepageTimestampNs(sourcePublishedAt);
     const sourceCurrent = String(fallbackCache?.sourceGeneratedAt || '') === String(meta.generatedAt || '')
       && accountingState?.decision?.fresh === true
-      && !Number.isNaN(minimum)
-      && !Number.isNaN(source)
+      && minimum !== null
+      && source !== null
       && source >= minimum;
     if (!sourceCurrent && !force) {
       const refreshScheduled = queueHasCurrentPendingBiSection(section, meta.generatedAt);
@@ -14640,8 +14673,7 @@ export function liveAccountingQueuePlan(event = {}) {
 
 export function normalizeBiLiveAccountingGeneration(meta) {
   const generatedAt = String(meta?.generatedAt || '').trim();
-  const exactIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
-  if (meta?.mode !== 'api' || !exactIso.test(generatedAt) || !Number.isFinite(Date.parse(generatedAt))) return '';
+  if (meta?.mode !== 'api' || homepageTimestampNs(generatedAt) === null) return '';
   return generatedAt;
 }
 
@@ -22870,6 +22902,8 @@ export const __testHooks = {
   BI_DIRECT_STDERR_MAX_BYTES,
   generateBiSection,
   loadBiSection,
+  homepageTimestampNs,
+  homepageTimestampIsValid,
   resetHomepageAccountingUsabilityCache,
   homepageAccountingUsabilityParseCount() {
     return homepageAccountingUsabilityParseCount;

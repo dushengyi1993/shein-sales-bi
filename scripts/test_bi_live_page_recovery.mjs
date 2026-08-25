@@ -12,7 +12,35 @@ import {__testHooks as serveHooks, usableHomepageAccountingFallback} from './ser
 
 const sourceGeneratedAt = '2026-08-24T07:59:49+08:00';
 const generatedAt = '2026-08-25T08:05:28+08:00';
+const fractionalGeneratedAt6 = '2026-08-25T08:05:28.560965+08:00';
+const fractionalGeneratedAt9 = '2026-08-25T08:05:28.560965123+08:00';
+const precisionMinimumAt = '2026-08-25T08:05:28.560966+08:00';
+const precisionSourceAt = '2026-08-25T08:05:28.560965+08:00';
 const sourceCachedAt = '2026-08-24T22:37:51Z';
+
+const timestampNs = serveHooks.homepageTimestampNs;
+assert.equal(typeof timestampNs, 'function');
+assert.equal(typeof timestampNs(fractionalGeneratedAt6), 'bigint', 'fractional timestamps use exact BigInt nanoseconds');
+assert.equal(timestampNs('2026-08-25T00:05:28Z'), timestampNs('2026-08-25T08:05:28+08'), 'Z and hour-only offsets identify the same instant');
+assert.equal(timestampNs('2026-08-25T00:05:28Z'), timestampNs('2026-08-25T08:05:28+08:00'), 'Z and hour-minute offsets identify the same instant');
+assert.equal(timestampNs('2026-08-25T00:05:28Z'), timestampNs('2026-08-25T00:05:28+00:00'), 'Z and explicit positive zero offset identify the same instant');
+assert.notEqual(timestampNs('2026-08-25T08:05:28+14:00'), null, 'the maximum positive numeric offset is valid');
+assert.ok(timestampNs(precisionSourceAt) < timestampNs(precisionMinimumAt), 'one microsecond boundary remains ordered after nanosecond parsing');
+for (const invalidTimestamp of [
+  '2026-02-29T08:05:28Z',
+  '2026-08-25T24:05:28Z',
+  '2026-08-25T08:60:28Z',
+  '2026-08-25T08:05:60Z',
+  '2026-08-25T08:05:28+14:01',
+  '2026-08-25T08:05:28-14:01',
+  '2026-08-25T08:05:28+23:59',
+  '2026-08-25T08:05:28-00:00',
+  '2026-08-25T08:05:28+24:00',
+  '2026-08-25T08:05:28+08:60',
+  '2026-08-25T08:05:28.1234567890Z',
+]) {
+  assert.equal(timestampNs(invalidTimestamp), null, `invalid timestamp is rejected: ${invalidTimestamp}`);
+}
 
 const validRankings = {
   dailyStores: [{date: '2026-08-12', store_key: 'HL', shop_name: 'HL', sales_sar: 12, quantity: 1, orders: 1}],
@@ -136,6 +164,21 @@ assert.equal(usableHomepageAccountingFallback('homeProfit', {
 assert.equal(usableHomepageAccountingFallback('homeProfit', {
   ok: true,
   generatedAt,
+  data: {homeProfitSummary: {...validProfitSummary, sourceCachedAt: '2026-08-25T08:05:28.560965+08:00'}},
+}, generatedAt), true, 'production-format timestamps with six fractional digits remain valid');
+assert.equal(usableHomepageAccountingFallback('homeProfit', {
+  ok: true,
+  generatedAt,
+  data: {homeProfitSummary: {...validProfitSummary, sourceCachedAt: '2026-08-25T08:05:28.560965123+08:00'}},
+}, generatedAt), true, 'timestamps with nine fractional digits remain valid');
+assert.equal(usableHomepageAccountingFallback('homeProfit', {
+  ok: true,
+  generatedAt,
+  data: {homeProfitSummary: {...validProfitSummary, sourceCachedAt: '2026-08-25T08:05:28.1234567890+08:00'}},
+}, generatedAt), false, 'timestamps with more than nine fractional digits remain invalid');
+assert.equal(usableHomepageAccountingFallback('homeProfit', {
+  ok: true,
+  generatedAt,
   data: {homeProfitSummary: {...validProfitSummary, dailyScopes: [{date: '2026-08-12', scope_value: 'ALL', scope_order: -1, net_revenue_sar: 12}]}},
 }, generatedAt), false, 'scope_order must be a non-negative integer');
 assert.equal(usableHomepageAccountingFallback('homeProfit', {
@@ -147,7 +190,19 @@ assert.equal(usableHomepageAccountingFallback('homeProfit', {
   ok: true,
   generatedAt,
   data: {homeProfitSummary: {...validProfitSummary, dailyScopes: [{date: '2026-08-12', scope_value: '', scope_order: 0, net_revenue_sar: 12}]}},
-}, generatedAt), false, 'scope rows require a non-empty range identity');
+}, generatedAt), true, 'the overall profit row may use an empty scope_value only at scope_order zero');
+assert.equal(usableHomepageAccountingFallback('homeProfit', {
+  ok: true,
+  generatedAt,
+  data: {homeProfitSummary: {...validProfitSummary, dailyScopes: [{date: '2026-08-12', scope_value: '', scope_order: 1, net_revenue_sar: 12}]}},
+}, generatedAt), false, 'non-overall profit rows still require a non-empty scope_value');
+for (const invalidScopeValue of [null, false, 0]) {
+  assert.equal(usableHomepageAccountingFallback('homeProfit', {
+    ok: true,
+    generatedAt,
+    data: {homeProfitSummary: {...validProfitSummary, dailyScopes: [{date: '2026-08-12', scope_value: invalidScopeValue, scope_order: 0, net_revenue_sar: 12}]}},
+  }, generatedAt), false, `non-string scope_value is rejected: ${String(invalidScopeValue)}`);
+}
 assert.equal(usableHomepageAccountingFallback('homeProfit', {
   ok: true,
   generatedAt,
@@ -176,12 +231,12 @@ const currentAccounting = {
   minimumPublishedAt: '2000-01-01T00:00:00.000Z',
   freshness: {accountingInputUpdatedAt: '2026-08-25T08:06:00+08:00'},
 };
-async function makePortalFixture(name) {
+async function makePortalFixture(name, coreAt = generatedAt) {
   const root = path.join(routeTemp, name);
   await fs.mkdir(path.join(root, 'sections'), {recursive: true});
   await fs.writeFile(path.join(root, 'data.json'), JSON.stringify({
-    generatedAt,
-    __sections: {mode: 'api', generatedAt, keys: ['homeRankings', 'homeProfit']},
+    generatedAt: coreAt,
+    __sections: {mode: 'api', generatedAt: coreAt, keys: ['homeRankings', 'homeProfit']},
   }));
   return root;
 }
@@ -248,6 +303,40 @@ try {
   assert.equal(degradedPayload.generatedAt, sourceGeneratedAt, 'degraded raw body retains its source generation');
   assert.notEqual(degradedPayload.generatedAt, generatedAt, 'current core identity never overwrites source body identity');
   assert.equal(degradedPayload.data.rankings.dailyStores[0].sales_sar, 12);
+
+  for (const [label, fractionalAt] of [['six', fractionalGeneratedAt6], ['nine', fractionalGeneratedAt9]]) {
+    const fractionalRoot = await makePortalFixture(`fractional-${label}`);
+    await writeValidRankings(fractionalRoot, fractionalAt);
+    const fractional = await loadHomepage(fractionalRoot, 'homeRankings', pendingAccounting);
+    assert.equal(fractional.result.status, 200, `a ${label}-digit fractional generatedAt remains eligible for homepage fallback`);
+    assert.equal(fractional.result.headers['X-Shein-BI-Source-Generated-At'], fractionalAt);
+    const fractionalPayload = await readResultPayload(fractional.result);
+    assert.equal(fractionalPayload.generatedAt, fractionalAt, `the ${label}-digit source generation is retained in the streamed body`);
+  }
+
+  const precisionRoot = await makePortalFixture('precision-nanosecond-ordering', precisionMinimumAt);
+  const precisionRows = [{date: '2026-08-12', scope_value: '', scope_order: 0, net_revenue_sar: 12, quantity: 1, orders: 1, profit_after_storage_sar: 4}];
+  await writeBiSectionCache(precisionRoot, 'profit', precisionMinimumAt, {rows: precisionRows}, run, {requireIntegrity: true});
+  await writeBiSectionCache(precisionRoot, 'profit.query', precisionMinimumAt, {rows: precisionRows}, run, {requireIntegrity: true});
+  await writeBiSectionCache(precisionRoot, 'homeProfit', precisionMinimumAt, {
+    homeProfitSummary: {
+      sourceGeneratedAt: precisionMinimumAt,
+      sourceCachedAt: precisionSourceAt,
+      staleSource: false,
+      dailyScopes: precisionRows,
+    },
+  }, run, {requireIntegrity: true});
+  await publishBiProfitBundleManifest(precisionRoot, precisionMinimumAt);
+  const precision = await loadHomepage(precisionRoot, 'homeProfit', {
+    decision: {fresh: true},
+    minimumPublishedAt: precisionMinimumAt,
+    freshness: {accountingInputUpdatedAt: '2026-08-25T08:06:00+08:00'},
+  });
+  assert.equal(precision.result.status, 200, 'source just below the exact minimum remains displayable as degraded data');
+  assert.equal(precision.result.headers['X-Shein-BI-Degraded'], 'true', 'source .560965 is older than minimum .560966');
+  assert.equal(precision.result.headers['X-Shein-BI-Source-Cached-At'], precisionSourceAt);
+  const precisionPayload = await readResultPayload(precision.result);
+  assert.equal(precisionPayload.generatedAt, precisionMinimumAt, 'the degraded body retains its exact source generation');
 
   const profitRoot = await makePortalFixture('profit-valid');
   const profitRows = [{date: '2026-08-12', scope_value: 'ALL', scope_order: 0, net_revenue_sar: 12, quantity: 1, orders: 1, profit_after_storage_sar: 4}];
