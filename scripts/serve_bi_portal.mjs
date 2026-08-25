@@ -12823,15 +12823,248 @@ async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt
   return true;
 }
 
+const HOMEPAGE_RANKING_ARRAY_KEYS = Object.freeze([
+  'dailyStores',
+  'dailyProducts',
+  'dailyStoreProducts',
+  'dailyPaymentSummary',
+  'dailyStoreProductPaymentSummary',
+]);
+
+const HOMEPAGE_RANKING_VALUE_FIELDS = [
+  'sales_sar',
+  'gross_sales_sar',
+  'net_revenue_sar',
+  'gross_revenue_sar',
+  'amount_sar',
+  'value',
+  'quantity',
+  'gross_quantity',
+  'orders',
+  'gross_orders',
+  'net_orders',
+  'order_count',
+  'store_count',
+];
+
+const HOMEPAGE_PROFIT_BUSINESS_VALUE_FIELDS = [
+  'gross_revenue_sar',
+  'net_revenue_sar',
+  'known_gross_revenue_sar',
+  'known_net_revenue_sar',
+  'risk_adjusted_net_revenue_sar',
+  'known_risk_adjusted_net_revenue_sar',
+  'profit_before_storage_sar',
+  'profit_after_storage_sar',
+  'risk_adjusted_profit_before_storage_sar',
+  'risk_adjusted_profit_after_storage_sar',
+  'profit_if_rtv_received_resellable_sar',
+  'profit_if_rtv_received_resellable_after_storage_sar',
+  'profit_if_rtv_09_resellable_sar',
+  'profit_if_rtv_09_resellable_after_storage_sar',
+  'quantity',
+  'gross_quantity',
+];
+
+const HOMEPAGE_RANKING_ROW_RULES = Object.freeze({
+  dailyStores: row => Boolean(String(row?.store_key || '').trim()),
+  dailyProducts: row => Boolean(
+    String(row?.standard_goods_sn || '').trim()
+      || String(row?.skc_list || '').trim()
+      || String(row?.goods_title || '').trim(),
+  ),
+  dailyStoreProducts: row => Boolean(
+    String(row?.store_key || '').trim()
+      && (String(row?.standard_goods_sn || '').trim()
+        || String(row?.skc_list || '').trim()
+        || String(row?.goods_title || '').trim()),
+  ),
+  dailyPaymentSummary: row => Boolean(
+    String(row?.store_key || '').trim()
+      && Object.prototype.hasOwnProperty.call(row || {}, 'is_cod'),
+  ),
+  dailyStoreProductPaymentSummary: row => Boolean(
+    String(row?.store_key || '').trim()
+      && (String(row?.standard_goods_sn || '').trim()
+        || String(row?.skc_list || '').trim()
+        || String(row?.goods_title || '').trim())
+      && Object.prototype.hasOwnProperty.call(row || {}, 'is_cod'),
+  ),
+});
+
+function homepageDateIsValid(date) {
+  const text = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const parsed = new Date(`${text}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
+}
+
+function homepageTimestampMs(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}(?::\d{2})?)$/.test(text)) return NaN;
+  const normalized = /[+-]\d{2}$/.test(text) ? `${text}:00` : text;
+  return homepageDateIsValid(text.slice(0, 10)) ? Date.parse(normalized) : NaN;
+}
+
+function homepageTimestampIsValid(value) {
+  return Number.isFinite(homepageTimestampMs(value));
+}
+
+function homepageRowHasDate(row) {
+  return homepageDateIsValid(row?.date);
+}
+
+function homepageRankingArrayIsWellShaped(key, rows) {
+  if (!Array.isArray(rows)) return false;
+  const rule = HOMEPAGE_RANKING_ROW_RULES[key];
+  if (typeof rule !== 'function') return false;
+  return rows.every(row => (
+    row && typeof row === 'object' && !Array.isArray(row)
+      && homepageRowHasDate(row)
+      && rule(row)
+  ));
+}
+
+function homepageRowHasNonZeroValue(row, fields) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  return fields.some(field => {
+    const value = row[field];
+    if (value === null || value === undefined || value === '' || typeof value === 'boolean') return false;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && Math.abs(numeric) > 0;
+  });
+}
+
+function homepageRankingsDataIsUsable(rankings) {
+  if (!rankings || typeof rankings !== 'object' || Array.isArray(rankings)) return false;
+  const businessArrays = HOMEPAGE_RANKING_ARRAY_KEYS.filter(key => Array.isArray(rankings[key]));
+  if (!businessArrays.length) return false;
+  if (businessArrays.some(key => !homepageRankingArrayIsWellShaped(key, rankings[key]))) return false;
+  return businessArrays.some(key => rankings[key].some(row => homepageRowHasNonZeroValue(row, HOMEPAGE_RANKING_VALUE_FIELDS)));
+}
+
+function homepageProfitSummaryIsUsable(summary) {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return false;
+  const rows = summary.dailyScopes;
+  if (!Array.isArray(rows) || !rows.length || rows.some(row => !row || typeof row !== 'object' || Array.isArray(row))) return false;
+  if (rows.some(row => (
+    !homepageRowHasDate(row)
+      || !Object.prototype.hasOwnProperty.call(row, 'scope_value')
+      || !Object.prototype.hasOwnProperty.call(row, 'scope_order')
+      || !String(row.scope_value || '').trim()
+      || typeof row.scope_order !== 'number'
+      || !Number.isSafeInteger(row.scope_order)
+      || row.scope_order < 0
+  ))) return false;
+  return rows.some(row => homepageRowHasNonZeroValue(row, HOMEPAGE_PROFIT_BUSINESS_VALUE_FIELDS));
+}
+
 export function usableHomepageAccountingFallback(section, existing, generatedAt) {
-  if (!existing || String(existing.generatedAt || '') !== String(generatedAt || '')) return false;
-  if (section === 'homeRankings') return Boolean(existing?.data?.rankings && typeof existing.data.rankings === 'object');
+  if (!existing || existing.ok !== true || String(existing.generatedAt || '') !== String(generatedAt || '')) return false;
+  if (section === 'homeRankings') return homepageRankingsDataIsUsable(existing?.data?.rankings);
   const summary = existing?.data?.homeProfitSummary;
   return section === 'homeProfit'
-    && Boolean(summary)
-    && String(summary.sourceGeneratedAt || '') === String(generatedAt || '')
-    && summary.staleSource !== true
-    && Array.isArray(summary.dailyScopes);
+    && String(summary?.sourceGeneratedAt || '') === String(generatedAt || '')
+    && homepageTimestampIsValid(summary?.sourceCachedAt)
+    && summary?.staleSource === false
+    && homepageProfitSummaryIsUsable(summary);
+}
+
+function homepageAccountingIntegrityProofUsable(integrity, section, generatedAt, cachedAt = '') {
+  return Boolean(
+    integrity?.ok
+    && String(integrity.section || '') === String(section || '')
+    && String(integrity.generatedAt || '') === String(generatedAt || '')
+    && (!cachedAt || String(integrity.cachedAt || '') === String(cachedAt || ''))
+    && integrity.raw?.sha256
+    && integrity.gzip?.sha256
+    && Number(integrity.raw?.byteSize || 0) > 0,
+  );
+}
+
+const HOMEPAGE_ACCOUNTING_USABILITY_CACHE_MAX = 256;
+const homepageAccountingUsabilityCache = new Map();
+const homepageAccountingUsabilityInFlight = new Map();
+let homepageAccountingUsabilityParseCount = 0;
+
+function homepageAccountingUsabilityBindingKey(root, section, generatedAt, integrity) {
+  return [
+    path.resolve(root),
+    String(section || ''),
+    String(generatedAt || ''),
+    String(integrity?.bindingSha256 || integrity?.generationIdentity || ''),
+    String(integrity?.raw?.sha256 || ''),
+    String(integrity?.gzip?.sha256 || ''),
+    String(integrity?.raw?.byteSize || ''),
+  ].join('|');
+}
+
+function rememberHomepageAccountingUsability(key, value) {
+  homepageAccountingUsabilityCache.set(key, value);
+  while (homepageAccountingUsabilityCache.size > HOMEPAGE_ACCOUNTING_USABILITY_CACHE_MAX) {
+    homepageAccountingUsabilityCache.delete(homepageAccountingUsabilityCache.keys().next().value);
+  }
+}
+
+async function readVerifiedHomepageAccountingFallback(root, section) {
+  const metadata = await readBiSectionMetadata(root, section).catch(() => null);
+  const sourceGeneratedAt = String(metadata?.generatedAt || '');
+  if (!homepageTimestampIsValid(sourceGeneratedAt) || !homepageTimestampIsValid(metadata?.cachedAt)) return null;
+  const integrity = await readBiSectionIntegrityMetadata(root, section, sourceGeneratedAt).catch(() => null);
+  if (!homepageAccountingIntegrityProofUsable(integrity, section, sourceGeneratedAt, metadata.cachedAt)) return null;
+  const bindingKey = homepageAccountingUsabilityBindingKey(root, section, sourceGeneratedAt, integrity);
+  let inspection = homepageAccountingUsabilityCache.get(bindingKey);
+  if (!inspection) {
+    let pending = homepageAccountingUsabilityInFlight.get(bindingKey);
+    if (!pending) {
+      pending = (async () => {
+        homepageAccountingUsabilityParseCount += 1;
+        const existing = await readBiSectionCache(root, section, sourceGeneratedAt).catch(() => null);
+        const summary = existing?.data?.homeProfitSummary;
+        const summaryCachedAt = String(summary?.sourceCachedAt || '');
+        return {
+          usable: Boolean(existing && usableHomepageAccountingFallback(section, existing, sourceGeneratedAt)),
+          sourceGeneratedAt,
+          sourceCachedAt: section === 'homeProfit'
+            ? (homepageTimestampIsValid(summaryCachedAt) ? summaryCachedAt : '')
+            : String(metadata.cachedAt || ''),
+        };
+      })().finally(() => {
+        if (homepageAccountingUsabilityInFlight.get(bindingKey) === pending) homepageAccountingUsabilityInFlight.delete(bindingKey);
+      });
+      homepageAccountingUsabilityInFlight.set(bindingKey, pending);
+    }
+    inspection = await pending;
+    rememberHomepageAccountingUsability(bindingKey, inspection);
+  }
+  if (!inspection?.usable) return null;
+  return {
+    sourceGeneratedAt: inspection.sourceGeneratedAt,
+    sourceCachedAt: inspection.sourceCachedAt,
+    cachedAt: String(metadata.cachedAt || ''),
+  };
+}
+
+function homepageAccountingDegradedHeaders(sourceMeta, generatedAt, accountingState, refreshScheduled) {
+  const queued = refreshScheduled === true;
+  const accountingPending = accountingState?.decision?.fresh !== true;
+  return {
+    'X-Shein-BI-Degraded': 'true',
+    'X-Shein-BI-Has-Data': 'true',
+    'X-Shein-BI-Core-Generated-At': String(generatedAt || ''),
+    'X-Shein-BI-Source-Generated-At': String(sourceMeta?.sourceGeneratedAt || ''),
+    'X-Shein-BI-Source-Cached-At': String(sourceMeta?.sourceCachedAt || ''),
+    'X-Shein-BI-Accounting-Pending': String(accountingPending),
+    'X-Shein-BI-Refresh-Scheduled': String(queued),
+    'X-Shein-BI-Queued-Section': String(queued),
+    'Cache-Control': 'no-store',
+  };
+}
+
+function resetHomepageAccountingUsabilityCache() {
+  homepageAccountingUsabilityCache.clear();
+  homepageAccountingUsabilityInFlight.clear();
+  homepageAccountingUsabilityParseCount = 0;
 }
 
 function sectionRequiresHostLockedWorker(section, options = {}) {
@@ -13822,14 +14055,17 @@ async function loadBiSection(args, root, section, options = {}) {
   if (section === 'homeProfit' && !String(meta.generatedAt || '')) {
     return {status: 503, payload: {ok: false, section, error: 'homeProfit requires a non-empty core generation'}};
   }
+  const homepageAccountingQueueEnabled = options.externalSectionQueueEnabled ?? BI_EXTERNAL_SECTION_QUEUE_ENABLED;
   if (
-    BI_EXTERNAL_SECTION_QUEUE_ENABLED
+    homepageAccountingQueueEnabled
     && options.hostLockedWorker !== true
     && ['homeRankings', 'homeProfit'].includes(section)
   ) {
     let accountingState;
     try {
-      accountingState = await readProfitAccountingState(args, meta.generatedAt);
+      accountingState = typeof options.readAccountingState === 'function'
+        ? await options.readAccountingState(meta.generatedAt)
+        : await readProfitAccountingState(args, meta.generatedAt);
     } catch (error) {
       recordBiSectionRefreshFailure(root, section, error);
       return {
@@ -13845,68 +14081,52 @@ async function loadBiSection(args, root, section, options = {}) {
         },
       };
     }
-    const existing = await readBiSectionCache(root, section, meta.generatedAt).catch(() => null);
-    const sourcePublishedAt = section === 'homeProfit'
-      ? String(existing?.data?.homeProfitSummary?.sourceCachedAt || '')
-      : String(existing?.cachedAt || '');
-    const minimum = Date.parse(accountingState.minimumPublishedAt);
-    const source = Date.parse(sourcePublishedAt);
-    const sourceCurrent = accountingState.decision.fresh
+    const fallbackCache = await readVerifiedHomepageAccountingFallback(root, section);
+    const sourcePublishedAt = String(fallbackCache?.sourceCachedAt || '');
+    const minimum = homepageTimestampMs(accountingState?.minimumPublishedAt);
+    const source = homepageTimestampMs(sourcePublishedAt);
+    const sourceCurrent = String(fallbackCache?.sourceGeneratedAt || '') === String(meta.generatedAt || '')
+      && accountingState?.decision?.fresh === true
       && !Number.isNaN(minimum)
       && !Number.isNaN(source)
       && source >= minimum;
-    if (!sourceCurrent) {
-      try {
-        await persistHomepageAccountingCatchupOnce(accountingState, meta.generatedAt);
-      } catch (error) {
-        recordBiSectionRefreshFailure(root, section, error);
-        return {
-          status: 503,
-          payload: {
-            ok: false,
-            section,
-            generatedAt: meta.generatedAt,
-            pendingSection: true,
-            cacheHit: false,
-            refreshScheduled: false,
-            error: 'homepage accounting is stale and durable refresh enqueue failed',
-          },
-        };
+    if (!sourceCurrent && !force) {
+      const refreshScheduled = queueHasCurrentPendingBiSection(section, meta.generatedAt);
+      if (fallbackCache) {
+        const rawFallback = await readBiSectionCacheRaw(
+          root,
+          section,
+          fallbackCache.sourceGeneratedAt,
+          true,
+          {gzip: options.gzip},
+        );
+        if (rawFallback) {
+          return {
+            status: 200,
+            rawBody: rawFallback.stream,
+            headers: {
+              ...rawFallback.headers,
+              ...homepageAccountingDegradedHeaders(fallbackCache, meta.generatedAt, accountingState, refreshScheduled),
+            },
+          };
+        }
       }
-      if (!force && usableHomepageAccountingFallback(section, existing, meta.generatedAt)) {
-        options = {
-          ...options,
-          extraFields: {
-            ...(options.extraFields || {}),
-            refreshScheduled: true,
-            refreshRetryPending: true,
-            queuedForHostLockedWorker: true,
-            accountingPending: true,
-            accountingTargetAt: String(
-              accountingState?.freshness?.accountingInputUpdatedAt
-              || accountingState?.freshness?.orderFactUpdatedAt
-              || accountingState?.freshness?.factUpdatedAt
-              || '',
-            ),
-            accountingPublishedAt: String(accountingState.minimumPublishedAt || ''),
-          },
-        };
-      } else {
-        return {
-          status: force ? 503 : 202,
-          payload: {
-            ok: !force,
-            section,
-            generatedAt: meta.generatedAt,
-            pendingSection: true,
-            cacheHit: false,
-            refreshScheduled: true,
-            queuedForHostLockedWorker: true,
-            accountingPending: true,
-            error: 'homepage accounting is catching up to newer order facts',
-          },
-        };
-      }
+      return {
+        status: refreshScheduled ? 202 : 503,
+        payload: {
+          ok: refreshScheduled,
+          section,
+          generatedAt: meta.generatedAt,
+          pendingSection: true,
+          cacheHit: false,
+          refreshScheduled,
+          queuedForHostLockedWorker: refreshScheduled,
+          accountingPending: accountingState?.decision?.fresh !== true,
+          error: refreshScheduled
+            ? 'homepage accounting is catching up to newer order facts'
+            : 'homepage accounting refresh has no exact-generation durable queue entry',
+        },
+      };
     }
   }
   if (!force && allowGenerate) {
@@ -22649,6 +22869,11 @@ export const __testHooks = {
   BI_DIRECT_STDOUT_MAX_BYTES,
   BI_DIRECT_STDERR_MAX_BYTES,
   generateBiSection,
+  loadBiSection,
+  resetHomepageAccountingUsabilityCache,
+  homepageAccountingUsabilityParseCount() {
+    return homepageAccountingUsabilityParseCount;
+  },
   createProfitAccountingStateReader,
   profitAccountingStateCacheKey,
   OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
