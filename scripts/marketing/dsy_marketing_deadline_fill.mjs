@@ -58,6 +58,7 @@ const DEFAULT_MARGIN_TARGET = 0.30;
 const FIXED_PRICE_JITTER = {min: -2, max: 1};
 const MARGIN_TARGET_JITTER = {min: -0.02, max: 0.01};
 const COUPON_FINAL_PRICE_TOLERANCE_SAR = 1;
+const VIRTUAL_TERMINAL_STABLE_SCAN_LIMIT = 3;
 
 // P0-#4 fix: load fallback prices from config instead of hardcoding in source.
 const FALLBACK_PRICE_CONFIG = JSON.parse(
@@ -2131,10 +2132,15 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
     fillSweeps = sweep;
     const scrollStep = sweepSteps[sweep - 1];
     top = sweep === 1 ? 0 : Math.floor(scrollStep / 2);
+    let terminalScanCount = 0;
+    let terminalProgressToken = null;
+    let terminalStableScans = 0;
     for (let guard = 0; guard < 240; guard++) {
       const scroll = await getScrollInfo(cdp, sessionId);
       const max = scroll.hasScroller ? scroll.max : 0;
-      await scrollTo(cdp, sessionId, top);
+      const scanTop = Math.min(top, max);
+      const atTerminal = scroll.hasScroller && scanTop >= max;
+      await scrollTo(cdp, sessionId, scanTop);
       await sleep(sweep === 1 ? 250 : 450);
       const rows = await collectVisibleRows(cdp, sessionId);
       const fills = [];
@@ -2160,9 +2166,26 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
       const done = await fillVisibleRows(cdp, sessionId, fills);
       for (const d of done) filled.set(d.key || d.idx, d);
       const covered = new Set([...targets.keys(), ...missingCost.keys(), ...priceStackBlockers.keys()]).size;
-      if (requiredCoverage && covered >= requiredCoverage) break;
-      if (!scroll.hasScroller || top >= max) break;
-      top = Math.min(top + scrollStep, max);
+      if (atTerminal) {
+        terminalScanCount += 1;
+        const rowSignature = rows
+          .map(row => `${row.key || row.skc || row.idx}:${row.idx}`)
+          .sort()
+          .join('|');
+        const progressToken = `${covered}:${rowSignature}`;
+        if (progressToken === terminalProgressToken) terminalStableScans += 1;
+        else {
+          terminalProgressToken = progressToken;
+          terminalStableScans = 0;
+        }
+      }
+      if (requiredCoverage && covered >= requiredCoverage && (!atTerminal || terminalStableScans >= 1)) break;
+      if (!scroll.hasScroller) break;
+      if (atTerminal) {
+        if (terminalScanCount >= VIRTUAL_TERMINAL_STABLE_SCAN_LIMIT || terminalStableScans >= 1) break;
+        continue;
+      }
+      top = Math.min(scanTop + scrollStep, max);
     }
     const covered = new Set([...targets.keys(), ...missingCost.keys(), ...priceStackBlockers.keys()]).size;
     if (!requiredCoverage || covered >= requiredCoverage) break;
@@ -2175,10 +2198,15 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
   for (let sweep = 1; sweep <= verifySteps.length; sweep += 1) {
     const scrollStep = verifySteps[sweep - 1];
     top = sweep === 1 ? 0 : Math.floor(scrollStep / 2);
+    let terminalScanCount = 0;
+    let terminalProgressToken = null;
+    let terminalStableScans = 0;
     for (let guard = 0; guard < 240; guard++) {
       const scroll = await getScrollInfo(cdp, sessionId);
       const max = scroll.hasScroller ? scroll.max : 0;
-      await scrollTo(cdp, sessionId, top);
+      const scanTop = Math.min(top, max);
+      const atTerminal = scroll.hasScroller && scanTop >= max;
+      await scrollTo(cdp, sessionId, scanTop);
       await sleep(sweep === 1 ? 200 : 350);
       const rows = await evalJs(cdp, sessionId, `
       const rows = [];
@@ -2216,10 +2244,28 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
         if (at >= 0) variants[at] = r; else variants.push(r);
         verifyRows.set(key, variants);
       }
+      if (atTerminal) {
+        terminalScanCount += 1;
+        const rowSignature = rows
+          .map(row => `${row.key || row.skc || row.idx}:${row.idx}`)
+          .sort()
+          .join('|');
+        const verifiedRowCount = [...verifyRows.values()].reduce((sum, variants) => sum + variants.length, 0);
+        const progressToken = `${verifiedRowCount}:${rowSignature}`;
+        if (progressToken === terminalProgressToken) terminalStableScans += 1;
+        else {
+          terminalProgressToken = progressToken;
+          terminalStableScans = 0;
+        }
+      }
       const allTargetsVerified = targets.size > 0 && [...targets.keys()].every(key => verifyRows.has(key));
-      if (allTargetsVerified) break;
-      if (!scroll.hasScroller || top >= max) break;
-      top = Math.min(top + scrollStep, max);
+      if (allTargetsVerified && (!atTerminal || terminalStableScans >= 1)) break;
+      if (!scroll.hasScroller) break;
+      if (atTerminal) {
+        if (terminalScanCount >= VIRTUAL_TERMINAL_STABLE_SCAN_LIMIT || terminalStableScans >= 1) break;
+        continue;
+      }
+      top = Math.min(scanTop + scrollStep, max);
     }
     const allTargetsVerified = targets.size > 0 && [...targets.keys()].every(key => verifyRows.has(key));
     if (allTargetsVerified) break;
