@@ -18,6 +18,8 @@ import {
   CLOUD_RUNTIME_SNAPSHOT_UNITS,
   CLOUD_TIMER_MAINTENANCE_POLICY,
   CLOUD_TIMER_UNITS,
+  INVENTORY_WRITER_COMPATIBILITY_SERVICES,
+  expectedInventoryWriterCompatibilityCommand,
 } from '../lib/cloud_runtime_inventory.mjs';
 import {
   CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE,
@@ -39,6 +41,9 @@ function healthyUnits() {
       return {
         NRestarts: '0',
         ExecCondition: unitClass === 'always' ? '' : `/usr/bin/node /opt/shein-bi/app/scripts/manage_cloud_maintenance_mode.mjs systemd-condition --class ${unitClass} --unit ${name}`,
+        ExecStartPre: INVENTORY_WRITER_COMPATIBILITY_SERVICES.includes(name)
+          ? `{ path=/usr/local/libexec/shein-bi-inventory-writer-compatibility-guard ; argv[]=${expectedInventoryWriterCompatibilityCommand(name)} ; }`
+          : '',
         RequiresMountsFor: directives.requiresMountsFor.join(' '),
         BindPaths: directives.bindPaths.join(' '),
         BindReadOnlyPaths: directives.bindReadOnlyPaths.join(' '),
@@ -199,6 +204,23 @@ assert.equal(healthy.infrastructureReady, true);
 assert.deepEqual(healthy.readiness.businessBlockers, []);
 assert.deepEqual(healthy.readiness.releaseAuditBlockers, []);
 assert.deepEqual(healthy.readiness.infrastructureBlockers, []);
+
+const missingInventoryWriterGuardUnits = healthyUnits();
+missingInventoryWriterGuardUnits['shein-bi-portal.service'].ExecStartPre = '';
+const missingInventoryWriterGuard = buildCloudRuntimeSnapshot({
+  ...base,
+  systemdSnapshot: {...base.systemdSnapshot, units: missingInventoryWriterGuardUnits},
+});
+assert.equal(missingInventoryWriterGuard.ok, false);
+assert.ok(missingInventoryWriterGuard.blockers.some(row => row.code === 'INVENTORY_WRITER_COMPATIBILITY_GUARD_EFFECTIVE_DRIFT'));
+const postGuardMutationUnits = healthyUnits();
+postGuardMutationUnits['shein-bi-portal.service'].ExecStartPre = `${postGuardMutationUnits['shein-bi-portal.service'].ExecStartPre} { path=/bin/true ; argv[]=/bin/true ; }`;
+const postGuardMutation = buildCloudRuntimeSnapshot({
+  ...base,
+  systemdSnapshot: {...base.systemdSnapshot, units: postGuardMutationUnits},
+});
+assert.equal(postGuardMutation.ok, false);
+assert.ok(postGuardMutation.blockers.some(row => row.code === 'INVENTORY_WRITER_COMPATIBILITY_GUARD_EFFECTIVE_DRIFT'));
 assert.equal(healthy.runtimeProbe.systemctlCommandCount, 2);
 assert.equal(healthy.runtimeProbe.requestedUnitCount, CLOUD_RUNTIME_SNAPSHOT_UNITS.length);
 assert.equal(healthy.runtimeProbe.inactiveTimers.length, 0);
@@ -555,6 +577,7 @@ console.log(JSON.stringify({
     'deployment_evidence_readback',
     'runtime_rejects_v2_receipt',
     'maintenance_guard_file_and_effective_readback',
+    'inventory_writer_guard_must_be_last',
     'runtime_namespace_effective_readback',
     'readonly_paths_effective_readback',
     'readonly_paths_omission_drift',

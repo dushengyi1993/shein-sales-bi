@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,6 +33,7 @@ const writeJson = async (file, value) => {
   await fs.mkdir(path.dirname(file), {recursive: true});
   await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 };
+const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 
 try {
   await fs.mkdir(path.join(tempRoot, 'config'), {recursive: true});
@@ -56,6 +58,19 @@ try {
     ruleClass: 'legacy_virtual_inventory_top_up',
     targetUsableInventory: 100,
   }];
+  const openApiEvidence = [];
+  for (const store of storeKeys) {
+    const relative = `outputs/shein_openapi_products/${store}/latest.json`;
+    const file = path.join(tempRoot, relative);
+    await writeJson(file, {storeKey: store, fetchedAt: new Date().toISOString(), summary: {stockFailedChunkCount: 0}});
+    openApiEvidence.push({
+      store,
+      file: relative,
+      sha256: await fileHash(file),
+      fetchedAt: new Date().toISOString(),
+      stockFailedChunkCount: 0,
+    });
+  }
   const plan = {
     schemaVersion: 'daily-inventory-replenishment-plan/v1',
     date: runDate,
@@ -69,7 +84,7 @@ try {
     sourceEvidence: [
       {store: 'ET', file: 'outputs/bi-portal/sections/inventoryTrend.json', fetchedAt: new Date().toISOString(), totalEtRows: 1, matchedCurrentDayEtRows: 1},
       {store: 'BI_LINKS', file: 'outputs/bi-portal/sections/linksData.json', fetchedAt: new Date().toISOString()},
-      ...storeKeys.map(store => ({store, file: `outputs/shein_openapi_products/${store}/latest.json`, fetchedAt: new Date().toISOString(), stockFailedChunkCount: 0})),
+      ...openApiEvidence,
     ],
     counts: {enabledStores: 19},
   };
@@ -85,6 +100,8 @@ try {
     authorizationId: policy.execution.automaticExecution.authorizationId,
     authorizationContext: policy.execution.automaticExecution.allowedContext,
     unresolvedIntents: [],
+    manualResolutionFences: [],
+    manualResolutionTombstoneCount: 0,
     results: [{...actionable[0], state: 'skipped_target_already_matched', before: {totalUsableInventory: 100}}],
   };
   await writeJson(resultFile, goodResult);
@@ -96,6 +113,16 @@ try {
   const options = {root: tempRoot, markerRoot, stateDir, inventoryRuntimeRoot: runtimeRoot, runDate, businessDate};
   const valid = await validateDailyOperatingRefresh(options);
   assert.equal(valid.ok, true);
+
+  await writeJson(resultFile, {...goodResult, manualResolutionTombstoneCount: 1});
+  await writeMarkers();
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /manual-resolution idempotency tombstone report mismatch/,
+    'validator must compare the report tombstone count with the aggregate lifecycle',
+  );
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
   assert.equal(valid.storeCount, 19);
   assert.equal(valid.artifactCount, 38);
 

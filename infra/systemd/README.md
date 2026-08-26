@@ -15,6 +15,97 @@ sudo -n install -m 0644 /opt/shein-bi/app/infra/systemd/shein-bi-et-low-inventor
 sudo -n systemctl daemon-reload
 ```
 
+## Inventory writer compatibility guard
+
+Inventory-capable services have an additional root-owned pre-start gate that is deliberately installed outside `/opt/shein-bi/app`. The only supported first-activation sequence is: enter fresh `maintenance=all`; install the external guard and its six drop-ins while activation is absent; root-deploy and restart the reader-first writers; harden the checkout; dry-run and execute the controlled activation; dry-run and execute the exact XL manual resolution; then restart and behavior-read every guarded entry. Do not hand-write, delete, or rename any activation, compatibility, or receipt file, and do not use `node -e` to call library functions.
+
+```bash
+sudo bash scripts/install_inventory_writer_compatibility_guard.sh \
+  --apply --confirm INSTALL_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1
+```
+
+The installer publishes `/usr/local/libexec/shein-bi-inventory-writer-compatibility-guard` and six `10-inventory-writer-compatibility.conf` drop-ins under `/etc/systemd/system`. Each effective `ExecStartPre` must contain that exact command once and as the final command; a later `99-*` or `zz-*` mutation is a startup blocker. Activation absence is legacy-compatible. After the exact reader-first deployment and writer restart, run the checkout hardener in audit mode, review its manifest, then apply it as root:
+
+```bash
+sudo python3 scripts/harden_inventory_writer_checkout_permissions.py --app-root /opt/shein-bi/app
+sudo python3 scripts/harden_inventory_writer_checkout_permissions.py --app-root /opt/shein-bi/app \
+  --apply --confirm HARDEN_INVENTORY_WRITER_CHECKOUT_V1
+```
+
+The hardener makes the app root, `.git`, tracked source, and tracked parents root-owned and non-writable by `sheinops`. It changes only the exact roots `state/tmp/outputs/profiles/node_modules` to sticky group-writable runtime roots and never recursively changes profile/session/runtime children. Keep its external receipt for the exact-hash rollback command; rollback is a reviewed recovery operation, never part of normal deployment.
+
+With fresh `maintenance=all`, invoke the formal CLI first without `--execute` and publish an immutable preflight artifact. The artifact binds the full authority/maintenance/CAS snapshot and expires after 30 minutes. Execute consumes that exact artifact and its file SHA-256; do not repeat the binding options or hand-edit the JSON:
+
+```bash
+sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs activate \
+  --journal /srv/shein-bi/runtime/daily-inventory-replenishment/results/EXACT.journal.ndjson \
+  --manual-receipt /srv/shein-bi/runtime/daily-inventory-replenishment/results/EXACT.manual-resolution.receipt.json \
+  --scope-key EXACT_64_HEX_SCOPE_KEY \
+  --out /srv/shein-bi/runtime/ops-snapshots/inventory-cutover/activate-preflight.json
+sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs activate \
+  --execute \
+  --preflight-artifact /srv/shein-bi/runtime/ops-snapshots/inventory-cutover/activate-preflight.json \
+  --expected-artifact-sha256 EXACT_ARTIFACT_FILE_SHA256 \
+  --expected-preflight-hash EXACT_DRY_RUN_HASH \
+  --confirm ACTIVATE_INVENTORY_READER_FIRST_V1
+```
+
+Activation captures exact release/source authority and the first Portal restart generation, and atomically creates the activation registry/receipt plus generation-1 compatibility journal/receipt under `/var/lib/shein-bi-control/inventory-writer-compatibility`. The generation is first-switch evidence only: later `Restart=always` PID/start/NRestarts changes at the same compatible source identity do not self-lock. Immediately run the resolver's own default dry-run and exact-hash `--execute`; until its required XL event and receipt exist, every activated `change-inventory/v2` path remains fail-closed. From activation onward, an old app rollback, dirty checkout, hidden index entry, missing tracked file, control receipt drift, source permission drift, or post-guard `ExecStartPre` mutation prevents writes/startup as applicable.
+
+The resolver accepts the raw R2 cache as `--live-inventory-baseline`; it independently selects the exact XL/SKC/SKU/warehouse row and binds that file's SHA-256, so no hand-built baseline JSON is part of the production sequence. Run the following once as the default dry-run, then repeat the identical command with `--execute --expected-preflight-hash EXACT_DRY_RUN_HASH`:
+
+```bash
+sudo node scripts/inventory/resolve_manual_inventory_intent.mjs \
+  --journal /srv/shein-bi/runtime/daily-inventory-replenishment/results/EXACT.journal.ndjson \
+  --plan /srv/shein-bi/runtime/daily-inventory-replenishment/plans/EXACT.json \
+  --readback-artifact /srv/shein-bi/runtime/marketing-hotrun-20260805-1343/logs/openapi-catalog-executor/20260826043306-3001695-XL.json \
+  --readback-artifact /srv/shein-bi/runtime/openapi-product-cache/XL/20260826T131840Z.json \
+  --live-inventory-baseline /srv/shein-bi/runtime/openapi-product-cache/XL/20260826T131840Z.json \
+  --owner-actor EXACT_CONFIRMED_OWNER \
+  --owner-confirmation MANUAL_BASELINE_ADOPTED_EFFECT_UNKNOWN \
+  --original-trace-id EXACT_ORIGINAL_POST_TRACE \
+  --receipt /srv/shein-bi/runtime/daily-inventory-replenishment/results/EXACT.manual-resolution.receipt.json
+```
+
+Compatibility updates use the same CLI, immutable preflight artifacts, and append-only state machine. Under fresh `maintenance=all`: publish a `rotation-stage` artifact against the candidate commit/bundle/release receipt/source fingerprint and execute that exact artifact; root-deploy the staged candidate, harden it, and restart writers; then publish and execute a fresh `rotation-finalize` artifact. A staged candidate can pass the external startup guard so recovery is possible, but the in-app writer reader remains fail-closed until finalize. After finalize, generation N is permanently rejected and N+1 same-commit restarts remain valid. `status` is read-only and reports active/pending generations. An interrupted append or receipt publication is resumed by rerunning the identical artifact/hash; a different or expired artifact is rejected. Never remove activation to recover or rotate.
+
+```bash
+sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-stage \
+  --candidate-commit EXACT_40_HEX_COMMIT \
+  --candidate-source-fingerprint EXACT_64_HEX_SOURCE_FINGERPRINT \
+  --candidate-bundle-sha256 EXACT_64_HEX_BUNDLE_SHA \
+  --candidate-release-receipt-kind formal \
+  --candidate-release-receipt-hash EXACT_64_HEX_RECEIPT_HASH \
+  --candidate-release-receipt-file /srv/shein-bi/runtime/deployed_release.json \
+  --out /srv/shein-bi/runtime/ops-snapshots/inventory-cutover/rotation-stage-preflight.json
+sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-stage \
+  --execute \
+  --preflight-artifact /srv/shein-bi/runtime/ops-snapshots/inventory-cutover/rotation-stage-preflight.json \
+  --expected-artifact-sha256 EXACT_STAGE_ARTIFACT_FILE_SHA256 \
+  --expected-preflight-hash EXACT_STAGE_HASH \
+  --confirm STAGE_INVENTORY_COMPATIBILITY_ROTATION_V1
+# Only after root deployment, source hardening, writer restart and readback:
+sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-finalize \
+  --out /srv/shein-bi/runtime/ops-snapshots/inventory-cutover/rotation-finalize-preflight.json
+sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-finalize \
+  --execute \
+  --preflight-artifact /srv/shein-bi/runtime/ops-snapshots/inventory-cutover/rotation-finalize-preflight.json \
+  --expected-artifact-sha256 EXACT_FINALIZE_ARTIFACT_FILE_SHA256 \
+  --expected-preflight-hash EXACT_FINALIZE_HASH \
+  --confirm FINALIZE_INVENTORY_COMPATIBILITY_ROTATION_V1
+sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs status
+```
+
+Never replace a present external guard from an app checkout by default. A reviewed update or recovery first records the audit output's exact `installedManifestSha256`, then uses:
+
+```bash
+sudo bash scripts/install_inventory_writer_compatibility_guard.sh --replace \
+  --expected-installed-manifest-sha256 <exact-current-hash> \
+  --confirm REPLACE_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1
+```
+
+This replacement gate is the only supported recovery path; Git checkout/rollback does not remove the external executable or its drop-ins. `shein-bi-query.service` is intentionally excluded because it disables the planner/job worker and exposes only the query surface.
+
 `ExecStartPre` is verify-only and never accesses PyPI. A missing or mismatched
 runtime fails the unit closed with an instruction to run the explicit install.
 The installer retains old versioned venvs and atomically switches `current`.
@@ -121,7 +212,7 @@ systemctl show shein-bi-portal.service shein-bi-query.service shein-bi-webhook.s
 
 资源护栏：高频销售和 ET 是轻量高优先任务；`daily-refresh` 是低优先慢任务，由晨间链路在销售刷新完成后启动。生产 oneshot 任务必须保留 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop`，常驻服务必须保留自己的 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` / `Restart=always`；`daily-refresh` 必须保留启动前的忙碌写入任务等待和可用内存检查。宁可让慢变补采晚一次，也不要为了补齐链接/营销/RTV 数据把 BI Portal、Metabase 或销售刷新拖死。
 
-权限护栏：部署前后先运行 `sudo bash scripts/harden_cloud_runtime_permissions.sh` 审计；确认清单后再运行 `sudo bash scripts/harden_cloud_runtime_permissions.sh --apply`。脚本只把 app 根目录收紧为 `sheinops:sheinops 0750`，并移除同一文件系统内普通文件/目录的 world-write，不递归改属主、不改组写位、不跟随 symlink，因此 root 与 `sheinops` 混合调度仍可工作。应用后必须确认 `worldWritableNonSymlinks=0`。所有生产 `flock` 路径必须固定在 `/opt/shein-bi/app/state/locks`，并通过 `scripts/lib/shared_lock.sh` 生成 `2770` 目录与 `0660 root|sheinops:sheinops` 锁；不得使用 `/tmp/*.lock` 或 `0666` 共享锁，否则定时任务会重新引入 world-write。
+权限护栏：部署前后先运行 `sudo bash scripts/harden_cloud_runtime_permissions.sh` 审计；确认清单后再运行 `sudo bash scripts/harden_cloud_runtime_permissions.sh --apply`。该通用脚本的旧 `sheinops:sheinops` app-root 结果不满足库存 writer 的 check-to-exec 威胁模型；安装库存兼容 guard 后，必须再按本节运行 `harden_inventory_writer_checkout_permissions.py`，以 root-owned tracked source 和精确运行态 allowlist 结果为最终权限合同。所有库存 cutover 操作只使用 `/srv/shein-bi/runtime/locks/inventory-v2-cutover.lock`（或显式的全局 override）；`SHEIN_BI_RUNTIME_ROOT` 与 cwd 不得改变该默认锁。其他生产 `flock` 仍通过 `scripts/lib/shared_lock.sh` 管理，且不得使用 `/tmp/*.lock` 或 `0666` 共享锁。
 
 部署到服务器后执行：
 

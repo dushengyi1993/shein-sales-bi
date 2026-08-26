@@ -104,6 +104,7 @@ async function loadClient(args) {
     baseUrl: config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
     openKeyId: store.openKeyId,
     secretKey: store.secretKey,
+    inventoryStoreKey: args.store,
   });
   return {client, store};
 }

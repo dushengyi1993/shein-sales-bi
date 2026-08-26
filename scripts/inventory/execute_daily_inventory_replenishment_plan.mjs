@@ -14,6 +14,7 @@ import {
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
+import {inventoryDetailRefreshWindow} from '../../lib/inventory_detail_refresh_window.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../../lib/shein_openapi_client.mjs';
 import {selectVirtualInventoryWarehouseCode} from '../../lib/shein_inventory_warehouse.mjs';
 import {
@@ -25,9 +26,11 @@ import {
 import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock.mjs';
 import {
   appendDurableJournalRecord,
+  assertInventoryWriteAllowed,
   classifyRecoveredInventoryIntent,
   compareInventoryIntentChronology,
   discoverInventoryJournalFiles,
+  findInventoryWriteFence,
   inventoryIntentScopeKey,
   inventoryRecoveryScopeKey,
   readInventoryIntentJournals,
@@ -288,13 +291,15 @@ function findStoreConfig(config, storeKey) {
   return rows.find(row => String(row.storeKey || row.key || '').trim().toUpperCase() === storeKey);
 }
 
-async function createStoreClient(config, storeKey) {
+async function createStoreClient(config, storeKey, inventoryFenceOptions = {}) {
   const store = findStoreConfig(config, storeKey);
   if (!store?.enabled || !store?.openKeyId || !store?.secretKey) throw new Error(`${storeKey} OpenAPI credentials unavailable`);
   const client = new SheinOpenApiClient({
     baseUrl: config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
     openKeyId: store.openKeyId,
     secretKey: store.secretKey,
+    inventoryStoreKey: storeKey,
+    ...inventoryFenceOptions,
   });
   const response = await requestWithRateLimitRetry(client, '/open-api/openapi-business-backend/query-store-info', {method: 'POST', body: {}, headers: {language: 'en'}});
   if (String(response.data?.code) !== '0') throw new Error(`${storeKey} store identity query failed`);
@@ -425,6 +430,40 @@ const expectedHash = isEtLowInventorySafetyPlan
   : stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
+const evidenceFileHash = async file => createHash('sha256').update(await fs.readFile(path.resolve(file))).digest('hex');
+for (const evidence of asArray(plan.sourceEvidence)) {
+  if (evidence?.sha256 && await evidenceFileHash(evidence.file) !== String(evidence.sha256).toLowerCase()) {
+    throw new Error(`Plan source evidence file hash drifted: ${evidence.store || evidence.file}`);
+  }
+  if (evidence?.store !== 'DETAIL_MANIFEST') continue;
+  if (await evidenceFileHash(evidence.manifestOriginalFile) !== evidence.manifestOriginalSha256
+    || await evidenceFileHash(evidence.terminalEvidenceFile) !== evidence.terminalEvidenceSha256) {
+    throw new Error('Daily detail manifest or terminal evidence immutable hash drifted');
+  }
+  const refreshStart = Date.parse(evidence.refreshStartedAt);
+  const refreshEnd = Date.parse(evidence.refreshEndedAt);
+  if (!Number.isFinite(refreshStart) || !Number.isFinite(refreshEnd) || refreshEnd < refreshStart) {
+    throw new Error('Daily detail manifest refresh window is invalid');
+  }
+  for (const cache of asArray(evidence.cacheBindings)) {
+    if (await evidenceFileHash(cache.cacheFile) !== cache.cacheSha256) {
+      throw new Error(`Daily detail cache hash drifted: ${cache.storeKey}`);
+    }
+  }
+  for (const binding of asArray(evidence.targetBindings)) {
+    const detailFetchedAt = Date.parse(binding.detailFetchedAt);
+    const cacheGeneratedAt = Date.parse(binding.cacheGeneratedAt);
+    if (!Number.isFinite(detailFetchedAt) || !Number.isFinite(cacheGeneratedAt)
+      || !inventoryDetailRefreshWindow({
+        refreshStartedAt: evidence.refreshStartedAt,
+        detailFetchedAt: binding.detailFetchedAt,
+        cacheGeneratedAt: binding.cacheGeneratedAt,
+        refreshEndedAt: evidence.refreshEndedAt,
+      }).ok) {
+      throw new Error(`Daily detail terminal binding timestamp drifted: ${binding.storeKey}::${binding.spu}`);
+    }
+  }
+}
 if (!args.reconcilePendingOnly && plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
 if (!args.reconcilePendingOnly && isEtLowInventorySafetyPlan) await validateEtSafetyFact(plan);
 const safetyEtRows = !args.reconcilePendingOnly && isEtLowInventorySafetyPlan ? etRowsFromSafetyAllocations(plan) : null;
@@ -481,6 +520,8 @@ if (args.execute) {
   });
 }
 let deferredHistoricalIntents = [];
+let manualResolutionFences = [];
+let manualResolutionTombstoneCount = 0;
 const resultEnvelope = currentResults => ({
   schemaVersion: 'daily-inventory-replenishment-result/v1',
   generatedAt: new Date().toISOString(),
@@ -496,6 +537,8 @@ const resultEnvelope = currentResults => ({
   // write to suppress. Keep the unresolved warning visible for audit and
   // future reappearance interception, but do not turn it into a run blocker.
   deferredHistorical: deferredHistoricalIntents,
+  manualResolutionFences,
+  manualResolutionTombstoneCount,
   // Keep the established validator contract: only a current-plan unresolved
   // intent belongs here. Historical scopes absent from this plan are warnings
   // in deferredHistorical and must not fail the morning chain.
@@ -532,6 +575,15 @@ const journalBundle = await readInventoryIntentJournals(journalFiles, {
   maxRunDate: today,
   allowMultiplePendingByScope: true,
 });
+manualResolutionFences = [...journalBundle.fences.values()].map(candidate => ({
+  resolutionId: candidate.event?.resolutionId || '',
+  intentId: candidate.event?.intentId || '',
+  disposition: candidate.event?.disposition || '',
+  scope: candidate.event?.scope || null,
+  idempotencyKey: candidate.event?.idempotencyKey || '',
+  journalFile: candidate.intent?.journalFile || '',
+}));
+manualResolutionTombstoneCount = journalBundle.tombstonedIdempotencyKeys.size;
 const pendingIntents = new Map(journalBundle.pending);
 const inventoryIntents = new Map(journalBundle.intents);
 const terminalIntentOutcomes = new Map(journalBundle.terminalOutcomes);
@@ -598,33 +650,30 @@ for (const metrics of linkMetricRows) {
 const clients = new Map();
 const pendingIntentsByScope = new Map();
 for (const intent of pendingIntents.values()) {
-  const scopeKey = inventoryIntentScopeKey({
-    storeKey: intent?.storeKey,
-    skc: intent?.skc,
-    skuCode: intent?.skuCode,
-  });
+  const scopeKey = inventoryIntentScopeKey(intent);
   if (!pendingIntentsByScope.has(scopeKey)) pendingIntentsByScope.set(scopeKey, []);
   pendingIntentsByScope.get(scopeKey).push(intent);
 }
 const inventoryIntentsByScope = new Map();
 for (const intent of inventoryIntents.values()) {
-  const scopeKey = inventoryIntentScopeKey({
-    storeKey: intent?.storeKey,
-    skc: intent?.skc,
-    skuCode: intent?.skuCode,
-  });
+  const scopeKey = inventoryIntentScopeKey(intent);
   if (!inventoryIntentsByScope.has(scopeKey)) inventoryIntentsByScope.set(scopeKey, []);
   inventoryIntentsByScope.get(scopeKey).push(intent);
 }
 const currentInventoryIntentsByScope = new Map();
-for (const intent of currentInventoryIntents.values()) {
-  const scopeKey = inventoryIntentScopeKey({storeKey: intent?.storeKey, skc: intent?.skc, skuCode: intent?.skuCode});
+for (const [intentKey, intent] of currentInventoryIntents.entries()) {
+  // A terminal manual_resolution is a permanent fence, not a pending or
+  // recoverable write intent. Keep its event in the report/fence aggregate,
+  // but do not let reconcile-pending-only's historical logical-action check
+  // reject the entire run before the row-level blocked result can be emitted.
+  if (journalBundle.manualResolutions.has(intentKey)) continue;
+  const scopeKey = inventoryIntentScopeKey(intent);
   if (!currentInventoryIntentsByScope.has(scopeKey)) currentInventoryIntentsByScope.set(scopeKey, []);
   currentInventoryIntentsByScope.get(scopeKey).push(intent);
 }
 const currentPendingIntentsByScope = new Map();
 for (const intent of currentPendingIntents.values()) {
-  const scopeKey = inventoryIntentScopeKey({storeKey: intent?.storeKey, skc: intent?.skc, skuCode: intent?.skuCode});
+  const scopeKey = inventoryIntentScopeKey(intent);
   if (!currentPendingIntentsByScope.has(scopeKey)) currentPendingIntentsByScope.set(scopeKey, []);
   currentPendingIntentsByScope.get(scopeKey).push(intent);
 }
@@ -633,6 +682,18 @@ if (args.reconcilePendingOnly) {
   const failures = [];
   for (const row of rows) {
     const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
+    // A manual-resolution fence deliberately removes the old intent from the
+    // recoverable lifecycle. It must still be handled by the row-level fence
+    // below, but it is not a logical-action mismatch that can abort the whole
+    // reconcile-only batch before a blocked result is recorded.
+    if (findInventoryWriteFence(journalBundle, {
+      scope: {
+        storeKey: row.storeKey,
+        skc: row.skc,
+        skuCode: row.skuCode,
+        invType: 'VI',
+      },
+    })) continue;
     const scopeIntents = currentInventoryIntentsByScope.get(recoveryScopeKey) || [];
     const approvedTarget = Number(row.targetUsableInventory);
     const logicalActionKey = stableInventoryHash({
@@ -815,9 +876,41 @@ for (const row of rows) {
       authorizationId: executionAuthorization?.authorizationId || '',
     });
     const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
+    // Intercept a permanently resolved historical scope before even opening
+    // a store client. This keeps a reappearing XL plan blocked with zero
+    // OpenAPI calls (including the otherwise harmless store-identity POST),
+    // while the lock-held reread below closes the concurrent race window.
+    const startupManualFence = findInventoryWriteFence(journalBundle, {
+      scope: {
+        storeKey: row.storeKey,
+        skc: row.skc,
+        skuCode: row.skuCode,
+        invType: 'VI',
+      },
+    });
+    if (startupManualFence) {
+      await recordResult({
+        ...result,
+        logicalActionKey,
+        state: 'blocked_by_manual_resolution_fence',
+        manualResolutionFence: {
+          resolutionId: startupManualFence.event?.resolutionId || '',
+          intentId: startupManualFence.event?.intentId || '',
+          disposition: startupManualFence.event?.disposition || '',
+          reason: startupManualFence.reason,
+          scope: startupManualFence.event?.scope || null,
+        },
+        error: 'exact store/SKC/SKU/warehouse VI scope is permanently fenced by manual resolution; no new inventory POST is permitted',
+      }, logicalActionKey);
+      continue;
+    }
     let client = clients.get(row.storeKey);
     if (!client) {
-      client = await createStoreClient(config, row.storeKey);
+      client = await createStoreClient(config, row.storeKey, {
+        inventoryStoreKey: row.storeKey,
+        inventoryJournalFile: journalFile,
+        inventoryJournalDirectories,
+      });
       clients.set(row.storeKey, client);
     }
     const lockFile = path.join(inventorySkuLockDirectory, `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
@@ -837,6 +930,30 @@ for (const row of rows) {
         allowMultiplePendingByScope: true,
       });
       const freshScopeIntents = freshJournalBundle.pendingByScope.get(recoveryScopeKey) || [];
+      const manualFence = findInventoryWriteFence(freshJournalBundle, {
+        scope: {
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          invType: 'VI',
+        },
+      });
+      if (manualFence) {
+        await recordResult({
+          ...result,
+          logicalActionKey,
+          state: 'blocked_by_manual_resolution_fence',
+          manualResolutionFence: {
+            resolutionId: manualFence.event?.resolutionId || '',
+            intentId: manualFence.event?.intentId || '',
+            disposition: manualFence.event?.disposition || '',
+            reason: manualFence.reason,
+            scope: manualFence.event?.scope || null,
+          },
+          error: 'exact store/SKC/SKU/warehouse VI scope is permanently fenced by manual resolution; no new inventory POST is permitted',
+        }, logicalActionKey);
+        continue;
+      }
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
       let scopeIntents = freshScopeIntents;
@@ -1053,6 +1170,17 @@ for (const row of rows) {
         headers: {language: 'en'},
       };
       const requestPayloadHash = stableInventoryHash(request);
+      assertInventoryWriteAllowed(freshJournalBundle, {
+        scope: {
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          warehouseCode,
+          invType: 'VI',
+        },
+        idempotencyKey,
+        requestPayloadHash,
+      });
       activeIntent = {
         kind: 'intent',
         intentId: randomUUID(),
@@ -1085,6 +1213,29 @@ for (const row of rows) {
       const submission = await submitDurableInventoryWriteOnce({
         journalFile,
         intent: activeIntent,
+        fenceBundle: freshJournalBundle,
+        inventoryScope: {
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          warehouseCode,
+          invType: 'VI',
+        },
+        assertInventoryAdmission: () => client.assertInventoryFence(
+          request.pathname,
+          request.method,
+          request.body,
+          {
+            storeKey: row.storeKey,
+            skc: row.skc,
+            skuCode: row.skuCode,
+            warehouseCode,
+            invType: 'VI',
+            requestPayloadHash,
+            intentId: activeIntent.intentId,
+            logicalActionKey: activeIntent.logicalActionKey,
+          },
+        ),
         // The write interface is called exactly once.  Read-only requests may
         // retry rate limits, but a write never retries at the transport layer;
         // the durable intent makes any unknown outcome readback-only.
@@ -1097,6 +1248,16 @@ for (const row of rows) {
             method: request.method,
             body: request.body,
             headers: request.headers,
+            inventoryScope: {
+              storeKey: row.storeKey,
+              skc: row.skc,
+              skuCode: row.skuCode,
+              warehouseCode,
+              invType: 'VI',
+              requestPayloadHash,
+              intentId: activeIntent.intentId,
+              logicalActionKey: activeIntent.logicalActionKey,
+            },
           });
         },
         readback: () => readStock(client, row.skuCode),
@@ -1156,7 +1317,7 @@ for (const row of rows) {
     }
   }
 }
-const unsafeResultCount = results.filter(row => ['blocked', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve', 'historical_readback_matched'].includes(row.state)).length;
+const unsafeResultCount = results.filter(row => ['blocked', 'blocked_by_manual_resolution_fence', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve', 'historical_readback_matched'].includes(row.state)).length;
 const counts = {
   total: results.length,
   updated: results.filter(row => row.state === 'updated_readback_matched').length,

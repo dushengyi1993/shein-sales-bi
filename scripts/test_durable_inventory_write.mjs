@@ -7,13 +7,16 @@ import path from 'node:path';
 
 import {
   appendDurableJournalRecord,
+  assertInventoryWriteAllowed,
   classifyRecoveredInventoryIntent,
   inventoryRecoveryScopeKey,
   readInventoryIntentLifecycle,
+  readInventoryIntentJournals,
   readPendingInventoryIntents,
   recoveredInventoryIntentMismatch,
   submitDurableInventoryWriteOnce,
 } from '../lib/durable_inventory_write.mjs';
+import {withInventoryCutoverLock} from '../lib/inventory_write_cutover.mjs';
 import {
   INVENTORY_OVERWRITE_COMPUTATION_VERSION,
   stableInventoryHash,
@@ -127,9 +130,11 @@ try {
 
   let submitCalls = 0;
   let readbackCalls = 0;
+  const admitInventoryWrite = async () => ({allowed: true});
   const delayed = await submitDurableInventoryWriteOnce({
     journalFile: journal,
     intent,
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => {
       submitCalls += 1;
       return {ok: true, status: 200, data: {code: '0', info: {success: true}}};
@@ -147,6 +152,84 @@ try {
   assert.equal(pending.has(intent.intentId), true, 'pending submission remains durably locked');
   assert.equal(classifyRecoveredInventoryIntent(pending.get(intent.intentId), 20), 'submitted_but_readback_pending');
   assert.equal(classifyRecoveredInventoryIntent(pending.get(intent.intentId), 100), 'readback_matched');
+
+  const releaseJournal = path.join(temp, 'post-response-lock-release.journal.ndjson');
+  const releaseLock = path.join(temp, 'post-response-lock-release.lock');
+  const releaseIntent = buildStrictIntent({
+    runDate: '2026-08-23',
+    policyVersion: '2026-08-23.1',
+    changeQuantity: 69,
+    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    intentId: 'post-response-lock-release-intent',
+  });
+  let releaseReadback;
+  const readbackStarted = new Promise(resolve => { releaseReadback = resolve; });
+  let unblockReadback;
+  const readbackGate = new Promise(resolve => { unblockReadback = resolve; });
+  let releasePostCalls = 0;
+  const pendingSubmission = submitDurableInventoryWriteOnce({
+    journalFile: releaseJournal,
+    intent: releaseIntent,
+    inventoryCutoverLock: releaseLock,
+    readFenceBundle: async () => readInventoryIntentJournals([releaseJournal], {allowMultiplePendingByScope: true}),
+    assertInventoryAdmission: async () => {
+      const bundle = await readInventoryIntentJournals([releaseJournal], {allowMultiplePendingByScope: true});
+      return assertInventoryWriteAllowed(bundle, {
+        scope: releaseIntent,
+        idempotencyKey: releaseIntent.idempotencyKey,
+        requestPayloadHash: releaseIntent.requestPayloadHash,
+        intentId: releaseIntent.intentId,
+        logicalActionKey: releaseIntent.logicalActionKey,
+      });
+    },
+    submit: async () => {
+      releasePostCalls += 1;
+      return {ok: true, status: 200, data: {code: '0', info: {success: true}}};
+    },
+    readback: async () => {
+      releaseReadback();
+      await readbackGate;
+      return {totalUsableInventory: releaseIntent.targetUsableInventory};
+    },
+    maxReadbackAttempts: 1,
+  });
+  await readbackStarted;
+  let competingLockAcquired = false;
+  await withInventoryCutoverLock(async () => { competingLockAcquired = true; }, {
+    lockFile: releaseLock,
+    timeoutMs: 2_000,
+    timeoutCode: 'TEST_POST_RESPONSE_LOCK_STILL_HELD',
+  });
+  assert.equal(competingLockAcquired, true, 'cutover lock must release before readback completes');
+  assert.equal(releasePostCalls, 1, 'lock release must not cause a duplicate POST');
+  const duplicateIntent = {...releaseIntent, intentId: 'post-response-lock-release-duplicate'};
+  let duplicatePostCalls = 0;
+  await assert.rejects(submitDurableInventoryWriteOnce({
+    journalFile: releaseJournal,
+    intent: duplicateIntent,
+    inventoryCutoverLock: releaseLock,
+    readFenceBundle: async () => readInventoryIntentJournals([releaseJournal], {allowMultiplePendingByScope: true}),
+    assertInventoryAdmission: async () => {
+      const bundle = await readInventoryIntentJournals([releaseJournal], {allowMultiplePendingByScope: true});
+      return assertInventoryWriteAllowed(bundle, {
+        scope: duplicateIntent,
+        idempotencyKey: duplicateIntent.idempotencyKey,
+        requestPayloadHash: duplicateIntent.requestPayloadHash,
+        intentId: duplicateIntent.intentId,
+        logicalActionKey: duplicateIntent.logicalActionKey,
+      });
+    },
+    submit: async () => {
+      duplicatePostCalls += 1;
+      return {ok: true, status: 200, data: {code: '0', info: {success: true}}};
+    },
+    readback: async () => ({totalUsableInventory: duplicateIntent.targetUsableInventory}),
+    maxReadbackAttempts: 1,
+  }), /INVENTORY_WRITE_PENDING_CONFLICT/);
+  assert.equal(duplicatePostCalls, 0, 'a second writer is blocked before transport while first readback is pending');
+  assert.equal((await readInventoryIntentLifecycle(releaseJournal)).intents.size, 1, 'journal keeps exactly one intent');
+  unblockReadback();
+  assert.equal((await pendingSubmission).state, 'readback_matched');
 
   const expected = {
     logicalActionKey: intent.logicalActionKey,
@@ -343,6 +426,7 @@ try {
   await assert.rejects(submitDurableInventoryWriteOnce({
     journalFile: crashJournal,
     intent,
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => {
       crashSubmitCalls += 1;
       throw new Error('simulated connection loss after platform acceptance');
@@ -357,6 +441,7 @@ try {
   const rejected = await submitDurableInventoryWriteOnce({
     journalFile: rejectedJournal,
     intent,
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {code: '400', info: {success: false}}}),
     readback: async () => ({totalUsableInventory: 20}),
   });
@@ -373,6 +458,7 @@ try {
   const strictRejected = await submitDurableInventoryWriteOnce({
     journalFile: strictRejectedJournal,
     intent: strictRejectedIntent,
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {code: '400', info: {success: false}}}),
     readback: async () => ({totalUsableInventory: 69}),
   });
@@ -469,6 +555,7 @@ try {
   const malformedCode = await submitDurableInventoryWriteOnce({
     journalFile: malformedCodeJournal,
     intent: {...intent, intentId: 'intent-malformed-code'},
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {code: {unexpected: true}, info: {success: false}}}),
     readback: async () => ({totalUsableInventory: 100}),
   });
@@ -481,6 +568,7 @@ try {
     const codeZeroFailure = await submitDurableInventoryWriteOnce({
       journalFile: codeZeroFailureJournal,
       intent: {...intent, intentId: codeZeroFailureIntentId},
+      assertInventoryAdmission: admitInventoryWrite,
       submit: async () => ({ok: true, status: 200, data: {code, info: {success: false}}}),
       readback: async () => ({totalUsableInventory: 100}),
     });
@@ -500,6 +588,7 @@ try {
     const outcome = await submitDurableInventoryWriteOnce({
       journalFile: ambiguousRejectionJournal,
       intent: {...intent, intentId: ambiguousIntentId},
+      assertInventoryAdmission: admitInventoryWrite,
       submit: async () => response,
       readback: async () => ({totalUsableInventory: 100}),
     });
@@ -512,6 +601,7 @@ try {
   const codeZeroMissingSuccess = await submitDurableInventoryWriteOnce({
     journalFile: codeZeroMissingSuccessJournal,
     intent: {...intent, intentId: 'intent-code-zero-missing-success'},
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {code: '0'}}),
     readback: async () => {
       codeZeroMissingSuccessReadbacks += 1;
@@ -531,6 +621,7 @@ try {
   const missingCode = await submitDurableInventoryWriteOnce({
     journalFile: missingCodeJournal,
     intent: {...intent, intentId: 'intent-missing-code'},
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {info: {success: true}}}),
     readback: async () => ({totalUsableInventory: 100}),
   });
@@ -545,6 +636,7 @@ try {
   await assert.rejects(submitDurableInventoryWriteOnce({
     journalFile: tornJournal,
     intent: {...intent, intentId: 'intent-after-torn'},
+    assertInventoryAdmission: admitInventoryWrite,
     submit: async () => { postAfterTorn += 1; return {data:{code:'0',info:{success:true}}}; },
     readback: async () => ({totalUsableInventory:100}),
   }), /INVENTORY_JOURNAL_TORN_TAIL/);
@@ -554,6 +646,7 @@ try {
     'one_post_only',
     'mixed_et_executor_run_records_are_ignored_by_inventory_lifecycle',
     'ten_readbacks_then_pending',
+    'global_cutover_lock_released_after_post_and_second_writer_blocked_before_duplicate_post',
     'pre_submit_intent_survives_unknown_submit',
     'recovery_never_resubmits',
     'stable_scope_catches_target_policy_authorization_drift',

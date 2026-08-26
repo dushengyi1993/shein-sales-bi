@@ -7,8 +7,10 @@ import {fileURLToPath} from 'node:url';
 
 import {
   discoverInventoryJournalFiles,
+  findInventoryWriteFence,
   readInventoryIntentJournals,
 } from '../lib/durable_inventory_write.mjs';
+import {inventoryDetailRefreshWindow} from '../lib/inventory_detail_refresh_window.mjs';
 import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 
 const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -127,11 +129,15 @@ function expectedPlanHash(plan) {
   return stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 }
 
-function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now()) {
+async function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now(), evidenceRoot = process.cwd()) {
+  const evidencePath = file => path.isAbsolute(String(file || ''))
+    ? path.resolve(file)
+    : path.resolve(evidenceRoot, String(file || ''));
   const evidence = Array.isArray(plan?.sourceEvidence) ? plan.sourceEvidence : [];
   const et = evidence.filter(row => row?.store === 'ET');
   const links = evidence.filter(row => row?.store === 'BI_LINKS');
   const openApi = evidence.filter(row => enabledStores.includes(String(row?.store || '').toUpperCase()));
+  const detailClosure = evidence.filter(row => row?.store === 'DETAIL_MANIFEST');
   assert(et.length === 1 && links.length === 1 && openApi.length === 19, 'inventory plan sourceEvidence must contain ET, BI_LINKS and 19 unique OpenAPI stores');
   assert(new Set(openApi.map(row => String(row.store).toUpperCase())).size === 19, 'inventory plan OpenAPI sourceEvidence store set is duplicate/incomplete');
   assert(Number(et[0].totalEtRows) > 0 && Number(et[0].matchedCurrentDayEtRows) > 0, 'inventory plan ET sourceEvidence has no matched current-day rows');
@@ -150,6 +156,34 @@ function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime =
   }
   for (const row of openApi) {
     assert(Number(row.stockFailedChunkCount) === 0, `inventory plan OpenAPI source has failed stock chunks: ${row.store}`);
+    assert(/^[a-f0-9]{64}$/i.test(String(row.sha256 || '')), `inventory plan OpenAPI source hash missing: ${row.store}`);
+    assert(String(row.sha256).toLowerCase() === await fileHash(evidencePath(row.file)), `inventory plan OpenAPI source hash drifted: ${row.store}`);
+  }
+  if (Array.isArray(plan.detailRefreshTargets) && plan.detailRefreshTargets.length > 0) {
+    assert(detailClosure.length === 1, 'inventory plan must contain exactly one daily detail manifest closure evidence');
+  }
+  for (const closure of detailClosure) {
+    assert(await fileHash(evidencePath(closure.file)) === closure.sha256, 'inventory detail bound manifest hash drifted');
+    assert(await fileHash(evidencePath(closure.manifestOriginalFile)) === closure.manifestOriginalSha256, 'inventory detail original manifest hash drifted');
+    assert(await fileHash(evidencePath(closure.terminalEvidenceFile)) === closure.terminalEvidenceSha256, 'inventory detail terminal evidence hash drifted');
+    const start = Date.parse(closure.refreshStartedAt);
+    const end = Date.parse(closure.refreshEndedAt);
+    assert(Number.isFinite(start) && Number.isFinite(end) && start <= end, 'inventory detail refresh window invalid');
+    for (const cache of (Array.isArray(closure.cacheBindings) ? closure.cacheBindings : [])) {
+      assert(await fileHash(evidencePath(cache.cacheFile)) === cache.cacheSha256, `inventory detail cache hash drifted: ${cache.storeKey}`);
+    }
+    for (const binding of (Array.isArray(closure.targetBindings) ? closure.targetBindings : [])) {
+      const detailFetchedAt = Date.parse(binding.detailFetchedAt);
+      const cacheGeneratedAt = Date.parse(binding.cacheGeneratedAt);
+      assert(Number.isFinite(detailFetchedAt) && Number.isFinite(cacheGeneratedAt)
+        && inventoryDetailRefreshWindow({
+          refreshStartedAt: closure.refreshStartedAt,
+          detailFetchedAt: binding.detailFetchedAt,
+          cacheGeneratedAt: binding.cacheGeneratedAt,
+          refreshEndedAt: closure.refreshEndedAt,
+        }).ok,
+      `inventory detail target timestamp invalid: ${binding.storeKey}::${binding.spu}`);
+    }
   }
   assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
 }
@@ -245,7 +279,7 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   assert(plan?.date === runDate && plan?.policyVersion === policy?.policyVersion, 'inventory plan date/policy mismatch');
   assert(plan?.executable === true && Array.isArray(plan?.blockers) && plan.blockers.length === 0, 'inventory plan is not executable');
   assert(/^[a-f0-9]{64}$/.test(String(plan?.payloadHash || '')) && expectedPlanHash(plan) === plan.payloadHash, 'inventory plan payloadHash mismatch');
-  validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime);
+  await validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime, root);
   assert(result?.planHash === plan.payloadHash && result?.policyVersion === plan.policyVersion, 'inventory result plan/policy hash mismatch');
   assert(result?.execute === true && result?.executionMode === 'automatic', 'inventory result is not an automatic execution');
   assert(Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length === 0, 'inventory result contains unresolved durable intents');
@@ -258,14 +292,64 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   const actionable = Array.isArray(plan.actionable) ? plan.actionable : [];
   const rows = Array.isArray(result.results) ? result.results : [];
   const currentTerminalAuditByIntentId = new Map();
-  if (rows.some(row => row?.state === 'skipped_terminal_readback_recorded')) {
-    const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
-    const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);
-    const lifecycle = await readInventoryIntentJournals(journalFiles, {maxRunDate: runDate});
-    for (const [intentKey, intent] of lifecycle.intents.entries()) {
-      if (intent.journalFile !== currentJournal) continue;
-      const outcome = lifecycle.terminalOutcomes.get(intentKey);
-      if (outcome) currentTerminalAuditByIntentId.set(intent.intentId, {intent, outcome});
+  const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
+  const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);
+  const lifecycle = await readInventoryIntentJournals(journalFiles, {maxRunDate: runDate});
+  for (const [intentKey, intent] of lifecycle.intents.entries()) {
+    if (intent.journalFile !== currentJournal) continue;
+    const outcome = lifecycle.terminalOutcomes.get(intentKey);
+    if (outcome) currentTerminalAuditByIntentId.set(intent.intentId, {intent, outcome});
+  }
+  const expectedManualResolutionReport = [...lifecycle.fences.values()]
+    .map(candidate => ({
+      resolutionId: candidate.event?.resolutionId || '',
+      intentId: candidate.event?.intentId || '',
+      disposition: candidate.event?.disposition || '',
+      scope: candidate.event?.scope || null,
+      idempotencyKey: candidate.event?.idempotencyKey || '',
+      journalFile: candidate.intent?.journalFile || candidate.journalFile || '',
+    }))
+    .sort((left, right) => `${left.journalFile}\u0000${left.intentId}`.localeCompare(`${right.journalFile}\u0000${right.intentId}`));
+  if (result.manualResolutionFences === undefined) {
+    assert(expectedManualResolutionReport.length === 0, 'inventory result omits manual-resolution fence report');
+  } else {
+    assert(Array.isArray(result.manualResolutionFences), 'inventory result manualResolutionFences is not an array');
+    const actualManualResolutionReport = result.manualResolutionFences.map(row => ({
+      resolutionId: row?.resolutionId || '',
+      intentId: row?.intentId || '',
+      disposition: row?.disposition || '',
+      scope: row?.scope || null,
+      idempotencyKey: row?.idempotencyKey || '',
+      journalFile: row?.journalFile || '',
+    })).sort((left, right) => `${left.journalFile}\u0000${left.intentId}`.localeCompare(`${right.journalFile}\u0000${right.intentId}`));
+    assert(stableInventoryHash(actualManualResolutionReport) === stableInventoryHash(expectedManualResolutionReport), 'inventory result manual-resolution fence report mismatch');
+  }
+  if (result.manualResolutionTombstoneCount === undefined) {
+    assert(lifecycle.tombstonedIdempotencyKeys.size === 0, 'inventory result omits manual-resolution idempotency tombstone report');
+  } else {
+    assert(Number.isSafeInteger(result.manualResolutionTombstoneCount)
+      && result.manualResolutionTombstoneCount === lifecycle.tombstonedIdempotencyKeys.size,
+    'inventory result manual-resolution idempotency tombstone report mismatch');
+  }
+  const manualResolutionFences = [];
+  for (const planRow of actionable) {
+    const fence = findInventoryWriteFence(lifecycle, {
+      scope: {
+        storeKey: planRow.storeKey,
+        skc: planRow.skc,
+        skuCode: planRow.skuCode,
+        invType: 'VI',
+      },
+    });
+    if (fence) {
+      manualResolutionFences.push({
+        intentId: fence.event?.intentId || '',
+        resolutionId: fence.event?.resolutionId || '',
+        disposition: fence.event?.disposition || '',
+        scope: fence.event?.scope || null,
+        reason: fence.reason,
+      });
+      assert(false, `inventory manual-resolution fence blocks current plan scope: store=${planRow.storeKey} skc=${planRow.skc} sku=${planRow.skuCode}`);
     }
   }
   assert(rows.length === actionable.length, 'inventory result row count mismatch');
@@ -284,7 +368,14 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     assert(resultRowIsSafe(row, planByKey.get(key), plan, result, policy, currentTerminalAuditByIntentId), `inventory result lacks exact terminal readback: ${key}`);
   }
   assert(seen.size === planByKey.size && [...planByKey.keys()].every(key => seen.has(key)), 'inventory plan/result identity set mismatch');
-  return {planFile, resultFile, inventoryMarkerFile, planHash: plan.payloadHash, resultCount: rows.length};
+  return {
+    planFile,
+    resultFile,
+    inventoryMarkerFile,
+    planHash: plan.payloadHash,
+    resultCount: rows.length,
+    manualResolutionFenceCount: manualResolutionFences.length,
+  };
 }
 
 export async function validateDailyOperatingRefresh(options) {

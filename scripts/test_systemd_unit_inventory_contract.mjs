@@ -11,6 +11,8 @@ import {
   CLOUD_MAINTENANCE_POLICY_BY_SERVICE,
   CLOUD_TIMER_SERVICE_BY_TIMER,
   CLOUD_TIMER_UNITS,
+  INVENTORY_WRITER_COMPATIBILITY_SERVICES,
+  expectedInventoryWriterCompatibilityCommand,
   validateCloudServicePolicyContract,
   validateCloudTimerPolicyContract,
 } from '../lib/cloud_runtime_inventory.mjs';
@@ -136,6 +138,22 @@ assert.match(captureSource, /fetchHealth\(args\.queryUrl, 'query'\)/);
 assert.match(captureSource, /surface:\s*String\(json\.surface/);
 assert.match(captureSource, /sideEffectsStartedIsArray:\s*Array\.isArray\(json\.sideEffectsStarted\)/);
 assert.match(captureSource, /healthEndpoints:\s*3/);
+assert.deepEqual([...INVENTORY_WRITER_COMPATIBILITY_SERVICES], [
+  'shein-bi-cloud-marketing-repair.service',
+  'shein-bi-cloud-morning-chain.service',
+  'shein-bi-daily-inventory-replenishment-guard.service',
+  'shein-bi-et-low-inventory-guard.service',
+  'shein-bi-et-low-inventory-recheck.service',
+  'shein-bi-portal.service',
+]);
+for (const service of INVENTORY_WRITER_COMPATIBILITY_SERVICES) {
+  const expectedGuard = expectedInventoryWriterCompatibilityCommand(service);
+  assert.match(expectedGuard, /^\/usr\/local\/libexec\//);
+  assert.match(expectedGuard, new RegExp(`--unit ${service.replaceAll('.', '\\.')} `));
+  assert.match(expectedGuard, /--systemctl-bin \/usr\/bin\/systemctl /);
+  assert.match(expectedGuard, /--compatibility-file \/var\/lib\/shein-bi-control\/inventory-writer-compatibility\/compatibility\.ndjson /);
+  assert.doesNotMatch(expectedGuard, /\/opt\/shein-bi\/app\/[^ ]*guard/);
+}
 
 console.log(JSON.stringify({
   ok: true,

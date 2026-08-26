@@ -274,6 +274,8 @@ assert.match(guard, /--et-manifest-hash "\$ET_MANIFEST_HASH"/);
 assert.match(guard, /--et-max-age-seconds "\$ET_FACT_MAX_AGE_SECONDS"/);
 assert.match(guard, /ET_FACT_MAX_AGE_HARD_LIMIT_SECONDS=21600/);
 assert.match(guard, /etManifestHash/);
+assert.match(guard, /\$entry\.kind == "manual_resolution"[\s\S]*del\(\.\[\$entry\.intentId\]\)/,
+  'ET durable-journal parsing must recognize manual_resolution without treating it as an ordinary write outcome');
 assert.match(guard, /\{ok:\(\$blocked==0\),businessState:/);
 assert.match(guard, /pendingCanonical:\$blockedCanonical/);
 assert.doesNotMatch(guard, /BLOCKED > 0 \|\| BLOCKED_CANONICAL > 0/);

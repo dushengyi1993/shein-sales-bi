@@ -17,6 +17,7 @@ const CLIENT_OPTIONS = {
   baseUrl: 'http://127.0.0.1:9',
   openKeyId: 'test-open-key',
   secretKey: 'test-secret-key',
+  inventoryStoreKey: 'TEST',
 };
 
 function transportError(message = 'fetch failed', causeCode = 'ECONNRESET') {
@@ -131,7 +132,15 @@ const tests = [];
     const {impl, calls} = sequencedFetch([transportError(), okResponse]);
     const client = new SheinOpenApiClient({...CLIENT_OPTIONS, fetchImpl: impl});
     await assert.rejects(
-      client.request('/open-api/stock/change-inventory/v2', {method: 'POST', body: {}}),
+      client.request('/open-api/stock/change-inventory/v2', {method: 'POST', body: {
+        updateSkuInventoryQuantityRequests: [{
+          idempotencyKey: 'test-write-no-retry',
+          skuCode: 'test-sku',
+          invType: 'VI',
+          changeType: 'OVERWRITE',
+          changeQuantity: 1,
+        }],
+      }}),
       error => error instanceof TypeError && /fetch failed/.test(error.message),
     );
     assert.equal(calls.length, 1, 'the generic write-path request must never retry');

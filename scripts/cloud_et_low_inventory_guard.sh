@@ -227,6 +227,13 @@ pending_inventory_intent_count() {
         and ($entry.intentId | type) == "string"
         and ($entry.disposition == "rejected" or $entry.disposition == "readback_matched") then
         del(.[$entry.intentId])
+      elif $entry.kind == "manual_resolution"
+        and ($entry.intentId | type) == "string" then
+        # manual_resolution is a terminal audit event for the old intent, but
+        # it is not a write_outcome and its exact scope remains permanently
+        # fenced. Do not report the resolved intent as pending while keeping
+        # the public v2 client/executor responsible for the actual fence.
+        del(.[$entry.intentId])
       else . end)
     | length
   ' "$RESULT_JOURNAL"

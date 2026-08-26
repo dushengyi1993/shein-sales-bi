@@ -13,6 +13,7 @@ import {
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
+import {inventoryDetailRefreshWindow} from '../../lib/inventory_detail_refresh_window.mjs';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 import {resolveOpenApiProductCacheDir, resolveOpenApiProductCacheFile} from '../../lib/shein_openapi_product_cache.mjs';
 
@@ -58,6 +59,11 @@ function parseArgs(argv) {
 }
 
 const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
+const readJsonEvidence = async file => {
+  const resolved = path.resolve(file);
+  const bytes = await fs.readFile(resolved);
+  return {file: resolved, bytes, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), json: JSON.parse(bytes.toString('utf8'))};
+};
 const readBiDocument = async file => {
   if (!args?.etManifest) return readJson(file);
   try {
@@ -73,6 +79,11 @@ const ageHours = value => (Date.now() - new Date(value || '').getTime()) / 3_600
 const ET_LOW_INVENTORY_MAX_AGE_HARD_LIMIT_SECONDS = 6 * 60 * 60;
 const ET_LOW_INVENTORY_MAX_FUTURE_SKEW_SECONDS = 5 * 60;
 const dateText = value => String(value || '').slice(0, 10);
+const isValidTimestampForManifest = (value, expectedDate) => {
+  const timestamp = new Date(value || '').getTime();
+  return Number.isFinite(timestamp)
+    && new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(timestamp)) === expectedDate;
+};
 const enabledStoreKeys = config => {
   const rows = Array.isArray(config?.stores)
     ? config.stores
@@ -531,9 +542,10 @@ const [policy, storeConfig, biDocument, linksDocument] = await Promise.all([
   readBiDocument(args.biData),
   readJson(args.linksData),
 ]);
-const requiredDetailTargets = args.requiredDetailTargets
-  ? await readJson(args.requiredDetailTargets)
+const requiredDetailTargetsMeta = args.requiredDetailTargets
+  ? await readJsonEvidence(args.requiredDetailTargets)
   : null;
+const requiredDetailTargets = requiredDetailTargetsMeta?.json || null;
 const etSource = args.etManifest
   ? await loadEtManifestSource(args.etManifest, {
     expectedDate: args.date,
@@ -638,13 +650,15 @@ const linkRows = [];
 for (const store of stores) {
   const file = resolveOpenApiProductCacheFile(store, {rootDir: ROOT, cacheDir: args.productsDir});
   try {
-    const doc = await readJson(file);
+    const cacheMeta = await readJsonEvidence(file);
+    const doc = cacheMeta.json;
     const sourceAge = ageHours(doc.fetchedAt);
     const stockFailedChunkCount = doc?.summary?.stockFailedChunkCount;
     const hasValidStockFailureEvidence = Number.isInteger(stockFailedChunkCount) && stockFailedChunkCount >= 0;
     sourceEvidence.push({
       store,
       file,
+      sha256: cacheMeta.sha256,
       fetchedAt: doc.fetchedAt || '',
       ageHours: Number(sourceAge.toFixed(4)),
       stockFailedChunkCount: hasValidStockFailureEvidence ? stockFailedChunkCount : null,
@@ -668,6 +682,8 @@ for (const store of stores) {
   }
 }
 const dailyRequiredTargetsByStore = new Map();
+const dailyRequiredTargetBindings = new Map();
+let dailyDetailClosureEvidence = null;
 if (requiredDetailTargets) {
   if (args.operationMode === 'et_low_inventory_safety') {
     if (requiredDetailTargets.schemaVersion !== 'et-low-inventory-detail-targets/v1'
@@ -702,6 +718,21 @@ if (requiredDetailTargets) {
     } else if (String(requiredDetailTargets.date || '') !== args.date) {
       blockers.push(`daily current-detail target manifest date does not match plan date: ${String(requiredDetailTargets.date || '')}`);
     } else {
+      const terminalEvidenceRequired = requiredDetailTargets.producer === 'cloud_daily_inventory_replenishment_guard'
+        || requiredDetailTargets.terminalEvidence !== undefined;
+      if (terminalEvidenceRequired) {
+        const generatedAt = String(requiredDetailTargets.generatedAt || '');
+        const terminalEvidence = requiredDetailTargets.terminalEvidence;
+        if (!isValidTimestampForManifest(generatedAt, args.date)
+          || !terminalEvidence
+          || terminalEvidence.schemaVersion !== 'daily-inventory-detail-terminal-evidence/v1'
+          || terminalEvidence.status !== 'terminal'
+          || String(terminalEvidence.date || '') !== args.date
+          || !isValidTimestampForManifest(terminalEvidence.recordedAt, args.date)
+          || !Array.isArray(terminalEvidence.targetBindings)) {
+          blockers.push('daily current-detail target manifest lacks same-day terminal evidence');
+        }
+      }
       const budgetPerStore = Number(requiredDetailTargets.budgetPerStore);
       if (!Number.isInteger(budgetPerStore) || budgetPerStore < 1) {
         blockers.push('daily current-detail target manifest has no valid per-store budget');
@@ -730,6 +761,49 @@ if (requiredDetailTargets) {
           if (!dailyRequiredTargetsByStore.has(normalizedStore)) dailyRequiredTargetsByStore.set(normalizedStore, []);
           dailyRequiredTargetsByStore.get(normalizedStore).push(...spus.map(value => String(value || '').trim()));
         }
+        const rawBindings = requiredDetailTargets.targetBindings;
+        if (rawBindings !== undefined) {
+          if (!Array.isArray(rawBindings)) {
+            blockers.push('daily current-detail target manifest canonical bindings are invalid');
+          } else {
+            for (const binding of rawBindings) {
+              const bindingStore = String(binding?.storeKey || '').trim().toUpperCase();
+              const bindingSpu = String(binding?.spu || '').trim();
+              const bindingKey = `${bindingStore}::${bindingSpu}`;
+              const bindingMatchKey = String(binding?.matchKey || '').trim();
+              if (!bindingStore || !bindingSpu || !bindingMatchKey || dailyRequiredTargetBindings.has(bindingKey)) {
+                blockers.push(`daily current-detail target manifest canonical binding is invalid: store=${bindingStore} spu=${bindingSpu}`);
+                continue;
+              }
+              dailyRequiredTargetBindings.set(bindingKey, {
+                storeKey: bindingStore,
+                spu: bindingSpu,
+                skc: String(binding?.skc || '').trim(),
+                matchKey: bindingMatchKey,
+              });
+            }
+          }
+        }
+        if (requiredDetailTargets.producer === 'cloud_daily_inventory_replenishment_guard') {
+          const expectedManifestTotal = [...dailyRequiredTargetsByStore.values()]
+            .flat()
+            .filter(Boolean).length;
+          const manifestCounts = requiredDetailTargets.counts;
+          const expectedPerStore = Object.fromEntries([...dailyRequiredTargetsByStore.entries()]
+            .map(([storeKey, values]) => [storeKey, new Set(values.filter(Boolean)).size]));
+          const actualPerStore = manifestCounts?.perStore && typeof manifestCounts.perStore === 'object'
+            ? Object.fromEntries(Object.entries(manifestCounts.perStore)
+              .map(([key, value]) => [String(key).toUpperCase(), Number(value)])
+              .sort(([left], [right]) => left.localeCompare(right)))
+            : null;
+          const expectedPerStoreSorted = Object.fromEntries(Object.entries(expectedPerStore).sort(([left], [right]) => left.localeCompare(right)));
+          if (!manifestCounts || Number(manifestCounts.total) !== expectedManifestTotal
+            || !actualPerStore
+            || JSON.stringify(actualPerStore) !== JSON.stringify(expectedPerStoreSorted)
+            || Number(manifestCounts.maxPerStore) !== Math.max(...Object.values(expectedPerStoreSorted), 0)) {
+            blockers.push('daily current-detail target manifest counts do not match deduplicated targets');
+          }
+        }
         for (const [storeKey, normalizedSpus] of dailyRequiredTargetsByStore) {
           const uniqueSpus = [...new Set(normalizedSpus.filter(Boolean))];
           if (!uniqueSpus.length || uniqueSpus.length !== normalizedSpus.length) {
@@ -753,12 +827,159 @@ if (requiredDetailTargets) {
             if (!rows.every(row => String(row?.supplierCode || '').trim())) {
               blockers.push(`daily current-detail target has incomplete canonical evidence after refresh: ${identity}`);
             }
+            const binding = dailyRequiredTargetBindings.get(`${storeKey}::${spu}`);
+            if (binding && rows.some(row => {
+              const rowMatchKey = resolveInventoryIdentityKey(row?.supplierCode) || canonicalInventoryKey(row?.supplierCode);
+              return rowMatchKey !== binding.matchKey;
+            })) {
+              blockers.push(`daily current-detail target canonical identity changed after refresh: ${identity}`);
+            }
           }
+        }
+        if (rawBindings !== undefined) {
+          for (const [bindingKey] of dailyRequiredTargetBindings) {
+            if (!dailyRequiredTargetsByStore.get(bindingKey.split('::')[0])?.includes(bindingKey.slice(bindingKey.indexOf('::') + 2))) {
+              blockers.push(`daily current-detail target manifest canonical binding has unknown target: ${bindingKey}`);
+            }
+          }
+          const expectedBindingCount = [...dailyRequiredTargetsByStore.values()].flat().filter(Boolean).length;
+          if (dailyRequiredTargetBindings.size !== expectedBindingCount) {
+            blockers.push(`daily current-detail target manifest canonical bindings are incomplete: expected=${expectedBindingCount} actual=${dailyRequiredTargetBindings.size}`);
+          }
+        }
+        if (terminalEvidenceRequired && requiredDetailTargets.terminalEvidence?.targetBindings !== undefined) {
+          const terminalBindings = requiredDetailTargets.terminalEvidence.targetBindings;
+          if (!Array.isArray(terminalBindings)) {
+            blockers.push('daily current-detail terminal evidence bindings are invalid');
+          } else {
+            const terminalKeys = new Set();
+            for (const binding of terminalBindings) {
+              const key = `${String(binding?.storeKey || '').trim().toUpperCase()}::${String(binding?.spu || '').trim()}`;
+              if (!key || key.endsWith('::') || terminalKeys.has(key)) {
+                blockers.push(`daily current-detail terminal evidence has duplicate or empty target: ${key}`);
+                continue;
+              }
+              terminalKeys.add(key);
+              const manifestBinding = dailyRequiredTargetBindings.get(key);
+              if (manifestBinding && String(binding?.matchKey || '') !== manifestBinding.matchKey) {
+                blockers.push(`daily current-detail terminal evidence canonical binding drifted: ${key}`);
+              }
+            }
+            const expectedTerminalKeys = new Set([...dailyRequiredTargetsByStore.entries()]
+              .flatMap(([storeKey, spus]) => spus.map(spu => `${storeKey}::${spu}`)));
+            if (terminalKeys.size !== expectedTerminalKeys.size || [...expectedTerminalKeys].some(key => !terminalKeys.has(key))) {
+              blockers.push('daily current-detail terminal evidence target coverage is incomplete');
+            }
+            if (Number(requiredDetailTargets.terminalEvidence.targetCount) !== terminalKeys.size) {
+              blockers.push(`daily current-detail terminal evidence target count mismatch: expected=${terminalKeys.size} actual=${requiredDetailTargets.terminalEvidence.targetCount}`);
+            }
+            const terminalEvidence = requiredDetailTargets.terminalEvidence;
+            const refreshStartedAt = terminalEvidence.refreshStartedAt;
+            const refreshEndedAt = terminalEvidence.refreshEndedAt;
+            const refreshStartedMs = new Date(refreshStartedAt || '').getTime();
+            const refreshEndedMs = new Date(refreshEndedAt || '').getTime();
+            if (terminalEvidence.coverage !== 'exact_manifest_target_bindings'
+              || !isValidTimestampForManifest(refreshStartedAt, args.date)
+              || !isValidTimestampForManifest(refreshEndedAt, args.date)
+              || refreshEndedMs < refreshStartedMs) {
+              blockers.push('daily current-detail terminal evidence refresh window is invalid');
+            }
+            let terminalArtifact = null;
+            try {
+              if (!String(terminalEvidence.evidenceFile || '').trim()
+                || !/^[a-f0-9]{64}$/i.test(String(terminalEvidence.evidenceSha256 || ''))
+                || !String(terminalEvidence.manifestFile || '').trim()
+                || !/^[a-f0-9]{64}$/i.test(String(terminalEvidence.manifestSha256 || ''))
+                || !Array.isArray(terminalEvidence.cacheBindings)) {
+                throw new Error('terminal evidence file/hash, original manifest hash or cache bindings missing');
+              }
+              const evidenceMeta = await readJsonEvidence(terminalEvidence.evidenceFile);
+              if (evidenceMeta.sha256 !== String(terminalEvidence.evidenceSha256).toLowerCase()) {
+                throw new Error('terminal evidence file hash mismatch');
+              }
+              const embeddedCore = {...terminalEvidence};
+              delete embeddedCore.evidenceFile;
+              delete embeddedCore.evidenceSha256;
+              if (stableInventoryHash(embeddedCore) !== stableInventoryHash(evidenceMeta.json)) {
+                throw new Error('embedded terminal evidence differs from immutable evidence artifact');
+              }
+              const originalManifestMeta = await readJsonEvidence(terminalEvidence.manifestFile);
+              if (originalManifestMeta.sha256 !== String(terminalEvidence.manifestSha256).toLowerCase()) {
+                throw new Error('original manifest file hash mismatch');
+              }
+              const cacheBindings = [];
+              const seenCacheStores = new Set();
+              for (const cacheBinding of terminalEvidence.cacheBindings) {
+                const storeKey = String(cacheBinding?.storeKey || '').trim().toUpperCase();
+                if (!storeKey || seenCacheStores.has(storeKey)
+                  || !String(cacheBinding?.cacheFile || '').trim()
+                  || !/^[a-f0-9]{64}$/i.test(String(cacheBinding?.cacheSha256 || ''))) {
+                  throw new Error(`invalid per-store cache binding:${storeKey}`);
+                }
+                seenCacheStores.add(storeKey);
+                const cacheMeta = await readJsonEvidence(cacheBinding.cacheFile);
+                if (cacheMeta.sha256 !== String(cacheBinding.cacheSha256).toLowerCase()) {
+                  throw new Error(`per-store cache hash mismatch:${storeKey}`);
+                }
+                cacheBindings.push({
+                  storeKey,
+                  cacheFile: cacheMeta.file,
+                  cacheSha256: cacheMeta.sha256,
+                  cacheGeneratedAt: cacheBinding.cacheGeneratedAt,
+                });
+              }
+              terminalArtifact = {
+                store: 'DETAIL_MANIFEST',
+                source: 'daily_current_detail_terminal_evidence',
+                file: requiredDetailTargetsMeta.file,
+                sha256: requiredDetailTargetsMeta.sha256,
+                fetchedAt: refreshEndedAt,
+                manifestOriginalFile: originalManifestMeta.file,
+                manifestOriginalSha256: originalManifestMeta.sha256,
+                terminalEvidenceFile: evidenceMeta.file,
+                terminalEvidenceSha256: evidenceMeta.sha256,
+                refreshStartedAt,
+                refreshEndedAt,
+                cacheBindings,
+                targetBindings: terminalEvidence.targetBindings,
+              };
+            } catch (error) {
+              blockers.push(`daily current-detail terminal evidence artifact hash verification failed: ${error.message}`);
+            }
+            for (const binding of terminalBindings) {
+              const key = `${String(binding?.storeKey || '').trim().toUpperCase()}::${String(binding?.spu || '').trim()}`;
+              const manifestBinding = dailyRequiredTargetBindings.get(key);
+              const cacheGeneratedAt = binding?.cacheGeneratedAt;
+              const detailFetchedAt = binding?.detailFetchedAt;
+              const cacheGeneratedMs = new Date(cacheGeneratedAt || '').getTime();
+              const detailFetchedMs = new Date(detailFetchedAt || '').getTime();
+              if (!manifestBinding
+                || !String(binding?.skc || '').trim()
+                || !String(binding?.cacheFile || '').trim()
+                || !/^[a-f0-9]{64}$/i.test(String(binding?.cacheSha256 || ''))
+                || binding?.hasCurrentDetail !== true
+                || String(binding?.canonicalMatchKey || '') !== manifestBinding.matchKey
+                || !isValidTimestampForManifest(cacheGeneratedAt, args.date)
+                || !isValidTimestampForManifest(detailFetchedAt, args.date)
+                || !inventoryDetailRefreshWindow({
+                  refreshStartedAt,
+                  detailFetchedAt,
+                  cacheGeneratedAt,
+                  refreshEndedAt,
+                }).ok) {
+                blockers.push(`daily current-detail terminal evidence artifact is invalid: ${key}`);
+              }
+            }
+            if (terminalArtifact) dailyDetailClosureEvidence = terminalArtifact;
+          }
+        } else if (terminalEvidenceRequired) {
+          blockers.push('daily current-detail terminal evidence target coverage is incomplete');
         }
       }
     }
   }
 }
+if (dailyDetailClosureEvidence) sourceEvidence.push(dailyDetailClosureEvidence);
 
 const actionable = [];
 const linkAlerts = [];
