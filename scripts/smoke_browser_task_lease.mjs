@@ -34,6 +34,18 @@ try {
   assert.deepEqual(releaseBrowserTaskLease({...base, storeKey: 'JSH', runId: 'wrong'}), {released: false, reason: 'not_owner'});
   assert.equal(releaseBrowserTaskLease({...base, storeKey: 'JSH', runId: 'run-c'}).released, true);
   assert.equal(fs.existsSync(browserLeasePath({...base, storeKey: 'JSH'})), false);
+
+  const longBase = {...base, storeKey: 'YJ', runId: 'six-hour-owner', ttlSec: 3000, nowMs: 1_000};
+  acquireBrowserTaskLease(longBase);
+  heartbeatBrowserTaskLease({...longBase, nowMs: 2_701_000});
+  assert.throws(() => acquireBrowserTaskLease({...longBase, runId: 'run-after-3001s', nowMs: 3_002_000}),
+    {code: 'LEASE_ACTIVE'}, 'a live heartbeating owner must not be reclaimed after the original 3000s TTL');
+  for (let nowMs = 3_001_000; nowMs <= 21_601_000; nowMs += 300_000) {
+    heartbeatBrowserTaskLease({...longBase, nowMs});
+  }
+  assert.throws(() => acquireBrowserTaskLease({...longBase, runId: 'second-six-hour-owner', nowMs: 21_602_000}),
+    {code: 'LEASE_ACTIVE'}, 'the managed 300s heartbeat must cover the legal six-hour run contract');
+  assert.equal(releaseBrowserTaskLease(longBase).released, true);
   console.log('browser task lease smoke: ok');
 } finally {
   fs.rmSync(root, {recursive: true, force: true});

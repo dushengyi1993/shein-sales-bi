@@ -21,6 +21,7 @@ import {normalizeInventoryProjection} from '../../lib/inventory_projection_contr
 import {
   buildSharedStorageCostIndex,
   findSharedStorageCost,
+  storageMethodForEvidence,
   storageEvidenceBlocksSharedFallback,
 } from '../../lib/marketing_shared_storage_cost.mjs';
 import {
@@ -1358,7 +1359,7 @@ function buildDetailRow(store, activity, activityDetail, row, couponContext) {
   if (cost.productCostSar === null) risk.push('商品成本缺失');
   if (cost.storageUnitCostSar === null) risk.push('仓储费缺失/估算缺失，不能按0安全通过');
   if (cost.storageQuantityEvidenceStatus && cost.storageQuantityEvidenceStatus !== 'fresh_quantity_crosscheck_passed') {
-    risk.push(`仓储证据冲突:${cost.storageQuantityEvidenceStatus}`);
+    risk.push(`数量差异提示:${cost.storageQuantityEvidenceStatus}`);
   }
   if (fullMargin !== null && fullMargin < 0.15) risk.push(`含仓储费利润率低于15%红线：${pct(fullMargin)}`);
   else if (fullMargin !== null && fullMargin < 0.20) risk.push(`含仓储费利润率低于20%默认线：${pct(fullMargin)}`);
@@ -1567,15 +1568,25 @@ function lookupCostInfo(keys) {
   const fullCostSar = explicitFullCostSar !== null ? explicitFullCostSar
     : (productCostSar !== null && storageUnitCostSar !== null ? round2(productCostSar + storageUnitCostSar) : productCostSar);
   const mappedStorageMethod = /^(?:missing|unknown)$/i.test(String(trueCost?.storageMethod || '').trim()) ? '' : trueCost?.storageMethod;
+  const storageQuantityEvidenceStatus = trueCost?.storageQuantityEvidenceStatus || '';
+  const storageMethod = storageMethodForEvidence({
+    storageUnitCostSar,
+    storageQuantityEvidenceStatus,
+    baseMethod: mappedStorageMethod || (storageEvidenceBlocked ? '' : (sharedStorageCost?.storageMethod || '')),
+  });
   return {
     productCostSar,
     storageUnitCostSar,
     fullCostSar,
-    storageMethod: storageEvidenceBlocked
-      ? `blocked:${trueCost.storageQuantityEvidenceStatus}`
-      : (mappedStorageMethod || sharedStorageCost?.storageMethod || ''),
-    storageQuantityEvidenceStatus: trueCost?.storageQuantityEvidenceStatus || '',
+    storageMethod,
+    storageQuantityEvidenceStatus,
     storageAllocationQuantitySource: trueCost?.storageAllocationQuantitySource || '',
+    storageQuantityDateGapDays: numValue(trueCost?.storageQuantityDateGapDays),
+    storageQuantityRatioOperationalToBilled: numValue(trueCost?.storageQuantityRatioOperationalToBilled),
+    storageQuantityRelativeDifference: numValue(trueCost?.storageQuantityRelativeDifference),
+    storageOperationalInventorySnapshotDate: trueCost?.storageOperationalInventorySnapshotDate || '',
+    storageSourceDateMin: trueCost?.storageSourceDateMin || '',
+    storageSourceDateMax: trueCost?.storageSourceDateMax || '',
     raw: trueCost ? {...trueCost, sharedStorageCostFallback: sharedStorageCost || null} : sharedStorageCost,
   };
 }

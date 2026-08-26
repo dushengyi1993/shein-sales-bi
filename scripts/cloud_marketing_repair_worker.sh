@@ -27,15 +27,60 @@ MARKETING_COST_MAP_PATH="${SHEIN_BI_MARKETING_COST_MAP_PATH:-${SHEIN_BI_MARKETIN
 GUARD_STAGE_DIR=""
 LEASE_TASK="${SHEIN_BI_MARKETING_REPAIR_LEASE_TASK:-cloud-marketing-repair}"
 LEASE_TTL_SEC="${SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC:-3000}"
+LEASE_HEARTBEAT_INTERVAL_SEC="${SHEIN_BI_MARKETING_REPAIR_LEASE_HEARTBEAT_INTERVAL_SEC:-300}"
 LEASE_ACQUIRED=0
-MAX_GROUPS="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-32}"
+LEASE_OWNER_PID="$$"
+LEASE_HEARTBEAT_PID=""
+LEASE_HEARTBEAT_FAILURE_FILE=""
+LEASE_HEARTBEAT_WAIT_FD=""
+LEASE_HEARTBEAT_WAKE_FD=""
+LEASE_HEARTBEAT_WAKER_PROCESS_PID=""
+MAX_GROUPS_OVERRIDE="${SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:-}"
+MAX_GROUPS="${MAX_GROUPS_OVERRIDE:-32}"
 AUTOMATION_CONTEXT="${SHEIN_BI_MARKETING_AUTOMATION_CONTEXT:-}"
 EXECUTION_LOCATION="${SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION:-cloud}"
 CLOUD_FALLBACK_ENABLED="${SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED:-false}"
 FALLBACK_MIN_START_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC:-900}"
 FALLBACK_GRACEFUL_CUTOFF_EPOCH="${SHEIN_BI_MARKETING_REPAIR_GRACEFUL_CUTOFF_EPOCH:-}"
 FALLBACK_OUTER_HARD_DEADLINE_EPOCH="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_EPOCH:-}"
+CONTINUATION_MODE=0
+IMMEDIATE_CONTINUATION_MODE="${SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION:-0}"
 RESUME_RECEIPT="${SHEIN_BI_MARKETING_REPAIR_RESUME_RECEIPT:-/srv/shein-bi/runtime/marketing-repair-resume/marketing-repair-${DATE}.json}"
+IMMEDIATE_AUTHORIZATION_FILE="${SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE:-/srv/shein-bi/marketing-repair-immediate/authorization.json}"
+IMMEDIATE_RUN_OVERRIDE="${SHEIN_BI_MARKETING_IMMEDIATE_RUN:-}"
+IMMEDIATE_AUTHORIZATION_PRESENT=0
+if [[ -e "$IMMEDIATE_AUTHORIZATION_FILE" || -L "$IMMEDIATE_AUTHORIZATION_FILE" ]]; then
+  IMMEDIATE_AUTHORIZATION_PRESENT=1
+fi
+if (( IMMEDIATE_AUTHORIZATION_PRESENT == 1 )); then
+  IMMEDIATE_MODE=1
+elif [[ -z "$IMMEDIATE_RUN_OVERRIDE" || "$IMMEDIATE_RUN_OVERRIDE" == "false" ]]; then
+  IMMEDIATE_MODE=0
+elif [[ "$IMMEDIATE_RUN_OVERRIDE" == "true" ]]; then
+  IMMEDIATE_MODE=1
+else
+  echo "[cloud_marketing_repair] invalid immediate-run flag: $IMMEDIATE_RUN_OVERRIDE" >&2
+  exit 64
+fi
+IMMEDIATE_AUTHORIZATION_ID="${SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_ID:-}"
+IMMEDIATE_AUTHORIZATION_FILE_SHA256="${SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE_SHA256:-}"
+IMMEDIATE_RECEIPT_FILE="${SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE:-}"
+IMMEDIATE_RECEIPT_SHA256="${SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256:-}"
+IMMEDIATE_AUTHORIZATION_DATE="${SHEIN_BI_MARKETING_IMMEDIATE_DATE:-}"
+IMMEDIATE_QUEUE_STATE_SHA256="${SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_STATE_SHA256:-}"
+IMMEDIATE_QUEUE_FINGERPRINT="${SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FINGERPRINT:-}"
+IMMEDIATE_SOURCE_GUARD_HASH="${SHEIN_BI_MARKETING_IMMEDIATE_SOURCE_GUARD_HASH:-}"
+IMMEDIATE_MAX_GROUPS="${SHEIN_BI_MARKETING_IMMEDIATE_MAX_GROUPS:-}"
+IMMEDIATE_GRACEFUL_CUTOFF_EPOCH="${SHEIN_BI_MARKETING_IMMEDIATE_GRACEFUL_CUTOFF_EPOCH:-}"
+IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH="${SHEIN_BI_MARKETING_IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH:-}"
+IMMEDIATE_REASON="${SHEIN_BI_MARKETING_IMMEDIATE_REASON:-}"
+IMMEDIATE_RECEIPT_STATUS="${SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_STATUS:-}"
+if [[ "$IMMEDIATE_CONTINUATION_MODE" == "1" ]]; then
+  CONTINUATION_MODE=1
+elif [[ "$IMMEDIATE_CONTINUATION_MODE" != "0" ]]; then
+  echo "[cloud_marketing_repair] invalid immediate continuation flag: $IMMEDIATE_CONTINUATION_MODE" >&2
+  exit 64
+fi
 IS_CLOUD_EXECUTION=1
 if [[ "$EXECUTION_LOCATION" == "local" && "$ROOT" != "/opt/shein-bi/app" ]]; then
   IS_CLOUD_EXECUTION=0
@@ -748,10 +793,38 @@ assert_stage_current() {
 }
 
 active_busy_services() {
-  local active=() service
-  command -v systemctl >/dev/null 2>&1 || return 0
+  local active=() service probe_output probe_status state
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "[cloud_marketing_repair] ERROR systemctl is unavailable; busy-service admission cannot be proven inactive" >&2
+    return 69
+  fi
   for service in $BUSY_SERVICES; do
-    systemctl is-active --quiet "$service" && active+=("$service")
+    if probe_output="$(systemctl is-active "$service" 2>&1)"; then
+      probe_status=0
+    else
+      probe_status=$?
+    fi
+    state="${probe_output%%$'\n'*}"
+    state="${state//$'\r'/}"
+    case "$state" in
+      inactive)
+        if (( probe_status != 3 )); then
+          echo "[cloud_marketing_repair] ERROR systemctl returned inactive with unexpected status=$probe_status service=$service" >&2
+          return 69
+        fi
+        ;;
+      active|activating|reloading|deactivating)
+        active+=("$service:$state")
+        ;;
+      failed|unknown)
+        echo "[cloud_marketing_repair] ERROR busy-service probe is not trustworthy service=$service state=$state status=$probe_status" >&2
+        return 69
+        ;;
+      *)
+        echo "[cloud_marketing_repair] ERROR busy-service probe failed service=$service status=$probe_status output=${state:-empty}" >&2
+        return 69
+        ;;
+    esac
   done
   printf '%s\n' "${active[*]}"
 }
@@ -793,6 +866,39 @@ try {
 NODE
 }
 
+processed_result_value() {
+  local result_path="$1" field="$2" default_value="${3:-}"
+  JSON_FILE="$ROOT/$result_path" JSON_FIELD="$field" JSON_DEFAULT="$default_value" node <<'NODE'
+const fs = require('node:fs');
+try {
+  const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
+  const row = Array.isArray(value?.processedThisRunResults) ? value.processedThisRunResults[0] : null;
+  const field = process.env.JSON_FIELD;
+  const result = row?.[field];
+  if (result === undefined || result === null) process.stdout.write(process.env.JSON_DEFAULT || '');
+  else if (typeof result === 'boolean') process.stdout.write(result ? '1' : '0');
+  else process.stdout.write(String(result));
+} catch {
+  process.stdout.write(process.env.JSON_DEFAULT || '');
+}
+NODE
+}
+
+result_top_level_value() {
+  local result_path="$1" field="$2" default_value="${3:-}"
+  JSON_FILE="$ROOT/$result_path" JSON_FIELD="$field" JSON_DEFAULT="$default_value" node <<'NODE'
+const fs = require('node:fs');
+try {
+  const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
+  const result = value?.[process.env.JSON_FIELD];
+  if (result === undefined || result === null) process.stdout.write(process.env.JSON_DEFAULT || '');
+  else process.stdout.write(String(result));
+} catch {
+  process.stdout.write(process.env.JSON_DEFAULT || '');
+}
+NODE
+}
+
 result_total() {
   local result_path="$1" field="$2"
   JSON_FILE="$ROOT/$result_path" JSON_FIELD="$field" node <<'NODE'
@@ -806,6 +912,123 @@ try {
 NODE
 }
 
+settled_result_disposition() {
+  local stage="$1" result_path="$2" expected_fingerprint="$3"
+  JSON_FILE="$ROOT/$result_path" RESULT_STAGE="$stage" EXPECTED_FINGERPRINT="$expected_fingerprint" node <<'NODE'
+const fs = require('node:fs');
+
+function count(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
+function finish(value) {
+  process.stdout.write(value);
+  process.exit(0);
+}
+
+let doc;
+try {
+  doc = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
+} catch {
+  finish('incomplete');
+}
+if (!doc || typeof doc !== 'object' || Array.isArray(doc)
+    || String(doc.workFingerprint || '') !== String(process.env.EXPECTED_FINGERPRINT || '')
+    || !Array.isArray(doc.results)) {
+  finish('incomplete');
+}
+
+const stage = process.env.RESULT_STAGE;
+const results = doc.results;
+const totals = doc.totals && typeof doc.totals === 'object' ? doc.totals : {};
+
+if (stage === 'highClickSpecial') {
+  const planned = count(totals.planned);
+  const processed = count(totals.processed);
+  const processedThisRun = count(totals.processedThisRun);
+  const resumed = count(totals.resumedItems);
+  const remaining = count(totals.remainingItems);
+  const recoverable = count(totals.recoverablePending);
+  const blocked = count(totals.blocked);
+  const failed = count(totals.failed);
+  if (doc.execute !== true || [planned, processed, processedThisRun, resumed, remaining, recoverable, blocked, failed].includes(null)) finish('incomplete');
+  if (remaining > 0) finish('pending');
+  if (processedThisRun !== 0 || processed !== results.length || resumed !== results.length || planned !== results.length || recoverable !== 0) finish('incomplete');
+  const settled = results.every(row => row?.ok === true || (row?.terminal === true && [
+    'login_terminal_blocker',
+    'inventory_transaction_restore_failed',
+    'submitted_without_exact_readback',
+  ].includes(String(row?.classification || ''))));
+  if (!settled) finish('incomplete');
+  if (failed > 0) finish('failed');
+  if (blocked > 0) finish('blocked');
+  finish(results.every(row => row?.ok === true) ? 'completed' : 'incomplete');
+}
+
+if (stage === 'manualSpecialRestore') {
+  const processed = count(totals.processed);
+  const processedThisRun = count(totals.processedThisRun);
+  const resumed = count(totals.resumedItems);
+  const remaining = count(totals.remainingItems);
+  if (doc.dryRunOnly !== false || [processed, processedThisRun, resumed, remaining].includes(null)) finish('incomplete');
+  if (remaining > 0) finish('pending');
+  if (processedThisRun !== 0 || processed !== results.length || resumed !== results.length) finish('incomplete');
+  if (!results.every(row => row?.ok === true || row?.terminalBlocked === true)) finish('incomplete');
+  if (results.some(row => row?.terminalBlocked === true)) finish('blocked');
+  finish(results.every(row => row?.ok === true) ? 'completed' : 'failed');
+}
+
+if (stage === 'driftRepair') {
+  const deferred = count(doc.deferredGroups);
+  // Older settled empty-result documents predate resumedGroups. Accept that
+  // one unambiguous zero-result form while retaining strict evidence for every
+  // non-empty crash-resume result.
+  const resumed = count(doc.resumedGroups ?? (results.length === 0 ? 0 : null));
+  const processed = count(totals.groupsProcessed);
+  const completed = count(totals.completedGroups);
+  const blocked = count(totals.businessBlockedGroups);
+  const failed = count(totals.failedGroups);
+  if (doc.dryRunOnly !== false || [deferred, resumed, processed, completed, blocked, failed].includes(null)) finish('incomplete');
+  if (deferred > 0) finish('pending');
+  if (doc.complete !== true || resumed !== results.length || processed !== results.length
+      || completed + blocked + failed !== results.length) finish('incomplete');
+  if (failed > 0) finish('failed');
+  if (blocked > 0) finish('blocked');
+  finish(completed === results.length ? 'completed' : 'incomplete');
+}
+
+if (stage === 'fallbackRepair') {
+  const deferred = count(doc.deferredGroups);
+  const resumed = count(doc.resumedGroups);
+  const processed = count(totals.storesProcessed);
+  const blocked = count(totals.storesBlocked);
+  const failed = count(totals.storesFailed);
+  if (doc.dryRunOnly !== false || [deferred, resumed, processed, blocked, failed].includes(null)) finish('incomplete');
+  if (deferred > 0) finish('pending');
+  if (doc.complete !== true || resumed !== results.length || processed !== results.length) finish('incomplete');
+  const settled = results.every(row => row?.ok === true
+    || (String(row?.status || '').startsWith('executed_subset_')
+      && Number(row?.createdActivityId || 0) > 0
+      && Array.isArray(row?.execute?.result?.desiredCoveredSkcs)
+      && row.execute.result.desiredCoveredSkcs.length > 0)
+    || (row?.blocked?.type === 'platform_or_inventory_blocked'
+      && Array.isArray(row?.blocked?.blockedSkcs)
+      && row.blocked.blockedSkcs.length > 0)
+    || (row?.classification === 'submitted_without_exact_readback'
+      && row?.terminal === true
+      && row?.writeAttempted === true
+      && row?.blocked?.type === 'submitted_without_exact_readback'));
+  if (!settled) finish('incomplete');
+  if (failed > 0) finish('failed');
+  if (blocked > 0) finish('blocked');
+  finish('completed');
+}
+
+finish('incomplete');
+NODE
+}
+
 consume_group_budget() {
   local count="${1:-0}"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
@@ -813,7 +1036,103 @@ consume_group_budget() {
 }
 
 lease_action() {
-  node scripts/manage_browser_task_leases.mjs "$1" --root "$ROOT" --task "$LEASE_TASK" --run-id "$RUN_ID" --owner-pid "$$" --ttl-sec "$LEASE_TTL_SEC" --group ALL
+  node scripts/manage_browser_task_leases.mjs "$1" --root "$ROOT" --task "$LEASE_TASK" --run-id "$RUN_ID" --owner-pid "$LEASE_OWNER_PID" --ttl-sec "$LEASE_TTL_SEC" --group ALL
+}
+
+assert_browser_lease_healthy() {
+  if [[ -n "$LEASE_HEARTBEAT_FAILURE_FILE" && -e "$LEASE_HEARTBEAT_FAILURE_FILE" ]]; then
+    echo "[cloud_marketing_repair] ERROR browser lease heartbeat failed closed task=$LEASE_TASK runId=$RUN_ID" >&2
+    return 75
+  fi
+  if [[ "$LEASE_ACQUIRED" == "1" && -n "$LEASE_HEARTBEAT_PID" ]] && ! kill -0 "$LEASE_HEARTBEAT_PID" 2>/dev/null; then
+    echo "[cloud_marketing_repair] ERROR browser lease heartbeat process stopped unexpectedly task=$LEASE_TASK runId=$RUN_ID" >&2
+    return 75
+  fi
+}
+
+start_browser_lease_heartbeat() {
+  if [[ ! "$LEASE_TTL_SEC" =~ ^[1-9][0-9]*$ || ! "$LEASE_HEARTBEAT_INTERVAL_SEC" =~ ^[1-9][0-9]*$ \
+    || "$LEASE_HEARTBEAT_INTERVAL_SEC" -ge "$LEASE_TTL_SEC" ]]; then
+    echo "[cloud_marketing_repair] ERROR lease heartbeat interval must be positive and shorter than TTL: interval=$LEASE_HEARTBEAT_INTERVAL_SEC ttl=$LEASE_TTL_SEC" >&2
+    return 64
+  fi
+  LEASE_HEARTBEAT_FAILURE_FILE="$ROOT/state/browser_task_leases/.heartbeat-failed-${RUN_ID}"
+  if ! mkdir -p -- "$ROOT/state/browser_task_leases"; then
+    echo "[cloud_marketing_repair] ERROR could not prepare browser lease heartbeat directory" >&2
+    return 75
+  fi
+  rm -f -- "$LEASE_HEARTBEAT_FAILURE_FILE"
+  coproc LEASE_HEARTBEAT_WAKER { IFS= read -r wake_signal; printf '%s\n' "$wake_signal"; }
+  LEASE_HEARTBEAT_WAKER_PROCESS_PID="$LEASE_HEARTBEAT_WAKER_PID"
+  local coproc_read_fd="${LEASE_HEARTBEAT_WAKER[0]}"
+  local coproc_write_fd="${LEASE_HEARTBEAT_WAKER[1]}"
+  if ! exec {LEASE_HEARTBEAT_WAIT_FD}<&"$coproc_read_fd"; then
+    kill "$LEASE_HEARTBEAT_WAKER_PROCESS_PID" 2>/dev/null || true
+    wait "$LEASE_HEARTBEAT_WAKER_PROCESS_PID" 2>/dev/null || true
+    LEASE_HEARTBEAT_WAKER_PROCESS_PID=""
+    echo "[cloud_marketing_repair] ERROR could not duplicate browser lease heartbeat wait pipe" >&2
+    return 75
+  fi
+  if ! exec {LEASE_HEARTBEAT_WAKE_FD}>&"$coproc_write_fd"; then
+    exec {LEASE_HEARTBEAT_WAIT_FD}<&-
+    LEASE_HEARTBEAT_WAIT_FD=""
+    kill "$LEASE_HEARTBEAT_WAKER_PROCESS_PID" 2>/dev/null || true
+    wait "$LEASE_HEARTBEAT_WAKER_PROCESS_PID" 2>/dev/null || true
+    LEASE_HEARTBEAT_WAKER_PROCESS_PID=""
+    echo "[cloud_marketing_repair] ERROR could not duplicate browser lease heartbeat wake pipe" >&2
+    return 75
+  fi
+  exec {coproc_read_fd}<&-
+  exec {coproc_write_fd}>&-
+  (
+    trap 'exit 0' TERM INT
+    while true; do
+      heartbeat_signal=""
+      if IFS= read -r -t "$LEASE_HEARTBEAT_INTERVAL_SEC" heartbeat_signal <&"$LEASE_HEARTBEAT_WAIT_FD"; then
+        [[ "$heartbeat_signal" == "stop" ]] && exit 0
+        continue
+      else
+        wait_status=$?
+      fi
+      if (( wait_status <= 128 )); then
+        printf '%s\n' "browser lease heartbeat wait failed status=$wait_status" >"$LEASE_HEARTBEAT_FAILURE_FILE"
+        kill -TERM "$LEASE_OWNER_PID" 2>/dev/null || true
+        exit 75
+      fi
+      if ! lease_action heartbeat >/dev/null; then
+        printf '%s\n' "browser lease heartbeat failed at $(date -u +%FT%TZ)" >"$LEASE_HEARTBEAT_FAILURE_FILE"
+        kill -TERM "$LEASE_OWNER_PID" 2>/dev/null || true
+        exit 75
+      fi
+    done
+  ) &
+  LEASE_HEARTBEAT_PID="$!"
+}
+
+stop_browser_lease_heartbeat() {
+  if [[ -n "$LEASE_HEARTBEAT_PID" ]]; then
+    if [[ -n "$LEASE_HEARTBEAT_WAKE_FD" ]]; then
+      printf 'stop\n' >&"$LEASE_HEARTBEAT_WAKE_FD" 2>/dev/null || true
+    fi
+    if kill -0 "$LEASE_HEARTBEAT_PID" 2>/dev/null; then
+      kill "$LEASE_HEARTBEAT_PID" 2>/dev/null || true
+    fi
+    wait "$LEASE_HEARTBEAT_PID" 2>/dev/null || true
+    LEASE_HEARTBEAT_PID=""
+  fi
+  if [[ -n "$LEASE_HEARTBEAT_WAIT_FD" ]]; then
+    exec {LEASE_HEARTBEAT_WAIT_FD}<&-
+    LEASE_HEARTBEAT_WAIT_FD=""
+  fi
+  if [[ -n "$LEASE_HEARTBEAT_WAKE_FD" ]]; then
+    exec {LEASE_HEARTBEAT_WAKE_FD}>&-
+    LEASE_HEARTBEAT_WAKE_FD=""
+  fi
+  if [[ -n "$LEASE_HEARTBEAT_WAKER_PROCESS_PID" ]]; then
+    kill "$LEASE_HEARTBEAT_WAKER_PROCESS_PID" 2>/dev/null || true
+    wait "$LEASE_HEARTBEAT_WAKER_PROCESS_PID" 2>/dev/null || true
+    LEASE_HEARTBEAT_WAKER_PROCESS_PID=""
+  fi
 }
 
 ensure_browser_lease() {
@@ -822,6 +1141,11 @@ ensure_browser_lease() {
   fi
   lease_action acquire || return $?
   LEASE_ACQUIRED=1
+  if ! start_browser_lease_heartbeat; then
+    lease_action release || true
+    LEASE_ACQUIRED=0
+    return 75
+  fi
   export SHEIN_BI_BROWSER_LEASE_TASK="$LEASE_TASK"
   export SHEIN_BI_BROWSER_LEASE_RUN_ID="$RUN_ID"
   cleanup_store_browsers
@@ -933,10 +1257,16 @@ fallback_remaining_seconds() {
 ensure_fallback_start_budget() {
   (( IS_CLOUD_EXECUTION == 1 )) || return 0
   [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]] || return 0
-  local remaining
+  local remaining now_epoch
   remaining="$(fallback_remaining_seconds)"
   if (( remaining < FALLBACK_MIN_START_BUDGET_SEC )); then
-    defer_remaining_work "cloud emergency slot has ${remaining}s left; refuse to start another transaction"
+    now_epoch="$(date +%s)"
+    if [[ "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]] \
+      && (( now_epoch < FALLBACK_OUTER_HARD_DEADLINE_EPOCH )); then
+      CONTINUATION_MODE=1
+      return 0
+    fi
+    defer_remaining_work "cloud emergency slot is outside the bounded continuation window; refuse all transaction work"
   fi
 }
 
@@ -963,8 +1293,17 @@ validate_cloud_fallback_window() {
   fi
   remaining=$((FALLBACK_GRACEFUL_CUTOFF_EPOCH - now_epoch))
   if (( remaining < FALLBACK_MIN_START_BUDGET_SEC )); then
-    write_state deferred_to_local "cloud emergency fallback has ${remaining}s before the graceful no-new-group cutoff; preserve the exact queue"
-    exit 75
+    if (( now_epoch < FALLBACK_OUTER_HARD_DEADLINE_EPOCH )); then
+      CONTINUATION_MODE=1
+      echo "[cloud_marketing_repair] graceful cutoff reached; only persisted recovery/compensation/readback continuations are permitted"
+    else
+      write_state deferred_to_local "cloud emergency fallback outer hard deadline elapsed; preserve the exact queue"
+      exit 75
+    fi
+  fi
+  if [[ "$IMMEDIATE_MODE" == "1" ]]; then
+    echo "[cloud_marketing_repair] immediate authorization bypasses only the 20:45-22:55 clock gate; absolute deadline and group budget remain enforced"
+    return 0
   fi
   hour=$((10#$(TZ="$TZ_NAME" date +%H)))
   minute=$((10#$(TZ="$TZ_NAME" date +%M)))
@@ -1217,20 +1556,280 @@ terminal_report_ready() {
     --fallback-result "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
 }
 
+parse_immediate_consume_output() {
+  local output="$1"
+  local -a fields=()
+  if ! mapfile -t fields < <(printf '%s' "$output" | node -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+const fields = [
+  value.authorizationId,
+  value.authorizationFileSha256,
+  value.consumedReceiptFile,
+  value.consumedReceiptSha256,
+  value.date,
+  value.queueStateSha256,
+  value.queueFingerprint,
+  value.sourceGuardHash,
+  value.maxGroups,
+  value.gracefulCutoffEpoch,
+  value.outerHardDeadlineEpoch,
+  value.reason,
+];
+if (fields.some(value => value === undefined || value === null || /[\r\n]/.test(String(value)))) {
+  throw new Error("immediate consume output is incomplete or contains unsafe fields");
+}
+process.stdout.write(fields.map(value => String(value)).join("\n"));
+'); then
+    echo "[cloud_marketing_repair] immediate consume output could not be parsed" >&2
+    return 64
+  fi
+  if [[ "${#fields[@]}" -ne 12 ]]; then
+    echo "[cloud_marketing_repair] immediate consume output has an invalid field count" >&2
+    return 64
+  fi
+  IMMEDIATE_AUTHORIZATION_ID="${fields[0]}"
+  IMMEDIATE_AUTHORIZATION_FILE_SHA256="${fields[1]}"
+  IMMEDIATE_RECEIPT_FILE="${fields[2]}"
+  IMMEDIATE_RECEIPT_SHA256="${fields[3]}"
+  IMMEDIATE_AUTHORIZATION_DATE="${fields[4]}"
+  IMMEDIATE_QUEUE_STATE_SHA256="${fields[5]}"
+  IMMEDIATE_QUEUE_FINGERPRINT="${fields[6]}"
+  IMMEDIATE_SOURCE_GUARD_HASH="${fields[7]}"
+  IMMEDIATE_MAX_GROUPS="${fields[8]}"
+  IMMEDIATE_GRACEFUL_CUTOFF_EPOCH="${fields[9]}"
+  IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH="${fields[10]}"
+  IMMEDIATE_REASON="${fields[11]}"
+}
+
+verify_immediate_authorization() {
+  [[ "$IMMEDIATE_MODE" == "1" ]] || return 0
+  local verification_status=0 verification_output
+  if [[ "$IMMEDIATE_CONTINUATION_MODE" == "1" ]]; then
+    if verification_output="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" verify-continuation \
+        --date "$DATE" --queue "$QUEUE_FILE" --root "$ROOT" --time-zone "$TZ_NAME" \
+        --receipt-file "$IMMEDIATE_RECEIPT_FILE" \
+        --expected-receipt-sha256 "$IMMEDIATE_RECEIPT_SHA256" \
+        --expected-authorization-id "$IMMEDIATE_AUTHORIZATION_ID" \
+        --expected-queue-state-sha256 "$IMMEDIATE_QUEUE_STATE_SHA256" \
+        --expected-queue-fingerprint "$IMMEDIATE_QUEUE_FINGERPRINT" \
+        --expected-source-guard-hash "$IMMEDIATE_SOURCE_GUARD_HASH" \
+        --expected-max-groups "$IMMEDIATE_MAX_GROUPS" \
+        --expected-graceful-cutoff-epoch "$IMMEDIATE_GRACEFUL_CUTOFF_EPOCH" \
+        --expected-outer-hard-deadline-epoch "$IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH" \
+        --expected-reason "$IMMEDIATE_REASON")"; then
+      :
+    else
+      verification_status=$?
+      echo "[cloud_marketing_repair] immutable continuation receipt verification failed status=$verification_status" >&2
+      return "$verification_status"
+    fi
+    if ! printf '%s' "$verification_output" | env \
+        EXPECTED_RECEIPT="$IMMEDIATE_RECEIPT_FILE" EXPECTED_RECEIPT_SHA="$IMMEDIATE_RECEIPT_SHA256" \
+        EXPECTED_STATUS="$IMMEDIATE_RECEIPT_STATUS" node -e '
+const fs=require("node:fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));
+if(v.continuation!==true||v.receiptFile!==process.env.EXPECTED_RECEIPT||v.receiptSha256!==process.env.EXPECTED_RECEIPT_SHA||v.status!==process.env.EXPECTED_STATUS)throw new Error("continuation receipt drift");'; then
+      echo "[cloud_marketing_repair] immutable continuation receipt differs from wrapper binding" >&2
+      return 64
+    fi
+    if [[ -z "$MAX_GROUPS_OVERRIDE" ]]; then MAX_GROUPS="$IMMEDIATE_MAX_GROUPS"; fi
+    if [[ "$MAX_GROUPS" != "$IMMEDIATE_MAX_GROUPS" || "$DATE" != "$IMMEDIATE_AUTHORIZATION_DATE" \
+      || "$CLOUD_FALLBACK_ENABLED" != "true" \
+      || "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" != "$IMMEDIATE_GRACEFUL_CUTOFF_EPOCH" \
+      || "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" != "$IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH" ]]; then
+      echo "[cloud_marketing_repair] immutable continuation does not bind this worker/date/deadline" >&2
+      return 64
+    fi
+    IMMEDIATE_AUTHORIZATION_CONSUMED=1
+    CONTINUATION_MODE=1
+    echo "[cloud_marketing_repair] immutable claimed/consumed receipt revalidated; continuation-only mode"
+    return 0
+  fi
+  if verification_output="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" verify-issued \
+      --date "$DATE" --queue "$QUEUE_FILE" --root "$ROOT" --time-zone "$TZ_NAME" \
+      --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE")"; then
+    :
+  else
+    verification_status=$?
+    echo "[cloud_marketing_repair] immediate authorization pending verification failed status=$verification_status" >&2
+    return "$verification_status"
+  fi
+  if ! printf '%s' "$verification_output" | \
+      env \
+      IMMEDIATE_EXPECTED_ID="$IMMEDIATE_AUTHORIZATION_ID" \
+      IMMEDIATE_EXPECTED_FILE_SHA="$IMMEDIATE_AUTHORIZATION_FILE_SHA256" \
+      IMMEDIATE_EXPECTED_DATE="${IMMEDIATE_AUTHORIZATION_DATE:-$DATE}" \
+      IMMEDIATE_EXPECTED_QUEUE_SHA="${IMMEDIATE_QUEUE_STATE_SHA256:-}" \
+      IMMEDIATE_EXPECTED_QUEUE_FINGERPRINT="${IMMEDIATE_QUEUE_FINGERPRINT:-}" \
+      IMMEDIATE_EXPECTED_SOURCE_GUARD_HASH="${IMMEDIATE_SOURCE_GUARD_HASH:-}" \
+      IMMEDIATE_EXPECTED_MAX_GROUPS="${IMMEDIATE_MAX_GROUPS:-}" \
+      IMMEDIATE_EXPECTED_GRACEFUL="${IMMEDIATE_GRACEFUL_CUTOFF_EPOCH:-}" \
+      IMMEDIATE_EXPECTED_OUTER="${IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH:-}" \
+      IMMEDIATE_EXPECTED_REASON="${IMMEDIATE_REASON:-}" \
+      node -e '
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(0, "utf8"));
+const expected = {
+  authorizationId: process.env.IMMEDIATE_EXPECTED_ID,
+  authorizationFileSha256: process.env.IMMEDIATE_EXPECTED_FILE_SHA,
+  date: process.env.IMMEDIATE_EXPECTED_DATE,
+  queueStateSha256: process.env.IMMEDIATE_EXPECTED_QUEUE_SHA,
+  queueFingerprint: process.env.IMMEDIATE_EXPECTED_QUEUE_FINGERPRINT,
+  sourceGuardHash: process.env.IMMEDIATE_EXPECTED_SOURCE_GUARD_HASH,
+  maxGroups: process.env.IMMEDIATE_EXPECTED_MAX_GROUPS,
+  gracefulCutoffEpoch: process.env.IMMEDIATE_EXPECTED_GRACEFUL,
+  outerHardDeadlineEpoch: process.env.IMMEDIATE_EXPECTED_OUTER,
+  reason: process.env.IMMEDIATE_EXPECTED_REASON,
+};
+for (const [key, wanted] of Object.entries(expected)) {
+  if (wanted && String(value[key]) !== String(wanted)) throw new Error(`immediate pending field drift: ${key}`);
+}
+process.stdout.write("ok");
+'; then
+    echo "[cloud_marketing_repair] immediate authorization pending metadata differs from wrapper verification" >&2
+    return 64
+  fi
+  IMMEDIATE_AUTHORIZATION_ID="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.authorizationId));')"
+  IMMEDIATE_AUTHORIZATION_FILE_SHA256="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.authorizationFileSha256));')"
+  IMMEDIATE_AUTHORIZATION_DATE="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.date));')"
+  IMMEDIATE_QUEUE_STATE_SHA256="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.queueStateSha256));')"
+  IMMEDIATE_QUEUE_FINGERPRINT="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.queueFingerprint));')"
+  IMMEDIATE_SOURCE_GUARD_HASH="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.sourceGuardHash));')"
+  IMMEDIATE_MAX_GROUPS="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.maxGroups));')"
+  IMMEDIATE_GRACEFUL_CUTOFF_EPOCH="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.gracefulCutoffEpoch));')"
+  IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.outerHardDeadlineEpoch));')"
+  IMMEDIATE_REASON="$(printf '%s' "$verification_output" | node -e 'const fs=require("node:fs"); const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(String(v.reason));')"
+  if [[ -z "$MAX_GROUPS_OVERRIDE" ]]; then MAX_GROUPS="$IMMEDIATE_MAX_GROUPS"; fi
+  if [[ "$MAX_GROUPS" != "$IMMEDIATE_MAX_GROUPS" ]]; then
+    echo "[cloud_marketing_repair] immediate authorization maxGroups differs from worker execution budget" >&2
+    return 64
+  fi
+  if [[ "$DATE" != "$IMMEDIATE_AUTHORIZATION_DATE" || "$CLOUD_FALLBACK_ENABLED" != "true" ]]; then
+    echo "[cloud_marketing_repair] immediate authorization is not bound to this cloud worker/date" >&2
+    return 64
+  fi
+  if [[ ! "$FALLBACK_MIN_START_BUDGET_SEC" =~ ^[1-9][0-9]*$ ]] || (( FALLBACK_MIN_START_BUDGET_SEC < 900 )); then
+    echo "[cloud_marketing_repair] immediate authorization minimum group budget is invalid" >&2
+    return 64
+  fi
+  if [[ "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" != "$IMMEDIATE_GRACEFUL_CUTOFF_EPOCH" \
+    || "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" != "$IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH" ]]; then
+    echo "[cloud_marketing_repair] immediate authorization deadlines differ from worker binding" >&2
+    return 64
+  fi
+  echo "[cloud_marketing_repair] immediate authorization revalidated without consuming the pending source"
+}
+
+consume_immediate_authorization_locked() {
+  [[ "$IMMEDIATE_MODE" == "1" ]] || return 0
+  if [[ "$IMMEDIATE_CONTINUATION_MODE" == "1" ]]; then
+    IMMEDIATE_AUTHORIZATION_CONSUMED=1
+    CONTINUATION_MODE=1
+    echo "[cloud_marketing_repair] immutable continuation receipt already owns authorization; no reconsume"
+    return 0
+  fi
+  [[ "${IMMEDIATE_AUTHORIZATION_CONSUMED:-0}" == "1" ]] && return 0
+  local consume_output consume_status
+  local expected_authorization_id="$IMMEDIATE_AUTHORIZATION_ID"
+  local expected_authorization_file_sha256="$IMMEDIATE_AUTHORIZATION_FILE_SHA256"
+  local expected_authorization_date="$IMMEDIATE_AUTHORIZATION_DATE"
+  local expected_queue_state_sha256="$IMMEDIATE_QUEUE_STATE_SHA256"
+  local expected_queue_fingerprint="$IMMEDIATE_QUEUE_FINGERPRINT"
+  local expected_source_guard_hash="$IMMEDIATE_SOURCE_GUARD_HASH"
+  local expected_max_groups="$IMMEDIATE_MAX_GROUPS"
+  local expected_graceful_cutoff_epoch="$IMMEDIATE_GRACEFUL_CUTOFF_EPOCH"
+  local expected_outer_hard_deadline_epoch="$IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH"
+  local expected_reason="$IMMEDIATE_REASON"
+  if consume_output="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" consume \
+      --date "$DATE" --queue "$QUEUE_FILE" --root "$ROOT" --time-zone "$TZ_NAME" \
+      --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE" \
+      --expected-authorization-id "$expected_authorization_id" \
+      --expected-authorization-file-sha256 "$expected_authorization_file_sha256" \
+      --expected-queue-state-sha256 "$expected_queue_state_sha256" \
+      --expected-queue-fingerprint "$expected_queue_fingerprint" \
+      --expected-source-guard-hash "$expected_source_guard_hash" \
+      --expected-max-groups "$expected_max_groups" \
+      --expected-graceful-cutoff-epoch "$expected_graceful_cutoff_epoch" \
+      --expected-outer-hard-deadline-epoch "$expected_outer_hard_deadline_epoch" \
+      --expected-reason "$expected_reason")"; then
+    :
+  else
+    consume_status=$?
+    echo "[cloud_marketing_repair] immediate authorization consume failed after admission status=$consume_status" >&2
+    return "$consume_status"
+  fi
+  parse_immediate_consume_output "$consume_output" || return $?
+  if [[ "$IMMEDIATE_AUTHORIZATION_ID" != "$expected_authorization_id" \
+    || "$IMMEDIATE_AUTHORIZATION_FILE_SHA256" != "$expected_authorization_file_sha256" \
+    || "$IMMEDIATE_AUTHORIZATION_DATE" != "$expected_authorization_date" \
+    || "$IMMEDIATE_QUEUE_STATE_SHA256" != "$expected_queue_state_sha256" \
+    || "$IMMEDIATE_QUEUE_FINGERPRINT" != "$expected_queue_fingerprint" \
+    || "$IMMEDIATE_SOURCE_GUARD_HASH" != "$expected_source_guard_hash" \
+    || "$IMMEDIATE_MAX_GROUPS" != "$expected_max_groups" \
+    || "$IMMEDIATE_GRACEFUL_CUTOFF_EPOCH" != "$expected_graceful_cutoff_epoch" \
+    || "$IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH" != "$expected_outer_hard_deadline_epoch" \
+    || "$IMMEDIATE_REASON" != "$expected_reason" \
+    || "$IMMEDIATE_AUTHORIZATION_DATE" != "$DATE" \
+    || "$IMMEDIATE_MAX_GROUPS" != "$MAX_GROUPS" \
+    || "$IMMEDIATE_GRACEFUL_CUTOFF_EPOCH" != "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" \
+    || "$IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH" != "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" ]]; then
+    echo "[cloud_marketing_repair] consumed authorization differs from admitted worker binding" >&2
+    return 64
+  fi
+  local verify_status=0
+  if node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" verify-consumed \
+      --date "$DATE" --queue "$QUEUE_FILE" --root "$ROOT" --time-zone "$TZ_NAME" \
+      --receipt-file "$IMMEDIATE_RECEIPT_FILE" \
+      --expected-authorization-id "$expected_authorization_id" \
+      --expected-queue-state-sha256 "$expected_queue_state_sha256" \
+      --expected-queue-fingerprint "$expected_queue_fingerprint" \
+      --expected-source-guard-hash "$expected_source_guard_hash" \
+      --expected-max-groups "$expected_max_groups" \
+      --expected-graceful-cutoff-epoch "$expected_graceful_cutoff_epoch" \
+      --expected-outer-hard-deadline-epoch "$expected_outer_hard_deadline_epoch" \
+      --expected-reason "$expected_reason" \
+      --expected-receipt-sha256 "$IMMEDIATE_RECEIPT_SHA256"; then
+    :
+  else
+    verify_status=$?
+    echo "[cloud_marketing_repair] consumed authorization receipt failed terminal verification status=$verify_status" >&2
+    return "$verify_status"
+  fi
+  IMMEDIATE_AUTHORIZATION_CONSUMED=1
+  echo "[cloud_marketing_repair] immediate authorization consumed after all admission and locked queue/registry checks"
+}
+
 on_exit() {
-  local status="$?"
+  local status="$?" lease_release_status=0 lock_release_status=0
   trap - EXIT
   set +e
   if [[ "$LEASE_ACQUIRED" == "1" ]]; then
     cleanup_store_browsers
-    lease_action release >/dev/null 2>&1
-    LEASE_ACQUIRED=0
+    stop_browser_lease_heartbeat
+    if lease_action release; then
+      LEASE_ACQUIRED=0
+    else
+      lease_release_status=$?
+      echo "[cloud_marketing_repair] ERROR browser lease release failed status=$lease_release_status task=$LEASE_TASK runId=$RUN_ID" >&2
+    fi
   fi
-  release_repair_critical_locks || true
+  if [[ -n "$LEASE_HEARTBEAT_FAILURE_FILE" ]]; then
+    rm -f -- "$LEASE_HEARTBEAT_FAILURE_FILE"
+  fi
+  if release_repair_critical_locks; then
+    :
+  else
+    lock_release_status=$?
+  fi
+  if (( lease_release_status != 0 )); then
+    write_state failed "browser lease release failed after bounded worker completion status=$lease_release_status" || true
+    if (( status == 0 )); then status=75; fi
+  elif (( lock_release_status != 0 && status == 0 )); then
+    status=75
+  fi
   exit "$status"
 }
 
-mkdir -p "$LOG_DIR" "$STATE_DIR/repair-queues" "$ALERT_DIR"
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 RUN_ID="${SHEIN_BI_MARKETING_REPAIR_RUN_ID:-$(node -e 'console.log(require("node:crypto").randomUUID())')}"
 LOG_FILE="$LOG_DIR/marketing-repair-${DATE}-${STAMP}.log"
@@ -1239,6 +1838,13 @@ GUARD_INPUT_OUT="$GUARD_OUT"
 PRICE_LEADS_FILE="${SHEIN_BI_MARKETING_PRICE_LEADS_FILE:-$ROOT/outputs/bi-portal/marketing-price-leads.json}"
 PRICE_LEADS_STAGE_FILE="$GUARD_STAGE_DIR/marketing-price-leads.json"
 trap on_exit EXIT
+if verify_immediate_authorization; then
+  :
+else
+  status=$?
+  exit "$status"
+fi
+mkdir -p "$LOG_DIR" "$STATE_DIR/repair-queues" "$ALERT_DIR"
 prepare_shared_lock_file "$LOCK_FILE"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -1253,18 +1859,26 @@ if [[ ! -f "$QUEUE_FILE" ]]; then
   echo "[cloud_marketing_repair] no queue for date=$DATE"
   exit 0
 fi
-if acquire_repair_artifact_registry_locks; then
+if acquire_repair_critical_locks; then
   :
 else
   status=$?
-  write_state deferred_to_local "could not acquire artifact publication lock before queue pair capture status=$status"
+  write_state deferred_to_local "could not acquire artifact/registry/queue critical locks before queue pair capture status=$status"
+  exit "$status"
+fi
+if verify_immediate_authorization; then
+  :
+else
+  status=$?
+  release_repair_critical_locks || true
+  echo "[cloud_marketing_repair] immediate authorization changed before locked queue capture; refusing to consume a different queue" >&2
   exit "$status"
 fi
 if refresh_queue_pair_locked && assert_current_queue_registry_locked; then
   QUEUE_STATUS="$(queue_value 'j.status' missing)"
 else
   status=$?
-  release_repair_artifact_registry_locks || true
+  release_repair_critical_locks || true
   if (( status == QUEUE_CONFLICT_STATUS )); then
     mark_queue_conflict initial before-execution
   else
@@ -1272,7 +1886,7 @@ else
   fi
   exit "$status"
 fi
-release_repair_artifact_registry_locks || true
+release_repair_critical_locks || true
 if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   if [[ "$QUEUE_STATUS" == "blocked" ]]; then
     if run_final_readback; then
@@ -1324,12 +1938,21 @@ if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" != "true" ]]; t
   echo "[cloud_marketing_repair] DEFER TO LOCAL before browser lease or SHEIN mutation; the final report waits for local execution and terminal readback"
   exit 75
 fi
-validate_cloud_fallback_window
-ACTIVE_BUSY="$(active_busy_services)"
-if [[ -n "$ACTIVE_BUSY" ]]; then
-  write_state deferred_to_local "cloud host is busy; keep the exact queue for local-browser continuation: $ACTIVE_BUSY"
-  echo "[cloud_marketing_repair] DEFER TO LOCAL busy services active: $ACTIVE_BUSY"
-  exit 75
+ACTIVE_BUSY=""
+if (( IS_CLOUD_EXECUTION == 1 || IMMEDIATE_MODE == 1 )); then
+  if ACTIVE_BUSY="$(active_busy_services)"; then
+    :
+  else
+    status=$?
+    write_state deferred_to_local "busy-service admission probe failed closed status=$status; exact queue and immediate authorization preserved"
+    echo "[cloud_marketing_repair] DEFER TO LOCAL busy-service admission probe failed status=$status" >&2
+    exit "$status"
+  fi
+  if [[ -n "$ACTIVE_BUSY" ]]; then
+    write_state deferred_to_local "cloud host is busy; keep the exact queue for local-browser continuation: $ACTIVE_BUSY"
+    echo "[cloud_marketing_repair] DEFER TO LOCAL busy services active: $ACTIVE_BUSY"
+    exit 75
+  fi
 fi
 CURRENT_MINUTE="$(TZ="$TZ_NAME" date +%M)"
 CURRENT_MINUTE=$((10#$CURRENT_MINUTE))
@@ -1342,6 +1965,30 @@ if (( IS_CLOUD_EXECUTION == 1 )); then
   echo "[cloud_marketing_repair] cloud repair batch max groups=$MAX_GROUPS; group writes remain serial context=${AUTOMATION_CONTEXT:-unknown}"
   export SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1
 fi
+validate_cloud_fallback_window
+
+EXECUTOR_DEADLINE_ARGS=()
+EXECUTOR_CONTINUATION_ARGS=()
+if [[ -n "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" || -n "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" ]]; then
+  if [[ ! "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" =~ ^[1-9][0-9]*$ ]] \
+    || [[ ! "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[cloud_marketing_repair] executor deadline pair is incomplete or invalid" >&2
+    exit 64
+  fi
+  EXECUTOR_DEADLINE_ARGS=(
+    --graceful-cutoff-epoch "$FALLBACK_GRACEFUL_CUTOFF_EPOCH"
+    --outer-hard-deadline-epoch "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH"
+  )
+fi
+
+refresh_executor_continuation_args() {
+  ensure_fallback_start_budget
+  if [[ "$CONTINUATION_MODE" == "1" ]]; then
+    EXECUTOR_CONTINUATION_ARGS=(--continuation)
+  else
+    EXECUTOR_CONTINUATION_ARGS=()
+  fi
+}
 
 REMAINING_GROUPS="$MAX_GROUPS"
 
@@ -1350,7 +1997,9 @@ REMAINING_GROUPS="$MAX_GROUPS"
 # browserless 19-store snapshot before it is allowed to open any cloud Chrome.
 # This prevents replaying work already completed on the owner's computer.
 if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; then
-  if [[ -f "$RESUME_RECEIPT" ]]; then
+  if [[ "$IMMEDIATE_MODE" == "1" ]]; then
+    echo "[cloud_marketing_repair] immediate authorization has an exact queue identity; skip the no-rescan resume/rebuild phase"
+  elif [[ -f "$RESUME_RECEIPT" ]]; then
     echo "[cloud_marketing_repair] consuming exact no-rescan resume receipt=$RESUME_RECEIPT"
     node scripts/marketing/manage_marketing_queue_resume_receipt.mjs consume \
       --queue "$QUEUE_FILE" --receipt "$RESUME_RECEIPT"
@@ -1359,7 +2008,11 @@ if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; t
   fi
   QUEUE_STATUS="$(queue_value 'j.status' pending)"
   if [[ "$QUEUE_STATUS" == "completed" ]]; then
-    write_state ok "local execution already covered all authorized repairs; cloud fallback only performed final readback"
+    if [[ "$IMMEDIATE_MODE" == "1" ]]; then
+      write_state ok "immediate authorization found the exact queue already completed; no rescan was performed"
+    else
+      write_state ok "local execution already covered all authorized repairs; cloud fallback only performed final readback"
+    fi
     send_daily_group_report
     echo "[cloud_marketing_repair] fallback readback found no remaining work date=$DATE"
     exit 0
@@ -1370,13 +2023,54 @@ if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; t
     echo "[cloud_marketing_repair] fallback readback found only terminal blockers date=$DATE"
     exit 0
   fi
-  ensure_fallback_start_budget
+  refresh_executor_continuation_args
 fi
 
 ensure_browser_lease
 
+# Immediate authorization is consumed only after the service lock, busy-host
+# check, reserved-minute check, exact queue/registry capture, and browser lease
+# acquisition all pass. Reacquire the complete critical lock set immediately
+# before the one-time claim, then release it only after the claim and receipt
+# readback are closed. If consume fails, on_exit releases the acquired lease.
+if [[ "$IMMEDIATE_MODE" == "1" ]]; then
+  if acquire_repair_critical_locks; then
+    :
+  else
+    status=$?
+    write_state deferred_to_local "could not reacquire artifact/registry/queue locks before immediate authorization consume status=$status"
+    exit "$status"
+  fi
+  if refresh_queue_pair_locked && assert_current_queue_registry_locked; then
+    QUEUE_STATUS="$(queue_value 'j.status' missing)"
+  else
+    status=$?
+    release_repair_critical_locks || true
+    if (( status == QUEUE_CONFLICT_STATUS )); then
+      mark_queue_conflict immediate-before-consume
+    else
+      write_state failed "immediate queue/registry revalidation failed before consume status=$status"
+    fi
+    exit "$status"
+  fi
+  if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
+    release_repair_critical_locks || true
+    echo "[cloud_marketing_repair] exact queue became terminal before immediate consume; source authorization remains available"
+    exit 0
+  fi
+  if consume_immediate_authorization_locked; then
+    :
+  else
+    status=$?
+    release_repair_critical_locks || true
+    exit "$status"
+  fi
+  release_repair_critical_locks || true
+fi
+
 HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
 while (( REMAINING_GROUPS > 0 )) && [[ "$HIGH_CLICK_STATUS" != "not_required" && "$HIGH_CLICK_STATUS" != "completed" && "$HIGH_CLICK_STATUS" != "blocked" ]]; do
+  assert_browser_lease_healthy || exit $?
   ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.highClickSpecial?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
@@ -1388,10 +2082,37 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$HIGH_CLICK_STATUS" != "not_required" &&
   node scripts/marketing/batch_apply_high_click_special_discounts.mjs \
     --date "$DATE" --guard "$GUARD_PATH" --plan "$HIGH_CLICK_PLAN_PATH" \
     --execute --max-items 1 --result "$ROOT/$RESULT_PATH" \
-    --expected-work-fingerprint "$WORK_FINGERPRINT"
+    --expected-work-fingerprint "$WORK_FINGERPRINT" \
+    "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
   status=$?
   set -e
   PROCESSED_ITEMS="$(processed_items_this_run "$RESULT_PATH")"
+  if [[ "$PROCESSED_ITEMS" =~ ^[0-9]+$ ]] && (( PROCESSED_ITEMS == 0 )); then
+    RESUME_DISPOSITION="$(settled_result_disposition highClickSpecial "$RESULT_PATH" "$WORK_FINGERPRINT")"
+    case "$RESUME_DISPOSITION" in
+      completed)
+        update_stage highClickSpecial completed true "same-fingerprint persistent result already settled successfully before queue update; no replay" "$RESULT_PATH"
+        HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
+        continue
+        ;;
+      blocked)
+        update_stage highClickSpecial blocked false "same-fingerprint persistent result contains terminal item evidence; no replay" "$RESULT_PATH"
+        write_state blocked "high-click persistent result closed with terminal item evidence"
+        HIGH_CLICK_STATUS="$(queue_value 'j.stages?.highClickSpecial?.status' not_required)"
+        continue
+        ;;
+      failed)
+        update_stage highClickSpecial failed false "same-fingerprint persistent result contains explicit failure evidence; no replay" "$RESULT_PATH"
+        write_state failed "high-click persistent result closed with explicit failure evidence"
+        exit 2
+        ;;
+      incomplete)
+        update_stage highClickSpecial failed false "processedThisRun=0 but persistent result evidence is incomplete or inconsistent" "$RESULT_PATH"
+        write_state failed "high-click persistent result could not safely close crash-resume"
+        exit 66
+        ;;
+    esac
+  fi
   if [[ "$status" -eq 4 && "$PROCESSED_ITEMS" == "0" ]]; then
     update_stage highClickSpecial pending false "recoverable items were attempted once in this service run; deferred without replay while independent stages continue" "$RESULT_PATH"
     write_state pending "high-click recoverable items deferred to the next fresh service run; continuing independent repair stages"
@@ -1434,8 +2155,9 @@ if (( REMAINING_GROUPS <= 0 )); then
 fi
 
 MANUAL_STATUS="$(queue_value 'j.stages?.manualSpecialRestore?.status' not_required)"
-if [[ "$MANUAL_STATUS" != "not_required" && "$MANUAL_STATUS" != "completed" ]]; then
-  ensure_fallback_start_budget
+while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$MANUAL_STATUS" != "completed" && "$MANUAL_STATUS" != "blocked" ]]; do
+  assert_browser_lease_healthy || exit $?
+  refresh_executor_continuation_args
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint || j.stages?.manualSpecialRestore?.inputFingerprint' '')"
   WORK_FINGERPRINT="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint' '')"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
@@ -1443,57 +2165,171 @@ if [[ "$MANUAL_STATUS" != "not_required" && "$MANUAL_STATUS" != "completed" ]]; 
   MANUAL_OUT_DIR="$(dirname "$MANUAL_PLAN_PATH")"
   RESULT_PATH="tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-result.json"
   begin_stage_critical_section manualSpecialRestore || { status=$?; exit "$status"; }
-  if node scripts/marketing/batch_restore_manual_limited_discounts.mjs \
-      --guard "$GUARD_PATH" --out-dir "$MANUAL_OUT_DIR" --skip-build --execute \
-      --max-items "$REMAINING_GROUPS" --result "$ROOT/$RESULT_PATH" \
-      --expected-work-fingerprint "$WORK_FINGERPRINT"; then
-    update_stage manualSpecialRestore completed true "bounded execute and per-item readback succeeded" "$RESULT_PATH"
-    consume_group_budget "$(processed_items_this_run "$RESULT_PATH")"
-  else
-    status=$?
-    if [[ "$status" -eq 3 ]]; then
-      update_stage manualSpecialRestore pending false "bounded chunk completed; more exact-plan items remain" "$RESULT_PATH"
-      defer_remaining_work "manual-special repair chunk completed without replaying successful items"
-    fi
-    update_stage manualSpecialRestore failed false "execute/readback failed status=$status"
+  set +e
+  node scripts/marketing/batch_restore_manual_limited_discounts.mjs \
+    --guard "$GUARD_PATH" --out-dir "$MANUAL_OUT_DIR" --skip-build --execute \
+    --max-items 1 --result "$ROOT/$RESULT_PATH" \
+    --expected-work-fingerprint "$WORK_FINGERPRINT" \
+    "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
+  status=$?
+  set -e
+  PROCESSED_ITEMS="$(processed_items_this_run "$RESULT_PATH")"
+  DEADLINE_DEFERRED="$(result_total "$RESULT_PATH" deadlineDeferred)"
+  REMAINING_ITEMS="$(result_total "$RESULT_PATH" remainingItems)"
+  TERMINAL_BLOCKED="$(processed_result_value "$RESULT_PATH" terminalBlocked 0)"
+  RECOVERABLE_DEFERRED="$(processed_result_value "$RESULT_PATH" recoverableDeferred 0)"
+  if [[ ! "$PROCESSED_ITEMS" =~ ^[0-9]+$ ]] || (( PROCESSED_ITEMS > 1 )); then
+    update_stage manualSpecialRestore failed false "single-item executor produced an invalid processedThisRun count=$PROCESSED_ITEMS status=$status" "$RESULT_PATH"
+    write_state failed "manual special single-item executor produced an invalid progress count status=$status"
+    exit 66
+  fi
+  if (( PROCESSED_ITEMS == 1 )); then
+    consume_group_budget "$PROCESSED_ITEMS"
+  fi
+  if (( PROCESSED_ITEMS == 0 )); then
+    RESUME_DISPOSITION="$(settled_result_disposition manualSpecialRestore "$RESULT_PATH" "$WORK_FINGERPRINT")"
+    case "$RESUME_DISPOSITION" in
+      completed)
+        update_stage manualSpecialRestore completed true "same-fingerprint persistent result already settled successfully before queue update; no replay" "$RESULT_PATH"
+        MANUAL_STATUS="$(queue_value 'j.stages?.manualSpecialRestore?.status' not_required)"
+        continue
+        ;;
+      blocked)
+        update_stage manualSpecialRestore blocked false "same-fingerprint persistent result contains terminal manual blockers; no replay" "$RESULT_PATH"
+        write_state blocked "manual-special persistent result closed with terminal blockers"
+        MANUAL_STATUS="$(queue_value 'j.stages?.manualSpecialRestore?.status' not_required)"
+        continue
+        ;;
+      failed)
+        update_stage manualSpecialRestore failed false "same-fingerprint persistent result contains explicit failure evidence; no replay" "$RESULT_PATH"
+        write_state failed "manual-special persistent result closed with explicit failure evidence"
+        exit 2
+        ;;
+      incomplete)
+        update_stage manualSpecialRestore failed false "processedThisRun=0 but persistent result evidence is incomplete or inconsistent" "$RESULT_PATH"
+        write_state failed "manual-special persistent result could not safely close crash-resume"
+        exit 66
+        ;;
+    esac
+  fi
+  if [[ "$status" -eq 4 && ( "$PROCESSED_ITEMS" == "0" || "$DEADLINE_DEFERRED" =~ ^[1-9][0-9]*$ || "$RECOVERABLE_DEFERRED" == "1" ) ]]; then
+    update_stage manualSpecialRestore pending false "deadline or recoverable item deferred; no new item will start in this slot" "$RESULT_PATH"
+    write_state pending "manual-special repair paused at the deadline/recoverable boundary; exact queue preserved"
+    break
+  fi
+  if (( PROCESSED_ITEMS == 0 )); then
+    update_stage manualSpecialRestore failed false "single-item executor produced no exact new item status=$status" "$RESULT_PATH"
+    write_state failed "manual special single-item executor made no durable progress status=$status"
+    exit 66
+  fi
+  if [[ "$status" -eq 2 && "$TERMINAL_BLOCKED" != "1" ]]; then
+    update_stage manualSpecialRestore failed false "execute/readback failed status=$status" "$RESULT_PATH"
     write_state failed "manual special restore failed status=$status"
     exit "$status"
   fi
-fi
+  if (( REMAINING_ITEMS > 0 )); then
+    if [[ "$status" -ne 0 && "$status" -ne 2 && "$status" -ne 3 && "$status" -ne 4 ]]; then
+      update_stage manualSpecialRestore failed false "unexpected single-item executor status=$status" "$RESULT_PATH"
+      write_state failed "manual special restore failed status=$status"
+      exit "$status"
+    fi
+    update_stage manualSpecialRestore pending false "one exact manual item reached terminal readback/blocker; serial consumer continuing" "$RESULT_PATH"
+  elif [[ "$status" -eq 4 || "$TERMINAL_BLOCKED" == "1" ]]; then
+    update_stage manualSpecialRestore blocked false "all exact manual items accounted; terminal business blockers were preserved" "$RESULT_PATH"
+    write_state blocked "manual special restore completed with terminal business blockers"
+  else
+    update_stage manualSpecialRestore completed true "serial single-item execute and per-item live readback succeeded" "$RESULT_PATH"
+  fi
+  MANUAL_STATUS="$(queue_value 'j.stages?.manualSpecialRestore?.status' not_required)"
+done
 
 if (( REMAINING_GROUPS <= 0 )); then
   defer_remaining_work "bounded group budget consumed"
 fi
 
 DRIFT_STATUS="$(queue_value 'j.stages?.driftRepair?.status' not_required)"
-if [[ "$DRIFT_STATUS" != "not_required" && "$DRIFT_STATUS" != "completed" ]]; then
-  ensure_fallback_start_budget
+while (( REMAINING_GROUPS > 0 )) && [[ "$DRIFT_STATUS" != "not_required" && "$DRIFT_STATUS" != "completed" && "$DRIFT_STATUS" != "blocked" ]]; do
+  assert_browser_lease_healthy || exit $?
+  refresh_executor_continuation_args
   WORK_FINGERPRINT="$(queue_value 'j.stages?.driftRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
   RESULT_PATH="tmp/marketing-signup/limited-discount-rescue/batch-drift-fix-result-${DATE}.json"
   begin_stage_critical_section driftRepair || { status=$?; exit "$status"; }
-  if node scripts/marketing/batch_fix_limited_discount_drift.mjs \
-      --guard "$GUARD_PATH" --skip-build-plan --execute --max-groups "$REMAINING_GROUPS" \
-      --expected-work-fingerprint "$WORK_FINGERPRINT"; then
-    update_stage driftRepair completed true "bounded execute and per-group readback succeeded" "$RESULT_PATH"
-    consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
-  else
-    status=$?
-    if [[ "$status" -eq 3 ]]; then
-      update_stage driftRepair pending false "bounded chunk completed; more exact-manifest groups remain" "$RESULT_PATH"
-      defer_remaining_work "drift repair chunk completed without replaying successful groups"
-    fi
-    if [[ "$status" -eq 4 ]]; then
-      update_stage driftRepair blocked false "current inventory/platform conditions safely blocked one or more drift repairs; existing protection was preserved" "$RESULT_PATH"
-      consume_group_budget "$(new_groups_in_result "$RESULT_PATH")"
-    else
-      update_stage driftRepair failed false "execute/readback failed status=$status" "$RESULT_PATH"
+  set +e
+  node scripts/marketing/batch_fix_limited_discount_drift.mjs \
+    --guard "$GUARD_PATH" --skip-build-plan --execute --max-groups 1 \
+    --expected-work-fingerprint "$WORK_FINGERPRINT" \
+    "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
+  status=$?
+  set -e
+  PROCESSED_GROUPS="$(new_groups_in_result "$RESULT_PATH")"
+  DEADLINE_DEFERRED="$(result_top_level_value "$RESULT_PATH" deadlineDeferred 0)"
+  if [[ ! "$PROCESSED_GROUPS" =~ ^[0-9]+$ ]] || (( PROCESSED_GROUPS > 1 )); then
+    update_stage driftRepair failed false "single-group executor produced an invalid new-group count=$PROCESSED_GROUPS status=$status" "$RESULT_PATH"
+    write_state failed "drift single-group executor produced an invalid progress count status=$status"
+    exit 66
+  fi
+  if (( PROCESSED_GROUPS == 1 )); then
+    consume_group_budget "$PROCESSED_GROUPS"
+  fi
+  if (( PROCESSED_GROUPS == 0 )); then
+    RESUME_DISPOSITION="$(settled_result_disposition driftRepair "$RESULT_PATH" "$WORK_FINGERPRINT")"
+    case "$RESUME_DISPOSITION" in
+      completed)
+        update_stage driftRepair completed true "same-fingerprint persistent result already settled successfully before queue update; no replay" "$RESULT_PATH"
+        DRIFT_STATUS="$(queue_value 'j.stages?.driftRepair?.status' not_required)"
+        continue
+        ;;
+      blocked)
+        update_stage driftRepair blocked false "same-fingerprint persistent result contains terminal drift blockers; no replay" "$RESULT_PATH"
+        write_state blocked "drift persistent result closed with terminal blockers"
+        DRIFT_STATUS="$(queue_value 'j.stages?.driftRepair?.status' not_required)"
+        continue
+        ;;
+      failed)
+        update_stage driftRepair failed false "same-fingerprint persistent result contains explicit failure evidence; no replay" "$RESULT_PATH"
+        write_state failed "drift persistent result closed with explicit failure evidence"
+        exit 2
+        ;;
+      incomplete)
+        update_stage driftRepair failed false "newGroups=0 but persistent result evidence is incomplete or inconsistent" "$RESULT_PATH"
+        write_state failed "drift persistent result could not safely close crash-resume"
+        exit 66
+        ;;
+    esac
+  fi
+  if [[ "$DEADLINE_DEFERRED" =~ ^[1-9][0-9]*$ ]]; then
+    update_stage driftRepair pending false "deadline/recovery boundary reached; no new drift group will start in this slot" "$RESULT_PATH"
+    write_state pending "drift repair paused at the deadline boundary; exact queue preserved"
+    break
+  fi
+  if (( PROCESSED_GROUPS == 0 )); then
+    update_stage driftRepair failed false "single-group executor produced no exact new group status=$status" "$RESULT_PATH"
+    write_state failed "drift single-group executor made no durable progress status=$status"
+    exit 66
+  fi
+  if [[ "$status" -eq 2 ]]; then
+    update_stage driftRepair failed false "execute/readback failed status=$status" "$RESULT_PATH"
+    write_state failed "drift repair failed status=$status"
+    exit "$status"
+  fi
+  REMAINING_DRIFT_GROUPS="$(result_top_level_value "$RESULT_PATH" deferredGroups 0)"
+  if (( REMAINING_DRIFT_GROUPS > 0 )); then
+    if [[ "$status" -ne 0 && "$status" -ne 3 && "$status" -ne 4 ]]; then
+      update_stage driftRepair failed false "unexpected single-group executor status=$status" "$RESULT_PATH"
       write_state failed "drift repair failed status=$status"
       exit "$status"
     fi
+    update_stage driftRepair pending false "one exact drift group reached terminal readback/blocker; serial consumer continuing" "$RESULT_PATH"
+  elif [[ "$status" -eq 4 ]]; then
+    update_stage driftRepair blocked false "all exact drift groups accounted; terminal business blockers were preserved" "$RESULT_PATH"
+    write_state blocked "drift repair completed with terminal business blockers"
+  else
+    update_stage driftRepair completed true "serial single-group execute and per-group readback succeeded" "$RESULT_PATH"
   fi
-fi
+  DRIFT_STATUS="$(queue_value 'j.stages?.driftRepair?.status' not_required)"
+done
 
 
 if (( REMAINING_GROUPS <= 0 )); then
@@ -1502,7 +2338,8 @@ fi
 
 FALLBACK_STATUS="$(queue_value 'j.stages?.fallbackRepair?.status' not_required)"
 while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "$FALLBACK_STATUS" != "completed" && "$FALLBACK_STATUS" != "blocked" ]]; do
-  ensure_fallback_start_budget
+  assert_browser_lease_healthy || exit $?
+  refresh_executor_continuation_args
   WORK_FINGERPRINT="$(queue_value 'j.stages?.fallbackRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
   GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
@@ -1512,17 +2349,58 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "
   node scripts/marketing/batch_apply_new_listing_limited_discount.mjs \
     --date "$DATE" --guard "$GUARD_PATH" --skip-build --execute --max-groups 1 \
     --graceful-cutoff-epoch "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" \
+    --outer-hard-deadline-epoch "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" \
     --min-start-budget-sec "$FALLBACK_MIN_START_BUDGET_SEC" \
-    --expected-work-fingerprint "$WORK_FINGERPRINT"
+    --expected-work-fingerprint "$WORK_FINGERPRINT" \
+    "${EXECUTOR_CONTINUATION_ARGS[@]}"
   status=$?
   set -e
   PROCESSED_GROUPS="$(new_groups_in_result "$RESULT_PATH")"
-  if [[ ! "$PROCESSED_GROUPS" =~ ^[1-9][0-9]*$ ]] || (( PROCESSED_GROUPS != 1 )); then
+  DEADLINE_DEFERRED="$(result_top_level_value "$RESULT_PATH" deadlineDeferred 0)"
+  if [[ ! "$PROCESSED_GROUPS" =~ ^[0-9]+$ ]] || (( PROCESSED_GROUPS > 1 )); then
+    update_stage fallbackRepair failed false "single-group executor produced an invalid new-group count=$PROCESSED_GROUPS status=$status" "$RESULT_PATH"
+    write_state failed "fallback single-group executor produced an invalid progress count status=$status"
+    exit 66
+  fi
+  if (( PROCESSED_GROUPS == 1 )); then
+    consume_group_budget "$PROCESSED_GROUPS"
+  fi
+  if (( PROCESSED_GROUPS == 0 )); then
+    RESUME_DISPOSITION="$(settled_result_disposition fallbackRepair "$RESULT_PATH" "$WORK_FINGERPRINT")"
+    case "$RESUME_DISPOSITION" in
+      completed)
+        update_stage fallbackRepair completed true "same-fingerprint persistent result already settled successfully before queue update; no replay" "$RESULT_PATH"
+        FALLBACK_STATUS="$(queue_value 'j.stages?.fallbackRepair?.status' not_required)"
+        continue
+        ;;
+      blocked)
+        update_stage fallbackRepair blocked false "same-fingerprint persistent result contains terminal fallback blockers; no replay" "$RESULT_PATH"
+        write_state blocked "fallback persistent result closed with terminal blockers"
+        FALLBACK_STATUS="$(queue_value 'j.stages?.fallbackRepair?.status' not_required)"
+        continue
+        ;;
+      failed)
+        update_stage fallbackRepair failed false "same-fingerprint persistent result contains explicit failure evidence; no replay" "$RESULT_PATH"
+        write_state failed "fallback persistent result closed with explicit failure evidence"
+        exit 2
+        ;;
+      incomplete)
+        update_stage fallbackRepair failed false "newGroups=0 but persistent result evidence is incomplete or inconsistent" "$RESULT_PATH"
+        write_state failed "fallback persistent result could not safely close crash-resume"
+        exit 66
+        ;;
+    esac
+  fi
+  if [[ "$DEADLINE_DEFERRED" =~ ^[1-9][0-9]*$ ]]; then
+    update_stage fallbackRepair pending false "deadline/recovery boundary reached; no new fallback group will start in this slot" "$RESULT_PATH"
+    write_state pending "fallback repair paused at the deadline boundary; exact queue preserved"
+    break
+  fi
+  if (( PROCESSED_GROUPS == 0 )); then
     update_stage fallbackRepair failed false "single-group executor produced no exact new group status=$status" "$RESULT_PATH"
     write_state failed "fallback single-group executor made no durable progress status=$status"
     exit 66
   fi
-  consume_group_budget "$PROCESSED_GROUPS"
   if [[ "$status" -eq 0 ]]; then
     BLOCKED_TARGETS="$(result_total "$RESULT_PATH" blockedTargetCount)"
     FAILED_TARGETS="$(result_total "$RESULT_PATH" failedTargetCount)"

@@ -24,6 +24,22 @@ async function exists(file) {
   }
 }
 
+function extractBalancedBlockAfter(source, marker) {
+  const markerIndex = source.indexOf(marker);
+  assert.ok(markerIndex >= 0, `missing source contract marker: ${marker}`);
+  const open = source.indexOf('{', markerIndex + marker.length);
+  assert.ok(open >= 0, `missing block after source contract marker: ${marker}`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, index);
+    }
+  }
+  assert.fail(`unterminated block after source contract marker: ${marker}`);
+}
+
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 let portableWindowsDir = '';
 
@@ -32,8 +48,15 @@ assert.match(batchSource, /replace_limited_discount_transactionally\.mjs/,
   'drift repair must delegate replacement safety to the durable transaction wrapper');
 assert.match(batchSource, /executeLimitedDiscountWithInventoryTransaction/,
   'the batch must wrap every live mutation in the shared activity-inventory transaction');
-assert.match(batchSource, /runSubmit:\s*async\s*\(\)\s*=>\s*await replaceTransactionally/,
-  'the transactional replacement must be the submit callback inside the inventory transaction');
+const runSubmitBlock = extractBalancedBlockAfter(batchSource, 'runSubmit: async () =>');
+const deadlineGuardIndex = runSubmitBlock.indexOf('assertBeforeOuter(ACTIVE_DEADLINE');
+const submitIndex = runSubmitBlock.indexOf('return await replaceTransactionally');
+assert.ok(deadlineGuardIndex >= 0 && submitIndex > deadlineGuardIndex,
+  'runSubmit must enforce the outer-deadline reserve immediately before delegating to the durable transaction');
+assert.match(runSubmitBlock, /reserveSec:\s*ACTIVE_DEADLINE\?\.minFinalizationBudgetSec\s*\|\|\s*0/,
+  'runSubmit deadline guard must preserve the complete inventory finalization reserve');
+assert.match(runSubmitBlock, /replaceTransactionally\(\{[\s\S]*sourceRescuePath,[\s\S]*continuation:\s*args\.continuation,[\s\S]*execute:\s*true/,
+  'runSubmit must bind source scope, continuation mode, and execute=true in the transactional child contract');
 assert.doesNotMatch(batchSource, /remove_skc_from_limited_discount\.mjs/,
   'the batch must not contain a direct delete path outside the transaction wrapper');
 

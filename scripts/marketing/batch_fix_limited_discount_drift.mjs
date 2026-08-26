@@ -28,7 +28,18 @@ import {
   executeLimitedDiscountWithInventoryTransaction,
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
+import {createMarketingActivityInventoryOpenApiAdapter} from '../../lib/marketing_activity_inventory_openapi.mjs';
 import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {
+  assertBeforeOuter,
+  assertCanStartUnit,
+  boundedRecoveryTimeoutMs,
+  boundedTimeoutMs,
+  createDeadlineContract,
+  deadlineBoundAdapterFactory,
+  findPersistedMarketingTransactionContinuation,
+  isMarketingDeadlineError,
+} from '../../lib/cloud_marketing_deadline_contract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -50,6 +61,9 @@ function parseArgs(argv) {
     maxGroups: 0,
     resume: true,
     expectedWorkFingerprint: '',
+    gracefulCutoffEpochRaw: '',
+    outerHardDeadlineEpochRaw: '',
+    continuation: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -73,6 +87,9 @@ function parseArgs(argv) {
     else if (arg === '--no-resume') args.resume = false;
     else if (arg === '--expected-work-fingerprint') args.expectedWorkFingerprint = String(argv[++i] || '').trim().toLowerCase();
     else if (arg.startsWith('--expected-work-fingerprint=')) args.expectedWorkFingerprint = String(arg.slice('--expected-work-fingerprint='.length)).trim().toLowerCase();
+    else if (arg === '--graceful-cutoff-epoch') args.gracefulCutoffEpochRaw = String(argv[++i] || '').trim();
+    else if (arg === '--outer-hard-deadline-epoch') args.outerHardDeadlineEpochRaw = String(argv[++i] || '').trim();
+    else if (arg === '--continuation') args.continuation = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.guard) throw new Error('Missing required --guard <marketing-daily-guard-YYYY-MM-DD.json>');
@@ -88,6 +105,11 @@ function parseArgs(argv) {
   if (args.expectedWorkFingerprint && !/^[a-f0-9]{64}$/.test(args.expectedWorkFingerprint)) {
     throw new Error(`Invalid --expected-work-fingerprint: ${args.expectedWorkFingerprint}`);
   }
+  if (args.continuation && args.dryRunOnly) throw new Error('--continuation requires --execute');
+  args.deadline = createDeadlineContract({
+    gracefulCutoffEpoch: args.gracefulCutoffEpochRaw,
+    outerHardDeadlineEpoch: args.outerHardDeadlineEpochRaw,
+  });
   return args;
 }
 
@@ -208,6 +230,20 @@ async function runCommand(command, commandArgs, options = {}) {
   });
 }
 
+let ACTIVE_DEADLINE = null;
+
+function deadlineTimeout(timeoutMs, {recovery = false, label = 'bounded operation'} = {}) {
+  if (!ACTIVE_DEADLINE) return timeoutMs;
+  return recovery
+    ? boundedRecoveryTimeoutMs(ACTIVE_DEADLINE, {capMs: timeoutMs, label})
+    : boundedTimeoutMs(ACTIVE_DEADLINE, {capMs: timeoutMs, label});
+}
+
+async function runBounded(command, commandArgs, options = {}) {
+  const timeoutMs = deadlineTimeout(options.timeoutMs ?? 600000, options);
+  return await runCommand(command, commandArgs, {...options, timeoutMs});
+}
+
 function parseLastJson(text) {
   const source = String(text || '').trim();
   if (!source) return null;
@@ -232,7 +268,7 @@ async function loadToolOutputFromStdout(commandResult) {
 }
 
 async function launchStore(storeKey) {
-  const result = await runCommand(process.execPath, [
+  const result = await runBounded(process.execPath, [
     'scripts/launch_store_browser.mjs',
     storeKey,
     '--headless',
@@ -240,6 +276,7 @@ async function launchStore(storeKey) {
     'https://sso.geiwohuo.com/#/mbrs/marketing/list',
   ], {
     timeoutMs: 60000,
+    label: `launch ${storeKey}`,
   });
   if (!result.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${result.stderr || result.stdout}`);
   await sleep(3000);
@@ -258,28 +295,38 @@ async function closeStore(storeKey) {
   );
 }
 
-async function replaceTransactionally({storeKey, port, rescuePath, execute}) {
+async function replaceTransactionally({storeKey, port, rescuePath, sourceRescuePath = rescuePath, execute, continuation = false}) {
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescuePath)).digest('hex');
-  const result = await runCommand(process.execPath, [
+  const sourceRescueHash = crypto.createHash('sha256').update(await fs.readFile(sourceRescuePath)).digest('hex');
+  const deadlineArgs = execute && ACTIVE_DEADLINE ? [
+    '--graceful-cutoff-epoch', String(ACTIVE_DEADLINE.gracefulCutoffEpoch),
+    '--outer-hard-deadline-epoch', String(ACTIVE_DEADLINE.outerHardDeadlineEpoch),
+    '--min-finalization-budget-sec', String(ACTIVE_DEADLINE.minFinalizationBudgetSec),
+  ] : [];
+  const result = await runBounded(process.execPath, [
     'scripts/marketing/replace_limited_discount_transactionally.mjs',
     '--store', storeKey,
     '--port', String(port),
     '--rescue', rescuePath,
     '--expected-rescue-hash', rescueHash,
+    '--source-rescue', sourceRescuePath,
+    '--expected-source-rescue-hash', sourceRescueHash,
+    ...deadlineArgs,
+    ...(execute && continuation ? ['--continuation'] : []),
     execute ? '--execute' : '--dry-run',
-  ], {timeoutMs: 1800000});
+  ], {timeoutMs: 1800000, recovery: execute, label: `${execute ? 'activity submit' : 'activity dry-run'} ${storeKey}`});
   const loaded = await loadToolOutputFromStdout(result);
   return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
 }
 
-async function applyRescue({storeKey, port, rescuePath}) {
-  const result = await runCommand(process.execPath, [
+async function applyRescue({storeKey, port, rescuePath, recovery = false}) {
+  const result = await runBounded(process.execPath, [
     'scripts/marketing/apply_hl_limited_discount_rescue.mjs',
     '--store-key', storeKey,
     '--port', String(port),
     '--rescue', rescuePath,
     '--dry-run',
-  ], {timeoutMs: 900000});
+  ], {timeoutMs: 900000, recovery, label: `${recovery ? 'inventory restore/readback' : 'inventory preflight'} ${storeKey}`});
   const loaded = await loadToolOutputFromStdout(result);
   return {...result, parsed: loaded.summary, full: loaded.full, outPath: loaded.outPath};
 }
@@ -292,6 +339,55 @@ function summarizeCommand(result) {
     out: result.parsed?.out || (result.outPath ? rel(result.outPath) : ''),
     stdoutSummary: result.parsed || null,
     stderrTail: result.stderr ? result.stderr.slice(-2000) : '',
+    writeAttempted: result.full?.writeAttempted === true,
+    mutationsStarted: result.full?.mutationsStarted === true,
+    submittedWithoutExactReadback: result.full?.submittedWithoutExactReadback === true
+      || result.full?.classification === 'submitted_without_exact_readback',
+  };
+}
+
+export function hasDriftSubmittedPendingEvidence(result) {
+  return result?.classification === 'submitted_without_exact_readback'
+    || result?.status === 'submitted_without_exact_readback'
+    || result?.inventoryTransaction?.submitAttempted === true
+    || result?.transaction?.writeAttempted === true
+    || result?.transaction?.mutationsStarted === true
+    || result?.executeApply?.writeAttempted === true
+    || result?.executeApply?.mutationsStarted === true
+    || Number(result?.executeApply?.createdActivityId || result?.readback?.createdActivityId || 0) > 0;
+}
+
+export function normalizeDriftResumeResult(result) {
+  if (!result || isSettledDriftRepairResult(result) || !hasDriftSubmittedPendingEvidence(result)) return result;
+  return {
+    ...result,
+    ok: false,
+    safe: result.safe !== false,
+    terminal: true,
+    terminalBlocked: true,
+    deferred: false,
+    recoverableDeferred: false,
+    writeAttempted: true,
+    status: 'submitted_without_exact_readback',
+    classification: 'submitted_without_exact_readback',
+  };
+}
+
+export function isDriftResumeResultSettled(result) {
+  return isSettledDriftRepairResult(result)
+    || result?.classification === 'submitted_without_exact_readback';
+}
+
+function summarizeDriftRepairOutcomesIncludingSubmitted(results) {
+  const base = summarizeDriftRepairOutcomes(results);
+  const submittedPending = results.filter(result => (
+    result?.classification === 'submitted_without_exact_readback'
+    && !isSettledDriftRepairResult(result)
+  )).length;
+  return {
+    ...base,
+    businessBlockedGroups: base.businessBlockedGroups + submittedPending,
+    failedGroups: Math.max(0, base.failedGroups - submittedPending),
   };
 }
 
@@ -310,14 +406,42 @@ export function filterDriftRescueRowsDefensively(rescue, manualIndex) {
 }
 
 async function processStore(storeKey, rescuePath, args, manualIndex, browserSession = {}) {
+  const sourceRescuePath = rescuePath;
   const store = storesByKey.get(storeKey);
   if (!store) throw new Error(`Unknown store ${storeKey}`);
   let rescue = JSON.parse(await fs.readFile(rescuePath, 'utf8'));
   let activeRescuePath = rescuePath;
+  let persistedContinuation = null;
+  if (args.continuation) {
+    const persisted = await findPersistedMarketingTransactionContinuation({
+      root: ROOT,
+      storeKey,
+      workFingerprint: args.expectedWorkFingerprint || process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+      rescuePath,
+    });
+    if (!persisted) {
+      return {
+        storeKey,
+        rescuePath: rel(rescuePath),
+        status: 'deadline_deferred',
+        deferred: true,
+        recoverableDeferred: true,
+        ok: false,
+        error: 'continuation mode found no persisted transaction; no new group was started',
+      };
+    }
+    persistedContinuation = persisted;
+    const fencedPath = persisted.journal?.createAttempt?.exactScope?.rescuePath
+      || persisted.journal?.operationRescuePath;
+    if (fencedPath) {
+      activeRescuePath = path.resolve(ROOT, fencedPath);
+      rescue = JSON.parse(await fs.readFile(activeRescuePath, 'utf8'));
+    }
+  }
   const defensive = filterDriftRescueRowsDefensively(rescue, manualIndex);
   const protectedManualSpecialRows = defensive.protectedManualSpecialRows;
   const ordinaryRows = defensive.rescue.rows;
-  if (protectedManualSpecialRows.length && ordinaryRows.length) {
+  if (!persistedContinuation && protectedManualSpecialRows.length && ordinaryRows.length) {
     rescue = {...defensive.rescue, protectedManualSpecialRows};
     activeRescuePath = path.join(args.outDir, `defensive-filtered-${path.basename(rescuePath)}`);
     await fs.writeFile(activeRescuePath, `${JSON.stringify(rescue, null, 2)}\n`, 'utf8');
@@ -327,7 +451,7 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
     storeKey,
     port: store.port,
     rescuePath: rel(activeRescuePath),
-    sourceRescuePath: rel(rescuePath),
+    sourceRescuePath: rel(sourceRescuePath),
     sourceLimitedDiscountName: rescue.sourceLimitedDiscountName,
     endTime: rescue.endTime,
     activityNamePrefix: rescue.activityNamePrefix,
@@ -347,11 +471,18 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
     skippedCreate: false,
     close: null,
     ok: false,
+    terminalBlocked: false,
+    recoverableDeferred: false,
+    deferred: false,
     status: 'pending',
     error: '',
   };
 
   try {
+    assertCanStartUnit(ACTIVE_DEADLINE, {
+      continuation: args.continuation,
+      label: `limited-discount drift group ${storeKey}::${targetSkcs.join(',')}`,
+    });
     if (!ordinaryRows.length) {
       record.ok = true;
       record.status = 'protected_manual_special_skipped';
@@ -408,30 +539,59 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
         storeKey,
         port: store.port,
         rescuePath: activeRescuePath,
+        sourceRescuePath,
+        continuation: args.continuation,
         execute: false,
       });
     } else {
+      assertCanStartUnit(ACTIVE_DEADLINE, {
+        continuation: args.continuation,
+        label: `drift inventory transaction ${storeKey}::${targetSkcs.join(',')}`,
+      });
       const inventoryTransaction = await executeLimitedDiscountWithInventoryTransaction({
         root: ROOT,
         storeKey,
         rescue,
         preflightFull: inventoryPreflight.full,
         transactionHash,
-        runSubmit: async () => await replaceTransactionally({
-          storeKey,
-          port: store.port,
-          rescuePath: activeRescuePath,
-          execute: true,
+        adapterFactory: deadlineBoundAdapterFactory(createMarketingActivityInventoryOpenApiAdapter, ACTIVE_DEADLINE, {
+          label: `drift inventory ${storeKey}`,
         }),
-        runEnrollmentReadback: async () => await applyRescue({
+        runSubmit: async () => {
+          assertBeforeOuter(ACTIVE_DEADLINE, {
+            reserveSec: ACTIVE_DEADLINE?.minFinalizationBudgetSec || 0,
+            label: `drift activity submit ${storeKey}`,
+          });
+          return await replaceTransactionally({
+            storeKey,
+            port: store.port,
+            rescuePath: activeRescuePath,
+            sourceRescuePath,
+            continuation: args.continuation,
+            execute: true,
+          });
+        },
+        runEnrollmentReadback: async context => await applyRescue({
           storeKey,
           port: store.port,
           rescuePath: activeRescuePath,
+          recovery: context?.phase === 'after_submit_without_inventory_transaction'
+            || context?.phase === 'after_submit_before_restore'
+            || context?.phase === 'after_restore',
         }),
       });
       record.inventoryTransaction = inventoryTransaction;
       if (!inventoryTransaction.ok) {
         record.status = classifyActivityInventoryFailureStatus(inventoryTransaction);
+        const deadlineDeferred = (inventoryTransaction.blockers || [])
+          .some(blocker => isMarketingDeadlineError({
+            code: blocker?.code,
+            message: blocker?.error || blocker?.reason,
+          }));
+        record.deferred = deadlineDeferred;
+        record.recoverableDeferred = deadlineDeferred;
+        record.terminalBlocked = !deadlineDeferred && (inventoryTransaction.safe === true
+          || inventoryTransaction.writeAttempted !== true);
         record.error = inventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
           || 'activity inventory transaction failed';
         return record;
@@ -494,7 +654,13 @@ async function processStore(storeKey, rescuePath, args, manualIndex, browserSess
     return record;
   } catch (error) {
     record.ok = false;
-    record.status = 'failed';
+    if (isMarketingDeadlineError(error)) {
+      record.status = 'deadline_deferred';
+      record.recoverableDeferred = true;
+      record.deferred = true;
+    } else {
+      record.status = 'failed';
+    }
     record.error = error.message;
     return record;
   } finally {
@@ -525,7 +691,7 @@ async function loadResumableResults(args, workFingerprint) {
     // manifest. Replaying it in every worker window cannot make progress and
     // used to turn safe business conditions into a false system failure. A
     // new daily guard/fingerprint will reconsider the link automatically.
-    return (previous.results || []).filter(isSettledDriftRepairResult);
+    return (previous.results || []).map(normalizeDriftResumeResult).filter(isDriftResumeResultSettled);
   } catch {
     return [];
   }
@@ -551,6 +717,7 @@ async function writeProgress(args, common, results, deferredEntries = []) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+ACTIVE_DEADLINE = args.deadline;
 let automationAuthorization = null;
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
@@ -606,8 +773,21 @@ const startedAt = new Date().toISOString();
 const resumedResults = await loadResumableResults(args, exactManifest.workFingerprint);
 const completedKeys = new Set(resumedResults.map(resultKey));
 const pendingEntries = exactEntries.filter(entry => !completedKeys.has(entry.relativePath.toLowerCase()));
-const selectedEntries = args.maxGroups > 0 ? pendingEntries.slice(0, args.maxGroups) : pendingEntries;
-const deferredEntries = args.maxGroups > 0 ? pendingEntries.slice(args.maxGroups) : [];
+let continuationEntries = pendingEntries;
+if (args.continuation) {
+  continuationEntries = [];
+  for (const entry of pendingEntries) {
+    if (await findPersistedMarketingTransactionContinuation({
+      root: ROOT,
+      storeKey: entry.storeKey,
+      workFingerprint: exactManifest.workFingerprint,
+      rescuePath: path.resolve(ROOT, entry.relativePath),
+    })) continuationEntries.push(entry);
+  }
+}
+const selectedEntries = args.maxGroups > 0 ? continuationEntries.slice(0, args.maxGroups) : continuationEntries;
+let deferredEntries = pendingEntries.filter(entry => !selectedEntries.some(selected => selected.relativePath === entry.relativePath));
+const continuationDeferredWithoutMatch = args.continuation && pendingEntries.length > 0 && selectedEntries.length === 0;
 const results = [...resumedResults];
 const common = {
   createdAt: startedAt,
@@ -623,6 +803,8 @@ const common = {
   workFingerprint: exactManifest.workFingerprint,
   exactGroupCount: exactEntries.length,
   resumedGroups: resumedResults.length,
+  gracefulCutoffEpoch: args.deadline?.gracefulCutoffEpoch || null,
+  outerHardDeadlineEpoch: args.deadline?.outerHardDeadlineEpoch || null,
 };
 
 const entriesByStore = new Map();
@@ -634,15 +816,31 @@ for (const entry of selectedEntries) {
 for (const [storeKey, storeEntries] of entriesByStore.entries()) {
   let launchSummary = null;
   try {
+    if (args.continuation && !await findPersistedMarketingTransactionContinuation({
+      root: ROOT,
+      storeKey,
+      workFingerprint: args.expectedWorkFingerprint || process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+      rescuePath: path.resolve(ROOT, storeEntries[0].relativePath),
+    })) {
+      deferredEntries = [...storeEntries, ...deferredEntries.filter(item => !storeEntries.some(entry => entry.relativePath === item.relativePath))];
+      continue;
+    }
+    assertCanStartUnit(ACTIVE_DEADLINE, {
+      continuation: args.continuation,
+      label: `limited-discount drift group ${storeKey}`,
+    });
     launchSummary = summarizeRaw(await launchStore(storeKey));
     for (const entry of storeEntries) {
       console.log(`[${new Date().toISOString()}] processing ${storeKey} rescue=${entry.relativePath}`);
-      const result = await processStore(storeKey, entry.path, args, manualIndex, {
+      const result = normalizeDriftResumeResult(await processStore(storeKey, entry.path, args, manualIndex, {
         ready: true,
         keepOpen: true,
         launchSummary: {...launchSummary, reusedForStoreBatch: true},
-      });
+      }));
       results.push(result);
+      if (result.deferred === true && !deferredEntries.some(item => item.relativePath === entry.relativePath)) {
+        deferredEntries = [entry, ...deferredEntries];
+      }
       await writeProgress(args, common, results, deferredEntries);
       console.log(JSON.stringify({
         storeKey,
@@ -669,6 +867,32 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
       }, null, 2));
     }
   } catch (error) {
+    if (isMarketingDeadlineError(error)) {
+      for (const entry of storeEntries) {
+        if (results.some(result => resultKey(result) === entry.relativePath.toLowerCase())) continue;
+        results.push({
+          storeKey,
+          rescuePath: entry.relativePath,
+          sourceRescuePath: entry.relativePath,
+          targetSkcs: entry.rescue.rows.map(row => String(row.skc || '')).filter(Boolean),
+          launched: launchSummary,
+          ok: false,
+          status: 'deadline_deferred',
+          deferred: true,
+          recoverableDeferred: true,
+          terminalBlocked: false,
+          error: error.message,
+          removals: [],
+          blockedSkcs: [],
+          readback: null,
+        });
+        if (!deferredEntries.some(item => item.relativePath === entry.relativePath)) {
+          deferredEntries = [entry, ...deferredEntries];
+        }
+      }
+      await writeProgress(args, common, results, deferredEntries);
+      continue;
+    }
     for (const entry of storeEntries) {
       if (results.some(result => resultKey(result) === entry.relativePath.toLowerCase())) continue;
       results.push({
@@ -693,8 +917,14 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
   }
 }
 
+const processedThisRunResults = selectedEntries
+  .map(entry => results.find(result => resultKey(result) === entry.relativePath.toLowerCase()))
+  .filter(Boolean);
+const deadlineDeferred = processedThisRunResults.filter(result => result.deferred === true).length
+  + (continuationDeferredWithoutMatch ? 1 : 0);
+common.deadlineDeferred = deadlineDeferred;
 const finalDoc = await writeProgress(args, common, results, deferredEntries);
-const outcomeTotals = summarizeDriftRepairOutcomes(results);
+const outcomeTotals = summarizeDriftRepairOutcomesIncludingSubmitted(results);
 console.log(JSON.stringify({
   ok: outcomeTotals.failedGroups === 0
     && outcomeTotals.businessBlockedGroups === 0
@@ -705,6 +935,7 @@ console.log(JSON.stringify({
   outcomes: outcomeTotals,
   resumedGroups: resumedResults.length,
   deferredGroups: deferredEntries.length,
+  deadlineDeferred,
 }, null, 2));
 process.exitCode = driftRepairBatchExitCode({
   ...outcomeTotals,
@@ -718,11 +949,14 @@ function summarizeTotals(results) {
     results.filter(result => result.storeKey === storeKey),
   ]));
   const failedStoreKeys = new Set(storeKeys.filter(storeKey => (
-    resultsByStore.get(storeKey).some(result => !isCompletedDriftRepairResult(result) && !isTerminalDriftBusinessBlock(result))
+    resultsByStore.get(storeKey).some(result => !isCompletedDriftRepairResult(result)
+      && !isTerminalDriftBusinessBlock(result)
+      && result?.classification !== 'submitted_without_exact_readback')
   )));
   const blockedStoreKeys = new Set(storeKeys.filter(storeKey => (
     !failedStoreKeys.has(storeKey)
-    && resultsByStore.get(storeKey).some(isTerminalDriftBusinessBlock)
+    && resultsByStore.get(storeKey).some(result => isTerminalDriftBusinessBlock(result)
+      || result?.classification === 'submitted_without_exact_readback')
   )));
   const completedStoreKeys = new Set(storeKeys.filter(storeKey => (
     resultsByStore.get(storeKey).every(isCompletedDriftRepairResult)
@@ -735,7 +969,7 @@ function summarizeTotals(results) {
   ), 0);
   const blockedSkcs = results.reduce((sum, result) => sum + (result.blockedSkcs?.length || 0), 0);
   const createdSkcs = results.reduce((sum, result) => sum + (result.readback?.overlapSkcs?.length || 0), 0);
-  const outcomes = summarizeDriftRepairOutcomes(results);
+  const outcomes = summarizeDriftRepairOutcomesIncludingSubmitted(results);
   return {
     storesProcessed: storeKeys.length,
     storesOk: completedStoreKeys.size,

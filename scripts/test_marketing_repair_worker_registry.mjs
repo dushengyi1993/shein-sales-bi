@@ -37,6 +37,7 @@ const executorMarker = path.join(fixtureRoot, 'executor.marker');
 const managerMarker = path.join(fixtureRoot, 'queue-manager.marker');
 const registryPublishAttemptMarker = path.join(fixtureRoot, 'registry-publish-attempt.marker');
 const queuePublishAttemptMarker = path.join(fixtureRoot, 'queue-publish-attempt.marker');
+const leaseActionMarker = path.join(fixtureRoot, 'lease-actions.ndjson');
 const resultPath = path.join(fixtureRoot, 'outputs', 'reports', `new-listing-7d-limited-discount-execution-summary-${date}.json`);
 
 function sha256File(file) {
@@ -178,7 +179,10 @@ function installFixtureScripts() {
   fs.mkdirSync(path.dirname(workerPath), {recursive: true});
   fs.mkdirSync(path.join(fixtureRoot, 'scripts', 'lib'), {recursive: true});
   fs.mkdirSync(path.join(fixtureRoot, 'lib'), {recursive: true});
-  fs.copyFileSync(path.join(repoRoot, 'scripts', 'cloud_marketing_repair_worker.sh'), workerPath);
+  const workerSource = fs.readFileSync(path.join(repoRoot, 'scripts', 'cloud_marketing_repair_worker.sh'), 'utf8');
+  assert.doesNotMatch(workerSource, /while\s+sleep\s+"?\$LEASE_HEARTBEAT_INTERVAL_SEC/,
+    'heartbeat timer must not spawn an external sleep that can inherit worker output pipes');
+  fs.writeFileSync(workerPath, workerSource, 'utf8');
   writeExecutable(path.join(fixtureRoot, 'scripts', 'lib', 'shared_lock.sh'), [
     '#!/usr/bin/env bash',
     'prepare_shared_lock_file() { mkdir -p "$(dirname -- "$1")"; touch -- "$1"; }',
@@ -188,7 +192,13 @@ function installFixtureScripts() {
   fs.copyFileSync(path.join(repoRoot, 'lib', 'atomic_file_publish.mjs'), path.join(fixtureRoot, 'lib', 'atomic_file_publish.mjs'));
   writeJson(storesConfig, {stores: stores.map(storeKey => ({storeKey}))});
   writeExecutable(path.join(binDir, 'systemctl'), '#!/usr/bin/env bash\nexit 1\n');
-  writeExecutable(path.join(fixtureRoot, 'scripts', 'manage_browser_task_leases.mjs'), 'process.exit(0);\n');
+  writeExecutable(path.join(fixtureRoot, 'scripts', 'manage_browser_task_leases.mjs'), [
+    "import fs from 'node:fs';",
+    "const action = process.argv[2] || '';",
+    "if (process.env.SHEIN_TEST_LEASE_ACTION_MARKER) fs.appendFileSync(process.env.SHEIN_TEST_LEASE_ACTION_MARKER, `${JSON.stringify({action, at: Date.now()})}\\n`);",
+    'process.exit(0);',
+    '',
+  ].join('\n'));
   writeExecutable(path.join(fixtureRoot, 'scripts', 'cleanup_shein_store_browsers.mjs'), 'process.exit(0);\n');
   writeExecutable(path.join(fixtureRoot, 'scripts', 'marketing', 'manage_marketing_repair_queue.mjs'), [
     "import crypto from 'node:crypto';",
@@ -241,6 +251,7 @@ function resetRuntime(pointerBytes, {missingRegistry = false} = {}) {
   fs.rmSync(path.join(registryRoot, '.publish.lock'), {recursive: true, force: true});
   fs.rmSync(path.join(fixtureRoot, 'state', 'cloud_ops_alerts'), {recursive: true, force: true});
   fs.rmSync(resultPath, {force: true});
+  fs.rmSync(leaseActionMarker, {force: true});
   writeQueue();
 }
 
@@ -253,6 +264,8 @@ function runWorker({pointerBytes, missingRegistry = false, switchDuringExecutor 
     SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION: 'local',
     SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED: 'false',
     SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS: '1',
+    SHEIN_BI_MARKETING_REPAIR_LEASE_TTL_SEC: '10',
+    SHEIN_BI_MARKETING_REPAIR_LEASE_HEARTBEAT_INTERVAL_SEC: '1',
     SHEIN_BI_MARKETING_REPAIR_BUSY_SERVICES: '',
     SHEIN_BI_MARKETING_LIVE_STATE_DIR: toBashPath(stateDir),
     SHEIN_BI_MARKETING_REPAIR_LOG_DIR: toBashPath(path.join(fixtureRoot, 'logs')),
@@ -268,6 +281,7 @@ function runWorker({pointerBytes, missingRegistry = false, switchDuringExecutor 
     SHEIN_TEST_QUEUE_PUBLISH_ATTEMPT_MARKER: toBashPath(queuePublishAttemptMarker),
     SHEIN_TEST_QUEUE_PATH: toBashPath(queuePath),
     SHEIN_TEST_RESULT_PATH: toBashPath(resultPath),
+    SHEIN_TEST_LEASE_ACTION_MARKER: toBashPath(leaseActionMarker),
     PATH: `${toBashPath(binDir)}:/usr/bin:/bin`,
   };
   if (switchDuringExecutor) values.SHEIN_TEST_SWITCH_REGISTRY_TO = toBashPath(registryBPointer);
@@ -282,6 +296,7 @@ function runWorker({pointerBytes, missingRegistry = false, switchDuringExecutor 
     encoding: 'utf8',
     input,
     maxBuffer: 4 * 1024 * 1024,
+    timeout: 15_000,
   });
 }
 
@@ -345,11 +360,21 @@ try {
   assert.match(`${mismatched.stdout}\n${mismatched.stderr}`, /current managed registry drift/);
   assert.equal(fs.existsSync(executorMarker), false, 'A guard plus B current.json must block before the executor');
 
+  const validStartedAt = Date.now();
   const valid = runWorker({pointerBytes: pointerA, runId: 'registry-a-control'});
+  const validElapsedMs = Date.now() - validStartedAt;
+  assert.equal(valid.error, undefined, `matching worker must exit without heartbeat pipe timeout: ${valid.error?.message || ''}`);
+  assert.ok(validElapsedMs < 12_000, `matching worker must stop heartbeat promptly, elapsed=${validElapsedMs}ms`);
   assert.equal(valid.status, 0, `${valid.stdout}\n${valid.stderr}`);
   assert.equal(fs.readFileSync(executorMarker, 'utf8'), 'executor\n', 'matching current.json must allow the guarded stage to reach its executor');
   assert.equal(fs.readFileSync(registryPublishAttemptMarker, 'utf8'), 'blocked\n', 'registry replacement attempt must be blocked by .publish.lock before executor mutation');
   assert.equal(fs.readFileSync(queuePublishAttemptMarker, 'utf8'), 'blocked\n', 'queue replacement attempt must be blocked by queue mutation lock before executor mutation');
+  const leaseActionsAtExit = fs.readFileSync(leaseActionMarker, 'utf8');
+  assert.match(leaseActionsAtExit, /"action":"acquire"/);
+  assert.match(leaseActionsAtExit, /"action":"release"/);
+  await new Promise(resolve => setTimeout(resolve, 1_300));
+  assert.equal(fs.readFileSync(leaseActionMarker, 'utf8'), leaseActionsAtExit,
+    'worker exit must leave no heartbeat process or inherited sleep that can act after release');
 
   const boundary = runWorker({pointerBytes: pointerA, switchDuringExecutor: true, runId: 'registry-switch-boundary'});
   assert.equal(boundary.status, 73, `${boundary.stdout}\n${boundary.stderr}`);
@@ -368,6 +393,8 @@ try {
     registryReplacementBlockedDuringCriticalSection: true,
     queueReplacementBlockedDuringCriticalSection: true,
     registrySwitchBlocksStageBoundaryMutation: true,
+    heartbeatStopsPromptlyWithoutResidualProcess: true,
+    validWorkerElapsedMs: validElapsedMs,
     registryA: publishedA.registryHash,
     registryB: publishedB.registryHash,
   }));

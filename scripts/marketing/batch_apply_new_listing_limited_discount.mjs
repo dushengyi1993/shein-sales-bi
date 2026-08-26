@@ -35,7 +35,18 @@ import {
   executeLimitedDiscountWithInventoryTransaction,
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
+import {createMarketingActivityInventoryOpenApiAdapter} from '../../lib/marketing_activity_inventory_openapi.mjs';
 import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {
+  assertBeforeOuter,
+  assertCanStartUnit,
+  boundedRecoveryTimeoutMs,
+  boundedTimeoutMs,
+  createDeadlineContract,
+  deadlineBoundAdapterFactory,
+  findPersistedMarketingTransactionContinuation,
+  isMarketingDeadlineError,
+} from '../../lib/cloud_marketing_deadline_contract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -57,6 +68,9 @@ function parseArgs(argv) {
     expectedWorkFingerprint: '',
     gracefulCutoffEpochRaw: '',
     gracefulCutoffEpoch: null,
+    outerHardDeadlineEpochRaw: '',
+    outerHardDeadlineEpoch: null,
+    continuation: false,
     minStartBudgetSec: DEFAULT_MIN_START_BUDGET_SEC,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -83,6 +97,9 @@ function parseArgs(argv) {
     else if (arg.startsWith('--expected-work-fingerprint=')) args.expectedWorkFingerprint = String(arg.slice('--expected-work-fingerprint='.length)).trim().toLowerCase();
     else if (arg === '--graceful-cutoff-epoch' || arg === '--deadline-epoch') args.gracefulCutoffEpochRaw = String(argv[++i] || '').trim();
     else if (arg.startsWith('--graceful-cutoff-epoch=') || arg.startsWith('--deadline-epoch=')) args.gracefulCutoffEpochRaw = String(arg.slice(arg.indexOf('=') + 1)).trim();
+    else if (arg === '--outer-hard-deadline-epoch') args.outerHardDeadlineEpochRaw = String(argv[++i] || '').trim();
+    else if (arg.startsWith('--outer-hard-deadline-epoch=')) args.outerHardDeadlineEpochRaw = String(arg.slice(arg.indexOf('=') + 1)).trim();
+    else if (arg === '--continuation') args.continuation = true;
     else if (arg === '--min-start-budget-sec') args.minStartBudgetSec = Number(argv[++i] || 0);
     else if (arg.startsWith('--min-start-budget-sec=')) args.minStartBudgetSec = Number(arg.slice('--min-start-budget-sec='.length));
     else throw new Error(`Unknown argument: ${arg}`);
@@ -106,6 +123,12 @@ function parseArgs(argv) {
   if (args.expectedWorkFingerprint && !/^[a-f0-9]{64}$/.test(args.expectedWorkFingerprint)) {
     throw new Error(`Invalid --expected-work-fingerprint: ${args.expectedWorkFingerprint}`);
   }
+  if (args.continuation && args.dryRunOnly) throw new Error('--continuation requires --execute');
+  args.deadline = createDeadlineContract({
+    gracefulCutoffEpoch: args.gracefulCutoffEpochRaw,
+    outerHardDeadlineEpoch: args.outerHardDeadlineEpochRaw,
+    minFinalizationBudgetSec: args.minStartBudgetSec,
+  });
   return args;
 }
 
@@ -114,6 +137,12 @@ function splitCsv(value) {
 }
 
 function groupStartBudget(args) {
+  if (args.continuation) {
+    const remainingSec = args.deadline
+      ? args.deadline.outerHardDeadlineEpoch - Math.floor(Date.now() / 1000)
+      : null;
+    return {ok: remainingSec === null || remainingSec > 0, remainingSec};
+  }
   if (args.gracefulCutoffEpoch === null) return {ok: true, remainingSec: null};
   const remainingSec = args.gracefulCutoffEpoch - Math.floor(Date.now() / 1000);
   return {
@@ -233,6 +262,20 @@ async function runCommand(command, commandArgs, options = {}) {
   });
 }
 
+let ACTIVE_DEADLINE = null;
+
+function deadlineTimeout(timeoutMs, {recovery = false, label = 'bounded operation'} = {}) {
+  if (!ACTIVE_DEADLINE) return timeoutMs;
+  return recovery
+    ? boundedRecoveryTimeoutMs(ACTIVE_DEADLINE, {capMs: timeoutMs, label})
+    : boundedTimeoutMs(ACTIVE_DEADLINE, {capMs: timeoutMs, label});
+}
+
+async function runBounded(command, commandArgs, options = {}) {
+  const timeoutMs = deadlineTimeout(options.timeoutMs ?? 900000, options);
+  return await runCommand(command, commandArgs, {...options, timeoutMs});
+}
+
 function parseLastJson(text) {
   const source = String(text || '').trim();
   if (!source) return null;
@@ -264,6 +307,42 @@ function summarizeRaw(result) {
   };
 }
 
+export function hasFallbackSubmittedPendingEvidence(result) {
+  return result?.classification === 'submitted_without_exact_readback'
+    || result?.status === 'submitted_without_exact_readback'
+    || result?.inventoryTransaction?.submitAttempted === true
+    || result?.execute?.writeAttempted === true
+    || result?.execute?.result?.writeAttempted === true
+    || result?.execute?.result?.mutationsStarted === true
+    || Number(result?.createdActivityId || result?.execute?.result?.createdActivityId || 0) > 0;
+}
+
+export function normalizeFallbackResumeResult(result) {
+  if (!result || isResumableFallbackResult(result) || !hasFallbackSubmittedPendingEvidence(result)) return result;
+  const blockedSkcs = Array.isArray(result.targetSkcs) ? result.targetSkcs : [];
+  return {
+    ...result,
+    ok: false,
+    terminal: true,
+    terminalBlocked: true,
+    deferred: false,
+    recoverableDeferred: false,
+    writeAttempted: true,
+    status: 'submitted_without_exact_readback',
+    classification: 'submitted_without_exact_readback',
+    blocked: {
+      type: 'submitted_without_exact_readback',
+      reason: 'activity mutation was submitted or attempted, but official exact readback is pending or unverifiable; replay is forbidden',
+      blockedSkcs,
+    },
+  };
+}
+
+export function isFallbackResumeResultSettled(result) {
+  return isResumableFallbackResult(result)
+    || result?.classification === 'submitted_without_exact_readback';
+}
+
 function storeConfigByKey() {
   const doc = JSON.parse(fsSync.readFileSync(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
   return new Map((doc.stores || [])
@@ -272,13 +351,13 @@ function storeConfigByKey() {
 }
 
 async function launchStore(storeKey) {
-  return await runCommand(process.execPath, [
+  return await runBounded(process.execPath, [
     'scripts/launch_store_browser.mjs',
     storeKey,
     '--headless',
     '--url',
     'https://sso.geiwohuo.com/#/mbrs/marketing/list',
-  ], {timeoutMs: 60000});
+  ], {timeoutMs: 60000, label: `launch ${storeKey}`});
 }
 
 async function closeStore(storeKey) {
@@ -293,8 +372,8 @@ async function closeStore(storeKey) {
   );
 }
 
-async function applyRescue({storeKey, port, rescuePath, execute}) {
-  const result = await runCommand(process.execPath, [
+async function applyRescue({storeKey, port, rescuePath, execute, recovery = false}) {
+  const result = await runBounded(process.execPath, [
     'scripts/marketing/apply_hl_limited_discount_rescue.mjs',
     '--store-key',
     storeKey,
@@ -303,20 +382,34 @@ async function applyRescue({storeKey, port, rescuePath, execute}) {
     '--rescue',
     rescuePath,
     execute ? '--execute' : '--dry-run',
-  ], {timeoutMs: execute ? 1200000 : 900000});
+  ], {
+    timeoutMs: execute ? 1200000 : 900000,
+    recovery,
+    label: `${recovery ? 'inventory restore/readback' : 'inventory preflight'} ${storeKey}`,
+  });
   return await loadToolOutput(result);
 }
 
-async function replaceTransactionally({storeKey, port, rescuePath, execute}) {
+async function replaceTransactionally({storeKey, port, rescuePath, sourceRescuePath = rescuePath, execute, continuation = false}) {
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescuePath)).digest('hex');
-  const result = await runCommand(process.execPath, [
+  const sourceRescueHash = crypto.createHash('sha256').update(await fs.readFile(sourceRescuePath)).digest('hex');
+  const deadlineArgs = execute && ACTIVE_DEADLINE ? [
+    '--graceful-cutoff-epoch', String(ACTIVE_DEADLINE.gracefulCutoffEpoch),
+    '--outer-hard-deadline-epoch', String(ACTIVE_DEADLINE.outerHardDeadlineEpoch),
+    '--min-finalization-budget-sec', String(ACTIVE_DEADLINE.minFinalizationBudgetSec),
+  ] : [];
+  const result = await runBounded(process.execPath, [
     'scripts/marketing/replace_limited_discount_transactionally.mjs',
     '--store', storeKey,
     '--port', String(port),
     '--rescue', rescuePath,
     '--expected-rescue-hash', rescueHash,
+    '--source-rescue', sourceRescuePath,
+    '--expected-source-rescue-hash', sourceRescueHash,
+    ...deadlineArgs,
+    ...(execute && continuation ? ['--continuation'] : []),
     execute ? '--execute' : '--dry-run',
-  ], {timeoutMs: 1800000});
+  ], {timeoutMs: 1800000, recovery: execute, label: `${execute ? 'activity submit' : 'activity dry-run'} ${storeKey}`});
   return await loadToolOutput(result);
 }
 
@@ -412,6 +505,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
   const storeKey = String(file.storeKey || '').toUpperCase();
   const store = storeMap.get(storeKey);
   let rescuePath = path.resolve(ROOT, file.path || '');
+  const sourceRescuePath = rescuePath;
   const record = {
     storeKey,
     rescuePath: rel(rescuePath),
@@ -429,18 +523,48 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
     targetSkcs: [],
     blocked: null,
     protectedManualSpecialRows: [],
+    terminalBlocked: false,
+    recoverableDeferred: false,
+    deferred: false,
     error: '',
   };
   try {
+    assertCanStartUnit(ACTIVE_DEADLINE, {
+      continuation: args.continuation,
+      label: `new-listing limited-discount group ${storeKey}`,
+    });
     if (!store) throw new Error(`Unknown or disabled store: ${storeKey}`);
     let rescue = await readJson(rescuePath);
+    if (args.continuation) {
+      const persisted = await findPersistedMarketingTransactionContinuation({
+        root: ROOT,
+        storeKey,
+        workFingerprint: args.expectedWorkFingerprint || process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+        rescuePath,
+      });
+      if (!persisted) {
+        record.status = 'deadline_deferred';
+        record.deferred = true;
+        record.recoverableDeferred = true;
+        record.error = 'continuation mode found no persisted transaction; no new group was started';
+        return record;
+      }
+      record.persistedContinuation = rel(persisted.file);
+      const fencedPath = persisted.journal?.createAttempt?.exactScope?.rescuePath
+        || persisted.journal?.operationRescuePath;
+      if (fencedPath) {
+        rescuePath = path.resolve(ROOT, fencedPath);
+        rescue = await readJson(rescuePath);
+        record.rescuePath = rel(rescuePath);
+      }
+    }
     const transformedRows = (rescue.rows || []).map(row => {
       const entry = manualIndex.activeByKey.get(`${storeKey}::${String(row.skc || '').trim()}`) || null;
       if (!entry) return row;
       record.protectedManualSpecialRows.push({skc: entry.skc, specialPrice: entry.specialPrice, validTo: entry.validTo, activityStock: entry.activityStock});
       return applyManualLimitedDiscountOverride({...row, storeKey}, entry);
     });
-    if (record.protectedManualSpecialRows.length) {
+    if (!args.continuation && record.protectedManualSpecialRows.length) {
       rescue = {...rescue, rows: transformedRows};
       const allManual = transformedRows.every(row => row.manualSpecialLimitedDiscount === true);
       if (allManual) {
@@ -507,6 +631,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
         blockedSkcs: record.inventoryTransactionPlan.blockers?.map(item => item.skc).filter(Boolean) || [],
       };
       record.status = record.blocked.type;
+      record.terminalBlocked = true;
       return record;
     }
 
@@ -514,7 +639,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       dryRun.full,
       record.inventoryTransactionPlan,
     );
-    if (blockedSkcs.length) {
+    if (blockedSkcs.length && !args.continuation) {
       const subset = await writeInventoryExecutableSubset({
         storeKey,
         rescue,
@@ -544,6 +669,12 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       };
       if (!subsetDryRun.full) throw new Error(`executable-subset dry-run produced no readable result for ${storeKey}`);
       dryRun.full = subsetDryRun.full;
+    } else if (blockedSkcs.length) {
+      record.blocked = {
+        ...classifyBlockedDryRun(dryRun.full || dryRun.parsed || {}),
+        blockedSkcs,
+        reason: dryRun.full?.reason || 'continuation retains its previously fenced executable rescue',
+      };
     }
     if (dryRun.full?.alreadyCovered) {
       record.createdActivityId = dryRun.full.createdActivityId || null;
@@ -552,7 +683,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       return record;
     }
     if (args.dryRunOnly) {
-      const transactionDryRun = await replaceTransactionally({storeKey, port: store.port, rescuePath, execute: false});
+      const transactionDryRun = await replaceTransactionally({storeKey, port: store.port, rescuePath, sourceRescuePath, execute: false});
       record.transactionDryRun = {
         ...summarizeRaw(transactionDryRun),
         out: transactionDryRun.outPath ? rel(transactionDryRun.outPath) : '',
@@ -572,14 +703,35 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       record.ok = !record.blocked && (transactionDryRun.full.ok === true || inventoryTransactionReady);
       return record;
     }
+    assertCanStartUnit(ACTIVE_DEADLINE, {
+      continuation: args.continuation,
+      label: `new-listing inventory transaction ${storeKey}`,
+    });
     const inventoryTransaction = await executeLimitedDiscountWithInventoryTransaction({
       root: ROOT,
       storeKey,
       rescue,
       preflightFull: dryRun.full,
       transactionHash,
-      runSubmit: async () => await replaceTransactionally({storeKey, port: store.port, rescuePath, execute: true}),
-      runEnrollmentReadback: async () => await applyRescue({storeKey, port: store.port, rescuePath, execute: false}),
+      adapterFactory: deadlineBoundAdapterFactory(createMarketingActivityInventoryOpenApiAdapter, ACTIVE_DEADLINE, {
+        label: `new-listing inventory ${storeKey}`,
+      }),
+      runSubmit: async () => {
+        assertBeforeOuter(ACTIVE_DEADLINE, {
+          reserveSec: ACTIVE_DEADLINE?.minFinalizationBudgetSec || 0,
+          label: `new-listing activity submit ${storeKey}`,
+        });
+        return await replaceTransactionally({storeKey, port: store.port, rescuePath, sourceRescuePath, execute: true, continuation: args.continuation});
+      },
+      runEnrollmentReadback: async context => await applyRescue({
+        storeKey,
+        port: store.port,
+        rescuePath,
+        execute: false,
+        recovery: context?.phase === 'after_submit_without_inventory_transaction'
+          || context?.phase === 'after_submit_before_restore'
+          || context?.phase === 'after_restore',
+      }),
     });
     record.inventoryTransaction = inventoryTransaction;
     if (!inventoryTransaction.ok) {
@@ -590,6 +742,15 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
         blockedSkcs: inventoryTransaction.extractedTargets?.map(item => item.skc) || [],
       };
       record.status = record.blocked.type;
+      const deadlineDeferred = (inventoryTransaction.blockers || [])
+        .some(blocker => isMarketingDeadlineError({
+          code: blocker?.code,
+          message: blocker?.error || blocker?.reason,
+        }));
+      record.deferred = deadlineDeferred;
+      record.recoverableDeferred = deadlineDeferred;
+      record.terminalBlocked = !deadlineDeferred && (inventoryTransaction.safe === true
+        || inventoryTransaction.writeAttempted !== true);
       return record;
     }
     const execute = inventoryTransaction.commandResult;
@@ -606,6 +767,10 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
         targetCount: execute.full.targetSkcs?.length || record.targetSkcs.length,
         targetCountForCreate: execute.full.desiredCoveredSkcs?.length || 0,
         createdActivityId: execute.full.desiredCreate?.createdActivityId || null,
+        writeAttempted: execute.full.writeAttempted === true,
+        mutationsStarted: execute.full.mutationsStarted === true,
+        submittedWithoutExactReadback: execute.full.submittedWithoutExactReadback === true
+          || execute.full.classification === 'submitted_without_exact_readback',
         desiredCoveredSkcs: execute.full.desiredCoveredSkcs || [],
         restoredCoveredSkcs: execute.full.compensation?.restoredCoveredSkcs || [],
         uncoveredSkcs: execute.full.uncoveredSkcs || [],
@@ -624,6 +789,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
           compensation: execute.full.compensation || null,
         };
         record.status = record.blocked.type;
+        record.terminalBlocked = true;
         record.ok = false;
         return record;
       }
@@ -635,7 +801,13 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
     return record;
   } catch (error) {
     record.ok = false;
-    record.status = 'failed';
+    if (isMarketingDeadlineError(error)) {
+      record.status = 'deadline_deferred';
+      record.recoverableDeferred = true;
+      record.deferred = true;
+    } else {
+      record.status = 'failed';
+    }
     record.error = error.message;
     return record;
   } finally {
@@ -647,7 +819,7 @@ function summarizeTotals(results, plan) {
   const executed = results.filter(row => String(row.status || '').startsWith('executed'));
   const dryRunOk = results.filter(row => row.status === 'dry_run_ok');
   const blocked = results.filter(row => Boolean(row.blocked));
-  const failed = results.filter(row => !row.ok && !row.blocked);
+  const failed = results.filter(row => !row.ok && !row.blocked && !row.deferred);
   return {
     planActionable: Number(plan?.totals?.actionable || 0),
     planCreateLimitedDiscount: Number(plan?.totals?.createLimitedDiscount || 0),
@@ -718,7 +890,7 @@ async function loadResumableResults(outputJson, {workFingerprint, dryRunOnly}) {
     if (previous.workFingerprint !== workFingerprint || previous.dryRunOnly !== dryRunOnly) return [];
     // A group may create the safe subset and retain per-SKC blockers. Replaying
     // that whole group would duplicate the activity already created for safe rows.
-    return (previous.results || []).filter(isResumableFallbackResult);
+    return (previous.results || []).map(normalizeFallbackResumeResult).filter(isFallbackResumeResultSettled);
   } catch {
     return [];
   }
@@ -742,6 +914,7 @@ async function writeExecutionProgress({outputJson, outputMd, common, results, pl
 }
 
 const args = parseArgs(process.argv.slice(2));
+ACTIVE_DEADLINE = args.deadline;
 let automationAuthorization = null;
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
@@ -775,8 +948,21 @@ const resumedResults = args.resume
   : [];
 const completedKeys = new Set(resumedResults.map(resultKey));
 const pendingEntries = rescueFiles.filter(entry => !completedKeys.has(entry.relativePath.toLowerCase()));
-const selectedEntries = args.maxGroups > 0 ? pendingEntries.slice(0, args.maxGroups) : pendingEntries;
-let deferredEntries = args.maxGroups > 0 ? pendingEntries.slice(args.maxGroups) : [];
+let continuationEntries = pendingEntries;
+if (args.continuation) {
+  continuationEntries = [];
+  for (const entry of pendingEntries) {
+    if (await findPersistedMarketingTransactionContinuation({
+      root: ROOT,
+      storeKey: entry.storeKey,
+      workFingerprint: exactPlan.workFingerprint,
+      rescuePath: path.resolve(ROOT, entry.relativePath),
+    })) continuationEntries.push(entry);
+  }
+}
+const selectedEntries = args.maxGroups > 0 ? continuationEntries.slice(0, args.maxGroups) : continuationEntries;
+let deferredEntries = pendingEntries.filter(entry => !selectedEntries.some(selected => selected.relativePath === entry.relativePath));
+const continuationDeferredWithoutMatch = args.continuation && pendingEntries.length > 0 && selectedEntries.length === 0;
 const results = [...resumedResults];
 const common = {
   createdAt: new Date().toISOString(),
@@ -805,6 +991,7 @@ const common = {
   outputJson: rel(outputJson),
   outputMd: rel(outputMd),
   gracefulCutoffEpoch: args.gracefulCutoffEpoch,
+  outerHardDeadlineEpoch: args.deadline?.outerHardDeadlineEpoch || null,
   minStartBudgetSec: args.minStartBudgetSec,
 };
 
@@ -823,12 +1010,24 @@ function mergeUnprocessedSelectedEntriesIntoDeferred() {
   });
   deferredEntries = [...unprocessed, ...deferredEntries];
 }
-let stoppedBeforeNextGroup = false;
-let stoppedReason = '';
+let stoppedBeforeNextGroup = continuationDeferredWithoutMatch;
+let stoppedReason = continuationDeferredWithoutMatch
+  ? 'continuation mode found no persisted transaction; no new group started'
+  : '';
 for (const [storeKey, storeEntries] of entriesByStore.entries()) {
   let launchSummary = null;
   let processedInStore = 0;
   try {
+    if (args.continuation && !await findPersistedMarketingTransactionContinuation({
+      root: ROOT,
+      storeKey,
+      workFingerprint: args.expectedWorkFingerprint || process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+      rescuePath: path.resolve(ROOT, storeEntries[0].relativePath),
+    })) {
+      stoppedBeforeNextGroup = true;
+      stoppedReason = `continuation mode found no persisted transaction for ${storeKey}; no new group started`;
+      continue;
+    }
     for (const file of storeEntries) {
       // This is the only graceful-stop boundary: once a group has started,
       // processStore owns its complete transaction, inventory restore and
@@ -837,6 +1036,18 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
       if (!startBudget.ok) {
         stoppedBeforeNextGroup = true;
         stoppedReason = `graceful cutoff reached with ${startBudget.remainingSec}s remaining; no new group started`;
+        mergeUnprocessedSelectedEntriesIntoDeferred();
+        break;
+      }
+      try {
+        assertCanStartUnit(ACTIVE_DEADLINE, {
+          continuation: args.continuation,
+          label: `new-listing group ${storeKey}`,
+        });
+      } catch (error) {
+        if (!isMarketingDeadlineError(error)) throw error;
+        stoppedBeforeNextGroup = true;
+        stoppedReason = error.message;
         mergeUnprocessedSelectedEntriesIntoDeferred();
         break;
       }
@@ -852,12 +1063,22 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
         browserSession: {ready: true, keepOpen: true, launchSummary: {...launchSummary, reusedForStoreBatch: true}},
       });
       result.sourceRescuePath = file.relativePath;
-      results.push(result);
+      results.push(normalizeFallbackResumeResult(result));
       processedSelectedKeys.add(entryKey(file));
+      if (result.deferred === true && !deferredEntries.some(entry => entryKey(entry) === entryKey(file))) {
+        deferredEntries = [file, ...deferredEntries];
+      }
       processedInStore += 1;
       await writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries});
     }
   } catch (error) {
+    if (isMarketingDeadlineError(error)) {
+      stoppedBeforeNextGroup = true;
+      stoppedReason = error.message;
+      mergeUnprocessedSelectedEntriesIntoDeferred();
+      await writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries});
+      continue;
+    }
     for (const file of storeEntries.slice(processedInStore)) {
       if (results.some(result => resultKey(result) === file.relativePath.toLowerCase())) continue;
       results.push({
@@ -889,6 +1110,12 @@ if (stoppedBeforeNextGroup) {
   common.gracefulStopReason = stoppedReason;
   await writeExecutionProgress({outputJson, outputMd, common, results, plan, deferredEntries});
 }
+const processedThisRunResults = selectedEntries
+  .map(entry => results.find(result => resultKey(result) === entry.relativePath.toLowerCase()))
+  .filter(Boolean);
+const deadlineDeferred = processedThisRunResults.filter(result => result.deferred === true).length
+  + (stoppedBeforeNextGroup ? 1 : 0);
+common.deadlineDeferred = deadlineDeferred;
 const doc = await writeExecutionProgress({
   outputJson,
   outputMd,
@@ -907,6 +1134,7 @@ console.log(JSON.stringify({
   totals: doc.totals,
   resumedGroups: resumedResults.length,
   deferredGroups: deferredEntries.length,
+  deadlineDeferred,
 }, null, 2));
 process.exitCode = fallbackBatchExitCode({
   failedCount: doc.totals.storesFailed,
