@@ -412,6 +412,10 @@ def mountinfo_entries():
                 "majorMinor": fields[2],
                 "roRw": "ro" if "ro" in mount_options or "ro" in super_options else "rw",
             }
+            if not identity["root"].startswith("/"):
+                # Namespace mounts (mnt/net/user/ipc/uts/pid/time:[...]) are not
+                # filesystem runtime roots and are never under the app root.
+                continue
             validate_mount_identity(identity)
             entries.append(identity)
     return entries
