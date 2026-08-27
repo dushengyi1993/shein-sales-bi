@@ -2,6 +2,9 @@
 set -Eeuo pipefail
 
 if [[ "$(id -u)" != 0 ]]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    exec sudo env INVENTORY_GUARD_TEST_ROOT=1 "$0" "$@"
+  fi
   exec unshare -Urm -- env INVENTORY_GUARD_TEST_USERNS=1 "$0" "$@"
 fi
 if [[ "${INVENTORY_GUARD_TEST_USERNS:-}" == 1 ]]; then
@@ -174,11 +177,12 @@ assert value["managedRuntime"]["roots"] == ["state", "tmp", "outputs", "profiles
 assert not value["excludedRuntimeRoots"]
 PY
 
-# An app-root parent that the service uid can rename through must fail the
-# source permission guard before it can admit the checkout.
+# The external-parent owner policy must allow a non-service non-root owner
+# without group/other write, reject the service owner with owner-write, and
+# continue to allow root ownership.
 UNSAFE_PARENT="$TMP/unsafe-parent"; UNSAFE_APP="$UNSAFE_PARENT/app"
 mkdir -p "$UNSAFE_APP"
-chmod 0775 "$UNSAFE_PARENT"
+chmod 0755 "$UNSAFE_PARENT"
 git -C "$UNSAFE_APP" init -q
 git -C "$UNSAFE_APP" config user.email test@example.invalid
 git -C "$UNSAFE_APP" config user.name inventory-guard-parent-test
@@ -198,13 +202,30 @@ script = os.path.join(os.environ["ROOT"], "infra", "inventory_writer_compatibili
 spec = importlib.util.spec_from_file_location("inventory_compatibility_guard_parent_test", script)
 guard_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard_module)
+parent = os.path.dirname(os.environ["UNSAFE_APP"])
+app = os.environ["UNSAFE_APP"]
+service_uid = 1003
+other_uid = 1000
+
+def admitted(owner):
+    os.chown(parent, owner, 0)
+    os.chmod(parent, 0o755)
+    scope = guard_module.validate_source_permissions(app, ["tracked.txt"], service_uid=service_uid)
+    assert scope["appRoot"] == app
+
+admitted(other_uid)
+
+os.chown(parent, service_uid, 0)
+os.chmod(parent, 0o755)
 try:
-    guard_module.validate_source_permissions(os.environ["UNSAFE_APP"], ["tracked.txt"])
+    guard_module.validate_source_permissions(app, ["tracked.txt"], service_uid=service_uid)
 except guard_module.GuardError as error:
     assert error.code == "INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", error.code
-    assert "external parent permits rename" in str(error), str(error)
+    assert "external parent permits service rename" in str(error), str(error)
 else:
-    raise AssertionError("unsafe external parent was admitted")
+    raise AssertionError("service-owned writable external parent was admitted")
+
+admitted(0)
 PY
 chmod 0555 "$APP/state" "$APP/profiles"
 GUARD_RO_JSON="$(guard)"
@@ -372,4 +393,4 @@ python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
 [[ -s "$NEXT_PERMISSION_RECEIPT" && -s "$NEXT_PERMISSION_PLAN" && -s "$NEXT_PERMISSION_COMPLETION" ]]
 guard >/dev/null
 
-printf '{"ok":true,"roGuardRuntimeMode":"%s","checks":["activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","tracked_outputs_managed_source","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","ro_runtime_root_guard_mount_or_equivalent","permission_rollback_requires_exact_receipt_hash_and_plan","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","tracked_source_hardlink_rejected","guard_mode_and_symlink_rejected","external_parent_rename_guard_rejected","rotation_staged_candidate_pass","rotation_finalize_new_pass","rotation_finalize_old_rejected","guard_current_generation_full_source_audit","historical_completion_current_scope_advanced","old_generation_rollback_scope_rejected","new_generation_distinct_artifacts_apply"]}\n' "$GUARD_RUNTIME_MODE"
+printf '{"ok":true,"roGuardRuntimeMode":"%s","checks":["activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","tracked_outputs_managed_source","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","ro_runtime_root_guard_mount_or_equivalent","permission_rollback_requires_exact_receipt_hash_and_plan","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","tracked_source_hardlink_rejected","guard_mode_and_symlink_rejected","external_parent_owner_policy_regression","external_parent_rename_guard_rejected","rotation_staged_candidate_pass","rotation_finalize_new_pass","rotation_finalize_old_rejected","guard_current_generation_full_source_audit","historical_completion_current_scope_advanced","old_generation_rollback_scope_rejected","new_generation_distinct_artifacts_apply"]}\n' "$GUARD_RUNTIME_MODE"

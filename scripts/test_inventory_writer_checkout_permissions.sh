@@ -65,6 +65,70 @@ assert value["generationRelation"] == "current_scope_matches_completed_generatio
 assert value["mutationAuthorized"] is False
 PY
 
+# Exercise the real hardener scope builder for all external-parent owner
+# states: another non-root owner without group/other write is safe, the
+# service-owned writable parent is rejected, and root ownership remains safe.
+PARENT_POLICY_ROOT="$SAFE_PARENT/parent-policy-regression"
+sudo env ROOT="$ROOT" PARENT_POLICY_ROOT="$PARENT_POLICY_ROOT" python3 - <<'PY'
+import importlib.util
+import os
+import subprocess
+
+script = os.path.join(os.environ["ROOT"], "scripts", "harden_inventory_writer_checkout_permissions.py")
+spec = importlib.util.spec_from_file_location("inventory_hardener_parent_policy_test", script)
+hardener = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hardener)
+
+policy_root = os.environ["PARENT_POLICY_ROOT"]
+parent = os.path.join(policy_root, "external-parent")
+app = os.path.join(parent, "app")
+os.makedirs(app, mode=0o755)
+subprocess.run(["git", "-C", app, "init", "-q"], check=True)
+subprocess.run(["git", "-C", app, "config", "user.email", "test@example.invalid"], check=True)
+subprocess.run(["git", "-C", app, "config", "user.name", "inventory-parent-policy-test"], check=True)
+with open(os.path.join(app, ".gitignore"), "w", encoding="utf-8") as stream:
+    stream.write("state/\ntmp/\noutputs/\nprofiles/\nnode_modules/\n")
+with open(os.path.join(app, "tracked.txt"), "w", encoding="utf-8") as stream:
+    stream.write("parent policy\n")
+subprocess.run(["git", "-C", app, "add", ".gitignore", "tracked.txt"], check=True)
+subprocess.run(["git", "-C", app, "commit", "-qm", "parent-policy"], check=True)
+for name in ("state", "tmp", "outputs", "profiles", "node_modules"):
+    os.makedirs(os.path.join(app, name), mode=0o755)
+for current, directories, files in os.walk(app):
+    os.chown(current, 0, 0)
+    os.chmod(current, 0o755)
+    for name in files:
+        target = os.path.join(current, name)
+        os.chown(target, 0, 0)
+        os.chmod(target, 0o644)
+os.chmod(app, 0o750)
+os.chmod(os.path.join(app, ".git"), 0o750)
+for name in ("state", "tmp", "outputs", "profiles", "node_modules"):
+    os.chmod(os.path.join(app, name), 0o1770)
+os.chown(policy_root, 0, 0)
+os.chmod(policy_root, 0o755)
+
+service_uid = 1003
+other_uid = 1000
+
+def admitted(owner):
+    os.chown(parent, owner, 0)
+    os.chmod(parent, 0o755)
+    scope = hardener.build_scope(app, service_uid=service_uid)
+    assert scope["appRoot"] == app
+
+admitted(other_uid)
+os.chown(parent, service_uid, 0)
+os.chmod(parent, 0o755)
+try:
+    hardener.build_scope(app, service_uid=service_uid)
+except RuntimeError as error:
+    assert "external parent permits service rename" in str(error), str(error)
+else:
+    raise AssertionError("service-owned writable external parent was admitted")
+admitted(0)
+PY
+
 set +e
 git -c safe.directory="$APP" -C "$APP" checkout -q --detach "$OLD" >/dev/null 2>&1
 CHECKOUT_CODE=$?
@@ -801,4 +865,4 @@ for row in race_rows:
 PY
 
 if [[ "$RO_BIND_MOUNT" == 1 ]]; then RO_RUNTIME_MODE=bind-ro; else RO_RUNTIME_MODE=mode-equivalent; fi
-printf '{"ok":true,"roRuntimeMode":"%s","checks":["real_service_user_git_checkout_denied","real_service_user_tracked_write_denied","real_service_user_tracked_replace_denied","five_runtime_allowlist_roots_writable","tracked_outputs_remain_managed_source","rollback_requires_exact_receipt_file_sha_and_plan","exact_rollback_restores_original_permissions","old_v1_receipt_resume_without_rewrite","ro_runtime_sentinel_unchanged","already_hardened_resume","wrong_receipt_hash_zero_write","wrong_recovery_plan_hash_zero_write","wrong_path_zero_write","historical_completion_current_scope_audit","old_generation_cannot_reharden_or_rollback_new_paths","new_generation_distinct_artifacts_apply","mount_or_read_only_equivalent_drift_zero_write","apply_ordinary_replacement_real_cli_fail_closed","apply_hardlink_replacement_real_cli_fail_closed","rollback_ordinary_replacement_real_cli_fail_closed","rollback_hardlink_replacement_real_cli_fail_closed","apply_swap_race_fd_anchored_fail_closed","rollback_swap_race_fd_anchored_fail_closed","external_victim_permissions_unchanged","apply_parent_directory_replacement_fd_recovery","rollback_parent_directory_replacement_fd_recovery","nonroot_apply_rename_blocked_by_parent_lock","nonroot_rollback_rename_blocked_by_parent_lock"]}\n' "$RO_RUNTIME_MODE"
+printf '{"ok":true,"roRuntimeMode":"%s","checks":["real_service_user_git_checkout_denied","real_service_user_tracked_write_denied","real_service_user_tracked_replace_denied","five_runtime_allowlist_roots_writable","tracked_outputs_remain_managed_source","rollback_requires_exact_receipt_file_sha_and_plan","exact_rollback_restores_original_permissions","old_v1_receipt_resume_without_rewrite","ro_runtime_sentinel_unchanged","already_hardened_resume","wrong_receipt_hash_zero_write","wrong_recovery_plan_hash_zero_write","wrong_path_zero_write","historical_completion_current_scope_audit","old_generation_cannot_reharden_or_rollback_new_paths","new_generation_distinct_artifacts_apply","mount_or_read_only_equivalent_drift_zero_write","apply_ordinary_replacement_real_cli_fail_closed","apply_hardlink_replacement_real_cli_fail_closed","rollback_ordinary_replacement_real_cli_fail_closed","rollback_hardlink_replacement_real_cli_fail_closed","apply_swap_race_fd_anchored_fail_closed","rollback_swap_race_fd_anchored_fail_closed","external_victim_permissions_unchanged","apply_parent_directory_replacement_fd_recovery","rollback_parent_directory_replacement_fd_recovery","nonroot_apply_rename_blocked_by_parent_lock","nonroot_rollback_rename_blocked_by_parent_lock","external_parent_owner_policy_regression"]}\n' "$RO_RUNTIME_MODE"

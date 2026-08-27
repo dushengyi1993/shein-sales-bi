@@ -431,8 +431,8 @@ def validate_fresh_scope(scope):
             raise RuntimeError(f"runtime read-only state drift:{row['name']}")
 
 
-def inventory_paths(app):
-    return build_scope(app)["managedPaths"]
+def inventory_paths(app, service_uid=None):
+    return build_scope(app, service_uid)["managedPaths"]
 
 
 def snapshot_paths(paths):
@@ -475,8 +475,8 @@ def validate_identity_row(row, app, label="permission plan row"):
     return row
 
 
-def snapshot(app):
-    return snapshot_paths(inventory_paths(app))
+def snapshot(app, service_uid=None):
+    return snapshot_paths(inventory_paths(app, service_uid))
 
 
 def write_atomic_no_replace(file, value):
@@ -810,8 +810,8 @@ def directory_chain(app, target, include_target=False):
         current = parent
 
 
-def verify_locked_ancestors(app, target, validated, directory_fds, gid):
-    validate_external_parent_chain(app)
+def verify_locked_ancestors(app, target, validated, directory_fds, gid, service_uid=None):
+    validate_external_parent_chain(app, service_uid)
     for current in directory_chain(app, target, include_target=False):
         row = validated.get(current)
         descriptor = directory_fds.get(current)
@@ -824,9 +824,9 @@ def verify_locked_ancestors(app, target, validated, directory_fds, gid):
             raise RuntimeError(f"permission ancestor is not locked:{current}")
 
 
-def verify_trusted_path_hierarchy(app, target, expected, validated):
+def verify_trusted_path_hierarchy(app, target, expected, validated, service_uid=None):
     """Verify the current pathname still denotes the frozen app hierarchy."""
-    validate_external_parent_chain(app)
+    validate_external_parent_chain(app, service_uid)
     for current in directory_chain(
             app, target, include_target=expected["type"] == "directory"):
         row = validated.get(current)
@@ -836,8 +836,8 @@ def verify_trusted_path_hierarchy(app, target, expected, validated):
     return verify_path_identity(expected, target)
 
 
-def verify_trusted_target(app, target, descriptor, validated, directory_fds, gid):
-    verify_locked_ancestors(app, target, validated, directory_fds, gid)
+def verify_trusted_target(app, target, descriptor, validated, directory_fds, gid, service_uid=None):
+    verify_locked_ancestors(app, target, validated, directory_fds, gid, service_uid)
     expected = validated[target]
     verify_path_identity(expected, target)
     return verify_opened_identity(descriptor, expected, target, expected["type"])
@@ -943,7 +943,8 @@ def validate_plan_binding(plan, scope, gid, generation, receipt_rows=None):
     return rows
 
 
-def validate_current_rows(rows, app, gid, scope, operation):
+def validate_current_rows(rows, app, gid, scope, operation, service_uid=None):
+    validate_external_parent_chain(app, service_uid)
     excluded = {row["path"] for row in scope["excludedRuntimeRoots"]}
     validated = {row["path"]: row for row in rows if row["path"] not in excluded}
     if excluded & set(validated) or set(validated) != set(scope["managedPaths"]) - excluded:
@@ -1346,7 +1347,7 @@ def row_from_keeper_snapshot(row, target, snapshot):
 
 
 def exact_audit_rows(app, gid, rows, scope, validated, directory_fds, mutated,
-                     recovery_pool, operation):
+                     recovery_pool, operation, service_uid=None):
     """Audit exact fds plus path identity without opening any recovery path."""
     records = {record["row"]["path"]: record for record in mutated}
     current_rows = []
@@ -1371,7 +1372,7 @@ def exact_audit_rows(app, gid, rows, scope, validated, directory_fds, mutated,
             info = verify_path_identity(row, target)
             current = row_from_info(row, info)
             observed_state = state_tuple(info)
-        verify_trusted_path_hierarchy(app, target, row, validated)
+        verify_trusted_path_hierarchy(app, target, row, validated, service_uid)
         current_rows.append(current)
         expected = desired_permission_state(app, gid, row, operation)
         if observed_state != expected:
@@ -1415,7 +1416,7 @@ def close_transaction_fds(app_descriptor, directory_fds, mutated):
             pass
 
 
-def mutate_permissions(app, gid, rows, scope, validated, operation):
+def mutate_permissions(app, gid, rows, scope, validated, operation, service_uid=None):
     excluded = {row["path"] for row in scope["excludedRuntimeRoots"]}
     if excluded & set(validated):
         raise RuntimeError("excluded runtime root entered mutation scope")
@@ -1426,7 +1427,7 @@ def mutate_permissions(app, gid, rows, scope, validated, operation):
     app_descriptor = None
     recovery_pool = RecoveryFdPool()
     try:
-        validate_external_parent_chain(app)
+        validate_external_parent_chain(app, service_uid)
         app_descriptor = os.open(app, open_flags("directory"))
         directory_fds[app] = app_descriptor
         app_row = validated[app]
@@ -1456,9 +1457,9 @@ def mutate_permissions(app, gid, rows, scope, validated, operation):
             verify_opened_identity(descriptor, row, target, "directory")
             verify_path_identity(row, target)
             if target == app:
-                validate_external_parent_chain(app)
+                validate_external_parent_chain(app, service_uid)
             else:
-                verify_locked_ancestors(app, target, validated, directory_fds, gid)
+                verify_locked_ancestors(app, target, validated, directory_fds, gid, service_uid)
             info = os.fstat(descriptor)
             validate_opened_state(info, row, app, gid, operation, target)
             lock_state = (0, gid, locked_directory_mode(info))
@@ -1468,10 +1469,10 @@ def mutate_permissions(app, gid, rows, scope, validated, operation):
                 }
                 mutated.append(recovery_record)
                 if target == app:
-                    lock_check = lambda: (validate_external_parent_chain(app), verify_path_identity(row, target))
+                    lock_check = lambda: (validate_external_parent_chain(app, service_uid), verify_path_identity(row, target))
                 else:
                     lock_check = lambda target=target: (
-                        verify_locked_ancestors(app, target, validated, directory_fds, gid),
+                        verify_locked_ancestors(app, target, validated, directory_fds, gid, service_uid),
                         verify_path_identity(row, target),
                     )
                 mutate_fd_state(descriptor, row, lock_state, trust_check=lock_check)
@@ -1509,7 +1510,7 @@ def mutate_permissions(app, gid, rows, scope, validated, operation):
                 app_descriptor, app, target, row["type"], validated, directory_fds=directory_fds)
             keep_open = False
             try:
-                info = verify_trusted_target(app, target, descriptor, validated, directory_fds, gid)
+                info = verify_trusted_target(app, target, descriptor, validated, directory_fds, gid, service_uid)
                 validate_opened_state(info, row, app, gid, operation, target)
                 before_state = state_tuple(info)
                 desired_state = desired_permission_state(app, gid, row, operation)
@@ -1520,11 +1521,11 @@ def mutate_permissions(app, gid, rows, scope, validated, operation):
                     mutated.append(recovery_record)
                     keep_open = True
                     before_permission_write(target, descriptor, operation)
-                    verify_trusted_target(app, target, descriptor, validated, directory_fds, gid)
+                    verify_trusted_target(app, target, descriptor, validated, directory_fds, gid, service_uid)
                     mutate_fd_state(
                         descriptor, row, desired_state,
                         trust_check=lambda target=target: verify_trusted_target(
-                            app, target, descriptor, validated, directory_fds, gid),
+                            app, target, descriptor, validated, directory_fds, gid, service_uid),
                     )
                     final = verify_opened_identity(descriptor, row, target, row["type"])
                     recovery_pool.hold(recovery_record, descriptor)
@@ -1544,7 +1545,7 @@ def mutate_permissions(app, gid, rows, scope, validated, operation):
 
         result = exact_audit_rows(
             app, gid, target_rows, scope, validated, directory_fds, mutated,
-            recovery_pool, operation)
+            recovery_pool, operation, service_uid)
         if not result["ok"]:
             raise RuntimeError("permission mutation exact terminal audit failed")
         recovery_pool.release()
@@ -1567,12 +1568,12 @@ def mutate_permissions(app, gid, rows, scope, validated, operation):
         recovery_pool.close()
 
 
-def apply_permissions(app, gid, rows, scope, validated):
-    return mutate_permissions(app, gid, rows, scope, validated, "apply")
+def apply_permissions(app, gid, rows, scope, validated, service_uid=None):
+    return mutate_permissions(app, gid, rows, scope, validated, "apply", service_uid)
 
 
-def restore_permissions(app, gid, rows, scope, validated):
-    return mutate_permissions(app, gid, rows, scope, validated, "rollback")
+def restore_permissions(app, gid, rows, scope, validated, service_uid=None):
+    return mutate_permissions(app, gid, rows, scope, validated, "rollback", service_uid)
 
 
 def audit_rows(app, gid, rows, scope, baseline_rows=None):
@@ -1614,8 +1615,8 @@ def audit_rows(app, gid, rows, scope, baseline_rows=None):
     }
 
 
-def audit(app, gid, scope=None, rows=None, baseline_rows=None):
-    scope = scope or build_scope(app)
+def audit(app, gid, scope=None, rows=None, baseline_rows=None, service_uid=None):
+    scope = scope or build_scope(app, service_uid)
     rows = rows if rows is not None else snapshot_paths(scope["managedPaths"])
     return audit_rows(scope["appRoot"], gid, rows, scope, baseline_rows=baseline_rows)
 
@@ -1922,7 +1923,8 @@ def main():
         ensure_no_symlink_parent(plan_file)
     gid = int(args.service_group) if args.service_group.isdigit() else grp.getgrnam(args.service_group).gr_gid
     global _RESOLVED_SERVICE_UID
-    _RESOLVED_SERVICE_UID = resolve_service_uid(args.service_group)
+    service_uid = resolve_service_uid(args.service_group)
+    _RESOLVED_SERVICE_UID = service_uid
     if args.apply and args.rollback:
         raise RuntimeError("choose apply or rollback")
 
@@ -1936,7 +1938,7 @@ def main():
                 raise RuntimeError("existing receipt requires exact receipt and recovery plan SHA-256")
             receipt = load_receipt(receipt_file, args.expected_receipt_sha256)
             validate_receipt(receipt, app, gid)
-            scope = build_scope(app)
+            scope = build_scope(app, service_uid)
             validate_fresh_scope(scope)
             if os.path.lexists(completion_file):
                 completion, _, historical_scope, payload = historical_completion(
@@ -1968,8 +1970,8 @@ def main():
             validate_receipt_scope(receipt, scope, plan_sha, generation)
             validate_exact_source_clean(app)
             ensure_no_symlink_parent(completion_file)
-            validated = validate_current_rows(plan_rows, app, gid, scope, "apply")
-            result = apply_permissions(app, gid, plan_rows, scope, validated)
+            validated = validate_current_rows(plan_rows, app, gid, scope, "apply", service_uid)
+            result = apply_permissions(app, gid, plan_rows, scope, validated, service_uid)
             core = completion_core(
                 receipt_file, args.expected_receipt_sha256, receipt, plan_sha, plan_rows, scope, generation)
             write_atomic_no_replace(completion_file, {**core, "attestationHash": digest(core)})
@@ -1986,7 +1988,7 @@ def main():
                 or not HEX64.fullmatch(args.expected_recovery_plan_sha256):
             raise RuntimeError("new generation apply requires explicit generation id, plan, exact plan SHA and completion artifacts")
         artifact_paths(app, receipt_file, plan_file, completion_file)
-        scope = build_scope(app)
+        scope = build_scope(app, service_uid)
         generation = source_generation(scope, args.generation_id)
         plan, before = frozen_plan_from_file(
             plan_file, args.expected_recovery_plan_sha256, scope, gid, generation)
@@ -1994,7 +1996,7 @@ def main():
         validate_exact_source_clean(app)
         ensure_no_symlink_parent(receipt_file)
         ensure_no_symlink_parent(completion_file)
-        validated = validate_current_rows(before, app, gid, scope, "apply")
+        validated = validate_current_rows(before, app, gid, scope, "apply", service_uid)
         validate_fresh_scope(scope)
         if os.path.lexists(completion_file):
             raise RuntimeError("completion attestation exists without receipt")
@@ -2002,7 +2004,7 @@ def main():
         write_atomic_no_replace(receipt_file, receipt)
         receipt_sha = file_sha256(receipt_file)
         validate_fresh_scope(scope)
-        result = apply_permissions(app, gid, before, scope, validated)
+        result = apply_permissions(app, gid, before, scope, validated, service_uid)
         core = completion_core(receipt_file, receipt_sha, receipt, plan_sha, before, scope, generation)
         write_atomic_no_replace(completion_file, {**core, "attestationHash": digest(core)})
         emit({**result, "state": "hardened", "mutationAuthorized": True,
@@ -2018,7 +2020,7 @@ def main():
             raise RuntimeError("root, exact rollback confirmation, receipt SHA-256 and recovery plan hash required")
         receipt = load_receipt(receipt_file, args.expected_receipt_sha256)
         validate_receipt(receipt, app, gid)
-        scope = build_scope(app)
+        scope = build_scope(app, service_uid)
         rows = receipt_rows_for_scope(receipt, scope)
         generation = generation_for_receipt(receipt, scope)
         plan, plan_rows = frozen_plan_from_file(
@@ -2027,15 +2029,15 @@ def main():
         plan_sha = plan["planHash"]
         validate_receipt_scope(receipt, scope, plan_sha, generation)
         validate_exact_source_clean(app)
-        validated = validate_current_rows(plan_rows, app, gid, scope, "rollback")
+        validated = validate_current_rows(plan_rows, app, gid, scope, "rollback", service_uid)
         validate_fresh_scope(scope)
-        restore_permissions(app, gid, plan_rows, scope, validated)
+        restore_permissions(app, gid, plan_rows, scope, validated, service_uid)
         emit({"ok": True, "state": "rolled_back", "receiptHash": receipt["receiptHash"],
               "receiptSha256": args.expected_receipt_sha256, "planSha256": plan_sha,
               "externalRuntimeMounts": scope["externalRuntimeMounts"]})
         return
 
-    scope = build_scope(app)
+    scope = build_scope(app, service_uid)
     validate_fresh_scope(scope)
     if os.path.lexists(receipt_file):
         receipt = load_receipt(receipt_file)
