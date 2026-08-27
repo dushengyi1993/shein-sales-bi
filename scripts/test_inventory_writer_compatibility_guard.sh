@@ -10,7 +10,11 @@ fi
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TMP="$(mktemp -d)"
-trap 'rm -rf -- "$TMP"' EXIT
+cleanup(){
+  if [[ "${GUARD_MOUNTED_STATE:-0}" == 1 ]]; then umount "$APP/state" >/dev/null 2>&1 || true; fi
+  rm -rf -- "$TMP"
+}
+trap cleanup EXIT
 APP="$TMP/app"; SYSTEMD="$TMP/systemd"; LIBEXEC="$TMP/libexec"; CONTROL="$TMP/control"; LOG="$TMP/systemctl.log"
 mkdir -p "$APP" "$SYSTEMD" "$LIBEXEC" "$CONTROL"
 git -C "$APP" init -q
@@ -18,7 +22,10 @@ git -C "$APP" config user.email test@example.invalid
 git -C "$APP" config user.name inventory-guard-test
 printf 'state/\ntmp/\noutputs/\nprofiles/\nnode_modules/\n' >"$APP/.gitignore"
 printf 'old\n' >"$APP/tracked.txt"
+mkdir -p "$APP/outputs"
+printf 'tracked output\n' >"$APP/outputs/tracked-output.txt"
 git -C "$APP" add .gitignore tracked.txt
+git -C "$APP" add -f outputs/tracked-output.txt
 git -C "$APP" commit -qm old
 OLD="$(git -C "$APP" rev-parse HEAD)"
 printf 'new\n' >"$APP/tracked.txt"; git -C "$APP" commit -qam new
@@ -80,11 +87,25 @@ guard | grep -q 'pre_activation_compatible'
 export MUTATION_AFTER_GUARD=1; reject; unset MUTATION_AFTER_GUARD
 
 PERMISSION_RECEIPT="$CONTROL/source-permissions.receipt.json"
-python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" --apply --confirm HARDEN_INVENTORY_WRITER_CHECKOUT_V1 >/dev/null
-python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" | grep -q '"ok":true'
+PERMISSION_PLAN="$CONTROL/source-permissions.plan.json"
+PERMISSION_COMPLETION="$CONTROL/source-permissions.completion.json"
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" \
+  --generation-id guard-generation-v1 --plan-file "$PERMISSION_PLAN" \
+  --completion-attestation "$PERMISSION_COMPLETION" >/dev/null
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" \
+  --generation-id guard-generation-v1 --plan-file "$PERMISSION_PLAN" \
+  --completion-attestation "$PERMISSION_COMPLETION" --apply \
+  --expected-recovery-plan-sha256 "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["planHash"])' <"$PERMISSION_PLAN")" \
+  --confirm HARDEN_INVENTORY_WRITER_CHECKOUT_V1 >/dev/null
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" \
+  --plan-file "$PERMISSION_PLAN" --completion-attestation "$PERMISSION_COMPLETION" | grep -q '"ok":true'
 [[ "$(stat -c %u:%g:%a "$APP")" == '0:0:750' ]]
 [[ "$(stat -c %u:%g:%a "$APP/.git")" == '0:0:750' ]]
 [[ "$(stat -c %u:%g:%a "$APP/tracked.txt")" == '0:0:640' ]]
+[[ "$(stat -c %u:%g:%a "$APP/outputs/tracked-output.txt")" == '0:0:640' ]]
 for runtime in state tmp outputs profiles node_modules; do [[ "$(stat -c %u:%g:%a "$APP/$runtime")" == '0:0:1770' ]]; done
 
 APP="$APP" python3 - <<'PY'
@@ -144,6 +165,91 @@ PY
 
 write_control_state initial "$NEW"
 guard | grep -q 'activated_exact'
+GUARD_SOURCE_JSON="$(guard)"
+GUARD_SOURCE_JSON="$GUARD_SOURCE_JSON" APP="$APP" python3 - <<'PY'
+import json, os
+value = json.loads(os.environ["GUARD_SOURCE_JSON"])
+assert any(path.endswith("/outputs/tracked-output.txt") for path in value["managedSource"]["paths"])
+assert value["managedRuntime"]["roots"] == ["state", "tmp", "outputs", "profiles", "node_modules"]
+assert not value["excludedRuntimeRoots"]
+PY
+
+# An app-root parent that the service uid can rename through must fail the
+# source permission guard before it can admit the checkout.
+UNSAFE_PARENT="$TMP/unsafe-parent"; UNSAFE_APP="$UNSAFE_PARENT/app"
+mkdir -p "$UNSAFE_APP"
+chmod 0775 "$UNSAFE_PARENT"
+git -C "$UNSAFE_APP" init -q
+git -C "$UNSAFE_APP" config user.email test@example.invalid
+git -C "$UNSAFE_APP" config user.name inventory-guard-parent-test
+printf 'state/\ntmp/\noutputs/\nprofiles/\nnode_modules/\n' >"$UNSAFE_APP/.gitignore"
+printf 'unsafe parent\n' >"$UNSAFE_APP/tracked.txt"
+git -C "$UNSAFE_APP" add .gitignore tracked.txt
+git -C "$UNSAFE_APP" commit -qm unsafe-parent
+mkdir -p "$UNSAFE_APP/state" "$UNSAFE_APP/tmp" "$UNSAFE_APP/outputs" "$UNSAFE_APP/profiles" "$UNSAFE_APP/node_modules"
+chmod 0750 "$UNSAFE_APP" "$UNSAFE_APP/.git"
+chmod 0640 "$UNSAFE_APP/.gitignore" "$UNSAFE_APP/tracked.txt"
+chmod 1770 "$UNSAFE_APP/state" "$UNSAFE_APP/tmp" "$UNSAFE_APP/outputs" "$UNSAFE_APP/profiles" "$UNSAFE_APP/node_modules"
+ROOT="$ROOT" UNSAFE_APP="$UNSAFE_APP" python3 - <<'PY'
+import importlib.util
+import os
+
+script = os.path.join(os.environ["ROOT"], "infra", "inventory_writer_compatibility_guard.py")
+spec = importlib.util.spec_from_file_location("inventory_compatibility_guard_parent_test", script)
+guard_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard_module)
+try:
+    guard_module.validate_source_permissions(os.environ["UNSAFE_APP"], ["tracked.txt"])
+except guard_module.GuardError as error:
+    assert error.code == "INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", error.code
+    assert "external parent permits rename" in str(error), str(error)
+else:
+    raise AssertionError("unsafe external parent was admitted")
+PY
+chmod 0555 "$APP/state" "$APP/profiles"
+GUARD_RO_JSON="$(guard)"
+GUARD_RO_JSON="$GUARD_RO_JSON" python3 - <<'PY'
+import json, os
+value = json.loads(os.environ["GUARD_RO_JSON"])
+assert {row["name"] for row in value["excludedRuntimeRoots"]} == {"state", "profiles"}
+assert not value["externalRuntimeMounts"]
+PY
+chmod 1770 "$APP/state" "$APP/profiles"
+GUARD_MOUNTED_STATE=0
+GUARD_MOUNT_SOURCE="$TMP/guard-mount-source"
+mkdir -p "$GUARD_MOUNT_SOURCE/state"
+printf 'guard mount sentinel\n' >"$GUARD_MOUNT_SOURCE/state/sentinel.txt"
+if mount --bind "$GUARD_MOUNT_SOURCE/state" "$APP/state" >/dev/null 2>&1; then
+  GUARD_MOUNTED_STATE=1
+  if ! mount -o remount,bind,ro "$APP/state" >/dev/null 2>&1; then
+    umount "$APP/state" >/dev/null 2>&1 || true
+    GUARD_MOUNTED_STATE=0
+  fi
+fi
+if [[ "$GUARD_MOUNTED_STATE" == 1 ]]; then
+  GUARD_RUNTIME_MODE=bind-ro
+  GUARD_BIND_JSON="$(guard)"
+  GUARD_BIND_JSON="$GUARD_BIND_JSON" APP="$APP" python3 - <<'PY'
+import json, os
+value = json.loads(os.environ["GUARD_BIND_JSON"])
+state = os.path.join(os.environ["APP"], "state")
+assert any(row["mountpoint"] == state and row["roRw"] == "ro" for row in value["externalRuntimeMounts"])
+assert {row["name"] for row in value["excludedRuntimeRoots"]} == {"state"}
+PY
+  umount "$APP/state"
+  GUARD_MOUNTED_STATE=0
+else
+  GUARD_RUNTIME_MODE=mode-equivalent
+  chmod 0555 "$APP/state"
+  GUARD_MODE_JSON="$(guard)"
+  GUARD_MODE_JSON="$GUARD_MODE_JSON" python3 - <<'PY'
+import json, os
+value = json.loads(os.environ["GUARD_MODE_JSON"])
+assert {row["name"] for row in value["excludedRuntimeRoots"]} == {"state", "profiles"}
+assert not value["externalRuntimeMounts"]
+PY
+  chmod 1770 "$APP/state"
+fi
 git -C "$APP" checkout -q --detach "$OLD"; reject
 git -C "$APP" checkout -q --detach "$NEW"; chmod 0640 "$APP/tracked.txt" "$APP/.gitignore"
 write_control_state initial 5cc31c12476bceed5e670dc49a04e274c976f98e; reject
@@ -165,6 +271,16 @@ git -C "$APP" update-index --skip-worktree tracked.txt; reject; git -C "$APP" up
 git -C "$APP" update-index --assume-unchanged tracked.txt; reject; git -C "$APP" update-index --no-assume-unchanged tracked.txt
 rm "$APP/tracked.txt"; reject; git -C "$APP" checkout -q -- tracked.txt; chmod 0640 "$APP/tracked.txt"
 chmod 0660 "$APP/tracked.txt"; reject; chmod 0640 "$APP/tracked.txt"
+TRACKED_HARDLINK_VICTIM="$TMP/tracked-hardlink-victim.txt"
+TRACKED_HARDLINK_PARKED="$TMP/tracked-hardlink-parked.txt"
+cp -p "$APP/tracked.txt" "$TRACKED_HARDLINK_VICTIM"
+TRACKED_HARDLINK_VICTIM_STAT="$(stat -c '%u:%g:%a:%s' "$TRACKED_HARDLINK_VICTIM")"
+mv "$APP/tracked.txt" "$TRACKED_HARDLINK_PARKED"
+ln "$TRACKED_HARDLINK_VICTIM" "$APP/tracked.txt"
+reject
+[[ "$(stat -c '%u:%g:%a:%s' "$TRACKED_HARDLINK_VICTIM")" == "$TRACKED_HARDLINK_VICTIM_STAT" ]]
+rm "$APP/tracked.txt"
+mv "$TRACKED_HARDLINK_PARKED" "$APP/tracked.txt"
 chmod 0770 "$APP"; reject; chmod 0750 "$APP"
 chmod 0770 "$APP/.git"; reject; chmod 0750 "$APP/.git"
 chmod 0777 "$APP/tmp"; reject; chmod 1770 "$APP/tmp"
@@ -187,12 +303,73 @@ git -C "$APP" checkout -q --detach "$NEXT"; chmod 0640 "$APP/tracked.txt" "$APP/
 guard >/dev/null
 
 PERMISSION_RECEIPT_SHA="$(sha256sum "$PERMISSION_RECEIPT" | awk '{print $1}')"
-set +e
-python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" --rollback --expected-receipt-sha256 "$(printf 'f%.0s' {1..64})" --confirm ROLLBACK_INVENTORY_WRITER_CHECKOUT_V1 >/dev/null 2>&1
-WRONG_PERMISSION_ROLLBACK=$?
-set -e
-[[ "$WRONG_PERMISSION_ROLLBACK" == 1 ]]
-python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" --rollback --expected-receipt-sha256 "$PERMISSION_RECEIPT_SHA" --confirm ROLLBACK_INVENTORY_WRITER_CHECKOUT_V1 >/dev/null
-[[ "$(stat -c %a "$APP")" == 755 && "$(stat -c %a "$APP/tracked.txt")" == 644 ]]
+PERMISSION_COMPLETION_SHA="$(sha256sum "$PERMISSION_COMPLETION" | awk '{print $1}')"
+PERMISSION_PLAN_SHA="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["planHash"])' <"$PERMISSION_PLAN")"
 
-printf '{"ok":true,"checks":["activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","permission_rollback_requires_exact_receipt_hash","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","guard_mode_and_symlink_rejected","rotation_staged_candidate_pass","rotation_finalize_new_pass","rotation_finalize_old_rejected"]}\n'
+printf 'deployment generation\n' >"$APP/deployment-generation.txt"
+git -C "$APP" add deployment-generation.txt
+git -C "$APP" commit -qm deployment-generation
+DEPLOYMENT_GENERATION="$(git -C "$APP" rev-parse HEAD)"
+chmod 0644 "$APP/deployment-generation.txt"
+write_control_state initial "$DEPLOYMENT_GENERATION"
+GUARD_GENERATION_JSON="$(guard)"
+GUARD_GENERATION_JSON="$GUARD_GENERATION_JSON" DEPLOYMENT_GENERATION="$DEPLOYMENT_GENERATION" APP="$APP" python3 - <<'PY'
+import json, os
+value = json.loads(os.environ["GUARD_GENERATION_JSON"])
+generation = value["currentSourceGeneration"]
+assert value["ok"] is True and value["deployedCommit"] == os.environ["DEPLOYMENT_GENERATION"]
+assert generation["headCommit"] == os.environ["DEPLOYMENT_GENERATION"]
+assert generation["generationId"] == "current:" + os.environ["DEPLOYMENT_GENERATION"]
+assert len(generation["generationHash"]) == 64
+assert os.path.join(os.environ["APP"], "deployment-generation.txt") in value["managedSource"]["paths"]
+PY
+PERMISSION_HISTORY_AUDIT="$TMP/permission-history-audit.json"
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" \
+  --plan-file "$PERMISSION_PLAN" --completion-attestation "$PERMISSION_COMPLETION" \
+  >"$PERMISSION_HISTORY_AUDIT"
+GUARD_GENERATION_JSON="$GUARD_GENERATION_JSON" PERMISSION_HISTORY_AUDIT="$PERMISSION_HISTORY_AUDIT" python3 - <<'PY'
+import json, os
+guard = json.loads(os.environ["GUARD_GENERATION_JSON"])
+hardener = json.load(open(os.environ["PERMISSION_HISTORY_AUDIT"], encoding="utf-8"))
+assert hardener["ok"] is True
+assert hardener["generationRelation"] == "historical_completion_current_scope_advanced"
+assert hardener["currentGeneration"] == guard["currentSourceGeneration"]
+PY
+DEPLOYMENT_FILE_STAT="$(stat -c '%u:%g:%a:%s' "$APP/deployment-generation.txt")"
+set +e
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" --rollback \
+  --expected-receipt-sha256 "$(printf 'f%.0s' {1..64})" \
+  --expected-recovery-plan-sha256 "$PERMISSION_PLAN_SHA" \
+  --confirm ROLLBACK_INVENTORY_WRITER_CHECKOUT_V1 >/dev/null 2>&1
+WRONG_PERMISSION_ROLLBACK=$?
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$PERMISSION_RECEIPT" --rollback \
+  --plan-file "$PERMISSION_PLAN" --expected-receipt-sha256 "$PERMISSION_RECEIPT_SHA" \
+  --expected-recovery-plan-sha256 "$PERMISSION_PLAN_SHA" \
+  --confirm ROLLBACK_INVENTORY_WRITER_CHECKOUT_V1 >/dev/null 2>&1
+OLD_GENERATION_ROLLBACK=$?
+set -e
+[[ "$WRONG_PERMISSION_ROLLBACK" == 1 && "$OLD_GENERATION_ROLLBACK" == 1 ]]
+[[ "$(stat -c '%u:%g:%a:%s' "$APP/deployment-generation.txt")" == "$DEPLOYMENT_FILE_STAT" ]]
+[[ "$(sha256sum "$PERMISSION_RECEIPT" | awk '{print $1}')" == "$PERMISSION_RECEIPT_SHA" ]]
+[[ "$(sha256sum "$PERMISSION_COMPLETION" | awk '{print $1}')" == "$PERMISSION_COMPLETION_SHA" ]]
+
+NEXT_PERMISSION_RECEIPT="$CONTROL/source-permissions-$DEPLOYMENT_GENERATION.receipt.json"
+NEXT_PERMISSION_PLAN="$CONTROL/source-permissions-$DEPLOYMENT_GENERATION.plan.json"
+NEXT_PERMISSION_COMPLETION="$CONTROL/source-permissions-$DEPLOYMENT_GENERATION.completion.json"
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$NEXT_PERMISSION_RECEIPT" \
+  --generation-id "deployment:$DEPLOYMENT_GENERATION" --plan-file "$NEXT_PERMISSION_PLAN" \
+  --completion-attestation "$NEXT_PERMISSION_COMPLETION" >/dev/null
+python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
+  --app-root "$APP" --service-group 0 --receipt "$NEXT_PERMISSION_RECEIPT" \
+  --generation-id "deployment:$DEPLOYMENT_GENERATION" --plan-file "$NEXT_PERMISSION_PLAN" \
+  --completion-attestation "$NEXT_PERMISSION_COMPLETION" --apply \
+  --expected-recovery-plan-sha256 "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["planHash"])' <"$NEXT_PERMISSION_PLAN")" \
+  --confirm HARDEN_INVENTORY_WRITER_CHECKOUT_V1 >/dev/null
+[[ -s "$NEXT_PERMISSION_RECEIPT" && -s "$NEXT_PERMISSION_PLAN" && -s "$NEXT_PERMISSION_COMPLETION" ]]
+guard >/dev/null
+
+printf '{"ok":true,"roGuardRuntimeMode":"%s","checks":["activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","tracked_outputs_managed_source","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","ro_runtime_root_guard_mount_or_equivalent","permission_rollback_requires_exact_receipt_hash_and_plan","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","tracked_source_hardlink_rejected","guard_mode_and_symlink_rejected","external_parent_rename_guard_rejected","rotation_staged_candidate_pass","rotation_finalize_new_pass","rotation_finalize_old_rejected","guard_current_generation_full_source_audit","historical_completion_current_scope_advanced","old_generation_rollback_scope_rejected","new_generation_distinct_artifacts_apply"]}\n' "$GUARD_RUNTIME_MODE"

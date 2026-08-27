@@ -3,9 +3,11 @@
 
 import argparse
 import datetime
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -22,12 +24,14 @@ DEFAULT_ACTIVATION = f"{DEFAULT_CONTROL_DIR}/activation.ndjson"
 DEFAULT_RECEIPT = f"{DEFAULT_CONTROL_DIR}/activation.receipt.json"
 DEFAULT_COMPATIBILITY = f"{DEFAULT_CONTROL_DIR}/compatibility.ndjson"
 DEFAULT_COMPATIBILITY_RECEIPT = f"{DEFAULT_CONTROL_DIR}/compatibility.receipt.json"
+DEFAULT_SERVICE_GROUP = "sheinops"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ISO_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 REQUIRED_INTENT_ID = "e07f999c-96b2-460c-bfa9-fa924f410ec3"
 REQUIRED_RESTART_GENERATION_UNITS = {"shein-bi-portal.service"}
-RUNTIME_ALLOWLIST = {"state", "tmp", "outputs", "profiles", "node_modules"}
+RUNTIME_ALLOWLIST = ("state", "tmp", "outputs", "profiles", "node_modules")
+MAJOR_MINOR = re.compile(r"^\d+:\d+$")
 
 
 class GuardError(Exception):
@@ -38,6 +42,26 @@ class GuardError(Exception):
 
 def fail(code, message):
     raise GuardError(code, message)
+
+
+def resolve_service_uid(service_group=DEFAULT_SERVICE_GROUP):
+    """Resolve the writer uid from its service group name.
+
+    A zero result deliberately means either root or an unresolved identity;
+    callers therefore retain the strict root-only parent-owner policy.
+    """
+    try:
+        if not isinstance(service_group, str) or not service_group:
+            return 0
+        if service_group.isdigit():
+            group_name = grp.getgrgid(int(service_group)).gr_name
+        else:
+            group_name = service_group
+            grp.getgrnam(group_name)
+        uid = pwd.getpwnam(group_name).pw_uid
+        return uid if isinstance(uid, int) and not isinstance(uid, bool) and uid >= 0 else 0
+    except (KeyError, OSError, TypeError, ValueError, OverflowError):
+        return 0
 
 
 def canonical_bytes(value):
@@ -312,43 +336,295 @@ def git(app_root, *arguments, binary=False):
     return result.stdout if binary else result.stdout.decode("utf-8").strip()
 
 
-def validate_source_permissions(app_root, tracked):
+def path_is_under(root, target):
+    root = os.path.normpath(os.path.abspath(root))
+    target = os.path.normpath(os.path.abspath(target))
+    try:
+        return os.path.commonpath([root, target]) == root
+    except ValueError:
+        return False
+
+
+def ensure_no_symlink_components(app_root, target):
+    app_root = os.path.normpath(os.path.abspath(app_root))
+    target = os.path.normpath(os.path.abspath(target))
+    if not path_is_under(app_root, target):
+        fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"path outside app root:{target}")
+    current = app_root
+    info = os.lstat(current)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"unsafe app root:{app_root}")
+    relative = os.path.relpath(target, app_root)
+    if relative == ".":
+        return
+    components = relative.split(os.sep)
+    for index, component in enumerate(components):
+        if component in ("", ".", ".."):
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"invalid path component:{target}")
+        current = os.path.join(current, component)
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"symlink path component:{current}")
+        if index < len(components) - 1 and not stat.S_ISDIR(info.st_mode):
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"non-directory path component:{current}")
+
+
+def decode_mountinfo_field(value):
+    def decode(match):
+        return chr(int(match.group(1), 8))
+
+    return re.sub(r"\\([0-7]{3})", decode, value)
+
+
+def validate_mount_identity(identity):
+    if not isinstance(identity, dict) or set(identity) != {"mountId", "mountpoint", "root", "majorMinor", "roRw"} \
+            or not isinstance(identity["mountId"], int) or isinstance(identity["mountId"], bool) \
+            or identity["mountId"] < 1 or not isinstance(identity["mountpoint"], str) \
+            or not os.path.isabs(identity["mountpoint"]) \
+            or os.path.normpath(identity["mountpoint"]) != identity["mountpoint"] \
+            or not isinstance(identity["root"], str) or not identity["root"].startswith("/") \
+            or not isinstance(identity["majorMinor"], str) or not MAJOR_MINOR.fullmatch(identity["majorMinor"]) \
+            or identity["roRw"] not in ("ro", "rw"):
+        fail("INVENTORY_WRITER_GUARD_MOUNT_IDENTITY_INVALID", "mount identity")
+
+
+def mountinfo_entries():
+    try:
+        stream = open("/proc/self/mountinfo", "r", encoding="utf-8")
+    except OSError as error:
+        fail("INVENTORY_WRITER_GUARD_MOUNT_INVENTORY_UNAVAILABLE", str(error))
+    entries = []
+    with stream:
+        for line in stream:
+            head, separator, tail = line.rstrip("\n").partition(" - ")
+            if not separator:
+                fail("INVENTORY_WRITER_GUARD_MOUNT_INVENTORY_INVALID", "mountinfo separator")
+            fields = head.split()
+            post_fields = tail.split()
+            if len(fields) < 6 or len(post_fields) < 3 or not fields[0].isdigit():
+                fail("INVENTORY_WRITER_GUARD_MOUNT_INVENTORY_INVALID", "mountinfo fields")
+            mount_options = fields[5].split(",")
+            super_options = post_fields[2].split(",")
+            identity = {
+                "mountId": int(fields[0]),
+                "mountpoint": os.path.normpath(decode_mountinfo_field(fields[4])),
+                "root": decode_mountinfo_field(fields[3]),
+                "majorMinor": fields[2],
+                "roRw": "ro" if "ro" in mount_options or "ro" in super_options else "rw",
+            }
+            validate_mount_identity(identity)
+            entries.append(identity)
+    return entries
+
+
+def source_authority_paths(app_root, tracked):
+    values = {app_root}
+    git_path = os.path.join(app_root, ".git")
+    try:
+        git_info = os.lstat(git_path)
+    except OSError as error:
+        fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f".git:{error.errno}")
+    if not stat.S_ISDIR(git_info.st_mode) or stat.S_ISLNK(git_info.st_mode):
+        fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", ".git must be a real directory")
+    def walk_error(error):
+        fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f".git walk:{error}")
+
+    for current, directories, files in os.walk(git_path, followlinks=False, onerror=walk_error):
+        values.add(current)
+        values.update(os.path.join(current, name) for name in directories + files)
+    for relative in tracked:
+        candidate = os.path.normpath(os.path.abspath(os.path.join(app_root, relative)))
+        if not os.path.lexists(candidate):
+            fail("INVENTORY_WRITER_GUARD_CHECKOUT_NOT_CLEAN", f"tracked path missing:{relative}")
+        values.add(candidate)
+        current = os.path.dirname(candidate)
+        while current != app_root:
+            if not path_is_under(app_root, current):
+                fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"tracked path outside app root:{relative}")
+            values.add(current)
+            current = os.path.dirname(current)
+    result = sorted(values)
+    for candidate in result:
+        ensure_no_symlink_components(app_root, candidate)
+    return result
+
+
+def runtime_permission_scope(app_root, source_paths):
+    app_info = os.lstat(app_root)
+    source_set = set(source_paths)
+    git_path = os.path.join(app_root, ".git")
+    mounts = []
+    for identity in mountinfo_entries():
+        mountpoint = identity["mountpoint"]
+        if not path_is_under(app_root, mountpoint):
+            continue
+        if mountpoint == app_root:
+            fail("INVENTORY_WRITER_GUARD_MOUNT_SCOPE_INVALID", "app root mount")
+        relative = os.path.relpath(mountpoint, app_root).replace(os.sep, "/")
+        first = relative.split("/", 1)[0]
+        exact_runtime_root = relative in RUNTIME_ALLOWLIST
+        if path_is_under(git_path, mountpoint):
+            fail("INVENTORY_WRITER_GUARD_MOUNT_SCOPE_INVALID", f"mount under .git:{mountpoint}")
+        if first not in RUNTIME_ALLOWLIST:
+            if mountpoint in source_set:
+                fail("INVENTORY_WRITER_GUARD_MOUNT_SCOPE_INVALID", f"mount under source:{mountpoint}")
+            fail("INVENTORY_WRITER_GUARD_MOUNT_SCOPE_INVALID", f"external mount outside allowlist:{mountpoint}")
+        if mountpoint in source_set and not exact_runtime_root:
+            fail("INVENTORY_WRITER_GUARD_MOUNT_SCOPE_INVALID", f"mount under source:{mountpoint}")
+        if any(path != mountpoint and path_is_under(mountpoint, path) for path in source_paths):
+            fail("INVENTORY_WRITER_GUARD_MOUNT_SCOPE_INVALID", f"mount hides tracked source:{mountpoint}")
+        mounts.append(identity)
+    if len({row["mountpoint"] for row in mounts}) != len(mounts):
+        fail("INVENTORY_WRITER_GUARD_MOUNT_IDENTITY_INVALID", "duplicate mountpoint")
+    mounts.sort(key=lambda row: (row["mountpoint"], row["mountId"]))
+
+    roots = []
+    for name in RUNTIME_ALLOWLIST:
+        candidate = os.path.join(app_root, name)
+        if not os.path.lexists(candidate):
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"runtime root missing:{name}")
+        ensure_no_symlink_components(app_root, candidate)
+        info = os.lstat(candidate)
+        if not stat.S_ISDIR(info.st_mode):
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"runtime root is not a directory:{name}")
+        exact_mounts = [row for row in mounts if row["mountpoint"] == candidate]
+        if len(exact_mounts) > 1:
+            fail("INVENTORY_WRITER_GUARD_MOUNT_IDENTITY_INVALID", f"duplicate runtime mount:{name}")
+        different_device = info.st_dev != app_info.st_dev
+        if different_device and not exact_mounts:
+            fail("INVENTORY_WRITER_GUARD_MOUNT_IDENTITY_INVALID", f"runtime mount identity unavailable:{name}")
+        hidden_source = [path for path in source_paths if path != candidate and path_is_under(candidate, path)]
+        read_only_mode = not stat.S_IMODE(info.st_mode) & 0o222
+        if read_only_mode and hidden_source:
+            fail("INVENTORY_WRITER_GUARD_MOUNT_SCOPE_INVALID", f"read-only runtime root hides source:{name}")
+        external = bool(exact_mounts or different_device)
+        reasons = []
+        if external:
+            reasons.append("external-mount")
+        if read_only_mode:
+            reasons.append("read-only-mode")
+        roots.append({
+            "name": name,
+            "path": candidate,
+            "excluded": bool(reasons),
+            "external": external,
+            "reasons": reasons,
+            "mountIdentity": exact_mounts[0] if exact_mounts else None,
+        })
+    return roots, mounts
+
+
+def permission_scope(app_root, tracked):
+    source = source_authority_paths(app_root, tracked)
+    runtime, external_mounts = runtime_permission_scope(app_root, source)
+    runtime_paths = {row["path"] for row in runtime}
+    managed_runtime = [row for row in runtime if not row["excluded"]]
+    excluded_runtime = [row for row in runtime if row["excluded"]]
+    managed_source = [path for path in source if path not in runtime_paths]
+    return {
+        "appRoot": app_root,
+        "sourceAuthorityPaths": source,
+        "managedSourcePaths": managed_source,
+        "managedRuntimeRoots": managed_runtime,
+        "excludedRuntimeRoots": excluded_runtime,
+        "externalRuntimeMounts": external_mounts,
+    }
+
+
+def current_source_generation(scope, head):
+    fingerprint = {
+        "headCommit": head,
+        "managedSourcePathCount": len(scope["managedSourcePaths"]),
+        "managedSourcePathsSha256": stable_hash(scope["managedSourcePaths"]),
+        "managedRuntimeRootsSha256": stable_hash([
+            {"name": row["name"], "path": row["path"]} for row in scope["managedRuntimeRoots"]
+        ]),
+        "externalRuntimeMountsSha256": stable_hash(scope["externalRuntimeMounts"]),
+    }
+    return {
+        "generationId": f"current:{head}", **fingerprint,
+        "generationHash": stable_hash(fingerprint),
+    }
+
+
+def validate_external_parent_chain(app_root, service_uid=None):
+    """Require the non-root writer's outside checkout parents to be stable."""
+    service_uid = resolve_service_uid() if service_uid is None else service_uid
+    child = app_root
+    current = os.path.dirname(app_root)
+    while True:
+        try:
+            parent_info = os.lstat(current)
+            child_info = os.lstat(child)
+        except OSError as error:
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"external parent:{current}:{error.errno}")
+        if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode) \
+                or not stat.S_ISDIR(child_info.st_mode) or stat.S_ISLNK(child_info.st_mode):
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"unsafe external parent:{current}")
+        # An unresolved service identity is represented by uid 0 and keeps the
+        # previous root-only owner policy.  Once a non-root writer is known,
+        # ownership by another non-writable user is safe and ownership by the
+        # writer is rejected only when its owner-write bit is set.
+        if current != "/" and service_uid == 0 and parent_info.st_uid != 0:
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"external parent not root-owned:{current}")
+        mode = stat.S_IMODE(parent_info.st_mode)
+        if mode & 0o022 and not (mode & stat.S_ISVTX and child_info.st_uid == 0):
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"external parent permits rename:{current}")
+        if service_uid != 0 and parent_info.st_uid == service_uid and mode & 0o200:
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"external parent permits service rename:{current}")
+        if current == os.path.dirname(current):
+            return
+        child = current
+        current = os.path.dirname(current)
+
+
+def validate_source_permissions(app_root, tracked, service_uid=None):
     root = os.lstat(app_root)
     if not stat.S_ISDIR(root.st_mode) or stat.S_ISLNK(root.st_mode) or root.st_uid != 0 \
             or root.st_mode & 0o027:
         fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", "app root must be root-owned 0750-compatible")
+    validate_external_parent_chain(app_root, service_uid)
+    scope = permission_scope(app_root, tracked)
+    source = scope["sourceAuthorityPaths"]
+    runtime_by_path = {row["path"]: row for row in scope["managedRuntimeRoots"] + scope["excludedRuntimeRoots"]}
     git_path = os.path.join(app_root, ".git")
-    if not os.path.isdir(git_path) or os.path.islink(git_path):
-        fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", ".git must be a real directory")
-    for current, directories, files in os.walk(git_path, followlinks=False):
-        for candidate in [current] + [os.path.join(current, name) for name in directories + files]:
-            info = os.lstat(candidate)
-            if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-                fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"mutable .git entry:{candidate}")
-    for name in RUNTIME_ALLOWLIST:
-        candidate = os.path.join(app_root, name)
-        if not os.path.lexists(candidate):
+    for candidate in source:
+        if candidate == app_root:
             continue
         info = os.lstat(candidate)
-        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 \
-                or not info.st_mode & stat.S_ISVTX or info.st_mode & 0o002:
-            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"runtime allowlist root:{name}")
+        if candidate.startswith(git_path + os.sep) or candidate == git_path:
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"mutable .git entry:{candidate}")
+    for row in runtime_by_path.values():
+        if row["excluded"]:
+            # External/read-only roots are evidence-only. Their mount identity
+            # is still part of the validated scope, but their mode is not ours.
+            if row["external"] and row["mountIdentity"] is None:
+                fail("INVENTORY_WRITER_GUARD_MOUNT_IDENTITY_INVALID", f"missing mount identity:{row['name']}")
+            continue
+        info = os.lstat(row["path"])
+        if info.st_uid != 0 or not info.st_mode & stat.S_ISVTX or info.st_mode & 0o002:
+            fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"runtime allowlist root:{row['name']}")
     for relative in tracked:
         candidate = os.path.join(app_root, relative)
         info = os.lstat(candidate)
-        if info.st_uid != 0 or info.st_mode & 0o022 or not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 \
+                or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"mutable tracked source:{relative}")
         current = os.path.dirname(candidate)
         while current != app_root:
             directory = os.lstat(current)
             relative_dir = os.path.relpath(current, app_root).replace(os.sep, "/")
             allowlist_root = relative_dir in RUNTIME_ALLOWLIST
-            safe_allowlist = allowlist_root and directory.st_uid == 0 and directory.st_mode & stat.S_ISVTX \
+            runtime = runtime_by_path.get(current)
+            safe_allowlist = allowlist_root and runtime is not None and not runtime["excluded"] \
+                and directory.st_uid == 0 and directory.st_mode & stat.S_ISVTX \
                 and not directory.st_mode & 0o002
             if not stat.S_ISDIR(directory.st_mode) or stat.S_ISLNK(directory.st_mode) or directory.st_uid != 0 \
                     or (directory.st_mode & 0o022 and not safe_allowlist):
                 fail("INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT", f"mutable tracked parent:{relative_dir}")
             current = os.path.dirname(current)
+    return scope
 
 
 def parse_exec_commands(raw):
@@ -379,7 +655,7 @@ def validate_execstartpre_last(args, executable_path):
         fail("INVENTORY_WRITER_GUARD_NOT_LAST", f"unit={args.unit}:count={commands.count(expected)}")
 
 
-def validate_checkout(app_root, expected_commits):
+def validate_checkout(app_root, expected_commits, return_scope=False, service_uid=None):
     if not os.path.isdir(app_root) or os.path.islink(app_root):
         fail("INVENTORY_WRITER_GUARD_CHECKOUT_INVALID", "app root")
     head = git(app_root, "rev-parse", "HEAD")
@@ -392,8 +668,8 @@ def validate_checkout(app_root, expected_commits):
     missing = [row for row in tracked if not os.path.lexists(os.path.join(app_root, row))]
     if dirty or hidden or missing:
         fail("INVENTORY_WRITER_GUARD_CHECKOUT_NOT_CLEAN", f"dirty={len(dirty)}:hidden={len(hidden)}:missing={len(missing)}")
-    validate_source_permissions(app_root, tracked)
-    return head
+    permission = validate_source_permissions(app_root, tracked, service_uid)
+    return (head, permission) if return_scope else head
 
 
 def run(args):
@@ -401,6 +677,7 @@ def run(args):
     secure_parent_chain(executable_path, "guard executable", args.filesystem_trust_root)
     secure_regular(executable_path, "guard executable", executable=True)
     validate_execstartpre_last(args, executable_path)
+    service_uid = resolve_service_uid(args.service_group)
     activation_exists = os.path.lexists(args.activation_file)
     receipt_exists = os.path.lexists(args.activation_receipt_file)
     if not activation_exists and not receipt_exists:
@@ -430,12 +707,24 @@ def run(args):
     active_commit = compatibility["active"]["authority"]["deployedCommit"]
     staged_commit = compatibility["pending"]["candidateAuthority"]["deployedCommit"] if compatibility["pending"] else None
     allowed = {active_commit} | ({staged_commit} if staged_commit else set())
-    head = validate_checkout(os.path.abspath(args.app_root), allowed)
+    head, permission = validate_checkout(
+        os.path.abspath(args.app_root), allowed, return_scope=True, service_uid=service_uid)
     state = "rotation_candidate_staged" if staged_commit and head == staged_commit and head != active_commit else "activated_exact"
     return {
         "ok": True, "activated": True, "state": state, "deployedCommit": head,
         "activationHash": activation["activationHash"], "activeGeneration": compatibility["active"]["generation"],
         "pendingGeneration": compatibility["pending"]["generation"] if compatibility["pending"] else None,
+        "currentSourceGeneration": current_source_generation(permission, head),
+        "managedSource": {
+            "pathCount": len(permission["managedSourcePaths"]),
+            "paths": permission["managedSourcePaths"],
+        },
+        "managedRuntime": {
+            "roots": [row["name"] for row in permission["managedRuntimeRoots"]],
+            "pathCount": len(permission["managedRuntimeRoots"]),
+        },
+        "excludedRuntimeRoots": permission["excludedRuntimeRoots"],
+        "externalRuntimeMounts": permission["externalRuntimeMounts"],
     }
 
 
@@ -448,6 +737,7 @@ def main():
     parser.add_argument("--activation-receipt-file", default=DEFAULT_RECEIPT)
     parser.add_argument("--compatibility-file", default=DEFAULT_COMPATIBILITY)
     parser.add_argument("--compatibility-receipt-file", default=DEFAULT_COMPATIBILITY_RECEIPT)
+    parser.add_argument("--service-group", default=DEFAULT_SERVICE_GROUP)
     parser.add_argument("--filesystem-trust-root", default="/")
     args = parser.parse_args()
     try:
