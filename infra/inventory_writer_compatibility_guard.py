@@ -32,6 +32,10 @@ REQUIRED_INTENT_ID = "e07f999c-96b2-460c-bfa9-fa924f410ec3"
 REQUIRED_RESTART_GENERATION_UNITS = {"shein-bi-portal.service"}
 RUNTIME_ALLOWLIST = ("state", "tmp", "outputs", "profiles", "node_modules")
 MAJOR_MINOR = re.compile(r"^\d+:\d+$")
+NSENTER_PATH = "/usr/bin/nsenter"
+SELF_MOUNT_NAMESPACE = "/proc/self/ns/mnt"
+HOST_MOUNT_NAMESPACE = "/proc/1/ns/mnt"
+MOUNT_NAMESPACE_REEXEC_MARKER = "_SHEIN_BI_INVENTORY_WRITER_GUARD_HOST_MOUNT_NAMESPACE"
 
 
 class GuardError(Exception):
@@ -116,6 +120,60 @@ def secure_parent_chain(path, label, trust_root="/"):
         if parent == current:
             fail("INVENTORY_WRITER_GUARD_DIRECTORY_PERMISSION_DRIFT", f"{label}:trust-root-not-reached")
         current = parent
+
+
+def validate_guard_executable(args):
+    executable_path = os.path.abspath(__file__)
+    secure_parent_chain(executable_path, "guard executable", args.filesystem_trust_root)
+    secure_regular(executable_path, "guard executable", executable=True)
+    return executable_path
+
+
+def mount_namespace_identity(path):
+    try:
+        info = os.stat(path)
+    except OSError as error:
+        fail("INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_UNAVAILABLE", f"{path}:{error.errno}")
+    return info.st_dev, info.st_ino
+
+
+def validate_nsenter_executable():
+    secure_parent_chain(NSENTER_PATH, "nsenter executable", "/")
+    secure_regular(NSENTER_PATH, "nsenter executable", executable=True)
+
+
+def reexec_in_host_mount_namespace(executable_path, argv=None, environment=None):
+    self_identity = mount_namespace_identity(SELF_MOUNT_NAMESPACE)
+    host_identity = mount_namespace_identity(HOST_MOUNT_NAMESPACE)
+    if self_identity == host_identity:
+        return False
+
+    source_environment = os.environ if environment is None else environment
+    if MOUNT_NAMESPACE_REEXEC_MARKER in source_environment:
+        fail(
+            "INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_LOOP",
+            f"marker-present:self={self_identity[0]}:{self_identity[1]}:host={host_identity[0]}:{host_identity[1]}",
+        )
+
+    original_argv = list(sys.argv if argv is None else argv)
+    if not original_argv or not isinstance(original_argv[0], str) or not original_argv[0] \
+            or any(not isinstance(value, str) or "\0" in value for value in original_argv) \
+            or original_argv[0] != executable_path:
+        fail("INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_INVALID", "guard argv")
+
+    validate_nsenter_executable()
+    reexec_environment = dict(source_environment)
+    reexec_environment[MOUNT_NAMESPACE_REEXEC_MARKER] = f"{host_identity[0]}:{host_identity[1]}"
+    command = [NSENTER_PATH, f"--mount={HOST_MOUNT_NAMESPACE}", "--", *original_argv]
+    try:
+        result = subprocess.run(
+            command, stdin=subprocess.DEVNULL, check=False, env=reexec_environment,
+        )
+    except OSError as error:
+        fail("INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_FAILED", f"exec:{error.errno}")
+    if result.returncode != 0:
+        fail("INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_FAILED", f"nsenter:{result.returncode}")
+    return True
 
 
 def read_bytes(path, maximum, label, trust_root="/"):
@@ -677,9 +735,7 @@ def validate_checkout(app_root, expected_commits, return_scope=False, service_ui
 
 
 def run(args):
-    executable_path = os.path.abspath(__file__)
-    secure_parent_chain(executable_path, "guard executable", args.filesystem_trust_root)
-    secure_regular(executable_path, "guard executable", executable=True)
+    executable_path = validate_guard_executable(args)
     validate_execstartpre_last(args, executable_path)
     service_uid = resolve_service_uid(args.service_group)
     activation_exists = os.path.lexists(args.activation_file)
@@ -745,6 +801,9 @@ def main():
     parser.add_argument("--filesystem-trust-root", default="/")
     args = parser.parse_args()
     try:
+        executable_path = validate_guard_executable(args)
+        if reexec_in_host_mount_namespace(executable_path):
+            return 0
         result = run(args)
         print(json.dumps(result, separators=(",", ":")))
         return 0

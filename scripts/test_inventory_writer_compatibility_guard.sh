@@ -1,17 +1,173 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+run_mount_namespace_reexec_tests(){
+  ROOT="$ROOT" python3 - <<'PY'
+import contextlib
+import errno
+import importlib.util
+import io
+import json
+import os
+import sys
+from types import SimpleNamespace
+from unittest import mock
+
+script = os.path.join(os.environ["ROOT"], "infra", "inventory_writer_compatibility_guard.py")
+spec = importlib.util.spec_from_file_location("inventory_compatibility_guard_namespace_test", script)
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+
+assert guard.NSENTER_PATH == "/usr/bin/nsenter"
+assert guard.SELF_MOUNT_NAMESPACE == "/proc/self/ns/mnt"
+assert guard.HOST_MOUNT_NAMESPACE == "/proc/1/ns/mnt"
+
+with mock.patch.object(guard.os, "stat", return_value=SimpleNamespace(st_dev=41, st_ino=73)) as stat_call:
+    assert guard.mount_namespace_identity(guard.SELF_MOUNT_NAMESPACE) == (41, 73)
+    stat_call.assert_called_once_with(guard.SELF_MOUNT_NAMESPACE)
+
+with mock.patch.object(guard, "secure_parent_chain") as secure_parent, \
+        mock.patch.object(guard, "secure_regular") as secure_file:
+    guard.validate_nsenter_executable()
+    secure_parent.assert_called_once_with("/usr/bin/nsenter", "nsenter executable", "/")
+    secure_file.assert_called_once_with("/usr/bin/nsenter", "nsenter executable", executable=True)
+
+original_argv = [
+    "/secure/inventory-guard", "--unit", "shein-bi-portal.service",
+    "--app-root", "/opt/shein-bi/app", "--activation-file", "/control/activation.ndjson",
+]
+same_identity = mock.Mock(return_value=(7, 11))
+with mock.patch.object(guard, "mount_namespace_identity", same_identity), \
+        mock.patch.object(guard, "validate_nsenter_executable") as nsenter_validation, \
+        mock.patch.object(guard.subprocess, "run") as runner:
+    assert guard.reexec_in_host_mount_namespace(
+        original_argv[0], argv=original_argv, environment={"PRESERVE": "yes"},
+    ) is False
+    assert same_identity.call_args_list == [
+        mock.call("/proc/self/ns/mnt"), mock.call("/proc/1/ns/mnt"),
+    ]
+    nsenter_validation.assert_not_called()
+    runner.assert_not_called()
+
+identities = {
+    guard.SELF_MOUNT_NAMESPACE: (7, 11),
+    guard.HOST_MOUNT_NAMESPACE: (7, 29),
+}
+observed = {}
+def successful_runner(command, **kwargs):
+    observed["command"] = command
+    observed["kwargs"] = kwargs
+    return SimpleNamespace(returncode=0)
+
+source_environment = {"PRESERVE": "yes"}
+with mock.patch.object(guard, "mount_namespace_identity", side_effect=lambda path: identities[path]), \
+        mock.patch.object(guard, "validate_nsenter_executable") as nsenter_validation, \
+        mock.patch.object(guard.subprocess, "run", side_effect=successful_runner) as runner:
+    assert guard.reexec_in_host_mount_namespace(
+        original_argv[0], argv=original_argv, environment=source_environment,
+    ) is True
+    nsenter_validation.assert_called_once_with()
+    runner.assert_called_once()
+
+assert observed["command"] == [
+    "/usr/bin/nsenter", "--mount=/proc/1/ns/mnt", "--", *original_argv,
+]
+assert observed["kwargs"]["stdin"] is guard.subprocess.DEVNULL
+assert observed["kwargs"]["check"] is False
+assert "shell" not in observed["kwargs"]
+assert observed["kwargs"]["env"]["PRESERVE"] == "yes"
+assert observed["kwargs"]["env"][guard.MOUNT_NAMESPACE_REEXEC_MARKER] == "7:29"
+assert source_environment == {"PRESERVE": "yes"}
+
+with mock.patch.object(guard, "mount_namespace_identity", side_effect=lambda path: identities[path]), \
+        mock.patch.object(guard, "validate_nsenter_executable") as nsenter_validation, \
+        mock.patch.object(guard.subprocess, "run") as runner:
+    try:
+        guard.reexec_in_host_mount_namespace(
+            original_argv[0], argv=original_argv,
+            environment={guard.MOUNT_NAMESPACE_REEXEC_MARKER: ""},
+        )
+    except guard.GuardError as error:
+        assert error.code == "INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_LOOP", error.code
+    else:
+        raise AssertionError("namespace drift with an existing loop marker was admitted")
+    nsenter_validation.assert_not_called()
+    runner.assert_not_called()
+
+with mock.patch.object(guard, "mount_namespace_identity", side_effect=lambda path: identities[path]), \
+        mock.patch.object(guard, "validate_nsenter_executable") as nsenter_validation, \
+        mock.patch.object(guard.subprocess, "run") as runner:
+    try:
+        guard.reexec_in_host_mount_namespace(
+            original_argv[0], argv=["/different/guard", *original_argv[1:]], environment={},
+        )
+    except guard.GuardError as error:
+        assert error.code == "INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_INVALID", error.code
+    else:
+        raise AssertionError("namespace re-exec admitted a different guard argv[0]")
+    nsenter_validation.assert_not_called()
+    runner.assert_not_called()
+
+for failed_runner in (
+    mock.Mock(return_value=SimpleNamespace(returncode=17)),
+    mock.Mock(side_effect=OSError(errno.ENOENT, "missing")),
+):
+    with mock.patch.object(guard, "mount_namespace_identity", side_effect=lambda path: identities[path]), \
+            mock.patch.object(guard, "validate_nsenter_executable"), \
+            mock.patch.object(guard.subprocess, "run", failed_runner):
+        try:
+            guard.reexec_in_host_mount_namespace(
+                original_argv[0], argv=original_argv, environment={},
+            )
+        except guard.GuardError as error:
+            assert error.code == "INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_FAILED", error.code
+        else:
+            raise AssertionError("failed nsenter execution was admitted")
+
+main_argv = [original_argv[0], "--unit", "shein-bi-portal.service"]
+with mock.patch.object(sys, "argv", main_argv), \
+        mock.patch.object(guard, "validate_guard_executable", return_value=original_argv[0]), \
+        mock.patch.object(guard, "reexec_in_host_mount_namespace", return_value=True) as reexec, \
+        mock.patch.object(guard, "run") as local_run:
+    assert guard.main() == 0
+    reexec.assert_called_once_with(original_argv[0])
+    local_run.assert_not_called()
+
+stderr = io.StringIO()
+namespace_failure = guard.GuardError(
+    "INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_FAILED", "nsenter:1",
+)
+with mock.patch.object(sys, "argv", main_argv), \
+        mock.patch.object(guard, "validate_guard_executable", return_value=original_argv[0]), \
+        mock.patch.object(guard, "reexec_in_host_mount_namespace", side_effect=namespace_failure), \
+        contextlib.redirect_stderr(stderr):
+    assert guard.main() == 78
+failure = json.loads(stderr.getvalue())
+assert failure["ok"] is False
+assert failure["code"] == "INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_FAILED"
+PY
+}
+
+if [[ "${1:-}" == --namespace-reexec-unit-only ]]; then
+  [[ "$#" == 1 ]]
+  run_mount_namespace_reexec_tests
+  printf '{"ok":true,"checks":["mount_namespace_device_inode_identity","same_namespace_no_reexec","different_namespace_exact_nsenter_argv","private_loop_marker_fail_closed","guard_argv_identity_fail_closed","nsenter_failures_map_to_78","reexec_precedes_guard_validation"]}\n'
+  exit 0
+fi
+
 if [[ "$(id -u)" != 0 ]]; then
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     exec sudo env INVENTORY_GUARD_TEST_ROOT=1 "$0" "$@"
   fi
-  exec unshare -Urm -- env INVENTORY_GUARD_TEST_USERNS=1 "$0" "$@"
+  exec unshare -Urmfp --mount-proc -- env INVENTORY_GUARD_TEST_USERNS=1 "$0" "$@"
 fi
 if [[ "${INVENTORY_GUARD_TEST_USERNS:-}" == 1 ]]; then
   mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /tmp
 fi
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+run_mount_namespace_reexec_tests
 TMP="$(mktemp -d)"
 cleanup(){
   if [[ "${GUARD_MOUNTED_STATE:-0}" == 1 ]]; then umount "$APP/state" >/dev/null 2>&1 || true; fi
@@ -393,4 +549,4 @@ python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
 [[ -s "$NEXT_PERMISSION_RECEIPT" && -s "$NEXT_PERMISSION_PLAN" && -s "$NEXT_PERMISSION_COMPLETION" ]]
 guard >/dev/null
 
-printf '{"ok":true,"roGuardRuntimeMode":"%s","checks":["activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","tracked_outputs_managed_source","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","ro_runtime_root_guard_mount_or_equivalent","permission_rollback_requires_exact_receipt_hash_and_plan","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","tracked_source_hardlink_rejected","guard_mode_and_symlink_rejected","external_parent_owner_policy_regression","external_parent_rename_guard_rejected","rotation_staged_candidate_pass","rotation_finalize_new_pass","rotation_finalize_old_rejected","guard_current_generation_full_source_audit","historical_completion_current_scope_advanced","old_generation_rollback_scope_rejected","new_generation_distinct_artifacts_apply"]}\n' "$GUARD_RUNTIME_MODE"
+printf '{"ok":true,"roGuardRuntimeMode":"%s","checks":["mount_namespace_device_inode_identity","same_namespace_no_reexec","different_namespace_exact_nsenter_argv","private_loop_marker_fail_closed","guard_argv_identity_fail_closed","nsenter_failures_map_to_78","reexec_precedes_guard_validation","activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","tracked_outputs_managed_source","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","ro_runtime_root_guard_mount_or_equivalent","permission_rollback_requires_exact_receipt_hash_and_plan","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","tracked_source_hardlink_rejected","guard_mode_and_symlink_rejected","external_parent_owner_policy_regression","external_parent_rename_guard_rejected","rotation_staged_candidate_pass","rotation_finalize_new_pass","rotation_finalize_old_rejected","guard_current_generation_full_source_audit","historical_completion_current_scope_advanced","old_generation_rollback_scope_rejected","new_generation_distinct_artifacts_apply"]}\n' "$GUARD_RUNTIME_MODE"
