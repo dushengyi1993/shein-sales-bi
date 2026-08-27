@@ -15,7 +15,10 @@ import {
   stageInventoryCompatibilityRotation,
   writeInventoryCompatibilityPreflightArtifact,
 } from '../../lib/inventory_write_cutover.mjs';
-import {readCloudMaintenanceStatus} from '../../lib/cloud_maintenance_mode.mjs';
+import {
+  DEFAULT_CLOUD_MAINTENANCE_FILE,
+  readCloudMaintenanceStatus,
+} from '../../lib/cloud_maintenance_mode.mjs';
 import {INVENTORY_MANUAL_RESOLUTION_INTENT_ID} from '../../lib/durable_inventory_write.mjs';
 import {stableInventoryHash} from '../../lib/inventory_replenishment_policy.mjs';
 
@@ -115,7 +118,7 @@ function invocationFromDryRun(args, result) {
     activationReceiptFile: result.paths.activationReceiptFile,
     compatibilityFile: result.paths.compatibilityFile,
     compatibilityReceiptFile: result.paths.compatibilityReceiptFile,
-    maintenanceFile: path.resolve(args.maintenanceFile || process.env.SHEIN_BI_MAINTENANCE_FILE || '/srv/shein-bi/runtime/cloud-maintenance.json'),
+    maintenanceFile: path.resolve(args.maintenanceFile || process.env.SHEIN_BI_MAINTENANCE_FILE || DEFAULT_CLOUD_MAINTENANCE_FILE),
     lockFile: inventoryCutoverLockFile(),
     ...(args.command === 'activate' ? {requiredManualResolution: {
       intentId: INVENTORY_MANUAL_RESOLUTION_INTENT_ID,

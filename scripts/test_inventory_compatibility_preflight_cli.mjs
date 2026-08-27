@@ -10,6 +10,7 @@ import {fileURLToPath} from 'node:url';
 
 import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 import {inventoryWriteScopeKey} from '../lib/durable_inventory_write.mjs';
+import {DEFAULT_CLOUD_MAINTENANCE_FILE} from '../lib/cloud_maintenance_mode.mjs';
 import {runInventoryCompatibilityCli} from './inventory/manage_inventory_writer_compatibility.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -115,6 +116,15 @@ async function parent() {
     const activationDry = await spawnCli(['activate', ...commonDry,
       '--journal', journalFile, '--manual-receipt', manualReceiptFile, '--scope-key', scopeKey,
       '--out', activationArtifact], env);
+
+    const defaultMaintenanceArtifact = path.join(temp, 'activate.default-maintenance.preflight.json');
+    await spawnCli(['activate',
+      '--activation-registry', activationFile, '--activation-receipt', activationReceiptFile,
+      '--compatibility-registry', compatibilityFile, '--compatibility-receipt', compatibilityReceiptFile,
+      '--journal', journalFile, '--manual-receipt', manualReceiptFile, '--scope-key', scopeKey,
+      '--out', defaultMaintenanceArtifact], env);
+    const defaultMaintenancePreflight = JSON.parse(await fs.readFile(defaultMaintenanceArtifact, 'utf8'));
+    assert.equal(defaultMaintenancePreflight.invocation.maintenanceFile, path.resolve(DEFAULT_CLOUD_MAINTENANCE_FILE));
 
     const tamperedFile = path.join(temp, 'activate.tampered.json');
     const tampered = JSON.parse(await fs.readFile(activationArtifact, 'utf8'));
