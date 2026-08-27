@@ -580,7 +580,11 @@ const finalLines = (await fs.readFile(journal, 'utf8')).trim().split(/\r?\n/).ma
 assert.equal(finalLines.filter(entry => entry.kind === 'manual_resolution').length, 1);
 assert.equal(finalLines.filter(entry => entry.kind === 'write_outcome').length, 0);
 assert.equal(MANUAL_READBACK_EVIDENCE_CONTRACT[0].sha256, 'd44b066ee35a622ede45ec4bd36bc633a853f2d6f869be88571da85579998c04');
-assert.equal(MANUAL_READBACK_EVIDENCE_CONTRACT[1].sha256, '762a87d1954f0a35a564cab16f53b0d34685059ed83578e4d3cfb92ed8d9f267');
+assert.equal(MANUAL_READBACK_EVIDENCE_CONTRACT[1].sha256, '944d4251b28d6bcec399cbf4111f1cd8573dd16ce1f29d67270ebd717b8603c0');
+assert.equal(MANUAL_READBACK_EVIDENCE_CONTRACT[1].path, '/srv/shein-bi/runtime/ops-snapshots/inventory-manual-completion-xl-20260827/xl-latest-readback.json');
+assert.equal(MANUAL_READBACK_EVIDENCE_CONTRACT[1].bytes, 4685630);
+assert.equal(MANUAL_READBACK_EVIDENCE_CONTRACT[1].generatedAt, '2026-08-27T09:48:38.825Z');
+assert.equal(MANUAL_READBACK_EVIDENCE_CONTRACT[1].traceId, 'ddf78ae095f862ab');
 
 console.log(JSON.stringify({
   ok: true,

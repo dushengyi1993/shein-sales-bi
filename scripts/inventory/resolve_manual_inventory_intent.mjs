@@ -61,10 +61,11 @@ export const MANUAL_READBACK_EVIDENCE_CONTRACT = Object.freeze([
     traceId: 'a79e7c6fe9e7127e',
   }),
   Object.freeze({
-    path: '/srv/shein-bi/runtime/openapi-product-cache/XL/20260826T131840Z.json',
-    sha256: '762a87d1954f0a35a564cab16f53b0d34685059ed83578e4d3cfb92ed8d9f267',
-    generatedAt: '2026-08-26T13:18:40.224Z',
-    traceId: '8119d3992e8f3c7c',
+    path: '/srv/shein-bi/runtime/ops-snapshots/inventory-manual-completion-xl-20260827/xl-latest-readback.json',
+    sha256: '944d4251b28d6bcec399cbf4111f1cd8573dd16ce1f29d67270ebd717b8603c0',
+    bytes: 4685630,
+    generatedAt: '2026-08-27T09:48:38.825Z',
+    traceId: 'ddf78ae095f862ab',
   }),
 ]);
 
