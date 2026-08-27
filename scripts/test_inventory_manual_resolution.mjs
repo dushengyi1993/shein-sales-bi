@@ -125,13 +125,53 @@ await writeJson(planFile, {schemaVersion: 'daily-inventory-replenishment-plan/v1
 
 const r1 = path.join(temp, 'r1.json');
 const r2 = path.join(temp, 'r2.json');
-await writeJson(r1, {
-  code: 0,
-  msg: 'OK',
-  traceId: 'a79e7c6fe9e7127e',
+const r1Document = {
+  storeKey: 'XL',
   startedAt: '2026-08-26T04:33:05.549Z',
   endedAt: '2026-08-26T04:33:06.692Z',
-  stockRows: [{...scope, totalInventoryQuantity: 50, totalUsableInventory: 49, totalLockedQuantity: 1, temporaryInventoryQuantity: 0}],
+  response: {
+    code: 0,
+    msg: 'OK',
+    traceId: 'a79e7c6fe9e7127e',
+    info: [{goodsInventory: [{
+      skcName: scope.skc,
+      skuList: [{
+        skuCode: scope.skuCode,
+        totalInventoryQuantity: 50,
+        totalUsableInventory: 49,
+        totalLockedQuantity: 1,
+        totalTempLockQuantity: 0,
+        warehouseInventoryList: [{warehouseCode: 'OTHER-WAREHOUSE'}, {warehouseCode: scope.warehouseCode}],
+      }],
+    }]}],
+  },
+};
+await writeJson(r1, r1Document);
+const wrongStoreR1 = path.join(temp, 'r1-wrong-store.json');
+await writeJson(wrongStoreR1, {...r1Document, storeKey: 'DL'});
+const r1NestedResponseFailure = path.join(temp, 'r1-nested-response-failure.json');
+await writeJson(r1NestedResponseFailure, {
+  ...r1Document,
+  code: 0,
+  msg: 'OK',
+  traceId: 'root-success-must-not-be-used',
+  response: {...r1Document.response, code: 1, msg: 'FAILED', traceId: 'nested-failure-trace'},
+});
+const r1NestedTraceDifferent = path.join(temp, 'r1-nested-trace-different.json');
+await writeJson(r1NestedTraceDifferent, {
+  ...r1Document,
+  code: 0,
+  msg: 'OK',
+  traceId: 'root-trace-must-not-be-used',
+  response: {...r1Document.response, traceId: 'nested-authoritative-trace'},
+});
+const r1NestedTraceMissing = path.join(temp, 'r1-nested-trace-missing.json');
+await writeJson(r1NestedTraceMissing, {
+  ...r1Document,
+  code: 0,
+  msg: 'OK',
+  traceId: 'root-trace-must-not-be-used',
+  response: {...r1Document.response, traceId: ''},
 });
 await writeJson(r2, {
   schemaVersion: 'shein-openapi-product-basics/v1',
@@ -263,6 +303,32 @@ assert.equal(dryRun.preflightHash, defaultDryRun.preflightHash, 'dry-run preflig
 assert.equal(dryRun.event.liveInventoryBaseline.totalInventoryQuantity, 50);
 assert.equal(dryRun.event.liveInventoryBaseline.totalUsableInventory, 49);
 assert.equal(dryRun.event.productionBaseline.deployedCommit, authority.deployedCommit);
+assert.equal(dryRun.event.readbackArtifacts[0].scope.storeKey, scope.storeKey);
+assert.equal(dryRun.event.readbackArtifacts[0].scope.skc, scope.skc);
+assert.equal(dryRun.event.readbackArtifacts[0].scope.skuCode, scope.skuCode);
+assert.equal(dryRun.event.readbackArtifacts[0].scope.warehouseCode, scope.warehouseCode);
+assert.equal(dryRun.event.readbackArtifacts[0].scope.invType, scope.invType);
+assert.equal(dryRun.event.readbackArtifacts[0].totalInventoryQuantity, 50);
+assert.equal(dryRun.event.readbackArtifacts[0].totalUsableInventory, 49);
+assert.equal(dryRun.event.readbackArtifacts[0].totalLockedQuantity, 1);
+assert.equal(dryRun.event.readbackArtifacts[0].temporaryInventoryQuantity, 0);
+await assert.rejects(resolveManualInventoryIntent(resolverInputs({
+  readbackArtifacts: [wrongStoreR1, r2],
+})), /INVENTORY_MANUAL_RESOLUTION_EVIDENCE_SCOPE_MISSING/,
+  'catalog artifact with wrong top-level store must fail closed');
+await assert.rejects(resolveManualInventoryIntent(resolverInputs({
+  readbackArtifacts: [r1NestedResponseFailure, r2],
+})), /INVENTORY_MANUAL_RESOLUTION_EVIDENCE_RESPONSE_INVALID/,
+  'catalog nested response failure must not be masked by root success fields');
+const nestedTraceDryRun = await resolveManualInventoryIntent(resolverInputs({
+  readbackArtifacts: [r1NestedTraceDifferent, r2],
+}));
+assert.equal(nestedTraceDryRun.event.readbackArtifacts[0].traceId, 'nested-authoritative-trace',
+  'catalog extraction must bind traceId to nested response rather than root trace');
+await assert.rejects(resolveManualInventoryIntent(resolverInputs({
+  readbackArtifacts: [r1NestedTraceMissing, r2],
+})), /INVENTORY_MANUAL_RESOLUTION_EVIDENCE_RESPONSE_INVALID/,
+  'catalog missing nested trace must fail closed rather than use root trace');
 const rawR2BaselineDryRun = await resolveManualInventoryIntent(resolverInputs({
   mode: 'dry-run',
   liveInventoryBaseline: r2,

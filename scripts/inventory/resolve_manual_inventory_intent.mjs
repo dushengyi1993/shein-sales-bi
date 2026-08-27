@@ -228,6 +228,12 @@ function firstMetric(value, keys) {
   return null;
 }
 
+function exactMetric(value) {
+  if ((typeof value !== 'string' && typeof value !== 'number') || (typeof value === 'string' && !text(value))) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
 function extractExactReadback(document, scope, fileMeta) {
   const normalizedScope = normalizeInventoryWriteScope(scope);
   const records = objectNodes(document);
@@ -247,6 +253,49 @@ function extractExactReadback(document, scope, fileMeta) {
       if (!skuCode) continue;
       if (!skuToSkcs.has(skuCode)) skuToSkcs.set(skuCode, new Set());
       skuToSkcs.get(skuCode).add(skc);
+    }
+  }
+  // Catalog-executor artifacts keep the store identity at the document root
+  // and the SKC identity on goodsInventory. Bind both before selecting the
+  // exact SKU/warehouse row; this shape has no productList association for
+  // the generic reader to recover safely.
+  const catalogStoreKey = text(document?.storeKey).toUpperCase();
+  const catalogResponse = document?.response;
+  if (catalogStoreKey === normalizedScope.storeKey && Array.isArray(catalogResponse?.info)) {
+    const catalogCode = String(catalogResponse?.code ?? '').trim();
+    const catalogMsg = String(catalogResponse?.msg ?? '').trim();
+    const catalogTraceId = text(catalogResponse?.traceId);
+    if (catalogCode !== '0' || catalogMsg.toUpperCase() !== 'OK' || !catalogTraceId) {
+      fail('INVENTORY_MANUAL_RESOLUTION_EVIDENCE_RESPONSE_INVALID', `${fileMeta.path}:catalog response code/msg/trace`);
+    }
+    for (const info of catalogResponse.info) {
+      for (const goods of Array.isArray(info?.goodsInventory) ? info.goodsInventory : []) {
+        if (text(goods?.skcName) !== normalizedScope.skc) continue;
+        for (const sku of Array.isArray(goods?.skuList) ? goods.skuList : []) {
+          if (text(sku?.skuCode) !== normalizedScope.skuCode) continue;
+          for (const warehouse of Array.isArray(sku?.warehouseInventoryList) ? sku.warehouseInventoryList : []) {
+            const warehouseCode = text(warehouse?.warehouseCode || warehouse?.warehouse_code).toUpperCase();
+            if (warehouseCode !== normalizedScope.warehouseCode) continue;
+            const counts = {
+              totalInventoryQuantity: exactMetric(sku?.totalInventoryQuantity),
+              totalUsableInventory: exactMetric(sku?.totalUsableInventory),
+              totalLockedQuantity: exactMetric(sku?.totalLockedQuantity),
+              temporaryInventoryQuantity: exactMetric(sku?.totalTempLockQuantity),
+            };
+            if (Object.values(counts).every(value => Number.isSafeInteger(value))) candidates.push({
+              candidateScope: {
+                storeKey: catalogStoreKey,
+                skc: text(goods.skcName),
+                skuCode: text(sku.skuCode),
+                warehouseCode,
+                invType: 'VI',
+              },
+              counts,
+              responseIdentity: {code: catalogCode, msg: catalogMsg, traceId: catalogTraceId},
+            });
+          }
+        }
+      }
     }
   }
   // Product-cache artifacts keep the SKC association in productList while
@@ -308,9 +357,10 @@ function extractExactReadback(document, scope, fileMeta) {
   if (unique.size !== 1) fail('INVENTORY_MANUAL_RESOLUTION_EVIDENCE_SCOPE_AMBIGUOUS', `${fileMeta.path}:exact scope has conflicting count rows`);
   const candidate = candidates[0];
   const allNodes = records.map(record => record.value);
-  const code = firstScalar(allNodes, ['code', 'statusCode']);
-  const msg = firstScalar(allNodes, ['msg', 'message', 'statusMessage']);
-  const traceId = firstScalar(allNodes, ['traceId', 'traceID', 'trace_id', 'requestId', 'request_id']);
+  const code = candidate.responseIdentity?.code ?? firstScalar(allNodes, ['code', 'statusCode']);
+  const msg = candidate.responseIdentity?.msg ?? firstScalar(allNodes, ['msg', 'message', 'statusMessage']);
+  const traceId = candidate.responseIdentity?.traceId
+    ?? firstScalar(allNodes, ['traceId', 'traceID', 'trace_id', 'requestId', 'request_id']);
   const capturedAt = firstScalar(allNodes, ['startedAt', 'generatedAt', 'capturedAt', 'fetchedAt', 'createdAt', 'endedAt']);
   if (String(code).trim() !== '0' || String(msg).trim().toUpperCase() !== 'OK' || !text(traceId)) {
     fail('INVENTORY_MANUAL_RESOLUTION_EVIDENCE_RESPONSE_INVALID', `${fileMeta.path}:code/msg/trace`);
