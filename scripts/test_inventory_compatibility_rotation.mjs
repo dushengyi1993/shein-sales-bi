@@ -14,9 +14,14 @@ import {
   stageInventoryCompatibilityRotation,
 } from '../lib/inventory_write_cutover.mjs';
 import {inventoryWriteScopeKey} from '../lib/durable_inventory_write.mjs';
+import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 import {runInventoryCompatibilityCli} from './inventory/manage_inventory_writer_compatibility.mjs';
 
-const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-compatibility-rotation-'));
+const requestedOutputDir = String(process.env.INVENTORY_COMPATIBILITY_TEST_OUTPUT_DIR || '').trim();
+const temp = requestedOutputDir
+  ? path.resolve(requestedOutputDir)
+  : await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-compatibility-rotation-'));
+if (requestedOutputDir) await fs.mkdir(temp);
 const activationFile = path.join(temp, 'activation.ndjson');
 const activationReceiptFile = path.join(temp, 'activation.receipt.json');
 const compatibilityFile = path.join(temp, 'compatibility.ndjson');
@@ -39,7 +44,8 @@ const candidate = {
   releaseReceiptFile: path.join(temp, 'release-n1.json'),
 };
 const authorityN1 = {
-  ...candidate, writerServices: service('5'.repeat(64)), capturedAt: '2026-08-27T01:20:00.000Z',
+  ...candidate, sourceFingerprint: '8'.repeat(64),
+  writerServices: service('5'.repeat(64)), capturedAt: '2026-08-27T01:20:00.000Z',
 };
 const requiredManualResolution = {
   intentId: 'e07f999c-96b2-460c-bfa9-fa924f410ec3',
@@ -76,14 +82,49 @@ await assert.rejects(stageInventoryCompatibilityRotation({
 assert.equal(stageInterrupted, true);
 const staged = await stageInventoryCompatibilityRotation({...stageOptions, mode: 'execute', expectedPreflightHash: stageDry.preflightHash});
 assert.equal(staged.state, 'rotation_stage_recovered');
+assert.equal(staged.record.candidateAuthority.sourceFingerprint, candidate.sourceFingerprint);
 assert.equal((await requireCurrentInventoryCutoverActivation({...commonPaths, authorityReader: async () => restartN})).activated, true);
+const stagedFromLiveCandidate = await stageInventoryCompatibilityRotation({
+  ...stageOptions, authorityReader: async () => authorityN1,
+});
+assert.equal(stagedFromLiveCandidate.state, 'rotation_already_staged');
+await assert.rejects(stageInventoryCompatibilityRotation({
+  ...stageOptions,
+  candidateAuthority: {...candidate, sourceFingerprint: '6'.repeat(64)},
+  authorityReader: async () => authorityN1,
+}), error => {
+  assert.equal(error.code, 'INVENTORY_CUTOVER_ROTATION_ALREADY_STAGED');
+  return true;
+});
 await assert.rejects(requireCurrentInventoryCutoverActivation({...commonPaths, authorityReader: async () => authorityN1}), /ROTATION_NOT_FINALIZED/);
 
 const finalizeOptions = {
   ...commonPaths, authorityReader: async () => authorityN1, maintenanceReader: async () => maintenance,
   now: () => new Date('2026-08-27T01:21:00.000Z'), lockFile,
 };
+for (const [field, value] of [
+  ['deployedCommit', '6'.repeat(40)],
+  ['bundleSha256', '7'.repeat(64)],
+  ['releaseReceiptKind', 'emergency'],
+  ['releaseReceiptHash', 'a'.repeat(64)],
+  ['releaseReceiptFile', path.join(temp, 'different-release.json')],
+]) {
+  await assert.rejects(finalizeInventoryCompatibilityRotation({
+    ...finalizeOptions, authorityReader: async () => ({...authorityN1, [field]: value}),
+  }), error => {
+    assert.equal(error.code, 'INVENTORY_CUTOVER_ROTATION_CANDIDATE_NOT_DEPLOYED', field);
+    return true;
+  });
+}
+await assert.rejects(finalizeInventoryCompatibilityRotation({
+  ...finalizeOptions, authorityReader: async () => ({...authorityN1, trackedSourceClean: false}),
+}), error => {
+  assert.equal(error.code, 'INVENTORY_CUTOVER_DEPLOYMENT_AUTHORITY_INVALID');
+  return true;
+});
 const finalizeDry = await finalizeInventoryCompatibilityRotation(finalizeOptions);
+assert.notEqual(candidate.sourceFingerprint, authorityN1.sourceFingerprint);
+assert.equal(finalizeDry.record.authority.sourceFingerprint, authorityN1.sourceFingerprint);
 let finalizeInterrupted = false;
 await assert.rejects(finalizeInventoryCompatibilityRotation({
   ...finalizeOptions, mode: 'execute', expectedPreflightHash: finalizeDry.preflightHash,
@@ -92,7 +133,12 @@ await assert.rejects(finalizeInventoryCompatibilityRotation({
 assert.equal(finalizeInterrupted, true);
 const finalized = await finalizeInventoryCompatibilityRotation({...finalizeOptions, mode: 'execute', expectedPreflightHash: finalizeDry.preflightHash});
 assert.equal(finalized.state, 'rotation_finalize_receipt_recovered');
+assert.equal(finalized.record.authority.sourceFingerprint, authorityN1.sourceFingerprint);
 await assert.rejects(requireCurrentInventoryCutoverActivation({...commonPaths, authorityReader: async () => restartN}), /ROLLBACK_OR_DEPLOYMENT_DRIFT/);
+await assert.rejects(requireCurrentInventoryCutoverActivation({
+  ...commonPaths,
+  authorityReader: async () => ({...authorityN1, sourceFingerprint: candidate.sourceFingerprint}),
+}), /ROLLBACK_OR_DEPLOYMENT_DRIFT/);
 const restartN1 = {...authorityN1, writerServices: service('7'.repeat(64)), capturedAt: '2026-08-27T01:25:00.000Z'};
 assert.equal((await requireCurrentInventoryCutoverActivation({...commonPaths, authorityReader: async () => restartN1})).compatibility.activeGeneration, 2);
 
@@ -111,17 +157,43 @@ await assert.rejects(runInventoryCompatibilityCli(['rotation-finalize', '--execu
 await assert.rejects(runInventoryCompatibilityCli(['status', '--execute']), /status is read-only/);
 await assert.rejects(runInventoryCompatibilityCli(['status', '--dry-run', '--execute']), /mutually exclusive/);
 
+const validCompatibilityBytes = await fs.readFile(compatibilityFile);
+const validCompatibilityRecords = validCompatibilityBytes.toString('utf8')
+  .split(/\r?\n/u).filter(line => line.trim()).map(line => JSON.parse(line));
+try {
+  for (const kind of ['compatibility_rotation_staged', 'compatibility_rotation_finalized']) {
+    const mutated = structuredClone(validCompatibilityRecords);
+    const record = mutated.find(row => row.kind === kind);
+    record.currentStateHash = 'not-a-hash';
+    const {recordHash: _recordHash, ...core} = record;
+    record.recordHash = stableInventoryHash(core);
+    await fs.writeFile(compatibilityFile, `${mutated.map(row => JSON.stringify(row)).join('\n')}\n`);
+    await assert.rejects(inventoryCompatibilityStatus(commonPaths), error => {
+      assert.equal(error.code, 'INVENTORY_CUTOVER_COMPATIBILITY_RECORD_INVALID', kind);
+      assert.match(error.message, new RegExp(kind === 'compatibility_rotation_staged' ? 'stage chain' : 'finalize chain'));
+      return true;
+    });
+  }
+} finally {
+  await fs.writeFile(compatibilityFile, validCompatibilityBytes);
+}
+
 console.log(JSON.stringify({
   ok: true,
   checks: [
     'initial_activation_default_dry_run_exact_hash_and_readback',
     'same_commit_portal_restart_does_not_self_lock',
     'rotation_stage_append_crash_recovers_same_hash',
+    'stage_binds_full_candidate_authority_and_live_candidate_recovers_by_release_identity',
     'staged_candidate_starts_but_writer_reader_fails_closed_until_finalize',
+    'commit_bundle_receipt_and_clean_drift_rejected_before_finalize',
+    'fingerprint_only_migration_finalizes_to_live_authority',
     'rotation_finalize_append_crash_recovers_same_hash',
     'generation_n_plus_one_finalizes_and_old_n_rolls_back_fail_closed',
+    'finalized_active_authority_restores_strict_fingerprint_comparison',
     'new_generation_restart_remains_compatible',
     'compatibility_records_are_append_only_and_status_cli_reads_generation',
+    'stage_and_finalize_current_state_hash_require_hex64',
     'execute_cli_requires_exact_confirmation',
     'status_is_read_only_and_cli_modes_are_mutually_exclusive',
   ],

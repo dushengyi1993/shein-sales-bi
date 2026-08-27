@@ -150,6 +150,38 @@ assert failure["code"] == "INVENTORY_WRITER_GUARD_MOUNT_NAMESPACE_REEXEC_FAILED"
 PY
 }
 
+run_js_python_registry_interop_tests(){
+  local interop="$1"
+  INVENTORY_COMPATIBILITY_TEST_OUTPUT_DIR="$interop" \
+    node "$ROOT/scripts/test_inventory_compatibility_rotation.mjs" >/dev/null
+
+  ROOT="$ROOT" INTEROP="$interop" python3 - <<'PY'
+import importlib.util
+import json
+import os
+
+script = os.path.join(os.environ["ROOT"], "infra", "inventory_writer_compatibility_guard.py")
+spec = importlib.util.spec_from_file_location("inventory_compatibility_guard_js_interop_test", script)
+guard_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard_module)
+
+activation_file = os.path.join(os.environ["INTEROP"], "activation.ndjson")
+compatibility_file = os.path.join(os.environ["INTEROP"], "compatibility.ndjson")
+with open(activation_file, encoding="utf-8") as source:
+    activation = json.load(source)
+with open(compatibility_file, "rb") as source:
+    compatibility_bytes = source.read()
+
+state = guard_module.validate_compatibility_registry(compatibility_bytes, activation)
+assert len(state["records"]) == 3
+assert state["pending"] is None
+assert guard_module.HEX64.fullmatch(state["records"][1]["currentStateHash"])
+assert guard_module.HEX64.fullmatch(state["active"]["currentStateHash"])
+assert state["records"][1]["candidateAuthority"]["sourceFingerprint"] == "2" * 64
+assert state["active"]["authority"]["sourceFingerprint"] == "8" * 64
+PY
+}
+
 if [[ "${1:-}" == --namespace-reexec-unit-only ]]; then
   [[ "$#" == 1 ]]
   run_mount_namespace_reexec_tests
@@ -174,6 +206,7 @@ cleanup(){
   rm -rf -- "$TMP"
 }
 trap cleanup EXIT
+run_js_python_registry_interop_tests "$TMP/js-python-interop"
 APP="$TMP/app"; SYSTEMD="$TMP/systemd"; LIBEXEC="$TMP/libexec"; CONTROL="$TMP/control"; LOG="$TMP/systemctl.log"
 mkdir -p "$APP" "$SYSTEMD" "$LIBEXEC" "$CONTROL"
 git -C "$APP" init -q
@@ -308,8 +341,8 @@ else:
         records.append({**stage,'recordHash':h(stage)})
     elif mode=='finalize':
         pending=next(record for record in reversed(records) if record['kind']=='compatibility_rotation_staged')
-        authority={**pending['candidateAuthority'],'writerServices':[{'unit':'shein-bi-portal.service','generationHash':'9'*64}],'capturedAt':'2026-08-27T00:03:00.000Z'}
-        final={'schemaVersion':'inventory-v2-compatibility-record/v1','kind':'compatibility_rotation_finalized','generation':pending['generation'],'previousGeneration':active['generation'],'previousFinalizedHash':active['recordHash'],'stageHash':pending['recordHash'],'authority':authority,'maintenance':{'generation':10,'hash':'a'*64},'recordedAt':'2026-08-27T00:03:00.000Z'}
+        authority={**pending['candidateAuthority'],'sourceFingerprint':'b'*64,'writerServices':[{'unit':'shein-bi-portal.service','generationHash':'9'*64}],'capturedAt':'2026-08-27T00:03:00.000Z'}
+        final={'schemaVersion':'inventory-v2-compatibility-record/v1','kind':'compatibility_rotation_finalized','generation':pending['generation'],'previousGeneration':active['generation'],'previousFinalizedHash':active['recordHash'],'stageHash':pending['recordHash'],'currentStateHash':'c'*64,'authority':authority,'maintenance':{'generation':10,'hash':'a'*64},'recordedAt':'2026-08-27T00:03:00.000Z'}
         records.append({**final,'recordHash':h(final)})
     else: raise AssertionError(mode)
 craw=b''.join(enc(record)+b'\n' for record in records); open(cp,'wb').write(craw)
@@ -474,6 +507,81 @@ write_control_state stage "$NEXT"
 git -C "$APP" checkout -q --detach "$NEXT"; chmod 0640 "$APP/tracked.txt" "$APP/.gitignore"
 guard | grep -q 'rotation_candidate_staged'
 write_control_state finalize "$NEXT"
+ROOT="$ROOT" ACTIVATION="$ACTIVATION" COMPATIBILITY="$COMPATIBILITY" python3 - <<'PY'
+import copy
+import importlib.util
+import json
+import os
+
+script = os.path.join(os.environ["ROOT"], "infra", "inventory_writer_compatibility_guard.py")
+spec = importlib.util.spec_from_file_location("inventory_compatibility_guard_release_identity_test", script)
+guard_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard_module)
+
+with open(os.environ["ACTIVATION"], encoding="utf-8") as source:
+    activation = json.load(source)
+with open(os.environ["COMPATIBILITY"], encoding="utf-8") as source:
+    records = [json.loads(line) for line in source if line.strip()]
+
+pending = records[-2]
+finalized = records[-1]
+assert pending["kind"] == "compatibility_rotation_staged"
+assert finalized["kind"] == "compatibility_rotation_finalized"
+assert pending["candidateAuthority"]["sourceFingerprint"] == "6" * 64
+assert finalized["authority"]["sourceFingerprint"] == "b" * 64
+assert guard_module.authority_identity(finalized["authority"]) != pending["candidateAuthority"]
+assert guard_module.authority_release_identity(finalized["authority"]) \
+    == guard_module.authority_release_identity(pending["candidateAuthority"])
+
+def encoded(value):
+    return b"".join(guard_module.canonical_bytes(record) + b"\n" for record in value)
+
+accepted = guard_module.validate_compatibility_registry(encoded(records), activation)
+assert accepted["active"]["recordHash"] == finalized["recordHash"]
+assert accepted["active"]["authority"]["sourceFingerprint"] == "b" * 64
+assert accepted["pending"] is None
+
+def reject_identity_drift(field, value, expected_code, expected_message):
+    mutated = copy.deepcopy(records)
+    mutated[-1]["authority"][field] = value
+    core = dict(mutated[-1])
+    core.pop("recordHash")
+    mutated[-1]["recordHash"] = guard_module.stable_hash(core)
+    try:
+        guard_module.validate_compatibility_registry(encoded(mutated), activation)
+    except guard_module.GuardError as error:
+        assert error.code == expected_code, (field, error.code)
+        assert expected_message in str(error), (field, str(error))
+    else:
+        raise AssertionError(f"finalize authority drift admitted:{field}")
+
+for field, value in (
+    ("deployedCommit", "d" * 40),
+    ("bundleSha256", "e" * 64),
+    ("releaseReceiptKind", "emergency"),
+    ("releaseReceiptHash", "f" * 64),
+    ("releaseReceiptFile", "/var/lib/different-release.json"),
+):
+    reject_identity_drift(
+        field, value, "INVENTORY_WRITER_GUARD_COMPATIBILITY_INVALID", "finalize chain",
+    )
+reject_identity_drift(
+    "trackedSourceClean", False, "INVENTORY_WRITER_GUARD_SCHEMA_INVALID", "authority source/receipt",
+)
+
+invalid_state_hash = copy.deepcopy(records)
+invalid_state_hash[-1]["currentStateHash"] = "not-a-hash"
+invalid_core = dict(invalid_state_hash[-1])
+invalid_core.pop("recordHash")
+invalid_state_hash[-1]["recordHash"] = guard_module.stable_hash(invalid_core)
+try:
+    guard_module.validate_compatibility_registry(encoded(invalid_state_hash), activation)
+except guard_module.GuardError as error:
+    assert error.code == "INVENTORY_WRITER_GUARD_COMPATIBILITY_INVALID", error.code
+    assert "finalize chain" in str(error), str(error)
+else:
+    raise AssertionError("invalid finalized currentStateHash admitted")
+PY
 guard | grep -q 'activated_exact'
 git -C "$APP" checkout -q --detach "$NEW"; chmod 0640 "$APP/tracked.txt" "$APP/.gitignore"; reject
 git -C "$APP" checkout -q --detach "$NEXT"; chmod 0640 "$APP/tracked.txt" "$APP/.gitignore"
@@ -549,4 +657,4 @@ python3 "$ROOT/scripts/harden_inventory_writer_checkout_permissions.py" \
 [[ -s "$NEXT_PERMISSION_RECEIPT" && -s "$NEXT_PERMISSION_PLAN" && -s "$NEXT_PERMISSION_COMPLETION" ]]
 guard >/dev/null
 
-printf '{"ok":true,"roGuardRuntimeMode":"%s","checks":["mount_namespace_device_inode_identity","same_namespace_no_reexec","different_namespace_exact_nsenter_argv","private_loop_marker_fail_closed","guard_argv_identity_fail_closed","nsenter_failures_map_to_78","reexec_precedes_guard_validation","activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","tracked_outputs_managed_source","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","ro_runtime_root_guard_mount_or_equivalent","permission_rollback_requires_exact_receipt_hash_and_plan","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","tracked_source_hardlink_rejected","guard_mode_and_symlink_rejected","external_parent_owner_policy_regression","external_parent_rename_guard_rejected","rotation_staged_candidate_pass","rotation_finalize_new_pass","rotation_finalize_old_rejected","guard_current_generation_full_source_audit","historical_completion_current_scope_advanced","old_generation_rollback_scope_rejected","new_generation_distinct_artifacts_apply"]}\n' "$GUARD_RUNTIME_MODE"
+printf '{"ok":true,"roGuardRuntimeMode":"%s","checks":["mount_namespace_device_inode_identity","same_namespace_no_reexec","different_namespace_exact_nsenter_argv","private_loop_marker_fail_closed","guard_argv_identity_fail_closed","nsenter_failures_map_to_78","reexec_precedes_guard_validation","js_registry_python_guard_interop","activation_absent_pass","guard_exact_once_and_last","post_guard_dropin_mutation_rejected","external_install_and_replace_cas","six_dropins_external_path","source_permission_hardening","tracked_outputs_managed_source","service_checkout_and_tracked_write_denied","runtime_allowlist_writable","ro_runtime_root_guard_mount_or_equivalent","permission_rollback_requires_exact_receipt_hash_and_plan","activation_and_compatibility_receipts","new_exact_commit_pass","old_and_5cc31c_rejected","missing_and_tampered_control_rejected","dirty_hidden_missing_source_rejected","source_owner_mode_drift_rejected","tracked_source_hardlink_rejected","guard_mode_and_symlink_rejected","external_parent_owner_policy_regression","external_parent_rename_guard_rejected","rotation_staged_candidate_pass","rotation_finalize_fingerprint_migration_guard_accept","rotation_finalize_release_identity_drift_guard_rejected","rotation_finalize_current_state_hash_guard_rejected","rotation_finalize_new_pass","rotation_finalize_old_rejected","guard_current_generation_full_source_audit","historical_completion_current_scope_advanced","old_generation_rollback_scope_rejected","new_generation_distinct_artifacts_apply"]}\n' "$GUARD_RUNTIME_MODE"

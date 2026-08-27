@@ -270,6 +270,13 @@ def authority_identity(authority):
     )}
 
 
+def authority_release_identity(authority):
+    return {key: authority[key] for key in (
+        "deployedCommit", "bundleSha256", "trackedSourceClean",
+        "releaseReceiptKind", "releaseReceiptHash", "releaseReceiptFile",
+    )}
+
+
 def validate_candidate_authority(authority):
     exact_keys(authority, [
         "deployedCommit", "sourceFingerprint", "bundleSha256", "trackedSourceClean",
@@ -345,7 +352,7 @@ def validate_compatibility_registry(data, activation):
         elif kind == "compatibility_rotation_finalized":
             exact_keys(record, [
                 "schemaVersion", "kind", "generation", "previousGeneration", "previousFinalizedHash",
-                "stageHash", "authority", "maintenance", "recordedAt", "recordHash",
+                "stageHash", "currentStateHash", "authority", "maintenance", "recordedAt", "recordHash",
             ], "compatibility finalize")
             validate_authority(record["authority"])
             validate_maintenance_evidence(record["maintenance"])
@@ -353,7 +360,9 @@ def validate_compatibility_registry(data, activation):
                     or record["previousGeneration"] != active["generation"] \
                     or record["previousFinalizedHash"] != active["recordHash"] \
                     or record["stageHash"] != pending["recordHash"] \
-                    or authority_identity(record["authority"]) != pending["candidateAuthority"]:
+                    or not HEX64.fullmatch(str(record["currentStateHash"])) \
+                    or authority_release_identity(record["authority"]) \
+                    != authority_release_identity(pending["candidateAuthority"]):
                 fail("INVENTORY_WRITER_GUARD_COMPATIBILITY_INVALID", "finalize chain")
             active = record
             pending = None
