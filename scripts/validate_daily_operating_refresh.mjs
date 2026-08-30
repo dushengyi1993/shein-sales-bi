@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {
   discoverInventoryJournalFiles,
   findInventoryWriteFence,
+  readInventoryIntentLifecycle,
   readInventoryIntentJournals,
 } from '../lib/durable_inventory_write.mjs';
 import {inventoryDetailRefreshWindow} from '../lib/inventory_detail_refresh_window.mjs';
@@ -72,6 +73,55 @@ export async function discoverInventoryJournalAuditFiles(currentJournal, environ
     includeAll: true,
     additionalDirectories,
   });
+}
+
+async function readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate}) {
+  try {
+    return await readInventoryIntentJournals(journalFiles, {maxRunDate});
+  } catch (error) {
+    const match = /^INVENTORY_JOURNAL_SUPERSEDE_INVALID:(.+):([^:]+):referencedIntentMissing$/.exec(String(error?.message || ''));
+    if (!match || path.resolve(match[1]) === path.resolve(currentJournal)) throw error;
+
+    // A legacy cross-day supersede with a missing referenced intent is invalid
+    // audit history, but it must not hide independently valid manual fences or
+    // invalidate a later day's fully read-back result.  Keep every original
+    // journal immutable and rebuild only the validator's read model from each
+    // file's strict local lifecycle.
+    const records = [];
+    const intents = new Map();
+    const pending = new Map();
+    const terminalOutcomes = new Map();
+    const manualResolutions = new Map();
+    const fences = new Map();
+    const tombstonedIdempotencyKeys = new Map();
+    for (const journalFile of journalFiles) {
+      const lifecycle = await readInventoryIntentLifecycle(journalFile, {strict: true, maxRunDate});
+      records.push({journalFile, ...lifecycle});
+      for (const [intentId, rawIntent] of lifecycle.intents) {
+        const key = `${path.resolve(journalFile)}\u0000${intentId}`;
+        const intent = {...rawIntent, journalFile: path.resolve(journalFile)};
+        if ([...intents.values()].some(candidate => candidate.intentId === intentId)) {
+          throw new Error(`INVENTORY_JOURNAL_CONFLICT:${journalFile}:duplicate_global_intentId=${intentId}`);
+        }
+        intents.set(key, intent);
+        if (lifecycle.pending.has(intentId)) pending.set(key, intent);
+        const outcome = lifecycle.terminalOutcomes.get(intentId);
+        if (outcome) terminalOutcomes.set(key, {...outcome, journalFile: path.resolve(journalFile)});
+        const resolution = lifecycle.manualResolutions.get(intentId);
+        if (!resolution) continue;
+        manualResolutions.set(key, resolution);
+        const scopeKey = String(resolution?.scope?.scopeKey || '');
+        if (!scopeKey || fences.has(scopeKey)) throw new Error(`INVENTORY_JOURNAL_FENCE_CONFLICT:${journalFile}:duplicate_global_scope=${scopeKey}`);
+        fences.set(scopeKey, {key, intent, event: resolution, journalFile: path.resolve(journalFile)});
+        const idempotencyKey = String(resolution.idempotencyKey || '');
+        if (idempotencyKey) {
+          if (tombstonedIdempotencyKeys.has(idempotencyKey)) throw new Error(`INVENTORY_JOURNAL_TOMBSTONE_CONFLICT:${journalFile}:duplicate_global_idempotencyKey=${idempotencyKey}`);
+          tombstonedIdempotencyKeys.set(idempotencyKey, {key, intent, event: resolution});
+        }
+      }
+    }
+    return {files: journalFiles, records, intents, pending, terminalOutcomes, manualResolutions, fences, tombstonedIdempotencyKeys};
+  }
 }
 
 function storedPath(root, value) {
@@ -317,7 +367,7 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   const currentTerminalAuditByIntentId = new Map();
   const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
   const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);
-  const lifecycle = await readInventoryIntentJournals(journalFiles, {maxRunDate: runDate});
+  const lifecycle = await readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate: runDate});
   for (const [intentKey, intent] of lifecycle.intents.entries()) {
     if (intent.journalFile !== currentJournal) continue;
     const outcome = lifecycle.terminalOutcomes.get(intentKey);

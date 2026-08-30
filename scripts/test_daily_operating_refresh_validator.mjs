@@ -325,6 +325,52 @@ try {
   await writeMarkers();
   await assert.rejects(validateDailyOperatingRefresh(options), /lacks exact terminal readback/);
 
+  const danglingRunDate = '2026-08-15';
+  const danglingLogicalActionKey = stableInventoryHash({
+    runDate: danglingRunDate,
+    store: actionable[0].storeKey,
+    skc: actionable[0].skc,
+    sku: actionable[0].skuCode,
+    target: actionable[0].targetUsableInventory,
+    actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+    policyVersion: plan.policyVersion,
+    authorizationId: goodResult.authorizationId,
+  });
+  const danglingRequest = {
+    ...terminalRequest,
+    body: {updateSkuInventoryQuantityRequests: [{
+      ...terminalRequest.body.updateSkuInventoryQuantityRequests[0],
+      idempotencyKey: `bi-inv-${danglingLogicalActionKey.slice(0, 42)}`,
+    }]},
+  };
+  const danglingIntent = {
+    ...terminalIntent,
+    intentId: 'validator-dangling-intent-1',
+    logicalActionKey: danglingLogicalActionKey,
+    runDate: danglingRunDate,
+    idempotencyKey: danglingRequest.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
+    requestPayloadHash: stableInventoryHash(danglingRequest),
+    request: danglingRequest,
+    recordedAt: '2026-08-15T07:55:00.000Z',
+  };
+  const danglingOutcome = {
+    kind: 'write_outcome',
+    intentId: danglingIntent.intentId,
+    logicalActionKey: danglingIntent.logicalActionKey,
+    disposition: 'superseded_by_later_readback',
+    supersededByIntentId: 'missing-later-intent',
+    supersededByRunDate: runDate,
+    supersededByRecordedAt: '2026-08-16T07:59:00.000Z',
+    recordedAt: '2026-08-16T08:00:00.000Z',
+  };
+  await fs.writeFile(
+    path.join(path.dirname(resultFile), `daily-inventory-replenishment-${danglingRunDate}.json.journal.ndjson`),
+    `${JSON.stringify(danglingIntent)}\n${JSON.stringify(danglingOutcome)}\n`,
+  );
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'a legacy dangling supersede must be quarantined from later-day completion validation');
+
   await writeJson(resultFile, {...goodResult, unresolvedIntents: [{intentId:'orphan-1',recoveryScopeKey:'scope-1',state:'needs_manual_resolve'}]});
   await writeMarkers();
   await assert.rejects(validateDailyOperatingRefresh(options), /contains unresolved durable intents/);
