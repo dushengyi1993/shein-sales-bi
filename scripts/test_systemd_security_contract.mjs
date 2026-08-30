@@ -171,6 +171,12 @@ assert.match(webhook, /^Environment=SHEIN_WEBHOOK_CREDENTIAL_CONFIG_FILE=\/srv\/
 assert.match(webhook, /^EnvironmentFile=\/srv\/shein-bi\/secrets\/webhook-warehouse\.env$/m);
 assert.match(webhook, /^Environment=SHEIN_WAREHOUSE_PG_USER=shein_webhook_ops$/m);
 assert.doesNotMatch(webhook, /portal-warehouse\.env|SHEIN_WAREHOUSE_PG_USER=shein_link_ops/, 'webhook must not inherit the portal database role');
+assert.match(portal, /^Environment=SHEIN_BI_MAINTENANCE_INVENTORY_JOURNAL_DIR=\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results$/m,
+  'portal maintenance inventory intents must append to the canonical daily journal domain');
+assert.match(portal, /^Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results:\/srv\/shein-bi\/runtime\/et-low-inventory-guard\/results$/m,
+  'portal inventory writes must read daily and ET pending intents');
+assert.match(portal, /^ExecStartPre=\+\/usr\/bin\/install -d -o sheinops -g sheinops -m 0750 \/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results$/m,
+  'portal must create the canonical inventory journal directory before start');
 assert.equal(property(webhook, 'NoNewPrivileges'), 'true');
 assertCommonHardening(webhook, 'webhook', {protectSystem: 'strict'});
 assert.equal(property(webhook, 'PrivateTmp'), 'true');

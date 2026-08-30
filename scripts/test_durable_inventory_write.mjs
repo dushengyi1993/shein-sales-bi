@@ -9,6 +9,7 @@ import {
   appendDurableJournalRecord,
   assertInventoryWriteAllowed,
   classifyRecoveredInventoryIntent,
+  INVENTORY_MAINTENANCE_WRITE_PROFILE,
   inventoryRecoveryScopeKey,
   readInventoryIntentLifecycle,
   readInventoryIntentJournals,
@@ -44,6 +45,8 @@ function buildStrictIntent({
   changeQuantity,
   overwriteComputationVersion,
   intentId,
+  inventoryWriteProfile,
+  warehouseCode,
 } = {}) {
   const target = 69;
   const before = {
@@ -73,6 +76,7 @@ function buildStrictIntent({
       idempotencyKey: `bi-inv-${logicalActionKey.slice(0, 42)}`,
       skuCode,
       invType: 'VI',
+      ...(warehouseCode !== undefined ? {warehouseCode} : {}),
       changeType: 'OVERWRITE',
       changeQuantity,
       changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
@@ -89,8 +93,10 @@ function buildStrictIntent({
     storeKey,
     skc,
     skuCode,
+    ...(warehouseCode !== undefined ? {warehouseCode} : {}),
     targetUsableInventory: target,
     policyVersion,
+    ...(inventoryWriteProfile ? {inventoryWriteProfile} : {}),
     ...(overwriteComputationVersion === undefined ? {} : {overwriteComputationVersion}),
     authorizationId,
     idempotencyKey: request.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
@@ -102,6 +108,40 @@ function buildStrictIntent({
 }
 
 try {
+  const maintenanceWarehouseJournal = path.join(temp, 'maintenance-existing-row-warehouse.journal.ndjson');
+  const maintenanceIntent = buildStrictIntent({
+    runDate: '2026-08-23',
+    policyVersion: INVENTORY_MAINTENANCE_WRITE_PROFILE,
+    changeQuantity: 69,
+    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    intentId: 'maintenance-existing-row-warehouse-ok',
+    inventoryWriteProfile: INVENTORY_MAINTENANCE_WRITE_PROFILE,
+    warehouseCode: 'PS299807325817',
+  });
+  await appendDurableJournalRecord(maintenanceWarehouseJournal, maintenanceIntent);
+  const maintenanceLifecycle = await readInventoryIntentLifecycle(maintenanceWarehouseJournal, {strict: true});
+  assert.equal(maintenanceLifecycle.pending.size, 1, 'maintenance profile allows existing stock rows to bind exact warehouse');
+
+  const missingWarehouseJournal = path.join(temp, 'maintenance-existing-row-missing-warehouse.journal.ndjson');
+  await appendDurableJournalRecord(missingWarehouseJournal, {...maintenanceIntent, intentId: 'maintenance-existing-row-missing-warehouse', warehouseCode: '', request: {...maintenanceIntent.request, body: {updateSkuInventoryQuantityRequests: [{...maintenanceIntent.request.body.updateSkuInventoryQuantityRequests[0], warehouseCode: ''}]}}, requestPayloadHash: stableInventoryHash({...maintenanceIntent.request, body: {updateSkuInventoryQuantityRequests: [{...maintenanceIntent.request.body.updateSkuInventoryQuantityRequests[0], warehouseCode: ''}]}})});
+  await assert.rejects(readInventoryIntentLifecycle(missingWarehouseJournal, {strict: true}), /request.warehouseCode/, 'maintenance profile requires non-empty warehouse');
+
+  const wrongWarehouseJournal = path.join(temp, 'maintenance-existing-row-wrong-warehouse.journal.ndjson');
+  await appendDurableJournalRecord(wrongWarehouseJournal, {...maintenanceIntent, intentId: 'maintenance-existing-row-wrong-warehouse', warehouseCode: 'PS299807325817', request: {...maintenanceIntent.request, body: {updateSkuInventoryQuantityRequests: [{...maintenanceIntent.request.body.updateSkuInventoryQuantityRequests[0], warehouseCode: 'PS-WRONG'}]}}, requestPayloadHash: stableInventoryHash({...maintenanceIntent.request, body: {updateSkuInventoryQuantityRequests: [{...maintenanceIntent.request.body.updateSkuInventoryQuantityRequests[0], warehouseCode: 'PS-WRONG'}]}})});
+  await assert.rejects(readInventoryIntentLifecycle(wrongWarehouseJournal, {strict: true}), /request.warehouseCode/, 'maintenance profile requires request warehouse to equal intent warehouse');
+
+  const dailyWarehouseJournal = path.join(temp, 'daily-existing-row-still-rejects-warehouse.journal.ndjson');
+  const dailyWithWarehouse = buildStrictIntent({
+    runDate: '2026-08-23',
+    policyVersion: '2026-08-23.1',
+    changeQuantity: 69,
+    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    intentId: 'daily-existing-row-still-rejects-warehouse',
+    warehouseCode: 'PS299807325817',
+  });
+  await appendDurableJournalRecord(dailyWarehouseJournal, dailyWithWarehouse);
+  await assert.rejects(readInventoryIntentLifecycle(dailyWarehouseJournal, {strict: true}), /request.warehouseCode/, 'daily existing-row contract still rejects warehouseCode');
+
   const mixedEtJournal = path.join(temp, 'mixed-et-run-and-inventory.journal.ndjson');
   const mixedEtIntent = buildStrictIntent({
     runDate: '2026-08-23',
@@ -141,7 +181,7 @@ try {
     },
     readback: async () => {
       readbackCalls += 1;
-      return {totalUsableInventory: 20};
+      return {ok: true, totalUsableInventory: 20};
     },
     maxReadbackAttempts: 10,
   });
@@ -189,7 +229,7 @@ try {
     readback: async () => {
       releaseReadback();
       await readbackGate;
-      return {totalUsableInventory: releaseIntent.targetUsableInventory};
+      return {ok: true, totalUsableInventory: releaseIntent.targetUsableInventory};
     },
     maxReadbackAttempts: 1,
   });
@@ -223,7 +263,7 @@ try {
       duplicatePostCalls += 1;
       return {ok: true, status: 200, data: {code: '0', info: {success: true}}};
     },
-    readback: async () => ({totalUsableInventory: duplicateIntent.targetUsableInventory}),
+    readback: async () => ({ok: true, totalUsableInventory: duplicateIntent.targetUsableInventory}),
     maxReadbackAttempts: 1,
   }), /INVENTORY_WRITE_PENDING_CONFLICT/);
   assert.equal(duplicatePostCalls, 0, 'a second writer is blocked before transport while first readback is pending');
@@ -431,7 +471,7 @@ try {
       crashSubmitCalls += 1;
       throw new Error('simulated connection loss after platform acceptance');
     },
-    readback: async () => ({totalUsableInventory: 20}),
+    readback: async () => ({ok: true, totalUsableInventory: 20}),
   }), error => error.inventoryIntentDurable === true);
   assert.equal(crashSubmitCalls, 1);
   pending = await readPendingInventoryIntents(crashJournal);
@@ -443,7 +483,7 @@ try {
     intent,
     assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {code: '400', info: {success: false}}}),
-    readback: async () => ({totalUsableInventory: 20}),
+    readback: async () => ({ok: true, totalUsableInventory: 20}),
   });
   assert.equal(rejected.state, 'rejected');
   assert.equal((await readPendingInventoryIntents(rejectedJournal)).has(intent.intentId), false, 'definitive rejection releases the durable intent');
@@ -460,7 +500,7 @@ try {
     intent: strictRejectedIntent,
     assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {code: '400', info: {success: false}}}),
-    readback: async () => ({totalUsableInventory: 69}),
+    readback: async () => ({ok: true, totalUsableInventory: 69}),
   });
   assert.equal(strictRejected.state, 'rejected');
   const strictRejectedEntries = (await fs.readFile(strictRejectedJournal, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
@@ -557,7 +597,7 @@ try {
     intent: {...intent, intentId: 'intent-malformed-code'},
     assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {code: {unexpected: true}, info: {success: false}}}),
-    readback: async () => ({totalUsableInventory: 100}),
+    readback: async () => ({ok: true, totalUsableInventory: 100}),
   });
   assert.equal(malformedCode.state, 'ambiguous_response');
   assert.equal((await readPendingInventoryIntents(malformedCodeJournal)).has('intent-malformed-code'), true, 'non-scalar response codes must retain the intent');
@@ -570,7 +610,7 @@ try {
       intent: {...intent, intentId: codeZeroFailureIntentId},
       assertInventoryAdmission: admitInventoryWrite,
       submit: async () => ({ok: true, status: 200, data: {code, info: {success: false}}}),
-      readback: async () => ({totalUsableInventory: 100}),
+      readback: async () => ({ok: true, totalUsableInventory: 100}),
     });
     assert.equal(codeZeroFailure.state, 'ambiguous_response');
     assert.equal((await readPendingInventoryIntents(codeZeroFailureJournal)).has(codeZeroFailureIntentId), true, `${label} code 0 with success=false must retain the intent`);
@@ -578,10 +618,10 @@ try {
     assert.equal(codeZeroFailureEntries.some(entry => entry.kind === 'write_outcome'), false, `${label} code 0 with success=false must not write a terminal outcome`);
   }
 
-  for (const [label, response] of [
-    ['http_502', {ok: false, status: 502, data: {code: '502', info: {success: false}}}],
-    ['business_conflict', {ok: true, status: 200, data: {code: '400', info: {success: true}}}],
-    ['business_failure_missing', {ok: true, status: 200, data: {code: '400', info: {}}}],
+  for (const [label, response, expectedState, expectedPending] of [
+    ['http_502', {ok: false, status: 502, data: {code: '502', info: {success: false}}}, 'ambiguous_response', true],
+    ['business_conflict', {ok: true, status: 200, data: {code: '400', info: {success: true}}}, 'rejected', false],
+    ['business_failure_missing', {ok: true, status: 200, data: {code: '400', info: {}}}, 'rejected', false],
   ]) {
     const ambiguousRejectionJournal = path.join(temp, `ambiguous-rejection-${label}.journal.ndjson`);
     const ambiguousIntentId = `intent-ambiguous-rejection-${label}`;
@@ -590,10 +630,10 @@ try {
       intent: {...intent, intentId: ambiguousIntentId},
       assertInventoryAdmission: admitInventoryWrite,
       submit: async () => response,
-      readback: async () => ({totalUsableInventory: 100}),
+      readback: async () => ({ok: true, totalUsableInventory: 100}),
     });
-    assert.equal(outcome.state, 'ambiguous_response');
-    assert.equal((await readPendingInventoryIntents(ambiguousRejectionJournal)).has(ambiguousIntentId), true, `${label} must retain the intent and forbid a second POST`);
+    assert.equal(outcome.state, expectedState);
+    assert.equal((await readPendingInventoryIntents(ambiguousRejectionJournal)).has(ambiguousIntentId), expectedPending, `${label} pending lifecycle must match its authoritative response class`);
   }
 
   const codeZeroMissingSuccessJournal = path.join(temp, 'code-zero-missing-success.journal.ndjson');
@@ -605,7 +645,7 @@ try {
     submit: async () => ({ok: true, status: 200, data: {code: '0'}}),
     readback: async () => {
       codeZeroMissingSuccessReadbacks += 1;
-      return {totalUsableInventory: 100};
+      return {ok: true, totalUsableInventory: 100};
     },
   });
   assert.equal(codeZeroMissingSuccess.state, 'readback_matched');
@@ -623,7 +663,7 @@ try {
     intent: {...intent, intentId: 'intent-missing-code'},
     assertInventoryAdmission: admitInventoryWrite,
     submit: async () => ({ok: true, status: 200, data: {info: {success: true}}}),
-    readback: async () => ({totalUsableInventory: 100}),
+    readback: async () => ({ok: true, totalUsableInventory: 100}),
   });
   assert.equal(missingCode.state, 'ambiguous_response');
   assert.equal((await readPendingInventoryIntents(missingCodeJournal)).has('intent-missing-code'), true, 'missing response code must never release the intent');
@@ -638,7 +678,7 @@ try {
     intent: {...intent, intentId: 'intent-after-torn'},
     assertInventoryAdmission: admitInventoryWrite,
     submit: async () => { postAfterTorn += 1; return {data:{code:'0',info:{success:true}}}; },
-    readback: async () => ({totalUsableInventory:100}),
+    readback: async () => ({ok: true, totalUsableInventory:100}),
   }), /INVENTORY_JOURNAL_TORN_TAIL/);
   assert.equal(postAfterTorn, 0, 'a torn tail must block append before any later POST');
 

@@ -211,6 +211,7 @@ const tests = [
   'scripts/test_daily_inventory_current_detail_targeting.mjs',
   'scripts/test_daily_inventory_guard_targeted_detail.mjs',
   'scripts/test_durable_inventory_write.mjs',
+  'scripts/test_link_ops_maintenance_inventory_durable.mjs',
   'scripts/test_daily_inventory_executor_lifecycle.mjs',
   'scripts/test_execute_inventory_durable_recovery.mjs',
   'scripts/test_inventory_cross_day_intent.mjs',

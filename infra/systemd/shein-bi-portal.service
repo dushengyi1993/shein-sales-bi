@@ -13,6 +13,8 @@ WorkingDirectory=/opt/shein-bi/app
 EnvironmentFile=/srv/shein-bi/secrets/portal-warehouse.env
 Environment=NODE_ENV=production
 Environment=SHEIN_OPENAPI_PRODUCT_CACHE_DIR=/srv/shein-bi/runtime/openapi-product-cache
+Environment=SHEIN_BI_MAINTENANCE_INVENTORY_JOURNAL_DIR=/srv/shein-bi/runtime/daily-inventory-replenishment/results
+Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=/srv/shein-bi/runtime/daily-inventory-replenishment/results:/srv/shein-bi/runtime/et-low-inventory-guard/results
 Environment=CODEX_HOME=/home/sheinops/.codex
 Environment=SHEIN_OWNER_KNOWLEDGE_PRINCIPAL=dushengyi
 Environment=SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR=/srv/shein-bi/owner-knowledge-repo
@@ -74,6 +76,7 @@ Environment=SHEIN_BI_PORTAL_SHUTDOWN_TIMEOUT_MS=12000
 Environment=SHEIN_LINK_OPS_OPENAPI_EXECUTOR_KILL_GRACE_MS=1500
 Environment=NODE_OPTIONS=--max-old-space-size=1536
 ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/openapi-product-cache
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/daily-inventory-replenishment/results
 ExecStartPre=/usr/bin/node scripts/generate_bi_portal_shell.mjs
 ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --host 127.0.0.1 --port 8787 --state-file /srv/shein-bi/runtime/bi_action_state.json --link-ops-task-file /srv/shein-bi/runtime/bi_link_ops_tasks.json --link-ops-chat-file /srv/shein-bi/runtime/bi_link_ops_chats.json --link-ops-asset-dir /srv/shein-bi/runtime/bi_link_ops_assets --audit-file /srv/shein-bi/logs/bi_portal_action_audit.jsonl --session-secret-file /data/shein-bi/state/bi_portal_session_secret.local
 Restart=always

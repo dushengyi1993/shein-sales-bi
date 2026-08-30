@@ -43,6 +43,21 @@ import {
   sha256Utf8,
   DESCRIPTION_PUBLISH_LANGUAGES,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {
+  appendDurableJournalRecord,
+  assertInventoryWriteAllowed,
+  discoverInventoryJournalFiles,
+  INVENTORY_MAINTENANCE_WRITE_PROFILE,
+  inventoryRecoveryScopeKey,
+  readInventoryIntentJournals,
+  submitDurableInventoryWriteOnce,
+} from '../lib/durable_inventory_write.mjs';
+import {withInventoryCutoverLock} from '../lib/inventory_write_cutover.mjs';
+import {
+  computeInventoryOverwriteQuantity,
+  INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+  stableInventoryHash,
+} from '../lib/inventory_replenishment_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_PRODUCT_CACHE_DIR = resolveOpenApiProductCacheDir({rootDir: ROOT});
@@ -50,6 +65,7 @@ const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 
 const DEFAULT_TASK_FILE = path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'logs', 'link-ops-maintenance-openapi-executor');
 const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
+const INVENTORY_CHANGE_REASON = 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard';
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
 
@@ -103,7 +119,7 @@ const CERTIFICATE_ALLOWED_ENDPOINTS = new Set([
 const MAINTENANCE_INTENTS = new Set(Object.keys(ACTIONS));
 
 function parseArgs(argv) {
-  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', claimNonce: '', dir: '', productCacheDir: DEFAULT_PRODUCT_CACHE_DIR, quiet: false};
+  const args = {config: DEFAULT_CONFIG, taskFile: DEFAULT_TASK_FILE, taskId: '', taskJson: '', mode: 'dry-run', outDir: DEFAULT_OUT_DIR, store: '', confirm: '', claimNonce: '', dir: '', productCacheDir: DEFAULT_PRODUCT_CACHE_DIR, quiet: false, reconcilePendingOnly: false};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--config') args.config = path.resolve(argv[++i]);
@@ -117,6 +133,7 @@ function parseArgs(argv) {
     else if (a === '--mode') args.mode = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--dry-run') args.mode = 'dry-run';
     else if (a === '--execute') args.mode = 'execute';
+    else if (a === '--reconcile-pending-only') { args.mode = 'reconcile-pending-only'; args.reconcilePendingOnly = true; }
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
     else if (a === '--claim-nonce') args.claimNonce = String(argv[++i] || '').trim();
     else if (a === '--quiet') args.quiet = true;
@@ -125,7 +142,7 @@ function parseArgs(argv) {
       process.exit(0);
     } else throw new Error(`Unknown argument: ${a}`);
   }
-  if (!['dry-run', 'execute'].includes(args.mode)) throw new Error(`Invalid --mode: ${args.mode}`);
+  if (!['dry-run', 'execute', 'reconcile-pending-only'].includes(args.mode)) throw new Error(`Invalid --mode: ${args.mode}`);
   return args;
 }
 function asArray(v){ if(v===undefined||v===null) return []; return Array.isArray(v)?v:[v]; }
@@ -224,6 +241,7 @@ function ensureSquareImageSortGlobal(payload){
 }
 async function readJson(file){ return JSON.parse(await fs.readFile(file,'utf8')); }
 async function writeJson(file,data){ await fs.mkdir(path.dirname(file),{recursive:true}); await fs.writeFile(file, `${JSON.stringify(data,null,2)}\n`, 'utf8'); }
+function safeFilePart(value){ return String(value||'').trim().replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,120) || 'unknown'; }
 function normalizeTaskStore(data){ if(Array.isArray(data?.tasks)) return data; if(data?.id) return {version:1,tasks:[data]}; throw new Error('Task JSON must be a task object or {tasks:[...]}'); }
 async function loadTask(args){ const source=args.taskJson||args.taskFile; const store=normalizeTaskStore(await readJson(source)); const task=args.taskId?store.tasks.find(t=>String(t?.id||'')===args.taskId):(store.tasks.length===1?store.tasks[0]:null); if(!task) throw new Error(`Task not found: ${args.taskId||'(missing --task-id)'}`); return {source, task, taskStore: store, executionContext: store.executionContext || null}; }
 function taskStores(task){ return unique([...(task?.targets?.stores||[]), ...(task?.targets?.targetStores||[]), ...(task?.stores||[]), ...(task?.targetStores||[])]).map(normalizeStoreKey).filter(Boolean); }
@@ -576,7 +594,7 @@ function inspectImageEditPayloads(payloads, blockers, warnings){
     payloads: inspections,
   };
 }
-async function loadClient(args){ const config=await readJson(args.config); const stores=Array.isArray(config.stores)?config.stores:Object.entries(config.stores||{}).map(([storeKey,v])=>({storeKey,...v})); const store=stores.find(s=>normalizeStoreKey(s?.storeKey||s?.key||s?.store)===normalizeStoreKey(args.store)); if(!store?.openKeyId||!store?.secretKey) throw new Error(`未在 ${rel(args.config)} 找到 ${args.store} 的 openKeyId/secretKey`); return {config, store, client:new SheinOpenApiClient({baseUrl:config.apiBaseUrls?.prodSemiManaged||SHEIN_OPENAPI_BASE_URLS.prodSemiManaged, openKeyId:store.openKeyId, secretKey:store.secretKey, inventoryStoreKey:normalizeStoreKey(args.store)})}; }
+async function loadClient(args){ const config=await readJson(args.config); const stores=Array.isArray(config.stores)?config.stores:Object.entries(config.stores||{}).map(([storeKey,v])=>({storeKey,...v})); const store=stores.find(s=>normalizeStoreKey(s?.storeKey||s?.key||s?.store)===normalizeStoreKey(args.store)); if(!store?.openKeyId||!store?.secretKey) throw new Error(`未在 ${rel(args.config)} 找到 ${args.store} 的 openKeyId/secretKey`); return {config, store, client:new SheinOpenApiClient({baseUrl:config.apiBaseUrls?.prodSemiManaged||SHEIN_OPENAPI_BASE_URLS.prodSemiManaged, openKeyId:store.openKeyId, secretKey:store.secretKey, inventoryStoreKey:normalizeStoreKey(args.store), inventoryJournalFile:args.inventoryJournalFile||''})}; }
 function compactCallResult(name,pathText,method,response){ const info=response.data?.info; return {name,path:pathText,method,httpStatus:response.status??response.httpStatus??null,code:response.data?.code??response.code??null,msg:safeString(response.data?.msg??response.msg??'',300),traceId:response.data?.traceId??response.traceId??null,infoSuccess:info?.success??null,infoVersion:info?.version??null,preValidResult:info?.pre_valid_result??null,skcList:info?.skc_list??null}; }
 async function callOpenApi(client, {name, path:pathText, method='POST', body, query}){ const response=await client.request(pathText,{method,body,query,headers:{language:'en'}}); return {...compactCallResult(name,pathText,method,response), data:response.data}; }
 function summarizeSiteList(data){ const rows=[]; const q=[data]; const seen=new Set(); while(q.length&&rows.length<300){ const cur=q.shift(); if(!cur||typeof cur!=='object'||seen.has(cur)) continue; seen.add(cur); if(Array.isArray(cur)){ q.push(...cur); continue; } const site=safeString(cur.siteAbbr||cur.site_abbr||cur.site||cur.subSite||cur.sub_site||cur.siteCode||cur.site_code,80); const currency=safeString(cur.currency||cur.currencyCode||cur.currency_code,20).toUpperCase(); if(site) rows.push({siteAbbr:site,currency}); q.push(...Object.values(cur)); } return rows; }
@@ -1089,7 +1107,7 @@ async function buildPayloads({task,intents,matches,siteInfo,blockers,warnings,im
       out.push({operation:intent, endpoint, body:{skc_site_info_list:active.map(m=>({shelf_state:2, site_list:[siteInfo.site], skc_name:m.skc}))}, targetLinks:active});
     } else if(intent==='update_inventory'){
       const qty=numberForTask(intent,task,command); if(!Number.isFinite(qty)||qty<0) blockers.push('改库存任务缺少目标库存数量。请提供结构化 inventory 参数。');
-      const items=matches.flatMap(m=>m.skuCodes.map(sku=>({idempotencyKey:`biops-${task.id||nowId()}-${m.storeKey}-${sku}-${Math.max(0,Math.trunc(qty||0))}`.slice(0,120), skuCode:sku, invType:'VI', ...(inventoryWarehouseCode?{warehouseCode:inventoryWarehouseCode}:{}), changeType:'OVERWRITE', changeQuantity:Math.max(0,Math.trunc(qty||0)), changeReason:'BI Ops guarded inventory update'})));
+      const items=matches.flatMap(m=>m.skuCodes.map(sku=>({skuCode:sku, invType:'VI', ...(inventoryWarehouseCode?{warehouseCode:inventoryWarehouseCode}:{}), changeType:'OVERWRITE', changeQuantity:Math.max(0,Math.trunc(qty||0)), changeReason:INVENTORY_CHANGE_REASON})));
       if(!items.length) blockers.push('改库存任务未解析到 SKU code，无法构建库存更新 payload。');
       out.push({operation:intent, endpoint, body:{updateSkuInventoryQuantityRequests:items}, targetLinks:matches});
     } else if(intent==='update_supply_price'){
@@ -1303,6 +1321,181 @@ function submissionPlanDescriptor(payload,index){
   const payloadBodyHash=sha256Stable(payload?.body||{});
   const submissionPlanId=sha256Stable({index,operation,endpoint,payloadBodyHash});
   return {index,operation,endpoint,payloadBodyHash,submissionPlanId};
+}
+function inventoryJournalFileForMaintenanceTask(args,{task,store}){
+  const journalDir=String(process.env.SHEIN_BI_MAINTENANCE_INVENTORY_JOURNAL_DIR||'').trim()||args.outDir;
+  return path.join(journalDir, 'maintenance-inventory-' + safeFilePart(store) + '-' + safeFilePart(task?.id||'task') + '.json.journal.ndjson');
+}
+function todayShanghai(){ return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date()); }
+function inventoryScopeForPayload({store,match,requestRow}){
+  return {storeKey:normalizeStoreKey(store||match?.storeKey),skc:String(match?.skc||''),skuCode:String(requestRow?.skuCode||''),warehouseCode:String(requestRow?.warehouseCode||''),invType:String(requestRow?.invType||'VI').trim().toUpperCase()};
+}
+function buildMaintenanceInventoryIntent({task,store,match,requestRow,planHash,runDate,authorizationId,before}){
+  const target=Number(requestRow?.changeQuantity);
+  const scope=inventoryScopeForPayload({store,match,requestRow});
+  const policyVersion=INVENTORY_MAINTENANCE_WRITE_PROFILE;
+  const logicalActionKey=stableInventoryHash({runDate,store:scope.storeKey,skc:scope.skc,sku:scope.skuCode,target,actionType:'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',policyVersion,authorizationId});
+  const request={pathname:'/open-api/stock/change-inventory/v2',method:'POST',body:{updateSkuInventoryQuantityRequests:[{idempotencyKey:'bi-inv-'+logicalActionKey.slice(0,42),skuCode:scope.skuCode,invType:'VI',...(scope.warehouseCode?{warehouseCode:scope.warehouseCode}:{}),changeType:'OVERWRITE',changeQuantity:computeInventoryOverwriteQuantity(target,before),changeReason:INVENTORY_CHANGE_REASON}]},headers:{language:'en'}};
+  return {kind:'intent',intentId:crypto.randomUUID(),logicalActionKey,recoveryScopeKey:inventoryRecoveryScopeKey(scope),planHash,runDate,storeKey:scope.storeKey,skc:scope.skc,skuCode:scope.skuCode,warehouseCode:scope.warehouseCode,invType:'VI',targetUsableInventory:target,policyVersion,inventoryWriteProfile:INVENTORY_MAINTENANCE_WRITE_PROFILE,overwriteComputationVersion:INVENTORY_OVERWRITE_COMPUTATION_VERSION,authorizationId,idempotencyKey:request.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,requestPayloadHash:stableInventoryHash(request),request,before:{...before,stockRowMissing:before?.stockRowMissing===true},maintenanceTaskId:String(task?.id||''),maintenancePayloadHash:planHash,recordedAt:new Date().toISOString()};
+}
+function assertSingleInventoryTarget({matches,payloads}){
+  const inventoryPayloads=payloads.filter(payload=>payload.operation==='update_inventory');
+  const rows=inventoryPayloads.flatMap(payload=>asArray(payload.body?.updateSkuInventoryQuantityRequests).map(row=>({payload,row})));
+  const skcs=unique(matches.map(match=>String(match?.skc||'')).filter(Boolean));
+  const skus=unique(rows.map(({row})=>String(row?.skuCode||'')).filter(Boolean));
+  const warehouses=unique(rows.map(({row})=>String(row?.warehouseCode||'')).filter(Boolean));
+  if(inventoryPayloads.length!==1||rows.length!==1||matches.length!==1||skcs.length!==1||skus.length!==1||warehouses.length!==1){
+    const error=new Error('INVENTORY_MAINTENANCE_TARGET_NOT_UNIQUE: update_inventory requires exactly one link/SKC/SKU/warehouse before durable intent');
+    error.code='INVENTORY_MAINTENANCE_TARGET_NOT_UNIQUE';
+    throw error;
+  }
+  return {payload:rows[0].payload,row:rows[0].row,match:matches[0],warehouseCode:warehouses[0]};
+}
+async function readMaintenanceInventoryBundle(journalFile){
+  const dirs=String(process.env.SHEIN_BI_INVENTORY_JOURNAL_DIRS||'').split(path.delimiter).map(v=>v.trim()).filter(Boolean);
+  const files=await discoverInventoryJournalFiles(journalFile,{includeAll:true,additionalDirectories:dirs});
+  return readInventoryIntentJournals(files,{allowMultiplePendingByScope:true});
+}
+function findInventoryLifecycleDuplicate(bundle,intent){
+  for(const candidate of bundle?.intents?.values?.()||[]){
+    const sameLogical=String(candidate?.logicalActionKey||'')===intent.logicalActionKey;
+    const sameIdempotency=String(candidate?.idempotencyKey||'')===intent.idempotencyKey;
+    if(!sameLogical&&!sameIdempotency) continue;
+    const samePayload=String(candidate?.requestPayloadHash||'')===intent.requestPayloadHash;
+    return {candidate,samePayload};
+  }
+  return null;
+}
+function exactInventoryRow(readback,skuCode){
+  if(readback?.ok!==true) return null;
+  const rows=asArray(readback?.rows).filter(row=>String(row?.skuCode||'')===String(skuCode||'')&&row?.inventoryFieldsValid===true);
+  return rows.length===1?rows[0]:null;
+}
+function inventoryReadbackError(readback,prefix='INVENTORY_FRESH_STOCK_ROW_REQUIRED'){
+  const details={
+    status:readback?.status||'not_run',
+    missingSkuCodes:readback?.missingSkuCodes||[],
+    ambiguousSkuCodes:readback?.ambiguousSkuCodes||[],
+    wrongWarehouseSkuCodes:readback?.wrongWarehouseSkuCodes||[],
+    invalidInventorySkuCodes:readback?.invalidInventorySkuCodes||[],
+    mismatchedSkuCodes:readback?.mismatchedSkuCodes||[],
+  };
+  const error=new Error(prefix+':'+JSON.stringify(details));
+  error.code=prefix;
+  return error;
+}
+async function prepareMaintenanceInventorySubmission({
+  client,task,store,match,requestRow,payloadHash,authorizationId,journalFile,calls,expectedCurrentInventory,
+}){
+  const requestedScope=inventoryScopeForPayload({store,match,requestRow});
+  const initialBundle=await readMaintenanceInventoryBundle(journalFile);
+  const priorSameTask=[...(initialBundle?.intents?.values?.()||[])].find(candidate=>
+    String(candidate?.inventoryWriteProfile||'')===INVENTORY_MAINTENANCE_WRITE_PROFILE
+    &&String(candidate?.maintenanceTaskId||'')===String(task?.id||'')
+    &&inventoryRecoveryScopeKey(candidate)===inventoryRecoveryScopeKey(requestedScope));
+  if(priorSameTask){
+    const samePayload=String(priorSameTask?.maintenancePayloadHash||'')===String(payloadHash||'');
+    const code=samePayload?'INVENTORY_WRITE_ALREADY_RECORDED':'INVENTORY_WRITE_HASH_OR_SCOPE_DRIFT';
+    const error=new Error(code+':intentId='+(priorSameTask?.intentId||'')+':logicalActionKey='+(priorSameTask?.logicalActionKey||''));
+    error.code=code;
+    throw error;
+  }
+  const live=await readbackStock(
+    client,
+    [{...match,skuCodes:[String(requestRow?.skuCode||'')]}],
+    calls,
+    Number.isInteger(expectedCurrentInventory)?expectedCurrentInventory:null,
+    String(requestRow?.warehouseCode||''),
+  );
+  const before=exactInventoryRow(live,requestRow?.skuCode);
+  if(!before) throw inventoryReadbackError(live);
+  const intent=buildMaintenanceInventoryIntent({
+    task,store,match,requestRow,planHash:payloadHash,runDate:todayShanghai(),authorizationId,before,
+  });
+  const intentRow=intent.request.body.updateSkuInventoryQuantityRequests[0];
+  const scope=inventoryScopeForPayload({store,match,requestRow:intentRow});
+  const bundle=await readMaintenanceInventoryBundle(journalFile);
+  const duplicate=findInventoryLifecycleDuplicate(bundle,intent);
+  if(duplicate){
+    const code=duplicate.samePayload?'INVENTORY_WRITE_ALREADY_RECORDED':'INVENTORY_WRITE_HASH_OR_SCOPE_DRIFT';
+    const error=new Error(code+':intentId='+(duplicate.candidate?.intentId||'')+':logicalActionKey='+(duplicate.candidate?.logicalActionKey||''));
+    error.code=code;
+    throw error;
+  }
+  assertInventoryWriteAllowed(bundle,{
+    scope,
+    idempotencyKey:intent.idempotencyKey,
+    requestPayloadHash:intent.requestPayloadHash,
+    intentId:intent.intentId,
+    logicalActionKey:intent.logicalActionKey,
+  });
+  await client.assertInventoryFence(intent.request.pathname,intent.request.method,intent.request.body,intent.request.headers,{
+    ...scope,
+    requestPayloadHash:intent.requestPayloadHash,
+    intentId:intent.intentId,
+    logicalActionKey:intent.logicalActionKey,
+  });
+  return {
+    intent,
+    inventoryScope:scope,
+    fenceBundle:bundle,
+    inventoryPreflight:live,
+    assertInventoryAdmission:()=>client.assertInventoryFence(intent.request.pathname,intent.request.method,intent.request.body,intent.request.headers,{
+      ...scope,
+      requestPayloadHash:intent.requestPayloadHash,
+      intentId:intent.intentId,
+      logicalActionKey:intent.logicalActionKey,
+    }),
+  };
+}
+async function reconcilePendingMaintenanceInventory({client,task,store,matches,payloads,journalFile,calls}){
+  const target=assertSingleInventoryTarget({matches,payloads});
+  const requestedScope=inventoryScopeForPayload({store,match:target.match,requestRow:target.row});
+  return withInventoryCutoverLock(async()=>{
+    const bundle=await readMaintenanceInventoryBundle(journalFile);
+    const pending=[...(bundle?.pending?.values?.()||[])].filter(candidate=>
+      String(candidate?.inventoryWriteProfile||'')===INVENTORY_MAINTENANCE_WRITE_PROFILE
+      &&String(candidate?.maintenanceTaskId||'')===String(task?.id||'')
+      &&inventoryRecoveryScopeKey(candidate)===inventoryRecoveryScopeKey(requestedScope));
+    if(pending.length!==1){
+      const error=new Error('INVENTORY_RECONCILE_PENDING_NOT_UNIQUE:count='+pending.length);
+      error.code='INVENTORY_RECONCILE_PENDING_NOT_UNIQUE';
+      throw error;
+    }
+    const intent=pending[0];
+    const readback=await readbackStock(
+      client,
+      [{...target.match,skuCodes:[intent.skuCode]}],
+      calls,
+      Number(intent.targetUsableInventory),
+      intent.warehouseCode,
+    );
+    const row=exactInventoryRow(readback,intent.skuCode);
+    if(!row){
+      return {state:'submitted_but_readback_pending',intent,readback,postAttempted:false};
+    }
+    const refreshed=await readMaintenanceInventoryBundle(journalFile);
+    const stillPending=[...(refreshed?.pending?.values?.()||[])].find(candidate=>
+      String(candidate?.intentId||'')===String(intent.intentId||'')
+      &&String(candidate?.logicalActionKey||'')===String(intent.logicalActionKey||''));
+    if(!stillPending){
+      const error=new Error('INVENTORY_RECONCILE_PENDING_DRIFT:intent no longer pending');
+      error.code='INVENTORY_RECONCILE_PENDING_DRIFT';
+      throw error;
+    }
+    await appendDurableJournalRecord(String(stillPending?.journalFile||journalFile),{
+      kind:'write_outcome',
+      intentId:intent.intentId,
+      logicalActionKey:intent.logicalActionKey,
+      disposition:'readback_matched',
+      recordedAt:new Date().toISOString(),
+    });
+    return {state:'readback_matched',intent,readback,postAttempted:false};
+  });
+}
+function preNetworkInventoryBlock(error,{operation='update_inventory',submissionPlan=null}={}){
+  const message=safeString(error?.message||error,600);
+  return {name:operation,operation,path:'/open-api/stock/change-inventory/v2',method:'POST',state:'blocked',writeAttempted:false,sheinWriteAttempted:false,code:error?.code||'PRE_NETWORK_BLOCKED',msg:message,preNetwork:true,...(submissionPlan?{submissionPlanId:submissionPlan.submissionPlanId,submissionPlanIndex:submissionPlan.index,submissionPlanEndpoint:submissionPlan.endpoint,submissionPlanPayloadHash:submissionPlan.payloadBodyHash}:{})};
 }
 function operationSubmissionEvidence(intent,payloads,submitResults){
   const aliases=payloadAliasesForIntent(intent);
@@ -1569,24 +1762,71 @@ function readbackProductPriceUnconfirmed(submission){
     evidence:{submission,identityOnlyAccepted:false,reason:'No repository-proven operation-specific authoritative read field is approved for update_product_price; product/query identity is not mutation proof.'},
   };
 }
-async function readbackStock(client, matches, calls, expectedInventory){
+function stockRowWarehouseCode(row,...parents){
+  return safeString(row?.warehouseCode||row?.warehouse_code||row?.warehouseNo||row?.warehouse_no||row?.warehouse||parents.find(Boolean)||'',120).toUpperCase();
+}
+function inventoryInteger(value){
+  if(value===undefined||value===null||value==='') return null;
+  const n=Number(value);
+  return Number.isSafeInteger(n)&&n>=0?n:null;
+}
+function normalizedInventoryFields({total,usable,locked,tempLocked}){
+  const fields={
+    totalInventoryQuantity:inventoryInteger(total),
+    totalUsableInventory:inventoryInteger(usable),
+    totalLockedQuantity:inventoryInteger(locked),
+    temporaryInventoryQuantity:inventoryInteger(tempLocked),
+  };
+  return {...fields,inventoryFieldsValid:Object.values(fields).every(Number.isSafeInteger)};
+}
+async function readbackStock(client, matches, calls, expectedInventory, expectedWarehouseCode=''){
   const skuCodes=unique(matches.flatMap(m=>m.skuCodes));
   if(!skuCodes.length) return {ok:false,status:'missing_sku_codes',matchedRows:[],calls};
   const response=await client.request('/open-api/stock/stock-query',{method:'POST',body:{skuCodeList:skuCodes,warehouseType:'2',invType:'VI'},headers:{language:'en'}});
   calls.push(compactCallResult('stock-query-readback','/open-api/stock/stock-query','POST',response));
   if(String(response.data?.code)!=='0') return {ok:false,status:'stock_query_failed',skuCodes:skuCodes.slice(0,100),matchedRows:[],calls};
-  const rows=asArray(response.data?.info)
-    .flatMap(group=>asArray(group?.goodsInventory))
-    .flatMap(group=>asArray(group?.skuList));
-  const missingSkuCodes=skuCodes.filter(sku=>!rows.some(row=>String(row?.skuCode||'')===sku));
+  const expectedWarehouse=safeString(expectedWarehouseCode,120).toUpperCase();
+  const rows=asArray(response.data?.info).flatMap(info=>asArray(info?.goodsInventory).flatMap(group=>{
+    const groupWarehouse=stockRowWarehouseCode(group,info?.warehouseCode,info?.warehouse_code);
+    return asArray(group?.skuList).flatMap(row=>{
+      const nested=asArray(row?.warehouseInventoryList||row?.warehouse_inventory_list);
+      if(nested.length){
+        return nested.map(warehouseRow=>({
+          ...row,
+          warehouseCode: stockRowWarehouseCode(warehouseRow,groupWarehouse),
+          ...normalizedInventoryFields({
+            total:warehouseRow?.inventoryQuantity??warehouseRow?.inventory_quantity??warehouseRow?.totalInventoryQuantity??warehouseRow?.total_inventory_quantity,
+            usable:warehouseRow?.usableInventory??warehouseRow?.usable_inventory??warehouseRow?.totalUsableInventory??warehouseRow?.total_usable_inventory,
+            locked:warehouseRow?.lockedQuantity??warehouseRow?.locked_quantity??warehouseRow?.totalLockedQuantity??warehouseRow?.total_locked_quantity,
+            tempLocked:warehouseRow?.tempLockQuantity??warehouseRow?.temp_lock_quantity??warehouseRow?.totalTempLockQuantity??warehouseRow?.total_temp_lock_quantity??warehouseRow?.temporaryInventoryQuantity??warehouseRow?.temporary_inventory_quantity,
+          }),
+        }));
+      }
+      return [{
+        ...row,
+        warehouseCode: stockRowWarehouseCode(row,groupWarehouse),
+        ...normalizedInventoryFields({
+          total:row?.totalInventoryQuantity??row?.total_inventory_quantity??row?.inventoryQuantity??row?.inventory_quantity,
+          usable:row?.totalUsableInventory??row?.total_usable_inventory??row?.usableInventory??row?.usable_inventory,
+          locked:row?.totalLockedQuantity??row?.total_locked_quantity??row?.lockedInventory??row?.locked_inventory,
+          tempLocked:row?.totalTempLockQuantity??row?.total_temp_lock_quantity??row?.temporaryInventoryQuantity??row?.temporary_inventory_quantity??row?.temporaryLockedQuantity??row?.temporary_locked_quantity,
+        }),
+      }];
+    });
+  }));
+  const rowsForScope=expectedWarehouse?rows.filter(row=>row.warehouseCode===expectedWarehouse):rows;
+  const missingSkuCodes=skuCodes.filter(sku=>!rowsForScope.some(row=>String(row?.skuCode||'')===sku));
+  const ambiguousSkuCodes=skuCodes.filter(sku=>rowsForScope.filter(row=>String(row?.skuCode||'')===sku).length>1);
+  const wrongWarehouseSkuCodes=expectedWarehouse?skuCodes.filter(sku=>rows.some(row=>String(row?.skuCode||'')===sku)&&!rowsForScope.some(row=>String(row?.skuCode||'')===sku)):[];
+  const invalidInventorySkuCodes=skuCodes.filter(sku=>rowsForScope.some(row=>String(row?.skuCode||'')===sku&&row?.inventoryFieldsValid!==true));
   const mismatchedSkuCodes=Number.isFinite(expectedInventory)
     ? skuCodes.filter(sku=>{
-      const row=rows.find(item=>String(item?.skuCode||'')===sku);
+      const row=rowsForScope.find(item=>String(item?.skuCode||'')===sku);
       return row && Number(row.totalUsableInventory)!==Number(expectedInventory);
     })
     : [];
-  const ok=missingSkuCodes.length===0&&mismatchedSkuCodes.length===0;
-  return {ok,status:ok?'matched_stock_query_exact':'stock_query_readback_mismatch',skuCodes:skuCodes.slice(0,100),missingSkuCodes,mismatchedSkuCodes,expectedInventory:Number.isFinite(expectedInventory)?expectedInventory:null,matchedRows:ok?matches.slice(0,20):[],calls};
+  const ok=missingSkuCodes.length===0&&ambiguousSkuCodes.length===0&&wrongWarehouseSkuCodes.length===0&&invalidInventorySkuCodes.length===0&&mismatchedSkuCodes.length===0;
+  return {ok,status:ok?'matched_stock_query_exact':'stock_query_readback_mismatch',skuCodes:skuCodes.slice(0,100),missingSkuCodes,ambiguousSkuCodes,wrongWarehouseSkuCodes,invalidInventorySkuCodes,mismatchedSkuCodes,expectedWarehouseCode:expectedWarehouse||null,expectedInventory:Number.isFinite(expectedInventory)?expectedInventory:null,matchedRows:ok?matches.slice(0,20):[],rows:rowsForScope,calls};
 }
 async function readbackForIntents(client, intents, matches, calls, expectedInventory, task, descriptionBeforePreflight = null, submittedDescriptionVersion = '', payloads = [], submitResults = []){
   const groups=[];
@@ -1599,7 +1839,10 @@ async function readbackForIntents(client, intents, matches, calls, expectedInven
     if(intent==='activate_link'||intent==='retire_link') groups.push(readbackShelfOperation(intent,payloads,matches,spuInfoCache,submission));
     else if(intent==='update_inventory'){
       if(!submission.fullySubmitted) groups.push(unsubmittedReadbackGroup(intent,submission));
-      else groups.push({operation:intent,...await readbackStock(client,matches,calls,expectedInventory),submitted:true,evidence:{submission,sourceEndpoint:'/open-api/stock/stock-query',expectedInventory:Number.isFinite(expectedInventory)?expectedInventory:null}});
+      else {
+        const expectedWarehouseCode=safeString(submitResults.find(row=>row?.operation==='update_inventory')?.inventoryIntent?.warehouseCode||'',120);
+        groups.push({operation:intent,...await readbackStock(client,matches,calls,expectedInventory,expectedWarehouseCode),submitted:true,evidence:{submission,sourceEndpoint:'/open-api/stock/stock-query',expectedInventory:Number.isFinite(expectedInventory)?expectedInventory:null,expectedWarehouseCode:expectedWarehouseCode||null}});
+      }
     }
     else if(intent==='update_supply_price') groups.push(readbackSupplyPriceOperation(payloads,spuInfoCache,submission));
     else if(intent==='update_product_price') groups.push(submission.fullySubmitted?readbackProductPriceUnconfirmed(submission):unsubmittedReadbackGroup(intent,submission));
@@ -1622,7 +1865,7 @@ async function readbackForIntents(client, intents, matches, calls, expectedInven
   return {ok,status:groups.map(g=>g.status).join('+'),matchedRows,groups,calls};
 }
 async function main(){
-  const args=parseArgs(process.argv.slice(2)); const startedAt=new Date().toISOString(); const runId=`lmo_${nowId()}_${crypto.randomBytes(4).toString('hex')}`; const {task, executionContext}=await loadTask(args); const store=args.store||taskStores(task)[0]; if(!store) throw new Error('Missing --store / task store'); const intents=taskIntents(task); const blockers=[]; const warnings=[]; const calls=[];
+  const args=parseArgs(process.argv.slice(2)); const startedAt=new Date().toISOString(); const runId=`lmo_${nowId()}_${crypto.randomBytes(4).toString('hex')}`; const {task, executionContext}=await loadTask(args); const store=args.store||taskStores(task)[0]; if(!store) throw new Error('Missing --store / task store'); const inventoryJournalFile=inventoryJournalFileForMaintenanceTask(args,{task,store}); args.inventoryJournalFile=inventoryJournalFile; const intents=taskIntents(task); const blockers=[]; const warnings=[]; const calls=[];
   if(!intents.length) blockers.push('任务不包含维护写动作。');
   if(intents.includes('update_description')&&(intents.length!==1||intents[0]!=='update_description')){
     blockers.push('历史描述回填任务必须单独 update_description，不能混入其他维护动作。');
@@ -1749,6 +1992,51 @@ async function main(){
   const submitPlan=projectSubmitPlanForPersistence(submitPlanFull);
   const payloadHash=payloads.some(p=>Object.keys(p.body||{}).length)?sha256Stable(submitPlanFull):'';
   let writeClaimEvidence=null;
+  let submitResults=[]; let actualWriteSubmitted=false; let writeAttempted=false; let recoveryRequired=false; let correctionReadback=null; let correctionPublishResult=null;
+  if(args.reconcilePendingOnly){
+    if(intents.length!==1||intents[0]!=='update_inventory') blockers.push('--reconcile-pending-only 仅允许单一 update_inventory 任务。');
+    if(blockers.length===0){
+      try{
+        const reconciliation=await reconcilePendingMaintenanceInventory({
+          client,task,store,matches:resolved.matches,payloads,journalFile:inventoryJournalFile,calls,
+        });
+        const reconciled=reconciliation.state==='readback_matched';
+        const output={
+          ok:reconciled,
+          runId,
+          mode:'reconcile-pending-only',
+          adapterKind:'link_maintenance_openapi_executor',
+          state:reconciliation.state,
+          outcome:reconciled?'completed':'unconfirmed',
+          committed:false,
+          partial:!reconciled,
+          startedAt,
+          endedAt:new Date().toISOString(),
+          storeKey:store,
+          task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)},
+          payload:{found:Boolean(payloadHash),payloadHash},
+          adapterEvidence:{realSubmit:false,writeAttempted:false,sheinWriteAttempted:false,recoveryRequired:!reconciled,postAttempted:false,inventoryIntent:{intentId:reconciliation.intent?.intentId||'',logicalActionKey:reconciliation.intent?.logicalActionKey||'',journalFile:rel(inventoryJournalFile)},calls},
+          publishResult:null,
+          readback:reconciliation.readback,
+          blockers:reconciled?[]:['库存 fresh readback 尚未匹配旧 pending intent 的目标；保持 pending，未发送库存 POST。'],
+          warnings:[],
+          safety:{canSilentWrite:false,reconcileOnly:true,inventoryPostForbidden:true},
+        };
+        const outPath=path.join(args.outDir,`${runId}.local.json`);
+        await writeJson(outPath,output);
+        output.savedTo=rel(outPath);
+        if(!args.quiet) console.log(JSON.stringify(output,null,2));
+        return;
+      }catch(error){
+        const output={ok:false,runId,mode:'reconcile-pending-only',adapterKind:'link_maintenance_openapi_executor',state:'blocked',outcome:'blocked',committed:false,partial:false,startedAt,endedAt:new Date().toISOString(),storeKey:store,task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)},adapterEvidence:{realSubmit:false,writeAttempted:false,sheinWriteAttempted:false,recoveryRequired:false,postAttempted:false,calls},publishResult:null,readback:{ok:false,status:'reconcile_blocked',calls:[]},blockers:[safeString(error?.message||error,800)],warnings:[],safety:{canSilentWrite:false,reconcileOnly:true,inventoryPostForbidden:true}};
+        const outPath=path.join(args.outDir,`${runId}.local.json`);
+        await writeJson(outPath,output);
+        output.savedTo=rel(outPath);
+        if(!args.quiet) console.log(JSON.stringify(output,null,2));
+        return;
+      }
+    }
+  }
   if(args.mode==='execute'){
     const expected=safeString(executionContext?.expectedPayloadHash||executionContext?.request?.expectedPayloadHash||executionContext?.request?.payloadHash||'',120);
     if(args.confirm!==SUBMIT_CONFIRM_TEXT) blockers.push(`真实提交必须显式传入 --confirm ${SUBMIT_CONFIRM_TEXT}`);
@@ -1807,20 +2095,17 @@ async function main(){
     ? Number(taskParameters.expectedCurrentInventory)
     : null;
   let inventoryPreflight=null;
-  if(intents.includes('update_inventory')&&hasExpectedCurrentInventory){
-    if(!Number.isInteger(expectedCurrentInventory)||expectedCurrentInventory<0){
+  if(blockers.length===0&&intents.includes('update_inventory')){
+    if(hasExpectedCurrentInventory&&(!Number.isInteger(expectedCurrentInventory)||expectedCurrentInventory<0)){
       blockers.push(`库存写前漂移门禁的 expectedCurrentInventory 非法：${taskParameters.expectedCurrentInventory}`);
-    }else if(resolved.matches.length){
-      inventoryPreflight=await readbackStock(client,resolved.matches,calls,expectedCurrentInventory);
-      if(!inventoryPreflight.ok){
-        blockers.push(`库存写前漂移门禁不匹配：期望当前可用 ${expectedCurrentInventory}，异常 SKU=${[
-          ...(inventoryPreflight.missingSkuCodes||[]),
-          ...(inventoryPreflight.mismatchedSkuCodes||[]),
-        ].join(',')||'unknown'}`);
+    }else{
+      try{
+        assertSingleInventoryTarget({matches:resolved.matches,payloads});
+      }catch(error){
+        blockers.push(safeString(error?.message||error,500));
       }
     }
   }
-  let submitResults=[]; let actualWriteSubmitted=false; let writeAttempted=false; let recoveryRequired=false; let correctionReadback=null; let correctionPublishResult=null;
   if(args.mode==='execute' && blockers.length===0){
     if (intents.includes('update_description') && descriptionAlreadyMatched) {
       // No-op: live content already equals the target; skipping the write
@@ -1832,6 +2117,84 @@ async function main(){
       for(const p of payloads){
         const submissionPlan=submissionPlanDescriptor(p,payloadIndex);
         payloadIndex+=1;
+        if(p.operation==='update_inventory'){
+          const rows=asArray(p.body?.updateSkuInventoryQuantityRequests);
+          for(const row of rows){
+            const match=p.targetLinks.find(item=>asArray(item?.skuCodes).map(String).includes(String(row?.skuCode||''))) || p.targetLinks[0] || {};
+            const authorizationId=String(executionContext?.writeClaim?.claimId||executionContext?.writeClaim?.claimedBy||task?.id||runId||'link-ops-maintenance');
+            let durablePrepared=null;
+            const guardedWrite=await runSheinWebhookExternalWriteGuarded({
+              writeStores:[store],
+              guard:testWebhookGuard||undefined,
+              write:()=>submitDurableInventoryWriteOnce({
+                journalFile:inventoryJournalFile,
+                intent:null,
+                prepareUnderLock:async()=>{
+                  durablePrepared=await prepareMaintenanceInventorySubmission({
+                    client,task,store,match,requestRow:row,payloadHash,authorizationId,journalFile:inventoryJournalFile,calls,
+                    expectedCurrentInventory:hasExpectedCurrentInventory?expectedCurrentInventory:null,
+                  });
+                  inventoryPreflight=durablePrepared.inventoryPreflight;
+                  return durablePrepared;
+                },
+                readFenceBundle:()=>readMaintenanceInventoryBundle(inventoryJournalFile),
+                submit:prepared=>{
+                  const activeIntent=prepared.intent;
+                  const scope=prepared.inventoryScope;
+                  return client.request(activeIntent.request.pathname,{
+                    method:activeIntent.request.method,
+                    body:activeIntent.request.body,
+                    headers:activeIntent.request.headers,
+                    inventoryScope:{...scope,requestPayloadHash:activeIntent.requestPayloadHash,intentId:activeIntent.intentId,logicalActionKey:activeIntent.logicalActionKey},
+                  });
+                },
+                readback:async(_attempt,prepared)=>{
+                  const activeIntent=prepared.intent;
+                  const scope=prepared.inventoryScope;
+                  const after=await readbackStock(client,[{...match,skuCodes:[activeIntent.skuCode]}],calls,Number(activeIntent.targetUsableInventory),scope.warehouseCode);
+                  const exact=exactInventoryRow(after,activeIntent.skuCode);
+                  return exact?{...exact,ok:true}:{ok:false,totalUsableInventory:null,status:after?.status||'stock_query_readback_mismatch'};
+                },
+                maxReadbackAttempts:1,
+              }),
+            });
+            if(!guardedWrite.ok){
+              blockers.push(...(guardedWrite.gate?.blockers||['平台动态安全闸门阻止真实提交。']));
+              break;
+            }
+            writeAttempted=true;
+            const submission=guardedWrite.value;
+            const response=submission.response;
+            const activeIntent=durablePrepared?.intent;
+            const scope=durablePrepared?.inventoryScope;
+            if(!activeIntent||!scope){
+              const compact=preNetworkInventoryBlock(new Error('INVENTORY_DURABLE_PREPARATION_MISSING'),{operation:p.operation,submissionPlan});
+              calls.push(compact);
+              submitResults.push(compact);
+              blockers.push('update_inventory durable 准备结果缺失，禁止继续。');
+              continue;
+            }
+            p.body=activeIntent.request.body;
+            const durableSubmissionPlan=submissionPlanDescriptor(p,submissionPlan.index);
+            const compact={...compactCallResult(p.operation,p.endpoint,'POST',response),operation:p.operation,state:submission.state,inventoryIntent:{intentId:activeIntent.intentId,logicalActionKey:activeIntent.logicalActionKey,idempotencyKey:activeIntent.idempotencyKey,requestPayloadHash:activeIntent.requestPayloadHash,warehouseCode:scope.warehouseCode,journalFile:rel(inventoryJournalFile)},submissionPlanId:durableSubmissionPlan.submissionPlanId,submissionPlanIndex:durableSubmissionPlan.index,submissionPlanEndpoint:durableSubmissionPlan.endpoint,submissionPlanPayloadHash:durableSubmissionPlan.payloadBodyHash};
+            calls.push(compact);
+            submitResults.push(compact);
+            if(submission.state==='readback_matched'){
+              actualWriteSubmitted=true;
+            }else if(submission.state==='submitted_but_readback_pending'){
+              actualWriteSubmitted=true;
+              recoveryRequired=true;
+              blockers.push('update_inventory 已提交但库存回读未精确匹配 target='+activeIntent.targetUsableInventory+'；durable intent 已保留，禁止重发，等待人工核销。');
+            }else if(submission.state==='rejected'){
+              blockers.push('update_inventory 平台拒绝：'+safeString(response?.data?.msg||response?.data?.code||'未知错误',500));
+            }else{
+              recoveryRequired=true;
+              blockers.push('update_inventory 写请求结果不确定：'+safeString(response?.data?.msg||response?.data?.code||submission.state||'unknown',500)+'；durable intent 已保留，禁止重发。');
+            }
+          }
+          if(blockers.length) break;
+          continue;
+        }
         const guardedWrite=await runSheinWebhookExternalWriteGuarded({
           writeStores:[store],
           guard:testWebhookGuard||undefined,
@@ -1964,7 +2327,7 @@ async function main(){
     : (blockers.length
         ? 'blocked'
         : (descriptionAlreadyMatched ? 'update_description_already_matched' : 'ready_for_submit'));
-  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, alreadyMatched:descriptionAlreadyMatched, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted,writeAttempted,recoveryRequired,correctionStateBefore,correctionReadback,correctionFingerprint:correction?.correctionFingerprint||'',sourceTaskId:correction?.sourceTaskId||'',protectedFieldsHash:correction?.protectedFieldsHash||'',phaseResults:submitResults,...(writeClaimEvidence?{writeClaim:writeClaimEvidence}:{}),canSilentWrite:false,matchedLinksCount:resolved.matches.length,matchedLinks:resolved.matches.slice(0,80),linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'',productCacheFile:productLoad.file?rel(productLoad.file):'',siteInfo,imagePayloadInspection,inventoryPreflight,calls}, publishResult: correction ? correctionPublishResult : (actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null), readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false,executeRequiresConfirm:SUBMIT_CONFIRM_TEXT,dryRunDoesNotCallBusinessWrite:args.mode!=='execute',inventoryPreflightRequired:hasExpectedCurrentInventory,pendingListingCorrection:correction?{sourceTaskRequired:true,exactIdentityRequired:true,approvedBindingRequired:true,phasedRevokeAndRepublish:true,protectedFieldsUntouched:true}:null,note:'维护写真实提交必须由账号权限、动作总闸门、payload hash 和确认文本共同放行；待审核新品纠图还必须撤回成功并精确回读 state=4 后，才可用原完整 payload 重提。'}};
+  const output={ok:blockers.length===0, runId, mode:args.mode, adapterKind:'link_maintenance_openapi_executor', state, startedAt, endedAt:new Date().toISOString(), storeKey:store, alreadyMatched:descriptionAlreadyMatched, task:{id:task.id||'',status:task.status||'',intents,productRefs:taskProductRefs(task)}, payload:{found:Boolean(payloadHash), payloadHash, payloadHashAlgorithm:payloadHash?'sha256-stable-json-v1':'', summary:{operations:payloads.map(p=>p.operation), endpoints:payloads.map(p=>p.endpoint), targetCount:resolved.matches.length, skuCount:unique(resolved.matches.flatMap(m=>m.skuCodes)).length, imagePayloadInspection:{payloadCount:imagePayloadInspection.payloadCount,totalSpuImages:imagePayloadInspection.totalSpuImages,totalSkcImages:imagePayloadInspection.totalSkcImages,totalSiteDetailImages:imagePayloadInspection.totalSiteDetailImages,totalSkuImages:imagePayloadInspection.totalSkuImages,totalDetailImages:imagePayloadInspection.totalDetailImages,totalUrlRefs:imagePayloadInspection.totalUrlRefs,uniqueUrlCount:imagePayloadInspection.uniqueUrlCount}}, submitPlan}, adapterEvidence:{realSubmit:actualWriteSubmitted,writeAttempted,recoveryRequired,correctionStateBefore,correctionReadback,correctionFingerprint:correction?.correctionFingerprint||'',sourceTaskId:correction?.sourceTaskId||'',protectedFieldsHash:correction?.protectedFieldsHash||'',phaseResults:submitResults,...(writeClaimEvidence?{writeClaim:writeClaimEvidence}:{}),canSilentWrite:false,matchedLinksCount:resolved.matches.length,matchedLinks:resolved.matches.slice(0,80),linkSnapshotFile:linkLoad.file?rel(linkLoad.file):'',productCacheFile:productLoad.file?rel(productLoad.file):'',siteInfo,imagePayloadInspection,inventoryPreflight,calls}, publishResult: correction ? correctionPublishResult : (actualWriteSubmitted ? {code:'0', msg:'submitted', traceId:submitResults.map(x=>x.traceId).filter(Boolean).join(',')||null, operations:submitResults} : null), readbackFingerprint:{taskId:task.id||'', intents, targetStores:[store], matchedSkcs:resolved.matches.map(m=>m.skc).filter(Boolean), matchedSkuCodes:unique(resolved.matches.flatMap(m=>m.skuCodes)), payloadHash, readbackStatus:readback.status}, readback, blockers, warnings, safety:{canSilentWrite:false,executeRequiresConfirm:SUBMIT_CONFIRM_TEXT,dryRunDoesNotCallBusinessWrite:args.mode!=='execute',inventoryPreflightRequired:intents.includes('update_inventory'),pendingListingCorrection:correction?{sourceTaskRequired:true,exactIdentityRequired:true,approvedBindingRequired:true,phasedRevokeAndRepublish:true,protectedFieldsUntouched:true}:null,note:'维护写真实提交必须由账号权限、动作总闸门、payload hash 和确认文本共同放行；待审核新品纠图还必须撤回成功并精确回读 state=4 后，才可用原完整 payload 重提。'}};
   output.partial=false;
   output.committed=Boolean(actualWriteSubmitted);
   output.outcome=args.mode!=='execute'
@@ -2033,4 +2396,10 @@ async function main(){
 export const __testHooks=Object.freeze({loadExactSpuInfoReadback,operationSubmissionEvidence,readbackForIntents,submissionPlanDescriptor});
 
 const IS_DIRECT_RUN=Boolean(process.argv[1]&&path.resolve(process.argv[1])===path.resolve(fileURLToPath(import.meta.url)));
-if(IS_DIRECT_RUN) main().catch(err=>{ console.error(err?.stack||err?.message||String(err)); process.exit(1); });
+if(IS_DIRECT_RUN) main().catch(err=>{
+  const durable=err?.inventoryIntentDurable===true;
+  const output={ok:false,adapterKind:'link_maintenance_openapi_executor',state:durable?'suspicious_write_attempted':'blocked',outcome:durable?'unconfirmed':'blocked',committed:false,partial:durable,adapterEvidence:{realSubmit:false,writeAttempted:durable,sheinWriteAttempted:durable,recoveryRequired:durable,preNetwork:!durable},publishResult:null,readback:{ok:false,status:durable?'durable_intent_after_transport_unknown':'pre_network_blocked',calls:[]},blockers:[safeString(err?.message||err,800)],warnings:durable?['durable intent 已写入后发生中断；保持人工核销/禁止重发。']:[]};
+  console.log(JSON.stringify(output,null,2));
+  console.error(err?.stack||err?.message||String(err));
+  process.exit(1);
+});
