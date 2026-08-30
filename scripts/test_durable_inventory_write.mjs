@@ -657,6 +657,52 @@ try {
     ['readback_matched'],
     'code=0 without info.success must write only the exact-match terminal outcome',
   );
+
+  const statusOnlyCodeZeroJournal = path.join(temp, 'status-only-code-zero.journal.ndjson');
+  let statusOnlyCodeZeroReadbacks = 0;
+  const statusOnlyCodeZero = await submitDurableInventoryWriteOnce({
+    journalFile: statusOnlyCodeZeroJournal,
+    intent: {...intent, intentId: 'intent-status-only-code-zero'},
+    assertInventoryAdmission: admitInventoryWrite,
+    submit: async () => ({status: 200, data: {code: '0'}}),
+    readback: async () => {
+      statusOnlyCodeZeroReadbacks += 1;
+      return {ok: true, totalUsableInventory: 100};
+    },
+  });
+  assert.equal(statusOnlyCodeZero.state, 'readback_matched');
+  assert.equal(statusOnlyCodeZeroReadbacks, 1, 'HTTP 2xx code=0 without response.ok must enter authoritative readback');
+  assert.equal((await readPendingInventoryIntents(statusOnlyCodeZeroJournal)).has('intent-status-only-code-zero'), false, 'status-only code=0 exact readback must release durable intent');
+  const statusOnlyCodeZeroEntries = (await fs.readFile(statusOnlyCodeZeroJournal, 'utf8')).trim().split(/\r?\n/).map(JSON.parse);
+  assert.deepEqual(
+    statusOnlyCodeZeroEntries.filter(entry => entry.kind === 'write_outcome').map(entry => entry.disposition),
+    ['readback_matched'],
+    'status-only code=0 must append only exact readback_matched outcome',
+  );
+
+  for (const [label, response] of [
+    ['explicit_ok_false', {ok: false, status: 200, data: {code: '0'}}],
+    ['non_2xx_status', {status: 503, data: {code: '0'}}],
+    ['missing_status', {data: {code: '0'}}],
+  ]) {
+    const failClosedJournal = path.join(temp, 'status-http-fail-closed-' + label + '.journal.ndjson');
+    const failClosedIntentId = 'intent-status-http-fail-closed-' + label;
+    let failClosedReadbacks = 0;
+    const failClosed = await submitDurableInventoryWriteOnce({
+      journalFile: failClosedJournal,
+      intent: {...intent, intentId: failClosedIntentId},
+      assertInventoryAdmission: admitInventoryWrite,
+      submit: async () => response,
+      readback: async () => {
+        failClosedReadbacks += 1;
+        return {ok: true, totalUsableInventory: 100};
+      },
+    });
+    assert.equal(failClosed.state, 'ambiguous_response', label + ' must not be treated as confirmed HTTP success');
+    assert.equal(failClosedReadbacks, 0, label + ' must not enter readback');
+    assert.equal((await readPendingInventoryIntents(failClosedJournal)).has(failClosedIntentId), true, label + ' must retain the durable intent');
+  }
+
   const missingCodeJournal = path.join(temp, 'missing-code.journal.ndjson');
   const missingCode = await submitDurableInventoryWriteOnce({
     journalFile: missingCodeJournal,
@@ -713,6 +759,8 @@ try {
     'code_zero_business_failure_retains_intent_without_terminal_outcome',
     'transport_and_business_conflicts_retain_intent',
     'code_zero_missing_success_readback_matches_and_terminalizes',
+    'status_only_code_zero_readback_matches_and_terminalizes',
+    'http_status_fail_closed_without_readback',
     'missing_code_retains_intent',
     'torn_tail_blocks_future_post',
   ]}, null, 2));

@@ -325,22 +325,50 @@ async function readStock(client, skuCode) {
     .flatMap(group => asArray(group?.goodsInventory))
     .flatMap(group => asArray(group?.skuList))
     .find(item => String(item?.skuCode || '') === skuCode);
+  const parseStockField = (source, field) => {
+    if (!source || typeof source !== 'object' || !Object.prototype.hasOwnProperty.call(source, field)) {
+      return {ok: false, value: null, error: `missing ${field}`};
+    }
+    const raw = source[field];
+    let value;
+    if (typeof raw === 'number') {
+      value = raw;
+    } else if (typeof raw === 'string' && /^(0|[1-9]\d*)$/.test(raw)) {
+      value = Number(raw);
+    } else {
+      return {ok: false, value: null, error: `invalid ${field}`};
+    }
+    if (!Number.isSafeInteger(value) || value < 0) {
+      return {ok: false, value: null, error: `invalid ${field}`};
+    }
+    return {ok: true, value};
+  };
   if (!row) {
     return {
+      ok: false,
       skuCode,
       totalInventoryQuantity: 0,
       totalUsableInventory: 0,
       totalLockedQuantity: 0,
       stockRowMissing: true,
+      error: 'stock row missing',
       warehouseCodes: [],
     };
   }
+  const parsed = {
+    totalInventoryQuantity: parseStockField(row, 'totalInventoryQuantity'),
+    totalUsableInventory: parseStockField(row, 'totalUsableInventory'),
+    totalLockedQuantity: parseStockField(row, 'totalLockedQuantity'),
+  };
+  const invalidField = Object.entries(parsed).find(([, value]) => !value.ok);
   return {
+    ok: !invalidField,
     skuCode,
-    totalInventoryQuantity: Number(row.totalInventoryQuantity || 0),
-    totalUsableInventory: Number(row.totalUsableInventory || 0),
-    totalLockedQuantity: Number(row.totalLockedQuantity || 0),
+    totalInventoryQuantity: parsed.totalInventoryQuantity.value,
+    totalUsableInventory: parsed.totalUsableInventory.value,
+    totalLockedQuantity: parsed.totalLockedQuantity.value,
     stockRowMissing: false,
+    ...(invalidField ? {error: invalidField[1].error} : {}),
     warehouseCodes: asArray(row.warehouseInventoryList)
       .map(item => String(item?.warehouseCode || '').trim())
       .filter(Boolean),
@@ -961,6 +989,16 @@ for (const row of rows) {
       }
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
+      if (before.ok !== true) {
+        await recordResult({
+          ...result,
+          logicalActionKey,
+          state: 'blocked',
+          before,
+          error: `stock-query readback is not an authoritative non-negative integer inventory row: ${before.error || 'invalid stock row'}; inventory POST forbidden`,
+        }, logicalActionKey);
+        continue;
+      }
       let scopeIntents = freshScopeIntents;
       if (scopeIntents.length) {
         if (scopeIntents.length > 1) {

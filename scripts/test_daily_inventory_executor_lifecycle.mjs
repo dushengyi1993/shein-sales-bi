@@ -75,10 +75,11 @@ function runExecutor(args, env = {}) {
   });
 }
 
-function createMockOpenApiServer({onChangeInventory, onQueryStoreInfo}) {
+function createMockOpenApiServer({onChangeInventory, onQueryStoreInfo, onStockQuery} = {}) {
   let currentUsable = 10;
   const counts = {queryStoreInfo: 0, spuInfo: 0, stockQuery: 0, changeInventory: 0};
   let changeHandler = onChangeInventory || (() => {});
+  let stockQueryHandler = onStockQuery || null;
   let destroyNextStockQuery = false;
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
@@ -124,6 +125,17 @@ function createMockOpenApiServer({onChangeInventory, onQueryStoreInfo}) {
         res.socket.destroy();
         return;
       }
+      if (stockQueryHandler) {
+        Promise.resolve(stockQueryHandler({res, json, currentUsable})).catch(error => {
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            json({code: '500', msg: error.message});
+          } else {
+            res.destroy(error);
+          }
+        });
+        return;
+      }
       json({
         code: '0',
         info: [{
@@ -156,6 +168,7 @@ function createMockOpenApiServer({onChangeInventory, onQueryStoreInfo}) {
     counts,
     getChangeInventoryPosts: () => counts.changeInventory,
     setChangeInventoryHandler: handler => { changeHandler = handler; },
+    setStockQueryHandler: handler => { stockQueryHandler = handler; },
     destroyNextStockQuery: () => { destroyNextStockQuery = true; },
   };
 }
@@ -473,13 +486,32 @@ try {
   }
 
   // ---------------------------------------------------------------------
-  // Scenario 3: successful write + readback -> updated_readback_matched, and
-  // a re-run resolves via the recovered intent without a second POST.
+  // Scenario 3: successful write + exact stock readback ->
+  // updated_readback_matched, and re-run/source-drift behavior stays bounded.
   // ---------------------------------------------------------------------
   const dirC = path.join(temp, 'c');
   await fs.mkdir(dirC);
   const {plan: planC} = await buildPlanFixture(dirC, {etProducts: [etRow]});
+  const scenarioCStringReadbacks = [];
   const mockC = createMockOpenApiServer({
+    onStockQuery: ({json, currentUsable}) => {
+      const totalUsableInventory = String(currentUsable);
+      scenarioCStringReadbacks.push(totalUsableInventory);
+      json({
+        code: '0',
+        info: [{
+          goodsInventory: [{
+            skuList: [{
+              skuCode: SKU_CODE,
+              totalInventoryQuantity: String(currentUsable),
+              totalUsableInventory,
+              totalLockedQuantity: '0',
+              warehouseInventoryList: [],
+            }],
+          }],
+        }],
+      });
+    },
     onChangeInventory: ({res, json, setCurrent}) => {
       setCurrent(15);
       json({code: '0', msg: 'success', traceId: 'trace-1', info: {success: true}});
@@ -513,6 +545,7 @@ try {
     const resultC = JSON.parse(await fs.readFile(outC, 'utf8'));
     assert.equal(resultC.results[0].state, 'updated_readback_matched',
       `unexpected scenario-C state, row=${JSON.stringify(resultC.results[0])}`);
+    assert.ok(scenarioCStringReadbacks.includes('15'), 'multi-digit integer string readback "15" must parse and allow readback_matched');
     assert.equal(resultC.results[0].before.totalUsableInventory, 10);
     assert.equal(resultC.results[0].after.totalUsableInventory, 15);
     assert.equal(resultC.results[0].writes.length, 1);
@@ -525,7 +558,7 @@ try {
     assert.equal(
       journalEntriesC.filter(entry => entry.kind === 'write_outcome' && entry.disposition === 'readback_matched').length,
       1,
-      'a matched readback must release the durable intent in the journal',
+      'exact readback must release the durable intent in the journal',
     );
 
     await fs.writeFile(path.join(dirC, 'source-links.json'), JSON.stringify({source: 'links', generation: 2}), 'utf8');
@@ -543,6 +576,7 @@ try {
     assert.equal(resultC2.results[0].logicalActionKey, resultC.results[0].logicalActionKey,
       'reconcile-only terminal result must preserve the original intent logicalActionKey');
     assert.equal(resultC2.results[0].before.totalUsableInventory, 15);
+    assert.equal(resultC2.results[0].after, undefined);
     assert.equal(mockC.getChangeInventoryPosts(), 1, 'reconcile-only terminal recovery must never POST again');
   } finally {
     mockC.server.close();
@@ -1036,8 +1070,8 @@ try {
       runExecutor(concurrentArgs(outConA), envCon),
       runExecutor(concurrentArgs(outConB), envCon),
     ]);
-    assert.equal(runConA.code, 1, `first concurrent executor must retain/read pending, stderr=${runConA.stderr}`);
-    assert.equal(runConB.code, 1, `second concurrent executor must retain/read pending, stderr=${runConB.stderr}`);
+    assert.equal(runConA.code, 1, `first concurrent executor must fail closed, stderr=${runConA.stderr}`);
+    assert.equal(runConB.code, 1, `second concurrent executor must fail closed, stderr=${runConB.stderr}`);
     assert.equal(mockCon.getChangeInventoryPosts(), 1, 'two stale startup snapshots must still produce one inventory POST total');
     const resultsCon = await Promise.all([outConA, outConB].map(async file => JSON.parse(await fs.readFile(file, 'utf8'))));
     assert.deepEqual(
@@ -1054,6 +1088,65 @@ try {
   } finally {
     mockCon.server.close();
     await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
+  // Scenario 5b: invalid stock-query inventory fields fail closed before
+  // building a write request. Blank string and NaN-like strings are not zero.
+  // ---------------------------------------------------------------------
+  for (const [label, stockPatch, expectedError] of [
+    ['blank_usable_inventory', {totalUsableInventory: ''}, /invalid totalUsableInventory/],
+    ['nan_usable_inventory', {totalUsableInventory: 'NaN'}, /invalid totalUsableInventory/],
+  ]) {
+    const dirInvalid = path.join(temp, 'invalid-stock-' + label);
+    await fs.mkdir(dirInvalid);
+    const {plan: planInvalid} = await buildPlanFixture(dirInvalid, {etProducts: [etRow]});
+    const mockInvalid = createMockOpenApiServer({
+      onStockQuery: ({json, currentUsable}) => json({
+        code: '0',
+        info: [{
+          goodsInventory: [{
+            skuList: [{
+              skuCode: SKU_CODE,
+              totalInventoryQuantity: currentUsable,
+              totalUsableInventory: currentUsable,
+              totalLockedQuantity: 0,
+              warehouseInventoryList: [],
+              ...stockPatch,
+            }],
+          }],
+        }],
+      }),
+    });
+    mockInvalid.url = await new Promise(resolve => mockInvalid.server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${mockInvalid.server.address().port}`)));
+    await fs.writeFile(path.join(dirInvalid, 'config.json'), JSON.stringify({
+      stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+      apiBaseUrls: {prodSemiManaged: mockInvalid.url},
+    }), 'utf8');
+    const outInvalid = path.join(dirInvalid, 'result.json');
+    const argsInvalid = [
+      '--plan', path.join(dirInvalid, 'plan.json'),
+      '--policy', path.join(dirInvalid, 'policy.json'),
+      '--config', path.join(dirInvalid, 'config.json'),
+      '--bi-data', path.join(dirInvalid, 'bi.json'),
+      '--links-data', path.join(dirInvalid, 'links.json'),
+      '--out', outInvalid,
+      '--execute',
+      '--execution-mode', 'automatic',
+      '--confirm-hash', planInvalid.payloadHash,
+    ];
+    try {
+      const runInvalid = await runExecutor(argsInvalid, envCon);
+      assert.equal(runInvalid.code, 1, label + ' must exit blocked, stderr=' + runInvalid.stderr);
+      const resultInvalid = JSON.parse(await fs.readFile(outInvalid, 'utf8'));
+      assert.equal(resultInvalid.results[0].state, 'blocked');
+      assert.equal(resultInvalid.results[0].before.ok, false);
+      assert.match(resultInvalid.results[0].error, expectedError);
+      assert.equal(mockInvalid.getChangeInventoryPosts(), 0, label + ' must not POST after invalid stock readback');
+    } finally {
+      mockInvalid.server.close();
+      await cleanupLock();
+    }
   }
 
   // ---------------------------------------------------------------------
