@@ -277,6 +277,54 @@ try {
   await writeMarkers();
   await assert.rejects(validateDailyOperatingRefresh(options), /lacks exact terminal readback/);
 
+  const historicalPendingResult = {
+    ...goodResult,
+    results: [{
+      ...actionable[0],
+      state: 'submitted_but_readback_pending',
+      disposition: 'skipped',
+      historicalPending: true,
+      historicalIntentId: 'historical-intent-1',
+      historicalRunDate: '2026-08-15',
+      historicalTargetUsableInventory: 10,
+      before: {totalUsableInventory: 9},
+    }],
+  };
+  await writeJson(resultFile, historicalPendingResult);
+  await writeMarkers();
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'a strictly identified historical unknown must not fail unrelated daily work');
+  await writeJson(resultFile, {...historicalPendingResult, results: historicalPendingResult.results.map(row => ({...row, historicalPending: false}))});
+  await writeMarkers();
+  await assert.rejects(validateDailyOperatingRefresh(options), /lacks exact terminal readback/);
+
+  const fencedResult = {
+    ...goodResult,
+    results: [{
+      ...actionable[0],
+      state: 'blocked_by_manual_resolution_fence',
+      manualResolutionFence: {
+        resolutionId: 'resolution-1',
+        intentId: 'historical-intent-1',
+        disposition: 'manual_baseline_adopted_effect_unknown',
+        reason: 'exact_scope_manual_resolution_fence',
+        scope: {
+          storeKey: actionable[0].storeKey,
+          skc: actionable[0].skc,
+          skuCode: actionable[0].skuCode,
+          warehouseCode: 'warehouse-1',
+          invType: 'VI',
+          scopeKey: 'f'.repeat(64),
+        },
+      },
+    }],
+  };
+  await writeJson(resultFile, fencedResult);
+  await writeMarkers();
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'an exact permanent fence must remain visible without failing unrelated daily work');
+  await writeJson(resultFile, {...fencedResult, results: fencedResult.results.map(row => ({...row, manualResolutionFence: {...row.manualResolutionFence, scope: {...row.manualResolutionFence.scope, skuCode: 'wrong-sku'}}}))});
+  await writeMarkers();
+  await assert.rejects(validateDailyOperatingRefresh(options), /lacks exact terminal readback/);
+
   await writeJson(resultFile, {...goodResult, unresolvedIntents: [{intentId:'orphan-1',recoveryScopeKey:'scope-1',state:'needs_manual_resolve'}]});
   await writeMarkers();
   await assert.rejects(validateDailyOperatingRefresh(options), /contains unresolved durable intents/);

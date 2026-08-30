@@ -252,6 +252,29 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
       && Number.isFinite(before)
       && before > Number(policy?.triggerUsableInventoryAtOrBelow ?? 20);
   }
+  if (row.state === 'submitted_but_readback_pending' && row.historicalPending === true) {
+    return row.disposition === 'skipped'
+      && typeof row.historicalIntentId === 'string' && row.historicalIntentId.length > 0
+      && /^\d{4}-\d{2}-\d{2}$/.test(String(row.historicalRunDate || ''))
+      && row.historicalRunDate < plan.date
+      && Number.isInteger(Number(row.historicalTargetUsableInventory))
+      && Number.isFinite(before)
+      && (!Array.isArray(row.writes) || row.writes.length === 0);
+  }
+  if (row.state === 'blocked_by_manual_resolution_fence') {
+    const fence = row.manualResolutionFence;
+    return fence?.disposition === 'manual_baseline_adopted_effect_unknown'
+      && fence?.reason === 'exact_scope_manual_resolution_fence'
+      && typeof fence?.resolutionId === 'string' && fence.resolutionId.length > 0
+      && typeof fence?.intentId === 'string' && fence.intentId.length > 0
+      && fence?.scope?.storeKey === row.storeKey
+      && fence?.scope?.skc === row.skc
+      && fence?.scope?.skuCode === row.skuCode
+      && typeof fence?.scope?.warehouseCode === 'string' && fence.scope.warehouseCode.length > 0
+      && fence?.scope?.invType === 'VI'
+      && /^[a-f0-9]{64}$/i.test(String(fence?.scope?.scopeKey || ''))
+      && (!Array.isArray(row.writes) || row.writes.length === 0);
+  }
   return false;
 }
 

@@ -131,6 +131,26 @@ result_is_complete_and_safe() {
         .ruleClass == "recent_sale_scarcity" and ((.before.totalUsableInventory | type) == "number")
       elif .state == "skipped_recovered" then
         .ruleClass == "legacy_virtual_inventory_top_up" and ((.before.totalUsableInventory | type) == "number")
+      elif .state == "submitted_but_readback_pending" and .historicalPending == true then
+        .disposition == "skipped"
+        and ((.historicalIntentId // "") | length) > 0
+        and ((.historicalRunDate // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
+        and (.historicalRunDate < $result.generatedAt[0:10])
+        and ((.historicalTargetUsableInventory | type) == "number")
+        and ((.before.totalUsableInventory | type) == "number")
+        and ((.writes // []) | length) == 0
+      elif .state == "blocked_by_manual_resolution_fence" then
+        .manualResolutionFence.disposition == "manual_baseline_adopted_effect_unknown"
+        and .manualResolutionFence.reason == "exact_scope_manual_resolution_fence"
+        and ((.manualResolutionFence.resolutionId // "") | length) > 0
+        and ((.manualResolutionFence.intentId // "") | length) > 0
+        and .manualResolutionFence.scope.storeKey == .storeKey
+        and .manualResolutionFence.scope.skc == .skc
+        and .manualResolutionFence.scope.skuCode == .skuCode
+        and ((.manualResolutionFence.scope.warehouseCode // "") | length) > 0
+        and .manualResolutionFence.scope.invType == "VI"
+        and ((.manualResolutionFence.scope.scopeKey // "") | test("^[a-f0-9]{64}$"))
+        and ((.writes // []) | length) == 0
       else false end)
   ' "$RESULT" >/dev/null \
     && node scripts/validate_daily_operating_refresh.mjs \
@@ -149,7 +169,7 @@ result_is_readback_pending_only() {
     and .execute == true
     and .executionMode == "automatic"
     and (.results | length) == $total
-    and ([.results[] | select(.state == "submitted_but_readback_pending")] | length) > 0
+    and ([.results[] | select(.state == "submitted_but_readback_pending" and .historicalPending != true)] | length) > 0
     and all(.results[];
       .state == "submitted_but_readback_pending"
       or .state == "updated_readback_matched"

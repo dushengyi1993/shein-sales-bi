@@ -490,6 +490,15 @@ match('closed terminal readback remains safe after natural inventory drift', gua
 match('updated readback equals target', guard,
   /after\.totalUsableInventory == \.targetUsableInventory/,
   'a status string alone is not enough without exact after inventory');
+match('historical unknown scopes are terminal exclusions, not whole-run failures', guard,
+  /submitted_but_readback_pending" and \.historicalPending == true[\s\S]*historicalIntentId[\s\S]*historicalRunDate[\s\S]*writes/,
+  'a pre-existing unknown request must remain skipped without blocking unrelated completed rows');
+match('manual-resolution fences are terminal exclusions with exact scope binding', guard,
+  /blocked_by_manual_resolution_fence[\s\S]*manual_baseline_adopted_effect_unknown[\s\S]*scope\.storeKey == \.storeKey[\s\S]*scopeKey/,
+  'an exact permanent fence must remain visible without failing the whole daily pipeline');
+match('only current pending writes remain retryable', guard,
+  /select\(\.state == "submitted_but_readback_pending" and \.historicalPending != true\)/,
+  'historical skipped intents must not force the current run into retry status');
 match('guard and final marker share semantic inventory validator', guard,
   /validate_daily_operating_refresh\.mjs[\s\S]*--inventory-only/,
   'guard must not write done from a weaker jq-only interpretation');
