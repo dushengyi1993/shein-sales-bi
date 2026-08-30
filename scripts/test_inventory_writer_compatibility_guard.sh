@@ -35,7 +35,7 @@ with mock.patch.object(guard, "secure_parent_chain") as secure_parent, \
     secure_file.assert_called_once_with("/usr/bin/nsenter", "nsenter executable", executable=True)
 
 original_argv = [
-    "/secure/inventory-guard", "--unit", "shein-bi-portal.service",
+    "/secure/inventory-guard", "--unit", "shein-bi-daily-inventory-replenishment-guard.service",
     "--app-root", "/opt/shein-bi/app", "--activation-file", "/control/activation.ndjson",
 ]
 same_identity = mock.Mock(return_value=(7, 11))
@@ -126,7 +126,7 @@ for failed_runner in (
         else:
             raise AssertionError("failed nsenter execution was admitted")
 
-main_argv = [original_argv[0], "--unit", "shein-bi-portal.service"]
+main_argv = [original_argv[0], "--unit", "shein-bi-daily-inventory-replenishment-guard.service"]
 with mock.patch.object(sys, "argv", main_argv), \
         mock.patch.object(guard, "validate_guard_executable", return_value=original_argv[0]), \
         mock.patch.object(guard, "reexec_in_host_mount_namespace", return_value=True) as reexec, \
@@ -255,23 +255,55 @@ install_args=(--root "$ROOT" --systemd-dir "$SYSTEMD" --libexec-dir "$LIBEXEC" -
 bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}" >/dev/null
 bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}" --apply --confirm INSTALL_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1 >/dev/null
 [[ "$(stat -c %u:%a "$TARGET")" == '0:755' ]]
-AUDIT_JSON="$(bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}")"
-INSTALLED_MANIFEST="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["installedManifestSha256"])' <<<"$AUDIT_JSON")"
-set +e
-bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}" --replace --expected-installed-manifest-sha256 "$(printf 'f%.0s' {1..64})" --confirm REPLACE_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1 >/dev/null 2>&1
-WRONG_REPLACE=$?
-set -e
-[[ "$WRONG_REPLACE" == 64 ]]
-bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}" --replace --expected-installed-manifest-sha256 "$INSTALLED_MANIFEST" --confirm REPLACE_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1 >/dev/null
-[[ "$(cat "$LOG")" == $'daemon-reload\ndaemon-reload' ]]
-SERVICES=(shein-bi-cloud-marketing-repair.service shein-bi-cloud-morning-chain.service shein-bi-daily-inventory-replenishment-guard.service shein-bi-et-low-inventory-guard.service shein-bi-et-low-inventory-recheck.service shein-bi-portal.service)
-for service in "${SERVICES[@]}"; do
+WRITER_SERVICES=(shein-bi-daily-inventory-replenishment-guard.service shein-bi-et-low-inventory-guard.service shein-bi-et-low-inventory-recheck.service)
+LEGACY_SERVICES=(shein-bi-cloud-marketing-repair.service shein-bi-cloud-morning-chain.service shein-bi-portal.service)
+for service in "${WRITER_SERVICES[@]}"; do
   dropin="$SYSTEMD/$service.d/10-inventory-writer-compatibility.conf"
   [[ -f "$dropin" && ! -L "$dropin" && "$(stat -c %u:%a "$dropin")" == '0:644' ]]
   grep -Fxq "ExecStartPre=+$TARGET --unit %n --systemctl-bin $FAKE_SYSTEMCTL --app-root $APP --activation-file $ACTIVATION --activation-receipt-file $RECEIPT --compatibility-file $COMPATIBILITY --compatibility-receipt-file $COMPATIBILITY_RECEIPT" "$dropin"
 done
 
-guard(){ "$TARGET" --unit shein-bi-portal.service --systemctl-bin "$FAKE_SYSTEMCTL" --app-root "$APP" --activation-file "$ACTIVATION" --activation-receipt-file "$RECEIPT" --compatibility-file "$COMPATIBILITY" --compatibility-receipt-file "$COMPATIBILITY_RECEIPT" --filesystem-trust-root "$TMP"; }
+# Intentionally create legacy drop-ins and unrelated files before replace
+for service in "${LEGACY_SERVICES[@]}"; do
+  mkdir -p "$SYSTEMD/$service.d"
+  printf '[Service]\nExecStartPre=legacy\n' >"$SYSTEMD/$service.d/10-inventory-writer-compatibility.conf"
+  printf '[Service]\nEnvironment=KEEP=1\n' >"$SYSTEMD/$service.d/unrelated.conf"
+  chmod 0644 "$SYSTEMD/$service.d/10-inventory-writer-compatibility.conf" "$SYSTEMD/$service.d/unrelated.conf"
+  chown 0:0 "$SYSTEMD/$service.d/10-inventory-writer-compatibility.conf" "$SYSTEMD/$service.d/unrelated.conf"
+done
+
+# Audit must be non-zero (state requires replace) and provide manifest
+set +e
+DIRTY_AUDIT="$(bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}" 2>&1)"
+AUDIT_STATUS=$?
+set -e
+[[ "$AUDIT_STATUS" != 0 ]]
+DIRTY_MANIFEST="$(grep -oE 'manifest=[a-f0-9]{64}' <<<"$DIRTY_AUDIT" | cut -d= -f2)"
+[[ -n "$DIRTY_MANIFEST" ]]
+
+set +e
+bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}" --replace --expected-installed-manifest-sha256 "$(printf 'f%.0s' {1..64})" --confirm REPLACE_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1 >/dev/null 2>&1
+WRONG_REPLACE=$?
+set -e
+[[ "$WRONG_REPLACE" == 64 ]]
+
+bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}" --replace --expected-installed-manifest-sha256 "$DIRTY_MANIFEST" --confirm REPLACE_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1 >/dev/null
+
+# Assert legacy drop-ins are removed, unrelated.conf is preserved, and writer drop-ins are present
+for service in "${LEGACY_SERVICES[@]}"; do
+  [[ ! -e "$SYSTEMD/$service.d/10-inventory-writer-compatibility.conf" ]]
+  [[ -f "$SYSTEMD/$service.d/unrelated.conf" ]]
+done
+for service in "${WRITER_SERVICES[@]}"; do
+  dropin="$SYSTEMD/$service.d/10-inventory-writer-compatibility.conf"
+  [[ -f "$dropin" && ! -L "$dropin" && "$(stat -c %u:%a "$dropin")" == '0:644' ]]
+done
+
+# Second audit is unchanged and status 0
+SECOND_AUDIT="$(bash "$ROOT/scripts/install_inventory_writer_compatibility_guard.sh" "${install_args[@]}")"
+[[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])' <<<"$SECOND_AUDIT")" == "unchanged" ]]
+
+guard(){ "$TARGET" --unit shein-bi-daily-inventory-replenishment-guard.service --systemctl-bin "$FAKE_SYSTEMCTL" --app-root "$APP" --activation-file "$ACTIVATION" --activation-receipt-file "$RECEIPT" --compatibility-file "$COMPATIBILITY" --compatibility-receipt-file "$COMPATIBILITY_RECEIPT" --filesystem-trust-root "$TMP"; }
 reject(){ set +e; guard >/dev/null 2>&1; code=$?; set -e; [[ "$code" == 78 ]]; }
 reject_direct(){ set +e; "$@" >/dev/null 2>&1; code=$?; set -e; [[ "$code" == 78 ]]; }
 
@@ -319,7 +351,7 @@ import hashlib,json,os
 def enc(v): return json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 def h(v): return hashlib.sha256(enc(v)).hexdigest()
 def full(commit,marker):
-    return {'deployedCommit':commit,'sourceFingerprint':marker*64,'bundleSha256':'2'*64,'trackedSourceClean':True,'releaseReceiptKind':'formal','releaseReceiptHash':'3'*64,'releaseReceiptFile':'/var/lib/release.json','writerServices':[{'unit':'shein-bi-portal.service','generationHash':'4'*64}],'capturedAt':'2026-08-27T00:00:00.000Z'}
+    return {'deployedCommit':commit,'sourceFingerprint':marker*64,'bundleSha256':'2'*64,'trackedSourceClean':True,'releaseReceiptKind':'formal','releaseReceiptHash':'3'*64,'releaseReceiptFile':'/var/lib/release.json','writerServices':[{'unit':'shein-bi-daily-inventory-replenishment-guard.service','generationHash':'4'*64},{'unit':'shein-bi-et-low-inventory-guard.service','generationHash':'4'*64},{'unit':'shein-bi-et-low-inventory-recheck.service','generationHash':'4'*64}],'capturedAt':'2026-08-27T00:00:00.000Z'}
 def identity(authority):
     return {key:authority[key] for key in ('deployedCommit','sourceFingerprint','bundleSha256','trackedSourceClean','releaseReceiptKind','releaseReceiptHash','releaseReceiptFile')}
 mode=os.environ['MODE']; commit=os.environ['EXPECTED_COMMIT']; ap=os.environ['ACTIVATION']; rp=os.environ['RECEIPT']; cp=os.environ['COMPATIBILITY']; crp=os.environ['COMPATIBILITY_RECEIPT']
@@ -341,7 +373,7 @@ else:
         records.append({**stage,'recordHash':h(stage)})
     elif mode=='finalize':
         pending=next(record for record in reversed(records) if record['kind']=='compatibility_rotation_staged')
-        authority={**pending['candidateAuthority'],'sourceFingerprint':'b'*64,'writerServices':[{'unit':'shein-bi-portal.service','generationHash':'9'*64}],'capturedAt':'2026-08-27T00:03:00.000Z'}
+        authority={**pending['candidateAuthority'],'sourceFingerprint':'b'*64,'writerServices':[{'unit':'shein-bi-daily-inventory-replenishment-guard.service','generationHash':'9'*64},{'unit':'shein-bi-et-low-inventory-guard.service','generationHash':'9'*64},{'unit':'shein-bi-et-low-inventory-recheck.service','generationHash':'9'*64}],'capturedAt':'2026-08-27T00:03:00.000Z'}
         final={'schemaVersion':'inventory-v2-compatibility-record/v1','kind':'compatibility_rotation_finalized','generation':pending['generation'],'previousGeneration':active['generation'],'previousFinalizedHash':active['recordHash'],'stageHash':pending['recordHash'],'currentStateHash':'c'*64,'authority':authority,'maintenance':{'generation':10,'hash':'a'*64},'recordedAt':'2026-08-27T00:03:00.000Z'}
         records.append({**final,'recordHash':h(final)})
     else: raise AssertionError(mode)
@@ -499,7 +531,7 @@ chmod 0777 "$TARGET"; reject; chmod 0755 "$TARGET"
 
 export MUTATION_AFTER_GUARD=1; reject; unset MUTATION_AFTER_GUARD
 mv "$TARGET" "$TARGET.real"; ln -s "$TARGET.real" "$TARGET"
-reject_direct "$TARGET" --unit shein-bi-portal.service --systemctl-bin "$FAKE_SYSTEMCTL" --app-root "$APP" --activation-file "$ACTIVATION" --activation-receipt-file "$RECEIPT" --compatibility-file "$COMPATIBILITY" --compatibility-receipt-file "$COMPATIBILITY_RECEIPT" --filesystem-trust-root "$TMP"
+reject_direct "$TARGET" --unit shein-bi-daily-inventory-replenishment-guard.service --systemctl-bin "$FAKE_SYSTEMCTL" --app-root "$APP" --activation-file "$ACTIVATION" --activation-receipt-file "$RECEIPT" --compatibility-file "$COMPATIBILITY" --compatibility-receipt-file "$COMPATIBILITY_RECEIPT" --filesystem-trust-root "$TMP"
 rm "$TARGET"; mv "$TARGET.real" "$TARGET"
 
 write_control_state initial "$NEW"

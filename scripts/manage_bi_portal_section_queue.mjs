@@ -449,6 +449,7 @@ function recordPublishedSnapshot(queue, entry, now = new Date()) {
 }
 
 function recoverExpired(queue, nowMillis) {
+  let changed = false;
   for (const entry of queue.entries) {
     if (entry.status !== 'running') continue;
     const expiresAt = Date.parse(entry.leaseExpiresAt || '');
@@ -460,8 +461,10 @@ function recoverExpired(queue, nowMillis) {
       entry.claimedIdempotencyKey = '';
       entry.claimedCoreGeneratedAt = '';
       entry.lastError = entry.lastError || 'worker lease expired';
+      changed = true;
     }
   }
+  return changed;
 }
 
 function generationCompletionSections(receipt) {
@@ -766,6 +769,15 @@ export function claimNext(queue, {
   ensureQueueState(queue);
   const nowMillis = now.getTime();
   recoverExpired(queue, nowMillis);
+  // A successful publication is already retained in publishedSnapshots and
+  // completedIdempotency.  If a crash left the same revision pending again,
+  // remove only that active queue copy so it cannot be executed twice; the
+  // durable publication evidence remains available for status and audit.
+  queue.entries = queue.entries.filter(entry => !(
+    entry.status === 'pending'
+      && Number(entry.lastPublishedRevision || 0) > 0
+      && Number(entry.requestRevision || 0) <= Number(entry.lastPublishedRevision || 0)
+  ));
   // A dependent homepage artifact must never publish from the old profit
   // cache while a newer profit request is pending, running, or backing off.
   // This is a dependency barrier, not just a priority hint: even a priority-0
@@ -1573,6 +1585,12 @@ export function main(argv = process.argv.slice(2)) {
   if (options.command === 'fail') {
     failClaim(queue, options);
     const saved = writeQueue(options.file, queue);
+    console.log(JSON.stringify(statusPayload(saved, options.file)));
+    return 0;
+  }
+  if (options.command === 'status') {
+    const recovered = recoverExpired(queue, Date.now());
+    const saved = recovered ? writeQueue(options.file, queue) : queue;
     console.log(JSON.stringify(statusPayload(saved, options.file)));
     return 0;
   }

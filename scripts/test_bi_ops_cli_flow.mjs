@@ -278,14 +278,14 @@ async function waitReady() {
   throw new Error(`server not ready\nstdout=${serverStdout}\nstderr=${serverStderr}`);
 }
 
-function runCli(cliArgs, {input = '', baseUrl: cliBaseUrl = null, knowledgeCacheDir: cliKnowledgeCacheDir = null} = {}) {
+function runCli(cliArgs, {input = '', baseUrl: cliBaseUrl = null, knowledgeCacheDir: cliKnowledgeCacheDir = null, env = {}} = {}) {
   return new Promise((resolve) => {
     const targetBaseUrl = cliBaseUrl || baseUrl;
     const targetKnowledgeCacheDir = cliKnowledgeCacheDir || knowledgeCacheDir;
     const child = spawn(process.execPath, ['scripts/bi_ops_cli.mjs', '--base-url', targetBaseUrl, '--knowledge-cache-dir', targetKnowledgeCacheDir, ...cliArgs], {
       cwd: ROOT,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {...process.env, SHEIN_BI_BASE_URL: targetBaseUrl},
+      env: {...process.env, SHEIN_BI_BASE_URL: targetBaseUrl, ...env},
     });
     let stdout = '';
     let stderr = '';
@@ -532,11 +532,19 @@ async function runCliExecutionOutcomeFixture() {
   const etag = `\"${published.manifest.fingerprint}-${sourceCommit}\"`;
   const calls = [];
   let lostResponseExecutePostCount = 0;
+  let knowledgeMode = 'ok';
   const stub = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
     const body = await readJsonBody(req);
     calls.push({method: req.method, path: pathname, body});
     if (pathname === '/api/owner-knowledge/manifest') {
+      if (knowledgeMode === 'network-failed') {
+        req.socket.destroy();
+        return;
+      }
+      if (knowledgeMode === 'unauthorized') {
+        return sendJson(res, {ok: false, error: 'fixture unauthorized'}, 401);
+      }
       if (req.headers['if-none-match'] === etag) {
         res.writeHead(304, {etag});
         res.end();
@@ -556,6 +564,23 @@ async function runCliExecutionOutcomeFixture() {
     }
     if (pathname === '/api/owner-knowledge/bundle') {
       return sendJson(res, {ok: true, data: {...published.bundle, manifest: {...published.manifest, sourceCommit}}});
+    }
+    if (pathname === '/api/link-ops-tasks') {
+      return sendJson(res, {ok: true, data: {tasks: [{id: 'ready-task', status: 'waiting_review'}]}});
+    }
+    if (pathname === '/api/bi/query-data') {
+      return sendJson(res, {
+        ok: true,
+        mode: 'direct-bi-data',
+        readOnly: true,
+        aiInvoked: false,
+        question: 'fixture query',
+        generatedAt: new Date().toISOString(),
+        sections: {requested: [], loaded: [], issues: []},
+        scope: {requestedStores: []},
+        rowCounts: {},
+        data: {},
+      });
     }
     if (pathname === '/api/link-ops-execute') {
       const id = String(body?.id || '');
@@ -621,6 +646,50 @@ async function runCliExecutionOutcomeFixture() {
     check('P1 CLI dry-run preserves ready outcome', ready.json?.outcome, 'ready');
     check('P1 CLI dry-run stays non-partial', ready.json?.partial, undefined);
 
+    await sleep(10);
+    const staleOptions = {
+      ...options,
+      env: {SHEIN_BI_PARTNER_CHECK_TTL_MS: '1'},
+    };
+    knowledgeMode = 'network-failed';
+    const staleTasks = await runCli(['--session-file', sessionFile, 'tasks'], staleOptions);
+    check('P1 CLI stale tasks continue', staleTasks.code, 0);
+    check('P1 CLI stale tasks expose source', staleTasks.json?.ownerKnowledge?.source, 'stale-verified-cache');
+
+    const knowledgeCallsBeforeQuery = calls.filter(call => call.path.startsWith('/api/owner-knowledge/')).length;
+    const readOnlyQuery = await runCli(['--session-file', sessionFile, 'query', '--text', 'fixture query'], staleOptions);
+    const knowledgeCallsAfterQuery = calls.filter(call => call.path.startsWith('/api/owner-knowledge/')).length;
+    check('P1 CLI read-only query continues without knowledge network', readOnlyQuery.code, 0);
+    check('P1 CLI read-only query does not call knowledge endpoints', knowledgeCallsAfterQuery, knowledgeCallsBeforeQuery);
+    check('P1 CLI read-only query has no stale fallback marker', readOnlyQuery.json?.ownerKnowledge, undefined);
+    check('P1 CLI read-only query uses verified cache diagnostics', readOnlyQuery.json?.cli?.diagnostics?.ownerKnowledge?.source, 'verified-cache');
+    check('P1 CLI read-only query reports no refresh attempt', readOnlyQuery.json?.cli?.diagnostics?.refreshAttempted, false);
+    check('P1 CLI read-only query reports cache-only policy', readOnlyQuery.json?.cli?.diagnostics?.refreshPolicy, 'read-only-verified-cache');
+
+    const stalePreflight = await runCli(['--session-file', sessionFile, 'preflight', '--task-id', 'ready-task'], staleOptions);
+    check('P1 CLI stale preflight continues', stalePreflight.code, 0);
+    check('P1 CLI stale preflight exposes source', stalePreflight.json?.ownerKnowledge?.source, 'stale-verified-cache');
+
+    const staleExecute = await runCli([
+      '--session-file', sessionFile,
+      'execute',
+      '--task-id', 'completed-task',
+      '--confirm', 'SHEIN_OPENAPI_SUBMIT',
+    ], staleOptions);
+    check('P1 CLI stale execute continues', staleExecute.code, 0);
+    check('P1 CLI stale execute exposes source', staleExecute.json?.ownerKnowledge?.source, 'stale-verified-cache');
+
+    const strictKnowledgeStatus = await runCli(['--session-file', sessionFile, 'knowledge-status'], staleOptions);
+    check('P1 CLI knowledge-status stays strict', strictKnowledgeStatus.code, code => code !== 0);
+
+    const linkCallsBeforeUnauthorized = calls.filter(call => call.path === '/api/link-ops-execute').length;
+    knowledgeMode = 'unauthorized';
+    const unauthorized = await runCli(['--session-file', sessionFile, 'preflight', '--task-id', 'ready-task'], staleOptions);
+    check('P1 CLI 401 remains failed', unauthorized.code, code => code !== 0);
+    check('P1 CLI 401 retains status', unauthorized.errorJson?.status, 401);
+    check('P1 CLI 401 does not call task endpoint', calls.filter(call => call.path === '/api/link-ops-execute').length, linkCallsBeforeUnauthorized);
+    knowledgeMode = 'ok';
+
     const unconfirmed = await runCli([
       '--session-file', sessionFile,
       'execute',
@@ -658,9 +727,22 @@ async function runCliExecutionOutcomeFixture() {
     check('P1 CLI lost response execute cannot claim completed', lostResponse.json?.outcome, outcome => outcome !== 'completed');
     check('P1 CLI lost response execute cannot claim top-level success', lostResponse.json?.ok, value => value !== true);
 
-    check('P1 CLI fixture uses only local deterministic endpoints', calls.some(call => !['/api/owner-knowledge/manifest', '/api/owner-knowledge/bundle', '/api/link-ops-execute'].includes(call.path)), false);
+    check('P1 CLI fixture uses only local deterministic endpoints', calls.some(call => !['/api/owner-knowledge/manifest', '/api/owner-knowledge/bundle', '/api/link-ops-tasks', '/api/bi/query-data', '/api/link-ops-execute'].includes(call.path)), false);
     result.summary.p1Cli = {
       ready: {exit: ready.code, outcome: ready.json?.outcome},
+      stale: {
+        tasks: {exit: staleTasks.code, source: staleTasks.json?.ownerKnowledge?.source},
+        query: {
+          exit: readOnlyQuery.code,
+          source: readOnlyQuery.json?.cli?.diagnostics?.ownerKnowledge?.source,
+          refreshAttempted: readOnlyQuery.json?.cli?.diagnostics?.refreshAttempted,
+          knowledgeCalls: knowledgeCallsAfterQuery - knowledgeCallsBeforeQuery,
+        },
+        preflight: {exit: stalePreflight.code, source: stalePreflight.json?.ownerKnowledge?.source},
+        execute: {exit: staleExecute.code, source: staleExecute.json?.ownerKnowledge?.source},
+      },
+      knowledgeStatus: {exit: strictKnowledgeStatus.code},
+      unauthorized: {exit: unauthorized.code, status: unauthorized.errorJson?.status},
       unconfirmed: {exit: unconfirmed.code, outcome: unconfirmed.json?.outcome, partial: unconfirmed.json?.partial},
       completed: {exit: completed.code, outcome: completed.json?.outcome},
       lostResponse: {exit: lostResponse.code, outcome: lostResponse.json?.outcome, executePosts: lostResponseExecutePostCount},

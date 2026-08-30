@@ -72,6 +72,7 @@ const DEFAULT_SESSION_FILE = process.env.SHEIN_BI_OPS_SESSION_FILE
 const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const LOCAL_OPENAPI_TEST_OVERRIDE = process.env.SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR === '1';
 const PARTNER_CHECK_TTL_MS = Math.max(0, Number(process.env.SHEIN_BI_PARTNER_CHECK_TTL_MS || 5 * 60_000));
+let activeOwnerKnowledge = null;
 
 function parseArgs(argv) {
   const args = {
@@ -763,10 +764,15 @@ async function refreshPartnerCliAndRelaunchIfNeeded(args, {force = false} = {}) 
   return {relaunched: true, result, relaunched};
 }
 
-async function refreshPartnerKnowledge(args, {strict = false, force = false} = {}) {
+async function refreshPartnerKnowledge(args, {
+  strict = false,
+  force = false,
+  allowTransientCacheFallback = !strict,
+} = {}) {
   const session = await readSession(args.sessionFile);
   if (!session.cookie) {
     if (strict) throw new Error('尚未登录 BI，无法检查负责人规则版本');
+    activeOwnerKnowledge = null;
     return {ok: false, skipped: true, warning: '尚未登录 BI'};
   }
   const result = await ensurePartnerKnowledgeCurrent({
@@ -776,12 +782,15 @@ async function refreshPartnerKnowledge(args, {strict = false, force = false} = {
     cliVersion: BI_OPS_CLI_VERSION,
     strict,
     maxAgeMs: force ? 0 : PARTNER_CHECK_TTL_MS,
+    allowTransientCacheFallback,
   });
+  activeOwnerKnowledge = result;
   if (result.updated && !args.json) {
     process.stderr.write(`负责人规则已更新并校验：${String(result.manifest?.sourceCommit || result.manifest?.fingerprint || '').slice(0, 12)}\n`);
   }
   if (result.warning && !args.json) {
-    process.stderr.write(`负责人规则检查提示：${result.warning}\n`);
+    const source = result.source === 'stale-verified-cache' ? `source=${result.source}；` : '';
+    process.stderr.write(`负责人规则检查提示：${source}${result.warning}\n`);
   }
   if (result.cliUpdateRecommended && !args.json) {
     process.stderr.write(`CLI 有推荐更新：当前 ${BI_OPS_CLI_VERSION}，推荐 ${result.recommendedCliVersion}\n`);
@@ -884,8 +893,8 @@ async function readLocalPartnerCliDiagnostic() {
   }
 }
 
-async function readReadOnlyPartnerDiagnostics(args) {
-  const [ownerKnowledge, partnerCli] = await Promise.all([
+async function readReadOnlyPartnerDiagnostics(args, refreshedKnowledge = null) {
+  const [cachedOwnerKnowledge, partnerCli] = await Promise.all([
     readVerifiedOwnerKnowledgeCacheDiagnostic(args).catch(error => ({
       ok: false,
       verified: false,
@@ -894,15 +903,34 @@ async function readReadOnlyPartnerDiagnostics(args) {
     })),
     readLocalPartnerCliDiagnostic(),
   ]);
+  const ownerKnowledge = refreshedKnowledge?.source === 'stale-verified-cache'
+    ? {
+        ...cachedOwnerKnowledge,
+        source: refreshedKnowledge.source,
+        stale: true,
+        checkedAt: refreshedKnowledge.checkedAt || cachedOwnerKnowledge.checkedAt,
+      }
+    : cachedOwnerKnowledge;
   return {
-    refreshAttempted: false,
-    refreshPolicy: 'read-only-verified-cache',
+    refreshAttempted: Boolean(refreshedKnowledge),
+    refreshPolicy: refreshedKnowledge ? 'live-then-verified-cache' : 'read-only-verified-cache',
     ownerKnowledge,
     partnerCli,
   };
 }
 
 function print(data, pretty = false) {
+  if (activeOwnerKnowledge?.source === 'stale-verified-cache'
+    && data && typeof data === 'object' && !Array.isArray(data)) {
+    data = {
+      ...data,
+      ownerKnowledge: {
+        source: activeOwnerKnowledge.source,
+        stale: true,
+        checkedAt: activeOwnerKnowledge.checkedAt || null,
+      },
+    };
+  }
   if (!pretty) {
     console.log(JSON.stringify(data, null, 2));
     return;
@@ -2995,7 +3023,11 @@ async function main() {
     if (update.relaunched) return;
   }
   if (!readOnlyQuery && KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
-    await refreshPartnerKnowledge(args, {strict: args.command === 'execute', force: args.command === 'execute'});
+    await refreshPartnerKnowledge(args, {
+      strict: args.command === 'execute',
+      force: args.command === 'execute',
+      allowTransientCacheFallback: true,
+    });
   }
   if (args.command === 'doctor') {
     const report = await runDoctor(args);

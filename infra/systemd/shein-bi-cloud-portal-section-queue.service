@@ -14,7 +14,7 @@ Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
-Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_FILE=/opt/shein-bi/app/state/portal-section-queue/queue.json
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_FILE=/data/shein-bi/state/portal-section-queue/queue.json
 Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC=900
 Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC=1200
 TimeoutStartSec=900

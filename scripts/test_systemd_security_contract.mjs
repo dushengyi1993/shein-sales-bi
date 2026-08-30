@@ -550,8 +550,8 @@ assert.equal(property(morningService, 'Restart'), 'on-failure',
   'a failed/interrupted morning run must auto-restart the same service');
 assert.equal(property(morningService, 'RestartSec'), '60',
   'the restart backoff keeps a rolling failure far from the StartLimit window');
-assert.equal(property(morningService, 'RestartPreventExitStatus'), '64 76 78',
-  'terminal/data/config failures stay visible without an infinite restart loop');
+assert.equal(property(morningService, 'RestartPreventExitStatus'), '64 76 78 79',
+  'terminal/data/config failures and exhausted session recovery stay visible without an infinite restart loop');
 assert.equal(property(morningService, 'StartLimitIntervalSec'), '900');
 assert.equal(property(morningService, 'StartLimitBurst'), '200',
   'one-minute retries must remain possible across the full three-hour window');

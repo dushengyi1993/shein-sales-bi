@@ -65,5 +65,5 @@ KillMode=control-group
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_morning_chain_job.sh --root /opt/shein-bi/app
 Restart=on-failure
 RestartSec=60
-RestartPreventExitStatus=64 76 78
+RestartPreventExitStatus=64 76 78 79
 ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/openapi-product-cache

@@ -29,7 +29,11 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ISO_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 REQUIRED_INTENT_ID = "e07f999c-96b2-460c-bfa9-fa924f410ec3"
-REQUIRED_RESTART_GENERATION_UNITS = {"shein-bi-portal.service"}
+REQUIRED_RESTART_GENERATION_UNITS = {
+    "shein-bi-daily-inventory-replenishment-guard.service",
+    "shein-bi-et-low-inventory-guard.service",
+    "shein-bi-et-low-inventory-recheck.service",
+}
 RUNTIME_ALLOWLIST = ("state", "tmp", "outputs", "profiles", "node_modules")
 MAJOR_MINOR = re.compile(r"^\d+:\d+$")
 NSENTER_PATH = "/usr/bin/nsenter"

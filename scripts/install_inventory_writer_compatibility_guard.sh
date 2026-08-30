@@ -17,11 +17,13 @@ APPLY=0 REPLACE=0 CONFIRM='' EXPECTED_MANIFEST=''
 readonly GUARD_NAME='shein-bi-inventory-writer-compatibility-guard'
 readonly DROPIN_NAME='10-inventory-writer-compatibility.conf'
 readonly -a SERVICES=(
-  shein-bi-cloud-marketing-repair.service
-  shein-bi-cloud-morning-chain.service
   shein-bi-daily-inventory-replenishment-guard.service
   shein-bi-et-low-inventory-guard.service
   shein-bi-et-low-inventory-recheck.service
+)
+readonly -a LEGACY_NON_WRITER_SERVICES=(
+  shein-bi-cloud-marketing-repair.service
+  shein-bi-cloud-morning-chain.service
   shein-bi-portal.service
 )
 
@@ -68,9 +70,20 @@ print(f"{sum(command==expected for command in commands)}:{int(bool(commands) and
 '
 }
 
+effective_has_guard(){
+  EXPECTED_PREFIX="$1" python3 -c '
+import os,re,sys
+raw=sys.stdin.read().strip()
+structured=[m.group(1).strip() for m in re.finditer(r"(?:^|[;{\s])argv\[\]=([^;}]*?)(?=\s*;|\s*\})",raw)]
+commands=structured if structured else ([raw] if raw else [])
+expected=os.environ["EXPECTED_PREFIX"]
+print(int(any(command.startswith(expected) for command in commands)))
+'
+}
+
 artifact_manifest(){
   {
-    for file in "$TARGET" "${SERVICES[@]/#/$SYSTEMD_DIR/}"; do
+    for file in "$TARGET" "${SERVICES[@]/#/$SYSTEMD_DIR/}" "${LEGACY_NON_WRITER_SERVICES[@]/#/$SYSTEMD_DIR/}"; do
       [[ "$file" == *.service ]] && file="$file.d/$DROPIN_NAME"
       if [[ -e "$file" || -L "$file" ]]; then
         if [[ -f "$file" && ! -L "$file" ]]; then
@@ -81,7 +94,7 @@ artifact_manifest(){
   } | sha256sum | awk '{print $1}'
 }
 
-canonical=1; present=0
+canonical=1; present=0; legacy_present=0
 if [[ -e "$TARGET" || -L "$TARGET" ]]; then
   present=$((present+1)); [[ -f "$TARGET" && ! -L "$TARGET" && "$(stat -c %u "$TARGET")" == 0 && "$(( 8#$(stat -c %a "$TARGET") & 8#022 ))" == 0 ]] || canonical=0
   cmp -s "$SOURCE" "$TARGET" || canonical=0
@@ -93,12 +106,18 @@ for service in "${SERVICES[@]}"; do
     cmp -s "$file" <(render_dropin) || canonical=0
   fi
 done
+for service in "${LEGACY_NON_WRITER_SERVICES[@]}"; do
+  file="$SYSTEMD_DIR/$service.d/$DROPIN_NAME"
+  if [[ -e "$file" || -L "$file" ]]; then
+    legacy_present=$((legacy_present+1))
+  fi
+done
 manifest="$(artifact_manifest)"
 total=$((1+${#SERVICES[@]}))
 
 if ((!APPLY)); then
-  [[ "$present" == 0 || ( "$present" == "$total" && "$canonical" == 1 ) ]] || die "partial-or-drifted installation manifest=$manifest"
-  printf '{"ok":true,"mode":"audit","serviceCount":%d,"installedManifestSha256":"%s","state":"%s"}\n' "${#SERVICES[@]}" "$manifest" "$([[ "$present" == 0 ]] && echo planned_install || echo unchanged)"
+  [[ ( "$present" == 0 || ( "$present" == "$total" && "$canonical" == 1 ) ) && "$legacy_present" == 0 ]] || die "partial-or-drifted installation manifest=$manifest"
+  printf '{"ok":true,"mode":"audit","serviceCount":%d,"legacyCount":%d,"installedManifestSha256":"%s","state":"%s"}\n' "${#SERVICES[@]}" "$legacy_present" "$manifest" "$([[ "$present" == 0 && "$legacy_present" == 0 ]] && echo planned_install || echo unchanged)"
   exit 0
 fi
 ((EUID==0)) || die 'apply requires root'
@@ -106,7 +125,7 @@ if ((REPLACE)); then
   [[ "$CONFIRM" == "$REPLACE_CONFIRM" && "$EXPECTED_MANIFEST" =~ ^[a-f0-9]{64}$ && "$EXPECTED_MANIFEST" == "$manifest" ]] || bad 'replace requires exact confirmation and installed manifest hash'
 else
   [[ "$CONFIRM" == "$INSTALL_CONFIRM" ]] || bad 'install confirmation mismatch'
-  [[ "$present" == 0 || ( "$present" == "$total" && "$canonical" == 1 ) ]] || die "existing drift requires --replace manifest=$manifest"
+  [[ ( "$present" == 0 || ( "$present" == "$total" && "$canonical" == 1 ) ) && "$legacy_present" == 0 ]] || die "existing drift requires --replace manifest=$manifest"
 fi
 
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR" "$SYSTEMD_DIR"
@@ -117,10 +136,20 @@ for service in "${SERVICES[@]}"; do
   dir="$SYSTEMD_DIR/$service.d"; install -d -o root -g root -m 0755 "$dir"
   tmp="$(mktemp "$dir/.${DROPIN_NAME}.XXXXXX")"; render_dropin >"$tmp"; chown root:root "$tmp"; chmod 0644 "$tmp"; mv -f "$tmp" "$dir/$DROPIN_NAME"
 done
+for service in "${LEGACY_NON_WRITER_SERVICES[@]}"; do
+  file="$SYSTEMD_DIR/$service.d/$DROPIN_NAME"
+  if [[ -e "$file" || -L "$file" ]]; then
+    rm -f -- "$file"
+  fi
+done
 "$SYSTEMCTL_BIN" daemon-reload || die 'systemctl daemon-reload failed'
 for service in "${SERVICES[@]}"; do
   effective="$("$SYSTEMCTL_BIN" show --no-pager --property=ExecStartPre --value "$service")" || die "systemctl show failed:$service"
   expected="$TARGET --unit $service --systemctl-bin $GUARD_SYSTEMCTL_BIN --app-root $APP_ROOT --activation-file $ACTIVATION --activation-receipt-file $RECEIPT --compatibility-file $COMPATIBILITY --compatibility-receipt-file $COMPATIBILITY_RECEIPT"
   [[ "$(effective_exact_and_last "$expected" <<<"$effective")" == '1:1' ]] || die "effective guard missing, altered, duplicated, or not last:$service"
+done
+for service in "${LEGACY_NON_WRITER_SERVICES[@]}"; do
+  effective="$("$SYSTEMCTL_BIN" show --no-pager --property=ExecStartPre --value "$service")" || die "systemctl show failed:$service"
+  [[ "$(effective_has_guard "$TARGET" <<<"$effective")" == '0' ]] || die "legacy service retained guard ExecStartPre:$service"
 done
 printf '{"ok":true,"mode":"%s","serviceCount":%d,"installedManifestSha256":"%s","daemonReload":true}\n' "$([[ "$REPLACE" == 1 ]] && echo replace || echo apply)" "${#SERVICES[@]}" "$(artifact_manifest)"

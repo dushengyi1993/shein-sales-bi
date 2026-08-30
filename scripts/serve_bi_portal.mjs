@@ -12124,10 +12124,13 @@ async function runBiDbChildProcess(args, command, childArgs, options = {}) {
 
 const BI_PORTAL_CORE_FIELD_LIMITS = Object.freeze({
   generatedAt: 4 * 1024,
+  dates: 64 * 1024,
   __sections: 1024 * 1024,
   audit: 4 * 1024 * 1024,
 });
 let biPortalCoreEnvelopeCache = null;
+const biPortalCoreEnvelopeInFlight = new Map();
+let biPortalCoreEnvelopeScanCount = 0;
 
 function biPortalCoreFileIdentity(stat) {
   return [stat?.dev, stat?.ino, stat?.size, stat?.mtimeMs, stat?.ctimeMs].map(value => String(value ?? '')).join(':');
@@ -12148,10 +12151,24 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
       }
       return {...biPortalCoreEnvelopeCache, handle, stat};
     }
-    const scan = await scanBoundedTopLevelJson(
-      handle.createReadStream({start: 0, autoClose: false}),
-      BI_PORTAL_CORE_FIELD_LIMITS,
-    );
+    const inFlightKey = `${file}|${identity}`;
+    let scanPromise = biPortalCoreEnvelopeInFlight.get(inFlightKey);
+    if (!scanPromise) {
+      scanPromise = (async () => {
+        biPortalCoreEnvelopeScanCount += 1;
+        return await scanBoundedTopLevelJson(
+          handle.createReadStream({start: 0, autoClose: false}),
+          BI_PORTAL_CORE_FIELD_LIMITS,
+        );
+      })();
+      biPortalCoreEnvelopeInFlight.set(inFlightKey, scanPromise);
+      scanPromise.finally(() => {
+        if (biPortalCoreEnvelopeInFlight.get(inFlightKey) === scanPromise) {
+          biPortalCoreEnvelopeInFlight.delete(inFlightKey);
+        }
+      }).catch(() => {});
+    }
+    const scan = await scanPromise;
     const generatedAt = String(scan.fields.generatedAt?.value || scan.fields.__sections?.value?.generatedAt || '');
     const generatedAtValid = homepageTimestampNs(generatedAt) !== null;
     const sections = scan.fields.__sections?.value;
@@ -12171,6 +12188,8 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
       identity,
       generatedAt,
       generatedAtValid,
+      dates: scan.fields.dates?.value && typeof scan.fields.dates.value === 'object' && !Array.isArray(scan.fields.dates.value) ? scan.fields.dates.value : null,
+      sectionsKeys: Array.isArray(sections?.keys) ? sections.keys : [],
       mode: String(sections?.mode || 'legacy'),
       audit: audit ?? null,
       auditRange: scan.fields.audit
@@ -12193,7 +12212,16 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
 async function readBiPortalCoreMeta(root) {
   try {
     const envelope = await readBiPortalCoreEnvelope(root, {requireGeneratedAt: false});
-    return {generatedAt: envelope.generatedAt, mode: envelope.mode};
+    return {
+      generatedAt: envelope.generatedAt,
+      mode: envelope.mode,
+      dates: envelope.dates || {},
+      sections: {
+        mode: envelope.mode,
+        generatedAt: envelope.generatedAt,
+        keys: envelope.sectionsKeys || [],
+      },
+    };
   } catch {
     // Preserve the section loader's historical missing-core contract: callers
     // decide whether an empty generation is a 202/503 condition. The public
@@ -15629,19 +15657,32 @@ async function loadDirectBiQuery(args, root, actor, question, options = {}) {
     }
   }
 
-  throwIfAborted();
-  // The AbortSignal is handed to the JSON reader itself (chunked, checked
-  // between reads), so a deadline or disconnect cancels the heap-heavy read
-  // cooperatively instead of racing it and leaving it running.
-  const loadPromise = loadBiOpsQueryData({
-    question,
-    dataPath: path.join(root, 'data.json'),
-    sectionsDir: path.join(root, 'sections'),
-    sections: plan.sections,
-    maxCoreBytes: 64 * 1024 * 1024,
-    maxSectionBytes: 96 * 1024 * 1024,
-    signal,
-  });
+    throwIfAborted();
+    const coreMeta = await readBiPortalCoreMeta(root);
+    const canUseLightweightCore = coreMeta.mode === 'api' && coreMeta.generatedAt;
+    // The AbortSignal is handed to the JSON reader itself (chunked, checked
+    // between reads), so a deadline or disconnect cancels the heap-heavy read
+    // cooperatively instead of racing it and leaving it running.
+    const loadPromise = loadBiOpsQueryData({
+      question,
+      dataPath: path.join(root, 'data.json'),
+      sectionsDir: path.join(root, 'sections'),
+      sections: plan.sections,
+      maxCoreBytes: 64 * 1024 * 1024,
+      maxSectionBytes: 96 * 1024 * 1024,
+      signal,
+      ...(canUseLightweightCore ? {
+        coreData: {
+          generatedAt: coreMeta.generatedAt,
+          dates: coreMeta.dates || {},
+          __sections: {
+            mode: coreMeta.mode,
+            generatedAt: coreMeta.generatedAt,
+            keys: coreMeta.sections?.keys || [],
+          },
+        },
+      } : {}),
+    });
   const loaded = await loadPromise;
   throwIfAborted();
   const response = buildBiOpsDirectQueryResponse({
@@ -16080,6 +16121,76 @@ async function sendLargeJson(req, res, status, value, headers = {}, options = {}
   }
 }
 
+const biPortalCoreRouteLifecycleState = {
+  totalResponseFailures: 0,
+  consecutiveResponseFailures: 0,
+  currentResponseFailureAt: '',
+  lastResponseFailureAt: '',
+  lastResponseError: '',
+};
+
+function biPortalCoreRouteLifecycleStatus() {
+  return {...biPortalCoreRouteLifecycleState};
+}
+
+function resetBiPortalCoreRouteLifecycleState() {
+  Object.assign(biPortalCoreRouteLifecycleState, {
+    totalResponseFailures: 0,
+    consecutiveResponseFailures: 0,
+    currentResponseFailureAt: '',
+    lastResponseFailureAt: '',
+    lastResponseError: '',
+  });
+}
+
+function recordBiPortalCoreRouteResponseSuccess() {
+  biPortalCoreRouteLifecycleState.consecutiveResponseFailures = 0;
+  biPortalCoreRouteLifecycleState.currentResponseFailureAt = '';
+  biPortalCoreRouteLifecycleState.lastResponseError = '';
+}
+
+function recordBiPortalCoreRouteResponseFailure(error, res) {
+  const at = new Date().toISOString();
+  const detail = String(error?.code || error?.message || error || 'unknown').slice(0, 500);
+  biPortalCoreRouteLifecycleState.totalResponseFailures += 1;
+  biPortalCoreRouteLifecycleState.consecutiveResponseFailures += 1;
+  biPortalCoreRouteLifecycleState.currentResponseFailureAt = at;
+  biPortalCoreRouteLifecycleState.lastResponseFailureAt = at;
+  biPortalCoreRouteLifecycleState.lastResponseError = detail;
+  console.error(JSON.stringify({
+    ok: false,
+    event: 'bi-portal-core-route-response-failed',
+    at,
+    error: detail,
+    headersSent: Boolean(res?.headersSent),
+    writableFinished: Boolean(res?.writableFinished),
+    destroyed: Boolean(res?.destroyed),
+  }));
+}
+
+function evaluateBiPortalCoreRouteLifecycleHealth(
+  routeStatus = biPortalCoreRouteLifecycleStatus(),
+) {
+  const failures = Number(routeStatus?.consecutiveResponseFailures || 0);
+  const issues = [];
+  if (failures >= 3) issues.push('routeResponse');
+  return {
+    ok: issues.length === 0,
+    degraded: failures > 0,
+    warning: failures > 0 ? 'routeResponse' : '',
+    issues,
+    routeResponseFailures: failures,
+  };
+}
+
+function evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth} = {}) {
+  const components = {
+    warmup: Boolean(warmupHealth?.ok),
+    routeResponse: Boolean(routeHealth?.ok),
+  };
+  return {ok: Object.values(components).every(Boolean), components};
+}
+
 async function sendBoundedCoreJson(req, res, handle, stat, replacement = null, headers = {}) {
   const replacementValue = replacement
     ? (Buffer.isBuffer(replacement.value) ? replacement.value : Buffer.from(String(replacement.value), 'utf8'))
@@ -16093,13 +16204,41 @@ async function sendBoundedCoreJson(req, res, handle, stat, replacement = null, h
     ...(gzip ? {'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding'} : {'Content-Length': String(contentLength)}),
     ...headers,
   });
+  const abortController = new AbortController();
+  const onReqAborted = () => { abortController.abort(); };
+  const onResClose = () => {
+    if (!res.writableEnded && !res.writableFinished) {
+      abortController.abort();
+    }
+  };
+  req.once('aborted', onReqAborted);
+  res.once('close', onResClose);
   const source = Readable.from(streamFileHandleWithReplacement(handle, stat, replacement
     ? {...replacement, value: replacementValue}
     : null));
+  const gzipStream = gzip ? createGzip({level: 6}) : null;
   if (gzip) {
-    await pipeline(source, createGzip({level: 6}), res);
-  } else {
-    await pipeline(source, res);
+    source.on('error', () => { gzipStream?.destroy(); });
+  }
+  try {
+    if (gzip) {
+      await pipeline(source, gzipStream, res, {signal: abortController.signal});
+    } else {
+      await pipeline(source, res, {signal: abortController.signal});
+    }
+    recordBiPortalCoreRouteResponseSuccess();
+  } catch (error) {
+    const expectedAbort = abortController.signal.aborted
+      && ['AbortError', 'ABORT_ERR', 'ERR_STREAM_PREMATURE_CLOSE'].includes(String(error?.name || error?.code || ''));
+    if (!expectedAbort) recordBiPortalCoreRouteResponseFailure(error, res);
+    throw error;
+  } finally {
+    req.off('aborted', onReqAborted);
+    res.off('close', onResClose);
+    if (!res.writableEnded && !res.writableFinished) {
+      source.destroy();
+      gzipStream?.destroy();
+    }
   }
 }
 
@@ -18824,8 +18963,12 @@ async function main() {
           : null;
         const effectiveWarmupState = effectiveBiPortalCoreWarmupStateFromReceipt(receiptHealth);
         const warmupHealth = evaluateBiPortalCoreWarmupHealth(effectiveWarmupState, {queueState});
+        const routeLifecycle = biPortalCoreRouteLifecycleStatus();
+        const routeHealth = evaluateBiPortalCoreRouteLifecycleHealth(routeLifecycle);
+        const topLevelHealth = evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth});
         return sendJson(res, 200, {
-          ok: warmupHealth.ok,
+          ok: topLevelHealth.ok,
+          healthComponents: topLevelHealth.components,
           service: 'shein-bi-portal',
           time: new Date().toISOString(),
           host: args.host,
@@ -18858,6 +19001,10 @@ async function main() {
          liveUpdates: biLiveUpdateBridge.status(),
           runtime: httpLifecycle.status(),
           mutationQueue: enqueueMutationRequest.status(),
+         biPortalCoreRoute: {
+            ...routeLifecycle,
+            health: routeHealth,
+          },
          biCoreWarmup: {
             generatedAt: effectiveWarmupState.generatedAt,
             status: effectiveWarmupState.status,
@@ -22874,9 +23021,19 @@ export const __testHooks = {
   readBiPortalCoreEnvelope,
   resetBiPortalCoreEnvelopeCache() {
     biPortalCoreEnvelopeCache = null;
+    biPortalCoreEnvelopeInFlight.clear();
+    biPortalCoreEnvelopeScanCount = 0;
+  },
+  biPortalCoreEnvelopeScanCount() {
+    return biPortalCoreEnvelopeScanCount;
   },
   resolveDescriptionBindingExpectedBodyHash,
+  loadDirectBiQuery,
   sendBoundedCoreJson,
+  biPortalCoreRouteLifecycleStatus,
+  resetBiPortalCoreRouteLifecycleState,
+  evaluateBiPortalCoreRouteLifecycleHealth,
+  evaluateBiPortalTopLevelHealth,
   sha256StableJson,
   verifyPersistedPublishAssetBindingReadback,
   descriptionBindingExplicitPreValidRejectionEvidence,

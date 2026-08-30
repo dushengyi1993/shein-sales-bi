@@ -430,13 +430,8 @@ try {
   }
 
   {
-    // Deterministic proof that the post-read UTF-8 byte budget re-check is
-    // enforced: fstat reports a size below the cap, but the decoded content
-    // expands to a UTF-8 byte length above it, so the loader must refuse on
-    // the bytes actually read. This is the same failure-closed path that
-    // catches a file growing between fstat and read on a single FileHandle
-    // (a path replacement cannot occur there because the check and the read
-    // share one open file identity).
+    // Invalid UTF-8 must fail closed even when the fstat size fits the cap;
+    // replacement decoding is not acceptable for business data.
     const fixture = await makeFixture('actual-bytes-recheck');
     await fs.writeFile(path.join(fixture.sectionsDir, 'homeRankings.json'), Buffer.alloc(700, 0xff));
     const loaded = await loadBiOpsQueryData({
@@ -447,9 +442,8 @@ try {
       maxSectionBytes: 1000,
     });
     const entry = loaded.meta.attemptedSections.find(item => item.section === 'homeRankings');
-    assert.equal(entry?.status, 'too_large', 'the post-read UTF-8 byte re-check must reject a file whose decoded length exceeds the per-file cap');
-    assert.ok(entry?.size > 1000, 'the rejection must carry the bytes actually read (expanded decode), not the fstat size');
-    assert.equal(entry?.maxBytes, 1000);
+    assert.equal(entry?.status, 'invalid_utf8', 'invalid UTF-8 must be rejected explicitly');
+    assert.equal(entry?.size, 700, 'the rejection must carry the bytes actually read');
     assert.deepEqual(loaded.meta.loadedSections, [], 'an oversized-by-actual-bytes section must not be treated as loaded data');
   }
 

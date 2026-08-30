@@ -9,6 +9,7 @@ LOCK_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE:-$ROOT/state/locks/shein-bi
 MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-3}"
 SECTION_TIMEOUT="${SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC:-900}"
 PROFIT_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC:-480}"
+PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-360}"
 HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC:-540}"
 POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC:-60}"
 MIN_REMAINING_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC:-120}"
@@ -31,6 +32,7 @@ trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 [[ "$MAX_SECTIONS" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$SECTION_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$PROFIT_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
+[[ "$PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$MIN_REMAINING_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
@@ -335,13 +337,18 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     fi
   fi
   if [[ "$HEAVY_ALLOWED" == 0 ]]; then
-    EXCLUDED_SECTIONS+=(profit homeRankings)
+    EXCLUDED_SECTIONS+=(profit homeRankings productSalesDaily)
     HEAVY_SECTION_DEFERRED=1
-    echo "[portal-section-worker] defer heavy sections=profit,homeRankings reason=short_reserved_window remainingSec=$REMAINING_SEC"
+    echo "[portal-section-worker] defer heavy sections=profit,homeRankings,productSalesDaily reason=short_reserved_window remainingSec=$REMAINING_SEC"
   elif (( REMAINING_SEC < PROFIT_MIN_RUNTIME_SEC )); then
     EXCLUDED_SECTIONS+=(profit)
     HEAVY_SECTION_DEFERRED=1
     echo "[portal-section-worker] defer heavy section=profit remainingSec=$REMAINING_SEC requiredSec=$PROFIT_MIN_RUNTIME_SEC"
+  fi
+  if [[ "$HEAVY_ALLOWED" != 0 ]] && (( REMAINING_SEC < PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC )); then
+    EXCLUDED_SECTIONS+=(productSalesDaily)
+    HEAVY_SECTION_DEFERRED=1
+    echo "[portal-section-worker] defer heavy section=productSalesDaily remainingSec=$REMAINING_SEC requiredSec=$PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC"
   fi
   # Any profit claim that is not a quiet, fully accepted completion is a
   # same-run dependency barrier. This includes a superseded publication and a
@@ -438,7 +445,7 @@ process.stdout.write(String(epoch));
   # margin for the bounded strict terminal readback and completion command.
   NOW_EPOCH="$(date +%s)"
   REMAINING_SEC=$((CLAIM_DEADLINE_EPOCH - NOW_EPOCH))
-  MAX_CURL_RUNTIME=$((REMAINING_SEC - 5))
+  MAX_CURL_RUNTIME=$((REMAINING_SEC - 30))
   if (( MAX_CURL_RUNTIME < 1 )); then
     queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
       --error "insufficient deadline budget for bounded terminal readback" >/dev/null
