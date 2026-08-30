@@ -1120,6 +1120,7 @@ for (const row of rows) {
         }
         await recordResult({
           ...result,
+          logicalActionKey: lifecycleIntent.logicalActionKey,
           state: 'skipped_terminal_readback_recorded',
           terminalIntentId: lifecycleIntent.intentId,
           terminalRunDate: lifecycleIntent.runDate,

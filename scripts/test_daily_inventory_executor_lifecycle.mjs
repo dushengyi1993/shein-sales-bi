@@ -540,6 +540,8 @@ try {
     assert.equal(resultC2.reconcilePendingOnly, true);
     assert.equal(resultC2.results[0].state, 'skipped_terminal_readback_recorded',
       'reconcile-only must use the terminal journal instead of creating any new write intent');
+    assert.equal(resultC2.results[0].logicalActionKey, resultC.results[0].logicalActionKey,
+      'reconcile-only terminal result must preserve the original intent logicalActionKey');
     assert.equal(resultC2.results[0].before.totalUsableInventory, 15);
     assert.equal(mockC.getChangeInventoryPosts(), 1, 'reconcile-only terminal recovery must never POST again');
   } finally {
