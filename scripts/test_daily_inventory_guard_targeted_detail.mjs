@@ -47,7 +47,7 @@ const noMatch = (name, source, pattern, hint) => check(name, () => assert.doesNo
 // ---------------------------------------------------------------------------
 match('budget default is 64',
   guard,
-  /DETAIL_TARGET_BUDGET_PER_STORE="\$\{SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE:-64\}"/,
+  /DETAIL_TARGET_BUDGET_PER_STORE="\$\{SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE:-96\}"/,
   'default per-store detail budget must be 64');
 match('budget validated as positive integer',
   guard,
@@ -386,24 +386,24 @@ match('reconciliation is gated by the single-run reason',
 
 // ---------------------------------------------------------------------------
 // MAX_DETAILS is the exact manifest maxPerStore (already validated <= 64):
-// maxTargets=59 reconciles with MAX_DETAILS=59, maxTargets>64 fails closed
+// maxTargets=68 reconciles with MAX_DETAILS=68, maxTargets>96 fails closed
 // before any reconciliation env is built.
 // ---------------------------------------------------------------------------
 match('reconciliation MAX_DETAILS is the exact validated maxTargets',
   guard,
   /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$max_targets" \\/,
   'the reconciliation pays for the real target count, not the ceiling');
-check('per-store ceiling stays 64 and gates before reconciliation', () => {
+check('per-store ceiling stays 96 and gates before reconciliation', () => {
   const budgetDefault = guard.match(/DETAIL_TARGET_BUDGET_PER_STORE="\$\{SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE:-(\d+)\}"/)?.[1];
-  assert.equal(budgetDefault, '64', 'the per-store ceiling remains 64');
+  assert.equal(budgetDefault, '96', 'the per-store ceiling remains 96');
   const budgetCheckAt = guard.indexOf('max_targets > DETAIL_TARGET_BUDGET_PER_STORE');
   const reconcileAt = guard.indexOf('SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="$max_targets"');
   assert.ok(budgetCheckAt >= 0 && reconcileAt >= 0 && budgetCheckAt < reconcileAt,
     'over-budget manifests must fail closed before any reconciliation env is built');
 });
-check('maxTargets=59 passes and maxTargets>64 fails closed', () => {
-  assert.equal(59 > 64, false, 'the measured 2026-08-15 maxPerStore=59 must pass the 64 ceiling');
-  assert.equal(65 > 64, true, 'any store over the 64 ceiling must hit the overrun branch');
+check('maxTargets=68 passes and maxTargets>96 fails closed', () => {
+  assert.equal(68 > 96, false, 'the measured 2026-08-30 maxPerStore=68 must pass the 96 ceiling');
+  assert.equal(97 > 96, true, 'any store over the 96 ceiling must hit the overrun branch');
   assert.match(guard, /\(\( max_targets > DETAIL_TARGET_BUDGET_PER_STORE \)\)[\s\S]*return 2/,
     'the over-ceiling branch must fail closed with return 2');
 });

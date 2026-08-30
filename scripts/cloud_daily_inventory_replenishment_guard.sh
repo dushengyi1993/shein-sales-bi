@@ -35,11 +35,11 @@ REFRESH_OPENAPI_ON_STALE="${SHEIN_BI_INVENTORY_REFRESH_OPENAPI_ON_STALE:-1}"
 REQUIRE_PIPELINE_MARKERS="${SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS:-0}"
 STOCK_NOT_BEFORE="${SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE:-${DATE}T15:11:00+08:00}"
 # The daily plan emits detailRefreshTargets for every inventory-relevant SPU
-# (measured maxPerStore=59 on FY for 2026-08-15). Refreshing those SPUs
+# (measured maxPerStore=68 on DX for 2026-08-30). Refreshing those SPUs
 # with current detail must stay bounded per store: the guard never runs a
 # blind full-catalog detail scan (no zero-MAX_DETAILS full scan), and
 # over-budget manifests fail closed instead of refreshing a partial target set.
-DETAIL_TARGET_BUDGET_PER_STORE="${SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE:-64}"
+DETAIL_TARGET_BUDGET_PER_STORE="${SHEIN_BI_INVENTORY_DETAIL_TARGET_BUDGET_PER_STORE:-96}"
 REFRESH_DETAIL_TARGETS_ON_BLOCKED="${SHEIN_BI_INVENTORY_REFRESH_DETAIL_TARGETS_ON_BLOCKED:-1}"
 DETAIL_REBUILD_MAX_ATTEMPTS="${SHEIN_BI_INVENTORY_DETAIL_REBUILD_MAX_ATTEMPTS:-3}"
 # The terminal manifest verifier reads the exact cache root used by the
