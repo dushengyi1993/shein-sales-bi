@@ -1269,6 +1269,7 @@ for (const row of rows) {
           request.pathname,
           request.method,
           request.body,
+          request.headers,
           {
             storeKey: row.storeKey,
             skc: row.skc,

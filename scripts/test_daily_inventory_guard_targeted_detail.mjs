@@ -621,6 +621,9 @@ noMatch('idempotency excludes mutable attempt and overwrite', executor,
 match('durable intent helper owns the single submission', executor,
   /submitDurableInventoryWriteOnce\(\{[\s\S]*journalFile[\s\S]*intent: activeIntent[\s\S]*maxReadbackAttempts: 10/,
   'the exact intent must be fsync-visible before the only network submission');
+match('pre-append inventory admission passes headers and scope separately', executor,
+  /assertInventoryAdmission: \(\) => client\.assertInventoryFence\(\s*request\.pathname,\s*request\.method,\s*request\.body,\s*request\.headers,\s*\{[\s\S]*?requestPayloadHash,[\s\S]*?intentId: activeIntent\.intentId,[\s\S]*?logicalActionKey: activeIntent\.logicalActionKey,[\s\S]*?\}\s*,?\s*\)/,
+  'the inventory scope must be the fifth argument; passing it as headers makes every valid row fail before the durable intent is appended');
 match('write POST bypasses read retry helper', executor,
   /submit: \(\) => \{[\s\S]*assertInventoryWriteWindow\(plan\.date\)[\s\S]*return client\.request\(request\.pathname/,
   'the inventory write must issue one transport POST, not a rate-limit retry loop');
