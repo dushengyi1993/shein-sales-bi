@@ -15,7 +15,7 @@ import fssync from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
-import {Readable} from 'node:stream';
+import {Readable, Transform, Writable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
@@ -12133,7 +12133,13 @@ const biPortalCoreEnvelopeInFlight = new Map();
 let biPortalCoreEnvelopeScanCount = 0;
 
 function biPortalCoreFileIdentity(stat) {
-  return [stat?.dev, stat?.ino, stat?.size, stat?.mtimeMs, stat?.ctimeMs].map(value => String(value ?? '')).join(':');
+  return [
+    stat?.dev,
+    stat?.ino,
+    stat?.size,
+    stat?.mtimeNs ?? stat?.mtimeMs,
+    stat?.ctimeNs ?? stat?.ctimeMs,
+  ].map(value => String(value ?? '')).join(':');
 }
 
 async function readBiPortalCoreEnvelope(root, options = {}) {
@@ -12141,7 +12147,7 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
   const handle = options.handle || await fs.open(file, 'r');
   const closeHandle = !options.handle;
   try {
-    const stat = options.stat || await handle.stat();
+    const stat = options.stat || await handle.stat({bigint: true});
     const identity = biPortalCoreFileIdentity(stat);
     if (biPortalCoreEnvelopeCache?.file === file && biPortalCoreEnvelopeCache.identity === identity) {
       if (options.requireGeneratedAt !== false && biPortalCoreEnvelopeCache.generatedAtValid !== true) {
@@ -12168,7 +12174,14 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
         }
       }).catch(() => {});
     }
-    const scan = await scanPromise;
+    let scan;
+    try {
+      scan = await scanPromise;
+    } finally {
+      if (biPortalCoreEnvelopeInFlight.get(inFlightKey) === scanPromise) {
+        biPortalCoreEnvelopeInFlight.delete(inFlightKey);
+      }
+    }
     const generatedAt = String(scan.fields.generatedAt?.value || scan.fields.__sections?.value?.generatedAt || '');
     const generatedAtValid = homepageTimestampNs(generatedAt) !== null;
     const sections = scan.fields.__sections?.value;
@@ -12214,6 +12227,8 @@ async function readBiPortalCoreMeta(root) {
     const envelope = await readBiPortalCoreEnvelope(root, {requireGeneratedAt: false});
     return {
       generatedAt: envelope.generatedAt,
+      file: envelope.file,
+      identity: envelope.identity,
       mode: envelope.mode,
       dates: envelope.dates || {},
       sections: {
@@ -12245,6 +12260,504 @@ function buildBiPortalCoreStreamPlan(envelope, evidence, options = {}) {
     audit: current.audit,
     overlayApplied: true,
   };
+}
+
+const BI_PORTAL_CORE_SNAPSHOT_PREFIX = 'shein-bi-portal-core-snapshot-v1-';
+const BI_PORTAL_CORE_SNAPSHOT_DIRECTORY = 'shein-bi-portal-core-snapshots-v1';
+const BI_PORTAL_CORE_SNAPSHOT_SUFFIXES = Object.freeze(['.raw.json', '.gzip.json.gz']);
+const DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_BASE_MS = 25;
+const DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_MAX_MS = 500;
+const DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRIES = 5;
+
+function biPortalCoreSnapshotDir(root, options = {}) {
+  if (options.snapshotDir) return path.resolve(options.snapshotDir);
+  const rootKey = crypto.createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 20);
+  return path.join(path.resolve(options.tempRoot || os.tmpdir()), BI_PORTAL_CORE_SNAPSHOT_DIRECTORY, rootKey);
+}
+
+/**
+ * Crash recovery is intentionally narrow: on process startup, remove only
+ * regular files carrying this cache's exact prefix and suffix in its own temp
+ * directory. Runtime ownership uses ordinary named files; no anonymous inode,
+ * parent-chain, or long-lived residue ledger is introduced.
+ */
+export async function cleanupBiPortalCoreSnapshotResidue(root, options = {}) {
+  const directory = biPortalCoreSnapshotDir(root, options);
+  await fs.mkdir(directory, {recursive: true});
+  const entries = await fs.readdir(directory, {withFileTypes: true});
+  let examined = 0;
+  let removed = 0;
+  const failures = [];
+  for (const entry of entries) {
+    if (!entry.isFile()
+      || !entry.name.startsWith(BI_PORTAL_CORE_SNAPSHOT_PREFIX)
+      || !BI_PORTAL_CORE_SNAPSHOT_SUFFIXES.some(suffix => entry.name.endsWith(suffix))) continue;
+    examined += 1;
+    const file = path.join(directory, entry.name);
+    try {
+      await fs.unlink(file);
+      removed += 1;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') failures.push({file, error: String(error?.code || error?.message || error).slice(0, 240)});
+    }
+  }
+  return {directory, examined, removed, failures};
+}
+
+function createBiPortalSnapshotHashingTransform() {
+  let byteLength = 0;
+  const hash = crypto.createHash('sha256');
+  const stream = new Transform({
+    transform(chunk, _encoding, callback) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      byteLength += buffer.length;
+      hash.update(buffer);
+      callback(null, buffer);
+    },
+  });
+  return {stream, finish: () => ({byteLength, sha256: hash.digest('hex')})};
+}
+
+function createBiPortalSnapshotFileWriter(handle) {
+  let position = 0;
+  return new Writable({
+    write(chunk, _encoding, callback) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      (async () => {
+        let offset = 0;
+        while (offset < buffer.length) {
+          const result = await handle.write(buffer, offset, buffer.length - offset, position);
+          if (!result.bytesWritten) throw new Error('BI Portal snapshot write made no progress');
+          offset += result.bytesWritten;
+          position += result.bytesWritten;
+        }
+      })().then(() => callback(), callback);
+    },
+  });
+}
+
+async function writeBiPortalSnapshot(handle, source, options = {}) {
+  const tap = createBiPortalSnapshotHashingTransform();
+  const destination = createBiPortalSnapshotFileWriter(handle);
+  if (options.gzip === true) await pipeline(source, createGzip({level: 6}), tap.stream, destination);
+  else await pipeline(source, tap.stream, destination);
+  await handle.sync();
+  const digest = tap.finish();
+  const stat = await handle.stat({bigint: true});
+  if (!stat.isFile() || stat.size !== BigInt(digest.byteLength)) {
+    throw new Error(`BI Portal snapshot write size mismatch: ${stat.size} != ${digest.byteLength}`);
+  }
+  return {...digest, stat};
+}
+
+function biPortalSnapshotError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function biPortalCoreOverlayIdentity(evidence, nowMs = Date.now()) {
+  const summaryMs = Date.parse(evidence?.summary?.generatedAt || '');
+  const withinOverlayWindow = Number.isFinite(summaryMs)
+    && summaryMs >= nowMs - 6 * 60 * 60 * 1_000
+    && summaryMs <= nowMs + 5 * 60_000;
+  return sha256StableJson({evidence: evidence ?? null, withinOverlayWindow});
+}
+
+/**
+ * One owner entry is retained for the current source/overlay identity. Request
+ * leases only protect a retired entry from closing while a response is using
+ * it; releasing the final request never clears the active owner cache.
+ */
+export function createBiPortalCoreSnapshotCache(options = {}) {
+  const root = path.resolve(options.root || options.dir || process.cwd());
+  const sourceFile = path.resolve(options.sourceFile || path.join(root, 'data.json'));
+  const directory = biPortalCoreSnapshotDir(root, options);
+  const retryBaseMs = Math.max(1, Number(options.retryBaseMs || DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_BASE_MS));
+  const retryMaxMs = Math.max(retryBaseMs, Number(options.retryMaxMs || DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_MAX_MS));
+  const maxRetries = Math.max(1, Math.min(20, Math.floor(Number(options.maxRetries || DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRIES))));
+  const closeHandle = typeof options.closeHandle === 'function'
+    ? options.closeHandle
+    : handle => handle.close();
+  const createReadStream = typeof options.createReadStream === 'function'
+    ? options.createReadStream
+    : (handle, stat) => handle.createReadStream({start: 0, end: Number(stat.size) - 1, autoClose: false});
+  const now = typeof options.now === 'function' ? options.now : () => Date.now();
+  let started = false;
+  let startPromise = null;
+  let startupCleanup = null;
+  let shuttingDown = false;
+  let current = null;
+  let building = null;
+  let builds = 0;
+  let openHandles = 0;
+  let closeFailureTotal = 0;
+  let retryTotal = 0;
+  const retired = new Set();
+  const retryTimers = new Set();
+  const drainWaiters = new Set();
+
+  const drained = () => !current
+    && !building
+    && retired.size === 0
+    && retryTimers.size === 0
+    && openHandles === 0;
+  const notifyDrained = () => {
+    if (!drained()) return;
+    for (const resolve of drainWaiters) resolve();
+    drainWaiters.clear();
+  };
+
+  const status = () => {
+    let requestLeases = 0;
+    let closeFailures = 0;
+    let retiredWithLeases = 0;
+    let retiredWithoutLeases = 0;
+    let retiredCleaning = 0;
+    let retiredRetryPending = 0;
+    let retryExhausted = 0;
+    let stuckRetired = 0;
+    let retiredOpenHandles = 0;
+    if (current) requestLeases += current.leases;
+    for (const entry of retired) {
+      requestLeases += entry.leases;
+      closeFailures += entry.closeFailureKinds.size;
+      retiredOpenHandles += Number(Boolean(entry.raw.handle)) + Number(Boolean(entry.gzip.handle));
+      if (entry.leases > 0) {
+        retiredWithLeases += 1;
+        continue;
+      }
+      retiredWithoutLeases += 1;
+      if (entry.cleanupRunning) retiredCleaning += 1;
+      if (entry.retryTimer) retiredRetryPending += 1;
+      if (!entry.cleanupRunning && !entry.retryTimer) {
+        if (entry.retryAttempts >= maxRetries) retryExhausted += 1;
+        else stuckRetired += 1;
+      }
+    }
+    return {
+      active: current ? 1 : 0,
+      retired: retired.size,
+      retiredWithLeases,
+      retiredWithoutLeases,
+      retiredCleaning,
+      retiredRetryPending,
+      retiredOpenHandles,
+      retryExhausted,
+      stuckRetired,
+      leases: requestLeases,
+      requestLeases,
+      openHandles,
+      closeFailures,
+      retries: retryTimers.size,
+      builds,
+      closeFailureTotal,
+      retryTotal,
+      building: Boolean(building),
+      shuttingDown,
+      directory,
+      startupCleanup,
+    };
+  };
+
+  const start = async () => {
+    if (started) return startupCleanup;
+    if (startPromise) return startPromise;
+    startPromise = cleanupBiPortalCoreSnapshotResidue(root, {...options, snapshotDir: directory})
+      .then(result => {
+        startupCleanup = result;
+        started = true;
+        return result;
+      })
+      .finally(() => { startPromise = null; });
+    return startPromise;
+  };
+
+  const unlinkEntryFiles = async entry => {
+    const failures = [];
+    for (const file of entry.paths) {
+      try {
+        await fs.unlink(file);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') failures.push(error);
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, 'BI Portal snapshot temp cleanup failed');
+  };
+
+  const scheduleRetry = entry => {
+    if (entry.terminated
+      || !entry.retired
+      || entry.leases > 0
+      || entry.retryTimer
+      || entry.retryAttempts >= maxRetries) return;
+    const delayMs = Math.min(retryMaxMs, retryBaseMs * (2 ** entry.retryAttempts));
+    entry.retryAttempts += 1;
+    retryTotal += 1;
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer);
+      if (entry.retryTimer === timer) entry.retryTimer = null;
+      void cleanupRetiredEntry(entry);
+    }, delayMs);
+    entry.retryTimer = timer;
+    retryTimers.add(timer);
+  };
+
+  async function cleanupRetiredEntry(entry) {
+    if (entry.terminated || !entry.retired || entry.leases > 0 || entry.cleanupRunning) return;
+    entry.cleanupRunning = true;
+    let cleanupFailed = false;
+    try {
+      for (const kind of ['raw', 'gzip']) {
+        const owned = entry[kind];
+        if (!owned.handle) continue;
+        try {
+          await closeHandle(owned.handle, {entry, kind});
+          owned.handle = null;
+          entry.closeFailureKinds.delete(kind);
+          openHandles = Math.max(0, openHandles - 1);
+        } catch (error) {
+          cleanupFailed = true;
+          closeFailureTotal += 1;
+          entry.closeFailureKinds.add(kind);
+          entry.lastCloseError = String(error?.code || error?.message || error).slice(0, 240);
+        }
+      }
+      if (!entry.raw.handle && !entry.gzip.handle) {
+        try {
+          await unlinkEntryFiles(entry);
+        } catch (error) {
+          cleanupFailed = true;
+          entry.lastCleanupError = String(error?.code || error?.message || error).slice(0, 240);
+        }
+      }
+      if (!entry.raw.handle && !entry.gzip.handle && !cleanupFailed) {
+        entry.terminated = true;
+        entry.retired = false;
+        if (entry.retryTimer) {
+          clearTimeout(entry.retryTimer);
+          retryTimers.delete(entry.retryTimer);
+          entry.retryTimer = null;
+        }
+        retired.delete(entry);
+        notifyDrained();
+      } else {
+        scheduleRetry(entry);
+      }
+    } finally {
+      entry.cleanupRunning = false;
+      if (!entry.terminated && entry.retired && entry.leases === 0 && !entry.retryTimer
+        && entry.retryAttempts < maxRetries) scheduleRetry(entry);
+    }
+  }
+
+  const retireEntry = entry => {
+    if (!entry || entry.terminated || entry.retired) return;
+    if (current === entry) current = null;
+    entry.retired = true;
+    retired.add(entry);
+    if (entry.leases === 0) void cleanupRetiredEntry(entry);
+  };
+
+  const buildEntry = async ({expectedIdentity, evidence, overlayIdentity}) => {
+    builds += 1;
+    await start();
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const stem = `${BI_PORTAL_CORE_SNAPSHOT_PREFIX}${process.pid}-${now()}-${nonce}`;
+    const rawPath = path.join(directory, `${stem}.raw.json`);
+    const gzipPath = path.join(directory, `${stem}.gzip.json.gz`);
+    let sourceHandle = null;
+    let rawHandle = null;
+    let gzipHandle = null;
+    let ownershipTransferred = false;
+    try {
+      sourceHandle = await fs.open(sourceFile, 'r');
+      const openedStat = await sourceHandle.stat({bigint: true});
+      const openedIdentity = biPortalCoreFileIdentity(openedStat);
+      if (!openedStat.isFile() || openedIdentity !== expectedIdentity) {
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_IDENTITY_CHANGED', 'BI Portal core changed before snapshot build');
+      }
+      const envelope = await readBiPortalCoreEnvelope(root, {handle: sourceHandle, stat: openedStat});
+      if (BigInt(envelope.byteLength) !== openedStat.size) {
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_IDENTITY_CHANGED', 'BI Portal core changed during bounded envelope scan');
+      }
+      const plan = buildBiPortalCoreStreamPlan(
+        envelope,
+        evidence,
+        {expectedStores: DEFAULT_SHEIN_STORE_KEYS},
+      );
+      rawHandle = await fs.open(rawPath, 'wx+');
+      gzipHandle = await fs.open(gzipPath, 'wx+');
+      const raw = await writeBiPortalSnapshot(
+        rawHandle,
+        Readable.from(streamFileHandleWithReplacement(sourceHandle, openedStat, plan.replacement)),
+      );
+      const gzip = await writeBiPortalSnapshot(
+        gzipHandle,
+        rawHandle.createReadStream({start: 0, end: Number(raw.stat.size) - 1, autoClose: false}),
+        {gzip: true},
+      );
+      const finalHandleStat = await sourceHandle.stat({bigint: true});
+      const finalPathStat = await fs.stat(sourceFile, {bigint: true});
+      if (!finalHandleStat.isFile()
+        || !finalPathStat.isFile()
+        || biPortalCoreFileIdentity(finalHandleStat) !== openedIdentity
+        || biPortalCoreFileIdentity(finalPathStat) !== openedIdentity) {
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_IDENTITY_CHANGED', 'BI Portal core changed while snapshot was built');
+      }
+      await sourceHandle.close();
+      sourceHandle = null;
+      const entry = {
+        key: `${openedIdentity}|${overlayIdentity}`,
+        generatedAt: envelope.generatedAt,
+        leases: 0,
+        retired: false,
+        terminated: false,
+        cleanupRunning: false,
+        retryAttempts: 0,
+        retryTimer: null,
+        closeFailureKinds: new Set(),
+        lastCloseError: '',
+        lastCleanupError: '',
+        paths: [rawPath, gzipPath],
+        raw: {...raw, handle: rawHandle},
+        gzip: {...gzip, handle: gzipHandle},
+      };
+      openHandles += 2;
+      ownershipTransferred = true;
+      rawHandle = null;
+      gzipHandle = null;
+      return entry;
+    } finally {
+      await sourceHandle?.close().catch(() => {});
+      if (!ownershipTransferred) {
+        await rawHandle?.close().catch(() => {});
+        await gzipHandle?.close().catch(() => {});
+        await fs.unlink(rawPath).catch(error => { if (error?.code !== 'ENOENT') throw error; });
+        await fs.unlink(gzipPath).catch(error => { if (error?.code !== 'ENOENT') throw error; });
+      }
+    }
+  };
+
+  const createLease = (entry, gzip) => {
+    entry.leases += 1;
+    let released = false;
+    const kind = gzip ? 'gzip' : 'raw';
+    const owned = entry[kind];
+    return {
+      kind,
+      generatedAt: entry.generatedAt,
+      byteLength: owned.byteLength,
+      sha256: owned.sha256,
+      rawByteLength: entry.raw.byteLength,
+      rawSha256: entry.raw.sha256,
+      createReadStream() {
+        if (!owned.handle) throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_CLOSED', 'BI Portal snapshot handle is closed');
+        return createReadStream(owned.handle, owned.stat, {entry, kind});
+      },
+      release() {
+        if (released) return;
+        released = true;
+        entry.leases = Math.max(0, entry.leases - 1);
+        if (entry.retired && entry.leases === 0) void cleanupRetiredEntry(entry);
+      },
+    };
+  };
+
+  const acquire = async ({gzip = false, evidence = null} = {}) => {
+    await start();
+    for (;;) {
+      if (shuttingDown) throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN', 'BI Portal snapshot cache is shutting down');
+      const observedStat = await fs.stat(sourceFile, {bigint: true});
+      if (!observedStat.isFile()) throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_NOT_FILE', 'BI Portal core is not a regular file');
+      const observedIdentity = biPortalCoreFileIdentity(observedStat);
+      const overlayIdentity = biPortalCoreOverlayIdentity(evidence, now());
+      const key = `${observedIdentity}|${overlayIdentity}`;
+      const cacheHitEntry = current;
+      if (cacheHitEntry?.key === key) {
+        if (typeof options.onBeforeCacheHitIdentityReadback === 'function') {
+          await options.onBeforeCacheHitIdentityReadback({
+            sourceFile,
+            observedIdentity,
+            entry: cacheHitEntry,
+          });
+        }
+        if (shuttingDown) {
+          throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN', 'BI Portal snapshot cache is shutting down');
+        }
+        let finalStat = null;
+        try {
+          finalStat = await fs.stat(sourceFile, {bigint: true});
+        } catch {}
+        const finalIdentity = finalStat?.isFile()
+          ? biPortalCoreFileIdentity(finalStat)
+          : '';
+        if (current === cacheHitEntry
+          && !cacheHitEntry.retired
+          && !cacheHitEntry.terminated
+          && finalIdentity === observedIdentity) {
+          return createLease(cacheHitEntry, gzip);
+        }
+        if (!cacheHitEntry.retired && !cacheHitEntry.terminated) retireEntry(cacheHitEntry);
+        continue;
+      }
+      if (building) {
+        await building.promise.catch(() => {});
+        continue;
+      }
+      if (current) retireEntry(current);
+      const pending = {
+        key,
+        promise: buildEntry({expectedIdentity: observedIdentity, evidence, overlayIdentity}),
+      };
+      building = pending;
+      let entry;
+      try {
+        entry = await pending.promise;
+      } finally {
+        if (building === pending) building = null;
+        notifyDrained();
+      }
+      if (shuttingDown) {
+        retireEntry(entry);
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN', 'BI Portal snapshot cache shut down during build');
+      }
+      current = entry;
+      return createLease(entry, gzip);
+    }
+  };
+
+  const stopAdmitting = () => {
+    shuttingDown = true;
+    if (current) retireEntry(current);
+  };
+
+  const shutdown = async ({timeoutMs = 5_000} = {}) => {
+    stopAdmitting();
+    if (building) {
+      const entry = await building.promise.catch(() => null);
+      if (entry) retireEntry(entry);
+    }
+    if (drained()) return {ok: true, ...status()};
+    let timer;
+    const drainedPromise = new Promise(resolve => {
+      drainWaiters.add(resolve);
+      notifyDrained();
+    });
+    const completed = await Promise.race([
+      drainedPromise.then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), Math.max(1, Number(timeoutMs) || 1)); }),
+    ]);
+    clearTimeout(timer);
+    if (!completed) {
+      const error = biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN_TIMEOUT', 'BI Portal snapshot cache did not drain before shutdown timeout');
+      error.snapshot = status();
+      throw error;
+    }
+    return {ok: true, ...status()};
+  };
+
+  return {start, acquire, stopAdmitting, shutdown, status};
 }
 
 function roundNumber(value, digits = 2) {
@@ -15698,6 +16211,23 @@ async function loadDirectBiQuery(args, root, actor, question, options = {}) {
     intent: plan.intent,
   };
   response.sections.preparation = preparation;
+  if (typeof options.onBeforeFinalCoreIdentityReadback === 'function') {
+    await options.onBeforeFinalCoreIdentityReadback({coreMeta});
+  }
+  if (coreMeta.file && coreMeta.identity) {
+    let currentCoreStat;
+    try {
+      currentCoreStat = await fs.stat(coreMeta.file, {bigint: true});
+    } catch {
+      currentCoreStat = null;
+    }
+    if (!currentCoreStat?.isFile() || biPortalCoreFileIdentity(currentCoreStat) !== coreMeta.identity) {
+      throw biPortalSnapshotError(
+        'BI_QUERY_IDENTITY_CHANGED',
+        'BI query final pathname no longer names the opened core generation',
+      );
+    }
+  }
   return response;
 }
 
@@ -16183,12 +16713,90 @@ function evaluateBiPortalCoreRouteLifecycleHealth(
   };
 }
 
-function evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth} = {}) {
+function evaluateBiPortalCoreSnapshotLifecycleHealth(snapshotStatus = {}) {
+  const active = Math.max(0, Number(snapshotStatus?.active || 0));
+  const retired = Math.max(0, Number(snapshotStatus?.retired || 0));
+  const retiredWithLeases = Object.hasOwn(snapshotStatus || {}, 'retiredWithLeases')
+    ? Math.max(0, Number(snapshotStatus.retiredWithLeases || 0))
+    : Math.min(retired, Math.max(0, Number(snapshotStatus?.requestLeases || 0)));
+  const retiredWithoutLeases = Object.hasOwn(snapshotStatus || {}, 'retiredWithoutLeases')
+    ? Math.max(0, Number(snapshotStatus.retiredWithoutLeases || 0))
+    : Math.max(0, retired - retiredWithLeases);
+  const openHandles = Math.max(0, Number(snapshotStatus?.openHandles || 0));
+  const expectedOwnerOpenHandles = (active + retiredWithLeases) * 2;
+  const issues = [];
+  if (retiredWithoutLeases > 0) issues.push('retiredWithoutLeases');
+  if (openHandles !== expectedOwnerOpenHandles) issues.push('openHandles');
+  if (Number(snapshotStatus?.closeFailures || 0) > 0) issues.push('closeFailures');
+  if (Number(snapshotStatus?.retryExhausted || 0) > 0) issues.push('retryExhausted');
+  if (Number(snapshotStatus?.stuckRetired || 0) > 0) issues.push('stuckRetired');
+  return {
+    ok: issues.length === 0,
+    issues,
+    expectedOwnerOpenHandles,
+    retiredWithLeases,
+    retiredWithoutLeases,
+  };
+}
+
+function evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth, snapshotHealth} = {}) {
   const components = {
     warmup: Boolean(warmupHealth?.ok),
     routeResponse: Boolean(routeHealth?.ok),
+    snapshotLifecycle: snapshotHealth ? Boolean(snapshotHealth.ok) : true,
   };
   return {ok: Object.values(components).every(Boolean), components};
+}
+
+export async function sendBiPortalCoreSnapshot(req, res, lease, headers = {}) {
+  const protectedHeaders = new Set([
+    'content-type',
+    'content-length',
+    'content-encoding',
+    'transfer-encoding',
+    'vary',
+    'x-content-sha256',
+    'x-uncompressed-content-length',
+    'x-uncompressed-sha256',
+  ]);
+  const callerHeaders = Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !protectedHeaders.has(String(name).toLowerCase())),
+  );
+  const abortController = new AbortController();
+  const onReqAborted = () => { abortController.abort(); };
+  const onResClose = () => {
+    if (!res.writableEnded && !res.writableFinished) abortController.abort();
+  };
+  req.once('aborted', onReqAborted);
+  res.once('close', onResClose);
+  let source = null;
+  try {
+    source = lease.createReadStream();
+    writeResponseHead(res, 200, {
+      ...callerHeaders,
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': String(lease.byteLength),
+      'Vary': 'Accept-Encoding',
+      'X-Content-SHA256': lease.sha256,
+      'X-Uncompressed-Content-Length': String(lease.rawByteLength),
+      'X-Uncompressed-SHA256': lease.rawSha256,
+      ...(lease.kind === 'gzip' ? {'Content-Encoding': 'gzip'} : {}),
+    });
+    await pipeline(source, res, {signal: abortController.signal});
+    if (!res.writableFinished) throw new Error('BI Portal snapshot response did not finish');
+    recordBiPortalCoreRouteResponseSuccess();
+  } catch (error) {
+    const expectedAbort = abortController.signal.aborted
+      && ['AbortError', 'ABORT_ERR', 'ERR_STREAM_PREMATURE_CLOSE'].includes(String(error?.name || error?.code || ''));
+    if (!expectedAbort) recordBiPortalCoreRouteResponseFailure(error, res);
+    if (res.headersSent && !res.destroyed && !res.writableFinished) res.destroy(error);
+    throw error;
+  } finally {
+    req.off('aborted', onReqAborted);
+    res.off('close', onResClose);
+    if (!res.writableEnded && !res.writableFinished) source?.destroy();
+    await lease.release();
+  }
 }
 
 async function sendBoundedCoreJson(req, res, handle, stat, replacement = null, headers = {}) {
@@ -16923,6 +17531,7 @@ export function createPortalShutdownHooks({
   biCoreWarmupWatcher = null,
   ownerKnowledgeReconcileTimer = null,
   liveUpdateBridge = null,
+  biPortalCoreSnapshotCache = null,
   linkOpsStoreGateway = null,
   sheinWebhookRepository = null,
   runtimeCancellationController = null,
@@ -16933,6 +17542,7 @@ export function createPortalShutdownHooks({
       // from this point on. An iteration that already entered claimJob() is
       // in-flight and is drained by stopWorkers() before any store is closed.
       linkOpsJobWorker?.stopAdmitting();
+      biPortalCoreSnapshotCache?.stopAdmitting?.();
       enqueueMutationRequest.shutdown();
       if (runtimeCancellationController && !runtimeCancellationController.signal?.aborted) {
         const reason = Object.assign(new Error('Portal runtime shutdown cancelled in-flight OpenAPI executors'), {
@@ -16970,6 +17580,7 @@ export function createPortalShutdownHooks({
       const results = await Promise.allSettled([
         linkOpsStoreGateway?.close?.(),
         sheinWebhookRepository?.close?.(),
+        biPortalCoreSnapshotCache?.shutdown?.(),
       ]);
       const rejected = results.filter(result => result.status === 'rejected');
       if (rejected.length) throw new Error(`${rejected.length} store close operation(s) failed`);
@@ -17712,6 +18323,12 @@ async function main() {
   if (!fssync.existsSync(indexFile)) {
     throw new Error(`BI portal not found: ${indexFile}. Run scripts/run_bi_daily_pipeline.ps1 first.`);
   }
+  const biPortalCoreSnapshotCache = createBiPortalCoreSnapshotCache({
+    root,
+    ...(String(process.env.SHEIN_BI_PORTAL_SNAPSHOT_DIR || '').trim()
+      ? {snapshotDir: String(process.env.SHEIN_BI_PORTAL_SNAPSHOT_DIR).trim()}
+      : {}),
+  });
   const authRequired = !args.noAuth && !args.readOnly;
   const authUsers = authRequired ? await loadPortalUsers(args) : [];
   if (authRequired && authUsers.length === 0) {
@@ -18965,7 +19582,9 @@ async function main() {
         const warmupHealth = evaluateBiPortalCoreWarmupHealth(effectiveWarmupState, {queueState});
         const routeLifecycle = biPortalCoreRouteLifecycleStatus();
         const routeHealth = evaluateBiPortalCoreRouteLifecycleHealth(routeLifecycle);
-        const topLevelHealth = evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth});
+        const snapshotStatus = biPortalCoreSnapshotCache.status();
+        const snapshotHealth = evaluateBiPortalCoreSnapshotLifecycleHealth(snapshotStatus);
+        const topLevelHealth = evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth, snapshotHealth});
         return sendJson(res, 200, {
           ok: topLevelHealth.ok,
           healthComponents: topLevelHealth.components,
@@ -19004,6 +19623,25 @@ async function main() {
          biPortalCoreRoute: {
             ...routeLifecycle,
             health: routeHealth,
+          },
+         biPortalCoreSnapshots: {
+            active: snapshotStatus.active,
+            retired: snapshotStatus.retired,
+            retiredWithLeases: snapshotStatus.retiredWithLeases,
+            retiredWithoutLeases: snapshotStatus.retiredWithoutLeases,
+            retiredCleaning: snapshotStatus.retiredCleaning,
+            retiredRetryPending: snapshotStatus.retiredRetryPending,
+            retiredOpenHandles: snapshotStatus.retiredOpenHandles,
+            retryExhausted: snapshotStatus.retryExhausted,
+            stuckRetired: snapshotStatus.stuckRetired,
+            leases: snapshotStatus.leases,
+            requestLeases: snapshotStatus.requestLeases,
+            openHandles: snapshotStatus.openHandles,
+            closeFailures: snapshotStatus.closeFailures,
+            retries: snapshotStatus.retries,
+            builds: snapshotStatus.builds,
+            health: snapshotHealth,
+            startupCleanup: snapshotStatus.startupCleanup,
           },
          biCoreWarmup: {
             generatedAt: effectiveWarmupState.generatedAt,
@@ -22681,20 +23319,16 @@ ${uploadCheckAnswer}` : `
         });
       }
       if (req.method === 'GET' && url.pathname === '/data.json') {
-        let handle;
+        let lease;
         try {
-          const file = path.join(root, 'data.json');
-          handle = await fs.open(file, 'r');
-          const stat = await handle.stat();
-          const envelope = await readBiPortalCoreEnvelope(root, {handle, stat});
-          const plan = buildBiPortalCoreStreamPlan(
-            envelope,
-            loadOpenApiProductReconciliationSummarySync(),
-            {expectedStores: DEFAULT_SHEIN_STORE_KEYS},
-          );
-          await sendBoundedCoreJson(req, res, handle, stat, plan.replacement, {
+          lease = await biPortalCoreSnapshotCache.acquire({
+            gzip: acceptsGzip(req.headers['accept-encoding']),
+            evidence: loadOpenApiProductReconciliationSummarySync(),
+          });
+          await sendBiPortalCoreSnapshot(req, res, lease, {
             'Cache-Control': 'private, no-cache, must-revalidate',
           });
+          lease = null;
           return;
         } catch (error) {
           if (res.headersSent) {
@@ -22703,7 +23337,7 @@ ${uploadCheckAnswer}` : `
           }
           return sendJson(res, 503, {ok: false, error: 'BI 页面底稿暂时不可用'}, {'Cache-Control': 'no-store'});
         } finally {
-          await handle?.close().catch(() => {});
+          await lease?.release?.();
         }
       }
       let file = safePath(root, req.url || '/');
@@ -22815,6 +23449,7 @@ ${uploadCheckAnswer}` : `
         biCoreWarmupWatcher,
         ownerKnowledgeReconcileTimer,
         liveUpdateBridge: biLiveUpdateBridge,
+        biPortalCoreSnapshotCache,
         linkOpsStoreGateway,
         sheinWebhookRepository: args.sheinWebhookRepository,
         runtimeCancellationController: openApiExecutorAbortController,
@@ -22870,6 +23505,8 @@ ${uploadCheckAnswer}` : `
   }
 
  try {
+    await runPortalStartupPhase(() => biPortalCoreSnapshotCache.start());
+    if (shutdownPromise) { await shutdownPromise; return; }
     await runPortalStartupPhase(() => new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(args.port, args.host, resolve);
@@ -23027,12 +23664,17 @@ export const __testHooks = {
   biPortalCoreEnvelopeScanCount() {
     return biPortalCoreEnvelopeScanCount;
   },
+  biPortalCoreSnapshotDir,
+  cleanupBiPortalCoreSnapshotResidue,
+  createBiPortalCoreSnapshotCache,
   resolveDescriptionBindingExpectedBodyHash,
   loadDirectBiQuery,
+  sendBiPortalCoreSnapshot,
   sendBoundedCoreJson,
   biPortalCoreRouteLifecycleStatus,
   resetBiPortalCoreRouteLifecycleState,
   evaluateBiPortalCoreRouteLifecycleHealth,
+  evaluateBiPortalCoreSnapshotLifecycleHealth,
   evaluateBiPortalTopLevelHealth,
   sha256StableJson,
   verifyPersistedPublishAssetBindingReadback,

@@ -7,13 +7,15 @@ import os from 'node:os';
 import zlib from 'node:zlib';
 import {promisify} from 'node:util';
 import {Readable} from 'node:stream';
+import crypto from 'node:crypto';
 
 import {__testHooks} from './serve_bi_portal.mjs';
 import {writeBiSectionCache} from '../lib/bi_section_cache.mjs';
 
 const gunzipAsync = promisify(zlib.gunzip);
 const {
-  sendBoundedCoreJson,
+  sendBiPortalCoreSnapshot,
+  createBiPortalCoreSnapshotCache,
   readBiPortalCoreEnvelope,
   resetBiPortalCoreEnvelopeCache,
   biPortalCoreEnvelopeScanCount,
@@ -21,6 +23,7 @@ const {
   biPortalCoreRouteLifecycleStatus,
   resetBiPortalCoreRouteLifecycleState,
   evaluateBiPortalCoreRouteLifecycleHealth,
+  evaluateBiPortalCoreSnapshotLifecycleHealth,
   evaluateBiPortalTopLevelHealth,
 } = __testHooks;
 
@@ -32,6 +35,9 @@ function httpGetBuffer(url, headers = {}) {
       const fail = error => {
         if (settled) return;
         settled = true;
+        error.statusCode = res.statusCode;
+        error.headers = res.headers;
+        error.receivedBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
         reject(error);
       };
       res.on('data', chunk => chunks.push(chunk));
@@ -50,8 +56,15 @@ function httpGetBuffer(url, headers = {}) {
   });
 }
 
-function failingCoreHandle(body) {
+function failingSnapshotLease(body) {
+  let released = false;
+  const sha256 = crypto.createHash('sha256').update(body).digest('hex');
   return {
+    kind: 'raw',
+    byteLength: body.length,
+    rawByteLength: body.length,
+    sha256,
+    rawSha256: sha256,
     createReadStream() {
       let emitted = false;
       return new Readable({
@@ -65,6 +78,8 @@ function failingCoreHandle(body) {
         },
       });
     },
+    release() { released = true; },
+    wasReleased() { return released; },
   };
 }
 
@@ -80,32 +95,36 @@ async function testHttpStreaming(tmpDir) {
   };
   await fs.writeFile(dataFile, JSON.stringify(payloadObj, null, 2), 'utf8');
 
-  let activeHandles = 0;
+  resetBiPortalCoreEnvelopeCache();
+  const manager = createBiPortalCoreSnapshotCache({
+    root: tmpDir,
+    snapshotDir: path.join(tmpDir, 'response-snapshots'),
+  });
   const failureBody = Buffer.from(JSON.stringify({ok: true, generatedAt: gen, payload: 'x'.repeat(64 * 1024)}));
+  let faultLease = null;
   const server = http.createServer(async (req, res) => {
-    let handle;
+    let lease;
     try {
       if (req.url === '/fault') {
-        await sendBoundedCoreJson(req, res, failingCoreHandle(failureBody), {size: failureBody.length});
+        faultLease = failingSnapshotLease(failureBody);
+        await sendBiPortalCoreSnapshot(req, res, faultLease);
         return;
       }
-      handle = await fs.open(dataFile, 'r');
-      activeHandles += 1;
-      const stat = await handle.stat();
-      await readBiPortalCoreEnvelope(tmpDir, {handle, stat});
-      await sendBoundedCoreJson(req, res, handle, stat, null, {
+      lease = await manager.acquire({
+        gzip: /(?:^|,)\s*gzip\b/iu.test(String(req.headers['accept-encoding'] || '')),
+        evidence: null,
+      });
+      await sendBiPortalCoreSnapshot(req, res, lease, {
         'Cache-Control': 'no-cache',
       });
+      lease = null;
     } catch (err) {
       if (!res.headersSent && !res.writableEnded) {
         res.writeHead(500, {'Content-Type': 'text/plain'});
         res.end(err.message);
       }
     } finally {
-      if (handle) {
-        await handle.close().catch(() => {});
-        activeHandles -= 1;
-      }
+      await lease?.release?.();
     }
   });
 
@@ -131,6 +150,8 @@ async function testHttpStreaming(tmpDir) {
     });
     assert.equal(gzipRes.statusCode, 200);
     assert.equal(gzipRes.headers['content-encoding'], 'gzip');
+    assert.equal(gzipRes.body.length, Number(gzipRes.headers['content-length']),
+      'prebuilt gzip response must also carry an exact Content-Length');
     const uncompressed = await gunzipAsync(gzipRes.body);
     const gzipJson = JSON.parse(uncompressed.toString('utf8'));
     assert.equal(gzipJson.generatedAt, gen);
@@ -153,11 +174,31 @@ async function testHttpStreaming(tmpDir) {
       });
     });
 
-    // Verify handle was closed and no leak
-    assert.equal(activeHandles, 0, 'all file handles cleanly closed after abort');
+    // The disconnected request releases only its request lease. The current
+    // owner intentionally retains two cache handles for unchanged-generation
+    // reuse instead of closing/rebuilding after every response.
+    for (let attempt = 0; attempt < 100 && manager.status().requestLeases !== 0; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(manager.status().requestLeases, 0, 'client disconnect must release its request lease');
+    assert.deepEqual(
+      (({active, retired, openHandles, builds}) => ({active, retired, openHandles, builds}))(manager.status()),
+      {active: 1, retired: 0, openHandles: 2, builds: 1},
+    );
+    assert.equal(evaluateBiPortalCoreSnapshotLifecycleHealth(manager.status()).ok, true);
 
     resetBiPortalCoreRouteLifecycleState();
-    await assert.rejects(httpGetBuffer(`http://127.0.0.1:${port}/fault`));
+    let truncated = null;
+    try {
+      await httpGetBuffer(`http://127.0.0.1:${port}/fault`);
+    } catch (error) {
+      truncated = error;
+    }
+    assert.ok(truncated, 'background EIO after headers must reject the client response');
+    assert.equal(truncated.statusCode, 200, 'the fixture must prove a status 200 alone is not complete');
+    assert.ok(Number(truncated.headers?.['content-length']) > Number(truncated.receivedBytes || 0),
+      'Content-Length must expose the truncated 200 response');
+    assert.equal(faultLease.wasReleased(), true, 'failed response must release its request lease');
     const routeStatus = biPortalCoreRouteLifecycleStatus();
     assert.equal(routeStatus.totalResponseFailures, 1);
     assert.equal(routeStatus.consecutiveResponseFailures, 1);
@@ -198,6 +239,7 @@ async function testHttpStreaming(tmpDir) {
   } finally {
     resetBiPortalCoreRouteLifecycleState();
     await new Promise(resolve => server.close(resolve));
+    await manager.shutdown({timeoutMs: 2_000});
   }
 }
 
@@ -252,6 +294,48 @@ async function testLargeApiCoreAndLegacy(tmpDir) {
   assert.ok(queryResult.data.rankings, 'homeRankings section loaded into data');
   assert.equal(queryResult.data.dates?.linkDate, '2026-08-30', 'dates loaded properly');
 
+  const sameLengthReplacement = path.join(tmpDir, 'data.same-length-replacement.json');
+  const openedOldCore = path.join(tmpDir, 'data.opened-old.json');
+  await fs.copyFile(dataFile, sameLengthReplacement);
+  let corePathSwapped = false;
+  await assert.rejects(
+    loadDirectBiQuery(
+      {},
+      tmpDir,
+      {username: 'test', role: 'admin', readStores: ['*']},
+      '今日销量排行',
+      {
+        sections: ['homeRankings'],
+        allowGenerate: false,
+        async onBeforeFinalCoreIdentityReadback() {
+          corePathSwapped = true;
+          await fs.rename(dataFile, openedOldCore);
+          await fs.rename(sameLengthReplacement, dataFile);
+        },
+      },
+    ),
+    error => error?.code === 'BI_QUERY_IDENTITY_CHANGED',
+  );
+  assert.equal(corePathSwapped, true,
+    'API-mode lightweight core query must perform a terminal pathname identity readback');
+  assert.equal((await fs.stat(dataFile)).size, (await fs.stat(openedOldCore)).size,
+    'the path-swap fixture must preserve exact core byte length');
+  await fs.rm(openedOldCore, {force: true});
+
+  const unavailable = await loadDirectBiQuery(
+    {},
+    tmpDir,
+    {username: 'test', role: 'admin', readStores: ['*']},
+    '查询售后',
+    {sections: ['afterSales'], allowGenerate: false},
+  );
+  assert.equal(unavailable.ok, false, 'an unavailable requested section must fail the data-completeness contract');
+  assert.equal(unavailable.sections.issues.some(issue => (
+    issue.section === 'afterSales' && issue.status !== 'loaded'
+  )), true, 'an unavailable section must return an explicit issue instead of a business zero');
+  assert.equal(Object.hasOwn(unavailable.data, 'afterSales'), false,
+    'missing section data must not be synthesized as an empty/zero result');
+
   // Test legacy small core backward compatibility
   const legacyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bi-legacy-core-'));
   try {
@@ -295,6 +379,9 @@ async function main() {
   try {
     await testHttpStreaming(tmpDir);
     await testLargeApiCoreAndLegacy(tmpDir);
+    const portalSource = await fs.readFile(new URL('./serve_bi_portal.mjs', import.meta.url), 'utf8');
+    assert.match(portalSource, /biPortalCoreSnapshots:\s*\{[\s\S]*?active:\s*snapshotStatus\.active[\s\S]*?retired:\s*snapshotStatus\.retired[\s\S]*?openHandles:\s*snapshotStatus\.openHandles[\s\S]*?closeFailures:\s*snapshotStatus\.closeFailures/u,
+      'Portal health must expose active/retired/openHandles/closeFailures snapshot lifecycle gauges');
     console.log('test_bi_response_completeness: passed (HTTP raw Content-Length, gzip decompression, client destroy cleanup, >64MB api core lightweight metadata, legacy small core compatibility)');
   } finally {
     await fs.rm(tmpDir, {recursive: true, force: true}).catch(() => {});

@@ -177,7 +177,7 @@ try {
 
   const portalSource = await fs.readFile(new URL('./serve_bi_portal.mjs', import.meta.url), 'utf8');
   const dataRoute = portalSource.slice(portalSource.indexOf("url.pathname === '/data.json'"), portalSource.indexOf("let file = safePath", portalSource.indexOf("url.pathname === '/data.json'")));
-  assert.match(dataRoute, /buildBiPortalCoreStreamPlan[\s\S]*sendBoundedCoreJson/);
+  assert.match(dataRoute, /biPortalCoreSnapshotCache\.acquire[\s\S]*sendBiPortalCoreSnapshot/);
   assert.doesNotMatch(dataRoute, /JSON\.parse\s*\(\s*await fs\.readFile/);
 
   const largeFile = path.join(temp, 'large.json');

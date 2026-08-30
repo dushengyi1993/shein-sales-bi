@@ -81,7 +81,9 @@ try {
 
   // An initially small file does not wait for the occupied large-reader slot.
   // If that same file grows after fstat, payload I/O must still stop at the
-  // opened size rather than following the new EOF into memory.
+  // opened size rather than following the new EOF into memory. The final
+  // identity check then rejects the changed generation instead of returning
+  // the old prefix as a complete result.
   const growthFile = path.join(temp, 'small-growth.json');
   const growthPayload = Buffer.from(JSON.stringify({generatedAt: GENERATED_AT, payload: 'small'}));
   await fs.writeFile(growthFile, growthPayload);
@@ -105,10 +107,11 @@ try {
     ]);
     assert.notEqual(growthResult.status, 'timeout',
       'an initially small reader must not wait for the occupied large-file slot');
-    assert.equal(growthResult.status, 'fulfilled');
-    assert.equal(growthResult.value.data.payload, 'small');
+    assert.equal(growthResult.status, 'rejected');
+    assert.match(String(growthResult.error?.message || growthResult.error), /\(identity_changed\)/u);
     assert.equal(growthReadBytes, growthPayload.length,
       'payload I/O must stop at the opened fstat size instead of following a grown EOF');
+    assert.equal(Number((await growthHandle.stat()).size), growthPayload.length + 20 * MiB);
   } finally {
     await growthHandle.close();
   }
@@ -132,6 +135,46 @@ try {
   assert.ok(queuedRssDelta < 80 * MiB, `queued readers must keep RSS bounded, delta=${queuedRssDelta}`);
   releaseHeld();
   await held;
+
+  // The large-reader slot remains owned after payload I/O, through strict
+  // decode, JSON.parse, and the final pathname identity boundary. Hold the
+  // first reader immediately before its final stat; a second large reader
+  // must not even open until that boundary is released.
+  let releaseFinalIdentity;
+  let markFinalIdentityReached;
+  const finalIdentityGate = new Promise(resolve => { releaseFinalIdentity = resolve; });
+  const finalIdentityReached = new Promise(resolve => { markFinalIdentityReached = resolve; });
+  let firstLifecycleHandle = null;
+  let lifecycleOpens = 0;
+  let lifecycleDecodes = 0;
+  let lifecycleParses = 0;
+  __setFileHandleLifecycleHooks({
+    onOpened({handle, admitted}) {
+      assert.equal(admitted, true);
+      lifecycleOpens += 1;
+      firstLifecycleHandle ||= handle;
+    },
+    onAfterDecode() { lifecycleDecodes += 1; },
+    onAfterParse() { lifecycleParses += 1; },
+    async onBeforeFinalPathStat({handle}) {
+      if (handle !== firstLifecycleHandle) return;
+      markFinalIdentityReached();
+      await finalIdentityGate;
+    },
+  });
+  const firstLifecycleRead = loadCore(largeFile);
+  await within(finalIdentityReached, 'first reader final identity boundary');
+  const secondLifecycleRead = loadCore(largeFile);
+  await delay(100);
+  assert.equal(lifecycleOpens, 1, 'second large reader must not open before the first final identity check');
+  assert.equal(lifecycleDecodes, 1, 'first reader must complete strict UTF-8 decode while still admitted');
+  assert.equal(lifecycleParses, 1, 'first reader must complete JSON.parse while still admitted');
+  releaseFinalIdentity();
+  const lifecycleResults = await Promise.all([firstLifecycleRead, secondLifecycleRead]);
+  assert.equal(lifecycleResults.every(result => result.data.payload.length === 20 * MiB), true);
+  assert.equal(lifecycleOpens, 2);
+  assert.equal(lifecycleDecodes, 2);
+  assert.equal(lifecycleParses, 2);
 
   // The path stat sees the small generation, then a normal atomic publication
   // replaces it immediately before open. The unadmitted handle must close with
@@ -175,7 +218,7 @@ try {
     onBeforePayloadRead({file, stat, admitted}) {
       if (file !== publicationFile) return;
       assert.equal(admitted, true, 'published large payload must only be read while admitted');
-      assert.ok(stat.size >= 16 * MiB, 'published generation must cross the parse gate');
+      assert.ok(Number(stat.size) >= 16 * MiB, 'published generation must cross the parse gate');
       publicationPayloadReads += 1;
     },
     onClosed({file, admitted}) {
@@ -221,6 +264,55 @@ try {
   assert.ok(activeHandle, 'active reader must have opened one handle');
   await assert.rejects(activeHandle.stat(), error => error?.code === 'EBADF');
   assert.equal(closedHooks, 1, 'active abort must complete exactly one handle close lifecycle');
+
+  // A same-length atomic replacement after the opened handle has been parsed
+  // must fail the final pathname identity check instead of returning old data.
+  const swapFile = path.join(temp, 'swap.json');
+  const oldGeneration = '2026-08-29T10:01:00.000+08:00';
+  const newGeneration = '2026-08-29T10:02:00.000+08:00';
+  const oldPayload = Buffer.from(JSON.stringify({generatedAt: oldGeneration, payload: 'a'.repeat(8192)}));
+  const newPayload = Buffer.from(JSON.stringify({generatedAt: newGeneration, payload: 'b'.repeat(8192)}));
+  assert.equal(newPayload.length, oldPayload.length);
+  await fs.writeFile(swapFile, oldPayload);
+  const replacementFile = path.join(temp, 'swap-replacement.json');
+  const openedOldFile = path.join(temp, 'swap-opened-old.json');
+  await fs.writeFile(replacementFile, newPayload);
+  let swapped = false;
+  __setFileHandleLifecycleHooks({
+    async onAfterPayloadRead({file}) {
+      if (file !== swapFile || swapped) return;
+      swapped = true;
+      await fs.rename(swapFile, openedOldFile);
+      await fs.rename(replacementFile, swapFile);
+    },
+  });
+  await assert.rejects(
+    loadCore(swapFile, {maxCoreBytes: MiB, maxAggregateBytes: MiB, parseGateBytes: MiB}),
+    error => /\(identity_changed\)/u.test(String(error?.message || error)),
+  );
+  assert.equal(swapped, true);
+
+  // Even after the per-file lifecycle succeeds, a replacement during result
+  // assembly is rejected by the query-terminal identity readback.
+  const lateSwapFile = path.join(temp, 'late-swap.json');
+  const lateSwapReplacement = path.join(temp, 'late-swap-replacement.json');
+  const lateSwapOpenedOld = path.join(temp, 'late-swap-opened-old.json');
+  await fs.writeFile(lateSwapFile, oldPayload);
+  await fs.writeFile(lateSwapReplacement, newPayload);
+  let lateSwapped = false;
+  __setFileHandleLifecycleHooks({
+    async onBeforeQueryFinalReadback() {
+      if (lateSwapped) return;
+      lateSwapped = true;
+      await fs.rename(lateSwapFile, lateSwapOpenedOld);
+      await fs.rename(lateSwapReplacement, lateSwapFile);
+    },
+  });
+  await assert.rejects(
+    loadCore(lateSwapFile, {maxCoreBytes: MiB, maxAggregateBytes: MiB, parseGateBytes: MiB}),
+    error => error?.code === 'BI_QUERY_IDENTITY_CHANGED',
+  );
+  assert.equal(lateSwapped, true);
 
   // Fatal TextDecoder semantics reject each invalid UTF-8 class before
   // JSON.parse; a valid multi-byte payload remains accepted.
