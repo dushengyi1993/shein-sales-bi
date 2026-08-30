@@ -65,8 +65,8 @@ require_run_budget() {
   if (( remaining <= 0 )); then
     write_state "failed" "the single daily run exhausted its ${RUN_BUDGET_SEC}s safety budget during $phase; prior complete BI snapshot remains active"
     write_marker "daily-operating-refresh" "failed" "run safety budget exhausted during $phase" "$LOG_FILE" >/dev/null || true
-    echo "[cloud_morning_chain] ERROR safety budget exhausted phase=$phase" >&2
-    exit 75
+    echo "[cloud_morning_chain] ERROR safety budget exhausted phase=$phase terminal=restart-prevented" >&2
+    exit 76
   fi
 }
 

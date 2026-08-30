@@ -263,6 +263,7 @@ for required_stage in "${REQUIRES[@]}"; do
   if ! node "$ROOT/scripts/pipeline_marker.mjs" require \
     --stage "$required_stage" \
     --date "$RUN_DATE" \
+    --business-date "$BUSINESS_DATE" \
     --root "$MARKER_ROOT" \
     --status done,warning; then
     echo "[pipeline-stage] deferred stage=$STAGE missingDependency=$required_stage runDate=$RUN_DATE" >&2

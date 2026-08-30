@@ -19,6 +19,11 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SYSTEMD_DIR = path.join(ROOT, 'infra', 'systemd');
+const dailyInventoryGuardSource = await fs.readFile(
+  path.join(SYSTEMD_DIR, 'shein-bi-daily-inventory-replenishment-guard.service'),
+  'utf8',
+);
+const runPipelineStageSource = await fs.readFile(path.join(ROOT, 'scripts', 'run_pipeline_stage.sh'), 'utf8');
 const entries = await fs.readdir(SYSTEMD_DIR, {withFileTypes: true});
 const serviceFiles = entries
   .filter(entry => entry.isFile() && /^shein-bi-[A-Za-z0-9_.@-]+\.service$/.test(entry.name))
@@ -82,6 +87,25 @@ assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-watchdog.servic
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-db-backup.service'], 'infrastructure');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-disk-maintenance.service'], 'infrastructure');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-portal-section-queue.service'], 'infrastructure');
+
+const dailyInventoryGuardWants = dailyInventoryGuardSource.match(/^Wants=([^\r\n]*)$/mu)?.[1] ?? '';
+const dailyInventoryGuardAfter = dailyInventoryGuardSource.match(/^After=([^\r\n]*)$/mu)?.[1] ?? '';
+const dailyInventoryGuardExecStart = dailyInventoryGuardSource.match(/^ExecStart=([^\r\n]*)$/mu)?.[1] ?? '';
+assert.doesNotMatch(dailyInventoryGuardWants, /\bshein-bi-cloud-morning-chain\.service\b/,
+  'manual start of inventory guard must not pull in morning-chain through Wants');
+assert.match(dailyInventoryGuardAfter, /\bshein-bi-cloud-morning-chain\.service\b/,
+  'inventory guard must still order after morning-chain when both are active');
+assert.match(dailyInventoryGuardExecStart,
+  /run_pipeline_stage\.sh --stage inventory-guard --run-date today --business-date yesterday\b/,
+  'standalone inventory guard must bind runDate=today and businessDate=yesterday explicitly');
+const dependencyRequireSource = runPipelineStageSource.slice(
+  runPipelineStageSource.indexOf('for required_stage in'),
+  runPipelineStageSource.indexOf('echo "[pipeline-stage] start'),
+);
+assert.match(dependencyRequireSource, /pipeline_marker\.mjs" require/,
+  'run_pipeline_stage must check dependency markers through pipeline_marker require');
+assert.match(dependencyRequireSource, /--business-date "\$BUSINESS_DATE"/,
+  'run_pipeline_stage dependency marker checks must bind the resolved businessDate');
 
 const omittedServicePolicy = {...CLOUD_MAINTENANCE_POLICY_BY_SERVICE};
 delete omittedServicePolicy['shein-bi-cloud-daily-refresh.service'];
@@ -159,4 +183,8 @@ console.log(JSON.stringify({
   expectedInstalledUnits: repositoryUnitFiles.length,
   omittedTimerCounterexample: true,
   omittedServiceCounterexample: true,
+  inventoryGuardDoesNotWantMorning: true,
+  inventoryGuardAfterMorning: true,
+  inventoryGuardDateArgs: true,
+  pipelineRequireBusinessDate: true,
 }, null, 2));

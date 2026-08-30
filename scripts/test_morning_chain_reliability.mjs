@@ -80,6 +80,11 @@ assert.doesNotMatch(chain, /nightly_session_marker_status\(\)/,
   'the morning chain must not re-implement a weak marker-only predicate');
 assert.match(chain, /run_cloud_session_manager_job\.sh[\s\S]*?--deadline-epoch "\$recovery_deadline"/,
   'the morning gate must call the shared coordinator with an explicit epoch deadline');
+const runBudgetSource = chain.slice(chain.indexOf('require_run_budget()'), chain.indexOf('require_pre_inventory_budget()'));
+assert.match(runBudgetSource, /terminal=restart-prevented/,
+  'an exhausted absolute morning run budget must be reported as restart-prevented');
+assert.match(runBudgetSource, /exit 76/,
+  'an exhausted absolute morning run budget must exit 76 so systemd will not retry it as temporary unavailability');
 const sessionGateSource = chain.slice(
   chain.indexOf('run_nightly_session_readiness_gate()'),
   chain.indexOf('# Idempotent terminal-state convergence'),
