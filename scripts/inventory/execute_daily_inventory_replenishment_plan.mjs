@@ -591,9 +591,6 @@ const journalIntentKey = intent => `${path.resolve(intent?.journalFile || journa
 const appendJournalRecord = async (entry, targetJournalFile = journalFile) => {
   await appendDurableJournalRecord(targetJournalFile, entry);
 };
-const currentInventoryIntents = new Map([...inventoryIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
-const currentPendingIntents = new Map([...pendingIntents].filter(([, intent]) => intent.journalFile === path.resolve(journalFile)));
-const currentTerminalIntentOutcomes = new Map([...terminalIntentOutcomes].filter(([, outcome]) => outcome.journalFile === path.resolve(journalFile)));
 if (!results.length) {
   const handle = await fs.open(journalFile, 'a', 0o600);
   await handle.close();
@@ -660,22 +657,22 @@ for (const intent of inventoryIntents.values()) {
   if (!inventoryIntentsByScope.has(scopeKey)) inventoryIntentsByScope.set(scopeKey, []);
   inventoryIntentsByScope.get(scopeKey).push(intent);
 }
-const currentInventoryIntentsByScope = new Map();
-for (const [intentKey, intent] of currentInventoryIntents.entries()) {
-  // A terminal manual_resolution is a permanent fence, not a pending or
-  // recoverable write intent. Keep its event in the report/fence aggregate,
-  // but do not let reconcile-pending-only's historical logical-action check
-  // reject the entire run before the row-level blocked result can be emitted.
-  if (journalBundle.manualResolutions.has(intentKey)) continue;
-  const scopeKey = inventoryIntentScopeKey(intent);
-  if (!currentInventoryIntentsByScope.has(scopeKey)) currentInventoryIntentsByScope.set(scopeKey, []);
-  currentInventoryIntentsByScope.get(scopeKey).push(intent);
+// Discovery de-duplicates hard links by inode and prefers the current path,
+// so journalFile may be a current alias for a historical intent. Only the
+// immutable runDate establishes plan-date membership. A terminal
+// manual_resolution remains a fence, not a recoverable plan-date intent.
+const planDateInventoryIntentsByScope = new Map();
+for (const [scopeKey, scopeIntents] of inventoryIntentsByScope.entries()) {
+  const planDateIntents = scopeIntents.filter(intent => (
+    intent.runDate === plan.date
+    && !journalBundle.manualResolutions.has(journalIntentKey(intent))
+  ));
+  if (planDateIntents.length) planDateInventoryIntentsByScope.set(scopeKey, planDateIntents);
 }
-const currentPendingIntentsByScope = new Map();
-for (const intent of currentPendingIntents.values()) {
-  const scopeKey = inventoryIntentScopeKey(intent);
-  if (!currentPendingIntentsByScope.has(scopeKey)) currentPendingIntentsByScope.set(scopeKey, []);
-  currentPendingIntentsByScope.get(scopeKey).push(intent);
+const historicalPendingIntentsByScope = new Map();
+for (const [scopeKey, scopeIntents] of pendingIntentsByScope.entries()) {
+  const historicalIntents = scopeIntents.filter(intent => intent.runDate < plan.date);
+  if (historicalIntents.length) historicalPendingIntentsByScope.set(scopeKey, historicalIntents);
 }
 const currentPlanScopeSet = new Set(planRecoveryScopes);
 if (args.reconcilePendingOnly) {
@@ -694,7 +691,8 @@ if (args.reconcilePendingOnly) {
         invType: 'VI',
       },
     })) continue;
-    const scopeIntents = currentInventoryIntentsByScope.get(recoveryScopeKey) || [];
+    const scopeIntents = planDateInventoryIntentsByScope.get(recoveryScopeKey) || [];
+    const historicalPendingScopeIntents = historicalPendingIntentsByScope.get(recoveryScopeKey) || [];
     const approvedTarget = Number(row.targetUsableInventory);
     const logicalActionKey = stableInventoryHash({
       runDate: plan.date,
@@ -731,6 +729,14 @@ if (args.reconcilePendingOnly) {
       ? matchingIntents.filter(intent => compareInventoryIntentChronology(intent, latestMatchingIntent) === 0)
       : [];
     if (!matchingIntents.length) {
+      if (!scopeIntents.length && historicalPendingScopeIntents.length) {
+        // Cross-day pending intents are date-independent durable item locks.
+        // They are intentionally resolved by the row-level lock-held branch
+        // below, which can only read back or keep the historical intent pending.
+        // Do not turn them into current-plan matches here: that would either
+        // rewrite history or mask a still-pending platform readback.
+        continue;
+      }
       const mismatchSummary = mismatches.map(candidate => candidate.mismatch || 'match').join(',');
       failures.push(`scope_matches=${matchingIntents.length}:scope_count=${scopeIntents.length}:mismatches=${mismatchSummary}:${row.storeKey}:${row.skc}:${row.skuCode}`);
       continue;
@@ -741,14 +747,13 @@ if (args.reconcilePendingOnly) {
       // allowing independent rows to reconcile.
       continue;
     }
-    const intentId = latestMatchingIntent.intentId;
-    const currentIntentKey = [...currentInventoryIntents.entries()].find(([, intent]) => intent.intentId === intentId)?.[0];
-    const terminalOutcome = currentIntentKey ? currentTerminalIntentOutcomes.get(currentIntentKey) : null;
-    if (currentIntentKey && !pendingIntents.has(currentIntentKey) && terminalOutcome?.disposition !== 'readback_matched') {
+    const planDateIntentKey = journalIntentKey(latestMatchingIntent);
+    const terminalOutcome = terminalIntentOutcomes.get(planDateIntentKey);
+    if (!pendingIntents.has(planDateIntentKey) && terminalOutcome?.disposition !== 'readback_matched') {
       failures.push(`intent_lifecycle=${terminalOutcome?.disposition || 'missing'}:${row.storeKey}:${row.skc}:${row.skuCode}`);
     }
   }
-  for (const scopeKey of currentInventoryIntentsByScope.keys()) {
+  for (const scopeKey of planDateInventoryIntentsByScope.keys()) {
     if (!currentPlanScopeSet.has(scopeKey)) failures.push(`extra_intent_scope=${scopeKey}`);
   }
   if (failures.length) {
@@ -1088,7 +1093,7 @@ for (const row of rows) {
         continue;
       }
       if (args.reconcilePendingOnly) {
-        const lifecycleCandidates = (currentInventoryIntentsByScope.get(recoveryScopeKey) || [])
+        const lifecycleCandidates = (planDateInventoryIntentsByScope.get(recoveryScopeKey) || [])
           .filter(intent => !recoveredInventoryIntentMismatch(intent, {
             logicalActionKey,
             plan,
@@ -1109,7 +1114,7 @@ for (const row of rows) {
           throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_AMBIGUOUS:${recoveryScopeKey}`);
         }
         const lifecycleKey = lifecycleIntent && journalIntentKey(lifecycleIntent);
-        const lifecycleOutcome = lifecycleIntent && currentTerminalIntentOutcomes.get(lifecycleKey);
+        const lifecycleOutcome = lifecycleIntent && terminalIntentOutcomes.get(lifecycleKey);
         if (lifecycleOutcome?.disposition !== 'readback_matched') {
           throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_MISSING:${recoveryScopeKey}`);
         }

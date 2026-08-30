@@ -49,6 +49,13 @@ const LOCK_FILE = path.join(ROOT, 'state', 'locks', `daily-inventory-${STORE_KEY
 const AUTOMATION_CONTEXT = 'cloud_daily_inventory_replenishment_guard';
 const AUTOMATION_AUTHORIZATION = 'owner-automatic-inventory-20260803-v1';
 const TODAY = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
+const dateDaysBefore = (date, days) => {
+  const value = new Date(`${date}T12:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - days);
+  return value.toISOString().slice(0, 10);
+};
+const YESTERDAY = dateDaysBefore(TODAY, 1);
+const TWO_DAYS_AGO = dateDaysBefore(TODAY, 2);
 const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 
 function runExecutor(args, env = {}) {
@@ -68,7 +75,7 @@ function runExecutor(args, env = {}) {
   });
 }
 
-function createMockOpenApiServer({onChangeInventory}) {
+function createMockOpenApiServer({onChangeInventory, onQueryStoreInfo}) {
   let currentUsable = 10;
   const counts = {queryStoreInfo: 0, spuInfo: 0, stockQuery: 0, changeInventory: 0};
   let changeHandler = onChangeInventory || (() => {});
@@ -81,6 +88,17 @@ function createMockOpenApiServer({onChangeInventory}) {
     };
     if (pathname === '/open-api/openapi-business-backend/query-store-info') {
       counts.queryStoreInfo += 1;
+      if (onQueryStoreInfo) {
+        Promise.resolve(onQueryStoreInfo({res, json})).catch(error => {
+          if (!res.headersSent) {
+            res.statusCode = 500;
+            json({code: '500', msg: error.message});
+          } else {
+            res.destroy(error);
+          }
+        });
+        return;
+      }
       json({code: '0', data: {accountNo: 'GS5337922', supplierId: '6720288'}});
       return;
     }
@@ -229,6 +247,113 @@ async function cleanupLock() {
   for (const dir of [path.dirname(LOCK_FILE), path.dirname(path.dirname(LOCK_FILE))]) {
     await fs.rmdir(dir).catch(() => {});
   }
+}
+
+function buildJournalIntent({
+  plan,
+  runDate = plan.date,
+  targetUsableInventory = 15,
+  beforeUsableInventory = 10,
+  recordedAt = new Date().toISOString(),
+  intentId = `intent-${crypto.randomUUID()}`,
+  authorizationId = AUTOMATION_AUTHORIZATION,
+} = {}) {
+  const before = {
+    skuCode: SKU_CODE,
+    totalInventoryQuantity: beforeUsableInventory,
+    totalUsableInventory: beforeUsableInventory,
+    totalLockedQuantity: 0,
+    stockRowMissing: false,
+    warehouseCodes: [],
+  };
+  const logicalActionKey = stableInventoryHash({
+    runDate,
+    store: STORE_KEY,
+    skc: SKC,
+    sku: SKU_CODE,
+    target: targetUsableInventory,
+    actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+    policyVersion: plan.policyVersion,
+    authorizationId,
+  });
+  const request = {
+    pathname: '/open-api/stock/change-inventory/v2',
+    method: 'POST',
+    body: {updateSkuInventoryQuantityRequests: [{
+      idempotencyKey: `bi-inv-${logicalActionKey.slice(0, 42)}`,
+      skuCode: SKU_CODE,
+      invType: 'VI',
+      changeType: 'OVERWRITE',
+      changeQuantity: computeInventoryOverwriteQuantity(targetUsableInventory, before),
+      changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
+    }]},
+    headers: {language: 'en'},
+  };
+  return {
+    kind: 'intent',
+    intentId,
+    logicalActionKey,
+    recoveryScopeKey: stableInventoryHash({
+      store: STORE_KEY,
+      skc: SKC,
+      sku: SKU_CODE,
+      actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+      invType: 'VI',
+    }),
+    planHash: plan.payloadHash,
+    runDate,
+    storeKey: STORE_KEY,
+    skc: SKC,
+    skuCode: SKU_CODE,
+    targetUsableInventory,
+    policyVersion: plan.policyVersion,
+    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    authorizationId,
+    idempotencyKey: request.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
+    requestPayloadHash: stableInventoryHash(request),
+    request,
+    before,
+    recordedAt,
+  };
+}
+
+function buildReadbackMatchedOutcome(intent, recordedAt = new Date().toISOString()) {
+  return {
+    kind: 'write_outcome',
+    intentId: intent.intentId,
+    logicalActionKey: intent.logicalActionKey,
+    disposition: 'readback_matched',
+    recordedAt,
+  };
+}
+
+async function readJournalEntries(file) {
+  return (await fs.readFile(file, 'utf8')).split(/\r?\n/).filter(Boolean).map(JSON.parse);
+}
+
+async function writeHardLinkedHistoricalIntent({
+  dir,
+  out,
+  plan,
+  runDate = YESTERDAY,
+  targetUsableInventory = 15,
+  intentId,
+} = {}) {
+  const historicalJournal = path.join(
+    dir,
+    `daily-inventory-replenishment-${runDate}.json.journal.ndjson`,
+  );
+  const currentJournal = `${out}.journal.ndjson`;
+  const intent = buildJournalIntent({plan, runDate, targetUsableInventory, intentId});
+  await fs.writeFile(historicalJournal, `${JSON.stringify(intent)}\n`, 'utf8');
+  await fs.link(historicalJournal, currentJournal);
+  const [historicalStat, currentStat] = await Promise.all([
+    fs.stat(historicalJournal, {bigint: true}),
+    fs.stat(currentJournal, {bigint: true}),
+  ]);
+  assert.equal(currentStat.dev, historicalStat.dev, 'hard-link fixture must share the same device');
+  assert.equal(currentStat.ino, historicalStat.ino, 'hard-link fixture must share the same inode');
+  return {historicalJournal, currentJournal, intent};
 }
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-executor-lifecycle-'));
@@ -419,6 +544,320 @@ try {
     assert.equal(mockC.getChangeInventoryPosts(), 1, 'reconcile-only terminal recovery must never POST again');
   } finally {
     mockC.server.close();
+    await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
+  // Scenario 3b: discovery prefers the current path when a historical
+  // journal is hard-linked as the current sidecar. Classification must use
+  // intent.runDate, reach lock-held row-level readback, keep the unmatched
+  // historical target pending, and never POST or create another intent.
+  // ---------------------------------------------------------------------
+  const dirH = path.join(temp, 'historical-pending-reconcile-only');
+  await fs.mkdir(dirH);
+  const {plan: planH} = await buildPlanFixture(dirH, {etProducts: [etRow]});
+  const mockH = createMockOpenApiServer({});
+  mockH.url = await new Promise(resolve => mockH.server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + mockH.server.address().port)));
+  await fs.writeFile(path.join(dirH, 'config.json'), JSON.stringify({
+    stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+    apiBaseUrls: {prodSemiManaged: mockH.url},
+  }), 'utf8');
+  const outH = path.join(dirH, 'result.json');
+  const argsH = [
+    '--plan', path.join(dirH, 'plan.json'),
+    '--policy', path.join(dirH, 'policy.json'),
+    '--config', path.join(dirH, 'config.json'),
+    '--bi-data', path.join(dirH, 'bi.json'),
+    '--links-data', path.join(dirH, 'links.json'),
+    '--out', outH,
+    '--execute',
+    '--execution-mode', 'automatic',
+    '--confirm-hash', planH.payloadHash,
+    '--reconcile-pending-only',
+  ];
+  const envH = {
+    SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT: AUTOMATION_CONTEXT,
+    SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION: AUTOMATION_AUTHORIZATION,
+  };
+  try {
+    const historicalRunDate = YESTERDAY;
+    const {historicalJournal, intent: historicalIntent} = await writeHardLinkedHistoricalIntent({
+      dir: dirH,
+      out: outH,
+      plan: planH,
+      runDate: historicalRunDate,
+      targetUsableInventory: 15,
+      intentId: 'historical-intent-1',
+    });
+    const runH = await runExecutor(argsH, envH);
+    assert.equal(runH.code, 1, 'historical pending reconcile-only must publish a pending row, stderr=' + runH.stderr);
+    assert.doesNotMatch(runH.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/,
+      'historical pending must not be rejected by the batch precondition');
+    const resultH = JSON.parse(await fs.readFile(outH, 'utf8'));
+    assert.equal(resultH.results[0].state, 'submitted_but_readback_pending');
+    assert.equal(resultH.results[0].historicalPending, true);
+    assert.equal(resultH.results[0].historicalRunDate, historicalRunDate);
+    assert.match(resultH.results[0].error, /historical durable inventory intent remains pending/);
+    assert.equal(mockH.getChangeInventoryPosts(), 0, 'historical reconcile-only must never POST');
+    const entriesH = await readJournalEntries(historicalJournal);
+    assert.deepEqual(
+      entriesH.filter(entry => entry.kind === 'intent').map(entry => entry.intentId),
+      [historicalIntent.intentId],
+      'hard-linked historical recovery must retain only the original intent',
+    );
+  } finally {
+    mockH.server.close();
+    await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
+  // Scenario 3bb: when fresh live stock exactly matches the historical
+  // target, reconcile-only closes only that original intent with one
+  // readback_matched outcome. It never creates a current-day intent or POST.
+  // ---------------------------------------------------------------------
+  const dirHM = path.join(temp, 'historical-hard-link-readback-matched');
+  await fs.mkdir(dirHM);
+  const {plan: planHM} = await buildPlanFixture(dirHM, {etProducts: [etRow]});
+  const mockHM = createMockOpenApiServer({});
+  mockHM.url = await new Promise(resolve => mockHM.server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + mockHM.server.address().port)));
+  await fs.writeFile(path.join(dirHM, 'config.json'), JSON.stringify({
+    stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+    apiBaseUrls: {prodSemiManaged: mockHM.url},
+  }), 'utf8');
+  const outHM = path.join(dirHM, 'result.json');
+  try {
+    const {historicalJournal, intent} = await writeHardLinkedHistoricalIntent({
+      dir: dirHM,
+      out: outHM,
+      plan: planHM,
+      runDate: YESTERDAY,
+      targetUsableInventory: 10,
+      intentId: 'historical-matched-intent-1',
+    });
+    const runHM = await runExecutor([
+      '--plan', path.join(dirHM, 'plan.json'),
+      '--policy', path.join(dirHM, 'policy.json'),
+      '--config', path.join(dirHM, 'config.json'),
+      '--bi-data', path.join(dirHM, 'bi.json'),
+      '--links-data', path.join(dirHM, 'links.json'),
+      '--out', outHM,
+      '--execute',
+      '--execution-mode', 'automatic',
+      '--confirm-hash', planHM.payloadHash,
+      '--reconcile-pending-only',
+    ], envH);
+    assert.equal(runHM.code, 1, 'historical matched target remains a deferred corrective row, stderr=' + runHM.stderr);
+    assert.doesNotMatch(runHM.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+    const resultHM = JSON.parse(await fs.readFile(outHM, 'utf8'));
+    assert.equal(resultHM.results[0].state, 'historical_readback_matched');
+    assert.equal(resultHM.results[0].historicalIntentId, intent.intentId);
+    assert.equal(mockHM.getChangeInventoryPosts(), 0, 'historical matched recovery must never POST');
+    const entriesHM = await readJournalEntries(historicalJournal);
+    assert.deepEqual(
+      entriesHM.filter(entry => entry.kind === 'intent').map(entry => entry.intentId),
+      [intent.intentId],
+      'historical matched recovery must not generate a new intent',
+    );
+    const outcomesHM = entriesHM.filter(entry => entry.kind === 'write_outcome');
+    assert.equal(outcomesHM.length, 1, 'historical matched recovery appends exactly one lifecycle outcome');
+    assert.equal(outcomesHM[0].intentId, intent.intentId);
+    assert.equal(outcomesHM[0].disposition, 'readback_matched');
+  } finally {
+    mockHM.server.close();
+    await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
+  // Scenario 3bc: another actor may close the historical intent after the
+  // batch snapshot but before the SKU ticket. The lock-held fresh reread
+  // must observe that closure, avoid stale pending handling, and never POST.
+  // ---------------------------------------------------------------------
+  const dirHR = path.join(temp, 'historical-close-after-precondition');
+  await fs.mkdir(dirHR);
+  const {plan: planHR} = await buildPlanFixture(dirHR, {etProducts: [etRow]});
+  const outHR = path.join(dirHR, 'result.json');
+  let closeHistoricalIntent;
+  const mockHR = createMockOpenApiServer({
+    onQueryStoreInfo: async ({json}) => {
+      await fs.appendFile(
+        closeHistoricalIntent.historicalJournal,
+        `${JSON.stringify(buildReadbackMatchedOutcome(closeHistoricalIntent.intent))}\n`,
+        'utf8',
+      );
+      json({code: '0', data: {accountNo: 'GS5337922', supplierId: '6720288'}});
+    },
+  });
+  mockHR.url = await new Promise(resolve => mockHR.server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + mockHR.server.address().port)));
+  await fs.writeFile(path.join(dirHR, 'config.json'), JSON.stringify({
+    stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+    apiBaseUrls: {prodSemiManaged: mockHR.url},
+  }), 'utf8');
+  try {
+    closeHistoricalIntent = await writeHardLinkedHistoricalIntent({
+      dir: dirHR,
+      out: outHR,
+      plan: planHR,
+      runDate: TWO_DAYS_AGO,
+      targetUsableInventory: 15,
+      intentId: 'historical-race-intent-1',
+    });
+    const runHR = await runExecutor([
+      '--plan', path.join(dirHR, 'plan.json'),
+      '--policy', path.join(dirHR, 'policy.json'),
+      '--config', path.join(dirHR, 'config.json'),
+      '--bi-data', path.join(dirHR, 'bi.json'),
+      '--links-data', path.join(dirHR, 'links.json'),
+      '--out', outHR,
+      '--execute',
+      '--execution-mode', 'automatic',
+      '--confirm-hash', planHR.payloadHash,
+      '--reconcile-pending-only',
+    ], envH);
+    assert.equal(runHR.code, 1, 'fresh reread of a newly closed historical intent must fail closed per row');
+    assert.doesNotMatch(runHR.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+    const resultHR = JSON.parse(await fs.readFile(outHR, 'utf8'));
+    assert.equal(resultHR.results[0].state, 'blocked');
+    assert.match(resultHR.results[0].error, /INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_AMBIGUOUS/);
+    assert.equal(mockHR.getChangeInventoryPosts(), 0, 'fresh reread race closure must never POST');
+    const entriesHR = await readJournalEntries(closeHistoricalIntent.historicalJournal);
+    assert.deepEqual(
+      entriesHR.filter(entry => entry.kind === 'intent').map(entry => entry.intentId),
+      [closeHistoricalIntent.intent.intentId],
+      'fresh reread race closure must not create a new intent',
+    );
+    assert.equal(entriesHR.filter(entry => entry.kind === 'write_outcome').length, 1,
+      'fresh reread must observe the one externally appended terminal outcome');
+  } finally {
+    mockHR.server.close();
+    await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
+  // Scenario 3c: current-plan same-scope intent drift still fails closed at
+  // the reconcile-pending-only precondition; historical tolerance cannot
+  // bless a current exact intent mismatch.
+  // ---------------------------------------------------------------------
+  const dirM = path.join(temp, 'current-intent-mismatch-reconcile-only');
+  await fs.mkdir(dirM);
+  const {plan: planM} = await buildPlanFixture(dirM, {etProducts: [etRow]});
+  const mockM = createMockOpenApiServer({});
+  mockM.url = await new Promise(resolve => mockM.server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + mockM.server.address().port)));
+  await fs.writeFile(path.join(dirM, 'config.json'), JSON.stringify({
+    stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+    apiBaseUrls: {prodSemiManaged: mockM.url},
+  }), 'utf8');
+  const outM = path.join(dirM, 'result.json');
+  const argsM = [
+    '--plan', path.join(dirM, 'plan.json'),
+    '--policy', path.join(dirM, 'policy.json'),
+    '--config', path.join(dirM, 'config.json'),
+    '--bi-data', path.join(dirM, 'bi.json'),
+    '--links-data', path.join(dirM, 'links.json'),
+    '--out', outM,
+    '--execute',
+    '--execution-mode', 'automatic',
+    '--confirm-hash', planM.payloadHash,
+    '--reconcile-pending-only',
+  ];
+  try {
+    await fs.writeFile(outM + '.journal.ndjson', JSON.stringify(buildJournalIntent({
+      plan: planM,
+      runDate: TODAY,
+      targetUsableInventory: 14,
+      intentId: 'current-mismatch-intent-1',
+    })) + '\n', 'utf8');
+    const runM = await runExecutor(argsM, envH);
+    assert.notEqual(runM.code, 0, 'current exact intent mismatch must fail closed');
+    assert.match(runM.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+    assert.match(runM.stderr, /scope_count=1/);
+    assert.equal(mockM.getChangeInventoryPosts(), 0, 'current mismatch precondition must never POST');
+  } finally {
+    mockM.server.close();
+    await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
+  // Scenario 3d: a reconcile-only row with neither a current intent nor a
+  // historical pending intent remains a batch precondition failure.
+  // ---------------------------------------------------------------------
+  const dirN = path.join(temp, 'no-intent-reconcile-only');
+  await fs.mkdir(dirN);
+  const {plan: planN} = await buildPlanFixture(dirN, {etProducts: [etRow]});
+  const mockN = createMockOpenApiServer({});
+  mockN.url = await new Promise(resolve => mockN.server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + mockN.server.address().port)));
+  await fs.writeFile(path.join(dirN, 'config.json'), JSON.stringify({
+    stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+    apiBaseUrls: {prodSemiManaged: mockN.url},
+  }), 'utf8');
+  const outN = path.join(dirN, 'result.json');
+  try {
+    const runN = await runExecutor([
+      '--plan', path.join(dirN, 'plan.json'),
+      '--policy', path.join(dirN, 'policy.json'),
+      '--config', path.join(dirN, 'config.json'),
+      '--bi-data', path.join(dirN, 'bi.json'),
+      '--links-data', path.join(dirN, 'links.json'),
+      '--out', outN,
+      '--execute',
+      '--execution-mode', 'automatic',
+      '--confirm-hash', planN.payloadHash,
+      '--reconcile-pending-only',
+    ], envH);
+    assert.notEqual(runN.code, 0, 'missing current and historical intent must fail closed');
+    assert.match(runN.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+    assert.match(runN.stderr, /scope_matches=0:scope_count=0/);
+    assert.equal(mockN.getChangeInventoryPosts(), 0, 'missing-intent precondition must never POST');
+  } finally {
+    mockN.server.close();
+    await cleanupLock();
+  }
+
+  // ---------------------------------------------------------------------
+  // Scenario 3e: multiple historical pending intents in the same scope stay
+  // item-level needs_manual_resolve rather than aborting the whole batch.
+  // ---------------------------------------------------------------------
+  const dirMH = path.join(temp, 'multiple-historical-pending-reconcile-only');
+  await fs.mkdir(dirMH);
+  const {plan: planMH} = await buildPlanFixture(dirMH, {etProducts: [etRow]});
+  const mockMH = createMockOpenApiServer({});
+  mockMH.url = await new Promise(resolve => mockMH.server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + mockMH.server.address().port)));
+  await fs.writeFile(path.join(dirMH, 'config.json'), JSON.stringify({
+    stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
+    apiBaseUrls: {prodSemiManaged: mockMH.url},
+  }), 'utf8');
+  const outMH = path.join(dirMH, 'result.json');
+  try {
+    await fs.writeFile(
+      path.join(dirMH, `daily-inventory-replenishment-${TWO_DAYS_AGO}.json.journal.ndjson`),
+      JSON.stringify(buildJournalIntent({plan: planMH, runDate: TWO_DAYS_AGO, intentId: 'historical-intent-a'})) + '\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(dirMH, `daily-inventory-replenishment-${YESTERDAY}.json.journal.ndjson`),
+      JSON.stringify(buildJournalIntent({plan: planMH, runDate: YESTERDAY, intentId: 'historical-intent-b'})) + '\n',
+      'utf8',
+    );
+    const runMH = await runExecutor([
+      '--plan', path.join(dirMH, 'plan.json'),
+      '--policy', path.join(dirMH, 'policy.json'),
+      '--config', path.join(dirMH, 'config.json'),
+      '--bi-data', path.join(dirMH, 'bi.json'),
+      '--links-data', path.join(dirMH, 'links.json'),
+      '--out', outMH,
+      '--execute',
+      '--execution-mode', 'automatic',
+      '--confirm-hash', planMH.payloadHash,
+      '--reconcile-pending-only',
+    ], envH);
+    assert.equal(runMH.code, 1, 'multiple historical pending intents must publish needs_manual_resolve, stderr=' + runMH.stderr);
+    assert.doesNotMatch(runMH.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/,
+      'multiple historical pending intents must not become a batch precondition failure');
+    const resultMH = JSON.parse(await fs.readFile(outMH, 'utf8'));
+    assert.equal(resultMH.results[0].state, 'needs_manual_resolve');
+    assert.match(resultMH.results[0].error, /multiple durable inventory intents exist in recovery scope/);
+    assert.equal(mockMH.getChangeInventoryPosts(), 0, 'multiple historical pending reconcile-only must never POST');
+  } finally {
+    mockMH.server.close();
     await cleanupLock();
   }
 
@@ -836,6 +1275,12 @@ try {
       'durable_intent_recovery_is_readback_only_no_second_post',
       'successful_write_readback_matched_one_post',
       'reconcile_only_terminal_recovery_skips_external_source_drift_no_second_post',
+      'reconcile_only_hard_linked_historical_pending_date_classified_no_post_no_new_intent',
+      'reconcile_only_hard_linked_historical_match_closes_original_intent_no_post',
+      'reconcile_only_historical_close_after_precondition_fresh_reread_no_post',
+      'reconcile_only_current_exact_intent_mismatch_fails_closed_no_post',
+      'reconcile_only_missing_current_and_historical_intent_fails_closed_no_post',
+      'reconcile_only_multiple_historical_pending_item_level_manual_resolve_no_post',
       'definitive_rejection_journals_write_outcome_rejected_and_releases_intent',
       'code_zero_missing_success_unmatched_readback_retains_intent_rerun_readback_only',
       'concurrent_stale_snapshots_refresh_under_sku_lock_one_post_total',
