@@ -388,6 +388,13 @@ run_stage_with_retry() {
 }
 
 run_guard_report() {
+  local -a current_run_evidence_args=()
+  if [[ -n "${RUN_EVIDENCE_SCAN_PATH:-}" && -n "${RUN_EVIDENCE_STACK_REVIEW_PATH:-}" ]]; then
+    current_run_evidence_args=(
+      --current-marketing-live-scan "$RUN_EVIDENCE_SCAN_PATH"
+      --marketing-stack-review "$RUN_EVIDENCE_STACK_REVIEW_PATH"
+    )
+  fi
   node scripts/marketing/build_marketing_daily_guard_report.mjs \
     --date "$DATE" \
     --out-dir "$GUARD_STAGE_DIR" \
@@ -395,7 +402,8 @@ run_guard_report() {
     --cloud-bi-ssh "$GUARD_CLOUD_BI_SSH" \
     --cloud-bi-root "$GUARD_CLOUD_BI_ROOT" \
     --marketing-cost-map "$MARKETING_COST_MAP_PATH" \
-    --expected-marketing-cost-map-sha256 "$MARKETING_COST_MAP_SHA256"
+    --expected-marketing-cost-map-sha256 "$MARKETING_COST_MAP_SHA256" \
+    "${current_run_evidence_args[@]}"
 }
 
 refresh_marketing_cost_map() {
