@@ -846,6 +846,9 @@ function structuredDestinationPreparation(task) {
           attribute_id: agreedInputCurrent.override.attributeId,
           attribute_extra_value: agreedInputCurrent.override.attributeExtraValue,
           attribute_unit: agreedInputCurrent.override.unit,
+          ...(agreedInputCurrent.override.attributeValueId
+            ? {attribute_value_id: agreedInputCurrent.override.attributeValueId}
+            : {}),
           ...(agreedInputCurrent.override.label ? {label: agreedInputCurrent.override.label} : {}),
           source: agreedInputCurrent.override.source,
         }]
@@ -866,6 +869,24 @@ function exactSourceOverrideField(row, snakeKey, camelKey, sourceLabel) {
     throw new Error(`${sourceLabel} Input current(1002323) row declares both ${snakeKey}/${camelKey}`);
   }
   return hasSnake ? row[snakeKey] : hasCamel ? row[camelKey] : undefined;
+}
+
+function normalizeExplicitInputCurrentDeclarationValue(extraValue, unit) {
+  if (typeof extraValue !== 'string' || typeof unit !== 'string') return null;
+  const normalizedUnit = unit.trim().toLowerCase();
+  if (normalizedUnit !== 'a' && normalizedUnit !== 'ma') return null;
+  const valueText = extraValue.trim();
+  const valuePattern = normalizedUnit === 'ma'
+    ? /^[1-9]\d*$/
+    : /^(?:0|[1-9]\d*)(?:\.\d{1,3})?$/;
+  if (!valuePattern.test(valueText)) return null;
+  const [integerPart, decimalPart = ''] = valueText.split('.');
+  const milliampsText = normalizedUnit === 'a'
+    ? integerPart + decimalPart.padEnd(3, '0')
+    : valueText;
+  const milliamps = BigInt(milliampsText);
+  if (milliamps < 1n || milliamps > BigInt(MAX_EXPLICIT_INPUT_CURRENT_MA)) return null;
+  return {value: valueText, unit: normalizedUnit === 'a' ? 'A' : 'mA'};
 }
 
 function normalizeExactSourceInputCurrentDeclaration(rawPreparation = {}, sourceLabel = 'exact source publishPreparation') {
@@ -897,27 +918,24 @@ function normalizeExactSourceInputCurrentDeclaration(rawPreparation = {}, source
     throw new Error(`${sourceLabel} may project only Input current(1002323)`);
   }
   const extraValue = exactSourceOverrideField(row, 'attribute_extra_value', 'attributeExtraValue', sourceLabel);
-  if (typeof extraValue !== 'string' || !/^[1-9]\d*$/.test(extraValue)) {
-    throw new Error(`${sourceLabel} Input current(1002323) must be a positive integer numeric string`);
-  }
-  const milliamps = Number(extraValue);
-  if (!Number.isSafeInteger(milliamps) || milliamps < 1 || milliamps > MAX_EXPLICIT_INPUT_CURRENT_MA) {
-    throw new Error(`${sourceLabel} Input current(1002323) must be within 1-${MAX_EXPLICIT_INPUT_CURRENT_MA} mA`);
-  }
   const unit = exactSourceOverrideField(row, 'attribute_unit', 'attributeUnit', sourceLabel);
-  if (unit !== 'mA') {
-    throw new Error(`${sourceLabel} Input current(1002323) unit must be mA`);
+  const normalizedVal = normalizeExplicitInputCurrentDeclarationValue(extraValue, unit);
+  if (!normalizedVal) {
+    throw new Error(`${sourceLabel} Input current(1002323) must be a valid positive number within 1-${MAX_EXPLICIT_INPUT_CURRENT_MA} mA (or equivalent in A)`);
   }
   if (row.source !== EXPLICIT_PREPARE_PUBLISH_SOURCE) {
     throw new Error(`${sourceLabel} Input current(1002323) source must be ${EXPLICIT_PREPARE_PUBLISH_SOURCE}`);
   }
+  const rawValueId = exactSourceOverrideField(row, 'attribute_value_id', 'attributeValueId', sourceLabel);
+  const attributeValueId = normalizeAttributeId(rawValueId) || null;
   return {
     declared: true,
     rowCount: 1,
     override: {
       attributeId: INPUT_CURRENT_ATTRIBUTE_ID,
-      attributeExtraValue: String(milliamps),
-      unit: 'mA',
+      attributeExtraValue: normalizedVal.value,
+      unit: normalizedVal.unit,
+      ...(attributeValueId ? {attributeValueId} : {}),
       label: safeString(row.label || '', 80),
       source: EXPLICIT_PREPARE_PUBLISH_SOURCE,
     },
@@ -1129,7 +1147,7 @@ function applyExplicitEmptyDescriptionProjection(payload, task, existingPayload)
 function applyExactSourceLockedInputCurrentOverride(payload, rawPreparation = {}) {
   const declaration = normalizeExactSourceInputCurrentDeclaration(rawPreparation);
   if (declaration.rowCount === 0) return {payload, applied: [], override: null};
-  const milliamps = Number(declaration.override.attributeExtraValue);
+  const {attributeExtraValue, unit, attributeValueId} = declaration.override;
 
   const next = jsonClone(payload || {});
   const list = asArray(next.product_attribute_list || next.productAttributeList)
@@ -1138,14 +1156,15 @@ function applyExactSourceLockedInputCurrentOverride(payload, rawPreparation = {}
     .map(item => ({...item}));
   list.push({
     attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
-    attribute_extra_value: String(milliamps),
-    __manual_attribute_unit: 'mA',
+    attribute_extra_value: attributeExtraValue,
+    __manual_attribute_unit: unit,
+    ...(attributeValueId ? {attribute_value_id: attributeValueId} : {}),
   });
   next.product_attribute_list = list;
   if (next.productAttributeList) delete next.productAttributeList;
   return {
     payload: next,
-    applied: [`product_attribute_list.${INPUT_CURRENT_ATTRIBUTE_ID}.explicit_prepare_publish=${milliamps}mA`],
+    applied: [`product_attribute_list.${INPUT_CURRENT_ATTRIBUTE_ID}.explicit_prepare_publish=${attributeExtraValue}${unit}`],
     override: declaration.override,
   };
 }
@@ -2640,10 +2659,11 @@ function normalizeInputCurrentExtraValue(value, unit = '') {
   const numeric = Number(match[1]);
   if (!Number.isFinite(numeric) || numeric <= 0) return text;
   const unitText = `${unit || text}`.toLowerCase();
-  const milliamps = /(^|[^m])a\b|安/.test(unitText) && !/ma|毫安/.test(unitText)
-    ? Math.round(numeric * 1000)
-    : Math.round(numeric);
-  return String(milliamps);
+  const isAmps = /(^|[^m])a\b|安/.test(unitText) && !/ma|毫安/.test(unitText);
+  if (isAmps) {
+    return match[1];
+  }
+  return String(Math.round(numeric));
 }
 
 function deterministicIntInclusive(min, max, seed) {
@@ -2768,7 +2788,8 @@ function normalizeManualAttributeOverride(row) {
   let attributeUnit = rawUnit;
   if (attributeId === INPUT_CURRENT_ATTRIBUTE_ID) {
     attributeExtraValue = normalizeInputCurrentExtraValue(attributeExtraValue, row.attribute_unit || row.attributeUnit || '');
-    attributeUnit = 'mA';
+    const isAmps = /(^|[^m])a\b|安/i.test(row.attribute_unit || row.attributeUnit || '') && !/ma|毫安/i.test(row.attribute_unit || row.attributeUnit || '');
+    attributeUnit = isAmps ? 'A' : 'mA';
   }
   if (!attributeId || !attributeExtraValue) return null;
   return {
@@ -2976,7 +2997,13 @@ function chooseAttributeValueIdForManualUnit(templateRow, row) {
   if (!unit) return null;
   const normalizedUnit = unit.replace(/\s+/g, '');
   const values = asArray(templateRow?.attribute_value_info_list);
-  const exact = values.find(value => safeString(value.attribute_value, 40).toLowerCase().replace(/\s+/g, '') === normalizedUnit);
+  const exact = values.find(value => {
+    const v = safeString(value.attribute_value, 40).toLowerCase().replace(/\s+/g, '');
+    if (v === normalizedUnit) return true;
+    if (normalizedUnit === 'a' && (v === 'a' || v === '安' || v === 'ampere')) return true;
+    if (normalizedUnit === 'ma' && (v === 'ma' || v === '毫安' || v === 'milliampere')) return true;
+    return false;
+  });
   if (exact?.attribute_value_id) return exact.attribute_value_id;
   return null;
 }
@@ -3460,6 +3487,12 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
         applied.push(`attribute_template:${attributeId}.attribute_value_id=${resolvedValueId}`);
       } else {
         blockers.push(`${template.attribute_name || attributeId} 是“下拉+手动输入”属性，已填写 ${row.attribute_extra_value}，但未能从官方属性模板匹配单位/属性值 ID。`);
+      }
+    } else if (template && hasExtra && mode === 4 && valueId) {
+      const matchingValue = asArray(template?.attribute_value_info_list).find(val => normalizeAttributeId(val?.attribute_value_id) === valueId);
+      if (matchingValue) {
+        row.attribute_value_id = valueId;
+        applied.push(`attribute_template:${attributeId}.attribute_value_id=${valueId}`);
       }
     }
     delete row.__manual_attribute_unit;
