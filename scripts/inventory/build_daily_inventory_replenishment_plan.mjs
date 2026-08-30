@@ -1111,19 +1111,25 @@ for (const context of rowContexts) {
     productName: metrics?.product_display_name || metrics?.product_name_cn || '',
     decision: decision.reason,
   };
-  evaluatedRows.push({row, et, metrics, decision, base, inventoryRelevant, productMatchKey, resolvedProductKey, resolvedMetricsKey});
+  evaluatedRows.push({row, et, metrics, decision, policyDecision, base, inventoryRelevant, productMatchKey, resolvedProductKey, resolvedMetricsKey});
 }
 
-// First daily build evidence gate: every inventory-relevant SPU (on-shelf, or
-// sold out with no other on-shelf same-store link for the canonical) must
-// carry current-run detail before the plan may execute, because cached detail
-// cannot prove the canonical mapping is still current. Cached rows outside
-// the inventory-relevant set stay out of this gate; the guard refreshes
-// exactly the emitted detailRefreshTargets and rebuilds with
-// --required-detail-targets. Current-detail fail-closed is never deleted.
+const requiresDailyCurrentDetail = item => {
+  if (!item.inventoryRelevant) return false;
+  const candidate = item.policyDecision || item.decision || {};
+  if (candidate.action === 'allocate') return true;
+  return candidate.action === 'set_exact'
+    && Number(item.base.platformUsableInventory) !== Number(candidate.targetUsableInventory);
+};
+
+// First daily build evidence gate: only rows that can produce a real inventory
+// mutation require current-run detail. Non-actionable alerts remain visible but
+// cannot block every independent inventory action when SHEIN has no detail for
+// that product. The guard refreshes exactly the emitted targets and rebuilds
+// with --required-detail-targets.
 if (args.operationMode === 'daily' && !requiredDetailTargets) {
   for (const item of evaluatedRows) {
-    if (!item.inventoryRelevant) continue;
+    if (!requiresDailyCurrentDetail(item)) continue;
     if (!String(item.row?.supplierCode || '').trim()) {
       blockers.push(`${item.base.storeKey} OpenAPI product canonical evidence is incomplete: store=${item.base.storeKey} spu=${item.base.spu} skc=${item.base.skc}`);
     }
@@ -1153,14 +1159,14 @@ const lowEtDetailRefreshTargets = [...lowEtGroups.values()]
   })))
   .filter(row => row.storeKey && row.spu)
   .sort((a, b) => a.storeKey.localeCompare(b.storeKey) || a.spu.localeCompare(b.spu) || a.skc.localeCompare(b.skc));
-// Daily mode targets every inventory-relevant SPU, deduplicated per
-// store+SPU, so stale canonical mapping changes cannot silently drop actions;
-// et mode keeps the conservative low-ET candidate set.
+// Daily mode targets only possible inventory mutations, deduplicated per
+// store+SPU. Non-actionable alerts stay item-scoped; ET mode keeps the
+// conservative low-ET candidate set.
 const dailyDetailRefreshTargets = [];
 if (args.operationMode === 'daily') {
   const targetByStoreSpu = new Map();
   for (const item of evaluatedRows) {
-    if (!item.inventoryRelevant) continue;
+    if (!requiresDailyCurrentDetail(item)) continue;
     const storeKey = String(item.base.storeKey || '').toUpperCase();
     const spu = String(item.base.spu || '').trim();
     if (!storeKey || !spu) continue;
