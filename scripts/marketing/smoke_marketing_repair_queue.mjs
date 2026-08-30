@@ -159,6 +159,26 @@ try {
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
   assert.equal(queue.stages.driftRepair.status, 'completed', 'same exact work fingerprint must preserve completed progress');
 
+  run('update-stage', '--queue', queuePath, '--stage', 'fallbackRepair', '--status', 'partial', '--readback-ok', 'false', '--detail', 'processed one group before browser lease loss', '--result-path', 'tmp/results/fallback-partial.json', ...await expectedQueueCas(queuePath));
+  queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
+  queue.stages.fallbackRepair.checkpoint = {lastGroup: 'DL', remainingGroups: 1};
+  queue.stages.fallbackRepair.successfulTuples = ['DL::sv2'];
+  await fs.writeFile(queuePath, `${JSON.stringify(queue, null, 2)}\n`, 'utf8');
+  run(...buildArgs);
+  queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
+  assert.equal(queue.stages.fallbackRepair.status, 'pending', 'same exact partial stage must automatically reopen so cloud workers can continue it');
+  assert.equal(queue.status, 'pending', 'partial recovery must remain worker-consumable instead of failing the whole queue');
+  assert.equal(queue.stages.fallbackRepair.previousPartial.detail, 'processed one group before browser lease loss');
+  assert.equal(queue.stages.fallbackRepair.previousPartial.resultPath, 'tmp/results/fallback-partial.json');
+  assert.deepEqual(queue.stages.fallbackRepair.previousPartial.checkpoint, {lastGroup: 'DL', remainingGroups: 1});
+  assert.deepEqual(queue.stages.fallbackRepair.previousPartial.successfulTuples, ['DL::sv2']);
+  run(...buildArgs);
+  queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));
+  assert.equal(queue.stages.fallbackRepair.status, 'pending', 'operator can continue the same business day after rebuilding/filling partial evidence');
+  assert.equal(queue.stages.driftRepair.status, 'completed', 'previously completed exact stages must not replay when partial is reopened');
+  assert.deepEqual(queue.stages.fallbackRepair.previousPartial.successfulTuples, ['DL::sv2'], 'partial success tuple audit must survive repeated queue rebuilds until worker consumes pending stage');
+  assert.equal(queue.status, 'pending');
+
   run('update-stage', '--queue', queuePath, '--stage', 'fallbackRepair', '--status', 'blocked', '--readback-ok', 'false', ...await expectedQueueCas(queuePath));
   run(...buildArgs);
   queue = JSON.parse(await fs.readFile(queuePath, 'utf8'));

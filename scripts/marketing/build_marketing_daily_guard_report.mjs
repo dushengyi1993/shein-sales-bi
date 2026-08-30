@@ -299,41 +299,77 @@ function latestFile(dir, regex) {
   return listFiles(dir, regex)[0] || '';
 }
 
+function scanBusinessDateFromDoc(doc) {
+  const raw = [doc?.businessDate, doc?.reportDate, doc?.date, doc?.createdAt]
+    .map(value => String(value || '').trim())
+    .find(value => /^\d{4}-\d{2}-\d{2}/.test(value));
+  return raw ? raw.slice(0, 10) : '';
+}
+
+function scanDocumentTimestamp(doc) {
+  const values = [doc?.updatedAt, doc?.createdAt, doc?.generatedAt]
+    .map(value => Date.parse(String(value || '')))
+    .filter(Number.isFinite);
+  return values.length ? Math.max(...values) : 0;
+}
+
+function sameStoreSet(actualKeys, expectedKeys) {
+  if (actualKeys.length !== expectedKeys.length) return false;
+  const actual = new Set(actualKeys);
+  return actual.size === expectedKeys.length && expectedKeys.every(key => actual.has(key));
+}
+
+function scanCandidateSummary(file, enabledStoreKeys) {
+  const doc = readJsonSafe(file);
+  const rows = Array.isArray(doc?.rows) ? doc.rows : [];
+  const storeKeys = Array.isArray(doc?.stores)
+    ? doc.stores.map(store => normKey(store?.storeKey || store?.store || store?.key)).filter(Boolean)
+    : rows.map(row => normKey(row.storeKey || row.store_key || row.store)).filter(Boolean);
+  const storeCount = new Set(storeKeys).size;
+  const businessDate = scanBusinessDateFromDoc(doc);
+  const documentTimestamp = scanDocumentTimestamp(doc);
+  return {
+    file,
+    doc,
+    storeCount,
+    businessDate,
+    documentTimestamp,
+    ok: doc?.ok !== false,
+    partial: doc?.partial === true,
+    merged: Boolean(doc?.mergeEvidence),
+    complete: Boolean(
+      doc
+      && doc?.ok !== false
+      && doc?.partial !== true
+      && enabledStoreKeys.length > 0
+      && sameStoreSet(storeKeys, enabledStoreKeys)
+    ),
+  };
+}
+
 export function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) {
   const files = listFiles(dir, regex);
-  const enabledStoreCount = Array.isArray(storesConfigDoc?.stores)
-    ? storesConfigDoc.stores.filter(store => store?.enabled !== false).length
-    : 0;
-  const inspected = [];
-  const newest = files[0] || '';
-  if (newest) {
-    const doc = readJsonSafe(newest);
-    const stat = fsSync.statSync(newest);
-    const freshHours = (Date.now() - stat.mtimeMs) / 36e5;
-    const rows = Array.isArray(doc?.rows) ? doc.rows : [];
-    const storeCount = new Set(rows.map(row => normKey(row.storeKey || row.store_key || row.store)).filter(Boolean)).size;
-    // Prefer today's/fresh live scan even when one store hit login page. Using
-    // an older all-green scan hides the actual blocker and violates the live
-    // evidence rule. A targeted scan is still only patch evidence even when
-    // the scanner completed its requested subset and wrote partial=false.
-    if (
-      doc
-      && doc?.partial !== true
-      && freshHours <= 24
-      && enabledStoreCount > 0
-      && storeCount >= enabledStoreCount
-    ) return newest;
-  }
-  for (const file of files.slice(0, 20)) {
-    const doc = readJsonSafe(file);
-    const rows = Array.isArray(doc?.rows) ? doc.rows : [];
-    const storeCount = new Set(rows.map(row => normKey(row.storeKey || row.store_key || row.store)).filter(Boolean)).size;
-    inspected.push({file, storeCount, ok: doc?.ok !== false, partial: doc?.partial === true});
-    if (doc?.ok !== false && doc?.partial !== true && enabledStoreCount > 0 && storeCount >= enabledStoreCount) {
-      return file;
-    }
-  }
-  return inspected[0]?.file || '';
+  const enabledStoreKeys = Array.isArray(storesConfigDoc?.stores)
+    ? [...new Set(storesConfigDoc.stores
+      .filter(store => store?.enabled !== false)
+      .map(store => normKey(store?.storeKey || store?.store || store?.key))
+      .filter(Boolean))]
+    : [];
+  const candidates = files
+    .map(file => scanCandidateSummary(file, enabledStoreKeys))
+    .filter(item => item.doc && item.businessDate);
+  if (!candidates.length) return '';
+  const latestBusinessDate = candidates.map(item => item.businessDate).sort().at(-1);
+  const sameDay = candidates
+    .filter(item => item.businessDate === latestBusinessDate)
+    .sort((a, b) => b.documentTimestamp - a.documentTimestamp || a.file.localeCompare(b.file));
+  const latestPartialTimestamp = sameDay
+    .filter(item => item.partial)
+    .reduce((latest, item) => Math.max(latest, item.documentTimestamp), 0);
+  const eligibleMerged = sameDay
+    .filter(item => item.complete && item.merged && item.documentTimestamp >= latestPartialTimestamp)
+    .sort((a, b) => b.documentTimestamp - a.documentTimestamp || a.file.localeCompare(b.file));
+  return eligibleMerged[0]?.file || sameDay[0]?.file || '';
 }
 
 function latestReportFile(regex) {

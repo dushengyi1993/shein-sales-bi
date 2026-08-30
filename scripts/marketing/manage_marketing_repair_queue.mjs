@@ -252,6 +252,41 @@ function assertExpectedQueueState(snapshot, expectedStateSha256) {
 
 function preserveStage(existing, next) {
   if (!existing || existing.inputFingerprint !== next.inputFingerprint) return next;
+  if (String(existing.status || '') === 'pending' && existing.previousPartial) {
+    return {...next, previousPartial: existing.previousPartial};
+  }
+  if (String(existing.status || '') === 'partial') {
+    const partialAudit = {
+      status: 'partial',
+      readbackOk: existing.readbackOk ?? null,
+      detail: existing.detail || '',
+      resultPath: existing.resultPath || '',
+      updatedAt: existing.updatedAt || '',
+    };
+    for (const key of [
+      'checkpoint',
+      'checkpoints',
+      'completedItems',
+      'completedKeys',
+      'completedTuples',
+      'processedItems',
+      'processedKeys',
+      'processedTuples',
+      'successfulItems',
+      'successfulKeys',
+      'successfulTuples',
+    ]) {
+      if (existing[key] !== undefined) partialAudit[key] = existing[key];
+    }
+    return {
+      ...next,
+      ...existing,
+      status: 'pending',
+      previousPartial: partialAudit,
+      inputFingerprint: next.inputFingerprint,
+      updatedAt: next.updatedAt,
+    };
+  }
   if (!['completed', 'blocked', 'failed'].includes(String(existing.status || ''))) return next;
   return {...next, ...existing, inputFingerprint: next.inputFingerprint};
 }
@@ -259,6 +294,7 @@ function preserveStage(existing, next) {
 function queueStatusFromStages(stages, {empty = false, afterUpdate = false} = {}) {
   if (empty) return 'completed';
   const statuses = Object.values(stages).map(stage => String(stage?.status || 'pending'));
+  if (statuses.some(status => status === 'partial')) return 'failed';
   if (statuses.some(status => status === 'failed')) return 'failed';
   const terminal = statuses.every(status => ['not_required', 'completed', 'blocked'].includes(status));
   if (!terminal) return 'pending';
@@ -464,6 +500,9 @@ async function updateStage(args) {
   const stageName = String(args.stage || '');
   const status = String(args.status || '');
   if (!stageName || !status) throw new Error('Missing --stage or --status');
+  if (!['pending', 'completed', 'blocked', 'failed', 'partial'].includes(status)) {
+    throw new Error(`Unsupported --status for queue stage: ${status}`);
+  }
   const expected = expectedQueuePair(args);
   const expectedStateSha256 = expectedQueueStateSha256(args);
   const mutationLock = await acquireQueueMutationLock(queuePath, args.queueLockToken || '');
