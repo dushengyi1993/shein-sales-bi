@@ -139,12 +139,9 @@ assert.match(captureSource, /surface:\s*String\(json\.surface/);
 assert.match(captureSource, /sideEffectsStartedIsArray:\s*Array\.isArray\(json\.sideEffectsStarted\)/);
 assert.match(captureSource, /healthEndpoints:\s*3/);
 assert.deepEqual([...INVENTORY_WRITER_COMPATIBILITY_SERVICES], [
-  'shein-bi-cloud-marketing-repair.service',
-  'shein-bi-cloud-morning-chain.service',
   'shein-bi-daily-inventory-replenishment-guard.service',
   'shein-bi-et-low-inventory-guard.service',
   'shein-bi-et-low-inventory-recheck.service',
-  'shein-bi-portal.service',
 ]);
 for (const service of INVENTORY_WRITER_COMPATIBILITY_SERVICES) {
   const expectedGuard = expectedInventoryWriterCompatibilityCommand(service);

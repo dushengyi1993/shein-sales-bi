@@ -206,7 +206,7 @@ assert.deepEqual(healthy.readiness.releaseAuditBlockers, []);
 assert.deepEqual(healthy.readiness.infrastructureBlockers, []);
 
 const missingInventoryWriterGuardUnits = healthyUnits();
-missingInventoryWriterGuardUnits['shein-bi-portal.service'].ExecStartPre = '';
+missingInventoryWriterGuardUnits['shein-bi-daily-inventory-replenishment-guard.service'].ExecStartPre = '';
 const missingInventoryWriterGuard = buildCloudRuntimeSnapshot({
   ...base,
   systemdSnapshot: {...base.systemdSnapshot, units: missingInventoryWriterGuardUnits},
@@ -214,7 +214,7 @@ const missingInventoryWriterGuard = buildCloudRuntimeSnapshot({
 assert.equal(missingInventoryWriterGuard.ok, false);
 assert.ok(missingInventoryWriterGuard.blockers.some(row => row.code === 'INVENTORY_WRITER_COMPATIBILITY_GUARD_EFFECTIVE_DRIFT'));
 const postGuardMutationUnits = healthyUnits();
-postGuardMutationUnits['shein-bi-portal.service'].ExecStartPre = `${postGuardMutationUnits['shein-bi-portal.service'].ExecStartPre} { path=/bin/true ; argv[]=/bin/true ; }`;
+postGuardMutationUnits['shein-bi-daily-inventory-replenishment-guard.service'].ExecStartPre = `${postGuardMutationUnits['shein-bi-daily-inventory-replenishment-guard.service'].ExecStartPre} { path=/bin/true ; argv[]=/bin/true ; }`;
 const postGuardMutation = buildCloudRuntimeSnapshot({
   ...base,
   systemdSnapshot: {...base.systemdSnapshot, units: postGuardMutationUnits},
