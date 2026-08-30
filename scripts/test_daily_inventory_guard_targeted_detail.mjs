@@ -84,8 +84,8 @@ match('manifest uses daily-inventory-detail-targets/v1 schema',
   'the second planner build only accepts this schema');
 match('manifest groups targets per store from planner detailRefreshTargets',
   guard,
-  /--argjson rows "\$\(jq '\.detailRefreshTargets \/\/ \[\]' "\$PLAN"\)"/,
-  'the manifest is generated from the planner-emitted targets');
+  /--slurpfile plan "\$PLAN"[\s\S]*?\(\$plan\[0\]\.detailRefreshTargets \/\/ \[\]\) as \$rows/,
+  'the manifest reads planner targets from the plan file without exceeding the host argument limit');
 match('manifest dedupes store+SPU pairs',
   guard,
   /\.\[\$row\.storeKey\] = \(\(\(\.\[\$row\.storeKey\] \/\/ \[\]\) \+ \[\$row\.spu\]\) \| unique \| sort\)/,

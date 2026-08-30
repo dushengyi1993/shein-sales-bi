@@ -463,7 +463,9 @@ refresh_targeted_openapi_sources() {
     --arg date "$DATE" \
     --arg generatedAt "$(date -Is)" \
     --argjson budget "$DETAIL_TARGET_BUDGET_PER_STORE" \
-    --argjson rows "$(jq '.detailRefreshTargets // []' "$PLAN")" '
+    --slurpfile plan "$PLAN" '
+      ($plan[0].detailRefreshTargets // []) as $rows
+      |
       ($rows | reduce .[] as $row ({};
         .[$row.storeKey] = (((.[$row.storeKey] // []) + [$row.spu]) | unique | sort)
       )) as $grouped
