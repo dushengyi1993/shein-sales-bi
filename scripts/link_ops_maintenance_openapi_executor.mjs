@@ -2123,41 +2123,51 @@ async function main(){
             const match=p.targetLinks.find(item=>asArray(item?.skuCodes).map(String).includes(String(row?.skuCode||''))) || p.targetLinks[0] || {};
             const authorizationId=String(executionContext?.writeClaim?.claimId||executionContext?.writeClaim?.claimedBy||task?.id||runId||'link-ops-maintenance');
             let durablePrepared=null;
-            const guardedWrite=await runSheinWebhookExternalWriteGuarded({
-              writeStores:[store],
-              guard:testWebhookGuard||undefined,
-              write:()=>submitDurableInventoryWriteOnce({
-                journalFile:inventoryJournalFile,
-                intent:null,
-                prepareUnderLock:async()=>{
-                  durablePrepared=await prepareMaintenanceInventorySubmission({
-                    client,task,store,match,requestRow:row,payloadHash,authorizationId,journalFile:inventoryJournalFile,calls,
-                    expectedCurrentInventory:hasExpectedCurrentInventory?expectedCurrentInventory:null,
-                  });
-                  inventoryPreflight=durablePrepared.inventoryPreflight;
-                  return durablePrepared;
-                },
-                readFenceBundle:()=>readMaintenanceInventoryBundle(inventoryJournalFile),
-                submit:prepared=>{
-                  const activeIntent=prepared.intent;
-                  const scope=prepared.inventoryScope;
-                  return client.request(activeIntent.request.pathname,{
-                    method:activeIntent.request.method,
-                    body:activeIntent.request.body,
-                    headers:activeIntent.request.headers,
-                    inventoryScope:{...scope,requestPayloadHash:activeIntent.requestPayloadHash,intentId:activeIntent.intentId,logicalActionKey:activeIntent.logicalActionKey},
-                  });
-                },
-                readback:async(_attempt,prepared)=>{
-                  const activeIntent=prepared.intent;
-                  const scope=prepared.inventoryScope;
-                  const after=await readbackStock(client,[{...match,skuCodes:[activeIntent.skuCode]}],calls,Number(activeIntent.targetUsableInventory),scope.warehouseCode);
-                  const exact=exactInventoryRow(after,activeIntent.skuCode);
-                  return exact?{...exact,ok:true}:{ok:false,totalUsableInventory:null,status:after?.status||'stock_query_readback_mismatch'};
-                },
-                maxReadbackAttempts:1,
-              }),
-            });
+            let guardedWrite=null;
+            try{
+              guardedWrite=await runSheinWebhookExternalWriteGuarded({
+                writeStores:[store],
+                guard:testWebhookGuard||undefined,
+                write:()=>submitDurableInventoryWriteOnce({
+                  journalFile:inventoryJournalFile,
+                  intent:null,
+                  prepareUnderLock:async()=>{
+                    durablePrepared=await prepareMaintenanceInventorySubmission({
+                      client,task,store,match,requestRow:row,payloadHash,authorizationId,journalFile:inventoryJournalFile,calls,
+                      expectedCurrentInventory:hasExpectedCurrentInventory?expectedCurrentInventory:null,
+                    });
+                    inventoryPreflight=durablePrepared.inventoryPreflight;
+                    return durablePrepared;
+                  },
+                  readFenceBundle:()=>readMaintenanceInventoryBundle(inventoryJournalFile),
+                  submit:prepared=>{
+                    const activeIntent=prepared.intent;
+                    const scope=prepared.inventoryScope;
+                    return client.request(activeIntent.request.pathname,{
+                      method:activeIntent.request.method,
+                      body:activeIntent.request.body,
+                      headers:activeIntent.request.headers,
+                      inventoryScope:{...scope,requestPayloadHash:activeIntent.requestPayloadHash,intentId:activeIntent.intentId,logicalActionKey:activeIntent.logicalActionKey},
+                    });
+                  },
+                  readback:async(_attempt,prepared)=>{
+                    const activeIntent=prepared.intent;
+                    const scope=prepared.inventoryScope;
+                    const after=await readbackStock(client,[{...match,skuCodes:[activeIntent.skuCode]}],calls,Number(activeIntent.targetUsableInventory),scope.warehouseCode);
+                    const exact=exactInventoryRow(after,activeIntent.skuCode);
+                    return exact?{...exact,ok:true}:{ok:false,totalUsableInventory:null,status:after?.status||'stock_query_readback_mismatch'};
+                  },
+                  maxReadbackAttempts:1,
+                }),
+              });
+            }catch(error){
+              if(error?.inventoryIntentDurable===true) throw error;
+              const compact=preNetworkInventoryBlock(error,{operation:p.operation,submissionPlan});
+              calls.push(compact);
+              submitResults.push(compact);
+              blockers.push(compact.msg);
+              break;
+            }
             if(!guardedWrite.ok){
               blockers.push(...(guardedWrite.gate?.blockers||['平台动态安全闸门阻止真实提交。']));
               break;
@@ -2306,7 +2316,10 @@ async function main(){
       }
     }
   }
-  const readbackCalls=[]; let readback={ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
+  const preNetworkInventoryResult=submitResults.find(row=>row?.operation==='update_inventory'&&row?.preNetwork===true);
+  const readbackCalls=[]; let readback=preNetworkInventoryResult
+    ? {ok:false,status:'pre_network_blocked',calls:readbackCalls}
+    : {ok:false,status:args.mode==='execute'?'not_run':'planned_not_run',calls:readbackCalls};
   const expectedInventory=intents.includes('update_inventory')?numberForTask('update_inventory',task,String(task?.command||task?.text||'')):null;
   const submittedDescriptionVersion = String(
     submitResults.find(r=>r.operation==='update_description')?.infoVersion || ''
@@ -2391,6 +2404,9 @@ async function main(){
     output.warnings.push('partialEdit 已发出但成功未确认（info.version 缺失）：任务保持 submitted_unconfirmed，禁止重复提交，必须人工核销。');
   }
   const outPath=path.join(args.outDir,`${runId}.local.json`); await writeJson(outPath,output); output.savedTo=rel(outPath); if(!args.quiet) console.log(JSON.stringify(output,null,2));
+  if(args.mode==='execute'&&blockers.length>0&&!actualWriteSubmitted&&!recoveryRequired){
+    process.exitCode=1;
+  }
 }
 
 export const __testHooks=Object.freeze({loadExactSpuInfoReadback,operationSubmissionEvidence,readbackForIntents,submissionPlanDescriptor});

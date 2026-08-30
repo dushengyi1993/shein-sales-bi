@@ -325,6 +325,7 @@ async function runMaintenanceExecutorOutcomeFixture() {
   const fixtureRoot = path.join(tmpRoot, 'p1-maintenance-executor');
   const calls = [];
   let inventoryValue = 7;
+  let inventoryStockQueryIncludesWarehouse = true;
   const fakeOpenApi = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
     const body = await readJsonBody(req);
@@ -357,7 +358,20 @@ async function runMaintenanceExecutorOutcomeFixture() {
     if (pathname === '/open-api/stock/stock-query') {
       return sendJson(res, {code: '0', msg: 'OK', info: [{goodsInventory: [{
         skcName: 'sv-p1-inventory',
-        skuList: [{skuCode: 'sku-p1-inventory', totalUsableInventory: inventoryValue}],
+        skuList: [{
+          skuCode: 'sku-p1-inventory',
+          totalInventoryQuantity: inventoryValue,
+          totalUsableInventory: inventoryValue,
+          totalLockedQuantity: 0,
+          totalTempLockQuantity: 0,
+          ...(inventoryStockQueryIncludesWarehouse ? {warehouseInventoryList: [{
+            warehouseCode: 'WH-1',
+            inventoryQuantity: inventoryValue,
+            usableInventory: inventoryValue,
+            lockedQuantity: 0,
+            tempLockQuantity: 0,
+          }]} : {}),
+        }],
       }]}]});
     }
     if (pathname === '/open-api/openapi-business-backend/product/query') {
@@ -390,6 +404,8 @@ async function runMaintenanceExecutorOutcomeFixture() {
       ],
     });
     const outDir = path.join(fixtureRoot, 'out');
+    const fenceDir = path.join(fixtureRoot, 'inventory-fence-domain');
+    await fs.mkdir(fenceDir, {recursive: true});
     const commonArgs = [
       'scripts/link_ops_maintenance_openapi_executor.mjs',
       '--config', configFile,
@@ -399,7 +415,17 @@ async function runMaintenanceExecutorOutcomeFixture() {
       '--out-dir', outDir,
     ];
     const runExecutor = (extraArgs) => runNode([...commonArgs, ...extraArgs], {
-      env: {NODE_ENV: 'test', SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1'},
+      env: {
+        NODE_ENV: 'test',
+        SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1',
+        SHEIN_BI_INVENTORY_CUTOVER_ACTIVATION_FILE: path.join(fenceDir, 'activation.ndjson'),
+        SHEIN_BI_INVENTORY_CUTOVER_ACTIVATION_RECEIPT_FILE: path.join(fenceDir, 'activation.receipt.json'),
+        SHEIN_BI_INVENTORY_JOURNAL_DIRS: fenceDir,
+        SHEIN_BI_MAINTENANCE_INVENTORY_JOURNAL_DIR: fenceDir,
+        SHEIN_BI_INVENTORY_RUNTIME_ROOT: '',
+        SHEIN_BI_ET_INVENTORY_RUNTIME_ROOT: '',
+        SHEIN_BI_ET_LOW_INVENTORY_RUNTIME_ROOT: '',
+      },
     });
     const executeSnapshot = async (name, task, payloadHash, nonce) => writeJson(name, {
       version: 1,
@@ -517,6 +543,29 @@ async function runMaintenanceExecutorOutcomeFixture() {
     check('P1 confirmed inventory executor keeps validated durable claim', inventoryExecute.json?.adapterEvidence?.writeClaim?.validated, true);
     check('P1 confirmed inventory uses unique SA warehouse', inventoryExecuteCalls.find(call => call.path === '/open-api/stock/change-inventory/v2')?.body?.updateSkuInventoryQuantityRequests?.[0]?.warehouseCode, 'WH-1');
     check('P1 confirmed inventory performs one real write', inventoryExecuteCalls.filter(call => call.path === '/open-api/stock/change-inventory/v2').length, 1);
+    inventoryStockQueryIncludesWarehouse = false;
+    const inventoryMissingWarehouseTask = {...inventoryTask, id: 'p1-inventory-missing-warehouse'};
+    const inventoryMissingWarehouseFile = await executeSnapshot(
+      'p1-maintenance-executor/inventory-missing-warehouse.json',
+      inventoryMissingWarehouseTask,
+      inventoryHash,
+      'nonce-p1-inventory-missing-warehouse',
+    );
+    const inventoryMissingWarehouseCallStart = calls.length;
+    const inventoryMissingWarehouse = await runExecutor([
+      '--task-id', inventoryMissingWarehouseTask.id,
+      '--task-json', inventoryMissingWarehouseFile,
+      '--execute',
+      '--confirm', 'SHEIN_OPENAPI_SUBMIT',
+      '--claim-nonce', 'nonce-p1-inventory-missing-warehouse',
+    ]);
+    const inventoryMissingWarehouseCalls = calls.slice(inventoryMissingWarehouseCallStart);
+    inventoryStockQueryIncludesWarehouse = true;
+    check('P1 inventory missing warehouse exits normally', inventoryMissingWarehouse.code, 1);
+    check('P1 inventory missing warehouse blocks structurally', inventoryMissingWarehouse.json?.outcome, 'blocked');
+    check('P1 inventory missing warehouse stays pre-network', inventoryMissingWarehouse.json?.readback?.status, 'pre_network_blocked');
+    check('P1 inventory missing warehouse never writes', inventoryMissingWarehouseCalls.filter(call => call.path === '/open-api/stock/change-inventory/v2').length, 0);
+    check('P1 inventory missing warehouse records blocker', inventoryMissingWarehouse.json?.blockers || [], rows => rows.some(row => /INVENTORY_FRESH_STOCK_ROW_REQUIRED/.test(String(row))));
     result.summary.p1Executor = {
       unconfirmed: {outcome: titleExecute.json?.outcome, committed: titleExecute.json?.committed, readback: titleExecute.json?.readback?.status},
       confirmed: {outcome: inventoryExecute.json?.outcome, committed: inventoryExecute.json?.committed, readback: inventoryExecute.json?.readback?.status},
