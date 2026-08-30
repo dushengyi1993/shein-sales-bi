@@ -405,6 +405,7 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     'inventory result manual-resolution idempotency tombstone report mismatch');
   }
   const manualResolutionFences = [];
+  const resultByKey = new Map(rows.map(row => [rowKey(row), row]));
   for (const planRow of actionable) {
     const fence = findInventoryWriteFence(lifecycle, {
       scope: {
@@ -422,7 +423,12 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
         scope: fence.event?.scope || null,
         reason: fence.reason,
       });
-      assert(false, `inventory manual-resolution fence blocks current plan scope: store=${planRow.storeKey} skc=${planRow.skc} sku=${planRow.skuCode}`);
+      const fencedRow = resultByKey.get(rowKey(planRow));
+      assert(fencedRow?.state === 'blocked_by_manual_resolution_fence'
+        && fencedRow?.manualResolutionFence?.resolutionId === fence.event?.resolutionId
+        && fencedRow?.manualResolutionFence?.intentId === fence.event?.intentId
+        && fencedRow?.manualResolutionFence?.scope?.scopeKey === fence.event?.scope?.scopeKey,
+      `inventory manual-resolution fence is not represented by the exact terminal exclusion row: store=${planRow.storeKey} skc=${planRow.skc} sku=${planRow.skuCode}`);
     }
   }
   assert(rows.length === actionable.length, 'inventory result row count mismatch');
