@@ -127,6 +127,8 @@ function parseArgs(argv) {
     productPrice: null,
     inventory: null,
     inputCurrentMa: null,
+    inputCurrentA: null,
+    inputCurrentValueId: '',
     titleGroup: '',
     titleAr: '',
     titleEn: '',
@@ -230,6 +232,8 @@ function parseArgs(argv) {
     else if (a === '--product-price' || a === '--sale-price' || a === '--shop-price') args.productPrice = Number(argv[++i]);
     else if (a === '--inventory' || a === '--stock-qty') args.inventory = Number(argv[++i]);
     else if (a === '--input-current-ma') args.inputCurrentMa = Number(argv[++i]);
+    else if (a === '--input-current-a') args.inputCurrentA = Number(argv[++i]);
+    else if (a === '--input-current-value-id') args.inputCurrentValueId = String(argv[++i] || '').trim();
     else if (a === '--title-group') args.titleGroup = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--title-ar') args.titleAr = String(argv[++i] || '').trim();
     else if (a === '--title-en') args.titleEn = String(argv[++i] || '').trim();
@@ -363,6 +367,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV/SH-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --supply-price 210 --inventory 100 --input-current-ma 700
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store FY --reuse-approved-binding --supply-price 172.22 --inventory 100 --input-current-a 0.18 --input-current-value-id 304301999
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --standard-goods-sn SK-999 --supply-price 210 --inventory 100 --allow-empty-description --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}
   node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML或普通OOXML DOCX> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
@@ -448,8 +453,8 @@ Options:
                       prepare-pending-image-correction 会复用任务中现有已审图片绑定，不重复上传图片
   --standard-goods-sn / --supply-price / --inventory
                    prepare-publish 用；把货号、供货价和库存锁到同一任务
-  --supplier-sku / --input-current-ma
-                   prepare-publish 用；同店重复链接时锁定唯一 Seller SKU，并补输入电流属性
+  --supplier-sku / --input-current-ma / --input-current-a / --input-current-value-id
+                   prepare-publish 用；同店重复链接时锁定唯一 Seller SKU，并按平台官方单位和值ID补输入电流属性
   --title-ar / --title-en / --category-id
                    prepare-publish 用；可选的精确标题与末级分类覆盖
   --performance-date retire-candidates 用；按该表现日期计算首次上架 15 天保护窗
@@ -1375,6 +1380,18 @@ function publishPreparationFromArgs(args) {
   if (args.inputCurrentMa !== null && (!Number.isFinite(args.inputCurrentMa) || args.inputCurrentMa <= 0)) {
     throw new Error('--input-current-ma must be a positive number');
   }
+  if (args.inputCurrentA !== null && (!Number.isFinite(args.inputCurrentA) || args.inputCurrentA <= 0)) {
+    throw new Error('--input-current-a must be a positive number');
+  }
+  if (args.inputCurrentMa !== null && args.inputCurrentA !== null) {
+    throw new Error('--input-current-ma and --input-current-a are mutually exclusive');
+  }
+  if (args.inputCurrentValueId && !/^[1-9]\d*$/.test(args.inputCurrentValueId)) {
+    throw new Error('--input-current-value-id must be a positive integer');
+  }
+  if (args.inputCurrentValueId && args.inputCurrentMa === null && args.inputCurrentA === null) {
+    throw new Error('--input-current-value-id requires --input-current-ma or --input-current-a');
+  }
   const categoryId = String(args.categoryId || '').trim();
   if (categoryId && (!/^\d+$/.test(categoryId) || Number(categoryId) <= 0)) throw new Error('--category-id must be a positive integer');
   const titleGroup = String(args.titleGroup || '').trim().toLowerCase();
@@ -1388,10 +1405,13 @@ function publishPreparationFromArgs(args) {
     categoryId: categoryId ? Number(categoryId) : null,
     titleAr: args.titleAr || '',
     titleEn: args.titleEn || '',
-    attributeOverrides: args.inputCurrentMa === null ? [] : [{
+    attributeOverrides: args.inputCurrentMa === null && args.inputCurrentA === null ? [] : [{
       attribute_id: 1002323,
-      attribute_extra_value: String(Math.round(args.inputCurrentMa)),
-      attribute_unit: 'mA',
+      attribute_extra_value: args.inputCurrentA !== null
+        ? String(args.inputCurrentA)
+        : String(Math.round(args.inputCurrentMa)),
+      attribute_unit: args.inputCurrentA !== null ? 'A' : 'mA',
+      ...(args.inputCurrentValueId ? {attribute_value_id: args.inputCurrentValueId} : {}),
       label: '输入电流',
       source: 'explicit_prepare_publish',
     }],
