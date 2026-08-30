@@ -27,7 +27,7 @@ const repositoryRoot = path.join(tempRoot, 'repo');
 const outputsRoot = path.join(repositoryRoot, 'outputs');
 await fs.mkdir(outputsRoot, {recursive: true});
 const summaryFile = path.join(outputsRoot, 'summary.md');
-const attachmentFile = path.join(outputsRoot, 'report.bin');
+const attachmentFile = path.join(outputsRoot, '销售日报-2026-08-24.xlsx');
 await fs.writeFile(summaryFile, '# team report\nnot a target\n', 'utf8');
 await fs.writeFile(attachmentFile, Buffer.from('attachment-v1\n', 'utf8'));
 const attachmentSha256 = sha256Bytes(await fs.readFile(attachmentFile));
@@ -45,6 +45,15 @@ upload complete
 assert.equal(prefixedPrettyReceipt?.ok, true);
 assert.equal(prefixedPrettyReceipt?.data?.message_id, 'om_hidden');
 
+assert.deepEqual(interpretLarkResult({
+  exitCode: 0,
+  stdout: '{"ok":true,"message_id":"om_top_level"}',
+}), {accepted: true, messageId: 'om_top_level'});
+assert.deepEqual(interpretLarkResult({
+  exitCode: 0,
+  stdout: '{"ok":true,"data":{"message":{"message_id":"om_nested"},"file_key":"file_nested"}}',
+}), {accepted: true, messageId: 'om_nested', fileKey: 'file_nested'});
+
 function fakeSpawnFactory(responses, calls = []) {
   return (bin, args, options) => {
     const response = responses.length ? responses.shift() : {ok: false, error: {code: 'NO_FAKE_RESPONSE'}};
@@ -52,9 +61,9 @@ function fakeSpawnFactory(responses, calls = []) {
     child.stdin = new PassThrough();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
-    let stdin = '';
-    child.stdin.on('data', chunk => { stdin += chunk.toString('utf8'); });
-    calls.push({bin, args: [...args], options, stdin, child});
+    const call = {bin, args: [...args], options, stdin: '', child};
+    child.stdin.on('data', chunk => { call.stdin += chunk.toString('utf8'); });
+    calls.push(call);
     queueMicrotask(() => {
       const output = typeof response === 'string' ? response : JSON.stringify(response.output || response);
       const stderr = typeof response === 'object' ? String(response.stderr || '') : '';
@@ -91,6 +100,7 @@ async function assertCode(action, code) {
 // lark-cli command or local chat target in the argv/stdout contract.
 const localCalls = [];
 const localFixtureBundle = await makeBundle();
+assert.equal(localFixtureBundle.attachmentName, path.basename(attachmentFile));
 const localResult = await runLocalCloudTeamReport({
   automationId: 'daily-report',
   businessDate: '2026-08-24',
@@ -107,7 +117,11 @@ const localResult = await runLocalCloudTeamReport({
     fingerprint: localFixtureBundle.fingerprint,
     attachmentSha256,
     summarySha256: sha256Bytes(Buffer.from(localFixtureBundle.summaryBase64, 'base64')),
-    items: {summary: {accepted: true}, attachment: {accepted: true}},
+    attachmentName: localFixtureBundle.attachmentName,
+    items: {
+      summary: {accepted: true, attempts: 1, messageId: 'om_local_summary'},
+      attachment: {accepted: true, attempts: 1, messageId: 'om_local_attachment', fileKey: 'file_local_attachment'},
+    },
     message_id: 'om_local_output_must_strip',
     chat_id: 'oc_local_output_must_strip',
   }], localCalls),
@@ -115,8 +129,46 @@ const localResult = await runLocalCloudTeamReport({
 assert.equal(localCalls.length, 1);
 assert.equal(localCalls[0].bin, 'ssh');
 assert.deepEqual(localCalls[0].args.slice(0, 4), [CLOUD_TEAM_REPORT_CLOUD_HOST, 'node', '/opt/shein-bi/app/scripts/cloud_team_report_delivery.mjs', 'deliver-stdin']);
+assert.equal(JSON.parse(localCalls[0].stdin).attachmentName, path.basename(attachmentFile));
+assert.equal(localResult.attachmentName, path.basename(attachmentFile));
+assert.equal(localResult.items.summary.accepted, true);
+assert.equal(localResult.items.summary.attempts, 1);
+assert.equal(localResult.items.summary.messageId, 'om_local_summary');
+assert.equal(localResult.items.attachment.accepted, true);
+assert.equal(localResult.items.attachment.attempts, 1);
+assert.equal(localResult.items.attachment.messageId, 'om_local_attachment');
+assert.equal(localResult.items.attachment.fileKey, 'file_local_attachment');
 assert.doesNotMatch(JSON.stringify(localCalls[0].args), /oc_|chat[_-]?id|recipientchatid/iu);
-assert.doesNotMatch(JSON.stringify(localResult), /oc_|om_|message[_-]?id|token|app[_-]?secret/iu);
+assert.doesNotMatch(JSON.stringify(localResult), /oc_|chat[_-]?id|token|app[_-]?secret/iu);
+
+const missingRemoteAttachmentNameCalls = [];
+const missingRemoteAttachmentNameResult = await runLocalCloudTeamReport({
+  automationId: 'daily-report',
+  businessDate: '2026-08-24',
+  summaryFile,
+  attachment: attachmentFile,
+  expectedAttachmentSha256: attachmentSha256,
+  cloudSsh: CLOUD_TEAM_REPORT_CLOUD_HOST,
+  root: repositoryRoot,
+  spawnImpl: fakeSpawnFactory([{
+    ok: true,
+    status: 'ok',
+    automationId: localFixtureBundle.automationId,
+    businessDate: localFixtureBundle.businessDate,
+    fingerprint: localFixtureBundle.fingerprint,
+    attachmentSha256,
+    summarySha256: sha256Bytes(Buffer.from(localFixtureBundle.summaryBase64, 'base64')),
+    items: {
+      summary: {accepted: true, attempts: 1, messageId: 'om_remote_summary'},
+      attachment: {accepted: true, attempts: 1, messageId: 'om_remote_attachment'},
+    },
+  }], missingRemoteAttachmentNameCalls),
+});
+assert.equal(missingRemoteAttachmentNameCalls.length, 1);
+assert.equal(missingRemoteAttachmentNameResult.ok, false);
+assert.equal(missingRemoteAttachmentNameResult.status, 'failed');
+assert.equal(missingRemoteAttachmentNameResult.errorCode, 'cloud_result_binding_mismatch');
+
 const localSource = await fs.readFile(new URL('../lib/cloud_team_report_local.mjs', import.meta.url), 'utf8');
 assert.doesNotMatch(localSource, /lark-cli/iu, 'local implementation must not invoke or name a local lark-cli');
 
@@ -133,11 +185,19 @@ const botResult = await deliverCloudTeamReport({
   landingRoot: botLandingRoot,
   spawnImpl: fakeSpawnFactory([
     {ok: true, message_id: 'om_hidden_summary', chat_id: 'oc_hidden_chat'},
-    {ok: true, data: {message_id: 'om_hidden_attachment', chat_id: 'oc_hidden_chat'}},
+    {ok: true, data: {message_id: 'om_hidden_attachment', file_key: 'file_hidden_attachment', chat_id: 'oc_hidden_chat'}},
   ], botCalls),
   now: () => '2026-08-24T00:00:00.000Z',
 });
 assert.equal(botResult.ok, true);
+assert.equal(botResult.attachmentName, path.basename(attachmentFile));
+assert.equal(botResult.items.summary.accepted, true);
+assert.equal(botResult.items.summary.attempts, 1);
+assert.equal(botResult.items.summary.messageId, 'om_hidden_summary');
+assert.equal(botResult.items.attachment.accepted, true);
+assert.equal(botResult.items.attachment.attempts, 1);
+assert.equal(botResult.items.attachment.messageId, 'om_hidden_attachment');
+assert.equal(botResult.items.attachment.fileKey, 'file_hidden_attachment');
 assert.equal(botCalls.length, 2);
 for (const call of botCalls) {
   assert.equal(call.bin, 'lark-cli');
@@ -163,6 +223,60 @@ assert.equal(attachmentArg.split(/[\\/]/u).includes('..'), false, 'attachment ar
 assert.equal(attachmentArg.includes('..'), false, 'attachment argv must not contain a parent traversal token');
 assert.equal(attachmentCall.args.includes(botPaths.attachmentFile), false, 'attachment argv must omit the absolute staged path');
 assert.equal(attachmentCall.options.cwd, botPaths.deliveryDir, 'attachment spawn cwd must be the verified delivery directory');
+const botState = JSON.parse(await fs.readFile(botPaths.stateFile, 'utf8'));
+assert.equal(botState.attachmentName, path.basename(attachmentFile));
+assert.equal(botState.items.summary.messageId, 'om_hidden_summary');
+assert.equal(botState.items.attachment.messageId, 'om_hidden_attachment');
+assert.equal(botState.items.attachment.fileKey, 'file_hidden_attachment');
+
+// A legacy false-success state is fail-closed without replaying either item.
+// Once normalized to unknown it stays sticky on subsequent invocations.
+const acceptedWithoutIdsRoot = path.join(tempRoot, 'accepted-without-ids-cloud');
+const acceptedWithoutIdsPaths = buildCloudLandingPaths({
+  landingRoot: acceptedWithoutIdsRoot,
+  automationId: botBundle.automationId,
+  businessDate: botBundle.businessDate,
+  fingerprint: botBundle.fingerprint,
+  attachmentName: botBundle.attachmentName,
+});
+await fs.mkdir(acceptedWithoutIdsPaths.deliveryDir, {recursive: true});
+const acceptedWithoutIdsState = JSON.parse(JSON.stringify(botState));
+acceptedWithoutIdsState.status = 'ok';
+for (const kind of ['summary', 'attachment']) {
+  acceptedWithoutIdsState.items[kind].accepted = true;
+  delete acceptedWithoutIdsState.items[kind].messageId;
+  delete acceptedWithoutIdsState.items[kind].unknown;
+  delete acceptedWithoutIdsState.items[kind].errorCode;
+}
+await fs.writeFile(acceptedWithoutIdsPaths.stateFile, JSON.stringify(acceptedWithoutIdsState), 'utf8');
+const acceptedWithoutIdsCalls = [];
+const acceptedWithoutIdsFirst = await deliverCloudTeamReport({
+  bundle: botBundle,
+  config,
+  landingRoot: acceptedWithoutIdsRoot,
+  spawnImpl: fakeSpawnFactory([{ok: true, message_id: 'om_must_not_send'}], acceptedWithoutIdsCalls),
+});
+assert.equal(acceptedWithoutIdsFirst.ok, false);
+assert.equal(acceptedWithoutIdsFirst.status, 'unknown');
+assert.equal(acceptedWithoutIdsFirst.errorCode, 'lark_receipt_unknown');
+assert.equal(acceptedWithoutIdsFirst.items.summary.accepted, false);
+assert.equal(acceptedWithoutIdsFirst.items.summary.unknown, true);
+assert.equal(acceptedWithoutIdsFirst.items.attachment.accepted, false);
+assert.equal(acceptedWithoutIdsFirst.items.attachment.unknown, true);
+assert.equal(acceptedWithoutIdsCalls.length, 0, 'accepted-without-ID state must not trigger a resend');
+const acceptedWithoutIdsPersisted = JSON.parse(await fs.readFile(acceptedWithoutIdsPaths.stateFile, 'utf8'));
+assert.equal(acceptedWithoutIdsPersisted.status, 'unknown');
+assert.equal(acceptedWithoutIdsPersisted.items.summary.unknown, true);
+assert.equal(acceptedWithoutIdsPersisted.items.attachment.unknown, true);
+const acceptedWithoutIdsSecond = await deliverCloudTeamReport({
+  bundle: botBundle,
+  config,
+  landingRoot: acceptedWithoutIdsRoot,
+  spawnImpl: fakeSpawnFactory([{ok: true, message_id: 'om_still_must_not_send'}], acceptedWithoutIdsCalls),
+});
+assert.equal(acceptedWithoutIdsSecond.ok, false);
+assert.equal(acceptedWithoutIdsSecond.status, 'unknown');
+assert.equal(acceptedWithoutIdsCalls.length, 0, 'normalized unknown state must remain no-resend');
 
 // SHA drift is rejected on both sides of the handoff, before a send.
 await fs.writeFile(attachmentFile, Buffer.from('attachment-v2\n', 'utf8'));
@@ -174,6 +288,12 @@ await assertCode(() => runLocalCloudTeamReport({
 await fs.writeFile(attachmentFile, Buffer.from('attachment-v1\n', 'utf8'));
 const stableBundle = await makeBundle();
 await assertCode(() => deliverCloudTeamReport({
+  bundle: Object.fromEntries(Object.entries(stableBundle).filter(([key]) => key !== 'attachmentName')),
+  config,
+  landingRoot: path.join(tempRoot, 'missing-attachment-name-cloud'),
+  spawnImpl: fakeSpawnFactory([], []),
+}), 'INVALID_ATTACHMENT_NAME');
+await assertCode(() => deliverCloudTeamReport({
   bundle: {...stableBundle, recipientChatId: 'oc_forbidden_local_target'},
   config,
   landingRoot: path.join(tempRoot, 'forbidden-target-cloud'),
@@ -181,6 +301,36 @@ await assertCode(() => deliverCloudTeamReport({
 }), 'LOCAL_TARGET_FORBIDDEN');
 const driftedBundle = {...stableBundle, attachmentBase64: Buffer.from('drifted', 'utf8').toString('base64')};
 await assertCode(() => deliverCloudTeamReport({bundle: driftedBundle, config, landingRoot: path.join(tempRoot, 'sha-cloud'), spawnImpl: fakeSpawnFactory([], [])}), 'ATTACHMENT_SHA256_MISMATCH');
+
+const attachmentNameDriftRoot = path.join(tempRoot, 'attachment-name-drift-cloud');
+const attachmentNameDriftPaths = buildCloudLandingPaths({
+  landingRoot: attachmentNameDriftRoot,
+  automationId: stableBundle.automationId,
+  businessDate: stableBundle.businessDate,
+  fingerprint: stableBundle.fingerprint,
+  attachmentName: stableBundle.attachmentName,
+});
+await fs.mkdir(attachmentNameDriftPaths.deliveryDir, {recursive: true});
+await fs.writeFile(attachmentNameDriftPaths.stateFile, JSON.stringify({
+  schemaVersion: 'cloud-team-report-state/v1',
+  automationId: stableBundle.automationId,
+  businessDate: stableBundle.businessDate,
+  fingerprint: stableBundle.fingerprint,
+  attachmentSha256: stableBundle.expectedAttachmentSha256,
+  summarySha256: sha256Bytes(Buffer.from(stableBundle.summaryBase64, 'base64')),
+  attachmentName: 'different.xlsx',
+  status: 'pending',
+  items: {
+    summary: {accepted: false, attempts: 0, idempotencyKeySha256: 'x'.repeat(64)},
+    attachment: {accepted: false, attempts: 0, idempotencyKeySha256: 'x'.repeat(64)},
+  },
+}), 'utf8');
+await assertCode(() => deliverCloudTeamReport({
+  bundle: stableBundle,
+  config,
+  landingRoot: attachmentNameDriftRoot,
+  spawnImpl: fakeSpawnFactory([], []),
+}), 'CLOUD_STATE_BINDING_MISMATCH');
 
 // Path escape and symlink rejection cover both the local input boundary and
 // the cloud landing boundary.
@@ -226,9 +376,12 @@ const missingIdResult = await deliverCloudTeamReport({
   ]),
 });
 assert.equal(missingIdResult.ok, false);
-assert.equal(missingIdResult.status, 'failed');
+assert.equal(missingIdResult.status, 'unknown');
 assert.equal(missingIdResult.items.summary.accepted, false);
-assert.doesNotMatch(JSON.stringify(missingIdResult), /chat[_-]?id|message[_-]?id|token|app[_-]?secret/iu);
+assert.equal(missingIdResult.items.summary.attempts, 1);
+assert.equal(missingIdResult.items.summary.unknown, true);
+assert.equal(missingIdResult.errorCode, 'lark_receipt_unknown');
+assert.doesNotMatch(JSON.stringify(missingIdResult), /oc_|chat[_-]?id|token|app[_-]?secret/iu);
 const notOkResult = await deliverCloudTeamReport({
   bundle: stableBundle,
   config,
@@ -274,12 +427,16 @@ const partialFirst = await deliverCloudTeamReport({
 assert.equal(partialFirst.ok, false);
 assert.equal(partialFirst.status, 'partial');
 assert.equal(partialFirst.items.summary.accepted, true);
+assert.equal(partialFirst.items.summary.attempts, 1);
+assert.equal(partialFirst.items.summary.messageId, 'om_hidden_one');
 assert.equal(partialFirst.items.attachment.accepted, false);
+assert.equal(partialFirst.items.attachment.attempts, 1);
 const partialPaths = buildCloudLandingPaths({landingRoot: partialRoot, automationId: stableBundle.automationId, businessDate: stableBundle.businessDate, fingerprint: stableBundle.fingerprint});
 const partialState = JSON.parse(await fs.readFile(partialPaths.stateFile, 'utf8'));
 assert.equal(partialState.items.summary.accepted, true);
 assert.equal(partialState.items.attachment.accepted, false);
-assert.doesNotMatch(await fs.readFile(partialPaths.stateFile, 'utf8'), /chat[_-]?id|message[_-]?id|token|app[_-]?secret|om_hidden_one/iu);
+assert.equal(partialState.items.summary.messageId, 'om_hidden_one');
+assert.doesNotMatch(await fs.readFile(partialPaths.stateFile, 'utf8'), /oc_|chat[_-]?id|token|app[_-]?secret/iu);
 const partialSecond = await deliverCloudTeamReport({
   bundle: stableBundle,
   config,
@@ -287,6 +444,9 @@ const partialSecond = await deliverCloudTeamReport({
   spawnImpl: fakeSpawnFactory([{ok: true, data: {message_id: 'om_hidden_two'}}], partialCalls),
 });
 assert.equal(partialSecond.ok, true);
+assert.equal(partialSecond.items.summary.attempts, 1);
+assert.equal(partialSecond.items.attachment.attempts, 2);
+assert.equal(partialSecond.items.attachment.messageId, 'om_hidden_two');
 assert.equal(partialCalls.length, 3, 'resume must send only the missing item');
 const partialThird = await deliverCloudTeamReport({
   bundle: stableBundle,
@@ -299,7 +459,7 @@ const partialThird = await deliverCloudTeamReport({
 });
 assert.equal(partialThird.ok, true);
 assert.equal(partialCalls.length, 3, 'duplicate complete delivery must not send again');
-assert.doesNotMatch(JSON.stringify(partialThird), /chat[_-]?id|message[_-]?id|token|app[_-]?secret|om_hidden/iu);
+assert.doesNotMatch(JSON.stringify(partialThird), /oc_|chat[_-]?id|token|app[_-]?secret/iu);
 
 // A power loss must not leave this exact report permanently blocked. The
 // shared ticket lock reclaims a ticket whose recorded owner is verifiably
