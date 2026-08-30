@@ -221,8 +221,8 @@ def validate_authority(authority):
                 or not service["unit"] or not HEX64.fullmatch(str(service.get("generationHash", ""))):
             fail("INVENTORY_WRITER_GUARD_SCHEMA_INVALID", "authority writerServices generation")
         units.append(service["unit"])
-    if len(units) != len(set(units)) or not REQUIRED_RESTART_GENERATION_UNITS.issubset(units):
-        fail("INVENTORY_WRITER_GUARD_SCHEMA_INVALID", "authority writerServices required generation")
+    if len(units) != len(set(units)):
+        fail("INVENTORY_WRITER_GUARD_SCHEMA_INVALID", "authority writerServices duplicate unit")
     if not valid_iso(authority["capturedAt"]):
         fail("INVENTORY_WRITER_GUARD_SCHEMA_INVALID", "authority capturedAt")
 
@@ -372,6 +372,10 @@ def validate_compatibility_registry(data, activation):
             pending = None
         else:
             fail("INVENTORY_WRITER_GUARD_COMPATIBILITY_INVALID", f"unknown record kind:{kind}")
+    if pending is None:
+        active_units = {service["unit"] for service in active["authority"]["writerServices"]}
+        if not REQUIRED_RESTART_GENERATION_UNITS.issubset(active_units):
+            fail("INVENTORY_WRITER_GUARD_SCHEMA_INVALID", "active authority writerServices required generation")
     return {"records": records, "active": active, "pending": pending}
 
 
