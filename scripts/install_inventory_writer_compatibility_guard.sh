@@ -13,6 +13,7 @@ APP_ROOT="${SHEIN_BI_APP_ROOT:-/opt/shein-bi/app}"
 SYSTEMCTL_BIN="${SHEIN_BI_SYSTEMCTL_BIN:-systemctl}"
 GUARD_SYSTEMCTL_BIN="${SHEIN_BI_GUARD_SYSTEMCTL_BIN:-/usr/bin/systemctl}"
 SERVICE_GROUP="${SHEIN_BI_SERVICE_GROUP:-sheinops}"
+LOCK_TICKET_DIR="${SHEIN_BI_INVENTORY_CUTOVER_TICKET_DIR:-/srv/shein-bi/runtime/locks/inventory-v2-cutover.lock.tickets}"
 APPLY=0 REPLACE=0 CONFIRM='' EXPECTED_MANIFEST=''
 readonly GUARD_NAME='shein-bi-inventory-writer-compatibility-guard'
 readonly DROPIN_NAME='10-inventory-writer-compatibility.conf'
@@ -41,7 +42,7 @@ while (($#)); do case "$1" in
   --expected-installed-manifest-sha256) EXPECTED_MANIFEST="$2"; shift 2;;
   -h|--help) usage; exit 0;; *) bad "unknown argument:$1";; esac; done
 
-for value in "$ROOT" "$SYSTEMD_DIR" "$LIBEXEC_DIR" "$CONTROL_DIR" "$APP_ROOT"; do
+for value in "$ROOT" "$SYSTEMD_DIR" "$LIBEXEC_DIR" "$CONTROL_DIR" "$APP_ROOT" "$LOCK_TICKET_DIR"; do
   [[ "$value" == /* && "$value" != / ]] || bad 'all paths must be safe absolute paths'
 done
 ROOT="${ROOT%/}"; SYSTEMD_DIR="${SYSTEMD_DIR%/}"; LIBEXEC_DIR="${LIBEXEC_DIR%/}"; CONTROL_DIR="${CONTROL_DIR%/}"; APP_ROOT="${APP_ROOT%/}"
@@ -112,6 +113,10 @@ for service in "${LEGACY_NON_WRITER_SERVICES[@]}"; do
     legacy_present=$((legacy_present+1))
   fi
 done
+if ((present > 0)); then
+  [[ -d "$LOCK_TICKET_DIR" && ! -L "$LOCK_TICKET_DIR" \
+    && "$(stat -c %U:%G:%a "$LOCK_TICKET_DIR")" == "root:$SERVICE_GROUP:2770" ]] || canonical=0
+fi
 manifest="$(artifact_manifest)"
 total=$((1+${#SERVICES[@]}))
 
@@ -130,6 +135,7 @@ fi
 
 install -d -o root -g root -m 0755 "$LIBEXEC_DIR" "$SYSTEMD_DIR"
 install -d -o root -g "$SERVICE_GROUP" -m 2750 "$CONTROL_DIR"
+install -d -o root -g "$SERVICE_GROUP" -m 2770 "$LOCK_TICKET_DIR"
 tmp="$(mktemp "$LIBEXEC_DIR/.${GUARD_NAME}.XXXXXX")"
 install -o root -g root -m 0755 "$SOURCE" "$tmp"; mv -f "$tmp" "$TARGET"
 for service in "${SERVICES[@]}"; do

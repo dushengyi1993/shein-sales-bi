@@ -10,6 +10,7 @@ import {
   finalizeInventoryCompatibilityRotation,
   inventoryCompatibilityAuthority,
   inventoryCompatibilityStatus,
+  readInventoryWriterServiceStates,
   requireCurrentInventoryCutoverActivation,
   stageInventoryCompatibilityRotation,
 } from '../lib/inventory_write_cutover.mjs';
@@ -31,7 +32,20 @@ const journalFile = path.join(temp, 'journal.ndjson');
 const manualReceiptFile = path.join(temp, 'manual.receipt.json');
 const commonPaths = {activationFile, activationReceiptFile, compatibilityFile, compatibilityReceiptFile};
 const maintenance = {ok: true, active: true, mode: 'all', generation: 19, hash: '9'.repeat(64)};
-const service = generationHash => [{unit: 'shein-bi-portal.service', generationHash}];
+const quiescentServices = await readInventoryWriterServiceStates(
+  ['shein-bi-daily-inventory-replenishment-guard.service'],
+  {execFileImpl: async () => ({stdout: [
+    'LoadState=loaded', 'ActiveState=inactive', 'SubState=dead', 'MainPID=0',
+    'ExecMainStartTimestamp=', 'NRestarts=0', '',
+  ].join('\n')})},
+);
+assert.equal(quiescentServices.length, 1);
+assert.match(quiescentServices[0].generationHash, /^[a-f0-9]{64}$/u);
+const service = generationHash => [
+  {unit: 'shein-bi-daily-inventory-replenishment-guard.service', generationHash},
+  {unit: 'shein-bi-et-low-inventory-guard.service', generationHash},
+  {unit: 'shein-bi-et-low-inventory-recheck.service', generationHash},
+];
 const authorityN = {
   deployedCommit: 'a'.repeat(40), sourceFingerprint: 'b'.repeat(64), bundleSha256: 'c'.repeat(64),
   trackedSourceClean: true, releaseReceiptKind: 'formal', releaseReceiptHash: 'd'.repeat(64),
@@ -69,8 +83,9 @@ assert.equal(initial.readback.compatibility.activeGeneration, 1);
 const restartN = {...authorityN, writerServices: service('6'.repeat(64)), capturedAt: '2026-08-27T01:05:00.000Z'};
 assert.equal((await requireCurrentInventoryCutoverActivation({...commonPaths, authorityReader: async () => restartN})).activated, true);
 
+const fingerprintDriftN = {...restartN, sourceFingerprint: '9'.repeat(64)};
 const stageOptions = {
-  ...commonPaths, candidateAuthority: candidate, authorityReader: async () => restartN,
+  ...commonPaths, candidateAuthority: candidate, authorityReader: async () => fingerprintDriftN,
   maintenanceReader: async () => maintenance, now: () => new Date('2026-08-27T01:10:00.000Z'), lockFile,
 };
 const stageDry = await stageInventoryCompatibilityRotation(stageOptions);
