@@ -231,6 +231,19 @@ try {
   };
   await writeJson(resultFile, terminalDriftResult);
   assert.equal((await validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false})).resultCount, 1, 'closed intent natural drift must be journal-proven and safe');
+  const driftedLegacyOpenApiFile = path.join(tempRoot, 'outputs', 'shein_openapi_products', 'DL', 'latest.json');
+  const originalLegacyOpenApiBytes = await fs.readFile(driftedLegacyOpenApiFile);
+  await writeJson(driftedLegacyOpenApiFile, {storeKey: 'DL', fetchedAt: new Date().toISOString(), summary: {stockFailedChunkCount: 0}, drift: true});
+  assert.equal((await validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false})).resultCount, 1,
+    'reconcile-only terminal validation must not depend on mutable external OpenAPI source files after the terminal journal is proven');
+  await writeJson(resultFile, goodResult);
+  await assert.rejects(
+    validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false}),
+    /OpenAPI source hash drifted: DL/,
+    'normal execution validation must still fail closed when legacy OpenAPI source evidence drifts',
+  );
+  await fs.writeFile(driftedLegacyOpenApiFile, originalLegacyOpenApiBytes);
+  await writeJson(resultFile, terminalDriftResult);
   await writeJson(resultFile, {
     ...terminalDriftResult,
     results: terminalDriftResult.results.map(row => ({...row, terminalRecordedAt: '2026-08-16T08:01:00.000Z'})),

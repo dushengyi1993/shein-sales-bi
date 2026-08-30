@@ -179,7 +179,7 @@ function expectedPlanHash(plan) {
   return stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 }
 
-async function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now(), evidenceRoot = process.cwd()) {
+async function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now(), evidenceRoot = process.cwd(), {validateExternalFiles = true, validateFreshness = true} = {}) {
   const evidencePath = file => path.isAbsolute(String(file || ''))
     ? path.resolve(file)
     : path.resolve(evidenceRoot, String(file || ''));
@@ -201,16 +201,20 @@ async function validatePlanSourceEvidence(plan, enabledStores, policy, reference
       : row.store === 'BI_LINKS'
         ? Number(plan?.executionConstraints?.decreaseOnly ? policy?.lowEtFastGuard?.maxLinksSnapshotAgeHours || policy.maxLinksSnapshotAgeHours || 4 : policy.maxLinksSnapshotAgeHours || 4)
         : Number(policy.maxOpenApiSnapshotAgeHours || 2);
-    assert((now - fetchedAt) / 3_600_000 <= maxHours, `inventory plan sourceEvidence is stale: ${row?.store || ''}`);
+    if (validateFreshness) assert((now - fetchedAt) / 3_600_000 <= maxHours, `inventory plan sourceEvidence is stale: ${row?.store || ''}`);
     assert(typeof row.file === 'string' && row.file.length > 0, `inventory plan sourceEvidence file missing: ${row?.store || ''}`);
   }
   for (const row of openApi) {
     assert(Number(row.stockFailedChunkCount) === 0, `inventory plan OpenAPI source has failed stock chunks: ${row.store}`);
     assert(/^[a-f0-9]{64}$/i.test(String(row.sha256 || '')), `inventory plan OpenAPI source hash missing: ${row.store}`);
-    assert(String(row.sha256).toLowerCase() === await fileHash(evidencePath(row.file)), `inventory plan OpenAPI source hash drifted: ${row.store}`);
+    if (validateExternalFiles) assert(String(row.sha256).toLowerCase() === await fileHash(evidencePath(row.file)), `inventory plan OpenAPI source hash drifted: ${row.store}`);
   }
   if (Array.isArray(plan.detailRefreshTargets) && plan.detailRefreshTargets.length > 0) {
     assert(detailClosure.length === 1, 'inventory plan must contain exactly one daily detail manifest closure evidence');
+  }
+  if (!validateExternalFiles) {
+    assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
+    return;
   }
   for (const closure of detailClosure) {
     assert(await fileHash(evidencePath(closure.file)) === closure.sha256, 'inventory detail bound manifest hash drifted');
@@ -328,6 +332,16 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
   return false;
 }
 
+function isReconcileOnlyTerminalOrReadbackOnlyResultRow(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (row.state === 'updated_readback_matched') return true;
+  if (row.state === 'skipped_terminal_readback_recorded') return true;
+  if (row.state === 'skipped_target_already_matched') return true;
+  if (row.state === 'submitted_but_readback_pending' && row.historicalPending === true) return true;
+  if (row.state === 'blocked_by_manual_resolution_fence') return true;
+  return false;
+}
+
 export async function validateInventoryArtifacts({root, markerRoot, inventoryRuntimeRoot, runDate, businessDate, enabledStores, requireMarker = true}) {
   const previous = new Date(`${runDate}T12:00:00Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
@@ -352,7 +366,6 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   assert(plan?.date === runDate && plan?.policyVersion === policy?.policyVersion, 'inventory plan date/policy mismatch');
   assert(plan?.executable === true && Array.isArray(plan?.blockers) && plan.blockers.length === 0, 'inventory plan is not executable');
   assert(/^[a-f0-9]{64}$/.test(String(plan?.payloadHash || '')) && expectedPlanHash(plan) === plan.payloadHash, 'inventory plan payloadHash mismatch');
-  await validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime, root);
   assert(result?.planHash === plan.payloadHash && result?.policyVersion === plan.policyVersion, 'inventory result plan/policy hash mismatch');
   assert(result?.execute === true && result?.executionMode === 'automatic', 'inventory result is not an automatic execution');
   assert(Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length === 0, 'inventory result contains unresolved durable intents');
@@ -364,6 +377,13 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   assert(expectedAuthorization && result.authorizationId === expectedAuthorization, 'inventory authorization id mismatch');
   const actionable = Array.isArray(plan.actionable) ? plan.actionable : [];
   const rows = Array.isArray(result.results) ? result.results : [];
+  const externalSourceEvidenceRequired = !(result.reconcilePendingOnly === true
+    && rows.length === actionable.length
+    && rows.every(isReconcileOnlyTerminalOrReadbackOnlyResultRow));
+  await validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime, root, {
+    validateExternalFiles: externalSourceEvidenceRequired,
+    validateFreshness: externalSourceEvidenceRequired,
+  });
   const currentTerminalAuditByIntentId = new Map();
   const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
   const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);

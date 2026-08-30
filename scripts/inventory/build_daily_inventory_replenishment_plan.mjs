@@ -64,6 +64,42 @@ const readJsonEvidence = async file => {
   const bytes = await fs.readFile(resolved);
   return {file: resolved, bytes, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), json: JSON.parse(bytes.toString('utf8'))};
 };
+async function writePlanPrivateEvidenceArtifact(evidence, {kind, storeKey = ''} = {}) {
+  const date = String(args?.date || '').trim();
+  const normalizedKind = String(kind || 'source').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'source';
+  const normalizedStore = String(storeKey || '').trim().toUpperCase().replace(/[^A-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'ALL';
+  const directory = path.join(path.dirname(args.out), 'source-evidence', date, normalizedKind, normalizedStore);
+  const target = path.join(directory, `${evidence.sha256}.json`);
+  await fs.mkdir(directory, {recursive: true});
+  let existing = null;
+  try {
+    existing = await fs.readFile(target);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  if (existing) {
+    const existingSha = crypto.createHash('sha256').update(existing).digest('hex');
+    if (existingSha !== evidence.sha256 || !existing.equals(evidence.bytes)) {
+      throw new Error(`plan-private evidence artifact differs from bound source bytes: ${target}`);
+    }
+    return {file: target, sha256: evidence.sha256};
+  }
+  const temporary = path.join(directory, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`);
+  let handle = null;
+  try {
+    handle = await fs.open(temporary, 'wx', 0o640);
+    await handle.writeFile(evidence.bytes);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(temporary, target);
+    return {file: target, sha256: evidence.sha256};
+  } catch (error) {
+    try { await handle?.close(); } catch {}
+    try { await fs.rm(temporary, {force: true}); } catch {}
+    throw error;
+  }
+}
 const readBiDocument = async file => {
   if (!args?.etManifest) return readJson(file);
   try {
@@ -651,14 +687,16 @@ for (const store of stores) {
   const file = resolveOpenApiProductCacheFile(store, {rootDir: ROOT, cacheDir: args.productsDir});
   try {
     const cacheMeta = await readJsonEvidence(file);
+    const immutableCache = await writePlanPrivateEvidenceArtifact(cacheMeta, {kind: 'openapi-product-cache', storeKey: store});
     const doc = cacheMeta.json;
     const sourceAge = ageHours(doc.fetchedAt);
     const stockFailedChunkCount = doc?.summary?.stockFailedChunkCount;
     const hasValidStockFailureEvidence = Number.isInteger(stockFailedChunkCount) && stockFailedChunkCount >= 0;
     sourceEvidence.push({
       store,
-      file,
-      sha256: cacheMeta.sha256,
+      file: immutableCache.file,
+      sourceFile: file,
+      sha256: immutableCache.sha256,
       fetchedAt: doc.fetchedAt || '',
       ageHours: Number(sourceAge.toFixed(4)),
       stockFailedChunkCount: hasValidStockFailureEvidence ? stockFailedChunkCount : null,
@@ -894,6 +932,7 @@ if (requiredDetailTargets) {
                 throw new Error('terminal evidence file/hash, original manifest hash or cache bindings missing');
               }
               const evidenceMeta = await readJsonEvidence(terminalEvidence.evidenceFile);
+              const immutableEvidenceMeta = await writePlanPrivateEvidenceArtifact(evidenceMeta, {kind: 'daily-detail-terminal-evidence'});
               if (evidenceMeta.sha256 !== String(terminalEvidence.evidenceSha256).toLowerCase()) {
                 throw new Error('terminal evidence file hash mismatch');
               }
@@ -904,9 +943,11 @@ if (requiredDetailTargets) {
                 throw new Error('embedded terminal evidence differs from immutable evidence artifact');
               }
               const originalManifestMeta = await readJsonEvidence(terminalEvidence.manifestFile);
+              const immutableOriginalManifestMeta = await writePlanPrivateEvidenceArtifact(originalManifestMeta, {kind: 'daily-detail-manifest-original'});
               if (originalManifestMeta.sha256 !== String(terminalEvidence.manifestSha256).toLowerCase()) {
                 throw new Error('original manifest file hash mismatch');
               }
+              const immutableBoundManifestMeta = await writePlanPrivateEvidenceArtifact(requiredDetailTargetsMeta, {kind: 'daily-detail-manifest-bound'});
               const cacheBindings = [];
               const seenCacheStores = new Set();
               for (const cacheBinding of terminalEvidence.cacheBindings) {
@@ -918,30 +959,45 @@ if (requiredDetailTargets) {
                 }
                 seenCacheStores.add(storeKey);
                 const cacheMeta = await readJsonEvidence(cacheBinding.cacheFile);
+                const immutableCacheMeta = await writePlanPrivateEvidenceArtifact(cacheMeta, {kind: 'daily-detail-openapi-cache', storeKey});
                 if (cacheMeta.sha256 !== String(cacheBinding.cacheSha256).toLowerCase()) {
                   throw new Error(`per-store cache hash mismatch:${storeKey}`);
                 }
                 cacheBindings.push({
                   storeKey,
-                  cacheFile: cacheMeta.file,
-                  cacheSha256: cacheMeta.sha256,
+                  cacheFile: immutableCacheMeta.file,
+                  sourceCacheFile: cacheMeta.file,
+                  cacheSha256: immutableCacheMeta.sha256,
                   cacheGeneratedAt: cacheBinding.cacheGeneratedAt,
                 });
               }
+              const targetBindings = terminalEvidence.targetBindings.map(binding => {
+                const storeKey = String(binding?.storeKey || '').trim().toUpperCase();
+                const sourceCacheFile = String(binding?.cacheFile || '').trim();
+                if (!storeKey || !sourceCacheFile) {
+                  throw new Error(`terminal target binding cache source is missing:${storeKey || '(missing-store)'}`);
+                }
+                const boundCache = cacheBindings.find(cache => cache.storeKey === storeKey
+                  && path.resolve(cache.sourceCacheFile) === path.resolve(sourceCacheFile));
+                if (!boundCache) {
+                  throw new Error(`terminal target binding cache source has no immutable cache binding:${storeKey}:${sourceCacheFile}`);
+                }
+                return {...binding, cacheFile: boundCache.cacheFile, sourceCacheFile};
+              });
               terminalArtifact = {
                 store: 'DETAIL_MANIFEST',
                 source: 'daily_current_detail_terminal_evidence',
-                file: requiredDetailTargetsMeta.file,
-                sha256: requiredDetailTargetsMeta.sha256,
+                file: immutableBoundManifestMeta.file,
+                sha256: immutableBoundManifestMeta.sha256,
                 fetchedAt: refreshEndedAt,
-                manifestOriginalFile: originalManifestMeta.file,
-                manifestOriginalSha256: originalManifestMeta.sha256,
-                terminalEvidenceFile: evidenceMeta.file,
-                terminalEvidenceSha256: evidenceMeta.sha256,
+                manifestOriginalFile: immutableOriginalManifestMeta.file,
+                manifestOriginalSha256: immutableOriginalManifestMeta.sha256,
+                terminalEvidenceFile: immutableEvidenceMeta.file,
+                terminalEvidenceSha256: immutableEvidenceMeta.sha256,
                 refreshStartedAt,
                 refreshEndedAt,
                 cacheBindings,
-                targetBindings: terminalEvidence.targetBindings,
+                targetBindings,
               };
             } catch (error) {
               blockers.push(`daily current-detail terminal evidence artifact hash verification failed: ${error.message}`);

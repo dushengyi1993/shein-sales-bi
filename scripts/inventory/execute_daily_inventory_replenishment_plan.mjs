@@ -431,7 +431,7 @@ const expectedHash = isEtLowInventorySafetyPlan
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
 const evidenceFileHash = async file => createHash('sha256').update(await fs.readFile(path.resolve(file))).digest('hex');
-for (const evidence of asArray(plan.sourceEvidence)) {
+for (const evidence of (args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence))) {
   if (evidence?.sha256 && await evidenceFileHash(evidence.file) !== String(evidence.sha256).toLowerCase()) {
     throw new Error(`Plan source evidence file hash drifted: ${evidence.store || evidence.file}`);
   }

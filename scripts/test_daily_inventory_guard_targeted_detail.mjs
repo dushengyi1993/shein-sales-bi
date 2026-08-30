@@ -443,6 +443,42 @@ match('planner fails closed on missing or non-current targets',
   planner,
   /daily current-detail target is (missing from refreshed snapshot|not from current detail after refresh):/,
   'any manifest target without current detail keeps the plan blocked');
+match('planner freezes the bound detail manifest as distinct plan-private evidence',
+  planner,
+  /immutableBoundManifestMeta = await writePlanPrivateEvidenceArtifact\(requiredDetailTargetsMeta, \{kind: 'daily-detail-manifest-bound'\}\)/,
+  'DETAIL_MANIFEST.file must bind the manifest after terminalEvidence was embedded');
+match('planner freezes the original detail manifest as distinct plan-private evidence',
+  planner,
+  /immutableOriginalManifestMeta = await writePlanPrivateEvidenceArtifact\(originalManifestMeta, \{kind: 'daily-detail-manifest-original'\}\)/,
+  'manifestOriginalFile must remain the original guard manifest, not the bound manifest');
+match('planner freezes terminal evidence as distinct plan-private evidence',
+  planner,
+  /immutableEvidenceMeta = await writePlanPrivateEvidenceArtifact\(evidenceMeta, \{kind: 'daily-detail-terminal-evidence'\}\)/,
+  'terminalEvidenceFile must remain the standalone terminal evidence artifact');
+match('DETAIL_MANIFEST file points at the bound manifest artifact',
+  planner,
+  /store: 'DETAIL_MANIFEST',[\s\S]*file: immutableBoundManifestMeta\.file,[\s\S]*sha256: immutableBoundManifestMeta\.sha256/,
+  'the DETAIL_MANIFEST primary file/hash must not be confused with the original manifest');
+match('DETAIL_MANIFEST original and terminal evidence paths stay separate',
+  planner,
+  /manifestOriginalFile: immutableOriginalManifestMeta\.file,[\s\S]*terminalEvidenceFile: immutableEvidenceMeta\.file/,
+  'bound manifest, original manifest and terminal evidence must be independently bound');
+match('planner rejects targetBindings without a cache source',
+  planner,
+  /if \(!storeKey \|\| !sourceCacheFile\) \{[\s\S]*terminal target binding cache source is missing/,
+  'targetBindings.cacheFile is required and cannot silently fall back to a mutable path');
+match('planner requires targetBindings to match immutable cacheBindings by original source path',
+  planner,
+  /path\.resolve\(cache\.sourceCacheFile\) === path\.resolve\(sourceCacheFile\)[\s\S]*terminal target binding cache source has no immutable cache binding/,
+  'a target binding with no matching cache binding must fail closed');
+match('planner always rewrites targetBindings to immutable cache files while retaining sourceCacheFile',
+  planner,
+  /return \{\.\.\.binding, cacheFile: boundCache\.cacheFile, sourceCacheFile\};/,
+  'successful targetBindings must never preserve the original mutable cacheFile');
+noMatch('planner no longer falls back to original terminal target binding',
+  planner,
+  /boundCache \? \{\.\.\.binding, cacheFile: boundCache\.cacheFile, sourceCacheFile\} : binding/,
+  'missing cache binding must throw instead of preserving the mutable source path');
 
 // ---------------------------------------------------------------------------
 // Fail-closed: refresh failure / empty targets / budget exceed => blocked,

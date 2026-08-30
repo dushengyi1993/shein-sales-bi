@@ -17,6 +17,7 @@
  * endpoint is contacted and no inventory write is executed.
  */
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
@@ -48,6 +49,7 @@ const LOCK_FILE = path.join(ROOT, 'state', 'locks', `daily-inventory-${STORE_KEY
 const AUTOMATION_CONTEXT = 'cloud_daily_inventory_replenishment_guard';
 const AUTOMATION_AUTHORIZATION = 'owner-automatic-inventory-20260803-v1';
 const TODAY = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
+const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 
 function runExecutor(args, env = {}) {
   return new Promise(resolve => {
@@ -174,9 +176,13 @@ async function buildPlanFixture(dir, {etProducts}) {
     targetUsableInventory: 15,
   };
   const sourceEvidence = [
-    {store: 'ET', file: 'outputs/bi-portal/sections/inventoryTrend.json', fetchedAt: nowIso},
-    {store: 'BI_LINKS', file: 'outputs/bi-portal/sections/linksData.json', fetchedAt: nowIso},
+    {store: 'ET', file: path.join(dir, 'source-et.json'), fetchedAt: nowIso},
+    {store: 'BI_LINKS', file: path.join(dir, 'source-links.json'), fetchedAt: nowIso},
   ];
+  await fs.writeFile(path.join(dir, 'source-et.json'), JSON.stringify({source: 'et'}), 'utf8');
+  const sourceLinksFile = path.join(dir, 'source-links.json');
+  await fs.writeFile(sourceLinksFile, JSON.stringify({source: 'links', generation: 1}), 'utf8');
+  sourceEvidence[1].sha256 = await fileHash(sourceLinksFile);
   const plan = {
     schemaVersion: 'daily-inventory-replenishment-plan/v1',
     date: TODAY,
@@ -397,13 +403,20 @@ try {
       'a matched readback must release the durable intent in the journal',
     );
 
+    await fs.writeFile(path.join(dirC, 'source-links.json'), JSON.stringify({source: 'links', generation: 2}), 'utf8');
     const runC2 = await runExecutor(argsC, envC);
-    assert.equal(runC2.code, 0, `idempotent re-run must exit clean, stderr=${runC2.stderr}`);
+    assert.notEqual(runC2.code, 0, `normal re-run must fail closed on source evidence drift, stderr=${runC2.stderr}`);
+    assert.match(runC2.stderr, /Plan source evidence file hash drifted: BI_LINKS/);
+    assert.equal(mockC.getChangeInventoryPosts(), 1, 'normal source drift failure must happen before any second POST');
+
+    const runC3 = await runExecutor([...argsC, '--reconcile-pending-only'], envC);
+    assert.equal(runC3.code, 0, `reconcile-only terminal recovery must ignore external source file drift, stderr=${runC3.stderr}`);
     const resultC2 = JSON.parse(await fs.readFile(outC, 'utf8'));
-    assert.equal(resultC2.results[0].state, 'skipped_target_already_matched',
-      'the journal write_outcome already released the intent, so the re-run must skip on the fresh readback');
+    assert.equal(resultC2.reconcilePendingOnly, true);
+    assert.equal(resultC2.results[0].state, 'skipped_terminal_readback_recorded',
+      'reconcile-only must use the terminal journal instead of creating any new write intent');
     assert.equal(resultC2.results[0].before.totalUsableInventory, 15);
-    assert.equal(mockC.getChangeInventoryPosts(), 1, 'an idempotent re-run must never POST again');
+    assert.equal(mockC.getChangeInventoryPosts(), 1, 'reconcile-only terminal recovery must never POST again');
   } finally {
     mockC.server.close();
     await cleanupLock();
@@ -822,7 +835,7 @@ try {
       'durable_transport_error_records_suspicious_write_attempted',
       'durable_intent_recovery_is_readback_only_no_second_post',
       'successful_write_readback_matched_one_post',
-      'idempotent_rerun_skips_on_fresh_readback_no_second_post',
+      'reconcile_only_terminal_recovery_skips_external_source_drift_no_second_post',
       'definitive_rejection_journals_write_outcome_rejected_and_releases_intent',
       'code_zero_missing_success_unmatched_readback_retains_intent_rerun_readback_only',
       'concurrent_stale_snapshots_refresh_under_sku_lock_one_post_total',

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +12,7 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'daily-inventory-plan-'));
 const date = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 const now = new Date().toISOString();
 const productsDir = path.join(tmp, 'products');
+const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 await fs.mkdir(path.join(productsDir, 'A'), {recursive: true});
 await fs.mkdir(path.join(productsDir, 'B'), {recursive: true});
 
@@ -181,6 +183,19 @@ assert.equal(plan.counts.soldOutLinksIgnoredSameStoreOnShelf, 1);
 assert.equal(plan.counts.etTotalRows, 9);
 assert.equal(plan.counts.etMatchedCurrentDayRows, 9);
 assert.equal(plan.sourceEvidence.find(row => row.store === 'ET')?.matchedCurrentDayEtRows, 9);
+for (const store of ['A', 'B']) {
+  const evidence = plan.sourceEvidence.find(row => row.store === store);
+  const legacyLatest = path.join(productsDir, store, 'latest.json');
+  assert.ok(evidence, `missing OpenAPI source evidence for ${store}`);
+  assert.equal(evidence.sourceFile, legacyLatest);
+  assert.notEqual(evidence.file, legacyLatest);
+  assert.match(evidence.file.replaceAll(path.sep, '/'), new RegExp(`source-evidence/${date}/openapi-product-cache/${store}/[a-f0-9]{64}\\.json$`));
+  assert.equal(evidence.sha256, await fileHash(evidence.file));
+  const originalLegacyLatest = await fs.readFile(legacyLatest);
+  await fs.writeFile(legacyLatest, JSON.stringify({fetchedAt: now, summary: {stockFailedChunkCount: 0}, normalizedRows: []}));
+  assert.equal(evidence.sha256, await fileHash(evidence.file), 'plan-private OpenAPI artifact must survive latest replacement');
+  await fs.writeFile(legacyLatest, originalLegacyLatest);
+}
 assert.deepEqual(plan.lowEtAllocations.map(row => row.targetUsableInventory), [2, 2, 2, 1, 1, 0]);
 assert.equal(plan.actionable.find(row => row.skc === 'skc-scarce')?.targetUsableInventory, 10);
 assert.equal(plan.ignored.find(row => row.skc === 'skc-stable')?.decision, 'recent_sale_scarcity_inventory_within_band');
