@@ -1166,15 +1166,21 @@ process.kill(process.pid, 'SIGKILL');
   assert.equal(await exists(harnessHostMarker), true,
     `the local stub host-heavy runner must actually execute: ${wrapperRun.stderr || wrapperRun.stdout || '(no wrapper output)'} auth=${harnessEnv.SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE} root=${harnessEnv.SHEIN_BI_ROOT} sourceExists=${await exists(harnessAuthorizationFile)}`);
 
-  // The same wrapper must not allow an explicit false flag to bypass a bad
-  // authorization artifact when the source file is present.
-  const tamperedHarness = JSON.parse(await fsp.readFile(harnessAuthorizationFile, 'utf8'));
-  tamperedHarness.maxGroups = 33;
-  await fsp.writeFile(harnessAuthorizationFile, `${JSON.stringify(tamperedHarness, null, 2)}\n`, 'utf8');
+  // A normal scheduled timer must ignore a stale issued authorization from an
+  // old business date/queue instead of turning it into immediate mode and
+  // failing closed before the ordinary 20:45/21:15 window logic.
+  const staleHarness = {
+    ...harnessIssued,
+    date: '2026-08-26',
+    queueFile: useNativeWslHarness
+      ? `${harnessRoot}/state/cloud_marketing_live_guard/repair-queues/marketing-repair-2026-08-26.json`
+      : shellPath(path.join(harnessStateDir, 'repair-queues', 'marketing-repair-2026-08-26.json')),
+  };
+  await fsp.writeFile(harnessAuthorizationFile, `${JSON.stringify(staleHarness, null, 2)}\n`, 'utf8');
   if (useNativeWslHarness) wslCopy(harnessAuthorizationFile, harnessAuthorizationRuntimePath);
   await fsp.rm(harnessHostMarker, {force: true});
-  const badWrapperRun = spawnSync('wsl.exe', [
-    '--exec', 'env', ...wslEnvironmentArgs(harnessEnv),
+  const ordinaryStaleWrapperRun = spawnSync('wsl.exe', [
+    '--exec', 'env', ...wslEnvironmentArgs({...harnessEnv, SHEIN_BI_MARKETING_IMMEDIATE_RUN: undefined}),
     'bash', '-lc', `bash ${bashQuote(shellPath(wrapperPath))}`,
   ], {
     cwd: root,
@@ -1182,10 +1188,33 @@ process.kill(process.pid, 'SIGKILL');
     encoding: 'utf8',
     timeout: 120000,
   });
-  assert.equal(badWrapperRun.error, undefined, `bad wrapper harness spawn failed: ${badWrapperRun.error?.message || ''}`);
-  assert.equal(badWrapperRun.status, 64, 'bad authorization must fail closed even with SHEIN_BI_MARKETING_IMMEDIATE_RUN=false');
-  assert.equal(await exists(harnessHostMarker), false, 'bad authorization must stop before host-heavy admission');
-  assert.equal(await exists(harnessAuthorizationFile), true, 'bad authorization source remains auditable and retryable');
+  assert.equal(ordinaryStaleWrapperRun.error, undefined,
+    `ordinary stale wrapper harness spawn failed: ${ordinaryStaleWrapperRun.error?.message || ''}`);
+  assert.equal(ordinaryStaleWrapperRun.status, 75,
+    `ordinary scheduled stale authorization must return the managed timer defer/skip status instead of exit64: ${ordinaryStaleWrapperRun.stderr || ordinaryStaleWrapperRun.stdout}`);
+  assert.doesNotMatch(ordinaryStaleWrapperRun.stderr, /immediate authorization verification failed/,
+    'ordinary scheduled stale authorization must not enter immediate fail-closed verification');
+  if (useNativeWslHarness) wslCopy(harnessAuthorizationRuntimePath, harnessAuthorizationFile);
+  assert.deepEqual(JSON.parse(await fsp.readFile(harnessAuthorizationFile, 'utf8')), staleHarness,
+    'ordinary scheduled stale authorization must remain immutable audit evidence');
+
+  const explicitStaleWrapperRun = spawnSync('wsl.exe', [
+    '--exec', 'env', ...wslEnvironmentArgs({...harnessEnv, SHEIN_BI_MARKETING_IMMEDIATE_RUN: 'true'}),
+    'bash', '-lc', `bash ${bashQuote(shellPath(wrapperPath))}`,
+  ], {
+    cwd: root,
+    env: process.env,
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  assert.equal(explicitStaleWrapperRun.error, undefined,
+    `explicit stale wrapper harness spawn failed: ${explicitStaleWrapperRun.error?.message || ''}`);
+  assert.equal(explicitStaleWrapperRun.status, 64,
+    'explicit immediate run with a stale authorization must fail closed');
+  assert.match(explicitStaleWrapperRun.stderr, /immediate authorization verification failed/,
+    'explicit immediate stale authorization must report immediate verification failure');
+  assert.equal(await exists(harnessHostMarker), false, 'explicit stale authorization must stop before host-heavy admission');
+  assert.equal(await exists(harnessAuthorizationFile), true, 'stale authorization source remains auditable and retryable');
 
   // Execute the worker's real pending-authorization verifier in a temporary
   // copy and stop immediately after it. The expected fields are deliberately

@@ -27,12 +27,27 @@ NOW_EPOCH="$(date +%s)"
 QUEUE_FILE="$STATE_DIR/repair-queues/marketing-repair-${TODAY}.json"
 IMMEDIATE_CONTINUATION=0
 IMMEDIATE_RESULT=""
+IMMEDIATE_ISSUED_CURRENT=0
 
-# A pending source wins. If it was already atomically claimed/consumed before
-# a crash, discover only an immutable receipt that still exactly binds this
-# date and current queue; this is continuation-only admission.
+# A pending source wins only when it still exactly binds this date and current
+# queue. A stale manual authorization artifact is audit evidence, not a normal
+# scheduled-run mode switch. If it was already atomically claimed/consumed
+# before a crash, discover only an immutable receipt that still exactly binds
+# this date and current queue; this is continuation-only admission.
 if (( AUTHORIZATION_PRESENT == 1 )); then
-  IMMEDIATE_RUN=true
+  if IMMEDIATE_RESULT="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" verify-issued \
+      --date "$TODAY" --queue "$QUEUE_FILE" --root "$ROOT" \
+      --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE" --time-zone "$TZ_NAME")"; then
+    IMMEDIATE_RUN=true
+    IMMEDIATE_ISSUED_CURRENT=1
+  else
+    status=$?
+    if [[ "$EXPLICIT_IMMEDIATE_RUN" == "true" ]]; then
+      echo "[marketing-fallback-slot] immediate authorization verification failed; no consume occurred" >&2
+      exit "$status"
+    fi
+    IMMEDIATE_RUN=false
+  fi
 elif [[ -f "$QUEUE_FILE" && -d "$(dirname "$IMMEDIATE_AUTHORIZATION_FILE")" ]]; then
   if IMMEDIATE_RESULT="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" find-continuation \
       --date "$TODAY" --queue "$QUEUE_FILE" --root "$ROOT" \
@@ -97,7 +112,7 @@ if [[ "$IMMEDIATE_RUN" == "true" ]]; then
     echo "[marketing-fallback-slot] immediate mode requires the authorization artifact" >&2
     exit 64
   fi
-  if (( IMMEDIATE_CONTINUATION == 0 )); then
+  if (( IMMEDIATE_CONTINUATION == 0 && IMMEDIATE_ISSUED_CURRENT == 0 )); then
     if IMMEDIATE_RESULT="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" verify-issued \
         --date "$TODAY" --queue "$QUEUE_FILE" --root "$ROOT" \
         --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE" --time-zone "$TZ_NAME")"; then
