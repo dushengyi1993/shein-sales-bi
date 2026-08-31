@@ -445,6 +445,8 @@ set -u
 echo inner >> "$SESSION_INNER_LOG"
 if [[ "$STUB_SESSION_MODE" == "fail" ]]; then
   exit 42
+elif [[ "$STUB_SESSION_MODE" == fail:* ]]; then
+  exit "\${STUB_SESSION_MODE#fail:}"
 fi
 mkdir -p "$PWD/outputs/reports"
 export TZ=Asia/Shanghai
@@ -612,25 +614,30 @@ if (( 1000 - T4_DELTA < 595 )); then
 fi
 echo 'PASS[t4 missing marker one-shot recovery and reserved link budget]'
 
-# t5: failed recovery is terminal and blocks link collection immediately.
-export STUB_SYNC_MODE=complete
-export SYNC_COUNT_FILE="\$SB/t5-count.txt"
-export STARTED_FILE="\$SB/t5-started.txt"
-export LANE_COUNT_FILE="\$SB/t5-lane.txt"
-export LANE_DEADLINE_LOG="\$SB/t5-lane-deadline.txt"
-export SESSION_INNER_LOG="\$SB/t5-inner.txt"
-export STUB_SESSION_MODE=fail
-rm -rf "\$SB/outputs" "\$SB/state/cloud_morning_chain" "\$SB/state/pipeline-markers"
-mkdir -p "\$SB/state/cloud_morning_chain"
-bash "\$CHAIN" all > "\$SB/t5.out" 2>&1
-RC=\$?
-if [[ "\$RC" -ne 42 ]]; then echo "FAIL[t5 exit=\$RC want=42]"; cat "\$SB/t5.out"; exit 1; fi
-[[ "\$(wc -l < "\$LANE_COUNT_FILE")" -eq 1 ]] || { echo 'FAIL[t5 lane count]'; exit 1; }
-[[ ! -e "\$SYNC_COUNT_FILE" ]] || { echo 'FAIL[t5 link sync started after session failure]'; exit 1; }
-grep -q '"status": "failed"' "\$CHAIN_STATE/latest.json" || { echo 'FAIL[t5 latest not failed]'; exit 1; }
-grep -q 'nightly session recovery failed status=42' "\$CHAIN_STATE/latest.json" || { echo 'FAIL[t5 clear failure state missing]'; exit 1; }
-grep -q 'nightly-session recovery failed status=42' "\$PIPE/morning-all.json" || { echo 'FAIL[t5 clear failure marker missing]'; exit 1; }
-echo 'PASS[t5 recovery failure blocks link sync]'
+# t5: failed recovery is terminal, maps to RestartPreventExitStatus=79,
+# preserves the original recovery status in state/marker text, and blocks
+# link collection immediately. This covers low-level status 1 and a higher
+# explicit session-manager failure such as 42.
+for STATUS in 1 42; do
+  export STUB_SYNC_MODE=complete
+  export SYNC_COUNT_FILE="\$SB/t5-\${STATUS}-count.txt"
+  export STARTED_FILE="\$SB/t5-\${STATUS}-started.txt"
+  export LANE_COUNT_FILE="\$SB/t5-\${STATUS}-lane.txt"
+  export LANE_DEADLINE_LOG="\$SB/t5-\${STATUS}-lane-deadline.txt"
+  export SESSION_INNER_LOG="\$SB/t5-\${STATUS}-inner.txt"
+  export STUB_SESSION_MODE="fail:\${STATUS}"
+  rm -rf "\$SB/outputs" "\$SB/state/cloud_morning_chain" "\$SB/state/pipeline-markers"
+  mkdir -p "\$SB/state/cloud_morning_chain"
+  bash "\$CHAIN" all > "\$SB/t5-\${STATUS}.out" 2>&1
+  RC=\$?
+  if [[ "\$RC" -ne 79 ]]; then echo "FAIL[t5 status=\$STATUS exit=\$RC want=79]"; cat "\$SB/t5-\${STATUS}.out"; exit 1; fi
+  [[ "\$(wc -l < "\$LANE_COUNT_FILE")" -eq 1 ]] || { echo "FAIL[t5 status=\$STATUS lane count]"; exit 1; }
+  [[ ! -e "\$SYNC_COUNT_FILE" ]] || { echo "FAIL[t5 status=\$STATUS link sync started after session failure]"; exit 1; }
+  grep -q '"status": "failed"' "\$CHAIN_STATE/latest.json" || { echo "FAIL[t5 status=\$STATUS latest not failed]"; exit 1; }
+  grep -q "nightly session recovery failed status=\$STATUS" "\$CHAIN_STATE/latest.json" || { echo "FAIL[t5 status=\$STATUS clear failure state missing]"; exit 1; }
+  grep -q "nightly-session recovery failed status=\$STATUS" "\$PIPE/morning-all.json" || { echo "FAIL[t5 status=\$STATUS clear failure marker missing]"; exit 1; }
+done
+echo 'PASS[t5 recovery failures map to 79 and block link sync]'
 
 # t6: an injected businessDate that is NOT runDate - 1 (here runDate ==
 # businessDate) must fail closed with exit 64 before any lane / session / link

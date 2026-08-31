@@ -8,14 +8,16 @@ QUEUE_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_FILE:-$ROOT/state/portal-section-que
 LOCK_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-section-queue.lock}"
 MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-3}"
 SECTION_TIMEOUT="${SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC:-900}"
+PRODUCT_SALES_DAILY_TIMEOUT_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-420}"
 PROFIT_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC:-480}"
-PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-360}"
+PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-450}"
 HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC:-540}"
 POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC:-60}"
 MIN_REMAINING_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC:-120}"
 LEASE_SECONDS="${SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC:-1200}"
 SCHEDULED_ENTRY="${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-0}"
 DEADLINE_MINUTE="${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE:-}"
+HEAVY_FIRST="${SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST:-0}"
 # The :02 slot has only a short reserved window. Its caller explicitly
 # disables heavy sections; the worker still keeps the time-budget checks below
 # as a second fail-closed guard for every other slot.
@@ -31,6 +33,7 @@ trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 
 [[ "$MAX_SECTIONS" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$SECTION_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || exit 64
+[[ "$PRODUCT_SALES_DAILY_TIMEOUT_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$PROFIT_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
@@ -38,6 +41,8 @@ trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 [[ "$MIN_REMAINING_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$DEADLINE_MINUTE" =~ ^[0-9]+$ ]] && (( DEADLINE_MINUTE >= 0 && DEADLINE_MINUTE <= 59 )) || exit 64
 [[ "$HEAVY_ALLOWED" == 0 || "$HEAVY_ALLOWED" == 1 ]] || exit 64
+[[ "$HEAVY_FIRST" == 0 || "$HEAVY_FIRST" == 1 ]] || exit 64
+(( PRODUCT_SALES_DAILY_TIMEOUT_SEC + 30 <= PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC )) || exit 64
 if [[ "$SCHEDULED_ENTRY" != "1" ]]; then
   echo "[portal-section-worker] defer reason=unscheduled_direct_entry; use shein-bi-cloud-portal-section-queue.service" >&2
   exit 75
@@ -311,7 +316,7 @@ process.stdout.write(String(x.completed===true && x.published===true && revision
   fi
 }
 
-echo "[portal-section-worker] start maxSections=$MAX_SECTIONS"
+echo "[portal-section-worker] start maxSections=$MAX_SECTIONS heavyAllowed=$HEAVY_ALLOWED heavyFirst=$HEAVY_FIRST"
 FAILED_SECTIONS=()
 CLAIMED_SECTIONS=()
 HEAVY_SECTION_DEFERRED=0
@@ -326,6 +331,9 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     break
   fi
   CLAIM_ARGS=(claim --lease-seconds "$LEASE_SECONDS")
+  if [[ "$HEAVY_FIRST" == "1" && "$HEAVY_ALLOWED" == "1" ]]; then
+    CLAIM_ARGS+=(--prefer-sections profit,productSalesDaily,homeRankings)
+  fi
   EXCLUDED_SECTIONS=("${CLAIMED_SECTIONS[@]}")
   if (( PROFIT_COMPLETED_THIS_RUN == 1 )); then
     PROFIT_QUEUE_STATUS="$(queue_command status)"
@@ -455,6 +463,11 @@ process.stdout.write(String(epoch));
   fi
   CURL_TIMEOUT="$SECTION_TIMEOUT"
   if (( CURL_TIMEOUT > MAX_CURL_RUNTIME )); then CURL_TIMEOUT=$MAX_CURL_RUNTIME; fi
+  if [[ "$SECTION" == "productSalesDaily" ]] \
+    && (( CURL_TIMEOUT > PRODUCT_SALES_DAILY_TIMEOUT_SEC )); then
+    CURL_TIMEOUT="$PRODUCT_SALES_DAILY_TIMEOUT_SEC"
+  fi
+  echo "[portal-section-worker] section=$SECTION curlBudgetSec=$CURL_TIMEOUT remainingSec=$REMAINING_SEC"
   HEADERS_FILE="$(mktemp)"
   EXPECTED_GENERATED_AT_QUERY="$(urlencode_query_value "$CLAIMED_CORE_GENERATED_AT")"
   # -f is deliberately not used: 202/403/503 responses must be classified

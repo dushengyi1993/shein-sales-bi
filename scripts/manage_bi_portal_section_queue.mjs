@@ -31,7 +31,7 @@ function usage(message = '') {
   console.error(`Usage:
   manage_bi_portal_section_queue.mjs enqueue --sections CSV --core-generated-at TOKEN [--priority N] [--reason TEXT] [--idempotency-key KEY] [--coalesce-key KEY] [--requeue-completed-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs reconcile-generation --phase snapshot|validate|commit --sections CSV --core-generated-at TOKEN [--snapshot-hash SHA256] [--validation-result BASE64URL] [--terminal-root PATH] [--terminal-validator PATH] [--file PATH]
-  manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--file PATH]
+  manage_bi_portal_section_queue.mjs claim [--lease-seconds N] [--exclude-sections CSV] [--prefer-sections CSV] [--file PATH]
   manage_bi_portal_section_queue.mjs complete --section NAME --lease-id ID --expected-generated-at TOKEN --terminal-generated-at TOKEN --terminal-section-generated-at TOKEN --terminal-generation-identity SHA256 [--not-after-epoch SECONDS] [--file PATH]
   manage_bi_portal_section_queue.mjs fail --section NAME --lease-id ID [--error TEXT] [--backoff-seconds N] [--file PATH]
   manage_bi_portal_section_queue.mjs status [--file PATH]`);
@@ -87,6 +87,7 @@ function parseArgs(argv) {
     notAfterEpoch: undefined,
     leaseSeconds: 2_700,
     excludeSections: [],
+    preferSections: [],
     error: '',
     backoffSeconds: DEFAULT_FAIL_BACKOFF_SECONDS,
   };
@@ -126,6 +127,9 @@ function parseArgs(argv) {
     else if (token === '--lease-seconds') options.leaseSeconds = Number(next());
     else if (token === '--exclude-sections') {
       options.excludeSections.push(...next().split(',').map(normalizeSection));
+    }
+    else if (token === '--prefer-sections') {
+      options.preferSections.push(...next().split(',').map(normalizeSection));
     }
     else if (token === '--error') options.error = next();
     else if (token === '--backoff-seconds') options.backoffSeconds = Number(next());
@@ -765,6 +769,7 @@ export function claimNext(queue, {
   now = new Date(),
   leaseId = crypto.randomUUID(),
   excludeSections = [],
+  preferSections = [],
 } = {}) {
   ensureQueueState(queue);
   const nowMillis = now.getTime();
@@ -790,6 +795,7 @@ export function claimNext(queue, {
   );
   const profitBlocksHomeProfit = Boolean(profitEntry);
   const excluded = new Set((excludeSections || []).map(normalizeSection));
+  const preferred = new Set((preferSections || []).map(normalizeSection));
   // A steady stream of priority-10 accounting work used to keep priority-50
   // daily/page caches pending forever.  Age lowers the effective priority by
   // one point every two minutes, but never ahead of an explicit priority-0
@@ -824,6 +830,8 @@ export function claimNext(queue, {
       return Number.isNaN(nextAttemptAt) || nextAttemptAt <= nowMillis;
     })
     .sort((left, right) => (
+      (preferred.has(right.section) ? 1 : 0) - (preferred.has(left.section) ? 1 : 0)
+      ||
       effectivePriority(left) - effectivePriority(right)
       || Number(left.priority || 0) - Number(right.priority || 0)
       // Within the same priority, sequence (enqueue order) decides instead of

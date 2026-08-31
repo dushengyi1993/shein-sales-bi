@@ -244,7 +244,7 @@ run_nightly_session_readiness_gate() {
   recovery_deadline="$(session_recovery_deadline_epoch)"
   now="$(date +%s)"
   if (( recovery_deadline <= now )); then
-    write_state "failed" "nightly session recovery cannot start without consuming the reserved ${LINK_COLLECTION_RESERVE_SEC}s link-collection budget; link collection was not started"
+    write_state "failed" "nightly session recovery cannot start without consuming the reserved ${LINK_COLLECTION_RESERVE_SEC}s link-collection budget; link collection was not started; manual login or scheduled session manager run required"
     write_marker "morning-all" "failed" "nightly-session recovery had no safe budget before link collection" "$LOG_FILE" >/dev/null || true
     echo "[cloud_morning_chain] ERROR session recovery has no safe budget runDeadline=$RUN_DEADLINE_EPOCH linkReserveSec=$LINK_COLLECTION_RESERVE_SEC" >&2
     return 79
@@ -274,10 +274,10 @@ run_nightly_session_readiness_gate() {
   fi
 
   if [[ "$recovery_status" != "0" ]]; then
-    write_state "failed" "nightly session recovery failed status=$recovery_status; link collection was not started"
+    write_state "failed" "nightly session recovery failed status=$recovery_status; manual login or scheduled session manager run required before link collection; all-store fetch skipped"
     write_marker "morning-all" "failed" "nightly-session recovery failed status=$recovery_status before link collection" "$LOG_FILE" >/dev/null || true
     echo "[cloud_morning_chain] ERROR session recovery failed status=$recovery_status; all-store fetch skipped" >&2
-    return "$recovery_status"
+    return 79
   fi
 
   # Re-verify through the same strong helper; never trust the recovery exit
@@ -293,7 +293,7 @@ run_nightly_session_readiness_gate() {
     return 0
   fi
 
-  write_state "failed" "nightly session recovery exited 0 but completion evidence (done marker + same-day 19/19 report) is missing; link collection was not started"
+  write_state "failed" "nightly session recovery exited 0 but completion evidence (done marker + same-day 19/19 report) is missing; manual login or scheduled session manager run required before link collection; all-store fetch skipped"
   write_marker "morning-all" "failed" "nightly-session recovery evidence missing after exit 0" "$LOG_FILE" >/dev/null || true
   echo "[cloud_morning_chain] ERROR session recovery evidence missing after exit 0; all-store fetch skipped" >&2
   return 79

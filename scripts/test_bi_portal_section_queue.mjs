@@ -70,6 +70,35 @@ function assertQueueFileUnchanged(file, before, label) {
 // ---- Sequence tie-break beats section-name alphabetical order.
 {
   const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['orders', 'afterSales'], priority: 10, now: at(0)});
+  enqueueSections(queue, {sections: ['productSalesDaily'], priority: 50, now: at(1_000)});
+  const heavy = claimNext(queue, {
+    leaseSeconds: 60,
+    leaseId: 'lease-heavy-first-product-sales-daily',
+    preferSections: ['profit', 'productSalesDaily', 'homeRankings'],
+    now: at(2_000),
+  });
+  assert.equal(heavy.section, 'productSalesDaily',
+    'the :32 heavy slot must be able to claim productSalesDaily before hot light accounting work');
+  failClaim(queue, {section: 'productSalesDaily', leaseId: heavy.leaseId, now: at(3_000)});
+  const backedOff = queue.entries.find(entry => entry.section === 'productSalesDaily');
+  assert.equal(backedOff.status, 'pending');
+  assert.ok(Date.parse(backedOff.nextAttemptAt) > at(3_000).getTime(),
+    'a failed heavy claim must back off instead of causing a same-slot retry storm');
+  const light = claimNext(queue, {
+    leaseSeconds: 60,
+    leaseId: 'lease-light-after-heavy-failure',
+    excludeSections: ['profit', 'productSalesDaily', 'homeRankings'],
+    preferSections: ['profit', 'productSalesDaily', 'homeRankings'],
+    now: at(4_000),
+  });
+  assert.equal(light.section, 'orders',
+    'the light slot exclusion must still beat heavy-first preference');
+}
+
+// ---- Sequence tie-break beats section-name alphabetical order.
+{
+  const queue = {version: 1, updatedAt: '', entries: []};
   enqueueSections(queue, {sections: ['zeta', 'alpha'], priority: 50, now: at(0)});
   const claim = claimNext(queue, {leaseSeconds: 60, leaseId: 'lease-seq-1', now: at(1_000)});
   assert.equal(claim.section, 'zeta', 'same-priority entries must claim by sequence, not section name');

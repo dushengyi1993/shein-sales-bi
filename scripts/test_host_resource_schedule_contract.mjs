@@ -603,6 +603,16 @@ assert.match(unit('shein-bi-cloud-portal-section-queue.timer'), /^\s*OnCalendar=
 const portalQueueUnit = unit('shein-bi-cloud-portal-section-queue.service');
 const portalQueueWorker = read('scripts/cloud_portal_section_queue_worker.sh');
 const portalQueueSlot = read('scripts/run_cloud_portal_section_queue_slot.sh');
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=420$/m,
+  'productSalesDaily timeout must cover the observed 337s success with volatility headroom while preserving terminal-readback budget');
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC=450$/m,
+  'productSalesDaily min runtime must preserve 30s terminal-readback budget after the 420s curl cap');
+assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-420\}"/,
+  'worker default productSalesDaily timeout must match the unit');
+assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-450\}"/,
+  'worker default productSalesDaily min runtime must match the unit');
+assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC \+ 30 <= PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC/,
+  'productSalesDaily timeout must retain at least 30s for terminal evidence');
 const portalQueueConditionMatch = portalQueueUnit.match(
   /^ExecCondition=\/usr\/bin\/bash -c '(.+)'$/m,
 );
@@ -634,8 +644,8 @@ assert.match(portalQueueSlot, /MINUTE >= 31 && MINUTE <= 34/);
 assert.match(portalQueueSlot, /--lock-wait-sec 0/);
 assert.match(portalQueueWorker, /for \(\(index=1; index<=MAX_SECTIONS; index\+=1\)\);/,
   'the section worker must consume the bounded batch serially');
-assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings\)/,
-  'the light slot must keep profit and homeRankings excluded');
+assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily\)/,
+  'the light slot must keep profit, homeRankings and productSalesDaily excluded');
 const hostWrapperExec = portalQueueSlot.indexOf('exec "$ROOT/scripts/run_host_heavy_job.sh"');
 assert.ok(
   hostWrapperExec > portalQueueSlot.indexOf('yield_to_daily_coordinator'),
@@ -974,11 +984,21 @@ assert.equal(
   1,
   'repair worker must keep acquire behind one idempotent lease helper',
 );
-assert.match(
-  normalizedRepair,
-  /\nensure_browser_lease\nREMAINING_GROUPS="\$MAX_GROUPS"/,
-  'the existing late lease path must reuse ensure_browser_lease',
-);
+const mainRemainingGroupsAt = normalizedRepair.indexOf('\nREMAINING_GROUPS="$MAX_GROUPS"');
+const mainEnsureAt = normalizedRepair.indexOf('\nensure_browser_lease', mainRemainingGroupsAt);
+const immediateConsumeAt = normalizedRepair.indexOf('consume_immediate_authorization_locked', mainRemainingGroupsAt);
+const firstExecuteAt = normalizedRepair.indexOf(' --execute', mainRemainingGroupsAt);
+const firstGroupProcessingAt = normalizedRepair.indexOf('while (( REMAINING_GROUPS > 0 ))', mainRemainingGroupsAt);
+assert.ok(mainRemainingGroupsAt >= 0,
+  'repair worker must initialize REMAINING_GROUPS in the main execution path');
+assert.ok(mainEnsureAt > mainRemainingGroupsAt,
+  'main execution path must ensure_browser_lease after REMAINING_GROUPS initialization');
+assert.ok(immediateConsumeAt > mainEnsureAt,
+  'main execution path must ensure_browser_lease before immediate authorization consume');
+assert.ok(firstExecuteAt > mainEnsureAt,
+  'main execution path must ensure_browser_lease before any execute operation');
+assert.ok(firstGroupProcessingAt > mainEnsureAt,
+  'main execution path must ensure_browser_lease before group processing loops');
 assert.match(repair, /write_state deferred_to_local/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /run_cloud_marketing_fallback_slot\.sh/);
 assert.match(repairSlot, /--defer-reason deferred_to_local/);
@@ -991,7 +1011,15 @@ assert.match(repairSlot, /HOUR == 20/);
 assert.match(repairSlot, /HOUR == 21/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS=32/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC=900/);
-assert.match(unit('shein-bi-cloud-marketing-repair.service'), /^TimeoutStartSec=9000$/m);
+const marketingRepairUnit = unit('shein-bi-cloud-marketing-repair.service');
+const marketingRepairTimeoutMatch = marketingRepairUnit.match(/^TimeoutStartSec=([0-9]+)$/m);
+assert.ok(marketingRepairTimeoutMatch,
+  'marketing repair service must expose a parseable TimeoutStartSec');
+const marketingRepairTimeoutStartSec = Number(marketingRepairTimeoutMatch[1]);
+assert.ok(marketingRepairTimeoutStartSec >= 9000,
+  'marketing repair service timeout must still cover at least the legacy 9000s recovery envelope');
+assert.equal(marketingRepairTimeoutStartSec, 26400,
+  'marketing repair service timeout must cover the current 20:45 to 04:05 recovery contract without expanding the write window');
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true/);
 assert.match(repair, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
@@ -1000,7 +1028,7 @@ assert.match(repair, /IS_CLOUD_EXECUTION=1/);
 assert.doesNotMatch(repair, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
 assert.match(repair, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
 assert.match(repair, /fallback readback found no remaining work/);
-assert.match(repair, /refuse to start another transaction/);
+assert.match(repair, /refuse all transaction work/);
 assert.match(repair, /outside 20:45-22:55 same-day window/);
 
 const fallbackBatch = read('scripts/marketing/batch_apply_new_listing_limited_discount.mjs');

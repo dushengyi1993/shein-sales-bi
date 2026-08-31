@@ -7,6 +7,7 @@ MINUTE=$((10#$(date +%M)))
 DEADLINE_MINUTE=""
 MAX_SECTIONS=8
 HEAVY_ALLOWED=0
+HEAVY_FIRST=0
 
 if (( HOUR == 1 )); then
   echo "[portal-section-slot] defer reason=full_hour_reserved hour=$HOUR minute=$MINUTE" >&2
@@ -48,6 +49,7 @@ elif (( MINUTE >= 31 && MINUTE <= 34 )); then
   DEADLINE_MINUTE=44
   MAX_SECTIONS=8
   HEAVY_ALLOWED=1
+  HEAVY_FIRST=1
 else
   echo "[portal-section-slot] defer reason=outside_portal_slot hour=$HOUR minute=$MINUTE" >&2
   exit 75
@@ -59,6 +61,7 @@ export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1
 export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE="$DEADLINE_MINUTE"
 export SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS="$MAX_SECTIONS"
 export SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED="$HEAVY_ALLOWED"
+export SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST="$HEAVY_FIRST"
 
 exec "$ROOT/scripts/run_host_heavy_job.sh" \
   --domain portal-sections \
