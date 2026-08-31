@@ -782,9 +782,9 @@ if (args.reconcilePendingOnly) {
       failures.push(`intent_lifecycle=${terminalOutcome?.disposition || 'missing'}:${row.storeKey}:${row.skc}:${row.skuCode}`);
     }
   }
-  for (const scopeKey of planDateInventoryIntentsByScope.keys()) {
-    if (!currentPlanScopeSet.has(scopeKey)) failures.push(`extra_intent_scope=${scopeKey}`);
-  }
+  // Same-day intents outside the current plan's exact scopes stay untouched.
+  // Reconcile-pending-only may only inspect and settle the current plan rows;
+  // unrelated scopes must not be written, terminated, or used to fail this batch.
   if (failures.length) {
     throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED:${failures.join('|')}`);
   }
