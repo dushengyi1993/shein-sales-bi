@@ -15,6 +15,7 @@ Environment=HOME=/root
 Environment=SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-nightly-maintenance.lock
 Environment=SHEIN_BI_BACKUP_RETENTION_DAYS=7
 Environment=SHEIN_BI_BACKUP_OFFSITE_ENABLED=0
+Environment=SHEIN_BI_PIPELINE_MARKER_ROOT=/data/shein-bi/state/pipeline-markers
 # Browser-state archival remains available but is not part of the production
 # database-backup SLA. Enable it only after key custody and a measured window
 # are approved separately.

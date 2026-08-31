@@ -213,6 +213,14 @@ assert.doesNotMatch(service, /After=.*shein-bi-cloud-session-manager\.service/,
   'database backup must not be ordered after the session-manager service');
 assert.match(service, /--stage nightly-backup --run-date today --business-date today --skip-if-done/,
   'database backup must retain a same-day marker stage');
+assert.deepEqual(
+  [...service.matchAll(/^Environment=SHEIN_BI_PIPELINE_MARKER_ROOT=(.*)$/gm)]
+    .map(match => match[1].trim()),
+  ['/data/shein-bi/state/pipeline-markers'],
+  'database backup marker stage must bind the canonical writable marker root',
+);
+assert.doesNotMatch(service, new RegExp('^Environment=SHEIN_BI_PIPELINE_MARKER_ROOT=/opt/shein-bi/app/state/pipeline-markers$', 'm'),
+  'database backup marker stage must not fall back to the read-only checkout state path');
 assert.match(service, /--work-fingerprint-scope nightly-backup/);
 assert.match(service, /--work-semantic-version nightly-backup\/v1-local-dump/);
 assert.match(service, /--workset-digest-program \/usr\/bin\/printf/);
