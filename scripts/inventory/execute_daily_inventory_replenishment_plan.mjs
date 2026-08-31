@@ -31,6 +31,7 @@ import {
   compareInventoryIntentChronology,
   discoverInventoryJournalFiles,
   findInventoryWriteFence,
+  INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
   inventoryIntentScopeKey,
   inventoryRecoveryScopeKey,
   readInventoryIntentJournals,
@@ -963,6 +964,15 @@ for (const row of rows) {
         allowMultiplePendingByScope: true,
       });
       const freshScopeIntents = freshJournalBundle.pendingByScope.get(recoveryScopeKey) || [];
+      const ownerConfirmedSameTargetPredecessors = [...freshJournalBundle.terminalOutcomes.entries()]
+        .filter(([intentKey, outcome]) => {
+          const predecessor = freshJournalBundle.intents.get(intentKey);
+          return outcome?.disposition === INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION
+            && outcome.newRunDate === plan.date
+            && Number(outcome.targetUsableInventory) === approvedTarget
+            && predecessor
+            && inventoryIntentScopeKey(predecessor) === recoveryScopeKey;
+        });
       const manualFence = findInventoryWriteFence(freshJournalBundle, {
         scope: {
           storeKey: row.storeKey,
@@ -987,6 +997,16 @@ for (const row of rows) {
         }, logicalActionKey);
         continue;
       }
+      if (ownerConfirmedSameTargetPredecessors.length > 1) {
+        await recordResult({
+          ...result,
+          logicalActionKey,
+          state: 'needs_manual_resolve',
+          error: `multiple owner-confirmed same-target predecessors exist in recovery scope ${recoveryScopeKey}; inventory POST forbidden`,
+        }, logicalActionKey);
+        continue;
+      }
+      const ownerConfirmedSameTargetResume = ownerConfirmedSameTargetPredecessors.length === 1;
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
       if (before.ok !== true) {
@@ -1173,6 +1193,10 @@ for (const row of rows) {
         await recordResult({...result, state: 'skipped_target_already_matched', before});
         continue;
       }
+      if (ownerConfirmedSameTargetResume && before.totalUsableInventory > approvedTarget) {
+        await recordResult({...result, state: 'skipped_owner_confirmed_same_target_above_target', before});
+        continue;
+      }
       if (plan?.executionConstraints?.decreaseOnly === true && before.totalUsableInventory < approvedTarget) {
         await recordResult({...result, state: 'skipped_safety_no_increase', before});
         continue;
@@ -1180,7 +1204,9 @@ for (const row of rows) {
       if (row.ruleClass === 'recent_sale_scarcity') {
         const refillBelow = Number(policy?.recentSaleScarcity?.refillWhenBelow ?? 5);
         const capAbove = Number(policy?.recentSaleScarcity?.capWhenAbove ?? 10);
-        if (before.totalUsableInventory >= refillBelow && before.totalUsableInventory <= capAbove) {
+        if (!ownerConfirmedSameTargetResume
+          && before.totalUsableInventory >= refillBelow
+          && before.totalUsableInventory <= capAbove) {
           await recordResult({...result, state: 'skipped_within_scarcity_band', before});
           continue;
         }

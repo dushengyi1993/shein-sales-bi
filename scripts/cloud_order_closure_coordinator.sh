@@ -87,7 +87,7 @@ while true; do
     # its own runDate and takes a fresh locked candidate snapshot.
     write_state "failed" "resource window expired before order closure could start; late candidates remain for the next authorized activation"
     echo "[order-closure-coordinator] ERROR start deadline $START_DEADLINE elapsed after attempts=$ATTEMPT; late candidates remain unclaimed for the next authorized activation" >&2
-    exit 1
+    exit 75
   fi
 
   if ! ATTEMPT_RUN_DATE="$(resolve_date "$RUN_DATE_TARGET")" \
@@ -177,7 +177,7 @@ while true; do
   if (( $(date +%s) + RETRY_DELAY_SEC >= DEADLINE_EPOCH )); then
     write_state "failed" "resource deferral persisted until the start deadline"
     echo "[order-closure-coordinator] ERROR resource deferral persisted until $START_DEADLINE attempts=$ATTEMPT" >&2
-    exit 1
+    exit 75
   fi
   write_state "waiting_resource" "host capacity is temporarily unavailable; retrying inside the same daily run"
   echo "[order-closure-coordinator] deferred attempt=$ATTEMPT; retrying in ${RETRY_DELAY_SEC}s without creating another timer"

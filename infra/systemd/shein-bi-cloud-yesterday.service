@@ -6,6 +6,7 @@ After=network-online.target docker.service shein-bi-cloud-session-manager.servic
 [Service]
 Type=oneshot
 Slice=shein-host-heavy-bi.slice
+SuccessExitStatus=75
 User=sheinops
 Group=sheinops
 UMask=0077

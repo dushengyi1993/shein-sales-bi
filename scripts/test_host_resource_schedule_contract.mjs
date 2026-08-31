@@ -318,14 +318,21 @@ for (const name of heavyUnits) {
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
   assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh|run_cloud_session_manager_job\.sh|cloud_order_closure_coordinator\.sh/, name);
   if (name === 'shein-bi-cloud-session-manager.service'
-    || name === 'shein-bi-db-backup.service'
-    || name === 'shein-bi-cloud-yesterday.service') {
+    || name === 'shein-bi-db-backup.service') {
     assert.doesNotMatch(content, /^SuccessExitStatus=75$/m,
-      'session-manager, database backup, and yesterday deferrals must remain real failed unit results');
+      'session-manager and database backup deferrals must remain real failed unit results');
   } else {
     assert.match(content, /^SuccessExitStatus=75$/m, name);
   }
 }
+
+const orderClosureCoordinator = read('scripts/cloud_order_closure_coordinator.sh');
+assert.ok(orderClosureCoordinator.includes('late candidates remain unclaimed for the next authorized activation" >&2\n    exit 75'),
+  'late unclaimed candidates after the start deadline must defer the service instead of failing it');
+assert.ok(orderClosureCoordinator.includes('resource deferral persisted until $START_DEADLINE attempts=$ATTEMPT" >&2\n    exit 75'),
+  'resource deferral that reaches the start deadline must defer the service instead of failing it');
+assert.ok(orderClosureCoordinator.includes('order lifecycle closure failed with exit=$status"\n    exit "$status"'),
+  'non-deferral order closure failures must still propagate as failures');
 
 const dailyCoordinatorUnit = unit('shein-bi-cloud-morning-chain.service');
 assert.match(dailyCoordinatorUnit, /^Slice=shein-host-heavy-bi\.slice$/m);
