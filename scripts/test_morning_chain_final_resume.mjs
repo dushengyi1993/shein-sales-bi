@@ -8,6 +8,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'morning-final-resume-'));
@@ -19,9 +20,6 @@ const stores = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS
 const runtime = path.join(root, 'runtime');
 const markerRoot = path.join(root, 'state', 'pipeline-markers');
 const stateDir = path.join(root, 'state', 'cloud_morning_chain');
-const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
-  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
-const hashValue = value => crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`); };
 const toWslPath = value => String(value).replace(/^([A-Za-z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`).replaceAll('\\', '/');
@@ -30,7 +28,11 @@ const evidence = files => files.map(file => ({path:toWslPath(file),bytes:fs.stat
 try {
   fs.mkdirSync(path.join(root, 'scripts'), {recursive:true});
   fs.mkdirSync(path.join(root, 'config'), {recursive:true});
+  fs.cpSync(path.join(repo, 'lib'), path.join(root, 'lib'), {recursive:true});
   fs.copyFileSync(path.join(repo, 'scripts', 'validate_daily_operating_refresh.mjs'), path.join(root, 'scripts', 'validate_daily_operating_refresh.mjs'));
+  fs.copyFileSync(path.join(repo, 'scripts', 'build_morning_resume_evidence.mjs'), path.join(root, 'scripts', 'build_morning_resume_evidence.mjs'));
+  fs.copyFileSync(path.join(repo, 'scripts', 'pipeline_marker.mjs'), path.join(root, 'scripts', 'pipeline_marker.mjs'));
+  fs.copyFileSync(path.join(repo, 'scripts', 'check_release_source_state.mjs'), path.join(root, 'scripts', 'check_release_source_state.mjs'));
   fs.copyFileSync(path.join(repo, 'config', 'inventory_replenishment_policy.json'), path.join(root, 'config', 'inventory_replenishment_policy.json'));
   write(path.join(root, 'config', 'stores.json'), {stores:stores.map(storeKey => ({storeKey,enabled:true}))});
   const artifacts = [];
@@ -46,14 +48,14 @@ try {
   const sourceEvidence = [
     {store:'ET',file:'outputs/bi-portal/sections/inventoryTrend.json',fetchedAt,totalEtRows:1,matchedCurrentDayEtRows:1},
     {store:'BI_LINKS',file:'outputs/bi-portal/sections/linksData.json',fetchedAt},
-    ...stores.map(store => ({store,file:`outputs/shein_openapi_products/${store}/latest.json`,fetchedAt,stockFailedChunkCount:0})),
+    ...stores.map(store => ({store,file:`outputs/shein_openapi_products/${store}/latest.json`,fetchedAt,stockFailedChunkCount:0,sha256:'0'.repeat(64)})),
   ];
   const plan = {schemaVersion:'daily-inventory-replenishment-plan/v1',date:runDate,policyVersion:policy.policyVersion,executable:true,blockers:[],actionable:[],lowEtAllocations:[],sourceEvidence,counts:{enabledStores:19}};
-  plan.payloadHash = hashValue({schemaVersion:plan.schemaVersion,date:plan.date,policyVersion:plan.policyVersion,actionable:[],lowEtAllocations:[],sourceEvidence});
+  plan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
   const planFile = path.join(runtime,'plans',`daily-inventory-replenishment-${runDate}.json`);
   const resultFile = path.join(runtime,'results',`daily-inventory-replenishment-${runDate}.json`);
   write(planFile,plan);
-  write(resultFile,{schemaVersion:'daily-inventory-replenishment-result/v1',generatedAt:fetchedAt,planHash:plan.payloadHash,policyVersion:plan.policyVersion,execute:true,executionMode:'automatic',authorizationId:policy.execution.automaticExecution.authorizationId,authorizationContext:policy.execution.automaticExecution.allowedContext,unresolvedIntents:[],results:[]});
+  write(resultFile,{schemaVersion:'daily-inventory-replenishment-result/v1',generatedAt:fetchedAt,planHash:plan.payloadHash,policyVersion:plan.policyVersion,execute:true,executionMode:'automatic',reconcilePendingOnly:true,authorizationId:policy.execution.automaticExecution.authorizationId,authorizationContext:policy.execution.automaticExecution.allowedContext,unresolvedIntents:[],manualResolutionFences:[],manualResolutionTombstoneCount:0,results:[]});
   const inventoryMarker = path.join(markerRoot,runDate,'daily-inventory-guard.json');
   write(inventoryMarker,{ok:true,stage:'daily-inventory-guard',status:'done',runDate,businessDate,completedAt:fetchedAt,evidence:evidence([planFile,resultFile])});
   write(path.join(markerRoot,runDate,'daily-operating-refresh.json'),{ok:true,stage:'daily-operating-refresh',status:'done',runDate,businessDate,completedAt:fetchedAt,evidence:evidence([morningFile,inventoryMarker,planFile,resultFile])});

@@ -314,7 +314,6 @@ function scanDocumentTimestamp(doc) {
 }
 
 function sameStoreSet(actualKeys, expectedKeys) {
-  if (actualKeys.length !== expectedKeys.length) return false;
   const actual = new Set(actualKeys);
   return actual.size === expectedKeys.length && expectedKeys.every(key => actual.has(key));
 }
@@ -323,26 +322,32 @@ function scanCandidateSummary(file, enabledStoreKeys) {
   const doc = readJsonSafe(file);
   const rows = Array.isArray(doc?.rows) ? doc.rows : [];
   const storeKeys = Array.isArray(doc?.stores)
-    ? doc.stores.map(store => normKey(store?.storeKey || store?.store || store?.key)).filter(Boolean)
+    ? doc.stores.map(store => normKey(store?.storeKey || store?.store || store?.key || store)).filter(Boolean)
     : rows.map(row => normKey(row.storeKey || row.store_key || row.store)).filter(Boolean);
   const storeCount = new Set(storeKeys).size;
   const businessDate = scanBusinessDateFromDoc(doc);
   const documentTimestamp = scanDocumentTimestamp(doc);
+  const allStoresOk = !Array.isArray(doc?.stores) || doc.stores.every(store => store?.ok !== false);
+  const ok = doc?.ok !== false && allStoresOk;
+  const partial = doc?.partial === true || !ok;
+  const fullStoreCoverage = enabledStoreKeys.length > 0
+    && sameStoreSet(storeKeys, enabledStoreKeys);
   return {
     file,
     doc,
     storeCount,
     businessDate,
     documentTimestamp,
-    ok: doc?.ok !== false,
-    partial: doc?.partial === true,
+    ok,
+    partial,
     merged: Boolean(doc?.mergeEvidence),
+    fullStoreCoverage,
+    targeted: !fullStoreCoverage,
     complete: Boolean(
       doc
-      && doc?.ok !== false
-      && doc?.partial !== true
-      && enabledStoreKeys.length > 0
-      && sameStoreSet(storeKeys, enabledStoreKeys)
+      && ok
+      && !doc?.partial
+      && fullStoreCoverage
     ),
   };
 }
@@ -352,8 +357,8 @@ export function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) 
   const enabledStoreKeys = Array.isArray(storesConfigDoc?.stores)
     ? [...new Set(storesConfigDoc.stores
       .filter(store => store?.enabled !== false)
-      .map(store => normKey(store?.storeKey || store?.store || store?.key))
-      .filter(Boolean))]
+        .map(store => normKey(store?.storeKey || store?.store || store?.key || store))
+        .filter(Boolean))]
     : [];
   const candidates = files
     .map(file => scanCandidateSummary(file, enabledStoreKeys))
@@ -363,13 +368,20 @@ export function latestCurrentMarketingLiveScanFile(dir, regex, storesConfigDoc) 
   const sameDay = candidates
     .filter(item => item.businessDate === latestBusinessDate)
     .sort((a, b) => b.documentTimestamp - a.documentTimestamp || a.file.localeCompare(b.file));
-  const latestPartialTimestamp = sameDay
-    .filter(item => item.partial)
+  const latestRecoveryTimestamp = sameDay
+    .filter(item => item.partial || item.targeted)
     .reduce((latest, item) => Math.max(latest, item.documentTimestamp), 0);
   const eligibleMerged = sameDay
-    .filter(item => item.complete && item.merged && item.documentTimestamp >= latestPartialTimestamp)
+    .filter(item => item.complete && item.merged && item.documentTimestamp >= latestRecoveryTimestamp)
     .sort((a, b) => b.documentTimestamp - a.documentTimestamp || a.file.localeCompare(b.file));
-  return eligibleMerged[0]?.file || sameDay[0]?.file || '';
+  if (eligibleMerged.length) return eligibleMerged[0].file;
+
+  // A later subset-only scan does not replace a successful full-store
+  // baseline. When the latest full-store attempt failed, preserve that
+  // incomplete evidence until a newer complete merged snapshot exists.
+  const latestFullAttempt = sameDay.find(item => item.fullStoreCoverage);
+  if (latestFullAttempt?.complete && !latestFullAttempt.merged) return latestFullAttempt.file;
+  return latestFullAttempt?.file || sameDay[0]?.file || '';
 }
 
 function latestReportFile(regex) {
