@@ -381,6 +381,73 @@ const PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS = Math.max(
   1_000,
   Math.min(5 * 60_000, Number(process.env.SHEIN_BI_PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS || 30_000)),
 );
+const PROFIT_ACCOUNTING_SNAPSHOT_REUSE_TTL_MS = Math.max(10_000, Math.min(900_000, Number(process.env.SHEIN_BI_ACCOUNTING_SNAPSHOT_REUSE_TTL_MS || 900_000)));
+
+function instant(value) {
+  const ms = Date.parse(String(value || ''));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+let recentAccountingSnapshotPublication = null;
+
+export function recordRecentAccountingSnapshotPublication({coreGeneratedAt, freshness, decision, publishedAtMs = Date.now()} = {}) {
+  if (!coreGeneratedAt || !freshness || !decision?.coversCostRun || !decision?.coversCostAssignments) {
+    return;
+  }
+  recentAccountingSnapshotPublication = {
+    coreGeneratedAt: String(coreGeneratedAt),
+    metaRefreshedAt: String(freshness.metaRefreshedAt || ''),
+    costRunSourceCutoffAt: String(freshness.costRunSourceCutoffAt || ''),
+    costRunCompletedAt: String(freshness.costRunCompletedAt || ''),
+    publishedAtMs,
+    ttlMs: PROFIT_ACCOUNTING_SNAPSHOT_REUSE_TTL_MS,
+  };
+}
+
+export function clearRecentAccountingSnapshotPublication() {
+  recentAccountingSnapshotPublication = null;
+}
+
+export function evaluateRecentAccountingSnapshotReuse(freshness, decision, coreGeneratedAt, nowMs = Date.now()) {
+  if (!recentAccountingSnapshotPublication || !coreGeneratedAt) return null;
+  const pub = recentAccountingSnapshotPublication;
+  if (pub.coreGeneratedAt !== String(coreGeneratedAt)) return null;
+  if (nowMs - pub.publishedAtMs > pub.ttlMs) {
+    recentAccountingSnapshotPublication = null;
+    return null;
+  }
+  const currentMetaMs = instant(freshness?.metaRefreshedAt);
+  const recordedMetaMs = instant(pub.metaRefreshedAt);
+  if (currentMetaMs === null || recordedMetaMs === null || currentMetaMs < recordedMetaMs) {
+    return null;
+  }
+  const currentCutoffMs = instant(freshness?.costRunSourceCutoffAt);
+  const recordedCutoffMs = instant(pub.costRunSourceCutoffAt);
+  if (currentCutoffMs === null || recordedCutoffMs === null || currentCutoffMs < recordedCutoffMs) {
+    return null;
+  }
+  if (!decision?.coversCostRun || !decision?.coversCostAssignments) {
+    return null;
+  }
+  return {
+    reused: true,
+    publishedAtMs: pub.publishedAtMs,
+    remainingTtlMs: Math.max(0, pub.ttlMs - (nowMs - pub.publishedAtMs)),
+    metaRefreshedAt: pub.metaRefreshedAt,
+    costRunSourceCutoffAt: pub.costRunSourceCutoffAt,
+  };
+}
+
+export function isAccountingStateUsable(accountingState, coreGeneratedAt) {
+  if (!accountingState?.decision) return false;
+  if (accountingState.decision.fresh) return true;
+  const reuse = evaluateRecentAccountingSnapshotReuse(
+    accountingState.freshness,
+    accountingState.decision,
+    coreGeneratedAt,
+  );
+  return Boolean(reuse);
+}
 const INVENTORY_COST_SNAPSHOT_RETRY_RE = /(?:inventory-cost source changed after snapshot|stale inventory-cost rebuild refused)/i;
 const INVENTORY_COST_REFRESH_MAX_ATTEMPTS = Math.max(1, Math.min(5, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_MAX_ATTEMPTS || 3)));
 const BI_FAST_BACKGROUND_SECTIONS = new Set(['homeRankings', 'homeProfit']);
@@ -14127,7 +14194,7 @@ async function refreshProfitMarts(args, options = {}) {
     const tail = String(run.stderr || run.stdout || '').slice(-4000);
     throw new Error(`profit mart cache refresh failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
   }
-  invalidateProfitAccountingStateCache();
+  invalidateProfitAccountingStateAndPublicationCache();
   return run;
 }
 
@@ -14158,7 +14225,7 @@ async function refreshInventoryCostLedger(args, options = {}) {
     throwIfBiSectionAborted(options.signal);
     runs.push(run);
     if (run.ok) {
-      invalidateProfitAccountingStateCache();
+      invalidateProfitAccountingStateAndPublicationCache();
       return {
         ...run,
         stdout: `${runs.slice(0, -1).map((item, index) => `[inventory-cost retry ${index + 1}] ${item.stderr || item.stdout || ''}`).join('\n')}\n${run.stdout || ''}`.trim(),
@@ -14196,7 +14263,22 @@ WITH primary_cutover AS (
 ), post_cutover_assignment AS (
   SELECT
     count(*)::bigint AS rows,
-    count(l.source_order_item_key)::bigint AS assigned_rows
+    count(l.source_order_item_key)::bigint AS assigned_rows,
+    count(*) FILTER (
+      WHERE r.source_cutoff_at IS NOT NULL
+        AND oi.updated_at IS NOT NULL
+        AND oi.updated_at <= r.source_cutoff_at
+    )::bigint AS cutoff_rows,
+    count(l.source_order_item_key) FILTER (
+      WHERE r.source_cutoff_at IS NOT NULL
+        AND oi.updated_at IS NOT NULL
+        AND oi.updated_at <= r.source_cutoff_at
+    )::bigint AS cutoff_assigned_rows,
+    count(*) FILTER (
+      WHERE r.source_cutoff_at IS NULL
+         OR oi.updated_at IS NULL
+         OR oi.updated_at > r.source_cutoff_at
+    )::bigint AS pending_follow_up_rows
   FROM fact.order_item oi
   CROSS JOIN primary_cutover c
   LEFT JOIN latest_cost_run r ON true
@@ -14230,7 +14312,11 @@ SELECT jsonb_build_object(
   'costAssignmentCoverageRequired', EXISTS (SELECT 1 FROM primary_cutover WHERE cutover_date IS NOT NULL),
   'costAssignmentPostCutoverRows', (SELECT rows FROM post_cutover_assignment),
   'costAssignmentPostCutoverAssignedRows', (SELECT assigned_rows FROM post_cutover_assignment),
-  'costAssignmentPostCutoverMissingRows', (SELECT rows-assigned_rows FROM post_cutover_assignment)
+  'costAssignmentPostCutoverMissingRows', (SELECT rows-assigned_rows FROM post_cutover_assignment),
+  'costAssignmentCutoffRows', (SELECT cutoff_rows FROM post_cutover_assignment),
+  'costAssignmentCutoffAssignedRows', (SELECT cutoff_assigned_rows FROM post_cutover_assignment),
+  'costAssignmentCutoffMissingRows', (SELECT cutoff_rows-cutoff_assigned_rows FROM post_cutover_assignment),
+  'costAssignmentPendingFollowUpRows', (SELECT pending_follow_up_rows FROM post_cutover_assignment)
 )::text;
 `;
   const psql = psqlSpawnCommand(args, ' -q -t -A', {applicationName: dbApplicationName});
@@ -14321,14 +14407,47 @@ function createProfitAccountingStateReader(options = {}) {
 
 const profitAccountingStateReader = createProfitAccountingStateReader();
 
-function invalidateProfitAccountingStateCache() {
+export function invalidateProfitAccountingStateCache() {
   profitAccountingStateReader.invalidate();
+}
+
+export function invalidateProfitAccountingStateAndPublicationCache() {
+  profitAccountingStateReader.invalidate();
+  clearRecentAccountingSnapshotPublication();
 }
 
 async function readProfitAccountingState(args, generatedAt = '', options = {}) {
   return profitAccountingStateReader.read(args, generatedAt, options);
 }
 
+export async function verifyAndRecordProfitMartPublication(args, {generatedAt, decision, preRefreshFreshness, options = {}} = {}) {
+  throwIfBiSectionAborted(options.signal);
+  const postPublicationFreshness = await readProfitMartCacheFreshness(args, options);
+  throwIfBiSectionAborted(options.signal);
+  const postPublicationDecision = evaluateProfitMartCacheFreshness(postPublicationFreshness, {
+    coreGeneratedAt: generatedAt,
+    allowedCoreSkewMs: decision?.allowedCoreSkewMs,
+  });
+  if (!postPublicationDecision.coversCostRun || !postPublicationDecision.coversCostAssignments) {
+    throw new Error(
+      `profit mart publication verification failed: cutoff=${postPublicationFreshness.costRunSourceCutoffAt || ''} `
+      + `missing=${postPublicationDecision.costAssignmentCutoffMissingRows ?? postPublicationDecision.costAssignmentPostCutoverMissingRows}`,
+    );
+  }
+  const preMetaMs = instant(preRefreshFreshness?.metaRefreshedAt);
+  const postMetaMs = instant(postPublicationFreshness.metaRefreshedAt);
+  if (postMetaMs === null || (preMetaMs !== null && postMetaMs <= preMetaMs)) {
+    throw new Error(
+      `profit mart publication metadata failed to advance: before=${preRefreshFreshness?.metaRefreshedAt || ''} after=${postPublicationFreshness.metaRefreshedAt || ''}`,
+    );
+  }
+  recordRecentAccountingSnapshotPublication({
+    coreGeneratedAt: generatedAt,
+    freshness: postPublicationFreshness,
+    decision: postPublicationDecision,
+  });
+  return {postPublicationFreshness, postPublicationDecision};
+}
 async function ensureProfitMartCacheFresh(args, generatedAt = '', options = {}) {
   throwIfBiSectionAborted(options.signal);
   if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') return null;
@@ -14361,6 +14480,15 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '', options = {}) 
         stderr: '',
       };
     }
+    const reuse = evaluateRecentAccountingSnapshotReuse(freshness, decision, generatedAt);
+    if (reuse) {
+      return {
+        code: 0,
+        timedOut: false,
+        stdout: `[ensureProfitMartCacheFresh] recent published accounting snapshot reused within TTL remainingMs=${reuse.remainingTtlMs} cutoff=${reuse.costRunSourceCutoffAt} metaRefreshedAt=${reuse.metaRefreshedAt} coreGeneratedAt=${generatedAt || ''} (follow-up pending)`,
+        stderr: '',
+      };
+    }
     // A newer order fact or an incomplete post-cutover assignment is never
     // repaired by rebuilding profit alone: first rebuild the moving-average
     // ledger, then verify the completed run actually covers the fact cutoff.
@@ -14375,21 +14503,37 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '', options = {}) 
         coreGeneratedAt: generatedAt,
         allowedCoreSkewMs: decision.allowedCoreSkewMs,
       });
-      if (!afterDecision.coversCostRun || !afterDecision.coversCostCutoff || !afterDecision.coversCostAssignments) {
+      if (!afterDecision.coversCostRun || !afterDecision.coversCostAssignments) {
         throw new Error(
           `inventory cost ledger remains incomplete after refresh: cutoff=${afterLedger.costRunSourceCutoffAt || ''} `
-          + `orderFactUpdatedAt=${afterLedger.orderFactUpdatedAt || afterLedger.factUpdatedAt || ''} assignment=${afterDecision.costAssignmentPostCutoverAssignedRows}/${afterDecision.costAssignmentPostCutoverRows} `
-          + `missing=${afterDecision.costAssignmentPostCutoverMissingRows}`,
+          + `orderFactUpdatedAt=${afterLedger.orderFactUpdatedAt || afterLedger.factUpdatedAt || ''} assignment=${afterDecision.costAssignmentCutoffAssignedRows ?? afterDecision.costAssignmentPostCutoverAssignedRows}/${afterDecision.costAssignmentCutoffRows ?? afterDecision.costAssignmentPostCutoverRows} `
+          + `missing=${afterDecision.costAssignmentCutoffMissingRows ?? afterDecision.costAssignmentPostCutoverMissingRows}`,
         );
       }
       const profitRun = await refreshProfitMarts(args, options);
+      const {postPublicationFreshness, postPublicationDecision} = await verifyAndRecordProfitMartPublication(args, {
+        generatedAt,
+        decision,
+        preRefreshFreshness: afterLedger,
+        options,
+      });
+      const followUpDetail = postPublicationDecision.followUpPending
+        ? `\n[ensureProfitMartCacheFresh] cost ledger completed with follow-up pending: cutoff=${postPublicationFreshness.costRunSourceCutoffAt || ''} latestOrder=${postPublicationFreshness.orderFactUpdatedAt || ''} pendingRows=${postPublicationDecision.pendingFollowUpRows}`
+        : '';
       return {
         ...profitRun,
-        stdout: `${ledgerRun.stdout || ''}\n${profitRun.stdout || ''}`,
+        stdout: `${ledgerRun.stdout || ''}\n${profitRun.stdout || ''}${followUpDetail}`.trim(),
         stderr: `${ledgerRun.stderr || ''}\n${profitRun.stderr || ''}`,
       };
     }
-    return refreshProfitMarts(args, options);
+    const profitRun = await refreshProfitMarts(args, options);
+    await verifyAndRecordProfitMartPublication(args, {
+      generatedAt,
+      decision,
+      preRefreshFreshness: freshness,
+      options,
+    });
+    return profitRun;
   })().finally(() => {
     biProfitMartFreshnessPromise = null;
   });
@@ -14571,7 +14715,7 @@ async function generateBiSection(args, root, section, generatedAt, options = {})
     let currentHomeProfitCache = await readBiSectionCache(root, 'homeProfit', generatedAt);
     throwIfBiSectionAborted(signal);
     if (
-      !accountingState.decision.fresh
+      !isAccountingStateUsable(accountingState, generatedAt)
       || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, accountingState.minimumPublishedAt)
       || !isCurrentHomeProfitSectionCache(currentHomeProfitCache, generatedAt, accountingState.minimumPublishedAt)
     ) {
@@ -14585,7 +14729,7 @@ async function generateBiSection(args, root, section, generatedAt, options = {})
       currentProfitCache = await readCurrentProfitSource(root, generatedAt);
       const after = await readProfitAccountingState(args, generatedAt, {forceFresh: true, signal, dbApplicationName});
       throwIfBiSectionAborted(signal);
-      if (!after.decision.fresh || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
+      if (!isAccountingStateUsable(after, generatedAt) || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
         throw new Error('homeProfit profit source remained stale after canonical refresh');
       }
       currentHomeProfitCache = await readBiSectionCache(root, 'homeProfit', generatedAt);
@@ -14741,7 +14885,7 @@ async function loadBiSection(args, root, section, options = {}) {
     const minimum = homepageTimestampNs(accountingState?.minimumPublishedAt);
     const source = homepageTimestampNs(sourcePublishedAt);
     const sourceCurrent = String(fallbackCache?.sourceGeneratedAt || '') === String(meta.generatedAt || '')
-      && accountingState?.decision?.fresh === true
+      && isAccountingStateUsable(accountingState, meta.generatedAt)
       && minimum !== null
       && source !== null
       && source >= minimum;

@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {buildInventoryCostLedger} from '../lib/inventory_cost_ledger.mjs';
+import {evaluateProfitMartCacheFreshness} from '../lib/bi_profit_mart_freshness.mjs';
 import {
+  buildLedgerRebuildSql,
   inventoryCostExistingRunDecision,
   inventoryCostRunIdentity,
   normalizeInventoryCostLogicalRunKey,
@@ -172,21 +174,20 @@ assert.doesNotMatch(
 );
 assert.match(rebuildScript, /pg_advisory_xact_lock\(hashtextextended\('shein-inventory-cost-ledger-rebuild'/);
 assert.match(rebuildScript, /stale inventory-cost rebuild refused/);
-assert.match(rebuildScript, /const SOURCE_TABLES[\s\S]*'fact\.order_item'[\s\S]*'ops\.accounting_period_close'/);
-assert.match(rebuildScript, /LOCK TABLE\s+\$\{SOURCE_TABLES\.join\('[\s\S]*IN SHARE MODE/);
-assert.match(rebuildScript, /inventory-cost source changed after snapshot/);
+assert.doesNotMatch(rebuildScript, /LOCK TABLE\s+\$\{SOURCE_TABLES\.join\('[\s\S]*IN SHARE MODE/,
+  'rebuild transaction must not lock all source tables in share mode causing write contention');
+assert.doesNotMatch(rebuildScript, /inventory-cost source changed after snapshot/,
+  'rebuild must commit consistent snapshot without crashing in a livelock when concurrent orders arrive');
 assert.match(rebuildScript, /'sourceSnapshotAt', statement_timestamp\(\)/);
 assert.match(rebuildScript, /'sourceSnapshot', txid_current_snapshot\(\)::text/);
 assert.match(rebuildScript, /'sourceCounts', jsonb_build_object/);
-assert.match(rebuildScript, /txid_visible_in_snapshot/);
-assert.match(rebuildScript, /rows_not_visible_in_snapshot/);
-assert.match(rebuildScript, /source_state\.row_count <> \$\{expectedCount\}/);
 assert.match(rebuildScript, /sourceCutoffAt: source\?\.sourceSnapshotAt \|\| startedAt/);
 assert.match(rebuildScript, /sourceSnapshot: source\?\.sourceSnapshot \|\| ''/);
 assert.match(rebuildScript, /sourceCounts: source\?\.sourceCounts \|\| \{\}/);
 assert.match(rebuildScript, /SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY/);
 assert.match(rebuildScript, /completed_same_logical_run_and_source_fingerprint/);
 assert.match(rebuildScript, /authoritativeInventoryCostRunReadback/);
+assert.match(rebuildScript, /'sourceCutoffAt', r\.source_cutoff_at/);
 assert.match(rebuildScript, /openingStates: \[\.\.\.openingStateMap\(source\?\.openingStates\)\.entries\(\)\]/);
 assert.match(rebuildScript, /AND completed_at > \$\{sqlLiteral\(run\.startedAt\)\}::timestamptz/);
 assert.doesNotMatch(rebuildScript, /product_unit_cost_by_match_key/);
@@ -201,4 +202,132 @@ const seedScript = await fs.readFile(new URL('./seed_inventory_cost_opening_from
 assert.match(periodScript, /\\\\pset tuples_only on/);
 assert.match(seedScript, /\\\\pset tuples_only on/);
 
-console.log(JSON.stringify({ok:true, tests:['logical-run-stable-identity','completed-run-authoritative-noop','running-run-same-identity-resume','source-fingerprint-revision','moving-average','future-receipt-isolation','rtv-reentry','manual-rtv-verification-source','missing-opening-receipt-settlement','known-cost-negative-inventory-estimate','negative-inventory-receipt-variance-settlement','inventory-value-conservation','in-transit-shortfall-estimate','past-arrival-missing-opening-estimate','inventory-count-reset','negative-rtv-shortfall','frozen-boundary','concurrent-rebuild-stale-write-guard','source-snapshot-lock','psql-readback-meta-command']}, null, 2));
+// Regression 1: SQL generation test verifies bounded completion without snapshot-drift livelock
+const sampleRun = {
+  runId: 'inventory-cost-test-run-1',
+  ledgerVersion: 'moving-average-v1:test',
+  startedAt: '2026-08-31T10:00:00.000Z',
+  completedAt: '2026-08-31T10:00:01.000Z',
+  sourceCutoffAt: '2026-08-31T10:00:00.123Z',
+  sourceSnapshot: '100:100:',
+  sourceCounts: {'fact.order_item': 500},
+  sourceHash: 'c'.repeat(64),
+  eventCount: 1,
+  saleCount: 1,
+  unvaluedSaleCount: 0,
+  summary: {test: true},
+};
+const sampleSql = buildLedgerRebuildSql({
+  events: [{
+    eventKey: 'sale:1', matchKey: 'SKU1', effectiveAt: '2026-08-31 09:00:00',
+    eventType: 'sale', quantity: 1, costAmountSar: null,
+    sourceTable: 'fact.order_item', sourceKey: '1', sourceOrderItemKey: '1',
+    estimatedUnitCostSar: null, estimatedCostBasis: null,
+    sourceHash: 'd'.repeat(64),
+  }],
+  ledgerRows: [{
+    eventKey: 'sale:1', matchKey: 'SKU1', effectiveAt: '2026-08-31 09:00:00',
+    eventType: 'sale', sourceTable: 'fact.order_item', sourceKey: '1',
+    sourceOrderItemKey: '1', quantity: 1, costAmountSar: null,
+    quantityBefore: 1, valueBeforeSar: 10, avgUnitCostBeforeSar: 10,
+    quantityAfter: 0, valueAfterSar: 0, avgUnitCostAfterSar: 10,
+    valuedQuantity: 1, unvaluedQuantity: 0, estimatedQuantity: 0,
+    settledEstimatedQuantity: 0, estimationVarianceSar: 0,
+    cogsSar: 10, valuationStatus: 'valued', valuationBasis: null,
+    ledgerVersion: 'moving-average-v1:test',
+  }],
+  run: sampleRun,
+  rebuildFrom: '2026-08-01',
+});
+assert.match(sampleSql, /BEGIN;/);
+assert.match(sampleSql, /pg_advisory_xact_lock/);
+assert.match(sampleSql, /stale inventory-cost rebuild refused/);
+assert.doesNotMatch(sampleSql, /LOCK TABLE.*IN SHARE MODE/s);
+assert.doesNotMatch(sampleSql, /inventory-cost source changed after snapshot/);
+assert.match(sampleSql, /DELETE FROM fact\.inventory_cost_event WHERE effective_at::date >= '2026-08-01'::date;/);
+assert.match(sampleSql, /COPY fact\.inventory_cost_event/);
+assert.match(sampleSql, /COPY fact\.inventory_cost_ledger/);
+assert.match(sampleSql, /INSERT INTO ops\.inventory_cost_run/);
+assert.match(sampleSql, /'2026-08-31T10:00:00\.123Z'/);
+assert.match(sampleSql, /inventory-cost completion identity conflict/);
+assert.match(sampleSql, /COMMIT;/);
+
+// Regression 2: Snapshot consistency and follow-up semantics
+const coveredFreshness = evaluateProfitMartCacheFreshness({
+  factOrderMax: '2026-08-31',
+  profitCacheMax: '2026-08-31',
+  profitCacheRows: 10,
+  orderFactUpdatedAt: '2026-08-31T10:00:00.000Z',
+  costRunCompletedAt: '2026-08-31T10:00:01.000Z',
+  costRunSourceCutoffAt: '2026-08-31T10:00:00.000Z',
+  metaRefreshedAt: '2026-08-31T10:00:02.000Z',
+});
+assert.equal(coveredFreshness.coversCostCutoff, true, 'cost run cutoff matching latest order mutation must be recognized as covered');
+
+const followUpRequiredFreshness = evaluateProfitMartCacheFreshness({
+  factOrderMax: '2026-08-31',
+  profitCacheMax: '2026-08-31',
+  profitCacheRows: 10,
+  orderFactUpdatedAt: '2026-08-31T10:00:05.000Z', // Concurrent order mutation arrived after snapshot cutoff
+  costRunCompletedAt: '2026-08-31T10:00:01.000Z',
+  costRunSourceCutoffAt: '2026-08-31T10:00:00.000Z', // Snapshot cutoff is earlier than orderFactUpdatedAt
+  metaRefreshedAt: '2026-08-31T10:00:06.000Z', // After profit mart refresh
+  costAssignmentCoverageRequired: true,
+  costAssignmentPostCutoverRows: 12,
+  costAssignmentPostCutoverAssignedRows: 10,
+  costAssignmentPostCutoverMissingRows: 2,
+  costAssignmentCutoffRows: 10,
+  costAssignmentCutoffAssignedRows: 10,
+  costAssignmentCutoffMissingRows: 0, // Pre-cutoff orders 100% assigned
+  costAssignmentPendingFollowUpRows: 2, // Post-cutoff orders pending follow-up
+});
+assert.equal(followUpRequiredFreshness.coversCostAssignments, true, 'pre-cutoff 100% assignment satisfies assignment check');
+assert.equal(followUpRequiredFreshness.usableSnapshot, true, 'usable snapshot allows bounded section completion without livelock');
+assert.equal(followUpRequiredFreshness.followUpPending, true, 'post-cutoff orders are marked as follow-up pending');
+assert.equal(followUpRequiredFreshness.pendingFollowUpRows, 2);
+assert.equal(followUpRequiredFreshness.coversCostCutoff, false, 'cost run snapshot cutoff earlier than concurrent order mutation must leave follow-up needed rather than falsely claiming coverage');
+assert.equal(followUpRequiredFreshness.fresh, false);
+
+// Regression 3: Pre-cutoff missing assignments must fail coverage
+const preCutoffMissingFreshness = evaluateProfitMartCacheFreshness({
+  factOrderMax: '2026-08-31',
+  orderFactUpdatedAt: '2026-08-31T10:00:05.000Z',
+  costRunCompletedAt: '2026-08-31T10:00:01.000Z',
+  costRunSourceCutoffAt: '2026-08-31T10:00:00.000Z',
+  costAssignmentCoverageRequired: true,
+  costAssignmentPostCutoverRows: 12,
+  costAssignmentPostCutoverAssignedRows: 9,
+  costAssignmentPostCutoverMissingRows: 3,
+  costAssignmentCutoffRows: 10,
+  costAssignmentCutoffAssignedRows: 9,
+  costAssignmentCutoffMissingRows: 1, // Missing assignment in pre-cutoff!
+  costAssignmentPendingFollowUpRows: 2,
+});
+assert.equal(preCutoffMissingFreshness.coversCostAssignments, false, 'missing assignments in pre-cutoff must fail coverage');
+assert.equal(preCutoffMissingFreshness.usableSnapshot, false);
+assert.equal(preCutoffMissingFreshness.fresh, false);
+
+console.log(JSON.stringify({ok:true, tests:[
+  'logical-run-stable-identity',
+  'completed-run-authoritative-noop',
+  'running-run-same-identity-resume',
+  'source-fingerprint-revision',
+  'moving-average',
+  'future-receipt-isolation',
+  'rtv-reentry',
+  'manual-rtv-verification-source',
+  'missing-opening-receipt-settlement',
+  'known-cost-negative-inventory-estimate',
+  'negative-inventory-receipt-variance-settlement',
+  'inventory-value-conservation',
+  'in-transit-shortfall-estimate',
+  'past-arrival-missing-opening-estimate',
+  'inventory-count-reset',
+  'negative-rtv-shortfall',
+  'frozen-boundary',
+  'concurrent-rebuild-stale-write-guard',
+  'psql-readback-meta-command',
+  'bounded-rebuild-sql-generation-without-drift-livelock',
+  'snapshot-cutoff-exactness-and-follow-up-freshness',
+  'pre-cutoff-assignment-strict-failure-contract',
+]}, null, 2));

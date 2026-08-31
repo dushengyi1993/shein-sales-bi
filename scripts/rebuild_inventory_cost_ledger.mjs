@@ -477,13 +477,14 @@ FROM ops.inventory_cost_run
 WHERE run_id=${sqlLiteral(runId)};`);
 }
 
-async function authoritativeInventoryCostRunReadback(args, run) {
+export async function authoritativeInventoryCostRunReadback(args, run) {
   const readback = await queryJson(args, `
 SELECT jsonb_build_object(
   'runId', r.run_id,
   'status', r.status,
   'sourceHash', r.source_hash,
   'ledgerVersion', r.ledger_version,
+  'sourceCutoffAt', r.source_cutoff_at,
   'eventRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version),
   'saleRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version AND l.event_type='sale'),
   'unvaluedSaleRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version AND l.event_type='sale' AND l.unvalued_quantity > 0),
@@ -538,7 +539,7 @@ COMMIT;`);
   return await readInventoryCostRun(args, run.runId);
 }
 
-async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
+export function buildLedgerRebuildSql({events, ledgerRows, run, rebuildFrom}) {
   const eventColumns = ['event_key','match_key','effective_at','event_type','quantity','cost_amount_sar','source_table','source_key','source_order_item_key','estimated_unit_cost_sar','estimated_cost_basis','source_hash','period_key'];
   const ledgerColumns = ['event_key','match_key','effective_at','event_type','source_table','source_key','source_order_item_key','quantity','cost_amount_sar','quantity_before','value_before_sar','avg_unit_cost_before_sar','quantity_after','value_after_sar','avg_unit_cost_after_sar','valued_quantity','unvalued_quantity','estimated_quantity','settled_estimated_quantity','estimation_variance_sar','cogs_sar','valuation_status','valuation_basis','ledger_version'];
   const eventDbRows = events.map(event => ({
@@ -565,14 +566,12 @@ async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
   const condition = rebuildFrom ? `effective_at::date >= ${sqlLiteral(rebuildFrom)}::date` : 'true';
   let sql = 'BEGIN;\n';
   sql += "SELECT pg_advisory_xact_lock(hashtextextended('shein-inventory-cost-ledger-rebuild', 0));\n";
-  // The read and write happen in separate processes/transactions. Lock every
-  // mutable source used by the snapshot, then reject the write if any source
-  // changed after the exact database statement timestamp returned by
-  // loadSources(). This closes the gap where a new order could otherwise land
-  // between the JSON snapshot and the ledger commit.
-  sql += `LOCK TABLE
-    ${SOURCE_TABLES.join(',\n    ')}
-  IN SHARE MODE;\n`;
+  // The ledger rebuild is guarded by an advisory transaction lock and a stale
+  // run check. The ledger is derived from a consistent database snapshot
+  // captured at sourceCutoffAt. Concurrent new orders arriving after that
+  // snapshot do not abort this transaction; the run commits the exact snapshot
+  // ledger and records sourceCutoffAt so downstream freshness evaluations and
+  // follow-up passes know exactly which mutations are covered.
   sql += `DO $inventory_cost_rebuild_guard$\nBEGIN\n`;
   sql += `  IF EXISTS (\n`;
   sql += `    SELECT 1 FROM ops.inventory_cost_run\n`;
@@ -581,35 +580,6 @@ async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
   sql += `  ) THEN\n`;
   sql += `    RAISE EXCEPTION 'stale inventory-cost rebuild refused: a newer snapshot committed after %', ${sqlLiteral(run.startedAt)}::timestamptz;\n`;
   sql += `  END IF;\nEND\n$inventory_cost_rebuild_guard$;\n`;
-  const sourceSnapshot = String(run.sourceSnapshot || '').trim();
-  if (!sourceSnapshot) throw new Error('Inventory cost source snapshot is missing');
-  const sourceGuards = SOURCE_TABLES.map(table => {
-    const expectedCount = Number(run.sourceCounts?.[table]);
-    if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) {
-      throw new Error(`Inventory cost source count is invalid: table=${table} count=${run.sourceCounts?.[table]}`);
-    }
-    return `EXISTS (
-      SELECT 1
-      FROM (
-        SELECT
-          count(*)::bigint AS row_count,
-          count(*) FILTER (
-            WHERE NOT txid_visible_in_snapshot(
-              (xmin::text)::bigint,
-              ${sqlLiteral(sourceSnapshot)}::txid_snapshot
-            )
-          )::bigint AS rows_not_visible_in_snapshot
-        FROM ${table}
-      ) source_state
-      WHERE source_state.row_count <> ${expectedCount}
-         OR source_state.rows_not_visible_in_snapshot > 0
-    )`;
-  });
-  sql += `DO $inventory_cost_source_guard$\nBEGIN\n`;
-  sql += `  IF ${sourceGuards.join('\n    OR ')}\n`;
-  sql += `  THEN\n`;
-  sql += `    RAISE EXCEPTION 'inventory-cost source changed after snapshot %; retry rebuild', ${sqlLiteral(run.sourceCutoffAt)}::timestamptz;\n`;
-  sql += `  END IF;\nEND\n$inventory_cost_source_guard$;\n`;
   sql += `DELETE FROM fact.inventory_cost_event WHERE ${condition};\n`;
   sql += copyBlock('fact.inventory_cost_event', eventColumns, eventDbRows);
   sql += copyBlock('fact.inventory_cost_ledger', ledgerColumns, ledgerDbRows);
@@ -639,6 +609,11 @@ END
 $inventory_cost_completion_guard$;
 COMMIT;
 `;
+  return sql;
+}
+
+async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
+  const sql = buildLedgerRebuildSql({events, ledgerRows, run, rebuildFrom});
   return await psql(args, sql);
 }
 

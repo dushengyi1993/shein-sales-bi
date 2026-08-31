@@ -81,11 +81,13 @@ assert.match(schema, /cost_estimated_quantity/);
 assert.match(schema, /settled_estimated_quantity/);
 assert.match(schema, /estimation_variance_sar/);
 assert.match(costRebuild, /const SOURCE_TABLES[\s\S]*'fact\.order_item'[\s\S]*'ops\.accounting_period_close'/);
-assert.match(costRebuild, /LOCK TABLE\s+\$\{SOURCE_TABLES\.join\('[\s\S]*IN SHARE MODE/);
-assert.match(costRebuild, /inventory-cost source changed after snapshot/);
+assert.doesNotMatch(costRebuild, /LOCK TABLE\s+\$\{SOURCE_TABLES\.join\('[\s\S]*IN SHARE MODE/,
+  'rebuild must not acquire exclusive share locks on all source tables');
+assert.doesNotMatch(costRebuild, /inventory-cost source changed after snapshot/,
+  'rebuild must not abort on snapshot drift livelock');
+assert.match(costRebuild, /pg_advisory_xact_lock\(hashtextextended\('shein-inventory-cost-ledger-rebuild'/);
+assert.match(costRebuild, /stale inventory-cost rebuild refused/);
 assert.match(costRebuild, /txid_current_snapshot\(\)::text/);
-assert.match(costRebuild, /txid_visible_in_snapshot/);
-assert.match(costRebuild, /rows_not_visible_in_snapshot/);
 assert.match(schema, /nullif\(b\.known_risk_adjusted_net_revenue_sar,0\)/,
   'risk profit and its denominator must describe the same cost-covered rows');
 assert.doesNotMatch(schema, /FILTER \(WHERE p\.missing_cost_lines = 0\)/,
