@@ -18,6 +18,8 @@ import {
 } from '../lib/cloud_watchdog_recovery.mjs';
 import {
   applyWatchdogMaintenanceTransition,
+  watchdogMaintenanceRecoveryIdempotencyKey,
+  watchdogMaintenanceRecoveryDeliveryKey,
   assessPortalAndEtFreshness,
   assessEtFetchFreshness,
   buildEtFetchFreshnessSql,
@@ -443,6 +445,75 @@ const firstInactive = applyWatchdogMaintenanceTransition({
 });
 assert.equal(firstInactive.recoveryCreated?.from.mode, 'business');
 assert.equal(firstInactive.pendingRecovery?.status, 'pending');
+const productionLikeKey = watchdogMaintenanceRecoveryIdempotencyKey(178, 'a'.repeat(64));
+assert.ok(productionLikeKey.startsWith('cwd-mr-'), 'maintenance recovery key must use a short readable prefix');
+assert.ok(productionLikeKey.length <= 50, 'lark-cli idempotency-key max is 50');
+assert.equal(productionLikeKey.length, 50);
+assert.equal(productionLikeKey, watchdogMaintenanceRecoveryIdempotencyKey(178, 'a'.repeat(64)), 'same generation+hash must stay stable');
+assert.notEqual(
+  watchdogMaintenanceRecoveryIdempotencyKey(178, 'a'.repeat(64)),
+  watchdogMaintenanceRecoveryIdempotencyKey(179, 'a'.repeat(64)),
+  'different generation must produce a different key',
+);
+assert.notEqual(
+  watchdogMaintenanceRecoveryIdempotencyKey(178, 'a'.repeat(64)),
+  watchdogMaintenanceRecoveryIdempotencyKey(178, 'b'.repeat(64)),
+  'different hash must produce a different key',
+);
+assert.ok(firstInactive.pendingRecovery.idempotencyKey.length <= 50);
+assert.equal(
+  firstInactive.pendingRecovery.idempotencyKey,
+  watchdogMaintenanceRecoveryIdempotencyKey(7, 'a'.repeat(64)),
+);
+assert.equal(
+  watchdogMaintenanceRecoveryDeliveryKey(firstInactive.pendingRecovery),
+  firstInactive.pendingRecovery.idempotencyKey,
+);
+const staleIllegalKey = `cloud-watchdog-maintenance-recovery-7-${'a'.repeat(64)}`;
+assert.ok(staleIllegalKey.length > 50);
+const stalePendingState = {
+  ...JSON.parse(JSON.stringify(firstInactive.nextState)),
+  pendingRecovery: {
+    ...firstInactive.pendingRecovery,
+    idempotencyKey: staleIllegalKey,
+  },
+};
+const reloadedPending = applyWatchdogMaintenanceTransition({
+  previousState: stalePendingState,
+  maintenance: inactiveMaintenance,
+  now: new Date('2026-08-17T02:05:00.000Z'),
+});
+assert.equal(reloadedPending.recoveryCreated, null, 'pending retry must not mint a new recovery episode');
+assert.equal(
+  reloadedPending.pendingRecovery.idempotencyKey,
+  firstInactive.pendingRecovery.idempotencyKey,
+  'loading an old oversized pending key must reuse the same legal delivery key',
+);
+assert.equal(
+  watchdogMaintenanceRecoveryDeliveryKey(reloadedPending.pendingRecovery),
+  firstInactive.pendingRecovery.idempotencyKey,
+);
+const staleBoundState = {
+  ...JSON.parse(JSON.stringify(stalePendingState)),
+  pendingRecovery: {
+    ...stalePendingState.pendingRecovery,
+    deliveryIdempotencyKey: staleIllegalKey,
+  },
+};
+const reloadedBound = applyWatchdogMaintenanceTransition({
+  previousState: staleBoundState,
+  maintenance: inactiveMaintenance,
+  now: new Date('2026-08-17T02:06:00.000Z'),
+});
+assert.equal(
+  reloadedBound.pendingRecovery.deliveryIdempotencyKey,
+  firstInactive.pendingRecovery.idempotencyKey,
+  'oversized bound delivery keys must be rewritten to the same legal retry key',
+);
+assert.equal(
+  watchdogMaintenanceRecoveryDeliveryKey(reloadedBound.pendingRecovery),
+  firstInactive.pendingRecovery.idempotencyKey,
+);
 const mergedRecovery = mergeMaintenanceRecoveryNotification(
   ['首页利润数据已恢复'],
   firstInactive.pendingRecovery,

@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import crypto from 'node:crypto';
 import {
   DEFAULT_CLOUD_MAINTENANCE_FILE,
   maintenanceBlocksClass,
@@ -61,6 +62,8 @@ const UNIT_NAMES = CLOUD_SERVICE_UNITS;
 const ALWAYS_RUNNING_UNITS = new Set(CLOUD_ALWAYS_RUNNING_UNITS);
 const TIMER_NAMES = CLOUD_TIMER_UNITS;
 const WATCHDOG_MAINTENANCE_STATE_SCHEMA = 'cloud-watchdog-maintenance-state/v1';
+const LARK_CLI_IDEMPOTENCY_KEY_MAX = 50;
+const MAINTENANCE_RECOVERY_IDEMPOTENCY_PREFIX = 'cwd-mr-';
 const VALID_MAINTENANCE_CLASSES = new Set(['scheduled', 'infrastructure', 'always']);
 
 // Cross-process single-instance lock.  The ticket queue lives inside
@@ -256,6 +259,40 @@ function maintenanceEpisodeKey(maintenance) {
   return `generation=${maintenance.generation ?? '-'};hash=${maintenance.hash || '-'}`;
 }
 
+export function watchdogMaintenanceRecoveryIdempotencyKey(generation, hash) {
+  const canonical = `generation=${generation ?? '-'};hash=${hash || '-'}`;
+  const digestLength = LARK_CLI_IDEMPOTENCY_KEY_MAX - MAINTENANCE_RECOVERY_IDEMPOTENCY_PREFIX.length;
+  const digest = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, digestLength);
+  const key = `${MAINTENANCE_RECOVERY_IDEMPOTENCY_PREFIX}${digest}`;
+  if (!key || key.length > LARK_CLI_IDEMPOTENCY_KEY_MAX) {
+    throw new Error(`maintenance recovery idempotency key exceeds ${LARK_CLI_IDEMPOTENCY_KEY_MAX} characters`);
+  }
+  return key;
+}
+
+export function watchdogMaintenanceRecoveryDeliveryKey(recovery) {
+  const bound = String(recovery?.deliveryIdempotencyKey || '').trim();
+  if (bound && bound.length <= LARK_CLI_IDEMPOTENCY_KEY_MAX) return bound;
+  return watchdogMaintenanceRecoveryIdempotencyKey(
+    recovery?.from?.generation ?? recovery?.generation,
+    recovery?.from?.hash ?? recovery?.hash,
+  );
+}
+
+function normalizePendingMaintenanceRecovery(recovery) {
+  if (!recovery || typeof recovery !== 'object') return recovery;
+  const legalKey = watchdogMaintenanceRecoveryIdempotencyKey(
+    recovery.from?.generation ?? recovery.generation,
+    recovery.from?.hash ?? recovery.hash,
+  );
+  const next = {...recovery, idempotencyKey: legalKey};
+  const bound = String(recovery.deliveryIdempotencyKey || '').trim();
+  if (bound && bound.length > LARK_CLI_IDEMPOTENCY_KEY_MAX) {
+    next.deliveryIdempotencyKey = legalKey;
+  }
+  return next;
+}
+
 function emptyWatchdogMaintenanceState(nowIso) {
   return {
     schemaVersion: WATCHDOG_MAINTENANCE_STATE_SCHEMA,
@@ -309,7 +346,7 @@ export function applyWatchdogMaintenanceTransition({previousState, maintenance, 
       && nextState.pendingRecovery?.key !== prior.key) {
       recoveryCreated = {
         key: prior.key,
-        idempotencyKey: `cloud-watchdog-maintenance-recovery-${prior.generation}-${prior.hash}`,
+        idempotencyKey: watchdogMaintenanceRecoveryIdempotencyKey(prior.generation, prior.hash),
         status: 'pending',
         attemptCount: 0,
         createdAt: nowIso,
@@ -327,6 +364,10 @@ export function applyWatchdogMaintenanceTransition({previousState, maintenance, 
       nextState.pendingRecovery = recoveryCreated;
     }
     nextState.activeEpisode = null;
+  }
+  if (nextState.pendingRecovery) {
+    nextState.pendingRecovery = normalizePendingMaintenanceRecovery(nextState.pendingRecovery);
+    if (recoveryCreated) recoveryCreated = nextState.pendingRecovery;
   }
   return {
     nextState,
@@ -1863,7 +1904,7 @@ async function runWatchdog(args) {
         logFile,
         {
           kind: 'cloud-watchdog-recovery',
-          idempotencyKey: maintenanceRecovery.deliveryIdempotencyKey || maintenanceRecovery.idempotencyKey,
+          idempotencyKey: watchdogMaintenanceRecoveryDeliveryKey(maintenanceRecovery),
         },
       );
       maintenanceState = result.ok
