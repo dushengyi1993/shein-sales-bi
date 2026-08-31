@@ -80,8 +80,36 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 {
   const workerFile = path.join(root, 'scripts', 'cloud_portal_section_queue_worker.sh');
   const workerText = fs.readFileSync(workerFile, 'utf8');
-  assert.match(workerText, /PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC=.*360/,
-    'worker must configure productSalesDaily budget >=360s');
+  const unitFile = path.join(root, 'infra', 'systemd', 'shein-bi-cloud-portal-section-queue.service');
+  const unitText = fs.readFileSync(unitFile, 'utf8');
+
+  const extractShellDefaultInt = (text, name) => {
+    const match = text.match(new RegExp(`${name}="\\$\\{[^:}]+:-([0-9]+)\\}"`));
+    return match ? Number(match[1]) : NaN;
+  };
+  const extractUnitOverrideInt = (text, name) => {
+    const match = text.match(new RegExp(`Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_${name}=([0-9]+)`));
+    return match ? Number(match[1]) : NaN;
+  };
+
+  const workerMinRuntimeDefault = extractShellDefaultInt(workerText,
+    'PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC');
+  const unitMinRuntimeOverride = extractUnitOverrideInt(unitText,
+    'PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC');
+  const productSalesDailyTimeout = extractShellDefaultInt(workerText,
+    'PRODUCT_SALES_DAILY_TIMEOUT_SEC');
+  assert.equal(Number.isInteger(workerMinRuntimeDefault), true,
+    'worker productSalesDaily min runtime default must be an integer');
+  assert.equal(Number.isInteger(unitMinRuntimeOverride), true,
+    'unit productSalesDaily min runtime override must be an integer');
+  assert.equal(Number.isInteger(productSalesDailyTimeout), true,
+    'worker productSalesDaily timeout default must be an integer');
+  assert.equal(workerMinRuntimeDefault >= 360, true,
+    'worker must configure productSalesDaily min runtime >=360s');
+  assert.equal(unitMinRuntimeOverride >= 360, true,
+    'unit must configure productSalesDaily min runtime >=360s');
+  assert.equal(productSalesDailyTimeout + 30 <= workerMinRuntimeDefault, true,
+    'worker productSalesDaily timeout must leave >=30s terminal readback before min runtime');
   assert.match(workerText, /defer heavy section=productSalesDaily/,
     'worker must enforce productSalesDaily runtime budget');
   assert.match(workerText, /MAX_CURL_RUNTIME=\$\(\(\s*REMAINING_SEC\s*-\s*30\s*\)\)/,

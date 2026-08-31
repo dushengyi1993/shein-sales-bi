@@ -15,6 +15,7 @@ import {
   readEmergencyLocalReleaseReceipt,
   validateEmergencyLocalReleaseReceipt,
   verifyEmergencyLocalReleaseReceipt,
+  writeEmergencyLocalReleaseReceipt,
 } from '../lib/emergency_local_release_receipt.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -35,6 +36,14 @@ function writeReceipt(file, receipt) {
 
 function sha256File(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+function assertReceiptFileMetadata(file, parentGid, expectedUid) {
+  if (process.platform === 'win32') return;
+  const stat = fs.statSync(file);
+  assert.equal(stat.gid, parentGid, 'receipt gid must inherit the parent directory gid');
+  assert.equal(stat.uid, expectedUid, 'receipt uid must preserve the target uid');
+  assert.equal(stat.mode & 0o777, 0o640, 'receipt mode must stay exactly 0640');
 }
 
 function makeSourceFixture() {
@@ -149,6 +158,37 @@ try {
   assert.equal(noBundleVerification.bundle, null);
   assert.equal(noBundleVerification.bundleVerified, false);
   assert.equal(noBundleVerification.bundleVerification, 'not-run');
+
+  const atomicReceiptDir = path.join(tempRoot, 'atomic-receipts');
+  fs.mkdirSync(atomicReceiptDir);
+  const atomicReceiptFile = path.join(atomicReceiptDir, 'emergency_local_release.json');
+  const atomicParentGid = process.platform === 'win32' ? null : fs.statSync(atomicReceiptDir).gid;
+  const firstAtomicReceipt = await writeEmergencyLocalReleaseReceipt({
+    bundleFile: fixture.validBundle,
+    cwd: fixture.gitRoot,
+    commit: fixture.target,
+    baselineCommit: fixture.baseline,
+    reason: 'atomic metadata fixture one',
+    createdAt,
+    receiptFile: atomicReceiptFile,
+  });
+  assert.equal(firstAtomicReceipt.readback.ok, true);
+  assert.equal(readEmergencyLocalReleaseReceipt(atomicReceiptFile).ok, true);
+  const firstAtomicUid = process.platform === 'win32' ? null : fs.statSync(atomicReceiptFile).uid;
+  assertReceiptFileMetadata(atomicReceiptFile, atomicParentGid, firstAtomicUid);
+
+  const secondAtomicReceipt = await writeEmergencyLocalReleaseReceipt({
+    bundleFile: fixture.validBundle,
+    cwd: fixture.gitRoot,
+    commit: fixture.target,
+    baselineCommit: fixture.baseline,
+    reason: 'atomic metadata fixture two',
+    createdAt,
+    receiptFile: atomicReceiptFile,
+  });
+  assert.equal(secondAtomicReceipt.readback.ok, true);
+  assert.equal(readEmergencyLocalReleaseReceipt(atomicReceiptFile).ok, true);
+  assertReceiptFileMetadata(atomicReceiptFile, atomicParentGid, firstAtomicUid);
 
   const invalidBundle = path.join(tempRoot, 'invalid.bundle');
   fs.writeFileSync(invalidBundle, Buffer.from('not a git bundle\n', 'utf8'));
@@ -326,6 +366,7 @@ try {
       'bundle_sha256_is_collected_not_trusted',
       'bundle_rebind_size_and_sha',
       'receipt_readback',
+      'atomic_receipt_metadata',
       'bundle_invalid_bytes',
       'bundle_target_must_be_head',
       'baseline_must_be_ancestor',
