@@ -561,6 +561,92 @@ function assertQueueFileUnchanged(file, before, label) {
     'one bounded worker run must not consume two slots on the same hot section');
 }
 
+// ---- Heavy preferred sections rotate durably across bounded slots. A hot
+// priority-5 profit section that repeatedly fails or consumes the :32 slot must
+// not starve a priority-50 productSalesDaily refresh forever; the next heavy
+// claim after profit advances to the cursor's successor.
+{
+  const heavySections = ['profit', 'productSalesDaily', 'homeRankings'];
+  const queue = {version: 1, updatedAt: '', entries: []};
+  enqueueSections(queue, {sections: ['profit'], priority: 5, now: at(0)});
+  enqueueSections(queue, {sections: ['productSalesDaily'], priority: 50, now: at(1_000)});
+
+  const profit = claimNext(queue, {
+    leaseSeconds: 60,
+    leaseId: 'heavy-profit-1',
+    preferSections: heavySections,
+    now: at(2_000),
+  });
+  assert.equal(profit.section, 'profit');
+  assert.equal(queue.fairnessCursor, 'profit', 'claiming a heavy preferred section must persist the cursor');
+  failClaim(queue, {section: 'profit', leaseId: 'heavy-profit-1', now: at(3_000), backoffSeconds: 0});
+
+  const productSales = claimNext(queue, {
+    leaseSeconds: 60,
+    leaseId: 'heavy-product-sales-1',
+    preferSections: heavySections,
+    now: at(4_000),
+  });
+  assert.equal(productSales.section, 'productSalesDaily',
+    'the next heavy slot must select the cursor successor instead of retrying fixed lower-priority profit first');
+  assert.equal(queue.fairnessCursor, 'productSalesDaily');
+  completeClaim(queue, {section: 'productSalesDaily', leaseId: 'heavy-product-sales-1', now: at(5_000)});
+
+  const profitAgain = claimNext(queue, {
+    leaseSeconds: 60,
+    leaseId: 'heavy-profit-2',
+    preferSections: heavySections,
+    now: at(6_000),
+  });
+  assert.equal(profitAgain.section, 'profit', 'after productSalesDaily completes, remaining heavy work continues normally');
+}
+
+// ---- Heavy cursor is persisted through the CLI queue file and does not leak
+// into the light slot, where heavy sections are explicitly excluded.
+{
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'queue-heavy-fairness-'));
+  try {
+    const queueFile = path.join(temp, 'queue.json');
+    const run = (...args) => spawnSync(process.execPath, [
+      path.join(process.cwd(), 'scripts', 'manage_bi_portal_section_queue.mjs'),
+      ...args,
+      '--file', queueFile,
+    ], {cwd: process.cwd(), encoding: 'utf8'});
+    let result = run('enqueue', '--sections', 'profit', '--priority', '5', '--core-generated-at', 'G1');
+    assert.equal(result.status, 0, result.stderr);
+    result = run('enqueue', '--sections', 'productSalesDaily', '--priority', '50', '--core-generated-at', 'G1');
+    assert.equal(result.status, 0, result.stderr);
+    result = run('enqueue', '--sections', 'orders', '--priority', '10', '--core-generated-at', 'G1');
+    assert.equal(result.status, 0, result.stderr);
+
+    result = run('claim', '--lease-seconds', '60', '--prefer-sections', 'profit,productSalesDaily,homeRankings');
+    assert.equal(result.status, 0, result.stderr);
+    const first = JSON.parse(result.stdout).entry;
+    assert.equal(first.section, 'profit');
+
+    result = run('fail', '--section', 'profit', '--lease-id', first.leaseId, '--backoff-seconds', '0');
+    assert.equal(result.status, 0, result.stderr);
+    let persisted = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    assert.equal(persisted.fairnessCursor, 'profit');
+
+    result = run('claim', '--lease-seconds', '60', '--prefer-sections', 'profit,productSalesDaily,homeRankings');
+    assert.equal(result.status, 0, result.stderr);
+    const second = JSON.parse(result.stdout).entry;
+    assert.equal(second.section, 'productSalesDaily');
+    persisted = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    assert.equal(persisted.fairnessCursor, 'productSalesDaily', 'cursor must survive process restart through queue.json');
+    result = run('fail', '--section', 'productSalesDaily', '--lease-id', second.leaseId, '--backoff-seconds', '60');
+    assert.equal(result.status, 0, result.stderr);
+
+    result = run('claim', '--lease-seconds', '60', '--exclude-sections', 'profit,productSalesDaily,homeRankings',
+      '--prefer-sections', 'profit,productSalesDaily,homeRankings');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).entry.section, 'orders', 'light slot exclusions must still beat the heavy fairness cursor');
+  } finally {
+    fs.rmSync(temp, {recursive: true, force: true});
+  }
+}
+
 // ---- Lease mismatch and section-name validation stay fail-closed.
 {
   const queue = {version: 1, updatedAt: '', entries: []};

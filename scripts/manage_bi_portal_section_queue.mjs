@@ -11,6 +11,7 @@ const DEFAULT_FILE = process.env.SHEIN_BI_PORTAL_SECTION_QUEUE_FILE
 const SECTION_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,79}$/;
 const QUEUE_AGING_INTERVAL_MS = 2 * 60 * 1_000;
 const DEFAULT_FAIL_BACKOFF_SECONDS = 60;
+const FAIRNESS_CURSOR_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,79}$/;
 // Durable per-section idempotency key: strict bounded safe characters so it
 // can never be interpreted as a section, path or shell argument.
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,120}$/;
@@ -194,6 +195,7 @@ function emptyQueue() {
     version: 1,
     updatedAt: '',
     nextSequence: 0,
+    fairnessCursor: '',
     nextIntentRevision: 0,
     sectionIntentRevisions: {},
     entries: [],
@@ -333,6 +335,9 @@ function normalizeQueue(queue) {
     }
   }
   queue.nextSequence = nextSequence;
+  queue.fairnessCursor = FAIRNESS_CURSOR_PATTERN.test(String(queue.fairnessCursor || ''))
+    ? String(queue.fairnessCursor)
+    : '';
   const revisions = queue.sectionIntentRevisions && typeof queue.sectionIntentRevisions === 'object'
     && !Array.isArray(queue.sectionIntentRevisions)
     ? queue.sectionIntentRevisions
@@ -363,6 +368,7 @@ function readQueue(file) {
       version: 1,
       updatedAt: String(value?.updatedAt || ''),
       nextSequence: Number(value?.nextSequence || 0),
+      fairnessCursor: String(value?.fairnessCursor || ''),
       nextIntentRevision: Number(value?.nextIntentRevision || 0),
       sectionIntentRevisions: value?.sectionIntentRevisions || {},
       entries: Array.isArray(value?.entries) ? value.entries : [],
@@ -404,6 +410,14 @@ function ensureQueueState(queue) {
     throw new TypeError('QUEUE_STATE_INVALID');
   }
   return normalizeQueue(queue);
+}
+
+function fairnessCursorRank(section, orderedSections, cursor) {
+  const index = orderedSections.indexOf(section);
+  if (index < 0) return Number.MAX_SAFE_INTEGER;
+  const cursorIndex = orderedSections.indexOf(cursor);
+  if (cursorIndex < 0) return index;
+  return (index - cursorIndex - 1 + orderedSections.length) % orderedSections.length;
 }
 
 function recordPublishedSnapshot(queue, entry, now = new Date()) {
@@ -796,6 +810,7 @@ export function claimNext(queue, {
   const profitBlocksHomeProfit = Boolean(profitEntry);
   const excluded = new Set((excludeSections || []).map(normalizeSection));
   const preferred = new Set((preferSections || []).map(normalizeSection));
+  const preferredOrder = [...preferred];
   // A steady stream of priority-10 accounting work used to keep priority-50
   // daily/page caches pending forever.  Age lowers the effective priority by
   // one point every two minutes, but never ahead of an explicit priority-0
@@ -828,19 +843,32 @@ export function claimNext(queue, {
       if (entry.section === 'homeProfit' && profitBlocksHomeProfit) return false;
       const nextAttemptAt = Date.parse(entry.nextAttemptAt || '');
       return Number.isNaN(nextAttemptAt) || nextAttemptAt <= nowMillis;
-    })
-    .sort((left, right) => (
-      (preferred.has(right.section) ? 1 : 0) - (preferred.has(left.section) ? 1 : 0)
-      ||
-      effectivePriority(left) - effectivePriority(right)
+    });
+  const hasPreferred = pending.some(entry => preferred.has(entry.section));
+  const preferredCandidates = hasPreferred ? pending.filter(entry => preferred.has(entry.section)) : [];
+  const useFairPreferredRoundRobin = preferredCandidates.length > 1;
+  pending.sort((left, right) => {
+    const leftPreferred = preferred.has(left.section);
+    const rightPreferred = preferred.has(right.section);
+    const preferredRank = (rightPreferred ? 1 : 0) - (leftPreferred ? 1 : 0);
+    if (preferredRank) return preferredRank;
+    if (useFairPreferredRoundRobin && leftPreferred && rightPreferred) {
+      return fairnessCursorRank(left.section, preferredOrder, queue.fairnessCursor)
+        - fairnessCursorRank(right.section, preferredOrder, queue.fairnessCursor)
+        || effectivePriority(left) - effectivePriority(right)
+        || Number(left.priority || 0) - Number(right.priority || 0)
+        || Number(left.sequence || 0) - Number(right.sequence || 0);
+    }
+    return effectivePriority(left) - effectivePriority(right)
       || Number(left.priority || 0) - Number(right.priority || 0)
       // Within the same priority, sequence (enqueue order) decides instead of
       // the section name, so a profit,homeProfit batch always claims profit
       // first and the homepage summary never derives from a missing source.
-      || Number(left.sequence || 0) - Number(right.sequence || 0)
-    ));
+      || Number(left.sequence || 0) - Number(right.sequence || 0);
+  });
   const entry = pending[0];
   if (!entry) return null;
+  if (preferred.has(entry.section)) queue.fairnessCursor = entry.section;
   entry.status = 'running';
   entry.attempts = Number(entry.attempts || 0) + 1;
   entry.leaseId = leaseId;
