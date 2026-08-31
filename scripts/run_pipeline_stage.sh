@@ -10,6 +10,7 @@ BUSINESS_DATE_TARGET=""
 MESSAGE=""
 EVIDENCE=()
 REQUIRES=()
+RUN_DATE_REQUIRES=()
 SKIP_IF_DONE=0
 WORK_FINGERPRINT=""
 WORK_FINGERPRINT_SCOPE=""
@@ -27,7 +28,7 @@ usage() {
 Usage:
   run_pipeline_stage.sh --stage NAME [--run-date today|yesterday|YYYY-MM-DD]
     [--business-date today|yesterday|YYYY-MM-DD]
-    [--require STAGE] [--message TEXT] [--evidence PATH]
+    [--require STAGE] [--require-run-date STAGE] [--message TEXT] [--evidence PATH]
     [--skip-if-done --work-fingerprint-scope NAME --work-semantic-version VERSION]
     [--work-parameter KEY=VALUE]
     [--workset-digest-program PROGRAM --workset-digest-arg ARG]
@@ -99,6 +100,11 @@ while (($#)); do
     --require)
       (($# >= 2)) || usage
       REQUIRES+=("$2")
+      shift 2
+      ;;
+    --require-run-date)
+      (($# >= 2)) || usage
+      RUN_DATE_REQUIRES+=("$2")
       shift 2
       ;;
     --message)
@@ -268,6 +274,18 @@ for required_stage in "${REQUIRES[@]}"; do
     --status done,warning; then
     echo "[pipeline-stage] deferred stage=$STAGE missingDependency=$required_stage runDate=$RUN_DATE" >&2
     write_marker "deferred" "dependency not ready: $required_stage" >/dev/null
+    exit 75
+  fi
+done
+
+for required_stage in "${RUN_DATE_REQUIRES[@]}"; do
+  if ! node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage "$required_stage" \
+    --date "$RUN_DATE" \
+    --root "$MARKER_ROOT" \
+    --status done,warning; then
+    echo "[pipeline-stage] deferred stage=$STAGE missingRunDateDependency=$required_stage runDate=$RUN_DATE" >&2
+    write_marker "deferred" "run-date dependency not ready: $required_stage" >/dev/null
     exit 75
   fi
 done

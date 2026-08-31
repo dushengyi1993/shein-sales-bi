@@ -335,7 +335,9 @@ const yesterday = readUnit('shein-bi-cloud-yesterday.service');
 const yesterdayTimer = readUnit('shein-bi-cloud-yesterday.timer');
 assert.match(yesterday, /flock -w 120/, 'yesterday final refresh waits briefly for the shared nightly maintenance lock');
 assert.match(yesterday, /--deadline-at 03:27/);
-assert.match(yesterday, /--stage yesterday-final --run-date today --business-date yesterday --require nightly-session --require nightly-backup --skip-if-done/);
+assert.match(yesterday, /--stage yesterday-final --run-date today --business-date yesterday --require-run-date nightly-session --require-run-date nightly-backup --skip-if-done/);
+assert.doesNotMatch(yesterday, /--require nightly-(session|backup)/,
+  'yesterday-final dependencies bind same runDate without requiring the same businessDate');
 assert.match(yesterday, /--work-fingerprint-scope yesterday-final/);
 assert.match(yesterday, /--work-semantic-version yesterday-final\/v1-openapi-finalization/);
 assert.match(yesterday, /--workset-digest-program \/usr\/bin\/printf/);

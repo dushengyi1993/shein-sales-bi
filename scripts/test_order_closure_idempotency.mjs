@@ -97,12 +97,25 @@ function coordinatorWorkParameters(maxPairs = 500) {
   };
 }
 
-function runStage({root, paths, runDate, businessDate, sideEffect, sourceCommit, maxPairs = 500}) {
+function runStage({
+  root,
+  paths,
+  runDate,
+  businessDate,
+  sideEffect,
+  sourceCommit,
+  maxPairs = 500,
+  stage = STAGE,
+  extraArgs = [],
+  includeStageIdentity = true,
+}) {
+  const identityArgs = includeStageIdentity ? stageIdentityArgs(root, maxPairs) : [];
   const args = [
-    '--stage', STAGE,
+    '--stage', stage,
     '--run-date', runDate,
     '--business-date', businessDate,
-    ...stageIdentityArgs(root, maxPairs),
+    ...extraArgs,
+    ...identityArgs,
     '--source-commit', sourceCommit,
     '--', 'bash', '-c', `printf 'executed\\n' >> ${shellQuote(toPosixPath(sideEffect))}`,
   ];
@@ -586,6 +599,67 @@ async function main() {
     assert.equal(readLines(effect).length, 1, 'sourceCommit change must not execute');
     assert.equal(fs.existsSync(path.join(compatibility.root, 'state', 'pipeline-markers', legacyDate, `${STAGE}.json`)), false,
       'custom marker root must be honored');
+
+    const runDateDependency = makeFixture('shein-run-date-dependency-');
+    fixtures.push(runDateDependency.root);
+    const dependencyRunDate = '2026-08-31';
+    const dependencyBusinessDate = '2026-08-31';
+    const dependentBusinessDate = '2026-08-30';
+    const dependencyStage = 'nightly-backup';
+    writeJson(markerPath(runDateDependency.paths.markerRoot, dependencyRunDate, dependencyStage), {
+      ok: true, stage: dependencyStage, status: 'done', runDate: dependencyRunDate,
+      businessDate: dependencyBusinessDate, completedAt: new Date().toISOString(),
+    });
+    const runDateDependencyEffect = path.join(runDateDependency.root, 'effect.log');
+    const strictBusinessDateDependency = runStage({
+      root: runDateDependency.root, paths: runDateDependency.paths,
+      runDate: dependencyRunDate, businessDate: dependentBusinessDate,
+      sideEffect: runDateDependencyEffect, sourceCommit: 'dependency-audit-one', stage: 'yesterday-final',
+      extraArgs: ['--require', dependencyStage],
+      includeStageIdentity: false,
+    });
+    assert.equal(strictBusinessDateDependency.status, 75,
+      `plain --require must reject businessDate mismatch\n${strictBusinessDateDependency.stdout}\n${strictBusinessDateDependency.stderr}`);
+    assert.equal(readLines(runDateDependencyEffect).length, 0,
+      'plain --require businessDate mismatch must not execute command');
+    const runDateOnlyDependency = runStage({
+      root: runDateDependency.root, paths: runDateDependency.paths,
+      runDate: dependencyRunDate, businessDate: dependentBusinessDate,
+      sideEffect: runDateDependencyEffect, sourceCommit: 'dependency-audit-two', stage: 'yesterday-final',
+      extraArgs: ['--require-run-date', dependencyStage],
+      includeStageIdentity: false,
+    });
+    assert.equal(runDateOnlyDependency.status, 0,
+      `--require-run-date must accept same runDate with different businessDate\n${runDateOnlyDependency.stdout}\n${runDateOnlyDependency.stderr}`);
+    assert.equal(readLines(runDateDependencyEffect).length, 1,
+      '--require-run-date must execute command when dependency is done for the same runDate');
+    writeJson(markerPath(runDateDependency.paths.markerRoot, dependencyRunDate, dependencyStage), {
+      ok: false, stage: dependencyStage, status: 'deferred', runDate: dependencyRunDate,
+      businessDate: dependencyBusinessDate, completedAt: new Date().toISOString(),
+    });
+    const notDoneDependency = runStage({
+      root: runDateDependency.root, paths: runDateDependency.paths,
+      runDate: dependencyRunDate, businessDate: dependentBusinessDate,
+      sideEffect: runDateDependencyEffect, sourceCommit: 'dependency-audit-three', stage: 'yesterday-final',
+      extraArgs: ['--require-run-date', dependencyStage],
+      includeStageIdentity: false,
+    });
+    assert.equal(notDoneDependency.status, 75,
+      `--require-run-date must defer when dependency is not done/warning\n${notDoneDependency.stdout}\n${notDoneDependency.stderr}`);
+    assert.equal(readLines(runDateDependencyEffect).length, 1,
+      'not-ready run-date dependency must not execute command');
+    fs.rmSync(markerPath(runDateDependency.paths.markerRoot, dependencyRunDate, dependencyStage), {force: true});
+    const missingDependency = runStage({
+      root: runDateDependency.root, paths: runDateDependency.paths,
+      runDate: dependencyRunDate, businessDate: dependentBusinessDate,
+      sideEffect: runDateDependencyEffect, sourceCommit: 'dependency-audit-four', stage: 'yesterday-final',
+      extraArgs: ['--require-run-date', dependencyStage],
+      includeStageIdentity: false,
+    });
+    assert.equal(missingDependency.status, 75,
+      `--require-run-date must defer when dependency marker is missing\n${missingDependency.stdout}\n${missingDependency.stderr}`);
+    assert.equal(readLines(runDateDependencyEffect).length, 1,
+      'missing run-date dependency must not execute command');
   } finally {
     for (const root of fixtures) fs.rmSync(root, {recursive: true, force: true});
   }
@@ -599,7 +673,7 @@ async function main() {
       'maxPairs-one-two-pair-consecutive-runs', 'status-zero-quality-partial-retry',
       'zero-candidate-one-pair-rejected-everywhere',
       'deadline-stop-next-authorized-activation', 'legacy-upgrade', 'sourceCommit-audit-only',
-      'custom-marker-root',
+      'custom-marker-root', 'run-date-dependency-business-date-mismatch',
     ],
   }, null, 2));
 }

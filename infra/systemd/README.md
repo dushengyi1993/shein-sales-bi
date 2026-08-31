@@ -150,7 +150,7 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 
 ### Pipeline marker 跨服务目录一次性修复
 
-`scripts/pipeline_marker.mjs` 只在 marker root 和具体日期目录上强制 `02770`（setgid + group-write），不递归修改任意路径；marker 文件内容、大小和 SHA-256 契约不变。canonical marker root 是 `/data/shein-bi/state/pipeline-markers`，属主保持 `sheinops:sheinops`；`/opt/shein-bi/app/state` 是只读 bind/兼容路径，禁止从那里写入。部署这次修复时，仅在 canonical root 模式不是 `2770` 时精确执行一次：
+`scripts/pipeline_marker.mjs` 只在 marker root 和具体日期目录上强制 `02770`（setgid + group-write），不递归修改任意路径；marker 文件内容、大小和 SHA-256 契约不变。canonical marker root 是 `/data/shein-bi/state/pipeline-markers`，属主保持 `sheinops:sheinops`；`/opt/shein-bi/app/state` 是只读 bind/兼容路径，禁止从那里写入。`run_pipeline_stage.sh --require-run-date STAGE` 只要求依赖 marker 与当前 stage 同一 run-date 且状态完成，不要求 business-date 相同；部署这次修复时，仅在 canonical root 模式不是 `2770` 时精确执行一次：
 
 ```bash
 sudo -n chmod 2770 /data/shein-bi/state/pipeline-markers
