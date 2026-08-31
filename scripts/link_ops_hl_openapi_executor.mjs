@@ -889,6 +889,20 @@ function normalizeExplicitInputCurrentDeclarationValue(extraValue, unit) {
   return {value: valueText, unit: normalizedUnit === 'a' ? 'A' : 'mA'};
 }
 
+function expectedInputCurrentValueIdForUnit(unit) {
+  if (unit === 'A') return 304301999;
+  if (unit === 'mA') return 304302428;
+  return null;
+}
+
+function assertInputCurrentValueIdMatchesUnit(attributeValueId, unit, sourceLabel) {
+  if (!attributeValueId) return;
+  const expectedValueId = expectedInputCurrentValueIdForUnit(unit);
+  if (expectedValueId && attributeValueId !== expectedValueId) {
+    throw new Error(`${sourceLabel} Input current(1002323) attribute_value_id ${attributeValueId} does not match unit ${unit}; expected ${expectedValueId}`);
+  }
+}
+
 function normalizeExactSourceInputCurrentDeclaration(rawPreparation = {}, sourceLabel = 'exact source publishPreparation') {
   const preparation = rawPreparation && typeof rawPreparation === 'object' && !Array.isArray(rawPreparation)
     ? rawPreparation
@@ -928,6 +942,10 @@ function normalizeExactSourceInputCurrentDeclaration(rawPreparation = {}, source
   }
   const rawValueId = exactSourceOverrideField(row, 'attribute_value_id', 'attributeValueId', sourceLabel);
   const attributeValueId = normalizeAttributeId(rawValueId) || null;
+  if (rawValueId !== undefined && rawValueId !== null && rawValueId !== '' && !attributeValueId) {
+    throw new Error(`${sourceLabel} Input current(1002323) attribute_value_id must be a positive integer`);
+  }
+  assertInputCurrentValueIdMatchesUnit(attributeValueId, normalizedVal.unit, sourceLabel);
   return {
     declared: true,
     rowCount: 1,
@@ -2775,6 +2793,12 @@ function applyRandomSupplyPrice(payload, task, executionContext, targetStore) {
 function normalizeManualAttributeOverride(row) {
   if (!row || typeof row !== 'object') return null;
   const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId ?? row.id);
+  let attributeValueId = null;
+  if (attributeId === INPUT_CURRENT_ATTRIBUTE_ID) {
+    const rawAttributeValueId = row.attribute_value_id ?? row.attributeValueId;
+    attributeValueId = normalizeAttributeId(rawAttributeValueId);
+    if (rawAttributeValueId !== undefined && rawAttributeValueId !== null && rawAttributeValueId !== '' && !attributeValueId) return null;
+  }
   const rawUnit = safeString(row.attribute_unit ?? row.attributeUnit ?? row.unit ?? '', 40);
   let attributeExtraValue = safeString(
     row.attribute_extra_value
@@ -2787,15 +2811,21 @@ function normalizeManualAttributeOverride(row) {
   );
   let attributeUnit = rawUnit;
   if (attributeId === INPUT_CURRENT_ATTRIBUTE_ID) {
-    attributeExtraValue = normalizeInputCurrentExtraValue(attributeExtraValue, row.attribute_unit || row.attributeUnit || '');
-    const isAmps = /(^|[^m])a\b|安/i.test(row.attribute_unit || row.attributeUnit || '') && !/ma|毫安/i.test(row.attribute_unit || row.attributeUnit || '');
-    attributeUnit = isAmps ? 'A' : 'mA';
+    const normalizedCurrent = normalizeExplicitInputCurrentDeclarationValue(
+      row.attribute_extra_value ?? row.attributeExtraValue ?? row.attribute_value ?? row.attributeValue ?? row.value,
+      row.attribute_unit ?? row.attributeUnit ?? row.unit,
+    );
+    if (!normalizedCurrent) return null;
+    attributeExtraValue = normalizedCurrent.value;
+    attributeUnit = normalizedCurrent.unit;
+    assertInputCurrentValueIdMatchesUnit(attributeValueId, attributeUnit, 'manual attribute override');
   }
   if (!attributeId || !attributeExtraValue) return null;
   return {
     attribute_id: attributeId,
     attribute_extra_value: attributeExtraValue,
     attribute_unit: attributeUnit,
+    ...(attributeId === INPUT_CURRENT_ATTRIBUTE_ID && attributeValueId ? {attribute_value_id: attributeValueId} : {}),
     label: safeString(row.label || '', 80),
     source: safeString(row.source || 'manual_override', 80),
   };
@@ -2942,7 +2972,8 @@ function applyManualAttributeOverrides(payload, task, executionContext) {
     row.attribute_id = override.attribute_id;
     row.attribute_extra_value = override.attribute_extra_value;
     if (override.attribute_unit) row.__manual_attribute_unit = override.attribute_unit;
-    delete row.attribute_value_id;
+    if (override.attribute_id === INPUT_CURRENT_ATTRIBUTE_ID && override.attribute_value_id) row.attribute_value_id = override.attribute_value_id;
+    else delete row.attribute_value_id;
     delete row.attributeValueId;
     delete row.attribute_value;
     delete row.attributeValue;

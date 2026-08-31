@@ -1,5 +1,41 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {spawn} from 'node:child_process';
+import {fileURLToPath, pathToFileURL} from 'node:url';
+
+if (process.platform === 'win32' && process.env.SHEIN_TEST_PG_LOADER !== '1') {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const sharedPg = path.resolve(root, '..', 'Shein销售统计', 'node_modules', 'pg', 'lib', 'index.js');
+  try {
+    await fs.access(sharedPg);
+    const tmp = path.join(root, 'tmp', 'exact-source-input-current-pg-loader');
+    await fs.mkdir(tmp, {recursive: true});
+    const loader = path.join(tmp, 'loader.mjs');
+    await fs.writeFile(loader, [
+      'export async function resolve(specifier, context, nextResolve) {',
+      '  if (specifier === \'pg\') return {url: ' + JSON.stringify(pathToFileURL(sharedPg).href) + ', shortCircuit: true};',
+      '  return nextResolve(specifier, context);',
+      '}',
+      '',
+    ].join('\n'), 'utf8');
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+        cwd: root,
+        env: {
+          ...process.env,
+          SHEIN_TEST_PG_LOADER: '1',
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --experimental-loader=${pathToFileURL(loader).href}`.trim(),
+        },
+        stdio: 'inherit',
+      });
+      child.on('error', reject);
+      child.on('close', code => resolve(Number(code)));
+    });
+    process.exit(result);
+  } catch {}
+}
 
 process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
 const {__testHooks} = await import('./link_ops_hl_openapi_executor.mjs');
@@ -31,6 +67,17 @@ function validOverride(extraValue = '6818') {
     attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
     attribute_extra_value: extraValue,
     attribute_unit: 'mA',
+    label: '输入电流',
+    source: 'explicit_prepare_publish',
+  };
+}
+
+function validAmpOverride(extraValue = '0.18', valueId = 304301999) {
+  return {
+    attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
+    attribute_extra_value: extraValue,
+    attribute_unit: 'A',
+    attribute_value_id: valueId,
     label: '输入电流',
     source: 'explicit_prepare_publish',
   };
@@ -145,6 +192,66 @@ assert.equal(finalizedInputCurrent[0].attribute_extra_value, '6818');
 assert.equal(finalizedInputCurrent[0].attribute_value_id, 304302428);
 assert.equal(Object.hasOwn(finalizedInputCurrent[0], '__manual_attribute_unit'), false);
 
+const validAmp = merge([validAmpOverride()]);
+assert.deepEqual(inputCurrentRows(validAmp.payload)[0], {
+  attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
+  attribute_extra_value: '0.18',
+  attribute_value_id: 304301999,
+  __manual_attribute_unit: 'A',
+});
+assert.equal(validAmp.applied.some(value => value.includes('1002323') && value.includes('0.18A')), true, '0.18A must not be rewritten to 180A');
+
+const finalizedAmp = await __testHooks.applyAttributeTemplateRules({
+  async request(pathname) {
+    assert.equal(pathname, '/open-api/goods/query-attribute-template');
+    return {
+      ok: true,
+      status: 200,
+      data: {
+        code: '0',
+        msg: 'OK',
+        info: {data: [{
+          product_type_id: 9851,
+          attribute_infos: [{
+            attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
+            attribute_name: 'Input current',
+            attribute_mode: 4,
+            attribute_status: 3,
+            attribute_value_info_list: [
+              {attribute_value_id: 304301999, attribute_value: 'A'},
+              {attribute_value_id: 304302428, attribute_value: 'mA'},
+            ],
+          }],
+        }]},
+      },
+    };
+  },
+}, validAmp.payload, {copyProductDraft: true, exactSourceLock: true});
+const finalizedAmpInputCurrent = inputCurrentRows(finalizedAmp.payload);
+assert.equal(finalizedAmp.blockers.length, 0, JSON.stringify(finalizedAmp.blockers));
+assert.equal(finalizedAmpInputCurrent[0].attribute_extra_value, '0.18');
+assert.equal(finalizedAmpInputCurrent[0].attribute_value_id, 304301999);
+assert.equal(Object.hasOwn(finalizedAmpInputCurrent[0], '__manual_attribute_unit'), false);
+
+const explicitMaEquivalent = __testHooks.applyManualAttributeOverrides(sourcePayload(), {}, {
+  publishPreparation: {attributeOverrides: [{...validOverride('180'), attribute_value_id: 304302428}]},
+});
+const explicitMaRow = inputCurrentRows(explicitMaEquivalent.payload)[0];
+assert.equal(explicitMaRow.attribute_extra_value, '180');
+assert.equal(explicitMaRow.attribute_value_id, 304302428);
+assert.equal(explicitMaRow.__manual_attribute_unit, 'mA');
+
+const explicitAmpEquivalent = __testHooks.applyManualAttributeOverrides(sourcePayload(), {}, {
+  publishPreparation: {attributeOverrides: [validAmpOverride('0.18', 304301999)]},
+});
+const explicitAmpRow = inputCurrentRows(explicitAmpEquivalent.payload)[0];
+assert.equal(explicitAmpRow.attribute_extra_value, '0.18');
+assert.equal(explicitAmpRow.attribute_value_id, 304301999);
+assert.equal(explicitAmpRow.__manual_attribute_unit, 'A');
+assert.throws(() => __testHooks.applyManualAttributeOverrides(sourcePayload(), {}, {
+  publishPreparation: {attributeOverrides: [validAmpOverride('0.18', 304302428)]},
+}), /Input current|attribute_value_id|unit/i, '0.18A with the mA valueId must fail before any write preparation');
+
 const replaced = merge([validOverride()], {withExistingInputCurrent: true});
 assert.equal(replaced.payload.product_attribute_list.length, 11, 'valid override must replace an existing source row');
 assert.equal(inputCurrentRows(replaced.payload).length, 1, 'replacement must remove source duplicates');
@@ -219,7 +326,10 @@ const invalidCases = [
   ['decimal value', [{...validOverride(), attribute_extra_value: '6818.5'}]],
   ['zero value', [{...validOverride(), attribute_extra_value: '0'}]],
   ['unreasonable value', [{...validOverride(), attribute_extra_value: '100001'}]],
-  ['wrong unit', [{...validOverride(), attribute_unit: 'A'}]],
+  ['wrong unit', [{...validOverride(), attribute_unit: 'amp'}]],
+  ['empty unit', [{...validOverride(), attribute_unit: ''}]],
+  ['ambiguous unit', [{...validOverride(), attribute_unit: 'A/mA'}]],
+  ['invalid value id', [{...validAmpOverride(), attribute_value_id: 'not-id'}]],
   ['wrong source', [{...validOverride(), source: 'request'}]],
   ['non-object row', [null]],
 ];

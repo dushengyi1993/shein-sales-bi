@@ -49,6 +49,7 @@ import {
   productAttributeBindingRequestKey,
   productAttributeBindingRequestKeyV2,
 } from '../lib/link_ops_product_attribute_binding.mjs';
+import {RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT} from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
 import {
   OPS_EXIT_CODES,
@@ -73,6 +74,22 @@ const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const LOCAL_OPENAPI_TEST_OVERRIDE = process.env.SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR === '1';
 const PARTNER_CHECK_TTL_MS = Math.max(0, Number(process.env.SHEIN_BI_PARTNER_CHECK_TTL_MS || 5 * 60_000));
 let activeOwnerKnowledge = null;
+
+function parseUploadedImageArgument(value) {
+  const raw = String(value ?? '').trim();
+  const parts = raw.split('|');
+  if (parts.length !== 3) {
+    throw new Error('--uploaded-image 必须使用精确格式 name|url|sha256');
+  }
+  const [name, imageUrl, rawSha256] = parts.map(part => part.trim());
+  const sha256 = rawSha256.toLowerCase();
+  let parsedUrl;
+  try { parsedUrl = new URL(imageUrl); } catch { throw new Error(`--uploaded-image URL 无效：${imageUrl || '(missing)'}`); }
+  if (!name || !['http:', 'https:'].includes(parsedUrl.protocol) || !/^[a-f0-9]{64}$/.test(sha256)) {
+    throw new Error('--uploaded-image 必须包含非空 name、HTTP(S) URL 和 64 位十六进制 sha256');
+  }
+  return {name, imageUrl, sha256};
+}
 
 function parseArgs(argv) {
   const args = {
@@ -120,6 +137,7 @@ function parseArgs(argv) {
     imageUrl: '',
     imageType: 0,
     imageDir: '',
+    uploadedImages: [],
     assetFiles: [],
     approvedAssets: false,
     standardGoodsSn: '',
@@ -143,6 +161,7 @@ function parseArgs(argv) {
     adoptExisting: false,
     refreshBinding: false,
     expectedBindingRequestKey: '',
+    expectedPrepareBatchId: '',
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
     format: '',
@@ -226,6 +245,7 @@ function parseArgs(argv) {
     else if (a === '--url' || a === '--image-url') args.imageUrl = String(argv[++i] || '').trim();
     else if (a === '--image-type' || a === '--type') args.imageType = Number(argv[++i] || 0);
     else if (a === '--image-dir' || a === '--dir') args.imageDir = path.resolve(String(argv[++i] || ''));
+    else if (a === '--uploaded-image') args.uploadedImages.push(parseUploadedImageArgument(argv[++i]));
     else if (a === '--approved-assets' || a === '--source-approved') args.approvedAssets = true;
     else if (a === '--standard-goods-sn' || a === '--supplier-code') args.standardGoodsSn = String(argv[++i] || '').trim();
     else if (a === '--supply-price') args.supplyPrice = Number(argv[++i]);
@@ -247,6 +267,7 @@ function parseArgs(argv) {
     else if (a === '--adopt-existing') args.adoptExisting = true;
     else if (a === '--refresh-binding') args.refreshBinding = true;
     else if (a === '--expected-binding-request-key') args.expectedBindingRequestKey = String(argv[++i] || '').trim();
+    else if (a === '--expected-prepare-batch-id' || a === '--prepare-batch-id') args.expectedPrepareBatchId = String(argv[++i] || '').trim();
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
@@ -373,6 +394,7 @@ Usage:
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --adopt-existing --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --refresh-binding --task-id <copy_product_draft任务id> --store FY [--expected-revision <n>] [--expected-binding-request-key <64位sha256>]
+  node scripts/bi_ops_cli.mjs recover-uploaded-asset-binding --task-id <copy_product_draft任务id> --prepare-batch-id <64位sha256> --uploaded-image "main.jpg|https://...|<sha256>" <重复共6次> --confirm ${RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT} [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <query.json|enriched.csv> --performance-date 2026-07-04 [--out <dir>]
@@ -733,6 +755,7 @@ const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'prepare-publish', 'prepare_publish',
   'prepare-descriptions', 'prepare_descriptions',
   'prepare-product-attribute', 'prepare_product_attribute',
+  'recover-uploaded-asset-binding', 'recover_uploaded_asset_binding',
   'update-description', 'update_description',
   'prepare-pending-image-correction', 'prepare_pending_image_correction',
 ]);
@@ -1578,6 +1601,7 @@ async function runPreparePublish(args) {
       sameTask: true,
       payloadSource: bindingJson.binding.payloadSource,
       realPublishOccurred: false,
+      uploadedImageCount: uploaded.length,
       reusedApprovedBinding: reused,
       emptyDescriptionAuthorized: bindingJson?.binding?.emptyDescriptionAuthorization?.ok === true,
       nextStep: '核对新预演的 payloadHash 和字段；只有用户明确确认后才调用 execute。',
@@ -1983,6 +2007,107 @@ async function runRefreshProductAttributeBinding(args, store) {
   print(output);
   if (!output.ok) process.exitCode = 1;
 }
+
+
+async function runRecoverUploadedAssetBinding(args) {
+  if (!args.taskId) throw new Error('recover-uploaded-asset-binding requires --task-id <id>');
+  const confirm = String(args.confirm || '').trim();
+  if (confirm !== RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT) {
+    throw new Error(`recover-uploaded-asset-binding 必须携带 --confirm ${RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT}`);
+  }
+  const expectedPrepareBatchId = String(args.expectedPrepareBatchId || '').trim();
+  if (!expectedPrepareBatchId || !/^[a-f0-9]{64}$/.test(expectedPrepareBatchId)) {
+    throw new Error('recover-uploaded-asset-binding requires --prepare-batch-id <64位十六进制哈希>');
+  }
+  const uploadedImages = Array.isArray(args.uploadedImages) ? args.uploadedImages : [];
+  if (uploadedImages.length !== 6) {
+    throw new Error(`recover-uploaded-asset-binding requires exactly 6 repeated --uploaded-image name|url|sha256 parameters; received ${uploadedImages.length}`);
+  }
+  for (const [field, code] of [['name', 'filename'], ['imageUrl', 'URL'], ['sha256', 'SHA-256']]) {
+    if (new Set(uploadedImages.map(row => row[field])).size !== 6) {
+      throw new Error(`recover-uploaded-asset-binding --uploaded-image ${code} values must be unique`);
+    }
+  }
+  const expectedRevisionProvided = args.expectedRevision !== null;
+  if (expectedRevisionProvided
+    && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision <= 0)) {
+    throw new Error('recover-uploaded-asset-binding --expected-revision 必须是正安全整数');
+  }
+  let recoverJson;
+  try {
+    ({json: recoverJson} = await request(args, '/api/link-ops-recover-uploaded-asset-binding', {
+      method: 'POST',
+      body: {
+        taskId: args.taskId,
+        confirm,
+        expectedPrepareBatchId,
+        uploadedImages,
+        ...(expectedRevisionProvided ? {expectedRevision: args.expectedRevision} : {}),
+      },
+      allowJsonFailure: true,
+    }));
+  } catch (error) {
+    const response = error?.response && typeof error.response === 'object' ? error.response : {};
+    const committedBinding = response.binding && typeof response.binding === 'object' ? response.binding : {};
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'recover-uploaded-asset-binding',
+      taskId: args.taskId,
+      stage: String(response.stage || 'binding_not_recovered'),
+      bindingCommitted: response.bindingCommitted === true,
+      readbackVerified: response.readbackVerified === true,
+      auditPending: response.auditPending === true,
+      persistedRevision: response.persistedRevision ?? null,
+      bindingFingerprint: String(committedBinding.bindingFingerprint || response.bindingFingerprint || ''),
+      imageCount: Number(committedBinding.imageCount || (Array.isArray(committedBinding.images) ? committedBinding.images.length : 0)),
+      roles: Array.isArray(committedBinding.images) ? committedBinding.images.map(image => image.role) : [],
+      prepareBatchId: String(committedBinding.prepareBatchId || expectedPrepareBatchId),
+      authority: String(committedBinding.authority || ''),
+      code: error?.code || response.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '已上传素材绑定恢复失败').slice(0, 500),
+      safety: {realPublishOccurred: false, newUploadTriggered: false, newTaskCreated: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+
+  const binding = recoverJson.binding || {};
+  const output = {
+    ok: recoverJson.ok === true
+      && recoverJson.bindingCommitted === true
+      && recoverJson.readbackVerified === true
+      && recoverJson.auditPending !== true,
+    aiInvoked: false,
+    command: 'recover-uploaded-asset-binding',
+    taskId: args.taskId,
+    idempotentReplay: recoverJson.idempotentReplay === true,
+    bindingCommitted: recoverJson.bindingCommitted === true,
+    readbackVerified: recoverJson.readbackVerified === true,
+    auditPending: recoverJson.auditPending === true,
+    persistedRevision: recoverJson.persistedRevision ?? null,
+    stage: String(recoverJson.stage || 'binding_not_recovered'),
+    code: String(recoverJson.code || ''),
+    error: String(recoverJson.error || '').slice(0, 500),
+    bindingFingerprint: String(binding.bindingFingerprint || recoverJson.bindingFingerprint || ''),
+    imageCount: Number(binding.imageCount || (Array.isArray(binding.images) ? binding.images.length : 0)),
+    roles: Array.isArray(binding.images) ? binding.images.map(img => img.role) : [],
+    prepareBatchId: String(binding.prepareBatchId || expectedPrepareBatchId),
+    authority: String(binding.authority || ''),
+    nextStep: recoverJson.nextStep || {command: 'preflight', note: '图片绑定已恢复，旧预演已作废，请重新执行 preflight。', realPublish: false},
+    safety: {
+      realPublishOccurred: false,
+      newUploadTriggered: false,
+      newTaskCreated: false,
+      sameTask: true,
+      preflightInvalidated: true,
+    },
+  };
+  print(output);
+  if (!output.ok) process.exitCode = 1;
+}
+
 
 async function runPrepareProductAttribute(args) {
   if (!args.taskId) throw new Error('prepare-product-attribute requires --task-id <id>');
@@ -3077,6 +3202,10 @@ async function main() {
   }
   if (args.command === 'prepare-product-attribute' || args.command === 'prepare_product_attribute') {
     await runPrepareProductAttribute(args);
+    return;
+  }
+  if (args.command === 'recover-uploaded-asset-binding' || args.command === 'recover_uploaded_asset_binding') {
+    await runRecoverUploadedAssetBinding(args);
     return;
   }
   if (args.command === 'update-description' || args.command === 'update_description') {

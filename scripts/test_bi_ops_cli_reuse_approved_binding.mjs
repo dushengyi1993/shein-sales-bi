@@ -17,6 +17,7 @@ import http from 'node:http';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {buildOwnerKnowledgeDistribution} from '../lib/owner_knowledge_distribution.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'scripts', 'bi_ops_cli.mjs');
@@ -24,6 +25,7 @@ const KEEP_TEMP = process.argv.includes('--keep-temp');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'cli-reuse-approved-binding-'));
+const ownerKnowledge = buildOwnerKnowledgeDistribution({authorityId: 'test-owner', rules: []}, {publishedAt: '2026-08-31T00:00:00.000Z'});
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -51,9 +53,12 @@ const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url || '/', 'http://127.0.0.1').pathname;
   const {json} = await readBody(req);
   calls.push({path: pathname, method: req.method, json});
-  if (pathname.startsWith('/api/owner-knowledge/')) {
-    // The CLI degrades this to a warning and continues; keeps the test offline.
-    sendJson(res, {ok: false, error: 'manifest not configured in mock'}, 404);
+  if (pathname === '/api/owner-knowledge/manifest') {
+    sendJson(res, {ok: true, data: {...ownerKnowledge.manifest, ready: true, current: true, sourceCommit: 'test-owner-knowledge'}});
+    return;
+  }
+  if (pathname === '/api/owner-knowledge/bundle') {
+    sendJson(res, {ok: true, data: {manifest: ownerKnowledge.manifest, ...ownerKnowledge.bundle}});
     return;
   }
   if (pathname === '/api/link-ops-publish-assets' && req.method === 'POST') {

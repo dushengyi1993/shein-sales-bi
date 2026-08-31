@@ -93,6 +93,15 @@ import {
   normalizePublishPreparationOverrides,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {buildPendingListingImageCorrection} from '../lib/link_ops_pending_listing_image_correction.mjs';
+import {
+  RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT,
+  LISTING_BIND_RECOVERY_AUDIT_TYPE,
+  canonicalRecoveredPublishPayloadHash,
+  extractTaskExactIdentity,
+  createUploadedAssetBindingRecoveryPlan,
+  buildRecoveredTaskFromPlan,
+  validateUploadedAssetBindingRecoveryReplay,
+} from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
 import {isSheinSkc, normalizeSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
   buildDescriptionPayloadRows,
@@ -3191,6 +3200,42 @@ async function appendProductAttributeAudit(file, entry) {
     throw error;
   }
   return appendAudit(file, entry);
+}
+
+async function appendUploadedAssetBindingRecoveryAudit(file, entry) {
+  const failureMarker = String(process.env.SHEIN_BI_TEST_RECOVERY_AUDIT_FAIL_FILE || '');
+  if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+    const error = new Error('injected uploaded asset binding recovery audit failure');
+    error.code = 'RECOVER_BINDING_AUDIT_INJECTED_FAILURE';
+    throw error;
+  }
+  return appendAudit(file, entry);
+}
+
+async function waitForUploadedAssetBindingRecoveryLockTestGate(taskId) {
+  const gateDir = String(process.env.SHEIN_BI_TEST_RECOVERY_LOCK_GATE_DIR || '').trim();
+  if (process.env.NODE_ENV !== 'test' || !gateDir) return;
+  const gateName = safeTaskId(taskId);
+  const armFile = path.join(gateDir, `${gateName}.arm`);
+  const claimedFile = path.join(gateDir, `${gateName}.claimed`);
+  const readyFile = path.join(gateDir, `${gateName}.ready`);
+  const releaseFile = path.join(gateDir, `${gateName}.release`);
+  try {
+    await fs.rename(armFile, claimedFile);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'EEXIST') return;
+    throw error;
+  }
+  await fs.writeFile(readyFile, `${process.pid}\n`, 'utf8');
+  const deadline = Date.now() + 10_000;
+  while (!fssync.existsSync(releaseFile)) {
+    if (Date.now() >= deadline) {
+      const error = new Error(`uploaded asset binding recovery test lock gate timed out for ${gateName}`);
+      error.code = 'RECOVER_BINDING_TEST_LOCK_GATE_TIMEOUT';
+      throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
 }
 
 async function inspectProductAttributeResignAudit(file, {
@@ -10487,13 +10532,33 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     // source images or block this explicit same-task preparation step.
     assets: asArray(taskForCapture.assets).filter(asset => !String(asset?.mime || asset?.type || '').toLowerCase().startsWith('image/')),
   };
-  const captured = await runOpenApiProductExecutorForStore(
-    captureTask,
-    args,
-    {mode: 'dry-run', source: 'approved_publish_asset_prepare', actorForWriteGate: actor},
-    targetStore,
-    {capturePublishPayload: true, publishPreparation},
-  );
+  const recoveredAuditReusePayload = isReuse
+    && taskForCapture.publishAssetBinding?.evidence?.recoveredFromAudit === true
+    && taskForCapture.openapiPublishPayload
+    && typeof taskForCapture.openapiPublishPayload === 'object'
+    && !Array.isArray(taskForCapture.openapiPublishPayload)
+    ? JSON.parse(JSON.stringify(taskForCapture.openapiPublishPayload))
+    : null;
+  const captured = recoveredAuditReusePayload
+    ? {
+        capturedPublishPayload: recoveredAuditReusePayload,
+        result: {
+          blockers: [],
+          warnings: [],
+          payload: {
+            source: 'task',
+            recoveredFromAudit: true,
+            bindingFingerprint: String(taskForCapture.publishAssetBinding?.bindingFingerprint || ''),
+          },
+        },
+      }
+    : await runOpenApiProductExecutorForStore(
+      captureTask,
+      args,
+      {mode: 'dry-run', source: 'approved_publish_asset_prepare', actorForWriteGate: actor},
+      targetStore,
+      {capturePublishPayload: true, publishPreparation},
+    );
   if (!captured.capturedPublishPayload) {
     const error = new Error('无法从当前任务生成可绑定图片的发布 payload；没有创建新任务，也没有回退到源链接图片');
     error.status = 409;
@@ -10512,6 +10577,20 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     ? stripPublishPayloadDescriptions(bound.payload)
     : bound.payload;
   const now = new Date().toISOString();
+  const priorRecoveredBindingEvidence = isReuse
+    && task?.publishAssetBinding?.evidence?.recoveredFromAudit === true
+    ? {
+        recoveredFromAudit: true,
+        prepareBatchId: String(task.publishAssetBinding.evidence.prepareBatchId || task.publishAssetBinding.prepareBatchId || ''),
+        tupleHash: String(task.publishAssetBinding.evidence.tupleHash || ''),
+        requestHash: String(task.publishAssetBinding.evidence.requestHash || ''),
+        recoveredAt: String(task.publishAssetBinding.evidence.recoveredAt || ''),
+        recoveryIdentity: task.publishAssetBinding.evidence.recoveryIdentity
+          ? JSON.parse(JSON.stringify(task.publishAssetBinding.evidence.recoveryIdentity))
+          : null,
+        payloadHash: canonicalRecoveredPublishPayloadHash(preparedPublishPayload),
+      }
+    : null;
   const bindingFingerprint = canonicalPublishAssetBindingFingerprint(taskForCapture, {
     binding: {targetStore},
     images: bound.bindings,
@@ -10529,6 +10608,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       boundAt: now,
       boundByUser: actorUser(actor, req),
       bindingFingerprint,
+      ...(priorRecoveredBindingEvidence?.prepareBatchId ? {prepareBatchId: priorRecoveredBindingEvidence.prepareBatchId} : {}),
       imageCount: bound.bindings.length,
       images: bound.bindings.map(row => ({
         name: row.name,
@@ -10541,6 +10621,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
         sha256: row.sha256,
       })),
       evidence: {
+        ...(priorRecoveredBindingEvidence || {}),
         ...bound.evidence,
         preflightInvalidated: true,
         preparationMigration: requiresPreparationMigration,
@@ -20418,6 +20499,395 @@ async function main() {
           linkOpsExecutionLocks.delete(lockId);
         }
       }
+
+      if (url.pathname === '/api/link-ops-recover-uploaded-asset-binding') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const actorGate = requireConcreteOperatorActor(actor);
+        if (actorGate) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-recover-uploaded-asset-binding-denied', actor, ...requestMeta(req), denied: actorGate});
+          return sendJson(res, 403, actorGate);
+        }
+        let body;
+        try {
+          body = await readBodyJson(req, 1024 * 1024);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        const taskRef = String(body.taskId || body.id || '').trim();
+        if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+        const confirm = String(body.confirm || '').trim();
+        if (confirm !== RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `恢复已上传素材绑定必须提供精确确认词：${RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT}`,
+            code: 'RECOVER_UPLOADED_BINDING_CONFIRM_REQUIRED',
+          });
+        }
+        const expectedPrepareBatchId = String(body.expectedPrepareBatchId || body.prepareBatchId || '').trim();
+        if (!expectedPrepareBatchId || !/^[a-f0-9]{64}$/.test(expectedPrepareBatchId)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'expectedPrepareBatchId 必须是 64 位十六进制字符串',
+            code: 'RECOVER_UPLOADED_BINDING_PREPARE_BATCH_INVALID',
+          });
+        }
+        const uploadedImages = Array.isArray(body.uploadedImages) ? body.uploadedImages : [];
+        if (uploadedImages.length !== 6) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `uploadedImages 必须是精确 6 个 name/imageUrl/sha256 tuple；收到 ${uploadedImages.length}`,
+            code: 'RECOVER_UPLOADED_BINDING_TUPLE_COUNT_INVALID',
+          });
+        }
+        if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-recover-uploaded-asset-binding-gateway-unavailable', actor, ...requestMeta(req), task: {id: taskRef}});
+          return sendJson(res, 503, {
+            ok: false,
+            error: '恢复已上传素材绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway.updateTaskRecord；当前存储网关不可用',
+            code: 'LINK_OPS_RECOVER_BINDING_GATEWAY_UNAVAILABLE',
+          });
+        }
+        let lockId;
+        try {
+          lockId = safeTaskId(taskRef);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他操作，请等待当前操作结束'});
+        linkOpsExecutionLocks.add(lockId);
+        let recoveryCommit = null;
+        try {
+          await waitForUploadedAssetBindingRecoveryLockTestGate(lockId);
+        let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+        let found;
+        try {
+          found = findLinkOpsTaskOrThrow(current, taskRef);
+        } catch (error) {
+          const message = error?.message || String(error);
+          return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+        }
+        const access = authorizeLinkOpsRecord(actor, found.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+        if (!access.ok) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-recover-uploaded-asset-binding-denied', actor, ...requestMeta(req), task: {id: found.task.id}, denied: access.denied});
+          return sendJson(res, 403, access.denied);
+        }
+
+        const task = access.record;
+        const currentRevision = Number(task?.repositoryRevision || 0);
+        const expectedRevision = Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
+          ? body.expectedRevision
+          : currentRevision;
+        if (expectedRevision !== currentRevision) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: `Recovery CAS revision changed: current=${currentRevision} expected=${expectedRevision}`,
+            code: 'RECOVER_CAS_REVISION_CONFLICT',
+            bindingCommitted: false,
+            currentRevision,
+            expectedRevision,
+          });
+        }
+        let auditLogs = [];
+        try {
+          const auditText = await fs.readFile(args.auditFile, 'utf8');
+          auditLogs = auditText.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+        } catch {
+          auditLogs = [];
+        }
+        const existingBatch = task?.publishAssetBinding?.prepareBatchId || task?.publishAssetBinding?.evidence?.prepareBatchId;
+        if (task?.publishAssetBinding
+          && task.publishAssetBinding.sourceApproved === true
+          && task.publishAssetBinding.authority === 'human_reviewed_source'
+          && existingBatch === expectedPrepareBatchId
+          && task.publishAssetBinding.evidence?.recoveredFromAudit === true) {
+          try {
+            const replay = validateUploadedAssetBindingRecoveryReplay({
+              task,
+              tuples: uploadedImages,
+              auditLogs,
+              expectedPrepareBatchId,
+            });
+            const recoveryAuditExists = auditLogs.some(entry => entry?.type === LISTING_BIND_RECOVERY_AUDIT_TYPE
+              && String(entry?.task?.id || '') === String(task.id || '')
+              && String(entry?.bindingFingerprint || '') === replay.bindingFingerprint
+              && String(entry?.tupleHash || '') === replay.tupleHash);
+            if (!recoveryAuditExists) {
+              try {
+                await appendUploadedAssetBindingRecoveryAudit(args.auditFile, {
+                  at: new Date().toISOString(),
+                  type: LISTING_BIND_RECOVERY_AUDIT_TYPE,
+                  actor,
+                  ...requestMeta(req),
+                  task: {
+                    id: task.id,
+                    revision: currentRevision,
+                    stores: taskTargetStores(task),
+                    writeStores: taskWriteStores(task),
+                  },
+                  prepareBatchId: replay.prepareBatchId,
+                  bindingFingerprint: replay.bindingFingerprint,
+                  imageCount: replay.normalizedBindings.length,
+                  tupleHash: replay.tupleHash,
+                  requestHash: String(task.publishAssetBinding.evidence?.requestHash || ''),
+                  idempotentReplay: true,
+                });
+              } catch (auditError) {
+                return sendJson(res, 409, {
+                  ok: false,
+                  idempotentReplay: true,
+                  error: '恢复图片绑定已持久化并通过当前状态重算，但最终审计仍待补写；禁止再次执行恢复写入',
+                  code: 'LINK_OPS_RECOVER_BINDING_AUDIT_PENDING',
+                  bindingCommitted: true,
+                  readbackVerified: true,
+                  auditPending: true,
+                  stage: 'committed_but_audit_or_readback_pending',
+                  persistedRevision: currentRevision,
+                  bindingFingerprint: replay.bindingFingerprint,
+                  binding: task.publishAssetBinding,
+                  task: projectLinkOpsTaskForClient(task),
+                  auditError: String(auditError?.message || auditError).slice(0, 500),
+                });
+              }
+            }
+            return sendJson(res, 200, {
+              ok: true,
+              idempotentReplay: true,
+              bindingCommitted: true,
+              readbackVerified: true,
+              auditPending: false,
+              persistedRevision: currentRevision,
+              task: projectLinkOpsTaskForClient(task),
+              binding: task.publishAssetBinding,
+              bindingFingerprint: replay.bindingFingerprint,
+              stage: 'binding_recovered_needs_dry_run',
+              nextStep: {command: 'preflight', note: '图片绑定已就绪，请重新预演。', realPublish: false},
+            });
+          } catch (error) {
+            return sendJson(res, Number(error?.status || 409), error?.response || {
+              ok: false,
+              error: error?.message || String(error),
+              code: error?.code || 'RECOVER_IDEMPOTENT_REPLAY_DRIFT',
+            });
+          }
+        }
+
+          const taskIdentity = extractTaskExactIdentity(task);
+          const plan = createUploadedAssetBindingRecoveryPlan({
+            task,
+            tuples: uploadedImages,
+            auditLogs,
+            expectedRevision,
+            expectedReleaseId: taskIdentity.releaseId,
+            expectedPrepareBatchId,
+            confirmMarker: confirm,
+            actor: actorUser(actor, req),
+          });
+          const nextTask = buildRecoveredTaskFromPlan(task, plan, {actorUser: actorUser(actor, req)});
+          const expectedCommittedRevision = expectedRevision + 1;
+          const expectedCommittedPayloadHash = linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(nextTask));
+          let persisted = null;
+          let recoveredPostCommitError = null;
+          try {
+            persisted = await args.linkOpsStoreGateway.updateTaskRecord(taskRef, nextTask, {
+              expectedRevision,
+              actorUser: actorUser(actor, req),
+            });
+            const failureMarker = String(process.env.SHEIN_BI_TEST_RECOVERY_POST_COMMIT_FAIL_FILE || '');
+            if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+              const injected = new Error('injected uploaded asset binding recovery post-commit failure');
+              injected.code = 'LINK_OPS_RECOVER_BINDING_POST_COMMIT_INJECTED_FAILURE';
+              throw injected;
+            }
+          } catch (error) {
+            let observed = null;
+            let observedReplay = null;
+            try {
+              const observedStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              observed = findLinkOpsTaskOrThrow(observedStore, taskRef).task;
+              observedReplay = validateUploadedAssetBindingRecoveryReplay({
+                task: observed,
+                tuples: uploadedImages,
+                auditLogs,
+                expectedPrepareBatchId,
+              });
+            } catch {}
+            if (!observed
+              || Number(observed.repositoryRevision || 0) !== expectedCommittedRevision
+              || String(observed.repositoryPayloadHash || '') !== expectedCommittedPayloadHash
+              || String(observedReplay?.bindingFingerprint || '') !== plan.bindingFingerprint
+              || String(observed.publishAssetBinding?.bindingFingerprint || '') !== plan.bindingFingerprint) {
+              throw error;
+            }
+            persisted = observed;
+            recoveredPostCommitError = error;
+          }
+          recoveryCommit = {
+            persisted,
+            plan,
+            taskIdentity,
+          };
+
+          if (recoveredPostCommitError) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已由权威 revision、payloadHash 与 binding 精确回读证明持久化，但最终审计仍待补写；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放核验',
+              code: 'LINK_OPS_RECOVER_BINDING_POST_COMMIT_PENDING',
+              bindingCommitted: true,
+              readbackVerified: true,
+              auditPending: true,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(persisted.repositoryRevision || 0),
+              bindingFingerprint: plan.bindingFingerprint,
+              binding: persisted.publishAssetBinding,
+              task: projectLinkOpsTaskForClient(persisted),
+              errorDetail: String(recoveredPostCommitError?.message || recoveredPostCommitError).slice(0, 500),
+            });
+          }
+
+          let readbackTask = persisted;
+          let readbackVerified = false;
+          let readbackError = '';
+          try {
+            const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
+            validateUploadedAssetBindingRecoveryReplay({
+              task: verifyFound.task,
+              tuples: uploadedImages,
+              auditLogs,
+              expectedPrepareBatchId,
+            });
+            if (Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)) {
+              readbackTask = verifyFound.task;
+              readbackVerified = true;
+            }
+          } catch (error) {
+            readbackError = String(error?.message || error).slice(0, 500);
+          }
+
+          if (!readbackVerified) {
+            let auditPending = false;
+            try {
+              await appendUploadedAssetBindingRecoveryAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-recover-uploaded-asset-binding-readback-unverified',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef, revision: Number(persisted?.repositoryRevision || 0)},
+                bindingFingerprint: plan.bindingFingerprint,
+                error: readbackError,
+              });
+            } catch {
+              auditPending = true;
+            }
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已持久化，但审计或严格回读仍待完成；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放重验',
+              code: 'LINK_OPS_RECOVER_BINDING_READBACK_UNVERIFIED',
+              bindingCommitted: true,
+              readbackVerified: false,
+              auditPending,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(persisted?.repositoryRevision || 0),
+              bindingFingerprint: plan.bindingFingerprint,
+              task: {id: taskRef, store: taskIdentity.targetStore, sourceStore: taskIdentity.sourceStore, sourceSkc: taskIdentity.sourceSkc},
+            });
+          }
+
+          try {
+            await appendUploadedAssetBindingRecoveryAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: LISTING_BIND_RECOVERY_AUDIT_TYPE,
+              actor,
+              ...requestMeta(req),
+              task: {
+                id: readbackTask.id,
+                revision: Number(persisted?.repositoryRevision || 0),
+                stores: taskTargetStores(readbackTask),
+                writeStores: taskWriteStores(readbackTask),
+              },
+              prepareBatchId: plan.prepareBatchId,
+              bindingFingerprint: plan.bindingFingerprint,
+              imageCount: plan.recoveredBinding.imageCount,
+              tupleHash: plan.tupleHash,
+              requestHash: plan.requestHash,
+            });
+          } catch (auditError) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已持久化并通过严格回读，但最终审计待补写；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放核验',
+              code: 'LINK_OPS_RECOVER_BINDING_AUDIT_PENDING',
+              bindingCommitted: true,
+              readbackVerified: true,
+              auditPending: true,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(persisted?.repositoryRevision || 0),
+              bindingFingerprint: plan.bindingFingerprint,
+              binding: readbackTask.publishAssetBinding,
+              task: projectLinkOpsTaskForClient(readbackTask),
+              auditError: String(auditError?.message || auditError).slice(0, 500),
+            });
+          }
+
+          return sendJson(res, 200, {
+            ok: true,
+            bindingCommitted: true,
+            readbackVerified: true,
+            auditPending: false,
+            persistedRevision: Number(persisted?.repositoryRevision || 0),
+            task: projectLinkOpsTaskForClient(readbackTask),
+            binding: readbackTask.publishAssetBinding,
+            stage: 'binding_recovered_needs_dry_run',
+            nextStep: {command: 'preflight', note: '已恢复图片绑定，请重新预演。', realPublish: false},
+          });
+        } catch (error) {
+          if (recoveryCommit) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已持久化，但后续审计或严格回读异常；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放重验',
+              code: 'LINK_OPS_RECOVER_BINDING_POST_COMMIT_PENDING',
+              bindingCommitted: true,
+              readbackVerified: false,
+              auditPending: true,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(recoveryCommit.persisted?.repositoryRevision || 0),
+              bindingFingerprint: recoveryCommit.plan.bindingFingerprint,
+              task: {
+                id: taskRef,
+                store: recoveryCommit.taskIdentity.targetStore,
+                sourceStore: recoveryCommit.taskIdentity.sourceStore,
+                sourceSkc: recoveryCommit.taskIdentity.sourceSkc,
+              },
+              errorDetail: String(error?.message || error).slice(0, 500),
+            });
+          }
+          const mapped = linkOpsRepositoryHttpDetails(error);
+          if (mapped) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-recover-uploaded-asset-binding-failed',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              code: mapped.body?.code || '',
+              error: String(error?.message || error).slice(0, 500),
+            });
+            return sendJson(res, mapped.status, mapped.body);
+          }
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-recover-uploaded-asset-binding-failed',
+            actor,
+            ...requestMeta(req),
+            task: {id: taskRef},
+            error: String(error?.message || error).slice(0, 500),
+          });
+          return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error), code: error?.code || ''});
+        } finally {
+          linkOpsExecutionLocks.delete(lockId);
+        }
+      }
+
       if (url.pathname === '/api/link-ops-prepare-descriptions') {
         if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
         if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
