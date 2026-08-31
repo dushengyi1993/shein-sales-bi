@@ -84,7 +84,14 @@ assert.match(stackReview, /level_rule_id: levelRuleId/);
 assert.match(guardReport, /summarizeFreshLiveLowPriceOverlap/);
 assert.match(guardReport, /freshCouponEvidenceSupersedesLegacy/);
 assert.match(guardReport, /active_coupon_outside_allowed_plan/);
-assert.match(repairWorker, /--max-groups "\$REMAINING_GROUPS"/);
+assert.doesNotMatch(repairWorker, /--max-groups "\$REMAINING_GROUPS"/,
+  'drift/fallback runners must not receive the whole remaining budget in one invocation');
+assert.match(repairWorker, /batch_fix_limited_discount_drift\.mjs[\s\S]*?--max-groups 1/,
+  'drift runner must process exactly one group per worker-loop invocation');
+assert.match(repairWorker, /batch_apply_new_listing_limited_discount\.mjs[\s\S]*?--max-groups 1/,
+  'fallback runner must process exactly one group per worker-loop invocation');
+assert.match(repairWorker, /consume_group_budget/,
+  'worker loop must account each processed item or group against the aggregate budget');
 assert.match(repairWorker, /new_groups_in_result/);
 assert.match(repairWorker, /--skip-build-plan --execute/);
 assert.match(repairWorker, /--expected-work-fingerprint/);

@@ -406,6 +406,33 @@ run_guard_report() {
     "${current_run_evidence_args[@]}"
 }
 
+rebuild_final_guard_report_after_repair_plans() {
+  local rebuild_status binding_status publish_status
+  echo "[cloud_marketing_live_guard] rebuild final guard report after repair plans before queue build"
+  if run_stage_with_retry "final-guard-report" run_guard_report; then
+    GUARD_INPUT_OUT="$GUARD_STAGE_DIR/marketing-daily-guard-${DATE}.json"
+    if validate_guard_plan_binding "$GUARD_INPUT_OUT" "$CURRENT_REGISTRY_HASH"; then
+      if publish_staged_guard_report; then
+        GUARD_INPUT_OUT="$GUARD_OUT"
+        echo "[cloud_marketing_live_guard] final guard report published before queue build guard=$GUARD_OUT registryHash=$GUARD_BOUND_REGISTRY_HASH priceOverridesHash=$GUARD_BOUND_PRICE_OVERRIDES_SHA256"
+        return 0
+      else
+        publish_status=$?
+        echo "[cloud_marketing_live_guard] WARN final guard report publication returned status=$publish_status" >&2
+        return "$publish_status"
+      fi
+    else
+      binding_status=$?
+      echo "[cloud_marketing_live_guard] WARN final guard report binding returned status=$binding_status" >&2
+      return "$binding_status"
+    fi
+  else
+    rebuild_status=$?
+    echo "[cloud_marketing_live_guard] WARN final guard report rebuild returned status=$rebuild_status" >&2
+    return "$rebuild_status"
+  fi
+}
+
 refresh_marketing_cost_map() {
   python3 scripts/marketing/build_marketing_cost_map.py
 }
@@ -1061,34 +1088,51 @@ if [[ "$GUARD_STATUS" -eq 0 ]]; then
         if [[ "$HIGH_CLICK_PLAN_STATUS" -eq 0 && "$ON_SHELF_PLAN_STATUS" -eq 0 && "$MANUAL_PLAN_STATUS" -eq 0 && "$DRIFT_PLAN_STATUS" -eq 0 ]]; then
           if [[ "$BUILD_REPAIR_QUEUE" != "1" ]]; then
             :
-          elif build_repair_queue; then
-            REPAIR_TOTAL_ROWS="$(queue_json_value 'Number(j.counts?.totalRows || 0)' 0)"
-            REPAIR_TOTAL_GROUPS="$(queue_json_value 'Number(j.counts?.totalGroups || 0)' 0)"
-            if read_repair_queue_pair; then
-              :
-            else
-              REPAIR_QUEUE_BUILD_STATUS=$?
-              echo "[cloud_marketing_live_guard] WARN generated repair queue pair validation returned status=$REPAIR_QUEUE_BUILD_STATUS" >&2
-            fi
-            if [[ "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 && "$REPAIR_TOTAL_ROWS" =~ ^[0-9]+$ && "$REPAIR_TOTAL_ROWS" -gt 0 ]]; then
-              REPAIR_DEFERRED=1
-              if node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
-                --queue "$REPAIR_QUEUE_FILE" \
-                --expected-queue-fingerprint "$REPAIR_QUEUE_FINGERPRINT" \
-                --expected-source-guard-hash "$REPAIR_QUEUE_SOURCE_GUARD_HASH" \
-                --expected-queue-state-sha256 "$REPAIR_QUEUE_STATE_SHA256" \
-                --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"; then
-                echo "[cloud_marketing_live_guard] repair workload queued rows=$REPAIR_TOTAL_ROWS groups=$REPAIR_TOTAL_GROUPS; cloud inspection is complete and all writes are handed to local controlled execution"
-              else
-                HANDOFF_STATUS=$?
-                REPAIR_QUEUE_BUILD_STATUS="$HANDOFF_STATUS"
-                REPAIR_DEFERRED=0
-                echo "[cloud_marketing_live_guard] WARN repair queue handoff returned status=$HANDOFF_STATUS" >&2
-              fi
-            fi
           else
-            REPAIR_QUEUE_BUILD_STATUS=$?
-            echo "[cloud_marketing_live_guard] WARN repair queue build returned status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+            FINAL_GUARD_REBUILD_STATUS=0
+            if rebuild_final_guard_report_after_repair_plans; then
+              echo "[cloud_marketing_live_guard] rebind high-click special plan to final canonical guard before queue build"
+              if run_high_click_special_plan; then
+                echo "[cloud_marketing_live_guard] high-click special plan rebound to final canonical guard"
+                if build_repair_queue; then
+                  REPAIR_TOTAL_ROWS="$(queue_json_value 'Number(j.counts?.totalRows || 0)' 0)"
+                  REPAIR_TOTAL_GROUPS="$(queue_json_value 'Number(j.counts?.totalGroups || 0)' 0)"
+                  if read_repair_queue_pair; then
+                    :
+                  else
+                    REPAIR_QUEUE_BUILD_STATUS=$?
+                    echo "[cloud_marketing_live_guard] WARN generated repair queue pair validation returned status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+                  fi
+                  if [[ "$REPAIR_QUEUE_BUILD_STATUS" -eq 0 && "$REPAIR_TOTAL_ROWS" =~ ^[0-9]+$ && "$REPAIR_TOTAL_ROWS" -gt 0 ]]; then
+                    REPAIR_DEFERRED=1
+                    if node scripts/marketing/manage_marketing_repair_queue.mjs handoff-local \
+                      --queue "$REPAIR_QUEUE_FILE" \
+                      --expected-queue-fingerprint "$REPAIR_QUEUE_FINGERPRINT" \
+                      --expected-source-guard-hash "$REPAIR_QUEUE_SOURCE_GUARD_HASH" \
+                      --expected-queue-state-sha256 "$REPAIR_QUEUE_STATE_SHA256" \
+                      --reason "cloud marketing writes are disabled; preserve the exact queue for local controlled execution"; then
+                      echo "[cloud_marketing_live_guard] repair workload queued rows=$REPAIR_TOTAL_ROWS groups=$REPAIR_TOTAL_GROUPS; cloud inspection is complete and all writes are handed to local controlled execution"
+                    else
+                      HANDOFF_STATUS=$?
+                      REPAIR_QUEUE_BUILD_STATUS="$HANDOFF_STATUS"
+                      REPAIR_DEFERRED=0
+                      echo "[cloud_marketing_live_guard] WARN repair queue handoff returned status=$HANDOFF_STATUS" >&2
+                    fi
+                  fi
+                else
+                  REPAIR_QUEUE_BUILD_STATUS=$?
+                  echo "[cloud_marketing_live_guard] WARN repair queue build returned status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+                fi
+              else
+                HIGH_CLICK_PLAN_STATUS=$?
+                REPAIR_QUEUE_BUILD_STATUS="$HIGH_CLICK_PLAN_STATUS"
+                echo "[cloud_marketing_live_guard] WARN repair queue skipped because final high-click plan rebind failed status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+              fi
+            else
+              FINAL_GUARD_REBUILD_STATUS=$?
+              REPAIR_QUEUE_BUILD_STATUS="$FINAL_GUARD_REBUILD_STATUS"
+              echo "[cloud_marketing_live_guard] WARN repair queue skipped because final guard rebuild failed status=$REPAIR_QUEUE_BUILD_STATUS" >&2
+            fi
           fi
         fi
         echo "[cloud_marketing_live_guard] action check highClickSpecial=$HIGH_CLICK_ACTION_COUNT manualSpecialRestore=$MANUAL_SPECIAL_RESTORE_COUNT driftBelow=$DRIFT_BELOW_COUNT limitedFallbackExecutable=$NEW_LISTING_EXEC_COUNT deferred=$REPAIR_DEFERRED"

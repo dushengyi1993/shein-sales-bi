@@ -4688,7 +4688,12 @@ async function main() {
   }
   if (couponSubmitDryRun.status === 'untrusted' && !freshCouponEvidenceSupersedesLegacy) addBlocker(blockers, 'coupon_submit_not_dry_run', '最新优惠券提交 summary 不是 dry-run，不能作为自动任务安全证据', {path: couponSubmitDryRun.summaryPath});
   if (couponEligibilityPlanError) addBlocker(blockers, 'coupon_target_plan_classifier_failed', '优惠券 allowed15 目标计划解析失败，不能判断旧普通活动叠券风险', {error: couponEligibilityPlanError});
-  if (knownOrdinaryEvidenceSource.status === 'missing') addBlocker(blockers, 'known_ordinary_evidence_missing', '旧普通营销活动填报价证据目录缺失，不能形成价格栈 no-action 结论', {path: knownOrdinaryEvidenceSource.path});
+  if (knownOrdinaryEvidenceSource.status === 'missing' && Number(knownOrdinaryActivityGuard.allowed15PlanCount || 0) > 0) {
+    addBlocker(blockers, 'known_ordinary_evidence_missing', '旧普通营销活动填报价证据目录缺失，不能形成价格栈 no-action 结论', {
+      path: knownOrdinaryEvidenceSource.path,
+      allowed15PlanCount: knownOrdinaryActivityGuard.allowed15PlanCount,
+    });
+  }
   if (!biPortal.data) addBlocker(blockers, 'bi_portal_source_unavailable', '没有可解析的 BI Portal data.json，不能判断新链接、BI 标签或新鲜度', {path: biPortal.source?.path || ''});
   if (!marketingStackReviewCoverage.coverageComplete) {
     addBlocker(
