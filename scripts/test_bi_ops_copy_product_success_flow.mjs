@@ -1567,6 +1567,13 @@ try {
           inventory: 100,
           titleAr: productCase.arName,
           titleEn: productCase.englishName,
+          attributeOverrides: [{
+            attribute_id: 1002323,
+            attribute_extra_value: '1200',
+            attribute_unit: 'mA',
+            attribute_value_id: 304302428,
+            source: 'explicit_prepare_publish',
+          }],
         },
         bindings: [
           {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1, sha256: 'a'.repeat(64)},
@@ -1697,6 +1704,13 @@ try {
           inventory: 100,
           titleAr: productCase.arName,
           titleEn: productCase.englishName,
+          attributeOverrides: [{
+            attribute_id: 1002323,
+            attribute_extra_value: '1200',
+            attribute_unit: 'mA',
+            attribute_value_id: 304302428,
+            source: 'explicit_prepare_publish',
+          }],
         },
         bindings: [
           {name: '02-approved-main.png', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/approved/main.png', width: 900, height: 1200, order: 1, sha256: 'a'.repeat(64)},

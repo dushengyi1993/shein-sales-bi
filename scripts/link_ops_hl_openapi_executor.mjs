@@ -1071,6 +1071,60 @@ function assertEqualNumberField(values, expected, label) {
   }
 }
 
+function verifiedPreBindingMaterializedDescriptionBase(task, existingPayload, targetStore) {
+  const materialization = task?.descriptionPayloadMaterialization;
+  const trustedPayloadSources = new Set([
+    "webapi_snapshot",
+    "bi_portal_webapi_snapshot",
+    "webapi_snapshot_exact_source_lock",
+  ]);
+  if (
+    task?.publishAssetBinding
+    || task?.metadata?.publishAssetBinding
+    || task?.descriptionMaterialBinding?.targetStore !== targetStore
+    || materialization?.source !== "openapi_executor_dry_run_capture"
+    || !trustedPayloadSources.has(String(materialization?.payloadSource || ""))
+    || materialization?.targetStore !== targetStore
+    || materialization?.payloadHashAlgorithm !== "sha256-stable-json-v1"
+    || !/^[a-f0-9]{64}$/i.test(String(materialization?.payloadHash || ""))
+    || !existingPayload || typeof existingPayload !== "object" || Array.isArray(existingPayload)
+  ) return false;
+
+  // descriptionMaterialization stores the hash of the base payload before its
+  // reviewed descriptions were added. Recompute that exact pre-binding hash
+  // so this exception cannot certify a later destination-field mutation.
+  const basePayload = JSON.parse(JSON.stringify(existingPayload));
+  delete basePayload.multi_language_desc_list;
+  delete basePayload.multiLanguageDescList;
+  delete basePayload.productMultiDescList;
+  delete basePayload.product_multi_desc_list;
+  if (sha256Stable(basePayload) !== String(materialization.payloadHash).toLowerCase()) return false;
+
+  const descriptionPolicy = validateCopyProductDescriptionPolicy(task, existingPayload);
+  return descriptionPolicy.ok === true;
+}
+
+function hasApprovedPayloadAsset(task) {
+  return asArray(task?.assets).some(asset => (
+    String(asset?.mime || "").toLowerCase() === "application/json"
+    && asset?.sourceApproved === true
+    && String(asset?.approvalKind || "") === "human_reviewed_publish_payload"
+    && /^[a-f0-9]{64}$/i.test(String(asset?.sha256 || ""))
+  ));
+}
+
+function approvedPayloadAssetBase(task, existingPayload) {
+  if (!existingPayload || typeof existingPayload !== "object" || Array.isArray(existingPayload)) return false;
+  if (!looksLikePublishPayload(existingPayload)) return false;
+  return hasApprovedPayloadAsset(task);
+}
+
+function approvedUnboundPayloadAssetBase(task, existingPayload) {
+  const directPayloadKeys = ["openapiPublishPayload", "sheinOpenapiPublishPayload", "publishPayload", "publishOrEditPayload"];
+  if (directPayloadKeys.some(key => looksLikePublishPayload(task?.[key]))) return false;
+  return approvedPayloadAssetBase(task, existingPayload);
+}
+
 function buildProtectedDestinationProjection(task, existingPayload, targetStore) {
   const destinationStore = normalizedTargetStore(targetStore);
   const stores = destinationStoreCandidates(task, destinationStore);
@@ -1079,18 +1133,33 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
   }
   const preparation = structuredDestinationPreparation(task);
   const overrides = preparation.normalized;
+  // A description binding may legally win the race before publish-assets and
+  // materialize a source-snapshot base payload. That payload is not yet a
+  // destination title/price/inventory/image lock: the retried publish-assets
+  // request is the operation that creates those locks. Trust it only when the
+  // portal persisted a hash-verified materialization marker.
+  const preBindingMaterializedBase = verifiedPreBindingMaterializedDescriptionBase(
+    task,
+    existingPayload,
+    destinationStore,
+  );
+  // A reviewed JSON payload upload is authoritative input, not a destination
+  // lock. The first approved publish-assets request may replace its source
+  // projection with the explicitly reviewed title/price/inventory/images.
+  const unboundTrustedBase = preBindingMaterializedBase
+    || approvedUnboundPayloadAssetBase(task, existingPayload);
   const payloadStores = payloadTargetStoreValues(existingPayload);
   if (payloadStores.length && payloadStores.some(store => store !== destinationStore)) {
     throw new Error(`existing task payload target store does not match ${destinationStore}`);
   }
   const payloadGroups = payloadTitleGroupValues(existingPayload);
-  if (payloadGroups.length && (!overrides.titleGroup || payloadGroups.some(group => group !== overrides.titleGroup))) {
+  if (!unboundTrustedBase && payloadGroups.length && (!overrides.titleGroup || payloadGroups.some(group => group !== overrides.titleGroup))) {
     throw new Error('existing task payload title group has no matching structured destination preparation lock');
   }
 
   const titles = targetTitleRows(existingPayload);
   const structuredTitles = overrides.titles || {};
-  if (titles.length) {
+  if (!unboundTrustedBase && titles.length) {
     for (const row of titles) {
       if (!structuredTitles[row.language] || structuredTitles[row.language] !== row.name) {
         throw new Error(`existing task payload title ${row.language} has no matching structured destination title lock`);
@@ -1108,7 +1177,7 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
   }
 
   const imageBinding = validateStructuredImageBinding(task, destinationStore, existingPayload);
-  if (normalizePublishPayloadImageProjection(existingPayload).length && !imageBinding) {
+  if (!unboundTrustedBase && normalizePublishPayloadImageProjection(existingPayload).length && !imageBinding) {
     throw new Error('existing task payload contains destination images without a locked publishAssetBinding');
   }
 
@@ -1116,14 +1185,16 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
   const supplierSkus = payloadSupplierSkuValues(existingPayload);
   const costs = payloadCostValues(existingPayload);
   const inventories = payloadInventoryValues(existingPayload);
-  assertEqualNumberField(costs, overrides.supplyPrice, 'supplyPrice');
-  assertEqualNumberField(inventories, overrides.inventory, 'inventory');
-  if (standardGoods.length && (!overrides.standardGoodsSn || standardGoods.some(value => value !== overrides.standardGoodsSn))) {
-    throw new Error('existing task payload standardGoodsSn has no matching structured preparation lock');
-  }
   const expectedSupplierSku = overrides.supplierSku || overrides.standardGoodsSn;
-  if (supplierSkus.length && (!expectedSupplierSku || supplierSkus.some(value => value !== expectedSupplierSku))) {
-    throw new Error('existing task payload supplierSku has no matching structured preparation lock');
+  if (!unboundTrustedBase) {
+    assertEqualNumberField(costs, overrides.supplyPrice, 'supplyPrice');
+    assertEqualNumberField(inventories, overrides.inventory, 'inventory');
+    if (standardGoods.length && (!overrides.standardGoodsSn || standardGoods.some(value => value !== overrides.standardGoodsSn))) {
+      throw new Error('existing task payload standardGoodsSn has no matching structured preparation lock');
+    }
+    if (supplierSkus.length && (!expectedSupplierSku || supplierSkus.some(value => value !== expectedSupplierSku))) {
+      throw new Error('existing task payload supplierSku has no matching structured preparation lock');
+    }
   }
 
   return {
@@ -1190,6 +1261,31 @@ function applyExactSourceLockedInputCurrentOverride(payload, rawPreparation = {}
 function mergeExactSourceDestinationBindings(sourcePayload, task, existingPayload, targetStore) {
   let payload = jsonClone(sourcePayload);
   const applied = [];
+  const preserveApprovedPayloadAttributes = approvedPayloadAssetBase(task, existingPayload)
+    || hasApprovedPayloadAsset(task)
+    || Boolean(task?.publishAssetBinding || task?.metadata?.publishAssetBinding);
+  if (preserveApprovedPayloadAttributes) {
+    // The reviewed JSON upload is the operator-owned base for destination
+    // attributes. Exact-source hydration still supplies identity and detail
+    // locks, while these rows give deterministic template rules the reviewed
+    // facts (for example non-dangerous hazard category) needed to fill
+    // required classification attributes without guessing.
+    const sourceRows = asArray(payload.product_attribute_list || payload.productAttributeList)
+      .filter(row => row && typeof row === "object" && !Array.isArray(row));
+    const sourceRowsById = new Map(sourceRows.map(row => [normalizeAttributeId(row.attribute_id ?? row.attributeId), row]));
+    const existingRows = asArray(existingPayload?.product_attribute_list || existingPayload?.productAttributeList)
+      .filter(row => row && typeof row === "object" && !Array.isArray(row));
+    for (const row of existingRows) {
+      const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId);
+      if (!attributeId || attributeId === normalizeAttributeId(1000546) || sourceRowsById.has(attributeId)) continue;
+      const cloned = jsonClone(row);
+      sourceRows.push(cloned);
+      sourceRowsById.set(attributeId, cloned);
+      applied.push(`destination.approved_payload_asset.attribute.${attributeId}`);
+    }
+    payload.product_attribute_list = sourceRows;
+    delete payload.productAttributeList;
+  }
   const projection = buildProtectedDestinationProjection(task, existingPayload, targetStore);
   const emptyDescriptionApplied = applyExplicitEmptyDescriptionProjection(payload, task, existingPayload);
   payload = emptyDescriptionApplied.payload;
@@ -1279,10 +1375,23 @@ async function buildExactSourceLockedPayload(task, {targetStore, source, existin
   // rewrite supplier_code. Provenance guards must never treat the merged
   // target identity as evidence about the locked source product.
   const sourcePayloadSupplierCodes = publishTargetSupplierCodes(readiness.payload);
-  const merged = mergeExactSourceDestinationBindings(readiness.payload, task, existingPayload, targetStore);
+  // A reviewed JSON payload upload is the destination-owned baseline. Exact
+  // source hydration remains authoritative for source identity/detail locks,
+  // but must not replace reviewed generic-product facts with a different
+  // cached source product before the first approved binding.
+  const useApprovedAssetBase = approvedPayloadAssetBase(task, existingPayload);
+  const exactSourceBasePayload = jsonClone(useApprovedAssetBase ? existingPayload : readiness.payload);
+  if (useApprovedAssetBase) {
+    const exactSourceSkc = asArray(exactSourceBasePayload.skc_list || exactSourceBasePayload.skcList)[0];
+    if (exactSourceSkc && !exactSourceSkc.source_skc) exactSourceSkc.source_skc = source.sourceSkc;
+  }
+  const merged = mergeExactSourceDestinationBindings(exactSourceBasePayload, task, existingPayload, targetStore);
+  const targetIdentity = useApprovedAssetBase
+    ? applyTargetStandardGoodsSn(merged.payload, taskStandardGoodsSn(task))
+    : {payload: merged.payload, applied: []};
   return {
     source: 'webapi_snapshot_exact_source_lock',
-    payload: merged.payload,
+    payload: targetIdentity.payload,
     inferred: source,
     exactSourceLock: true,
     generatedDraft: summarizeDraftForExecutor(generated),
@@ -1290,7 +1399,10 @@ async function buildExactSourceLockedPayload(task, {targetStore, source, existin
     mappingBlockers: generated.blockers,
     structuredMappingBlockers: generated.mappingBlockers,
     mappingWarnings: generated.warnings,
-    destinationBindingsApplied: merged.applied,
+    destinationBindingsApplied: [
+      ...merged.applied,
+      ...targetIdentity.applied.map(value => `destination.task_standard_goods_sn.${value}`),
+    ],
     destinationProjection: merged.projection.protectedFields,
     sourceDetailHash: readiness.sourceDetailHash,
     sourceDetailLock: readiness.sourceDetailLock,
