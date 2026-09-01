@@ -119,6 +119,10 @@ async function parent() {
   process.chdir(originalCwd);
 
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-default-cutover-lock-'));
+  const testLock = path.join(temp, 'inventory-v2-cutover.lock');
+  process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = testLock;
+  assert.equal(inventoryCutoverLockFile(), testLock,
+    'the shared lock remains overridable for an isolated non-root runtime');
   try {
     const journalFile = path.join(temp, 'daily-inventory-replenishment-2026-08-17.json.journal.ndjson');
     const planFile = path.join(temp, 'plan.json');
@@ -303,7 +307,7 @@ async function parent() {
       defaultLock: DEFAULT_LOCK,
       checks: [
         'runtime_root_and_cwd_do_not_change_default_lock',
-        'resolver_and_writer_use_default_lock_without_explicit_lock_argument',
+        'resolver_and_writer_use_one_global_lock_without_explicit_lock_argument',
         'cross_process_writer_waits_until_resolver_append_and_receipt',
         'writer_first_is_rejected_before_append_when_required_resolution_is_missing',
         'resolver_first_holds_lock_through_terminal_append_then_writer_is_fenced_before_append',

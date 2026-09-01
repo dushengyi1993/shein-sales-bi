@@ -16,6 +16,7 @@ import {SheinOpenApiClient} from '../lib/shein_openapi_client.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-v2-entrypoints-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 const exactScope = {
   storeKey: 'XL',
   skc: 'sb260606205087254179320',

@@ -103,6 +103,7 @@ const server = http.createServer((request, response) => {
 
 const port = await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => resolve(server.address().port)); });
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-owner-same-target-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 try {
   const resultsDir = path.join(temp, 'runtime', 'results'); const plansDir = path.join(temp, 'runtime', 'plans');
   await fs.mkdir(resultsDir, {recursive: true}); await fs.mkdir(plansDir, {recursive: true});

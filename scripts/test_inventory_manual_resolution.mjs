@@ -27,6 +27,7 @@ import {
 } from './inventory/resolve_manual_inventory_intent.mjs';
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-manual-resolution-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 const journal = path.join(temp, 'daily-inventory-replenishment-2026-08-17.json.journal.ndjson');
 const otherDir = path.join(temp, 'other-journals');
 const otherJournal = path.join(otherDir, 'et-low-inventory-batch-2026-08-17.json.journal.ndjson');

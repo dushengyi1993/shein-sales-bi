@@ -323,6 +323,7 @@ const TEST_ESTIMATES_MS = {
   'scripts/test_bi_ops_cli_flow.mjs': 90_000,
   'scripts/test_partner_cli_version_change.mjs': 30_000,
   'scripts/test_partner_cli_updater.mjs': 35_000,
+  'scripts/test_daily_inventory_executor_lifecycle.mjs': 90_000,
   'scripts/test_link_ops_executor_source_detail_lock.mjs': 60_000,
   'scripts/test_et_forwarder_runtime_contract.mjs': 60_000,
   'scripts/test_migrate_cloud_runtime_mount_layout.mjs': 1_800_000,
@@ -479,7 +480,11 @@ for (const file of selectedTests) {
   // that integration test a bounded 60s outer tier and a measured 30s shard
   // estimate. The updater crash/recovery matrix also needs just over the
   // default tier (31042ms locally), so it gets the same bounded 60s tier and a
-  // measured 35s estimate; unclassified tests keep the 30s fail-fast budget.
+  // measured 35s estimate. The daily inventory executor lifecycle spans many
+  // isolated subprocess scenarios and crossed even a 60s local outer budget
+  // without an assertion failure; its WSL pass measured 85.21s, so it uses a
+  // bounded 180s tier and a 90s shard estimate. Unclassified tests keep the
+  // 30s fail-fast budget.
   const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     ? 300_000
     : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs'
@@ -510,6 +515,8 @@ for (const file of selectedTests) {
                 ? 60_000
               : file === 'scripts/test_partner_cli_updater.mjs'
                 ? 60_000
+              : file === 'scripts/test_daily_inventory_executor_lifecycle.mjs'
+                ? 180_000
               : file === 'scripts/test_cloud_marketing_immediate_run.mjs'
                 ? 90_000
               : file === 'scripts/test_link_ops_executor_source_detail_lock.mjs'
