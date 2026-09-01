@@ -1,7 +1,8 @@
 [Unit]
 Description=SHEIN BI Portal Node service
 Wants=network-online.target
-After=network-online.target
+Requires=shein-bi-session-secret.service
+After=network-online.target shein-bi-session-secret.service
 
 [Service]
 Type=simple
@@ -11,6 +12,9 @@ UMask=0027
 WorkingDirectory=/opt/shein-bi/app
 EnvironmentFile=/srv/shein-bi/secrets/portal-warehouse.env
 Environment=NODE_ENV=production
+Environment=SHEIN_OPENAPI_PRODUCT_CACHE_DIR=/srv/shein-bi/runtime/openapi-product-cache
+Environment=SHEIN_BI_MAINTENANCE_INVENTORY_JOURNAL_DIR=/srv/shein-bi/runtime/daily-inventory-replenishment/results
+Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=/srv/shein-bi/runtime/daily-inventory-replenishment/results:/srv/shein-bi/runtime/et-low-inventory-guard/results
 Environment=CODEX_HOME=/home/sheinops/.codex
 Environment=SHEIN_OWNER_KNOWLEDGE_PRINCIPAL=dushengyi
 Environment=SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR=/srv/shein-bi/owner-knowledge-repo
@@ -18,8 +22,9 @@ Environment=SHEIN_OWNER_KNOWLEDGE_GIT_BRANCH=owner-knowledge
 Environment=SHEIN_OWNER_KNOWLEDGE_GIT_REMOTE=origin
 Environment=SHEIN_OWNER_KNOWLEDGE_GIT_LOCK_FILE=/srv/shein-bi/runtime/owner-knowledge-git-publish.lock
 Environment=SHEIN_OWNER_KNOWLEDGE_RECONCILE_MS=3600000
-Environment=SHEIN_BI_OPS_CLI_MIN_VERSION=2026.07.12.1
-Environment=SHEIN_BI_OPS_CLI_RECOMMENDED_VERSION=2026.07.12.1
+Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=/srv/shein-bi/partner-cli
+# The Portal defaults both values to BI_OPS_CLI_VERSION from the packaged
+# source.  Do not pin a second, manually drifting version in systemd.
 Environment=SHEIN_LINK_OPS_STORE=postgres
 Environment=SHEIN_WEBHOOK_REPOSITORY_ENABLED=1
 Environment=SHEIN_WEBHOOK_TASK_RECONCILE_MS=5000
@@ -67,11 +72,17 @@ Environment=SHEIN_BI_INTENT_PLANNER_ENABLED=1
 Environment=SHEIN_BI_JOB_WORKER_ENABLED=1
 Environment=SHEIN_BI_JOB_POLL_MS=1500
 Environment=SHEIN_BI_JOB_LEASE_MS=600000
+Environment=SHEIN_BI_PORTAL_SHUTDOWN_TIMEOUT_MS=12000
+Environment=SHEIN_LINK_OPS_OPENAPI_EXECUTOR_KILL_GRACE_MS=1500
 Environment=NODE_OPTIONS=--max-old-space-size=1536
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/openapi-product-cache
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/daily-inventory-replenishment/results
 ExecStartPre=/usr/bin/node scripts/generate_bi_portal_shell.mjs
-ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --host 127.0.0.1 --port 8787 --state-file /srv/shein-bi/runtime/bi_action_state.json --link-ops-task-file /srv/shein-bi/runtime/bi_link_ops_tasks.json --link-ops-chat-file /srv/shein-bi/runtime/bi_link_ops_chats.json --link-ops-asset-dir /srv/shein-bi/runtime/bi_link_ops_assets --audit-file /srv/shein-bi/logs/bi_portal_action_audit.jsonl
+ExecStart=/usr/bin/node scripts/serve_bi_portal.mjs --host 127.0.0.1 --port 8787 --state-file /srv/shein-bi/runtime/bi_action_state.json --link-ops-task-file /srv/shein-bi/runtime/bi_link_ops_tasks.json --link-ops-chat-file /srv/shein-bi/runtime/bi_link_ops_chats.json --link-ops-asset-dir /srv/shein-bi/runtime/bi_link_ops_assets --audit-file /srv/shein-bi/logs/bi_portal_action_audit.jsonl --session-secret-file /data/shein-bi/state/bi_portal_session_secret.local
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
 MemoryHigh=1200M
 MemoryMax=2200M
 OOMPolicy=stop

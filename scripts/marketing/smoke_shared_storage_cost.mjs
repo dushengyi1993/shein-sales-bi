@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import {
   buildSharedStorageCostIndex,
   findSharedStorageCost,
+  storageMethodForEvidence,
   storageEvidenceBlocksSharedFallback,
 } from '../../lib/marketing_shared_storage_cost.mjs';
 
@@ -88,8 +89,23 @@ assert.equal(findSharedStorageCost(index, ['MISSING-SALES']), null);
 assert.equal(findSharedStorageCost(index, ['STALE-UNSOLD']), null);
 assert.equal(findSharedStorageCost(index, ['UNMATCHED-UNSOLD']), null);
 assert.equal(storageEvidenceBlocksSharedFallback({storageQuantityEvidenceStatus: 'fresh_quantity_crosscheck_passed'}), false);
-assert.equal(storageEvidenceBlocksSharedFallback({storageQuantityEvidenceStatus: 'inventory_storage_quantity_mismatch'}), true);
+assert.equal(storageEvidenceBlocksSharedFallback({
+  storageUnitCostSar: 2.2078,
+  storageQuantityEvidenceStatus: 'inventory_storage_quantity_mismatch',
+}), true, 'an explicit mismatch must still block shared fallback even when direct billing evidence exists');
 assert.equal(storageEvidenceBlocksSharedFallback({}), false, 'old maps without evidence status remain backward compatible');
+const mismatchStorageMethod = storageMethodForEvidence({
+  storageUnitCostSar: 2.2078,
+  storageQuantityEvidenceStatus: 'inventory_storage_quantity_mismatch',
+  baseMethod: 'download_detail',
+});
+assert.match(mismatchStorageMethod, /billing_unit_cost/);
+assert.match(mismatchStorageMethod, /crosscheck_warning/);
+assert.doesNotMatch(mismatchStorageMethod, /blocked|missing/i);
+assert.equal(storageMethodForEvidence({
+  storageQuantityEvidenceStatus: 'inventory_storage_quantity_mismatch',
+  baseMethod: 'download_detail',
+}), 'missing', 'a missing direct billed unit must remain fail-closed');
 for (const file of [
   'scripts/marketing/build_marketing_sku_approval.mjs',
   'scripts/marketing/export_marketing_stack_review.mjs',
@@ -97,6 +113,10 @@ for (const file of [
   const source = fs.readFileSync(file, 'utf8');
   assert.match(source, /storageEvidenceBlocked \? null : findSharedStorageCost/,
     `${file} must not bypass an explicit storage evidence conflict through shared fallback`);
+  assert.match(source, /storageMethodForEvidence\(/,
+    `${file} must label a direct billed unit plus crosscheck conflict as a warning`);
+  assert.match(source, /数量差异提示/,
+    `${file} must retain a readable quantity-difference warning`);
 }
 console.log(JSON.stringify({
   ok: true,

@@ -68,6 +68,9 @@ assert.match(chain, /--deadline-epoch "\$RUN_DEADLINE_EPOCH"/,
   'the inventory host-heavy lock and child must inherit the absolute run deadline');
 assert.match(chain, /pipeline_marker_done "inventory-started"/,
   'a restart after entering the reserve must resume inventory instead of reapplying the pre-inventory cutoff');
+assert.match(chain,
+  /if pipeline_marker_done "morning-supplements"; then[\s\S]*?write_marker "morning-links-ready" "done"[\s\S]*?"\$RESULT_FILE"\s+>\/dev\/null/,
+  'a restart with completed supplements must re-sign links-ready against the rebuilt RESULT_FILE before inventory');
 assert.match(chain, /"\$INVENTORY_PLAN" "\$INVENTORY_RESULT"/,
   'the final marker must directly bind the real inventory plan and result');
 assert.match(chain, /budget_deadline=\$\(\(now \+ SESSION_RECOVERY_BUDGET_SEC\)\)/);
@@ -77,6 +80,11 @@ assert.doesNotMatch(chain, /nightly_session_marker_status\(\)/,
   'the morning chain must not re-implement a weak marker-only predicate');
 assert.match(chain, /run_cloud_session_manager_job\.sh[\s\S]*?--deadline-epoch "\$recovery_deadline"/,
   'the morning gate must call the shared coordinator with an explicit epoch deadline');
+const runBudgetSource = chain.slice(chain.indexOf('require_run_budget()'), chain.indexOf('require_pre_inventory_budget()'));
+assert.match(runBudgetSource, /terminal=restart-prevented/,
+  'an exhausted absolute morning run budget must be reported as restart-prevented');
+assert.match(runBudgetSource, /exit 76/,
+  'an exhausted absolute morning run budget must exit 76 so systemd will not retry it as temporary unavailability');
 const sessionGateSource = chain.slice(
   chain.indexOf('run_nightly_session_readiness_gate()'),
   chain.indexOf('# Idempotent terminal-state convergence'),
@@ -319,15 +327,19 @@ const dateAt = process.argv.indexOf('--date');
 const outAt = process.argv.indexOf('--out');
 const date = dateAt > 0 ? process.argv[dateAt + 1] : '';
 const out = outAt > 0 ? process.argv[outAt + 1] : '';
+const version = process.env.STUB_RESUME_EVIDENCE_VERSION || 'default';
 if (out) {
   fs.mkdirSync(path.dirname(out), {recursive: true});
-  fs.writeFileSync(out, JSON.stringify({ok: true, date, artifactCount: 0}, null, 2) + '\\n');
+  fs.writeFileSync(out, JSON.stringify({ok: true, date, artifactCount: 0, version}, null, 2) + '\\n');
 }
 process.exit(0);
 EOF
 for stub in cloud_daily_refresh cloud_openapi_stock_refresh; do
   cat > "\$SB/scripts/\$stub.sh" <<'EOF'
 #!/usr/bin/env bash
+if [[ "\$(basename "\$0")" == "cloud_daily_refresh.sh" && -n "\${STUB_REFRESH_COUNT_FILE:-}" ]]; then
+  echo refresh >> "\$STUB_REFRESH_COUNT_FILE"
+fi
 exit 0
 EOF
   chmod +x "\$SB/scripts/\$stub.sh"
@@ -347,6 +359,17 @@ set -euo pipefail
 R="\$SHEIN_BI_INVENTORY_RUN_DATE"
 B="\$SHEIN_BI_INVENTORY_BUSINESS_DATE"
 IR="\$SHEIN_BI_INVENTORY_RUNTIME_ROOT"
+if [[ -n "\${INVENTORY_COUNT_FILE:-}" ]]; then
+  echo inventory >> "\$INVENTORY_COUNT_FILE"
+fi
+if [[ "\${REQUIRE_LINKS_READY_EVIDENCE:-0}" == "1" ]]; then
+  node "\$SHEIN_BI_ROOT/scripts/pipeline_marker.mjs" require \
+    --stage morning-links-ready --date "\$R" --business-date "\$B" \
+    --status done --require-evidence >/dev/null || {
+      echo 'stale morning-links-ready evidence' >&2
+      exit 99
+    }
+fi
 mkdir -p "\$IR/plans" "\$IR/results"
 PLAN="\$IR/plans/daily-inventory-replenishment-\$R.json"
 RESULT="\$IR/results/daily-inventory-replenishment-\$R.json"
@@ -422,6 +445,8 @@ set -u
 echo inner >> "$SESSION_INNER_LOG"
 if [[ "$STUB_SESSION_MODE" == "fail" ]]; then
   exit 42
+elif [[ "$STUB_SESSION_MODE" == fail:* ]]; then
+  exit "\${STUB_SESSION_MODE#fail:}"
 fi
 mkdir -p "$PWD/outputs/reports"
 export TZ=Asia/Shanghai
@@ -589,25 +614,30 @@ if (( 1000 - T4_DELTA < 595 )); then
 fi
 echo 'PASS[t4 missing marker one-shot recovery and reserved link budget]'
 
-# t5: failed recovery is terminal and blocks link collection immediately.
-export STUB_SYNC_MODE=complete
-export SYNC_COUNT_FILE="\$SB/t5-count.txt"
-export STARTED_FILE="\$SB/t5-started.txt"
-export LANE_COUNT_FILE="\$SB/t5-lane.txt"
-export LANE_DEADLINE_LOG="\$SB/t5-lane-deadline.txt"
-export SESSION_INNER_LOG="\$SB/t5-inner.txt"
-export STUB_SESSION_MODE=fail
-rm -rf "\$SB/outputs" "\$SB/state/cloud_morning_chain" "\$SB/state/pipeline-markers"
-mkdir -p "\$SB/state/cloud_morning_chain"
-bash "\$CHAIN" all > "\$SB/t5.out" 2>&1
-RC=\$?
-if [[ "\$RC" -ne 42 ]]; then echo "FAIL[t5 exit=\$RC want=42]"; cat "\$SB/t5.out"; exit 1; fi
-[[ "\$(wc -l < "\$LANE_COUNT_FILE")" -eq 1 ]] || { echo 'FAIL[t5 lane count]'; exit 1; }
-[[ ! -e "\$SYNC_COUNT_FILE" ]] || { echo 'FAIL[t5 link sync started after session failure]'; exit 1; }
-grep -q '"status": "failed"' "\$CHAIN_STATE/latest.json" || { echo 'FAIL[t5 latest not failed]'; exit 1; }
-grep -q 'nightly session recovery failed status=42' "\$CHAIN_STATE/latest.json" || { echo 'FAIL[t5 clear failure state missing]'; exit 1; }
-grep -q 'nightly-session recovery failed status=42' "\$PIPE/morning-all.json" || { echo 'FAIL[t5 clear failure marker missing]'; exit 1; }
-echo 'PASS[t5 recovery failure blocks link sync]'
+# t5: failed recovery is terminal, maps to RestartPreventExitStatus=79,
+# preserves the original recovery status in state/marker text, and blocks
+# link collection immediately. This covers low-level status 1 and a higher
+# explicit session-manager failure such as 42.
+for STATUS in 1 42; do
+  export STUB_SYNC_MODE=complete
+  export SYNC_COUNT_FILE="\$SB/t5-\${STATUS}-count.txt"
+  export STARTED_FILE="\$SB/t5-\${STATUS}-started.txt"
+  export LANE_COUNT_FILE="\$SB/t5-\${STATUS}-lane.txt"
+  export LANE_DEADLINE_LOG="\$SB/t5-\${STATUS}-lane-deadline.txt"
+  export SESSION_INNER_LOG="\$SB/t5-\${STATUS}-inner.txt"
+  export STUB_SESSION_MODE="fail:\${STATUS}"
+  rm -rf "\$SB/outputs" "\$SB/state/cloud_morning_chain" "\$SB/state/pipeline-markers"
+  mkdir -p "\$SB/state/cloud_morning_chain"
+  bash "\$CHAIN" all > "\$SB/t5-\${STATUS}.out" 2>&1
+  RC=\$?
+  if [[ "\$RC" -ne 79 ]]; then echo "FAIL[t5 status=\$STATUS exit=\$RC want=79]"; cat "\$SB/t5-\${STATUS}.out"; exit 1; fi
+  [[ "\$(wc -l < "\$LANE_COUNT_FILE")" -eq 1 ]] || { echo "FAIL[t5 status=\$STATUS lane count]"; exit 1; }
+  [[ ! -e "\$SYNC_COUNT_FILE" ]] || { echo "FAIL[t5 status=\$STATUS link sync started after session failure]"; exit 1; }
+  grep -q '"status": "failed"' "\$CHAIN_STATE/latest.json" || { echo "FAIL[t5 status=\$STATUS latest not failed]"; exit 1; }
+  grep -q "nightly session recovery failed status=\$STATUS" "\$CHAIN_STATE/latest.json" || { echo "FAIL[t5 status=\$STATUS clear failure state missing]"; exit 1; }
+  grep -q "nightly-session recovery failed status=\$STATUS" "\$PIPE/morning-all.json" || { echo "FAIL[t5 status=\$STATUS clear failure marker missing]"; exit 1; }
+done
+echo 'PASS[t5 recovery failures map to 79 and block link sync]'
 
 # t6: an injected businessDate that is NOT runDate - 1 (here runDate ==
 # businessDate) must fail closed with exit 64 before any lane / session / link
@@ -673,6 +703,71 @@ if [[ "\$SEEN2" != "\$EXPECTED_PRE_INVENTORY_DEADLINE" ]]; then
   exit 1
 fi
 echo 'PASS[t7 first-start absolute deadline injected and not reset across starts]'
+
+# t8: a restart after supplements completed rebuilds RESULT_FILE with a new
+# byte/hash identity.  The old links-ready marker must be re-signed before the
+# inventory guard's strict evidence check; neither supplements/Portal nor link
+# collection may run again.
+export STUB_SYNC_MODE=never
+export SYNC_COUNT_FILE="\$SB/t8-sync-count.txt"
+export STUB_REFRESH_COUNT_FILE="\$SB/t8-refresh-count.txt"
+export INVENTORY_COUNT_FILE="\$SB/t8-inventory-count.txt"
+export REQUIRE_LINKS_READY_EVIDENCE=1
+export STUB_RESUME_EVIDENCE_VERSION=before-restart
+rm -rf "\$SB/outputs" "\$SB/state/cloud_morning_chain" "\$SB/state/pipeline-markers"
+mkdir -p "\$SB/state/cloud_morning_chain"
+BUSINESS_DATE="\$(TZ=Asia/Shanghai date -d "\$RUN_DATE - 1 day" +%F)"
+for dom in shein_links shein_business_domains; do
+  mkdir -p "\$SB/outputs/\$dom/T1"
+  printf '{"ok":true,"date":"%s","store":{"storeKey":"T1"}}\n' "\$BUSINESS_DATE" \
+    > "\$SB/outputs/\$dom/T1/\$BUSINESS_DATE.json"
+done
+RESULT_FILE="\$CHAIN_STATE/\$RUN_DATE-all.json"
+node "\$SB/scripts/build_morning_resume_evidence.mjs" --date "\$BUSINESS_DATE" --out "\$RESULT_FILE"
+node "\$SB/scripts/pipeline_marker.mjs" write \
+  --stage morning-links-ready --date "\$RUN_DATE" --business-date "\$BUSINESS_DATE" \
+  --status done --message before-restart --root "\$SB/state/pipeline-markers" \
+  --evidence "\$RESULT_FILE" >/dev/null
+node "\$SB/scripts/pipeline_marker.mjs" write \
+  --stage morning-supplements --date "\$RUN_DATE" --business-date "\$BUSINESS_DATE" \
+  --status done --message complete --root "\$SB/state/pipeline-markers" >/dev/null
+hash_file() {
+  node - "\$1" <<'NODE'
+const fs = req${'uire'}('fs');
+const crypto = req${'uire'}('crypto');
+const file = process.argv[process.argv.length - 1];
+process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'));
+NODE
+}
+OLD_BYTES="\$(wc -c < "\$RESULT_FILE" | tr -d ' ')"
+OLD_HASH="\$(hash_file "\$RESULT_FILE")"
+export STUB_RESUME_EVIDENCE_VERSION=after-restart
+bash "\$CHAIN" all > "\$SB/t8.out" 2>&1
+RC=\$?
+if [[ "\$RC" -ne 0 ]]; then echo "FAIL[t8 exit=\$RC]"; cat "\$SB/t8.out"; exit 1; fi
+[[ ! -e "\$SYNC_COUNT_FILE" && ! -e "\$STUB_REFRESH_COUNT_FILE" ]] \
+  || { echo 'FAIL[t8 restart reran link collection or supplements/Portal]'; exit 1; }
+[[ -f "\$INVENTORY_COUNT_FILE" && "\$(wc -l < "\$INVENTORY_COUNT_FILE")" -eq 1 ]] \
+  || { echo 'FAIL[t8 inventory stage did not continue once]'; cat "\$SB/t8.out"; exit 1; }
+NEW_BYTES="\$(wc -c < "\$RESULT_FILE" | tr -d ' ')"
+NEW_HASH="\$(hash_file "\$RESULT_FILE")"
+node - "\$PIPE/morning-links-ready.json" "\$RESULT_FILE" \
+  "\$RUN_DATE" "\$BUSINESS_DATE" "\$OLD_BYTES" "\$OLD_HASH" "\$NEW_BYTES" "\$NEW_HASH" <<'NODE'
+const fs = req${'uire'}('fs');
+const [markerFile, resultFile, expectedRunDate, expectedBusinessDate, oldBytes, oldHash, newBytes, newHash] = process.argv.slice(2);
+const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+if (oldBytes === newBytes || oldHash === newHash) throw new Error('RESULT_FILE evidence identity did not change');
+if (marker.ok !== true || marker.status !== 'done'
+  || marker.runDate !== expectedRunDate || marker.businessDate !== expectedBusinessDate) {
+  throw new Error('links-ready marker is not terminal done/date-scoped evidence');
+}
+if (!Array.isArray(marker.evidence) || marker.evidence.length !== 1) throw new Error('links-ready evidence shape changed');
+const [evidence] = marker.evidence;
+if (evidence.path !== resultFile || evidence.bytes !== Number(newBytes) || evidence.sha256 !== newHash) {
+  throw new Error('links-ready marker does not bind current RESULT_FILE bytes/hash');
+}
+NODE
+echo 'PASS[t8 restart re-signs current links-ready evidence and continues inventory]'
 
 echo 'CHAIN_HARNESS_OK'
 `;

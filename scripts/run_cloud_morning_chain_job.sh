@@ -118,6 +118,86 @@ try {
 NODE
 }
 
+# Validate a recovery binding before any completion/deadline path can clear or
+# replace active.json.  Missing or malformed JSON remains the existing
+# fail-closed fresh-run case; a partial/invalid recovery binding is different:
+# it is an unsafe state and must stop this activation without child or state
+# writes.
+validate_active_recovery_binding() {
+  ACTIVE_FILE="$ACTIVE_FILE" node - <<'NODE'
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const stable = value => Array.isArray(value)
+  ? value.map(stable)
+  : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]))
+    : value;
+let activeBytes;
+try {
+  activeBytes = fs.readFileSync(process.env.ACTIVE_FILE, 'utf8');
+} catch (error) {
+  if (error && error.code === 'ENOENT') process.exit(0);
+  process.stderr.write('active recovery state is unreadable; refusing to start\n');
+  process.exit(78);
+}
+let payload;
+try {
+  payload = JSON.parse(activeBytes);
+} catch (error) {
+  let recoveryReceipts = [];
+  try {
+    recoveryReceipts = fs.readdirSync(path.join(path.dirname(process.env.ACTIVE_FILE), 'recovery'))
+      .filter(name => name.endsWith('.json'));
+  } catch (directoryError) {
+    if (directoryError && directoryError.code !== 'ENOENT') {
+      process.stderr.write('active recovery state is unreadable; refusing to start\n');
+      process.exit(78);
+    }
+  }
+  if (error instanceof SyntaxError && recoveryReceipts.length === 0) process.exit(0);
+  process.stderr.write('active recovery state is unreadable or conflicts with a durable receipt; refusing to start\n');
+  process.exit(78);
+}
+const recoveryKeys = ['recoveryGeneration', 'receiptHash', 'previousDeadline'];
+const receiptFile = path.join(path.dirname(process.env.ACTIVE_FILE), 'recovery', `${payload.runDate}.json`);
+if (!recoveryKeys.some(key => Object.hasOwn(payload || {}, key))) {
+  if (fs.existsSync(receiptFile)) {
+    process.stderr.write('orphan recovery receipt exists without an active binding; refusing to start\n');
+    process.exit(78);
+  }
+  process.exit(0);
+}
+let valid = Number.isSafeInteger(payload.recoveryGeneration)
+  && payload.recoveryGeneration >= 1
+  && /^[a-f0-9]{64}$/.test(String(payload.receiptHash || ''))
+  && Number.isSafeInteger(payload.previousDeadline)
+  && payload.previousDeadline > 0;
+if (valid) {
+  try {
+    const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+    const body = {...receipt};
+    delete body.canonicalHash;
+    const computed = crypto.createHash('sha256').update(JSON.stringify(stable(body))).digest('hex');
+    valid = receipt.schemaVersion === 'morning-chain-recovery/v1'
+      && receipt.canonicalHash === computed
+      && receipt.canonicalHash === payload.receiptHash
+      && receipt.recoveryGeneration === payload.recoveryGeneration
+      && receipt.oldDeadlineEpoch === payload.previousDeadline
+      && receipt.newDeadlineEpoch === payload.deadlineEpoch
+      && receipt.runDate === payload.runDate
+      && receipt.businessDate === payload.businessDate;
+  } catch {
+    valid = false;
+  }
+}
+if (!valid) {
+  process.stderr.write('invalid or missing recovery receipt binding; refusing to start\n');
+  process.exit(78);
+}
+NODE
+}
+
 write_active_context() {
   local run_date="$1"
   local business_date="$2"
@@ -129,6 +209,29 @@ write_active_context() {
 const fs = require('fs');
 const path = require('path');
 const file = process.env.ACTIVE_FILE;
+let previous = null;
+try {
+  previous = JSON.parse(fs.readFileSync(file, 'utf8'));
+} catch {}
+const recoveryKeys = ['recoveryGeneration', 'receiptHash', 'previousDeadline'];
+const hasRecoveryFields = previous && recoveryKeys.some(key => Object.hasOwn(previous, key));
+let recovery = {};
+if (hasRecoveryFields) {
+  const valid = Number.isSafeInteger(previous.recoveryGeneration)
+    && previous.recoveryGeneration >= 1
+    && /^[a-f0-9]{64}$/.test(String(previous.receiptHash || ''))
+    && Number.isSafeInteger(previous.previousDeadline)
+    && previous.previousDeadline > 0;
+  if (!valid) {
+    process.stderr.write('invalid recovery binding in active context; refusing to start\n');
+    process.exit(78);
+  }
+  recovery = {
+    recoveryGeneration: previous.recoveryGeneration,
+    receiptHash: previous.receiptHash,
+    previousDeadline: previous.previousDeadline,
+  };
+}
 const payload = {
   runDate: process.env.RUN_DATE,
   businessDate: process.env.BUSINESS_DATE,
@@ -137,6 +240,7 @@ const payload = {
   pid: process.pid,
   attempt: Number(process.env.ATTEMPT || 1),
   deadlineEpoch: Number(process.env.DEADLINE_EPOCH || 0),
+  ...recovery,
 };
 fs.mkdirSync(path.dirname(file), {recursive: true});
 const temporary = `${file}.${process.pid}.tmp`;
@@ -334,7 +438,10 @@ run_chain_once() {
   local business_date="$2"
   local attempt="$3"
   local deadline="$4"
-  write_active_context "$run_date" "$business_date" "$attempt" "$deadline"
+  if ! write_active_context "$run_date" "$business_date" "$attempt" "$deadline"; then
+    echo "[cloud-morning-chain-wrapper] ERROR active context write/recovery binding validation failed; child not started" >&2
+    return 78
+  fi
   echo "[cloud-morning-chain-wrapper] start child chain runDate=$run_date businessDate=$business_date deadlineEpoch=$deadline attempt=$attempt"
   set +e
   SHEIN_BI_MORNING_RUN_DATE="$run_date" \
@@ -392,6 +499,10 @@ exec 8>"$WRAPPER_LOCK_FILE"
 if ! flock -n 8; then
   echo "[cloud-morning-chain-wrapper] another coordinator owns $WRAPPER_LOCK_FILE; active context was not touched" >&2
   exit 75
+fi
+if ! validate_active_recovery_binding; then
+  echo "[cloud-morning-chain-wrapper] ERROR active context has an invalid recovery binding; child not started and active context not touched" >&2
+  exit 78
 fi
 
 if [[ ! -f "$CHAIN_SCRIPT" ]]; then

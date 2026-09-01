@@ -7,6 +7,10 @@ import {fileURLToPath} from 'node:url';
 import {loadOrdinaryCampaignApproval} from '../../lib/marketing_ordinary_campaign_approval.mjs';
 import {activityExecutionTransactionHash} from '../../lib/marketing_activity_inventory_integration.mjs';
 import {executeOrdinaryActivityWithInventoryTransaction} from '../../lib/marketing_ordinary_activity_transaction_runner.mjs';
+import {
+  scopeOrdinaryEnrollmentReadbackToApprovedRows,
+  wrapOrdinaryEnrollmentReadbackForTransaction,
+} from '../../lib/marketing_ordinary_enrollment_scope.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -15,7 +19,7 @@ function split(value) {
 }
 
 function parseArgs(argv) {
-  const args = {stores: [], activities: [], selection: '', prices: '', approvalManifest: '', outDir: '', concurrency: 3};
+  const args = {stores: [], activities: [], selection: '', prices: '', approvalManifest: '', outDir: '', bi: '', inventoryTrend: '', concurrency: 3};
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
     if (key === '--stores') args.stores = split(argv[++i]).map(item => item.toUpperCase());
@@ -24,6 +28,8 @@ function parseArgs(argv) {
     else if (key === '--prices') args.prices = path.resolve(argv[++i] || '');
     else if (key === '--approval-manifest') args.approvalManifest = path.resolve(argv[++i] || '');
     else if (key === '--out-dir') args.outDir = path.resolve(argv[++i] || '');
+    else if (key === '--bi') args.bi = path.resolve(argv[++i] || '');
+    else if (key === '--inventory-trend') args.inventoryTrend = path.resolve(argv[++i] || '');
     else if (key === '--concurrency') args.concurrency = Number(argv[++i] || 3);
     else throw new Error(`Unknown argument: ${key}`);
   }
@@ -57,6 +63,15 @@ function lastJson(text) {
     try { return JSON.parse(source.slice(i)); } catch {}
   }
   return null;
+}
+
+async function cleanupStoreBrowser(storeKey) {
+  return await runNode([
+    path.join(ROOT, 'scripts', 'cleanup_shein_store_browsers.mjs'),
+    '--store', storeKey,
+    '--kill-after-sec', '5',
+    '--json',
+  ], `${storeKey}:browser-cleanup`);
 }
 
 async function newestSummary(dir) {
@@ -98,6 +113,8 @@ let cursor = 0;
 async function worker() {
   while (cursor < args.stores.length) {
     const storeKey = args.stores[cursor++];
+    let row = null;
+    try {
     const base = [
       path.join(ROOT, 'scripts', 'marketing', 'dsy_marketing_deadline_fill.mjs'),
       '--stores', storeKey,
@@ -106,7 +123,10 @@ async function worker() {
       '--price-overrides', args.prices,
       '--approval-manifest', approval.manifestPath,
       '--execution-work-fingerprint', approval.workFingerprint,
+      ...(args.bi ? ['--bi', args.bi] : []),
+      ...(args.inventoryTrend ? ['--inventory-trend', args.inventoryTrend] : []),
       '--headless',
+      '--no-close',
       ...(storeKey === 'FY' ? ['--runtime-port', '9455'] : []),
     ];
     const dryDir = path.join(args.outDir, storeKey, 'dry-run');
@@ -115,7 +135,7 @@ async function worker() {
     const dryProcess = await runNode([...base, '--out-dir', dryDir], `${storeKey}:dry`);
     const dry = await newestSummary(dryDir);
     const dryResults = activityResults(dry.doc);
-    const row = {storeKey, dryProcess, dryFile: dry.file || '', dryError: dry.error || '', dryResults};
+    row = {storeKey, dryProcess, dryFile: dry.file || '', dryError: dry.error || '', dryResults};
     if (dryProcess.code !== 0 || !dryResults.length || dryResults.some(result => !result.ok)) {
       row.status = 'dry_run_failed';
       results.push(row);
@@ -158,9 +178,15 @@ async function worker() {
           '--activity', args.activities.join(','),
           '--selection-plan', args.selection,
           '--price-overrides', args.prices,
+          '--fill-results-dir', path.join(args.outDir, storeKey),
           '--wait-ms', '30000',
+          '--no-close',
         ], `${storeKey}:verify:${phase}`);
-        return lastJson(verify.stdout)?.summary || {ok: false, reason: verify.stderr || 'verify output missing'};
+        const summary = lastJson(verify.stdout)?.summary;
+        const scoped = summary
+          ? scopeOrdinaryEnrollmentReadbackToApprovedRows(summary)
+          : {ok: false, reason: verify.stderr || 'verify output missing'};
+        return wrapOrdinaryEnrollmentReadbackForTransaction(scoped);
       },
     });
     row.inventoryTransaction = transaction;
@@ -184,6 +210,10 @@ async function worker() {
       : (platformSubmitted ? 'submitted_readback_failed' : 'execute_failed');
     results.push(row);
     console.log(`[STORE-BATCH] ${row.status.toUpperCase()} ${storeKey}`);
+    } finally {
+      const browserCleanup = await cleanupStoreBrowser(storeKey);
+      if (row) row.browserCleanup = browserCleanup;
+    }
   }
 }
 
@@ -198,6 +228,7 @@ const summary = {
   submittedReadbackFailedStores: results.filter(row => row.status === 'submitted_readback_failed').map(row => row.storeKey),
   dryRunFailedStores: results.filter(row => row.status === 'dry_run_failed').map(row => row.storeKey),
   executeFailedStores: results.filter(row => row.status === 'execute_failed').map(row => row.storeKey),
+  browserCleanupFailedStores: results.filter(row => row.browserCleanup?.code !== 0).map(row => row.storeKey),
   results,
 };
 const file = path.join(args.outDir, 'store-submission-summary.json');
@@ -207,4 +238,7 @@ console.log(
   + `verified=${summary.submittedStores.length}/${args.stores.length} `
   + `submitted_readback_failed=${summary.submittedReadbackFailedStores.length}`,
 );
-process.exitCode = summary.submittedStores.length === args.stores.length ? 0 : 2;
+process.exitCode = summary.submittedStores.length === args.stores.length
+  && summary.browserCleanupFailedStores.length === 0
+  ? 0
+  : 2;

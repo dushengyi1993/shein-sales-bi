@@ -19,6 +19,12 @@ FORCE_REFRESH="${SHEIN_BI_PORTAL_PREWARM_FORCE:-1}"
 ASYNC_REFRESH="${SHEIN_BI_PORTAL_PREWARM_ASYNC:-1}"
 HOST_LOCKED_WORKER="${SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED:-0}"
 LOCK_FILE="${SHEIN_BI_PORTAL_PREWARM_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-prewarm.lock}"
+REFRESH_RUN_TOKEN="${SHEIN_BI_PORTAL_PREWARM_REFRESH_TOKEN:-prewarm:$(date -u +%Y%m%dT%H%M%SZ):$$}"
+
+[[ "$REFRESH_RUN_TOKEN" =~ ^[A-Za-z0-9._:-]{1,160}$ ]] || {
+  echo "[prewarm_bi_portal_sections] invalid refresh run token" >&2
+  exit 64
+}
 
 # Never leak the per-section curl header file, even on early exit paths.
 trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
@@ -62,7 +68,7 @@ for RAW_SECTION in "${SECTION_LIST[@]}"; do
   echo "[prewarm_bi_portal_sections] section=$SECTION start"
   SECTION_URL="$PORTAL_URL/api/bi/section/$SECTION"
   if [[ "$FORCE_REFRESH" == "1" ]]; then
-    SECTION_URL="${SECTION_URL}?refresh=1"
+    SECTION_URL="${SECTION_URL}?refresh=1&refreshToken=${REFRESH_RUN_TOKEN}"
     if [[ "$ASYNC_REFRESH" == "1" ]]; then
       SECTION_URL="${SECTION_URL}&async=1"
     fi

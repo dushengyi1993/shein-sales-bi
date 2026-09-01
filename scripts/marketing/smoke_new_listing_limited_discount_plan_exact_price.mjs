@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -266,6 +267,7 @@ await fs.writeFile(priceOverridesPath, `${JSON.stringify({
     },
   ],
 }, null, 2)}\n`, 'utf8');
+const priceOverridesSha256 = crypto.createHash('sha256').update(await fs.readFile(priceOverridesPath)).digest('hex');
 
 await fs.writeFile(sourceGuardPath, `${JSON.stringify({
   reportDate: '2026-07-04',
@@ -298,6 +300,7 @@ const result = spawnSync(process.execPath, [
   '--date', '2026-07-04',
   '--links-data', linksDataPath,
   '--price-overrides', priceOverridesPath,
+  '--expected-price-overrides-sha256', priceOverridesSha256,
   '--out-dir', outDir,
   '--report-json', reportJson,
   '--report-md', reportMd,
@@ -370,6 +373,7 @@ const incompleteResult = spawnSync(process.execPath, [
   '--date', '2026-07-04',
   '--links-data', linksDataPath,
   '--price-overrides', priceOverridesPath,
+  '--expected-price-overrides-sha256', priceOverridesSha256,
   '--out-dir', path.join(tmp, 'out-incomplete'),
   '--report-json', incompleteReportJson,
   '--report-md', path.join(tmp, 'report-incomplete.md'),

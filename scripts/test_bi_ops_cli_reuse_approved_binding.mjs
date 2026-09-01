@@ -17,6 +17,7 @@ import http from 'node:http';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {buildOwnerKnowledgeDistribution} from '../lib/owner_knowledge_distribution.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'scripts', 'bi_ops_cli.mjs');
@@ -24,6 +25,7 @@ const KEEP_TEMP = process.argv.includes('--keep-temp');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'cli-reuse-approved-binding-'));
+const ownerKnowledge = buildOwnerKnowledgeDistribution({authorityId: 'test-owner', rules: []}, {publishedAt: '2026-08-31T00:00:00.000Z'});
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -51,9 +53,12 @@ const server = http.createServer(async (req, res) => {
   const pathname = new URL(req.url || '/', 'http://127.0.0.1').pathname;
   const {json} = await readBody(req);
   calls.push({path: pathname, method: req.method, json});
-  if (pathname.startsWith('/api/owner-knowledge/')) {
-    // The CLI degrades this to a warning and continues; keeps the test offline.
-    sendJson(res, {ok: false, error: 'manifest not configured in mock'}, 404);
+  if (pathname === '/api/owner-knowledge/manifest') {
+    sendJson(res, {ok: true, data: {...ownerKnowledge.manifest, ready: true, current: true, sourceCommit: 'test-owner-knowledge'}});
+    return;
+  }
+  if (pathname === '/api/owner-knowledge/bundle') {
+    sendJson(res, {ok: true, data: {manifest: ownerKnowledge.manifest, ...ownerKnowledge.bundle}});
     return;
   }
   if (pathname === '/api/link-ops-publish-assets' && req.method === 'POST') {
@@ -66,6 +71,9 @@ const server = http.createServer(async (req, res) => {
         imageCount: 3,
         squareDimensions: '1254x1254',
         boundNames: ['approved-main.png', 'approved-detail-1.png', 'approved-square.png'],
+        ...(json?.allowEmptyDescription === true ? {
+          emptyDescriptionAuthorization: {ok: true, stale: false},
+        } : {}),
       },
     });
     return;
@@ -128,6 +136,7 @@ async function run() {
   }, null, 2), 'utf8');
 
   const publishPreparation = {
+    titleGroup: '',
     standardGoodsSn: '',
     supplierSku: '',
     supplyPrice: 210,
@@ -192,7 +201,44 @@ async function run() {
   check('reuse zero upload-pic calls', uploadCalls.length, 0);
   check('reuse never calls image role planner endpoint', callsTo('/api/link-ops-image-roles').length, 0);
 
-  // Case 2: --reuse-approved-binding + --image-dir must fail closed before any request.
+  // Case 2: explicit-empty mode forwards only the exact paired opt-in fields.
+  calls.length = 0;
+  const empty = await runCli([
+    'prepare-publish', '--task-id', 'task-empty-101', '--store', 'HL',
+    '--reuse-approved-binding', '--supply-price', '210', '--inventory', '100',
+    '--allow-empty-description', '--empty-description-confirm', 'USER_EXPLICIT_EMPTY_DESCRIPTION',
+    ...common,
+  ]);
+  let emptyJson = null;
+  try { emptyJson = JSON.parse(empty.stdout.trim()); } catch {}
+  const emptyPublishCalls = callsTo('/api/link-ops-publish-assets');
+  check('empty mode exit code 0', empty.code, 0);
+  check('empty mode stdout ok', emptyJson?.ok, true);
+  check('empty mode reports server authorization', emptyJson?.safety?.emptyDescriptionAuthorized, true);
+  check('empty mode binding endpoint called once', emptyPublishCalls.length, 1);
+  check('empty mode request carries exact opt-in pair', {
+    allowEmptyDescription: emptyPublishCalls[0]?.json?.allowEmptyDescription,
+    emptyDescriptionConfirm: emptyPublishCalls[0]?.json?.emptyDescriptionConfirm,
+  }, {
+    allowEmptyDescription: true,
+    emptyDescriptionConfirm: 'USER_EXPLICIT_EMPTY_DESCRIPTION',
+  });
+  check('empty mode still uses zero uploads', callsTo('/api/openapi-image-asset/upload-pic').length, 0);
+  check('empty mode still performs exactly one dry-run', callsTo('/api/link-ops-execute').length, 1);
+
+  // Mismatched or unpaired confirmation must fail before any HTTP request.
+  calls.length = 0;
+  const emptyWrongToken = await runCli([
+    'prepare-publish', '--task-id', 'task-empty-102', '--store', 'HL',
+    '--reuse-approved-binding', '--allow-empty-description',
+    '--empty-description-confirm', 'WRONG_TOKEN', ...common,
+  ]);
+  check('empty mode wrong token exits non-zero', emptyWrongToken.code === 0, false);
+  check('empty mode wrong token explains exact token', emptyWrongToken.stderr, text => /USER_EXPLICIT_EMPTY_DESCRIPTION/.test(text));
+  check('empty mode wrong token performs zero binding calls', callsTo('/api/link-ops-publish-assets').length, 0);
+  check('empty mode wrong token performs zero dry-run calls', callsTo('/api/link-ops-execute').length, 0);
+
+  // Case 3: --reuse-approved-binding + --image-dir must fail closed before any request.
   calls.length = 0;
   const mutexDir = await runCli([
     'prepare-publish', '--task-id', 'task-102', '--store', 'HL',
@@ -204,7 +250,7 @@ async function run() {
   check('mutex image-dir zero dry-run calls', callsTo('/api/link-ops-execute').length, 0);
   check('mutex image-dir zero upload-pic calls', callsTo('/api/openapi-image-asset/upload-pic').length, 0);
 
-  // Case 3: --reuse-approved-binding + --source-task-id (update_images mode) must fail closed.
+  // Case 4: --reuse-approved-binding + --source-task-id (update_images mode) must fail closed.
   calls.length = 0;
   const mutexSource = await runCli([
     'prepare-publish', '--task-id', 'task-103', '--store', 'HL',
@@ -215,7 +261,7 @@ async function run() {
   check('mutex source-task-id zero binding calls', callsTo('/api/link-ops-publish-assets').length, 0);
   check('mutex source-task-id zero dry-run calls', callsTo('/api/link-ops-execute').length, 0);
 
-  // Case 4: old path without --reuse-approved-binding still requires --image-dir.
+  // Case 5: old path without --reuse-approved-binding still requires --image-dir.
   calls.length = 0;
   const oldPath = await runCli([
     'prepare-publish', '--task-id', 'task-104', '--store', 'HL', ...common,

@@ -18,16 +18,18 @@ import {
   findActiveManualLimitedDiscount,
   loadManualLimitedDiscountRegistry,
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
+import {resolveCurrentMarketingPlanPair} from '../../lib/marketing_plan_selector.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const DEFAULT_PLAN = path.join(ROOT, 'tmp', 'marketing-signup', 'price-overrides-2026-06-03-ALL-ready.json');
 const DEFAULT_SALES_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp', 'marketing-signup', 'order-price-audit');
 const DEFAULT_LINKS_DATA = path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json');
 
 function parseArgs(argv) {
   const out = {
-    plan: DEFAULT_PLAN,
+    plan: '',
+    planExplicit: false,
+    planSelection: null,
     salesDirs: [DEFAULT_SALES_DIR],
     stores: [],
     start: '',
@@ -44,7 +46,10 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--plan' || a === '--price-plan') out.plan = path.resolve(argv[++i]);
+    if (a === '--plan' || a === '--price-plan') {
+      out.plan = path.resolve(argv[++i]);
+      out.planExplicit = true;
+    }
     else if (a === '--sales-dir') out.salesDirs = splitList(argv[++i]).map(p => path.resolve(p));
     else if (a === '--add-sales-dir') out.salesDirs.push(...splitList(argv[++i]).map(p => path.resolve(p)));
     else if (a === '--stores') out.stores.push(...splitList(argv[++i]).map(s => s.toUpperCase()));
@@ -91,6 +96,10 @@ Options:
   if (!Number.isFinite(out.toleranceSar) || out.toleranceSar < 0) out.toleranceSar = 0.01;
   out.stores = [...new Set(out.stores)];
   out.salesDirs = [...new Set(out.salesDirs)];
+  if (!out.planExplicit) {
+    out.planSelection = resolveCurrentMarketingPlanPair({root: ROOT});
+    out.plan = out.planSelection.priceOverrides;
+  }
   return out;
 }
 
@@ -527,6 +536,14 @@ async function main() {
   const summary = {
     createdAt: new Date().toISOString(),
     plan: path.relative(ROOT, args.plan).replace(/\\/g, '/'),
+    planSelection: args.planSelection ? {
+      strategy: args.planSelection.strategy,
+      registryFile: args.planSelection.registryFile || '',
+      registryHash: args.planSelection.registryHash || '',
+      selectionPlanHash: args.planSelection.selectionPlanHash || '',
+      priceOverridesHash: args.planSelection.priceOverridesHash || '',
+      workFingerprint: args.planSelection.workFingerprint || '',
+    } : {strategy: 'explicit_plan', registryFile: '', registryHash: ''},
     salesDirs: args.salesDirs.map(dir => path.relative(ROOT, dir).replace(/\\/g, '/')),
     stores: args.stores,
     start: args.start || null,

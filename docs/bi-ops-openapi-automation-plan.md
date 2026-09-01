@@ -133,7 +133,7 @@
 - 调度：销售订单生产刷新由 `cloud_bi_refresh.sh` 通过 WebAPI 执行；销售订单、退货退款、商品/链接 OpenAPI 对账仍接入 `scripts/cloud_daily_refresh.sh`。生产 `shein-bi-cloud-daily-refresh.service` 保留 `SHEIN_BI_DAILY_OPENAPI_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_RETURN_RECONCILIATION=1`、`SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=1`；销售对账用于一周双跑质量监控，退货/商品仍只写隔离并行对账层。自动化运营写操作走独立任务池、账号店铺写权限、动作总闸门、确认和审计链路。
 - 销售深度门禁（2026-07-16 起）：`mart.openapi_sales_reconciliation` 除原有汇总数和集合外，还必须核对店铺/group/shop 元数据、逐商品行的订单/商品/SKC/SKU/数量/SAR 金额/有效性/取消分类、SAR 散点的时间和单价、订单业务时间以及 COD 布尔值。`business_line_diff_count`、`scatter_point_diff_count`、`order_time_diff_count`、`cod_diff_count`、`metadata_diff_count` 任一非零都不得标记 `matched`。`status_diff_count` 和 `identity_overlay_required` 单独记录：OpenAPI 可候选替换销售量/成交价事实，但平台内部 orderId/entityId/SKU 属性后缀和四档状态仍需 WebAPI 低频补充层，不得伪造 OpenAPI 字段来“对齐”。
 - 并发入仓护栏（2026-07-16 起）：销售和商品 OpenAPI runner 都必须先单独执行 `--ensure-only`，再让各店 loader 以 `--skip-ensure` 并行入仓。不允许多店同时执行 `CREATE/ALTER TABLE`；这会和另一店 upsert 交叉锁表并引发 PostgreSQL deadlock。退货并行层继续使用已有的同类一次性 ensure 护栏。
-- 空间：商品原始抓取文件位于忽略目录 `outputs/shein_openapi_products/`，脚本默认每店只保留最近 2 个时间戳快照和 `latest.json`，避免云盘长期膨胀。
+- 空间：商品原始抓取文件由统一 `SHEIN_OPENAPI_PRODUCT_CACHE_DIR` 根目录管理；本地未设置时仍使用忽略目录 `outputs/shein_openapi_products/`，生产固定使用 checkout 外的 `/srv/shein-bi/runtime/openapi-product-cache`。脚本默认每店只保留最近 2 个时间戳快照和 `latest.json`，避免云盘长期膨胀。
 - 空间：凡图包、源图、转换后图片、上传暂存文件或其他大文件同步到 `shein-bi-tencent` 用于 OpenAPI 上传/批量执行，执行结束后必须清理源图和中间大文件；只保留轻量 `summary` / `log` / `manifest` / 审计证据和平台回执日志。清理动作必须记录路径和清理前后大小，禁止删除最终汇总、manifest、审计日志、平台回执日志。
 
 ### B 类：可用 API 辅助，但不能马上完全替换

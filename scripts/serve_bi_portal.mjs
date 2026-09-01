@@ -15,14 +15,15 @@ import fssync from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
-import {Readable} from 'node:stream';
+import {Readable, Transform, Writable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import {createGzip, gzipSync} from 'node:zlib';
+import {createGzip} from 'node:zlib';
 import pg from 'pg';
+import {loadBiSessionSecret} from './provision_bi_session_secret.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
 import {executeTransformPic} from '../lib/openapi_adapters/transform_pic.mjs';
@@ -42,10 +43,14 @@ import {
 } from '../lib/shein_store_identity.mjs';
 import {
   acceptsGzip,
+  readBiSectionArtifactCache,
+  readBiSectionIntegrityMetadata,
   readBiSectionCache,
   readBiSectionCacheAnyGeneratedAt,
+  readBiSectionMetadata,
   readBiSectionCacheRaw,
   readBiSectionStaleRaw,
+  readBiProfitBundleManifest,
   writeBiSectionCache,
 } from '../lib/bi_section_cache.mjs';
 import {
@@ -68,7 +73,7 @@ import {
 import {loadBiOpsQueryData} from '../lib/bi_ops_query_context.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
-import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
+import {LinkOpsValidationError, linkOpsPayloadHash, stripLinkOpsRepositoryMetadata} from '../lib/link_ops_repository.mjs';
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
 import {createSheinWebhookTaskReconciler} from '../lib/shein_webhook_task_reconciler.mjs';
 import {evaluateSheinWebhookWriteGates} from '../lib/shein_webhook_write_gate.mjs';
@@ -76,7 +81,11 @@ import {createLoopbackTestWebhookWriteGuard} from '../lib/shein_webhook_external
 import {createOwnerKnowledgeService} from '../lib/owner_knowledge_service.mjs';
 import {createOwnerKnowledgeGitPublisher} from '../lib/owner_knowledge_distribution.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
-import {createPartnerCliReleaseStore} from '../lib/partner_cli_release_store.mjs';
+import {
+  createPartnerCliReleaseStore,
+  partnerCliReleasePublicErrorCode,
+  partnerCliReleasePublicMessage,
+} from '../lib/partner_cli_release_store.mjs';
 import {
   applyApprovedImageBindingsToPublishPayload,
   applyApprovedImageBindingsToMaintenancePayload,
@@ -85,10 +94,23 @@ import {
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {buildPendingListingImageCorrection} from '../lib/link_ops_pending_listing_image_correction.mjs';
 import {
+  RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT,
+  LISTING_BIND_RECOVERY_AUDIT_TYPE,
+  canonicalRecoveredPublishPayloadHash,
+  extractTaskExactIdentity,
+  createUploadedAssetBindingRecoveryPlan,
+  buildRecoveredTaskFromPlan,
+  validateUploadedAssetBindingRecoveryReplay,
+} from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
+import {isSheinSkc, normalizeSheinSkc} from '../lib/shein_product_identifiers.mjs';
+import {
   buildDescriptionPayloadRows,
+  buildEmptyDescriptionAuthorization,
   descriptionBindingRequestKey,
   describeDescriptionMaterial,
   sha256StableJson,
+  stripPublishPayloadDescriptions,
+  validateCopyProductDescriptionPolicy,
   validateDescriptionMaterialJson,
   validateDescriptionBindingLock,
   buildUpdateDescriptionPayload,
@@ -97,6 +119,9 @@ import {
   DESCRIPTION_PUBLISH_LANGUAGES,
   DESCRIPTION_SOURCE_PROOF,
   DESCRIPTION_SOURCE_PROOF_S9,
+  DESCRIPTION_SOURCE_PROOF_DOCX,
+  EMPTY_DESCRIPTION_CONFIRM_TEXT,
+  verifyDescriptionMaterialAgainstDocx,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {
@@ -170,6 +195,11 @@ const partnerCliReleaseStore = createPartnerCliReleaseStore({
   fallbackChecksumFile: process.env.SHEIN_PARTNER_CLI_PACKAGE_SHA256_FILE || '',
 });
 
+function partnerCliReleaseUnavailablePayload(error) {
+  const code = partnerCliReleasePublicErrorCode(error);
+  return {ok: false, code, error: partnerCliReleasePublicMessage(code)};
+}
+
 function parseArgs(argv) {
   const args = {
     host: '127.0.0.1',
@@ -187,6 +217,7 @@ function parseArgs(argv) {
     sessionSecretFile: process.env.SHEIN_BI_SESSION_SECRET_FILE || path.join(ROOT, 'state', 'bi_portal_session_secret.local'),
     sessionTtlDays: Number(process.env.SHEIN_BI_SESSION_TTL_DAYS || DEFAULT_BI_SESSION_TTL_DAYS),
     partnerCliSessionTtlDays: Number(process.env.SHEIN_BI_PARTNER_CLI_SESSION_TTL_DAYS || DEFAULT_BI_PARTNER_CLI_SESSION_TTL_DAYS),
+    surface: String(process.env.SHEIN_BI_SURFACE || 'portal').trim().toLowerCase(),
     auditFile: path.join(ROOT, 'logs', 'bi_portal_action_audit.jsonl'),
     distro: 'Ubuntu-24.04',
     container: 'shein-warehouse-db',
@@ -212,6 +243,7 @@ function parseArgs(argv) {
     else if (a === '--session-secret-file') args.sessionSecretFile = path.resolve(argv[++i]);
     else if (a === '--session-ttl-days') args.sessionTtlDays = Number(argv[++i]);
     else if (a === '--partner-cli-session-ttl-days') args.partnerCliSessionTtlDays = Number(argv[++i]);
+    else if (a === '--surface') args.surface = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--audit-file') args.auditFile = path.resolve(argv[++i]);
     else if (a === '--distro') args.distro = argv[++i];
     else if (a === '--container') args.container = argv[++i];
@@ -228,6 +260,9 @@ function parseArgs(argv) {
   }
   if (!Number.isFinite(args.partnerCliSessionTtlDays) || args.partnerCliSessionTtlDays < 1 || args.partnerCliSessionTtlDays > 365) {
     throw new Error(`Invalid --partner-cli-session-ttl-days: ${args.partnerCliSessionTtlDays}; expected 1-365`);
+  }
+  if (!['portal', 'query'].includes(args.surface)) {
+    throw new Error(`Invalid --surface: ${args.surface}; expected portal or query`);
   }
   args.sessionTtlDays = Math.round(args.sessionTtlDays);
   args.partnerCliSessionTtlDays = Math.round(args.partnerCliSessionTtlDays);
@@ -263,6 +298,10 @@ const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL'
 const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
 const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'inventoryStock', 'productState', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'liveSalesToday', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
+const BI_DIRECT_RECEIPT_MAX_BYTES = 64 * 1024;
+const BI_DIRECT_STDOUT_MAX_BYTES = 64 * 1024;
+const BI_DIRECT_STDERR_MAX_BYTES = 64 * 1024;
+const BI_PROFIT_FULL_FALLBACK_MAX_BYTES = 64 * 1024 * 1024;
 const BI_LIVE_UPDATE_CHANNEL = 'shein_bi_live_update';
 const BI_LIVE_UPDATE_RECONNECT_MS = Math.max(1_000, Number(process.env.SHEIN_BI_LIVE_UPDATE_RECONNECT_MS || 5_000));
 const BI_LIVE_UPDATE_HEARTBEAT_MS = Math.max(10_000, Number(process.env.SHEIN_BI_LIVE_UPDATE_HEARTBEAT_MS || 25_000));
@@ -287,6 +326,128 @@ const biSectionRefreshFailures = new Map();
 let biSectionBackgroundQueue = Promise.resolve();
 let biSectionFastBackgroundQueue = Promise.resolve();
 let biProfitMartFreshnessPromise = null;
+
+function biSectionAbortError(signal, fallback = 'BI section generation cancelled by request disconnect') {
+  const error = new Error(String(signal?.reason?.message || signal?.reason || fallback));
+  error.name = 'AbortError';
+  error.code = 'BI_SECTION_REQUEST_ABORTED';
+  return error;
+}
+
+function throwIfBiSectionAborted(signal) {
+  if (signal?.aborted) throw biSectionAbortError(signal);
+}
+
+function trackBiSectionInFlight(key, promise) {
+  biSectionInFlight.set(key, promise);
+  // A shared producer may outlive the request that started it. Attach a
+  // handling branch at registration time so a disconnected owner cannot
+  // create an unhandled rejection before another reader observes the result.
+  promise.catch(() => {});
+  promise.finally(() => {
+    if (biSectionInFlight.get(key) === promise) biSectionInFlight.delete(key);
+  }).catch(() => {});
+  return promise;
+}
+
+function getOrCreateBiSectionInFlight(key, factory, options = {}) {
+  const existing = biSectionInFlight.get(key);
+  if (existing) return existing;
+  const promise = Promise.resolve().then(() => factory(options.signal || null));
+  return trackBiSectionInFlight(key, promise);
+}
+
+function abortableBiSectionDelay(ms, signal) {
+  throwIfBiSectionAborted(signal);
+  const delayMs = Math.max(0, Number(ms) || 0);
+  if (!signal) return new Promise(resolve => setTimeout(resolve, delayMs));
+  return new Promise((resolve, reject) => {
+    let timer = null;
+    const onAbort = () => {
+      if (timer !== null) clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(biSectionAbortError(signal));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener('abort', onAbort, {once: true});
+    if (signal.aborted) onAbort();
+  });
+}
+
+const PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS = Math.max(
+  1_000,
+  Math.min(5 * 60_000, Number(process.env.SHEIN_BI_PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS || 30_000)),
+);
+const PROFIT_ACCOUNTING_SNAPSHOT_REUSE_TTL_MS = Math.max(10_000, Math.min(900_000, Number(process.env.SHEIN_BI_ACCOUNTING_SNAPSHOT_REUSE_TTL_MS || 900_000)));
+
+function instant(value) {
+  const ms = Date.parse(String(value || ''));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+let recentAccountingSnapshotPublication = null;
+
+export function recordRecentAccountingSnapshotPublication({coreGeneratedAt, freshness, decision, publishedAtMs = Date.now()} = {}) {
+  if (!coreGeneratedAt || !freshness || !decision?.coversCostRun || !decision?.coversCostAssignments) {
+    return;
+  }
+  recentAccountingSnapshotPublication = {
+    coreGeneratedAt: String(coreGeneratedAt),
+    metaRefreshedAt: String(freshness.metaRefreshedAt || ''),
+    costRunSourceCutoffAt: String(freshness.costRunSourceCutoffAt || ''),
+    costRunCompletedAt: String(freshness.costRunCompletedAt || ''),
+    publishedAtMs,
+    ttlMs: PROFIT_ACCOUNTING_SNAPSHOT_REUSE_TTL_MS,
+  };
+}
+
+export function clearRecentAccountingSnapshotPublication() {
+  recentAccountingSnapshotPublication = null;
+}
+
+export function evaluateRecentAccountingSnapshotReuse(freshness, decision, coreGeneratedAt, nowMs = Date.now()) {
+  if (!recentAccountingSnapshotPublication || !coreGeneratedAt) return null;
+  const pub = recentAccountingSnapshotPublication;
+  if (pub.coreGeneratedAt !== String(coreGeneratedAt)) return null;
+  if (nowMs - pub.publishedAtMs > pub.ttlMs) {
+    recentAccountingSnapshotPublication = null;
+    return null;
+  }
+  const currentMetaMs = instant(freshness?.metaRefreshedAt);
+  const recordedMetaMs = instant(pub.metaRefreshedAt);
+  if (currentMetaMs === null || recordedMetaMs === null || currentMetaMs < recordedMetaMs) {
+    return null;
+  }
+  const currentCutoffMs = instant(freshness?.costRunSourceCutoffAt);
+  const recordedCutoffMs = instant(pub.costRunSourceCutoffAt);
+  if (currentCutoffMs === null || recordedCutoffMs === null || currentCutoffMs < recordedCutoffMs) {
+    return null;
+  }
+  if (!decision?.coversCostRun || !decision?.coversCostAssignments) {
+    return null;
+  }
+  return {
+    reused: true,
+    publishedAtMs: pub.publishedAtMs,
+    remainingTtlMs: Math.max(0, pub.ttlMs - (nowMs - pub.publishedAtMs)),
+    metaRefreshedAt: pub.metaRefreshedAt,
+    costRunSourceCutoffAt: pub.costRunSourceCutoffAt,
+  };
+}
+
+export function isAccountingStateUsable(accountingState, coreGeneratedAt) {
+  if (!accountingState?.decision) return false;
+  if (accountingState.decision.fresh) return true;
+  const reuse = evaluateRecentAccountingSnapshotReuse(
+    accountingState.freshness,
+    accountingState.decision,
+    coreGeneratedAt,
+  );
+  return Boolean(reuse);
+}
 const INVENTORY_COST_SNAPSHOT_RETRY_RE = /(?:inventory-cost source changed after snapshot|stale inventory-cost rebuild refused)/i;
 const INVENTORY_COST_REFRESH_MAX_ATTEMPTS = Math.max(1, Math.min(5, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_MAX_ATTEMPTS || 3)));
 const BI_FAST_BACKGROUND_SECTIONS = new Set(['homeRankings', 'homeProfit']);
@@ -336,6 +497,147 @@ function biPortalCoreWarmupIdempotencyKey(generatedAt) {
   // manager's 120-char bound (12 + 7 + 64 + 2 + 16 = 101).
   return `core-warmup:sha256:${digest}`;
 }
+
+function biPortalQueueHashIdempotencyKey(namespace, ...parts) {
+  const safeNamespace = String(namespace || 'request').replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 16) || 'request';
+  const digest = crypto.createHash('sha256').update(JSON.stringify(parts.map(value => String(value ?? '')))).digest('hex');
+  return `portal-${safeNamespace}:sha256:${digest}`;
+}
+
+function biPortalForceRefreshIdempotencyKey(generatedAt, refreshToken = '') {
+  // A force refresh is one explicit refresh intent on top of a core
+  // generation. Without a stable token the 30-day completed tombstone of the
+  // managed section queue can swallow a LATER unrelated business rerun of the
+  // same generation (incident re-pull, order re-check), silently serving stale
+  // results. Callers therefore MUST supply a deterministic run/attempt token:
+  // the same run reuses its token (retries dedupe), a different run uses a new
+  // token (it forms a new request). The token is hashed so arbitrary browser
+  // text never reaches the queue key or its 120-character boundary.
+  const token = String(refreshToken || '').trim();
+  if (!token) {
+    throw new TypeError('BI_FORCE_REFRESH_TOKEN_REQUIRED: host-locked force refresh requires a stable refreshToken');
+  }
+  return biPortalQueueHashIdempotencyKey('force', generatedAt, token);
+}
+
+function biPortalHomepageAccountingIdempotencyKey(accountingState, generatedAt = '') {
+  const minimumPublishedAt = String(accountingState?.minimumPublishedAt || '');
+  const targetAt = String(
+    accountingState?.freshness?.accountingInputUpdatedAt
+    || accountingState?.freshness?.orderFactUpdatedAt
+    || accountingState?.freshness?.factUpdatedAt
+    || minimumPublishedAt
+    || '',
+  );
+  return biPortalQueueHashIdempotencyKey('accounting', generatedAt, minimumPublishedAt, targetAt);
+}
+
+function biPortalLiveAccountingEventIdentity(event = {}) {
+  const entityId = String(event?.entityId || '');
+  // Startup catch-up is a synthetic generation-level invalidation. Its wall
+  // clock changes on every restart but the underlying request does not.
+  const occurredAt = entityId === 'portal-startup-accounting-catchup'
+    ? ''
+    : String(event?.occurredAt || '');
+  return crypto.createHash('sha256').update(JSON.stringify([
+    String(event?.kind || ''),
+    String(event?.storeKey || ''),
+    entityId,
+    String(event?.receiptId || ''),
+    String(event?.businessDate || ''),
+    String(event?.orderStatus || ''),
+    String(event?.orderStatusDesc || ''),
+    event?.cancelledBeforePickup === true ? '1' : '0',
+    String(event?.salesQuantity ?? ''),
+    String(event?.salesSar ?? ''),
+    occurredAt,
+  ])).digest('hex');
+}
+
+function biPortalLiveAccountingIdempotencyKey(generatedAt, event = {}) {
+  const eventIdentities = Array.isArray(event?.accountingEventIdentities)
+    ? [...new Set(event.accountingEventIdentities.map(value => String(value || '')).filter(Boolean))].sort()
+    : [biPortalLiveAccountingEventIdentity(event)];
+  return biPortalQueueHashIdempotencyKey('live', generatedAt, ...eventIdentities);
+}
+
+export function isOrdinaryCurrentDayAccountingEvent(event = {}, now = event?.receivedAt || new Date()) {
+  const accountingKinds = new Set([
+    event?.kind,
+    ...(Array.isArray(event?.accountingKinds) ? event.accountingKinds : []),
+  ].map(value => String(value || '')));
+  if (!accountingKinds.has('order') || accountingKinds.has('return') || event?.refreshHistoricalSections === true) return false;
+  const businessDate = String(event?.businessDate || '');
+  const occurredAt = String(event?.occurredAt || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(businessDate) || !Number.isFinite(Date.parse(occurredAt))) return false;
+  return businessDate === shanghaiDateKey(now);
+}
+
+export function mergeBiLiveAccountingRefreshEvent(current, event, now = new Date()) {
+  const evaluatedEvent = {
+    ...event,
+    receivedAt: String(event?.receivedAt || now.toISOString()),
+  };
+  const kinds = new Set([
+    ...(Array.isArray(current?.accountingKinds) ? current.accountingKinds : []),
+    current?.kind,
+    ...(Array.isArray(evaluatedEvent?.accountingKinds) ? evaluatedEvent.accountingKinds : []),
+    evaluatedEvent?.kind,
+  ].map(value => String(value || '')).filter(value => ['order', 'return'].includes(value)));
+  const eventNeedsHistoricalRefresh = evaluatedEvent?.kind === 'return'
+    || (evaluatedEvent?.kind === 'order' && !isOrdinaryCurrentDayAccountingEvent(evaluatedEvent, evaluatedEvent.receivedAt));
+  const currentNeedsHistoricalRefresh = current?.kind === 'return'
+    || (current?.kind === 'order' && !isOrdinaryCurrentDayAccountingEvent(current, now));
+  const accountingEventIdentities = [...new Set([
+    ...(Array.isArray(current?.accountingEventIdentities)
+      ? current.accountingEventIdentities
+      : (current ? [biPortalLiveAccountingEventIdentity(current)] : [])),
+    ...(Array.isArray(evaluatedEvent?.accountingEventIdentities)
+      ? evaluatedEvent.accountingEventIdentities
+      : [biPortalLiveAccountingEventIdentity(evaluatedEvent)]),
+  ].map(value => String(value || '')).filter(Boolean))].slice(-64);
+  return {
+    ...(current || {}),
+    ...evaluatedEvent,
+    accountingKinds: [...kinds],
+    accountingEventIdentities,
+    refreshHistoricalSections: Boolean(
+      current?.refreshHistoricalSections
+      || evaluatedEvent?.refreshHistoricalSections
+      || currentNeedsHistoricalRefresh
+      || eventNeedsHistoricalRefresh
+    ),
+  };
+}
+
+export function reevaluateBiLiveAccountingRefreshEvent(event, now = new Date()) {
+  return mergeBiLiveAccountingRefreshEvent(null, {
+    ...event,
+    receivedAt: now.toISOString(),
+  }, now);
+}
+
+export function nextBiCanonicalAccountingCatchupDelay(
+  nowMs = Date.now(),
+  intervalMs = 15 * 60_000,
+) {
+  const interval = Math.max(60_000, Number(intervalMs) || 15 * 60_000);
+  // The external section worker runs at :14 and :44. A :12/:27/:42/:57
+  // phase puts every stale intent no more than 17 minutes from a worker slot,
+  // without creating a second systemd scheduler.
+  const phase = (12 * 60_000) % interval;
+  const remainder = ((Number(nowMs) - phase) % interval + interval) % interval;
+  return Math.max(1_000, interval - remainder);
+}
+
+function biPortalGenerationCoalesceKey(generatedAt) {
+  // Core warmup, homepage accounting catch-up and live events for one API
+  // core generation share a pending/running group. A pending materialization
+  // reads the latest database state, while a running materialization needs at
+  // most one rerun for facts that may land after its snapshot. A new core
+  // generation gets a different group; force refreshes bypass this group.
+  return biPortalQueueHashIdempotencyKey('generation', generatedAt);
+}
 // Queue reason sanitizer: every C0 control character (including NUL), DEL
 // and C1 range byte is %HH-encoded so a reason can never corrupt exec argv
 // ("argument must be a string without null bytes") and stays deterministic.
@@ -366,6 +668,36 @@ const biExternalSectionQueuePending = new Set();
 const biAccountingCatchupTargets = new Map();
 const DEFAULT_BI_PORTAL_CORE_WARMUP_SECTIONS = ['profit', 'homeRankings', 'homeProfit', 'afterSales', 'orders', 'homeTrafficDaily', 'priceScatter'];
 const BI_PORTAL_CORE_WARMUP_INTERVAL_MS = Math.max(15_000, Number(process.env.SHEIN_BI_CORE_WARMUP_INTERVAL_MS || 60_000));
+function boundedBiPortalWarmupMs(name, fallback, minimum, maximum) {
+  const parsed = Number(process.env[name]);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.floor(parsed)));
+}
+const BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS = boundedBiPortalWarmupMs(
+  'SHEIN_BI_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS',
+  60_000,
+  1_000,
+  15 * 60_000,
+);
+const BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS = Math.max(
+  BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS,
+  boundedBiPortalWarmupMs(
+    'SHEIN_BI_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS',
+    15 * 60_000,
+    1_000,
+    60 * 60_000,
+  ),
+);
+const BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS = boundedBiPortalWarmupMs(
+  'SHEIN_BI_CORE_WARMUP_STALLED_AFTER_MS',
+  // The external section queue normally runs at :14/:44 but deliberately
+  // skips the reserved 01/06/08 hours.  Its longest planned gap is therefore
+  // 90 minutes; keep a small scheduling tolerance without hiding a genuinely
+  // abandoned queue indefinitely.
+  105 * 60_000,
+  5 * 60_000,
+  6 * 60 * 60_000,
+);
 const biPortalCoreWarmupState = {
   generatedAt: '',
   status: 'idle',
@@ -374,7 +706,75 @@ const biPortalCoreWarmupState = {
   finishedAt: 0,
   inFlight: null,
   lastError: '',
+  consecutiveFailures: 0,
+  nextAttemptAt: 0,
+  lastFailureAt: 0,
+  failureGeneratedAt: '',
 };
+function evaluateBiPortalCoreWarmupHealth(
+  state = biPortalCoreWarmupState,
+  {
+    nowMs = Date.now(),
+    stalledAfterMs = BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS,
+    queueState = null,
+  } = {},
+) {
+  const queued = state?.status === 'queued' && state?.owner === 'external-section-queue';
+  const referenceNowMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const startedAt = Number(state?.startedAt || 0);
+  const validStartedAt = Number.isFinite(startedAt) && startedAt > 0 && startedAt <= referenceNowMs
+    ? startedAt
+    : 0;
+  const parseQueueTimestamp = value => {
+    const parsed = typeof value === 'number' ? value : Date.parse(String(value || ''));
+    return Number.isFinite(parsed) && parsed > 0 && parsed <= referenceNowMs ? parsed : 0;
+  };
+  const latestPublishedSnapshotAt = (Array.isArray(queueState?.publishedSnapshots)
+    ? queueState.publishedSnapshots
+    : [])
+    .map(record => parseQueueTimestamp(record?.publishedAt))
+    .reduce((latest, atMs) => Math.max(latest, atMs), 0);
+  const latestCompletedAt = latestPublishedSnapshotAt > 0
+    ? 0
+    : (Array.isArray(queueState?.completedIdempotency) ? queueState.completedIdempotency : [])
+      .map(record => parseQueueTimestamp(record?.completedAt))
+      .reduce((latest, atMs) => Math.max(latest, atMs), 0);
+  const latestPublishedAt = Math.max(latestPublishedSnapshotAt, latestCompletedAt);
+  const lastProgressAt = Math.max(validStartedAt, latestPublishedAt);
+  const queuedAgeMs = queued && lastProgressAt > 0
+    ? Math.max(0, referenceNowMs - lastProgressAt)
+    : 0;
+  const stalled = queued
+    && !Boolean(state?.inFlight)
+    && lastProgressAt > 0
+    && queuedAgeMs >= Math.max(1, Number(stalledAfterMs) || BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS);
+  return {ok: !stalled, stalled, queuedAgeMs, stalledAfterMs};
+}
+function resetBiPortalCoreWarmupEnqueueBackoff() {
+  biPortalCoreWarmupState.consecutiveFailures = 0;
+  biPortalCoreWarmupState.nextAttemptAt = 0;
+  biPortalCoreWarmupState.lastFailureAt = 0;
+  biPortalCoreWarmupState.failureGeneratedAt = '';
+}
+function recordBiPortalCoreWarmupEnqueueFailure(generatedAt, error, atMs = Date.now()) {
+  if (biPortalCoreWarmupState.failureGeneratedAt !== generatedAt) resetBiPortalCoreWarmupEnqueueBackoff();
+  const consecutiveFailures = biPortalCoreWarmupState.consecutiveFailures + 1;
+  const exponent = Math.min(30, Math.max(0, consecutiveFailures - 1));
+  const delayMs = Math.min(
+    BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS,
+    BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS * (2 ** exponent),
+  );
+  biPortalCoreWarmupState.generatedAt = generatedAt;
+  biPortalCoreWarmupState.status = 'error';
+  biPortalCoreWarmupState.owner = 'external-section-queue';
+  biPortalCoreWarmupState.finishedAt = 0;
+  biPortalCoreWarmupState.lastError = error;
+  biPortalCoreWarmupState.consecutiveFailures = consecutiveFailures;
+  biPortalCoreWarmupState.lastFailureAt = atMs;
+  biPortalCoreWarmupState.nextAttemptAt = atMs + delayMs;
+  biPortalCoreWarmupState.failureGeneratedAt = generatedAt;
+  return {consecutiveFailures, delayMs, nextAttemptAt: biPortalCoreWarmupState.nextAttemptAt};
+}
 const linkOpsExecutionLocks = new Set();
 // Store capability must come from the same dynamic evidence for every store.
 // Do not add one-store readiness fallbacks here: they make an expired shared
@@ -793,6 +1193,15 @@ function send(res, status, body, headers = {}) {
   writeResponseHead(res, status, headers);
   res.end(body);
 }
+async function sendBiSectionRawStream(res, status, stream, headers = {}) {
+  writeResponseHead(res, status, headers);
+  try {
+    await pipeline(stream, res);
+  } catch {
+    if (!res.destroyed && !res.writableFinished) res.destroy();
+  }
+}
+
 
 async function readJsonFile(file, fallback) {
   try {
@@ -2049,18 +2458,6 @@ function parseCookies(req) {
   return out;
 }
 
-async function ensureSessionSecret(file) {
-  try {
-    const text = (await fs.readFile(file, 'utf8')).trim();
-    if (text.length >= 32) return text;
-  } catch {}
-  const secret = crypto.randomBytes(48).toString('base64url');
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  await fs.writeFile(file, secret + '\n', {encoding: 'utf8', mode: 0o600});
-  try { await fs.chmod(file, 0o600); } catch {}
-  return secret;
-}
-
 function signSessionPayload(payload, secret) {
   const body = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const sig = crypto.createHmac('sha256', secret).update(body).digest('base64url');
@@ -2201,41 +2598,241 @@ function inferredLinkOpsStoreActor(value) {
 
 async function readLinkOpsTaskStore(args) {
   if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readTaskStore();
-  return readLinkOpsTaskStore(args);
-}
-
-async function writeLinkOpsTaskStore(args, value) {
-  if (args.linkOpsStoreGateway) {
-    return args.linkOpsStoreGateway.replaceTaskStore(value, {actorUser: inferredLinkOpsStoreActor(value)});
-  }
-  await writeLinkOpsTaskStore(args, value);
-  return value;
+  return readJsonFile(args.linkOpsTaskFile, {version: 1, updatedAt: null, tasks: []});
 }
 
 async function readLinkOpsChatStore(args) {
   if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readChatStore();
-  return readLinkOpsChatStore(args);
-}
-
-async function writeLinkOpsChatStore(args, value) {
-  if (args.linkOpsStoreGateway) {
-    return args.linkOpsStoreGateway.replaceChatStore(value, {actorUser: inferredLinkOpsStoreActor(value)});
-  }
-  await writeLinkOpsChatStore(args, value);
-  return value;
+  return readJsonFile(args.linkOpsChatFile, {version: 1, updatedAt: null, sessions: []});
 }
 
 async function readLinkOpsActionState(args) {
   if (args.linkOpsStoreGateway) return args.linkOpsStoreGateway.readActionState();
-  return readLinkOpsActionState(args);
+  return readJsonFile(args.stateFile, defaultActionState());
 }
 
-async function writeLinkOpsActionState(args, value) {
-  if (args.linkOpsStoreGateway) {
-    return args.linkOpsStoreGateway.replaceActionState(value, {actorUser: inferredLinkOpsStoreActor(value)});
+function repositoryRevisionAtRequestStart(record, label) {
+  const revision = Number(record?.repositoryRevision);
+  if (!Number.isSafeInteger(revision) || revision <= 0) {
+    throw new LinkOpsValidationError(`${label} repositoryRevision must be a positive integer from the request-start read`);
   }
-  await writeLinkOpsActionState(args, value);
-  return value;
+  return revision;
+}
+
+function linkOpsGatewayMethod(args, method) {
+  const fn = args?.linkOpsStoreGateway?.[method];
+  if (typeof fn !== 'function') {
+    throw Object.assign(new Error(`linkOpsStoreGateway.${method} unavailable`), {
+      status: 503,
+      code: 'LINK_OPS_GATEWAY_UNAVAILABLE',
+    });
+  }
+  return fn.bind(args.linkOpsStoreGateway);
+}
+
+async function createLinkOpsTaskRecord(args, task, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'createTaskRecord')(task, {actorUser});
+}
+
+async function updateLinkOpsTaskRecord(args, original, next, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'updateTaskRecord')(String(original?.id || ''), next, {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `task ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+async function deleteLinkOpsTaskRecord(args, original, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'deleteTaskRecord')(String(original?.id || ''), {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `task ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+async function createLinkOpsChatRecord(args, session, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'createChatSessionRecord')(session, {actorUser});
+}
+
+async function updateLinkOpsChatRecord(args, original, next, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'updateChatSessionRecord')(String(original?.id || ''), next, {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `chat session ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+async function deleteLinkOpsChatRecord(args, original, actorUser = '') {
+  return linkOpsGatewayMethod(args, 'deleteChatSessionRecord')(String(original?.id || ''), {
+    expectedRevision: repositoryRevisionAtRequestStart(original, `chat session ${String(original?.id || '')}`),
+    actorUser,
+  });
+}
+
+function replacePersistedStoreRecord(store, collection, persisted) {
+  const rows = Array.isArray(store?.[collection]) ? store[collection].slice() : [];
+  const index = rows.findIndex(row => String(row?.id || '') === String(persisted?.id || ''));
+  if (index >= 0) rows[index] = persisted;
+  else rows.unshift(persisted);
+  return {...store, updatedAt: persisted?.updatedAt || new Date().toISOString(), [collection]: rows};
+}
+
+function buildLinkOpsActionChanges(current, patches, {updatedAt, updatedBy, updatedByUser} = {}) {
+  const currentActions = current?.actions && typeof current.actions === 'object' ? current.actions : {};
+  const seen = new Set();
+  return patches.map((patch, index) => {
+    const key = String(patch?.key || '').trim();
+    if (!key) throw new LinkOpsValidationError(`actions[${index}].key is required`);
+    if (seen.has(key)) throw new LinkOpsValidationError(`Duplicate action key: ${key}`);
+    seen.add(key);
+    const status = String(patch?.status || 'open');
+    if (!['open', 'done', 'review', 'ignored'].includes(status)) {
+      throw new LinkOpsValidationError(`Invalid action status: ${status}`);
+    }
+    const previous = currentActions[key] && typeof currentActions[key] === 'object' ? currentActions[key] : null;
+    const owner = typeof patch?.owner === 'string' ? patch.owner.trim().slice(0, 80) : String(previous?.owner || '');
+    const note = typeof patch?.note === 'string' ? patch.note.trim().slice(0, 500) : String(previous?.note || '');
+    if (status === 'open' && !owner && !note) {
+      if (!previous) return null;
+      return {
+        key,
+        delete: true,
+        expectedRevision: repositoryRevisionAtRequestStart(previous, `action ${key}`),
+      };
+    }
+    return {
+      key,
+      expectedRevision: previous ? repositoryRevisionAtRequestStart(previous, `action ${key}`) : null,
+      record: {
+        status,
+        owner,
+        note,
+        updatedAt: updatedAt || new Date().toISOString(),
+        updatedBy: String(updatedBy || ''),
+        updatedByUser: String(updatedByUser || ''),
+      },
+    };
+  }).filter(Boolean);
+}
+
+async function applyLinkOpsActionChanges(args, changes, actorUser = '') {
+  const apply = linkOpsGatewayMethod(args, 'applyActionChanges');
+  try {
+    return await apply(changes, {actorUser});
+  } catch (error) {
+    // applyActionChanges commits the entity batch before derived legacy-state
+    // flushing. If that post-commit flush fails, prove the exact requested
+    // revisions and payloads from one readback; never retry the atomic batch.
+    let observed;
+    try {
+      observed = await readLinkOpsActionState(args);
+    } catch {
+      throw error;
+    }
+    const actions = observed?.actions && typeof observed.actions === 'object' ? observed.actions : {};
+    const committed = changes.every(change => {
+      const row = actions[change.key];
+      if (change.delete) return !row;
+      const expectedRevision = change.expectedRevision === null || change.expectedRevision === undefined
+        ? 1
+        : Number(change.expectedRevision) + 1;
+      return Number(row?.repositoryRevision || 0) === expectedRevision
+        && linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(row))
+          === linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(change.record));
+    });
+    if (!committed) throw error;
+    return {
+      ...observed,
+      postCommitRecovered: true,
+      postCommitErrorCode: String(error?.code || 'POST_COMMIT_ERROR').slice(0, 120),
+    };
+  }
+}
+
+async function settleLinkOpsPostCommit(persisted, effects = []) {
+  const failures = [];
+  for (let index = 0; index < effects.length; index += 1) {
+    try {
+      await effects[index]();
+    } catch (error) {
+      failures.push({index, code: String(error?.code || 'POST_COMMIT_ERROR'), error: String(error?.message || error)});
+    }
+  }
+  return {
+    persisted,
+    committed: true,
+    postCommitPending: failures.length > 0,
+    postCommitFailures: failures,
+  };
+}
+
+async function deleteLinkOpsChatThenCleanup(args, original, {actorUser = '', cleanup = null} = {}) {
+  const deleted = await deleteLinkOpsChatRecord(args, original, actorUser);
+  const settled = await settleLinkOpsPostCommit(deleted, cleanup ? [cleanup] : []);
+  return settled;
+}
+
+function createLinkOpsRequestWriter(args, {actorUser = ''} = {}) {
+  const gateway = args?.linkOpsStoreGateway;
+  for (const method of [
+    'createTaskRecord',
+    'updateTaskRecord',
+    'deleteTaskRecord',
+    'createChatSessionRecord',
+    'updateChatSessionRecord',
+    'deleteChatSessionRecord',
+  ]) linkOpsGatewayMethod(args, method);
+  const tasks = new Map();
+  const sessions = new Map();
+  const observe = (map, record) => {
+    const id = String(record?.id || '');
+    if (id && !map.has(id)) map.set(id, record);
+  };
+  return {
+    supportsCrud: true,
+    observeTask(record) { observe(tasks, record); },
+    observeTaskStore(store) {
+      for (const record of normalizeLinkOpsTaskStore(store).tasks) observe(tasks, record);
+    },
+    observeSession(record) { observe(sessions, record); },
+    observeSessionStore(store) {
+      for (const record of normalizeLinkOpsChatStore(store).sessions) observe(sessions, record);
+    },
+    async persistTask(next, {store = null, actorUser: overrideActor = ''} = {}) {
+      const id = String(next?.id || '');
+      const original = tasks.get(id) || null;
+      const persisted = original
+        ? await updateLinkOpsTaskRecord(args, original, next, overrideActor || actorUser)
+        : await createLinkOpsTaskRecord(args, next, overrideActor || actorUser);
+      tasks.set(id, persisted);
+      return {
+        task: persisted,
+        store: replacePersistedStoreRecord(store || {version: 1, tasks: []}, 'tasks', persisted),
+        created: !original,
+      };
+    },
+    async persistSession(next, {store = null} = {}) {
+      const id = String(next?.id || '');
+      const original = sessions.get(id) || null;
+      const persisted = original
+        ? await updateLinkOpsChatRecord(args, original, next, actorUser)
+        : await createLinkOpsChatRecord(args, next, actorUser);
+      sessions.set(id, persisted);
+      return {
+        session: persisted,
+        store: replacePersistedStoreRecord(store || {version: 1, memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions: []}, 'sessions', persisted),
+        created: !original,
+      };
+    },
+    async deleteSession(sessionId, {expectedRevision, actorUser: overrideActor = ''} = {}) {
+      const id = String(sessionId || '');
+      const original = sessions.get(id);
+      if (!original || (expectedRevision !== undefined && Number(original.repositoryRevision) !== Number(expectedRevision))) {
+        throw new LinkOpsValidationError(`chat session ${id} request-start revision mismatch`);
+      }
+      const deleted = await deleteLinkOpsChatRecord(args, original, overrideActor || actorUser);
+      sessions.delete(id);
+      return deleted;
+    },
+    gateway,
+  };
 }
 
 function actorHasGlobalOpsView(actor) {
@@ -2642,6 +3239,26 @@ async function appendDescriptionBindingAudit(file, entry) {
   return appendAudit(file, entry);
 }
 
+async function appendLinkOpsExecutionAudit(file, entry, {attempts = 3} = {}) {
+  const failureMarker = String(process.env.SHEIN_BI_TEST_EXECUTION_AUDIT_FAIL_FILE || '');
+  let lastError;
+  for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+    try {
+      if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+        const injected = new Error('injected link ops execution audit failure');
+        injected.code = 'LINK_OPS_EXECUTION_AUDIT_INJECTED_FAILURE';
+        throw injected;
+      }
+      await appendAudit(file, entry);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, attempt * 40));
+    }
+  }
+  throw lastError;
+}
+
 async function appendProductAttributeAudit(file, entry) {
   const failureMarker = String(process.env.SHEIN_BI_TEST_ATTRIBUTE_AUDIT_FAIL_FILE || '');
   if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
@@ -2650,6 +3267,42 @@ async function appendProductAttributeAudit(file, entry) {
     throw error;
   }
   return appendAudit(file, entry);
+}
+
+async function appendUploadedAssetBindingRecoveryAudit(file, entry) {
+  const failureMarker = String(process.env.SHEIN_BI_TEST_RECOVERY_AUDIT_FAIL_FILE || '');
+  if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+    const error = new Error('injected uploaded asset binding recovery audit failure');
+    error.code = 'RECOVER_BINDING_AUDIT_INJECTED_FAILURE';
+    throw error;
+  }
+  return appendAudit(file, entry);
+}
+
+async function waitForUploadedAssetBindingRecoveryLockTestGate(taskId) {
+  const gateDir = String(process.env.SHEIN_BI_TEST_RECOVERY_LOCK_GATE_DIR || '').trim();
+  if (process.env.NODE_ENV !== 'test' || !gateDir) return;
+  const gateName = safeTaskId(taskId);
+  const armFile = path.join(gateDir, `${gateName}.arm`);
+  const claimedFile = path.join(gateDir, `${gateName}.claimed`);
+  const readyFile = path.join(gateDir, `${gateName}.ready`);
+  const releaseFile = path.join(gateDir, `${gateName}.release`);
+  try {
+    await fs.rename(armFile, claimedFile);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'EEXIST') return;
+    throw error;
+  }
+  await fs.writeFile(readyFile, `${process.pid}\n`, 'utf8');
+  const deadline = Date.now() + 10_000;
+  while (!fssync.existsSync(releaseFile)) {
+    if (Date.now() >= deadline) {
+      const error = new Error(`uploaded asset binding recovery test lock gate timed out for ${gateName}`);
+      error.code = 'RECOVER_BINDING_TEST_LOCK_GATE_TIMEOUT';
+      throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
 }
 
 async function inspectProductAttributeResignAudit(file, {
@@ -2939,7 +3592,7 @@ function inferLinkOpsTargets(command, options = {}) {
     writeStores.push(storeMatches[0]);
   }
   const namedProductMatches = productInferenceText.match(/\b[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?[\u4e00-\u9fa5]{1,24}?(?=(?:补|复制|改|换|上架|下架|，|,|。|；|;|\s|$))/giu) || [];
-  const alnumMatches = productInferenceText.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [];
+  const alnumMatches = productInferenceText.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb|sh)\d{8,})\b/giu) || [];
   const numericProductMatches = (productInferenceText.match(/(?<!\d)(\d{3,6}[A-Z]?)(?=\s*(?:缝纫机|咖啡机|空气炸锅|热风梳|厨师机|脱毛仪|榨汁机|绞肉机|吸尘器|电磁炉|按摩器|链接|货号|产品|品))/giu) || [])
     .map(x => x.match(/\d{3,6}[A-Z]?/i)?.[0] || '');
   const skuMatches = [...new Set([...namedProductMatches, ...alnumMatches, ...numericProductMatches]
@@ -3901,6 +4554,7 @@ function projectLinkOpsProductExecutorForClient(executor) {
     mode: projectLinkOpsClientMode(result.mode || executor.mode || ''),
     state: String(result.state || executor.state || executor.status || ''),
     status: String(result.status || executor.status || ''),
+    ...projectOpenApiExecutorAbortEvidence(result, executor),
     payload: {
       found: Boolean(payload.found || payload.payloadHash),
       payloadHash: safeSha256(payload.payloadHash),
@@ -3969,6 +4623,7 @@ function projectLinkOpsMaintenanceExecutorForClient(executor) {
     mode: projectLinkOpsClientMode(result.mode || executor.mode || ''),
     state: String(result.state || executor.state || executor.status || ''),
     status: String(result.status || executor.status || ''),
+    ...projectOpenApiExecutorAbortEvidence(result, executor),
     adapterKind: sanitizeLinkOpsClientText(result.adapterKind || executor.adapterKind || '', 120),
     matchedLinksCount,
     adapterEvidence: {matchedLinksCount},
@@ -4028,7 +4683,7 @@ function projectLinkOpsTargetsForClient(targets, intents = []) {
   const rawProductRefs = asArray(normalized.productRefs)
     .map(x => compactChatLine(x, 120))
     .filter(Boolean);
-  const nonSourceProductRefs = rawProductRefs.filter(x => !/^(?:sv|sb)\d{8,}$/i.test(String(x || '').trim()));
+  const nonSourceProductRefs = rawProductRefs.filter(x => !/^(?:sv|sb|sh)\d{8,}$/i.test(String(x || '').trim()));
   const productRefs = hasCopyProduct && nonSourceProductRefs.length ? nonSourceProductRefs : rawProductRefs;
   return {
     stores: normalizeConcreteStoreKeys(normalized.stores),
@@ -4167,6 +4822,27 @@ function describeDescriptionBindingLockForClient(task) {
   };
 }
 
+function projectEmptyDescriptionAuthorizationForClient(task) {
+  const authorization = task?.emptyDescriptionAuthorization;
+  if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization)) return null;
+  const gate = validateCopyProductDescriptionPolicy(task, task?.openapiPublishPayload);
+  return {
+    ok: gate.ok === true && gate.mode === 'explicit_empty',
+    stale: gate.ok !== true || gate.mode !== 'explicit_empty',
+    mode: String(authorization.mode || ''),
+    taskId: String(authorization.taskId || ''),
+    targetStore: String(authorization.targetStore || ''),
+    sourceStore: String(authorization.sourceStore || ''),
+    sourceSkc: String(authorization.sourceSkc || ''),
+    standardGoodsSn: String(authorization.standardGoodsSn || ''),
+    baseTaskRevision: Number(authorization.baseTaskRevision || 0),
+    imageBindingFingerprint: String(authorization.imageBindingFingerprint || ''),
+    payloadHash: String(authorization.payloadHash || ''),
+    authorizationRequestKey: String(authorization.authorizationRequestKey || ''),
+    authorizedAt: String(authorization.authorizedAt || ''),
+  };
+}
+
 function projectLinkOpsTaskForClient(task) {
   const execution = projectLinkOpsExecutionForClient(task?.execution);
   const preflight = projectLinkOpsPreflightForClient(task?.preflight) || execution?.preflight || null;
@@ -4198,6 +4874,7 @@ function projectLinkOpsTaskForClient(task) {
         : projectDescriptionBindingCommit(task))
       : null,
     descriptionBindingLock: describeDescriptionBindingLockForClient(task),
+    emptyDescriptionAuthorization: projectEmptyDescriptionAuthorizationForClient(task),
     productAttributeBinding: task?.productAttributeBinding && typeof task.productAttributeBinding === 'object'
       ? projectProductAttributeBindingCommit(task)
       : null,
@@ -4537,6 +5214,15 @@ function taskRequiresOwnerLifecycleResolve(task) {
   const lifecycleStatus = String(task?.lifecycle?.lifecycleStatus || task?.lifecycle?.status || '');
   return LINK_OPS_RESTRICTED_LIFECYCLE_STATUSES.has(status)
     || LINK_OPS_RESTRICTED_LIFECYCLE_STATUSES.has(lifecycleStatus);
+}
+
+function taskCannotRepeatRealExecution(task) {
+  const status = String(task?.status || '');
+  const lifecycle = task?.lifecycle && typeof task.lifecycle === 'object' ? task.lifecycle : {};
+  return ['done', 'archived'].includes(status)
+    || lifecycle.terminal === true
+    || task?.execution?.actualWriteSubmitted === true
+    || task?.execution?.writeAudit?.actualWriteSubmitted === true;
 }
 
 function patchLinkOpsTask(task, body, actor, req) {
@@ -4971,10 +5657,11 @@ async function appendLinkOpsChatAssistantMessageForTask(args, task, answer, meta
   const idx = current.sessions.findIndex(s => String(s.id || '') === sessionId);
   if (idx < 0) return {ok: false, reason: 'session_not_found'};
   const sessions = current.sessions.slice();
-  sessions[idx] = appendAssistantChatMessage(sessions[idx], content, meta);
-  const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-  await writeLinkOpsChatStore(args, next);
-  return {ok: true, session: sessions[idx], store: next};
+  const original = sessions[idx];
+  const nextSession = appendAssistantChatMessage(original, content, meta);
+  const persisted = await updateLinkOpsChatRecord(args, original, nextSession, inferredLinkOpsStoreActor({sessions: [nextSession]}));
+  const next = replacePersistedStoreRecord(current, 'sessions', persisted);
+  return {ok: true, session: persisted, store: next};
 }
 
 async function removeLinkOpsTaskAssetDir(taskId, args) {
@@ -5257,8 +5944,8 @@ function resolveApprovedMaintenanceImageIdentity(task, body, taskRows = [], {act
   const refs = asArray(task?.targets?.productRefs || task?.productRefs)
     .map(value => String(value || '').trim())
     .filter(Boolean);
-  const refSpus = refs.filter(value => /^[a-z]\d{10,}$/i.test(value) && !/^s(?:v|b)\d+$/i.test(value));
-  const refSkcs = refs.filter(value => /^s(?:v|b)\d+$/i.test(value));
+  const refSpus = refs.filter(value => /^[a-z]\d{10,}$/i.test(value) && !isSheinSkc(value));
+  const refSkcs = refs.map(normalizeSheinSkc).filter(Boolean);
   const candidateSpus = explicitSpu ? [explicitSpu] : (sourceIdentity.spuNames.length ? sourceIdentity.spuNames : refSpus);
   const candidateSkcs = explicitSkc ? [explicitSkc] : (sourceIdentity.skcNames.length ? sourceIdentity.skcNames : refSkcs);
   if (explicitSpu && sourceIdentity.spuNames.length && !sourceIdentity.spuNames.some(value => value.toLowerCase() === explicitSpu.toLowerCase())) {
@@ -5271,7 +5958,7 @@ function resolveApprovedMaintenanceImageIdentity(task, body, taskRows = [], {act
   const spuNames = uniqueInsensitive(candidateSpus);
   const skcNames = uniqueInsensitive(candidateSkcs);
   if (spuNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one SPU; received ${spuNames.length}`);
-  if (skcNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one sv/sb SKC; received ${skcNames.length}`);
+  if (skcNames.length !== 1) throw new Error(`Approved update_images binding requires exactly one sv/sb/sh SKC; received ${skcNames.length}`);
   return {
     spuName: spuNames[0],
     skcName: skcNames[0],
@@ -5386,6 +6073,14 @@ function buildChatExecutionAnswer(task, {userMessage = ''} = {}) {
 
 async function executeChatNaturalLanguageTask({task, taskData, session, userMessage, actor, req, args}) {
   const current = normalizeLinkOpsTaskStore(taskData || {version: 1, updatedAt: null, tasks: []});
+  if (taskCannotRepeatRealExecution(task)) {
+    return {
+      handled: true,
+      task,
+      taskData: current,
+      answer: '这件事已经有终态或真实提交证据，我不会重复提交。请先查看现有平台回读；如果确实需要修正，请明确新建一件修复任务。',
+    };
+  }
   if (taskRequiresOwnerLifecycleResolve(task)) {
     const deniedLifecycle = {
       ok: false,
@@ -5408,59 +6103,92 @@ async function executeChatNaturalLanguageTask({task, taskData, session, userMess
   }
   if (id) linkOpsExecutionLocks.add(id);
   try {
-    const {task: updated, writeClaim: executionWriteClaim} = await startControlledLinkOpsExecution(task, actor, req, args, {
+    const executionResult = await startControlledLinkOpsExecution(task, actor, req, args, {
       mode: 'execute',
       executionMode: 'execute',
       confirm: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
       confirmText: LINK_OPS_OPENAPI_SUBMIT_CONFIRM_TEXT,
       source: 'chat_natural_language_execute',
     });
+    let updated = executionResult.task;
+    const executionWriteClaim = executionResult.writeClaim;
+    let commitRecovered = false;
+    let recoveryCauseCode = '';
     let nextData;
     if (executionWriteClaim) {
       // Claim path: single-task CAS only, never a whole-store replace.
-      const persisted = await persistClaimedLinkOpsExecutionResult(args, {
+      const commit = await persistClaimedLinkOpsExecutionResult(args, {
         taskId: String(updated.id || ''),
         next: updated,
         writeClaim: executionWriteClaim,
         actorUser: actorUser(actor, req),
         now: new Date().toISOString(),
       });
-      updated.task = persisted;
-      updated.execution = persisted.execution;
-      nextData = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
-    } else {
+      updated = commit.task;
+      commitRecovered = commit.commitRecovered;
+      recoveryCauseCode = commit.recoveryCauseCode;
       const tasks = current.tasks.slice();
-      const idx = tasks.findIndex(t => String(t.id || '') === String(updated.id || ''));
+      const idx = tasks.findIndex(row => String(row.id || '') === String(updated.id || ''));
       if (idx >= 0) tasks[idx] = updated;
       else tasks.unshift(updated);
-      nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
-      await writeLinkOpsTaskStore(args, nextData);
+      nextData = {version: 1, updatedAt: updated.updatedAt || new Date().toISOString(), tasks: tasks.slice(0, 1000)};
+    } else {
+      const idx = current.tasks.findIndex(t => String(t.id || '') === String(updated.id || ''));
+      const commit = await persistUnclaimedLinkOpsExecutionResult(args, {
+        current,
+        taskIndex: idx,
+        next: updated,
+        actorUser: actorUser(actor, req),
+        now: new Date().toISOString(),
+      });
+      updated = commit.task;
+      commitRecovered = commit.commitRecovered;
+      recoveryCauseCode = commit.recoveryCauseCode;
+      const tasks = current.tasks.slice();
+      if (idx >= 0) tasks[idx] = updated;
+      else tasks.unshift(updated);
+      nextData = {version: 1, updatedAt: updated.updatedAt || new Date().toISOString(), tasks: tasks.slice(0, 1000)};
     }
-    await appendAudit(args.auditFile, {
-      at: new Date().toISOString(),
-      type: 'link-ops-chat-natural-execute',
-      actor,
-      ...requestMeta(req),
-      session: {id: session?.id || ''},
-      task: {
-        id: updated.id,
-        status: updated.status,
-        state: updated.execution?.state || '',
-        stores: taskTargetStores(updated),
-        writeStores: taskWriteStores(updated),
-      },
-      naturalLanguageConfirm: compactChatLine(userMessage, 200),
-      submitted: Boolean(updated.execution?.actualWriteSubmitted || updated.execution?.writeAudit?.actualWriteSubmitted),
-    });
-    return {handled: true, task: updated, taskData: nextData, answer: buildChatExecutionAnswer(updated, {userMessage})};
+    let auditPending = false;
+    try {
+      await appendLinkOpsExecutionAudit(args.auditFile, {
+        at: new Date().toISOString(),
+        type: 'link-ops-chat-natural-execute',
+        actor,
+        ...requestMeta(req),
+        session: {id: session?.id || ''},
+        task: {
+          id: updated.id,
+          status: updated.status,
+          state: updated.execution?.state || '',
+          stores: taskTargetStores(updated),
+          writeStores: taskWriteStores(updated),
+        },
+        naturalLanguageConfirm: compactChatLine(userMessage, 200),
+        submitted: Boolean(updated.execution?.actualWriteSubmitted || updated.execution?.writeAudit?.actualWriteSubmitted),
+        commitRecovered,
+        recoveryCauseCode,
+      });
+    } catch {
+      auditPending = true;
+    }
+    const auditNote = auditPending
+      ? '\n\n执行结果已经按任务 revision/hash 精确回读；外部审计文件暂待补写，请勿重复提交。'
+      : '';
+    return {
+      handled: true,
+      task: updated,
+      taskData: nextData,
+      answer: `${buildChatExecutionAnswer(updated, {userMessage})}${auditNote}`,
+    };
   } catch (err) {
-    return {handled: true, task, taskData: current, answer: `我收到你的确认了，但执行没有跑完：${String(err?.message || err || 'unknown error')}。\n\n这件事没有被重复提交；你可以继续在聊天里补充或让我重试。`};
+    return {handled: true, task, taskData: current, answer: `我收到你的确认了，但执行链路没有完整返回：${String(err?.message || err || 'unknown error')}。\n\n当前是否已经提交不能只凭这次报错判断。请先回读任务和 SHEIN 平台状态，不要直接重试；若任务已有提交锁或提交证据，必须由全店管理账号人工核销。`};
   } finally {
     if (id) linkOpsExecutionLocks.delete(id);
   }
 }
 
-async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, taskData, actor, req, args}) {
+async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, taskData, writer = null, actor, req, args}) {
   const current = normalizeLinkOpsTaskStore(taskData || {version: 1, updatedAt: null, tasks: []});
   const actorTasks = linkOpsTasksForActor(current.tasks, actor, {mode: 'mutate'});
   const activeTasks = activeChatTasks(actorTasks, session?.id);
@@ -5483,7 +6211,7 @@ async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, 
       const task = activeTasks[0];
       const eligibility = chatNaturalExecutionEligibility(task);
       await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-chat-natural-execute-needs-check', actor, ...requestMeta(req), session: {id: session?.id || ''}, task: {id: task.id, status: task.status, state: task.execution?.state || '', reasons: eligibility.reasons}});
-      const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: current, actor, req, args, updated: true});
+      const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: current, writer, actor, req, args, updated: true});
       if (checked.task && chatNaturalExecutionEligibility(checked.task).ok) {
         await appendAudit(args.auditFile, {
           at: new Date().toISOString(),
@@ -5510,8 +6238,10 @@ async function runChatNaturalLanguageExecutionIfPossible({session, userMessage, 
   if (knowledgeBinding.changed) {
     task = knowledgeBinding.task;
     const reboundStore = replaceLinkOpsTaskInStore(current, task);
-    await writeLinkOpsTaskStore(args, reboundStore);
-    const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: reboundStore, actor, req, args, updated: true});
+    if (!writer) throw new Error('explicit task CRUD writer required');
+    const taskPersist = await writer.persistTask(task, {store: reboundStore});
+    task = taskPersist.task;
+    const checked = await runImmediateChatSystemCheckIfPossible({task, taskData: taskPersist.store, writer, actor, req, args, updated: true});
     if (previousKnowledgeFingerprint && previousKnowledgeFingerprint !== knowledgeBinding.bundle?.fingerprint) {
       return {
         handled: true,
@@ -5604,7 +6334,7 @@ function buildChatSystemCheckAnswer(task, {updated = false} = {}) {
   return lines.join('\n\n');
 }
 
-async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req, args, updated = false}) {
+async function runImmediateChatSystemCheckIfPossible({task, taskData, writer = null, actor, req, args, updated = false}) {
   if (!task || !shouldRunImmediateChatSystemCheck(task)) {
     return {task, taskData, answer: ''};
   }
@@ -5637,7 +6367,12 @@ async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req
     if (idx >= 0) tasks[idx] = checked;
     else tasks.unshift(checked);
     const nextData = {version: 1, updatedAt: new Date().toISOString(), tasks: tasks.slice(0, 1000)};
-    await writeLinkOpsTaskStore(args, nextData);
+    let persistedChecked = checked;
+    let persistedStoreData = nextData;
+    if (!writer) throw new Error('explicit task CRUD writer required');
+    const taskPersist = await writer.persistTask(checked, {store: nextData});
+    persistedChecked = taskPersist.task;
+    persistedStoreData = taskPersist.store;
     await appendAudit(args.auditFile, {
       at: new Date().toISOString(),
       type: 'link-ops-chat-immediate-system-check',
@@ -5651,7 +6386,7 @@ async function runImmediateChatSystemCheckIfPossible({task, taskData, actor, req
         writeStores: taskWriteStores(checked),
       },
     });
-    return {task: checked, taskData: nextData, answer: buildChatSystemCheckAnswer(checked, {updated})};
+    return {task: persistedChecked, taskData: persistedStoreData, answer: buildChatSystemCheckAnswer(checked, {updated})};
   } catch (err) {
     const answer = `我已收到，但刚才自动检查没有跑完：${String(err?.message || err || 'unknown error')}。\n\n你不用重新说需求，稍后我会继续按当前会话处理。`;
     return {task, taskData, answer};
@@ -5775,9 +6510,9 @@ function hasApprovedMaintenanceImageBinding(task) {
   if (!targetStore || !taskWriteStores(task).includes(targetStore)) return false;
   if (!payload || typeof payload !== 'object') return false;
   const spu = String(payload.spu_name || payload.spuName || '').trim();
-  if (!/^[a-z]\d{10,}$/i.test(spu) || /^s(?:v|b)\d+$/i.test(spu)) return false;
+  if (!/^[a-z]\d{10,}$/i.test(spu) || isSheinSkc(spu)) return false;
   const skcRows = asArray(payload.skc_list || payload.skcList);
-  if (!skcRows.length || skcRows.some(row => !/^s(?:v|b)\d+$/i.test(String(row?.skc_name || row?.skcName || '').trim()))) return false;
+  if (!skcRows.length || skcRows.some(row => !isSheinSkc(String(row?.skc_name || row?.skcName || '').trim()))) return false;
   const imageRows = [
     ...asArray(payload?.image_info?.image_info_list || payload?.imageInfo?.imageInfoList),
     ...skcRows.flatMap(row => asArray(row?.image_info?.image_info_list || row?.imageInfo?.imageInfoList)),
@@ -5979,6 +6714,7 @@ function projectProductExecutorHistoryEvidence(executorRun = {}) {
     storeKey: executorResult.storeKey || '',
     mode: executorRun?.mode || '',
     state: executorResult.state || '',
+    ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
     runId: executorResult.runId || '',
     savedTo: executorResult.savedTo || '',
     payloadFound: Boolean(executorResult.payload?.found),
@@ -5987,6 +6723,9 @@ function projectProductExecutorHistoryEvidence(executorRun = {}) {
     sourceStore: String(executorResult.sourceStore || '').toUpperCase(),
     sourceSkc: sanitizeLinkOpsClientText(executorResult.sourceSkc || '', 120),
     payload: {
+      sourceDetailHash: /^[a-f0-9]{64}$/.test(String(executorResult.payload?.sourceDetailHash || ''))
+        ? String(executorResult.payload.sourceDetailHash)
+        : '',
       sourceDetailLock: compactSourceDetailLock(executorResult.payload?.sourceDetailLock),
     },
     payloadSummary: executorResult.payload?.summary || null,
@@ -6046,6 +6785,7 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         mode: executorRun?.mode || '',
         state: result.state || '',
         ok: Boolean(result.ok),
+        ...projectOpenApiExecutorAbortEvidence(result, executorRun),
         childRunId: result.runId || '',
         savedTo: result.savedTo || '',
         adapterKind: result.adapterKind || '',
@@ -6053,6 +6793,9 @@ function buildLinkOpsExecutionWriteAudit({task, actor, req, runId, at, requested
         payloadHash: result.payload?.payloadHash || '',
         payloadHashAlgorithm: result.payload?.payloadHashAlgorithm || '',
         payload: {
+          sourceDetailHash: /^[a-f0-9]{64}$/.test(String(result.payload?.sourceDetailHash || ''))
+            ? String(result.payload.sourceDetailHash)
+            : '',
           sourceDetailLock: compactSourceDetailLock(result.payload?.sourceDetailLock),
         },
         payloadSummary: result.payload?.summary || null,
@@ -6119,6 +6862,63 @@ function executorReadbackOutcomes(executorResults = []) {
       matchedCount: Array.isArray(result?.readback?.matchedRows) ? result.readback.matchedRows.length : 0,
       weakMatchedCount: Array.isArray(result?.readback?.weakMatchedRows) ? result.readback.weakMatchedRows.length : 0,
     }));
+}
+
+function linkOpsExecutionResponseOutcome(task, {requestedExecute = false} = {}) {
+  const execution = task?.execution && typeof task.execution === 'object' ? task.execution : {};
+  const lifecycle = task?.lifecycle && typeof task.lifecycle === 'object'
+    ? task.lifecycle
+    : (execution?.lifecycle && typeof execution.lifecycle === 'object' ? execution.lifecycle : {});
+  const executorRuns = [
+    ...asArray(execution.openApiProductExecutors),
+    ...asArray(execution.linkMaintenanceExecutors),
+  ];
+  if (execution.hlOpenApiExecutor && typeof execution.hlOpenApiExecutor === 'object') {
+    executorRuns.push(execution.hlOpenApiExecutor);
+  }
+  const blockers = uniqueMessages([
+    ...asArray(task?.preflight?.blockers),
+    ...asArray(execution?.preflight?.blockers),
+    ...executorRuns.flatMap(run => asArray(run?.blockers)),
+  ]);
+  const lifecycleStatus = String(lifecycle.lifecycleStatus || lifecycle.status || '');
+  const executorFailed = executorRuns.some(run => run?.ok === false);
+  const executorSubmittedUnconfirmed = executorRuns.some(run => run?.ok === false && (
+    String(run?.state || '') === 'submitted'
+    || run?.adapterEvidence?.realSubmit === true
+    || run?.submittedPossibly === true
+    || run?.suspiciousWriteAttempted === true
+    || (run?.publishResult && run?.readback?.ok === false)
+  ));
+  const unconfirmedLifecycleStatuses = new Set([
+    'submitted_but_readback_pending',
+    'submitted_readback_pending',
+    'submitted_readback_failed',
+    'suspicious_write_attempted',
+  ]);
+  const unconfirmed = requestedExecute && (
+    String(execution?.writeClaim?.state || '') === 'unconfirmed'
+    || lifecycle?.needsManualResolve === true
+    || unconfirmedLifecycleStatuses.has(lifecycleStatus)
+    || executorSubmittedUnconfirmed
+  );
+  if (unconfirmed) {
+    return {
+      ok: false,
+      partial: true,
+      outcome: 'unconfirmed',
+      error: 'SHEIN 写入结果已持久化，但强回读未确认业务完成；任务已锁定，禁止重复提交，需人工核销。',
+    };
+  }
+  if (executorFailed || blockers.length > 0 || execution?.preflight?.ok === false || task?.preflight?.ok === false) {
+    return {
+      ok: false,
+      partial: true,
+      outcome: 'blocked',
+      error: '执行结果已持久化，但业务操作未完成；请查看任务 blockers 和 execution 状态。',
+    };
+  }
+  return {ok: true, partial: false, outcome: requestedExecute ? 'completed' : 'ready', error: ''};
 }
 
 function classifyLinkOpsLifecycle({
@@ -6313,7 +7113,97 @@ function blockedStoreExecutorResult(storeKey, blockers = []) {
   };
 }
 
-const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v3';
+function buildOpenApiExecutorChildOutcome({
+  kind,
+  storeKey,
+  mode,
+  childResult,
+  parsed = null,
+  capturedPublishPayload = null,
+} = {}) {
+  const targetStore = String(storeKey || '').trim().toUpperCase();
+  const executeMode = String(mode || '') === 'execute';
+  const productExecutor = kind === 'product';
+  const executorLabel = productExecutor ? 'OpenAPI 商品执行器' : 'OpenAPI 维护执行器';
+  const run = childResult && typeof childResult === 'object' ? childResult : {};
+  const stderrTail = String(run.stderr || '').slice(-1200);
+  const common = {
+    mode,
+    storeKey: targetStore,
+    code: run.code ?? null,
+    timedOut: run.timedOut === true,
+    aborted: run.aborted === true,
+    abortReason: sanitizeLinkOpsClientText(run.abortReason || '', 300),
+    terminationSignal: sanitizeLinkOpsClientText(run.terminationSignal || '', 40),
+    exitSignal: sanitizeLinkOpsClientText(run.exitSignal || '', 40),
+    stderrTail,
+    ...(productExecutor ? {capturedPublishPayload} : {}),
+  };
+  if (run.aborted === true) {
+    const abortReason = common.abortReason || 'Portal runtime shutdown';
+    return {
+      ...common,
+      ok: false,
+      result: {
+        ok: false,
+        state: executeMode ? 'suspicious_write_attempted' : 'aborted',
+        blockers: executeMode
+          ? []
+          : [`${targetStore} ${executorLabel}因 Portal 关停被取消；本次系统检查未完成。`],
+        warnings: executeMode
+          ? [`${targetStore} ${executorLabel}在真实提交模式下因 Portal 关停被终止。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
+          : [],
+        aborted: true,
+        abortReason,
+        terminationSignal: common.terminationSignal,
+        exitSignal: common.exitSignal,
+        suspiciousWriteAttempted: executeMode,
+        submittedPossibly: executeMode,
+        rawStdoutTail: String(run.stdout || '').slice(-1200),
+        rawStderrTail: stderrTail,
+      },
+    };
+  }
+  if (parsed && typeof parsed === 'object') {
+    return {
+      ...common,
+      ok: Boolean(parsed.ok),
+      result: parsed,
+    };
+  }
+  return {
+    ...common,
+    ok: false,
+    result: {
+      ok: false,
+      state: executeMode ? 'suspicious_write_attempted' : (run.timedOut ? 'timeout' : 'error'),
+      blockers: executeMode
+        ? []
+        : [`${targetStore} ${executorLabel}未返回可解析结果：code=${run.code}${run.timedOut ? ' timeout=true' : ''}`],
+      warnings: executeMode
+        ? [`${targetStore} ${executorLabel}在真实提交模式下未返回可解析结果：code=${run.code}${run.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
+        : [],
+      suspiciousWriteAttempted: executeMode,
+      submittedPossibly: executeMode,
+      rawStdoutTail: String(run.stdout || '').slice(-1200),
+      rawStderrTail: stderrTail,
+    },
+  };
+}
+
+function projectOpenApiExecutorAbortEvidence(result = {}, run = {}) {
+  if (result?.aborted !== true && run?.aborted !== true) return {};
+  return {
+    aborted: true,
+    abortReason: sanitizeLinkOpsClientText(result?.abortReason || run?.abortReason || '', 300),
+    terminationSignal: sanitizeLinkOpsClientText(result?.terminationSignal || run?.terminationSignal || '', 40),
+    exitSignal: sanitizeLinkOpsClientText(result?.exitSignal || run?.exitSignal || '', 40),
+    suspiciousWriteAttempted: result?.suspiciousWriteAttempted === true,
+    submittedPossibly: result?.submittedPossibly === true,
+  };
+}
+
+const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v4';
 
 function payloadHashForStoreFromTaskExecution(task, storeKey = '') {
   const target = String(storeKey || '').trim().toUpperCase();
@@ -6349,15 +7239,41 @@ function payloadHashForMaintenanceFromTaskExecution(task, storeKey = '', operati
 }
 
 /**
- * Durable write-attempt claim for update_description. Executed through the
- * atomic single-task CAS (repositoryRevision predicate), so a process crash
- * between the claim and the partialEdit leaves a persisted claim that blocks
- * any repeated submit until manual resolution. The executor requires the
- * claim nonce/taskId/expectedPayloadHash/operation to match before writing.
+ * Durable single-task write-attempt claim. Executed through repository CAS,
+ * so a process crash between the claim and SHEIN leaves a persisted claim
+ * that blocks any repeated submit until exact readback/manual resolution.
+ * Each executor must verify nonce/taskId/store/operation/payload hash.
  */
-async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, storeKey, expectedPayloadHash, now}) {
+async function claimLinkOpsWriteAttempt(task, args, {
+  actor,
+  req,
+  storeKey,
+  operation = '',
+  operations = [],
+  expectedPayloadHash,
+  now,
+}) {
+  const normalizedOperations = [...new Set([
+    ...asArray(operations),
+    operation,
+  ].map(value => String(value || '').trim().toLowerCase()).filter(Boolean))];
+  if (!normalizedOperations.length) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_OPERATION_REQUIRED', error: 'write-claim 缺少精确 operation'};
+  }
+  const unsupportedOperations = normalizedOperations.filter(value => !BI_OPS_STRUCTURED_WRITE_INTENTS.has(value));
+  if (unsupportedOperations.length) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_OPERATION_INVALID', error: `write-claim 包含未受控 operation：${unsupportedOperations.join(',')}`};
+  }
+  const normalizedStoreKey = String(storeKey || '').trim().toUpperCase();
+  if (!normalizedStoreKey) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_STORE_REQUIRED', error: 'write-claim 缺少精确目标店铺'};
+  }
+  const normalizedExpectedPayloadHash = String(expectedPayloadHash || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(normalizedExpectedPayloadHash)) {
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_PAYLOAD_HASH_INVALID', error: 'write-claim 缺少有效的系统检查 payload hash'};
+  }
   if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
-    return {ok: false, code: 'DESCRIPTION_WRITE_CLAIM_GATEWAY_UNAVAILABLE', error: 'write-claim 需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用，禁止真实提交。'};
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_GATEWAY_UNAVAILABLE', error: 'write-claim 需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用，禁止真实提交。'};
   }
   let current;
   let found;
@@ -6376,8 +7292,8 @@ async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, store
   if (existingClaim && ['claimed', 'unconfirmed'].includes(String(existingClaim.state || ''))) {
     return {
       ok: false,
-      code: 'DESCRIPTION_WRITE_CLAIM_ACTIVE',
-      error: `该任务已有进行中/未确认的写 claim（state=${existingClaim.state}，claimId=${existingClaim.claimId}），禁止重复提交 partialEdit；请由全店管理账号人工核销后再处理。`,
+      code: 'LINK_OPS_WRITE_CLAIM_ACTIVE',
+      error: `该任务已有进行中/未确认的写 claim（state=${existingClaim.state}，claimId=${existingClaim.claimId}），禁止重复提交 ${normalizedOperations.join(',')}；请由全店管理账号人工核销后再处理。`,
     };
   }
   const claim = {
@@ -6385,9 +7301,9 @@ async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, store
     claimId: `wc_${now.replace(/[-:.TZ]/g, '').slice(0, 14)}_${crypto.randomBytes(4).toString('hex')}`,
     nonce: crypto.randomBytes(16).toString('hex'),
     taskId: String(record.id || ''),
-    storeKey: String(storeKey || '').trim().toUpperCase(),
-    operations: ['update_description'],
-    expectedPayloadHash: String(expectedPayloadHash || ''),
+    storeKey: normalizedStoreKey,
+    operations: normalizedOperations,
+    expectedPayloadHash: normalizedExpectedPayloadHash,
     claimedAt: now,
     claimedBy: actorUser(actor, req),
     state: 'claimed',
@@ -6409,7 +7325,7 @@ async function claimUpdateDescriptionWriteAttempt(task, args, {actor, req, store
   } catch (error) {
     const mapped = linkOpsRepositoryHttpDetails(error);
     if (mapped) return {ok: false, code: mapped.body?.code || 'LINK_OPS_REVISION_CONFLICT', error: mapped.body?.error || 'write-claim CAS 冲突'};
-    return {ok: false, code: 'DESCRIPTION_WRITE_CLAIM_FAILED', error: `write-claim 持久化失败：${String(error?.message || error).slice(0, 300)}`};
+    return {ok: false, code: 'LINK_OPS_WRITE_CLAIM_FAILED', error: `write-claim 持久化失败：${String(error?.message || error).slice(0, 300)}`};
   }
 }
 
@@ -6440,7 +7356,15 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   const mode = requestedExecute && cap.productPublishExecuteAdapter
     ? 'execute'
     : 'dry-run';
-  const {actorForWriteGate: _actorForWriteGate, beforeStoreWrite: _beforeStoreWrite, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
+  const {
+    actorForWriteGate: _actorForWriteGate,
+    beforeStoreWrite: _beforeStoreWrite,
+    executionContext: _bodyExecutionContext,
+    ...safeBodyForSnapshot
+  } = body && typeof body === 'object' ? body : {};
+  const {signal: runtimeCancellationSignal, ...serializableExecutionContext} = executionContext && typeof executionContext === 'object'
+    ? executionContext
+    : {};
   const expectedPayloadHash = mode === 'execute'
     ? payloadHashForStoreFromTaskExecution(task, targetStore)
     : '';
@@ -6455,7 +7379,7 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     version: 1,
     updatedAt: new Date().toISOString(),
     executionContext: {
-      ...executionContext,
+      ...serializableExecutionContext,
       request: safeBodyForSnapshot,
       targetStore,
       requestedMode: mode,
@@ -6475,6 +7399,8 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
   ];
   if (mode === 'execute') {
     childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
+    const claimNonce = String(executionContext?.writeClaim?.nonce || '');
+    if (claimNonce) childArgs.push('--claim-nonce', claimNonce);
   }
   if (payloadCaptureFile) childArgs.push('--payload-out', payloadCaptureFile);
   let result;
@@ -6487,6 +7413,8 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     result = await runChildProcess(process.execPath, childArgs, {
       cwd: ROOT,
       timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
+      killGraceMs: OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
+      signal: runtimeCancellationSignal || args?.runtimeCancellationSignal || null,
     });
     if (payloadCaptureFile) capturedPublishPayload = await readJsonFile(payloadCaptureFile, null);
   } finally {
@@ -6494,41 +7422,14 @@ async function runOpenApiProductExecutorForStore(task, args, body = {}, storeKey
     if (payloadCaptureFile) await fs.rm(payloadCaptureFile, {force: true}).catch(() => {});
   }
   const parsed = parseChildJsonOutput(result.stdout);
-  if (parsed) {
-    return {
-      ok: Boolean(parsed.ok),
-      mode,
-      storeKey: targetStore,
-      code: result.code,
-      timedOut: result.timedOut,
-      result: parsed,
-      capturedPublishPayload,
-      stderrTail: String(result.stderr || '').slice(-1200),
-    };
-  }
-  return {
-    ok: false,
-    mode,
+  return buildOpenApiExecutorChildOutcome({
+    kind: 'product',
     storeKey: targetStore,
-    code: result.code,
-    timedOut: result.timedOut,
+    mode,
+    childResult: result,
+    parsed,
     capturedPublishPayload,
-      result: {
-        ok: false,
-        state: mode === 'execute' ? 'suspicious_write_attempted' : (result.timedOut ? 'timeout' : 'error'),
-        blockers: mode === 'execute'
-          ? []
-          : [`${targetStore} OpenAPI 商品系统检查执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
-        warnings: mode === 'execute'
-          ? [`${targetStore} OpenAPI 商品执行器在真实提交模式下未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
-          : [],
-        suspiciousWriteAttempted: mode === 'execute',
-        submittedPossibly: mode === 'execute',
-        rawStdoutTail: String(result.stdout || '').slice(-1200),
-        rawStderrTail: String(result.stderr || '').slice(-1200),
-    },
-    stderrTail: String(result.stderr || '').slice(-1200),
-  };
+  });
 }
 
 /**
@@ -6755,15 +7656,17 @@ async function retainOrphanMaterialFile(args, storedPayload) {
 
 function decodeReviewedDescriptionSourceFile(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('必须上传实际审核 HTML 字节，不能只提交自报 material/hash');
+    throw new Error('必须上传实际审核 HTML 或普通 OOXML DOCX 字节，不能只提交自报 material/hash');
   }
   const keys = Object.keys(value).sort();
   if (keys.join(',') !== 'dataBase64,name') {
     throw new Error('sourceFile 必须严格只含 name/dataBase64');
   }
   const name = String(value.name || '').trim();
-  if (!name || path.basename(name) !== name || name.includes('/') || name.includes('\\') || !/\.html?$/i.test(name)) {
-    throw new Error('sourceFile.name 必须是 HTML 文件 basename');
+  const isHtml = /\.html?$/i.test(name);
+  const isDocx = /\.docx$/i.test(name);
+  if (!name || path.basename(name) !== name || name.includes('/') || name.includes('\\') || (!isHtml && !isDocx)) {
+    throw new Error('sourceFile.name 必须是 HTML 或普通 .docx 文件 basename');
   }
   const raw = String(value.dataBase64 || '');
   if (!raw || raw.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw)) {
@@ -6771,15 +7674,23 @@ function decodeReviewedDescriptionSourceFile(value) {
   }
   const bytes = Buffer.from(raw, 'base64');
   if (!bytes.length || bytes.length > DESCRIPTION_SOURCE_MAX_BYTES || bytes.toString('base64') !== raw) {
-    throw new Error(`审核 HTML 字节大小必须在 1-${DESCRIPTION_SOURCE_MAX_BYTES} bytes 且 base64 可逆`);
+    throw new Error(`审核源文件字节大小必须在 1-${DESCRIPTION_SOURCE_MAX_BYTES} bytes 且 base64 可逆`);
   }
-  let htmlText;
-  try {
-    htmlText = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
-  } catch {
-    throw new Error('审核 HTML 必须是有效 UTF-8');
+  let htmlText = '';
+  if (isHtml) {
+    try {
+      htmlText = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+    } catch {
+      throw new Error('审核 HTML 必须是有效 UTF-8');
+    }
   }
-  return {name, bytes, htmlText};
+  return {name, bytes, htmlText, kind: isDocx ? 'docx' : 'html'};
+}
+
+function descriptionSourceProofForSection(sectionUsed) {
+  const normalized = String(sectionUsed || 's09').trim().toLowerCase();
+  if (normalized === 'docx') return DESCRIPTION_SOURCE_PROOF_DOCX;
+  return normalized === 's9' ? DESCRIPTION_SOURCE_PROOF_S9 : DESCRIPTION_SOURCE_PROOF;
 }
 
 function descriptionBindingWriteEvidence(task) {
@@ -7646,7 +8557,7 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
     throw error;
   }
   if (!Number.isSafeInteger(Number(sourceByteLength)) || Number(sourceByteLength) <= 0) {
-    const error = new Error('描述绑定缺少审核 HTML 字节长度证明');
+    const error = new Error('描述绑定缺少审核源文件字节长度证明');
     error.status = 400;
     throw error;
   }
@@ -7670,9 +8581,7 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
   const imageBindingFingerprint = String(task?.publishAssetBinding?.bindingFingerprint || '');
   const now = new Date().toISOString();
   const summary = describeDescriptionMaterial(material);
-  const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
-    ? DESCRIPTION_SOURCE_PROOF_S9
-    : DESCRIPTION_SOURCE_PROOF;
+  const sourceProof = descriptionSourceProofForSection(sectionUsed);
   const newPayloadHash = sha256StableJson(boundPayload);
   if (newPayloadHash !== linkOpsPayloadHash(boundPayload)) {
     throw new Error('描述绑定 payload hash 算法与 link-ops canonical hash 不一致');
@@ -7758,6 +8667,10 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
       : resetNote,
     updatedAt: now,
   };
+  // A task may use either reviewed descriptions or the explicit empty policy,
+  // never both. Binding reviewed material deterministically revokes the empty
+  // marker before the CAS commit.
+  delete nextTask.emptyDescriptionAuthorization;
   nextTask.history = appendTaskHistory(nextTask, 'approved_description_material_bound', actor, req, {
     targetStore,
     sourceLabel: material.sourceLabel,
@@ -7857,13 +8770,43 @@ function loadProductAliasContextSync() {
   }
 }
 
+function portalExactCopySourceLock(task) {
+  const intents = asArray(task?.intents).map(value => String(value || '').trim());
+  if (!intents.includes('copy_product_draft')) return null;
+  const sourceStores = task?.targets?.sourceStores;
+  if (!Array.isArray(sourceStores) || sourceStores.length !== 1) return null;
+  const sourceStore = String(sourceStores[0] || '').trim().toUpperCase();
+  const sourceSkc = task?.targets?.sourceSkc;
+  if (!sourceStore) return null;
+  if (typeof sourceSkc !== 'string' || !/^s[avb]\d{8,}$/.test(sourceSkc)) return null;
+  return {sourceStore, sourceSkc};
+}
+
+function isExactSourceCopyProductDraftTask(task, payload) {
+  if (!portalExactCopySourceLock(task)) return false;
+  const unboundClassificationRows = productAttributeRowsForId(payload, 1002328);
+  const sourceHazardCategoryRows = productAttributeRowsForId(payload, 1000462);
+  const classificationValueId = normalizeProductAttributeId(unboundClassificationRows[0]?.attribute_value_id
+    ?? unboundClassificationRows[0]?.attributeValueId);
+  const hazardCategoryValueId = normalizeProductAttributeId(sourceHazardCategoryRows[0]?.attribute_value_id
+    ?? sourceHazardCategoryRows[0]?.attributeValueId);
+  return unboundClassificationRows.length === 1
+    && classificationValueId === 316914660
+    && sourceHazardCategoryRows.length === 1
+    && hazardCategoryValueId === 1006206;
+}
+
 /**
  * Execution gate for the actual copy_product_draft dry-run AND execute path.
  * Whenever a productAttributeBinding exists OR the payload carries a
  * whitelisted (donor-bound) attribute row, the persisted lock must be valid
  * and the alias/catalog registry fingerprints must match the live config;
- * otherwise both dry-run and execute are blocked. Unbound whitelisted rows
- * are treated as tampering and fail closed.
+ * otherwise both dry-run and execute are blocked. An unbound whitelisted row
+ * is allowed only for an exact-source copy whose task payload has exactly one
+ * 1002328=316914660 row and exactly one source hazard row
+ * 1000462=1006206: the executor must rebuild from the locked
+ * sourceStore/sourceSkc and apply template rules there; this gate never
+ * treats the task row as a destination protection binding.
  */
 function productAttributeExecutionGate(task) {
   const payload = task?.openapiPublishPayload;
@@ -7876,6 +8819,9 @@ function productAttributeExecutionGate(task) {
   }
   const blockers = [];
   if (!binding) {
+    if (isExactSourceCopyProductDraftTask(task, payload)) {
+      return {ok: true, active: true, blockers: [], exactSourceUnboundRowsAllowed: true};
+    }
     blockers.push({
       code: 'PRODUCT_ATTRIBUTE_UNBOUND_ROWS',
       message: 'payload 含受控白名单商品属性行但缺少 productAttributeBinding，来源不明，禁止系统检查/执行',
@@ -7907,7 +8853,55 @@ function productAttributeExecutionGate(task) {
  * carries a valid sha256, imageCount equals the image set, and the approved
  * authority/source invariants hold.
  */
-function validateExistingPublishAssetBindingForAdopt(task) {
+function taskPublishPreparationForBindingFingerprint(task) {
+  const candidates = [task?.publishPreparation, task?.targets?.publishPreparation]
+    .filter(value => value && typeof value === 'object' && !Array.isArray(value));
+  return candidates[0] || null;
+}
+
+function bindingPreparationEvidenceMatchesTask(task, binding, {allowLegacyCompactPreparation = false} = {}) {
+  const taskPreparation = taskPublishPreparationForBindingFingerprint(task);
+  const bindingPreparation = binding?.publishPreparation;
+  if (!taskPreparation || !bindingPreparation || typeof bindingPreparation !== 'object' || Array.isArray(bindingPreparation)) return false;
+  const taskNormalized = normalizePublishPreparationOverrides(taskPreparation);
+  const bindingNormalized = normalizePublishPreparationOverrides(bindingPreparation);
+  if (sha256StableJson(bindingNormalized) === sha256StableJson(taskNormalized)) return true;
+  if (!allowLegacyCompactPreparation) return false;
+  const requiredLegacyKeys = [
+    'attributeOverrideIds', 'categoryId', 'inventory', 'standardGoodsSn', 'supplierSku',
+    'supplyPrice', 'supplyPriceCurrency', 'targetStore', 'titleGroup', 'titleLanguages',
+  ];
+  if (Object.keys(bindingPreparation).sort().join(',') !== requiredLegacyKeys.sort().join(',')) return false;
+  const scalarFields = ['targetStore', 'titleGroup', 'standardGoodsSn', 'supplierSku', 'supplyPrice', 'inventory', 'categoryId'];
+  if (scalarFields.some(field => bindingNormalized[field] !== taskNormalized[field])) return false;
+  if (bindingPreparation.supplyPriceCurrency !== (taskNormalized.supplyPrice === null ? null : 'SAR')) return false;
+  const expectedLanguages = Object.keys(taskNormalized.titles || {}).sort();
+  const actualLanguages = [...new Set(asArray(bindingPreparation.titleLanguages).map(value => String(value || '').trim().toLowerCase()).filter(Boolean))].sort();
+  if (JSON.stringify(actualLanguages) !== JSON.stringify(expectedLanguages)) return false;
+  const expectedAttributeIds = [...new Set(asArray(taskNormalized.attributeOverrides).map(row => attributeOverrideIdOf(row)).filter(Number.isSafeInteger))].sort((a, b) => a - b);
+  const actualAttributeIds = [...new Set(asArray(bindingPreparation.attributeOverrideIds).map(value => Number(value)).filter(Number.isSafeInteger))].sort((a, b) => a - b);
+  return JSON.stringify(actualAttributeIds) === JSON.stringify(expectedAttributeIds);
+}
+
+function publishAssetBindingFingerprintCandidates(task, binding, images) {
+  const candidates = [];
+  const add = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const fingerprint = canonicalPublishAssetBindingFingerprint(task, {
+      binding,
+      images,
+      publishPreparation: value,
+    });
+    if (!candidates.includes(fingerprint)) candidates.push(fingerprint);
+  };
+  const taskPreparation = taskPublishPreparationForBindingFingerprint(task);
+  if (taskPreparation) add(taskPreparation);
+  if (binding?.publishPreparation) add(binding.publishPreparation);
+  if (!candidates.length) add({});
+  return candidates;
+}
+
+function validateExistingPublishAssetBindingForAdopt(task, {allowLegacyCompactPreparation = false} = {}) {
   const blockers = [];
   const binding = task?.publishAssetBinding && typeof task.publishAssetBinding === 'object' && !Array.isArray(task.publishAssetBinding)
     ? task.publishAssetBinding
@@ -7958,11 +8952,14 @@ function validateExistingPublishAssetBindingForAdopt(task) {
     });
   }
   const storedFingerprint = String(binding.bindingFingerprint || '');
-  const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {binding, images: binding.images});
-  if (!storedFingerprint || storedFingerprint !== recomputedFingerprint) {
+  const recomputedFingerprints = publishAssetBindingFingerprintCandidates(task, binding, binding.images);
+  const recomputedFingerprint = recomputedFingerprints[0] || '';
+  if (!bindingPreparationEvidenceMatchesTask(task, binding, {allowLegacyCompactPreparation})
+    || !storedFingerprint
+    || !recomputedFingerprints.includes(storedFingerprint)) {
     blockers.push({
       code: 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID',
-      message: `adopt_existing 要求 bindingFingerprint 与规范算法重算值一致（stored=${storedFingerprint || '(missing)'} recomputed=${recomputedFingerprint || '(missing)'}）`,
+      message: `adopt_existing 要求 bindingFingerprint 与规范算法重算值一致（stored=${storedFingerprint || '(missing)'} recomputed=${recomputedFingerprint || '(missing)'} candidates=${recomputedFingerprints.join('/') || '(missing)'}）`,
     });
   }
   return {ok: blockers.length === 0, blockers};
@@ -8283,8 +9280,9 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       error.code = adoptImageGate.blockers[0]?.code || 'PRODUCT_ATTRIBUTE_ADOPT_IMAGE_BINDING_INVALID';
       throw error;
     }
-    if (!task?.descriptionMaterialBinding || !validateDescriptionBindingLock(task, originalPayload).ok) {
-      const error = new Error('adopt_existing 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效（无需重绑）；先修复描述绑定');
+    const descriptionPolicy = validateCopyProductDescriptionPolicy(task, originalPayload);
+    if (!descriptionPolicy.ok) {
+      const error = new Error(`adopt_existing 要求当前描述策略锁完全有效；先修复描述绑定或空描述授权：${descriptionPolicy.blockers.slice(0, 3).join('；')}`);
       error.status = 409;
       error.code = 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID';
       throw error;
@@ -8642,9 +9640,7 @@ async function bindUpdateDescriptionMaterialToTask(task, targetStore, material, 
   }
   const now = new Date().toISOString();
   const summary = describeDescriptionMaterial(material);
-  const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
-    ? DESCRIPTION_SOURCE_PROOF_S9
-    : DESCRIPTION_SOURCE_PROOF;
+  const sourceProof = descriptionSourceProofForSection(sectionUsed);
   const payload = buildUpdateDescriptionPayload(material, spuName);
   const newPayloadHash = sha256StableJson(payload);
   const storedPayload = await writeStoredUpdateDescriptionPayload(task.id, payload);
@@ -8875,7 +9871,15 @@ async function materializeDescriptionBindingPayloadIfNeeded(task, args, targetSt
     throw error;
   }
   const payloadSource = String(captured?.result?.payload?.source || '');
-  const snapshotSource = ['webapi_snapshot', 'bi_portal_webapi_snapshot'].includes(payloadSource);
+  const snapshotSource = [
+    'webapi_snapshot',
+    'bi_portal_webapi_snapshot',
+    // The exact-source executor is stricter than the legacy snapshot path: it
+    // binds one source store/SKC plus the current source-detail hash. Treat its
+    // capture as the same trusted snapshot provenance instead of rejecting the
+    // current canonical source label as an unknown string.
+    'webapi_snapshot_exact_source_lock',
+  ].includes(payloadSource);
   const payloadAssetId = String(captured?.result?.payload?.assetId || '');
   const payloadAssetSha256 = String(captured?.result?.payload?.assetSha256 || '').toLowerCase();
   const approvedPayloadAsset = payloadSource === 'asset_json'
@@ -9021,6 +10025,7 @@ function projectPersistedPublishAssetBindingForResponse(task) {
     boundImageCount: images.length,
     boundNames: images.map(row => row.name),
     publishPreparation,
+    emptyDescriptionAuthorization: projectEmptyDescriptionAuthorizationForClient(task),
     preflightInvalidated: evidence.preflightInvalidated === true,
   };
 }
@@ -9055,6 +10060,9 @@ function injectPublishAssetsReadbackDriftForTest(task) {
       ? 'imageEditPayload'
       : 'openapiPublishPayload';
     drifted[payloadKey] = {...(drifted[payloadKey] || {}), __testReadbackDrift: true};
+  }
+  if (mode === 'empty_description_authorization' && drifted.emptyDescriptionAuthorization) {
+    drifted.emptyDescriptionAuthorization.payloadHash = 'f'.repeat(64);
   }
   return drifted;
 }
@@ -9171,6 +10179,18 @@ function verifyPersistedPublishAssetBindingReadback(freshTask, prepared) {
     || sha256StableJson(freshPayload) !== sha256StableJson(preparedPayload)) {
     drift.push(`${payloadKey} canonical hash differs from prepared payload`);
   }
+  const freshEmptyAuthorization = freshTask?.emptyDescriptionAuthorization;
+  const preparedEmptyAuthorization = preparedTask?.emptyDescriptionAuthorization;
+  if (Boolean(freshEmptyAuthorization) !== Boolean(preparedEmptyAuthorization)
+    || (freshEmptyAuthorization && sha256StableJson(freshEmptyAuthorization) !== sha256StableJson(preparedEmptyAuthorization))) {
+    drift.push('emptyDescriptionAuthorization canonical hash differs from prepared task');
+  }
+  if (preparedEmptyAuthorization) {
+    const policy = validateCopyProductDescriptionPolicy(freshTask, freshPayload);
+    if (!policy.ok || policy.mode !== 'explicit_empty') {
+      drift.push(`emptyDescriptionAuthorization policy readback invalid: ${policy.blockers.slice(0, 3).join('; ')}`);
+    }
+  }
   return {ok: drift.length === 0, drift};
 }
 
@@ -9211,6 +10231,8 @@ function sparseMergePublishPreparation(existing, incoming) {
     throw error;
   }
   return {
+    targetStore: next.targetStore || base.targetStore || '',
+    titleGroup: next.titleGroup || base.titleGroup || '',
     standardGoodsSn: next.standardGoodsSn || base.standardGoodsSn || '',
     supplierSku: next.supplierSku || base.supplierSku || '',
     supplyPrice: next.supplyPrice ?? base.supplyPrice,
@@ -9232,7 +10254,7 @@ function validateReusedApprovedTaskBinding(task, {targetStore, expectedKind = 'c
   const binding = task?.publishAssetBinding;
   const blockers = [];
   if (expectedKind === 'copy_product_draft') {
-    blockers.push(...validateExistingPublishAssetBindingForAdopt(task).blockers);
+    blockers.push(...validateExistingPublishAssetBindingForAdopt(task, {allowLegacyCompactPreparation: true}).blockers);
   } else {
     const explicitKind = String(binding.kind || '');
     if (explicitKind !== 'update_images') blockers.push({code: 'REUSE_APPROVED_BINDING_KIND_INVALID', message: `expected explicit binding.kind=update_images, got ${explicitKind || '(missing)'}`});
@@ -9245,7 +10267,11 @@ function validateReusedApprovedTaskBinding(task, {targetStore, expectedKind = 'c
     const imageCount = Number(binding.imageCount);
     if (!Number.isSafeInteger(imageCount) || imageCount !== images.length) blockers.push({code: 'REUSE_APPROVED_BINDING_IMAGE_COUNT_INVALID', message: `imageCount=${binding.imageCount ?? '(missing)'} does not match images=${images.length}`});
     const storedFingerprint = String(binding.bindingFingerprint || '');
-    const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {binding, images: binding.images});
+    const recomputedFingerprint = canonicalPublishAssetBindingFingerprint(task, {
+      binding,
+      images: binding.images,
+      publishPreparation: binding.publishPreparation || {},
+    });
     if (!storedFingerprint || storedFingerprint !== recomputedFingerprint) blockers.push({code: 'REUSE_APPROVED_BINDING_FINGERPRINT_INVALID', message: `bindingFingerprint does not match canonical recomputation`});
   }
   const canonicalImages = canonicalPublishAssetBindingImages(binding.images);
@@ -9265,6 +10291,77 @@ function validateReusedApprovedTaskBinding(task, {targetStore, expectedKind = 'c
     throw error;
   }
   return binding;
+}
+
+/**
+ * A reuse request may correct only an explicitly supplied destination title.
+ * The old task payload remains the capture snapshot for every other protected
+ * field; an absent/implicit title never gets replaced from source data.
+ */
+function replaceExplicitPublishPreparationTitlesInCapturePayload(payload, publishPreparation = {}) {
+  const normalized = normalizePublishPreparationOverrides(publishPreparation);
+  const explicitTitles = normalized.titles || {};
+  if (!Object.keys(explicitTitles).length) return {payload, replacedLanguages: []};
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('显式标题覆盖要求同任务已有可捕获的 openapiPublishPayload；未找到时拒绝猜测源标题');
+  }
+  const rawRows = asArray(payload.multi_language_name_list || payload.multiLanguageNameList)
+    .filter(row => row && typeof row === 'object' && !Array.isArray(row))
+    .map(row => ({...row}));
+  const titleRowsKey = Array.isArray(payload.multi_language_name_list)
+    ? 'multi_language_name_list'
+    : 'multiLanguageNameList';
+  const rows = rawRows.map(row => ({
+    ...row,
+    language: String(row.language || row.lang || row.languageCode || '').trim().toLowerCase(),
+  }));
+  const next = JSON.parse(JSON.stringify(payload));
+  const replacedLanguages = [];
+  for (const [language, title] of Object.entries(explicitTitles)) {
+    const matches = rows.filter(row => row.language === language);
+    if (matches.length !== 1) {
+      throw new Error(`显式目标标题 ${language} 要求 capture 快照恰有一个对应 structured title row（当前 ${matches.length}）；禁止新增/猜测标题`);
+    }
+    const row = matches[0];
+    const index = rows.indexOf(row);
+    const nextRows = asArray(next[titleRowsKey])
+      .filter(item => item && typeof item === 'object' && !Array.isArray(item))
+      .map(item => ({...item}));
+    if (!nextRows[index]) {
+      throw new Error(`显式目标标题 ${language} 的 capture structured title row 无法重建；禁止新增/猜测标题`);
+    }
+    const existingTitleKeys = ['name', 'product_name', 'productName', 'value']
+      .filter(key => Object.hasOwn(nextRows[index], key));
+    const titleKey = existingTitleKeys[0] || 'name';
+    nextRows[index] = {...nextRows[index], [titleKey]: title};
+    next[titleRowsKey] = nextRows;
+    replacedLanguages.push(language);
+  }
+  return {payload: next, replacedLanguages};
+}
+
+function persistedPublishPreparationLock(publishPreparation = {}) {
+  const normalized = normalizePublishPreparationOverrides(publishPreparation);
+  return JSON.parse(JSON.stringify(normalized));
+}
+
+function invalidateDependentPublishLocksForPreparationMigration(task) {
+  const next = JSON.parse(JSON.stringify(task || {}));
+  const payload = next.openapiPublishPayload && typeof next.openapiPublishPayload === 'object'
+    && !Array.isArray(next.openapiPublishPayload)
+    ? next.openapiPublishPayload
+    : null;
+  if (payload) {
+    delete payload.multi_language_desc_list;
+    delete payload.multiLanguageDescList;
+    delete payload.productMultiDescList;
+    delete payload.product_multi_desc_list;
+  }
+  const invalidatedDescriptionBinding = Boolean(next.descriptionMaterialBinding);
+  const invalidatedProductAttributeBinding = Boolean(next.productAttributeBinding);
+  delete next.descriptionMaterialBinding;
+  delete next.productAttributeBinding;
+  return {task: next, invalidatedDescriptionBinding, invalidatedProductAttributeBinding};
 }
 
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
@@ -9294,6 +10391,23 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       : [];
   const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
   const isMaintenanceImageBinding = intents.includes('update_images') && !intents.includes('copy_product_draft');
+  const allowEmptyDescriptionFieldPresent = Object.prototype.hasOwnProperty.call(body || {}, 'allowEmptyDescription');
+  const emptyDescriptionConfirmFieldPresent = Object.prototype.hasOwnProperty.call(body || {}, 'emptyDescriptionConfirm');
+  if (allowEmptyDescriptionFieldPresent && typeof body.allowEmptyDescription !== 'boolean') {
+    throw new Error('allowEmptyDescription 必须是原始 JSON boolean；禁止字符串或隐式真值');
+  }
+  const allowEmptyDescription = body.allowEmptyDescription === true;
+  const emptyDescriptionConfirm = String(body.emptyDescriptionConfirm || '');
+  if (allowEmptyDescription) {
+    if (emptyDescriptionConfirm !== EMPTY_DESCRIPTION_CONFIRM_TEXT) {
+      throw new Error(`空描述授权必须同时携带 --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}`);
+    }
+    if (intents.length !== 1 || intents[0] !== 'copy_product_draft' || isMaintenanceImageBinding) {
+      throw new Error('空描述授权只支持单独 copy_product_draft 发布准备');
+    }
+  } else if (emptyDescriptionConfirmFieldPresent && emptyDescriptionConfirm) {
+    throw new Error('emptyDescriptionConfirm 只能与 allowEmptyDescription=true 同时使用');
+  }
   if (isReuse && !isMaintenanceImageBinding) {
     if (!intents.includes('copy_product_draft')) {
       const error = new Error('reuseApprovedBinding only supports copy_product_draft tasks');
@@ -9420,14 +10534,18 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   if (!intents.includes('copy_product_draft')) {
     throw new Error('Approved image binding supports copy_product_draft or a standalone update_images task only');
   }
-  let publishPreparation = normalizePublishPreparationOverrides(body.publishPreparation || body);
+  let publishPreparation = {
+    ...normalizePublishPreparationOverrides(body.publishPreparation || body),
+    targetStore,
+  };
   if (isReuse) {
     publishPreparation = sparseMergePublishPreparation(
       task?.publishPreparation || task?.targets?.publishPreparation || {},
       publishPreparation,
     );
+    publishPreparation.targetStore = targetStore;
   }
-  const taskForCapture = {
+  let taskForCapture = {
     ...task,
     status: String(task.status || '') === 'draft' ? 'confirmed' : task.status,
     targets: {
@@ -9441,7 +10559,39 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       publishPreparation,
     },
     publishPreparation,
+    ...(task?.publishAssetBinding && typeof task.publishAssetBinding === 'object' && !Array.isArray(task.publishAssetBinding)
+      ? {publishAssetBinding: {...task.publishAssetBinding, publishPreparation}}
+      : {}),
   };
+  // Every publish preparation revokes a prior empty marker first. The caller
+  // must explicitly request and re-bind it to the newly prepared payload.
+  delete taskForCapture.emptyDescriptionAuthorization;
+  if (allowEmptyDescription) {
+    delete taskForCapture.descriptionMaterialBinding;
+    if (taskForCapture.openapiPublishPayload && typeof taskForCapture.openapiPublishPayload === 'object' && !Array.isArray(taskForCapture.openapiPublishPayload)) {
+      taskForCapture.openapiPublishPayload = stripPublishPayloadDescriptions(taskForCapture.openapiPublishPayload);
+    }
+  }
+  if (isReuse && Object.keys(publishPreparation.titles || {}).length && taskForCapture.openapiPublishPayload) {
+    const replaced = replaceExplicitPublishPreparationTitlesInCapturePayload(
+      taskForCapture.openapiPublishPayload,
+      publishPreparation,
+    );
+    taskForCapture = {...taskForCapture, openapiPublishPayload: replaced.payload};
+  }
+  const priorBindingPreparation = task?.publishAssetBinding?.publishPreparation;
+  const requiresPreparationMigration = isReuse && (
+    !priorBindingPreparation
+    || sha256StableJson(normalizePublishPreparationOverrides(priorBindingPreparation)) !== sha256StableJson(publishPreparation)
+  );
+  let invalidatedDescriptionBinding = false;
+  let invalidatedProductAttributeBinding = false;
+  if (requiresPreparationMigration) {
+    const invalidated = invalidateDependentPublishLocksForPreparationMigration(taskForCapture);
+    taskForCapture = invalidated.task;
+    invalidatedDescriptionBinding = invalidated.invalidatedDescriptionBinding;
+    invalidatedProductAttributeBinding = invalidated.invalidatedProductAttributeBinding;
+  }
   const captureTask = {
     ...taskForCapture,
     // The reviewed bindings below replace every publish image. Raw image assets
@@ -9449,13 +10599,33 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     // source images or block this explicit same-task preparation step.
     assets: asArray(taskForCapture.assets).filter(asset => !String(asset?.mime || asset?.type || '').toLowerCase().startsWith('image/')),
   };
-  const captured = await runOpenApiProductExecutorForStore(
-    captureTask,
-    args,
-    {mode: 'dry-run', source: 'approved_publish_asset_prepare', actorForWriteGate: actor},
-    targetStore,
-    {capturePublishPayload: true, publishPreparation},
-  );
+  const recoveredAuditReusePayload = isReuse
+    && taskForCapture.publishAssetBinding?.evidence?.recoveredFromAudit === true
+    && taskForCapture.openapiPublishPayload
+    && typeof taskForCapture.openapiPublishPayload === 'object'
+    && !Array.isArray(taskForCapture.openapiPublishPayload)
+    ? JSON.parse(JSON.stringify(taskForCapture.openapiPublishPayload))
+    : null;
+  const captured = recoveredAuditReusePayload
+    ? {
+        capturedPublishPayload: recoveredAuditReusePayload,
+        result: {
+          blockers: [],
+          warnings: [],
+          payload: {
+            source: 'task',
+            recoveredFromAudit: true,
+            bindingFingerprint: String(taskForCapture.publishAssetBinding?.bindingFingerprint || ''),
+          },
+        },
+      }
+    : await runOpenApiProductExecutorForStore(
+      captureTask,
+      args,
+      {mode: 'dry-run', source: 'approved_publish_asset_prepare', actorForWriteGate: actor},
+      targetStore,
+      {capturePublishPayload: true, publishPreparation},
+    );
   if (!captured.capturedPublishPayload) {
     const error = new Error('无法从当前任务生成可绑定图片的发布 payload；没有创建新任务，也没有回退到源链接图片');
     error.status = 409;
@@ -9470,7 +10640,24 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   }
   const explicit = applyExplicitPublishPreparationOverrides(captured.capturedPublishPayload, publishPreparation);
   const bound = applyApprovedImageBindingsToPublishPayload(explicit.payload, bindings, {sourceApproved: true});
+  const preparedPublishPayload = allowEmptyDescription
+    ? stripPublishPayloadDescriptions(bound.payload)
+    : bound.payload;
   const now = new Date().toISOString();
+  const priorRecoveredBindingEvidence = isReuse
+    && task?.publishAssetBinding?.evidence?.recoveredFromAudit === true
+    ? {
+        recoveredFromAudit: true,
+        prepareBatchId: String(task.publishAssetBinding.evidence.prepareBatchId || task.publishAssetBinding.prepareBatchId || ''),
+        tupleHash: String(task.publishAssetBinding.evidence.tupleHash || ''),
+        requestHash: String(task.publishAssetBinding.evidence.requestHash || ''),
+        recoveredAt: String(task.publishAssetBinding.evidence.recoveredAt || ''),
+        recoveryIdentity: task.publishAssetBinding.evidence.recoveryIdentity
+          ? JSON.parse(JSON.stringify(task.publishAssetBinding.evidence.recoveryIdentity))
+          : null,
+        payloadHash: canonicalRecoveredPublishPayloadHash(preparedPublishPayload),
+      }
+    : null;
   const bindingFingerprint = canonicalPublishAssetBindingFingerprint(taskForCapture, {
     binding: {targetStore},
     images: bound.bindings,
@@ -9479,7 +10666,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   });
   const nextTask = {
     ...taskForCapture,
-    openapiPublishPayload: bound.payload,
+    openapiPublishPayload: preparedPublishPayload,
     publishAssetBinding: {
       schemaVersion: 1,
       sourceApproved: true,
@@ -9488,6 +10675,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       boundAt: now,
       boundByUser: actorUser(actor, req),
       bindingFingerprint,
+      ...(priorRecoveredBindingEvidence?.prepareBatchId ? {prepareBatchId: priorRecoveredBindingEvidence.prepareBatchId} : {}),
       imageCount: bound.bindings.length,
       images: bound.bindings.map(row => ({
         name: row.name,
@@ -9499,8 +10687,18 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
         height: row.height,
         sha256: row.sha256,
       })),
-      evidence: {...bound.evidence, preflightInvalidated: true},
-      publishPreparation: explicit.evidence,
+      evidence: {
+        ...(priorRecoveredBindingEvidence || {}),
+        ...bound.evidence,
+        preflightInvalidated: true,
+        preparationMigration: requiresPreparationMigration,
+        descriptionBindingInvalidated: invalidatedDescriptionBinding,
+        productAttributeBindingInvalidated: invalidatedProductAttributeBinding,
+      },
+      // Persist the complete normalized destination lock.  Audit/history may
+      // remain compact, but executor preflight and fingerprint validation must
+      // retain the exact title values and attribute overrides.
+      publishPreparation: persistedPublishPreparationLock(publishPreparation),
     },
     execution: {
       ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
@@ -9515,12 +10713,34 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     note: '人工审核图片已上传并绑定到同一任务；旧预演锁已作废，必须重新预演后才能提交。',
     updatedAt: now,
   };
+  delete nextTask.emptyDescriptionAuthorization;
+  if (allowEmptyDescription) {
+    nextTask.emptyDescriptionAuthorization = buildEmptyDescriptionAuthorization({
+      task: nextTask,
+      payload: nextTask.openapiPublishPayload,
+      baseTaskRevision: Number(task?.repositoryRevision || 0),
+      authorizedAt: now,
+      authorizedByUser: actorUser(actor, req),
+    });
+  }
   nextTask.history = appendTaskHistory(nextTask, 'approved_publish_assets_bound', actor, req, {
     targetStore,
     bindingFingerprint,
     imageCount: bound.bindings.length,
     boundNames: bound.evidence.boundNames,
     publishPreparation: explicit.evidence,
+    emptyDescriptionAuthorized: allowEmptyDescription,
+    emptyDescriptionAuthorization: allowEmptyDescription ? {
+      taskId: nextTask.emptyDescriptionAuthorization.taskId,
+      targetStore: nextTask.emptyDescriptionAuthorization.targetStore,
+      sourceStore: nextTask.emptyDescriptionAuthorization.sourceStore,
+      sourceSkc: nextTask.emptyDescriptionAuthorization.sourceSkc,
+      standardGoodsSn: nextTask.emptyDescriptionAuthorization.standardGoodsSn,
+      baseTaskRevision: nextTask.emptyDescriptionAuthorization.baseTaskRevision,
+      imageBindingFingerprint: nextTask.emptyDescriptionAuthorization.imageBindingFingerprint,
+      payloadHash: nextTask.emptyDescriptionAuthorization.payloadHash,
+      authorizationRequestKey: nextTask.emptyDescriptionAuthorization.authorizationRequestKey,
+    } : null,
   });
   return {
     task: nextTask,
@@ -9530,6 +10750,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       payloadSource: 'task',
       ...bound.evidence,
       publishPreparation: explicit.evidence,
+      emptyDescriptionAuthorization: projectEmptyDescriptionAuthorizationForClient(nextTask),
       preflightInvalidated: true,
     },
   };
@@ -9580,7 +10801,15 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     return cap.authorized && cap.verifiedRead && control.enabled;
   });
   const mode = requestedExecute && allActionsEnabled ? 'execute' : 'dry-run';
-  const {actorForWriteGate: _actorForWriteGate, beforeStoreWrite: _beforeStoreWrite, ...safeBodyForSnapshot} = body && typeof body === 'object' ? body : {};
+  const {
+    actorForWriteGate: _actorForWriteGate,
+    beforeStoreWrite: _beforeStoreWrite,
+    executionContext: _bodyExecutionContext,
+    ...safeBodyForSnapshot
+  } = body && typeof body === 'object' ? body : {};
+  const {signal: runtimeCancellationSignal, ...serializableExecutionContext} = executionContext && typeof executionContext === 'object'
+    ? executionContext
+    : {};
   const expectedPayloadHash = mode === 'execute'
     ? (intents.map(intent => payloadHashForMaintenanceFromTaskExecution(task, targetStore, intent)).find(Boolean) || '')
     : '';
@@ -9591,7 +10820,7 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     version: 1,
     updatedAt: new Date().toISOString(),
     executionContext: {
-      ...executionContext,
+      ...serializableExecutionContext,
       request: safeBodyForSnapshot,
       targetStore,
       requestedMode: mode,
@@ -9612,7 +10841,7 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     mode === 'execute' ? '--execute' : '--dry-run',
   ];
   if (mode === 'execute') childArgs.push('--confirm', String(body.confirm || body.confirmText || ''));
-  if (mode === 'execute' && intents.includes('update_description')) {
+  if (mode === 'execute') {
     const claimNonce = String(executionContext?.writeClaim?.nonce || '');
     if (claimNonce) childArgs.push('--claim-nonce', claimNonce);
   }
@@ -9625,44 +10854,20 @@ async function runOpenApiMaintenanceExecutorForStore(task, args, body = {}, stor
     result = await runChildProcess(process.execPath, childArgs, {
       cwd: ROOT,
       timeoutMs: Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS || 180_000),
+      killGraceMs: OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
+      signal: runtimeCancellationSignal || args?.runtimeCancellationSignal || null,
     });
   } finally {
     await fs.rm(taskSnapshotFile, {force: true}).catch(() => {});
   }
   const parsed = parseChildJsonOutput(result.stdout);
-  if (parsed) {
-    return {
-      ok: Boolean(parsed.ok),
-      mode,
-      storeKey: targetStore,
-      code: result.code,
-      timedOut: result.timedOut,
-      result: parsed,
-      stderrTail: String(result.stderr || '').slice(-1200),
-    };
-  }
-  return {
-    ok: false,
-    mode,
+  return buildOpenApiExecutorChildOutcome({
+    kind: 'maintenance',
     storeKey: targetStore,
-    code: result.code,
-    timedOut: result.timedOut,
-    result: {
-      ok: false,
-      state: mode === 'execute' ? 'suspicious_write_attempted' : (result.timedOut ? 'timeout' : 'error'),
-      blockers: mode === 'execute'
-        ? []
-        : [`${targetStore} OpenAPI 维护执行器未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}`],
-      warnings: mode === 'execute'
-        ? [`${targetStore} OpenAPI 维护执行器在真实提交模式下未返回可解析结果：code=${result.code}${result.timedOut ? ' timeout=true' : ''}。无法确认 SHEIN 是否已接收写请求，任务已锁定，禁止重复提交，需人工核销。`]
-        : [],
-      suspiciousWriteAttempted: mode === 'execute',
-      submittedPossibly: mode === 'execute',
-      rawStdoutTail: String(result.stdout || '').slice(-1200),
-      rawStderrTail: String(result.stderr || '').slice(-1200),
-    },
-    stderrTail: String(result.stderr || '').slice(-1200),
-  };
+    mode,
+    childResult: result,
+    parsed,
+  });
 }
 
 async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
@@ -9672,6 +10877,44 @@ async function runOpenApiMaintenanceExecutors(task, args, body = {}) {
     out.push(await runOpenApiMaintenanceExecutorForStore(task, args, body, store, body.executionContext || {}));
   }
   return out;
+}
+
+function resolveLinkOpsWriteClaimState({writeClaim, productExecutors = [], maintenanceExecutors = []} = {}) {
+  if (!writeClaim) return '';
+  const claimStore = String(writeClaim.storeKey || '').trim().toUpperCase();
+  const claimOperations = asArray(writeClaim.operations).map(value => String(value || '').trim().toLowerCase());
+  const productClaim = claimOperations.includes('copy_product_draft');
+  const claimRuns = productClaim ? productExecutors : maintenanceExecutors;
+  const relevant = asArray(claimRuns).find(run => (
+    String(run?.storeKey || '').trim().toUpperCase() === claimStore
+  )) || asArray(claimRuns)[0];
+  const result = relevant?.result || {};
+  // Runtime cancellation is explicit ambiguous-write evidence. Even if a
+  // terminating child managed to flush parseable stdout, shutdown cannot prove
+  // where it was relative to the remote write boundary, so the durable claim
+  // must remain locked for readback/manual resolution.
+  if (relevant?.aborted === true || result?.aborted === true) return 'unconfirmed';
+  if (productClaim) {
+    if (linkOpsProductExecutorSubmitted(result)) {
+      return result?.readback?.ok === true ? 'completed' : 'unconfirmed';
+    }
+    if (linkOpsExecutorExplicitPreValidFailure(result)) return 'released';
+    if (result?.publishResult
+      || result?.suspiciousWriteAttempted === true
+      || result?.submittedPossibly === true) {
+      return 'unconfirmed';
+    }
+    return 'released';
+  }
+  if (result?.adapterEvidence?.realSubmit === true) {
+    return result?.readback?.ok === true ? 'completed' : 'unconfirmed';
+  }
+  if (result?.adapterEvidence?.writeAttempted === true
+    || String(result?.state || '') === 'suspicious_write_attempted'
+    || relevant?.suspiciousWriteAttempted === true) {
+    return 'unconfirmed';
+  }
+  return 'released';
 }
 
 /**
@@ -9686,7 +10929,7 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
   if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
     throw Object.assign(new Error('claim 结果持久化需要支持单任务原子 CAS 的 linkOpsStoreGateway；当前存储网关不可用'), {
       status: 503,
-      code: 'DESCRIPTION_WRITE_CLAIM_GATEWAY_UNAVAILABLE',
+      code: 'LINK_OPS_WRITE_CLAIM_GATEWAY_UNAVAILABLE',
     });
   }
   const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
@@ -9704,7 +10947,7 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
     || String(freshClaim.nonce || '') !== String(writeClaim?.nonce || '')) {
     throw Object.assign(new Error('执行期间任务的写 claim 已被替换或清除；拒绝整库覆盖，任务保持 claim 锁定，必须人工核销。'), {
       status: 409,
-      code: 'DESCRIPTION_WRITE_CLAIM_MISSING',
+      code: 'LINK_OPS_WRITE_CLAIM_MISSING',
     });
   }
   const freshRevision = Number(fresh.repositoryRevision || 0);
@@ -9715,6 +10958,7 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
       code: 'LINK_OPS_REVISION_CONFLICT',
     });
   }
+  const committedAt = now || next.updatedAt || new Date().toISOString();
   const merged = {
     ...fresh,
     status: next.status,
@@ -9727,11 +10971,102 @@ async function persistClaimedLinkOpsExecutionResult(args, {taskId, next, writeCl
     lifecycle: next.lifecycle,
     executionHistory: next.executionHistory,
     history: next.history,
-    updatedAt: now || next.updatedAt || new Date().toISOString(),
+    updatedAt: committedAt,
   };
-  return args.linkOpsStoreGateway.updateTaskRecord(String(taskId), merged, {
-    expectedRevision: freshRevision,
-    actorUser: String(actorUser || ''),
+  const expectedRevision = freshRevision + 1;
+  const expectedPayloadHash = linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(merged));
+  try {
+    const persisted = await args.linkOpsStoreGateway.updateTaskRecord(String(taskId), merged, {
+      expectedRevision: freshRevision,
+      actorUser: String(actorUser || ''),
+    });
+    const failureMarker = String(process.env.SHEIN_BI_TEST_EXECUTION_POST_COMMIT_FAIL_FILE || '');
+    if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+      const injected = new Error('injected link ops execution post-commit failure');
+      injected.code = 'LINK_OPS_EXECUTION_POST_COMMIT_INJECTED_FAILURE';
+      throw injected;
+    }
+    return {task: persisted, commitRecovered: false, recoveryCauseCode: ''};
+  } catch (error) {
+    // updateTaskRecord may fail after the atomic repository write (for
+    // example, a transient lock-file release/readback error). Never turn an
+    // exact committed SHEIN result into a generic retryable failure: recover
+    // only from the immutable revision+payload hash written by this attempt.
+    let observed = null;
+    try {
+      const readback = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+      observed = readback.tasks.find(row => String(row.id || '') === String(taskId || '')) || null;
+    } catch {}
+    if (observed
+      && Number(observed.repositoryRevision || 0) === expectedRevision
+      && String(observed.repositoryPayloadHash || '') === expectedPayloadHash) {
+      return {
+        task: observed,
+        commitRecovered: true,
+        recoveryCauseCode: String(error?.code || 'POST_COMMIT_ERROR').slice(0, 120),
+      };
+    }
+    throw error;
+  }
+}
+
+async function persistUnclaimedLinkOpsExecutionResult(args, {
+  current,
+  taskIndex,
+  next,
+  actorUser = '',
+  now = '',
+}) {
+  const tasks = normalizeLinkOpsTaskStore(current).tasks.slice();
+  if (!Number.isInteger(taskIndex) || taskIndex < 0 || taskIndex >= tasks.length) {
+    throw Object.assign(new Error('执行结果持久化缺少精确任务位置'), {
+      status: 409,
+      code: 'LINK_OPS_REVISION_CONFLICT',
+    });
+  }
+  const committedAt = now || next.updatedAt || new Date().toISOString();
+  const committedTask = {...next, updatedAt: committedAt};
+  const expectedPayloadHash = linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(committedTask));
+  const currentRevision = Number(tasks[taskIndex]?.repositoryRevision || 0);
+  if (!currentRevision) repositoryRevisionAtRequestStart(tasks[taskIndex], `task ${String(committedTask.id || '')}`);
+  const expectedRevision = currentRevision + 1;
+  let persistenceError = null;
+  try {
+    const persisted = await updateLinkOpsTaskRecord(args, tasks[taskIndex], committedTask, String(actorUser || ''));
+    const failureMarker = String(process.env.SHEIN_BI_TEST_EXECUTION_POST_COMMIT_FAIL_FILE || '');
+    if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+      const injected = new Error('injected link ops execution post-commit failure');
+      injected.code = 'LINK_OPS_EXECUTION_POST_COMMIT_INJECTED_FAILURE';
+      throw injected;
+    }
+    if (persisted
+      && String(persisted.repositoryPayloadHash || '') === expectedPayloadHash
+      && Number(persisted.repositoryRevision || 0) === expectedRevision) {
+      return {task: persisted, commitRecovered: false, recoveryCauseCode: ''};
+    }
+  } catch (error) {
+    persistenceError = error;
+  }
+  let observed = null;
+  try {
+    const readback = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+    observed = readback.tasks.find(row => String(row.id || '') === String(committedTask.id || '')) || null;
+  } catch (error) {
+    if (!persistenceError) persistenceError = error;
+  }
+  if (observed
+    && String(observed.repositoryPayloadHash || '') === expectedPayloadHash
+    && Number(observed.repositoryRevision || 0) === expectedRevision) {
+    return {
+      task: observed,
+      commitRecovered: Boolean(persistenceError),
+      recoveryCauseCode: persistenceError ? String(persistenceError?.code || 'POST_COMMIT_ERROR').slice(0, 120) : '',
+    };
+  }
+  if (persistenceError) throw persistenceError;
+  throw Object.assign(new Error('执行结果写入后无法按任务 payload hash 精确回读'), {
+    status: 409,
+    code: 'LINK_OPS_EXECUTION_READBACK_MISMATCH',
   });
 }
 
@@ -9740,6 +11075,13 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   const now = new Date().toISOString();
   const rawRequestedMode = String(body.mode || body.executionMode || (body.execute === true ? 'execute' : 'dry-run') || 'dry-run').toLowerCase();
   const requestedMode = rawRequestedMode === 'execute' ? 'execute' : 'dry-run';
+  const runtimeCancellationSignal = args?.runtimeCancellationSignal || null;
+  if (requestedMode === 'execute' && taskCannotRepeatRealExecution(task)) {
+    const error = new Error('该任务已有终态或真实提交证据，禁止再次执行');
+    error.code = 'LINK_OPS_TERMINAL_EXECUTION_RETRY_DENIED';
+    error.status = 409;
+    throw error;
+  }
   let ownerKnowledgeDistribution = null;
   let ownerKnowledgeDistributionError = '';
   const ownerKnowledgeGenerationAtStart = Number(args?.getOwnerKnowledgeGeneration?.() || 0);
@@ -9842,6 +11184,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       preflight.blockers.push('真实提交必须先完成一次 系统检查，并停在“等你确认”状态。');
     }
     if (hasProductPublishIntent) {
+      if (writeStores.length !== 1) {
+        preflight.blockers.push('复制上品真实提交必须拆成单店任务串行执行；当前任务不能用一次确认覆盖多个目标店。');
+      }
       if (task?.execution?.state !== 'openapi_product_preflight_ready' || task?.execution?.preflight?.ok !== true) {
         preflight.blockers.push('真实提交前缺少已通过的 OpenAPI 商品系统检查证据。');
       }
@@ -9859,6 +11204,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       }
     }
     if (hasMaintenanceIntent) {
+      if (writeStores.length !== 1) {
+        preflight.blockers.push('链接维护真实提交必须拆成单店任务串行执行；当前任务不能用一次确认覆盖多个目标店。');
+      }
       const maintenancePreflightReady = task?.execution?.state === 'link_maintenance_preflight_ready'
         || (intents.includes('update_description') && task?.execution?.state === 'update_description_already_matched');
       if (!maintenancePreflightReady || task?.execution?.preflight?.ok !== true) {
@@ -9885,6 +11233,12 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
             preflight.blockers.push(`${store}/${linkOpsIntentLabel(operation)} 缺少上一次 系统检查 锁定的 payload hash，不能真实提交。`);
           }
         }
+        const maintenancePayloadHashes = [...new Set(maintenanceIntents
+          .map(operation => payloadHashForMaintenanceFromTaskExecution(task, store, operation))
+          .filter(Boolean))];
+        if (maintenancePayloadHashes.length > 1) {
+          preflight.blockers.push(`${store} 的维护动作系统检查 payload hash 不一致，必须重新系统检查并拆分任务。`);
+        }
       }
     }
     executeAllowed = confirmTextPresent
@@ -9899,6 +11253,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       );
   }
   const executionContext = {
+    signal: runtimeCancellationSignal,
     actor: auditActor,
     requestMeta: auditRequestMeta,
     parentTaskId: String(task?.id || ''),
@@ -9919,8 +11274,9 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     // Whitelisted product attribute execution gate: whenever a donor-bound
     // attribute exists (productAttributeBinding or a whitelisted row), the
     // persisted lock and the live alias/catalog registry fingerprints must be
-    // valid for BOTH dry-run and execute. Unbound whitelisted rows are
-    // tampering and fail closed.
+    // valid for BOTH dry-run and execute. The only unbound-row exception is
+    // the exact-source copy path; its executor rebuilds from sourceStore /
+    // sourceSkc and does not project the task row into the destination.
     let product;
     if (hasProductPublishIntent) {
       const attributeGate = productAttributeExecutionGate(runnableTask);
@@ -9934,7 +11290,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           confirm: allowExecute ? confirmText : '',
           confirmText: allowExecute ? confirmText : '',
           beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
-          executionContext,
+          executionContext: writeClaim ? {...executionContext, writeClaim} : executionContext,
         });
       } else {
         product = openApiProductExecutorTargetStores(runnableTask).map(storeKey => (
@@ -9951,7 +11307,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         confirm: allowExecute ? confirmText : '',
         confirmText: allowExecute ? confirmText : '',
         beforeStoreWrite: store => evaluateWebhookWriteGates([store]),
-        executionContext,
+        executionContext: writeClaim ? {...executionContext, writeClaim} : executionContext,
       });
     }
     const maintenance = await runOpenApiMaintenanceExecutors(runnableTask, args, {
@@ -10011,19 +11367,50 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
     if (testDelayMs) await new Promise(resolve => setTimeout(resolve, testDelayMs));
     const withConsistencyLock = args?.withOwnerKnowledgeConsistencyLock || (work => work());
     const guarded = await withConsistencyLock(async () => {
+      if (runtimeCancellationSignal?.aborted) {
+        return {guard: {ok: true, manifest: ownerKnowledgeDistribution}, webhookGate: null, executions: null, writeClaim: null, runtimeCancelled: true};
+      }
       const guard = await verifyDistributionUnchanged();
       if (!guard.ok || !executeAllowed) return {guard, webhookGate: null, executions: null};
       // Re-evaluate immediately before the executor receives execute=true. A
       // webhook may have closed a store gate during preparation.
       const webhookGate = await evaluateWebhookWriteGates();
       if (!webhookGate.ok) return {guard, webhookGate, executions: null};
-      if (maintenanceIntents.includes('update_description') && writeStores.length === 1) {
-        const expectedPayloadHash = payloadHashForMaintenanceFromTaskExecution(runnableTask, writeStores[0], 'update_description');
-        const claimResult = await claimUpdateDescriptionWriteAttempt(runnableTask, args, {
+      if (runtimeCancellationSignal?.aborted) {
+        return {guard, webhookGate, executions: null, writeClaim: null, runtimeCancelled: true};
+      }
+      if (hasProductPublishIntent && writeStores.length === 1) {
+        const expectedPayloadHash = payloadHashForStoreFromTaskExecution(runnableTask, writeStores[0]);
+        const claimResult = await claimLinkOpsWriteAttempt(runnableTask, args, {
           actor,
           req,
           storeKey: writeStores[0],
+          operation: 'copy_product_draft',
           expectedPayloadHash,
+          now,
+        });
+        if (!claimResult.ok) {
+          preflight.blockers.push(claimResult.error);
+          return {guard, webhookGate, executions: null, writeClaim: null};
+        }
+        executeWriteClaim = claimResult.claim;
+        executeWriteClaimState = 'claimed';
+        executeWriteClaimRevision = Number(claimResult.revision || 0);
+        runnableTask = claimResult.task;
+      } else if (hasMaintenanceIntent && writeStores.length === 1) {
+        const expectedPayloadHashes = [...new Set(maintenanceIntents
+          .map(operation => payloadHashForMaintenanceFromTaskExecution(runnableTask, writeStores[0], operation))
+          .filter(Boolean))];
+        if (expectedPayloadHashes.length !== 1) {
+          preflight.blockers.push(`${writeStores[0]} 的维护动作无法绑定唯一系统检查 payload hash，禁止真实提交。`);
+          return {guard, webhookGate, executions: null, writeClaim: null};
+        }
+        const claimResult = await claimLinkOpsWriteAttempt(runnableTask, args, {
+          actor,
+          req,
+          storeKey: writeStores[0],
+          operations: maintenanceIntents,
+          expectedPayloadHash: expectedPayloadHashes[0],
           now,
         });
         if (!claimResult.ok) {
@@ -10037,6 +11424,10 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       }
       return {guard, webhookGate, executions: await runExecutors(true, executeWriteClaim), writeClaim: executeWriteClaim};
     });
+    if (guarded.runtimeCancelled) {
+      preflight.blockers.push('Portal 正在关停；本次未创建 write claim，也未向 SHEIN 启动新的真实写执行器。');
+      executeAllowed = false;
+    }
     if (!guarded.guard.ok) {
       preflight.blockers.push('负责人规则在执行准备期间发生变化或尚未完成 GitHub 校验；本次未向 SHEIN 发出真实写请求，请重新系统检查和确认。');
       executeAllowed = false;
@@ -10054,18 +11445,11 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       openApiMaintenanceExecutors = dryRun.maintenance;
     }
     if (guarded.writeClaim && guarded.executions) {
-      const claimStore = String(guarded.writeClaim.storeKey || '').trim().toUpperCase();
-      const relevant = (openApiMaintenanceExecutors || []).find(run => (
-        String(run?.storeKey || '').trim().toUpperCase() === claimStore
-      )) || (openApiMaintenanceExecutors || [])[0];
-      const result = relevant?.result || {};
-      if (result?.adapterEvidence?.realSubmit === true) {
-        executeWriteClaimState = result?.readback?.ok === true ? 'completed' : 'unconfirmed';
-      } else if (result?.adapterEvidence?.writeAttempted === true || String(result?.state || '') === 'suspicious_write_attempted' || relevant?.suspiciousWriteAttempted === true) {
-        executeWriteClaimState = 'unconfirmed';
-      } else {
-        executeWriteClaimState = 'released';
-      }
+      executeWriteClaimState = resolveLinkOpsWriteClaimState({
+        writeClaim: guarded.writeClaim,
+        productExecutors: openApiProductExecutors,
+        maintenanceExecutors: openApiMaintenanceExecutors,
+      }) || executeWriteClaimState;
     }
   } else {
     const dryRun = await runExecutors(false);
@@ -10162,6 +11546,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ok: Boolean(executorResult.ok),
       mode: executorRun.mode || '',
       state: executorResult.state || '',
+      ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
       runId: executorResult.runId || '',
       savedTo: executorResult.savedTo || '',
       payload: executorResult.payload || null,
@@ -10190,6 +11575,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       ok: Boolean(executorResult.ok),
       mode: executorRun.mode || '',
       state: executorResult.state || '',
+      ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
       runId: executorResult.runId || '',
       savedTo: executorResult.savedTo || '',
       adapterKind: executorResult.adapterKind || '',
@@ -10254,6 +11640,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
         ok: Boolean(executorResults[0].ok),
         mode: executorRuns[0]?.mode || '',
         state: executorResults[0].state || '',
+        ...projectOpenApiExecutorAbortEvidence(executorResults[0], executorRuns[0]),
         runId: executorResults[0].runId || '',
         savedTo: executorResults[0].savedTo || '',
         payload: executorResults[0].payload || null,
@@ -10323,6 +11710,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
           mode: executorRun?.mode || '',
           state: result.state || '',
           ok: Boolean(result.ok),
+          ...projectOpenApiExecutorAbortEvidence(result, executorRun),
           runId: result.runId || '',
           payloadHash: result.payload?.payloadHash || '',
           payloadHashAlgorithm: result.payload?.payloadHashAlgorithm || '',
@@ -10362,6 +11750,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       return {
         storeKey: executorResult.storeKey || '',
         state: executorResult.state || '',
+        ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
         runId: executorResult.runId || '',
         savedTo: executorResult.savedTo || '',
         adapterKind: executorResult.adapterKind || '',
@@ -10383,6 +11772,7 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
       return {
         storeKey: executorResult.storeKey || '',
         state: executorResult.state || '',
+        ...projectOpenApiExecutorAbortEvidence(executorResult, executorRun),
         runId: executorResult.runId || '',
         adapterKind: executorResult.adapterKind || '',
         matchedLinksCount: Number(executorResult.adapterEvidence?.matchedLinksCount || 0),
@@ -10404,46 +11794,294 @@ async function startControlledLinkOpsExecution(task, actor, req, args, body = {}
   };
 }
 
+const OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS = (() => {
+  const parsed = Number(process.env.SHEIN_LINK_OPS_OPENAPI_EXECUTOR_KILL_GRACE_MS || 1_500);
+  return Number.isFinite(parsed) ? Math.max(50, Math.min(5_000, Math.floor(parsed))) : 1_500;
+})();
+
+// Bound after the SIGKILL escalation: if the child still never emits close by
+// this deadline, runChildProcess abandons the local stdio/unrefs the child and
+// settles with explicit ambiguous-failure evidence instead of hanging forever
+// or inventing a success. systemd KillMode=control-group remains the final
+// cgroup fallback for an unkillable process in production.
+const RUN_CHILD_PROCESS_FINAL_SETTLE_GRACE_MS = (() => {
+  const parsed = Number(process.env.SHEIN_LINK_OPS_CHILD_FINAL_SETTLE_GRACE_MS || 250);
+  return Number.isFinite(parsed) ? Math.max(50, Math.min(2_000, Math.floor(parsed))) : 250;
+})();
+
+function childAbortReason(signal) {
+  const reason = signal?.reason;
+  if (reason === undefined || reason === null || reason === '') return 'AbortSignal aborted';
+  if (typeof reason === 'string') return reason.slice(0, 300);
+  return String(reason?.message || reason?.code || reason).slice(0, 300);
+}
+
 function runChildProcess(command, args, options = {}) {
-  return new Promise(resolve => {
-    const child = spawn(command, args, {
-      cwd: options.cwd || ROOT,
-      env: {...process.env, ...(options.env || {})},
-      windowsHide: true,
-      stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+  const signal = options.signal || null;
+  const onTerminationRequested = typeof options.onTerminationRequested === 'function'
+    ? options.onTerminationRequested
+    : null;
+  // The default remains direct-child termination for every existing caller.
+  // Only the bounded BI refresh/generator lane opts into a detached Unix
+  // process group so bash/docker/psql descendants inherit the same kill
+  // boundary. `platform` and `killProcessGroupImpl` are internal test seams.
+  const childPlatform = String(options.platform || process.platform);
+  const processGroup = options.processGroup === true;
+  const killProcessGroup = typeof options.killProcessGroupImpl === 'function'
+    ? options.killProcessGroupImpl
+    : (pid, signalName) => process.kill(-pid, signalName);
+  const timeoutValue = Number(options.timeoutMs ?? 120_000);
+  const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue > 0 ? Math.floor(timeoutValue) : 120_000;
+  const killGraceValue = Number(options.killGraceMs ?? 2_000);
+  const killGraceMs = Number.isFinite(killGraceValue)
+    ? Math.max(50, Math.min(5_000, Math.floor(killGraceValue)))
+    : 2_000;
+  const settleGraceValue = Number(options.settleGraceMs ?? RUN_CHILD_PROCESS_FINAL_SETTLE_GRACE_MS);
+  const finalSettleGraceMs = Number.isFinite(settleGraceValue)
+    ? Math.max(50, Math.min(2_000, Math.floor(settleGraceValue)))
+    : RUN_CHILD_PROCESS_FINAL_SETTLE_GRACE_MS;
+  const normalizeOutputCap = value => {
+    if (value === undefined || value === null) return Infinity;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : Infinity;
+  };
+  const maxStdoutBytes = normalizeOutputCap(options.maxStdoutBytes);
+  const maxStderrBytes = normalizeOutputCap(options.maxStderrBytes);
+  const failOnOutputOverflow = options.failOnOutputOverflow === true;
+  // Internal-only test seam used by the shutdown-lifecycle suite to inject a
+  // fake child whose kill() never produces close. Production callers never
+  // pass it, and no external input can reach this option.
+  const spawnImpl = typeof options.spawnImpl === 'function' ? options.spawnImpl : spawn;
+  const startedAt = Date.now();
+  if (signal?.aborted) {
+    return Promise.resolve({
+      ok: false,
+      code: null,
+      timedOut: false,
+      aborted: true,
+      abortReason: childAbortReason(signal),
+      terminationRequested: false,
+      terminationSignals: [],
+      terminationSignal: '',
+      exitSignal: '',
+      closeNeverObserved: false,
+      stdout: '',
+      stderr: '',
+      outputOverflow: false,
+      overflowStream: '',
+      stdoutBytes: 0,
+      stderrBytes: 0,
+      wallMs: Date.now() - startedAt,
     });
+  }
+  return new Promise(resolve => {
+    let child = null;
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutCapturedBytes = 0;
+    let stderrCapturedBytes = 0;
+    let outputOverflow = false;
+    let overflowStream = '';
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 2000).unref?.();
-    }, options.timeoutMs || 120_000);
+    let aborted = false;
+    let abortReason = '';
+    let settled = false;
+    let terminationRequested = false;
+    const terminationSignals = [];
+    let timeoutTimer = null;
+    let killTimer = null;
+    let finalSettleTimer = null;
+    let groupKillIssued = false;
+    let deferredClose = null;
+    let abortListener = null;
+    let childErrorListener = null;
+    let childCloseListener = null;
+    const appendOutput = (stream, chunk) => {
+      const text = String(chunk ?? '');
+      const bytes = Buffer.byteLength(text, 'utf8');
+      const isStdout = stream === 'stdout';
+      const cap = isStdout ? maxStdoutBytes : maxStderrBytes;
+      if (isStdout) stdoutBytes += bytes;
+      else stderrBytes += bytes;
+      let current = isStdout ? stdout : stderr;
+      const currentBytes = isStdout ? stdoutCapturedBytes : stderrCapturedBytes;
+      const remaining = Number.isFinite(cap) ? Math.max(0, cap - currentBytes) : bytes;
+      if (remaining > 0) {
+        const appended = Number.isFinite(cap) && bytes > remaining
+          ? Buffer.from(text, 'utf8').subarray(0, remaining).toString('utf8')
+          : text;
+        current += appended;
+        const appendedBytes = Buffer.byteLength(appended, 'utf8');
+        if (isStdout) stdoutCapturedBytes += appendedBytes;
+        else stderrCapturedBytes += appendedBytes;
+      }
+      if (isStdout) stdout = current;
+      else stderr = current;
+      if (Number.isFinite(cap) && bytes > remaining && failOnOutputOverflow && !outputOverflow) {
+        outputOverflow = true;
+        overflowStream = stream;
+        terminate('output-overflow');
+      }
+    };
+    const onStdout = chunk => appendOutput('stdout', chunk);
+    const onStderr = chunk => appendOutput('stderr', chunk);
+    const onStdinError = error => appendOutput('stderr', `\nstdin error: ${error?.message || error}`);
+
+    const cleanup = () => {
+      clearTimeout(timeoutTimer);
+      clearTimeout(killTimer);
+      clearTimeout(finalSettleTimer);
+      if (signal && abortListener) signal.removeEventListener('abort', abortListener);
+      child?.stdout?.off?.('data', onStdout);
+      child?.stderr?.off?.('data', onStderr);
+      child?.stdin?.off?.('error', onStdinError);
+      if (childErrorListener) child?.off?.('error', childErrorListener);
+      if (childCloseListener) child?.off?.('close', childCloseListener);
+    };
+    const settle = ({code = null, exitSignal = '', spawnError = null, closeNeverObserved = false} = {}) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (spawnError) appendOutput('stderr', `${stderr ? '\n' : ''}${String(spawnError?.stack || spawnError)}`);
+      resolve({
+        ok: code === 0 && !timedOut && !aborted && !spawnError && !closeNeverObserved && !outputOverflow,
+        code: spawnError ? -1 : code,
+        timedOut,
+        aborted,
+        abortReason,
+        terminationRequested,
+        terminationSignals: [...terminationSignals],
+        terminationSignal: terminationSignals.at(-1) || '',
+        exitSignal: String(exitSignal || ''),
+        closeNeverObserved,
+        stdout,
+        stderr,
+        outputOverflow,
+        overflowStream,
+        stdoutBytes,
+        stderrBytes,
+        wallMs: Date.now() - startedAt,
+      });
+    };
+    const terminate = cause => {
+      if (settled) return;
+      if (cause === 'abort') {
+        aborted = true;
+        abortReason = childAbortReason(signal);
+      } else if (cause === 'timeout') {
+        timedOut = true;
+      } else if (cause === 'output-overflow') {
+        outputOverflow = true;
+      }
+      if (!child || terminationRequested) return;
+      terminationRequested = true;
+      if (onTerminationRequested) {
+        try {
+          Promise.resolve(onTerminationRequested(cause)).catch(error => {
+            appendOutput('stderr', `\ntermination hook failed: ${error?.message || error}`);
+          });
+        } catch (error) {
+          appendOutput('stderr', `\ntermination hook failed: ${error?.message || error}`);
+        }
+      }
+      terminationSignals.push('SIGTERM');
+      const killChild = signalName => {
+        let groupTerminationAttempted = false;
+        if (processGroup && childPlatform !== 'win32' && Number.isInteger(child?.pid) && child.pid > 0) {
+          groupTerminationAttempted = true;
+          try {
+            killProcessGroup(child.pid, signalName);
+            return;
+          } catch (error) {
+            appendOutput('stderr', `\n${signalName} process-group failed: ${error?.message || error}`);
+          }
+        }
+        try {
+          child.kill(signalName);
+        } catch (error) {
+          appendOutput('stderr', `\n${signalName}${groupTerminationAttempted ? ' direct-child fallback' : ''} failed: ${error?.message || error}`);
+        }
+      };
+      killChild('SIGTERM');
+      killTimer = setTimeout(() => {
+        if (settled) return;
+        groupKillIssued = true;
+        terminationSignals.push('SIGKILL');
+        killChild('SIGKILL');
+        // Bounded final settle grace after SIGKILL. If the child still never
+        // emits close (unkillable process / zombie), destroy the local stdio so
+        // no output is buffered against a dead pipe, unref the child so the
+        // runtime is not held hostage, and settle with explicit ambiguous
+        // failure evidence. Never a false success, never an unbounded hang.
+        // The settle timer deliberately stays ref'd: it is the guarantee that
+        // the failure evidence is produced even when no child handle keeps the
+        // event loop alive (ignored termination / already-orphaned child).
+        finalSettleTimer = setTimeout(() => {
+          if (settled) return;
+          try { child?.stdin?.destroy?.(); } catch {}
+          try { child?.stdout?.destroy?.(); } catch {}
+          try { child?.stderr?.destroy?.(); } catch {}
+          try { child?.unref?.(); } catch {}
+          settle(deferredClose || {closeNeverObserved: true});
+        }, finalSettleGraceMs);
+      }, killGraceMs);
+    };
+
+    try {
+      child = spawnImpl(command, args, {
+        cwd: options.cwd || ROOT,
+        env: {...process.env, ...(options.env || {})},
+        windowsHide: true,
+        stdio: [options.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        ...(processGroup && childPlatform !== 'win32' ? {detached: true} : {}),
+      });
+    } catch (error) {
+      settle({spawnError: error});
+      return;
+    }
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', d => { stdout += d; });
-    child.stderr.on('data', d => { stderr += d; });
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
+    childErrorListener = error => settle({spawnError: error});
+    childCloseListener = (code, exitSignal) => {
+      if (
+        processGroup
+        && childPlatform !== 'win32'
+        && terminationRequested
+        && (aborted || timedOut || outputOverflow)
+        && !groupKillIssued
+      ) {
+        // A detached group leader may close while bash/docker/psql descendants
+        // are still alive. Keep the termination timer and defer cleanup until
+        // the scheduled group SIGKILL (or its final bounded settle grace).
+        deferredClose = {code, exitSignal};
+        return;
+      }
+      settle({code, exitSignal});
+    };
+    child.once('error', childErrorListener);
+    child.once('close', childCloseListener);
+    if (signal) {
+      abortListener = () => terminate('abort');
+      signal.addEventListener('abort', abortListener, {once: true});
+      // Close the spawn/listener race: AbortSignal dispatch is synchronous, but
+      // it may have fired between the pre-spawn check and listener attachment.
+      if (signal.aborted) abortListener();
+    }
+    timeoutTimer = setTimeout(() => terminate('timeout'), timeoutMs);
     if (options.stdin) {
-      child.stdin.on('error', err => {
-        stderr += `\nstdin error: ${err?.message || err}`;
-      });
+      child.stdin.on('error', onStdinError);
       try {
         child.stdin.write(String(options.stdin));
         child.stdin.end();
-      } catch (err) {
-        stderr += `\nstdin write failed: ${err?.message || err}`;
-        try { child.kill('SIGTERM'); } catch {}
+      } catch (error) {
+        appendOutput('stderr', `\nstdin write failed: ${error?.message || error}`);
+        terminate('stdin-error');
       }
     }
-    child.on('error', err => {
-      clearTimeout(timer);
-      resolve({ok: false, code: -1, timedOut, stdout, stderr: String(err?.stack || err)});
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve({ok: code === 0 && !timedOut, code, timedOut, stdout, stderr});
-    });
   });
 }
 
@@ -10457,8 +12095,40 @@ function dockerPrefix() {
   return 'sudo ';
 }
 
-function psqlSpawnCommand(args, extraFlags = '') {
-  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
+const BI_DB_APPLICATION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/;
+// Leave one second inside the five-second total cancellation envelope for
+// runChildProcess TERM/KILL/final-settle cleanup.
+const BI_DB_CANCEL_TIMEOUT_MS = 4_000;
+const BI_DB_CANCEL_WAIT_SECONDS = 0.25;
+const BI_DB_CANCEL_REMAINING_MARKER = 'SHEIN_BI_DB_CANCEL_REMAINING=';
+
+function validateBiDbApplicationName(value, options = {}) {
+  const name = String(value ?? '');
+  if (!name) {
+    if (options.required === true) throw new Error('BI database application_name is required');
+    return '';
+  }
+  if (name !== name.trim() || Buffer.byteLength(name, 'utf8') > 63 || !BI_DB_APPLICATION_NAME_RE.test(name)) {
+    throw new Error('BI database application_name must be 1-63 ASCII characters matching [A-Za-z0-9][A-Za-z0-9._:-]*');
+  }
+  return name;
+}
+
+function createBiDbApplicationName(section = 'section') {
+  const sectionSlug = String(section || 'section')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 20) || 'section';
+  return validateBiDbApplicationName(`shein-bi-${sectionSlug}-${crypto.randomBytes(12).toString('hex')}`, {required: true});
+}
+
+function psqlSpawnCommand(args, extraFlags = '', options = {}) {
+  const applicationName = validateBiDbApplicationName(options.applicationName || '');
+  const applicationEnv = applicationName
+    ? ` -e ${shellQuote(`PGAPPNAME=${applicationName}`)}`
+    : '';
+  const psql = `${dockerPrefix()}docker exec -i${applicationEnv} ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
   if (process.platform === 'win32') {
     return {
       command: 'wsl',
@@ -10471,15 +12141,153 @@ function psqlSpawnCommand(args, extraFlags = '') {
   };
 }
 
+async function cancelBiDbBackends(args, applicationName) {
+  const targetApplicationName = validateBiDbApplicationName(applicationName, {required: true});
+  let cancelApplicationName = createBiDbApplicationName('cancel');
+  while (cancelApplicationName === targetApplicationName) {
+    cancelApplicationName = createBiDbApplicationName('cancel');
+  }
+  const psql = psqlSpawnCommand(
+    args,
+    ` -q -t -A -v ${shellQuote(`target_application_name=${targetApplicationName}`)}`,
+    {applicationName: cancelApplicationName},
+  );
+  const sql = `
+SET statement_timeout='3000ms';
+SELECT 'SHEIN_BI_DB_CANCEL_SENT=' || count(*) FILTER (WHERE pg_cancel_backend(pid))::text
+FROM pg_stat_activity
+WHERE application_name = :'target_application_name'
+  AND datname = current_database()
+  AND pid <> pg_backend_pid();
+SELECT pg_sleep(${BI_DB_CANCEL_WAIT_SECONDS});
+SELECT 'SHEIN_BI_DB_TERMINATE_SENT=' || count(*) FILTER (WHERE pg_terminate_backend(pid, 1000))::text
+FROM pg_stat_activity
+WHERE application_name = :'target_application_name'
+  AND datname = current_database()
+  AND pid <> pg_backend_pid();
+SELECT '${BI_DB_CANCEL_REMAINING_MARKER}' || count(*)::text
+FROM pg_stat_activity
+WHERE application_name = :'target_application_name'
+  AND datname = current_database()
+  AND pid <> pg_backend_pid();
+`;
+  const run = await runChildProcess(psql.command, psql.args, {
+    cwd: ROOT,
+    timeoutMs: BI_DB_CANCEL_TIMEOUT_MS,
+    killGraceMs: 250,
+    settleGraceMs: 250,
+    stdin: sql,
+    processGroup: true,
+    maxStdoutBytes: 16 * 1024,
+    maxStderrBytes: 16 * 1024,
+    failOnOutputOverflow: true,
+  });
+  return evaluateBiDbCancellationRun(run);
+}
+
+function evaluateBiDbCancellationRun(run = {}) {
+  const diagnostic = detail => ({
+    ...run,
+    ok: false,
+    error: String(detail || 'PostgreSQL backend cancellation failed').slice(0, 1000),
+  });
+  if (run.ok !== true) {
+    const tail = String(run.stderr || run.stdout || '').slice(-600);
+    return diagnostic(`PostgreSQL cancellation command failed: code=${run.code ?? 'null'} timedOut=${Boolean(run.timedOut)} ${tail}`.trim());
+  }
+  const markerPattern = new RegExp(`^${BI_DB_CANCEL_REMAINING_MARKER}(\\d+)\\r?$`, 'gm');
+  const matches = [...String(run.stdout || '').matchAll(markerPattern)];
+  if (matches.length !== 1) {
+    return diagnostic(`PostgreSQL cancellation result requires exactly one ${BI_DB_CANCEL_REMAINING_MARKER}<count> marker; found=${matches.length}`);
+  }
+  const remainingBackendCount = Number(matches[0][1]);
+  if (!Number.isSafeInteger(remainingBackendCount) || remainingBackendCount !== 0) {
+    return {
+      ...diagnostic(`PostgreSQL cancellation left exact application_name backends remaining=${matches[0][1]}`),
+      remainingBackendCount,
+    };
+  }
+  return {...run, ok: true, remainingBackendCount: 0, error: ''};
+}
+
+async function runBiDbChildProcess(args, command, childArgs, options = {}) {
+  const {
+    dbApplicationName: rawApplicationName = '',
+    cancelBackendsImpl = cancelBiDbBackends,
+    ...childOptions
+  } = options;
+  const applicationName = validateBiDbApplicationName(rawApplicationName || '');
+  let cancellationPromise = null;
+  let cancellationCause = '';
+  const startCancellation = (phase, cause) => {
+    try {
+      return Promise.resolve(cancelBackendsImpl(args, applicationName, {cause, phase}))
+        .catch(error => ({ok: false, error: error?.message || String(error)}));
+    } catch (error) {
+      return Promise.resolve({ok: false, error: error?.message || String(error)});
+    }
+  };
+  const run = await runChildProcess(command, childArgs, {
+    ...childOptions,
+    ...(applicationName ? {
+      onTerminationRequested(cause) {
+        if (!cancellationPromise) {
+          cancellationCause = String(cause || 'unknown');
+          cancellationPromise = startCancellation('immediate', cause);
+        }
+        return cancellationPromise;
+      },
+    } : {}),
+  });
+  if (run.terminationRequested && applicationName) {
+    const immediateCancellation = cancellationPromise
+      ? await cancellationPromise
+      : {ok: false, error: 'Immediate PostgreSQL backend cancellation did not start'};
+    const finalCancellation = await startCancellation('final', cancellationCause || 'termination');
+    const failures = [
+      ['immediate', immediateCancellation],
+      ['final', finalCancellation],
+    ].filter(([, cancellation]) => cancellation?.ok !== true);
+    if (failures.length > 0) {
+      const detail = failures.map(([phase, cancellation]) => (
+        `${phase}: ${String(cancellation?.error || cancellation?.stderr || cancellation?.stdout || 'unknown failure').slice(-700)}`
+      )).join('; ').slice(-1000);
+      console.error(JSON.stringify({
+        ok: false,
+        event: 'bi-db-backend-cancel-failed',
+        applicationName,
+        cause: cancellationCause,
+        error: detail,
+      }));
+      return {
+        ...run,
+        ok: false,
+        stderr: `${run.stderr || ''}\nPostgreSQL backend cancellation failed for ${applicationName}: ${detail}`.trim(),
+      };
+    }
+    return {...run, ok: false};
+  }
+  return run;
+}
+
 const BI_PORTAL_CORE_FIELD_LIMITS = Object.freeze({
   generatedAt: 4 * 1024,
+  dates: 64 * 1024,
   __sections: 1024 * 1024,
   audit: 4 * 1024 * 1024,
 });
 let biPortalCoreEnvelopeCache = null;
+const biPortalCoreEnvelopeInFlight = new Map();
+let biPortalCoreEnvelopeScanCount = 0;
 
 function biPortalCoreFileIdentity(stat) {
-  return [stat?.dev, stat?.ino, stat?.size, stat?.mtimeMs, stat?.ctimeMs].map(value => String(value ?? '')).join(':');
+  return [
+    stat?.dev,
+    stat?.ino,
+    stat?.size,
+    stat?.mtimeNs ?? stat?.mtimeMs,
+    stat?.ctimeNs ?? stat?.ctimeMs,
+  ].map(value => String(value ?? '')).join(':');
 }
 
 async function readBiPortalCoreEnvelope(root, options = {}) {
@@ -10487,7 +12295,7 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
   const handle = options.handle || await fs.open(file, 'r');
   const closeHandle = !options.handle;
   try {
-    const stat = options.stat || await handle.stat();
+    const stat = options.stat || await handle.stat({bigint: true});
     const identity = biPortalCoreFileIdentity(stat);
     if (biPortalCoreEnvelopeCache?.file === file && biPortalCoreEnvelopeCache.identity === identity) {
       if (options.requireGeneratedAt !== false && biPortalCoreEnvelopeCache.generatedAtValid !== true) {
@@ -10497,12 +12305,33 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
       }
       return {...biPortalCoreEnvelopeCache, handle, stat};
     }
-    const scan = await scanBoundedTopLevelJson(
-      handle.createReadStream({start: 0, autoClose: false}),
-      BI_PORTAL_CORE_FIELD_LIMITS,
-    );
+    const inFlightKey = `${file}|${identity}`;
+    let scanPromise = biPortalCoreEnvelopeInFlight.get(inFlightKey);
+    if (!scanPromise) {
+      scanPromise = (async () => {
+        biPortalCoreEnvelopeScanCount += 1;
+        return await scanBoundedTopLevelJson(
+          handle.createReadStream({start: 0, autoClose: false}),
+          BI_PORTAL_CORE_FIELD_LIMITS,
+        );
+      })();
+      biPortalCoreEnvelopeInFlight.set(inFlightKey, scanPromise);
+      scanPromise.finally(() => {
+        if (biPortalCoreEnvelopeInFlight.get(inFlightKey) === scanPromise) {
+          biPortalCoreEnvelopeInFlight.delete(inFlightKey);
+        }
+      }).catch(() => {});
+    }
+    let scan;
+    try {
+      scan = await scanPromise;
+    } finally {
+      if (biPortalCoreEnvelopeInFlight.get(inFlightKey) === scanPromise) {
+        biPortalCoreEnvelopeInFlight.delete(inFlightKey);
+      }
+    }
     const generatedAt = String(scan.fields.generatedAt?.value || scan.fields.__sections?.value?.generatedAt || '');
-    const generatedAtValid = Boolean(generatedAt) && Number.isFinite(Date.parse(generatedAt));
+    const generatedAtValid = homepageTimestampNs(generatedAt) !== null;
     const sections = scan.fields.__sections?.value;
     if (sections !== undefined && (!sections || typeof sections !== 'object' || Array.isArray(sections))) {
       const error = new Error('BI core __sections must be an object');
@@ -10520,6 +12349,8 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
       identity,
       generatedAt,
       generatedAtValid,
+      dates: scan.fields.dates?.value && typeof scan.fields.dates.value === 'object' && !Array.isArray(scan.fields.dates.value) ? scan.fields.dates.value : null,
+      sectionsKeys: Array.isArray(sections?.keys) ? sections.keys : [],
       mode: String(sections?.mode || 'legacy'),
       audit: audit ?? null,
       auditRange: scan.fields.audit
@@ -10542,7 +12373,18 @@ async function readBiPortalCoreEnvelope(root, options = {}) {
 async function readBiPortalCoreMeta(root) {
   try {
     const envelope = await readBiPortalCoreEnvelope(root, {requireGeneratedAt: false});
-    return {generatedAt: envelope.generatedAt, mode: envelope.mode};
+    return {
+      generatedAt: envelope.generatedAt,
+      file: envelope.file,
+      identity: envelope.identity,
+      mode: envelope.mode,
+      dates: envelope.dates || {},
+      sections: {
+        mode: envelope.mode,
+        generatedAt: envelope.generatedAt,
+        keys: envelope.sectionsKeys || [],
+      },
+    };
   } catch {
     // Preserve the section loader's historical missing-core contract: callers
     // decide whether an empty generation is a 202/503 condition. The public
@@ -10566,6 +12408,504 @@ function buildBiPortalCoreStreamPlan(envelope, evidence, options = {}) {
     audit: current.audit,
     overlayApplied: true,
   };
+}
+
+const BI_PORTAL_CORE_SNAPSHOT_PREFIX = 'shein-bi-portal-core-snapshot-v1-';
+const BI_PORTAL_CORE_SNAPSHOT_DIRECTORY = 'shein-bi-portal-core-snapshots-v1';
+const BI_PORTAL_CORE_SNAPSHOT_SUFFIXES = Object.freeze(['.raw.json', '.gzip.json.gz']);
+const DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_BASE_MS = 25;
+const DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_MAX_MS = 500;
+const DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRIES = 5;
+
+function biPortalCoreSnapshotDir(root, options = {}) {
+  if (options.snapshotDir) return path.resolve(options.snapshotDir);
+  const rootKey = crypto.createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 20);
+  return path.join(path.resolve(options.tempRoot || os.tmpdir()), BI_PORTAL_CORE_SNAPSHOT_DIRECTORY, rootKey);
+}
+
+/**
+ * Crash recovery is intentionally narrow: on process startup, remove only
+ * regular files carrying this cache's exact prefix and suffix in its own temp
+ * directory. Runtime ownership uses ordinary named files; no anonymous inode,
+ * parent-chain, or long-lived residue ledger is introduced.
+ */
+export async function cleanupBiPortalCoreSnapshotResidue(root, options = {}) {
+  const directory = biPortalCoreSnapshotDir(root, options);
+  await fs.mkdir(directory, {recursive: true});
+  const entries = await fs.readdir(directory, {withFileTypes: true});
+  let examined = 0;
+  let removed = 0;
+  const failures = [];
+  for (const entry of entries) {
+    if (!entry.isFile()
+      || !entry.name.startsWith(BI_PORTAL_CORE_SNAPSHOT_PREFIX)
+      || !BI_PORTAL_CORE_SNAPSHOT_SUFFIXES.some(suffix => entry.name.endsWith(suffix))) continue;
+    examined += 1;
+    const file = path.join(directory, entry.name);
+    try {
+      await fs.unlink(file);
+      removed += 1;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') failures.push({file, error: String(error?.code || error?.message || error).slice(0, 240)});
+    }
+  }
+  return {directory, examined, removed, failures};
+}
+
+function createBiPortalSnapshotHashingTransform() {
+  let byteLength = 0;
+  const hash = crypto.createHash('sha256');
+  const stream = new Transform({
+    transform(chunk, _encoding, callback) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      byteLength += buffer.length;
+      hash.update(buffer);
+      callback(null, buffer);
+    },
+  });
+  return {stream, finish: () => ({byteLength, sha256: hash.digest('hex')})};
+}
+
+function createBiPortalSnapshotFileWriter(handle) {
+  let position = 0;
+  return new Writable({
+    write(chunk, _encoding, callback) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      (async () => {
+        let offset = 0;
+        while (offset < buffer.length) {
+          const result = await handle.write(buffer, offset, buffer.length - offset, position);
+          if (!result.bytesWritten) throw new Error('BI Portal snapshot write made no progress');
+          offset += result.bytesWritten;
+          position += result.bytesWritten;
+        }
+      })().then(() => callback(), callback);
+    },
+  });
+}
+
+async function writeBiPortalSnapshot(handle, source, options = {}) {
+  const tap = createBiPortalSnapshotHashingTransform();
+  const destination = createBiPortalSnapshotFileWriter(handle);
+  if (options.gzip === true) await pipeline(source, createGzip({level: 6}), tap.stream, destination);
+  else await pipeline(source, tap.stream, destination);
+  await handle.sync();
+  const digest = tap.finish();
+  const stat = await handle.stat({bigint: true});
+  if (!stat.isFile() || stat.size !== BigInt(digest.byteLength)) {
+    throw new Error(`BI Portal snapshot write size mismatch: ${stat.size} != ${digest.byteLength}`);
+  }
+  return {...digest, stat};
+}
+
+function biPortalSnapshotError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function biPortalCoreOverlayIdentity(evidence, nowMs = Date.now()) {
+  const summaryMs = Date.parse(evidence?.summary?.generatedAt || '');
+  const withinOverlayWindow = Number.isFinite(summaryMs)
+    && summaryMs >= nowMs - 6 * 60 * 60 * 1_000
+    && summaryMs <= nowMs + 5 * 60_000;
+  return sha256StableJson({evidence: evidence ?? null, withinOverlayWindow});
+}
+
+/**
+ * One owner entry is retained for the current source/overlay identity. Request
+ * leases only protect a retired entry from closing while a response is using
+ * it; releasing the final request never clears the active owner cache.
+ */
+export function createBiPortalCoreSnapshotCache(options = {}) {
+  const root = path.resolve(options.root || options.dir || process.cwd());
+  const sourceFile = path.resolve(options.sourceFile || path.join(root, 'data.json'));
+  const directory = biPortalCoreSnapshotDir(root, options);
+  const retryBaseMs = Math.max(1, Number(options.retryBaseMs || DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_BASE_MS));
+  const retryMaxMs = Math.max(retryBaseMs, Number(options.retryMaxMs || DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRY_MAX_MS));
+  const maxRetries = Math.max(1, Math.min(20, Math.floor(Number(options.maxRetries || DEFAULT_BI_PORTAL_CORE_SNAPSHOT_RETRIES))));
+  const closeHandle = typeof options.closeHandle === 'function'
+    ? options.closeHandle
+    : handle => handle.close();
+  const createReadStream = typeof options.createReadStream === 'function'
+    ? options.createReadStream
+    : (handle, stat) => handle.createReadStream({start: 0, end: Number(stat.size) - 1, autoClose: false});
+  const now = typeof options.now === 'function' ? options.now : () => Date.now();
+  let started = false;
+  let startPromise = null;
+  let startupCleanup = null;
+  let shuttingDown = false;
+  let current = null;
+  let building = null;
+  let builds = 0;
+  let openHandles = 0;
+  let closeFailureTotal = 0;
+  let retryTotal = 0;
+  const retired = new Set();
+  const retryTimers = new Set();
+  const drainWaiters = new Set();
+
+  const drained = () => !current
+    && !building
+    && retired.size === 0
+    && retryTimers.size === 0
+    && openHandles === 0;
+  const notifyDrained = () => {
+    if (!drained()) return;
+    for (const resolve of drainWaiters) resolve();
+    drainWaiters.clear();
+  };
+
+  const status = () => {
+    let requestLeases = 0;
+    let closeFailures = 0;
+    let retiredWithLeases = 0;
+    let retiredWithoutLeases = 0;
+    let retiredCleaning = 0;
+    let retiredRetryPending = 0;
+    let retryExhausted = 0;
+    let stuckRetired = 0;
+    let retiredOpenHandles = 0;
+    if (current) requestLeases += current.leases;
+    for (const entry of retired) {
+      requestLeases += entry.leases;
+      closeFailures += entry.closeFailureKinds.size;
+      retiredOpenHandles += Number(Boolean(entry.raw.handle)) + Number(Boolean(entry.gzip.handle));
+      if (entry.leases > 0) {
+        retiredWithLeases += 1;
+        continue;
+      }
+      retiredWithoutLeases += 1;
+      if (entry.cleanupRunning) retiredCleaning += 1;
+      if (entry.retryTimer) retiredRetryPending += 1;
+      if (!entry.cleanupRunning && !entry.retryTimer) {
+        if (entry.retryAttempts >= maxRetries) retryExhausted += 1;
+        else stuckRetired += 1;
+      }
+    }
+    return {
+      active: current ? 1 : 0,
+      retired: retired.size,
+      retiredWithLeases,
+      retiredWithoutLeases,
+      retiredCleaning,
+      retiredRetryPending,
+      retiredOpenHandles,
+      retryExhausted,
+      stuckRetired,
+      leases: requestLeases,
+      requestLeases,
+      openHandles,
+      closeFailures,
+      retries: retryTimers.size,
+      builds,
+      closeFailureTotal,
+      retryTotal,
+      building: Boolean(building),
+      shuttingDown,
+      directory,
+      startupCleanup,
+    };
+  };
+
+  const start = async () => {
+    if (started) return startupCleanup;
+    if (startPromise) return startPromise;
+    startPromise = cleanupBiPortalCoreSnapshotResidue(root, {...options, snapshotDir: directory})
+      .then(result => {
+        startupCleanup = result;
+        started = true;
+        return result;
+      })
+      .finally(() => { startPromise = null; });
+    return startPromise;
+  };
+
+  const unlinkEntryFiles = async entry => {
+    const failures = [];
+    for (const file of entry.paths) {
+      try {
+        await fs.unlink(file);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') failures.push(error);
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, 'BI Portal snapshot temp cleanup failed');
+  };
+
+  const scheduleRetry = entry => {
+    if (entry.terminated
+      || !entry.retired
+      || entry.leases > 0
+      || entry.retryTimer
+      || entry.retryAttempts >= maxRetries) return;
+    const delayMs = Math.min(retryMaxMs, retryBaseMs * (2 ** entry.retryAttempts));
+    entry.retryAttempts += 1;
+    retryTotal += 1;
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer);
+      if (entry.retryTimer === timer) entry.retryTimer = null;
+      void cleanupRetiredEntry(entry);
+    }, delayMs);
+    entry.retryTimer = timer;
+    retryTimers.add(timer);
+  };
+
+  async function cleanupRetiredEntry(entry) {
+    if (entry.terminated || !entry.retired || entry.leases > 0 || entry.cleanupRunning) return;
+    entry.cleanupRunning = true;
+    let cleanupFailed = false;
+    try {
+      for (const kind of ['raw', 'gzip']) {
+        const owned = entry[kind];
+        if (!owned.handle) continue;
+        try {
+          await closeHandle(owned.handle, {entry, kind});
+          owned.handle = null;
+          entry.closeFailureKinds.delete(kind);
+          openHandles = Math.max(0, openHandles - 1);
+        } catch (error) {
+          cleanupFailed = true;
+          closeFailureTotal += 1;
+          entry.closeFailureKinds.add(kind);
+          entry.lastCloseError = String(error?.code || error?.message || error).slice(0, 240);
+        }
+      }
+      if (!entry.raw.handle && !entry.gzip.handle) {
+        try {
+          await unlinkEntryFiles(entry);
+        } catch (error) {
+          cleanupFailed = true;
+          entry.lastCleanupError = String(error?.code || error?.message || error).slice(0, 240);
+        }
+      }
+      if (!entry.raw.handle && !entry.gzip.handle && !cleanupFailed) {
+        entry.terminated = true;
+        entry.retired = false;
+        if (entry.retryTimer) {
+          clearTimeout(entry.retryTimer);
+          retryTimers.delete(entry.retryTimer);
+          entry.retryTimer = null;
+        }
+        retired.delete(entry);
+        notifyDrained();
+      } else {
+        scheduleRetry(entry);
+      }
+    } finally {
+      entry.cleanupRunning = false;
+      if (!entry.terminated && entry.retired && entry.leases === 0 && !entry.retryTimer
+        && entry.retryAttempts < maxRetries) scheduleRetry(entry);
+    }
+  }
+
+  const retireEntry = entry => {
+    if (!entry || entry.terminated || entry.retired) return;
+    if (current === entry) current = null;
+    entry.retired = true;
+    retired.add(entry);
+    if (entry.leases === 0) void cleanupRetiredEntry(entry);
+  };
+
+  const buildEntry = async ({expectedIdentity, evidence, overlayIdentity}) => {
+    builds += 1;
+    await start();
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const stem = `${BI_PORTAL_CORE_SNAPSHOT_PREFIX}${process.pid}-${now()}-${nonce}`;
+    const rawPath = path.join(directory, `${stem}.raw.json`);
+    const gzipPath = path.join(directory, `${stem}.gzip.json.gz`);
+    let sourceHandle = null;
+    let rawHandle = null;
+    let gzipHandle = null;
+    let ownershipTransferred = false;
+    try {
+      sourceHandle = await fs.open(sourceFile, 'r');
+      const openedStat = await sourceHandle.stat({bigint: true});
+      const openedIdentity = biPortalCoreFileIdentity(openedStat);
+      if (!openedStat.isFile() || openedIdentity !== expectedIdentity) {
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_IDENTITY_CHANGED', 'BI Portal core changed before snapshot build');
+      }
+      const envelope = await readBiPortalCoreEnvelope(root, {handle: sourceHandle, stat: openedStat});
+      if (BigInt(envelope.byteLength) !== openedStat.size) {
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_IDENTITY_CHANGED', 'BI Portal core changed during bounded envelope scan');
+      }
+      const plan = buildBiPortalCoreStreamPlan(
+        envelope,
+        evidence,
+        {expectedStores: DEFAULT_SHEIN_STORE_KEYS},
+      );
+      rawHandle = await fs.open(rawPath, 'wx+');
+      gzipHandle = await fs.open(gzipPath, 'wx+');
+      const raw = await writeBiPortalSnapshot(
+        rawHandle,
+        Readable.from(streamFileHandleWithReplacement(sourceHandle, openedStat, plan.replacement)),
+      );
+      const gzip = await writeBiPortalSnapshot(
+        gzipHandle,
+        rawHandle.createReadStream({start: 0, end: Number(raw.stat.size) - 1, autoClose: false}),
+        {gzip: true},
+      );
+      const finalHandleStat = await sourceHandle.stat({bigint: true});
+      const finalPathStat = await fs.stat(sourceFile, {bigint: true});
+      if (!finalHandleStat.isFile()
+        || !finalPathStat.isFile()
+        || biPortalCoreFileIdentity(finalHandleStat) !== openedIdentity
+        || biPortalCoreFileIdentity(finalPathStat) !== openedIdentity) {
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_IDENTITY_CHANGED', 'BI Portal core changed while snapshot was built');
+      }
+      await sourceHandle.close();
+      sourceHandle = null;
+      const entry = {
+        key: `${openedIdentity}|${overlayIdentity}`,
+        generatedAt: envelope.generatedAt,
+        leases: 0,
+        retired: false,
+        terminated: false,
+        cleanupRunning: false,
+        retryAttempts: 0,
+        retryTimer: null,
+        closeFailureKinds: new Set(),
+        lastCloseError: '',
+        lastCleanupError: '',
+        paths: [rawPath, gzipPath],
+        raw: {...raw, handle: rawHandle},
+        gzip: {...gzip, handle: gzipHandle},
+      };
+      openHandles += 2;
+      ownershipTransferred = true;
+      rawHandle = null;
+      gzipHandle = null;
+      return entry;
+    } finally {
+      await sourceHandle?.close().catch(() => {});
+      if (!ownershipTransferred) {
+        await rawHandle?.close().catch(() => {});
+        await gzipHandle?.close().catch(() => {});
+        await fs.unlink(rawPath).catch(error => { if (error?.code !== 'ENOENT') throw error; });
+        await fs.unlink(gzipPath).catch(error => { if (error?.code !== 'ENOENT') throw error; });
+      }
+    }
+  };
+
+  const createLease = (entry, gzip) => {
+    entry.leases += 1;
+    let released = false;
+    const kind = gzip ? 'gzip' : 'raw';
+    const owned = entry[kind];
+    return {
+      kind,
+      generatedAt: entry.generatedAt,
+      byteLength: owned.byteLength,
+      sha256: owned.sha256,
+      rawByteLength: entry.raw.byteLength,
+      rawSha256: entry.raw.sha256,
+      createReadStream() {
+        if (!owned.handle) throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_CLOSED', 'BI Portal snapshot handle is closed');
+        return createReadStream(owned.handle, owned.stat, {entry, kind});
+      },
+      release() {
+        if (released) return;
+        released = true;
+        entry.leases = Math.max(0, entry.leases - 1);
+        if (entry.retired && entry.leases === 0) void cleanupRetiredEntry(entry);
+      },
+    };
+  };
+
+  const acquire = async ({gzip = false, evidence = null} = {}) => {
+    await start();
+    for (;;) {
+      if (shuttingDown) throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN', 'BI Portal snapshot cache is shutting down');
+      const observedStat = await fs.stat(sourceFile, {bigint: true});
+      if (!observedStat.isFile()) throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_NOT_FILE', 'BI Portal core is not a regular file');
+      const observedIdentity = biPortalCoreFileIdentity(observedStat);
+      const overlayIdentity = biPortalCoreOverlayIdentity(evidence, now());
+      const key = `${observedIdentity}|${overlayIdentity}`;
+      const cacheHitEntry = current;
+      if (cacheHitEntry?.key === key) {
+        if (typeof options.onBeforeCacheHitIdentityReadback === 'function') {
+          await options.onBeforeCacheHitIdentityReadback({
+            sourceFile,
+            observedIdentity,
+            entry: cacheHitEntry,
+          });
+        }
+        if (shuttingDown) {
+          throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN', 'BI Portal snapshot cache is shutting down');
+        }
+        let finalStat = null;
+        try {
+          finalStat = await fs.stat(sourceFile, {bigint: true});
+        } catch {}
+        const finalIdentity = finalStat?.isFile()
+          ? biPortalCoreFileIdentity(finalStat)
+          : '';
+        if (current === cacheHitEntry
+          && !cacheHitEntry.retired
+          && !cacheHitEntry.terminated
+          && finalIdentity === observedIdentity) {
+          return createLease(cacheHitEntry, gzip);
+        }
+        if (!cacheHitEntry.retired && !cacheHitEntry.terminated) retireEntry(cacheHitEntry);
+        continue;
+      }
+      if (building) {
+        await building.promise.catch(() => {});
+        continue;
+      }
+      if (current) retireEntry(current);
+      const pending = {
+        key,
+        promise: buildEntry({expectedIdentity: observedIdentity, evidence, overlayIdentity}),
+      };
+      building = pending;
+      let entry;
+      try {
+        entry = await pending.promise;
+      } finally {
+        if (building === pending) building = null;
+        notifyDrained();
+      }
+      if (shuttingDown) {
+        retireEntry(entry);
+        throw biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN', 'BI Portal snapshot cache shut down during build');
+      }
+      current = entry;
+      return createLease(entry, gzip);
+    }
+  };
+
+  const stopAdmitting = () => {
+    shuttingDown = true;
+    if (current) retireEntry(current);
+  };
+
+  const shutdown = async ({timeoutMs = 5_000} = {}) => {
+    stopAdmitting();
+    if (building) {
+      const entry = await building.promise.catch(() => null);
+      if (entry) retireEntry(entry);
+    }
+    if (drained()) return {ok: true, ...status()};
+    let timer;
+    const drainedPromise = new Promise(resolve => {
+      drainWaiters.add(resolve);
+      notifyDrained();
+    });
+    const completed = await Promise.race([
+      drainedPromise.then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), Math.max(1, Number(timeoutMs) || 1)); }),
+    ]);
+    clearTimeout(timer);
+    if (!completed) {
+      const error = biPortalSnapshotError('BI_PORTAL_SNAPSHOT_SHUTDOWN_TIMEOUT', 'BI Portal snapshot cache did not drain before shutdown timeout');
+      error.snapshot = status();
+      throw error;
+    }
+    return {ok: true, ...status()};
+  };
+
+  return {start, acquire, stopAdmitting, shutdown, status};
 }
 
 function roundNumber(value, digits = 2) {
@@ -10800,10 +13140,161 @@ function withBiSectionRefreshFailureHeaders(root, section, headers = {}) {
   };
 }
 
+const BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.SHEIN_BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS || 15_000);
+  return Number.isFinite(raw) ? Math.max(1_500, Math.min(120_000, Math.trunc(raw))) : 15_000;
+})();
+
+const BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS = (() => {
+  const raw = Number(process.env.SHEIN_BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS || 2_000);
+  return Number.isFinite(raw) ? Math.max(250, Math.min(10_000, Math.trunc(raw))) : 2_000;
+})();
+
+// Injectable spawn specification for the fire-and-forget enqueue child. The
+// production default is the tracked enqueue script under /usr/bin/env; tests
+// may point the spec at a deterministic fixture to prove that a hung child is
+// really terminated and the pending key is only released after the child
+// closes. Env values are "command|arg1|arg2" (pipe-separated pieces).
+function biSectionEnqueueChildSpec() {
+  const raw = String(process.env.SHEIN_BI_SECTION_ENQUEUE_CHILD_SPEC || '').trim();
+  if (raw) {
+    const parts = raw.split('|').map(part => String(part || '').trim()).filter(Boolean);
+    if (!parts.length) {
+      throw new Error('SHEIN_BI_SECTION_ENQUEUE_CHILD_SPEC must be command|arg1|arg2');
+    }
+    return {command: parts[0], args: parts.slice(1)};
+  }
+  return {
+    command: '/usr/bin/env',
+    args: ['bash', path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh')],
+  };
+}
+
+function terminateBiSectionEnqueueChild(child, signal) {
+  const pid = Number(child?.pid || 0);
+  if (process.platform !== 'win32' && Number.isSafeInteger(pid) && pid > 0) {
+    try {
+      // The production child is detached into its own process group, so kill
+      // bash plus any lock/helper descendants instead of orphaning them.
+      process.kill(-pid, signal);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ESRCH') return true;
+    }
+  }
+  try { return child?.kill?.(signal) === true; } catch { return false; }
+}
+
+function biPortalSectionQueueFile() {
+  const configured = String(process.env.SHEIN_BI_PORTAL_SECTION_QUEUE_FILE || '').trim();
+  return path.resolve(ROOT, configured || path.join('state', 'portal-section-queue', 'queue.json'));
+}
+
+function readBiPortalSectionQueueState() {
+  try {
+    const queue = JSON.parse(fssync.readFileSync(biPortalSectionQueueFile(), 'utf8'));
+    if (!queue || typeof queue !== 'object' || Array.isArray(queue) || !Array.isArray(queue.entries)) return null;
+    return {
+      entries: queue.entries,
+      completedIdempotency: Array.isArray(queue.completedIdempotency) ? queue.completedIdempotency : [],
+      publishedSnapshots: Array.isArray(queue.publishedSnapshots) ? queue.publishedSnapshots : [],
+      generationCompletion: queue.generationCompletion && typeof queue.generationCompletion === 'object'
+        ? queue.generationCompletion
+        : null,
+    };
+  } catch {
+    // Reconciliation is fail-closed. A missing/corrupt queue cannot prove
+    // either completion or the absence of a newer request; the normal enqueue
+    // path remains responsible for recovering the durable queue state.
+    return null;
+  }
+}
+
+function readBiPortalSectionQueueEntries() {
+  return readBiPortalSectionQueueState()?.entries || null;
+}
+
+function biPortalQueueEntryMatchesCurrentGeneration(entry, section, generatedAt, expectedReason = '', idempotencyKey = '') {
+  if (!entry || entry.section !== section || !['pending', 'running'].includes(entry.status)) return false;
+  const generation = String(generatedAt || '');
+  const generationToken = sanitizeBiQueueReason(generation || 'current');
+  const reasons = Array.isArray(entry.reasons) ? entry.reasons.map(value => String(value || '')) : [];
+  const normalizedReason = sanitizeBiQueueReason(expectedReason);
+  if (idempotencyKey && String(entry.idempotencyKey || '') === `${idempotencyKey}::${section}`) return true;
+  if (normalizedReason && reasons.includes(normalizedReason)) return true;
+  if (generation && [entry.generatedAt, entry.coreGeneratedAt, entry.generation]
+    .map(value => String(value || ''))
+    .includes(generation)) return true;
+
+  // Queue-owned core warmup entries already carry a durable per-generation
+  // key. Reuse that existing key without changing the queue schema.
+  if (generation && String(entry.idempotencyKey || '') === `${biPortalCoreWarmupIdempotencyKey(generation)}::${section}`) {
+    return true;
+  }
+
+  // Ordinary page/SSE/cache-miss requests do not pass an idempotency key to
+  // the external manager. Their existing reason is the durable generation
+  // binding, so recognize the current generation across the established
+  // Portal enqueue reason families.
+  const reasonPrefixes = [
+    'portal-cache-miss-',
+    'portal-force-',
+    'productProfit-cache-miss-',
+    'homeProfit-async-needs-profit-',
+    'homeProfit-needs-profit-',
+    'homepage-accounting-stale-',
+    'core-warmup-',
+  ];
+  return reasonPrefixes.some(prefix => reasons.includes(`${prefix}${generationToken}`));
+}
+
+function queueHasCurrentPendingBiSection(section, generatedAt, expectedReason = '', idempotencyKey = '') {
+  const entries = readBiPortalSectionQueueEntries();
+  if (!entries) return false;
+  return entries.some(entry => biPortalQueueEntryMatchesCurrentGeneration(
+    entry,
+    section,
+    generatedAt,
+    expectedReason,
+    idempotencyKey,
+  ));
+}
+
+function rememberBiExternalSectionQueuePending(key) {
+  biExternalSectionQueuePending.add(key);
+  const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
+  timer.unref?.();
+}
+
 function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
   if (!BI_EXTERNAL_SECTION_QUEUE_ENABLED || BI_INLINE_FAST_SECTIONS.has(section)) return false;
-  const key = `${section}|${generatedAt || ''}`;
+  const refreshToken = String(options.refreshToken || '').trim().slice(0, 160);
+  // A force refresh must never enter the managed queue without an explicit
+  // refresh token: the queue would blindly reuse one stable per-generation key
+  // and its 30-day completed tombstone would swallow later business reruns.
+  // Fail closed here no matter how the caller reached the host-locked path.
+  if (options.force === true && !refreshToken) {
+    console.error(`[bi-section-queue] refusing force enqueue without refreshToken section=${section} generatedAt=${generatedAt || ''}`);
+    return false;
+  }
+  const idempotencyKey = String(options.idempotencyKey || (
+    options.force === true
+      ? biPortalForceRefreshIdempotencyKey(generatedAt, refreshToken)
+      : biPortalCoreWarmupIdempotencyKey(generatedAt)
+  ));
+  const coalesceKey = String(options.coalesceKey || (
+    options.force === true ? '' : biPortalGenerationCoalesceKey(generatedAt)
+  ));
+  const key = `${section}|${generatedAt || ''}|${idempotencyKey}|${coalesceKey}`;
   if (biExternalSectionQueuePending.has(key)) return true;
+  const reason = sanitizeBiQueueReason(options.reason || `portal-${generatedAt || 'current'}`);
+  // An explicit force refresh must still reach the manager so it can retain
+  // the existing priority-0/revision semantics. Ordinary cache misses alone
+  // use durable queue state for cross-process coalescing.
+  if (!options.force && queueHasCurrentPendingBiSection(section, generatedAt, reason, idempotencyKey)) {
+    rememberBiExternalSectionQueuePending(key);
+    return true;
+  }
   biExternalSectionQueuePending.add(key);
   // A user pressing "force refresh" must not sit behind background rebuilds.
   // Normal first-screen sections share the same priority as the other home
@@ -10813,29 +13304,63 @@ function enqueueHostLockedBiSection(section, generatedAt = '', options = {}) {
     : (options.force === true
       ? '0'
       : (BI_OWNER_VISIBLE_PRIORITY_SECTIONS.has(section) ? '10' : '50'));
-  const reason = sanitizeBiQueueReason(options.reason || `portal-${generatedAt || 'current'}`);
-  const child = spawn('/usr/bin/env', [
-    'bash',
-    path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
+  const spec = biSectionEnqueueChildSpec();
+  const child = spawn(spec.command, [
+    ...spec.args,
     '--sections', section,
     '--priority', priority,
     '--reason', reason,
+    '--core-generated-at', String(generatedAt || ''),
+    '--idempotency-key', idempotencyKey,
+    ...(coalesceKey ? ['--coalesce-key', coalesceKey] : []),
   ], {
     cwd: ROOT,
     env: process.env,
     stdio: ['ignore', 'ignore', 'ignore'],
+    detached: process.platform !== 'win32',
   });
+  // The in-process pending key is released ONLY on a real terminal child
+  // state ('error' or 'close'). A fire-and-forget enqueue that wedges must be
+  // terminated (SIGTERM then SIGKILL after a bounded grace period) so the same
+  // section/generation can be enqueued again instead of stacking duplicate
+  // worker processes behind a never-cleared pending entry.
+  let settled = false;
+  let deadlineExceeded = false;
+  let pendingTimer = null;
+  let killGraceTimer = null;
+  const clearPending = () => {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+    if (killGraceTimer) { clearTimeout(killGraceTimer); killGraceTimer = null; }
+    biExternalSectionQueuePending.delete(key);
+  };
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    clearPending();
+  };
   child.once('error', error => {
+    settle();
     console.error(`[bi-section-queue] enqueue failed section=${section} error=${String(error?.message || error)}`);
   });
-  child.once('exit', code => {
+  child.once('close', (code, signal) => {
+    settle();
     if (code && code !== 75) {
-      console.error(`[bi-section-queue] enqueue exited section=${section} code=${code}`);
+      console.error(`[bi-section-queue] enqueue exited section=${section} code=${code} signal=${String(signal || '')}${deadlineExceeded ? ' terminated-after-deadline' : ''}`);
     }
   });
   child.unref?.();
-  const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
-  timer.unref?.();
+  pendingTimer = setTimeout(() => {
+    pendingTimer = null;
+    deadlineExceeded = true;
+    console.error(`[bi-section-queue] enqueue child exceeded ${BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS}ms; terminating section=${section} pid=${child.pid}`);
+    terminateBiSectionEnqueueChild(child, 'SIGTERM');
+    killGraceTimer = setTimeout(() => {
+      killGraceTimer = null;
+      terminateBiSectionEnqueueChild(child, 'SIGKILL');
+    }, BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS);
+    killGraceTimer.unref?.();
+  }, BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS);
+  pendingTimer.unref?.();
   return true;
 }
 
@@ -10869,6 +13394,7 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
   };
   for (const group of groups) {
     const idempotencyKey = String(options.idempotencyKey || '');
+    const coalesceKey = String(options.coalesceKey || '');
     const requeueCompleted = Array.isArray(options.requeueCompletedSections)
       ? options.requeueCompletedSections.filter(section => group.sections.includes(section))
       : [];
@@ -10878,7 +13404,9 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
       '--sections', group.sections.join(','),
       '--priority', String(group.priority),
       '--reason', reason,
+      '--core-generated-at', String(generatedAt || ''),
       ...(idempotencyKey ? ['--idempotency-key', idempotencyKey] : []),
+      ...(coalesceKey ? ['--coalesce-key', coalesceKey] : []),
       ...(requeueCompleted.length ? ['--requeue-completed-sections', requeueCompleted.join(',')] : []),
     ], {
       cwd: ROOT,
@@ -10935,12 +13463,6 @@ async function persistHostLockedBiSectionPlan(plan, generatedAt = '', options = 
         `live accounting queue persistence did not account for every requested section exactly once: priority=${group.priority} requested=${[...requested].join(',')} accounted=${[...accounted].join(',')}`,
       );
     }
-    for (const section of group.sections) {
-      const key = `${section}|${generatedAt || ''}`;
-      biExternalSectionQueuePending.add(key);
-      const timer = setTimeout(() => biExternalSectionQueuePending.delete(key), 15_000);
-      timer.unref?.();
-    }
     for (const field of ['newlyQueued', 'updatedRevision', 'deduplicatedPending', 'deduplicatedCompleted', 'coalescedRerun', 'requeuedCompleted', 'supersededByExisting']) {
       aggregate[field].push(...outcome[field]);
     }
@@ -10960,13 +13482,22 @@ async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt
     || accountingState?.minimumPublishedAt
     || '',
   );
-  const key = `${generatedAt || ''}|${targetAt}`;
+  const idempotencyKey = biPortalHomepageAccountingIdempotencyKey(accountingState, generatedAt);
+  const key = idempotencyKey;
   if (biAccountingCatchupTargets.has(key)) {
     await biAccountingCatchupTargets.get(key);
     return false;
   }
-  const pending = persistHostLockedBiSectionPlan(liveAccountingQueuePlan({kind: 'order'}), generatedAt, {
+  // Ordinary current-day orders are already projected through liveSalesToday.
+  // Only the stale-homepage discriminator owns this bounded canonical catch-up;
+  // otherwise every order would advance a multi-minute profit queue revision.
+  const pending = persistHostLockedBiSectionPlan([
+    {section: 'profit', priority: 5},
+    {section: 'homeProfit', priority: 5},
+  ], generatedAt, {
     reason: `homepage-accounting-stale-${generatedAt || 'current'}`,
+    idempotencyKey,
+    coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
   });
   biAccountingCatchupTargets.set(key, pending);
   try {
@@ -10981,15 +13512,281 @@ async function persistHomepageAccountingCatchupOnce(accountingState, generatedAt
   return true;
 }
 
+const HOMEPAGE_RANKING_ARRAY_KEYS = Object.freeze([
+  'dailyStores',
+  'dailyProducts',
+  'dailyStoreProducts',
+  'dailyPaymentSummary',
+  'dailyStoreProductPaymentSummary',
+]);
+
+const HOMEPAGE_RANKING_VALUE_FIELDS = [
+  'sales_sar',
+  'gross_sales_sar',
+  'net_revenue_sar',
+  'gross_revenue_sar',
+  'amount_sar',
+  'value',
+  'quantity',
+  'gross_quantity',
+  'orders',
+  'gross_orders',
+  'net_orders',
+  'order_count',
+  'store_count',
+];
+
+const HOMEPAGE_PROFIT_BUSINESS_VALUE_FIELDS = [
+  'gross_revenue_sar',
+  'net_revenue_sar',
+  'known_gross_revenue_sar',
+  'known_net_revenue_sar',
+  'risk_adjusted_net_revenue_sar',
+  'known_risk_adjusted_net_revenue_sar',
+  'profit_before_storage_sar',
+  'profit_after_storage_sar',
+  'risk_adjusted_profit_before_storage_sar',
+  'risk_adjusted_profit_after_storage_sar',
+  'profit_if_rtv_received_resellable_sar',
+  'profit_if_rtv_received_resellable_after_storage_sar',
+  'profit_if_rtv_09_resellable_sar',
+  'profit_if_rtv_09_resellable_after_storage_sar',
+  'quantity',
+  'gross_quantity',
+];
+
+const HOMEPAGE_RANKING_ROW_RULES = Object.freeze({
+  dailyStores: row => Boolean(String(row?.store_key || '').trim()),
+  dailyProducts: row => Boolean(
+    String(row?.standard_goods_sn || '').trim()
+      || String(row?.skc_list || '').trim()
+      || String(row?.goods_title || '').trim(),
+  ),
+  dailyStoreProducts: row => Boolean(
+    String(row?.store_key || '').trim()
+      && (String(row?.standard_goods_sn || '').trim()
+        || String(row?.skc_list || '').trim()
+        || String(row?.goods_title || '').trim()),
+  ),
+  dailyPaymentSummary: row => Boolean(
+    String(row?.store_key || '').trim()
+      && Object.prototype.hasOwnProperty.call(row || {}, 'is_cod'),
+  ),
+  dailyStoreProductPaymentSummary: row => Boolean(
+    String(row?.store_key || '').trim()
+      && (String(row?.standard_goods_sn || '').trim()
+        || String(row?.skc_list || '').trim()
+        || String(row?.goods_title || '').trim())
+      && Object.prototype.hasOwnProperty.call(row || {}, 'is_cod'),
+  ),
+});
+
+function homepageDateIsValid(date) {
+  const text = String(date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const parsed = new Date(`${text}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
+}
+
+function homepageTimestampNs(value) {
+  const text = String(value || '').trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}(?::\d{2})?)$/.exec(text);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  const zone = match[8];
+  let offsetMinutes = 0;
+  if (zone !== 'Z') {
+    const offsetHours = Number(zone.slice(1, 3));
+    const zoneMinutes = zone.length === 6 ? Number(zone.slice(4, 6)) : 0;
+    if (offsetHours > 14
+      || zoneMinutes > 59
+      || (offsetHours === 14 && zoneMinutes !== 0)
+      || (zone[0] === '-' && offsetHours === 0 && zoneMinutes === 0)) return null;
+    offsetMinutes = (zone[0] === '-' ? -1 : 1) * (offsetHours * 60 + zoneMinutes);
+  }
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  calendar.setUTCHours(hour, minute, second, 0);
+  if (!Number.isFinite(calendar.getTime())
+    || calendar.getUTCFullYear() !== year
+    || calendar.getUTCMonth() !== month - 1
+    || calendar.getUTCDate() !== day
+    || calendar.getUTCHours() !== hour
+    || calendar.getUTCMinutes() !== minute
+    || calendar.getUTCSeconds() !== second) return null;
+  const fractionalNs = BigInt((match[7] || '').padEnd(9, '0') || '0');
+  return BigInt(calendar.getTime()) * 1_000_000n
+    - BigInt(offsetMinutes) * 60n * 1_000_000_000n
+    + fractionalNs;
+}
+
+function homepageTimestampIsValid(value) {
+  return homepageTimestampNs(value) !== null;
+}
+
+function homepageRowHasDate(row) {
+  return homepageDateIsValid(row?.date);
+}
+
+function homepageRankingArrayIsWellShaped(key, rows) {
+  if (!Array.isArray(rows)) return false;
+  const rule = HOMEPAGE_RANKING_ROW_RULES[key];
+  if (typeof rule !== 'function') return false;
+  return rows.every(row => (
+    row && typeof row === 'object' && !Array.isArray(row)
+      && homepageRowHasDate(row)
+      && rule(row)
+  ));
+}
+
+function homepageRowHasNonZeroValue(row, fields) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  return fields.some(field => {
+    const value = row[field];
+    if (value === null || value === undefined || value === '' || typeof value === 'boolean') return false;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && Math.abs(numeric) > 0;
+  });
+}
+
+function homepageRankingsDataIsUsable(rankings) {
+  if (!rankings || typeof rankings !== 'object' || Array.isArray(rankings)) return false;
+  const businessArrays = HOMEPAGE_RANKING_ARRAY_KEYS.filter(key => Array.isArray(rankings[key]));
+  if (!businessArrays.length) return false;
+  if (businessArrays.some(key => !homepageRankingArrayIsWellShaped(key, rankings[key]))) return false;
+  return businessArrays.some(key => rankings[key].some(row => homepageRowHasNonZeroValue(row, HOMEPAGE_RANKING_VALUE_FIELDS)));
+}
+
+function homepageProfitSummaryIsUsable(summary) {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return false;
+  const rows = summary.dailyScopes;
+  if (!Array.isArray(rows) || !rows.length || rows.some(row => !row || typeof row !== 'object' || Array.isArray(row))) return false;
+  if (rows.some(row => (
+      !homepageRowHasDate(row)
+      || !Object.prototype.hasOwnProperty.call(row, 'scope_value')
+      || !Object.prototype.hasOwnProperty.call(row, 'scope_order')
+      || typeof row.scope_order !== 'number'
+      || !Number.isSafeInteger(row.scope_order)
+      || row.scope_order < 0
+      || typeof row.scope_value !== 'string'
+      || (row.scope_value !== '' && !row.scope_value.trim())
+      || (row.scope_order > 0 && !row.scope_value.trim())
+  ))) return false;
+  return rows.some(row => homepageRowHasNonZeroValue(row, HOMEPAGE_PROFIT_BUSINESS_VALUE_FIELDS));
+}
+
 export function usableHomepageAccountingFallback(section, existing, generatedAt) {
-  if (!existing || String(existing.generatedAt || '') !== String(generatedAt || '')) return false;
-  if (section === 'homeRankings') return Boolean(existing?.data?.rankings && typeof existing.data.rankings === 'object');
+  if (!existing || existing.ok !== true || String(existing.generatedAt || '') !== String(generatedAt || '')) return false;
+  if (section === 'homeRankings') return homepageRankingsDataIsUsable(existing?.data?.rankings);
   const summary = existing?.data?.homeProfitSummary;
   return section === 'homeProfit'
-    && Boolean(summary)
-    && String(summary.sourceGeneratedAt || '') === String(generatedAt || '')
-    && summary.staleSource !== true
-    && Array.isArray(summary.dailyScopes);
+    && String(summary?.sourceGeneratedAt || '') === String(generatedAt || '')
+    && homepageTimestampIsValid(summary?.sourceCachedAt)
+    && summary?.staleSource === false
+    && homepageProfitSummaryIsUsable(summary);
+}
+
+function homepageAccountingIntegrityProofUsable(integrity, section, generatedAt, cachedAt = '') {
+  return Boolean(
+    integrity?.ok
+    && String(integrity.section || '') === String(section || '')
+    && String(integrity.generatedAt || '') === String(generatedAt || '')
+    && (!cachedAt || String(integrity.cachedAt || '') === String(cachedAt || ''))
+    && integrity.raw?.sha256
+    && integrity.gzip?.sha256
+    && Number(integrity.raw?.byteSize || 0) > 0,
+  );
+}
+
+const HOMEPAGE_ACCOUNTING_USABILITY_CACHE_MAX = 256;
+const homepageAccountingUsabilityCache = new Map();
+const homepageAccountingUsabilityInFlight = new Map();
+let homepageAccountingUsabilityParseCount = 0;
+
+function homepageAccountingUsabilityBindingKey(root, section, generatedAt, integrity) {
+  return [
+    path.resolve(root),
+    String(section || ''),
+    String(generatedAt || ''),
+    String(integrity?.bindingSha256 || integrity?.generationIdentity || ''),
+    String(integrity?.raw?.sha256 || ''),
+    String(integrity?.gzip?.sha256 || ''),
+    String(integrity?.raw?.byteSize || ''),
+  ].join('|');
+}
+
+function rememberHomepageAccountingUsability(key, value) {
+  homepageAccountingUsabilityCache.set(key, value);
+  while (homepageAccountingUsabilityCache.size > HOMEPAGE_ACCOUNTING_USABILITY_CACHE_MAX) {
+    homepageAccountingUsabilityCache.delete(homepageAccountingUsabilityCache.keys().next().value);
+  }
+}
+
+async function readVerifiedHomepageAccountingFallback(root, section) {
+  const metadata = await readBiSectionMetadata(root, section).catch(() => null);
+  const sourceGeneratedAt = String(metadata?.generatedAt || '');
+  if (!homepageTimestampIsValid(sourceGeneratedAt) || !homepageTimestampIsValid(metadata?.cachedAt)) return null;
+  const integrity = await readBiSectionIntegrityMetadata(root, section, sourceGeneratedAt).catch(() => null);
+  if (!homepageAccountingIntegrityProofUsable(integrity, section, sourceGeneratedAt, metadata.cachedAt)) return null;
+  const bindingKey = homepageAccountingUsabilityBindingKey(root, section, sourceGeneratedAt, integrity);
+  let inspection = homepageAccountingUsabilityCache.get(bindingKey);
+  if (!inspection) {
+    let pending = homepageAccountingUsabilityInFlight.get(bindingKey);
+    if (!pending) {
+      pending = (async () => {
+        homepageAccountingUsabilityParseCount += 1;
+        const existing = await readBiSectionCache(root, section, sourceGeneratedAt).catch(() => null);
+        const summary = existing?.data?.homeProfitSummary;
+        const summaryCachedAt = String(summary?.sourceCachedAt || '');
+        return {
+          usable: Boolean(existing && usableHomepageAccountingFallback(section, existing, sourceGeneratedAt)),
+          sourceGeneratedAt,
+          sourceCachedAt: section === 'homeProfit'
+            ? (homepageTimestampIsValid(summaryCachedAt) ? summaryCachedAt : '')
+            : String(metadata.cachedAt || ''),
+        };
+      })().finally(() => {
+        if (homepageAccountingUsabilityInFlight.get(bindingKey) === pending) homepageAccountingUsabilityInFlight.delete(bindingKey);
+      });
+      homepageAccountingUsabilityInFlight.set(bindingKey, pending);
+    }
+    inspection = await pending;
+    rememberHomepageAccountingUsability(bindingKey, inspection);
+  }
+  if (!inspection?.usable) return null;
+  return {
+    sourceGeneratedAt: inspection.sourceGeneratedAt,
+    sourceCachedAt: inspection.sourceCachedAt,
+    cachedAt: String(metadata.cachedAt || ''),
+  };
+}
+
+function homepageAccountingDegradedHeaders(sourceMeta, generatedAt, accountingState, refreshScheduled) {
+  const queued = refreshScheduled === true;
+  const accountingPending = accountingState?.decision?.fresh !== true;
+  return {
+    'X-Shein-BI-Degraded': 'true',
+    'X-Shein-BI-Has-Data': 'true',
+    'X-Shein-BI-Core-Generated-At': String(generatedAt || ''),
+    'X-Shein-BI-Source-Generated-At': String(sourceMeta?.sourceGeneratedAt || ''),
+    'X-Shein-BI-Source-Cached-At': String(sourceMeta?.sourceCachedAt || ''),
+    'X-Shein-BI-Accounting-Pending': String(accountingPending),
+    'X-Shein-BI-Refresh-Scheduled': String(queued),
+    'X-Shein-BI-Queued-Section': String(queued),
+    'Cache-Control': 'no-store',
+  };
+}
+
+function resetHomepageAccountingUsabilityCache() {
+  homepageAccountingUsabilityCache.clear();
+  homepageAccountingUsabilityInFlight.clear();
+  homepageAccountingUsabilityParseCount = 0;
 }
 
 function sectionRequiresHostLockedWorker(section, options = {}) {
@@ -11005,6 +13802,7 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
     return enqueueHostLockedBiSection(section, generatedAt, {
       reason: force ? `portal-force-${generatedAt || 'current'}` : `portal-cache-miss-${generatedAt || 'current'}`,
       force,
+      refreshToken,
       priority: options.priority,
     });
   }
@@ -11072,34 +13870,33 @@ function scheduleBiSectionBackgroundGeneration(args, root, section, generatedAt,
   }).catch(err => {
     recordBiSectionRefreshFailure(root, section, err);
     console.warn('BI section background generation failed', section, err?.message || err);
-  }).finally(() => {
-    biSectionInFlight.delete(key);
-    biSectionActiveRefreshTokens.delete(key);
   });
-  biSectionInFlight.set(key, run);
+  trackBiSectionInFlight(key, run);
+  run.finally(() => {
+    biSectionActiveRefreshTokens.delete(key);
+  }).catch(() => {});
   if (fastLane) biSectionFastBackgroundQueue = run.catch(() => {});
   else biSectionBackgroundQueue = run.catch(() => {});
   return true;
 }
 
-async function deriveHomeProfitSectionFromProfitCache(root, generatedAt) {
+async function deriveHomeProfitSectionFromProfitCache(root, generatedAt, signal = null) {
+  throwIfBiSectionAborted(signal);
   if (!String(generatedAt || '')) return null;
-  const currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+  const currentProfitCache = await readCurrentProfitSource(root, generatedAt);
+  throwIfBiSectionAborted(signal);
   // homeProfit must derive only from the profit cache of the exact current
   // core generation. An older profit cache is never a valid homeProfit source:
   // serving it would let an outdated profit summary masquerade as current.
   if (!isCurrentProfitSectionCache(currentProfitCache, generatedAt)) return null;
-  const sourceGeneratedAt = String(currentProfitCache.generatedAt || '');
-  const data = buildHomeProfitSummaryFromProfitData(currentProfitCache.data, {
-    sourceGeneratedAt,
-    sourceCachedAt: String(currentProfitCache.cachedAt || ''),
-    staleSource: Boolean(generatedAt && sourceGeneratedAt && sourceGeneratedAt !== String(generatedAt || '')),
-  });
-  return writeBiSectionCache(root, 'homeProfit', generatedAt, data, {
-    code: 0,
-    timedOut: false,
-    stderr: '',
-  });
+  // homeProfit is a member of the profit bundle. A request-time derivation
+  // must never publish it alone, because that would make the three artifacts
+  // observe different cachedAt/generation identities after a crash.
+  const currentHomeProfit = await readBiSectionCache(root, 'homeProfit', generatedAt).catch(() => null);
+  throwIfBiSectionAborted(signal);
+  return isCurrentHomeProfitSectionCache(currentHomeProfit, generatedAt)
+    ? currentHomeProfit
+    : null;
 }
 
 // Request-state productProfit section: never persisted, never prewarmed,
@@ -11115,43 +13912,83 @@ let biProductProfitIndexPromise = null;
 
 function isCurrentProfitSectionCache(cache, generatedAt, minCachedAt = '') {
   const expected = String(generatedAt || '');
-  const minimum = Date.parse(String(minCachedAt || ''));
-  const cached = Date.parse(String(cache?.cachedAt || ''));
+  const minimum = homepageTimestampNs(minCachedAt);
+  const cached = homepageTimestampNs(cache?.cachedAt);
   return Boolean(
     expected
     && String(cache?.generatedAt || '') === expected
     && Array.isArray(cache?.data?.profit?.dailyStoreProducts),
   ) && (
-    Number.isNaN(minimum)
-    || (!Number.isNaN(cached) && cached >= minimum)
+    minimum === null
+    || (cached !== null && cached >= minimum)
+  );
+}
+
+async function readCurrentProfitSource(root, generatedAt) {
+  const expected = String(generatedAt || '');
+  if (!expected) return null;
+  if (!await readBiProfitBundleManifest(root, expected).catch(() => null)) return null;
+  const compact = await readBiSectionArtifactCache(
+    root,
+    'profit.query',
+    'profit.query',
+    expected,
+    {requireIntegrity: true},
+  ).catch(() => null);
+  if (isCurrentProfitSectionCache(compact, expected)) return compact;
+
+  // A legacy/full artifact is only an allowed fallback when its bounded
+  // metadata proves it is below the 64 MiB per-section ceiling. In particular,
+  // the normal ~104 MiB profit Portal cache is never parsed by this path.
+  const fullMeta = await readBiSectionMetadata(root, 'profit');
+  if (!fullMeta || fullMeta.generatedAt !== expected || Number(fullMeta.size || 0) > BI_PROFIT_FULL_FALLBACK_MAX_BYTES) return null;
+  const full = await readBiSectionCache(root, 'profit', expected).catch(() => null);
+  return isCurrentProfitSectionCache(full, expected) ? full : null;
+}
+
+function isCurrentHomeProfitSectionCache(cache, generatedAt, minSourceCachedAt = '') {
+  const expected = String(generatedAt || '');
+  const minimum = homepageTimestampNs(minSourceCachedAt);
+  const summary = cache?.data?.homeProfitSummary;
+  const sourceCachedAt = homepageTimestampNs(summary?.sourceCachedAt);
+  return Boolean(
+    expected
+    && String(cache?.generatedAt || '') === expected
+    && summary
+    && summary.staleSource !== true
+    && String(summary.sourceGeneratedAt || '') === expected
+    && Array.isArray(summary.dailyScopes),
+  ) && (
+    minimum === null
+    || (sourceCachedAt !== null && sourceCachedAt >= minimum)
   );
 }
 
 async function readBiSectionArtifactIdentity(root, section) {
-  const file = path.join(root, 'sections', `${section}.json`);
-  let handle;
-  try {
-    handle = await fs.open(file, 'r');
-    const stat = await handle.stat();
-    const buffer = Buffer.alloc(Math.min(8192, Math.max(1, Number(stat.size || 0))));
-    const {bytesRead} = await handle.read(buffer, 0, buffer.length, 0);
-    const head = buffer.subarray(0, bytesRead).toString('utf8');
-    const stringField = field => new RegExp(`"${field}"\\s*:\\s*"([^"]*)"`).exec(head)?.[1] || '';
-    const generatedAt = stringField('generatedAt');
-    const cachedAt = stringField('cachedAt');
-    if (!generatedAt || !cachedAt) return null;
-    return {
-      generatedAt,
-      cachedAt,
-      size: Number(stat.size || 0),
-      mtimeMs: Number(stat.mtimeMs || 0),
-      cacheKey: `${path.resolve(root)}|${section}|${generatedAt}|${cachedAt}|${Number(stat.size || 0)}|${Number(stat.mtimeMs || 0)}`,
-    };
-  } catch {
-    return null;
-  } finally {
-    await handle?.close().catch(() => {});
+  const meta = await readBiSectionMetadata(root, section);
+  if (!meta) return null;
+  return {
+    artifact: section,
+    generatedAt: meta.generatedAt,
+    cachedAt: meta.cachedAt,
+    size: meta.size,
+    mtimeMs: meta.mtimeMs,
+    cacheKey: meta.cacheKey,
+  };
+}
+
+async function readCurrentProfitSourceIdentity(root, generatedAt) {
+  const expected = String(generatedAt || '');
+  if (!expected) return null;
+  if (!await readBiProfitBundleManifest(root, expected).catch(() => null)) return null;
+  const compactIntegrity = await readBiSectionIntegrityMetadata(root, 'profit.query', expected).catch(() => null);
+  if (compactIntegrity) {
+    const compact = await readBiSectionArtifactIdentity(root, 'profit.query');
+    if (compact?.generatedAt === expected) return compact;
   }
+  const full = await readBiSectionArtifactIdentity(root, 'profit');
+  if (!full || full.generatedAt !== expected || Number(full.size || 0) > BI_PROFIT_FULL_FALLBACK_MAX_BYTES) return null;
+  return full;
 }
 
 function buildBiProductProfitIndex(profitCache, cacheKey = '', productDisplayNames = {}) {
@@ -11184,7 +14021,7 @@ function buildBiProductProfitIndex(profitCache, cacheKey = '', productDisplayNam
 
 async function loadCurrentBiProductProfitIndex(root, generatedAt, retry = 0) {
   if (!String(generatedAt || '')) return null;
-  const before = await readBiSectionArtifactIdentity(root, 'profit');
+  const before = await readCurrentProfitSourceIdentity(root, generatedAt);
   if (!before || before.generatedAt !== String(generatedAt || '')) return null;
   const cacheKey = before.cacheKey;
   if (biProductProfitIndex?.cacheKey === cacheKey) return biProductProfitIndex;
@@ -11198,15 +14035,15 @@ async function loadCurrentBiProductProfitIndex(root, generatedAt, retry = 0) {
     const holder = {cacheKey, promise: null};
     holder.promise = (async () => {
       if (previous) await previous;
-      const profitCache = await readBiSectionCache(root, 'profit', generatedAt).catch(() => null);
+      const profitCache = await readCurrentProfitSource(root, generatedAt);
       if (!isCurrentProfitSectionCache(profitCache, generatedAt) || String(profitCache.cachedAt || '') !== before.cachedAt) return null;
       const core = await readJsonFile(path.join(root, 'data.json'), {});
       const productDisplayNames = core?.productDisplayNames && typeof core.productDisplayNames === 'object'
         ? core.productDisplayNames
         : {};
       const index = buildBiProductProfitIndex(profitCache, cacheKey, productDisplayNames);
-      const after = await readBiSectionArtifactIdentity(root, 'profit');
-      if (!after || after.cacheKey !== cacheKey) return null;
+      const after = await readCurrentProfitSourceIdentity(root, generatedAt);
+      if (!after || after.cacheKey !== cacheKey || after.artifact !== before.artifact) return null;
       biProductProfitIndex = index;
       return index;
     })().finally(() => {
@@ -11298,7 +14135,7 @@ async function loadBiProductProfitSection(args, root, options = {}) {
   }
   const [latestMeta, latestArtifact] = await Promise.all([
     readBiPortalCoreMeta(root).catch(() => null),
-    readBiSectionArtifactIdentity(root, 'profit'),
+    readCurrentProfitSourceIdentity(root, generatedAt),
   ]);
   if (String(latestMeta?.generatedAt || '') !== generatedAt || latestArtifact?.cacheKey !== index.cacheKey) {
     if (options.generationRetry !== true) {
@@ -11325,7 +14162,8 @@ async function loadBiProductProfitSection(args, root, options = {}) {
   };
 }
 
-async function refreshProfitMarts(args) {
+async function refreshProfitMarts(args, options = {}) {
+  throwIfBiSectionAborted(options.signal);
   if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') {
     return {
       code: 0,
@@ -11334,45 +14172,60 @@ async function refreshProfitMarts(args) {
       stderr: '',
     };
   }
+  const dbApplicationName = validateBiDbApplicationName(options.dbApplicationName || '');
   const timeoutMs = Math.max(60_000, Number(process.env.SHEIN_BI_PROFIT_MART_REFRESH_TIMEOUT_MS || 600_000));
-  const run = await runChildProcess('bash', [
+  const run = await runBiDbChildProcess(args, 'bash', [
     path.join(ROOT, 'scripts', 'refresh_profit_marts.sh'),
   ], {
     cwd: ROOT,
     timeoutMs,
+    signal: options.signal || null,
+    processGroup: true,
+    dbApplicationName,
     env: {
       SHEIN_BI_DB_CONTAINER: args.container,
       SHEIN_BI_DB_DATABASE: args.database,
       SHEIN_BI_DB_USER: args.user,
+      SHEIN_BI_DB_APPLICATION_NAME: dbApplicationName,
     },
   });
+  throwIfBiSectionAborted(options.signal);
   if (!run.ok) {
     const tail = String(run.stderr || run.stdout || '').slice(-4000);
     throw new Error(`profit mart cache refresh failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
   }
+  invalidateProfitAccountingStateAndPublicationCache();
   return run;
 }
 
-async function refreshInventoryCostLedger(args) {
+async function refreshInventoryCostLedger(args, options = {}) {
+  throwIfBiSectionAborted(options.signal);
   if (process.env.SHEIN_BI_INVENTORY_COST_REFRESH === '0') {
     throw new Error('inventory cost ledger refresh is disabled; cannot safely rebuild stale profit marts');
   }
+  const dbApplicationName = validateBiDbApplicationName(options.dbApplicationName || '');
   const timeoutMs = Math.max(60_000, Number(process.env.SHEIN_BI_INVENTORY_COST_REFRESH_TIMEOUT_MS || 900_000));
   const runs = [];
   for (let attempt = 1; attempt <= INVENTORY_COST_REFRESH_MAX_ATTEMPTS; attempt += 1) {
-    const run = await runChildProcess('bash', [
+    const run = await runBiDbChildProcess(args, 'bash', [
       path.join(ROOT, 'scripts', 'refresh_inventory_cost_ledger.sh'),
     ], {
       cwd: ROOT,
       timeoutMs,
+      signal: options.signal || null,
+      processGroup: true,
+      dbApplicationName,
       env: {
         SHEIN_BI_DB_CONTAINER: args.container,
         SHEIN_BI_DB_DATABASE: args.database,
         SHEIN_BI_DB_USER: args.user,
+        SHEIN_BI_DB_APPLICATION_NAME: dbApplicationName,
       },
     });
+    throwIfBiSectionAborted(options.signal);
     runs.push(run);
     if (run.ok) {
+      invalidateProfitAccountingStateAndPublicationCache();
       return {
         ...run,
         stdout: `${runs.slice(0, -1).map((item, index) => `[inventory-cost retry ${index + 1}] ${item.stderr || item.stdout || ''}`).join('\n')}\n${run.stdout || ''}`.trim(),
@@ -11386,12 +14239,14 @@ async function refreshInventoryCostLedger(args) {
     // The source guard intentionally rejects a snapshot when orders arrive
     // during the build. Retry from a new database snapshot under the same
     // outer freshness single-flight; never publish the rejected ledger.
-    await new Promise(resolve => setTimeout(resolve, Math.min(5_000, attempt * 1_000)));
+    await abortableBiSectionDelay(Math.min(5_000, attempt * 1_000), options.signal);
   }
   throw new Error('inventory cost ledger refresh exhausted without a result');
 }
 
-async function readProfitMartCacheFreshness(args) {
+async function readProfitMartCacheFreshness(args, options = {}) {
+  throwIfBiSectionAborted(options.signal);
+  const dbApplicationName = validateBiDbApplicationName(options.dbApplicationName || '');
   const sql = `
 WITH primary_cutover AS (
   SELECT NULLIF(setting_value,'')::date AS cutover_date
@@ -11408,7 +14263,22 @@ WITH primary_cutover AS (
 ), post_cutover_assignment AS (
   SELECT
     count(*)::bigint AS rows,
-    count(l.source_order_item_key)::bigint AS assigned_rows
+    count(l.source_order_item_key)::bigint AS assigned_rows,
+    count(*) FILTER (
+      WHERE r.source_cutoff_at IS NOT NULL
+        AND oi.updated_at IS NOT NULL
+        AND oi.updated_at <= r.source_cutoff_at
+    )::bigint AS cutoff_rows,
+    count(l.source_order_item_key) FILTER (
+      WHERE r.source_cutoff_at IS NOT NULL
+        AND oi.updated_at IS NOT NULL
+        AND oi.updated_at <= r.source_cutoff_at
+    )::bigint AS cutoff_assigned_rows,
+    count(*) FILTER (
+      WHERE r.source_cutoff_at IS NULL
+         OR oi.updated_at IS NULL
+         OR oi.updated_at > r.source_cutoff_at
+    )::bigint AS pending_follow_up_rows
   FROM fact.order_item oi
   CROSS JOIN primary_cutover c
   LEFT JOIN latest_cost_run r ON true
@@ -11442,15 +14312,23 @@ SELECT jsonb_build_object(
   'costAssignmentCoverageRequired', EXISTS (SELECT 1 FROM primary_cutover WHERE cutover_date IS NOT NULL),
   'costAssignmentPostCutoverRows', (SELECT rows FROM post_cutover_assignment),
   'costAssignmentPostCutoverAssignedRows', (SELECT assigned_rows FROM post_cutover_assignment),
-  'costAssignmentPostCutoverMissingRows', (SELECT rows-assigned_rows FROM post_cutover_assignment)
+  'costAssignmentPostCutoverMissingRows', (SELECT rows-assigned_rows FROM post_cutover_assignment),
+  'costAssignmentCutoffRows', (SELECT cutoff_rows FROM post_cutover_assignment),
+  'costAssignmentCutoffAssignedRows', (SELECT cutoff_assigned_rows FROM post_cutover_assignment),
+  'costAssignmentCutoffMissingRows', (SELECT cutoff_rows-cutoff_assigned_rows FROM post_cutover_assignment),
+  'costAssignmentPendingFollowUpRows', (SELECT pending_follow_up_rows FROM post_cutover_assignment)
 )::text;
 `;
-  const psql = psqlSpawnCommand(args, ' -q -t -A');
-  const run = await runChildProcess(psql.command, psql.args, {
+  const psql = psqlSpawnCommand(args, ' -q -t -A', {applicationName: dbApplicationName});
+  const run = await runBiDbChildProcess(args, psql.command, psql.args, {
     cwd: ROOT,
     timeoutMs: Math.max(30_000, Number(process.env.SHEIN_BI_PROFIT_MART_FRESHNESS_TIMEOUT_MS || 60_000)),
     stdin: sql,
+    signal: options.signal || null,
+    processGroup: true,
+    dbApplicationName,
   });
+  throwIfBiSectionAborted(options.signal);
   if (!run.ok) {
     const tail = String(run.stderr || run.stdout || '').slice(-1000);
     throw new Error(`profit mart freshness check failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
@@ -11458,36 +14336,135 @@ SELECT jsonb_build_object(
   return JSON.parse(String(run.stdout || '{}').trim() || '{}');
 }
 
-async function readProfitAccountingState(args, generatedAt = '') {
-  const freshness = await readProfitMartCacheFreshness(args);
-  const decision = evaluateProfitMartCacheFreshness(freshness, {
-    coreGeneratedAt: generatedAt,
-    allowedCoreSkewMs: Math.max(
-      0,
-      Number(process.env.SHEIN_BI_PROFIT_MART_CORE_SKEW_MS || PROFIT_MART_CORE_SKEW_MS),
-    ),
-  });
+function profitAccountingStateCacheKey(args, generatedAt) {
+  return JSON.stringify([
+    String(args?.distro || ''),
+    String(args?.container || ''),
+    String(args?.database || ''),
+    String(args?.user || ''),
+    String(generatedAt || ''),
+  ]);
+}
+
+function createProfitAccountingStateReader(options = {}) {
+  const loadFreshness = options.loadFreshness || readProfitMartCacheFreshness;
+  const now = options.now || Date.now;
+  const ttlMs = Math.max(0, Number(options.ttlMs ?? PROFIT_ACCOUNTING_STATE_CACHE_TTL_MS));
+  let entry = null;
+
+  const read = async (args, generatedAt = '', readOptions = {}) => {
+    const key = profitAccountingStateCacheKey(args, generatedAt);
+    const forceFresh = readOptions.forceFresh === true;
+    if (entry?.key === key) {
+      // One warehouse probe is shared even when a host-locked refresh and
+      // several browser reads arrive together. A forceFresh caller bypasses
+      // only a settled cache value, never an identical in-flight probe.
+      if (entry.promise) return entry.promise;
+      if (!forceFresh && entry.value && entry.expiresAt > now()) return entry.value;
+    }
+
+    const promise = (async () => {
+      const freshness = await loadFreshness(args, {
+        signal: readOptions.signal || null,
+        dbApplicationName: readOptions.dbApplicationName || '',
+      });
+      const decision = evaluateProfitMartCacheFreshness(freshness, {
+        coreGeneratedAt: generatedAt,
+        allowedCoreSkewMs: Math.max(
+          0,
+          Number(process.env.SHEIN_BI_PROFIT_MART_CORE_SKEW_MS || PROFIT_MART_CORE_SKEW_MS),
+        ),
+      });
+      return {
+        freshness,
+        decision,
+        minimumPublishedAt: String(freshness.metaRefreshedAt || ''),
+      };
+    })();
+    entry = {key, promise, value: null, expiresAt: 0};
+    promise.catch(() => {});
+    try {
+      const value = await promise;
+      if (entry?.key === key && entry.promise === promise) {
+        entry = {key, promise: null, value, expiresAt: now() + ttlMs};
+      }
+      return value;
+    } catch (error) {
+      // A failed warehouse probe is never negative-cached. The next bounded
+      // retry must be able to observe recovery immediately.
+      if (entry?.key === key && entry.promise === promise) entry = null;
+      throw error;
+    }
+  };
+
   return {
-    freshness,
-    decision,
-    minimumPublishedAt: String(freshness.metaRefreshedAt || ''),
+    read,
+    invalidate() {
+      entry = null;
+    },
   };
 }
 
-async function ensureProfitMartCacheFresh(args, generatedAt = '') {
+const profitAccountingStateReader = createProfitAccountingStateReader();
+
+export function invalidateProfitAccountingStateCache() {
+  profitAccountingStateReader.invalidate();
+}
+
+export function invalidateProfitAccountingStateAndPublicationCache() {
+  profitAccountingStateReader.invalidate();
+  clearRecentAccountingSnapshotPublication();
+}
+
+async function readProfitAccountingState(args, generatedAt = '', options = {}) {
+  return profitAccountingStateReader.read(args, generatedAt, options);
+}
+
+export async function verifyAndRecordProfitMartPublication(args, {generatedAt, decision, preRefreshFreshness, options = {}} = {}) {
+  throwIfBiSectionAborted(options.signal);
+  const postPublicationFreshness = await readProfitMartCacheFreshness(args, options);
+  throwIfBiSectionAborted(options.signal);
+  const postPublicationDecision = evaluateProfitMartCacheFreshness(postPublicationFreshness, {
+    coreGeneratedAt: generatedAt,
+    allowedCoreSkewMs: decision?.allowedCoreSkewMs,
+  });
+  if (!postPublicationDecision.coversCostRun || !postPublicationDecision.coversCostAssignments) {
+    throw new Error(
+      `profit mart publication verification failed: cutoff=${postPublicationFreshness.costRunSourceCutoffAt || ''} `
+      + `missing=${postPublicationDecision.costAssignmentCutoffMissingRows ?? postPublicationDecision.costAssignmentPostCutoverMissingRows}`,
+    );
+  }
+  const preMetaMs = instant(preRefreshFreshness?.metaRefreshedAt);
+  const postMetaMs = instant(postPublicationFreshness.metaRefreshedAt);
+  if (postMetaMs === null || (preMetaMs !== null && postMetaMs <= preMetaMs)) {
+    throw new Error(
+      `profit mart publication metadata failed to advance: before=${preRefreshFreshness?.metaRefreshedAt || ''} after=${postPublicationFreshness.metaRefreshedAt || ''}`,
+    );
+  }
+  recordRecentAccountingSnapshotPublication({
+    coreGeneratedAt: generatedAt,
+    freshness: postPublicationFreshness,
+    decision: postPublicationDecision,
+  });
+  return {postPublicationFreshness, postPublicationDecision};
+}
+async function ensureProfitMartCacheFresh(args, generatedAt = '', options = {}) {
+  throwIfBiSectionAborted(options.signal);
   if (process.env.SHEIN_BI_PROFIT_MART_REFRESH_DISABLED === '1') return null;
   if (biProfitMartFreshnessPromise) return biProfitMartFreshnessPromise;
   biProfitMartFreshnessPromise = (async () => {
     let freshness;
     try {
-      freshness = await readProfitMartCacheFreshness(args);
+      freshness = await readProfitMartCacheFreshness(args, options);
     } catch (err) {
-      const refreshed = await refreshProfitMarts(args);
+      throwIfBiSectionAborted(options.signal);
+      const refreshed = await refreshProfitMarts(args, options);
       return {
         ...refreshed,
         stderr: `${refreshed.stderr || ''}\n[ensureProfitMartCacheFresh] freshness check failed; refreshed cache instead: ${err?.message || err}`,
       };
     }
+    throwIfBiSectionAborted(options.signal);
     const decision = evaluateProfitMartCacheFreshness(freshness, {
       coreGeneratedAt: generatedAt,
       allowedCoreSkewMs: Math.max(
@@ -11503,6 +14480,15 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
         stderr: '',
       };
     }
+    const reuse = evaluateRecentAccountingSnapshotReuse(freshness, decision, generatedAt);
+    if (reuse) {
+      return {
+        code: 0,
+        timedOut: false,
+        stdout: `[ensureProfitMartCacheFresh] recent published accounting snapshot reused within TTL remainingMs=${reuse.remainingTtlMs} cutoff=${reuse.costRunSourceCutoffAt} metaRefreshedAt=${reuse.metaRefreshedAt} coreGeneratedAt=${generatedAt || ''} (follow-up pending)`,
+        stderr: '',
+      };
+    }
     // A newer order fact or an incomplete post-cutover assignment is never
     // repaired by rebuilding profit alone: first rebuild the moving-average
     // ledger, then verify the completed run actually covers the fact cutoff.
@@ -11510,34 +14496,204 @@ async function ensureProfitMartCacheFresh(args, generatedAt = '') {
       || !decision.coversCostCutoff
       || !decision.coversCostAssignments;
     if (needsLedger) {
-      const ledgerRun = await refreshInventoryCostLedger(args);
-      const afterLedger = await readProfitMartCacheFreshness(args);
+      const ledgerRun = await refreshInventoryCostLedger(args, options);
+      const afterLedger = await readProfitMartCacheFreshness(args, options);
+      throwIfBiSectionAborted(options.signal);
       const afterDecision = evaluateProfitMartCacheFreshness(afterLedger, {
         coreGeneratedAt: generatedAt,
         allowedCoreSkewMs: decision.allowedCoreSkewMs,
       });
-      if (!afterDecision.coversCostRun || !afterDecision.coversCostCutoff || !afterDecision.coversCostAssignments) {
+      if (!afterDecision.coversCostRun || !afterDecision.coversCostAssignments) {
         throw new Error(
           `inventory cost ledger remains incomplete after refresh: cutoff=${afterLedger.costRunSourceCutoffAt || ''} `
-          + `orderFactUpdatedAt=${afterLedger.orderFactUpdatedAt || afterLedger.factUpdatedAt || ''} assignment=${afterDecision.costAssignmentPostCutoverAssignedRows}/${afterDecision.costAssignmentPostCutoverRows} `
-          + `missing=${afterDecision.costAssignmentPostCutoverMissingRows}`,
+          + `orderFactUpdatedAt=${afterLedger.orderFactUpdatedAt || afterLedger.factUpdatedAt || ''} assignment=${afterDecision.costAssignmentCutoffAssignedRows ?? afterDecision.costAssignmentPostCutoverAssignedRows}/${afterDecision.costAssignmentCutoffRows ?? afterDecision.costAssignmentPostCutoverRows} `
+          + `missing=${afterDecision.costAssignmentCutoffMissingRows ?? afterDecision.costAssignmentPostCutoverMissingRows}`,
         );
       }
-      const profitRun = await refreshProfitMarts(args);
+      const profitRun = await refreshProfitMarts(args, options);
+      const {postPublicationFreshness, postPublicationDecision} = await verifyAndRecordProfitMartPublication(args, {
+        generatedAt,
+        decision,
+        preRefreshFreshness: afterLedger,
+        options,
+      });
+      const followUpDetail = postPublicationDecision.followUpPending
+        ? `\n[ensureProfitMartCacheFresh] cost ledger completed with follow-up pending: cutoff=${postPublicationFreshness.costRunSourceCutoffAt || ''} latestOrder=${postPublicationFreshness.orderFactUpdatedAt || ''} pendingRows=${postPublicationDecision.pendingFollowUpRows}`
+        : '';
       return {
         ...profitRun,
-        stdout: `${ledgerRun.stdout || ''}\n${profitRun.stdout || ''}`,
+        stdout: `${ledgerRun.stdout || ''}\n${profitRun.stdout || ''}${followUpDetail}`.trim(),
         stderr: `${ledgerRun.stderr || ''}\n${profitRun.stderr || ''}`,
       };
     }
-    return refreshProfitMarts(args);
+    const profitRun = await refreshProfitMarts(args, options);
+    await verifyAndRecordProfitMartPublication(args, {
+      generatedAt,
+      decision,
+      preRefreshFreshness: freshness,
+      options,
+    });
+    return profitRun;
   })().finally(() => {
     biProfitMartFreshnessPromise = null;
   });
+  biProfitMartFreshnessPromise.catch(() => {});
   return biProfitMartFreshnessPromise;
 }
 
-async function generateBiSection(args, root, section, generatedAt) {
+function directReceiptExactKeys(value, keys, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const expected = new Set(keys);
+  const actual = Object.keys(value);
+  if (actual.length !== expected.size || actual.some(key => !expected.has(key))) {
+    throw new Error(`${label} has unexpected fields`);
+  }
+  return value;
+}
+
+function directReceiptSha(value, label) {
+  const text = String(value || '');
+  if (!/^[a-f0-9]{64}$/.test(text)) throw new Error(`${label} must be a sha256 digest`);
+  return text;
+}
+
+function directReceiptByteSize(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive safe byte size`);
+  return value;
+}
+
+function validateDirectReceiptArtifact(value, expectedArtifact, expectedGeneratedAt) {
+  const artifact = directReceiptExactKeys(value, [
+    'artifact',
+    'file',
+    'section',
+    'generatedAt',
+    'cachedAt',
+    'publishedAt',
+    'generationIdentity',
+    'bindingSha256',
+    'raw',
+    'gzip',
+  ], `receipt artifact ${expectedArtifact}`);
+  if (String(artifact.artifact || '') !== expectedArtifact
+    || String(artifact.section || '') !== expectedArtifact
+    || String(artifact.generatedAt || '') !== expectedGeneratedAt) {
+    throw new Error(`receipt artifact ${expectedArtifact} identity mismatch`);
+  }
+  for (const [field, value] of [['file', artifact.file], ['cachedAt', artifact.cachedAt], ['publishedAt', artifact.publishedAt], ['generationIdentity', artifact.generationIdentity], ['bindingSha256', artifact.bindingSha256]]) {
+    if (typeof value !== 'string' || !value) throw new Error(`receipt artifact ${expectedArtifact}.${field} is missing`);
+  }
+  directReceiptSha(artifact.generationIdentity, `receipt artifact ${expectedArtifact}.generationIdentity`);
+  directReceiptSha(artifact.bindingSha256, `receipt artifact ${expectedArtifact}.bindingSha256`);
+  const raw = directReceiptExactKeys(artifact.raw, ['file', 'sha256', 'byteSize'], `receipt artifact ${expectedArtifact}.raw`);
+  const gzip = directReceiptExactKeys(artifact.gzip, ['file', 'sha256', 'byteSize', 'sourceRawSha256', 'sourceGenerationIdentity'], `receipt artifact ${expectedArtifact}.gzip`);
+  if (typeof raw.file !== 'string' || !raw.file || typeof gzip.file !== 'string' || !gzip.file) {
+    throw new Error(`receipt artifact ${expectedArtifact} file metadata is missing`);
+  }
+  directReceiptSha(raw.sha256, `receipt artifact ${expectedArtifact}.raw.sha256`);
+  directReceiptSha(gzip.sha256, `receipt artifact ${expectedArtifact}.gzip.sha256`);
+  directReceiptByteSize(raw.byteSize, `receipt artifact ${expectedArtifact}.raw.byteSize`);
+  directReceiptByteSize(gzip.byteSize, `receipt artifact ${expectedArtifact}.gzip.byteSize`);
+  if (gzip.sourceRawSha256 !== raw.sha256 || gzip.sourceGenerationIdentity !== artifact.generationIdentity) {
+    throw new Error(`receipt artifact ${expectedArtifact} gzip source binding mismatch`);
+  }
+  return artifact;
+}
+
+export function parseDirectCacheReceipt(stdout, expectedSection, expectedGeneratedAt) {
+  const text = String(stdout || '').trim();
+  if (!text) throw new Error('BI direct-cache receipt is empty');
+  if (Buffer.byteLength(text, 'utf8') > BI_DIRECT_RECEIPT_MAX_BYTES) {
+    throw new Error('BI direct-cache receipt exceeds bounded stdout limit');
+  }
+  let receipt;
+  try {
+    receipt = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`BI direct-cache receipt is invalid JSON: ${error?.message || error}`);
+  }
+  const section = String(expectedSection || '');
+  const generatedAt = String(expectedGeneratedAt || '');
+  if (!section || !generatedAt) throw new Error('BI direct-cache receipt verification requires section and generatedAt');
+  directReceiptExactKeys(receipt, ['ok', 'mode', 'section', 'generatedAt', 'coreGeneratedAt', 'artifacts'], 'BI direct-cache receipt');
+  if (receipt.ok !== true || receipt.mode !== 'direct-cache-publish'
+    || String(receipt.section || '') !== section
+    || String(receipt.generatedAt || '') !== generatedAt
+    || String(receipt.coreGeneratedAt || '') !== generatedAt) {
+    throw new Error('BI direct-cache receipt core identity mismatch');
+  }
+  const expectedArtifacts = section === 'profit' ? ['profit', 'profit.query', 'homeProfit'] : [section];
+  if (!Array.isArray(receipt.artifacts) || receipt.artifacts.length !== expectedArtifacts.length) {
+    throw new Error(`BI direct-cache receipt artifact count mismatch for ${section}`);
+  }
+  receipt.artifacts.forEach((artifact, index) => validateDirectReceiptArtifact(artifact, expectedArtifacts[index], generatedAt));
+  return receipt;
+}
+
+function directReceiptMatchesIntegrity(receiptArtifact, integrity) {
+  if (!integrity?.ok || !receiptArtifact) return false;
+  return receiptArtifact.artifact === integrity.artifact
+    && receiptArtifact.file === integrity.file
+    && receiptArtifact.section === integrity.section
+    && receiptArtifact.generatedAt === integrity.generatedAt
+    && receiptArtifact.cachedAt === integrity.cachedAt
+    && receiptArtifact.publishedAt === integrity.publishedAt
+    && receiptArtifact.generationIdentity === integrity.generationIdentity
+    && receiptArtifact.bindingSha256 === integrity.bindingSha256
+    && receiptArtifact.raw?.file === integrity.raw?.file
+    && receiptArtifact.raw?.sha256 === integrity.raw?.sha256
+    && receiptArtifact.raw?.byteSize === integrity.raw?.byteSize
+    && receiptArtifact.gzip?.file === integrity.gzip?.file
+    && receiptArtifact.gzip?.sha256 === integrity.gzip?.sha256
+    && receiptArtifact.gzip?.byteSize === integrity.gzip?.byteSize
+    && receiptArtifact.gzip?.sourceRawSha256 === integrity.gzip?.sourceRawSha256
+    && receiptArtifact.gzip?.sourceGenerationIdentity === integrity.gzip?.sourceGenerationIdentity;
+}
+
+export async function verifyDirectCacheReceipt(root, receipt, expectedSection, expectedGeneratedAt) {
+  const parsed = parseDirectCacheReceipt(JSON.stringify(receipt), expectedSection, expectedGeneratedAt);
+  const bundle = ['profit', 'homeProfit'].includes(String(expectedSection || ''))
+    ? await readBiProfitBundleManifest(root, expectedGeneratedAt).catch(() => null)
+    : null;
+  if (['profit', 'homeProfit'].includes(String(expectedSection || '')) && !bundle) {
+    throw new Error(`BI direct-cache ${expectedSection} profit bundle manifest readback mismatch`);
+  }
+  const verified = [];
+  for (const receiptArtifact of parsed.artifacts) {
+    const integrity = await readBiSectionIntegrityMetadata(root, receiptArtifact.artifact, expectedGeneratedAt);
+    if (!directReceiptMatchesIntegrity(receiptArtifact, integrity)) {
+      throw new Error(`BI direct-cache artifact ${receiptArtifact.artifact} integrity readback mismatch`);
+    }
+    const metadata = await readBiSectionMetadata(root, receiptArtifact.artifact);
+    if (!metadata || metadata.section !== receiptArtifact.artifact
+      || metadata.generatedAt !== expectedGeneratedAt || metadata.hasData !== true) {
+      throw new Error(`BI direct-cache artifact ${receiptArtifact.artifact} metadata readback mismatch`);
+    }
+    if (bundle) {
+      const record = bundle.artifacts[receiptArtifact.artifact];
+      if (!record
+        || record.cachedAt !== receiptArtifact.cachedAt
+        || record.generationIdentity !== receiptArtifact.generationIdentity
+        || record.rawSha256 !== receiptArtifact.raw.sha256
+        || record.rawByteSize !== receiptArtifact.raw.byteSize) {
+        throw new Error(`BI direct-cache bundle artifact ${receiptArtifact.artifact} mismatch`);
+      }
+    }
+    verified.push({artifact: receiptArtifact.artifact, metadata, integrity});
+  }
+  return {receipt: parsed, verified};
+}
+
+async function generateBiSection(args, root, section, generatedAt, options = {}) {
+  const signal = options.signal || null;
+  throwIfBiSectionAborted(signal);
+  const dbApplicationName = options.dbApplicationName
+    ? validateBiDbApplicationName(options.dbApplicationName, {required: true})
+    : signal
+      ? createBiDbApplicationName(section)
+      : '';
   // inventoryTrend consumes historical sales/profit rows too. Using the
   // published cache avoids expanding mart.profit_order_item on every trend
   // request, which previously turned one portal warmup into a 10+ minute SQL.
@@ -11549,36 +14705,50 @@ async function generateBiSection(args, root, section, generatedAt) {
   const accountingFreshnessRequiredSections = new Set(['profit', 'homeRankings', 'rankings', 'productSalesDaily', 'inventoryTrend']);
   const useProfitMartCache = profitBackedSections.has(section) && process.env.SHEIN_BI_PROFIT_MART_CACHE_DISABLED !== '1';
   const sourceMode = useProfitMartCache ? 'cache' : 'view';
-  const refreshRun = sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)
-    ? await ensureProfitMartCacheFresh(args, generatedAt)
-    : null;
+  if (sourceMode === 'cache' && accountingFreshnessRequiredSections.has(section)) {
+    await ensureProfitMartCacheFresh(args, generatedAt, {signal, dbApplicationName});
+    throwIfBiSectionAborted(signal);
+  }
   if (sourceMode === 'cache' && section === 'homeProfit') {
-    const accountingState = await readProfitAccountingState(args, generatedAt);
-    let currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
+    const accountingState = await readProfitAccountingState(args, generatedAt, {forceFresh: true, signal, dbApplicationName});
+    let currentProfitCache = await readCurrentProfitSource(root, generatedAt);
+    let currentHomeProfitCache = await readBiSectionCache(root, 'homeProfit', generatedAt);
+    throwIfBiSectionAborted(signal);
     if (
-      !accountingState.decision.fresh
+      !isAccountingStateUsable(accountingState, generatedAt)
       || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, accountingState.minimumPublishedAt)
+      || !isCurrentHomeProfitSectionCache(currentHomeProfitCache, generatedAt, accountingState.minimumPublishedAt)
     ) {
-      const generated = await generateBiSection(args, root, 'profit', generatedAt);
-      if (!generated?.data?.profit) {
-        throw new Error('homeProfit requires a fresh profit section cache');
+      const generated = await generateBiSection(args, root, 'profit', generatedAt, {
+        signal,
+        dbApplicationName,
+      });
+      if (!generated?.directCache || !generated?.receipt) {
+        throw new Error('homeProfit requires a direct-cache profit publication receipt');
       }
-      currentProfitCache = await readBiSectionCache(root, 'profit', generatedAt);
-      const after = await readProfitAccountingState(args, generatedAt);
-      if (!after.decision.fresh || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
+      currentProfitCache = await readCurrentProfitSource(root, generatedAt);
+      const after = await readProfitAccountingState(args, generatedAt, {forceFresh: true, signal, dbApplicationName});
+      throwIfBiSectionAborted(signal);
+      if (!isAccountingStateUsable(after, generatedAt) || !isCurrentProfitSectionCache(currentProfitCache, generatedAt, after.minimumPublishedAt)) {
         throw new Error('homeProfit profit source remained stale after canonical refresh');
       }
+      currentHomeProfitCache = await readBiSectionCache(root, 'homeProfit', generatedAt);
+      if (!isCurrentHomeProfitSectionCache(currentHomeProfitCache, generatedAt, after.minimumPublishedAt)) {
+        throw new Error('homeProfit direct publication remained stale after canonical refresh');
+      }
     }
-    const derived = await deriveHomeProfitSectionFromProfitCache(root, generatedAt);
-    if (!derived?.data?.homeProfitSummary) {
-      throw new Error('homeProfit could not be derived from the current profit section cache');
-    }
-    return derived;
+    return currentHomeProfitCache;
   }
-  const run = await runChildProcess(process.execPath, [
+  const coreMeta = await readBiPortalCoreMeta(root);
+  throwIfBiSectionAborted(signal);
+  if (!generatedAt || String(coreMeta.generatedAt || '') !== String(generatedAt || '')) {
+    throw new Error(`BI section ${section} generation requires exact core generatedAt: expected=${generatedAt || ''} actual=${coreMeta.generatedAt || ''}`);
+  }
+  const run = await runBiDbChildProcess(args, process.execPath, [
     path.join(ROOT, 'scripts', 'generate_bi_portal.mjs'),
     '--section', section,
-    '--json-only',
+    '--direct-cache-publish',
+    '--generated-at', generatedAt,
     '--out-dir', root,
     '--distro', args.distro,
     '--container', args.container,
@@ -11587,49 +14757,39 @@ async function generateBiSection(args, root, section, generatedAt) {
   ], {
     cwd: ROOT,
     timeoutMs: BI_PORTAL_SECTION_TIMEOUT_MS,
+    signal,
+    processGroup: true,
+    dbApplicationName,
+    maxStdoutBytes: BI_DIRECT_STDOUT_MAX_BYTES,
+    maxStderrBytes: BI_DIRECT_STDERR_MAX_BYTES,
+    failOnOutputOverflow: true,
     env: {
       SHEIN_BI_PORTAL_TIMEOUT_MS: String(Math.max(BI_PORTAL_SECTION_TIMEOUT_MS + 60_000, Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 0) || 0)),
       SHEIN_BI_PROFIT_MART_SOURCE: sourceMode,
+      SHEIN_BI_DB_APPLICATION_NAME: dbApplicationName,
     },
   });
+  throwIfBiSectionAborted(signal);
   if (!run.ok) {
     const tail = String(run.stderr || run.stdout || '').slice(-2000);
-    throw new Error(`BI section ${section} generation failed: code=${run.code} timedOut=${run.timedOut} ${tail}`);
+    throw new Error(`BI section ${section} generation failed: code=${run.code} timedOut=${run.timedOut} outputOverflow=${Boolean(run.outputOverflow)} ${tail}`);
   }
-  let data;
-  try {
-    data = JSON.parse(run.stdout || '{}');
-  } catch (err) {
-    throw new Error(`BI section ${section} returned invalid JSON: ${err?.message || err}`);
+  throwIfBiSectionAborted(signal);
+  const postGenerationCoreMeta = await readBiPortalCoreMeta(root);
+  throwIfBiSectionAborted(signal);
+  if (String(postGenerationCoreMeta.generatedAt || '') !== String(generatedAt || '')) {
+    throw new Error(`BI section ${section} core generatedAt changed during child publication: expected=${generatedAt || ''} actual=${postGenerationCoreMeta.generatedAt || ''}`);
   }
-  if (section === 'homeRankings') {
-    data = compactHomeRankingsSectionData(data);
-  }
-  return writeBiSectionCache(root, section, generatedAt, data, refreshRun ? {
-    ...run,
-    stderr: `${run.stderr || ''}\n${refreshRun.stdout || ''}\n${refreshRun.stderr || ''}`,
-  } : run);
-}
-
-function compactHomeRankingsSectionData(data) {
-  if (!data?.rankings || typeof data.rankings !== 'object') return data;
-  const compact = {...data, rankings: {...data.rankings}};
-  for (const key of ['dailyProducts', 'dailyStoreProducts']) {
-    const rows = Array.isArray(compact.rankings[key]) ? compact.rankings[key] : null;
-    if (!rows) continue;
-    compact.rankings[key] = rows.map(row => {
-      if (!row || typeof row !== 'object') return row;
-      const {
-        goods_title: _goodsTitle,
-        skc_list: _skcList,
-        product_display_name: _productDisplayName,
-        product_display_name_source: _productDisplayNameSource,
-        ...rest
-      } = row;
-      return rest;
-    });
-  }
-  return compact;
+  const receipt = parseDirectCacheReceipt(run.stdout, section, generatedAt);
+  await verifyDirectCacheReceipt(root, receipt, section, generatedAt);
+  throwIfBiSectionAborted(signal);
+  return {
+    ok: true,
+    directCache: true,
+    section,
+    generatedAt,
+    receipt,
+  };
 }
 
 async function loadBiSection(args, root, section, options = {}) {
@@ -11640,9 +14800,29 @@ async function loadBiSection(args, root, section, options = {}) {
       ...biSectionRefreshFailureFields(root, section),
     },
   };
+  const signal = options.signal || null;
+  throwIfBiSectionAborted(signal);
   const force = !!options.force;
   const allowGenerate = options.allowGenerate !== false;
   const allowStale = options.allowStale !== false;
+  if (force && sectionRequiresHostLockedWorker(section, options) && !String(options.refreshToken || '').trim()) {
+    // A force refresh of a host-locked section always flows through the
+    // managed queue at some point. Without an explicit refresh token it would
+    // collapse to one stable per-generation key whose 30-day completed
+    // tombstone silently swallows later business reruns of the same core
+    // generation. Reject explicitly instead of minting an untokened request:
+    // callers must pass a deterministic run/attempt token (same run reuses it,
+    // a different run forms a new request).
+    return {
+      status: 400,
+      payload: {
+        ok: false,
+        section,
+        code: 'BI_SECTION_FORCE_REFRESH_TOKEN_REQUIRED',
+        error: 'host-locked section force refresh requires a stable refreshToken (same run reuses it; a different run uses a new token)',
+      },
+    };
+  }
   if (section === 'productProfit') {
     // Request-state productProfit is deliberately outside BI_PORTAL_SECTION_KEYS:
     // it must never be prewarmed, never enter the external section queue, and
@@ -11654,20 +14834,37 @@ async function loadBiSection(args, root, section, options = {}) {
     return {status: 404, payload: {ok: false, error: 'Unknown BI section', section}};
   }
   const meta = await readBiPortalCoreMeta(root);
+  const expectedGeneratedAt = String(options.expectedGeneratedAt || '').trim();
+  if (expectedGeneratedAt && String(meta.generatedAt || '') !== expectedGeneratedAt) {
+    return {
+      status: 409,
+      payload: {
+        ok: false,
+        section,
+        code: 'BI_SECTION_CORE_GENERATION_MISMATCH',
+        expectedGeneratedAt,
+        generatedAt: String(meta.generatedAt || ''),
+        error: 'section refresh claim generation is no longer current',
+      },
+    };
+  }
   if (meta.mode !== 'api' && !force) {
     return {status: 400, payload: {ok: false, error: 'BI portal is not in api data mode', section, mode: meta.mode}};
   }
   if (section === 'homeProfit' && !String(meta.generatedAt || '')) {
     return {status: 503, payload: {ok: false, section, error: 'homeProfit requires a non-empty core generation'}};
   }
+  const homepageAccountingQueueEnabled = options.externalSectionQueueEnabled ?? BI_EXTERNAL_SECTION_QUEUE_ENABLED;
   if (
-    BI_EXTERNAL_SECTION_QUEUE_ENABLED
+    homepageAccountingQueueEnabled
     && options.hostLockedWorker !== true
     && ['homeRankings', 'homeProfit'].includes(section)
   ) {
     let accountingState;
     try {
-      accountingState = await readProfitAccountingState(args, meta.generatedAt);
+      accountingState = typeof options.readAccountingState === 'function'
+        ? await options.readAccountingState(meta.generatedAt)
+        : await readProfitAccountingState(args, meta.generatedAt);
     } catch (error) {
       recordBiSectionRefreshFailure(root, section, error);
       return {
@@ -11683,68 +14880,52 @@ async function loadBiSection(args, root, section, options = {}) {
         },
       };
     }
-    const existing = await readBiSectionCache(root, section, meta.generatedAt).catch(() => null);
-    const sourcePublishedAt = section === 'homeProfit'
-      ? String(existing?.data?.homeProfitSummary?.sourceCachedAt || '')
-      : String(existing?.cachedAt || '');
-    const minimum = Date.parse(accountingState.minimumPublishedAt);
-    const source = Date.parse(sourcePublishedAt);
-    const sourceCurrent = accountingState.decision.fresh
-      && !Number.isNaN(minimum)
-      && !Number.isNaN(source)
+    const fallbackCache = await readVerifiedHomepageAccountingFallback(root, section);
+    const sourcePublishedAt = String(fallbackCache?.sourceCachedAt || '');
+    const minimum = homepageTimestampNs(accountingState?.minimumPublishedAt);
+    const source = homepageTimestampNs(sourcePublishedAt);
+    const sourceCurrent = String(fallbackCache?.sourceGeneratedAt || '') === String(meta.generatedAt || '')
+      && isAccountingStateUsable(accountingState, meta.generatedAt)
+      && minimum !== null
+      && source !== null
       && source >= minimum;
-    if (!sourceCurrent) {
-      try {
-        await persistHomepageAccountingCatchupOnce(accountingState, meta.generatedAt);
-      } catch (error) {
-        recordBiSectionRefreshFailure(root, section, error);
-        return {
-          status: 503,
-          payload: {
-            ok: false,
-            section,
-            generatedAt: meta.generatedAt,
-            pendingSection: true,
-            cacheHit: false,
-            refreshScheduled: false,
-            error: 'homepage accounting is stale and durable refresh enqueue failed',
-          },
-        };
+    if (!sourceCurrent && !force) {
+      const refreshScheduled = queueHasCurrentPendingBiSection(section, meta.generatedAt);
+      if (fallbackCache) {
+        const rawFallback = await readBiSectionCacheRaw(
+          root,
+          section,
+          fallbackCache.sourceGeneratedAt,
+          true,
+          {gzip: options.gzip},
+        );
+        if (rawFallback) {
+          return {
+            status: 200,
+            rawBody: rawFallback.stream,
+            headers: {
+              ...rawFallback.headers,
+              ...homepageAccountingDegradedHeaders(fallbackCache, meta.generatedAt, accountingState, refreshScheduled),
+            },
+          };
+        }
       }
-      if (!force && usableHomepageAccountingFallback(section, existing, meta.generatedAt)) {
-        options = {
-          ...options,
-          extraFields: {
-            ...(options.extraFields || {}),
-            refreshScheduled: true,
-            refreshRetryPending: true,
-            queuedForHostLockedWorker: true,
-            accountingPending: true,
-            accountingTargetAt: String(
-              accountingState?.freshness?.accountingInputUpdatedAt
-              || accountingState?.freshness?.orderFactUpdatedAt
-              || accountingState?.freshness?.factUpdatedAt
-              || '',
-            ),
-            accountingPublishedAt: String(accountingState.minimumPublishedAt || ''),
-          },
-        };
-      } else {
-        return {
-          status: force ? 503 : 202,
-          payload: {
-            ok: !force,
-            section,
-            generatedAt: meta.generatedAt,
-            pendingSection: true,
-            cacheHit: false,
-            refreshScheduled: true,
-            queuedForHostLockedWorker: true,
-            accountingPending: true,
-            error: 'homepage accounting is catching up to newer order facts',
-          },
-        };
-      }
+      return {
+        status: refreshScheduled ? 202 : 503,
+        payload: {
+          ok: refreshScheduled,
+          section,
+          generatedAt: meta.generatedAt,
+          pendingSection: true,
+          cacheHit: false,
+          refreshScheduled,
+          queuedForHostLockedWorker: refreshScheduled,
+          accountingPending: accountingState?.decision?.fresh !== true,
+          error: refreshScheduled
+            ? 'homepage accounting is catching up to newer order facts'
+            : 'homepage accounting refresh has no exact-generation durable queue entry',
+        },
+      };
     }
   }
   if (!force && allowGenerate) {
@@ -11794,7 +14975,7 @@ async function loadBiSection(args, root, section, options = {}) {
       // summary is never valid data. Derive inline from the current-generation
       // profit cache when present; otherwise enqueue profit at dependency
       // priority and fail with 503 (this branch is force-only).
-      const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt).catch(() => null);
+      const currentProfitCache = await readCurrentProfitSource(root, meta.generatedAt);
       if (!isCurrentProfitSectionCache(currentProfitCache, meta.generatedAt)) {
         const refreshScheduled = scheduleBiSectionBackgroundGeneration(args, root, 'profit', meta.generatedAt, {
           priority: '5',
@@ -11815,13 +14996,14 @@ async function loadBiSection(args, root, section, options = {}) {
         };
       }
       const deriveKey = `${root}|${section}|${meta.generatedAt || ''}|derive`;
-      if (!biSectionInFlight.has(deriveKey)) {
-        biSectionInFlight.set(deriveKey, deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt).finally(() => {
-          biSectionInFlight.delete(deriveKey);
-        }));
-      }
+      getOrCreateBiSectionInFlight(
+        deriveKey,
+        ownerSignal => deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt, ownerSignal),
+        {signal},
+      );
       try {
         const derived = await biSectionInFlight.get(deriveKey);
+        throwIfBiSectionAborted(signal);
         clearBiSectionRefreshFailure(root, section);
         if (derived) {
           const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, {
@@ -11831,10 +15013,11 @@ async function loadBiSection(args, root, section, options = {}) {
               coreGeneratedAt: meta.generatedAt,
             },
           });
-          if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+          if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
           return {status: 200, payload: {...derived, cacheHit: false, coreGeneratedAt: meta.generatedAt}};
         }
       } catch (error) {
+        if (signal?.aborted) throw error;
         recordBiSectionRefreshFailure(root, section, error);
         return {
           status: 503,
@@ -11860,11 +15043,11 @@ async function loadBiSection(args, root, section, options = {}) {
       },
     });
     if (currentRaw) {
-      return {status: 202, rawBody: currentRaw.body, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)}};
+      return {status: 202, rawBody: currentRaw.stream, headers: {...currentRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)}};
     }
     const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, {...options, refreshScheduled});
     if (staleRaw) {
-      return {status: 202, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)})};
+      return {status: 202, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, {...staleRaw.headers, 'X-BI-Section-Refresh-Scheduled': String(refreshScheduled)})};
     }
     const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
     if (stale) {
@@ -11897,13 +15080,13 @@ async function loadBiSection(args, root, section, options = {}) {
     );
     if (sourceFresh) {
       const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
-      if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
+      if (rawCached) return {status: 200, rawBody: rawCached.stream, headers: rawCached.headers};
       return {status: 200, payload: {...cached, cacheHit: true}};
     }
     // A stale-source homeProfit cache is never a valid 200: only the current
     // core generation's profit cache may back homeProfit. Without it, enqueue
     // profit at dependency priority (merged by key) and fail closed.
-    const currentProfitCache = await readBiSectionCache(root, 'profit', meta.generatedAt).catch(() => null);
+    const currentProfitCache = await readCurrentProfitSource(root, meta.generatedAt);
     if (!isCurrentProfitSectionCache(currentProfitCache, meta.generatedAt)) {
       if (!allowGenerate) {
         return {
@@ -11963,22 +15146,26 @@ async function loadBiSection(args, root, section, options = {}) {
       };
     }
     const key = `${root}|${section}|${meta.generatedAt || ''}|derive`;
-    if (!biSectionInFlight.has(key)) {
-      biSectionInFlight.set(key, deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt).finally(() => {
-        biSectionInFlight.delete(key);
-      }));
-    }
+    getOrCreateBiSectionInFlight(
+      key,
+      ownerSignal => deriveHomeProfitSectionFromProfitCache(root, meta.generatedAt, ownerSignal),
+      {signal},
+    );
     let payload;
     try {
       payload = await biSectionInFlight.get(key);
+      throwIfBiSectionAborted(signal);
       clearBiSectionRefreshFailure(root, section);
     } catch (error) {
+      if (signal?.aborted) throw error;
       recordBiSectionRefreshFailure(root, section, error);
       throw error;
     }
     if (payload) {
+      throwIfBiSectionAborted(signal);
       const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
-      if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+      throwIfBiSectionAborted(signal);
+      if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
       return {status: 200, payload: {...payload, cacheHit: false}};
     }
     return {
@@ -11993,14 +15180,14 @@ async function loadBiSection(args, root, section, options = {}) {
   }
   if (!force) {
     const rawCached = await readBiSectionCacheRaw(root, section, meta.generatedAt, true, options);
-    if (rawCached) return {status: 200, rawBody: rawCached.body, headers: rawCached.headers};
+    if (rawCached) return {status: 200, rawBody: rawCached.stream, headers: rawCached.headers};
     const cached = await readBiSectionCache(root, section, meta.generatedAt);
     if (cached) return {status: 200, payload: {...cached, cacheHit: true}};
   }
   if (!allowGenerate) {
     if (!force && allowStale) {
       const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
-      if (staleRaw) return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
+      if (staleRaw) return {status: 200, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
       const stale = await readBiSectionCacheAnyGeneratedAt(root, section);
       if (stale) {
         return {status: 200, payload: {...stale, cacheHit: true, staleSection: true, cacheStale: true, coreGeneratedAt: meta.generatedAt}};
@@ -12029,12 +15216,17 @@ async function loadBiSection(args, root, section, options = {}) {
       refreshScheduled,
     });
     if (staleRaw) {
-      return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
+      return {status: 200, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
     }
   }
   if (sectionRequiresHostLockedWorker(section, options)) {
     const refreshScheduled = enqueueHostLockedBiSection(section, meta.generatedAt, {
-      reason: `portal-empty-cache-${meta.generatedAt || 'current'}`,
+      reason: force && options.refreshToken
+        ? `portal-force-sync-${meta.generatedAt || 'current'}`
+        : `portal-empty-cache-${meta.generatedAt || 'current'}`,
+      force: force === true,
+      refreshToken: options.refreshToken,
+      priority: force === true ? '0' : undefined,
     });
     return {
       status: 202,
@@ -12050,26 +15242,32 @@ async function loadBiSection(args, root, section, options = {}) {
     };
   }
   if (!biSectionInFlight.has(key)) {
-    biSectionInFlight.set(key, generateBiSection(args, root, section, meta.generatedAt).finally(() => {
-      biSectionInFlight.delete(key);
-    }));
+    getOrCreateBiSectionInFlight(
+      key,
+      ownerSignal => generateBiSection(args, root, section, meta.generatedAt, {signal: ownerSignal}),
+      {signal},
+    );
   }
   let payload;
   try {
     payload = await biSectionInFlight.get(key);
+    throwIfBiSectionAborted(signal);
     clearBiSectionRefreshFailure(root, section);
   } catch (error) {
+    if (signal?.aborted) throw error;
     recordBiSectionRefreshFailure(root, section, error);
     if (allowStale) {
       const staleRaw = await readBiSectionStaleRaw(root, section, meta.generatedAt, options);
       if (staleRaw) {
-        return {status: 200, rawBody: staleRaw.body, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
+        return {status: 200, rawBody: staleRaw.stream, headers: withBiSectionRefreshFailureHeaders(root, section, staleRaw.headers)};
       }
     }
     throw error;
   }
+  throwIfBiSectionAborted(signal);
   const rawGenerated = await readBiSectionCacheRaw(root, section, meta.generatedAt, false, options);
-  if (rawGenerated) return {status: 200, rawBody: rawGenerated.body, headers: rawGenerated.headers};
+  throwIfBiSectionAborted(signal);
+  if (rawGenerated) return {status: 200, rawBody: rawGenerated.stream, headers: rawGenerated.headers};
   return {status: 200, payload: {...payload, cacheHit: false}};
 }
 
@@ -12139,6 +15337,13 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
   else if (/order|sales?/.test(kindText)) kind = 'order';
   else if (/authorization|quota|compliance|inventory|out.?of.?stock|invoice|logistics|purchase|delivery/.test(kindText)) kind = 'platform';
   if (!kind) return null;
+  const rawBusinessDate = String(record.businessDate || record.business_date || '').trim();
+  const businessDateMs = Date.parse(`${rawBusinessDate}T00:00:00.000Z`);
+  const businessDate = /^\d{4}-\d{2}-\d{2}$/u.test(rawBusinessDate)
+    && Number.isFinite(businessDateMs)
+    && new Date(businessDateMs).toISOString().slice(0, 10) === rawBusinessDate
+    ? rawBusinessDate
+    : '';
   return {
     kind,
     receiptId: boundedLiveText(record.receiptId || record.receipt_id || '', 32),
@@ -12149,7 +15354,7 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
       || record.businessKey || record.business_key || record.id || '',
       160
     ),
-    businessDate: boundedLiveText(record.businessDate || record.business_date || '', 10),
+    businessDate,
     orderStatus: boundedLiveText(record.orderStatus || record.order_status || '', 40),
     orderStatusDesc: boundedLiveText(record.orderStatusDesc || record.order_status_desc || '', 120),
     cancelledBeforePickup: record.cancelledBeforePickup === true
@@ -12158,6 +15363,7 @@ export function normalizeBiLiveUpdatePayload(payload, now = new Date()) {
     salesSar: Number.isFinite(Number(record.salesSar)) ? Number(record.salesSar) : 0,
     occurredAt: boundedLiveText(record.occurredAt || record.updatedAt || record.updated_at || record.processedAt || record.createdAt || '', 64)
       || now.toISOString(),
+    receivedAt: now.toISOString(),
   };
 }
 
@@ -12186,9 +15392,7 @@ export function liveSectionsForBiUpdate(kind, event = {}) {
     if (kind === 'inventory') return ['inventoryStock'];
     return [];
   }
-  const businessDate = String(event.businessDate || '').slice(0, 10);
-  const currentDate = shanghaiDateKey(event.occurredAt || new Date());
-  const historicalOrder = hasOrder && businessDate && currentDate && businessDate !== currentDate;
+  const historicalOrder = hasOrder && !isOrdinaryCurrentDayAccountingEvent({...event, kind});
   // liveSalesToday already carries current-day order rows and enough fields to
   // overlay the order list, rankings, and price scatter in the browser. Do not
   // regenerate the large orders/priceScatter sections for every tab or every
@@ -12214,25 +15418,115 @@ export function liveAccountingQueuePlan(event = {}) {
   const hasReturn = accountingKinds.has('return');
   if (!hasOrder && !hasReturn) return [];
 
-  // Current-day orders are immediately visible through liveSalesToday, but
-  // they must still advance the canonical profit cache before the date rolls
-  // over and that live overlay moves to the next day. Keep the accounting
-  // dependency lane ahead of ordinary section work so one safe worker slot can
-  // publish profit first and the historical homepage baseline second.
-  const canonical = [
+  // Current-day orders are immediately visible through liveSalesToday, whose
+  // browser overlay replaces today's order, ranking, scatter, and profit rows.
+  // Do not enqueue durable multi-minute accounting for every order: the
+  // stale-homepage discriminator schedules one bounded profit/homeProfit
+  // catch-up when the canonical baseline actually falls behind. Historical
+  // mutations and returns retain the full invalidation set below.
+  if (isOrdinaryCurrentDayAccountingEvent(event)) return [];
+  return [
     {section: 'profit', priority: 5},
     {section: 'homeRankings', priority: 5},
     {section: 'homeProfit', priority: 5},
-  ];
-  if (!hasReturn && event?.refreshHistoricalSections !== true) return canonical;
-  return [
-    ...canonical,
     {section: 'orders', priority: 10},
     {section: 'afterSales', priority: 10},
     {section: 'productSalesDaily', priority: 50},
     {section: 'inventoryTrend', priority: 50},
     {section: 'rankings', priority: 50},
   ];
+}
+
+export function normalizeBiLiveAccountingGeneration(meta) {
+  const generatedAt = String(meta?.generatedAt || '').trim();
+  if (meta?.mode !== 'api' || homepageTimestampNs(generatedAt) === null) return '';
+  return generatedAt;
+}
+
+function biLiveAccountingGuardError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+export async function executeBiLiveAccountingRefreshAttempt({
+  sourceEvent,
+  allowGenerateSections,
+  readCoreMeta,
+  generateLiveProjection,
+  clearLiveProjectionFailure,
+  persistAccountingPlan,
+  publish,
+  now = () => new Date(),
+} = {}) {
+  if (!allowGenerateSections) {
+    throw biLiveAccountingGuardError(
+      'BI_LIVE_ACCOUNTING_GENERATION_DISABLED',
+      'live accounting generation is disabled for this Portal surface',
+    );
+  }
+  const meta = await readCoreMeta();
+  const generatedAt = normalizeBiLiveAccountingGeneration(meta);
+  if (!generatedAt) {
+    throw biLiveAccountingGuardError(
+      'BI_LIVE_ACCOUNTING_GENERATION_MISSING',
+      'live accounting requires a valid API core generation',
+    );
+  }
+  await generateLiveProjection(generatedAt);
+  clearLiveProjectionFailure?.();
+  publish?.({
+    ...sourceEvent,
+    occurredAt: now().toISOString(),
+    liveProjectionRefreshed: true,
+  });
+  const accountingQueue = liveAccountingQueuePlan(sourceEvent);
+  if (!accountingQueue.length) {
+    return {ok: true, generatedAt, liveProjectionRefreshed: true, accountingQueued: false};
+  }
+  try {
+    await persistAccountingPlan(accountingQueue, generatedAt, {
+      reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
+      idempotencyKey: biPortalLiveAccountingIdempotencyKey(generatedAt, sourceEvent),
+      coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
+    });
+  } catch (error) {
+    if (error && typeof error === 'object') error.liveProjectionRefreshed = true;
+    throw error;
+  }
+  publish?.({
+    ...sourceEvent,
+    occurredAt: now().toISOString(),
+    liveProjectionRefreshed: true,
+    accountingQueued: true,
+  });
+  return {ok: true, generatedAt, liveProjectionRefreshed: true, accountingQueued: true};
+}
+
+export async function executeBiCanonicalAccountingCatchupAttempt({
+  allowGenerateSections = false,
+  readCoreMeta,
+  readAccountingState,
+  persistCatchup,
+  shouldContinue = () => true,
+} = {}) {
+  if (!allowGenerateSections) return {ok: true, fresh: false, queued: false, skipped: 'generation-disabled'};
+  const meta = await readCoreMeta();
+  if (!shouldContinue()) return {ok: true, fresh: false, queued: false, skipped: 'stopped'};
+  const generatedAt = normalizeBiLiveAccountingGeneration(meta);
+  if (!generatedAt) {
+    throw biLiveAccountingGuardError(
+      'BI_LIVE_ACCOUNTING_GENERATION_MISSING',
+      'canonical accounting catch-up requires a valid API core generation',
+    );
+  }
+  const accountingState = await readAccountingState(generatedAt);
+  if (!shouldContinue()) return {ok: true, generatedAt, fresh: false, queued: false, skipped: 'stopped'};
+  if (accountingState?.decision?.fresh === true) {
+    return {ok: true, generatedAt, fresh: true, queued: false};
+  }
+  const queued = await persistCatchup(accountingState, generatedAt);
+  return {ok: true, generatedAt, fresh: false, queued: Boolean(queued)};
 }
 
 function livePgClientConfig(env = process.env) {
@@ -12289,6 +15583,31 @@ export function createBiLiveUpdateBridge(options = {}) {
     try { await target?.end?.(); } catch {}
     if (!stopped) scheduleReconnect();
   };
+  const removeSseClient = (response, {terminate = false} = {}) => {
+    if (!response) return false;
+    const removed = clients.delete(response);
+    if (terminate && removed) {
+      try { response.end?.(); } catch {}
+      if (!response.writableEnded && !response.destroyed) {
+        try { response.destroy?.(); } catch {}
+      }
+    }
+    return removed;
+  };
+  const writeSse = (response, payload) => {
+    if (!clients.has(response)) return false;
+    try {
+      const accepted = response.write(payload);
+      if (accepted === false) {
+        removeSseClient(response, {terminate: true});
+        return false;
+      }
+      return true;
+    } catch {
+      removeSseClient(response, {terminate: true});
+      return false;
+    }
+  };
   const publish = event => {
     if (!event) return;
     const wire = JSON.stringify({
@@ -12297,11 +15616,7 @@ export function createBiLiveUpdateBridge(options = {}) {
       receivedAt: now().toISOString(),
     });
     for (const response of [...clients]) {
-      try {
-        response.write(`event: live-update\ndata: ${wire}\n\n`);
-      } catch {
-        clients.delete(response);
-      }
+      writeSse(response, `event: live-update\ndata: ${wire}\n\n`);
     }
   };
   const handleNotification = notification => {
@@ -12360,14 +15675,17 @@ export function createBiLiveUpdateBridge(options = {}) {
   };
   const addSseClient = response => {
     clients.add(response);
-    response.write(`retry: ${Math.max(1_000, reconnectMs)}\nevent: ready\ndata: ${JSON.stringify({ok: true, live: status()})}\n\n`);
-    return () => clients.delete(response);
+    const remove = () => removeSseClient(response);
+    response.once?.('error', remove);
+    response.once?.('close', remove);
+    writeSse(response, `retry: ${Math.max(1_000, reconnectMs)}\nevent: ready\ndata: ${JSON.stringify({ok: true, live: status()})}\n\n`);
+    return remove;
   };
   const start = async () => {
     if (heartbeatMs > 0 && !heartbeatTimer) {
       heartbeatTimer = setInterval(() => {
         for (const response of [...clients]) {
-          try { response.write(`: keepalive ${now().toISOString()}\n\n`); } catch { clients.delete(response); }
+          writeSse(response, `: keepalive ${now().toISOString()}\n\n`);
         }
       }, heartbeatMs);
       heartbeatTimer.unref?.();
@@ -12375,21 +15693,21 @@ export function createBiLiveUpdateBridge(options = {}) {
     await connect();
     return status();
   };
+  const closeSseClients = () => {
+    for (const response of [...clients]) removeSseClient(response, {terminate: true});
+  };
   const stop = async () => {
     stopped = true;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = null;
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = null;
-    for (const response of clients) {
-      try { response.end(); } catch {}
-    }
-    clients.clear();
+    closeSseClients();
     const current = client;
     client = null;
     await Promise.allSettled([connecting, current?.end?.()]);
   };
-  return {start, stop, addSseClient, publish, status};
+  return {start, stop, closeSseClients, addSseClient, publish, status};
 }
 
 async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
@@ -12419,10 +15737,6 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       runningGeneratedAt: biPortalCoreWarmupState.generatedAt,
     };
   }
-  if (biPortalCoreWarmupState.generatedAt === generatedAt && biPortalCoreWarmupState.status === 'done') {
-    return {scheduled: false, reason: 'already-warm', generatedAt};
-  }
-
   const sections = configuredBiPortalCoreWarmupSections();
   if (!sections.length) return {scheduled: false, reason: 'no-sections', generatedAt};
 
@@ -12440,145 +15754,138 @@ async function scheduleBiPortalCoreWarmup(args, root, options = {}) {
       logBiPortalCoreWarmup('queue-owned-contradiction', {error: message});
       return {scheduled: false, reason: 'queue-owned-without-external-queue', error: message};
     }
-    if (biPortalCoreWarmupState.status === 'queued' && biPortalCoreWarmupState.generatedAt === generatedAt) {
-      return {scheduled: false, reason: 'already-queued', generatedAt};
+    const attemptNow = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+    if (biPortalCoreWarmupState.failureGeneratedAt
+      && biPortalCoreWarmupState.failureGeneratedAt !== generatedAt) {
+      resetBiPortalCoreWarmupEnqueueBackoff();
+      if (biPortalCoreWarmupState.status === 'error') {
+        biPortalCoreWarmupState.status = 'idle';
+        biPortalCoreWarmupState.lastError = '';
+      }
     }
-    if (biPortalCoreWarmupState.status === 'done' && biPortalCoreWarmupState.generatedAt === generatedAt) {
-      return {scheduled: false, reason: 'already-completed', generatedAt};
+    if (biPortalCoreWarmupState.failureGeneratedAt === generatedAt
+      && biPortalCoreWarmupState.nextAttemptAt > attemptNow) {
+      return {
+        scheduled: false,
+        reason: 'enqueue-backoff',
+        generatedAt,
+        consecutiveFailures: biPortalCoreWarmupState.consecutiveFailures,
+        nextAttemptAt: new Date(biPortalCoreWarmupState.nextAttemptAt).toISOString(),
+      };
     }
+    const queueOwnedRun = {owner: 'external-section-queue', generatedAt};
+    biPortalCoreWarmupState.inFlight = queueOwnedRun;
     try {
-      const plan = sections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY}));
-      // Durable per-generation idempotency key for the whole warmup set: after
-      // a Portal restart the same core generation deduplicates in the managed
-      // queue instead of enqueueing a fresh revision.  A new generatedAt
-      // produces a new key and a normal new revision.
-      const warmupIdempotencyKey = biPortalCoreWarmupIdempotencyKey(generatedAt);
-      // Serialize concurrent watcher/index triggers: only one enqueue per
-      // generation may be in flight (the shared inFlight slot also makes the
-      // earlier already-running guard apply to queue-owned scheduling).
-      const enqueueRun = persistHostLockedBiSectionPlan(plan, generatedAt, {
-        reason: biPortalCoreWarmupReason(generatedAt),
-        idempotencyKey: warmupIdempotencyKey,
-      }).finally(() => {
-        if (biPortalCoreWarmupState.inFlight === enqueueRun) biPortalCoreWarmupState.inFlight = null;
-      });
-      biPortalCoreWarmupState.inFlight = enqueueRun;
-      const enqueued = await enqueueRun;
-      const requestedCount = sections.length;
-      const completedCount = (enqueued.deduplicatedCompleted || []).length;
-      const activeCount = (enqueued.newlyQueued || []).length
-        + (enqueued.updatedRevision || []).length
-        + (enqueued.deduplicatedPending || []).length
-        + (enqueued.coalescedRerun || []).length;
-      // Truthful terminal state: when EVERY requested section was already
-      // completed (tombstones, queue entries 0) the generation is done, never
-      // queued.  Any active/queued section keeps the state queued.
-      const allCompleted = completedCount === requestedCount && activeCount === 0;
-      biPortalCoreWarmupState.owner = 'external-section-queue';
-      biPortalCoreWarmupState.generatedAt = generatedAt;
-      biPortalCoreWarmupState.startedAt = Date.now();
-      biPortalCoreWarmupState.lastError = '';
-      if (allCompleted) {
-        // Tombstones are historical receipts only: before claiming done,
-        // verify EVERY configured section against the authoritative terminal
-        // artifact validator for the exact current core generation.  Only all
-        // exit 0 => done; missing/corrupt/stale/validator-error => requeue.
-        const terminal = await verifyWarmupSectionsTerminal(root, sections, generatedAt);
-        // Cross-generation guard: the core can flip between this watch tick
-        // and the last of the 7 validators.  Re-read the authoritative core
-        // BEFORE either claiming done or mutating tombstones.  A changed
-        // generation is a truthful stale/superseded state with zero queue or
-        // tombstone mutation; the next tick processes the new generation.
-        const stillCurrent = await warmupCoreStillCurrent(root, generatedAt);
-        if (!stillCurrent.current) {
-          biPortalCoreWarmupState.status = 'stale';
-          biPortalCoreWarmupState.generatedAt = stillCurrent.latest || generatedAt;
-          biPortalCoreWarmupState.finishedAt = 0;
-          biPortalCoreWarmupState.lastError = `core generation changed during terminal verification: ${generatedAt} -> ${stillCurrent.latest || '(unreadable)'}`;
-          logBiPortalCoreWarmup('core-generation-changed', {
-            generatedAt,
-            latestGeneratedAt: stillCurrent.latest || '',
-            terminal: terminal.ok ? 'all-pass' : `invalid=${terminal.invalid.join(',')}`,
-          });
-          return {
-            scheduled: false,
-            reason: 'core-generation-changed',
-            generatedAt: stillCurrent.latest || generatedAt,
-            previousGeneratedAt: generatedAt,
-          };
-        }
-        if (terminal.ok) {
-          biPortalCoreWarmupState.status = 'done';
-          biPortalCoreWarmupState.finishedAt = Date.now();
-          logBiPortalCoreWarmup('already-completed', {generatedAt});
-          return {scheduled: false, reason: 'already-completed', generatedAt, sections, queued: false};
-        }
-        // Atomic requeue of exactly the invalid sections: the matching
-        // tombstones are removed under the queue lock and their entries are
-        // recreated; valid tombstones stay.  Failures stay visible and the
-        // next tick retries.
-        const requeued = await persistHostLockedBiSectionPlan(
-          sections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY})),
-          generatedAt,
-          {
-            reason: biPortalCoreWarmupReason(generatedAt),
-            idempotencyKey: warmupIdempotencyKey,
-            requeueCompletedSections: terminal.invalid,
-          },
-        );
-        // A requeue can be superseded by a newer-generation entry that already
-        // owns one or more section slots in the queue: this generation must
-        // never claim queued/done.  Re-read live state and defer to the newer
-        // generation; the next tick handles it.
-        const superseded = requeued.supersededByExisting || [];
-        if (superseded.length) {
-          const latestNow = await warmupCoreStillCurrent(root, generatedAt);
-          biPortalCoreWarmupState.status = 'stale';
-          biPortalCoreWarmupState.generatedAt = latestNow.latest || generatedAt;
-          biPortalCoreWarmupState.finishedAt = 0;
-          biPortalCoreWarmupState.lastError = `warmup requeue superseded by existing newer-generation entry: sections=${superseded.join(',')}`;
-          logBiPortalCoreWarmup('superseded', {generatedAt, sections: superseded.join(',')});
-          return {
-            scheduled: false,
-            reason: 'core-generation-superseded',
-            generatedAt: latestNow.latest || generatedAt,
-            previousGeneratedAt: generatedAt,
-            supersededSections: superseded,
-          };
-        }
-        biPortalCoreWarmupState.status = 'queued';
+      // A watcher tick must reconcile durable queue state after Portal
+      // restart and after the worker completes.  In particular, do not let an
+      // in-memory queued/done shortcut hide a newer request revision or a
+      // missing/mismatched terminal artifact.
+      const reconciliation = await reconcileBiPortalCoreWarmupQueueOwned(root, sections, generatedAt);
+      if (reconciliation.status === 'done') {
+        const finishedAt = Date.parse(String(reconciliation.generationCompletion?.completedAt || '')) || Date.now();
+        biPortalCoreWarmupState.owner = 'external-section-queue';
+        biPortalCoreWarmupState.generatedAt = generatedAt;
+        biPortalCoreWarmupState.status = 'done';
+        biPortalCoreWarmupState.startedAt = biPortalCoreWarmupState.startedAt || finishedAt;
+        biPortalCoreWarmupState.finishedAt = finishedAt;
+        biPortalCoreWarmupState.lastError = '';
+        resetBiPortalCoreWarmupEnqueueBackoff();
+        logBiPortalCoreWarmup('reconciled-done', {generatedAt, sections: sections.join(',')});
+        return {scheduled: false, reason: 'already-completed', generatedAt, sections, queued: false};
+      }
+      if (reconciliation.status === 'stale') {
+        biPortalCoreWarmupState.owner = 'external-section-queue';
+        biPortalCoreWarmupState.status = 'stale';
+        biPortalCoreWarmupState.generatedAt = reconciliation.latestGeneratedAt || generatedAt;
         biPortalCoreWarmupState.finishedAt = 0;
-        biPortalCoreWarmupState.lastError = `terminal verification failed for sections: ${terminal.invalid.join(',')}; invalid tombstones requeued`;
-        logBiPortalCoreWarmup('requeued', {
+        biPortalCoreWarmupState.lastError = `core generation changed during terminal verification: ${generatedAt} -> ${reconciliation.latestGeneratedAt || '(unreadable)'}`;
+        logBiPortalCoreWarmup('core-generation-changed', {
           generatedAt,
-          sections: terminal.invalid.join(','),
-          requeuedCompleted: (requeued.requeuedCompleted || []).join(','),
+          latestGeneratedAt: reconciliation.latestGeneratedAt || '',
+          reconciliation: reconciliation.reason,
         });
         return {
-          scheduled: true,
-          reason: 'queued',
-          generatedAt,
-          sections,
-          queued: requeued.queued,
-          requeuedSections: terminal.invalid,
+          scheduled: false,
+          reason: 'core-generation-changed',
+          generatedAt: reconciliation.latestGeneratedAt || generatedAt,
+          previousGeneratedAt: generatedAt,
         };
       }
-      biPortalCoreWarmupState.status = 'queued';
-      biPortalCoreWarmupState.finishedAt = 0;
-      logBiPortalCoreWarmup('queued', {
-        generatedAt,
-        sections: sections.join(','),
-        reason: biPortalCoreWarmupReason(generatedAt),
-        newlyQueued: (enqueued.newlyQueued || []).join(','),
-        updatedRevision: (enqueued.updatedRevision || []).join(','),
-        deduplicatedPending: (enqueued.deduplicatedPending || []).join(','),
-        deduplicatedCompleted: (enqueued.deduplicatedCompleted || []).join(','),
-      });
-      return {scheduled: true, reason: 'queued', generatedAt, sections, queued: enqueued.queued};
+      if (reconciliation.status === 'queued') {
+        const wasQueued = biPortalCoreWarmupState.status === 'queued'
+          && biPortalCoreWarmupState.generatedAt === generatedAt;
+        const repairSections = [...new Set([
+          ...(reconciliation.missingCompletedSections || []),
+          ...(reconciliation.conflictingCompletedSections || []),
+          ...(reconciliation.invalidSections || []),
+        ])];
+        let persisted = null;
+        if (reconciliation.reason !== 'queue-active' && repairSections.length) {
+          persisted = await persistHostLockedBiSectionPlan(
+            repairSections.map(section => ({section, priority: BI_CORE_WARMUP_QUEUE_PRIORITY})),
+            generatedAt,
+            {
+              reason: biPortalCoreWarmupReason(generatedAt),
+              idempotencyKey: biPortalCoreWarmupIdempotencyKey(generatedAt),
+              coalesceKey: biPortalGenerationCoalesceKey(generatedAt),
+              requeueCompletedSections: repairSections,
+            },
+          );
+        }
+        biPortalCoreWarmupState.owner = 'external-section-queue';
+        biPortalCoreWarmupState.generatedAt = generatedAt;
+        biPortalCoreWarmupState.status = 'queued';
+        biPortalCoreWarmupState.startedAt = wasQueued && biPortalCoreWarmupState.startedAt
+          ? biPortalCoreWarmupState.startedAt
+          : Date.now();
+        biPortalCoreWarmupState.finishedAt = 0;
+        biPortalCoreWarmupState.lastError = reconciliation.reason === 'terminal-mismatch'
+          ? `terminal verification failed for sections: ${repairSections.join(',')}`
+          : '';
+        resetBiPortalCoreWarmupEnqueueBackoff();
+        logBiPortalCoreWarmup('queued', {
+          generatedAt,
+          reason: reconciliation.reason,
+          activeSections: (reconciliation.activeSections || []).join(','),
+          conflictingGenerationSections: (reconciliation.conflictingGenerationSections || []).join(','),
+          repairSections: repairSections.join(','),
+        });
+        return {
+          scheduled: Boolean(persisted),
+          reason: wasQueued && reconciliation.reason === 'queue-active' ? 'already-queued' : 'queued',
+          reconciliationReason: reconciliation.reason,
+          generatedAt,
+          sections,
+          queued: true,
+          activeSections: reconciliation.activeSections || [],
+          newerRevisionSections: reconciliation.newerRevisionSections || [],
+          conflictingGenerationSections: reconciliation.conflictingGenerationSections || [],
+          requeuedSections: repairSections,
+        };
+      }
+      throw new Error(`unexpected warmup reconciliation status: ${String(reconciliation.status || 'missing')}`);
     } catch (error) {
-      biPortalCoreWarmupState.lastError = error?.message || String(error || 'warmup enqueue failed');
-      logBiPortalCoreWarmup('enqueue-failed', {generatedAt, error: biPortalCoreWarmupState.lastError.slice(0, 500)});
-      return {scheduled: false, reason: 'enqueue-failed', error: biPortalCoreWarmupState.lastError};
+      const message = error?.message || String(error || 'warmup enqueue failed');
+      const failedAt = Number.isFinite(Number(options.nowMs)) ? attemptNow : Date.now();
+      const failure = recordBiPortalCoreWarmupEnqueueFailure(generatedAt, message, failedAt);
+      logBiPortalCoreWarmup('enqueue-failed', {
+        generatedAt,
+        error: message.slice(0, 500),
+        consecutiveFailures: failure.consecutiveFailures,
+        delayMs: failure.delayMs,
+        nextAttemptAt: new Date(failure.nextAttemptAt).toISOString(),
+      });
+      return {
+        scheduled: false,
+        reason: 'enqueue-failed',
+        error: message,
+        consecutiveFailures: failure.consecutiveFailures,
+        nextAttemptAt: new Date(failure.nextAttemptAt).toISOString(),
+      };
+    } finally {
+      if (biPortalCoreWarmupState.inFlight === queueOwnedRun) {
+        biPortalCoreWarmupState.inFlight = null;
+      }
     }
   }
 
@@ -12628,6 +15935,9 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
       }
 
       const sectionStartedAt = Date.now();
+      // `result` lives at iteration scope so the finally below always sees
+      // the rawBody handover, even when a statement in between throws.
+      let result = null;
       try {
         const existingCache = await readBiSectionCache(root, section, generatedAt).catch(() => null);
         const existingHomeProfit = existingCache?.data?.homeProfitSummary;
@@ -12645,7 +15955,7 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
           logBiPortalCoreWarmup('section-skip-cache', {section, generatedAt});
           continue;
         }
-        const result = await loadBiSection(args, root, section, {
+        result = await loadBiSection(args, root, section, {
           force: true,
           allowGenerate: options.allowGenerate !== false,
           allowStale: false,
@@ -12669,6 +15979,12 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
         const error = err?.message || String(err || 'section failed');
         failures.push({section, status: 500, error});
         logBiPortalCoreWarmup('section-failed', {section, durationMs, error: error.slice(0, 500)});
+      } finally {
+        // Warmup only reads status/headers of the freshly generated section;
+        // deterministically release any rawBody stream before the next pass.
+        // finally (not an after-the-fact call) guarantees the release even
+        // when a statement between the load and the disposal throws.
+        await disposeBiSectionRawBody(result?.rawBody);
       }
     }
   } catch (err) {
@@ -12696,44 +16012,147 @@ async function runBiPortalCoreWarmup(args, root, meta, options = {}) {
   return {ok: failures.length === 0, generatedAt, results, failures};
 }
 
-async function warmupCoreStillCurrent(root, expectedGeneratedAt) {
-  // Authoritative re-read used to gate cross-generation races: after the
-  // terminal checks (and before done or any tombstone mutation) the core must
-  // still carry the exact generation this warmup was pinned to.  An unreadable
-  // core is fail-closed: not current.
-  let latest = '';
-  try {
-    latest = String((await readBiPortalCoreMeta(root))?.generatedAt || '');
-  } catch {}
+// Queue-owned completion is reconciled only by the lock-owning manager.
+function biPortalGenerationCompletionMatches(receipt, generatedAt, sections) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  const requested = [...new Set((sections || []).map(section => String(section || '')).filter(Boolean))].sort();
+  const completed = [...new Set((receipt.sections || []).map(section => String(section || '')).filter(Boolean))].sort();
+  const evidenceRecords = Array.isArray(receipt.completedIdempotency) ? receipt.completedIdempotency : [];
+  const evidenceSections = [...new Set(evidenceRecords
+    .map(record => String(record?.section || ''))
+    .filter(Boolean))].sort();
+  return receipt.version === 1
+    && String(receipt.coreGeneratedAt || '') === String(generatedAt || '')
+    && requested.length === 7
+    && completed.length === requested.length
+    && requested.every((section, index) => section === completed[index])
+    && evidenceRecords.length === requested.length
+    && evidenceSections.length === requested.length
+    && requested.every((section, index) => section === evidenceSections[index])
+    && evidenceRecords.every(record => String(record?.idempotencyKey || '')
+      && Number.isFinite(Date.parse(String(record?.completedAt || ''))))
+    && /^[a-f0-9]{64}$/u.test(String(receipt.evidenceHash || ''))
+    && Number.isFinite(Date.parse(String(receipt.completedAt || '')));
+}
+
+function parseBiPortalQueueManagerReport(stdout) {
+  const lines = String(stdout || '').trim().split(/\r?\n/u).filter(Boolean);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const report = JSON.parse(lines.slice(index).join('\n'));
+      if (report && typeof report === 'object' && !Array.isArray(report)) return report;
+    } catch {}
+  }
+  return null;
+}
+
+async function reconcileBiPortalCoreWarmupQueueOwned(root, sections, generatedAt) {
+  const requestedSections = [...new Set((sections || []).map(section => String(section || '')).filter(Boolean))];
+  const run = await runChildProcess('/usr/bin/env', [
+    'bash',
+    path.join(ROOT, 'scripts', 'enqueue_bi_portal_sections.sh'),
+    'reconcile-generation',
+    '--sections', requestedSections.join(','),
+    '--core-generated-at', String(generatedAt || ''),
+    '--terminal-root', root,
+  ], {
+    cwd: ROOT,
+    timeoutMs: 240_000,
+  });
+  if (!run.ok) {
+    throw new Error(`warmup generation reconciliation failed: code=${run.code} timedOut=${run.timedOut}`);
+  }
+  const report = parseBiPortalQueueManagerReport(run.stdout);
+  if (!report || report.ok !== true || String(report.coreGeneratedAt || '') !== String(generatedAt || '')) {
+    throw new Error('warmup generation reconciliation returned an invalid manager receipt');
+  }
+  const currentMeta = await readBiPortalCoreMeta(root).catch(() => null);
+  const currentGeneratedAt = String(currentMeta?.generatedAt || '');
+  if (currentGeneratedAt !== String(generatedAt || '')) {
+    return {
+      status: 'stale',
+      reason: 'core-generation-changed',
+      generatedAt,
+      latestGeneratedAt: currentGeneratedAt,
+    };
+  }
+  if (report.completed === true
+    && biPortalGenerationCompletionMatches(report.generationCompletion, generatedAt, requestedSections)) {
+    return {
+      status: 'done',
+      reason: report.reason,
+      generatedAt,
+      completedSections: requestedSections,
+      generationCompletion: report.generationCompletion,
+    };
+  }
   return {
-    current: Boolean(latest) && latest === String(expectedGeneratedAt || ''),
-    latest,
+    status: 'queued',
+    reason: String(report.reason || 'generation-completion-missing'),
+    generatedAt,
+    activeSections: Array.isArray(report.activeSections) ? report.activeSections : [],
+    newerRevisionSections: Array.isArray(report.newerRevisionSections) ? report.newerRevisionSections : [],
+    conflictingGenerationSections: Array.isArray(report.conflictingGenerationSections)
+      ? report.conflictingGenerationSections
+      : [],
+    missingCompletedSections: Array.isArray(report.missingCompletedSections) ? report.missingCompletedSections : [],
+    conflictingCompletedSections: Array.isArray(report.conflictingCompletedSections)
+      ? report.conflictingCompletedSections
+      : [],
+    invalidSections: Array.isArray(report.invalidTerminalSections) ? report.invalidTerminalSections : [],
   };
 }
 
-async function verifyWarmupSectionsTerminal(root, sections, expectedGeneratedAt) {
-  // Authoritative read-only terminal verification pinned to the exact core
-  // generation under warmup.  Bounded and deterministic: each section gets one
-  // child validator invocation with a hard timeout; any error/timeout/non-zero
-  // is treated as NON-terminal so the scheduler requeues instead of claiming
-  // done.  The expected-generation pin makes a mid-verification core flip fail
-  // every later check instead of silently validating against a newer core.
-  const validatorScript = process.env.SHEIN_BI_TERMINAL_VALIDATOR
-    || path.join(ROOT, 'scripts', 'check_bi_portal_section_terminal.mjs');
-  const invalid = [];
-  for (const section of sections) {
-    const probe = await runChildProcess(process.execPath, [
-      validatorScript,
-      '--root', root,
-      '--section', section,
-      '--expected-generated-at', expectedGeneratedAt,
-    ], {
-      cwd: root,
-      timeoutMs: 10_000,
-    });
-    if (probe.code !== 0 || probe.timedOut) invalid.push(section);
+async function resolveBiPortalCoreWarmupReceiptHealth(root, sections = configuredBiPortalCoreWarmupSections()) {
+  const meta = await readBiPortalCoreMeta(root).catch(() => null);
+  const currentGeneratedAt = String(meta?.generatedAt || '');
+  const receipt = readBiPortalSectionQueueState()?.generationCompletion || null;
+  const done = Boolean(currentGeneratedAt
+    && biPortalGenerationCompletionMatches(receipt, currentGeneratedAt, sections));
+  if (done) {
+    return {
+      done: true,
+      generatedAt: currentGeneratedAt,
+      finishedAt: Date.parse(receipt.completedAt),
+      receipt,
+    };
   }
-  return {ok: invalid.length === 0, invalid};
+  return {
+    done: false,
+    generatedAt: currentGeneratedAt,
+    finishedAt: 0,
+    receipt: null,
+  };
+}
+
+function effectiveBiPortalCoreWarmupStateFromReceipt(
+  receiptHealth,
+  state = biPortalCoreWarmupState,
+) {
+  if (!BI_CORE_WARMUP_QUEUE_OWNED || !BI_EXTERNAL_SECTION_QUEUE_ENABLED) return state;
+  if (receiptHealth?.done) {
+    return {
+      ...state,
+      generatedAt: receiptHealth.generatedAt,
+      status: 'done',
+      owner: 'external-section-queue',
+      finishedAt: receiptHealth.finishedAt,
+      inFlight: null,
+      lastError: '',
+    };
+  }
+  return {
+    ...state,
+    generatedAt: receiptHealth?.generatedAt || state.generatedAt,
+    status: 'queued',
+    owner: 'external-section-queue',
+    startedAt: state.status === 'queued'
+      && state.generatedAt === receiptHealth?.generatedAt
+      ? state.startedAt
+      : 0,
+    finishedAt: 0,
+    inFlight: null,
+  };
 }
 
 function startBiPortalCoreWarmupWatcher(args, root, options = {}) {
@@ -12807,13 +16226,142 @@ async function askReadonlyOpsAgent(question, options = {}) {
   };
 }
 
+/**
+ * Deterministically release a section raw-body stream that loadBiSection
+ * returned but that is not delivered to any HTTP response. The direct query
+ * preparation loop and the core warmup loop only read status/headers, so an
+ * unconsumed rawBody stream keeps its transferred FileHandle open until a GC
+ * finalizer closes it and emits a DEP0137 warning.
+ *
+ * The promise never resolves early: only the real 'close' event (or a stream
+ * already observed `closed`) counts as released, matching the cache layer
+ * where ownedSectionStream releases the FileHandle inside the close handler.
+ * A stream that is merely `destroyed` is still awaited until its close
+ * lands, so tight call loops cannot stack up fds behind a premature resolve.
+ * Errors are swallowed by a listener but never treated as completion,
+ * destroy() is only invoked on a pristine (not destroyed/not ended) stream
+ * so an install/close race cannot deadlock the waiter, and no error is
+ * rethrown into the caller.
+ */
+async function disposeBiSectionRawBody(rawBody) {
+  if (!rawBody || typeof rawBody.destroy !== 'function') return;
+  await new Promise(resolve => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      rawBody.removeListener('close', finish);
+      rawBody.removeListener('error', swallow);
+      resolve();
+    };
+    const swallow = () => {
+      // An error after destroy never shortcuts the wait: the FileHandle is
+      // released only when 'close' fires. The listener exists solely so the
+      // error cannot become an unhandled 'error' event while we wait.
+    };
+    rawBody.once('close', finish);
+    rawBody.once('error', swallow);
+    if (rawBody.closed === true) {
+      // A close that raced between the initial check and listener
+      // installation must not deadlock the waiter.
+      finish();
+      return;
+    }
+    // `destroyed` alone is NOT proof of closure: it flips synchronously while
+    // 'close' (and the fd release in ownedSectionStream) can still be pending
+    // for a tick. Only a pristine stream needs the destroy that schedules the
+    // close; an already destroyed or already ended stream is left alone and
+    // the waiter resolves on the real 'close'.
+    if (rawBody.destroyed || rawBody.readableEnded) return;
+    try {
+      rawBody.destroy();
+    } catch {
+      // destroy() throwing synchronously is outside the stream contract;
+      // settle so the caller never hangs. Owned cache streams never throw
+      // here -- their close always follows destroy.
+      finish();
+    }
+  });
+}
+
+function biHostLockedSectionAcknowledgement(section, result = {}, expectedGeneratedAt = '') {
+  const status = Number(result.status || 500);
+  const payload = result.payload && typeof result.payload === 'object' ? result.payload : {};
+  return {
+    ok: status >= 200 && status < 300 && payload.ok !== false,
+    section,
+    generatedAt: String(payload.generatedAt || payload.coreGeneratedAt || expectedGeneratedAt || ''),
+    terminal: status === 200
+      && payload.pendingSection !== true
+      && payload.staleSection !== true
+      && payload.cacheStale !== true,
+  };
+}
+
+function biHostLockedSectionAcknowledgementHeaders(headers = {}) {
+  return Object.fromEntries(
+    Object.entries(headers || {}).filter(([name]) => {
+      const lower = String(name).toLowerCase();
+      return lower.startsWith('x-bi-') || lower === 'cache-control' || lower === 'retry-after';
+    }),
+  );
+}
+
+function createBiHostLockedRequestCancellation(req, res) {
+  const controller = new AbortController();
+  let active = true;
+  const abort = reason => {
+    if (!active || controller.signal.aborted) return;
+    controller.abort(reason instanceof Error ? reason : new Error(String(reason || 'BI host-locked worker request disconnected')));
+  };
+  const onRequestAborted = () => abort('BI host-locked worker request aborted');
+  const onRequestClose = () => {
+    // IncomingMessage emits close for the underlying request stream. The
+    // explicit aborted/destroyed checks avoid treating a normally completed
+    // request parser close as a client cancellation.
+    if (req?.aborted === true || (req?.destroyed === true && req?.complete !== true)) {
+      abort('BI host-locked worker request closed');
+    }
+  };
+  const onResponseClose = () => {
+    if (!res?.writableEnded && !res?.writableFinished) abort('BI host-locked worker response closed');
+  };
+  req?.once?.('aborted', onRequestAborted);
+  req?.once?.('close', onRequestClose);
+  res?.once?.('close', onResponseClose);
+  return {
+    signal: controller.signal,
+    dispose() {
+      active = false;
+      req?.off?.('aborted', onRequestAborted);
+      req?.off?.('close', onRequestClose);
+      res?.off?.('close', onResponseClose);
+    },
+  };
+}
+
 async function loadDirectBiQuery(args, root, actor, question, options = {}) {
   const plan = planBiOpsDirectQuerySections(question, {sections: options.sections || []});
   const preparation = [];
+  const signal = options.signal || null;
+  const cancelledError = () => {
+    const error = new Error('BI query cancelled by deadline or client disconnect');
+    error.name = 'AbortError';
+    error.code = 'BI_QUERY_CANCELLED';
+    return error;
+  };
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw cancelledError();
+  };
   for (const section of plan.sections) {
     const startedAt = Date.now();
+    throwIfAborted();
+    // `result` lives at iteration scope so the finally can always reach the
+    // rawBody handover, even when a statement between the load and the
+    // disposal throws.
+    let result = null;
     try {
-      const result = await loadBiSection(args, root, section, {
+      result = await loadBiSection(args, root, section, {
         force: false,
         allowGenerate: options.allowGenerate !== false,
         // Link performance is a daily business snapshot while the core sales
@@ -12838,17 +16386,43 @@ async function loadDirectBiQuery(args, root, actor, question, options = {}) {
         durationMs: Date.now() - startedAt,
         error: String(error?.message || error).slice(0, 500),
       });
+    } finally {
+      // The preparation loop only reads status/payload; any rawBody stream
+      // must be destroyed and awaited closed so its FileHandle is not
+      // leaked. finally (not an after-the-fact call) guarantees the release
+      // even when the status/payload handling above throws.
+      await disposeBiSectionRawBody(result?.rawBody);
     }
   }
 
-  const loaded = await loadBiOpsQueryData({
-    question,
-    dataPath: path.join(root, 'data.json'),
-    sectionsDir: path.join(root, 'sections'),
-    sections: plan.sections,
-    maxCoreBytes: 64 * 1024 * 1024,
-    maxSectionBytes: 96 * 1024 * 1024,
-  });
+    throwIfAborted();
+    const coreMeta = await readBiPortalCoreMeta(root);
+    const canUseLightweightCore = coreMeta.mode === 'api' && coreMeta.generatedAt;
+    // The AbortSignal is handed to the JSON reader itself (chunked, checked
+    // between reads), so a deadline or disconnect cancels the heap-heavy read
+    // cooperatively instead of racing it and leaving it running.
+    const loadPromise = loadBiOpsQueryData({
+      question,
+      dataPath: path.join(root, 'data.json'),
+      sectionsDir: path.join(root, 'sections'),
+      sections: plan.sections,
+      maxCoreBytes: 64 * 1024 * 1024,
+      maxSectionBytes: 96 * 1024 * 1024,
+      signal,
+      ...(canUseLightweightCore ? {
+        coreData: {
+          generatedAt: coreMeta.generatedAt,
+          dates: coreMeta.dates || {},
+          __sections: {
+            mode: coreMeta.mode,
+            generatedAt: coreMeta.generatedAt,
+            keys: coreMeta.sections?.keys || [],
+          },
+        },
+      } : {}),
+    });
+  const loaded = await loadPromise;
+  throwIfAborted();
   const response = buildBiOpsDirectQueryResponse({
     question,
     sections: plan.sections,
@@ -12862,6 +16436,23 @@ async function loadDirectBiQuery(args, root, actor, question, options = {}) {
     intent: plan.intent,
   };
   response.sections.preparation = preparation;
+  if (typeof options.onBeforeFinalCoreIdentityReadback === 'function') {
+    await options.onBeforeFinalCoreIdentityReadback({coreMeta});
+  }
+  if (coreMeta.file && coreMeta.identity) {
+    let currentCoreStat;
+    try {
+      currentCoreStat = await fs.stat(coreMeta.file, {bigint: true});
+    } catch {
+      currentCoreStat = null;
+    }
+    if (!currentCoreStat?.isFile() || biPortalCoreFileIdentity(currentCoreStat) !== coreMeta.identity) {
+      throw biPortalSnapshotError(
+        'BI_QUERY_IDENTITY_CHANGED',
+        'BI query final pathname no longer names the opened core generation',
+      );
+    }
+  }
   return response;
 }
 
@@ -12956,23 +16547,481 @@ function sendJson(res, status, value, headers = {}) {
   send(res, status, JSON.stringify(value, null, 2), {'Content-Type': 'application/json; charset=utf-8', ...headers});
 }
 
-function sendLargeJson(req, res, status, value, headers = {}) {
-  const body = Buffer.from(JSON.stringify(value), 'utf8');
-  if (body.length >= 64 * 1024 && acceptsGzip(req.headers['accept-encoding'])) {
-    const compressed = gzipSync(body, {level: 6});
-    return send(res, status, compressed, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Encoding': 'gzip',
-      'Content-Length': String(compressed.length),
-      'Vary': 'Accept-Encoding',
-      ...headers,
-    });
+const JSON_STRING_SLICE = 8192;
+const JSON_STREAM_CHUNK_LIMIT = 64 * 1024;
+
+function streamingAbortError() {
+  const error = new Error('BI large JSON stream cancelled by deadline or client disconnect');
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+function serializationError(code, message) {
+  const error = new TypeError(message);
+  error.code = code;
+  return error;
+}
+
+function checkStreamingAbort(state) {
+  if (state.signal?.aborted || state.req?.destroyed || state.res?.destroyed) {
+    throw streamingAbortError();
   }
-  return send(res, status, body, {
+}
+
+// Genuine boxed String/Number/Boolean/BigInt objects carry the corresponding
+// internal data slot. The builtin prototype valueOf calls can observe that
+// slot but cannot be forged by an own valueOf, Symbol.toStringTag or a
+// prototype alias, so they are the JSON.stringify-compatible discriminator
+// (JSON.stringify unboxes genuine boxed primitives and their subclasses, but
+// serializes a forged/aliased object as an ordinary object).
+function unboxBuiltinPrimitive(value) {
+  try { return {kind: 'number', value: Number.prototype.valueOf.call(value)}; } catch {}
+  try { return {kind: 'string', value: String.prototype.valueOf.call(value)}; } catch {}
+  try { return {kind: 'boolean', value: Boolean.prototype.valueOf.call(value)}; } catch {}
+  try { return {kind: 'bigint', value: BigInt.prototype.valueOf.call(value)}; } catch {}
+  return null;
+}
+
+// JSON.stringify-compatible string escaping with a strict UTF-16 boundary: a
+// valid surrogate pair is never split across slice boundaries, and lone
+// surrogates are escaped as \uXXXX (lowercase hex, matching JSON.stringify).
+function escapeJsonStringSlice(str, start, end) {
+  const parts = [];
+  let index = start;
+  while (index < end) {
+    const code = str.charCodeAt(index);
+    if (code === 0x22) {
+      parts.push('\\"');
+      index += 1;
+      continue;
+    }
+    if (code === 0x5c) {
+      parts.push('\\\\');
+      index += 1;
+      continue;
+    }
+    if (code < 0x20) {
+      if (code === 0x08) parts.push('\\b');
+      else if (code === 0x09) parts.push('\\t');
+      else if (code === 0x0a) parts.push('\\n');
+      else if (code === 0x0c) parts.push('\\f');
+      else if (code === 0x0d) parts.push('\\r');
+      else parts.push(`\\u${code.toString(16).padStart(4, '0')}`);
+      index += 1;
+      continue;
+    }
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < end ? str.charCodeAt(index + 1) : -1;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        parts.push(str[index], str[index + 1]);
+        index += 2;
+      } else {
+        parts.push(`\\u${code.toString(16).padStart(4, '0')}`);
+        index += 1;
+      }
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      parts.push(`\\u${code.toString(16).padStart(4, '0')}`);
+      index += 1;
+      continue;
+    }
+    // Batch a run of plain (non-surrogate, non-special) code units so normal
+    // ASCII/Chinese runs do not emit one micro-token per character.
+    let runEnd = index + 1;
+    while (runEnd < end) {
+      const next = str.charCodeAt(runEnd);
+      if (next === 0x22 || next === 0x5c || next < 0x20 || (next >= 0xd800 && next <= 0xdfff)) break;
+      runEnd += 1;
+    }
+    parts.push(str.slice(index, runEnd));
+    index = runEnd;
+  }
+  return parts.join('');
+}
+
+function* jsonStringPieces(str, state) {
+  const length = str.length;
+  let index = 0;
+  while (index < length) {
+    checkStreamingAbort(state);
+    let end = Math.min(index + JSON_STRING_SLICE, length);
+    if (end < length) {
+      const previous = str.charCodeAt(end - 1);
+      if (previous >= 0xd800 && previous <= 0xdbff) {
+        const next = str.charCodeAt(end);
+        if (next >= 0xdc00 && next <= 0xdfff) end += 1;
+      }
+    }
+    yield escapeJsonStringSlice(str, index, end);
+    index = end;
+  }
+}
+
+function* jsonKeyStringPieces(key, state) {
+  yield '"';
+  yield* jsonStringPieces(key, state);
+  yield '"';
+}
+
+// Mirrors JSON.stringify: toJSON is called once for each object/function value
+// (key is the property key; '' for the root), and the caller decides whether
+// the resolved value is omitted (object property), null (array element), or
+// invalid (root).
+function resolveJsonValue(value, key, state) {
+  let current = value;
+  if (current !== null && (typeof current === 'object' || typeof current === 'function')) {
+    const toJson = current.toJSON;
+    if (typeof toJson === 'function') {
+      checkStreamingAbort(state);
+      current = toJson.call(current, key);
+    }
+    // JSON.stringify unboxes genuine String/Number/Boolean wrapper objects to
+    // their primitive value and rejects boxed BigInts exactly like primitive
+    // ones. An object pretending to be boxed (Symbol.toStringTag or a proto
+    // alias) is intentionally left as a normal object.
+    if (typeof current === 'object' && current !== null) {
+      const unboxed = unboxBuiltinPrimitive(current);
+      if (unboxed && unboxed.kind === 'bigint') {
+        throw serializationError('JSON_SERIALIZE_BIGINT', 'Do not know how to serialize a BigInt');
+      }
+      if (unboxed) current = unboxed.value;
+    }
+  }
+  return {
+    value: current,
+    omittable: current === undefined || typeof current === 'function' || typeof current === 'symbol',
+  };
+}
+
+function* jsonObjectPieces(obj, key, ancestors, state) {
+  const keys = Object.keys(obj);
+  yield '{';
+  let first = true;
+  for (const propertyKey of keys) {
+    const resolved = resolveJsonValue(obj[propertyKey], propertyKey, state);
+    if (resolved.omittable) continue;
+    if (!first) yield ',';
+    yield* jsonKeyStringPieces(propertyKey, state);
+    yield ':';
+    yield* jsonPieces(resolved.value, propertyKey, ancestors, state);
+    first = false;
+  }
+  yield '}';
+}
+
+function* jsonArrayPieces(arr, key, ancestors, state) {
+  const length = arr.length;
+  yield '[';
+  for (let index = 0; index < length; index += 1) {
+    if (index > 0) yield ',';
+    const resolved = resolveJsonValue(arr[index], String(index), state);
+    if (resolved.omittable) {
+      yield 'null';
+      continue;
+    }
+    yield* jsonPieces(resolved.value, String(index), ancestors, state);
+  }
+  yield ']';
+}
+
+function* jsonPieces(value, key, ancestors, state) {
+  checkStreamingAbort(state);
+  if (value === null) {
+    yield 'null';
+    return;
+  }
+  const type = typeof value;
+  if (type === 'string') {
+    yield '"';
+    yield* jsonStringPieces(value, state);
+    yield '"';
+    return;
+  }
+  if (type === 'boolean') {
+    yield value ? 'true' : 'false';
+    return;
+  }
+  if (type === 'number') {
+    yield Number.isFinite(value) ? String(value) : 'null';
+    return;
+  }
+  if (type === 'bigint') {
+    throw serializationError('JSON_SERIALIZE_BIGINT', 'Do not know how to serialize a BigInt');
+  }
+  if (type === 'undefined' || type === 'function' || type === 'symbol') {
+    throw serializationError('JSON_SERIALIZE_UNSERIALIZABLE', 'JSON.stringify cannot serialize this value here');
+  }
+  if (typeof value === 'object') {
+    if (ancestors.has(value)) {
+      throw serializationError('JSON_CIRCULAR', 'Converting circular structure to JSON');
+    }
+    ancestors.add(value);
+    try {
+      if (Array.isArray(value)) yield* jsonArrayPieces(value, key, ancestors, state);
+      else yield* jsonObjectPieces(value, key, ancestors, state);
+    } finally {
+      ancestors.delete(value);
+    }
+    return;
+  }
+  yield 'null';
+}
+
+// Bounded-memory JSON encoder: yields ~64KB string chunks, never materializes
+// the whole JSON string/Buffer, honors an optional AbortSignal and socket
+// liveness between chunks, and preserves JSON.stringify semantics for plain
+// serializable objects.
+function* emitJsonChunks(value, options = {}) {
+  const state = {signal: options.signal || null, req: options.req || null, res: options.res || null};
+  const ancestors = new Set();
+  const rootResolved = resolveJsonValue(value, '', state);
+  if (rootResolved.omittable) {
+    throw serializationError('JSON_SERIALIZE_UNSERIALIZABLE', 'JSON.stringify cannot serialize this value at the top level');
+  }
+  const pending = [];
+  let pendingLength = 0;
+  for (const piece of jsonPieces(rootResolved.value, '', ancestors, state)) {
+    if (!piece.length) continue;
+    if (pendingLength && pendingLength + piece.length > JSON_STREAM_CHUNK_LIMIT) {
+      checkStreamingAbort(state);
+      yield pending.join('');
+      pending.length = 0;
+      pendingLength = 0;
+    }
+    pending.push(piece);
+    pendingLength += piece.length;
+  }
+  if (pendingLength) {
+    checkStreamingAbort(state);
+    yield pending.join('');
+  }
+}
+
+async function collectStreamJson(value, options = {}) {
+  let json = '';
+  for await (const chunk of emitJsonChunks(value, options)) {
+    json += chunk;
+  }
+  return json;
+}
+
+async function streamJsonByteLength(value, options = {}) {
+  let bytes = 0;
+  for await (const chunk of emitJsonChunks(value, options)) {
+    bytes += Buffer.byteLength(chunk, 'utf8');
+  }
+  return bytes;
+}
+
+async function sendLargeJson(req, res, status, value, headers = {}, options = {}) {
+  const signal = options.signal || null;
+  const reqObject = options.req || req;
+  // The first chunk is produced (or the encoder throws) before the response
+  // headers are written. A serialization error in that window therefore
+  // surfaces as a structured JSON error; anything after the first write can
+  // only terminate the socket because the response has already started.
+  const iterator = emitJsonChunks(value, {signal, req: reqObject, res});
+  let firstChunk = null;
+  try {
+    const first = await iterator.next();
+    if (!first.done) firstChunk = first.value;
+  } catch (error) {
+    // Header not written yet: keep the socket alive so the caller can hand a
+    // structured error back to the client. Only terminate when the peer is
+    // already gone or a cancellation already answered this response. An
+    // already-sent or already-ended response (for example the lane timeout
+    // handler completing a 503 during this window) must never be destroyed,
+    // even when its finish event has not flushed yet.
+    if ((reqObject.destroyed || res.destroyed)
+      && !res.headersSent && !res.writableEnded && !res.writableFinished) res.destroy();
+    throw error;
+  }
+  if (signal?.aborted || reqObject.destroyed || res.destroyed || res.headersSent || res.writableFinished) {
+    // A pending timeout/disconnect may already have answered this response
+    // with a terminal status or ended it; never destroy a response that has
+    // begun or been ended. Only cancel a socket that never started and whose
+    // peer is gone or cancellation already fired.
+    if (!res.headersSent && !res.writableEnded && !res.writableFinished && !res.destroyed) res.destroy();
+    return;
+  }
+  const gzip = acceptsGzip(reqObject.headers?.['accept-encoding']);
+  writeResponseHead(res, status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': String(body.length),
+    'Vary': 'Accept-Encoding',
+    ...(gzip ? {'Content-Encoding': 'gzip'} : {}),
     ...headers,
   });
+  // The first chunk is replayed into the SAME pipeline as the rest of the
+  // stream: a gzip response must be compressed from the very first byte.
+  const source = Readable.from(function* () {
+    if (firstChunk !== null) yield firstChunk;
+    yield* iterator;
+  }());
+  try {
+    if (gzip) {
+      if (signal) await pipeline(source, createGzip({level: 6}), res, {signal});
+      else await pipeline(source, createGzip({level: 6}), res);
+    } else {
+      if (signal) await pipeline(source, res, {signal});
+      else await pipeline(source, res);
+    }
+  } catch (error) {
+    // A mid-stream failure (deadline, disconnect, or a late serialization
+    // error) must terminate the socket: the client must never receive a
+    // truncated body that parses as a successful JSON response.
+    if (!res.destroyed && !res.writableFinished) res.destroy();
+    throw error;
+  }
+}
+
+const biPortalCoreRouteLifecycleState = {
+  totalResponseFailures: 0,
+  consecutiveResponseFailures: 0,
+  currentResponseFailureAt: '',
+  lastResponseFailureAt: '',
+  lastResponseError: '',
+};
+
+function biPortalCoreRouteLifecycleStatus() {
+  return {...biPortalCoreRouteLifecycleState};
+}
+
+function resetBiPortalCoreRouteLifecycleState() {
+  Object.assign(biPortalCoreRouteLifecycleState, {
+    totalResponseFailures: 0,
+    consecutiveResponseFailures: 0,
+    currentResponseFailureAt: '',
+    lastResponseFailureAt: '',
+    lastResponseError: '',
+  });
+}
+
+function recordBiPortalCoreRouteResponseSuccess() {
+  biPortalCoreRouteLifecycleState.consecutiveResponseFailures = 0;
+  biPortalCoreRouteLifecycleState.currentResponseFailureAt = '';
+  biPortalCoreRouteLifecycleState.lastResponseError = '';
+}
+
+function recordBiPortalCoreRouteResponseFailure(error, res) {
+  const at = new Date().toISOString();
+  const detail = String(error?.code || error?.message || error || 'unknown').slice(0, 500);
+  biPortalCoreRouteLifecycleState.totalResponseFailures += 1;
+  biPortalCoreRouteLifecycleState.consecutiveResponseFailures += 1;
+  biPortalCoreRouteLifecycleState.currentResponseFailureAt = at;
+  biPortalCoreRouteLifecycleState.lastResponseFailureAt = at;
+  biPortalCoreRouteLifecycleState.lastResponseError = detail;
+  console.error(JSON.stringify({
+    ok: false,
+    event: 'bi-portal-core-route-response-failed',
+    at,
+    error: detail,
+    headersSent: Boolean(res?.headersSent),
+    writableFinished: Boolean(res?.writableFinished),
+    destroyed: Boolean(res?.destroyed),
+  }));
+}
+
+function evaluateBiPortalCoreRouteLifecycleHealth(
+  routeStatus = biPortalCoreRouteLifecycleStatus(),
+) {
+  const failures = Number(routeStatus?.consecutiveResponseFailures || 0);
+  const issues = [];
+  if (failures >= 3) issues.push('routeResponse');
+  return {
+    ok: issues.length === 0,
+    degraded: failures > 0,
+    warning: failures > 0 ? 'routeResponse' : '',
+    issues,
+    routeResponseFailures: failures,
+  };
+}
+
+function evaluateBiPortalCoreSnapshotLifecycleHealth(snapshotStatus = {}) {
+  const active = Math.max(0, Number(snapshotStatus?.active || 0));
+  const retired = Math.max(0, Number(snapshotStatus?.retired || 0));
+  const retiredWithLeases = Object.hasOwn(snapshotStatus || {}, 'retiredWithLeases')
+    ? Math.max(0, Number(snapshotStatus.retiredWithLeases || 0))
+    : Math.min(retired, Math.max(0, Number(snapshotStatus?.requestLeases || 0)));
+  const retiredWithoutLeases = Object.hasOwn(snapshotStatus || {}, 'retiredWithoutLeases')
+    ? Math.max(0, Number(snapshotStatus.retiredWithoutLeases || 0))
+    : Math.max(0, retired - retiredWithLeases);
+  const openHandles = Math.max(0, Number(snapshotStatus?.openHandles || 0));
+  const expectedOwnerOpenHandles = (active + retiredWithLeases) * 2;
+  const issues = [];
+  if (retiredWithoutLeases > 0) issues.push('retiredWithoutLeases');
+  if (openHandles !== expectedOwnerOpenHandles) issues.push('openHandles');
+  if (Number(snapshotStatus?.closeFailures || 0) > 0) issues.push('closeFailures');
+  if (Number(snapshotStatus?.retryExhausted || 0) > 0) issues.push('retryExhausted');
+  if (Number(snapshotStatus?.stuckRetired || 0) > 0) issues.push('stuckRetired');
+  return {
+    ok: issues.length === 0,
+    issues,
+    expectedOwnerOpenHandles,
+    retiredWithLeases,
+    retiredWithoutLeases,
+  };
+}
+
+function evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth, snapshotHealth} = {}) {
+  const components = {
+    warmup: Boolean(warmupHealth?.ok),
+    routeResponse: Boolean(routeHealth?.ok),
+    snapshotLifecycle: snapshotHealth ? Boolean(snapshotHealth.ok) : true,
+  };
+  return {ok: Object.values(components).every(Boolean), components};
+}
+
+export async function sendBiPortalCoreSnapshot(req, res, lease, headers = {}) {
+  const protectedHeaders = new Set([
+    'content-type',
+    'content-length',
+    'content-encoding',
+    'transfer-encoding',
+    'vary',
+    'x-content-sha256',
+    'x-uncompressed-content-length',
+    'x-uncompressed-sha256',
+  ]);
+  const callerHeaders = Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !protectedHeaders.has(String(name).toLowerCase())),
+  );
+  const abortController = new AbortController();
+  const onReqAborted = () => { abortController.abort(); };
+  const onResClose = () => {
+    if (!res.writableEnded && !res.writableFinished) abortController.abort();
+  };
+  req.once('aborted', onReqAborted);
+  res.once('close', onResClose);
+  let source = null;
+  try {
+    source = lease.createReadStream();
+    writeResponseHead(res, 200, {
+      ...callerHeaders,
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': String(lease.byteLength),
+      'Vary': 'Accept-Encoding',
+      'X-Content-SHA256': lease.sha256,
+      'X-Uncompressed-Content-Length': String(lease.rawByteLength),
+      'X-Uncompressed-SHA256': lease.rawSha256,
+      ...(lease.kind === 'gzip' ? {'Content-Encoding': 'gzip'} : {}),
+    });
+    await pipeline(source, res, {signal: abortController.signal});
+    if (!res.writableFinished) throw new Error('BI Portal snapshot response did not finish');
+    recordBiPortalCoreRouteResponseSuccess();
+  } catch (error) {
+    const expectedAbort = abortController.signal.aborted
+      && ['AbortError', 'ABORT_ERR', 'ERR_STREAM_PREMATURE_CLOSE'].includes(String(error?.name || error?.code || ''));
+    if (!expectedAbort) recordBiPortalCoreRouteResponseFailure(error, res);
+    if (res.headersSent && !res.destroyed && !res.writableFinished) res.destroy(error);
+    throw error;
+  } finally {
+    req.off('aborted', onReqAborted);
+    res.off('close', onResClose);
+    if (!res.writableEnded && !res.writableFinished) source?.destroy();
+    await lease.release();
+  }
 }
 
 async function sendBoundedCoreJson(req, res, handle, stat, replacement = null, headers = {}) {
@@ -12988,13 +17037,41 @@ async function sendBoundedCoreJson(req, res, handle, stat, replacement = null, h
     ...(gzip ? {'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding'} : {'Content-Length': String(contentLength)}),
     ...headers,
   });
+  const abortController = new AbortController();
+  const onReqAborted = () => { abortController.abort(); };
+  const onResClose = () => {
+    if (!res.writableEnded && !res.writableFinished) {
+      abortController.abort();
+    }
+  };
+  req.once('aborted', onReqAborted);
+  res.once('close', onResClose);
   const source = Readable.from(streamFileHandleWithReplacement(handle, stat, replacement
     ? {...replacement, value: replacementValue}
     : null));
+  const gzipStream = gzip ? createGzip({level: 6}) : null;
   if (gzip) {
-    await pipeline(source, createGzip({level: 6}), res);
-  } else {
-    await pipeline(source, res);
+    source.on('error', () => { gzipStream?.destroy(); });
+  }
+  try {
+    if (gzip) {
+      await pipeline(source, gzipStream, res, {signal: abortController.signal});
+    } else {
+      await pipeline(source, res, {signal: abortController.signal});
+    }
+    recordBiPortalCoreRouteResponseSuccess();
+  } catch (error) {
+    const expectedAbort = abortController.signal.aborted
+      && ['AbortError', 'ABORT_ERR', 'ERR_STREAM_PREMATURE_CLOSE'].includes(String(error?.name || error?.code || ''));
+    if (!expectedAbort) recordBiPortalCoreRouteResponseFailure(error, res);
+    throw error;
+  } finally {
+    req.off('aborted', onReqAborted);
+    res.off('close', onResClose);
+    if (!res.writableEnded && !res.writableFinished) {
+      source.destroy();
+      gzipStream?.destroy();
+    }
   }
 }
 
@@ -13296,8 +17373,1074 @@ async function handleManualLoginWsUpgrade(req, socket, args, {authRequired, auth
   socket.on('error', () => { try { upstream.destroy(); } catch {} });
 }
 
+const QUERY_SURFACE_METHODS = new Map([
+  ['/api/health', 'GET'],
+  ['/api/login', 'POST'],
+  ['/api/logout', 'POST'],
+  ['/api/auth/me', 'GET'],
+  ['/api/bi/query-data', 'GET'],
+  ['/api/partner-cli/package', 'GET'],
+  ['/api/partner-cli/manifest', 'GET'],
+  ['/api/partner-cli/bundle', 'GET'],
+  ['/api/owner-knowledge/manifest', 'GET'],
+  ['/api/owner-knowledge/bundle', 'GET'],
+]);
+
+export function createHttpRuntimeLifecycle(server) {
+  if (!server || typeof server.close !== 'function') {
+    throw new TypeError('HTTP lifecycle requires a Node HTTP server');
+  }
+  // Admission is closed by default. The runtime must not accept traffic until
+  // every bridge/reconciler/watcher/worker component has started and the
+  // caller explicitly opens admission, otherwise requests race a half-started
+  // service. openAdmission() is the single atomic gate.
+  let accepting = false;
+  let admissionOpened = false;
+  let closeStarted = false;
+  let serverClosePromise = null;
+  let activeHandlers = 0;
+  const activeWaiters = new Set();
+  const upgradeWaiters = new Set();
+  const sockets = new Set();
+  const upgradeSockets = new Set();
+  const activeResponses = new Set();
+
+  const closeIdleConnectionsIfClosing = () => {
+    if (!closeStarted) return;
+    try { server.closeIdleConnections?.(); } catch {}
+  };
+
+  const notifyActiveDrained = () => {
+    if (activeHandlers !== 0) return;
+    for (const resolve of activeWaiters) resolve();
+    activeWaiters.clear();
+  };
+  const waitForActiveHandlers = () => activeHandlers === 0
+    ? Promise.resolve()
+    : new Promise(resolve => activeWaiters.add(resolve));
+  const notifyUpgradesDrained = () => {
+    if (upgradeSockets.size !== 0) return;
+    for (const resolve of upgradeWaiters) resolve();
+    upgradeWaiters.clear();
+  };
+  const waitForUpgradeSockets = () => upgradeSockets.size === 0
+    ? Promise.resolve()
+    : new Promise(resolve => upgradeWaiters.add(resolve));
+  // Pre-open (BI_RUNTIME_STARTING) and post-close (BI_RUNTIME_SHUTTING_DOWN)
+  // both refuse traffic with 503, but keep the two states distinguishable for
+  // operators and health probes.
+  const rejectUnavailable = res => {
+    const shuttingDown = closeStarted;
+    try {
+      writeResponseHead(res, 503, {
+        'Connection': 'close',
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify({
+        ok: false,
+        code: shuttingDown ? 'BI_RUNTIME_SHUTTING_DOWN' : 'BI_RUNTIME_STARTING',
+        error: shuttingDown ? 'Service is shutting down' : 'Service is starting; try again shortly',
+      }));
+    } catch {
+      try { res.destroy?.(); } catch {}
+    }
+  };
+  const dispatchRequest = (req, res, handler) => {
+    if (!accepting) {
+      rejectUnavailable(res);
+      return false;
+    }
+    activeHandlers += 1;
+    activeResponses.add(res);
+    let responseSettled = false;
+    const settleResponse = () => {
+      if (responseSettled) return;
+      responseSettled = true;
+      activeResponses.delete(res);
+      res.removeListener?.('finish', settleResponse);
+      res.removeListener?.('close', settleResponse);
+      // server.close() only sweeps connections that are idle at the instant it
+      // starts. A request that finishes afterwards can otherwise sit in the
+      // keep-alive pool until keepAliveTimeout, consuming the whole shutdown
+      // budget and turning an otherwise graceful restart into a forced error.
+      // Re-sweep after the response has transitioned from active to idle; the
+      // immediate retry runs after Node's internal finish bookkeeping.
+      closeIdleConnectionsIfClosing();
+      if (closeStarted) setImmediate(closeIdleConnectionsIfClosing);
+    };
+    res.once?.('finish', settleResponse);
+    res.once?.('close', settleResponse);
+    Promise.resolve()
+      .then(() => handler(req, res))
+      .catch(error => {
+        console.error(`[http-lifecycle] request failed: ${String(error?.stack || error)}`);
+        if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+          try { sendJson(res, 500, {ok: false, error: 'Server error'}, {'Connection': 'close'}); } catch {}
+        } else if (!res.writableEnded && !res.destroyed) {
+          try { res.destroy(); } catch {}
+        }
+      })
+      .finally(() => {
+        activeHandlers = Math.max(0, activeHandlers - 1);
+        notifyActiveDrained();
+      });
+    return true;
+  };
+  const admitUpgrade = socket => {
+    if (!accepting) {
+      try { socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch {}
+      try { socket.destroy(); } catch {}
+      return false;
+    }
+    upgradeSockets.add(socket);
+    const remove = () => {
+      upgradeSockets.delete(socket);
+      notifyUpgradesDrained();
+    };
+    socket.once?.('close', remove);
+    socket.once?.('error', remove);
+    return true;
+  };
+  // Atomic admission open: called exactly once by the runtime owner after all
+  // components have started. Returns false if close already began.
+  const openAdmission = () => {
+    if (closeStarted) return false;
+    accepting = true;
+    admissionOpened = true;
+    return true;
+  };
+  const beginClose = () => {
+    if (closeStarted) return serverClosePromise;
+    accepting = false;
+    closeStarted = true;
+    for (const response of activeResponses) {
+      try {
+        response.shouldKeepAlive = false;
+        if (!response.headersSent && !response.writableEnded && !response.destroyed) {
+          response.setHeader?.('Connection', 'close');
+        }
+      } catch {}
+    }
+    serverClosePromise = new Promise(resolve => {
+      try {
+        server.close(error => resolve({ok: !error, error: error?.message || ''}));
+      } catch (error) {
+        resolve({
+          ok: error?.code === 'ERR_SERVER_NOT_RUNNING',
+          error: error?.code === 'ERR_SERVER_NOT_RUNNING' ? '' : String(error?.message || error),
+        });
+      }
+    });
+    try { server.closeIdleConnections?.(); } catch {}
+    for (const socket of [...upgradeSockets]) {
+      try { socket.end(); } catch {}
+    }
+    return serverClosePromise;
+  };
+  const forceClose = () => {
+    try { server.closeAllConnections?.(); } catch {}
+    for (const socket of [...sockets, ...upgradeSockets]) {
+      try { socket.destroy(); } catch {}
+    }
+  };
+  const waitForDrain = async (timeoutMs, forceGraceMs = 250) => {
+    beginClose();
+    const boundedTimeoutMs = Math.max(1, Number(timeoutMs) || 1);
+    const drainWork = Promise.all([serverClosePromise, waitForActiveHandlers(), waitForUpgradeSockets()]);
+    let timer;
+    const graceful = await Promise.race([
+      drainWork.then(values => ({settled: true, values})),
+      new Promise(resolve => { timer = setTimeout(() => resolve({settled: false}), boundedTimeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    if (graceful.settled) {
+      const closeResult = graceful.values[0];
+      return {
+        ok: closeResult.ok,
+        timedOut: false,
+        forced: false,
+        activeHandlers,
+        openConnections: sockets.size,
+        openUpgrades: upgradeSockets.size,
+        error: closeResult.error || '',
+      };
+    }
+    forceClose();
+    let forceTimer;
+    const settledAfterForce = await Promise.race([
+      drainWork.then(() => true),
+      new Promise(resolve => { forceTimer = setTimeout(() => resolve(false), Math.max(1, forceGraceMs)); }),
+    ]);
+    clearTimeout(forceTimer);
+    return {
+      ok: false,
+      timedOut: true,
+      forced: true,
+      settledAfterForce,
+      activeHandlers,
+      openConnections: sockets.size,
+      openUpgrades: upgradeSockets.size,
+      error: `HTTP drain timed out after ${boundedTimeoutMs}ms`,
+    };
+  };
+  const status = () => ({
+    accepting,
+    admissionOpened,
+    closeStarted,
+    activeHandlers,
+    openConnections: sockets.size,
+    openUpgrades: upgradeSockets.size,
+  });
+
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  return {dispatchRequest, admitUpgrade, openAdmission, beginClose, waitForDrain, forceClose, status};
+}
+
+/**
+ * Maps a bounded mutation-queue rejection (error.queueRejected === true) to an
+ * HTTP response for the request surface. Saturation and queue-deadline
+ * rejections are transient backpressure and map to 429; shutdown/cancellation
+ * map to 503. Returns null when the error is not a queue rejection so callers
+ * keep their existing error handling for everything else.
+ */
+function queueRejectionHttpDetails(error, surface = 'portal') {
+  if (!error || error.queueRejected !== true) return null;
+  const query = surface === 'query';
+  const reason = String(error.reason || '');
+ if (reason === 'shutdown' || reason === 'cancelled') {
+   return {
+     status: 503,
+     code: query ? 'QUERY_SURFACE_SHUTTING_DOWN' : 'BI_MUTATION_QUEUE_SHUTTING_DOWN',
+     message: query
+       ? 'BI query runtime is shutting down; the request was cancelled before it started'
+       : 'Service is shutting down; the mutation was cancelled before it started and was not retried',
+      // During shutdown the connection is not reused: closing it lets the
+      // HTTP drain settle promptly instead of waiting out keep-alive.
+      headers: {'Cache-Control': 'no-store', 'Retry-After': '5', 'Connection': 'close'},
+    };
+ }
+  if (reason === 'saturated') {
+    return {
+      status: 429,
+      code: query ? 'QUERY_SURFACE_BUSY' : 'BI_MUTATION_QUEUE_SATURATED',
+      message: query
+        ? 'BI query runtime is busy; retry shortly'
+        : 'Mutation queue is saturated; retry shortly',
+      headers: {'Cache-Control': 'no-store', 'Retry-After': '2'},
+    };
+  }
+  if (reason === 'deadline-exceeded') {
+    return {
+      status: query ? 503 : 429,
+      code: query ? 'BI_QUERY_TIMEOUT' : 'BI_MUTATION_QUEUE_DEADLINE_EXCEEDED',
+      message: query
+        ? 'BI query deadline exceeded; the request was cancelled before it started'
+        : 'Mutation queue deadline exceeded before the write started; nothing was written',
+      headers: {'Cache-Control': 'no-store', 'Retry-After': '5'},
+    };
+  }
+  return null;
+}
+
+async function runBoundedRuntimeClosePhase(phase, operation, timeoutMs) {
+  if (timeoutMs <= 0) return {ok: false, timedOut: true, phase, error: `${phase} had no shutdown budget`};
+  const startedAt = Date.now();
+  let timer;
+  const work = Promise.resolve().then(operation).then(
+    value => ({ok: true, value}),
+    error => ({ok: false, error: String(error?.message || error || `${phase} failed`)}),
+  );
+  const result = await Promise.race([
+    work,
+    new Promise(resolve => { timer = setTimeout(() => resolve({ok: false, timedOut: true, error: `${phase} timed out after ${timeoutMs}ms`}), timeoutMs); }),
+  ]);
+  clearTimeout(timer);
+  return {...result, phase, wallMs: Date.now() - startedAt};
+}
+
+export async function shutdownHttpRuntime({
+  lifecycle,
+  timeoutMs = 5_000,
+  onAdmissionClosed = null,
+  stopWorkers = null,
+  closeStores = null,
+} = {}) {
+  if (!lifecycle?.beginClose || !lifecycle?.waitForDrain) {
+    throw new TypeError('shutdownHttpRuntime requires an HTTP lifecycle');
+  }
+  const startedAt = Date.now();
+  const boundedTimeoutMs = Math.max(100, Math.min(30_000, Number(timeoutMs) || 5_000));
+  const deadlineAt = startedAt + boundedTimeoutMs;
+  lifecycle.beginClose();
+  let admission = {ok: true, phase: 'admission-close', wallMs: 0};
+  try {
+    const result = onAdmissionClosed?.();
+    if (result && typeof result.then === 'function') {
+      throw new TypeError('onAdmissionClosed must be synchronous');
+    }
+  } catch (error) {
+    admission = {ok: false, phase: 'admission-close', wallMs: 0, error: String(error?.message || error)};
+  }
+  // HTTP drain and worker/bridge stop start concurrently within the same
+  // total deadline. Each phase is independently bounded, so a drain that never
+  // settles (handler stuck past the deadline) must not block the worker drain,
+  // and a worker drain timeout must not be re-reported later as skipped. Both
+  // results are reported truthfully; store close stays gated on both.
+  const drainPromise = lifecycle.waitForDrain(Math.max(1, deadlineAt - Date.now()));
+  const workersPromise = runBoundedRuntimeClosePhase(
+    'workers-and-bridges',
+    () => stopWorkers?.(),
+    Math.max(0, deadlineAt - Date.now()),
+  );
+  const [drain, workers] = await Promise.all([drainPromise, workersPromise]);
+  let stores;
+  if (drain.ok && workers.ok) {
+    stores = await runBoundedRuntimeClosePhase(
+      'stores',
+      () => closeStores?.(),
+      Math.max(0, deadlineAt - Date.now()),
+    );
+  } else {
+    // Any failed or timed-out phase skips store close; the reasons stay
+    // explicit so the caller can see which prerequisite did not pass.
+    const failures = [];
+    if (!drain.ok) failures.push('http-drain-failed');
+    if (!workers.ok) failures.push('workers-not-stopped');
+    stores = {
+      ok: false,
+      skipped: true,
+      phase: 'stores',
+      reason: failures.join(';') || 'prerequisite-not-met',
+    };
+  }
+  return {
+    ok: admission.ok && drain.ok && workers.ok && stores.ok,
+    admission,
+    drain,
+    workers,
+    stores,
+    wallMs: Date.now() - startedAt,
+  };
+}
+
+/**
+ * Single source of truth for the Portal's shutdown wiring. The Portal's
+ * shutdown() passes exactly this object to shutdownHttpRuntime, and tests
+ * import this factory to prove the ordering contract:
+ *
+ *  1. onAdmissionClosed (synchronous): HTTP admission closes AND worker claim
+ *     admission closes in the same call. linkOpsJobWorker.stopAdmitting() is
+ *     synchronous, so from this instant no job that has not already entered
+ *     claimJob() may start. The shared runtime AbortController also signals
+ *     every in-flight OpenAPI executor child in this same synchronous phase;
+ *     its result still drains through the durable claim path.
+ *  2. stopWorkers runs concurrently with the HTTP drain inside the same total
+ *     deadline and awaits linkOpsJobWorker.stop(), which drains every
+ *     in-flight iteration to a terminal state before returning.
+ *  3. closeStores runs only after BOTH the HTTP drain and stopWorkers succeed,
+ *     so no store is closed underneath a stuck handler or an in-flight worker
+ *     iteration. Any drain or worker failure/timed-out skips the store close.
+ *     Both stopAdmitting/drain are idempotent, so repeated shutdown is safe.
+ */
+export function createPortalShutdownHooks({
+  enqueueMutationRequest,
+  linkOpsJobWorker = null,
+  webhookTaskReconciler = null,
+  waitForStartup = null,
+  liveAccountingRefreshStop = () => {},
+  liveAccountingRefreshDrain = null,
+  biCoreWarmupWatcher = null,
+  ownerKnowledgeReconcileTimer = null,
+  liveUpdateBridge = null,
+  biPortalCoreSnapshotCache = null,
+  linkOpsStoreGateway = null,
+  sheinWebhookRepository = null,
+  runtimeCancellationController = null,
+} = {}) {
+  return {
+    onAdmissionClosed: () => {
+      // Synchronous claim admission close: no new link-ops job may be claimed
+      // from this point on. An iteration that already entered claimJob() is
+      // in-flight and is drained by stopWorkers() before any store is closed.
+      linkOpsJobWorker?.stopAdmitting();
+      biPortalCoreSnapshotCache?.stopAdmitting?.();
+      enqueueMutationRequest.shutdown();
+      if (runtimeCancellationController && !runtimeCancellationController.signal?.aborted) {
+        const reason = Object.assign(new Error('Portal runtime shutdown cancelled in-flight OpenAPI executors'), {
+          code: 'BI_RUNTIME_SHUTDOWN',
+        });
+        runtimeCancellationController.abort(reason);
+      }
+      liveAccountingRefreshStop();
+      if (biCoreWarmupWatcher) clearInterval(biCoreWarmupWatcher);
+      if (ownerKnowledgeReconcileTimer) clearInterval(ownerKnowledgeReconcileTimer);
+      liveUpdateBridge?.closeSseClients?.();
+    },
+    stopWorkers: async () => {
+      let startupFailure = null;
+      try {
+        await waitForStartup?.();
+      } catch (error) {
+        startupFailure = error;
+      }
+      const results = await Promise.allSettled([
+        linkOpsJobWorker?.stop(),
+        webhookTaskReconciler?.stop(),
+        liveUpdateBridge?.stop?.(),
+        liveAccountingRefreshDrain?.(),
+      ]);
+      const rejected = results.filter(result => result.status === 'rejected');
+      if (startupFailure || rejected.length) {
+        const startupDetail = startupFailure
+          ? '; startup phase failed: ' + String(startupFailure?.message || startupFailure)
+          : '';
+        throw new Error(String(rejected.length) + ' worker/bridge stop operation(s) failed' + startupDetail);
+      }
+    },
+    closeStores: async () => {
+      const results = await Promise.allSettled([
+        linkOpsStoreGateway?.close?.(),
+        sheinWebhookRepository?.close?.(),
+        biPortalCoreSnapshotCache?.shutdown?.(),
+      ]);
+      const rejected = results.filter(result => result.status === 'rejected');
+      if (rejected.length) throw new Error(`${rejected.length} store close operation(s) failed`);
+    },
+  };
+}
+
+/**
+ * Minimal, fail-closed runtime for deterministic BI reads and signed bundle
+ * distribution.  This deliberately does not construct any Portal worker,
+ * webhook repository, live bridge, generator, warmup watcher or reconciliation
+ * timer.  Domain reads reuse the same authentication, query loader and release
+ * stores as the full Portal; only the HTTP orchestration is isolated.
+ */
+async function runQuerySurface(args) {
+  const root = path.resolve(args.dir);
+  const authUsers = await loadPortalUsers(args);
+  if (authUsers.length === 0) {
+    throw new Error(`BI query runtime requires at least one user from ${args.authFile}, ${args.htpasswdFile}, or infra/metabase/.admin.local.json`);
+  }
+  const sessionSecret = await loadBiSessionSecret(args.sessionSecretFile);
+  const loginRateLimiter = createLoginRateLimiter();
+  const linkOpsStoreGateway = createConfiguredLinkOpsStoreGateway({
+    env: process.env,
+    rootDir: ROOT,
+    taskFile: args.linkOpsTaskFile,
+    sessionFile: args.linkOpsChatFile,
+    actionFile: args.stateFile,
+    runtimeFile: args.linkOpsRuntimeFile,
+  });
+  const ownerKnowledgeService = createOwnerKnowledgeService({
+    repository: linkOpsStoreGateway.repository,
+    authorityId: process.env.SHEIN_OWNER_KNOWLEDGE_PRINCIPAL || 'dushengyi',
+  });
+  const sideEffectsStarted = Object.freeze([]);
+  // A current production profit shard is about 100 MB before JSON parsing and
+  // response serialization.  Keep those heap-heavy reads strictly serial so
+  // two otherwise valid CLI requests cannot OOM this independent runtime.
+  // Lightweight auth, health and signed-bundle routes remain available while
+  // the query lane is busy.
+  const configuredMaxConcurrent = Number(process.env.SHEIN_BI_QUERY_MAX_CONCURRENT || 1);
+  if (configuredMaxConcurrent !== 1) {
+    throw new Error('SHEIN_BI_QUERY_MAX_CONCURRENT must be exactly 1 for the bounded query runtime');
+  }
+  const maxConcurrent = configuredMaxConcurrent;
+  const configuredMaxQueued = Number(process.env.SHEIN_BI_QUERY_MAX_QUEUED || 3);
+  const maxQueued = Number.isInteger(configuredMaxQueued)
+    ? Math.max(0, Math.min(16, configuredMaxQueued))
+    : 3;
+  // Absolute per-request lifetime for the serial lane: queue wait AND work
+  // execution combined. On deadline or client disconnect the client response
+  // ends immediately, but the execution slot stays held until the lane work
+  // settles; a work that never settles trips the bounded grace window below
+  // and fail-fasts this process so systemd Restart=always recovers it. The
+  // slot is never released to a second query while the first work runs.
+  const configuredQueryTimeoutMs = Number(process.env.SHEIN_BI_QUERY_REQUEST_TIMEOUT_MS || 120_000);
+  const queryTimeoutMs = Number.isFinite(configuredQueryTimeoutMs)
+    ? Math.max(1_000, Math.min(600_000, Math.trunc(configuredQueryTimeoutMs)))
+    : 120_000;
+  // Bounded grace window after a deadline/disconnect cancellation while the
+  // lane work is still running. The client response may end immediately, but
+  // the execution slot is NOT released until the work settles; a work that
+  // never settles trips this window and fail-fasts the whole query process so
+  // systemd Restart=always recovers it. Releasing the slot earlier would let
+  // a second query overlap the still-running first work and break the serial
+  // heap-heavy read invariant. Default 30s keeps deadline(120s)+grace(30s)
+  // inside the nginx 180s proxy_read_timeout for /api/bi/query-data.
+  const configuredQueryGraceMs = Number(process.env.SHEIN_BI_QUERY_GRACE_MS || 30_000);
+  const queryGraceMs = Number.isFinite(configuredQueryGraceMs)
+    ? Math.max(1_000, Math.min(120_000, Math.trunc(configuredQueryGraceMs)))
+    : 30_000;
+  const QUERY_LANE_FAILFAST_EXIT_CODE = 70;
+  // Deterministic, env-gated test control: any question containing one of
+  // these markers is delayed for SHEIN_BI_QUERY_TEST_HANG_MS before doing
+  // real work. Production never sets these variables; tests use them to prove
+  // the lane deadline and the client-disconnect path deterministically.
+  const queryTestHangMarkers = String(process.env.SHEIN_BI_QUERY_TEST_HANG_FOR || '').split(',').map(value => String(value || '').trim()).filter(Boolean);
+  const queryTestNeverMarkers = String(process.env.SHEIN_BI_QUERY_TEST_NEVER_FOR || '').split(',').map(value => String(value || '').trim()).filter(Boolean);
+  const queryTestHangMs = Math.max(0, Number(process.env.SHEIN_BI_QUERY_TEST_HANG_MS || 60_000) || 0);
+  const delayAbortable = (ms, signal) => new Promise(resolve => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+    if (!signal) return;
+    signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, {once: true});
+  });
+  // Bounded serial lane: the per-lane saturation/deadline logic below remains
+  // the primary backpressure (429) and timeout (503) control, so the queue is
+  // sized to never reject before the lane does while still bounding the
+  // promise tail instead of growing without limit.
+  const enqueueQuery = createSerialMutationQueue({
+    capacity: maxConcurrent + maxQueued,
+    deadlineMs: queryTimeoutMs + 5_000,
+  });
+  let activeQueries = 0;
+  let queuedQueries = 0;
+  let rejectedQueries = 0;
+  let timedOutQueries = 0;
+  let clientCancelledQueries = 0;
+
+  const waitForResponseCompletion = res => {
+    if (res.writableFinished || res.destroyed) return Promise.resolve();
+    return new Promise(resolve => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        res.off('finish', done);
+        res.off('close', done);
+        res.off('error', done);
+        resolve();
+      };
+      res.once('finish', done);
+      res.once('close', done);
+      res.once('error', done);
+    });
+  };
+
+  const runInQueryLane = async (req, res, work) => {
+    if (activeQueries + queuedQueries >= maxConcurrent + maxQueued) {
+      rejectedQueries += 1;
+      return sendJson(res, 429, {
+        ok: false,
+        code: 'QUERY_SURFACE_BUSY',
+        error: 'BI query runtime is busy; retry shortly',
+      }, {'Cache-Control': 'no-store', 'Retry-After': '2'});
+    }
+    queuedQueries += 1;
+    const controller = new AbortController();
+    let state = 'queued'; // queued | running | done | timed-out | client-gone
+    let timer = null;
+    let graceTimer = null;
+    // Strict single execution slot: activeQueries is decremented ONLY when the
+    // work promise settles (or the whole process fail-fasts). A deadline or
+    // disconnect may end the client response immediately, but it must never
+    // release the slot while the first work is still executing, otherwise a
+    // second query would overlap the first heap-heavy JSON read.
+    const startGraceWindow = () => {
+      if (graceTimer) return;
+      graceTimer = setTimeout(failFastQueryProcess, queryGraceMs);
+      graceTimer.unref?.();
+    };
+    const failFastQueryProcess = () => {
+      // The work ignored AbortSignal for the whole bounded grace window. The
+      // process must not keep serving: releasing the slot would overlap the
+      // orphan work with the next query, and keeping the slot would wedge the
+      // queue forever. Exit now; systemd Restart=always restarts the runtime.
+      const message = `[bi-query] lane work did not settle within ${queryGraceMs}ms after cancellation; ` +
+        `fail-fast exit ${QUERY_LANE_FAILFAST_EXIT_CODE} so systemd Restart=always recovers; ` +
+        `the execution slot is never released to a second query while the first work is still running`;
+      try { fssync.writeSync(2, message + '\n'); } catch { /* stderr may already be gone */ }
+      process.exit(QUERY_LANE_FAILFAST_EXIT_CODE);
+    };
+    const onClientGone = () => {
+      if (state === 'done' || state === 'timed-out' || state === 'client-gone') return;
+      const previous = state;
+      state = 'client-gone';
+      clientCancelledQueries += 1;
+      controller.abort();
+      if (previous === 'queued') {
+        // Cancelled before execution started: no overlap is possible, so the
+        // queued slot is released immediately and the queued task short-
+        // circuits when it reaches the head of the queue.
+        queuedQueries -= 1;
+        return;
+      }
+      // Running: the client is gone, but the slot stays held until the work
+      // settles; a never-settling work trips the bounded grace fail-fast.
+      startGraceWindow();
+    };
+    const onTimeout = () => {
+      if (state === 'done' || state === 'timed-out' || state === 'client-gone') return;
+      const previous = state;
+      state = 'timed-out';
+      timedOutQueries += 1;
+      controller.abort();
+      if (previous === 'queued') {
+        queuedQueries -= 1;
+        if (!res.destroyed && !res.headersSent) {
+          sendJson(res, 503, {
+            ok: false,
+            code: 'BI_QUERY_TIMEOUT',
+            error: 'BI query deadline exceeded; the request was cancelled before it started',
+          }, {'Cache-Control': 'no-store', 'Retry-After': '5'});
+        }
+        return;
+      }
+      // The client response ends now, but the execution slot stays held until
+      // the work settles; a never-settling work trips the bounded grace
+      // fail-fast instead of ever overlapping the next query.
+      if (!res.destroyed && !res.headersSent) {
+        sendJson(res, 503, {
+          ok: false,
+          code: 'BI_QUERY_TIMEOUT',
+          error: 'BI query deadline exceeded; the request was cancelled while the lane work finishes',
+        }, {'Cache-Control': 'no-store', 'Retry-After': '5'});
+      }
+      startGraceWindow();
+    };
+    const onResponseClose = () => {
+      if (!res.writableFinished) onClientGone();
+    };
+    req.once('aborted', onClientGone);
+    res.once('close', onResponseClose);
+    timer = setTimeout(onTimeout, queryTimeoutMs);
+    timer.unref?.();
+    return enqueueQuery(async () => {
+      if (state === 'timed-out' || state === 'client-gone') {
+        // Cancelled while queued: the slot was already released and the work
+        // never started; nothing else to do.
+        return;
+      }
+      state = 'running';
+      queuedQueries -= 1;
+      activeQueries += 1;
+      try {
+        await Promise.resolve().then(() => work(controller.signal));
+      } catch (error) {
+        // work() reports its own failures; the slot must still release once
+        // the work has settled.
+      } finally {
+        // The slot is released here and only here: the work has settled.
+        // Cooperative work settles promptly after AbortSignal; non-cooperative
+        // never-work already triggered failFastQueryProcess via the grace
+        // window, so this code no longer runs in that case.
+        clearTimeout(timer);
+        clearTimeout(graceTimer);
+        req.off('aborted', onClientGone);
+        res.off('close', onResponseClose);
+        if (state === 'running') state = 'done';
+        activeQueries -= 1;
+      }
+    }).catch(queueError => {
+      // The queue refused the item before it started (shutdown cancellation,
+      // saturation, or queue deadline defense). Release the lane slot that was
+      // reserved while queued, stop the lane timers/listeners, and map the
+      // bounded-queue rejection to the same 429/503 semantics the lane already
+      // publishes for its own saturation and deadline paths.
+      const mapped = queueRejectionHttpDetails(queueError, 'query');
+      if (!mapped) throw queueError;
+      clearTimeout(timer);
+      clearTimeout(graceTimer);
+      req.off('aborted', onClientGone);
+      res.off('close', onResponseClose);
+      if (state === 'queued') {
+        state = 'done';
+        queuedQueries -= 1;
+      }
+      if (!res.destroyed && !res.headersSent) {
+        sendJson(res, mapped.status, {ok: false, code: mapped.code, error: mapped.message}, mapped.headers);
+      }
+      return undefined;
+    });
+  };
+
+  const handleRequest = async (req, res) => {
+    try {
+      const url = new URL(req.url || '/', 'http://localhost');
+      const expectedMethod = QUERY_SURFACE_METHODS.get(url.pathname);
+      if (!expectedMethod) {
+        return sendJson(res, 404, {ok: false, code: 'QUERY_SURFACE_ROUTE_DENIED', error: 'Not found'}, {'Cache-Control': 'no-store'});
+      }
+      if (req.method !== expectedMethod) {
+        return sendJson(res, 405, {ok: false, code: 'QUERY_SURFACE_METHOD_DENIED', error: 'Method not allowed'}, {
+          'Allow': expectedMethod,
+          'Cache-Control': 'no-store',
+        });
+      }
+
+      const trustedHealthProbe = url.pathname === '/api/health' && isTrustedInternalRequest(req);
+      const authenticatedActor = authenticateRequest(req, authUsers, sessionSecret);
+      const actor = authenticatedActor || (trustedHealthProbe ? internalActor() : null);
+
+      if (url.pathname === '/api/login') {
+        if (!mutationOriginAllowed(req, {trustedInternal: isTrustedInternalRequest(req)})) {
+          return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'}, {'Cache-Control': 'no-store'});
+        }
+        const contentType = String(req.headers['content-type'] || '');
+        let body;
+        if (contentType.includes('application/json')) {
+          body = await readBodyJson(req, 32 * 1024).catch(error => ({_error: error?.message || String(error)}));
+        } else {
+          const raw = await readBodyText(req, 32 * 1024).catch(error => `__ERROR__${error?.message || String(error)}`);
+          body = raw.startsWith('__ERROR__') ? {_error: raw.slice(9)} : Object.fromEntries(new URLSearchParams(raw));
+        }
+        if (body._error) return sendJson(res, 400, {ok: false, error: body._error}, {'Cache-Control': 'no-store'});
+        const username = String(body.username || '').trim();
+        const password = String(body.password || '');
+        const rateKey = loginRateKey(req, username);
+        const rate = loginRateLimiter.inspect(rateKey);
+        if (!rate.allowed) {
+          return sendJson(res, 429, {ok: false, error: '登录尝试过多，请稍后重试'}, {'Retry-After': String(rate.retryAfterSec), 'Cache-Control': 'no-store'});
+        }
+        const user = authUsers.find(candidate => candidate.username.toLowerCase() === username.toLowerCase());
+        if (!verifyPassword(user, password)) {
+          const failedRate = loginRateLimiter.fail(rateKey);
+          return sendJson(res, failedRate.allowed ? 401 : 429, {
+            ok: false,
+            error: failedRate.allowed ? '账号或密码不正确' : '登录尝试过多，请稍后重试',
+          }, failedRate.allowed ? {'Cache-Control': 'no-store'} : {'Retry-After': String(failedRate.retryAfterSec), 'Cache-Control': 'no-store'});
+        }
+        loginRateLimiter.success(rateKey);
+        const loginActor = actorFromUser(user);
+        const requestedClient = String(body.client || '').trim().toLowerCase();
+        const partnerCliLogin = requestedClient === 'partner-cli'
+          || /^shein-bi-ops-cli\//i.test(String(req.headers['user-agent'] || '').trim());
+        const sessionClient = partnerCliLogin ? 'partner-cli' : 'portal';
+        const sessionTtlDays = partnerCliLogin ? args.partnerCliSessionTtlDays : args.sessionTtlDays;
+        const issuedAt = Date.now();
+        const expiresAtMs = issuedAt + sessionTtlDays * 86400 * 1000;
+        const token = signSessionPayload({
+          username: user.username,
+          client: sessionClient,
+          iat: issuedAt,
+          exp: expiresAtMs,
+        }, sessionSecret);
+        writeResponseHead(res, 200, {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': sessionCookie(token, req, sessionTtlDays * 86400),
+        });
+        res.end(JSON.stringify({
+          ok: true,
+          user: publicActor(loginActor),
+          session: {
+            client: sessionClient,
+            ttlDays: sessionTtlDays,
+            issuedAt: new Date(issuedAt).toISOString(),
+            expiresAt: new Date(expiresAtMs).toISOString(),
+          },
+        }));
+        return;
+      }
+
+      if (!actor) return unauthorized(res, url.pathname);
+
+      if (url.pathname === '/api/health') {
+        const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
+        const partnerCliRelease = await partnerCliReleaseStore.currentReleaseSummary();
+        const ready = partnerCliRelease.ready === true;
+        return sendJson(res, ready ? 200 : 503, {
+          ok: ready,
+          service: 'shein-bi-query',
+          surface: 'query',
+          time: new Date().toISOString(),
+          host: args.host,
+          port: args.port,
+          url: `http://${urlHost}:${args.port}/api/health`,
+          authRequired: true,
+          allowGenerate: false,
+          allowGenerateSections: false,
+          worker: null,
+          workers: [],
+          concurrency: {
+            active: activeQueries,
+            queued: queuedQueries,
+            max: maxConcurrent,
+            maxQueued,
+            rejected: rejectedQueries,
+            timedOut: timedOutQueries,
+            clientCancelled: clientCancelledQueries,
+            deadlineMs: queryTimeoutMs,
+            graceMs: queryGraceMs,
+          },
+          sideEffectsStarted,
+          partnerCliRelease,
+          runtime: httpLifecycle.status(),
+          mutationQueue: enqueueQuery.status(),
+        }, {'Cache-Control': 'no-store'});
+      }
+      if (url.pathname === '/api/logout') {
+        if (!mutationOriginAllowed(req, {trustedInternal: isTrustedInternalRequest(req)})) {
+          return sendJson(res, 403, {ok: false, error: 'Cross-origin state-changing request denied'}, {'Cache-Control': 'no-store'});
+        }
+        writeResponseHead(res, 200, {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': clearSessionCookie(req),
+        });
+        res.end(JSON.stringify({ok: true}));
+        return;
+      }
+      if (url.pathname === '/api/auth/me') {
+        return sendJson(res, 200, {ok: true, user: publicActor(actor)}, {'Cache-Control': 'private, no-store'});
+      }
+      if (url.pathname === '/api/bi/query-data') {
+        return runInQueryLane(req, res, async signal => {
+          const responseCompleted = waitForResponseCompletion(res);
+          const sendOpen = (status, value, headers = {}) => {
+            if (req.destroyed || res.destroyed || res.headersSent) return;
+            sendJson(res, status, value, headers);
+          };
+          const question = String(url.searchParams.get('q') || url.searchParams.get('question') || '').normalize('NFKC').trim().slice(0, 4_000);
+          if (!question) {
+            sendOpen(400, {ok: false, code: 'BI_QUERY_QUESTION_REQUIRED', error: 'query-data requires q'}, {'Cache-Control': 'no-store'});
+            await responseCompleted;
+            return;
+          }
+          if (queryTestNeverMarkers.some(marker => question.includes(marker))) {
+            // Test-only non-cooperative work: unlike delayAbortable this
+            // promise intentionally ignores AbortSignal, proving that the
+            // lane slot is never released to a second query while the work is
+            // still running and that the bounded grace window fail-fasts the
+            // process for systemd Restart=always to recover.
+            await new Promise(() => {});
+          }
+          if (queryTestHangMarkers.some(marker => question.includes(marker))) {
+            await delayAbortable(queryTestHangMs, signal);
+            if (signal?.aborted) {
+              // Deadline or client disconnect already ended the client
+              // response; the lane slot stays held until this work settles,
+              // which is exactly now.
+              await responseCompleted;
+              return;
+            }
+          }
+          const sections = [
+            ...url.searchParams.getAll('section'),
+            ...String(url.searchParams.get('sections') || '').split(/[,\s，、]+/),
+          ].map(value => String(value || '').trim()).filter(Boolean);
+          const stores = [
+            ...url.searchParams.getAll('store'),
+            ...String(url.searchParams.get('stores') || '').split(/[,\s，、]+/),
+          ].map(value => String(value || '').trim()).filter(Boolean);
+          try {
+            const result = await loadDirectBiQuery(args, root, actor, question, {sections, stores, allowGenerate: false, signal});
+            if (!result.ok) {
+              const {data: _incompleteData, ...diagnostic} = result;
+              sendOpen(503, {...diagnostic, ok: false, code: 'BI_QUERY_DATA_INCOMPLETE', error: '所需 BI 数据分区未完整加载，未返回不完整结果'}, {'Cache-Control': 'private, no-store'});
+            } else {
+              if (!req.destroyed && !res.destroyed && !res.headersSent) {
+                await sendLargeJson(req, res, 200, result, {'Cache-Control': 'private, no-store'}, {signal});
+              }
+            }
+          } catch (error) {
+            if (signal?.aborted) {
+              // Timeout/disconnect already answered or the socket is gone.
+              await responseCompleted;
+              return;
+            }
+            if (res.headersSent || res.destroyed) {
+              // A mid-stream serialization or pipeline failure must never
+              // hand a second response to a socket that already started.
+              // Terminating it keeps the failure visible to the client
+              // instead of faking success with a truncated body.
+              if (!res.destroyed && !res.writableFinished) res.destroy();
+              await responseCompleted;
+              return;
+            }
+            const forbidden = String(error?.code || '') === 'BI_QUERY_STORE_FORBIDDEN';
+            const invalid = ['BI_QUERY_SECTION_UNSUPPORTED', 'BI_QUERY_TOO_MANY_SECTIONS'].includes(String(error?.code || ''));
+            sendOpen(forbidden ? 403 : invalid ? 400 : 503, {
+              ok: false,
+              code: String(error?.code || 'BI_QUERY_FAILED'),
+              error: forbidden || invalid ? String(error?.message || error) : 'BI 数据暂时不可用',
+            }, {'Cache-Control': 'private, no-store'});
+          }
+          await responseCompleted;
+        });
+      }
+      if (url.pathname === '/api/partner-cli/package') {
+        try {
+          const release = await partnerCliReleaseStore.getCurrentRelease();
+          const packageFile = release.package;
+          if (String(req.headers['if-none-match'] || '') === packageFile.etag) {
+            writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: packageFile.etag});
+            return res.end();
+          }
+          writeResponseHead(res, 200, {
+            'Cache-Control': 'private, no-cache, must-revalidate',
+            'Content-Type': 'application/zip',
+            'Content-Disposition': `attachment; filename="${packageFile.fileName}"`,
+            'Content-Length': String(packageFile.size),
+            'X-Checksum-SHA256': packageFile.sha256,
+            ETag: packageFile.etag,
+          });
+          res.end(packageFile.bytes);
+          return;
+        } catch (error) {
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
+        }
+      }
+      if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
+        try {
+          const release = await partnerCliReleaseStore.getCurrentRelease();
+          const etag = `"pcli-${release.manifest.bundleSha256}"`;
+          if (String(req.headers['if-none-match'] || '') === etag) {
+            writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+            return res.end();
+          }
+          const data = url.pathname.endsWith('/bundle') ? release.bundle : release.manifest;
+          return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+        } catch (error) {
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
+        }
+      }
+      if (url.pathname === '/api/owner-knowledge/manifest') {
+        const manifest = await ownerKnowledgeService.distributionManifest();
+        if (!manifest.ready) return sendJson(res, 503, {ok: false, error: '负责人规则包尚未完成发布', data: manifest}, {'Cache-Control': 'no-store'});
+        const data = {
+          schemaVersion: 1,
+          authorityId: ownerKnowledgeService.authorityId,
+          ...manifest,
+          cli: {
+            minimumVersion: process.env.SHEIN_BI_OPS_CLI_MIN_VERSION || BI_OPS_CLI_VERSION,
+            recommendedVersion: process.env.SHEIN_BI_OPS_CLI_RECOMMENDED_VERSION || BI_OPS_CLI_VERSION,
+          },
+        };
+        const etag = `"okb-${crypto.createHash('sha256').update(`${data.fingerprint}|${data.activeFingerprint}|${data.sourceCommit}|${data.current}`).digest('hex').slice(0, 32)}"`;
+        if (String(req.headers['if-none-match'] || '') === etag) {
+          writeResponseHead(res, 304, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+          return res.end();
+        }
+        return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+      }
+      if (url.pathname === '/api/owner-knowledge/bundle') {
+        const bundle = await ownerKnowledgeService.distributionBundle();
+        if (!bundle.manifest?.ready) return sendJson(res, 503, {ok: false, error: '负责人规则包尚未完成发布'}, {'Cache-Control': 'no-store'});
+        const data = {...bundle, manifest: {schemaVersion: 1, authorityId: ownerKnowledgeService.authorityId, ...bundle.manifest}};
+        const etag = `"okb-${crypto.createHash('sha256').update(`${bundle.fingerprint}|${bundle.manifest.sourceCommit}`).digest('hex').slice(0, 32)}"`;
+        return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
+      }
+      return sendJson(res, 404, {ok: false, code: 'QUERY_SURFACE_ROUTE_DENIED', error: 'Not found'}, {'Cache-Control': 'no-store'});
+    } catch (error) {
+      console.error(`query surface handleRequest error: ${error?.stack || error}`);
+      return sendJson(res, 500, {ok: false, error: 'Server error'}, {'Cache-Control': 'no-store'});
+    }
+  };
+
+  const server = http.createServer();
+  const httpLifecycle = createHttpRuntimeLifecycle(server);
+  server.on('request', (req, res) => {
+    httpLifecycle.dispatchRequest(req, res, handleRequest);
+  });
+
+  const queryShutdownTimeoutMs = Math.max(
+    100,
+    Math.min(30_000, Number(process.env.SHEIN_BI_QUERY_SHUTDOWN_TIMEOUT_MS || 5_000) || 5_000),
+  );
+  let shutdownPromise = null;
+  const shutdown = signal => {
+    if (shutdownPromise) return shutdownPromise;
+    console.log(JSON.stringify({ok: true, event: 'shutdown', surface: 'query', signal, time: new Date().toISOString()}));
+    // Cancels every queued-but-not-started query lane item (503) and refuses
+    // new admissions; an already-started query drain ends exactly once.
+    enqueueQuery.shutdown();
+    shutdownPromise = shutdownHttpRuntime({
+      lifecycle: httpLifecycle,
+      timeoutMs: queryShutdownTimeoutMs,
+      stopWorkers: async () => {},
+      closeStores: () => linkOpsStoreGateway.close(),
+    }).then(result => {
+      console.log(JSON.stringify({
+        ok: result.ok,
+        event: 'shutdown-complete',
+        surface: 'query',
+        signal,
+        forcedConnections: Boolean(result.drain?.forced),
+        wallMs: result.wallMs,
+        drain: result.drain,
+        workers: result.workers,
+        stores: result.stores,
+      }));
+      process.exit(result.ok ? 0 : 1);
+    }, error => {
+      console.error(JSON.stringify({ok: false, event: 'shutdown-failed', surface: 'query', signal, error: error?.message || String(error)}));
+      process.exit(1);
+    });
+    return shutdownPromise;
+  };
+  // Signals are registered before listen so a shutdown signal arriving during
+  // startup goes through the same unified shutdown instead of the process
+  // dying with a listening-but-half-started surface.
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(args.port, args.host, resolve);
+    });
+  } catch (startupError) {
+    console.log(JSON.stringify({
+      ok: false,
+      event: 'startup-failure',
+      surface: 'query',
+      phase: 'listen',
+      error: String(startupError?.message || startupError),
+    }));
+    try {
+      enqueueQuery.shutdown();
+      await shutdownHttpRuntime({
+        lifecycle: httpLifecycle,
+        timeoutMs: queryShutdownTimeoutMs,
+        stopWorkers: async () => {},
+        closeStores: () => linkOpsStoreGateway.close(),
+      });
+    } catch (cleanupError) {
+      console.error(JSON.stringify({ok: false, event: 'startup-cleanup-failed', surface: 'query', error: String(cleanupError?.message || cleanupError)}));
+    }
+    process.exit(1);
+  }
+  // The surface is ready: atomically open admission. Before this point the
+  // lifecycle refused traffic by default (BI_RUNTIME_STARTING / 503).
+  httpLifecycle.openAdmission();
+
+  const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
+  console.log(JSON.stringify({
+    ok: true,
+    service: 'shein-bi-query',
+    surface: 'query',
+    url: `http://${urlHost}:${args.port}/api/health`,
+    host: args.host,
+    port: args.port,
+    root,
+    authRequired: true,
+    allowGenerate: false,
+    maxConcurrent,
+    maxQueued,
+    sideEffectsStarted,
+  }));
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.surface === 'query') {
+    await runQuerySurface(args);
+    return;
+  }
+  const openApiExecutorAbortController = new AbortController();
+  Object.defineProperty(args, 'runtimeCancellationSignal', {
+    value: openApiExecutorAbortController.signal,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
   const linkOpsStoreGateway = createConfiguredLinkOpsStoreGateway({
     env: process.env,
     rootDir: ROOT,
@@ -13405,15 +18548,42 @@ async function main() {
   if (!fssync.existsSync(indexFile)) {
     throw new Error(`BI portal not found: ${indexFile}. Run scripts/run_bi_daily_pipeline.ps1 first.`);
   }
+  const biPortalCoreSnapshotCache = createBiPortalCoreSnapshotCache({
+    root,
+    ...(String(process.env.SHEIN_BI_PORTAL_SNAPSHOT_DIR || '').trim()
+      ? {snapshotDir: String(process.env.SHEIN_BI_PORTAL_SNAPSHOT_DIR).trim()}
+      : {}),
+  });
   const authRequired = !args.noAuth && !args.readOnly;
   const authUsers = authRequired ? await loadPortalUsers(args) : [];
   if (authRequired && authUsers.length === 0) {
     throw new Error(`BI portal requires at least one user from ${args.authFile}, ${args.htpasswdFile}, or infra/metabase/.admin.local.json`);
   }
-  const sessionSecret = authRequired ? await ensureSessionSecret(args.sessionSecretFile) : '';
+  const sessionSecret = authRequired ? await loadBiSessionSecret(args.sessionSecretFile) : '';
   const allowGenerateSections = !(args.readOnly || (args.host === '0.0.0.0' && !authRequired));
   const loginRateLimiter = createLoginRateLimiter();
-  const enqueueMutationRequest = createSerialMutationQueue();
+  // Bounded serial mutation queue: capacity bounds queued-but-not-started
+  // mutation handlers, every queued item has a start deadline, and shutdown
+  // cancels queued work (503) while an already-started write drain ends
+  // exactly once. Saturation and queue-deadline rejections map to 429/503 at
+  // the request surface; an admitted mutation is never automatically retried.
+  const mutationQueueCapacity = Number(process.env.SHEIN_BI_MUTATION_QUEUE_CAPACITY);
+  const mutationQueueDeadlineMs = Number(process.env.SHEIN_BI_MUTATION_QUEUE_DEADLINE_MS);
+  const enqueueMutationRequest = createSerialMutationQueue({
+    capacity: Number.isFinite(mutationQueueCapacity) && mutationQueueCapacity > 0 ? Math.floor(mutationQueueCapacity) : 256,
+    deadlineMs: Number.isFinite(mutationQueueDeadlineMs) && mutationQueueDeadlineMs > 0 ? Math.floor(mutationQueueDeadlineMs) : 30_000,
+  });
+  // Env-gated deterministic test control (production never sets these): when a
+  // mutation request URL contains one of these markers, its admitted task holds
+  // for SHEIN_BI_MUTATION_TEST_HOLD_MS before the handler runs so tests can
+  // prove bounded capacity, queue deadline and shutdown cancellation without
+  // racing a real write.
+  const mutationTestHoldMarkers = String(process.env.SHEIN_BI_MUTATION_TEST_HOLD_FOR || '').split(',').map(value => String(value || '').trim()).filter(Boolean);
+  const mutationTestHoldMsRaw = Number(process.env.SHEIN_BI_MUTATION_TEST_HOLD_MS);
+  const mutationTestHoldMs = Number.isFinite(mutationTestHoldMsRaw) && mutationTestHoldMsRaw > 0 ? Math.floor(mutationTestHoldMsRaw) : 0;
+  const shouldHoldMutationQueueRequest = urlString => mutationTestHoldMs > 0
+    && mutationTestHoldMarkers.length > 0
+    && mutationTestHoldMarkers.some(marker => String(urlString || '').includes(marker));
   const webhookTaskReconciler = sheinWebhookRepository && linkOpsStoreGateway.mode === 'postgres'
     ? createSheinWebhookTaskReconciler({
         webhookRepository: sheinWebhookRepository,
@@ -13431,47 +18601,97 @@ async function main() {
     liveAccountingDebounceMs,
     Number(process.env.SHEIN_BI_LIVE_ACCOUNTING_RETRY_MS || 5 * 60_000),
   );
+  // Webhook projection remains immediate. Canonical profit accounting gets one
+  // lightweight stale check per bounded interval, independent of whether a
+  // browser stays open, so continuous orders cannot advance the heavy queue on
+  // every event and an idle browser cannot suppress eventual accounting.
+  const liveCanonicalAccountingCatchupIntervalMs = Math.max(
+    60_000,
+    Number(process.env.SHEIN_BI_CANONICAL_ACCOUNTING_CATCHUP_MS || 15 * 60_000) || 15 * 60_000,
+  );
   let liveAccountingRefreshTimer = null;
   let liveAccountingRefreshRunning = false;
   let liveAccountingRefreshPendingEvent = null;
   let liveAccountingRefreshStopped = false;
+  let liveCanonicalAccountingCatchupTimer = null;
+  let liveCanonicalAccountingCatchupRunning = false;
+  let liveCanonicalAccountingCatchupNeeded = false;
+  let liveCanonicalAccountingCatchupRevision = 0;
+  let liveCanonicalAccountingCatchupPromise = null;
   let biLiveUpdateBridge;
+
+  const scheduleNextCanonicalAccountingCatchup = () => {
+    if (liveAccountingRefreshStopped || liveCanonicalAccountingCatchupTimer) return;
+    liveCanonicalAccountingCatchupTimer = setTimeout(
+      runCanonicalAccountingCatchup,
+      nextBiCanonicalAccountingCatchupDelay(Date.now(), liveCanonicalAccountingCatchupIntervalMs),
+    );
+    liveCanonicalAccountingCatchupTimer.unref?.();
+  };
+
+  const runCanonicalAccountingCatchup = async () => {
+    liveCanonicalAccountingCatchupTimer = null;
+    if (liveAccountingRefreshStopped) return;
+    if (!liveCanonicalAccountingCatchupNeeded || liveCanonicalAccountingCatchupRunning) {
+      scheduleNextCanonicalAccountingCatchup();
+      return;
+    }
+    const requestedRevision = liveCanonicalAccountingCatchupRevision;
+    liveCanonicalAccountingCatchupRunning = true;
+    const operation = executeBiCanonicalAccountingCatchupAttempt({
+      allowGenerateSections,
+      readCoreMeta: () => readBiPortalCoreMeta(root),
+      readAccountingState: generatedAt => readProfitAccountingState(args, generatedAt, {forceFresh: true}),
+      persistCatchup: (accountingState, generatedAt) => persistHomepageAccountingCatchupOnce(accountingState, generatedAt),
+      shouldContinue: () => !liveAccountingRefreshStopped,
+    });
+    liveCanonicalAccountingCatchupPromise = operation;
+    try {
+      await operation;
+      if (requestedRevision === liveCanonicalAccountingCatchupRevision) {
+        liveCanonicalAccountingCatchupNeeded = false;
+      }
+    } catch (error) {
+      console.error(`[bi-live-accounting] periodic canonical catch-up failed: ${String(error?.message || error)}`);
+    } finally {
+      if (liveCanonicalAccountingCatchupPromise === operation) liveCanonicalAccountingCatchupPromise = null;
+      liveCanonicalAccountingCatchupRunning = false;
+      scheduleNextCanonicalAccountingCatchup();
+    }
+  };
 
   const runLiveAccountingRefresh = async () => {
     liveAccountingRefreshTimer = null;
     if (liveAccountingRefreshStopped || liveAccountingRefreshRunning || !liveAccountingRefreshPendingEvent) return;
-    const sourceEvent = liveAccountingRefreshPendingEvent;
+    // A 23:59 event may cross the business-date boundary during debounce. The
+    // execution-time recheck upgrades it to sticky historical scope before any
+    // section plan is selected; liveSalesToday has already advanced to the new
+    // current_date and cannot represent the prior-day mutation by itself.
+    const sourceEvent = reevaluateBiLiveAccountingRefreshEvent(
+      liveAccountingRefreshPendingEvent,
+      new Date(),
+    );
     liveAccountingRefreshPendingEvent = null;
     liveAccountingRefreshRunning = true;
     let liveProjectionRefreshed = false;
     try {
-      const meta = await readBiPortalCoreMeta(root);
-      const generatedAt = String(meta?.generatedAt || '');
-      if (allowGenerateSections && generatedAt) {
-        await generateBiSection(args, root, 'liveSalesToday', generatedAt);
-        clearBiSectionRefreshFailure(root, 'liveSalesToday');
-      }
-      liveProjectionRefreshed = true;
-      // Publish current sales first. A normal current-day order must never wait
-      // for moving-average cost or historical profit rebuilds before becoming
-      // visible on the homepage and order center.
-      biLiveUpdateBridge?.publish({
-        ...sourceEvent,
-        occurredAt: new Date().toISOString(),
-        liveProjectionRefreshed: true,
+      const result = await executeBiLiveAccountingRefreshAttempt({
+        sourceEvent,
+        allowGenerateSections,
+        readCoreMeta: () => readBiPortalCoreMeta(root),
+        generateLiveProjection: generatedAt => generateBiSection(args, root, 'liveSalesToday', generatedAt),
+        clearLiveProjectionFailure: () => clearBiSectionRefreshFailure(root, 'liveSalesToday'),
+        persistAccountingPlan: async (accountingQueue, generatedAt, options) => {
+          await persistHostLockedBiSectionPlan(accountingQueue, generatedAt, {
+            ...options,
+            reason: options?.reason || `live-accounting-${sourceEvent?.kind || 'event'}`,
+          });
+        },
+        publish: event => biLiveUpdateBridge?.publish(event),
       });
-      const accountingQueue = liveAccountingQueuePlan(sourceEvent);
-      if (!accountingQueue.length) return;
-      await persistHostLockedBiSectionPlan(accountingQueue, generatedAt, {
-        reason: `live-accounting-${sourceEvent?.kind || 'event'}`,
-      });
-      biLiveUpdateBridge?.publish({
-        ...sourceEvent,
-        occurredAt: new Date().toISOString(),
-        liveProjectionRefreshed: true,
-        accountingQueued: true,
-      });
+      liveProjectionRefreshed = result.liveProjectionRefreshed;
     } catch (error) {
+      liveProjectionRefreshed = liveProjectionRefreshed || error?.liveProjectionRefreshed === true;
       recordBiSectionRefreshFailure(root, liveProjectionRefreshed ? 'profit' : 'liveSalesToday', error);
       console.error(`[bi-live-accounting] ${String(error?.message || error)}`);
       biLiveUpdateBridge?.publish({
@@ -13496,29 +18716,6 @@ async function main() {
     }
   };
 
-  const mergeLiveAccountingRefreshEvent = (current, event) => {
-    const kinds = new Set([
-      ...(Array.isArray(current?.accountingKinds) ? current.accountingKinds : []),
-      current?.kind,
-      ...(Array.isArray(event?.accountingKinds) ? event.accountingKinds : []),
-      event?.kind,
-    ].map(value => String(value || '')).filter(value => ['order', 'return'].includes(value)));
-    const businessDate = String(event?.businessDate || '').slice(0, 10);
-    const currentDate = shanghaiDateKey(event?.occurredAt || new Date());
-    const eventNeedsHistoricalRefresh = event?.kind === 'return'
-      || Boolean(businessDate && currentDate && businessDate !== currentDate);
-    return {
-      ...(current || {}),
-      ...event,
-      accountingKinds: [...kinds],
-      refreshHistoricalSections: Boolean(
-        current?.refreshHistoricalSections
-        || event?.refreshHistoricalSections
-        || eventNeedsHistoricalRefresh
-      ),
-    };
-  };
-
   const scheduleLiveAccountingRefresh = event => {
     if (
       liveAccountingRefreshStopped
@@ -13526,12 +18723,21 @@ async function main() {
       || !allowGenerateSections
       || !['order','return'].includes(String(event?.kind || ''))
     ) return;
+    if (isOrdinaryCurrentDayAccountingEvent(event)) {
+      liveCanonicalAccountingCatchupNeeded = true;
+      liveCanonicalAccountingCatchupRevision += 1;
+    }
+    // New order/return facts invalidate the short read cache immediately. The
+    // 30s TTL protects polling tabs when nothing changed; live facts never wait
+    // for TTL expiry before the next accounting decision.
+    invalidateProfitAccountingStateCache();
     // Preserve the widest invalidation scope across a burst. Otherwise a
     // current-day sale arriving after a prior-day cancellation could replace
     // its metadata and leave the historical page cache stale.
-    liveAccountingRefreshPendingEvent = mergeLiveAccountingRefreshEvent(
+    liveAccountingRefreshPendingEvent = mergeBiLiveAccountingRefreshEvent(
       liveAccountingRefreshPendingEvent,
       event,
+      new Date(),
     );
     if (liveAccountingRefreshRunning || liveAccountingRefreshTimer) return;
     liveAccountingRefreshTimer = setTimeout(runLiveAccountingRefresh, liveAccountingDebounceMs);
@@ -13543,7 +18749,14 @@ async function main() {
     liveAccountingRefreshPendingEvent = null;
     if (liveAccountingRefreshTimer) clearTimeout(liveAccountingRefreshTimer);
     liveAccountingRefreshTimer = null;
+    if (liveCanonicalAccountingCatchupTimer) clearTimeout(liveCanonicalAccountingCatchupTimer);
+    liveCanonicalAccountingCatchupTimer = null;
   };
+  const drainLiveAccountingRefresh = () => liveCanonicalAccountingCatchupPromise || Promise.resolve();
+
+  if (liveAccountingEnabled(process.env) && allowGenerateSections) {
+    scheduleNextCanonicalAccountingCatchup();
+  }
 
   biLiveUpdateBridge = createBiLiveUpdateBridge({
     onUpdate: event => {
@@ -13938,9 +19151,12 @@ async function main() {
         plannerFactsIgnored,
         advisoryOnly: existingActionTask,
       });
-      const tasks = taskStore.tasks.slice();
-      tasks[taskIndex] = updatedTask;
-      await writeLinkOpsTaskStore(args, {...taskStore, updatedAt: completedAt, tasks});
+      const persistedTask = await updateLinkOpsTaskRecord(
+        args,
+        task,
+        updatedTask,
+        String(job.actorUser || inferredLinkOpsStoreActor({tasks: [updatedTask]}) || ''),
+      );
 
       const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
       const sessionIndex = chatStore.sessions.findIndex(session => String(session?.id || '') === String(job.chatSessionId || ''));
@@ -13959,21 +19175,25 @@ async function main() {
             const answer = questions.length
               ? `结构化检查完成：${plan.summary}\n\n还需要你确认：\n${questions.map(question => `- ${question}`).join('\n')}`
               : `结构化检查完成：${plan.summary}\n\n我已把识别出的店铺、商品、动作参数和风险写入当前任务；任何真实写操作仍会先重新检查并等你确认。`;
-            const sessions = chatStore.sessions.slice();
-            sessions[sessionIndex] = appendAssistantChatMessage(sessionAccess.record, answer, {
+            const nextSession = appendAssistantChatMessage(sessionAccess.record, answer, {
               mode: 'structured-intent-plan',
               intentPlanJobId: job.jobId,
-              autoTaskId: updatedTask.id,
+              autoTaskId: persistedTask.id,
               agentProfile: modelProfilePublicSummary(profile),
             });
-            await writeLinkOpsChatStore(args, {...chatStore, updatedAt: completedAt, sessions});
+            await updateLinkOpsChatRecord(
+              args,
+              sessionAccess.record,
+              nextSession,
+              String(job.actorUser || inferredLinkOpsStoreActor({sessions: [nextSession]}) || ''),
+            );
           }
         }
       }
 
       return {
         applied: true,
-        taskId: updatedTask.id,
+        taskId: persistedTask.id,
         requestType: plan.requestType,
         summary: plan.summary,
         confidence: plan.confidence,
@@ -14163,12 +19383,19 @@ async function main() {
           ...url.searchParams.getAll('store'),
           ...String(url.searchParams.get('stores') || '').split(/[,\s，、]+/),
         ].map(value => String(value || '').trim()).filter(Boolean);
+        const streamController = new AbortController();
+        const streamAbortOnClose = () => {
+          if (!res.writableFinished) streamController.abort();
+        };
+        req.once('aborted', streamAbortOnClose);
+        res.once('close', streamAbortOnClose);
         const startedAt = Date.now();
         try {
           const result = await loadDirectBiQuery(args, root, actor || internalActor(), question, {
             sections,
             stores,
             allowGenerate: allowGenerateSections,
+            signal: streamController.signal,
           });
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
@@ -14193,8 +19420,12 @@ async function main() {
               error: '所需 BI 数据分区未完整加载，未返回不完整结果',
             }, {'Cache-Control': 'private, no-store'});
           }
-          return sendLargeJson(req, res, 200, result, {'Cache-Control': 'private, no-store'});
+          return await sendLargeJson(req, res, 200, result, {'Cache-Control': 'private, no-store'}, {signal: streamController.signal});
         } catch (error) {
+          if (res.headersSent || res.destroyed) {
+            if (!res.destroyed && !res.writableFinished) res.destroy();
+            return;
+          }
           const forbidden = String(error?.code || '') === 'BI_QUERY_STORE_FORBIDDEN';
           const invalid = ['BI_QUERY_SECTION_UNSUPPORTED', 'BI_QUERY_TOO_MANY_SECTIONS'].includes(String(error?.code || ''));
           await appendAudit(args.auditFile, {
@@ -14220,6 +19451,9 @@ async function main() {
             ...(Array.isArray(error?.allowedStores) ? {allowedStores: error.allowedStores} : {}),
             ...(Array.isArray(error?.deniedStores) ? {deniedStores: error.deniedStores} : {}),
           }, {'Cache-Control': 'private, no-store'});
+        } finally {
+          req.off('aborted', streamAbortOnClose);
+          res.off('close', streamAbortOnClose);
         }
       }
       if (url.pathname === '/api/bi/live-events') {
@@ -14314,7 +19548,7 @@ async function main() {
           res.end(packageFile.bytes);
           return;
         } catch (error) {
-          return sendJson(res, 503, {ok: false, error: `CLI 安装包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
         }
       }
       if (url.pathname === '/api/partner-cli/manifest' || url.pathname === '/api/partner-cli/bundle') {
@@ -14339,7 +19573,7 @@ async function main() {
           }
           return sendJson(res, 200, {ok: true, data}, {'Cache-Control': 'private, no-cache, must-revalidate', ETag: etag});
         } catch (error) {
-          return sendJson(res, 503, {ok: false, error: `CLI 发布包尚未就绪：${error?.message || String(error)}`}, {'Cache-Control': 'no-store'});
+          return sendJson(res, 503, partnerCliReleaseUnavailablePayload(error), {'Cache-Control': 'no-store'});
         }
       }
       if (url.pathname === '/api/owner-knowledge/distribution/activate') {
@@ -14563,8 +19797,22 @@ async function main() {
       }
       if (url.pathname === '/api/health') {
         const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
+        const queueState = BI_CORE_WARMUP_QUEUE_OWNED
+          ? readBiPortalSectionQueueState()
+          : null;
+        const receiptHealth = BI_CORE_WARMUP_QUEUE_OWNED
+          ? await resolveBiPortalCoreWarmupReceiptHealth(root)
+          : null;
+        const effectiveWarmupState = effectiveBiPortalCoreWarmupStateFromReceipt(receiptHealth);
+        const warmupHealth = evaluateBiPortalCoreWarmupHealth(effectiveWarmupState, {queueState});
+        const routeLifecycle = biPortalCoreRouteLifecycleStatus();
+        const routeHealth = evaluateBiPortalCoreRouteLifecycleHealth(routeLifecycle);
+        const snapshotStatus = biPortalCoreSnapshotCache.status();
+        const snapshotHealth = evaluateBiPortalCoreSnapshotLifecycleHealth(snapshotStatus);
+        const topLevelHealth = evaluateBiPortalTopLevelHealth({warmupHealth, routeHealth, snapshotHealth});
         return sendJson(res, 200, {
-          ok: true,
+          ok: topLevelHealth.ok,
+          healthComponents: topLevelHealth.components,
           service: 'shein-bi-portal',
           time: new Date().toISOString(),
           host: args.host,
@@ -14592,17 +19840,48 @@ async function main() {
           writableLinkOpsTasks: !args.readOnly,
           writableLinkOpsChats: !args.readOnly,
           readOnly: args.readOnly,
-          authRequired,
-          allowGenerateSections,
-          liveUpdates: biLiveUpdateBridge.status(),
-          biCoreWarmup: {
-            generatedAt: biPortalCoreWarmupState.generatedAt,
-            status: biPortalCoreWarmupState.status,
-            owner: biPortalCoreWarmupState.owner || '',
-            startedAt: biPortalCoreWarmupState.startedAt ? new Date(biPortalCoreWarmupState.startedAt).toISOString() : null,
-            finishedAt: biPortalCoreWarmupState.finishedAt ? new Date(biPortalCoreWarmupState.finishedAt).toISOString() : null,
-            inFlight: Boolean(biPortalCoreWarmupState.inFlight),
-            lastError: biPortalCoreWarmupState.lastError,
+         authRequired,
+         allowGenerateSections,
+         liveUpdates: biLiveUpdateBridge.status(),
+          runtime: httpLifecycle.status(),
+          mutationQueue: enqueueMutationRequest.status(),
+         biPortalCoreRoute: {
+            ...routeLifecycle,
+            health: routeHealth,
+          },
+         biPortalCoreSnapshots: {
+            active: snapshotStatus.active,
+            retired: snapshotStatus.retired,
+            retiredWithLeases: snapshotStatus.retiredWithLeases,
+            retiredWithoutLeases: snapshotStatus.retiredWithoutLeases,
+            retiredCleaning: snapshotStatus.retiredCleaning,
+            retiredRetryPending: snapshotStatus.retiredRetryPending,
+            retiredOpenHandles: snapshotStatus.retiredOpenHandles,
+            retryExhausted: snapshotStatus.retryExhausted,
+            stuckRetired: snapshotStatus.stuckRetired,
+            leases: snapshotStatus.leases,
+            requestLeases: snapshotStatus.requestLeases,
+            openHandles: snapshotStatus.openHandles,
+            closeFailures: snapshotStatus.closeFailures,
+            retries: snapshotStatus.retries,
+            builds: snapshotStatus.builds,
+            health: snapshotHealth,
+            startupCleanup: snapshotStatus.startupCleanup,
+          },
+         biCoreWarmup: {
+            generatedAt: effectiveWarmupState.generatedAt,
+            status: effectiveWarmupState.status,
+            owner: effectiveWarmupState.owner || '',
+            startedAt: effectiveWarmupState.startedAt ? new Date(effectiveWarmupState.startedAt).toISOString() : null,
+            finishedAt: effectiveWarmupState.finishedAt ? new Date(effectiveWarmupState.finishedAt).toISOString() : null,
+            inFlight: Boolean(effectiveWarmupState.inFlight),
+            lastError: effectiveWarmupState.lastError,
+            consecutiveFailures: biPortalCoreWarmupState.consecutiveFailures,
+            nextAttemptAt: biPortalCoreWarmupState.nextAttemptAt ? new Date(biPortalCoreWarmupState.nextAttemptAt).toISOString() : null,
+            lastFailureAt: biPortalCoreWarmupState.lastFailureAt ? new Date(biPortalCoreWarmupState.lastFailureAt).toISOString() : null,
+            stalled: warmupHealth.stalled,
+            queuedAgeMs: warmupHealth.queuedAgeMs,
+            stalledAfterMs: warmupHealth.stalledAfterMs,
           },
           user: actor ? {
             username: actor.username,
@@ -14622,6 +19901,7 @@ async function main() {
           const force = url.searchParams.get('refresh') === '1';
           const asyncRefresh = force && ['1', 'true', 'yes'].includes(String(url.searchParams.get('async') || '').toLowerCase());
           const refreshToken = String(url.searchParams.get('refreshToken') || '').slice(0, 160);
+          const expectedGeneratedAt = String(url.searchParams.get('expectedGeneratedAt') || '').trim().slice(0, 1024);
           const q = String(url.searchParams.get('q') || '').trim();
           const hostLockedWorker = isTrustedInternalRequest(req)
             && String(req.headers['x-shein-bi-host-locked-worker'] || '') === '1';
@@ -14629,21 +19909,47 @@ async function main() {
           if (force && !allowGenerate) {
             return sendJson(res, 403, {ok: false, section, error: 'Section refresh is disabled in read-only or unauthenticated LAN mode'});
           }
+          const requestCancellation = hostLockedWorker
+            ? createBiHostLockedRequestCancellation(req, res)
+            : null;
           try {
             const result = await loadBiSection(args, root, section, {
               force,
               asyncRefresh,
               refreshToken,
+              expectedGeneratedAt,
               hostLockedWorker,
               allowGenerate,
+              signal: requestCancellation?.signal || null,
               gzip: acceptsGzip(req.headers['accept-encoding']),
               q,
               actor,
             });
+            if (hostLockedWorker) {
+              // The queue worker performs its own strict on-disk terminal
+              // readback and uses curl -o /dev/null. Never stream a newly
+              // generated multi-megabyte section to that internal caller.
+              if (result.rawBody && typeof result.rawBody.pipe === 'function') {
+                await disposeBiSectionRawBody(result.rawBody);
+              }
+              if (requestCancellation.signal.aborted || req.aborted || res.destroyed) return;
+              return sendJson(
+                res,
+                result.status,
+                biHostLockedSectionAcknowledgement(section, result, expectedGeneratedAt),
+                biHostLockedSectionAcknowledgementHeaders(result.headers),
+              );
+            }
+            if (result.rawBody && typeof result.rawBody.pipe === 'function') {
+              return await sendBiSectionRawStream(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
+            }
             if (result.rawBody) return send(res, result.status, result.rawBody, result.headers || {'Content-Type': 'application/json; charset=utf-8'});
             return sendJson(res, result.status, result.payload);
           } catch (err) {
+            if (requestCancellation?.signal.aborted || req.aborted || res.destroyed) return;
             return sendJson(res, 500, {ok: false, section, error: err?.message || String(err || 'BI section failed')});
+          } finally {
+            requestCancellation?.dispose();
           }
         }
       }
@@ -14818,31 +20124,19 @@ async function main() {
             return sendJson(res, 403, denied);
           }
           const current = await readLinkOpsActionState(args);
-          const actions = current.actions && typeof current.actions === 'object' ? current.actions : {};
-          for (const patch of patches) {
-            const key = String(patch.key || '');
-            const status = String(patch.status || 'open');
-            const owner = typeof patch.owner === 'string' ? patch.owner.trim().slice(0, 80) : undefined;
-            const note = typeof patch.note === 'string' ? patch.note.trim().slice(0, 500) : undefined;
-            if (!key) return sendJson(res, 400, {ok: false, error: 'Missing key'});
-            if (!['open', 'done', 'review', 'ignored'].includes(status)) {
-              return sendJson(res, 400, {ok: false, error: 'Invalid status'});
-            }
-            const prev = actions[key] && typeof actions[key] === 'object' ? actions[key] : {};
-            const nextItem = {
-              status,
-              owner: owner ?? String(prev.owner || ''),
-              note: note ?? String(prev.note || ''),
-              updatedAt: new Date().toISOString(),
+          const now = new Date().toISOString();
+          let changes;
+          try {
+            changes = buildLinkOpsActionChanges(current, patches, {
+              updatedAt: now,
               updatedBy: actorLabel(actor, req),
               updatedByUser: actorUser(actor, req),
-            };
-            if (status === 'open' && !nextItem.owner && !nextItem.note) delete actions[key];
-            else actions[key] = nextItem;
+            });
+          } catch (error) {
+            return sendJson(res, 400, {ok: false, error: error?.message || String(error), code: error?.code || 'LINK_OPS_VALIDATION'});
           }
-          const next = {version: 1, updatedAt: new Date().toISOString(), actions};
-          await writeLinkOpsActionState(args, next);
-          await appendAudit(args.auditFile, {
+          const persisted = await applyLinkOpsActionChanges(args, changes, actorUser(actor, req));
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'action-state',
             actor,
@@ -14853,8 +20147,8 @@ async function main() {
               owner: typeof p.owner === 'string' ? p.owner.slice(0, 80) : undefined,
               hasNote: typeof p.note === 'string' && p.note.length > 0,
             })),
-          });
-          return sendJson(res, 200, {ok: true, data: next});
+          }); } catch {}
+          return sendJson(res, 200, {ok: true, data: persisted});
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
       }
@@ -14923,12 +20217,15 @@ async function main() {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-denied', actor, ...requestMeta(req), task: {stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task), commandLength: String(task.command || '').length}, denied: sourceDenied});
             return sendJson(res, 403, sourceDenied);
           }
+          const taskCreateActor = actorUser(actor, req);
+          const taskCreateWriter = createLinkOpsRequestWriter(args, {actorUser: taskCreateActor});
           if (task.chatSessionId) {
             let sessionId;
             try { sessionId = safeLinkOpsChatSessionId(task.chatSessionId); } catch (err) {
               return sendJson(res, 400, {ok: false, error: err?.message || 'Invalid chat session id'});
             }
             const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+            taskCreateWriter.observeSessionStore(chatStore);
             const sessionIdx = chatStore.sessions.findIndex(session => String(session?.id || '') === sessionId);
             if (sessionIdx < 0) return sendJson(res, 404, {ok: false, error: 'Chat session not found'});
             const sessionAccess = authorizeLinkOpsRecord(actor, chatStore.sessions[sessionIdx], {kind: 'session', mode: 'mutate', claimLegacy: true});
@@ -14938,21 +20235,17 @@ async function main() {
             }
             task.chatSessionId = sessionId;
             if (sessionAccess.claimedLegacy || sessionAccess.ownershipMigrated) {
-              const sessions = chatStore.sessions.slice();
-              sessions[sessionIdx] = sessionAccess.record;
-              await writeLinkOpsChatStore(args, {...chatStore, updatedAt: new Date().toISOString(), sessions});
+              await taskCreateWriter.persistSession(sessionAccess.record, {store: chatStore});
             }
           }
           const knowledgeBinding = await bindOwnerKnowledgeToTask(task, args, task.command || '');
           task = knowledgeBinding.task;
           const current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
-          const next = {
-            version: 1,
-            updatedAt: new Date().toISOString(),
-            tasks: [task, ...current.tasks].slice(0, 1000),
-          };
-          await writeLinkOpsTaskStore(args, next);
-          await appendAudit(args.auditFile, {
+          taskCreateWriter.observeTaskStore(current);
+          const taskPersist = await taskCreateWriter.persistTask(task, {store: current});
+          task = taskPersist.task;
+          const next = taskPersist.store;
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task',
             actor,
@@ -14966,7 +20259,7 @@ async function main() {
               commandLength: task.command.length,
               ownerKnowledgeFingerprint: String(task.ownerKnowledgePolicy?.fingerprint || ''),
             },
-          });
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
@@ -15030,29 +20323,35 @@ async function main() {
             }
             let persisted;
             try {
-              persisted = await args.linkOpsStoreGateway.updateTaskRecord(id, updated, {
-                expectedRevision: Number(body.expectedRevision || 0),
-                actorUser: actorUser(actor, req),
-              });
+              const requestStartRevision = repositoryRevisionAtRequestStart(access.record, `task ${id}`);
+              if (Number(body.expectedRevision || 0) !== requestStartRevision) {
+                throw Object.assign(new Error(`任务 revision 已变化：请求期望 ${Number(body.expectedRevision || 0)}，请求开始读取 ${requestStartRevision}`), {
+                  code: 'LINK_OPS_REVISION_CONFLICT',
+                  status: 409,
+                });
+              }
+              persisted = await updateLinkOpsTaskRecord(args, access.record, updated, actorUser(actor, req));
             } catch (error) {
               const mapped = linkOpsRepositoryHttpDetails(error);
               if (mapped) return sendJson(res, mapped.status, mapped.body);
               throw error;
             }
-            await appendAudit(args.auditFile, {
+            try { await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
               type: 'link-ops-task-update',
               actor,
               ...requestMeta(req),
               task: {id, event: 'lock_source_skc_cli', status: persisted.status, progress: normalizeProgress(persisted.progress, 0)},
-            });
+            }); } catch {}
             return sendJson(res, 200, {ok: true, task: projectLinkOpsTaskForClient(persisted)});
           }
-          const tasks = current.tasks.slice();
-          tasks[idx] = updated;
-          const next = {version: 1, updatedAt: new Date().toISOString(), tasks};
-          await writeLinkOpsTaskStore(args, next);
-          await appendAudit(args.auditFile, {
+          const taskUpdateActor = actorUser(actor, req);
+          const taskUpdateWriter = createLinkOpsRequestWriter(args, {actorUser: taskUpdateActor});
+          taskUpdateWriter.observeTaskStore(current);
+          const taskPersist = await taskUpdateWriter.persistTask(updated, {store: current});
+          updated = taskPersist.task;
+          const next = taskPersist.store;
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task-update',
             actor,
@@ -15065,7 +20364,7 @@ async function main() {
               claimedLegacy: access.claimedLegacy,
               ownershipMigrated: access.ownershipMigrated,
             },
-          });
+          }); } catch {}
           if (!['done', 'archived'].includes(String(access.record.status || ''))
               && ['done', 'archived'].includes(String(updated.status || ''))
               && actorCanPublishOwnerKnowledge(actor, ownerKnowledgeService.authorityId)) {
@@ -15121,28 +20420,29 @@ async function main() {
             await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-task-delete-denied', actor, ...requestMeta(req), task: {id, stores: taskTargetStores(task), writeStores: taskWriteStores(task), sourceStores: taskSourceStores(task)}, denied: deniedLifecycle});
             return sendJson(res, 403, deniedLifecycle);
           }
+          const taskDeleteActor = actorUser(actor, req);
+          const deletedTaskRecord = await deleteLinkOpsTaskRecord(args, task, taskDeleteActor);
           const next = {
-            version: 1,
+            ...current,
             updatedAt: new Date().toISOString(),
             tasks: current.tasks.filter(t => String(t.id || '') !== id),
           };
-          await writeLinkOpsTaskStore(args, next);
           let assetsDeleted = false;
           try {
             await removeLinkOpsTaskAssetDir(id, args);
             assetsDeleted = true;
           } catch {}
-          await appendAudit(args.auditFile, {
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-task-delete',
             actor,
             ...requestMeta(req),
             task: {id, status: task.status, commandLength: String(task.command || '').length, assetsDeleted, claimedLegacy: access.claimedLegacy},
-          });
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsTaskStoreForActor(next, actor, {limit: 500}),
-            deleted: {id},
+            deleted: projectLinkOpsTaskForClient(deletedTaskRecord) || {id},
           });
         }
         return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
@@ -15343,6 +20643,395 @@ async function main() {
           linkOpsExecutionLocks.delete(lockId);
         }
       }
+
+      if (url.pathname === '/api/link-ops-recover-uploaded-asset-binding') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const actorGate = requireConcreteOperatorActor(actor);
+        if (actorGate) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-recover-uploaded-asset-binding-denied', actor, ...requestMeta(req), denied: actorGate});
+          return sendJson(res, 403, actorGate);
+        }
+        let body;
+        try {
+          body = await readBodyJson(req, 1024 * 1024);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        const taskRef = String(body.taskId || body.id || '').trim();
+        if (!taskRef) return sendJson(res, 400, {ok: false, error: 'Missing task id'});
+        const confirm = String(body.confirm || '').trim();
+        if (confirm !== RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `恢复已上传素材绑定必须提供精确确认词：${RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT}`,
+            code: 'RECOVER_UPLOADED_BINDING_CONFIRM_REQUIRED',
+          });
+        }
+        const expectedPrepareBatchId = String(body.expectedPrepareBatchId || body.prepareBatchId || '').trim();
+        if (!expectedPrepareBatchId || !/^[a-f0-9]{64}$/.test(expectedPrepareBatchId)) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'expectedPrepareBatchId 必须是 64 位十六进制字符串',
+            code: 'RECOVER_UPLOADED_BINDING_PREPARE_BATCH_INVALID',
+          });
+        }
+        const uploadedImages = Array.isArray(body.uploadedImages) ? body.uploadedImages : [];
+        if (uploadedImages.length !== 6) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: `uploadedImages 必须是精确 6 个 name/imageUrl/sha256 tuple；收到 ${uploadedImages.length}`,
+            code: 'RECOVER_UPLOADED_BINDING_TUPLE_COUNT_INVALID',
+          });
+        }
+        if (!args.linkOpsStoreGateway || typeof args.linkOpsStoreGateway.updateTaskRecord !== 'function') {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-recover-uploaded-asset-binding-gateway-unavailable', actor, ...requestMeta(req), task: {id: taskRef}});
+          return sendJson(res, 503, {
+            ok: false,
+            error: '恢复已上传素材绑定需要支持单任务原子 CAS 的 linkOpsStoreGateway.updateTaskRecord；当前存储网关不可用',
+            code: 'LINK_OPS_RECOVER_BINDING_GATEWAY_UNAVAILABLE',
+          });
+        }
+        let lockId;
+        try {
+          lockId = safeTaskId(taskRef);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        if (linkOpsExecutionLocks.has(lockId)) return sendJson(res, 409, {ok: false, error: '该任务正在执行其他操作，请等待当前操作结束'});
+        linkOpsExecutionLocks.add(lockId);
+        let recoveryCommit = null;
+        try {
+          await waitForUploadedAssetBindingRecoveryLockTestGate(lockId);
+        let current = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+        let found;
+        try {
+          found = findLinkOpsTaskOrThrow(current, taskRef);
+        } catch (error) {
+          const message = error?.message || String(error);
+          return sendJson(res, message === 'Invalid task id' ? 400 : 404, {ok: false, error: message});
+        }
+        const access = authorizeLinkOpsRecord(actor, found.task, {kind: 'task', mode: 'mutate', claimLegacy: true});
+        if (!access.ok) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'link-ops-recover-uploaded-asset-binding-denied', actor, ...requestMeta(req), task: {id: found.task.id}, denied: access.denied});
+          return sendJson(res, 403, access.denied);
+        }
+
+        const task = access.record;
+        const currentRevision = Number(task?.repositoryRevision || 0);
+        const expectedRevision = Number.isSafeInteger(body.expectedRevision) && body.expectedRevision > 0
+          ? body.expectedRevision
+          : currentRevision;
+        if (expectedRevision !== currentRevision) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: `Recovery CAS revision changed: current=${currentRevision} expected=${expectedRevision}`,
+            code: 'RECOVER_CAS_REVISION_CONFLICT',
+            bindingCommitted: false,
+            currentRevision,
+            expectedRevision,
+          });
+        }
+        let auditLogs = [];
+        try {
+          const auditText = await fs.readFile(args.auditFile, 'utf8');
+          auditLogs = auditText.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+        } catch {
+          auditLogs = [];
+        }
+        const existingBatch = task?.publishAssetBinding?.prepareBatchId || task?.publishAssetBinding?.evidence?.prepareBatchId;
+        if (task?.publishAssetBinding
+          && task.publishAssetBinding.sourceApproved === true
+          && task.publishAssetBinding.authority === 'human_reviewed_source'
+          && existingBatch === expectedPrepareBatchId
+          && task.publishAssetBinding.evidence?.recoveredFromAudit === true) {
+          try {
+            const replay = validateUploadedAssetBindingRecoveryReplay({
+              task,
+              tuples: uploadedImages,
+              auditLogs,
+              expectedPrepareBatchId,
+            });
+            const recoveryAuditExists = auditLogs.some(entry => entry?.type === LISTING_BIND_RECOVERY_AUDIT_TYPE
+              && String(entry?.task?.id || '') === String(task.id || '')
+              && String(entry?.bindingFingerprint || '') === replay.bindingFingerprint
+              && String(entry?.tupleHash || '') === replay.tupleHash);
+            if (!recoveryAuditExists) {
+              try {
+                await appendUploadedAssetBindingRecoveryAudit(args.auditFile, {
+                  at: new Date().toISOString(),
+                  type: LISTING_BIND_RECOVERY_AUDIT_TYPE,
+                  actor,
+                  ...requestMeta(req),
+                  task: {
+                    id: task.id,
+                    revision: currentRevision,
+                    stores: taskTargetStores(task),
+                    writeStores: taskWriteStores(task),
+                  },
+                  prepareBatchId: replay.prepareBatchId,
+                  bindingFingerprint: replay.bindingFingerprint,
+                  imageCount: replay.normalizedBindings.length,
+                  tupleHash: replay.tupleHash,
+                  requestHash: String(task.publishAssetBinding.evidence?.requestHash || ''),
+                  idempotentReplay: true,
+                });
+              } catch (auditError) {
+                return sendJson(res, 409, {
+                  ok: false,
+                  idempotentReplay: true,
+                  error: '恢复图片绑定已持久化并通过当前状态重算，但最终审计仍待补写；禁止再次执行恢复写入',
+                  code: 'LINK_OPS_RECOVER_BINDING_AUDIT_PENDING',
+                  bindingCommitted: true,
+                  readbackVerified: true,
+                  auditPending: true,
+                  stage: 'committed_but_audit_or_readback_pending',
+                  persistedRevision: currentRevision,
+                  bindingFingerprint: replay.bindingFingerprint,
+                  binding: task.publishAssetBinding,
+                  task: projectLinkOpsTaskForClient(task),
+                  auditError: String(auditError?.message || auditError).slice(0, 500),
+                });
+              }
+            }
+            return sendJson(res, 200, {
+              ok: true,
+              idempotentReplay: true,
+              bindingCommitted: true,
+              readbackVerified: true,
+              auditPending: false,
+              persistedRevision: currentRevision,
+              task: projectLinkOpsTaskForClient(task),
+              binding: task.publishAssetBinding,
+              bindingFingerprint: replay.bindingFingerprint,
+              stage: 'binding_recovered_needs_dry_run',
+              nextStep: {command: 'preflight', note: '图片绑定已就绪，请重新预演。', realPublish: false},
+            });
+          } catch (error) {
+            return sendJson(res, Number(error?.status || 409), error?.response || {
+              ok: false,
+              error: error?.message || String(error),
+              code: error?.code || 'RECOVER_IDEMPOTENT_REPLAY_DRIFT',
+            });
+          }
+        }
+
+          const taskIdentity = extractTaskExactIdentity(task);
+          const plan = createUploadedAssetBindingRecoveryPlan({
+            task,
+            tuples: uploadedImages,
+            auditLogs,
+            expectedRevision,
+            expectedReleaseId: taskIdentity.releaseId,
+            expectedPrepareBatchId,
+            confirmMarker: confirm,
+            actor: actorUser(actor, req),
+          });
+          const nextTask = buildRecoveredTaskFromPlan(task, plan, {actorUser: actorUser(actor, req)});
+          const expectedCommittedRevision = expectedRevision + 1;
+          const expectedCommittedPayloadHash = linkOpsPayloadHash(stripLinkOpsRepositoryMetadata(nextTask));
+          let persisted = null;
+          let recoveredPostCommitError = null;
+          try {
+            persisted = await args.linkOpsStoreGateway.updateTaskRecord(taskRef, nextTask, {
+              expectedRevision,
+              actorUser: actorUser(actor, req),
+            });
+            const failureMarker = String(process.env.SHEIN_BI_TEST_RECOVERY_POST_COMMIT_FAIL_FILE || '');
+            if (process.env.NODE_ENV === 'test' && failureMarker && fssync.existsSync(failureMarker)) {
+              const injected = new Error('injected uploaded asset binding recovery post-commit failure');
+              injected.code = 'LINK_OPS_RECOVER_BINDING_POST_COMMIT_INJECTED_FAILURE';
+              throw injected;
+            }
+          } catch (error) {
+            let observed = null;
+            let observedReplay = null;
+            try {
+              const observedStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              observed = findLinkOpsTaskOrThrow(observedStore, taskRef).task;
+              observedReplay = validateUploadedAssetBindingRecoveryReplay({
+                task: observed,
+                tuples: uploadedImages,
+                auditLogs,
+                expectedPrepareBatchId,
+              });
+            } catch {}
+            if (!observed
+              || Number(observed.repositoryRevision || 0) !== expectedCommittedRevision
+              || String(observed.repositoryPayloadHash || '') !== expectedCommittedPayloadHash
+              || String(observedReplay?.bindingFingerprint || '') !== plan.bindingFingerprint
+              || String(observed.publishAssetBinding?.bindingFingerprint || '') !== plan.bindingFingerprint) {
+              throw error;
+            }
+            persisted = observed;
+            recoveredPostCommitError = error;
+          }
+          recoveryCommit = {
+            persisted,
+            plan,
+            taskIdentity,
+          };
+
+          if (recoveredPostCommitError) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已由权威 revision、payloadHash 与 binding 精确回读证明持久化，但最终审计仍待补写；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放核验',
+              code: 'LINK_OPS_RECOVER_BINDING_POST_COMMIT_PENDING',
+              bindingCommitted: true,
+              readbackVerified: true,
+              auditPending: true,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(persisted.repositoryRevision || 0),
+              bindingFingerprint: plan.bindingFingerprint,
+              binding: persisted.publishAssetBinding,
+              task: projectLinkOpsTaskForClient(persisted),
+              errorDetail: String(recoveredPostCommitError?.message || recoveredPostCommitError).slice(0, 500),
+            });
+          }
+
+          let readbackTask = persisted;
+          let readbackVerified = false;
+          let readbackError = '';
+          try {
+            const verifyStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+            const verifyFound = findLinkOpsTaskOrThrow(verifyStore, taskRef);
+            validateUploadedAssetBindingRecoveryReplay({
+              task: verifyFound.task,
+              tuples: uploadedImages,
+              auditLogs,
+              expectedPrepareBatchId,
+            });
+            if (Number(verifyFound.task?.repositoryRevision || 0) === Number(persisted?.repositoryRevision || 0)) {
+              readbackTask = verifyFound.task;
+              readbackVerified = true;
+            }
+          } catch (error) {
+            readbackError = String(error?.message || error).slice(0, 500);
+          }
+
+          if (!readbackVerified) {
+            let auditPending = false;
+            try {
+              await appendUploadedAssetBindingRecoveryAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-recover-uploaded-asset-binding-readback-unverified',
+                actor,
+                ...requestMeta(req),
+                task: {id: taskRef, revision: Number(persisted?.repositoryRevision || 0)},
+                bindingFingerprint: plan.bindingFingerprint,
+                error: readbackError,
+              });
+            } catch {
+              auditPending = true;
+            }
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已持久化，但审计或严格回读仍待完成；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放重验',
+              code: 'LINK_OPS_RECOVER_BINDING_READBACK_UNVERIFIED',
+              bindingCommitted: true,
+              readbackVerified: false,
+              auditPending,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(persisted?.repositoryRevision || 0),
+              bindingFingerprint: plan.bindingFingerprint,
+              task: {id: taskRef, store: taskIdentity.targetStore, sourceStore: taskIdentity.sourceStore, sourceSkc: taskIdentity.sourceSkc},
+            });
+          }
+
+          try {
+            await appendUploadedAssetBindingRecoveryAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: LISTING_BIND_RECOVERY_AUDIT_TYPE,
+              actor,
+              ...requestMeta(req),
+              task: {
+                id: readbackTask.id,
+                revision: Number(persisted?.repositoryRevision || 0),
+                stores: taskTargetStores(readbackTask),
+                writeStores: taskWriteStores(readbackTask),
+              },
+              prepareBatchId: plan.prepareBatchId,
+              bindingFingerprint: plan.bindingFingerprint,
+              imageCount: plan.recoveredBinding.imageCount,
+              tupleHash: plan.tupleHash,
+              requestHash: plan.requestHash,
+            });
+          } catch (auditError) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已持久化并通过严格回读，但最终审计待补写；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放核验',
+              code: 'LINK_OPS_RECOVER_BINDING_AUDIT_PENDING',
+              bindingCommitted: true,
+              readbackVerified: true,
+              auditPending: true,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(persisted?.repositoryRevision || 0),
+              bindingFingerprint: plan.bindingFingerprint,
+              binding: readbackTask.publishAssetBinding,
+              task: projectLinkOpsTaskForClient(readbackTask),
+              auditError: String(auditError?.message || auditError).slice(0, 500),
+            });
+          }
+
+          return sendJson(res, 200, {
+            ok: true,
+            bindingCommitted: true,
+            readbackVerified: true,
+            auditPending: false,
+            persistedRevision: Number(persisted?.repositoryRevision || 0),
+            task: projectLinkOpsTaskForClient(readbackTask),
+            binding: readbackTask.publishAssetBinding,
+            stage: 'binding_recovered_needs_dry_run',
+            nextStep: {command: 'preflight', note: '已恢复图片绑定，请重新预演。', realPublish: false},
+          });
+        } catch (error) {
+          if (recoveryCommit) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: '恢复图片绑定已持久化，但后续审计或严格回读异常；禁止重复恢复写入，可用同一 exact 6 tuple 幂等重放重验',
+              code: 'LINK_OPS_RECOVER_BINDING_POST_COMMIT_PENDING',
+              bindingCommitted: true,
+              readbackVerified: false,
+              auditPending: true,
+              stage: 'committed_but_audit_or_readback_pending',
+              persistedRevision: Number(recoveryCommit.persisted?.repositoryRevision || 0),
+              bindingFingerprint: recoveryCommit.plan.bindingFingerprint,
+              task: {
+                id: taskRef,
+                store: recoveryCommit.taskIdentity.targetStore,
+                sourceStore: recoveryCommit.taskIdentity.sourceStore,
+                sourceSkc: recoveryCommit.taskIdentity.sourceSkc,
+              },
+              errorDetail: String(error?.message || error).slice(0, 500),
+            });
+          }
+          const mapped = linkOpsRepositoryHttpDetails(error);
+          if (mapped) {
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-recover-uploaded-asset-binding-failed',
+              actor,
+              ...requestMeta(req),
+              task: {id: taskRef},
+              code: mapped.body?.code || '',
+              error: String(error?.message || error).slice(0, 500),
+            });
+            return sendJson(res, mapped.status, mapped.body);
+          }
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'link-ops-recover-uploaded-asset-binding-failed',
+            actor,
+            ...requestMeta(req),
+            task: {id: taskRef},
+            error: String(error?.message || error).slice(0, 500),
+          });
+          return sendJson(res, Number(error?.status || 400), error?.response || {ok: false, error: error?.message || String(error), code: error?.code || ''});
+        } finally {
+          linkOpsExecutionLocks.delete(lockId);
+        }
+      }
+
       if (url.pathname === '/api/link-ops-prepare-descriptions') {
         if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
         if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
@@ -15395,12 +21084,19 @@ async function main() {
         let sectionUsed = '';
         try {
           reviewedSource = decodeReviewedDescriptionSourceFile(body.sourceFile);
-          const verified = verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
-            material: body.materialJson || null,
-            sourceFileBasename: reviewedSource.name,
-            sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
-            section,
-          });
+          const verified = reviewedSource.kind === 'docx'
+            ? verifyDescriptionMaterialAgainstDocx(reviewedSource.bytes, {
+                material: body.materialJson || null,
+                sourceFileBasename: reviewedSource.name,
+                sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
+                section,
+              })
+            : verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
+                material: body.materialJson || null,
+                sourceFileBasename: reviewedSource.name,
+                sourceFileSha256: body.materialJson?.sourceFileSha256 || '',
+                section,
+              });
           sectionUsed = verified.sectionUsed;
           material = validateDescriptionMaterialJson(verified.material);
         } catch (error) {
@@ -15426,9 +21122,7 @@ async function main() {
         }
         const task = access.record;
         const currentRevision = Number(task.repositoryRevision || 0);
-        const sourceProof = String(sectionUsed || 's09').trim().toLowerCase() === 's9'
-          ? DESCRIPTION_SOURCE_PROOF_S9
-          : DESCRIPTION_SOURCE_PROOF;
+        const sourceProof = descriptionSourceProofForSection(sectionUsed);
         const bindingRequestKey = descriptionBindingRequestKey({
           taskId: taskRef,
           targetStore,
@@ -15740,10 +21434,11 @@ async function main() {
               code: 'PRODUCT_ATTRIBUTE_REFRESH_PAYLOAD_HASH_MISMATCH',
             });
           }
-          if (!refreshTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(refreshTask, refreshPayload).ok) {
+          const refreshDescriptionPolicy = validateCopyProductDescriptionPolicy(refreshTask, refreshPayload);
+          if (!refreshDescriptionPolicy.ok) {
             return sendJson(res, 409, {
               ok: false,
-              error: 'refresh_binding 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效',
+              error: `refresh_binding 要求当前描述策略锁对 payload 完全有效：${refreshDescriptionPolicy.blockers.slice(0, 3).join('；')}`,
               code: 'PRODUCT_ATTRIBUTE_REFRESH_DESCRIPTION_INVALID',
             });
           }
@@ -16170,10 +21865,10 @@ async function main() {
           });
         }
         const donorSkc = String(body.donorSkc || '').trim();
-        if (!donorSkc || donorSkc.length > 160 || !/^s[abv]\d{8,}$/i.test(donorSkc)) {
+        if (!donorSkc || donorSkc.length > 160 || !isSheinSkc(donorSkc) || !/\d{8,}$/.test(donorSkc)) {
           return sendJson(res, 400, {
             ok: false,
-            error: 'donorSkc 必须是一个区分大小写的 SHEIN SKC（s[abv] + 8 位以上数字）',
+            error: 'donorSkc 必须是完整 SHEIN SKC（sv/sb/sh + 8 位以上数字，大小写不敏感）',
             code: 'DONOR_SKC_INVALID',
           });
         }
@@ -16496,7 +22191,8 @@ async function main() {
             && linkOpsPayloadHash(lockedTask?.openapiPublishPayload) === linkOpsPayloadHash(task?.openapiPublishPayload)
             && String(lockedTask?.publishAssetBinding?.bindingFingerprint || '') === String(task?.publishAssetBinding?.bindingFingerprint || '')
             && String(lockedTask?.descriptionMaterialBinding?.bindingRequestKey || '') === String(task?.descriptionMaterialBinding?.bindingRequestKey || '')
-            && String(lockedTask?.descriptionMaterialBinding?.newPayloadHash || '') === String(task?.descriptionMaterialBinding?.newPayloadHash || '');
+            && String(lockedTask?.descriptionMaterialBinding?.newPayloadHash || '') === String(task?.descriptionMaterialBinding?.newPayloadHash || '')
+            && sha256StableJson(lockedTask?.emptyDescriptionAuthorization || null) === sha256StableJson(task?.emptyDescriptionAuthorization || null);
           if (!lockedStateMatches) {
             return sendJson(res, 409, {
               ok: false,
@@ -16524,13 +22220,11 @@ async function main() {
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });
             }
-            const resignDescriptionGate = bindingTask?.descriptionMaterialBinding
-              ? validateDescriptionBindingLock(bindingTask, currentPayload)
-              : {ok: false, blockers: []};
+            const resignDescriptionGate = validateCopyProductDescriptionPolicy(bindingTask, currentPayload);
             if (!resignDescriptionGate.ok) {
               return sendJson(res, 409, {
                 ok: false,
-                error: '重签要求当前 descriptionMaterialBinding 存在且对净化前 payload 完全有效',
+                error: `重签要求当前描述策略锁对净化前 payload 完全有效：${resignDescriptionGate.blockers.slice(0, 3).join('；')}`,
                 code: 'PRODUCT_ATTRIBUTE_RESIGN_DESCRIPTION_INVALID',
                 blockers: asArray(resignDescriptionGate.blockers).map(row => row?.code || '').filter(Boolean).slice(0, 12),
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
@@ -16625,10 +22319,11 @@ async function main() {
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });
             }
-            if (!resignExistingBinding && (!operationTask?.descriptionMaterialBinding || !validateDescriptionBindingLock(operationTask, payload).ok)) {
+            const adoptDescriptionPolicy = validateCopyProductDescriptionPolicy(operationTask, payload);
+            if (!resignExistingBinding && !adoptDescriptionPolicy.ok) {
               return sendJson(res, 409, {
                 ok: false,
-                error: 'adopt_existing 要求当前 descriptionMaterialBinding 存在且对当前 payload 完全有效（无需重绑）；先修复描述绑定',
+                error: `adopt_existing 要求当前描述策略锁对 payload 完全有效：${adoptDescriptionPolicy.blockers.slice(0, 3).join('；')}`,
                 code: 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID',
                 safety: {realPublishOccurred: false, dryRunAttempted: false},
               });
@@ -16909,6 +22604,9 @@ async function main() {
         let verified;
         try {
           reviewedSource = decodeReviewedDescriptionSourceFile(body.sourceFile);
+          if (reviewedSource.kind !== 'html') {
+            throw new Error('历史 update-description 维护路径只接受 HTML；DOCX 仅允许 prepare-descriptions');
+          }
           verified = verifyDescriptionMaterialAgainstHtml(reviewedSource.htmlText, reviewedSource.bytes, {
             material: body.materialJson || null,
             sourceFileBasename: reviewedSource.name,
@@ -17220,6 +22918,10 @@ async function main() {
           }
 
           const chatCurrent = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+          const assetsMutationActor = actorUser(actor, req);
+          const assetsWriter = createLinkOpsRequestWriter(args, {actorUser: assetsMutationActor});
+          assetsWriter.observeTaskStore(current);
+          assetsWriter.observeSessionStore(chatCurrent);
           let sessionId = String(body.sessionId || body.chatSessionId || targetTask?.chatSessionId || targetTask?.chat?.sessionId || targetTask?.targets?.chatSessionId || '').trim();
           let chatSession = null;
           let chatCreated = false;
@@ -17259,22 +22961,25 @@ async function main() {
               });
               responseStore = result.store;
               responseTask = result.task;
+              const taskPersist = await assetsWriter.persistTask(result.task, {store: result.store});
+              responseStore = taskPersist.store;
+              responseTask = taskPersist.task;
               try {
                 const checkResult = await runImmediateChatSystemCheckIfPossible({
-                  task: result.task,
-                  taskData: result.store,
+                  task: responseTask,
+                  taskData: responseStore,
+                  writer: assetsWriter,
                   actor,
                   req,
                   args,
                   updated: true,
                 });
-                responseStore = checkResult.taskData || result.store;
-                responseTask = checkResult.task || result.task;
+                responseStore = checkResult.taskData || responseStore;
+                responseTask = checkResult.task || responseTask;
                 uploadCheckAnswer = checkResult.answer || '';
               } catch (err) {
                 uploadCheckAnswer = `我已收到你上传的资料，但重新检查时没有跑完：${String(err?.message || err || 'unknown error')}。你可以继续在聊天里补充或让我重试。`;
               }
-              await writeLinkOpsTaskStore(args, responseStore);
             } else {
               const stored = await storeLinkOpsUploadedFiles({
                 bucketId: `session-${sessionId}`,
@@ -17304,11 +23009,8 @@ ${uploadCheckAnswer}` : `
             message: sessionMessage,
             meta: {mode: targetTask ? 'bi-ops-upload-check' : 'bi-ops-session-upload', autoTaskId: responseTask?.id || ''},
           });
-          const sessions = chatCreated
-            ? [chatSession, ...chatCurrent.sessions].slice(0, 300)
-            : chatCurrent.sessions.map(s => String(s.id || '') === chatSession.id ? chatSession : s);
-          const nextChatStore = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeLinkOpsChatStore(args, nextChatStore);
+          const sessionPersist = await assetsWriter.persistSession(chatSession, {store: chatCurrent});
+          if (sessionPersist.session) chatSession = sessionPersist.session;
           const projectedChatSession = projectLinkOpsChatSessionForClient(chatSession);
           await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
@@ -17357,6 +23059,28 @@ ${uploadCheckAnswer}` : `
             return sendJson(res, 403, access.denied);
           }
           current.tasks[idx] = access.record;
+          const requestedExecute = String(body.mode || body.executionMode || '').trim().toLowerCase() === 'execute'
+            || body.execute === true;
+          if (requestedExecute && taskCannotRepeatRealExecution(access.record)) {
+            const deniedTerminal = {
+              ok: false,
+              error: '该任务已有终态或真实提交证据，禁止再次执行；请读取现有回读，必要时由全店管理账号新建明确的修复任务。',
+              code: 'LINK_OPS_TERMINAL_EXECUTION_RETRY_DENIED',
+              taskId: id,
+              status: access.record.status || '',
+              lifecycleStatus: access.record.lifecycle?.lifecycleStatus || access.record.lifecycle?.status || '',
+              actualWriteSubmitted: access.record.execution?.writeAudit?.actualWriteSubmitted === true,
+            };
+            await appendAudit(args.auditFile, {
+              at: new Date().toISOString(),
+              type: 'link-ops-execute-denied-terminal-retry',
+              actor,
+              ...requestMeta(req),
+              task: {id, status: access.record.status || ''},
+              denied: deniedTerminal,
+            });
+            return sendJson(res, 409, deniedTerminal);
+          }
           if (taskRequiresOwnerLifecycleResolve(access.record)) {
             const deniedLifecycle = {
               ok: false,
@@ -17375,51 +23099,97 @@ ${uploadCheckAnswer}` : `
           }
           linkOpsExecutionLocks.add(id);
           try {
-            const {task: updated, writeClaim: executionWriteClaim} = await startControlledLinkOpsExecution(access.record, actor, req, args, body);
-            let storeForResponse;
+            const executionResult = await startControlledLinkOpsExecution(access.record, actor, req, args, body);
+            let updated = executionResult.task;
+            const executionWriteClaim = executionResult.writeClaim;
+            let commitRecovered = false;
+            let recoveryCauseCode = '';
             if (executionWriteClaim) {
               // Claim path: single-task CAS only. Never a whole-store replace.
-              const persisted = await persistClaimedLinkOpsExecutionResult(args, {
+              const commit = await persistClaimedLinkOpsExecutionResult(args, {
                 taskId: id,
                 next: updated,
                 writeClaim: executionWriteClaim,
                 actorUser: actorUser(actor, req),
                 now: new Date().toISOString(),
               });
-              updated.task = persisted;
-              updated.execution = persisted.execution;
-              storeForResponse = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              updated = commit.task;
+              commitRecovered = commit.commitRecovered;
+              recoveryCauseCode = commit.recoveryCauseCode;
             } else {
-              const tasks = current.tasks.slice();
-              tasks[idx] = updated;
-              storeForResponse = {version: 1, updatedAt: new Date().toISOString(), tasks};
-              await writeLinkOpsTaskStore(args, storeForResponse);
+              const commit = await persistUnclaimedLinkOpsExecutionResult(args, {
+                current,
+                taskIndex: idx,
+                next: updated,
+                actorUser: actorUser(actor, req),
+                now: new Date().toISOString(),
+              });
+              updated = commit.task;
+              commitRecovered = commit.commitRecovered;
+              recoveryCauseCode = commit.recoveryCauseCode;
             }
-            await appendAudit(args.auditFile, {
-              at: new Date().toISOString(),
-              type: 'link-ops-execute',
-              actor,
-              ...requestMeta(req),
-              task: {
-                id: updated.id,
-                status: updated.status,
-                progress: normalizeProgress(updated.progress, 0),
-                execution: {
-                  runId: updated.execution?.runId || '',
-                  state: updated.execution?.state || '',
-                  lifecycleStatus: updated.lifecycle?.lifecycleStatus || updated.execution?.lifecycle?.lifecycleStatus || '',
-                  lifecycleLocked: Boolean(updated.lifecycle?.locked || updated.execution?.lifecycle?.locked),
-                  needsManualResolve: Boolean(updated.lifecycle?.needsManualResolve || updated.execution?.lifecycle?.needsManualResolve),
-                  canSilentWrite: false,
-                  canAutoSubmit: false,
+            let auditPending = false;
+            try {
+              await appendLinkOpsExecutionAudit(args.auditFile, {
+                at: new Date().toISOString(),
+                type: 'link-ops-execute',
+                actor,
+                ...requestMeta(req),
+                task: {
+                  id: updated.id,
+                  status: updated.status,
+                  progress: normalizeProgress(updated.progress, 0),
+                  execution: {
+                    runId: updated.execution?.runId || '',
+                    state: updated.execution?.state || '',
+                    lifecycleStatus: updated.lifecycle?.lifecycleStatus || updated.execution?.lifecycle?.lifecycleStatus || '',
+                    lifecycleLocked: Boolean(updated.lifecycle?.locked || updated.execution?.lifecycle?.locked),
+                    needsManualResolve: Boolean(updated.lifecycle?.needsManualResolve || updated.execution?.lifecycle?.needsManualResolve),
+                    canSilentWrite: false,
+                    canAutoSubmit: false,
+                  },
+                  writeAudit: updated.execution?.writeAudit || null,
                 },
-                writeAudit: updated.execution?.writeAudit || null,
-              },
-            });
+                commitRecovered,
+                recoveryCauseCode,
+              });
+            } catch {
+              auditPending = true;
+            }
+            const projectedTask = projectLinkOpsTaskForClient(updated);
+            const stage = auditPending
+              ? 'execution_committed_audit_pending'
+              : commitRecovered
+                ? 'execution_committed_recovered'
+                : executionWriteClaim
+                  ? 'execution_committed_verified'
+                  : 'execution_check_persisted';
+            const responseOutcome = linkOpsExecutionResponseOutcome(updated, {requestedExecute});
+            const responseWarning = uniqueMessages([
+              auditPending ? '执行结果已持久化，但外部审计暂待补写；请勿重复提交。' : '',
+              responseOutcome.outcome === 'unconfirmed'
+                ? '业务强回读尚未确认完成；持久提交已保留，请勿重复写。'
+                : '',
+            ]).join('；');
             return sendJson(res, 200, {
-              ok: true,
-              data: projectLinkOpsTaskStoreForActor(storeForResponse, actor, {limit: 500}),
-              task: projectLinkOpsTaskForClient(updated),
+              ok: responseOutcome.ok,
+              committed: true,
+              ...(responseOutcome.ok ? {} : {
+                partial: responseOutcome.partial,
+                outcome: responseOutcome.outcome,
+                error: responseOutcome.error,
+              }),
+              commitRecovered,
+              auditPending,
+              stage,
+              warning: responseWarning,
+              data: {
+                version: 1,
+                updatedAt: updated.updatedAt || new Date().toISOString(),
+                partial: true,
+                tasks: [projectedTask],
+              },
+              task: projectedTask,
               execution: projectLinkOpsExecutionForClient(updated.execution),
             });
           } finally {
@@ -17511,6 +23281,13 @@ ${uploadCheckAnswer}` : `
             return sendJson(res, 400, {ok: false, error: err?.message || String(err || 'Invalid request')});
           }
           const current = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
+          // Request-scoped explicit-CRUD coordinator. Every dependent task /
+          // chat mutation in this request feeds the authoritative record from
+          // the previous create/update into the next expectedRevision instead
+          // of re-submitting a stale whole-store snapshot.
+          const chatMutationActor = actorUser(actor, req);
+          const chatWriter = createLinkOpsRequestWriter(args, {actorUser: chatMutationActor});
+          chatWriter.observeSessionStore(current);
           const sessionId = String(body.sessionId || body.id || '').trim();
           let session;
           let created = false;
@@ -17549,20 +23326,15 @@ ${uploadCheckAnswer}` : `
             // brand-new chat before any auto-task is written, then update the
             // same session with assistant/preflight messages at the end.
             if (created && linkOpsStoreGateway.mode === 'postgres') {
-              const bootstrapSessions = [session, ...current.sessions].slice(0, 300);
-              await writeLinkOpsChatStore(args, {
-                version: 1,
-                updatedAt: new Date().toISOString(),
-                memoryPolicy: CLOUD_AI_MEMORY_POLICY,
-                sessions: bootstrapSessions,
-              });
-              await appendAudit(args.auditFile, {
+              const sessionPersist = await chatWriter.persistSession(session, {store: current});
+              session = sessionPersist.session;
+              try { await appendAudit(args.auditFile, {
                 at: new Date().toISOString(),
                 type: 'link-ops-chat-session-bootstrap',
                 actor,
                 ...requestMeta(req),
                 session: {id: session.id, created: true},
-              });
+              }); } catch {}
             }
             let attributeContextTask = null;
             try {
@@ -17598,10 +23370,12 @@ ${uploadCheckAnswer}` : `
             let naturalExecutionHandled = false;
             if (confirmExecuteCommand && !explicitActionCommand) {
               taskData = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              chatWriter.observeTaskStore(taskData);
               const executionResult = await runChatNaturalLanguageExecutionIfPossible({
                 session,
                 userMessage,
                 taskData,
+                writer: chatWriter,
                 actor,
                 req,
                 args,
@@ -17678,6 +23452,7 @@ ${uploadCheckAnswer}` : `
             }
             if (!naturalExecutionHandled && shouldAutoTask) {
               const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              chatWriter.observeTaskStore(taskStore);
               const actorTasks = linkOpsTasksForActor(taskStore.tasks, actor, {mode: 'mutate'});
               const duplicate = findDuplicateAutoTask(actorTasks, session.id, effectiveTaskCommand);
               const reusable = duplicate || findReusableChatTask(actorTasks, session.id);
@@ -17709,7 +23484,9 @@ ${uploadCheckAnswer}` : `
                 const tasks = taskStore.tasks.slice();
                 if (idx >= 0) tasks[idx] = autoTask;
                 taskData = {version: 1, updatedAt: new Date().toISOString(), tasks};
-                await writeLinkOpsTaskStore(args, taskData);
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
                 await appendAudit(args.auditFile, {
                   at: new Date().toISOString(),
                   type: 'link-ops-chat-update-task',
@@ -17763,7 +23540,9 @@ ${uploadCheckAnswer}` : `
                   updatedAt: new Date().toISOString(),
                   tasks: [autoTask, ...taskStore.tasks].slice(0, 1000),
                 };
-                await writeLinkOpsTaskStore(args, taskData);
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
                 await appendAudit(args.auditFile, {
                   at: new Date().toISOString(),
                   type: 'link-ops-chat-auto-task',
@@ -17784,17 +23563,24 @@ ${uploadCheckAnswer}` : `
               if (taskWithSessionAssets !== autoTask) {
                 autoTask = taskWithSessionAssets;
                 taskData = replaceLinkOpsTaskInStore(taskData, autoTask);
-                await writeLinkOpsTaskStore(args, taskData);
+              {
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
+              }
               }
               const knowledgeBinding = await bindOwnerKnowledgeToTask(autoTask, args, userMessage);
               if (knowledgeBinding.changed) {
                 autoTask = knowledgeBinding.task;
                 taskData = replaceLinkOpsTaskInStore(taskData, autoTask);
-                await writeLinkOpsTaskStore(args, taskData);
+                const taskPersist = await chatWriter.persistTask(autoTask, {store: taskData});
+                autoTask = taskPersist.task;
+                taskData = taskPersist.store;
               }
               const checkResult = await runImmediateChatSystemCheckIfPossible({
                 task: autoTask,
                 taskData,
+                writer: chatWriter,
                 actor,
                 req,
                 args,
@@ -17814,6 +23600,7 @@ ${uploadCheckAnswer}` : `
             }
             if (!naturalExecutionHandled && !shouldAutoTask && userAttributeOverrides.length) {
               const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
+              chatWriter.observeTaskStore(taskStore);
               const reusable = findReusableChatTask(linkOpsTasksForActor(taskStore.tasks, actor, {mode: 'mutate'}), session.id);
               if (reusable) {
                 const denied = requireWriteStores(actor, taskWriteStores(reusable));
@@ -17859,8 +23646,9 @@ ${uploadCheckAnswer}` : `
                   const tasks = taskStore.tasks.slice();
                   if (idx >= 0) tasks[idx] = updatedTask;
                   taskData = {version: 1, updatedAt: nowForOverride, tasks};
-                  await writeLinkOpsTaskStore(args, taskData);
-                  autoTask = updatedTask;
+                  const taskPersist = await chatWriter.persistTask(updatedTask, {store: taskData});
+                  autoTask = taskPersist.task;
+                  taskData = taskPersist.store;
                   await appendAudit(args.auditFile, {
                     at: nowForOverride,
                     type: 'link-ops-chat-manual-attribute-override',
@@ -17871,8 +23659,9 @@ ${uploadCheckAnswer}` : `
                     attributeOverrides: userAttributeOverrides,
                   });
                   const checkResult = await runImmediateChatSystemCheckIfPossible({
-                    task: updatedTask,
+                    task: autoTask,
                     taskData,
+                    writer: chatWriter,
                     actor,
                     req,
                     args,
@@ -17901,11 +23690,9 @@ ${uploadCheckAnswer}` : `
           } catch (err) {
             return sendJson(res, 500, {ok: false, error: err?.message || String(err || 'Chat failed')});
           }
-          const sessions = created
-            ? [session, ...current.sessions].slice(0, 300)
-            : current.sessions.map(s => String(s.id || '') === session.id ? session : s);
-          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeLinkOpsChatStore(args, next);
+          const sessionPersist = await chatWriter.persistSession(session, {store: current});
+          if (sessionPersist.session) session = sessionPersist.session;
+          const next = sessionPersist.store;
           if (ownerKnowledgeCapture?.captured) {
             await appendAudit(args.auditFile, {
               at: new Date().toISOString(),
@@ -17996,21 +23783,19 @@ ${uploadCheckAnswer}` : `
             memoryPolicy: CLOUD_AI_MEMORY_POLICY,
             updatedAt: new Date().toISOString(),
           };
-          const sessions = current.sessions.slice();
-          sessions[idx] = session;
-          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions};
-          await writeLinkOpsChatStore(args, next);
-          await appendAudit(args.auditFile, {
+          const persistedSession = await updateLinkOpsChatRecord(args, access.record, session, actorUser(actor, req));
+          const next = replacePersistedStoreRecord(current, 'sessions', persistedSession);
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-chat-update',
             actor,
             ...requestMeta(req),
-            session: {id, claimedLegacy: access.claimedLegacy, ownershipMigrated: access.ownershipMigrated, status: session.status || ''},
-          });
+            session: {id, claimedLegacy: access.claimedLegacy, ownershipMigrated: access.ownershipMigrated, status: persistedSession.status || session.status || ''},
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsChatStoreForActor(next, actor, {limit: 300}),
-            session: projectLinkOpsChatSessionForClient(session),
+            session: projectLinkOpsChatSessionForClient(persistedSession),
           });
         }
         if (req.method === 'DELETE') {
@@ -18035,21 +23820,23 @@ ${uploadCheckAnswer}` : `
           }
           const deletedSession = access.record;
           let codexSessionDelete = {ok: true, skipped: true, reason: 'no_codex_session_id', deletedFiles: []};
-          if (deletedSession?.codexSessionId) {
-            try {
-              codexSessionDelete = await deleteCodexSessionRecord(deletedSession.codexSessionId);
-            } catch (err) {
-              codexSessionDelete = {
-                ok: false,
-                sessionId: safeCodexSessionId(deletedSession.codexSessionId),
-                deletedFiles: [],
-                warnings: [String(err?.message || err).slice(0, 300)],
-              };
-            }
-          }
-          const next = {version: 1, updatedAt: new Date().toISOString(), memoryPolicy: CLOUD_AI_MEMORY_POLICY, sessions: current.sessions.filter(s => String(s.id || '') !== id)};
-          await writeLinkOpsChatStore(args, next);
-          await appendAudit(args.auditFile, {
+          const deletion = await deleteLinkOpsChatThenCleanup(args, deletedSession, {
+            actorUser: actorUser(actor, req),
+            cleanup: deletedSession?.codexSessionId ? async () => {
+              try {
+                codexSessionDelete = await deleteCodexSessionRecord(deletedSession.codexSessionId);
+              } catch (err) {
+                codexSessionDelete = {
+                  ok: false,
+                  sessionId: safeCodexSessionId(deletedSession.codexSessionId),
+                  deletedFiles: [],
+                  warnings: [String(err?.message || err).slice(0, 300)],
+                };
+              }
+            } : null,
+          });
+          const next = {...current, updatedAt: new Date().toISOString(), sessions: current.sessions.filter(s => String(s.id || '') !== id)};
+          try { await appendAudit(args.auditFile, {
             at: new Date().toISOString(),
             type: 'link-ops-chat-delete',
             actor,
@@ -18061,13 +23848,14 @@ ${uploadCheckAnswer}` : `
               codexSessionId: deletedSession?.codexSessionId || '',
               codexSessionDelete,
             },
-          });
+          }); } catch {}
           return sendJson(res, 200, {
             ok: true,
             data: projectLinkOpsChatStoreForActor(next, actor, {limit: 300}),
             deleted: {
-              id,
-              existed: Boolean(deletedSession),
+              ...projectLinkOpsChatSessionForClient(deletion.persisted),
+              id: deletion.persisted?.id || id,
+              existed: true,
               codexSession: {
                 ok: codexSessionDelete.ok !== false,
                 skipped: Boolean(codexSessionDelete.skipped),
@@ -18145,20 +23933,16 @@ ${uploadCheckAnswer}` : `
         });
       }
       if (req.method === 'GET' && url.pathname === '/data.json') {
-        let handle;
+        let lease;
         try {
-          const file = path.join(root, 'data.json');
-          handle = await fs.open(file, 'r');
-          const stat = await handle.stat();
-          const envelope = await readBiPortalCoreEnvelope(root, {handle, stat});
-          const plan = buildBiPortalCoreStreamPlan(
-            envelope,
-            loadOpenApiProductReconciliationSummarySync(),
-            {expectedStores: DEFAULT_SHEIN_STORE_KEYS},
-          );
-          await sendBoundedCoreJson(req, res, handle, stat, plan.replacement, {
+          lease = await biPortalCoreSnapshotCache.acquire({
+            gzip: acceptsGzip(req.headers['accept-encoding']),
+            evidence: loadOpenApiProductReconciliationSummarySync(),
+          });
+          await sendBiPortalCoreSnapshot(req, res, lease, {
             'Cache-Control': 'private, no-cache, must-revalidate',
           });
+          lease = null;
           return;
         } catch (error) {
           if (res.headersSent) {
@@ -18167,7 +23951,7 @@ ${uploadCheckAnswer}` : `
           }
           return sendJson(res, 503, {ok: false, error: 'BI 页面底稿暂时不可用'}, {'Cache-Control': 'no-store'});
         } finally {
-          await handle?.close().catch(() => {});
+          await lease?.release?.();
         }
       }
       let file = safePath(root, req.url || '/');
@@ -18190,6 +23974,13 @@ ${uploadCheckAnswer}` : `
       const data = await fs.readFile(file);
       send(res, 200, data, {'Content-Type': types[ext] || 'application/octet-stream'});
     } catch (err) {
+      // A mutation handler that enqueues deeper work (for example the
+      // intent-plan path) surfaces bounded-queue backpressure here; map it to
+      // 429/503 so deep rejections never become a generic 500.
+      const queueFailure = queueRejectionHttpDetails(err);
+      if (queueFailure) {
+        return sendJson(res, queueFailure.status, {ok: false, code: queueFailure.code, error: queueFailure.message}, queueFailure.headers);
+      }
       const storageFailure = linkOpsRepositoryHttpDetails(err);
       if (storageFailure) {
         return sendJson(res, storageFailure.status, storageFailure.body);
@@ -18202,16 +23993,31 @@ ${uploadCheckAnswer}` : `
     }
   };
 
-  const server = http.createServer((req, res) => {
-    const task = () => handleRequest(req, res);
-    if (isMutationMethod(req.method)) {
-      void enqueueMutationRequest(task);
-      return;
-    }
-    void task();
+  const server = http.createServer();
+  const httpLifecycle = createHttpRuntimeLifecycle(server);
+  server.on('request', (req, res) => {
+    httpLifecycle.dispatchRequest(req, res, () => {
+      if (!isMutationMethod(req.method)) return handleRequest(req, res);
+      const task = () => handleRequest(req, res);
+      const mutationTask = shouldHoldMutationQueueRequest(req.url || '')
+        ? () => new Promise(resolve => setTimeout(resolve, mutationTestHoldMs)).then(task)
+        : task;
+      // Bounded-queue backpressure maps here at the admission boundary: 429 for
+      // saturation/queue-deadline, 503 for shutdown cancellation. An admitted
+      // mutation task is still executed exactly once and never auto-retried.
+      return enqueueMutationRequest(mutationTask).catch(queueError => {
+        const mapped = queueRejectionHttpDetails(queueError);
+        if (!mapped) throw queueError;
+        if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+          sendJson(res, mapped.status, {ok: false, code: mapped.code, error: mapped.message}, mapped.headers);
+        }
+        return undefined;
+      });
+    });
   });
 
   server.on('upgrade', (req, socket) => {
+    if (!httpLifecycle.admitUpgrade(socket)) return;
     handleManualLoginWsUpgrade(req, socket, args, {authRequired, authUsers, sessionSecret}).catch(err => {
       try {
         socket.write(`HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n${String(err?.message || err)}`);
@@ -18220,40 +24026,145 @@ ${uploadCheckAnswer}` : `
     });
   });
 
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(args.port, args.host, resolve);
-  });
-
-  await biLiveUpdateBridge.start();
-  scheduleLiveAccountingRefresh({
-    kind: 'order',
-    accountingKinds: ['order', 'return'],
-    refreshHistoricalSections: true,
-    entityId: 'portal-startup-accounting-catchup',
-    occurredAt: new Date().toISOString(),
-  });
-  await webhookTaskReconciler?.start();
-  startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
-  linkOpsJobWorker?.start();
-
-  let shuttingDown = false;
-  const shutdown = async signal => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(JSON.stringify({ok: true, event: 'shutdown', signal, time: new Date().toISOString()}));
-    stopLiveAccountingRefresh();
-    await linkOpsJobWorker?.stop();
-    await webhookTaskReconciler?.stop();
-    await biLiveUpdateBridge.stop();
-    await new Promise(resolve => server.close(resolve));
-    await Promise.allSettled([
-      linkOpsStoreGateway.close(),
-      args.sheinWebhookRepository?.close?.(),
-    ]);
+  const configuredShutdownTimeoutMs = Number(process.env.SHEIN_BI_PORTAL_SHUTDOWN_TIMEOUT_MS || 5_000);
+  const shutdownTimeoutMs = Number.isFinite(configuredShutdownTimeoutMs)
+    ? Math.max(100, Math.min(30_000, Math.floor(configuredShutdownTimeoutMs)))
+    : 5_000;
+  let shutdownPromise = null;
+  let biCoreWarmupWatcher = null;
+  let portalStartupPhase = null;
+  const runPortalStartupPhase = async operation => {
+    const phase = Promise.resolve().then(operation);
+    portalStartupPhase = phase;
+    try {
+      return await phase;
+    } finally {
+      if (portalStartupPhase === phase) portalStartupPhase = null;
+    }
   };
-  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
-  process.once('SIGINT', () => { void shutdown('SIGINT'); });
+  const waitForPortalStartupPhase = () => portalStartupPhase || Promise.resolve();
+  const shutdown = signal => {
+    if (shutdownPromise) return shutdownPromise;
+    console.log(JSON.stringify({ok: true, event: 'shutdown', surface: 'portal', signal, time: new Date().toISOString()}));
+    shutdownPromise = shutdownHttpRuntime({
+      lifecycle: httpLifecycle,
+      timeoutMs: shutdownTimeoutMs,
+      // Single source of truth for the shutdown ordering: worker claim
+      // admission closes synchronously with HTTP admission (onAdmissionClosed),
+      // in-flight iterations drain inside stopWorkers, and store close runs
+      // only after the worker has drained. See createPortalShutdownHooks.
+      ...createPortalShutdownHooks({
+        enqueueMutationRequest,
+        linkOpsJobWorker,
+        webhookTaskReconciler,
+        waitForStartup: waitForPortalStartupPhase,
+        liveAccountingRefreshStop: stopLiveAccountingRefresh,
+        liveAccountingRefreshDrain: drainLiveAccountingRefresh,
+        biCoreWarmupWatcher,
+        ownerKnowledgeReconcileTimer,
+        liveUpdateBridge: biLiveUpdateBridge,
+        biPortalCoreSnapshotCache,
+        linkOpsStoreGateway,
+        sheinWebhookRepository: args.sheinWebhookRepository,
+        runtimeCancellationController: openApiExecutorAbortController,
+      }),
+    }).then(result => {
+      console.log(JSON.stringify({
+        ok: result.ok,
+        event: 'shutdown-complete',
+        surface: 'portal',
+        signal,
+        forcedConnections: Boolean(result.drain?.forced),
+        wallMs: result.wallMs,
+        admission: result.admission,
+        drain: result.drain,
+        workers: result.workers,
+        stores: result.stores,
+      }));
+      return result;
+    });
+    return shutdownPromise;
+  };
+  const handleShutdownSignal = signal => {
+    void shutdown(signal).then(
+      result => process.exit(result.ok ? 0 : 1),
+      error => {
+        console.error(JSON.stringify({ok: false, event: 'shutdown-failed', signal, error: error?.message || String(error)}));
+        process.exit(1);
+      },
+    );
+  };
+  // Signals are registered before listen so a shutdown signal arriving during
+  // startup (bridge/reconciler/watcher/worker bring-up) goes through the same
+  // unified shutdown instead of leaving a listening-but-half-started runtime.
+ process.once('SIGTERM', () => handleShutdownSignal('SIGTERM'));
+ process.once('SIGINT', () => handleShutdownSignal('SIGINT'));
+  // Env-gated deterministic test control (production never sets these): when
+  // SHEIN_BI_TEST_SHUTDOWN_FILE is set, the appearance of that file drives the
+  // exact same unified shutdown path as SIGTERM/SIGINT. Windows cannot deliver
+  // a catchable POSIX signal to a spawned subprocess, so integration tests use
+  // this to prove the shutdown/admission contract deterministically on every
+  // platform. Mirrors the existing SHEIN_BI_QUERY_TEST_* controls.
+  const testShutdownFile = process.env.SHEIN_BI_TEST_SHUTDOWN_FILE
+    ? path.resolve(String(process.env.SHEIN_BI_TEST_SHUTDOWN_FILE).trim())
+    : '';
+  if (testShutdownFile) {
+    const testShutdownTimer = setInterval(() => {
+      if (fssync.existsSync(testShutdownFile)) {
+        clearInterval(testShutdownTimer);
+        handleShutdownSignal('test-shutdown-trigger');
+      }
+    }, 25);
+    testShutdownTimer.unref?.();
+  }
+
+ try {
+    await runPortalStartupPhase(() => biPortalCoreSnapshotCache.start());
+    if (shutdownPromise) { await shutdownPromise; return; }
+    await runPortalStartupPhase(() => new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(args.port, args.host, resolve);
+    }));
+    if (shutdownPromise) { await shutdownPromise; return; }
+    await runPortalStartupPhase(() => biLiveUpdateBridge.start());
+    if (shutdownPromise) { await shutdownPromise; return; }
+    scheduleLiveAccountingRefresh({
+      kind: 'order',
+      accountingKinds: ['order', 'return'],
+      refreshHistoricalSections: true,
+      entityId: 'portal-startup-accounting-catchup',
+      occurredAt: new Date().toISOString(),
+    });
+    await runPortalStartupPhase(() => webhookTaskReconciler?.start());
+    if (shutdownPromise) { await shutdownPromise; return; }
+    biCoreWarmupWatcher = startBiPortalCoreWarmupWatcher(args, root, {allowGenerate: allowGenerateSections});
+    linkOpsJobWorker?.start();
+  } catch (startupError) {
+    // Any startup failure (listen error or a bridge/reconciler/watcher/worker
+    // bring-up failure) goes through the same unified shutdown path: admission
+    // closes synchronously, started components stop, stores close, then the
+    // process exits non-zero. No half-started runtime keeps listening.
+    console.log(JSON.stringify({
+      ok: false,
+      event: 'startup-failure',
+      surface: 'portal',
+      phase: 'startup',
+      error: String(startupError?.message || startupError),
+    }));
+    try {
+      await shutdown('startup-failure');
+    } catch (cleanupError) {
+      console.error(JSON.stringify({ok: false, event: 'startup-cleanup-failed', surface: 'portal', error: String(cleanupError?.message || cleanupError)}));
+    }
+    process.exit(1);
+  }
+  // Every bridge/reconciler/watcher/worker component is up: atomically open
+  // admission. Before this point the lifecycle refused traffic by default
+  // (503 BI_RUNTIME_STARTING).
+  if (!httpLifecycle.openAdmission()) {
+    if (shutdownPromise) { await shutdownPromise; return; }
+    throw new Error('Portal admission could not open after startup');
+  }
 
   const urlHost = args.host === '0.0.0.0' ? '127.0.0.1' : args.host;
   console.log(JSON.stringify({
@@ -18293,31 +24204,126 @@ if (IS_DIRECT_RUN) {
 }
 
 export const __testHooks = {
+  portalExactCopySourceLock,
+  productAttributeExecutionGate,
+  linkOpsRepositoryHttpDetails,
+  repositoryRevisionAtRequestStart,
+  createLinkOpsTaskRecord,
+  updateLinkOpsTaskRecord,
+  deleteLinkOpsTaskRecord,
+  createLinkOpsChatRecord,
+  updateLinkOpsChatRecord,
+  deleteLinkOpsChatRecord,
+  deleteLinkOpsChatThenCleanup,
+  buildLinkOpsActionChanges,
+  applyLinkOpsActionChanges,
+  settleLinkOpsPostCommit,
+  createLinkOpsRequestWriter,
+  emitJsonChunks,
+  collectStreamJson,
+  streamJsonByteLength,
+  sendLargeJson,
+  disposeBiSectionRawBody,
+  biHostLockedSectionAcknowledgement,
+  biHostLockedSectionAcknowledgementHeaders,
+  createBiHostLockedRequestCancellation,
+  getOrCreateBiSectionInFlight,
   BI_CORE_WARMUP_QUEUE_OWNED,
   BI_CORE_WARMUP_QUEUE_PRIORITY,
+  BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_BASE_MS,
+  BI_PORTAL_CORE_WARMUP_ENQUEUE_BACKOFF_CAP_MS,
+  BI_PORTAL_CORE_WARMUP_STALLED_AFTER_MS,
   biPortalCoreWarmupState,
+  evaluateBiPortalCoreWarmupHealth,
+  biPortalCoreWarmupIdempotencyKey,
+  biPortalForceRefreshIdempotencyKey,
+  BI_SECTION_ENQUEUE_CHILD_TIMEOUT_MS,
+  BI_SECTION_ENQUEUE_CHILD_KILL_GRACE_MS,
+  biSectionEnqueueChildSpec,
+  enqueueHostLockedBiSection,
+  biExternalSectionQueuePendingSize() {
+    return biExternalSectionQueuePending.size;
+  },
+  scheduleBiSectionBackgroundGeneration,
+  resetBiExternalSectionQueuePending() {
+    biExternalSectionQueuePending.clear();
+  },
+  biPortalHomepageAccountingIdempotencyKey,
+  biPortalLiveAccountingEventIdentity,
+  biPortalLiveAccountingIdempotencyKey,
+  biPortalGenerationCoalesceKey,
+  resetBiPortalCoreWarmupEnqueueBackoff,
+  biPortalGenerationCompletionMatches,
+  resolveBiPortalCoreWarmupReceiptHealth,
+  effectiveBiPortalCoreWarmupStateFromReceipt,
+  reconcileBiPortalCoreWarmupQueueOwned,
   scheduleBiPortalCoreWarmup,
   startBiPortalCoreWarmupWatcher,
   biPortalCoreFileIdentity,
   buildBiPortalCoreStreamPlan,
   canonicalPublishAssetBindingFingerprint,
   canonicalPublishAssetBindingImages,
+  validateExistingPublishAssetBindingForAdopt,
   sparseMergePublishPreparation,
+  replaceExplicitPublishPreparationTitlesInCapturePayload,
+  persistedPublishPreparationLock,
+  invalidateDependentPublishLocksForPreparationMigration,
   validateReusedApprovedTaskBinding,
   readBiPortalCoreEnvelope,
   resetBiPortalCoreEnvelopeCache() {
     biPortalCoreEnvelopeCache = null;
+    biPortalCoreEnvelopeInFlight.clear();
+    biPortalCoreEnvelopeScanCount = 0;
   },
+  biPortalCoreEnvelopeScanCount() {
+    return biPortalCoreEnvelopeScanCount;
+  },
+  biPortalCoreSnapshotDir,
+  cleanupBiPortalCoreSnapshotResidue,
+  createBiPortalCoreSnapshotCache,
   resolveDescriptionBindingExpectedBodyHash,
+  loadDirectBiQuery,
+  sendBiPortalCoreSnapshot,
   sendBoundedCoreJson,
+  biPortalCoreRouteLifecycleStatus,
+  resetBiPortalCoreRouteLifecycleState,
+  evaluateBiPortalCoreRouteLifecycleHealth,
+  evaluateBiPortalCoreSnapshotLifecycleHealth,
+  evaluateBiPortalTopLevelHealth,
   sha256StableJson,
   verifyPersistedPublishAssetBindingReadback,
   descriptionBindingExplicitPreValidRejectionEvidence,
   strictOwnBooleanField,
+  linkOpsExecutionResponseOutcome,
   linkOpsPublishResultSucceeded,
   linkOpsExecutorExplicitPreValidFailure,
   linkOpsProductExecutorSubmitted,
   linkOpsMaintenanceExecutorSubmitted,
+  buildOpenApiExecutorChildOutcome,
+  resolveLinkOpsWriteClaimState,
+  classifyLinkOpsLifecycle,
+  persistClaimedLinkOpsExecutionResult,
+  runChildProcess,
+  runBiDbChildProcess,
+  evaluateBiDbCancellationRun,
+  createBiDbApplicationName,
+  validateBiDbApplicationName,
+  parseDirectCacheReceipt,
+  verifyDirectCacheReceipt,
+  BI_DIRECT_RECEIPT_MAX_BYTES,
+  BI_DIRECT_STDOUT_MAX_BYTES,
+  BI_DIRECT_STDERR_MAX_BYTES,
+  generateBiSection,
+  loadBiSection,
+  homepageTimestampNs,
+  homepageTimestampIsValid,
+  resetHomepageAccountingUsabilityCache,
+  homepageAccountingUsabilityParseCount() {
+    return homepageAccountingUsabilityParseCount;
+  },
+  createProfitAccountingStateReader,
+  profitAccountingStateCacheKey,
+  OPENAPI_EXECUTOR_ABORT_KILL_GRACE_MS,
   legacyPreValidArtifactCandidates,
   verifyLegacyPreValidArtifact,
   hydrateLegacyPreValidProofs,

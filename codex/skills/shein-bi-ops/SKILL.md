@@ -143,7 +143,21 @@ The command fresh-reads and CAS-locks the task repository revision; a committed
 binding whose audit/readback is pending is reported as that exact stage and is
 not blindly rebound.
 It never rewrites, translates or auto-maps descriptions. A copy_product_draft
-final publish payload without bound ar/en 5-line descriptions is a blocker.
+final publish payload without bound ar/en 5-line descriptions is a blocker by
+default. The only exception is a current, explicit user instruction to leave
+the description empty. In that case, do not invent text and do not treat the
+absence of an HTML/DOCX file as a blocker; bind the exception to the same task
+and approved payload with the controlled preparation flags:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" prepare-publish --task-id <task-id> --store <target-store> --reuse-approved-binding --standard-goods-sn '<exact supplier code>' --supply-price <SAR> --inventory <quantity> --allow-empty-description --empty-description-confirm USER_EXPLICIT_EMPTY_DESCRIPTION
+```
+
+The server-side marker is default-off and must lock the exact task, target
+store, source store/SKC, supplier code, approved image binding and payload
+hash. A later payload, source or binding change invalidates it. Never infer
+this exception merely because reviewed description material is missing or the
+source link returns an empty description.
 
 For a **historical** published product whose description must be backfilled
 from the same reviewed 审核资料 (legacy unique `section#s9` with exactly three

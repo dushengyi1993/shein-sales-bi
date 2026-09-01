@@ -10,9 +10,11 @@ import {fileURLToPath} from 'node:url';
 import {buildPartnerCliRelease, validatePartnerCliRelease} from '../lib/partner_cli_release.mjs';
 import {PARTNER_CLI_DEPLOYMENT_SCHEMA_VERSION} from '../lib/partner_cli_release_store.mjs';
 import {BI_OPS_CLI_VERSION} from '../lib/partner_knowledge_cache.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'partner-cli-portal-release-'));
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const auditFile = path.join(temp, 'audit.jsonl');
 const authFile = path.join(temp, 'auth.json');
 const packageFile = path.join(temp, `shein-bi-ops-cli-${BI_OPS_CLI_VERSION}.zip`);

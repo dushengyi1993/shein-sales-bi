@@ -5,6 +5,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
+import {
+  discoverInventoryJournalFiles,
+  findInventoryWriteFence,
+  readInventoryIntentLifecycle,
+  readInventoryIntentJournals,
+} from '../lib/durable_inventory_write.mjs';
+import {inventoryDetailRefreshWindow} from '../lib/inventory_detail_refresh_window.mjs';
+import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+
 const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DOMAINS = Object.freeze(['shein_business_domains', 'shein_links']);
 
@@ -48,17 +57,71 @@ function parseArgs(argv) {
 }
 
 const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
-const stable = input => {
-  if (Array.isArray(input)) return input.map(stable);
-  if (!input || typeof input !== 'object') return input;
-  return Object.fromEntries(Object.keys(input).sort().map(key => [key, stable(input[key])]));
-};
-const stableHash = value => crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 const rowKey = row => `${String(row?.storeKey || '').toUpperCase()}::${String(row?.skc || '')}::${String(row?.skuCode || '')}`;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+export async function discoverInventoryJournalAuditFiles(currentJournal, environment = process.env) {
+  const additionalDirectories = String(environment.SHEIN_BI_INVENTORY_JOURNAL_DIRS || '')
+    .split(path.delimiter)
+    .map(directory => directory.trim())
+    .filter(Boolean);
+  return discoverInventoryJournalFiles(currentJournal, {
+    includeAll: true,
+    additionalDirectories,
+  });
+}
+
+async function readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate}) {
+  try {
+    return await readInventoryIntentJournals(journalFiles, {maxRunDate});
+  } catch (error) {
+    const match = /^INVENTORY_JOURNAL_SUPERSEDE_INVALID:(.+):([^:]+):referencedIntentMissing$/.exec(String(error?.message || ''));
+    if (!match || path.resolve(match[1]) === path.resolve(currentJournal)) throw error;
+
+    // A legacy cross-day supersede with a missing referenced intent is invalid
+    // audit history, but it must not hide independently valid manual fences or
+    // invalidate a later day's fully read-back result.  Keep every original
+    // journal immutable and rebuild only the validator's read model from each
+    // file's strict local lifecycle.
+    const records = [];
+    const intents = new Map();
+    const pending = new Map();
+    const terminalOutcomes = new Map();
+    const manualResolutions = new Map();
+    const fences = new Map();
+    const tombstonedIdempotencyKeys = new Map();
+    for (const journalFile of journalFiles) {
+      const lifecycle = await readInventoryIntentLifecycle(journalFile, {strict: true, maxRunDate});
+      records.push({journalFile, ...lifecycle});
+      for (const [intentId, rawIntent] of lifecycle.intents) {
+        const key = `${path.resolve(journalFile)}\u0000${intentId}`;
+        const intent = {...rawIntent, journalFile: path.resolve(journalFile)};
+        if ([...intents.values()].some(candidate => candidate.intentId === intentId)) {
+          throw new Error(`INVENTORY_JOURNAL_CONFLICT:${journalFile}:duplicate_global_intentId=${intentId}`);
+        }
+        intents.set(key, intent);
+        if (lifecycle.pending.has(intentId)) pending.set(key, intent);
+        const outcome = lifecycle.terminalOutcomes.get(intentId);
+        if (outcome) terminalOutcomes.set(key, {...outcome, journalFile: path.resolve(journalFile)});
+        const resolution = lifecycle.manualResolutions.get(intentId);
+        if (!resolution) continue;
+        manualResolutions.set(key, resolution);
+        const scopeKey = String(resolution?.scope?.scopeKey || '');
+        if (!scopeKey || fences.has(scopeKey)) throw new Error(`INVENTORY_JOURNAL_FENCE_CONFLICT:${journalFile}:duplicate_global_scope=${scopeKey}`);
+        fences.set(scopeKey, {key, intent, event: resolution, journalFile: path.resolve(journalFile)});
+        const idempotencyKey = String(resolution.idempotencyKey || '');
+        if (idempotencyKey) {
+          if (tombstonedIdempotencyKeys.has(idempotencyKey)) throw new Error(`INVENTORY_JOURNAL_TOMBSTONE_CONFLICT:${journalFile}:duplicate_global_idempotencyKey=${idempotencyKey}`);
+          tombstonedIdempotencyKeys.set(idempotencyKey, {key, intent, event: resolution});
+        }
+      }
+    }
+    return {files: journalFiles, records, intents, pending, terminalOutcomes, manualResolutions, fences, tombstonedIdempotencyKeys};
+  }
 }
 
 function storedPath(root, value) {
@@ -113,25 +176,18 @@ async function validateMorningEvidence({root, businessDate, file, enabledStores}
 }
 
 function expectedPlanHash(plan) {
-  return stableHash({
-    schemaVersion: plan.schemaVersion,
-    date: plan.date,
-    policyVersion: plan.policyVersion,
-    actionable: plan.actionable,
-    lowEtAllocations: plan.lowEtAllocations,
-    ...(plan.detailRefreshTargets ? {detailRefreshTargets: plan.detailRefreshTargets} : {}),
-    sourceEvidence: Array.isArray(plan.sourceEvidence)
-      ? plan.sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence)
-      : [],
-    ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
-  });
+  return stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 }
 
-function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now()) {
+async function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now(), evidenceRoot = process.cwd(), {validateExternalFiles = true, validateFreshness = true} = {}) {
+  const evidencePath = file => path.isAbsolute(String(file || ''))
+    ? path.resolve(file)
+    : path.resolve(evidenceRoot, String(file || ''));
   const evidence = Array.isArray(plan?.sourceEvidence) ? plan.sourceEvidence : [];
   const et = evidence.filter(row => row?.store === 'ET');
   const links = evidence.filter(row => row?.store === 'BI_LINKS');
   const openApi = evidence.filter(row => enabledStores.includes(String(row?.store || '').toUpperCase()));
+  const detailClosure = evidence.filter(row => row?.store === 'DETAIL_MANIFEST');
   assert(et.length === 1 && links.length === 1 && openApi.length === 19, 'inventory plan sourceEvidence must contain ET, BI_LINKS and 19 unique OpenAPI stores');
   assert(new Set(openApi.map(row => String(row.store).toUpperCase())).size === 19, 'inventory plan OpenAPI sourceEvidence store set is duplicate/incomplete');
   assert(Number(et[0].totalEtRows) > 0 && Number(et[0].matchedCurrentDayEtRows) > 0, 'inventory plan ET sourceEvidence has no matched current-day rows');
@@ -145,23 +201,55 @@ function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime =
       : row.store === 'BI_LINKS'
         ? Number(plan?.executionConstraints?.decreaseOnly ? policy?.lowEtFastGuard?.maxLinksSnapshotAgeHours || policy.maxLinksSnapshotAgeHours || 4 : policy.maxLinksSnapshotAgeHours || 4)
         : Number(policy.maxOpenApiSnapshotAgeHours || 2);
-    assert((now - fetchedAt) / 3_600_000 <= maxHours, `inventory plan sourceEvidence is stale: ${row?.store || ''}`);
+    if (validateFreshness) assert((now - fetchedAt) / 3_600_000 <= maxHours, `inventory plan sourceEvidence is stale: ${row?.store || ''}`);
     assert(typeof row.file === 'string' && row.file.length > 0, `inventory plan sourceEvidence file missing: ${row?.store || ''}`);
   }
   for (const row of openApi) {
     assert(Number(row.stockFailedChunkCount) === 0, `inventory plan OpenAPI source has failed stock chunks: ${row.store}`);
+    assert(/^[a-f0-9]{64}$/i.test(String(row.sha256 || '')), `inventory plan OpenAPI source hash missing: ${row.store}`);
+    if (validateExternalFiles) assert(String(row.sha256).toLowerCase() === await fileHash(evidencePath(row.file)), `inventory plan OpenAPI source hash drifted: ${row.store}`);
+  }
+  if (Array.isArray(plan.detailRefreshTargets) && plan.detailRefreshTargets.length > 0) {
+    assert(detailClosure.length === 1, 'inventory plan must contain exactly one daily detail manifest closure evidence');
+  }
+  if (!validateExternalFiles) {
+    assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
+    return;
+  }
+  for (const closure of detailClosure) {
+    assert(await fileHash(evidencePath(closure.file)) === closure.sha256, 'inventory detail bound manifest hash drifted');
+    assert(await fileHash(evidencePath(closure.manifestOriginalFile)) === closure.manifestOriginalSha256, 'inventory detail original manifest hash drifted');
+    assert(await fileHash(evidencePath(closure.terminalEvidenceFile)) === closure.terminalEvidenceSha256, 'inventory detail terminal evidence hash drifted');
+    const start = Date.parse(closure.refreshStartedAt);
+    const end = Date.parse(closure.refreshEndedAt);
+    assert(Number.isFinite(start) && Number.isFinite(end) && start <= end, 'inventory detail refresh window invalid');
+    for (const cache of (Array.isArray(closure.cacheBindings) ? closure.cacheBindings : [])) {
+      assert(await fileHash(evidencePath(cache.cacheFile)) === cache.cacheSha256, `inventory detail cache hash drifted: ${cache.storeKey}`);
+    }
+    for (const binding of (Array.isArray(closure.targetBindings) ? closure.targetBindings : [])) {
+      const detailFetchedAt = Date.parse(binding.detailFetchedAt);
+      const cacheGeneratedAt = Date.parse(binding.cacheGeneratedAt);
+      assert(Number.isFinite(detailFetchedAt) && Number.isFinite(cacheGeneratedAt)
+        && inventoryDetailRefreshWindow({
+          refreshStartedAt: closure.refreshStartedAt,
+          detailFetchedAt: binding.detailFetchedAt,
+          cacheGeneratedAt: binding.cacheGeneratedAt,
+          refreshEndedAt: closure.refreshEndedAt,
+        }).ok,
+      `inventory detail target timestamp invalid: ${binding.storeKey}::${binding.spu}`);
+    }
   }
   assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
 }
 
-function resultRowIsSafe(row, planRow, plan, result, policy) {
+function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAuditByIntentId) {
   if (!row || !planRow || rowKey(row) !== rowKey(planRow)) return false;
   const target = Number(planRow.targetUsableInventory);
   if (!Number.isInteger(target) || Number(row.targetUsableInventory) !== target || row.ruleClass !== planRow.ruleClass) return false;
   const before = Number(row?.before?.totalUsableInventory);
   if (row.state === 'updated_readback_matched') {
     const writes = Array.isArray(row.writes) ? row.writes : [];
-    const logicalActionKey = stableHash({
+    const logicalActionKey = stableInventoryHash({
       runDate: plan.date,
       store: planRow.storeKey,
       skc: planRow.skc,
@@ -175,7 +263,7 @@ function resultRowIsSafe(row, planRow, plan, result, policy) {
       && row.logicalActionKey === logicalActionKey
       && writes.length > 0
       && writes.every(write => write?.idempotencyKey === `bi-inv-${logicalActionKey.slice(0, 42)}`
-        && write?.requestPayloadHash === stableHash(write?.request)
+        && write?.requestPayloadHash === stableInventoryHash(write?.request)
         && write?.request?.pathname === '/open-api/stock/change-inventory/v2'
         && write?.request?.method === 'POST'
         && write?.request?.body?.updateSkuInventoryQuantityRequests?.length === 1
@@ -188,6 +276,24 @@ function resultRowIsSafe(row, planRow, plan, result, policy) {
         && write?.success === true);
   }
   if (row.state === 'skipped_target_already_matched') return before === target;
+  if (row.state === 'skipped_terminal_readback_recorded') {
+    const audit = currentTerminalAuditByIntentId.get(String(row.terminalIntentId || ''));
+    return result.reconcilePendingOnly === true
+      && audit?.outcome?.disposition === 'readback_matched'
+      && audit.outcome.recordedAt === row.terminalRecordedAt
+      && audit.intent.runDate === plan.date
+      && audit.intent.runDate === row.terminalRunDate
+      && audit.intent.planHash === result.planHash
+      && audit.intent.storeKey === planRow.storeKey
+      && audit.intent.skc === planRow.skc
+      && audit.intent.skuCode === planRow.skuCode
+      && Number(audit.intent.targetUsableInventory) === target
+      && row.logicalActionKey === audit.intent.logicalActionKey
+      && row.terminalDisposition === 'readback_matched'
+      && Number.isFinite(before)
+      && Number(row.currentLiveUsableInventory) === before
+      && (!Array.isArray(row.writes) || row.writes.length === 0);
+  }
   if (row.state === 'skipped_safety_no_increase') return plan?.executionConstraints?.decreaseOnly === true && Number.isFinite(before) && before < target;
   if (row.state === 'skipped_within_scarcity_band') {
     return row.ruleClass === 'recent_sale_scarcity'
@@ -200,6 +306,39 @@ function resultRowIsSafe(row, planRow, plan, result, policy) {
       && Number.isFinite(before)
       && before > Number(policy?.triggerUsableInventoryAtOrBelow ?? 20);
   }
+  if (row.state === 'submitted_but_readback_pending' && row.historicalPending === true) {
+    return row.disposition === 'skipped'
+      && typeof row.historicalIntentId === 'string' && row.historicalIntentId.length > 0
+      && /^\d{4}-\d{2}-\d{2}$/.test(String(row.historicalRunDate || ''))
+      && row.historicalRunDate < plan.date
+      && Number.isInteger(Number(row.historicalTargetUsableInventory))
+      && Number.isFinite(before)
+      && (!Array.isArray(row.writes) || row.writes.length === 0);
+  }
+  if (row.state === 'blocked_by_manual_resolution_fence') {
+    const fence = row.manualResolutionFence;
+    return fence?.disposition === 'manual_baseline_adopted_effect_unknown'
+      && fence?.reason === 'exact_scope_manual_resolution_fence'
+      && typeof fence?.resolutionId === 'string' && fence.resolutionId.length > 0
+      && typeof fence?.intentId === 'string' && fence.intentId.length > 0
+      && fence?.scope?.storeKey === row.storeKey
+      && fence?.scope?.skc === row.skc
+      && fence?.scope?.skuCode === row.skuCode
+      && typeof fence?.scope?.warehouseCode === 'string' && fence.scope.warehouseCode.length > 0
+      && fence?.scope?.invType === 'VI'
+      && /^[a-f0-9]{64}$/i.test(String(fence?.scope?.scopeKey || ''))
+      && (!Array.isArray(row.writes) || row.writes.length === 0);
+  }
+  return false;
+}
+
+function isReconcileOnlyTerminalOrReadbackOnlyResultRow(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (row.state === 'updated_readback_matched') return true;
+  if (row.state === 'skipped_terminal_readback_recorded') return true;
+  if (row.state === 'skipped_target_already_matched') return true;
+  if (row.state === 'submitted_but_readback_pending' && row.historicalPending === true) return true;
+  if (row.state === 'blocked_by_manual_resolution_fence') return true;
   return false;
 }
 
@@ -227,7 +366,6 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   assert(plan?.date === runDate && plan?.policyVersion === policy?.policyVersion, 'inventory plan date/policy mismatch');
   assert(plan?.executable === true && Array.isArray(plan?.blockers) && plan.blockers.length === 0, 'inventory plan is not executable');
   assert(/^[a-f0-9]{64}$/.test(String(plan?.payloadHash || '')) && expectedPlanHash(plan) === plan.payloadHash, 'inventory plan payloadHash mismatch');
-  validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime);
   assert(result?.planHash === plan.payloadHash && result?.policyVersion === plan.policyVersion, 'inventory result plan/policy hash mismatch');
   assert(result?.execute === true && result?.executionMode === 'automatic', 'inventory result is not an automatic execution');
   assert(Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length === 0, 'inventory result contains unresolved durable intents');
@@ -239,6 +377,80 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   assert(expectedAuthorization && result.authorizationId === expectedAuthorization, 'inventory authorization id mismatch');
   const actionable = Array.isArray(plan.actionable) ? plan.actionable : [];
   const rows = Array.isArray(result.results) ? result.results : [];
+  const externalSourceEvidenceRequired = !(result.reconcilePendingOnly === true
+    && rows.length === actionable.length
+    && rows.every(isReconcileOnlyTerminalOrReadbackOnlyResultRow));
+  await validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime, root, {
+    validateExternalFiles: externalSourceEvidenceRequired,
+    validateFreshness: externalSourceEvidenceRequired,
+  });
+  const currentTerminalAuditByIntentId = new Map();
+  const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
+  const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);
+  const lifecycle = await readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate: runDate});
+  for (const [intentKey, intent] of lifecycle.intents.entries()) {
+    if (intent.journalFile !== currentJournal) continue;
+    const outcome = lifecycle.terminalOutcomes.get(intentKey);
+    if (outcome) currentTerminalAuditByIntentId.set(intent.intentId, {intent, outcome});
+  }
+  const expectedManualResolutionReport = [...lifecycle.fences.values()]
+    .map(candidate => ({
+      resolutionId: candidate.event?.resolutionId || '',
+      intentId: candidate.event?.intentId || '',
+      disposition: candidate.event?.disposition || '',
+      scope: candidate.event?.scope || null,
+      idempotencyKey: candidate.event?.idempotencyKey || '',
+      journalFile: candidate.intent?.journalFile || candidate.journalFile || '',
+    }))
+    .sort((left, right) => `${left.journalFile}\u0000${left.intentId}`.localeCompare(`${right.journalFile}\u0000${right.intentId}`));
+  if (result.manualResolutionFences === undefined) {
+    assert(expectedManualResolutionReport.length === 0, 'inventory result omits manual-resolution fence report');
+  } else {
+    assert(Array.isArray(result.manualResolutionFences), 'inventory result manualResolutionFences is not an array');
+    const actualManualResolutionReport = result.manualResolutionFences.map(row => ({
+      resolutionId: row?.resolutionId || '',
+      intentId: row?.intentId || '',
+      disposition: row?.disposition || '',
+      scope: row?.scope || null,
+      idempotencyKey: row?.idempotencyKey || '',
+      journalFile: row?.journalFile || '',
+    })).sort((left, right) => `${left.journalFile}\u0000${left.intentId}`.localeCompare(`${right.journalFile}\u0000${right.intentId}`));
+    assert(stableInventoryHash(actualManualResolutionReport) === stableInventoryHash(expectedManualResolutionReport), 'inventory result manual-resolution fence report mismatch');
+  }
+  if (result.manualResolutionTombstoneCount === undefined) {
+    assert(lifecycle.tombstonedIdempotencyKeys.size === 0, 'inventory result omits manual-resolution idempotency tombstone report');
+  } else {
+    assert(Number.isSafeInteger(result.manualResolutionTombstoneCount)
+      && result.manualResolutionTombstoneCount === lifecycle.tombstonedIdempotencyKeys.size,
+    'inventory result manual-resolution idempotency tombstone report mismatch');
+  }
+  const manualResolutionFences = [];
+  const resultByKey = new Map(rows.map(row => [rowKey(row), row]));
+  for (const planRow of actionable) {
+    const fence = findInventoryWriteFence(lifecycle, {
+      scope: {
+        storeKey: planRow.storeKey,
+        skc: planRow.skc,
+        skuCode: planRow.skuCode,
+        invType: 'VI',
+      },
+    });
+    if (fence) {
+      manualResolutionFences.push({
+        intentId: fence.event?.intentId || '',
+        resolutionId: fence.event?.resolutionId || '',
+        disposition: fence.event?.disposition || '',
+        scope: fence.event?.scope || null,
+        reason: fence.reason,
+      });
+      const fencedRow = resultByKey.get(rowKey(planRow));
+      assert(fencedRow?.state === 'blocked_by_manual_resolution_fence'
+        && fencedRow?.manualResolutionFence?.resolutionId === fence.event?.resolutionId
+        && fencedRow?.manualResolutionFence?.intentId === fence.event?.intentId
+        && fencedRow?.manualResolutionFence?.scope?.scopeKey === fence.event?.scope?.scopeKey,
+      `inventory manual-resolution fence is not represented by the exact terminal exclusion row: store=${planRow.storeKey} skc=${planRow.skc} sku=${planRow.skuCode}`);
+    }
+  }
   assert(rows.length === actionable.length, 'inventory result row count mismatch');
   const planByKey = new Map();
   for (const row of actionable) {
@@ -252,10 +464,17 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     const key = rowKey(row);
     assert(!seen.has(key), `inventory result row identity duplicate: ${key}`);
     seen.add(key);
-    assert(resultRowIsSafe(row, planByKey.get(key), plan, result, policy), `inventory result lacks exact terminal readback: ${key}`);
+    assert(resultRowIsSafe(row, planByKey.get(key), plan, result, policy, currentTerminalAuditByIntentId), `inventory result lacks exact terminal readback: ${key}`);
   }
   assert(seen.size === planByKey.size && [...planByKey.keys()].every(key => seen.has(key)), 'inventory plan/result identity set mismatch');
-  return {planFile, resultFile, inventoryMarkerFile, planHash: plan.payloadHash, resultCount: rows.length};
+  return {
+    planFile,
+    resultFile,
+    inventoryMarkerFile,
+    planHash: plan.payloadHash,
+    resultCount: rows.length,
+    manualResolutionFenceCount: manualResolutionFences.length,
+  };
 }
 
 export async function validateDailyOperatingRefresh(options) {

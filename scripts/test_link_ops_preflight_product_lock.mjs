@@ -27,7 +27,7 @@ const task = {
       state: 'blocked',
       payload: {
         payloadHash: driftedHash,
-        payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+        payloadHashAlgorithm: 'sha256-stable-json-scope-v4',
         summary: {hopeOnSaleDate: '2036-07-12 10:00:00'},
         inferredSource: {sourceStore: 'YJ', sourceSkc: 'sv260211111931313305907'},
       },
@@ -43,7 +43,7 @@ const task = {
         state: 'ready_for_submit',
         ok: true,
         payloadHash: expectedHash,
-        payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+        payloadHashAlgorithm: 'sha256-stable-json-scope-v4',
         payloadSummary: {hopeOnSaleDate: '2036-07-11 10:00:00'},
         payload: {
           sourceDetailLock: historySourceDetailLock,
@@ -63,7 +63,7 @@ assert.equal(lock.sourceStore, 'QY');
 assert.equal(lock.sourceSkc, 'sv25082869650540305');
 assert.equal(lock.hopeOnSaleDate, '2036-07-11 10:00:00');
 assert.equal(lock.payloadHash, expectedHash);
-assert.equal(lock.payloadHashAlgorithm, 'sha256-stable-json-scope-v3');
+assert.equal(lock.payloadHashAlgorithm, 'sha256-stable-json-scope-v4');
 assert.deepEqual(lock.sourceDetailLock, historySourceDetailLock);
 assert.equal(resolvePreflightProductLock(task, 'TZ', {expectedPayloadHash: 'f'.repeat(64)}), null);
 
@@ -96,8 +96,8 @@ for (const [label, mutate] of [
   ['lock SHA object', row => { row.payload.sourceDetailLock.detailContentSha256 = {value: 'a'.repeat(64)}; }],
   ['payloadHash array', row => { row.payloadHash = [expectedHash]; }],
   ['payloadHash object', row => { row.payloadHash = {value: expectedHash}; }],
-  ['payloadHashAlgorithm array', row => { row.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }],
-  ['payloadHashAlgorithm object', row => { row.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }],
+  ['payloadHashAlgorithm array', row => { row.payloadHashAlgorithm = ['sha256-stable-json-scope-v4']; }],
+  ['payloadHashAlgorithm object', row => { row.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v4'}; }],
   ['explicit inferred sourceStore null hides fingerprint fallback', row => { row.payload.inferredSource = {sourceStore: null}; }],
   ['explicit inferred sourceSkc false hides fingerprint fallback', row => { row.payload.inferredSource = {sourceSkc: false}; }],
   ['explicit payload hash null hides result fallback', row => { row.payload.payloadHash = null; }],

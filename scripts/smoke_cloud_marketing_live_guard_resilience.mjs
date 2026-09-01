@@ -7,6 +7,8 @@ import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const guard = fs.readFileSync(path.join(root, 'scripts', 'cloud_marketing_live_guard.sh'), 'utf8');
+const marketingGuardUnit = fs.readFileSync(path.join(root, 'infra/systemd/shein-bi-cloud-marketing-live-guard.service'), 'utf8');
+const marketingGuardTimer = fs.readFileSync(path.join(root, 'infra/systemd/shein-bi-cloud-marketing-live-guard.timer'), 'utf8');
 const biPublishHelper = fs.readFileSync(path.join(root, 'scripts', 'publish_marketing_price_leads_to_bi.sh'), 'utf8');
 const cleanup = fs.readFileSync(path.join(root, 'scripts', 'cleanup_shein_store_browsers.mjs'), 'utf8');
 const cleanupTimer = fs.readFileSync(path.join(root, 'infra/systemd/shein-bi-cloud-browser-cleanup.timer'), 'utf8');
@@ -32,8 +34,32 @@ for (const script of ['scripts/cloud_daily_refresh.sh','scripts/cloud_link_busin
 assert.match(guard, /RUN_ID=.*randomUUID/);
 assert.match(guard, /browserless inspection via session HTTP/);
 assert.match(guard, /--session-http/);
+assert.match(marketingGuardUnit, /^Environment=SHEIN_BI_HOST_RESOURCE_LANE=api-light$/m);
+assert.match(marketingGuardUnit, /^ExecStart=\/usr\/bin\/env bash \/opt\/shein-bi\/app\/scripts\/cloud_marketing_live_guard\.sh$/m);
+assert.doesNotMatch(marketingGuardUnit, /^Slice=/m);
+assert.doesNotMatch(marketingGuardUnit, /run_host_heavy_job\.sh/);
+assert.doesNotMatch(marketingGuardUnit, /^SuccessExitStatus=75$/m);
+assert.match(marketingGuardUnit, /^CPUWeight=40$/m);
+assert.match(marketingGuardUnit, /^MemoryHigh=1000M$/m);
+assert.match(marketingGuardUnit, /^MemoryMax=1400M$/m);
+assert.match(marketingGuardUnit, /^IOSchedulingClass=best-effort$/m);
+assert.match(marketingGuardUnit, /^Environment=SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_RETRY_INTERVAL_SEC=15$/m);
+assert.match(marketingGuardUnit, /^Environment=SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_MAX_WAIT_SEC=600$/m);
+assert.deepEqual(
+  [...marketingGuardTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim()),
+  ['*-*-* 11:00:00'],
+);
+assert.match(marketingGuardTimer, /^Persistent=false$/m);
 assert.doesNotMatch(guard, /manage_browser_task_leases\.mjs/);
 assert.doesNotMatch(guard, /cleanup_shein_store_browsers/);
+assert.doesNotMatch(guard, /\bsystemctl\b/);
+assert.doesNotMatch(guard, /BUSY_SERVICES|active_busy_services|skipped_busy/);
+assert.doesNotMatch(guard, /skipped_low_memory/);
+assert.match(guard, /wait_for_low_memory_capacity/);
+assert.match(guard, /blocked_low_memory/);
+assert.match(guard, /LOW_MEMORY_RETRY_INTERVAL_SEC="\$\{SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_RETRY_INTERVAL_SEC:-15\}"/);
+assert.match(guard, /LOW_MEMORY_MAX_WAIT_SEC="\$\{SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_MAX_WAIT_SEC:-600\}"/);
+assert.match(guard, /max_wait >= 1800/);
 assert.match(guard, /build_repair_queue/);
 assert.match(guard, /IGNORE_RESERVED_WINDOW="\$\{SHEIN_BI_MARKETING_LIVE_IGNORE_RESERVED_WINDOW:-1\}"/);
 assert.match(guard, /refresh_marketing_cost_map/);
@@ -58,7 +84,14 @@ assert.match(stackReview, /level_rule_id: levelRuleId/);
 assert.match(guardReport, /summarizeFreshLiveLowPriceOverlap/);
 assert.match(guardReport, /freshCouponEvidenceSupersedesLegacy/);
 assert.match(guardReport, /active_coupon_outside_allowed_plan/);
-assert.match(repairWorker, /--max-groups "\$REMAINING_GROUPS"/);
+assert.doesNotMatch(repairWorker, /--max-groups "\$REMAINING_GROUPS"/,
+  'drift/fallback runners must not receive the whole remaining budget in one invocation');
+assert.match(repairWorker, /batch_fix_limited_discount_drift\.mjs[\s\S]*?--max-groups 1/,
+  'drift runner must process exactly one group per worker-loop invocation');
+assert.match(repairWorker, /batch_apply_new_listing_limited_discount\.mjs[\s\S]*?--max-groups 1/,
+  'fallback runner must process exactly one group per worker-loop invocation');
+assert.match(repairWorker, /consume_group_budget/,
+  'worker loop must account each processed item or group against the aggregate budget');
 assert.match(repairWorker, /new_groups_in_result/);
 assert.match(repairWorker, /--skip-build-plan --execute/);
 assert.match(repairWorker, /--expected-work-fingerprint/);
@@ -103,8 +136,12 @@ const helperEnqueueAt = biPublishHelper.indexOf('enqueue_bi_portal_sections.sh')
 assert.ok(helperExportAt !== -1 && helperEnqueueAt !== -1 && helperExportAt < helperEnqueueAt,
   'shared BI publish helper must run the price-lead export before enqueueing the portal section');
 assert.match(biPublishHelper, /set -Eeuo pipefail/);
-assert.doesNotMatch(biPublishHelper, /\|\| true/,
-  'shared BI publish helper must not swallow export/enqueue failures');
+const criticalPublishLines = biPublishHelper.split(/\r?\n/)
+  .filter(line => /export_marketing_price_leads_for_bi\.mjs|enqueue_bi_portal_sections\.sh/.test(line));
+assert.equal(criticalPublishLines.length, 2, 'shared BI publish helper must expose one export and one enqueue command');
+for (const line of criticalPublishLines) {
+  assert.doesNotMatch(line, /\|\| true/, 'shared BI publish helper must not swallow export/enqueue failures');
+}
 assert.deepEqual(
   [...biPublishHelper.matchAll(/--sections\s+([A-Za-z0-9,]+)/g)].map(match => match[1]),
   ['linksData'],
@@ -120,10 +157,28 @@ assert.match(biPublishHelper, /export_marketing_price_leads_for_bi\.mjs --requir
   'shared BI publish helper must reject stale/error preserved price snapshots before enqueue');
 const helperHarness = stage => [
   `FAIL_STAGE=${stage}`,
-  'SHEIN_BI_ROOT=.',
-  'node() { echo EXPORT; if [[ "$FAIL_STAGE" == "export" ]]; then return 31; fi; return 0; }',
+  'SMOKE_TMP="$(mktemp -d)"',
+  'export SHEIN_BI_ROOT=.',
+  'export SHEIN_BI_MARKETING_PRICE_LEADS_FILE="$SMOKE_TMP/marketing-price-leads.json"',
+  'export SHEIN_BI_MARKETING_PRICE_LEADS_STAGE_FILE="$SMOKE_TMP/marketing-price-leads.stage.json"',
+  'export SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE="$SMOKE_TMP/publication.lock"',
+  '(',
+  'prepare_shared_lock_file() { mkdir -p -- "$(dirname -- "$1")"; : > "$1"; }',
+  'node() {',
+  '  if [[ "$*" == *"export_marketing_price_leads_for_bi.mjs"* ]]; then',
+  '    echo EXPORT',
+  '    if [[ "$FAIL_STAGE" == "export" ]]; then return 31; fi',
+  '    printf \'{"rows":[]}\\n\' > "$SHEIN_BI_MARKETING_PRICE_LEADS_STAGE_FILE"',
+  '    return 0',
+  '  fi',
+  '  command node "$@"',
+  '}',
   'bash() { echo ENQUEUE; if [[ "$FAIL_STAGE" == "enqueue" ]]; then return 32; fi; return 0; }',
   biPublishHelper,
+  ')',
+  'status=$?',
+  'rm -rf -- "$SMOKE_TMP"',
+  'exit "$status"',
 ].join('\n');
 const helperExportFailure = spawnSync('bash', [], {cwd: root, encoding: 'utf8', input: helperHarness('export')});
 assert.notEqual(helperExportFailure.status, 0, 'price export failure must propagate out of the BI publish helper');
@@ -139,16 +194,22 @@ const ordinaryReadyAt = guard.indexOf('ORDINARY_LIVE_READY=');
 const guardPublishAt = guard.indexOf('publish complete marketing live snapshot to BI portal queue');
 assert.ok(ordinaryReadyAt !== -1 && guardPublishAt > ordinaryReadyAt,
   'live guard must publish only after the guard report has proved ordinary evidence readiness');
-assert.match(guard, /if \[\[ "\$STACK_REVIEW_STATUS" -eq 0 && "\$ORDINARY_LIVE_READY" -eq 1 && "\$SCAN_STATUS" -eq 0 && "\$GUARD_STATUS" -eq 0 \]\]; then[\s\S]*?bash scripts\/publish_marketing_price_leads_to_bi\.sh/,
-  'live guard must require complete ordinary, limited-discount, and guard evidence before BI publish');
+assert.match(guard, /if \[\[ "\$GUARD_STATUS" -eq 0 \]\]; then[\s\S]*?publish_staged_guard_report/,
+  'live guard must publish the staged guard only after a successful guard build');
+assert.match(guard, /if \[\[ "\$COST_MAP_STATUS" -eq 0 && "\$STACK_REVIEW_STATUS" -eq 0 && "\$ORDINARY_LIVE_READY" -eq 1 && "\$SCAN_STATUS" -eq 0 \]\]; then[\s\S]*?bash scripts\/publish_marketing_price_leads_to_bi\.sh/,
+  'live guard must require complete cost, ordinary, and limited-discount evidence before BI publish');
 assert.match(guard, /BI_PUBLISH_STATUS=\$\?/,
   'live guard must record a failed BI publish status');
 assert.match(guard, /"\$BI_PUBLISH_STATUS" -eq 0/,
   'live guard ok state must require a successful BI publish');
 assert.match(guard, /biPublish=\$BI_PUBLISH_STATUS/,
   'live guard warning state must surface the BI publish status');
-assert.match(repairWorker, /run_terminal_final_snapshot\(\)[\s\S]*build_marketing_daily_guard_report\.mjs[\s\S]*FINAL_SCAN_OUT="\$scan_out"[\s\S]*publish_marketing_price_leads_to_bi\.sh \|\| return \$\?/,
-  'repair worker must publish to BI after a successful terminal final snapshot and propagate publish failure');
+const finalReadbackAt = repairWorker.indexOf('run_final_readback() {');
+const terminalSnapshotAt = repairWorker.indexOf('run_terminal_final_snapshot || return $?', finalReadbackAt);
+const terminalPublishAt = repairWorker.indexOf('bash scripts/publish_marketing_price_leads_to_bi.sh', terminalSnapshotAt);
+const terminalPublishReturnAt = repairWorker.indexOf('return "$publication_status"', terminalPublishAt);
+assert.ok(finalReadbackAt !== -1 && terminalSnapshotAt > finalReadbackAt && terminalPublishAt > terminalSnapshotAt && terminalPublishReturnAt > terminalPublishAt,
+  'repair worker must publish to BI after a successful terminal final snapshot and propagate publication status');
 assert.match(repairWorker, /run_final_readback\(\)[\s\S]*run_terminal_final_snapshot \|\| return \$\?/,
   'repair worker final readback must not report ok when the terminal snapshot publish fails');
 
@@ -171,8 +232,36 @@ const repairFailureHarness = [
   'GUARD_CLOUD_BI_ROOT=/tmp/shein-bi-repair-smoke',
   'GUARD_MAX_AGE_HOURS=96',
   'QUEUE_FILE=/tmp/shein-bi-repair-smoke/queue.json',
+  'GUARD_STAGE_DIR=/tmp/shein-bi-repair-smoke/guard-stage',
+  'GUARD_OUT=/tmp/shein-bi-repair-smoke/guard.json',
+  'GUARD_INPUT_OUT="$GUARD_OUT"',
+  'MARKETING_COST_MAP_PATH=/tmp/shein-bi-repair-smoke/cost-map.json',
+  'MARKETING_COST_MAP_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  'CURRENT_REGISTRY_HASH=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  'GUARD_BOUND_REGISTRY_HASH="$CURRENT_REGISTRY_HASH"',
+  'GUARD_BOUND_PRICE_OVERRIDES_PATH=/tmp/shein-bi-repair-smoke/price-overrides.json',
+  'GUARD_BOUND_PRICE_OVERRIDES_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+  'GUARD_BOUND_MARKETING_COST_MAP_PATH="$MARKETING_COST_MAP_PATH"',
+  'GUARD_BOUND_MARKETING_COST_MAP_SHA256="$MARKETING_COST_MAP_SHA256"',
+  'ARTIFACT_PUBLICATION_LOCK_FILE=/tmp/shein-bi-repair-smoke/publication.lock',
+  'ARTIFACT_PUBLICATION_LOCK_WAIT_SEC=1',
+  'PRICE_LEADS_FILE=/tmp/shein-bi-repair-smoke/price-leads.json',
+  'PRICE_LEADS_STAGE_FILE=/tmp/shein-bi-repair-smoke/price-leads.stage.json',
+  'QUEUE_EXPECTED_FINGERPRINT=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+  'QUEUE_EXPECTED_SOURCE_GUARD_HASH=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
   'FINAL_SCAN_OUT=',
+  'ensure_browser_lease() { return 0; }',
   'lease_action() { return 0; }',
+  'bind_marketing_cost_map() { return 0; }',
+  'verify_current_marketing_plan_registry() { return 0; }',
+  'validate_guard_plan_binding() { if [[ "$FAIL_STAGE" == "price_overrides" ]]; then return 41; fi; return 0; }',
+  'prepare_marketing_price_leads() { return 0; }',
+  'acquire_repair_artifact_registry_locks() { return 0; }',
+  'publish_staged_guard_report() { return 0; }',
+  'refresh_queue_pair_locked() { return 0; }',
+  'assert_current_queue_registry_locked() { return 0; }',
+  'release_repair_artifact_registry_locks() { return 0; }',
+  'rebuild_repair_queue_locked() { node scripts/marketing/manage_marketing_repair_queue.mjs; }',
   'timeout() { if [[ "$1" == "-k" ]]; then shift 3; fi; "$@"; }',
   `node() {
     local joined="$*" stage=""
@@ -200,7 +289,6 @@ const repairFailureHarness = [
   shellFunction(repairWorker, 'run_terminal_final_snapshot'),
   shellFunction(repairWorker, 'run_final_readback'),
   shellFunction(repairWorker, 'build_current_repair_plans'),
-  shellFunction(repairWorker, 'rebuild_repair_queue'),
   'if run_final_readback; then echo OK; exit 0; else status=$?; echo "FAIL:$status"; exit "$status"; fi',
 ].join('\n');
 

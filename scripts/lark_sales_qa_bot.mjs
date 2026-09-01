@@ -269,7 +269,7 @@ function extractNumberHints(text) {
 }
 
 function extractSkcHints(text) {
-  return [...new Set((String(text || '').match(/\b(?:sv|sb)\d{8,}\b/ig) || [])
+  return [...new Set((String(text || '').match(/\b(?:sv|sb|sh)\d{8,}\b/ig) || [])
     .map(x => x.trim()))]
     .slice(0, 40);
 }
@@ -1710,7 +1710,7 @@ function inferLinkOpsTargets(command) {
     .map(x => x.toUpperCase())
     .filter(x => STORE_KEYS.includes(x) || ['DSY', 'LGM'].includes(x)))]
     .slice(0, 24);
-  const productRefs = [...new Set((text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb)\d{8,})\b/giu) || [])
+  const productRefs = [...new Set((text.match(/\b(?:[A-Z]{1,6}-?\d{1,8}[A-Z]?(?:-[A-Z0-9]+)?(?:[\u4e00-\u9fa5A-Za-z0-9-]*)?|(?:sv|sb|sh)\d{8,})\b/giu) || [])
     .map(x => x
       .replace(/[，。；、,.]+$/g, '')
       .replace(/(各店|全店|所有店|差链接|弱链接|死链接|缺链接|链接|建议|下架|换图|补新|补链|覆盖).*$/u, ''))

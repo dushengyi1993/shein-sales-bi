@@ -16,6 +16,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_OPENAPI_PRODUCT_CACHE_DIR=/srv/shein-bi/runtime/openapi-product-cache
 Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
 Environment=SHEIN_DOCKER_USE_SUDO=1
 Environment=SHEIN_BI_MORNING_CHAIN_LOG_DIR=/srv/shein-bi/logs/cloud-morning-chain
@@ -30,12 +31,13 @@ Environment=SHEIN_OPENAPI_FINANCE_WINDOW_DAYS=35
 Environment=SHEIN_OPENAPI_FINANCE_CONCURRENCY=3
 Environment=SHEIN_BI_DAILY_OPENAPI_PRODUCT_RECONCILIATION=0
 Environment=SHEIN_BI_DAILY_INVENTORY_COST_REFRESH=1
+Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=/srv/shein-bi/runtime/daily-inventory-replenishment/results:/srv/shein-bi/runtime/et-low-inventory-guard/results
 Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=2
 Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRIES=12
 Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRY_SLEEP_SEC=30
 Environment=SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=2
 Environment=SHEIN_BI_MORNING_RUN_BUDGET_SEC=10200
-Environment=SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=4500
+Environment=SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=2700
 Environment=SHEIN_BI_MORNING_STORE_RETRY_DELAY_SEC=120
 Environment=SHEIN_BI_MORNING_PLATFORM_RETRY_DELAY_SEC=300
 Environment=SHEIN_BI_MORNING_CATCHUP_MIN_UPTIME_SEC=600
@@ -63,4 +65,5 @@ KillMode=control-group
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_morning_chain_job.sh --root /opt/shein-bi/app
 Restart=on-failure
 RestartSec=60
-RestartPreventExitStatus=64 76 78
+RestartPreventExitStatus=64 76 78 79
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/openapi-product-cache

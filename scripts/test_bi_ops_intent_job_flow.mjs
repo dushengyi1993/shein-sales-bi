@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'bi-intent-job-flow-'));
@@ -18,6 +19,7 @@ const taskFile = path.join(temp, 'tasks.json');
 const chatFile = path.join(temp, 'chats.json');
 const runtimeFile = path.join(temp, 'runtime.json');
 const sessionSecretFile = path.join(temp, 'session-secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const auditFile = path.join(temp, 'audit.jsonl');
 const fakeCodexJs = path.join(temp, 'fake-codex.mjs');
 const fakeCodexBin = process.execPath;

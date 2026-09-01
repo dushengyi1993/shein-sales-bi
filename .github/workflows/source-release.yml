@@ -1,0 +1,685 @@
+name: Source release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact source release version and tag (YYYY.MM.DD.N)
+        required: true
+        type: string
+      expected_commit:
+        description: Exact 40-character origin/main HEAD commit SHA
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: source-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout exact origin/main history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+
+      - name: Use the tested Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Validate, recover, publish once, and read back
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          set -euo pipefail
+
+          version="$INPUT_VERSION"
+          expected_commit="$INPUT_EXPECTED_COMMIT"
+          policy_file='config/source_release_trust_policy.json'
+          release_title="SHEIN BI Ops $version"
+          api_root="${GITHUB_API_URL:-https://api.github.com}"
+          temp_dir="$(mktemp -d)"
+          trap 'rm -rf "$temp_dir"' EXIT
+
+          gh_json() {
+            gh api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$@"
+          }
+
+          fetch_main_head() {
+            git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main' >/dev/null
+            local head
+            head="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+            [[ "$head" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "origin/main did not resolve to an exact commit SHA: $head" >&2
+              return 1
+            }
+            printf '%s\n' "$head"
+          }
+
+          assert_source_version_order() {
+            local label="$1"
+            node scripts/check_source_release_version_order.mjs \
+              --version "$version" \
+              --remote origin \
+              --label "$label" > "$temp_dir/version-order-$label.json"
+          }
+
+          evidence_cli="$temp_dir/source-release-evidence.mjs"
+          cat > "$evidence_cli" <<'NODE'
+          import fs from 'node:fs/promises';
+          import path from 'node:path';
+          import {pathToFileURL} from 'node:url';
+
+          const moduleUrl = pathToFileURL(path.join(process.cwd(), 'lib', 'source_release_github_evidence.mjs')).href;
+          const {
+            buildPublicationJournal,
+            createGitHubEvidenceClient,
+            decideArmedDraftSourceReleaseState,
+            decideSourceReleaseState,
+            fetchCiBindingEvidence,
+            fetchLatestCiBindingEvidence,
+            fetchRepositoryTrustEvidence,
+            validateSourceReleaseTrustPolicy,
+            verifyRemoteSourceReleaseEvidence,
+          } = await import(moduleUrl);
+          const [command, ...args] = process.argv.slice(2);
+          const policyFrom = async file => validateSourceReleaseTrustPolicy(JSON.parse(await fs.readFile(file, 'utf8')));
+          const client = createGitHubEvidenceClient({token: process.env.GH_TOKEN, apiBaseUrl: process.env.GITHUB_API_URL || 'https://api.github.com'});
+          const ciDocument = value => {
+            const clean = ci => ({
+              workflow: ci.workflow,
+              event: ci.event,
+              branch: ci.branch,
+              headSha: ci.headSha,
+              runId: ci.runId,
+              runAttempt: ci.runAttempt,
+              url: ci.url,
+              completedAt: ci.completedAt,
+              jobCount: ci.jobCount,
+              jobsSha256: ci.jobsSha256,
+              status: ci.status,
+              conclusion: ci.conclusion,
+            });
+            return {bound: clean(value.bound), latest: clean(value.latest), warnings: value.warnings};
+          };
+          if (command === 'repository') {
+            const [policyFile, output] = args;
+            const evidence = await fetchRepositoryTrustEvidence({client, policy: await policyFrom(policyFile)});
+            await fs.writeFile(output, `${JSON.stringify(evidence)}\n`);
+          } else if (command === 'ci') {
+            const [policyFile, commit, output, runId, runAttempt, requireLatestRaw] = args;
+            const policy = await policyFrom(policyFile);
+            const evidence = runId
+              ? await fetchCiBindingEvidence({
+                  client,
+                  policy,
+                  commit,
+                  boundRunId: Number(runId),
+                  boundRunAttempt: Number(runAttempt),
+                  requireLatest: requireLatestRaw === 'true',
+                })
+              : await fetchLatestCiBindingEvidence({client, policy, commit});
+            await fs.writeFile(output, `${JSON.stringify(ciDocument(evidence))}\n`);
+          } else if (command === 'state') {
+            const [input, output] = args;
+            const state = decideSourceReleaseState(JSON.parse(await fs.readFile(input, 'utf8')));
+            await fs.writeFile(output, `${JSON.stringify(state)}\n`);
+          } else if (command === 'armed') {
+            const [input, output] = args;
+            const state = decideArmedDraftSourceReleaseState(JSON.parse(await fs.readFile(input, 'utf8')));
+            await fs.writeFile(output, `${JSON.stringify(state)}\n`);
+          } else if (command === 'journal') {
+            const [state, tag, commit, attestationSha256, output] = args;
+            await fs.writeFile(output, `${buildPublicationJournal({state, tag, commit, attestationSha256})}\n`);
+          } else if (command === 'remote') {
+            const [policyFile, attestationFile, checksumFile, output] = args;
+            const policyBytes = await fs.readFile(policyFile);
+            const policy = validateSourceReleaseTrustPolicy(JSON.parse(policyBytes.toString('utf8')));
+            const attestationBytes = await fs.readFile(attestationFile);
+            const checksumBytes = await fs.readFile(checksumFile);
+            const attestation = JSON.parse(attestationBytes.toString('utf8'));
+            const crypto = await import('node:crypto');
+            const evidence = await verifyRemoteSourceReleaseEvidence({
+              policy,
+              trustPolicySha256: crypto.createHash('sha256').update(policyBytes).digest('hex'),
+              tag: attestation.tag,
+              commit: attestation.commit,
+              attestationBytes,
+              checksumBytes,
+              client,
+            });
+            await fs.writeFile(output, `${JSON.stringify(evidence)}\n`);
+          } else {
+            throw new Error(`Unknown source-release evidence command: ${command}`);
+          }
+          NODE
+
+          verify_repository_trust() {
+            local label="$1"
+            node "$evidence_cli" repository "$policy_file" "$temp_dir/repository-$label.json"
+          }
+
+          inspect_tag() {
+            local output="$1"
+            local remote="${output}.remote"
+            local status
+            set +e
+            git ls-remote --exit-code --tags origin "refs/tags/$version" > "$remote" 2>"${remote}.err"
+            status="$?"
+            set -e
+            if [ "$status" = '2' ]; then
+              printf '%s\n' '{"exists":false}' > "$output"
+              return
+            fi
+            if [ "$status" != '0' ]; then
+              echo "Unable to inspect remote tag $version." >&2
+              return 1
+            fi
+            if [ "$(wc -l < "$remote" | tr -d ' ')" != '1' ] \
+              || [ "$(awk 'NR == 1 {print $2}' "$remote")" != "refs/tags/$version" ]; then
+              echo "Remote tag lookup for $version was ambiguous." >&2
+              return 1
+            fi
+            git fetch --no-tags --force origin "refs/tags/$version:refs/tags/$version" >/dev/null
+            local object_id type peeled message_file
+            object_id="$(git rev-parse --verify "refs/tags/$version")"
+            type="$(git cat-file -t "refs/tags/$version")"
+            peeled="$(git rev-parse --verify "refs/tags/$version^{commit}" 2>/dev/null || true)"
+            message_file="${output}.message"
+            : > "$message_file"
+            if [ "$type" = 'tag' ]; then
+              git cat-file tag "refs/tags/$version" > "${output}.object"
+              sed '1,/^$/d' "${output}.object" > "$message_file"
+            fi
+            jq -n \
+              --argjson exists true \
+              --arg objectId "$object_id" \
+              --arg type "$type" \
+              --arg peeledCommit "$peeled" \
+              --rawfile message "$message_file" \
+              '{exists:$exists,objectId:$objectId,type:$type,peeledCommit:$peeledCommit,message:$message,messageMatches:false}' > "$output"
+          }
+
+          inspect_release() {
+            local output="$1"
+            local pages="${output}.pages"
+            gh_json --paginate --slurp \
+              "/repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$pages"
+            jq -c --arg tag "$version" '
+              [ .[][] | select(.tag_name == $tag) ]
+              | if length == 0 then {exists:false}
+                elif length != 1 then error("duplicate GitHub Releases for exact tag")
+                else .[0] | {
+                  exists:true,
+                  id:.id,
+                  tagName:.tag_name,
+                  title:.name,
+                  body:.body,
+                  draft:.draft,
+                  prerelease:.prerelease,
+                  immutable:.immutable,
+                  publishedAt:.published_at,
+                  url:.html_url,
+                  assets:[.assets[] | {id:.id,name:.name,state:.state,size:.size,digest:.digest}]
+                } end
+            ' "$pages" > "$output"
+          }
+
+          parse_tag_binding() {
+            local tag_json="$1"
+            local output="$2"
+            node - "$tag_json" "$version" "$expected_commit" "$output" <<'NODE'
+          const fs = require('fs');
+          const [tagFile, version, commit, output] = process.argv.slice(2);
+          const tag = JSON.parse(fs.readFileSync(tagFile, 'utf8'));
+          if (tag.exists !== true || tag.type !== 'tag' || tag.peeledCommit !== commit) {
+            throw new Error('Existing remote tag is not the expected annotated commit');
+          }
+          const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const pattern = new RegExp(`^Source release ${escaped}\\ncommit: (${commit})\\nci-run-id: ([1-9][0-9]*)\\nci-run-attempt: ([1-9][0-9]*)\\nrelease-attestation-sha256: ([0-9a-f]{64})\\n$`);
+          const match = pattern.exec(String(tag.message || '').replace(/\r\n/g, '\n'));
+          if (!match) throw new Error('Annotated tag message does not have the exact source-release binding');
+          fs.writeFileSync(output, `${JSON.stringify({runId:Number(match[2]),runAttempt:Number(match[3]),attestationSha256:match[4]})}\n`);
+          NODE
+          }
+
+          refresh_bound_ci() {
+            local require_latest="$1"
+            local label="$2"
+            local run_id run_attempt fresh
+            run_id="$(jq -r '.bound.runId' "$bound_ci_file")"
+            run_attempt="$(jq -r '.bound.runAttempt' "$bound_ci_file")"
+            fresh="$temp_dir/ci-$label.json"
+            node "$evidence_cli" ci "$policy_file" "$expected_commit" "$fresh" "$run_id" "$run_attempt" "$require_latest"
+            jq -S '.bound' "$bound_ci_file" > "$temp_dir/bound-before-$label.json"
+            jq -S '.bound' "$fresh" > "$temp_dir/bound-after-$label.json"
+            cmp "$temp_dir/bound-before-$label.json" "$temp_dir/bound-after-$label.json"
+            cp "$fresh" "$bound_ci_file"
+          }
+
+          assert_tag_exact() {
+            local label="$1"
+            inspect_tag "$tag_json"
+            jq -e --arg commit "$expected_commit" '
+              .exists == true and .type == "tag" and .peeledCommit == $commit
+            ' "$tag_json" >/dev/null
+            node - "$tag_json" "$temp_dir/actual-tag-message-$label.txt" <<'NODE'
+          const fs = require('fs');
+          const [input, output] = process.argv.slice(2);
+          fs.writeFileSync(output, JSON.parse(fs.readFileSync(input, 'utf8')).message);
+          NODE
+            cmp "$tag_message_file" "$temp_dir/actual-tag-message-$label.txt"
+            jq '.messageMatches = true | del(.message)' "$tag_json" > "${tag_json}.exact"
+            mv "${tag_json}.exact" "$tag_json"
+          }
+
+          build_state() {
+            local observed_main="$1"
+            local output="$2"
+            jq -n \
+              --arg version "$version" \
+              --arg expectedCommit "$expected_commit" \
+              --arg observedMain "$observed_main" \
+              --arg expectedTitle "$release_title" \
+              --arg attestationSha256 "$attestation_sha" \
+              --slurpfile tag "$tag_json" \
+              --slurpfile release "$release_json" \
+              --slurpfile expectedAssets "$expected_assets_file" \
+              --slurpfile ci "$bound_ci_file" '
+                {
+                  version:$version,
+                  expectedCommit:$expectedCommit,
+                  observedMain:$observedMain,
+                  expectedTitle:$expectedTitle,
+                  attestationSha256:$attestationSha256,
+                  tag:$tag[0],
+                  release:$release[0],
+                  expectedAssets:$expectedAssets[0],
+                  warnings:$ci[0].warnings
+                }
+              ' > "$output"
+          }
+
+          run_state() {
+            node "$evidence_cli" state "$1" "$2"
+          }
+
+          download_and_compare_assets() {
+            local label="$1"
+            local download_dir="$temp_dir/download-$label"
+            mkdir -p "$download_dir"
+            local name id
+            for name in release-attestation.json release-attestation.json.sha256; do
+              id="$(jq -r --arg name "$name" '[.assets[] | select(.name == $name)] | if length == 1 then .[0].id else empty end' "$release_json")"
+              [[ "$id" =~ ^[0-9]+$ ]] || {
+                echo "Unable to resolve exact asset id for $name ($label)." >&2
+                return 1
+              }
+              curl --fail --silent --show-error --location \
+                --output "$download_dir/$name" \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header 'Accept: application/octet-stream' \
+                --header 'X-GitHub-Api-Version: 2022-11-28' \
+                "$api_root/repos/$GITHUB_REPOSITORY/releases/assets/$id"
+            done
+            cmp "$attestation_file" "$download_dir/release-attestation.json"
+            cmp "$checksum_file" "$download_dir/release-attestation.json.sha256"
+            (cd "$download_dir" && sha256sum --check release-attestation.json.sha256)
+          }
+
+          if [ "$GITHUB_REF" != 'refs/heads/main' ]; then
+            echo "Source releases must be dispatched from refs/heads/main; received $GITHUB_REF" >&2
+            exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12][0-9]|3[01])\.[1-9][0-9]*$ ]]; then
+            echo "Invalid source release version: $version" >&2
+            exit 1
+          fi
+          IFS='.' read -r year month day revision <<<"$version"
+          [ "$(date -u -d "$year-$month-$day" '+%Y.%m.%d' 2>/dev/null || true)" = "$year.$month.$day" ] || {
+            echo "Invalid calendar date in source release version: $version" >&2
+            exit 1
+          }
+          if [[ ! "$expected_commit" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'expected_commit and GITHUB_SHA must be exact lowercase commit SHAs.' >&2
+            exit 1
+          fi
+          [ -z "$(git status --porcelain --untracked-files=all)" ] || {
+            echo 'Release checkout is not clean.' >&2
+            exit 1
+          }
+          jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .schemaVersion == "shein-bi-source-release-trust-policy/v1"
+            and .repository.fullName == $repo
+            and .ci.workflowPath == ".github/workflows/ci.yml"
+            and .sourceRelease.workflowPath == ".github/workflows/source-release.yml"
+          ' "$policy_file" >/dev/null
+
+          initial_main="$(fetch_main_head)"
+          checkout_head="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [ "$expected_commit" != "$initial_main" ] || [ "$checkout_head" != "$initial_main" ] \
+            || [ "$GITHUB_SHA" != "$initial_main" ]; then
+            echo "Refusing source release outside current origin/main HEAD." >&2
+            exit 1
+          fi
+          assert_source_version_order initial
+          verify_repository_trust initial
+
+          tag_json="$temp_dir/tag.json"
+          release_json="$temp_dir/release.json"
+          inspect_tag "$tag_json"
+          inspect_release "$release_json"
+          bound_ci_file="$temp_dir/bound-ci.json"
+          tag_binding_file="$temp_dir/tag-binding.json"
+          if [ "$(jq -r '.exists' "$tag_json")" = 'true' ]; then
+            parse_tag_binding "$tag_json" "$tag_binding_file"
+            require_latest=true
+            if [ "$(jq -r '.exists == true and .draft == false' "$release_json")" = 'true' ]; then require_latest=false; fi
+            node "$evidence_cli" ci "$policy_file" "$expected_commit" "$bound_ci_file" \
+              "$(jq -r '.runId' "$tag_binding_file")" "$(jq -r '.runAttempt' "$tag_binding_file")" "$require_latest"
+          else
+            node "$evidence_cli" ci "$policy_file" "$expected_commit" "$bound_ci_file" '' '' true
+          fi
+
+          trust_policy_sha="$(sha256sum "$policy_file" | awk '{print $1}')"
+          attestation_file="$temp_dir/release-attestation.json"
+          checksum_file="$temp_dir/release-attestation.json.sha256"
+          # SOURCE_RELEASE_ATTESTATION_V3_BEGIN
+          jq -S -n \
+            --argjson repositoryId "$(jq -r '.repository.id' "$policy_file")" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg version "$version" \
+            --arg commit "$expected_commit" \
+            --arg trustPolicySha256 "$trust_policy_sha" \
+            --arg workflow "$(jq -r '.ci.workflowPath' "$policy_file")" \
+            --arg event "$(jq -r '.bound.event' "$bound_ci_file")" \
+            --arg branch "$(jq -r '.bound.branch' "$bound_ci_file")" \
+            --argjson runId "$(jq -r '.bound.runId' "$bound_ci_file")" \
+            --argjson runAttempt "$(jq -r '.bound.runAttempt' "$bound_ci_file")" \
+            --arg url "$(jq -r '.bound.url' "$bound_ci_file")" \
+            --arg completedAt "$(jq -r '.bound.completedAt' "$bound_ci_file")" \
+            --argjson jobCount "$(jq -r '.bound.jobCount' "$bound_ci_file")" \
+            --arg jobsSha256 "$(jq -r '.bound.jobsSha256' "$bound_ci_file")" \
+            --arg sourceWorkflow "$(jq -r '.sourceRelease.workflowPath' "$policy_file")" '
+              {
+                schemaVersion:3,
+                repository:{id:$repositoryId,fullName:$repository},
+                version:$version,
+                tag:$version,
+                commit:$commit,
+                trustPolicySha256:$trustPolicySha256,
+                ci:{
+                  workflow:$workflow,event:$event,branch:$branch,runId:$runId,runAttempt:$runAttempt,
+                  url:$url,completedAt:$completedAt,jobCount:$jobCount,jobsSha256:$jobsSha256
+                },
+                sourceWorkflow:{path:$sourceWorkflow}
+              }
+            ' > "$attestation_file"
+          # SOURCE_RELEASE_ATTESTATION_V3_END
+          (
+            cd "$temp_dir"
+            sha256sum release-attestation.json > release-attestation.json.sha256
+            sha256sum --check release-attestation.json.sha256
+          )
+          attestation_sha="$(sha256sum "$attestation_file" | awk '{print $1}')"
+          checksum_sha="$(sha256sum "$checksum_file" | awk '{print $1}')"
+          if [ -s "$tag_binding_file" ] && [ "$(jq -r '.attestationSha256' "$tag_binding_file")" != "$attestation_sha" ]; then
+            echo 'Existing annotated tag binds a different attestation; recovery is unsafe.' >&2
+            exit 1
+          fi
+
+          tag_message_file="$temp_dir/tag-message.txt"
+          printf '%s\n' \
+            "Source release $version" \
+            "commit: $expected_commit" \
+            "ci-run-id: $(jq -r '.bound.runId' "$bound_ci_file")" \
+            "ci-run-attempt: $(jq -r '.bound.runAttempt' "$bound_ci_file")" \
+            "release-attestation-sha256: $attestation_sha" > "$tag_message_file"
+          if [ "$(jq -r '.exists' "$tag_json")" = 'true' ]; then assert_tag_exact initial; fi
+
+          expected_assets_file="$temp_dir/expected-assets.json"
+          jq -n \
+            --arg attestationDigest "sha256:$attestation_sha" \
+            --arg checksumDigest "sha256:$checksum_sha" \
+            --argjson attestationSize "$(wc -c < "$attestation_file" | tr -d ' ')" \
+            --argjson checksumSize "$(wc -c < "$checksum_file" | tr -d ' ')" '
+              {
+                "release-attestation.json":{size:$attestationSize,digest:$attestationDigest},
+                "release-attestation.json.sha256":{size:$checksumSize,digest:$checksumDigest}
+              }
+            ' > "$expected_assets_file"
+          node "$evidence_cli" journal DRAFT_READY "$version" "$expected_commit" "$attestation_sha" "$temp_dir/journal-draft.txt"
+          node "$evidence_cli" journal PUBLISH_OUTCOME_UNKNOWN "$version" "$expected_commit" "$attestation_sha" "$temp_dir/journal-unknown.txt"
+          draft_body_file="$temp_dir/draft-body.md"
+          unknown_body_file="$temp_dir/unknown-body.md"
+          {
+            echo "Source release $version"
+            echo
+            echo "Commit: $expected_commit"
+            echo "Required main push CI: $(jq -r '.bound.url' "$bound_ci_file") (attempt $(jq -r '.bound.runAttempt' "$bound_ci_file"))"
+            echo
+            cat "$temp_dir/journal-draft.txt"
+          } > "$draft_body_file"
+          node - "$draft_body_file" "$temp_dir/journal-draft.txt" "$temp_dir/journal-unknown.txt" "$unknown_body_file" <<'NODE'
+          const fs = require('fs');
+          const [bodyFile, fromFile, toFile, output] = process.argv.slice(2);
+          const body = fs.readFileSync(bodyFile, 'utf8');
+          const from = fs.readFileSync(fromFile, 'utf8').trim();
+          const to = fs.readFileSync(toFile, 'utf8').trim();
+          if (!body.includes(from)) throw new Error('Draft body journal is missing');
+          fs.writeFileSync(output, body.replace(from, to));
+          NODE
+
+          initial_state="$temp_dir/state-initial.json"
+          initial_plan="$temp_dir/plan-initial.json"
+          build_state "$initial_main" "$initial_state"
+          run_state "$initial_state" "$initial_plan"
+          [ "$(jq -r '.publishState // empty' "$initial_plan")" != 'PUBLISHED_CONFLICT' ] || {
+            jq -r '.reason' "$initial_plan" >&2
+            exit 1
+          }
+
+          if [ "$(jq -r '.createTag' "$initial_plan")" = 'true' ]; then
+            verify_repository_trust pre-tag
+            refresh_bound_ci true pre-tag
+            [ "$(fetch_main_head)" = "$expected_commit" ] || { echo 'origin/main moved before tag push.' >&2; exit 1; }
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag --annotate --cleanup=verbatim --file "$tag_message_file" "$version" "$expected_commit"
+            assert_source_version_order immediately-before-tag-push
+            git push --porcelain origin "refs/tags/$version:refs/tags/$version"
+          fi
+
+          assert_tag_exact after-tag
+          inspect_release "$release_json"
+          after_tag_state="$temp_dir/state-after-tag.json"
+          after_tag_plan="$temp_dir/plan-after-tag.json"
+          build_state "$(fetch_main_head)" "$after_tag_state"
+          run_state "$after_tag_state" "$after_tag_plan"
+          if [ "$(jq -r '.createDraft' "$after_tag_plan")" = 'true' ]; then
+            verify_repository_trust pre-draft
+            refresh_bound_ci true pre-draft
+            [ "$(fetch_main_head)" = "$expected_commit" ] || { echo 'origin/main moved before draft creation.' >&2; exit 1; }
+            create_payload="$temp_dir/create-release.json"
+            jq -n \
+              --arg tag "$version" \
+              --arg commit "$expected_commit" \
+              --arg title "$release_title" \
+              --rawfile body "$draft_body_file" '
+                {tag_name:$tag,target_commitish:$commit,name:$title,body:$body,draft:true,prerelease:false}
+              ' > "$create_payload"
+            assert_source_version_order immediately-before-draft-create
+            gh_json --method POST --input "$create_payload" "/repos/$GITHUB_REPOSITORY/releases" > "$temp_dir/create-response.json"
+            jq -e --arg tag "$version" --arg title "$release_title" '
+              .tag_name == $tag and .name == $title and .draft == true and .prerelease == false
+            ' "$temp_dir/create-response.json" >/dev/null
+          fi
+
+          assert_tag_exact before-assets
+          inspect_release "$release_json"
+          before_assets_state="$temp_dir/state-before-assets.json"
+          before_assets_plan="$temp_dir/plan-before-assets.json"
+          build_state "$(fetch_main_head)" "$before_assets_state"
+          run_state "$before_assets_state" "$before_assets_plan"
+          if [ "$(jq -r '.uploadAssets' "$before_assets_plan")" = 'true' ]; then
+            verify_repository_trust pre-assets
+            refresh_bound_ci true pre-assets
+            [ "$(jq -r '.draft' "$release_json")" = 'true' ] || { echo 'Assets may be replaced only on a draft.' >&2; exit 1; }
+            assert_source_version_order immediately-before-assets-upload
+            gh release upload "$version" "$attestation_file" "$checksum_file" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+
+          assert_tag_exact assets-ready
+          inspect_release "$release_json"
+          assets_state="$temp_dir/state-assets-ready.json"
+          assets_plan="$temp_dir/plan-assets-ready.json"
+          build_state "$(fetch_main_head)" "$assets_state"
+          run_state "$assets_state" "$assets_plan"
+          publish_state="$(jq -r '.publishState // empty' "$assets_plan")"
+          if [ "$publish_state" = 'PUBLISHED_CONFLICT' ]; then
+            jq -r '.reason' "$assets_plan" >&2
+            exit 1
+          fi
+          if [ "$publish_state" = 'PUBLISH_OUTCOME_UNKNOWN' ]; then
+            echo 'PUBLISH_OUTCOME_UNKNOWN: prior publication request cannot be retried automatically; read-only reconciliation required.' >&2
+            exit 1
+          fi
+          if [ "$publish_state" = 'PUBLISHED_VERIFIED' ]; then
+            node "$evidence_cli" remote "$policy_file" "$attestation_file" "$checksum_file" "$temp_dir/remote-terminal.json"
+            final_plan="$assets_plan"
+          else
+            [ "$publish_state" = 'DRAFT_READY' ] || { echo "Release did not reach DRAFT_READY: $(jq -r '.mode' "$assets_plan")" >&2; exit 1; }
+            download_and_compare_assets assets-ready
+            verify_repository_trust pre-arm
+            refresh_bound_ci true pre-arm
+            [ "$(fetch_main_head)" = "$expected_commit" ] || { echo 'origin/main moved before publication arm.' >&2; exit 1; }
+            release_id="$(jq -r '.id' "$release_json")"
+            arm_payload="$temp_dir/arm-publication.json"
+            jq -n --rawfile body "$unknown_body_file" '{body:$body}' > "$arm_payload"
+            gh_json --method PATCH --input "$arm_payload" "/repos/$GITHUB_REPOSITORY/releases/$release_id" > "$temp_dir/arm-response.json" || {
+              echo 'Publication arm API outcome is unknown; no publish request was sent.' >&2
+              exit 1
+            }
+            inspect_release "$release_json" || {
+              echo 'Publication arm readback is unknown; no publish request was sent.' >&2
+              exit 1
+            }
+            node - "$release_json" "$unknown_body_file" "$release_id" <<'NODE'
+          const fs = require('fs');
+          const [releaseFile, bodyFile, expectedId] = process.argv.slice(2);
+          const release = JSON.parse(fs.readFileSync(releaseFile, 'utf8'));
+          const body = fs.readFileSync(bodyFile, 'utf8');
+          if (release.exists !== true || String(release.id) !== expectedId || release.draft !== true || release.body !== body) {
+            throw new Error('Publication arm did not persist exact PUBLISH_OUTCOME_UNKNOWN journal');
+          }
+          NODE
+
+            # This is the last mutable preflight. Slow asset byte downloads and
+            # read-only confidence checks (repository trust, CI, main head)
+            # complete before the final tight gate; only after those is one fresh
+            # metadata readback passed through the armed-draft full gate. After
+            # that gate succeeds, the only remaining steps are local payload
+            # construction and the single draft=false PATCH; no network reads or
+            # timing checks run between the gate and the PATCH. Every outcome
+            # after the publish is reconciled read-only.
+            download_and_compare_assets immediately-before-publish
+            verify_repository_trust immediately-before-publish
+            refresh_bound_ci true immediately-before-publish
+            armed_main="$(fetch_main_head)"
+            [ "$armed_main" = "$expected_commit" ] || { echo 'origin/main moved immediately before publish.' >&2; exit 1; }
+            assert_tag_exact immediately-before-publish
+            inspect_release "$release_json"
+            armed_state="$temp_dir/state-armed.json"
+            armed_plan="$temp_dir/plan-armed.json"
+            jq -n --arg version "$version" --arg expectedCommit "$expected_commit" --arg observedMain "$armed_main" --arg expectedTitle "$release_title" --arg attestationSha256 "$attestation_sha" --argjson expectedReleaseId "$release_id" --slurpfile tag "$tag_json" --slurpfile release "$release_json" --slurpfile expectedAssets "$expected_assets_file" --slurpfile ci "$bound_ci_file" --rawfile expectedArmedBody "$unknown_body_file" '{version:$version,expectedCommit:$expectedCommit,observedMain:$observedMain,expectedTitle:$expectedTitle,attestationSha256:$attestationSha256,expectedReleaseId:$expectedReleaseId,expectedArmedBody:$expectedArmedBody,tag:$tag[0],release:$release[0],expectedAssets:$expectedAssets[0],warnings:$ci[0].warnings}' > "$armed_state"
+            node "$evidence_cli" armed "$armed_state" "$armed_plan"
+            if [ "$(jq -r '.mode // empty' "$armed_plan")" != 'armed-draft' ] || [ "$(jq -r '.publish // empty' "$armed_plan")" != 'true' ]; then
+              echo 'Armed draft re-verification failed before the single publish PATCH.' >&2
+              exit 1
+            fi
+            armed_release_id="$(jq -r '.releaseId // empty' "$armed_plan")"
+            if [ "$armed_release_id" != "$release_id" ]; then
+              echo "Armed gate release id ${armed_release_id:-<missing>} does not match the armed release $release_id; refusing to publish." >&2
+              exit 1
+            fi
+
+            publish_payload="$temp_dir/publish-release.json"
+            printf '%s\n' '{"draft":false,"prerelease":false}' > "$publish_payload"
+            set +e
+            publish_http_status="$(curl --silent --show-error \
+              --connect-timeout 15 --max-time 60 \
+              --output "$temp_dir/publish-response.json" \
+              --write-out '%{http_code}' \
+              --request PATCH \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              --header 'Content-Type: application/json' \
+              --data-binary "@$publish_payload" \
+              "$api_root/repos/$GITHUB_REPOSITORY/releases/$armed_release_id")"
+            publish_curl_status="$?"
+            set -e
+            # Never retry or PATCH back to draft here, even when curl/API is unknown.
+            echo "Publish request transport=$publish_curl_status http=${publish_http_status:-unknown}"
+
+            if ! inspect_release "$release_json"; then
+              echo 'PUBLISH_OUTCOME_UNKNOWN: terminal GitHub Release readback failed; no automatic publish retry is allowed.' >&2
+              exit 1
+            fi
+            refresh_bound_ci false terminal
+            terminal_state="$temp_dir/state-terminal.json"
+            terminal_plan="$temp_dir/plan-terminal.json"
+            build_state "$(fetch_main_head)" "$terminal_state"
+            run_state "$terminal_state" "$terminal_plan"
+            terminal_publish_state="$(jq -r '.publishState // empty' "$terminal_plan")"
+            if [ "$terminal_publish_state" != 'PUBLISHED_VERIFIED' ]; then
+              echo "$terminal_publish_state: terminal readback did not prove exact immutable publication; no retry was attempted." >&2
+              exit 1
+            fi
+            node "$evidence_cli" remote "$policy_file" "$attestation_file" "$checksum_file" "$temp_dir/remote-terminal.json"
+            final_plan="$terminal_plan"
+          fi
+
+          published_at="$(jq -r '.publishedAt' "$release_json")"
+          ci_completed_at="$(jq -r '.bound.completedAt' "$bound_ci_file")"
+          published_epoch="$(date -u -d "$published_at" '+%s')"
+          ci_completed_epoch="$(date -u -d "$ci_completed_at" '+%s')"
+          # GitHub run/job timestamps share second precision; a publication at
+          # the same second as the exact-attempt completion is still sequential,
+          # because exact-attempt CI completion was already proven above before
+          # the single publish PATCH.  Only a strictly later publication fails.
+          [ "$ci_completed_epoch" -le "$published_epoch" ] || {
+            echo "Exact-attempt jobs must complete no later than publication: ci=$ci_completed_at release=$published_at" >&2
+            exit 1
+          }
+          assert_source_version_order terminal
+          {
+            echo '## Source release terminal verification'
+            echo
+            echo "- State: \`$(jq -r '.publishState' "$final_plan")\`"
+            echo "- Version/tag: \`$version\`"
+            echo "- Commit: \`$expected_commit\`"
+            echo "- Main push CI: run \`$(jq -r '.bound.runId' "$bound_ci_file")\`, attempt \`$(jq -r '.bound.runAttempt' "$bound_ci_file")\`"
+            echo "- CI completion source: exact-attempt jobs; jobs SHA-256 \`$(jq -r '.bound.jobsSha256' "$bound_ci_file")\`"
+            echo "- Attestation SHA-256: \`$attestation_sha\`"
+            echo "- Release URL: $(jq -r '.releaseUrl' "$temp_dir/remote-terminal.json")"
+            echo "- Immutable and owner-enforced remote evidence: exact"
+            echo "- Later CI rerun warnings: \`$(jq '.warnings | length' "$temp_dir/remote-terminal.json")\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {randomUUID} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {
   assertDailyInventoryExecutionAuthorization,
   assertCurrentInventoryListingIdentity,
+  buildDailyInventoryPlanHashPayload,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
+  INVENTORY_OVERWRITE_COMPUTATION_VERSION,
   resolveInventoryIdentityKey,
   resolveInventoryShelfStatus,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
+import {inventoryDetailRefreshWindow} from '../../lib/inventory_detail_refresh_window.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../../lib/shein_openapi_client.mjs';
 import {selectVirtualInventoryWarehouseCode} from '../../lib/shein_inventory_warehouse.mjs';
 import {
@@ -23,8 +26,15 @@ import {
 import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock.mjs';
 import {
   appendDurableJournalRecord,
+  assertInventoryWriteAllowed,
   classifyRecoveredInventoryIntent,
+  compareInventoryIntentChronology,
+  discoverInventoryJournalFiles,
+  findInventoryWriteFence,
+  INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
+  inventoryIntentScopeKey,
   inventoryRecoveryScopeKey,
+  readInventoryIntentJournals,
   recoveredInventoryIntentMismatch,
   submitDurableInventoryWriteOnce,
 } from '../../lib/durable_inventory_write.mjs';
@@ -44,6 +54,7 @@ function parseArgs(argv) {
     executionMode: 'manual_review',
     confirmHash: '',
     maxRows: 500,
+    reconcilePendingOnly: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -58,10 +69,12 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.execute = false;
     else if (a === '--execution-mode') args.executionMode = String(argv[++i] || '');
     else if (a === '--confirm-hash') args.confirmHash = String(argv[++i] || '');
+    else if (a === '--reconcile-pending-only') args.reconcilePendingOnly = true;
     else throw new Error(`Unknown argument: ${a}`);
   }
   if (!args.plan) throw new Error('--plan is required');
   if (!Number.isInteger(args.maxRows) || args.maxRows < 1 || args.maxRows > 1000) throw new Error('Invalid --max-rows');
+  if (args.reconcilePendingOnly && !args.execute) throw new Error('--reconcile-pending-only requires --execute');
   if (!args.out) args.out = path.join(ROOT, 'outputs', 'reports', `daily-inventory-replenishment-result-${Date.now()}.json`);
   return args;
 }
@@ -71,6 +84,181 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const asArray = value => value == null ? [] : Array.isArray(value) ? value : [value];
 const ageHours = value => (Date.now() - new Date(value || '').getTime()) / 3_600_000;
 const runDeadlineEpoch = Number(process.env.SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH || 0);
+const etText = value => String(value ?? '').trim();
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+const isCount = value => value !== '' && value != null && Number.isInteger(Number(value)) && Number(value) >= 0;
+
+async function readControlledEtFile(file, label) {
+  const relative = etText(file).replaceAll('\\', '/');
+  if (!relative || path.isAbsolute(relative) || !relative.startsWith('outputs/et-forwarder/')) {
+    throw new Error(`${label} path is outside outputs/et-forwarder`);
+  }
+  const root = await fs.realpath(path.join(ROOT, 'outputs', 'et-forwarder'));
+  const candidate = path.resolve(ROOT, relative);
+  const stat = await fs.lstat(candidate);
+  if (!stat.isFile()) throw new Error(`${label} is not a regular file`);
+  const real = await fs.realpath(candidate);
+  if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw new Error(`${label} realpath escapes outputs/et-forwarder`);
+  const bytes = await fs.readFile(real);
+  return {relative, real, bytes, hash: sha256(bytes), json: JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''))};
+}
+
+function etEvidenceHash(fact) {
+  return stableInventoryHash({
+    schemaVersion: 'et-low-inventory-evidence/v1',
+    manifestHash: etText(fact.manifestHash).toLowerCase(),
+    batchId: etText(fact.batchId),
+    targetDate: etText(fact.targetDate),
+    endpoints: ['store_stock', 'box_stock'].map(endpoint => {
+      const file = fact.files?.[endpoint] || {};
+      return {
+        endpoint,
+        path: etText(file.path),
+        hash: etText(file.hash).toLowerCase(),
+        rowCount: isCount(file.rowCount) ? Number(file.rowCount) : null,
+        count: isCount(file.count) ? Number(file.count) : null,
+        rawRowCount: isCount(file.rawRowCount) ? Number(file.rawRowCount) : null,
+        pageCount: isCount(file.pageCount) ? Number(file.pageCount) : null,
+        fetchedAt: etText(file.fetchedAt),
+        complete: file.complete === true,
+      };
+    }),
+  });
+}
+
+function assertFreshEtTimestamp(value, targetDate, maxAgeSeconds, label) {
+  const timestamp = new Date(value || '').getTime();
+  const date = Number.isFinite(timestamp)
+    ? new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(timestamp))
+    : '';
+  const ageSeconds = (Date.now() - timestamp) / 1000;
+  if (date !== targetDate || !Number.isFinite(ageSeconds) || ageSeconds < -300 || ageSeconds > maxAgeSeconds) {
+    throw new Error(`${label} freshness is invalid`);
+  }
+}
+
+async function validateEtSafetyFact(plan) {
+  const fact = plan.etFactSource;
+  const constraints = plan.executionConstraints;
+  const etEvidence = asArray(plan.sourceEvidence).filter(row => row.store === 'ET' && row.authoritative === true);
+  if (fact?.schemaVersion !== 'et-low-inventory-fact-source/v1' || fact?.kind !== 'et_forwarder_manifest') {
+    throw new Error('ET safety fact source schema/kind is invalid');
+  }
+  if (constraints?.mode !== 'et_low_inventory_safety' || constraints.decreaseOnly !== true
+    || etEvidence.length !== 1 || etEvidence[0].source !== 'et_forwarder_manifest') {
+    throw new Error('ET safety constraints/sourceEvidence binding is invalid');
+  }
+  const evidence = etEvidence[0];
+  const boundFields = ['batchId', 'targetDate', 'manifestHash', 'inventoryEvidenceHash', 'completeInventoryEvidence', 'maxAgeSeconds'];
+  if (boundFields.some(field => etText(evidence[field]) !== etText(fact[field]))) throw new Error('ET safety sourceEvidence differs from etFactSource');
+  if (etText(evidence.file) !== etText(fact.manifestPath)
+    || etText(evidence.fetchedAt) !== etText(fact.createdAt)
+    || stableInventoryHash(evidence.sourceFiles) !== stableInventoryHash(fact.files)
+    || stableInventoryHash(evidence.endpointRows) !== stableInventoryHash(fact.endpointRows)
+    || etText(constraints.triggerBatchId) !== etText(fact.batchId)
+    || etText(constraints.triggerTargetDate) !== etText(fact.targetDate)
+    || etText(constraints.triggerManifestHash).toLowerCase() !== etText(fact.manifestHash).toLowerCase()
+    || Number(constraints.maximumEtSellableInventory) !== 10
+    || fact.targetDate !== plan.date || fact.completeInventoryEvidence !== true || Number(fact.invalidRows) !== 0) {
+    throw new Error('ET safety immutable source binding is invalid');
+  }
+  const manifestFile = await readControlledEtFile(fact.manifestPath, 'ET manifest');
+  if (manifestFile.hash !== etText(fact.manifestHash).toLowerCase()) throw new Error('ET manifest hash changed after plan');
+  const pointerRef = etText(fact.pointerPath).replaceAll('\\', '/');
+  if (!pointerRef || path.isAbsolute(pointerRef) || !pointerRef.startsWith('outputs/et-forwarder/')) {
+    throw new Error('ET manifest pointer path is invalid');
+  }
+  if (path.resolve(ROOT, pointerRef) !== path.resolve(ROOT, manifestFile.relative)) {
+    const pointer = await readControlledEtFile(pointerRef, 'ET manifest pointer');
+    if (!etText(pointer.json?.manifestPath)) throw new Error('ET manifest pointer target is missing');
+    const target = await readControlledEtFile(pointer.json.manifestPath, 'ET manifest pointer target');
+    if (target.real !== manifestFile.real || ['batchId', 'targetDate', 'createdAt'].some(field => etText(pointer.json[field]) !== etText(fact[field]))
+      || pointer.json.ok !== true || pointer.json.mode !== 'daily') throw new Error('ET manifest pointer drifted after plan');
+  }
+  const manifest = manifestFile.json;
+  const maxAgeSeconds = Number(fact.maxAgeSeconds);
+  if (manifest.ok !== true || manifest.mode !== 'daily'
+    || ['batchId', 'targetDate', 'createdAt'].some(field => etText(manifest[field]) !== etText(fact[field]))
+    || !Number.isInteger(maxAgeSeconds) || maxAgeSeconds < 1 || maxAgeSeconds > 21600) {
+    throw new Error('ET manifest identity/freshness is invalid');
+  }
+  assertFreshEtTimestamp(fact.createdAt, fact.targetDate, maxAgeSeconds, 'ET manifest');
+  for (const endpoint of ['store_stock', 'box_stock']) {
+    const bound = fact.files?.[endpoint];
+    const meta = manifest.endpoints?.[endpoint];
+    const relative = etText(manifest.files?.[endpoint]);
+    if (!bound || !relative || meta?.kind !== 'snapshot' || bound.complete !== true
+      || meta.stoppedByOverlap !== false || meta.stoppedByDailyInitialCap !== false) {
+      throw new Error(`ET ${endpoint} completeness binding is invalid`);
+    }
+    const manifestDir = path.dirname(manifestFile.real);
+    const declaredPath = path.resolve(manifestDir, relative);
+    if (path.isAbsolute(relative) || (declaredPath !== manifestDir && !declaredPath.startsWith(`${manifestDir}${path.sep}`))) {
+      throw new Error(`ET ${endpoint} manifest path is invalid`);
+    }
+    const declaredFile = await readControlledEtFile(path.relative(ROOT, declaredPath), `ET manifest ${endpoint}`);
+    const endpointFile = await readControlledEtFile(bound.path, `ET ${endpoint}`);
+    if (endpointFile.real !== declaredFile.real || endpointFile.hash !== etText(bound.hash).toLowerCase()) {
+      throw new Error(`ET ${endpoint} file/hash differs from manifest binding`);
+    }
+    const doc = endpointFile.json;
+    const pages = Array.isArray(doc.pages) ? doc.pages : [];
+    const rows = Array.isArray(doc.rows) ? doc.rows : [];
+    const rowCounts = [bound.rowCount, bound.count, bound.rawRowCount, fact.endpointRows?.[endpoint],
+      meta.rowCount, meta.count, meta.rawRowCount, doc.count, doc.rawRowCount];
+    const pageCounts = [bound.pageCount, meta.pages];
+    if (doc.endpoint !== endpoint || etText(doc.fetchedAt) !== etText(bound.fetchedAt)
+      || !Array.isArray(doc.rows) || pages.length < 1
+      || rowCounts.some(value => !isCount(value) || Number(value) !== rows.length)
+      || pageCounts.some(value => !isCount(value) || Number(value) !== pages.length)
+      || pages.some(page => !isCount(page?.rows) || Number(page.count) !== Number(meta.count))
+      || pages.reduce((sum, page) => sum + Number(page.rows), 0) !== rows.length) {
+      throw new Error(`ET ${endpoint} endpoint completeness metadata drifted`);
+    }
+    assertFreshEtTimestamp(bound.fetchedAt, fact.targetDate, maxAgeSeconds, `ET ${endpoint}`);
+  }
+  if (etText(fact.inventoryEvidenceHash).toLowerCase() !== etEvidenceHash(fact)) throw new Error('ET inventoryEvidenceHash mismatch');
+}
+
+function etRowsFromSafetyAllocations(plan) {
+  const actionable = asArray(plan.actionable);
+  if (!actionable.length) return new Map();
+  const allocations = asArray(plan.lowEtAllocations);
+  const exact = new Map();
+  const facts = new Map();
+  for (const allocation of allocations) {
+    const exactKey = `${etText(allocation.storeKey).toUpperCase()}::${etText(allocation.skc)}::${etText(allocation.skuCode)}`;
+    if (!allocation.storeKey || !allocation.skc || !allocation.skuCode || exact.has(exactKey)) throw new Error('ET low allocation identity is missing or duplicated');
+    exact.set(exactKey, allocation);
+    const matchKey = etText(allocation.matchKey).toUpperCase();
+    const canonicalKey = etText(resolveInventoryIdentityKey(allocation.canonical) || canonicalInventoryKey(allocation.canonical)).toUpperCase();
+    const quantity = Number(allocation.etSellableInventory);
+    const snapshotDate = etText(allocation.etSnapshotDate).slice(0, 10);
+    const fact = `${quantity}::${snapshotDate}`;
+    if (!matchKey || canonicalKey !== matchKey || !Number.isInteger(quantity) || quantity < 0 || snapshotDate !== plan.date
+      || (facts.has(matchKey) && facts.get(matchKey) !== fact)) throw new Error(`ET low allocation fact conflicts for ${matchKey || '(missing)'}`);
+    facts.set(matchKey, fact);
+  }
+  const rows = new Map();
+  for (const row of actionable) {
+    const allocation = exact.get(`${etText(row.storeKey).toUpperCase()}::${etText(row.skc)}::${etText(row.skuCode)}`);
+    const fields = ['matchKey', 'canonical', 'etSellableInventory', 'etSnapshotDate', 'plannedAllocationTotal', 'targetUsableInventory'];
+    if (row.ruleClass !== 'low_et_top_exposure_allocation' || !allocation
+      || fields.some(field => etText(allocation[field]) !== etText(row[field]))) throw new Error('ET actionable does not match its exact lowEtAllocation');
+    rows.set(etText(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase(), {
+      current_sellable_quantity: Number(allocation.etSellableInventory),
+      et_store_snapshot_date: etText(allocation.etSnapshotDate).slice(0, 10),
+      inventory_match_status: 'matched',
+    });
+  }
+  return rows;
+}
+
+function isValidCalendarDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 
 function assertInventoryWriteWindow(runDate) {
   const currentDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
@@ -104,13 +292,15 @@ function findStoreConfig(config, storeKey) {
   return rows.find(row => String(row.storeKey || row.key || '').trim().toUpperCase() === storeKey);
 }
 
-async function createStoreClient(config, storeKey) {
+async function createStoreClient(config, storeKey, inventoryFenceOptions = {}) {
   const store = findStoreConfig(config, storeKey);
   if (!store?.enabled || !store?.openKeyId || !store?.secretKey) throw new Error(`${storeKey} OpenAPI credentials unavailable`);
   const client = new SheinOpenApiClient({
     baseUrl: config.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
     openKeyId: store.openKeyId,
     secretKey: store.secretKey,
+    inventoryStoreKey: storeKey,
+    ...inventoryFenceOptions,
   });
   const response = await requestWithRateLimitRetry(client, '/open-api/openapi-business-backend/query-store-info', {method: 'POST', body: {}, headers: {language: 'en'}});
   if (String(response.data?.code) !== '0') throw new Error(`${storeKey} store identity query failed`);
@@ -136,22 +326,50 @@ async function readStock(client, skuCode) {
     .flatMap(group => asArray(group?.goodsInventory))
     .flatMap(group => asArray(group?.skuList))
     .find(item => String(item?.skuCode || '') === skuCode);
+  const parseStockField = (source, field) => {
+    if (!source || typeof source !== 'object' || !Object.prototype.hasOwnProperty.call(source, field)) {
+      return {ok: false, value: null, error: `missing ${field}`};
+    }
+    const raw = source[field];
+    let value;
+    if (typeof raw === 'number') {
+      value = raw;
+    } else if (typeof raw === 'string' && /^(0|[1-9]\d*)$/.test(raw)) {
+      value = Number(raw);
+    } else {
+      return {ok: false, value: null, error: `invalid ${field}`};
+    }
+    if (!Number.isSafeInteger(value) || value < 0) {
+      return {ok: false, value: null, error: `invalid ${field}`};
+    }
+    return {ok: true, value};
+  };
   if (!row) {
     return {
+      ok: false,
       skuCode,
       totalInventoryQuantity: 0,
       totalUsableInventory: 0,
       totalLockedQuantity: 0,
       stockRowMissing: true,
+      error: 'stock row missing',
       warehouseCodes: [],
     };
   }
+  const parsed = {
+    totalInventoryQuantity: parseStockField(row, 'totalInventoryQuantity'),
+    totalUsableInventory: parseStockField(row, 'totalUsableInventory'),
+    totalLockedQuantity: parseStockField(row, 'totalLockedQuantity'),
+  };
+  const invalidField = Object.entries(parsed).find(([, value]) => !value.ok);
   return {
+    ok: !invalidField,
     skuCode,
-    totalInventoryQuantity: Number(row.totalInventoryQuantity || 0),
-    totalUsableInventory: Number(row.totalUsableInventory || 0),
-    totalLockedQuantity: Number(row.totalLockedQuantity || 0),
+    totalInventoryQuantity: parsed.totalInventoryQuantity.value,
+    totalUsableInventory: parsed.totalUsableInventory.value,
+    totalLockedQuantity: parsed.totalLockedQuantity.value,
     stockRowMissing: false,
+    ...(invalidField ? {error: invalidField[1].error} : {}),
     warehouseCodes: asArray(row.warehouseInventoryList)
       .map(item => String(item?.warehouseCode || '').trim())
       .filter(Boolean),
@@ -194,39 +412,95 @@ async function assertStillListed(client, row) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const [plan, policy, config, biDocument, linksDocument] = await Promise.all([
-  readJson(args.plan),
+// Recovery-only adjudicates a write that already crossed the transport
+// boundary. Requiring mutable ET/links decision snapshots here can strand the
+// durable intent forever; the immutable plan/intent and fresh live identity +
+// stock readback below are the only relevant evidence, and no new write path
+// is reachable in this mode.
+const plan = await readJson(args.plan);
+const isEtLowInventorySafetyPlan = plan.schemaVersion === 'et-low-inventory-safety-plan/v1';
+const [policy, config, biDocument, linksDocument] = await Promise.all([
   readJson(args.policy),
   readJson(args.config),
-  readJson(args.biData),
-  readJson(args.linksData),
+  args.reconcilePendingOnly || isEtLowInventorySafetyPlan ? Promise.resolve({}) : readJson(args.biData),
+  args.reconcilePendingOnly ? Promise.resolve({}) : readJson(args.linksData),
 ]);
 const bi = biDocument?.data && typeof biDocument.data === 'object' ? biDocument.data : biDocument;
 const links = linksDocument?.data && typeof linksDocument.data === 'object' ? linksDocument.data : linksDocument;
 const biGeneratedAt = biDocument.cachedAt || biDocument.generatedAt || bi.generatedAt || bi.createdAt;
 const biAge = ageHours(biGeneratedAt);
-if (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4)) {
+if (!args.reconcilePendingOnly && !isEtLowInventorySafetyPlan
+  && (!Number.isFinite(biAge) || biAge < -0.25 || biAge > Number(policy.maxBiSnapshotAgeHours || 4))) {
   throw new Error(`BI/ET projection is stale: generatedAt=${biGeneratedAt || ''} ageHours=${biAge}`);
 }
-if (plan.policyVersion !== policy.policyVersion) throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
-const expectedHash = stableInventoryHash({
-  schemaVersion: plan.schemaVersion,
-  date: plan.date,
-  policyVersion: plan.policyVersion,
-  actionable: plan.actionable,
-  lowEtAllocations: plan.lowEtAllocations,
-  ...(plan.detailRefreshTargets ? {detailRefreshTargets: plan.detailRefreshTargets} : {}),
-  sourceEvidence: asArray(plan.sourceEvidence).map(({ageHours: _ageHours, ...evidence}) => evidence),
-  ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
-});
+const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
+if (!isValidCalendarDate(plan.date)) throw new Error(`Plan date is invalid: ${plan.date}`);
+if (plan.date > today) throw new Error(`Plan date is in the future: ${plan.date} vs ${today}`);
+const historicalReconcileOnly = args.reconcilePendingOnly && plan.date < today;
+if (plan.policyVersion !== policy.policyVersion && !historicalReconcileOnly) {
+  throw new Error(`Plan policy version is stale: ${plan.policyVersion} vs ${policy.policyVersion}`);
+}
+const expectedHash = isEtLowInventorySafetyPlan
+  ? stableInventoryHash({
+      schemaVersion: plan.schemaVersion,
+      date: plan.date,
+      policyVersion: plan.policyVersion,
+      actionable: plan.actionable,
+      lowEtAllocations: plan.lowEtAllocations,
+      etFactSource: plan.etFactSource,
+      sourceEvidence: asArray(plan.sourceEvidence).map(({
+        ageHours: _ageHours,
+        manifestAgeSeconds: _manifestAgeSeconds,
+        endpointAgeSeconds: _endpointAgeSeconds,
+        ...evidence
+      }) => evidence),
+      ...(plan.executionConstraints ? {executionConstraints: plan.executionConstraints} : {}),
+    })
+  : stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 if (expectedHash !== plan.payloadHash) throw new Error(`Plan payload hash mismatch: expected=${plan.payloadHash} actual=${expectedHash}`);
 if (plan.executable !== true || asArray(plan.blockers).length) throw new Error('Plan is not executable');
-const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
-if (plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
-for (const evidence of asArray(plan.sourceEvidence)) {
+const evidenceFileHash = async file => createHash('sha256').update(await fs.readFile(path.resolve(file))).digest('hex');
+for (const evidence of (args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence))) {
+  if (evidence?.sha256 && await evidenceFileHash(evidence.file) !== String(evidence.sha256).toLowerCase()) {
+    throw new Error(`Plan source evidence file hash drifted: ${evidence.store || evidence.file}`);
+  }
+  if (evidence?.store !== 'DETAIL_MANIFEST') continue;
+  if (await evidenceFileHash(evidence.manifestOriginalFile) !== evidence.manifestOriginalSha256
+    || await evidenceFileHash(evidence.terminalEvidenceFile) !== evidence.terminalEvidenceSha256) {
+    throw new Error('Daily detail manifest or terminal evidence immutable hash drifted');
+  }
+  const refreshStart = Date.parse(evidence.refreshStartedAt);
+  const refreshEnd = Date.parse(evidence.refreshEndedAt);
+  if (!Number.isFinite(refreshStart) || !Number.isFinite(refreshEnd) || refreshEnd < refreshStart) {
+    throw new Error('Daily detail manifest refresh window is invalid');
+  }
+  for (const cache of asArray(evidence.cacheBindings)) {
+    if (await evidenceFileHash(cache.cacheFile) !== cache.cacheSha256) {
+      throw new Error(`Daily detail cache hash drifted: ${cache.storeKey}`);
+    }
+  }
+  for (const binding of asArray(evidence.targetBindings)) {
+    const detailFetchedAt = Date.parse(binding.detailFetchedAt);
+    const cacheGeneratedAt = Date.parse(binding.cacheGeneratedAt);
+    if (!Number.isFinite(detailFetchedAt) || !Number.isFinite(cacheGeneratedAt)
+      || !inventoryDetailRefreshWindow({
+        refreshStartedAt: evidence.refreshStartedAt,
+        detailFetchedAt: binding.detailFetchedAt,
+        cacheGeneratedAt: binding.cacheGeneratedAt,
+        refreshEndedAt: evidence.refreshEndedAt,
+      }).ok) {
+      throw new Error(`Daily detail terminal binding timestamp drifted: ${binding.storeKey}::${binding.spu}`);
+    }
+  }
+}
+if (!args.reconcilePendingOnly && plan.date !== today) throw new Error(`Plan date is not current day: ${plan.date} vs ${today}`);
+if (!args.reconcilePendingOnly && isEtLowInventorySafetyPlan) await validateEtSafetyFact(plan);
+const safetyEtRows = !args.reconcilePendingOnly && isEtLowInventorySafetyPlan ? etRowsFromSafetyAllocations(plan) : null;
+for (const evidence of (args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence))
+  .filter(row => !(isEtLowInventorySafetyPlan && row.store === 'ET_PORTAL_PROJECTION_DIAGNOSTIC'))) {
   const evidenceStore = String(evidence.store || '');
   const maximumAge = evidenceStore === 'ET'
-    ? Number(policy.maxBiSnapshotAgeHours || 4)
+    ? Number(isEtLowInventorySafetyPlan ? plan.etFactSource.maxAgeSeconds / 3600 : policy.maxBiSnapshotAgeHours || 4)
     : evidenceStore === 'BI_LINKS'
       ? Number(plan?.executionConstraints?.decreaseOnly
         ? policy?.lowEtFastGuard?.maxLinksSnapshotAgeHours || policy.maxLinksSnapshotAgeHours || 4
@@ -238,10 +512,10 @@ for (const evidence of asArray(plan.sourceEvidence)) {
   }
 }
 const currentSourceTimes = new Map([
-  ['ET', biGeneratedAt],
   ['BI_LINKS', linksDocument.cachedAt || linksDocument.generatedAt || links.generatedAt || links.createdAt],
 ]);
-for (const evidence of asArray(plan.sourceEvidence).filter(row => currentSourceTimes.has(String(row.store || '')))) {
+if (!isEtLowInventorySafetyPlan) currentSourceTimes.set('ET', biGeneratedAt);
+for (const evidence of (args.reconcilePendingOnly ? [] : asArray(plan.sourceEvidence)).filter(row => currentSourceTimes.has(String(row.store || '')))) {
   if (String(currentSourceTimes.get(String(evidence.store || '')) || '') !== String(evidence.fetchedAt || '')) {
     throw new Error(`Plan source changed after hash generation: ${evidence.store}`);
   }
@@ -274,18 +548,30 @@ if (args.execute) {
     confirmHash: args.confirmHash,
   });
 }
-let unresolvedIntents = [];
+let deferredHistoricalIntents = [];
+let manualResolutionFences = [];
+let manualResolutionTombstoneCount = 0;
 const resultEnvelope = currentResults => ({
   schemaVersion: 'daily-inventory-replenishment-result/v1',
   generatedAt: new Date().toISOString(),
   planHash: plan.payloadHash,
   policyVersion: plan.policyVersion,
   execute: args.execute,
+  reconcilePendingOnly: args.reconcilePendingOnly,
   executionMode: args.execute ? executionAuthorization?.mode : 'dry_run',
   authorizationId: executionAuthorization?.authorizationId || null,
   authorizationContext: executionAuthorization?.context || null,
   executionConstraints: plan.executionConstraints || null,
-  unresolvedIntents,
+  // A historical intent omitted from today's rebuilt plan has no current
+  // write to suppress. Keep the unresolved warning visible for audit and
+  // future reappearance interception, but do not turn it into a run blocker.
+  deferredHistorical: deferredHistoricalIntents,
+  manualResolutionFences,
+  manualResolutionTombstoneCount,
+  // Keep the established validator contract: only a current-plan unresolved
+  // intent belongs here. Historical scopes absent from this plan are warnings
+  // in deferredHistorical and must not fail the morning chain.
+  unresolvedIntents: [],
   results: currentResults,
 });
 const writeResultFile = async currentResults => {
@@ -297,36 +583,42 @@ const writeResultFile = async currentResults => {
 const journalFile = `${args.out}.journal.ndjson`;
 await fs.mkdir(path.dirname(args.out), {recursive: true});
 const results = [];
-const pendingIntents = new Map();
-try {
-  const journal = await fs.readFile(journalFile, 'utf8');
-  if (journal && !journal.endsWith('\n')) throw new Error('INVENTORY_JOURNAL_TORN_TAIL');
-  const lines = journal.split(/\r?\n/).filter(Boolean);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    try {
-      const entry = JSON.parse(line);
-      if (entry?.kind === 'intent' && entry?.logicalActionKey) {
-        const intentId = entry.intentId || `legacy-${index}-${entry.logicalActionKey}`;
-        pendingIntents.set(intentId, {...entry, intentId});
-        continue;
-      }
-      if (entry?.kind === 'write_outcome' && entry?.intentId) {
-        if (['rejected', 'readback_matched'].includes(entry.disposition)) pendingIntents.delete(entry.intentId);
-        continue;
-      }
-      // Historical result rows are audit evidence only.  They are never
-      // restored as current terminal state: every restart re-runs read-only
-      // guards and performs a fresh stock readback under the SKU lock.
-    } catch (error) {
-      throw new Error(`INVENTORY_JOURNAL_INVALID_LINE:${index + 1}:${error.message}`);
-    }
-  }
-} catch (error) {
-  if (error?.code !== 'ENOENT') throw error;
-}
-const appendJournalRecord = async entry => {
-  await appendDurableJournalRecord(journalFile, entry);
+const inventoryJournalDirectories = String(process.env.SHEIN_BI_INVENTORY_JOURNAL_DIRS || '')
+  .split(path.delimiter)
+  .map(directory => directory.trim())
+  .filter(Boolean);
+const inventorySkuLockDirectory = path.resolve(String(
+  process.env.SHEIN_BI_INVENTORY_SKU_LOCK_DIR
+  || path.join(ROOT, 'state', 'locks'),
+));
+// A current result keeps its sidecar for compatibility. This executor is
+// shared by daily replenishment and ET low-inventory runs. Their journals use
+// different prefixes and result directories, but belong to one inventory
+// write domain and must participate in cross-lane/cross-day recovery without
+// moving or rewriting the original append-only journal.
+const journalFiles = await discoverInventoryJournalFiles(journalFile, {
+  includeAll: true,
+  additionalDirectories: inventoryJournalDirectories,
+});
+const journalBundle = await readInventoryIntentJournals(journalFiles, {
+  maxRunDate: today,
+  allowMultiplePendingByScope: true,
+});
+manualResolutionFences = [...journalBundle.fences.values()].map(candidate => ({
+  resolutionId: candidate.event?.resolutionId || '',
+  intentId: candidate.event?.intentId || '',
+  disposition: candidate.event?.disposition || '',
+  scope: candidate.event?.scope || null,
+  idempotencyKey: candidate.event?.idempotencyKey || '',
+  journalFile: candidate.intent?.journalFile || '',
+}));
+manualResolutionTombstoneCount = journalBundle.tombstonedIdempotencyKeys.size;
+const pendingIntents = new Map(journalBundle.pending);
+const inventoryIntents = new Map(journalBundle.intents);
+const terminalIntentOutcomes = new Map(journalBundle.terminalOutcomes);
+const journalIntentKey = intent => `${path.resolve(intent?.journalFile || journalFile)}\u0000${intent?.intentId || ''}`;
+const appendJournalRecord = async (entry, targetJournalFile = journalFile) => {
+  await appendDurableJournalRecord(targetJournalFile, entry);
 };
 if (!results.length) {
   const handle = await fs.open(journalFile, 'a', 0o600);
@@ -346,13 +638,15 @@ const recordResult = async (row, logicalActionKey = '') => {
 // ET rows are bound by the alias-aware identity (resolveInventoryIdentityKey)
 // exactly like the planner: explicitly separate products (KJ-102S vs KJ-102)
 // must never share an ET row through a collapsed canonicalInventoryKey.
-const etByKey = new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
-  String(
-    resolveInventoryIdentityKey(row.standard_goods_sn || row.match_key || '')
-    || canonicalInventoryKey(row.standard_goods_sn || row.match_key || ''),
-  ).toUpperCase(),
-  row,
-]));
+const etByKey = isEtLowInventorySafetyPlan
+  ? safetyEtRows || new Map()
+  : new Map(asArray(bi?.inventoryDepletion?.products).map(row => [
+      String(
+        resolveInventoryIdentityKey(row.standard_goods_sn || row.match_key || '')
+        || canonicalInventoryKey(row.standard_goods_sn || row.match_key || ''),
+      ).toUpperCase(),
+      row,
+    ]));
 const linkMetricRows = Array.isArray(links?.storeLinks)
   ? links.storeLinks
   : Array.isArray(links?.links) ? links.links : [];
@@ -382,17 +676,120 @@ for (const metrics of linkMetricRows) {
 const clients = new Map();
 const pendingIntentsByScope = new Map();
 for (const intent of pendingIntents.values()) {
-  const scopeKey = intent?.recoveryScopeKey || inventoryRecoveryScopeKey({
-    runDate: intent?.runDate,
-    storeKey: intent?.storeKey,
-    skc: intent?.skc,
-    skuCode: intent?.skuCode,
-  });
+  const scopeKey = inventoryIntentScopeKey(intent);
   if (!pendingIntentsByScope.has(scopeKey)) pendingIntentsByScope.set(scopeKey, []);
   pendingIntentsByScope.get(scopeKey).push(intent);
 }
+const inventoryIntentsByScope = new Map();
+for (const intent of inventoryIntents.values()) {
+  const scopeKey = inventoryIntentScopeKey(intent);
+  if (!inventoryIntentsByScope.has(scopeKey)) inventoryIntentsByScope.set(scopeKey, []);
+  inventoryIntentsByScope.get(scopeKey).push(intent);
+}
+// Discovery de-duplicates hard links by inode and prefers the current path,
+// so journalFile may be a current alias for a historical intent. Only the
+// immutable runDate establishes plan-date membership. A terminal
+// manual_resolution remains a fence, not a recoverable plan-date intent.
+const planDateInventoryIntentsByScope = new Map();
+for (const [scopeKey, scopeIntents] of inventoryIntentsByScope.entries()) {
+  const planDateIntents = scopeIntents.filter(intent => (
+    intent.runDate === plan.date
+    && !journalBundle.manualResolutions.has(journalIntentKey(intent))
+  ));
+  if (planDateIntents.length) planDateInventoryIntentsByScope.set(scopeKey, planDateIntents);
+}
+const historicalPendingIntentsByScope = new Map();
+for (const [scopeKey, scopeIntents] of pendingIntentsByScope.entries()) {
+  const historicalIntents = scopeIntents.filter(intent => intent.runDate < plan.date);
+  if (historicalIntents.length) historicalPendingIntentsByScope.set(scopeKey, historicalIntents);
+}
 const currentPlanScopeSet = new Set(planRecoveryScopes);
-unresolvedIntents = [...pendingIntentsByScope.entries()]
+if (args.reconcilePendingOnly) {
+  const failures = [];
+  for (const row of rows) {
+    const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
+    // A manual-resolution fence deliberately removes the old intent from the
+    // recoverable lifecycle. It must still be handled by the row-level fence
+    // below, but it is not a logical-action mismatch that can abort the whole
+    // reconcile-only batch before a blocked result is recorded.
+    if (findInventoryWriteFence(journalBundle, {
+      scope: {
+        storeKey: row.storeKey,
+        skc: row.skc,
+        skuCode: row.skuCode,
+        invType: 'VI',
+      },
+    })) continue;
+    const scopeIntents = planDateInventoryIntentsByScope.get(recoveryScopeKey) || [];
+    const historicalPendingScopeIntents = historicalPendingIntentsByScope.get(recoveryScopeKey) || [];
+    const approvedTarget = Number(row.targetUsableInventory);
+    const logicalActionKey = stableInventoryHash({
+      runDate: plan.date,
+      store: row.storeKey,
+      skc: row.skc,
+      sku: row.skuCode,
+      target: approvedTarget,
+      actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+      policyVersion: plan.policyVersion,
+      authorizationId: executionAuthorization?.authorizationId || '',
+    });
+    const mismatches = scopeIntents.map(intent => ({
+      intent,
+      mismatch: recoveredInventoryIntentMismatch(intent, {
+        logicalActionKey,
+        plan,
+        row,
+        approvedTarget,
+        authorizationId: executionAuthorization?.authorizationId || null,
+        // A prior-date reconcile-only plan is historical readback/supersede
+        // handling. Current-day recovery must prove the new explicit version;
+        // historical read-only reconciliation must remain compatible with
+        // unversioned legacy intents.
+        requireCurrentOverwriteComputationVersion: plan.date === today,
+      }),
+    }));
+    const matchingIntents = mismatches.filter(candidate => !candidate.mismatch).map(candidate => candidate.intent);
+    const latestMatchingIntent = matchingIntents.length
+      ? matchingIntents.reduce((candidate, intent) => (
+        compareInventoryIntentChronology(intent, candidate) > 0 ? intent : candidate
+      ))
+      : null;
+    const latestMatchingTies = latestMatchingIntent
+      ? matchingIntents.filter(intent => compareInventoryIntentChronology(intent, latestMatchingIntent) === 0)
+      : [];
+    if (!matchingIntents.length) {
+      if (!scopeIntents.length && historicalPendingScopeIntents.length) {
+        // Cross-day pending intents are date-independent durable item locks.
+        // They are intentionally resolved by the row-level lock-held branch
+        // below, which can only read back or keep the historical intent pending.
+        // Do not turn them into current-plan matches here: that would either
+        // rewrite history or mask a still-pending platform readback.
+        continue;
+      }
+      const mismatchSummary = mismatches.map(candidate => candidate.mismatch || 'match').join(',');
+      failures.push(`scope_matches=${matchingIntents.length}:scope_count=${scopeIntents.length}:mismatches=${mismatchSummary}:${row.storeKey}:${row.skc}:${row.skuCode}`);
+      continue;
+    }
+    if (latestMatchingTies.length !== 1) {
+      // Ambiguous same-scope lifecycle is an item-level condition. The fresh
+      // lock-held branch below records needs_manual_resolve for that SKU while
+      // allowing independent rows to reconcile.
+      continue;
+    }
+    const planDateIntentKey = journalIntentKey(latestMatchingIntent);
+    const terminalOutcome = terminalIntentOutcomes.get(planDateIntentKey);
+    if (!pendingIntents.has(planDateIntentKey) && terminalOutcome?.disposition !== 'readback_matched') {
+      failures.push(`intent_lifecycle=${terminalOutcome?.disposition || 'missing'}:${row.storeKey}:${row.skc}:${row.skuCode}`);
+    }
+  }
+  // Same-day intents outside the current plan's exact scopes stay untouched.
+  // Reconcile-pending-only may only inspect and settle the current plan rows;
+  // unrelated scopes must not be written, terminated, or used to fail this batch.
+  if (failures.length) {
+    throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED:${failures.join('|')}`);
+  }
+}
+deferredHistoricalIntents = [...pendingIntentsByScope.entries()]
   .filter(([scopeKey]) => !currentPlanScopeSet.has(scopeKey))
   .flatMap(([scopeKey, intents]) => intents.map(intent => ({
     intentId: intent.intentId,
@@ -406,24 +803,15 @@ unresolvedIntents = [...pendingIntentsByScope.entries()]
     planHash: intent.planHash,
     policyVersion: intent.policyVersion,
     authorizationId: intent.authorizationId,
-    state: 'needs_manual_resolve',
-    reason: 'durable intent scope is absent from the rebuilt current plan; duplicate submission and final success are forbidden',
+    state: 'deferred_historical',
+    warning: 'durable intent scope is absent from the rebuilt current plan; retained for audit and intercepted if the scope reappears',
   })));
-if (unresolvedIntents.length) {
-  for (const row of rows) {
-    await recordResult({
-      storeKey: row.storeKey,
-      skc: row.skc,
-      skuCode: row.skuCode,
-      canonical: row.canonical,
-      ruleClass: row.ruleClass,
-      targetUsableInventory: Number(row.targetUsableInventory),
-      state: 'needs_manual_resolve',
-      error: `${unresolvedIntents.length} durable inventory intent(s) are absent from the rebuilt plan; no current-plan POST was attempted`,
-    });
-  }
-}
-for (const row of unresolvedIntents.length ? [] : rows) {
+// Historical pending scopes that are absent from today's rebuilt plan remain
+// visible in the envelope-level audit field.  They must not be projected onto
+// every current row: doing so duplicates result rows and blocks unrelated
+// item scopes.  A current row is blocked only when its own scope is reached
+// in the serial loop below.
+for (const row of rows) {
   const result = {
     storeKey: row.storeKey,
     skc: row.skc,
@@ -440,74 +828,76 @@ for (const row of unresolvedIntents.length ? [] : rows) {
   // `blocked` (production 2026.08.16.10 regression).
   let activeIntent = null;
   try {
-    const et = etByKey.get(String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase());
-    const etQty = Number(et?.current_sellable_quantity ?? et?.et_estimated_available_qty);
-    const etDate = String(
-      String(et?.et_operational_stock_policy || '').includes('01_full_carton_exception')
-        ? et?.et_box_snapshot_date
-        : et?.et_store_snapshot_date,
-    ).slice(0, 10);
-    if (etDate !== today || String(et?.inventory_match_status || '') !== 'matched') throw new Error('ET inventory is not a current-day matched fact');
-    if (Number(row.etSellableInventory) !== etQty) throw new Error(`ET sellable inventory changed after plan: ${row.etSellableInventory} -> ${etQty}`);
     const approvedTarget = Number(row.targetUsableInventory);
     if (!Number.isInteger(approvedTarget) || approvedTarget < 0 || approvedTarget > Number(policy.targetUsableInventory || 100)) {
       throw new Error(`Invalid approved target usable inventory: ${row.targetUsableInventory}`);
     }
-    const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
-    if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
-    const metricsIdentityKey = resolveInventoryIdentityKey(
-      metrics.standard_goods_sn
-      ?? metrics.standardGoodsSn
-      ?? metrics.raw_goods_sn
-      ?? metrics.rawGoodsSn,
-    );
-    const expectedIdentityKey = resolveInventoryIdentityKey(row.canonical || row.supplierCode);
-    if (!metricsIdentityKey || !expectedIdentityKey || metricsIdentityKey !== expectedIdentityKey) {
-      throw new Error('linksData canonical identity changed or is unavailable');
-    }
-    const currentShelfStatus = resolveInventoryShelfStatus(metrics, row.openApiShelfStatusCode || row.shelfStatusCode);
-    if (currentShelfStatus.code !== String(row.shelfStatusCode || '')) {
-      throw new Error(`Four-state shelf status changed after plan: ${row.shelfStatusName || row.shelfStatusCode} -> ${currentShelfStatus.name}`);
-    }
-    if (!new Set((policy.eligibleShelfStatusCodes || ['1', '3']).map(String)).has(currentShelfStatus.code)) {
-      throw new Error(`Link is not inventory-relevant: ${currentShelfStatus.name}`);
-    }
-    const currentSameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
-      `${String(row.storeKey || '').toUpperCase()}::${String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase()}`,
-    ) || [])]
-      .filter(skc => skc && skc !== String(row.skc || ''))
-      .sort();
-    if (
-      currentShelfStatus.code === String(policy.soldOutShelfStatusCode || '3')
-      && policy.ignoreSoldOutWhenSameStoreHasOnShelfCanonical !== false
-      && currentSameStoreOnShelfSkcs.length > 0
-    ) {
-      throw new Error(`Sold-out link is superseded by same-store on-shelf link(s): ${currentSameStoreOnShelfSkcs.join(',')}`);
-    }
-    if (JSON.stringify(currentSameStoreOnShelfSkcs) !== JSON.stringify([...asArray(row.sameStoreOnShelfSkcs)].sort())) {
-      throw new Error('Same-store on-shelf link evidence changed after plan');
-    }
-    if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
-      throw new Error('7-day sales/exposure evidence changed after plan');
-    }
-    if (row.ruleClass === 'low_et_top_exposure_allocation') {
-      if (etQty > Number(policy.lowEtAllocationAtOrBelow ?? 10)) throw new Error(`ET no longer requires physical allocation: ${etQty}`);
-      if (etQty < Number(row.plannedAllocationTotal || 0)) {
-        throw new Error(`ET sellable inventory dropped below planned allocation total: ${etQty} < ${row.plannedAllocationTotal}`);
+    if (!args.reconcilePendingOnly) {
+      const et = etByKey.get(String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase());
+      const etQty = Number(et?.current_sellable_quantity ?? et?.et_estimated_available_qty);
+      const etDate = String(
+        String(et?.et_operational_stock_policy || '').includes('01_full_carton_exception')
+          ? et?.et_box_snapshot_date
+          : et?.et_store_snapshot_date,
+      ).slice(0, 10);
+      if (etDate !== today || String(et?.inventory_match_status || '') !== 'matched') throw new Error('ET inventory is not a current-day matched fact');
+      if (Number(row.etSellableInventory) !== etQty) throw new Error(`ET sellable inventory changed after plan: ${row.etSellableInventory} -> ${etQty}`);
+      const metrics = linkMetricsByKey.get(`${String(row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`);
+      if (!metrics) throw new Error('Current 7-day link metrics are unavailable');
+      const metricsIdentityKey = resolveInventoryIdentityKey(
+        metrics.standard_goods_sn
+        ?? metrics.standardGoodsSn
+        ?? metrics.raw_goods_sn
+        ?? metrics.rawGoodsSn,
+      );
+      const expectedIdentityKey = resolveInventoryIdentityKey(row.canonical || row.supplierCode);
+      if (!metricsIdentityKey || !expectedIdentityKey || metricsIdentityKey !== expectedIdentityKey) {
+        throw new Error('linksData canonical identity changed or is unavailable');
       }
-    } else {
-      if (etQty < Number(policy.minimumEtSellableForVirtualTopUp || 11)) throw new Error(`ET sellable inventory requires physical allocation: ${etQty}`);
-      if (etQty < approvedTarget) throw new Error(`ET sellable inventory dropped below approved target: ${etQty} < ${approvedTarget}`);
-      if (row.ruleClass === 'recent_sale_scarcity' && Number(metrics.c7_sale_cnt) < Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
-        throw new Error('Link no longer qualifies for recent-sale scarcity inventory');
+      const currentShelfStatus = resolveInventoryShelfStatus(metrics, row.openApiShelfStatusCode || row.shelfStatusCode);
+      if (currentShelfStatus.code !== String(row.shelfStatusCode || '')) {
+        throw new Error(`Four-state shelf status changed after plan: ${row.shelfStatusName || row.shelfStatusCode} -> ${currentShelfStatus.name}`);
       }
-      if (row.ruleClass === 'legacy_virtual_inventory_top_up' && Number(metrics.c7_sale_cnt) >= Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
-        throw new Error('Link now qualifies for recent-sale scarcity inventory; rebuild plan');
+      if (!new Set((policy.eligibleShelfStatusCodes || ['1', '3']).map(String)).has(currentShelfStatus.code)) {
+        throw new Error(`Link is not inventory-relevant: ${currentShelfStatus.name}`);
       }
-    }
-    if (!args.execute) {
-      await recordResult({...result, state: 'dry_run_ready', etSellableInventory: etQty});
-      continue;
+      const currentSameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
+        `${String(row.storeKey || '').toUpperCase()}::${String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase()}`,
+      ) || [])]
+        .filter(skc => skc && skc !== String(row.skc || ''))
+        .sort();
+      if (
+        currentShelfStatus.code === String(policy.soldOutShelfStatusCode || '3')
+        && policy.ignoreSoldOutWhenSameStoreHasOnShelfCanonical !== false
+        && currentSameStoreOnShelfSkcs.length > 0
+      ) {
+        throw new Error(`Sold-out link is superseded by same-store on-shelf link(s): ${currentSameStoreOnShelfSkcs.join(',')}`);
+      }
+      if (JSON.stringify(currentSameStoreOnShelfSkcs) !== JSON.stringify([...asArray(row.sameStoreOnShelfSkcs)].sort())) {
+        throw new Error('Same-store on-shelf link evidence changed after plan');
+      }
+      if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
+        throw new Error('7-day sales/exposure evidence changed after plan');
+      }
+      if (row.ruleClass === 'low_et_top_exposure_allocation') {
+        if (etQty > Number(policy.lowEtAllocationAtOrBelow ?? 10)) throw new Error(`ET no longer requires physical allocation: ${etQty}`);
+        if (etQty < Number(row.plannedAllocationTotal || 0)) {
+          throw new Error(`ET sellable inventory dropped below planned allocation total: ${etQty} < ${row.plannedAllocationTotal}`);
+        }
+      } else {
+        if (etQty < Number(policy.minimumEtSellableForVirtualTopUp || 11)) throw new Error(`ET sellable inventory requires physical allocation: ${etQty}`);
+        if (etQty < approvedTarget) throw new Error(`ET sellable inventory dropped below approved target: ${etQty} < ${approvedTarget}`);
+        if (row.ruleClass === 'recent_sale_scarcity' && Number(metrics.c7_sale_cnt) < Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
+          throw new Error('Link no longer qualifies for recent-sale scarcity inventory');
+        }
+        if (row.ruleClass === 'legacy_virtual_inventory_top_up' && Number(metrics.c7_sale_cnt) >= Number(policy?.recentSaleScarcity?.minimumSaleCount ?? 1)) {
+          throw new Error('Link now qualifies for recent-sale scarcity inventory; rebuild plan');
+        }
+      }
+      if (!args.execute) {
+        await recordResult({...result, state: 'dry_run_ready', etSellableInventory: etQty});
+        continue;
+      }
     }
     const logicalActionKey = stableInventoryHash({
       runDate: plan.date,
@@ -520,29 +910,198 @@ for (const row of unresolvedIntents.length ? [] : rows) {
       authorizationId: executionAuthorization?.authorizationId || '',
     });
     const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
+    // Intercept a permanently resolved historical scope before even opening
+    // a store client. This keeps a reappearing XL plan blocked with zero
+    // OpenAPI calls (including the otherwise harmless store-identity POST),
+    // while the lock-held reread below closes the concurrent race window.
+    const startupManualFence = findInventoryWriteFence(journalBundle, {
+      scope: {
+        storeKey: row.storeKey,
+        skc: row.skc,
+        skuCode: row.skuCode,
+        invType: 'VI',
+      },
+    });
+    if (startupManualFence) {
+      await recordResult({
+        ...result,
+        logicalActionKey,
+        state: 'blocked_by_manual_resolution_fence',
+        manualResolutionFence: {
+          resolutionId: startupManualFence.event?.resolutionId || '',
+          intentId: startupManualFence.event?.intentId || '',
+          disposition: startupManualFence.event?.disposition || '',
+          reason: startupManualFence.reason,
+          scope: startupManualFence.event?.scope || null,
+        },
+        error: 'exact store/SKC/SKU/warehouse VI scope is permanently fenced by manual resolution; no new inventory POST is permitted',
+      }, logicalActionKey);
+      continue;
+    }
     let client = clients.get(row.storeKey);
     if (!client) {
-      client = await createStoreClient(config, row.storeKey);
+      client = await createStoreClient(config, row.storeKey, {
+        inventoryStoreKey: row.storeKey,
+        inventoryJournalFile: journalFile,
+        inventoryJournalDirectories,
+      });
       clients.set(row.storeKey, client);
     }
-    const lockFile = path.join(ROOT, 'state', 'locks', `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
+    const lockFile = path.join(inventorySkuLockDirectory, `daily-inventory-${row.storeKey}-${row.skc}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
     const release = await acquireCrossProcessTicketLock(lockFile, {timeoutMs: 60_000, staleMs: 20 * 60_000});
     try {
+      // Another executor may have persisted this scope after our startup
+      // snapshot while we waited for the per-SKU ticket.  Re-read the full
+      // journal set after acquiring that ticket and before creating any new
+      // intent or issuing a POST; otherwise an empty startup cache can race
+      // into a second durable intent.
+      const freshJournalFiles = await discoverInventoryJournalFiles(journalFile, {
+        includeAll: true,
+        additionalDirectories: inventoryJournalDirectories,
+      });
+      const freshJournalBundle = await readInventoryIntentJournals(freshJournalFiles, {
+        maxRunDate: today,
+        allowMultiplePendingByScope: true,
+      });
+      const freshScopeIntents = freshJournalBundle.pendingByScope.get(recoveryScopeKey) || [];
+      const ownerConfirmedSameTargetPredecessors = [...freshJournalBundle.terminalOutcomes.entries()]
+        .filter(([intentKey, outcome]) => {
+          const predecessor = freshJournalBundle.intents.get(intentKey);
+          return outcome?.disposition === INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION
+            && outcome.newRunDate === plan.date
+            && Number(outcome.targetUsableInventory) === approvedTarget
+            && predecessor
+            && inventoryIntentScopeKey(predecessor) === recoveryScopeKey;
+        });
+      const manualFence = findInventoryWriteFence(freshJournalBundle, {
+        scope: {
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          invType: 'VI',
+        },
+      });
+      if (manualFence) {
+        await recordResult({
+          ...result,
+          logicalActionKey,
+          state: 'blocked_by_manual_resolution_fence',
+          manualResolutionFence: {
+            resolutionId: manualFence.event?.resolutionId || '',
+            intentId: manualFence.event?.intentId || '',
+            disposition: manualFence.event?.disposition || '',
+            reason: manualFence.reason,
+            scope: manualFence.event?.scope || null,
+          },
+          error: 'exact store/SKC/SKU/warehouse VI scope is permanently fenced by manual resolution; no new inventory POST is permitted',
+        }, logicalActionKey);
+        continue;
+      }
+      if (ownerConfirmedSameTargetPredecessors.length > 1) {
+        await recordResult({
+          ...result,
+          logicalActionKey,
+          state: 'needs_manual_resolve',
+          error: `multiple owner-confirmed same-target predecessors exist in recovery scope ${recoveryScopeKey}; inventory POST forbidden`,
+        }, logicalActionKey);
+        continue;
+      }
+      const ownerConfirmedSameTargetResume = ownerConfirmedSameTargetPredecessors.length === 1;
       await assertStillListed(client, row);
       let before = await readStock(client, row.skuCode);
-      const scopeIntents = pendingIntentsByScope.get(recoveryScopeKey) || [];
+      if (before.ok !== true) {
+        await recordResult({
+          ...result,
+          logicalActionKey,
+          state: 'blocked',
+          before,
+          error: `stock-query readback is not an authoritative non-negative integer inventory row: ${before.error || 'invalid stock row'}; inventory POST forbidden`,
+        }, logicalActionKey);
+        continue;
+      }
+      let scopeIntents = freshScopeIntents;
       if (scopeIntents.length) {
-        if (scopeIntents.length !== 1) {
-          await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, error: `multiple durable inventory intents exist in recovery scope ${recoveryScopeKey}; duplicate submission forbidden`}, logicalActionKey);
+        if (scopeIntents.length > 1) {
+          await recordResult({
+            ...result,
+            logicalActionKey,
+            state: 'needs_manual_resolve',
+            before,
+            error: `multiple durable inventory intents exist in recovery scope ${recoveryScopeKey}; this SKU is blocked without changing other rows`,
+          }, logicalActionKey);
           continue;
         }
         const [recoveredIntent] = scopeIntents;
+        const historicalScopeMismatch = [
+          [String(recoveredIntent?.storeKey || '').trim().toUpperCase() === String(row.storeKey || '').trim().toUpperCase(), 'storeKey'],
+          [String(recoveredIntent?.skc || '').trim() === String(row.skc || '').trim(), 'skc'],
+          [String(recoveredIntent?.skuCode || '').trim() === String(row.skuCode || '').trim(), 'skuCode'],
+          [String(recoveredIntent?.logicalActionKey || '').trim() !== '', 'logicalActionKey'],
+        ].find(([ok]) => !ok)?.[1] || '';
+        if (recoveredIntent.runDate !== plan.date) {
+          if (historicalScopeMismatch) {
+            await recordResult({
+              ...result,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              state: 'needs_manual_resolve',
+              historicalPending: true,
+              before,
+              historicalIntentId: recoveredIntent.intentId,
+              historicalRunDate: recoveredIntent.runDate,
+              error: `historical durable inventory intent scope cannot be proven: ${historicalScopeMismatch}; duplicate submission forbidden`,
+            }, recoveredIntent.logicalActionKey);
+            continue;
+          }
+          const historicalTarget = Number(recoveredIntent.targetUsableInventory);
+          if (Number(before.totalUsableInventory) === historicalTarget) {
+            await appendJournalRecord({
+              kind: 'write_outcome',
+              intentId: recoveredIntent.intentId,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              disposition: 'readback_matched',
+              recordedAt: new Date().toISOString(),
+            }, recoveredIntent.journalFile);
+            pendingIntents.delete(journalIntentKey(recoveredIntent));
+            const sameCurrentTarget = Number(before.totalUsableInventory) === approvedTarget;
+            await recordResult({
+              ...result,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              state: sameCurrentTarget ? 'skipped_target_already_matched' : 'historical_readback_matched',
+              disposition: 'readback_matched',
+              historicalIntentClosed: true,
+              historicalIntentId: recoveredIntent.intentId,
+              historicalRunDate: recoveredIntent.runDate,
+              historicalTargetUsableInventory: historicalTarget,
+              deferred: true,
+              before,
+              after: before,
+              error: 'historical durable inventory intent matched by fresh identity and stock readback; current corrective action deferred to a future plan',
+            }, recoveredIntent.logicalActionKey);
+          } else {
+            await recordResult({
+              ...result,
+              logicalActionKey: recoveredIntent.logicalActionKey,
+              state: 'submitted_but_readback_pending',
+              disposition: 'skipped',
+              historicalPending: true,
+              historicalIntentId: recoveredIntent.intentId,
+              historicalRunDate: recoveredIntent.runDate,
+              historicalTargetUsableInventory: historicalTarget,
+              before,
+              idempotencyKey: recoveredIntent.idempotencyKey || null,
+              requestPayloadHash: recoveredIntent.requestPayloadHash || null,
+              error: `historical durable inventory intent remains pending: live usable inventory ${before?.totalUsableInventory ?? 'unavailable'} does not match historical target ${historicalTarget}; current scope skipped and duplicate submission forbidden`,
+            }, recoveredIntent.logicalActionKey);
+          }
+          continue;
+        }
         const mismatch = recoveredInventoryIntentMismatch(recoveredIntent, {
           logicalActionKey,
           plan,
           row,
           approvedTarget,
           authorizationId: executionAuthorization?.authorizationId || null,
+          requireCurrentOverwriteComputationVersion: plan.date === today,
         });
         if (mismatch) {
           await recordResult({
@@ -575,8 +1134,8 @@ for (const row of unresolvedIntents.length ? [] : rows) {
             logicalActionKey,
             disposition: 'readback_matched',
             recordedAt: new Date().toISOString(),
-          });
-          pendingIntents.delete(recoveredIntent.intentId);
+          }, recoveredIntent.journalFile);
+          pendingIntents.delete(journalIntentKey(recoveredIntent));
           await recordResult({...result, logicalActionKey, state: 'updated_readback_matched', before: recoveredIntent.before, after: before, writes: [recoveredWrite]}, logicalActionKey);
         } else {
           await recordResult({
@@ -591,8 +1150,51 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         }
         continue;
       }
+      if (args.reconcilePendingOnly) {
+        const lifecycleCandidates = (planDateInventoryIntentsByScope.get(recoveryScopeKey) || [])
+          .filter(intent => !recoveredInventoryIntentMismatch(intent, {
+            logicalActionKey,
+            plan,
+            row,
+            approvedTarget,
+            authorizationId: executionAuthorization?.authorizationId || null,
+            requireCurrentOverwriteComputationVersion: plan.date === today,
+          }));
+        const lifecycleIntent = lifecycleCandidates.length
+          ? lifecycleCandidates.reduce((candidate, intent) => (
+            compareInventoryIntentChronology(intent, candidate) > 0 ? intent : candidate
+          ))
+          : null;
+        const lifecycleTies = lifecycleIntent
+          ? lifecycleCandidates.filter(intent => compareInventoryIntentChronology(intent, lifecycleIntent) === 0)
+          : [];
+        if (lifecycleTies.length !== 1) {
+          throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_AMBIGUOUS:${recoveryScopeKey}`);
+        }
+        const lifecycleKey = lifecycleIntent && journalIntentKey(lifecycleIntent);
+        const lifecycleOutcome = lifecycleIntent && terminalIntentOutcomes.get(lifecycleKey);
+        if (lifecycleOutcome?.disposition !== 'readback_matched') {
+          throw new Error(`INVENTORY_RECONCILE_PENDING_ONLY_LIFECYCLE_MISSING:${recoveryScopeKey}`);
+        }
+        await recordResult({
+          ...result,
+          logicalActionKey: lifecycleIntent.logicalActionKey,
+          state: 'skipped_terminal_readback_recorded',
+          terminalIntentId: lifecycleIntent.intentId,
+          terminalRunDate: lifecycleIntent.runDate,
+          terminalDisposition: lifecycleOutcome.disposition,
+          terminalRecordedAt: lifecycleOutcome.recordedAt,
+          currentLiveUsableInventory: before.totalUsableInventory,
+          before,
+        }, lifecycleIntent.logicalActionKey);
+        continue;
+      }
       if (before.totalUsableInventory === approvedTarget) {
         await recordResult({...result, state: 'skipped_target_already_matched', before});
+        continue;
+      }
+      if (ownerConfirmedSameTargetResume && before.totalUsableInventory > approvedTarget) {
+        await recordResult({...result, state: 'skipped_owner_confirmed_same_target_above_target', before});
         continue;
       }
       if (plan?.executionConstraints?.decreaseOnly === true && before.totalUsableInventory < approvedTarget) {
@@ -602,7 +1204,9 @@ for (const row of unresolvedIntents.length ? [] : rows) {
       if (row.ruleClass === 'recent_sale_scarcity') {
         const refillBelow = Number(policy?.recentSaleScarcity?.refillWhenBelow ?? 5);
         const capAbove = Number(policy?.recentSaleScarcity?.capWhenAbove ?? 10);
-        if (before.totalUsableInventory >= refillBelow && before.totalUsableInventory <= capAbove) {
+        if (!ownerConfirmedSameTargetResume
+          && before.totalUsableInventory >= refillBelow
+          && before.totalUsableInventory <= capAbove) {
           await recordResult({...result, state: 'skipped_within_scarcity_band', before});
           continue;
         }
@@ -636,6 +1240,17 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         headers: {language: 'en'},
       };
       const requestPayloadHash = stableInventoryHash(request);
+      assertInventoryWriteAllowed(freshJournalBundle, {
+        scope: {
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          warehouseCode,
+          invType: 'VI',
+        },
+        idempotencyKey,
+        requestPayloadHash,
+      });
       activeIntent = {
         kind: 'intent',
         intentId: randomUUID(),
@@ -648,6 +1263,7 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         skuCode: row.skuCode,
         targetUsableInventory: approvedTarget,
         policyVersion: plan.policyVersion,
+        overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
         authorizationId: executionAuthorization?.authorizationId || null,
         idempotencyKey,
         requestPayloadHash,
@@ -660,13 +1276,37 @@ for (const row of unresolvedIntents.length ? [] : rows) {
       // durable lock which recovery must read back; it can never invent a new
       // key or submit a second overwrite.
       assertInventoryWriteWindow(plan.date);
-      // The live map shares the journal's intentId key (load and every delete
-      // path use intentId), so terminal outcomes below actually release the
+      // The live map uses a composite journal+intentId key (load and every
+      // delete path use it), so terminal outcomes below actually release the
       // entry instead of leaving a stale pending record behind.
-      pendingIntents.set(activeIntent.intentId, activeIntent);
+      pendingIntents.set(journalIntentKey(activeIntent), activeIntent);
       const submission = await submitDurableInventoryWriteOnce({
         journalFile,
         intent: activeIntent,
+        fenceBundle: freshJournalBundle,
+        inventoryScope: {
+          storeKey: row.storeKey,
+          skc: row.skc,
+          skuCode: row.skuCode,
+          warehouseCode,
+          invType: 'VI',
+        },
+        assertInventoryAdmission: () => client.assertInventoryFence(
+          request.pathname,
+          request.method,
+          request.body,
+          request.headers,
+          {
+            storeKey: row.storeKey,
+            skc: row.skc,
+            skuCode: row.skuCode,
+            warehouseCode,
+            invType: 'VI',
+            requestPayloadHash,
+            intentId: activeIntent.intentId,
+            logicalActionKey: activeIntent.logicalActionKey,
+          },
+        ),
         // The write interface is called exactly once.  Read-only requests may
         // retry rate limits, but a write never retries at the transport layer;
         // the durable intent makes any unknown outcome readback-only.
@@ -679,6 +1319,16 @@ for (const row of unresolvedIntents.length ? [] : rows) {
             method: request.method,
             body: request.body,
             headers: request.headers,
+            inventoryScope: {
+              storeKey: row.storeKey,
+              skc: row.skc,
+              skuCode: row.skuCode,
+              warehouseCode,
+              invType: 'VI',
+              requestPayloadHash,
+              intentId: activeIntent.intentId,
+              logicalActionKey: activeIntent.logicalActionKey,
+            },
           });
         },
         readback: () => readStock(client, row.skuCode),
@@ -695,15 +1345,19 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         code: response?.data?.code,
         msg: response?.data?.msg || '',
         traceId: response?.data?.traceId || '',
-        success: response?.data?.info?.success ?? null,
+        // Exact stock readback is the terminal business proof. SHEIN's
+        // successful stock endpoint can omit info.success even when code=0.
+        success: submission.state === 'readback_matched'
+          ? true
+          : (response?.data?.info?.success ?? null),
       });
       if (submission.state === 'rejected') {
-        pendingIntents.delete(activeIntent.intentId);
+        pendingIntents.delete(journalIntentKey(activeIntent));
         activeIntent = null;
         throw new Error(`inventory write failed: ${response?.data?.code} ${response?.data?.msg || ''}`);
       }
       if (submission.state === 'ambiguous_response') {
-        await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, writes, error: 'inventory write response did not contain explicit code=0 and info.success=true; durable intent retained and duplicate submission forbidden'}, logicalActionKey);
+        await recordResult({...result, logicalActionKey, state: 'needs_manual_resolve', before, writes, error: 'inventory write response was not HTTP 2xx/code=0 or explicitly reported success=false; durable intent retained and duplicate submission forbidden'}, logicalActionKey);
         activeIntent = null;
         continue;
       }
@@ -713,7 +1367,7 @@ for (const row of unresolvedIntents.length ? [] : rows) {
         activeIntent = null;
         continue;
       }
-      pendingIntents.delete(activeIntent.intentId);
+      pendingIntents.delete(journalIntentKey(activeIntent));
       activeIntent = null;
       await recordResult({...result, logicalActionKey, state: 'updated_readback_matched', before, after, writes}, logicalActionKey);
     } finally {
@@ -734,13 +1388,14 @@ for (const row of unresolvedIntents.length ? [] : rows) {
     }
   }
 }
-const unsafeResultCount = results.filter(row => ['blocked', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve'].includes(row.state)).length;
+const unsafeResultCount = results.filter(row => ['blocked', 'blocked_by_manual_resolution_fence', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve', 'historical_readback_matched'].includes(row.state)).length;
 const counts = {
   total: results.length,
   updated: results.filter(row => row.state === 'updated_readback_matched').length,
   dryRunReady: results.filter(row => row.state === 'dry_run_ready').length,
   skipped: results.filter(row => row.state.startsWith('skipped_')).length,
-  blocked: Math.max(unsafeResultCount, unresolvedIntents.length),
+  deferredHistorical: deferredHistoricalIntents.length,
+  blocked: unsafeResultCount,
 };
 // Per-row progress is append-only in the journal. Publish the complete JSON
 // envelope exactly once so result-file IO stays O(N), not O(N²).

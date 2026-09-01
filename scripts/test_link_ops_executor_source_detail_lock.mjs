@@ -46,6 +46,7 @@ import {
   sha256StableJson,
   sha256Utf8,
 } from '../lib/link_ops_product_descriptions.mjs';
+import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 
 process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
 const {__testHooks: executorHooks} = await import('../scripts/link_ops_hl_openapi_executor.mjs');
@@ -66,11 +67,15 @@ const DESCRIPTION_LINES = Object.freeze({
 });
 const DESCRIPTION_SOURCE_BYTES = Buffer.from('reviewed source-detail-lock smoke fixture', 'utf8');
 const DESCRIPTION_SOURCE_LABEL = 'source-detail-lock-reviewed-fixture.html';
-const sourceLinkDir = path.join(ROOT, 'outputs', 'shein_links', SOURCE_STORE);
-const sourceOpenApiDir = path.join(ROOT, 'outputs', 'shein_openapi_products', SOURCE_STORE);
+const IMAGE_BINDING_FINGERPRINT = sha256Utf8('source-detail-lock-smoke-images');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'link-ops-source-detail-lock-'));
+const testOutputDir = path.join(tmpRoot, 'outputs');
+process.env.SHEIN_BI_OUTPUT_DIR = testOutputDir;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(testOutputDir, 'shein_openapi_products');
+const sourceLinkDir = path.join(testOutputDir, 'shein_links', SOURCE_STORE);
+const sourceOpenApiDir = path.join(testOutputDir, 'shein_openapi_products', SOURCE_STORE);
 
 const nowMs = Date.now();
 const FRESH_AT = new Date(nowMs - 23 * 60 * 60 * 1000).toISOString();
@@ -133,9 +138,9 @@ function detailInfo({titleSuffix = ''} = {}) {
       skcName: SOURCE_SKC,
       supplierCode: 'SRC-LKD-CODE',
       skcImageInfoList: [
-        {imageType: 1, imageUrl: 'https://example.invalid/lock-main.jpg'},
-        {imageType: 2, imageUrl: 'https://example.invalid/lock-detail.jpg'},
-        {imageType: 5, imageUrl: 'https://example.invalid/lock-square.jpg'},
+        {imageType: 1, imageUrl: 'https://img.shein.com/lock-main.jpg'},
+        {imageType: 2, imageUrl: 'https://img.shein.com/lock-detail.jpg'},
+        {imageType: 5, imageUrl: 'https://img.shein.com/lock-square.jpg'},
       ],
       saleAttributeList: [{attributeId: 301, attributeValueId: 401}],
       skuInfoList: [{
@@ -170,16 +175,16 @@ function publishPayload() {
     shelf_way: 2,
     hope_on_sale_date: '2036-06-27 10:00:00',
     skc_list: [{
-      supplier_code: 'HL-LOCK-SMOKE-SKC',
+      supplier_code: STANDARD_GOODS_SN,
       image_info: {
         image_info_list: [
-          {image_type: 1, image_sort: 1, image_url: 'https://example.invalid/smoke-main.jpg'},
-          {image_type: 5, image_sort: 2, image_url: 'https://example.invalid/smoke-square.jpg'},
+          {image_type: 1, image_sort: 1, image_url: 'https://img.shein.com/smoke-main.jpg'},
+          {image_type: 5, image_sort: 2, image_url: 'https://img.shein.com/smoke-square.jpg'},
         ],
       },
       sale_attribute: {attribute_id: 301, attribute_value_id: 401},
       sku_list: [{
-        supplier_sku: 'HL-LOCK-SMOKE-SKU-001',
+        supplier_sku: `${STANDARD_GOODS_SN}-SKU`,
         mall_state: 1,
         height: 10,
         length: 20,
@@ -225,6 +230,7 @@ const descriptionMaterialBinding = {
   lineCounts: descriptionSummary.lineCounts,
   newPayloadHash: sha256StableJson(boundPayload),
   payloadHashAlgorithm: DESCRIPTION_PAYLOAD_HASH_ALGORITHM,
+  imageBindingFingerprint: IMAGE_BINDING_FINGERPRINT,
   publishLanguages: descriptionSummary.publishLanguages,
   schemaVersion: descriptionSummary.schemaVersion,
   sourceApproved: true,
@@ -324,15 +330,16 @@ function runNode(args) {
   });
 }
 
-async function writeDetail({detailFetchedAt = FRESH_AT, info = detailInfo(), detailResults = undefined} = {}) {
-  await writeJson(path.join(sourceOpenApiDir, 'latest.json'), {
+async function writeDetail({detailFetchedAt = FRESH_AT, info = detailInfo(), detailResults = undefined, useFallback = false} = {}) {
+  const selectedDetails = detailResults === undefined ? [{ok: true, detailFetchedAt, info}] : detailResults;
+  await writeOpenApiProductCacheAtomically(path.join(sourceOpenApiDir, 'latest.json'), {
     schemaVersion: 'shein-openapi-product-basics/v1',
     storeKey: SOURCE_STORE,
     fetchedAt: detailFetchedAt,
     normalizedRows: [{spu: SOURCE_SPU, skc: SOURCE_SKC}],
-    detailResults: detailResults === undefined ? [{ok: true, detailFetchedAt, info}] : detailResults,
-    detailFallbackResults: [],
-  });
+    detailResults: useFallback ? [] : selectedDetails,
+    detailFallbackResults: useFallback ? selectedDetails : [],
+  }, {storeKey: SOURCE_STORE, generatedAt: FRESH_AT});
 }
 
 function baseTask() {
@@ -346,6 +353,29 @@ function baseTask() {
     sourceSkc: SOURCE_SKC,
     openapiPublishPayload: JSON.parse(JSON.stringify(boundPayload)),
     descriptionMaterialBinding,
+    publishAssetBinding: {
+      schemaVersion: 1,
+      kind: 'copy_product_draft',
+      sourceApproved: true,
+      authority: 'human_reviewed_source',
+      targetStore: 'HL',
+      boundAt: '2026-08-11T00:00:00.000Z',
+      bindingFingerprint: IMAGE_BINDING_FINGERPRINT,
+      imageCount: 2,
+      images: [
+        {name: 'smoke-main.jpg', role: 'mainCover', imageType: 1, imageUrl: 'https://img.shein.com/smoke-main.jpg', width: 1000, height: 1000, sha256: sha256Utf8('source-detail-lock-main')},
+        {name: 'smoke-square.jpg', role: 'squareImage', imageType: 5, imageUrl: 'https://img.shein.com/smoke-square.jpg', width: 800, height: 800, sha256: sha256Utf8('source-detail-lock-square')},
+      ],
+      publishPreparation: {
+        standardGoodsSn: STANDARD_GOODS_SN,
+        supplierSku: `${STANDARD_GOODS_SN}-SKU`,
+        supplyPrice: 99,
+        inventory: 100,
+        categoryId: 123456,
+        titles: {en: EN_TITLE, ar: AR_TITLE},
+        attributeOverrides: [],
+      },
+    },
     targets: {
       stores: ['HL'],
       writeStores: ['HL'],
@@ -356,13 +386,42 @@ function baseTask() {
   };
 }
 
-async function runExecutor({label, mode, executionContext = null, task = null, expectedPayloadHash = ''}) {
+async function runExecutor({
+  label,
+  mode,
+  executionContext = null,
+  task = null,
+  expectedPayloadHash = '',
+  includeWriteClaim = true,
+  claimOperations = ['copy_product_draft'],
+}) {
+  let activeTask = JSON.parse(JSON.stringify(task || baseTask()));
+  let activeExecutionContext = executionContext ? JSON.parse(JSON.stringify(executionContext)) : null;
+  let claimNonce = '';
+  if (mode === 'execute' && includeWriteClaim) {
+    const lockedHash = typeof activeExecutionContext?.expectedPayloadHash === 'string'
+      ? activeExecutionContext.expectedPayloadHash
+      : String(expectedPayloadHash || '');
+    claimNonce = `claim-${label.replace(/[^a-z0-9]+/gi, '-').slice(0, 48)}`;
+    const writeClaim = {
+      schemaVersion: 1,
+      claimId: `wc-${label.replace(/[^a-z0-9]+/gi, '-').slice(0, 48)}`,
+      nonce: claimNonce,
+      taskId: String(activeTask.id || ''),
+      storeKey: 'HL',
+      operations: claimOperations,
+      expectedPayloadHash: lockedHash,
+      state: 'claimed',
+    };
+    activeExecutionContext = {...(activeExecutionContext || {}), writeClaim};
+    activeTask.execution = {...(activeTask.execution || {}), writeClaim};
+  }
   const storeFile = path.join(tmpRoot, `task-${label.replace(/[^a-z0-9]+/gi, '-')}.json`);
   await writeJson(storeFile, {
     version: 1,
     updatedAt: null,
-    ...(executionContext ? {executionContext} : {}),
-    tasks: [task || baseTask()],
+    ...(activeExecutionContext ? {executionContext: activeExecutionContext} : {}),
+    tasks: [activeTask],
   });
   const args = [
     'scripts/link_ops_hl_openapi_executor.mjs',
@@ -371,6 +430,7 @@ async function runExecutor({label, mode, executionContext = null, task = null, e
     '--store', 'HL',
     mode === 'execute' ? '--execute' : '--dry-run',
     ...(mode === 'execute' ? ['--confirm', 'SHEIN_OPENAPI_SUBMIT'] : []),
+    ...(mode === 'execute' && includeWriteClaim ? ['--claim-nonce', claimNonce] : []),
     '--out-dir', path.join(tmpRoot, `logs-${label.replace(/[^a-z0-9]+/gi, '-')}`),
   ];
   const run = await runNode(args);
@@ -486,6 +546,13 @@ try {
   }
   check('gate invalid expected lock blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, source: ''}, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_PREFLIGHT_INVALID'));
   check('gate source type drift blocks', gate({currentLock: baseLock, expectedLock: {...baseLock, source: 'different_source'}, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT'));
+  const fallbackLock = {...baseLock, source: 'openapi_product_detail_cached_fallback'};
+  check('gate accepts trusted fallback to snapshot provenance-only transition', gate({currentLock: baseLock, expectedLock: fallbackLock, ...requiredGateScope}), value => value.ok === true && value.trustedProvenanceTransition === true);
+  check('gate accepts trusted snapshot to fallback provenance-only transition', gate({currentLock: fallbackLock, expectedLock: baseLock, ...requiredGateScope}), value => value.ok === true && value.trustedProvenanceTransition === true);
+  check('gate does not excuse content drift during provenance transition', gate({currentLock: {...baseLock, detailContentSha256: 'f'.repeat(64)}, expectedLock: fallbackLock, ...requiredGateScope}).blockers.map(b => b.code), codes => codes.includes('SOURCE_DETAIL_LOCK_CONTENT_DRIFT'));
+  const shSourceSkc = 'sh20990101000000009';
+  const shLock = {...baseLock, matchedSkcName: shSourceSkc};
+  check('gate accepts authoritative SH source SKC', gate({currentLock: shLock, expectedLock: shLock, required: true, sourceStore: SOURCE_STORE, sourceSkc: shSourceSkc, standardGoodsSn: STANDARD_GOODS_SN}), value => value.ok === true);
   check('hash scope excludes observation timestamp', executorHooks.sourceDetailLockExecutionHashScope(baseLock), value => !Object.prototype.hasOwnProperty.call(value || {}, 'detailFetchedAt'));
   check('hash scope preserves source identity and content', executorHooks.sourceDetailLockExecutionHashScope(baseLock), value => value?.source === baseLock.source
     && value?.matchedSkcName === SOURCE_SKC
@@ -501,7 +568,7 @@ try {
   });
   const baseExecutionHash = executorHooks.sha256Stable(baseExecutionScope);
   check('scope-v3 schema is hash-domain separated', baseExecutionScope.schema, executorHooks.PRODUCT_EXECUTION_HASH_SCHEMA);
-  check('scope-v3 algorithm constant', executorHooks.PRODUCT_EXECUTION_HASH_ALGORITHM, 'sha256-stable-json-scope-v3');
+  check('scope-v4 algorithm constant', executorHooks.PRODUCT_EXECUTION_HASH_ALGORITHM, 'sha256-stable-json-scope-v4');
   const portalHashTask = algorithm => ({
     execution: {
       openApiProductExecutors: [{
@@ -510,19 +577,19 @@ try {
       }],
     },
   });
-  check('portal accepts current scope-v3 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v3'), 'HL'), 'a'.repeat(64));
+  check('portal accepts current scope-v4 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v4'), 'HL'), 'a'.repeat(64));
   check('portal rejects legacy scope-v2 hash', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask('sha256-stable-json-scope-v2'), 'HL'), '');
   check('portal rejects missing hash algorithm', portalHooks.payloadHashForStoreFromTaskExecution(portalHashTask(''), 'HL'), '');
-  const portalMissingStoreTask = portalHashTask('sha256-stable-json-scope-v3');
+  const portalMissingStoreTask = portalHashTask('sha256-stable-json-scope-v4');
   delete portalMissingStoreTask.execution.openApiProductExecutors[0].storeKey;
   check('portal rejects unique executor row missing storeKey', portalHooks.payloadHashForStoreFromTaskExecution(portalMissingStoreTask, 'HL'), '');
   for (const [label, mutate] of [
     ['payload hash array', task => { task.execution.openApiProductExecutors[0].payload.payloadHash = ['a'.repeat(64)]; }],
     ['payload hash object', task => { task.execution.openApiProductExecutors[0].payload.payloadHash = {value: 'a'.repeat(64)}; }],
-    ['payload hash algorithm array', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }],
-    ['payload hash algorithm object', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }],
+    ['payload hash algorithm array', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v4']; }],
+    ['payload hash algorithm object', task => { task.execution.openApiProductExecutors[0].payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v4'}; }],
   ]) {
-    const pollutedTask = portalHashTask('sha256-stable-json-scope-v3');
+    const pollutedTask = portalHashTask('sha256-stable-json-scope-v4');
     mutate(pollutedTask);
     check(`portal rejects ${label}`, portalHooks.payloadHashForStoreFromTaskExecution(pollutedTask, 'HL'), '');
   }
@@ -535,14 +602,16 @@ try {
       payload: {
         found: true,
         payloadHash: 'a'.repeat(64),
-        payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+        payloadHashAlgorithm: 'sha256-stable-json-scope-v4',
+        sourceDetailHash: 'b'.repeat(64),
         sourceDetailLock: baseLock,
       },
     },
   });
-  check('portal history projection preserves scope-v3 algorithm', projectedHistoryEvidence.payloadHashAlgorithm, 'sha256-stable-json-scope-v3');
+  check('portal history projection preserves scope-v4 algorithm', projectedHistoryEvidence.payloadHashAlgorithm, 'sha256-stable-json-scope-v4');
   check('portal history projection preserves exact source store', projectedHistoryEvidence.sourceStore, SOURCE_STORE);
   check('portal history projection preserves exact source SKC', projectedHistoryEvidence.sourceSkc, SOURCE_SKC);
+  check('portal history projection preserves canonical source detail hash', projectedHistoryEvidence.payload?.sourceDetailHash, 'b'.repeat(64));
   check('portal history projection preserves full source lock', projectedHistoryEvidence.payload?.sourceDetailLock, value => value?.detailFetchedAt === baseLock.detailFetchedAt
     && value?.detailContentSha256 === baseLock.detailContentSha256
     && Object.keys(value || {}).length === 5);
@@ -597,12 +666,22 @@ try {
   check('preflight ready for submit', preflightOutput?.state || '', 'ready_for_submit');
   check('preflight no blockers', preflightOutput?.blockers?.length || 0, 0);
   check('preflight locks scope-v3 hash', preflightOutput?.payload?.payloadHash || '', value => /^[a-f0-9]{64}$/.test(String(value)));
-  check('preflight declares scope-v3 algorithm', preflightOutput?.payload?.payloadHashAlgorithm || '', 'sha256-stable-json-scope-v3');
+  check('preflight declares scope-v4 algorithm', preflightOutput?.payload?.payloadHashAlgorithm || '', 'sha256-stable-json-scope-v4');
   check('preflight payload carries sourceDetailLock', Boolean(preflightOutput?.payload?.sourceDetailLock), true);
   check('preflight lock matched SKC', preflightOutput?.payload?.sourceDetailLock?.matchedSkcName, SOURCE_SKC);
   check('preflight lock content hash is sha256', preflightOutput?.payload?.sourceDetailLock?.detailContentSha256 || '', value => /^[a-f0-9]{64}$/.test(String(value)));
   check('preflight structured mapping blockers empty', preflightOutput?.payload?.mappingBlockers?.length || 0, 0);
   check('publish not called in dry-run', publishAttemptCount, 0);
+  if (!preflightOutput?.payload?.sourceDetailLock) {
+    result.debug = {
+      preflightState: preflightOutput?.state || null,
+      blockers: preflightOutput?.blockers || [],
+      payload: preflightOutput?.payload || null,
+      stderr: preflight.run.stderr.slice(0, 4000),
+    };
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
 
   const executeContext = {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
@@ -626,7 +705,7 @@ try {
   const resolvedCurrentLock = executorHooks.resolvePreflightProductLock(executeTask(), 'HL', {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
   });
-  check('current execution resolver restores v3 lock', resolvedCurrentLock, value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+  check('current execution resolver restores v4 lock', resolvedCurrentLock, value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v4'
     && value?.sourceDetailLock?.detailContentSha256 === preflightOutput.payload.sourceDetailLock.detailContentSha256);
   check('resolver rejects array expectedPayloadHash', executorHooks.resolvePreflightProductLock(executeTask(), 'HL', {
     expectedPayloadHash: [preflightOutput.payload.payloadHash],
@@ -764,7 +843,7 @@ try {
   }];
   check('history writeAudit resolver restores v3 lock', executorHooks.resolvePreflightProductLock(historyWriteAuditTask, 'HL', {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
-  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v4'
     && value?.sourceStore === SOURCE_STORE
     && value?.sourceSkc === SOURCE_SKC);
   const historyExecutorTask = baseTask();
@@ -774,7 +853,7 @@ try {
   }];
   check('history executor resolver restores v3 lock', executorHooks.resolvePreflightProductLock(historyExecutorTask, 'HL', {
     expectedPayloadHash: preflightOutput.payload.payloadHash,
-  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v3'
+  }), value => value?.payloadHashAlgorithm === 'sha256-stable-json-scope-v4'
     && value?.sourceStore === SOURCE_STORE
     && value?.sourceSkc === SOURCE_SKC);
   const historyEventArrayTask = JSON.parse(JSON.stringify(historyWriteAuditTask));
@@ -839,8 +918,8 @@ try {
       {label: 'source lock expired timestamp', apply: row => { row.payload.sourceDetailLock.detailFetchedAt = EXPIRED_AT; }},
       {label: 'payloadHash array', apply: row => { row.payloadHash = [preflightOutput.payload.payloadHash]; }},
       {label: 'payloadHash object', apply: row => { row.payloadHash = {value: preflightOutput.payload.payloadHash}; }},
-      {label: 'payloadHashAlgorithm array', apply: row => { row.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }},
-      {label: 'payloadHashAlgorithm object', apply: row => { row.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }},
+      {label: 'payloadHashAlgorithm array', apply: row => { row.payloadHashAlgorithm = ['sha256-stable-json-scope-v4']; }},
+      {label: 'payloadHashAlgorithm object', apply: row => { row.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v4'}; }},
     ]) {
       const tamperedTask = taskFactory();
       const row = historyKind === 'writeAudit'
@@ -878,8 +957,8 @@ try {
   for (const [label, mutate] of [
     ['current payloadHash array', output => { output.payload.payloadHash = [preflightOutput.payload.payloadHash]; }],
     ['current payloadHash object', output => { output.payload.payloadHash = {value: preflightOutput.payload.payloadHash}; }],
-    ['current payloadHashAlgorithm array', output => { output.payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v3']; }],
-    ['current payloadHashAlgorithm object', output => { output.payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v3'}; }],
+    ['current payloadHashAlgorithm array', output => { output.payload.payloadHashAlgorithm = ['sha256-stable-json-scope-v4']; }],
+    ['current payloadHashAlgorithm object', output => { output.payload.payloadHashAlgorithm = {value: 'sha256-stable-json-scope-v4'}; }],
   ]) {
     const pollutedOutput = JSON.parse(JSON.stringify(preflightOutput));
     mutate(pollutedOutput);
@@ -915,6 +994,30 @@ try {
   check('timestamp-only refresh updates full evidence timestamp', timestampRefresh.output?.payload?.sourceDetailLock?.detailFetchedAt || '', refreshedAt);
   check('timestamp-only refresh keeps content hash', timestampRefresh.output?.payload?.sourceDetailLock?.detailContentSha256 || '', preflightOutput.payload.sourceDetailLock.detailContentSha256);
   check('timestamp-only refresh does not publish', publishAttemptCount, 0);
+
+  const missingClaim = await runExecutor({
+    label: 'execute-missing-write-claim',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: executeTask(),
+    includeWriteClaim: false,
+  });
+  check('execute without durable write claim is blocked', missingClaim.output?.state, 'blocked');
+  check('execute without durable write claim explains claim gate', missingClaim.output?.blockers || [],
+    blockers => blockers.some(message => /write-claim/.test(String(message))));
+  check('execute without durable write claim does not publish', publishAttemptCount, 0);
+
+  const overbroadClaim = await runExecutor({
+    label: 'execute-overbroad-write-claim',
+    mode: 'execute',
+    executionContext: executeContext,
+    task: executeTask(),
+    claimOperations: ['copy_product_draft', 'update_title'],
+  });
+  check('execute with overbroad write claim is blocked', overbroadClaim.output?.state, 'blocked');
+  check('execute with overbroad write claim explains claim gate', overbroadClaim.output?.blockers || [],
+    blockers => blockers.some(message => /write-claim/.test(String(message))));
+  check('execute with overbroad write claim does not publish', publishAttemptCount, 0);
 
   // Fresh execute: same content/identity with a refreshed timestamp and the
   // original preflight lock -> publishOrEdit once.
@@ -1161,6 +1264,41 @@ try {
   check('old preflight message forces re-preflight', oldPreflight.output?.blockers || [], rows => rows.some(row => /重新 dry-run/.test(String(row))));
   checkNoPublishEvidence('old preflight execute', oldPreflight.output, beforeOldPreflight);
 
+  // The same source bytes may move from the short-lived fallback into the
+  // current snapshot between preflight and execute. This provenance-only
+  // transition must retain the preflight hash and reach exactly one fake
+  // publish while the real current lock remains visible in audit evidence.
+  const provenanceAt = new Date().toISOString();
+  await writeDetail({detailFetchedAt: provenanceAt, useFallback: true});
+  const provenancePreflight = await runExecutor({label: 'preflight-fallback-provenance', mode: 'dry-run'});
+  check('fallback provenance preflight ready', provenancePreflight.output?.state || '', 'ready_for_submit');
+  check('fallback provenance preflight locks fallback source', provenancePreflight.output?.payload?.sourceDetailLock?.source || '', 'openapi_product_detail_cached_fallback');
+  const provenanceHash = provenancePreflight.output?.payload?.payloadHash || '';
+  const provenanceTask = baseTask();
+  provenanceTask.execution = {
+    state: 'preflight_ready',
+    preflight: {ok: true, blockers: [], warnings: []},
+    openApiProductExecutors: [{
+      storeKey: 'HL',
+      state: 'preflight_ready',
+      runId: provenancePreflight.output?.runId || '',
+      result: provenancePreflight.output,
+    }],
+  };
+  await writeDetail({detailFetchedAt: new Date().toISOString()});
+  const beforeProvenancePublish = publishAttemptCount;
+  const provenanceExecute = await runExecutor({
+    label: 'execute-fallback-to-snapshot-provenance',
+    mode: 'execute',
+    executionContext: {expectedPayloadHash: provenanceHash, reusePreflightLock: true},
+    task: provenanceTask,
+  });
+  check('provenance-only execute keeps preflight hash', provenanceExecute.output?.payload?.payloadHash || '', provenanceHash);
+  check('provenance-only execute keeps real current snapshot evidence', provenanceExecute.output?.payload?.sourceDetailLock?.source || '', 'openapi_product_detail_snapshot');
+  check('provenance-only execute gate records trusted transition', provenanceExecute.output?.evidence?.sourceDetailLockGate?.trustedProvenanceTransition, true);
+  check('provenance-only execute reaches exactly one fake publish', publishAttemptCount, beforeProvenancePublish + 1);
+  check('provenance-only execute records publishResult', Boolean(provenanceExecute.output?.publishResult), true);
+
   // Mapper hydrates but produces no lock (empty detailResults): both dry-run
   // and execute must block; the fake publish endpoint sees no new calls.
   await writeDetail({detailResults: []});
@@ -1183,7 +1321,7 @@ try {
   const hydrationFail = await runExecutor({label: 'dry-run-hydration-fail', mode: 'dry-run', task: baseTask()});
   check('hydration-fail dry-run state blocked', hydrationFail.output?.state || '', 'blocked');
   check('hydration-fail gate code', hydrationFail.output?.evidence?.sourceDetailLockGate?.blockers?.map(b => b.code) || [], codes => codes.includes('SOURCE_DETAIL_LOCK_MISSING'));
-  check('hydration-fail warning recorded but not passed', hydrationFail.output?.warnings || [], rows => rows.some(row => /无法从当前详情快照还原只读元数据/.test(String(row))));
+  check('hydration-fail warning recorded but not passed', hydrationFail.output?.warnings || [], rows => rows.some(row => /无法从当前详情快照还原只读元数据|当前 BI 数据不足以还原完整发布 payload/.test(String(row))));
   check('hydration-fail dry-run does not publish', publishAttemptCount, beforeHydrationFail);
 
   result.stdout = fresh.run.stdout.slice(0, 1000);

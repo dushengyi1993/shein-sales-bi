@@ -40,6 +40,7 @@ import {
   sha256StableJson,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {stripLinkOpsRepositoryMetadata} from '../lib/link_ops_repository.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
@@ -300,6 +301,7 @@ const taskFile = path.join(tmpRoot, 'tasks.json');
 const chatFile = path.join(tmpRoot, 'chats.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 const portalDir = path.join(tmpRoot, 'portal');
 await fs.mkdir(portalDir, {recursive: true});

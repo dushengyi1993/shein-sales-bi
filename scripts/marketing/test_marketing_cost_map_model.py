@@ -5,13 +5,13 @@ import unittest
 import build_marketing_cost_map as model
 
 
-def storage_row(canonical: str, fee: float, quantity: float, date: str = "2026-08-10") -> dict:
+def storage_row(canonical: str, fee: float | None, quantity: float, date: str = "2026-08-10") -> dict:
     return {
         "date": date,
         "standard_goods_sn": canonical,
         "storage_fee_sar": fee,
         "storage_quantity": quantity,
-        "storage_fee_per_unit_sar": fee / quantity if quantity else None,
+        "storage_fee_per_unit_sar": fee / quantity if fee is not None and quantity else None,
         "storage_fee_method": "download_detail",
     }
 
@@ -69,7 +69,7 @@ class MarketingStorageAllocationTests(unittest.TestCase):
             "moving_average_remaining_inventory_storage_cost_over_unitized_billed_inventory",
         )
 
-    def test_ununitized_box_quantity_fails_closed(self):
+    def test_ununitized_box_quantity_keeps_direct_billing_unit(self):
         result = self.build(
             [storage_row("SK-03038制冰机", 157.6237, 2)],
             [inventory_row(
@@ -79,12 +79,12 @@ class MarketingStorageAllocationTests(unittest.TestCase):
             )],
         )[model.compact("SK-03038制冰机")]
 
-        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageUnitCostSar"], 78.8119)
         self.assertEqual(result["storageUnitCostCandidateSar"], 78.8119)
         self.assertIsNone(result["storageAllocationQuantity"])
         self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_storage_quantity_mismatch")
         self.assertEqual(result["storageAllocationQuantitySource"], "blocked_inventory_storage_quantity_mismatch")
-        self.assertEqual(result["storageUnitBasis"], "suspect_quantity_evidence_fail_closed")
+        self.assertIn("crosscheck_warning", result["storageUnitBasis"])
 
     def test_tolerates_bounded_intra_day_quantity_difference(self):
         result = self.build(
@@ -98,13 +98,45 @@ class MarketingStorageAllocationTests(unittest.TestCase):
         self.assertEqual(result["storageQuantityEvidenceStatus"], "fresh_quantity_crosscheck_passed")
         self.assertEqual(result["storageQuantityRelativeDifference"], 0.05)
 
+    def test_sm_505a_keeps_billed_unit_when_operational_inventory_mismatches(self):
+        result = self.build(
+            [storage_row("SM-505A电动缝纫机", 99.351, 45)],
+            [inventory_row("SM-505A电动缝纫机", 395)],
+        )[model.compact("SM-505A电动缝纫机")]
+
+        self.assertEqual(result["storageUnitCostCandidateSar"], 2.2078)
+        self.assertEqual(result["storageUnitCostSar"], 2.2078)
+        self.assertIsNone(result["storageAllocationQuantity"])
+        self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_storage_quantity_mismatch")
+        self.assertEqual(result["storageQuantityRatioOperationalToBilled"], 8.7778)
+        self.assertEqual(result["storageQuantityRelativeDifference"], 0.8861)
+        self.assertIn("crosscheck_warning", result["storageUnitBasis"])
+        self.assertNotEqual(result["storageMethod"], "missing")
+
+    def test_billed_unit_examples_survive_quantity_mismatch(self):
+        examples = [
+            ("SK-1914", 1.1222),
+            ("SK-1914-ALT", 1.5043),
+            ("SK-1914-SECOND", 4.3754),
+        ]
+        for canonical, expected_unit in examples:
+            with self.subTest(canonical=canonical):
+                result = self.build(
+                    [storage_row(canonical, expected_unit * 45, 45)],
+                    [inventory_row(canonical, 395)],
+                )[model.compact(canonical)]
+                self.assertEqual(result["storageUnitCostSar"], expected_unit)
+                self.assertEqual(result["storageUnitCostCandidateSar"], expected_unit)
+                self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_storage_quantity_mismatch")
+                self.assertIsNone(result["storageAllocationQuantity"])
+
     def test_new_arrival_cannot_dilute_unbilled_storage_balance(self):
         result = self.build(
             [storage_row("NEW-ARRIVAL", 1000, 100)],
             [inventory_row("NEW-ARRIVAL", 1000)],
         )[model.compact("NEW-ARRIVAL")]
 
-        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageUnitCostSar"], 10)
         self.assertEqual(result["storageUnitCostCandidateSar"], 10)
         self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_storage_quantity_mismatch")
 
@@ -125,7 +157,7 @@ class MarketingStorageAllocationTests(unittest.TestCase):
         )[model.compact("STALE-STOCK")]
 
         self.assertIsNone(result["storageAllocationQuantity"])
-        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageUnitCostSar"], 50)
         self.assertEqual(result["storageUnitCostCandidateSar"], 50)
         self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_storage_date_mismatch")
         self.assertEqual(result["storageQuantityDateGapDays"], 9)
@@ -137,7 +169,7 @@ class MarketingStorageAllocationTests(unittest.TestCase):
         )[model.compact("UNMATCHED-STOCK")]
 
         self.assertIsNone(result["storageAllocationQuantity"])
-        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageUnitCostSar"], 40)
         self.assertEqual(result["storageUnitCostCandidateSar"], 40)
         self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_not_fresh_matched")
 
@@ -154,7 +186,7 @@ class MarketingStorageAllocationTests(unittest.TestCase):
         )[model.compact("FULL-CARTON-BLEND")]
 
         self.assertIsNone(result["storageAllocationQuantity"])
-        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageUnitCostSar"], 50)
         self.assertEqual(result["storageUnitCostCandidateSar"], 50)
         self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_storage_date_mismatch")
         self.assertEqual(result["storageQuantityDateGapDays"], 9)
@@ -171,7 +203,7 @@ class MarketingStorageAllocationTests(unittest.TestCase):
             )],
         )[model.compact("LOOSE-ONLY")]
 
-        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageUnitCostSar"], 1)
         self.assertEqual(result["storageQuantityEvidenceStatus"], "inventory_storage_date_mismatch")
         self.assertIsNone(result["storageQuantityDateGapDays"])
 
@@ -202,16 +234,26 @@ class MarketingStorageAllocationTests(unittest.TestCase):
         self.assertEqual(result["storageQuantityEvidenceStatus"], "historical_nonpositive_quantity_with_fee")
         self.assertEqual(result["storageNonpositiveQuantityFeeDays"], 1)
 
-    def test_storage_only_path_fails_closed_without_inventory_crosscheck(self):
+    def test_storage_only_path_keeps_direct_unit_without_inventory_crosscheck(self):
         result = self.build(
             [storage_row("STORAGE-ONLY", 12, 3)],
             [],
         )[model.compact("STORAGE-ONLY")]
 
         self.assertIsNone(result["storageAllocationQuantity"])
-        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageUnitCostSar"], 4)
         self.assertEqual(result["storageUnitCostCandidateSar"], 4)
         self.assertEqual(result["storageQuantityEvidenceStatus"], "missing_inventory_crosscheck")
+
+    def test_missing_original_billed_unit_stays_missing(self):
+        result = self.build(
+            [storage_row("NO-BILLED-UNIT", None, 45)],
+            [inventory_row("NO-BILLED-UNIT", 45)],
+        )[model.compact("NO-BILLED-UNIT")]
+
+        self.assertIsNone(result["storageUnitCostCandidateSar"])
+        self.assertIsNone(result["storageUnitCostSar"])
+        self.assertEqual(result["storageQuantityEvidenceStatus"], "fresh_quantity_crosscheck_passed")
 
     def test_targeted_section_wins_when_same_or_newer(self):
         bi = {

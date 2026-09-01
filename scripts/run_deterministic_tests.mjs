@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {spawnSync} from 'node:child_process';
+import {selectDeterministicTestShard} from '../lib/deterministic_test_shards.mjs';
 
 const tests = [
   'scripts/marketing/smoke_coupon_budget_guard.mjs',
@@ -25,6 +26,7 @@ const tests = [
   'scripts/marketing/smoke_low_et_fast_seller_pricing.mjs',
   'scripts/marketing/smoke_low_et_fast_seller_integrations.mjs',
   'scripts/marketing/smoke_transactional_limited_discount_replacement.mjs',
+  'scripts/marketing/smoke_transactional_limited_discount_deadline.mjs',
   'scripts/marketing/smoke_marketing_pricing_policy.mjs',
   'scripts/marketing/smoke_authorized_fallback_inventory_top_up.mjs',
   'scripts/marketing/smoke_latest_raw_marketing_link_overlay.mjs',
@@ -54,27 +56,60 @@ const tests = [
   'scripts/test_product_sku_normalizer.mjs',
   'scripts/test_business_domain_fetch_contract.mjs',
   'scripts/test_marketing_plan_selector.mjs',
+  'scripts/test_marketing_coupon_low_price_overlap_scanner.mjs',
+  'scripts/test_marketing_coupon_risk_artifact_bindings.mjs',
+  'scripts/test_marketing_repair_queue_cas.mjs',
+  'scripts/test_marketing_plan_registry.mjs',
+  'scripts/test_marketing_plan_promotion_registry.mjs',
+  'scripts/test_marketing_plan_source_contracts.mjs',
+  'scripts/test_marketing_repair_worker_registry.mjs',
+  'scripts/test_cloud_marketing_repair_serial_contract.mjs',
+  'scripts/test_cloud_marketing_immediate_run.mjs',
+  'scripts/test_marketing_executor_cli_compatibility.mjs',
+  'scripts/test_marketing_high_click_recovery_contract.mjs',
+  'scripts/test_marketing_unified_login_recovery_contract.mjs',
+  'scripts/test_new_listing_limited_discount_plan_price_source.mjs',
+  'scripts/test_cloud_marketing_live_guard_resume.mjs',
+  'scripts/test_cloud_marketing_source_contracts.mjs',
   'scripts/test_marketing_scan_resilience.mjs',
   'scripts/test_marketing_price_lead_merge.mjs',
   'scripts/test_cloud_watchdog_recovery.mjs',
   'scripts/test_cloud_watchdog_alert_state.mjs',
   'scripts/test_cloud_watchdog_issue_collapse.mjs',
+  'scripts/test_cloud_watchdog_release_audit.mjs',
+  'scripts/test_cloud_maintenance_mode.mjs',
   'scripts/test_cloud_data_coverage_policy.mjs',
   'scripts/test_cloud_manual_login_recovery.mjs',
   'scripts/test_session_manager_webapi_export_contract.mjs',
+  'scripts/test_bi_session_secret_provision.mjs',
+  'scripts/test_bi_runtime_shutdown_lifecycle.mjs',
+  'scripts/test_bi_live_accounting_refresh_guard.mjs',
   'scripts/test_bi_client_resilience.mjs',
+  'scripts/test_bi_query_surface_isolation.mjs',
   'scripts/test_bi_frontend_accessibility.mjs',
   'scripts/test_bi_home_period_comparison.mjs',
   'scripts/test_bi_section_cache.mjs',
+  'scripts/test_bi_section_parse_slot.mjs',
+  'scripts/test_bi_core_stream_reuse.mjs',
+  'scripts/test_bi_query_reader_lifecycle.mjs',
+  'scripts/test_bi_response_completeness.mjs',
+  'scripts/test_bi_section_streaming.mjs',
+  'scripts/test_bi_section_portal_streaming.mjs',
   'scripts/test_bi_portal_section_queue.mjs',
+  'scripts/test_bi_portal_section_queue_window.mjs',
   'scripts/test_bi_portal_core_warmup_queue_owned.mjs',
+  'scripts/test_bi_portal_external_queue_reconciliation.mjs',
+  'scripts/test_bi_portal_core_run_identity.mjs',
+  'scripts/test_bi_core_warmup_health.mjs',
   'scripts/test_bi_portal_section_terminal.mjs',
   'scripts/test_bi_portal_data_mode.mjs',
+  'scripts/test_bi_portal_direct_cache.mjs',
   'scripts/test_bi_live_page_recovery.mjs',
   'scripts/test_bounded_top_level_json.mjs',
   'scripts/test_atomic_file_publish.mjs',
   'scripts/test_ops_run_bundle.mjs',
   'scripts/test_bi_profit_mart_freshness.mjs',
+  'scripts/test_bi_portal_accounting_state_cache.mjs',
   'scripts/test_profit_refresh_pipeline_contract.mjs',
   'scripts/test_marketing_price_snapshot_health.mjs',
   'scripts/test_cloud_session_manager_reliability.mjs',
@@ -84,6 +119,7 @@ const tests = [
   'scripts/test_bi_ops_intent_planner.mjs',
   'scripts/test_bi_ops_query_context.mjs',
   'scripts/test_bi_ops_direct_query.mjs',
+  'scripts/test_bi_ops_p0_cli_runtime_snapshot.mjs',
   'scripts/test_bi_ops_query_retry.mjs',
   'scripts/test_owner_knowledge_policy.mjs',
   'scripts/test_owner_knowledge_service.mjs',
@@ -93,11 +129,17 @@ const tests = [
   'scripts/test_owner_knowledge_distribution.mjs',
   'scripts/test_partner_knowledge_cache.mjs',
   'scripts/test_partner_cli_package.mjs',
+  'scripts/test_partner_cli_version_change.mjs',
   'scripts/test_partner_cli_updater.mjs',
   'scripts/test_partner_cli_portal_release.mjs',
   'scripts/test_partner_cli_release_pipeline.mjs',
   'scripts/test_link_ops_publish_asset_binding.mjs',
+  'scripts/test_link_business_audit_nonblocking.mjs',
+  'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs',
+  'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs',
   'scripts/test_link_ops_product_descriptions.mjs',
+  'scripts/test_link_ops_empty_description_authorization.mjs',
+  'scripts/test_link_ops_duplicate_publish_override.mjs',
   'scripts/test_link_ops_description_material_extract.mjs',
   'scripts/test_link_ops_extract_sk11004.mjs',
   'scripts/test_link_ops_prepare_descriptions_flow.mjs',
@@ -110,6 +152,7 @@ const tests = [
   'scripts/test_link_retire_candidate_policy.mjs',
   'scripts/test_link_retire_candidates_from_csv.mjs',
   'scripts/test_retire_supplier_code_repair_payload.mjs',
+  'scripts/test_retire_execute_best_effort.mjs',
   'scripts/test_shein_openapi_client_timeout.mjs',
   'scripts/test_openapi_stock_refresh_contract.mjs',
   'scripts/test_shein_webhook_receiver.mjs',
@@ -125,8 +168,11 @@ const tests = [
   'scripts/test_shein_webhook_service.mjs',
   'scripts/test_notify_sync_issue.mjs',
   'scripts/test_lark_delivery_target.mjs',
+  'scripts/test_cloud_team_report_delivery.mjs',
   'scripts/test_shein_webhook_portal_contract.mjs',
   'scripts/test_webhook_primary_sales_migration.mjs',
+  'scripts/test_cloud_primary_sales_finalize_contract.mjs',
+  'scripts/test_primary_sales_cutover_guard.mjs',
   'scripts/test_bi_live_events_bridge.mjs',
   'scripts/test_bi_webhook_frontend.mjs',
   'scripts/test_link_ops_json_repository.mjs',
@@ -139,6 +185,7 @@ const tests = [
   'scripts/test_migrate_link_ops_runtime_to_postgres.mjs',
   'scripts/test_morning_chain_reliability.mjs',
   'scripts/test_morning_coordinator_portal_async.mjs',
+  'scripts/test_authorize_cloud_morning_chain_recovery.mjs',
   'scripts/test_morning_chain_final_resume.mjs',
   'scripts/test_morning_chain_watchdog_stale_running.mjs',
   'scripts/test_morning_chain_wrapper_reliability.mjs',
@@ -146,25 +193,48 @@ const tests = [
   'scripts/test_shared_lock_security.mjs',
   'scripts/test_pipeline_marker.mjs',
   'scripts/test_morning_resume_evidence.mjs',
+  'scripts/test_morning_metric_refetch.mjs',
   'scripts/test_systemd_unit_snapshot.mjs',
+  'scripts/test_systemd_unit_inventory_contract.mjs',
+  'scripts/test_install_cloud_maintenance_guards.mjs',
+  'scripts/test_cloud_runtime_path_policy.mjs',
+  'scripts/test_install_cloud_runtime_path_namespaces.mjs',
+  'scripts/test_migrate_cloud_runtime_mount_layout.mjs',
+  'scripts/test_systemd_runtime_bind_paths_probe_contract.mjs',
   'scripts/test_cloud_runtime_snapshot.mjs',
   'scripts/test_cloud_disk_maintenance_contract.mjs',
   'scripts/test_host_resource_schedule_contract.mjs',
   'scripts/test_release_source_state.mjs',
+  'scripts/test_emergency_local_release_receipt.mjs',
+  'scripts/test_source_release_workflow_contract.mjs',
   'scripts/test_systemd_security_contract.mjs',
   'scripts/test_bi_product_section_contract.mjs',
   'scripts/test_bi_product_profit_section_contract.mjs',
   'scripts/test_inventory_projection_contract.mjs',
   'scripts/test_inventory_replenishment_policy.mjs',
+  'scripts/test_inventory_compatibility_preflight_cli.mjs',
+  'scripts/test_inventory_compatibility_rotation.mjs',
+  'scripts/test_inventory_default_cutover_lock.mjs',
+  'scripts/test_inventory_detail_manifest_terminal.mjs',
   'scripts/test_inventory_identity_alias_guard.mjs',
+  'scripts/test_inventory_manual_resolution.mjs',
+  'scripts/test_inventory_manual_resolution_executor_fence.mjs',
+  'scripts/test_inventory_minimal_compatibility_normal_flows.mjs',
+  'scripts/test_inventory_owner_confirmed_same_target_resume.mjs',
   'scripts/test_inventory_planner_alias_identity.mjs',
   'scripts/test_inventory_planner_kj102_separation.mjs',
+  'scripts/test_inventory_reconcile_extra_scope.mjs',
+  'scripts/test_inventory_v2_fence_entrypoints.mjs',
+  'scripts/test_inventory_write_cutover_activation.mjs',
   'scripts/test_daily_inventory_replenishment_plan.mjs',
   'scripts/test_daily_inventory_current_detail_targeting.mjs',
   'scripts/test_daily_inventory_guard_targeted_detail.mjs',
   'scripts/test_durable_inventory_write.mjs',
+  'scripts/test_link_ops_maintenance_inventory_durable.mjs',
   'scripts/test_daily_inventory_executor_lifecycle.mjs',
   'scripts/test_execute_inventory_durable_recovery.mjs',
+  'scripts/test_inventory_cross_day_intent.mjs',
+  'scripts/test_inventory_journal_discovery_domain.mjs',
   'scripts/test_et_low_inventory_safety_guard.mjs',
   'scripts/test_et_low_inventory_detail_evidence.mjs',
   'scripts/test_inventory_cost_ledger.mjs',
@@ -177,16 +247,24 @@ const tests = [
   'scripts/test_read_transport_policy.mjs',
   'scripts/test_warehouse_business_logic_contract.mjs',
   'scripts/test_order_status_effective_evidence_contract.mjs',
+  'scripts/test_order_closure_idempotency.mjs',
   'scripts/smoke_browser_task_lease.mjs',
   'scripts/smoke_cloud_marketing_live_guard_resilience.mjs',
+  'scripts/test_marketing_api_light_lane.mjs',
+  'scripts/test_marketing_artifact_publication_lock.mjs',
+  'scripts/test_marketing_virtual_last_row_fill.mjs',
+  'scripts/test_marketing_visible_fast_path_contract.mjs',
   'scripts/test_openapi_sales_loader_validity.mjs',
   'scripts/test_openapi_sales_mapping_contract.mjs',
   'scripts/test_historical_store_identity.mjs',
   'scripts/test_historical_store_identity_repair_contract.mjs',
   'scripts/test_openapi_product_reconciliation_policy.mjs',
   'scripts/test_openapi_product_detail_cache.mjs',
+  'scripts/test_openapi_product_cache_runtime_path.mjs',
+  'scripts/test_link_ops_source_skc_precedence.mjs',
   'scripts/test_fetch_shein_openapi_products_stock_retry.mjs',
   'scripts/test_cloud_bi_refresh_lock_handoff.mjs',
+  'scripts/test_portal_section_queue_recovery.mjs',
   'scripts/test_portal_security.mjs',
   'scripts/test_portal_http_security.mjs',
   'scripts/test_owner_knowledge_portal_flow.mjs',
@@ -203,16 +281,144 @@ const tests = [
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
   'scripts/test_shein_browser_cdp.mjs',
   'scripts/test_local_browser_profile_cache_cleanup.mjs',
+  'scripts/test_chrome_profile_atomic_metadata.mjs',
   'scripts/test_local_repo_hygiene_contract.mjs',
   'scripts/test_chrome_tmp_hygiene.mjs',
   'scripts/test_bi_ops_portal_shell_sync.mjs',
   'scripts/test_pending_discuss_batch.mjs',
   'scripts/test_pending_discuss_daily.mjs',
   'scripts/test_deterministic_timeout_contract.mjs',
+  'scripts/test_deterministic_test_shards.mjs',
+  'scripts/test_deterministic_focused_selection.mjs',
+  'scripts/test_cloud_db_backup_contract.mjs',
+  'scripts/test_cos_backup_remote_verifier.mjs',
+  'scripts/test_encrypted_browser_state_backup.mjs',
+  // Portal repository safety tests are registered here exactly once, so every
+  // four-shard green run proves each of them ran. The release-gate job is the
+  // sole owner of scripts/test_bi_ops_release_gate.mjs, and ci-terminal still
+  // fails closed unless both deterministic shards and that dedicated job pass.
+  'scripts/test_bi_portal_repository_crud.mjs',
+  'scripts/test_bi_portal_mutation_queue.mjs',
 ];
 
+const TEST_ESTIMATES_MS = {
+  'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs': 2_000,
+  'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs': 5_000,
+  'scripts/test_link_ops_prepare_product_attribute_flow.mjs': 1_200_000,
+  'scripts/test_link_ops_prepare_descriptions_flow.mjs': 300_000,
+  'scripts/test_link_ops_update_description_flow.mjs': 240_000,
+  'scripts/test_morning_chain_reliability.mjs': 120_000,
+  'scripts/test_morning_chain_wrapper_reliability.mjs': 120_000,
+  'scripts/test_morning_metric_refetch.mjs': 120_000,
+  'scripts/test_cloud_session_manager_reliability.mjs': 120_000,
+  'scripts/test_bi_query_surface_isolation.mjs': 120_000,
+  'scripts/test_cloud_marketing_immediate_run.mjs': 90_000,
+  'scripts/test_bi_section_streaming.mjs': 120_000,
+  'scripts/test_bi_section_portal_streaming.mjs': 120_000,
+  'scripts/test_bi_portal_section_queue_window.mjs': 60_000,
+  'scripts/test_bi_portal_core_warmup_queue_owned.mjs': 120_000,
+  'scripts/test_bi_portal_external_queue_reconciliation.mjs': 60_000,
+  'scripts/test_bi_portal_core_run_identity.mjs': 30_000,
+  'scripts/test_morning_coordinator_portal_async.mjs': 120_000,
+  'scripts/test_bi_ops_cli_flow.mjs': 90_000,
+  'scripts/test_partner_cli_version_change.mjs': 30_000,
+  'scripts/test_partner_cli_updater.mjs': 35_000,
+  'scripts/test_daily_inventory_executor_lifecycle.mjs': 90_000,
+  'scripts/test_link_ops_executor_source_detail_lock.mjs': 60_000,
+  'scripts/test_et_forwarder_runtime_contract.mjs': 60_000,
+  'scripts/test_migrate_cloud_runtime_mount_layout.mjs': 1_800_000,
+  'scripts/test_cloud_db_backup_contract.mjs': 120_000,
+  'scripts/test_cos_backup_remote_verifier.mjs': 60_000,
+  'scripts/test_bi_portal_mutation_queue.mjs': 60_000,
+  'scripts/test_order_closure_idempotency.mjs': 60_000,
+};
+
+function parseRunnerArgs(argv) {
+  const args = {shard: '', shardProvided: false, files: null, list: false};
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--shard') {
+      args.shardProvided = true;
+      // Preserve the existing --shard parser/default semantics. The
+      // --files conflict is checked separately after all options are read.
+      args.shard = argv[++i] || '';
+    } else if (argv[i] === '--files') {
+      if (args.files !== null) throw new Error('--files may be specified only once');
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--')) {
+        throw new Error('--files requires a non-empty comma-separated value');
+      }
+      args.files = value;
+    } else if (argv[i] === '--list') args.list = true;
+    else throw new Error(`Unknown deterministic test runner argument: ${argv[i]}`);
+  }
+  if (args.files !== null && args.shardProvided) {
+    throw new Error('--files cannot be combined with --shard');
+  }
+  return args;
+}
+
+function parseFocusedFiles(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('--files requires a non-empty comma-separated value');
+  }
+  const requestedFiles = value.split(',').map(file => file.trim());
+  const emptyEntry = requestedFiles.find(file => !file);
+  if (emptyEntry !== undefined) {
+    throw new Error('--files cannot contain empty file paths');
+  }
+  const traversalEntry = requestedFiles.find(file => file.split(/[\\/]/u).includes('..'));
+  if (traversalEntry !== undefined) {
+    throw new Error(`--files rejects path traversal: ${traversalEntry}`);
+  }
+  const registered = new Set(tests);
+  const unknownEntry = requestedFiles.find(file => !registered.has(file));
+  if (unknownEntry !== undefined) {
+    throw new Error(`--files path is not registered: ${unknownEntry}`);
+  }
+  return [...new Set(requestedFiles)];
+}
+
+function estimateFocusedTests(selectedTests) {
+  return selectedTests.reduce((total, file) => {
+    const configured = Number(TEST_ESTIMATES_MS[file]);
+    const estimateMs = Number.isFinite(configured) && configured > 0
+      ? Math.floor(configured)
+      : 2_000;
+    return total + estimateMs;
+  }, 0);
+}
+
+const runnerArgs = parseRunnerArgs(process.argv.slice(2));
+const shard = runnerArgs.files === null
+  ? selectDeterministicTestShard(tests, runnerArgs.shard || '1/1', TEST_ESTIMATES_MS)
+  : null;
+const focusedFiles = runnerArgs.files === null ? null : parseFocusedFiles(runnerArgs.files);
+const selectedTests = shard?.tests || tests.filter(file => focusedFiles.includes(file));
+const estimatedMs = shard?.estimatedMs || estimateFocusedTests(selectedTests);
+if (runnerArgs.list) {
+  if (shard) {
+    console.log(JSON.stringify({ok: true, shard: `${shard.index}/${shard.count}`, estimatedMs, tests: selectedTests}, null, 2));
+  } else {
+    console.log(JSON.stringify({
+      ok: true,
+      mode: 'files',
+      order: 'registered',
+      requestedFiles: runnerArgs.files.split(',').map(file => file.trim()),
+      deduplicatedFiles: focusedFiles,
+      estimatedMs,
+      tests: selectedTests,
+    }, null, 2));
+  }
+  process.exit(0);
+}
+if (shard) {
+  console.error(`TEST_SHARD ${shard.index}/${shard.count} selected=${selectedTests.length} total=${tests.length} estimatedMs=${estimatedMs}`);
+} else {
+  console.error(`TEST_FILES order=registered selected=${selectedTests.length} requested=${runnerArgs.files.split(',').length} unique=${focusedFiles.length} total=${tests.length} estimatedMs=${estimatedMs}`);
+}
+
 const failures = [];
-for (const file of tests) {
+for (const file of selectedTests) {
   const startedAt = Date.now();
   // Keep deterministic tests bounded and fail-fast, with explicit tiers only
   // where measured evidence exceeds the default. PR #99 CI attempt 1 killed
@@ -227,19 +433,115 @@ for (const file of tests) {
   // deterministic headroom without disabling timeout. Update descriptions
   // keeps 240s, morning reliability keeps 120s, and every other deterministic
   // test keeps the default 30s budget.
+  // Shard 2 evidence: portal warmup queue-owned (30016ms), morning coordinator
+  // portal async (30014ms), bi-ops CLI flow (30021ms), and ET forwarder runtime
+  // contract (30011ms) were all killed on the default 30s tier. Warmup measured
+  // over 58s locally, morning coordinator runs an internal 120s bash harness,
+  // CLI flow measured 36,615ms locally before its full pass, and ET forwarder
+  // spawns many bash steps on cold CI. Each gets an explicit bounded tier
+  // (warmup/morning 120s, CLI flow 90s, ET forwarder 60s); the default stays 30s.
+  // The runtime-layout migration A-R crash/fingerprint/path-safety suite takes
+  // more than 15 minutes on Windows/Git Bash. A stale default tier killed the
+  // earlier A-L suite at 30018ms; after M-P added effective-systemd and complete
+  // rollback-evidence gates, the 900s tier reached scenarios A-O successfully
+  // and was killed at 900018ms before P. With the Q1-Q4 rollback sub-phase
+  // markers and scenario R drift guard added, scenarios A-R and Q1-Q4 now all
+  // pass, but the 1200s outer
+  // tier still SIGTERMed the completed suite at 1,200,015ms. The latest complete
+  // pass on Windows/Git Bash took 1,791,363ms, leaving under 9 seconds of margin
+  // against the 1,800,000ms gate. This near-gate margin is a local-only concern:
+  // keep the bounded 30-minute tier (1,800,000ms) on every non-Windows platform
+  // including the GitHub Linux CI, and TEST_ESTIMATES_MS stays at 1,800,000 for
+  // deterministic shard balancing; only local Windows/Git Bash gets a bounded
+  // 40-minute (2,400,000ms) timeout margin so the near-gate suite can complete.
+  // Never unbounded.
+  // The dedicated release-gate job is the sole owner of
+  // scripts/test_bi_ops_release_gate.mjs; deterministic shards deliberately do
+  // not register or budget it. The Portal repository CRUD and mutation-queue
+  // safety tests remain registered here once each; mutation queue keeps an
+  // explicit bounded 120s tier (60s estimate), while CRUD stays on the default
+  // 30s budget. ci-terminal fails closed on both CI owners.
+  // Query-surface isolation is deliberately integration-heavy: its default
+  // 30s tier was killed at 30025ms after the direct-query checks, while the
+  // separate large-stream runtime was already healthy. A standalone run then
+  // completed both large wire modes, the constrained-heap slow-client probe,
+  // fail-fast restart, and Portal continuity in about 96.7s; the subsequent
+  // full runner pass measured 125946ms. Use a 120s shard estimate and a bounded
+  // 240s outer tier; its individual 45s/75s/120s probe and request bounds remain
+  // the inner failure controls.
+  // The database-backup contract now covers 27 isolated fault-injection
+  // scenarios, including hung remote verification, path swaps, retention, and
+  // browser-profile receipts. A frozen-candidate standalone run completed in
+  // 103081ms; the old default tier killed it at 30023ms without an assertion
+  // failure. Keep a bounded 180s outer tier and a 120s shard estimate.
+  // Partner CLI version-change validation measured 27014ms in the complete
+  // local runner, then the four-shard replay was SIGTERMed at 30013ms with no
+  // stdout, stderr, or assertion failure while other shards were active. Give
+  // that integration test a bounded 60s outer tier and a measured 30s shard
+  // estimate. The updater crash/recovery matrix also needs just over the
+  // default tier (31042ms locally), so it gets the same bounded 60s tier and a
+  // measured 35s estimate. The daily inventory executor lifecycle spans many
+  // isolated subprocess scenarios and crossed even a 60s local outer budget
+  // without an assertion failure; its WSL pass measured 85.21s, so it uses a
+  // bounded 180s tier and a 90s shard estimate. Unclassified tests keep the
+  // 30s fail-fast budget.
   const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     ? 300_000
+    : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs'
+      ? 30_000
+      : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs'
+        ? 60_000
     : file === 'scripts/test_link_ops_update_description_flow.mjs'
       ? 240_000
-    : file === 'scripts/test_link_ops_executor_source_detail_lock.mjs'
-      ? 60_000
-      : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
-        ? 1_800_000
-       : ['scripts/test_morning_chain_reliability.mjs',
-         'scripts/test_morning_chain_wrapper_reliability.mjs',
-         'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
-         ? 120_000
-       : 30_000;
+      : file === 'scripts/test_bi_query_surface_isolation.mjs'
+        ? 240_000
+        : file === 'scripts/test_bi_portal_core_warmup_queue_owned.mjs'
+          ? 120_000
+          : file === 'scripts/test_bi_portal_external_queue_reconciliation.mjs'
+            ? 150_000
+            : file === 'scripts/test_bi_portal_core_run_identity.mjs'
+              ? 60_000
+            : file === 'scripts/test_bi_portal_section_queue_window.mjs'
+              ? 120_000
+          : file === 'scripts/test_bi_section_streaming.mjs'
+            ? 120_000
+            : file === 'scripts/test_bi_section_portal_streaming.mjs'
+              ? 120_000
+            : file === 'scripts/test_morning_coordinator_portal_async.mjs'
+              ? 120_000
+              : file === 'scripts/test_bi_ops_cli_flow.mjs'
+              ? 90_000
+              : file === 'scripts/test_partner_cli_version_change.mjs'
+                ? 60_000
+              : file === 'scripts/test_partner_cli_updater.mjs'
+                ? 60_000
+              : file === 'scripts/test_daily_inventory_executor_lifecycle.mjs'
+                ? 180_000
+              : file === 'scripts/test_cloud_marketing_immediate_run.mjs'
+                ? 90_000
+              : file === 'scripts/test_link_ops_executor_source_detail_lock.mjs'
+                ? 60_000
+                : file === 'scripts/test_et_forwarder_runtime_contract.mjs'
+                  ? 60_000
+                  : file === 'scripts/test_migrate_cloud_runtime_mount_layout.mjs'
+                    ? (process.platform === 'win32' ? 2_400_000 : 1_800_000)
+                    : file === 'scripts/test_cloud_db_backup_contract.mjs'
+                      ? 180_000
+                    : file === 'scripts/test_link_ops_prepare_product_attribute_flow.mjs'
+                      ? 1_800_000
+                      : file === 'scripts/test_cos_backup_remote_verifier.mjs'
+                        ? 60_000
+                    : file === 'scripts/test_bi_portal_mutation_queue.mjs'
+                      ? 120_000
+                      : file === 'scripts/test_order_closure_idempotency.mjs'
+                        ? 120_000
+                      : file === 'scripts/test_morning_metric_refetch.mjs'
+                        ? 180_000
+                      : ['scripts/test_morning_chain_reliability.mjs',
+                            'scripts/test_morning_chain_wrapper_reliability.mjs',
+                            'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
+                            ? 120_000
+                          : 30_000;
   console.error(`START ${file} timeoutMs=${timeout}`);
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),
@@ -257,8 +559,37 @@ for (const file of tests) {
 }
 
 if (failures.length) {
-  console.error(JSON.stringify({ok: false, passed: tests.length - failures.length, failed: failures}, null, 2));
+  const failureManifest = {
+    ok: false,
+    selected: selectedTests.length,
+    passed: selectedTests.length - failures.length,
+    failed: failures,
+  };
+  if (shard) failureManifest.shard = `${shard.index}/${shard.count}`;
+  else {
+    failureManifest.mode = 'files';
+    failureManifest.order = 'registered';
+    failureManifest.tests = selectedTests;
+  }
+  console.error(JSON.stringify(failureManifest, null, 2));
   process.exit(1);
 }
 
-console.log(JSON.stringify({ok: true, passed: tests.length, failed: 0}, null, 2));
+if (shard) {
+  console.log(JSON.stringify({
+    ok: true,
+    shard: `${shard.index}/${shard.count}`,
+    passed: selectedTests.length,
+    total: tests.length,
+    failed: 0,
+  }, null, 2));
+} else {
+  console.log(JSON.stringify({
+    ok: true,
+    mode: 'files',
+    order: 'registered',
+    passed: selectedTests.length,
+    total: tests.length,
+    failed: 0,
+  }, null, 2));
+}

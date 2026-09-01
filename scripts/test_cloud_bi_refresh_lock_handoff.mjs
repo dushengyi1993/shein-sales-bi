@@ -120,6 +120,11 @@ assert.match(
 );
 assert.match(
   queueWorkerSource,
+  /HOME_RANKINGS_MIN_RUNTIME_SEC=.*540[\s\S]*EXCLUDED_SECTIONS\+=\(homeRankings\)[\s\S]*defer heavy section=homeRankings/,
+  'the measured multi-minute homeRankings rebuild must not enter a short ET queue window',
+);
+assert.match(
+  queueWorkerSource,
   /if \[\[ "\$\{#FAILED_SECTIONS\[@\]\}" -gt 0 \]\]; then[\s\S]*failed sections=[\s\S]*exit 1/,
   'a failed lease must keep systemd failed until a later successful lease completes the requested revision',
 );

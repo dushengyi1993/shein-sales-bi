@@ -80,6 +80,22 @@ check('maintenance binding still locks exact SKU identity outside payload',
 check('maintenance binding without SKU image does not claim SKU fields are touched',
   maintenanceWithoutSkuImage.evidence.touchedFields.join(','), text => !text.includes('sku_list'));
 
+const maintenanceShBound = applyApprovedImageBindingsToMaintenancePayload({
+  spuName: 'B2608062023343035',
+  skcName: 'SH260607203410692590516',
+}, bindings, {sourceApproved: true});
+check('maintenance binding canonicalizes SH SKC', maintenanceShBound.payload.skc_list[0].skc_name, 'sh260607203410692590516');
+let shMisclassifiedAsSpu = false;
+try {
+  applyApprovedImageBindingsToMaintenancePayload({
+    spuName: 'SH260607203410692590516',
+    skcName: 'SB260806202334303501938',
+  }, bindings, {sourceApproved: true});
+} catch {
+  shMisclassifiedAsSpu = true;
+}
+check('maintenance binding rejects SH SKC as SPU', shMisclassifiedAsSpu, true);
+
 const correction = buildPendingListingImageCorrection({
   sourceTask: {
     id: 'published-source-task',

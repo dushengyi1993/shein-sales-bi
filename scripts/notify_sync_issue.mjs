@@ -74,6 +74,18 @@ function idempotencyKey(parts) {
   return `sync-issue-${hash}`;
 }
 
+export const NO_KEY_RETRY_PROTECTED_KINDS = Object.freeze([
+  'webhook',
+  'cloud-watchdog',
+  'cloud-watchdog-recovery',
+]);
+
+export function shouldRetryLegacyNoKeyFallback({kind = '', ok = false, output = ''} = {}) {
+  if (ok === true) return false;
+  if (NO_KEY_RETRY_PROTECTED_KINDS.includes(String(kind || '').trim().toLowerCase())) return false;
+  return /field validation failed/i.test(String(output || ''));
+}
+
 function humanServiceName(unit) {
   const names = {
     'shein-bi-portal.service': 'BI 网页服务',
@@ -380,10 +392,12 @@ async function main() {
   const key = args.idempotencyKey || idempotencyKey([date, modeLabel, failed.join(','), loginRequired.join(','), args.message, stamp]);
   let res = await runLark([...baseLarkArgs, '--idempotency-key', key]);
   let fallbackTried = false;
-  // Webhook P0 alerts are retried by the durable receipt worker. Never retry
-  // those without an idempotency key: a process crash between send and local
+  // Webhook P0 alerts and cloud-watchdog/recovery dispatches are deduplicated
+  // by the durable receipt worker through their idempotency key. Never retry
+  // those without the key: a process crash between send and local
   // acknowledgement would otherwise produce duplicate emergency messages.
-  if (!isWebhook && !res.ok && /field validation failed/i.test(`${res.stdout}\n${res.stderr}`)) {
+  if (!isWebhook && !res.ok && !isCloudWatchdog && !isCloudWatchdogRecovery
+    && /field validation failed/i.test(`${res.stdout}\n${res.stderr}`)) {
     fallbackTried = true;
     res = await runLark(baseLarkArgs);
   }

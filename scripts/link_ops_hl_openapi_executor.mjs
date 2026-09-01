@@ -13,6 +13,7 @@ import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_
 import {
   buildProductDraftFromSnapshots,
   inferSourceProductFromTask,
+  resolveLinkOpsOutputDir,
   summarizeDraftForExecutor,
 } from '../lib/link_ops_product_draft_mapper.mjs';
 import {
@@ -23,14 +24,21 @@ import {
 } from '../lib/shein_store_identity.mjs';
 import {buildProductDisplayName} from '../lib/product_display_name.mjs';
 import {
+  applyApprovedImageBindingsToPublishPayload,
   applyExplicitPublishPreparationOverrides,
+  normalizeApprovedImageBindingProjection,
+  normalizeApprovedImageBindings,
+  normalizePublishPayloadImageProjection,
+  normalizePublishPreparationOverrides,
   taskHasUnboundImageAssets,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 import {evaluateAdditionalDuplicatePublishOverride} from '../lib/link_ops_duplicate_publish_override.mjs';
 import {
   evaluateDescriptionReadback,
   describePublishPayloadDescription,
-  validateDescriptionBindingLock,
+  stripPublishPayloadDescriptions,
+  validateCopyProductDescriptionPolicy,
+  validateEmptyDescriptionAuthorization,
   validatePublishPayloadDescription,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {isSheinSkc, sameSheinSkc} from '../lib/shein_product_identifiers.mjs';
@@ -39,6 +47,10 @@ import {
   runSheinWebhookExternalWriteGuarded,
 } from '../lib/shein_webhook_external_write_guard.mjs';
 import {INPUT_VOLTAGE_AC_VALUE_ID} from '../lib/retire_supplier_code_repair_payload.mjs';
+import {
+  buildProductAliasContext,
+  resolveExplicitProductAlias,
+} from '../lib/link_ops_product_attribute_binding.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -49,6 +61,18 @@ const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const STORES_CONFIG = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const STORES = STORES_CONFIG.stores || [];
 const STORE_ACCOUNT_TRUTH = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'store_account_truth.json'), 'utf8'));
+const PRODUCT_ALIASES_BYTES = await fs.readFile(path.join(ROOT, 'config', 'product_aliases.json'));
+const PRODUCT_CATALOG_BYTES = await fs.readFile(path.join(ROOT, 'config', 'product_catalog.json'));
+const PRODUCT_ALIAS_REGISTRY_FINGERPRINT = crypto.createHash('sha256').update(PRODUCT_ALIASES_BYTES).digest('hex');
+const PRODUCT_CATALOG_FINGERPRINT = crypto.createHash('sha256').update(PRODUCT_CATALOG_BYTES).digest('hex');
+const PRODUCT_ALIAS_CONTEXT = buildProductAliasContext({
+  aliasRegistryJson: JSON.parse(PRODUCT_ALIASES_BYTES.toString('utf8')),
+  catalogJson: JSON.parse(PRODUCT_CATALOG_BYTES.toString('utf8')),
+  aliasRegistryFingerprint: PRODUCT_ALIAS_REGISTRY_FINGERPRINT,
+  catalogFingerprint: PRODUCT_CATALOG_FINGERPRINT,
+  aliasRegistrySource: 'config/product_aliases.json',
+  catalogSource: 'config/product_catalog.json',
+});
 const ALLOWED_SKC_IMAGE_TYPES = new Set([1, 2, 5, 6]);
 const SKC_IMAGE_TYPE_LABELS = new Map([
   [1, '主图'],
@@ -75,6 +99,8 @@ const HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID = 1006206;
 const HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID = 1002328;
 const INPUT_VOLTAGE_AC_UNIT_LABEL = 'Vac 50–60Hz';
 const DEFAULT_AIR_FRYER_INPUT_CURRENT_MA = 6800;
+const MAX_EXPLICIT_INPUT_CURRENT_MA = 100_000;
+const EXPLICIT_PREPARE_PUBLISH_SOURCE = 'explicit_prepare_publish';
 
 function parseArgs(argv) {
   const args = {
@@ -86,6 +112,7 @@ function parseArgs(argv) {
     outDir: DEFAULT_OUT_DIR,
     store: TARGET_STORE,
     confirm: '',
+    claimNonce: '',
     quiet: false,
     payloadOut: '',
   };
@@ -101,6 +128,7 @@ function parseArgs(argv) {
     else if (a === '--dry-run') args.mode = 'dry-run';
     else if (a === '--execute') args.mode = 'execute';
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
+    else if (a === '--claim-nonce') args.claimNonce = String(argv[++i] || '').trim();
     else if (a === '--payload-out') args.payloadOut = path.resolve(argv[++i]);
     else if (a === '--quiet') args.quiet = true;
     else if (a === '--help' || a === '-h') {
@@ -546,9 +574,10 @@ function sourceCandidateMetrics(row) {
 
 async function inferSourceCandidatesFromBi(task, {targetStore}) {
   const rows = [];
+  const outputDir = resolveLinkOpsOutputDir();
   for (const file of [
-    path.join(ROOT, 'outputs', 'bi-portal', 'sections', 'linksData.json'),
-    path.join(ROOT, 'outputs', 'bi-portal', 'data.json'),
+    path.join(outputDir, 'bi-portal', 'sections', 'linksData.json'),
+    path.join(outputDir, 'bi-portal', 'data.json'),
   ]) {
     const data = await readJsonIfExists(file);
     rows.push(...biPortalLinkRows(data));
@@ -679,13 +708,742 @@ async function findPublishPayload(task) {
   return null;
 }
 
-async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
-  const exactSourceStores = [...new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean))];
-  const exactSourceStore = exactSourceStores.length === 1 ? exactSourceStores[0] : '';
-  const exactSourceSkc = safeString(task?.targets?.sourceSkc || '', 120);
-  const hasExactSourceLock = Boolean(exactSourceStore && exactSourceSkc);
-  const taskExactSource = hasExactSourceLock ? {sourceStore: exactSourceStore, sourceSkc: exactSourceSkc} : null;
+function exactCopySourceLock(task) {
+  const intents = asArray(task?.intents).map(value => String(value || '').trim());
+  if (!intents.includes('copy_product_draft')) return null;
+  const sourceStores = task?.targets?.sourceStores;
+  if (!Array.isArray(sourceStores) || sourceStores.length !== 1) return null;
+  const sourceStore = normalizeStoreKey(sourceStores[0]);
+  const sourceSkc = task?.targets?.sourceSkc;
+  if (!sourceStore) return null;
+  if (typeof sourceSkc !== 'string' || !/^s[avb]\d{8,}$/.test(sourceSkc)) return null;
+  return {sourceStore, sourceSkc};
+}
+
+function exactSourcePayloadReadiness(generated, source) {
+  const payload = generated?.openapiPublishPayloadDraft;
+  const blockers = asArray(generated?.blockers).map(value => String(value || '').trim()).filter(Boolean);
+  const detail = generated?.canonicalDraft?.openApiDetail;
+  const skcList = asArray(payload?.skc_list || payload?.skcList);
+  const matchingSourceSkcs = skcList.filter(row => String(row?.source_skc || row?.sourceSkc || row?.skc_name || row?.skcName || '') === source.sourceSkc);
+  const sourceSkc = matchingSourceSkcs.length === 1 ? matchingSourceSkcs[0] : null;
+  const skuList = asArray(sourceSkc?.sku_list || sourceSkc?.skuList);
+  if (generated?.ok !== true) blockers.push('mapper did not return ok=true');
+  if (generated?.readyForOpenApiSubmit !== true) blockers.push('mapper draft is not readyForOpenApiSubmit');
+  if (!looksLikePublishPayload(payload)) blockers.push('mapper did not return a publish payload');
+  if (!['openapi_product_detail_snapshot', 'openapi_product_detail_cached_fallback'].includes(detail?.source)) {
+    blockers.push('fresh exact OpenAPI product detail source is missing');
+  }
+  if (matchingSourceSkcs.length !== 1) blockers.push(`generated payload must contain exactly one source_skc=${source.sourceSkc}; matched=${matchingSourceSkcs.length}`);
+  if (sourceSkc && String(sourceSkc?.source_skc || sourceSkc?.sourceSkc || '') !== source.sourceSkc) {
+    blockers.push(`generated payload source_skc drifted from locked sourceSkc=${source.sourceSkc}`);
+  }
+  if (generated?.sourceSkc !== source.sourceSkc) blockers.push(`mapper sourceSkc drifted from locked sourceSkc=${source.sourceSkc}`);
+  if (detail?.sourceDetailLock?.sourceStore !== source.sourceStore || detail?.sourceDetailLock?.sourceSkc !== source.sourceSkc) {
+    blockers.push('source detail lock identity does not match exact sourceStore/sourceSkc');
+  }
+  if (!/^[a-f0-9]{64}$/i.test(String(detail?.sourceDetailHash || detail?.sourceDetailLock?.sourceDetailHash || ''))) {
+    blockers.push('source detail canonical hash is missing');
+  }
+  if (!Number.isFinite(Number(payload?.category_id ?? payload?.categoryId)) || Number(payload?.category_id ?? payload?.categoryId) <= 0) {
+    blockers.push('exact source detail is missing category_id');
+  }
+  if (!Number.isFinite(Number(payload?.product_type_id ?? payload?.productTypeId)) || Number(payload?.product_type_id ?? payload?.productTypeId) <= 0) {
+    blockers.push('exact source detail is missing product_type_id');
+  }
+  if (!Array.isArray(payload?.product_attribute_list || payload?.productAttributeList) || !(payload.product_attribute_list || payload.productAttributeList).length) {
+    blockers.push('exact source detail is missing product_attribute_list');
+  }
+  if (!sourceSkc || !skuList.length) blockers.push('exact source detail is missing an SKC/SKU payload');
+  for (const [index, sku] of skuList.entries()) {
+    for (const field of ['height', 'length', 'width', 'weight']) {
+      if (!Number.isFinite(Number(sku?.[field])) || Number(sku[field]) <= 0) blockers.push(`exact source detail SKU[${index}] is missing ${field}`);
+    }
+    if (!sku?.cost_info && !sku?.costInfo) blockers.push(`exact source detail SKU[${index}] is missing cost_info`);
+  }
+  if (blockers.length) {
+    return {
+      ok: false,
+      reason: `exact source ${source.sourceStore}/${source.sourceSkc} mapper draft is incomplete: ${blockers.slice(0, 8).join('；')}`,
+    };
+  }
+  return {
+    ok: true,
+    payload,
+    sourceDetailHash: generated.sourceDetailHash || detail.sourceDetailHash,
+    sourceDetailLock: generated.sourceDetailLock || detail.sourceDetailLock,
+  };
+}
+
+function normalizedTargetStore(value) {
+  return normalizeStoreKey(value || '');
+}
+
+function destinationStoreCandidates(task, targetStore) {
+  const sourceStores = new Set(asArray(task?.targets?.sourceStores).map(normalizeStoreKey).filter(Boolean));
+  const writeStores = asArray(task?.targets?.writeStores || task?.targets?.targetStores || task?.writeStores || task?.targetStores)
+    .map(normalizeStoreKey)
+    .filter(Boolean);
+  const taskStores = asArray(task?.targets?.stores || task?.stores)
+    .map(normalizeStoreKey)
+    .filter(store => store && !sourceStores.has(store));
+  const candidates = writeStores.length ? writeStores : taskStores;
+  const explicit = [
+    task?.targetStore,
+    task?.target_store,
+    task?.targets?.targetStore,
+    task?.targets?.target_store,
+    task?.targets?.writeStore,
+    task?.targets?.write_store,
+  ].map(normalizedTargetStore).filter(Boolean);
+  return [...new Set([...candidates, ...explicit, normalizedTargetStore(targetStore)].filter(Boolean))];
+}
+
+function structuredDestinationPreparation(task) {
+  const directBindingPreparation = task?.publishAssetBinding?.publishPreparation;
+  const metadataBindingPreparation = task?.metadata?.publishAssetBinding?.publishPreparation;
+  const bindingPreparation = directBindingPreparation || metadataBindingPreparation;
+  const persistedTaskPreparations = [
+    ['task.publishPreparation', task?.publishPreparation],
+    ['targets.publishPreparation', task?.targets?.publishPreparation],
+  ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+  const persistedPreparations = [
+    ...persistedTaskPreparations,
+    ['publishAssetBinding.publishPreparation', directBindingPreparation],
+    ['metadata.publishAssetBinding.publishPreparation', metadataBindingPreparation],
+  ].filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+  const inputCurrentDeclarations = persistedPreparations.map(([source, value]) => ({
+    source,
+    ...normalizeExactSourceInputCurrentDeclaration(value, source),
+  }));
+  const declarationSignatures = new Set(inputCurrentDeclarations.map(declaration => JSON.stringify({
+    declared: declaration.declared,
+    rowCount: declaration.rowCount,
+    override: declaration.override,
+  })));
+  if (declarationSignatures.size > 1) {
+    throw new Error(`exact source Input current(1002323) declarations differ across persisted publishPreparation sources: ${inputCurrentDeclarations.map(row => row.source).join(', ')}`);
+  }
+  const candidates = bindingPreparation && typeof bindingPreparation === 'object' && !Array.isArray(bindingPreparation)
+    ? [[directBindingPreparation ? 'publishAssetBinding.publishPreparation' : 'metadata.publishAssetBinding.publishPreparation', bindingPreparation]]
+    : persistedTaskPreparations;
+  const raw = {};
+  for (const [, value] of candidates) {
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'attributeOverrides' || key === 'attribute_overrides') continue;
+      // Binding evidence may carry explicit null placeholders for fields that
+      // were not prepared. Those placeholders must not erase a verified field
+      // from another structured preparation source.
+      if (item === null || item === undefined || item === '') continue;
+      if (key === 'titles' && item && typeof item === 'object' && !Array.isArray(item) && !Object.keys(item).length) continue;
+      raw[key] = item;
+    }
+  }
+  const agreedInputCurrent = inputCurrentDeclarations[0] || null;
+  if (agreedInputCurrent?.declared) {
+    raw.attributeOverrides = agreedInputCurrent.rowCount === 1
+      ? [{
+          attribute_id: agreedInputCurrent.override.attributeId,
+          attribute_extra_value: agreedInputCurrent.override.attributeExtraValue,
+          attribute_unit: agreedInputCurrent.override.unit,
+          ...(agreedInputCurrent.override.attributeValueId
+            ? {attribute_value_id: agreedInputCurrent.override.attributeValueId}
+            : {}),
+          ...(agreedInputCurrent.override.label ? {label: agreedInputCurrent.override.label} : {}),
+          source: agreedInputCurrent.override.source,
+        }]
+      : [];
+  }
+  const normalized = normalizePublishPreparationOverrides(raw);
+  return {
+    raw,
+    normalized,
+    sources: candidates.map(([source]) => source),
+  };
+}
+
+function exactSourceOverrideField(row, snakeKey, camelKey, sourceLabel) {
+  const hasSnake = Object.hasOwn(row, snakeKey);
+  const hasCamel = Object.hasOwn(row, camelKey);
+  if (hasSnake && hasCamel) {
+    throw new Error(`${sourceLabel} Input current(1002323) row declares both ${snakeKey}/${camelKey}`);
+  }
+  return hasSnake ? row[snakeKey] : hasCamel ? row[camelKey] : undefined;
+}
+
+function normalizeExplicitInputCurrentDeclarationValue(extraValue, unit) {
+  if (typeof extraValue !== 'string' || typeof unit !== 'string') return null;
+  const normalizedUnit = unit.trim().toLowerCase();
+  if (normalizedUnit !== 'a' && normalizedUnit !== 'ma') return null;
+  const valueText = extraValue.trim();
+  const valuePattern = normalizedUnit === 'ma'
+    ? /^[1-9]\d*$/
+    : /^(?:0|[1-9]\d*)(?:\.\d{1,3})?$/;
+  if (!valuePattern.test(valueText)) return null;
+  const [integerPart, decimalPart = ''] = valueText.split('.');
+  const milliampsText = normalizedUnit === 'a'
+    ? integerPart + decimalPart.padEnd(3, '0')
+    : valueText;
+  const milliamps = BigInt(milliampsText);
+  if (milliamps < 1n || milliamps > BigInt(MAX_EXPLICIT_INPUT_CURRENT_MA)) return null;
+  return {value: valueText, unit: normalizedUnit === 'a' ? 'A' : 'mA'};
+}
+
+function expectedInputCurrentValueIdForUnit(unit) {
+  if (unit === 'A') return 304301999;
+  if (unit === 'mA') return 304302428;
+  return null;
+}
+
+function assertInputCurrentValueIdMatchesUnit(attributeValueId, unit, sourceLabel) {
+  if (!attributeValueId) return;
+  const expectedValueId = expectedInputCurrentValueIdForUnit(unit);
+  if (expectedValueId && attributeValueId !== expectedValueId) {
+    throw new Error(`${sourceLabel} Input current(1002323) attribute_value_id ${attributeValueId} does not match unit ${unit}; expected ${expectedValueId}`);
+  }
+}
+
+function normalizeExactSourceInputCurrentDeclaration(rawPreparation = {}, sourceLabel = 'exact source publishPreparation') {
+  const preparation = rawPreparation && typeof rawPreparation === 'object' && !Array.isArray(rawPreparation)
+    ? rawPreparation
+    : {};
+  const hasCamel = Object.hasOwn(preparation, 'attributeOverrides');
+  const hasSnake = Object.hasOwn(preparation, 'attribute_overrides');
+  if (hasCamel && hasSnake) {
+    throw new Error(`${sourceLabel} declares both attributeOverrides aliases`);
+  }
+  if (!hasCamel && !hasSnake) return {declared: false, rowCount: 0, override: null};
+  const rows = hasCamel ? preparation.attributeOverrides : preparation.attribute_overrides;
+  if (!Array.isArray(rows)) {
+    throw new Error(`${sourceLabel} attributeOverrides must be an array`);
+  }
+  if (rows.length > 1) {
+    throw new Error(`${sourceLabel} must contain at most one Input current(1002323) override`);
+  }
+  if (!rows.length) return {declared: true, rowCount: 0, override: null};
+  const row = rows[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    throw new Error(`${sourceLabel} Input current(1002323) override must be an object`);
+  }
+  const rawAttributeId = exactSourceOverrideField(row, 'attribute_id', 'attributeId', sourceLabel);
+  const attributeIdValid = (Number.isSafeInteger(rawAttributeId) && rawAttributeId > 0)
+    || (typeof rawAttributeId === 'string' && /^[1-9]\d*$/.test(rawAttributeId));
+  if (!attributeIdValid || Number(rawAttributeId) !== INPUT_CURRENT_ATTRIBUTE_ID) {
+    throw new Error(`${sourceLabel} may project only Input current(1002323)`);
+  }
+  const extraValue = exactSourceOverrideField(row, 'attribute_extra_value', 'attributeExtraValue', sourceLabel);
+  const unit = exactSourceOverrideField(row, 'attribute_unit', 'attributeUnit', sourceLabel);
+  const normalizedVal = normalizeExplicitInputCurrentDeclarationValue(extraValue, unit);
+  if (!normalizedVal) {
+    throw new Error(`${sourceLabel} Input current(1002323) must be a valid positive number within 1-${MAX_EXPLICIT_INPUT_CURRENT_MA} mA (or equivalent in A)`);
+  }
+  if (row.source !== EXPLICIT_PREPARE_PUBLISH_SOURCE) {
+    throw new Error(`${sourceLabel} Input current(1002323) source must be ${EXPLICIT_PREPARE_PUBLISH_SOURCE}`);
+  }
+  const rawValueId = exactSourceOverrideField(row, 'attribute_value_id', 'attributeValueId', sourceLabel);
+  const attributeValueId = normalizeAttributeId(rawValueId) || null;
+  if (rawValueId !== undefined && rawValueId !== null && rawValueId !== '' && !attributeValueId) {
+    throw new Error(`${sourceLabel} Input current(1002323) attribute_value_id must be a positive integer`);
+  }
+  assertInputCurrentValueIdMatchesUnit(attributeValueId, normalizedVal.unit, sourceLabel);
+  return {
+    declared: true,
+    rowCount: 1,
+    override: {
+      attributeId: INPUT_CURRENT_ATTRIBUTE_ID,
+      attributeExtraValue: normalizedVal.value,
+      unit: normalizedVal.unit,
+      ...(attributeValueId ? {attributeValueId} : {}),
+      label: safeString(row.label || '', 80),
+      source: EXPLICIT_PREPARE_PUBLISH_SOURCE,
+    },
+  };
+}
+
+function targetTitleRows(payload) {
+  return asArray(payload?.multi_language_name_list || payload?.multiLanguageNameList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({
+      language: safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase(),
+      name: safeString(row.name || row.product_name || row.productName || row.value || '', 1000),
+    }))
+    .filter(row => row.language && row.name);
+}
+
+function targetDescriptionRows(payload) {
+  return asArray(payload?.multi_language_desc_list || payload?.multiLanguageDescList || payload?.productMultiDescList)
+    .filter(row => row && typeof row === 'object')
+    .map(row => ({
+      language: safeString(row.language || row.lang || row.languageCode || '', 40).toLowerCase(),
+      productDesc: safeString(row.product_desc || row.productDesc || row.description || row.name || row.value || '', 10000),
+    }))
+    .filter(row => row.language && row.productDesc);
+}
+
+function payloadSkuRows(payload) {
+  return asArray(payload?.skc_list || payload?.skcList).flatMap(skc => asArray(skc?.sku_list || skc?.skuList));
+}
+
+function payloadCostValues(payload) {
+  return payloadSkuRows(payload)
+    .map(sku => sku?.cost_info || sku?.costInfo || {})
+    .map(cost => cost.cost_price ?? cost.costPrice ?? cost.price ?? '')
+    .filter(value => value !== '' && value !== null && value !== undefined)
+    .map(Number)
+    .filter(Number.isFinite);
+}
+
+function payloadInventoryValues(payload) {
+  return payloadSkuRows(payload).flatMap(sku => asArray(sku?.stock_info_list || sku?.stockInfoList))
+    .flatMap(row => ['inventory_num', 'inventoryNum', 'stock', 'stock_num', 'stockNum', 'quantity']
+      .filter(key => row?.[key] !== undefined && row?.[key] !== null && row?.[key] !== '')
+      .map(key => Number(row[key])))
+    .filter(Number.isFinite);
+}
+
+function payloadStandardGoodsValues(payload) {
+  return asArray(payload?.skc_list || payload?.skcList)
+    .map(skc => skc?.supplier_code ?? skc?.supplierCode ?? '')
+    .map(value => safeString(value, 240))
+    .filter(Boolean);
+}
+
+function payloadSupplierSkuValues(payload) {
+  return payloadSkuRows(payload)
+    .map(sku => safeString(sku?.supplier_sku ?? sku?.supplierSku ?? '', 240))
+    .filter(Boolean);
+}
+
+function payloadTargetStoreValues(payload) {
+  return [
+    payload?.target_store,
+    payload?.targetStore,
+    payload?.store_key,
+    payload?.storeKey,
+    payload?.write_store,
+    payload?.writeStore,
+  ].map(normalizedTargetStore).filter(Boolean);
+}
+
+function payloadTitleGroupValues(payload) {
+  return [payload?.title_group, payload?.titleGroup]
+    .map(value => safeString(value, 40).toLowerCase())
+    .filter(Boolean);
+}
+
+function structuredImageBinding(task) {
+  return task?.publishAssetBinding || task?.metadata?.publishAssetBinding || null;
+}
+
+function validateStructuredImageBinding(task, targetStore, existingPayload) {
+  const binding = structuredImageBinding(task);
+  if (!binding) return null;
+  const bindingTarget = normalizedTargetStore(binding.targetStore);
+  if (binding.sourceApproved !== true || String(binding.authority || '') !== 'human_reviewed_source') {
+    throw new Error('exact source lock requires an approved human_reviewed_source destination image binding');
+  }
+  if (bindingTarget !== targetStore) {
+    throw new Error(`destination image binding store ${bindingTarget || '(missing)'} does not match target store ${targetStore}`);
+  }
+  if (!binding.boundAt || !/^[a-f0-9]{64}$/i.test(String(binding.bindingFingerprint || ''))) {
+    throw new Error('destination image binding lacks a verifiable boundAt/bindingFingerprint lock');
+  }
+  const images = normalizeApprovedImageBindings(binding.images, {sourceApproved: true});
+  if (binding.imageCount !== undefined && Number(binding.imageCount) !== images.length) {
+    throw new Error('destination image binding imageCount does not match its normalized images');
+  }
+  const existingImages = normalizePublishPayloadImageProjection(existingPayload);
+  const bindingImages = normalizeApprovedImageBindingProjection(images, {sourceApproved: true});
+  const hasExistingPayload = Boolean(existingPayload && typeof existingPayload === 'object' && !Array.isArray(existingPayload));
+  if (hasExistingPayload && JSON.stringify(existingImages) !== JSON.stringify(bindingImages)) {
+    throw new Error('existing task payload images do not match the locked destination image binding');
+  }
+  return {binding, images};
+}
+
+function assertEqualNumberField(values, expected, label) {
+  if (!values.length) return;
+  if (expected === null || expected === undefined || !Number.isFinite(Number(expected))) {
+    throw new Error(`existing task payload contains destination ${label} but no structured preparation lock`);
+  }
+  if (values.some(value => Number(value) !== Number(expected))) {
+    throw new Error(`existing task payload destination ${label} differs from the structured preparation lock`);
+  }
+}
+
+function verifiedPreBindingMaterializedDescriptionBase(task, existingPayload, targetStore) {
+  const materialization = task?.descriptionPayloadMaterialization;
+  const trustedPayloadSources = new Set([
+    "webapi_snapshot",
+    "bi_portal_webapi_snapshot",
+    "webapi_snapshot_exact_source_lock",
+  ]);
+  if (
+    task?.publishAssetBinding
+    || task?.metadata?.publishAssetBinding
+    || task?.descriptionMaterialBinding?.targetStore !== targetStore
+    || materialization?.source !== "openapi_executor_dry_run_capture"
+    || !trustedPayloadSources.has(String(materialization?.payloadSource || ""))
+    || materialization?.targetStore !== targetStore
+    || materialization?.payloadHashAlgorithm !== "sha256-stable-json-v1"
+    || !/^[a-f0-9]{64}$/i.test(String(materialization?.payloadHash || ""))
+    || !existingPayload || typeof existingPayload !== "object" || Array.isArray(existingPayload)
+  ) return false;
+
+  // descriptionMaterialization stores the hash of the base payload before its
+  // reviewed descriptions were added. Recompute that exact pre-binding hash
+  // so this exception cannot certify a later destination-field mutation.
+  const basePayload = JSON.parse(JSON.stringify(existingPayload));
+  delete basePayload.multi_language_desc_list;
+  delete basePayload.multiLanguageDescList;
+  delete basePayload.productMultiDescList;
+  delete basePayload.product_multi_desc_list;
+  if (sha256Stable(basePayload) !== String(materialization.payloadHash).toLowerCase()) return false;
+
+  const descriptionPolicy = validateCopyProductDescriptionPolicy(task, existingPayload);
+  return descriptionPolicy.ok === true;
+}
+
+function hasApprovedPayloadAsset(task) {
+  return asArray(task?.assets).some(asset => (
+    String(asset?.mime || "").toLowerCase() === "application/json"
+    && asset?.sourceApproved === true
+    && String(asset?.approvalKind || "") === "human_reviewed_publish_payload"
+    && /^[a-f0-9]{64}$/i.test(String(asset?.sha256 || ""))
+  ));
+}
+
+function approvedPayloadAssetBase(task, existingPayload) {
+  if (!existingPayload || typeof existingPayload !== "object" || Array.isArray(existingPayload)) return false;
+  if (!looksLikePublishPayload(existingPayload)) return false;
+  return hasApprovedPayloadAsset(task);
+}
+
+function approvedUnboundPayloadAssetBase(task, existingPayload) {
+  const directPayloadKeys = ["openapiPublishPayload", "sheinOpenapiPublishPayload", "publishPayload", "publishOrEditPayload"];
+  if (directPayloadKeys.some(key => looksLikePublishPayload(task?.[key]))) return false;
+  return approvedPayloadAssetBase(task, existingPayload);
+}
+
+function buildProtectedDestinationProjection(task, existingPayload, targetStore) {
+  const destinationStore = normalizedTargetStore(targetStore);
+  const stores = destinationStoreCandidates(task, destinationStore);
+  if (stores.some(store => store !== destinationStore)) {
+    throw new Error(`destination store binding drifted: expected ${destinationStore}, got ${stores.join('/')}`);
+  }
+  const preparation = structuredDestinationPreparation(task);
+  const overrides = preparation.normalized;
+  // A description binding may legally win the race before publish-assets and
+  // materialize a source-snapshot base payload. That payload is not yet a
+  // destination title/price/inventory/image lock: the retried publish-assets
+  // request is the operation that creates those locks. Trust it only when the
+  // portal persisted a hash-verified materialization marker.
+  const preBindingMaterializedBase = verifiedPreBindingMaterializedDescriptionBase(
+    task,
+    existingPayload,
+    destinationStore,
+  );
+  // A reviewed JSON payload upload is authoritative input, not a destination
+  // lock. The first approved publish-assets request may replace its source
+  // projection with the explicitly reviewed title/price/inventory/images.
+  const unboundTrustedBase = preBindingMaterializedBase
+    || approvedUnboundPayloadAssetBase(task, existingPayload);
+  const payloadStores = payloadTargetStoreValues(existingPayload);
+  if (payloadStores.length && payloadStores.some(store => store !== destinationStore)) {
+    throw new Error(`existing task payload target store does not match ${destinationStore}`);
+  }
+  const payloadGroups = payloadTitleGroupValues(existingPayload);
+  if (!unboundTrustedBase && payloadGroups.length && (!overrides.titleGroup || payloadGroups.some(group => group !== overrides.titleGroup))) {
+    throw new Error('existing task payload title group has no matching structured destination preparation lock');
+  }
+
+  const titles = targetTitleRows(existingPayload);
+  const structuredTitles = overrides.titles || {};
+  if (!unboundTrustedBase && titles.length) {
+    for (const row of titles) {
+      if (!structuredTitles[row.language] || structuredTitles[row.language] !== row.name) {
+        throw new Error(`existing task payload title ${row.language} has no matching structured destination title lock`);
+      }
+    }
+  }
+  const descriptions = targetDescriptionRows(existingPayload);
+  const descriptionBinding = task?.descriptionMaterialBinding;
+  const emptyDescriptionAuthorization = task?.emptyDescriptionAuthorization;
+  if (descriptions.length || descriptionBinding || emptyDescriptionAuthorization) {
+    const descriptionPolicy = validateCopyProductDescriptionPolicy(task, existingPayload);
+    if (!descriptionPolicy.ok) {
+      throw new Error(`existing task payload description policy lock is invalid: ${descriptionPolicy.blockers.slice(0, 4).join('; ')}`);
+    }
+  }
+
+  const imageBinding = validateStructuredImageBinding(task, destinationStore, existingPayload);
+  if (!unboundTrustedBase && normalizePublishPayloadImageProjection(existingPayload).length && !imageBinding) {
+    throw new Error('existing task payload contains destination images without a locked publishAssetBinding');
+  }
+
+  const standardGoods = payloadStandardGoodsValues(existingPayload);
+  const supplierSkus = payloadSupplierSkuValues(existingPayload);
+  const costs = payloadCostValues(existingPayload);
+  const inventories = payloadInventoryValues(existingPayload);
+  const expectedSupplierSku = overrides.supplierSku || overrides.standardGoodsSn;
+  if (!unboundTrustedBase) {
+    assertEqualNumberField(costs, overrides.supplyPrice, 'supplyPrice');
+    assertEqualNumberField(inventories, overrides.inventory, 'inventory');
+    if (standardGoods.length && (!overrides.standardGoodsSn || standardGoods.some(value => value !== overrides.standardGoodsSn))) {
+      throw new Error('existing task payload standardGoodsSn has no matching structured preparation lock');
+    }
+    if (supplierSkus.length && (!expectedSupplierSku || supplierSkus.some(value => value !== expectedSupplierSku))) {
+      throw new Error('existing task payload supplierSku has no matching structured preparation lock');
+    }
+  }
+
+  return {
+    targetStore: destinationStore,
+    titleGroup: overrides.titleGroup || '',
+    titles: structuredTitles,
+    descriptionBinding,
+    emptyDescriptionAuthorization,
+    imageBinding,
+    overrides,
+    rawPreparation: preparation.raw,
+    preparationSources: preparation.sources,
+    protectedFields: {
+      targetStore: destinationStore,
+      titleGroup: overrides.titleGroup || '',
+      titleLanguages: Object.keys(structuredTitles),
+      descriptionsLocked: Boolean(descriptionBinding || emptyDescriptionAuthorization),
+      imagesLocked: Boolean(imageBinding),
+      supplyPrice: overrides.supplyPrice,
+      inventory: overrides.inventory,
+      standardGoodsSn: overrides.standardGoodsSn || '',
+      supplierSku: expectedSupplierSku || '',
+    },
+  };
+}
+
+function applyExplicitEmptyDescriptionProjection(payload, task, existingPayload) {
+  if (!task?.emptyDescriptionAuthorization) return {payload, applied: []};
+  const gate = validateEmptyDescriptionAuthorization(task, existingPayload);
+  if (!gate.ok) {
+    throw new Error(`empty-description destination lock is invalid: ${gate.blockers.slice(0, 4).join('; ')}`);
+  }
+  return {
+    payload: stripPublishPayloadDescriptions(payload),
+    applied: ['destination.emptyDescriptionAuthorization.omit_descriptions'],
+  };
+}
+
+function applyExactSourceLockedInputCurrentOverride(payload, rawPreparation = {}) {
+  const declaration = normalizeExactSourceInputCurrentDeclaration(rawPreparation);
+  if (declaration.rowCount === 0) return {payload, applied: [], override: null};
+  const {attributeExtraValue, unit, attributeValueId} = declaration.override;
+
+  const next = jsonClone(payload || {});
+  const list = asArray(next.product_attribute_list || next.productAttributeList)
+    .filter(item => item && typeof item === 'object' && !Array.isArray(item))
+    .filter(item => normalizeAttributeId(item.attribute_id ?? item.attributeId) !== INPUT_CURRENT_ATTRIBUTE_ID)
+    .map(item => ({...item}));
+  list.push({
+    attribute_id: INPUT_CURRENT_ATTRIBUTE_ID,
+    attribute_extra_value: attributeExtraValue,
+    __manual_attribute_unit: unit,
+    ...(attributeValueId ? {attribute_value_id: attributeValueId} : {}),
+  });
+  next.product_attribute_list = list;
+  if (next.productAttributeList) delete next.productAttributeList;
+  return {
+    payload: next,
+    applied: [`product_attribute_list.${INPUT_CURRENT_ATTRIBUTE_ID}.explicit_prepare_publish=${attributeExtraValue}${unit}`],
+    override: declaration.override,
+  };
+}
+
+function mergeExactSourceDestinationBindings(sourcePayload, task, existingPayload, targetStore) {
+  let payload = jsonClone(sourcePayload);
+  const applied = [];
+  const preserveApprovedPayloadAttributes = approvedPayloadAssetBase(task, existingPayload)
+    || hasApprovedPayloadAsset(task)
+    || Boolean(task?.publishAssetBinding || task?.metadata?.publishAssetBinding);
+  if (preserveApprovedPayloadAttributes) {
+    // The reviewed JSON upload is the operator-owned base for destination
+    // attributes. Exact-source hydration still supplies identity and detail
+    // locks, while these rows give deterministic template rules the reviewed
+    // facts (for example non-dangerous hazard category) needed to fill
+    // required classification attributes without guessing.
+    const sourceRows = asArray(payload.product_attribute_list || payload.productAttributeList)
+      .filter(row => row && typeof row === "object" && !Array.isArray(row));
+    const sourceRowsById = new Map(sourceRows.map(row => [normalizeAttributeId(row.attribute_id ?? row.attributeId), row]));
+    const existingRows = asArray(existingPayload?.product_attribute_list || existingPayload?.productAttributeList)
+      .filter(row => row && typeof row === "object" && !Array.isArray(row));
+    for (const row of existingRows) {
+      const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId);
+      if (!attributeId || attributeId === normalizeAttributeId(1000546) || sourceRowsById.has(attributeId)) continue;
+      const cloned = jsonClone(row);
+      sourceRows.push(cloned);
+      sourceRowsById.set(attributeId, cloned);
+      applied.push(`destination.approved_payload_asset.attribute.${attributeId}`);
+    }
+    payload.product_attribute_list = sourceRows;
+    delete payload.productAttributeList;
+  }
+  const projection = buildProtectedDestinationProjection(task, existingPayload, targetStore);
+  const emptyDescriptionApplied = applyExplicitEmptyDescriptionProjection(payload, task, existingPayload);
+  payload = emptyDescriptionApplied.payload;
+  applied.push(...emptyDescriptionApplied.applied);
+  const imageBinding = projection.imageBinding;
+  if (imageBinding) {
+    const bound = applyApprovedImageBindingsToPublishPayload(payload, imageBinding.images, {sourceApproved: true});
+    payload = bound.payload;
+    applied.push('destination.publishAssetBinding.images');
+  }
+
+  const descriptionBinding = projection.descriptionBinding;
+  if (descriptionBinding && typeof descriptionBinding === 'object') {
+    payload.multi_language_desc_list = jsonClone(existingPayload.multi_language_desc_list);
+    applied.push('destination.descriptionMaterialBinding.multi_language_desc_list');
+  }
+
+  // A separately signed productAttributeBinding is destination-owned state.
+  // Exact-source hydration must not discard the one row that the binding pins,
+  // but it must also never copy the whole task attribute list. The downstream
+  // binding gate revalidates the donor evidence, hashes and payload row before
+  // submit; malformed, missing or duplicate rows remain blocked.
+  const attributeBinding = task?.productAttributeBinding;
+  const boundAttributeId = Number(attributeBinding?.attributeId);
+  const boundAttributeValueId = Number(attributeBinding?.attributeValueId);
+  if (Number.isSafeInteger(boundAttributeId) && boundAttributeId > 0
+    && Number.isSafeInteger(boundAttributeValueId) && boundAttributeValueId > 0) {
+    const existingRows = asArray(existingPayload?.product_attribute_list || existingPayload?.productAttributeList)
+      .filter(row => row && typeof row === 'object' && !Array.isArray(row));
+    const matchingRows = existingRows.filter(row => {
+      return Number(row.attribute_id ?? row.attributeId) === boundAttributeId
+        && Number(row.attribute_value_id ?? row.attributeValueId) === boundAttributeValueId;
+    });
+    if (matchingRows.length === 1) {
+      const sourceRows = asArray(payload?.product_attribute_list || payload?.productAttributeList)
+        .filter(row => row && typeof row === 'object' && !Array.isArray(row))
+        .filter(row => Number(row.attribute_id ?? row.attributeId) !== boundAttributeId)
+        .map(row => jsonClone(row));
+      payload.product_attribute_list = [...sourceRows, jsonClone(matchingRows[0])];
+      delete payload.productAttributeList;
+      applied.push(`destination.productAttributeBinding.${boundAttributeId}`);
+    }
+  }
+
+  const preparation = applyExplicitPublishPreparationOverrides(payload, projection.overrides);
+  payload = preparation.payload;
+  applied.push(...preparation.applied.map(value => `destination.publishPreparation.${value}`));
+  const inputCurrent = applyExactSourceLockedInputCurrentOverride(payload, projection.rawPreparation);
+  payload = inputCurrent.payload;
+  applied.push(...inputCurrent.applied.map(value => `destination.publishPreparation.${value}`));
+  return {payload, applied, projection};
+}
+
+async function buildExactSourceLockedPayload(task, {targetStore, source, existingPayload, expectedSourceDetailHash = ''}) {
+  const generated = await buildProductDraftFromSnapshots({
+    sourceStore: source.sourceStore,
+    sourceSkc: source.sourceSkc,
+    date: 'latest',
+    targetStore,
+  });
+  const readiness = exactSourcePayloadReadiness(generated, source);
+  if (!readiness.ok) {
+    return {
+      source: 'exact_source_snapshot_incomplete',
+      payload: null,
+      inferred: source,
+      exactSourceLock: true,
+      generatedDraft: summarizeDraftForExecutor(generated),
+      mappingBlockers: generated?.blockers || [],
+      structuredMappingBlockers: generated?.mappingBlockers || [],
+      generationError: readiness.reason,
+    };
+  }
+  const currentSourceDetailHash = String(readiness.sourceDetailHash || '').toLowerCase();
+  if (expectedSourceDetailHash && currentSourceDetailHash !== String(expectedSourceDetailHash).toLowerCase()) {
+    return {
+      source: 'exact_source_cache_drifted',
+      payload: null,
+      inferred: source,
+      exactSourceLock: true,
+      generatedDraft: summarizeDraftForExecutor(generated),
+      sourceDetailLock: readiness.sourceDetailLock || null,
+      generationError: `exact source detail cache drifted since preflight: expected=${expectedSourceDetailHash} actual=${currentSourceDetailHash || 'missing'}`,
+    };
+  }
+  // Capture source identity before any destination-owned preparation can
+  // rewrite supplier_code. Provenance guards must never treat the merged
+  // target identity as evidence about the locked source product.
+  const sourcePayloadSupplierCodes = publishTargetSupplierCodes(readiness.payload);
+  // A reviewed JSON payload upload is the destination-owned baseline. Exact
+  // source hydration remains authoritative for source identity/detail locks,
+  // but must not replace reviewed generic-product facts with a different
+  // cached source product before the first approved binding.
+  const useApprovedAssetBase = approvedPayloadAssetBase(task, existingPayload);
+  const exactSourceBasePayload = jsonClone(useApprovedAssetBase ? existingPayload : readiness.payload);
+  if (useApprovedAssetBase) {
+    const exactSourceSkc = asArray(exactSourceBasePayload.skc_list || exactSourceBasePayload.skcList)[0];
+    if (exactSourceSkc && !exactSourceSkc.source_skc) exactSourceSkc.source_skc = source.sourceSkc;
+  }
+  const merged = mergeExactSourceDestinationBindings(exactSourceBasePayload, task, existingPayload, targetStore);
+  const targetIdentity = useApprovedAssetBase
+    ? applyTargetStandardGoodsSn(merged.payload, taskStandardGoodsSn(task))
+    : {payload: merged.payload, applied: []};
+  return {
+    source: 'webapi_snapshot_exact_source_lock',
+    payload: targetIdentity.payload,
+    inferred: source,
+    exactSourceLock: true,
+    generatedDraft: summarizeDraftForExecutor(generated),
+    canonicalDraft: generated.canonicalDraft,
+    mappingBlockers: generated.blockers,
+    structuredMappingBlockers: generated.mappingBlockers,
+    mappingWarnings: generated.warnings,
+    destinationBindingsApplied: [
+      ...merged.applied,
+      ...targetIdentity.applied.map(value => `destination.task_standard_goods_sn.${value}`),
+    ],
+    destinationProjection: merged.projection.protectedFields,
+    sourceDetailHash: readiness.sourceDetailHash,
+    sourceDetailLock: readiness.sourceDetailLock,
+    sourcePayloadSupplierCodes,
+    taskPayloadIgnored: Boolean(existingPayload),
+  };
+}
+
+export async function findOrBuildPublishPayload(task, {targetStore, preferredSource = null}) {
+  const taskExactSource = exactCopySourceLock(task);
+  const hasExactSourceLock = Boolean(taskExactSource);
+
   const existing = await findPublishPayload(task);
+  const exactSource = taskExactSource;
+  if (exactSource) {
+    if (taskHasUnboundImageAssets(task) && !task?.publishAssetBinding) {
+      return {
+        source: 'exact_source_unbound_image_assets',
+        payload: null,
+        inferred: exactSource,
+        exactSourceLock: true,
+        generationError: 'exact source lock cannot fall back to unbound destination image assets; bind reviewed images to the same task first',
+      };
+    }
+    try {
+      return await buildExactSourceLockedPayload(task, {
+        targetStore,
+        source: exactSource,
+        existingPayload: existing?.payload || null,
+        expectedSourceDetailHash: preferredSource?.sourceDetailHash || '',
+      });
+    } catch (error) {
+      return {
+        source: 'exact_source_snapshot_error',
+        payload: null,
+        inferred: exactSource,
+        exactSourceLock: true,
+        generationError: error?.message || String(error),
+      };
+    }
+  }
   if (existing?.payload) {
     // A server-bound task keeps the reviewed payload at the task root. Retain
     // that payload as the only publish source, but hydrate read-only source
@@ -717,7 +1475,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
       // The bound payload (root openapiPublishPayload or approved asset) stays
       // authoritative; snapshot hydration is read-only metadata enrichment.
       // The exact task source lock is preserved and enforced separately by the
-      // source scope resolution and the scope-v3 execution hash.
+      // source scope resolution and the scope-v4 execution hash.
       return {
         ...existing,
         inferred,
@@ -805,7 +1563,7 @@ async function findOrBuildPublishPayload(task, {targetStore, preferredSource = n
 // unique task source lock (targets.sourceStores single value + sourceSkc) MUST
 // resolve and preserve that lock, even when the payload comes from a root
 // openapiPublishPayload or an approved asset. The resolved store/skc feed the
-// scope-v3 execution hash, the provenance guard and the executor projection.
+// scope-v4 execution hash, the provenance guard and the executor projection.
 // Missing/multi-valued locks or a conflict between the exact lock and the
 // inferred source fail closed with a blocker instead of an empty source.
 function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore = ''}) {
@@ -814,7 +1572,7 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
   // itself: single-valued targets.sourceStores plus a non-empty
   // targets.sourceSkc. A copy task that declares NO source at all is allowed
   // through the legacy/approved-asset flow (source may stay empty and the
-  // scope-v3 hash stays stable). Partial declarations, multi-valued stores and
+  // scope-v4 hash stays stable). Partial declarations, multi-valued stores and
   // exact-vs-inferred conflicts fail closed.
   const rawDeclaredSourceStores = asArray(task?.targets?.sourceStores);
   const rawDeclaredSourceSkc = task?.targets?.sourceSkc;
@@ -872,8 +1630,8 @@ function resolveLockedSourceScope({payloadFound, task, intents = [], targetStore
 }
 
 const SOURCE_DETAIL_LOCK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v3';
-const PRODUCT_EXECUTION_HASH_SCHEMA = 'copy_product_draft_execution_scope/v3';
+const PRODUCT_EXECUTION_HASH_ALGORITHM = 'sha256-stable-json-scope-v4';
+const PRODUCT_EXECUTION_HASH_SCHEMA = 'copy_product_draft_execution_scope/v4';
 const SOURCE_DETAIL_LOCK_SOURCES = new Set([
   'openapi_product_detail_snapshot',
   'openapi_product_detail_cached_fallback',
@@ -894,7 +1652,7 @@ function validSourceSkc(value) {
   if (typeof value !== 'string') return false;
   if (hasControlCharacters(value)) return false;
   const raw = String(value ?? '');
-  return raw.length <= 160 && /^s[abv]\d{8,}$/i.test(raw);
+  return raw.length <= 160 && isSheinSkc(raw) && /\d{8,}$/.test(raw);
 }
 
 function validSourceSpu(value) {
@@ -951,6 +1709,44 @@ function sourceDetailLockBlocker(code, message) {
   return {code, message: safeString(message, 1000)};
 }
 
+// The OpenAPI product cache may move the same byte-identical detail between
+// the current snapshot and its short-lived fallback while a task is between
+// preflight and execute. Those two labels describe observation provenance,
+// not a different product. Treat them as equivalent only when the exact task
+// source scope, platform identities and content hash all still match.
+function sourceDetailLocksDifferOnlyByTrustedProvenance({
+  currentLock = null,
+  expectedLock = null,
+  sourceStore = '',
+  sourceSkc = '',
+} = {}) {
+  const current = currentLock && typeof currentLock === 'object' && !Array.isArray(currentLock) ? currentLock : null;
+  const expected = expectedLock && typeof expectedLock === 'object' && !Array.isArray(expectedLock) ? expectedLock : null;
+  if (!current || !expected) return false;
+  if (!validSourceStoreKey(sourceStore) || !validSourceSkc(sourceSkc)) return false;
+  if (!validSourceDetailSource(current.source) || !validSourceDetailSource(expected.source)) return false;
+  const currentSource = String(current.source);
+  const expectedSource = String(expected.source);
+  if (currentSource === expectedSource) return false;
+  const exactSkc = String(sourceSkc);
+  const currentSpu = safeString(current.matchedSpuName, 160);
+  const expectedSpu = safeString(expected.matchedSpuName, 160);
+  const currentSkc = safeString(current.matchedSkcName, 160);
+  const expectedSkc = safeString(expected.matchedSkcName, 160);
+  const currentHash = safeString(current.detailContentSha256, 120).toLowerCase();
+  const expectedHash = safeString(expected.detailContentSha256, 120).toLowerCase();
+  return validSourceSpu(currentSpu)
+    && validSourceSpu(expectedSpu)
+    && currentSpu === expectedSpu
+    && validSourceSkc(currentSkc)
+    && validSourceSkc(expectedSkc)
+    && currentSkc === exactSkc
+    && expectedSkc === exactSkc
+    && validLowerSha256(currentHash)
+    && validLowerSha256(expectedHash)
+    && currentHash === expectedHash;
+}
+
 // The execution-confirmation hash locks source identity and source content,
 // not the observation timestamp. detailFetchedAt remains part of the persisted
 // evidence and the 24-hour write gate below, but including it in the hash makes
@@ -974,8 +1770,11 @@ function buildProductExecutionHashScope({
   sourceSkc = '',
   standardGoodsSn = '',
   sourceDetailLock = null,
+  productAliasRegistryFingerprint = '',
+  productCatalogFingerprint = '',
+  emptyDescriptionAuthorization = null,
 } = {}) {
-  return {
+  const scope = {
     schema: PRODUCT_EXECUTION_HASH_SCHEMA,
     payload,
     targetStore: executionHashScalar(targetStore, 80),
@@ -986,7 +1785,15 @@ function buildProductExecutionHashScope({
     // valid canonical value "ABC DEF" before the gate blocks it.
     standardGoodsSn: executionHashScalar(standardGoodsSn, 160),
     sourceDetailLock: sourceDetailLockExecutionHashScope(sourceDetailLock),
+    productAliasRegistryFingerprint: executionHashScalar(productAliasRegistryFingerprint, 120),
+    productCatalogFingerprint: executionHashScalar(productCatalogFingerprint, 120),
   };
+  // Preserve legacy v4 hashes for every ordinary task. Only an explicit marker
+  // adds a new hash member, so unrelated in-flight preflights do not drift.
+  if (emptyDescriptionAuthorization && typeof emptyDescriptionAuthorization === 'object' && !Array.isArray(emptyDescriptionAuthorization)) {
+    scope.emptyDescriptionAuthorization = emptyDescriptionAuthorization;
+  }
+  return scope;
 }
 
 // 写前详情锁门：把本次 hydration 得到的当前 sourceDetailLock 与预检锁定的锁
@@ -996,7 +1803,7 @@ function buildProductExecutionHashScope({
 //   bound payload hydration 失败/无锁是结构化 blocker，不能仅 warning 后继续。
 // - requireExpectedLock=true（copy_product_draft 的 execute）：预检锁必须带
 //   sourceDetailLock；旧版只有 payload hash 的预检强制重新 dry-run。
-  // - 其它流程（维护执行等）无预检锁时沿用既有 scope-v3 hash 覆盖，不额外阻断。
+  // - 其它流程（维护执行等）无预检锁时沿用既有 scope-v4 hash 覆盖，不额外阻断。
 function validateSourceDetailLockForWrite({
   currentLock = null,
   expectedLock = null,
@@ -1021,7 +1828,7 @@ function validateSourceDetailLockForWrite({
       gateActive: false,
       blockers: [],
       checkedAt,
-      note: '没有预检详情锁且当前流程不强制详情锁；沿用既有流程，scope-v3 hash 仍覆盖本次执行范围。',
+      note: '没有预检详情锁且当前流程不强制详情锁；沿用既有流程，scope-v4 hash 仍覆盖本次执行范围。',
     };
   }
   if (!current) {
@@ -1039,6 +1846,12 @@ function validateSourceDetailLockForWrite({
   const exactSourceStore = normalizeStoreKey(sourceStore);
   const exactSourceSkc = safeString(sourceSkc, 160);
   const exactStandardGoodsSn = safeString(standardGoodsSn, 160);
+  const trustedProvenanceTransition = sourceDetailLocksDifferOnlyByTrustedProvenance({
+    currentLock: current,
+    expectedLock: expected,
+    sourceStore,
+    sourceSkc,
+  });
   if ((required || expected) && !validSourceStoreKey(sourceStore)) {
     blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_SCOPE_INVALID', `写前详情锁 sourceStore 格式无效（当前=${exactSourceStore || '空'}），禁止写入。`));
   }
@@ -1093,62 +1906,126 @@ function validateSourceDetailLockForWrite({
     } else if (checkedMs - expectedFetchedMs > SOURCE_DETAIL_LOCK_MAX_AGE_MS) {
       blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_PREFLIGHT_EXPIRED', `预检 sourceDetailLock 的 detailFetchedAt=${expectedFetchedText} 已超过 24 小时，必须重新 dry-run。`));
     }
-    if (expectedSource && currentSource && expectedSource !== currentSource) {
+    if (expectedSource && currentSource && expectedSource !== currentSource && !trustedProvenanceTransition) {
       blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_IDENTITY_DRIFT', `写前详情锁来源类型漂移：预检锁定 ${expectedSource}，当前详情 ${currentSource}，禁止写入。`));
     }
     if (!/^[a-f0-9]{64}$/.test(expectedHash) || !/^[a-f0-9]{64}$/.test(currentContentHash) || expectedHash !== currentContentHash) {
       blockers.push(sourceDetailLockBlocker('SOURCE_DETAIL_LOCK_CONTENT_DRIFT', `写前详情内容 hash 漂移：预检锁定 ${expectedHash || '空'}，当前详情 ${currentContentHash || '空'}，禁止写入。`));
     }
   }
-  return {ok: blockers.length === 0, gateActive: true, blockers, checkedAt};
+  return {
+    ok: blockers.length === 0,
+    gateActive: true,
+    blockers,
+    checkedAt,
+    trustedProvenanceTransition,
+  };
 }
 
 function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
+  const taskPreparation = task?.publishPreparation && typeof task.publishPreparation === 'object'
+    ? task.publishPreparation
+    : {};
+  const metadataPreparation = task?.metadata?.publishPreparation && typeof task.metadata.publishPreparation === 'object'
+    ? task.metadata.publishPreparation
+    : {};
+  const targetPreparation = task?.targets?.publishPreparation && typeof task.targets.publishPreparation === 'object'
+    ? task.targets.publishPreparation
+    : {};
+  const executionPreparation = executionContext?.publishPreparation && typeof executionContext.publishPreparation === 'object'
+    ? executionContext.publishPreparation
+    : {};
   return {
-    ...(task?.publishPreparation && typeof task.publishPreparation === 'object' ? task.publishPreparation : {}),
-    ...(task?.metadata?.publishPreparation && typeof task.metadata.publishPreparation === 'object' ? task.metadata.publishPreparation : {}),
-    ...(task?.targets?.publishPreparation && typeof task.targets.publishPreparation === 'object' ? task.targets.publishPreparation : {}),
-    ...(executionContext?.publishPreparation && typeof executionContext.publishPreparation === 'object' ? executionContext.publishPreparation : {}),
+    ...taskPreparation,
+    ...metadataPreparation,
+    ...targetPreparation,
+    ...executionPreparation,
     standardGoodsSn: firstNonEmpty(
-      executionContext?.publishPreparation?.standardGoodsSn,
-      task?.publishPreparation?.standardGoodsSn,
+      executionPreparation.standardGoodsSn,
+      executionPreparation.standard_goods_sn,
+      taskPreparation.standardGoodsSn,
+      taskPreparation.standard_goods_sn,
+      metadataPreparation.standardGoodsSn,
+      metadataPreparation.standard_goods_sn,
+      targetPreparation.standardGoodsSn,
+      targetPreparation.standard_goods_sn,
       task?.targets?.standardGoodsSn,
       task?.standardGoodsSn,
     ),
     supplierSku: firstNonEmpty(
-      executionContext?.publishPreparation?.supplierSku,
-      task?.publishPreparation?.supplierSku,
+      executionPreparation.supplierSku,
+      executionPreparation.supplier_sku,
+      taskPreparation.supplierSku,
+      taskPreparation.supplier_sku,
+      metadataPreparation.supplierSku,
+      metadataPreparation.supplier_sku,
+      targetPreparation.supplierSku,
+      targetPreparation.supplier_sku,
       task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
         ? task?.notes?.supplierSkuPolicy?.value
         : '',
     ),
     supplyPrice: firstNonEmpty(
-      executionContext?.publishPreparation?.supplyPrice,
-      task?.publishPreparation?.supplyPrice,
+      executionPreparation.supplyPrice,
+      executionPreparation.supply_price,
+      taskPreparation.supplyPrice,
+      taskPreparation.supply_price,
+      metadataPreparation.supplyPrice,
+      metadataPreparation.supply_price,
+      targetPreparation.supplyPrice,
+      targetPreparation.supply_price,
       task?.targets?.supplyPrice,
       task?.supplyPrice,
     ),
     inventory: firstNonEmpty(
-      executionContext?.publishPreparation?.inventory,
-      task?.publishPreparation?.inventory,
+      executionPreparation.inventory,
+      executionPreparation.stockQty,
+      executionPreparation.stock_qty,
+      taskPreparation.inventory,
+      taskPreparation.stockQty,
+      taskPreparation.stock_qty,
+      metadataPreparation.inventory,
+      metadataPreparation.stockQty,
+      metadataPreparation.stock_qty,
+      targetPreparation.inventory,
+      targetPreparation.stockQty,
+      targetPreparation.stock_qty,
       task?.targets?.inventory,
       task?.inventory,
     ),
     categoryId: firstNonEmpty(
-      executionContext?.publishPreparation?.categoryId,
-      task?.publishPreparation?.categoryId,
+      executionPreparation.categoryId,
+      executionPreparation.category_id,
+      taskPreparation.categoryId,
+      taskPreparation.category_id,
+      metadataPreparation.categoryId,
+      metadataPreparation.category_id,
+      targetPreparation.categoryId,
+      targetPreparation.category_id,
       task?.targets?.categoryId,
       task?.categoryId,
     ),
     titleAr: firstNonEmpty(
-      executionContext?.publishPreparation?.titleAr,
-      task?.publishPreparation?.titleAr,
+      executionPreparation.titleAr,
+      executionPreparation.title_ar,
+      taskPreparation.titleAr,
+      taskPreparation.title_ar,
+      metadataPreparation.titleAr,
+      metadataPreparation.title_ar,
+      targetPreparation.titleAr,
+      targetPreparation.title_ar,
       task?.targets?.titleAr,
       task?.titleAr,
     ),
     titleEn: firstNonEmpty(
-      executionContext?.publishPreparation?.titleEn,
-      task?.publishPreparation?.titleEn,
+      executionPreparation.titleEn,
+      executionPreparation.title_en,
+      taskPreparation.titleEn,
+      taskPreparation.title_en,
+      metadataPreparation.titleEn,
+      metadataPreparation.title_en,
+      targetPreparation.titleEn,
+      targetPreparation.title_en,
       task?.targets?.titleEn,
       task?.titleEn,
     ),
@@ -1671,6 +2548,14 @@ function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
   if (!sourceStore || !sourceSkc || !isSha256PayloadHash(payloadHash)
     || payloadHashAlgorithm !== PRODUCT_EXECUTION_HASH_ALGORITHM) return null;
   if (!validRecoverableSourceDetailLock(sourceDetailLock, sourceSkc)) return null;
+  const sourceDetailHash = safeString(
+    payload.sourceDetailHash
+    || sourceDetailLock.sourceDetailHash
+    || generated.sourceDetailHash
+    || generated.openApiDetail?.sourceDetailHash
+    || '',
+    120,
+  );
   return {
     storeKey,
     sourceStore,
@@ -1679,6 +2564,7 @@ function preflightProductLockFromRow(row, targetStore = '', fallback = {}) {
     hopeOnSaleDate: safeString(summary.hopeOnSaleDate || summary.hope_on_sale_date || fallback.hopeOnSaleDate || '', 80),
     payloadHash,
     payloadHashAlgorithm,
+    sourceDetailHash,
     sourceDetailLock,
     lockedAt: safeString(fallback.lockedAt || result.endedAt || result.startedAt || '', 80),
     runId: safeString(result.runId || fallback.runId || '', 120),
@@ -1903,10 +2789,11 @@ function normalizeInputCurrentExtraValue(value, unit = '') {
   const numeric = Number(match[1]);
   if (!Number.isFinite(numeric) || numeric <= 0) return text;
   const unitText = `${unit || text}`.toLowerCase();
-  const milliamps = /(^|[^m])a\b|安/.test(unitText) && !/ma|毫安/.test(unitText)
-    ? Math.round(numeric * 1000)
-    : Math.round(numeric);
-  return String(milliamps);
+  const isAmps = /(^|[^m])a\b|安/.test(unitText) && !/ma|毫安/.test(unitText);
+  if (isAmps) {
+    return match[1];
+  }
+  return String(Math.round(numeric));
 }
 
 function deterministicIntInclusive(min, max, seed) {
@@ -2018,6 +2905,12 @@ function applyRandomSupplyPrice(payload, task, executionContext, targetStore) {
 function normalizeManualAttributeOverride(row) {
   if (!row || typeof row !== 'object') return null;
   const attributeId = normalizeAttributeId(row.attribute_id ?? row.attributeId ?? row.id);
+  let attributeValueId = null;
+  if (attributeId === INPUT_CURRENT_ATTRIBUTE_ID) {
+    const rawAttributeValueId = row.attribute_value_id ?? row.attributeValueId;
+    attributeValueId = normalizeAttributeId(rawAttributeValueId);
+    if (rawAttributeValueId !== undefined && rawAttributeValueId !== null && rawAttributeValueId !== '' && !attributeValueId) return null;
+  }
   const rawUnit = safeString(row.attribute_unit ?? row.attributeUnit ?? row.unit ?? '', 40);
   let attributeExtraValue = safeString(
     row.attribute_extra_value
@@ -2030,14 +2923,21 @@ function normalizeManualAttributeOverride(row) {
   );
   let attributeUnit = rawUnit;
   if (attributeId === INPUT_CURRENT_ATTRIBUTE_ID) {
-    attributeExtraValue = normalizeInputCurrentExtraValue(attributeExtraValue, row.attribute_unit || row.attributeUnit || '');
-    attributeUnit = 'mA';
+    const normalizedCurrent = normalizeExplicitInputCurrentDeclarationValue(
+      row.attribute_extra_value ?? row.attributeExtraValue ?? row.attribute_value ?? row.attributeValue ?? row.value,
+      row.attribute_unit ?? row.attributeUnit ?? row.unit,
+    );
+    if (!normalizedCurrent) return null;
+    attributeExtraValue = normalizedCurrent.value;
+    attributeUnit = normalizedCurrent.unit;
+    assertInputCurrentValueIdMatchesUnit(attributeValueId, attributeUnit, 'manual attribute override');
   }
   if (!attributeId || !attributeExtraValue) return null;
   return {
     attribute_id: attributeId,
     attribute_extra_value: attributeExtraValue,
     attribute_unit: attributeUnit,
+    ...(attributeId === INPUT_CURRENT_ATTRIBUTE_ID && attributeValueId ? {attribute_value_id: attributeValueId} : {}),
     label: safeString(row.label || '', 80),
     source: safeString(row.source || 'manual_override', 80),
   };
@@ -2184,7 +3084,8 @@ function applyManualAttributeOverrides(payload, task, executionContext) {
     row.attribute_id = override.attribute_id;
     row.attribute_extra_value = override.attribute_extra_value;
     if (override.attribute_unit) row.__manual_attribute_unit = override.attribute_unit;
-    delete row.attribute_value_id;
+    if (override.attribute_id === INPUT_CURRENT_ATTRIBUTE_ID && override.attribute_value_id) row.attribute_value_id = override.attribute_value_id;
+    else delete row.attribute_value_id;
     delete row.attributeValueId;
     delete row.attribute_value;
     delete row.attributeValue;
@@ -2239,7 +3140,13 @@ function chooseAttributeValueIdForManualUnit(templateRow, row) {
   if (!unit) return null;
   const normalizedUnit = unit.replace(/\s+/g, '');
   const values = asArray(templateRow?.attribute_value_info_list);
-  const exact = values.find(value => safeString(value.attribute_value, 40).toLowerCase().replace(/\s+/g, '') === normalizedUnit);
+  const exact = values.find(value => {
+    const v = safeString(value.attribute_value, 40).toLowerCase().replace(/\s+/g, '');
+    if (v === normalizedUnit) return true;
+    if (normalizedUnit === 'a' && (v === 'a' || v === '安' || v === 'ampere')) return true;
+    if (normalizedUnit === 'ma' && (v === 'ma' || v === '毫安' || v === 'milliampere')) return true;
+    return false;
+  });
   if (exact?.attribute_value_id) return exact.attribute_value_id;
   return null;
 }
@@ -2402,6 +3309,28 @@ function listHasFilledInputVoltage(list) {
   return list.some(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === INPUT_VOLTAGE_ATTRIBUTE_ID && payloadAttributeHasValue(row));
 }
 
+function resolveExplicitSameProductIdentity(rawCodes) {
+  const values = asArray(rawCodes).map(normalizeSupplierIdentity).filter(Boolean);
+  if (!values.length) return {ok: false, canonical: '', resolutions: []};
+  const resolutions = values.map(value => ({value, ...resolveExplicitProductAlias(PRODUCT_ALIAS_CONTEXT, value)}));
+  if (resolutions.some(row => row.ok !== true || !row.canonical)) {
+    return {ok: false, canonical: '', resolutions};
+  }
+  const canonicals = [...new Set(resolutions.map(row => row.canonical))];
+  return {
+    ok: canonicals.length === 1,
+    canonical: canonicals.length === 1 ? canonicals[0] : '',
+    resolutions,
+  };
+}
+
+function sourcePayloadSupplierCodesForProvenance(payloadFound, publishStandardPayload) {
+  if (payloadFound?.exactSourceLock === true) {
+    return [...new Set(asArray(payloadFound?.sourcePayloadSupplierCodes).map(normalizeSupplierIdentity).filter(Boolean))];
+  }
+  return publishTargetSupplierCodes(publishStandardPayload);
+}
+
 /**
  * Owner-authorized fail-closed provenance lookup: when Input voltage(1002322)
  * is required by the target template path but cannot be filled authoritatively,
@@ -2482,9 +3411,38 @@ function summarizeProductAttributes(productAttributeList, templateById) {
   }).filter(row => row.attributeId);
 }
 
+function exactSourceRequiresHazardTemplateDerivation(payload, sourceContext = {}) {
+  if (sourceContext?.copyProductDraft !== true || sourceContext?.exactSourceLock !== true) return false;
+  const list = asArray(payload?.product_attribute_list || payload?.productAttributeList)
+    .filter(row => row && typeof row === 'object');
+  const hazardRows = list.filter(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === HAZARD_CATEGORY_ATTRIBUTE_ID);
+  const classificationRows = list.filter(row => normalizeAttributeId(row?.attribute_id ?? row?.attributeId) === HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID);
+  return hazardRows.length === 1
+    && normalizeAttributeId(hazardRows[0]?.attribute_value_id ?? hazardRows[0]?.attributeValueId) === HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID
+    && !classificationRows.some(payloadAttributeHasValue);
+}
+
+function shouldIssuePublishOrEdit(mode, readyForSubmit) {
+  return mode === 'execute' && readyForSubmit === true;
+}
+
+function hazardousMaterialsTemplateBlocker(reason) {
+  return `精确源商品已标记 Hazard Category(${HAZARD_CATEGORY_ATTRIBUTE_ID})=${HAZARD_CATEGORY_NON_TRANSPORT_SENSITIVE_VALUE_ID} 且缺少 Hazardous materials classification(${HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID})；${reason}，无法按官方模板确定性补值，禁止发布。`;
+}
+
 async function applyAttributeTemplateRules(client, payload, sourceContext = {}) {
+  const requiresHazardTemplateDerivation = exactSourceRequiresHazardTemplateDerivation(payload, sourceContext);
   const productTypeId = payloadProductTypeId(payload);
-  if (!productTypeId) return {payload, applied: [], warnings: [], blockers: [], evidence: {status: 'skipped_missing_product_type_id'}, call: null};
+  if (!productTypeId) return {
+    payload,
+    applied: [],
+    warnings: [],
+    blockers: requiresHazardTemplateDerivation
+      ? [hazardousMaterialsTemplateBlocker('源 payload 缺少 product_type_id，不能查询官方属性模板')]
+      : [],
+    evidence: {status: 'skipped_missing_product_type_id'},
+    call: null,
+  };
   let response = null;
   try {
     response = await client.request('/open-api/goods/query-attribute-template', {
@@ -2497,7 +3455,9 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
       payload,
       applied: [],
       warnings: [`查询商品属性模板失败：${safeString(err?.message || err, 300)}`],
-      blockers: [],
+      blockers: requiresHazardTemplateDerivation
+        ? [hazardousMaterialsTemplateBlocker('官方属性模板请求异常')]
+        : [],
       evidence: {status: 'query_failed', productTypeId, error: safeString(err?.message || err, 300)},
       call: null,
     };
@@ -2515,7 +3475,9 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
       payload,
       applied: [],
       warnings: [`查询商品属性模板失败：code=${safeString(response.data?.code || '', 80)} msg=${safeString(response.data?.msg || response.statusText || '', 300)}`],
-      blockers: [],
+      blockers: requiresHazardTemplateDerivation
+        ? [hazardousMaterialsTemplateBlocker('官方属性模板返回失败')]
+        : [],
       evidence,
       call,
     };
@@ -2529,12 +3491,16 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
   const applied = [];
   const blockers = [];
   const warnings = [];
+  if (requiresHazardTemplateDerivation && !byId.has(HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID)) {
+    blockers.push(hazardousMaterialsTemplateBlocker(`官方模板缺少属性 ${HAZARDOUS_MATERIALS_CLASSIFICATION_ATTRIBUTE_ID}`));
+  }
   const powerSupplyInputVoltage = ensurePowerSupplyInputVoltage(next, list, byId);
   if (powerSupplyInputVoltage.inputVoltageRequired && !listHasFilledInputVoltage(list)) {
     // Locked owner authorization: ONLY a copy_product_draft task whose source
     // is the exact findOrBuild source lock (sourceStore + sourceSkc present,
-    // exactSourceLock) and whose target standard goods number equals the source
-    // payload supplier identity may derive Input voltage(1002322) from the
+    // exactSourceLock) and whose target standard goods number either exactly
+    // equals the source payload supplier identity or all identities resolve to
+    // one explicit, reviewed catalog alias may derive Input voltage(1002322) from the
     // locked source payload's official Plug(Voltage)/Voltage attributes. No
     // target-store live fallback exists anymore. The range is parsed with the
     // existing deterministic inference and the unit value id reuses the
@@ -2547,6 +3513,20 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
     const lockedStandardGoodsSnNormalized = normalizeSupplierIdentity(lockedStandardGoodsSn);
     const sourcePayloadCodes = [...new Set(asArray(sourceContext?.sourcePayloadSupplierCodes).map(normalizeSupplierIdentity).filter(Boolean))];
     const payloadCodes = [...new Set(publishTargetSupplierCodes(next).map(normalizeSupplierIdentity).filter(Boolean))];
+    const strictIdentityMatches = sourcePayloadCodes.length === 1
+      && payloadCodes.length === 1
+      && sourcePayloadCodes[0] === lockedStandardGoodsSnNormalized
+      && payloadCodes[0] === lockedStandardGoodsSnNormalized;
+    const explicitAliasIdentity = strictIdentityMatches
+      ? {ok: true, canonical: lockedStandardGoodsSnNormalized, resolutions: [], mode: 'strict_exact'}
+      : {
+          ...resolveExplicitSameProductIdentity([
+            lockedStandardGoodsSnNormalized,
+            sourcePayloadCodes.length === 1 ? sourcePayloadCodes[0] : '',
+            payloadCodes.length === 1 ? payloadCodes[0] : '',
+          ]),
+          mode: 'explicit_alias_registry',
+        };
     const provenanceAllowed = sourceContext?.copyProductDraft === true
       && sourceContext?.exactSourceLock === true
       && Boolean(lockedSourceStore)
@@ -2554,8 +3534,7 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
       && Boolean(lockedStandardGoodsSn)
       && sourcePayloadCodes.length === 1
       && payloadCodes.length === 1
-      && sourcePayloadCodes[0] === lockedStandardGoodsSnNormalized
-      && payloadCodes[0] === lockedStandardGoodsSnNormalized;
+      && explicitAliasIdentity.ok === true;
     if (powerSupplyInputVoltage.unitValueIdConflict) {
       blockers.push(...powerSupplyInputVoltage.blockers);
       evidence.inputVoltageProvenance = {
@@ -2581,6 +3560,8 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
         standardGoodsNumber: lockedStandardGoodsSn,
         sourcePayloadSupplierCodes: sourcePayloadCodes,
         payloadSupplierCodes: payloadCodes,
+        identityResolutionMode: explicitAliasIdentity.mode,
+        canonicalCode: explicitAliasIdentity.canonical,
       };
     } else {
       const payloadInferred = inferInputVoltageFromPayload(next, byId);
@@ -2602,6 +3583,8 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
           sourceStore: lockedSourceStore,
           sourceSkc: lockedSourceSkc,
           standardGoodsNumber: lockedStandardGoodsSn,
+          identityResolutionMode: explicitAliasIdentity.mode,
+          canonicalCode: explicitAliasIdentity.canonical,
           sourceAttributeId: payloadInferred.source_attribute_id || null,
           sourceValueId: payloadInferred.source_value_id || null,
           sourceValue: safeString(payloadInferred.source_value, 160),
@@ -2647,6 +3630,12 @@ async function applyAttributeTemplateRules(client, payload, sourceContext = {}) 
         applied.push(`attribute_template:${attributeId}.attribute_value_id=${resolvedValueId}`);
       } else {
         blockers.push(`${template.attribute_name || attributeId} 是“下拉+手动输入”属性，已填写 ${row.attribute_extra_value}，但未能从官方属性模板匹配单位/属性值 ID。`);
+      }
+    } else if (template && hasExtra && mode === 4 && valueId) {
+      const matchingValue = asArray(template?.attribute_value_info_list).find(val => normalizeAttributeId(val?.attribute_value_id) === valueId);
+      if (matchingValue) {
+        row.attribute_value_id = valueId;
+        applied.push(`attribute_template:${attributeId}.attribute_value_id=${valueId}`);
       }
     }
     delete row.__manual_attribute_unit;
@@ -2852,7 +3841,7 @@ function applyTargetStandardGoodsSn(payload, standardGoodsSn, {preserveExplicitS
   return {payload: next, applied};
 }
 
-function validatePublishPayload(payload) {
+function validatePublishPayload(payload, task) {
   const blockers = [];
   const warnings = [];
   const has = (...keys) => keys.some(k => payload?.[k] !== undefined && payload?.[k] !== null && payload?.[k] !== '');
@@ -2865,7 +3854,13 @@ function validatePublishPayload(payload) {
   if (!has('source_system', 'sourceSystem')) blockers.push('缺 source_system=OpenAPI。');
   if (!arr('multi_language_name_list', 'multiLanguageNameList').length) blockers.push('缺 multi_language_name_list：至少需要商品标题/多语言名称。');
   if (!arr('product_attribute_list', 'productAttributeList').length) blockers.push('缺 product_attribute_list：需要类目属性模板和源商品参数。');
-  const descriptionGate = validatePublishPayloadDescription(payload);
+  // Preserve the legacy structural gate for every normal task. The stronger
+  // task/binding policy is applied below to the final execution payload. Only
+  // an explicit-empty task needs its authorization-aware policy at this early
+  // shape-validation stage because an omitted description is intentional.
+  const descriptionGate = task?.emptyDescriptionAuthorization
+    ? validateCopyProductDescriptionPolicy(task, payload)
+    : validatePublishPayloadDescription(payload);
   blockers.push(...descriptionGate.blockers);
   const siteList = arr('site_list', 'siteList');
   if (!siteList.length) {
@@ -3490,6 +4485,12 @@ function matchProductReadbackRows(rows, fingerprint) {
   };
 }
 
+function descriptionReadbackLanguageList(task) {
+  return task?.emptyDescriptionAuthorization
+    ? ['en', 'ar', 'zh-cn']
+    : ['en', 'ar'];
+}
+
 async function readbackPublishedProduct(client, fingerprint, {enabled = false, task = null} = {}) {
   const startedAt = new Date().toISOString();
   const calls = [];
@@ -3537,12 +4538,31 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
   const descriptionBinding = task?.descriptionMaterialBinding && typeof task.descriptionMaterialBinding === 'object'
     ? task.descriptionMaterialBinding
     : null;
+  const emptyDescriptionAuthorization = task?.emptyDescriptionAuthorization && typeof task.emptyDescriptionAuthorization === 'object'
+    ? task.emptyDescriptionAuthorization
+    : null;
+  const emptyDescriptionAuthorizationGate = emptyDescriptionAuthorization
+    ? validateEmptyDescriptionAuthorization(task, task?.openapiPublishPayload)
+    : null;
+  const descriptionLanguages = descriptionReadbackLanguageList(task);
   const verifyMatchedRowsDescription = async (matchedRows, label) => {
-    if (!descriptionBinding) {
+    if (!descriptionBinding && !emptyDescriptionAuthorization) {
       return {
         ok: true,
         status: 'description_readback_not_required',
         descriptionReadback: {ok: true, status: 'description_readback_not_required', blockers: [], summary: {}},
+      };
+    }
+    if (emptyDescriptionAuthorization && emptyDescriptionAuthorizationGate?.ok !== true) {
+      return {
+        ok: false,
+        status: 'description_readback_unverifiable',
+        descriptionReadback: {
+          ok: false,
+          status: 'description_readback_unverifiable',
+          blockers: emptyDescriptionAuthorizationGate?.blockers || ['空描述授权在终态回读前已失效'],
+          summary: {},
+        },
       };
     }
     const spuNames = [...new Set(asArray(matchedRows).map(row => safeString(row?.spuName || '', 120)).filter(Boolean))];
@@ -3561,7 +4581,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
     const spuName = spuNames[0];
     const response = await client.request('/open-api/goods/spu-info', {
       method: 'POST',
-      body: {spuName, languageList: ['en', 'ar']},
+      body: {spuName, languageList: descriptionLanguages},
       headers: {language: 'en'},
     });
     calls.push(compactCallResult(`${label}-description-spu-info-${spuName}`, '/open-api/goods/spu-info', 'POST', response));
@@ -3609,7 +4629,7 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
     for (const spuName of publishSpuNames.slice(0, 5)) {
       const response = await client.request('/open-api/goods/spu-info', {
         method: 'POST',
-        body: {spuName, languageList: ['en', 'ar']},
+        body: {spuName, languageList: descriptionLanguages},
         headers: {language: 'en'},
       });
       calls.push(compactCallResult(`spu-info-readback-${spuName}`, '/open-api/goods/spu-info', 'POST', response));
@@ -3621,8 +4641,15 @@ async function readbackPublishedProduct(client, fingerprint, {enabled = false, t
         // Phase A live description gate: identity strongly matched, but the
         // spu-info productMultiDescList must still carry ar/en exactly once
         // each with hashes equal to the task's descriptionMaterialBinding.
-        const descriptionReadback = task?.descriptionMaterialBinding
-          ? evaluateDescriptionReadback(task.descriptionMaterialBinding, info)
+        const descriptionReadback = task?.descriptionMaterialBinding || emptyDescriptionAuthorization
+          ? (emptyDescriptionAuthorization && emptyDescriptionAuthorizationGate?.ok !== true
+              ? {
+                  ok: false,
+                  status: 'description_readback_unverifiable',
+                  blockers: emptyDescriptionAuthorizationGate?.blockers || ['空描述授权在终态回读前已失效'],
+                  summary: {},
+                }
+              : evaluateDescriptionReadback(task?.descriptionMaterialBinding || null, info))
           : null;
         if (descriptionReadback && !descriptionReadback.ok) {
           return {
@@ -4041,6 +5068,10 @@ async function main() {
   const productDraftLock = reusePreflightLock
     ? resolvePreflightProductLock(task, targetStore, {expectedPayloadHash})
     : null;
+  const exactSourceCopy = exactCopySourceLock(task);
+  if (args.mode === 'execute' && exactSourceCopy && !productDraftLock) {
+    blockers.push('精确源 copy_product_draft execute 缺少可解析的 productDraftLock（必须匹配 expectedPayloadHash）；拒绝仅凭 expectedPayloadHash 调用 publishOrEdit。');
+  }
   const effectiveExecutionContext = productDraftLock
     ? {...(executionContext || {}), productDraftLock}
     : executionContext;
@@ -4056,6 +5087,21 @@ async function main() {
   const lockedSourceScope = resolveLockedSourceScope({payloadFound, task, intents, targetStore});
   appendUnique(blockers, lockedSourceScope.blockers);
   if (payloadFound?.sourceMetadataWarning) appendUnique(warnings, payloadFound.sourceMetadataWarning);
+  if (productDraftLock && !productDraftLock.sourceDetailHash) {
+    blockers.push('现有 preflight 锁缺少 sourceDetailHash；缓存漂移不可验证，必须重新预检。');
+  }
+  if (productDraftLock?.sourceDetailHash && payloadFound?.sourceDetailHash
+    && String(productDraftLock.sourceDetailHash).toLowerCase() !== String(payloadFound.sourceDetailHash).toLowerCase()) {
+    blockers.push(`source detail canonical hash 与 preflight 锁不一致：expected=${productDraftLock.sourceDetailHash} actual=${payloadFound.sourceDetailHash}`);
+  }
+  if (payloadFound?.exactSourceLock && payloadFound?.payload && payloadFound?.inferred?.sourceSkc) {
+    const generatedSourceSkc = payloadFound.payload?.skc_list?.[0]?.source_skc
+      || payloadFound.payload?.skc_list?.[0]?.sourceSkc
+      || '';
+    if (generatedSourceSkc !== payloadFound.inferred.sourceSkc) {
+      blockers.push(`最终 publish payload source_skc 与锁定 sourceSkc 不一致：expected=${payloadFound.inferred.sourceSkc} actual=${generatedSourceSkc || 'missing'}`);
+    }
+  }
   let payloadSummary = null;
   let safeDefaults = [];
   let manualAttributeOverrides = [];
@@ -4067,23 +5113,28 @@ async function main() {
     appendUnique(blockers, payloadFound.mappingBlockers);
     appendUnique(warnings, payloadFound.mappingWarnings);
     const applied = applySafeDefaults(payloadFound.payload, {sites, brands, task, executionContext: effectiveExecutionContext});
-    const manualApplied = applyManualAttributeOverrides(applied.payload, task, effectiveExecutionContext);
+    const exactSourceLock = payloadFound.exactSourceLock === true;
+    const manualApplied = exactSourceLock
+      ? {payload: applied.payload, applied: [], overrides: []}
+      : applyManualAttributeOverrides(applied.payload, task, effectiveExecutionContext);
     const liveSourceNames = await enrichPayloadNamesFromLiveSourceOpenApi(config, manualApplied.payload, payloadFound);
     if (liveSourceNames.calls?.length) calls.push(...liveSourceNames.calls);
     else if (liveSourceNames.call) calls.push(liveSourceNames.call);
     const publishStandardApplied = await applyPublishFillInStandardRules(client, liveSourceNames.payload);
     if (publishStandardApplied.call) calls.push(publishStandardApplied.call);
-    const sourcePayloadSupplierCodes = publishTargetSupplierCodes(publishStandardApplied.payload);
+    const sourcePayloadSupplierCodes = sourcePayloadSupplierCodesForProvenance(payloadFound, publishStandardApplied.payload);
     const preserveExplicitSupplierSku = task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link';
     // Order contract: the target standard goods number must be applied to the
     // payload BEFORE any template/provenance transform, so the provenance guard
     // sees the final identity and can never source a value from goods number A
     // and publish it under goods number B.
-    const standardGoodsSnApplied = applyTargetStandardGoodsSn(
-      publishStandardApplied.payload,
-      taskStandardGoodsSn(task, effectiveExecutionContext),
-      {preserveExplicitSupplierSku},
-    );
+    const standardGoodsSnApplied = exactSourceLock
+      ? {payload: publishStandardApplied.payload, applied: []}
+      : applyTargetStandardGoodsSn(
+        publishStandardApplied.payload,
+        taskStandardGoodsSn(task, effectiveExecutionContext),
+        {preserveExplicitSupplierSku},
+      );
     const taskStandardGoodsSnValue = taskStandardGoodsSn(task, effectiveExecutionContext);
     const templateApplied = await applyAttributeTemplateRules(client, standardGoodsSnApplied.payload, {
       copyProductDraft: intents.includes('copy_product_draft'),
@@ -4094,17 +5145,21 @@ async function main() {
       sourcePayloadSupplierCodes,
     });
     if (templateApplied.call) calls.push(templateApplied.call);
-    const randomSupplyPriceApplied = applyRandomSupplyPrice(templateApplied.payload, task, effectiveExecutionContext, targetStore);
-    const explicitPreparationApplied = applyExplicitPublishPreparationOverrides(
-      randomSupplyPriceApplied.payload,
-      taskPublishPreparationOverrides(task, effectiveExecutionContext),
-    );
+    const randomSupplyPriceApplied = exactSourceLock
+      ? {payload: templateApplied.payload, applied: [], evidence: null}
+      : applyRandomSupplyPrice(templateApplied.payload, task, effectiveExecutionContext, targetStore);
+    const explicitPreparationApplied = exactSourceLock
+      ? {payload: randomSupplyPriceApplied.payload, applied: [], evidence: null}
+      : applyExplicitPublishPreparationOverrides(
+        randomSupplyPriceApplied.payload,
+        taskPublishPreparationOverrides(task, effectiveExecutionContext),
+      );
     // A reviewed image package is an operator-owned fact, not an AI suggestion.
     // Preserve its explicit order even when an older task/template still carries
     // shuffleImages=true; otherwise a later preflight can silently rewrite the
     // sequence that the operator just approved and locked to this task.
     const approvedImageOrderLocked = taskApprovedImageOrderLocked(task);
-    const imageShuffleApplied = approvedImageOrderLocked
+    const imageShuffleApplied = exactSourceLock || approvedImageOrderLocked
       ? {payload: explicitPreparationApplied.payload, applied: ['publish_asset_binding.approved_order_locked']}
       : shufflePublishDetailImages(explicitPreparationApplied.payload, task, effectiveExecutionContext, targetStore);
     const imageSortApplied = ensurePublishImageSortGlobalUnique(imageShuffleApplied.payload);
@@ -4139,9 +5194,9 @@ async function main() {
     appendUnique(blockers, templateApplied.blockers);
     appendUnique(warnings, targetDuplicateCheck.warnings);
     appendUnique(blockers, targetDuplicateCheck.blockers);
-    payloadValidation = validatePublishPayload(publishPayload);
+    payloadValidation = validatePublishPayload(publishPayload, task);
     payloadSummary = extractPayloadSummary(publishPayload);
-    // Execution lock hash v3: the real expectedPayloadHash must cover the final
+    // Execution lock hash v4: the real expectedPayloadHash must cover the final
     // publish payload PLUS the locked source store/sourceSkc and the target
     // standard goods number plus source identity/content (stable JSON scope).
     // detailFetchedAt is deliberately excluded because it is freshness
@@ -4150,13 +5205,31 @@ async function main() {
     // preflight and execute still changes the hash and blocks the write. The raw
     // body hash stays available separately for description binding and audit;
     // the two are never mixed.
+    const expectedSourceDetailLock = productDraftLock?.sourceDetailLock || null;
+    const trustedProvenanceTransition = args.mode === 'execute'
+      && sourceDetailLocksDifferOnlyByTrustedProvenance({
+        currentLock: currentSourceDetailLock,
+        expectedLock: expectedSourceDetailLock,
+        sourceStore: lockedSourceScope.sourceStore,
+        sourceSkc: lockedSourceScope.sourceSkc,
+      });
+    // Keep the established scope-v4 confirmation hash stable when the exact
+    // same source bytes merely move between the two trusted cache provenance
+    // labels. Audit and freshness validation continue to use the real current
+    // lock below; only the hash projection is pinned to the preflight label.
+    const executionHashSourceDetailLock = trustedProvenanceTransition
+      ? {...currentSourceDetailLock, source: expectedSourceDetailLock.source}
+      : currentSourceDetailLock;
     const executionScope = buildProductExecutionHashScope({
       payload: publishPayload,
       targetStore,
       sourceStore: lockedSourceScope.sourceStore,
       sourceSkc: lockedSourceScope.sourceSkc,
       standardGoodsSn: taskStandardGoodsSn(task, effectiveExecutionContext),
-      sourceDetailLock: currentSourceDetailLock,
+      sourceDetailLock: executionHashSourceDetailLock,
+      productAliasRegistryFingerprint: PRODUCT_ALIAS_REGISTRY_FINGERPRINT,
+      productCatalogFingerprint: PRODUCT_CATALOG_FINGERPRINT,
+      emptyDescriptionAuthorization: task?.emptyDescriptionAuthorization || null,
     });
     bodyHash = sha256Stable(publishPayload);
     payloadHash = sha256Stable(executionScope);
@@ -4165,13 +5238,17 @@ async function main() {
     // Reviewed-material binding lock: the final payload's ar/en description
     // hashes must equal the task's descriptionMaterialBinding hashes. Passing
     // the 5-line shape is not enough; any byte drift blocks dry-run/execute.
-    const finalDescriptionGate = validatePublishPayloadDescription(publishPayload);
-    const descriptionBindingLock = validateDescriptionBindingLock(task, publishPayload);
-    payloadSummary.descriptionBindingLocked = finalDescriptionGate.ok && descriptionBindingLock.ok;
-    appendUnique(blockers, descriptionBindingLock.blockers);
+    const finalDescriptionPolicy = validateCopyProductDescriptionPolicy(task, publishPayload);
+    payloadSummary.descriptionBindingLocked = finalDescriptionPolicy.ok;
+    payloadSummary.descriptionPolicyMode = finalDescriptionPolicy.mode;
+    appendUnique(blockers, finalDescriptionPolicy.blockers);
   } else {
     appendUnique(blockers, payloadValidation.blockers);
-    if (payloadFound?.generationError) appendUnique(warnings, `自动生成源商品草稿失败：${payloadFound.generationError}`);
+    if (payloadFound?.generationError) {
+      const message = `自动生成源商品草稿失败：${payloadFound.generationError}`;
+      if (payloadFound?.exactSourceLock) appendUnique(blockers, message);
+      else appendUnique(warnings, message);
+    }
   }
 
   if (productRefs.length && !payloadFound?.payload) {
@@ -4191,6 +5268,24 @@ async function main() {
       blockers.push('真实提交缺少 dry-run 锁定的 payload hash，不能提交未经锁定的发布 payload。');
     } else if (!payloadHash || payloadHash !== expectedHash) {
       blockers.push(`真实提交 payload hash 与 dry-run 锁定值不一致：expected=${expectedHash || 'missing'} actual=${payloadHash || 'missing'}`);
+    }
+    const writeClaim = executionContext?.writeClaim && typeof executionContext.writeClaim === 'object'
+      ? executionContext.writeClaim
+      : null;
+    const claimOperations = Array.isArray(writeClaim?.operations)
+      ? [...new Set(writeClaim.operations.map(value => String(value || '').trim().toLowerCase()).filter(Boolean))].sort()
+      : [];
+    const claimOk = Boolean(writeClaim
+      && args.claimNonce
+      && String(writeClaim.nonce || '') === args.claimNonce
+      && String(writeClaim.taskId || '') === String(task?.id || '')
+      && normalizeStoreKey(writeClaim.storeKey) === targetStore
+      && JSON.stringify(claimOperations) === JSON.stringify(['copy_product_draft'])
+      && String(writeClaim.expectedPayloadHash || '') === expectedHash
+      && String(writeClaim.expectedPayloadHash || '') === payloadHash
+      && String(writeClaim.state || '') === 'claimed');
+    if (!claimOk) {
+      blockers.push('copy_product_draft 真实提交缺少服务端持久化 write-claim（nonce/taskId/store/expectedPayloadHash/operation 必须一致），禁止调用 publishOrEdit。');
     }
   }
 
@@ -4213,7 +5308,7 @@ async function main() {
 
   const readyForSubmit = blockers.length === 0 && Boolean(publishPayload);
   let publishResult = null;
-  if (args.mode === 'execute' && readyForSubmit) {
+  if (shouldIssuePublishOrEdit(args.mode, readyForSubmit)) {
     const testWebhookGuard = createLoopbackTestWebhookWriteGuard({baseUrl: client.baseUrl});
     const guardedWrite = await runSheinWebhookExternalWriteGuarded({
       writeStores: [targetStore],
@@ -4314,6 +5409,8 @@ async function main() {
         sourceSkc: productDraftLock.sourceSkc,
         hopeOnSaleDate: productDraftLock.hopeOnSaleDate,
         payloadHash: productDraftLock.payloadHash,
+        sourceDetailHash: productDraftLock.sourceDetailHash || '',
+        sourceDetailLock: productDraftLock.sourceDetailLock || null,
         runId: productDraftLock.runId,
       } : null,
     } : null,
@@ -4342,17 +5439,25 @@ async function main() {
       payloadHashAlgorithm: payloadHash ? PRODUCT_EXECUTION_HASH_ALGORITHM : '',
       summary: payloadSummary,
       validation: payloadValidation,
+      sourceStore: payloadFound?.inferred?.sourceStore || null,
+      sourceSkc: payloadFound?.inferred?.sourceSkc || null,
+      sourceDetailHash: payloadFound?.sourceDetailHash || payloadFound?.sourceDetailLock?.sourceDetailHash || null,
+      sourceDetailLock: currentSourceDetailLock,
       generatedDraft: payloadFound?.generatedDraft || null,
       generationError: payloadFound?.generationError || null,
       inferredSource: payloadFound?.inferred || null,
-      sourceDetailLock: currentSourceDetailLock,
-      mappingBlockers: payloadFound?.structuredMappingBlockers || [],
+      mappingBlockers: payloadFound?.structuredMappingBlockers || payloadFound?.mappingBlockers || [],
+      taskPayloadIgnored: payloadFound?.taskPayloadIgnored === true,
+      destinationBindingsApplied: payloadFound?.destinationBindingsApplied || [],
+      destinationProjection: payloadFound?.destinationProjection || null,
       preflightLock: productDraftLock ? {
         reused: true,
         sourceStore: productDraftLock.sourceStore,
         sourceSkc: productDraftLock.sourceSkc,
         hopeOnSaleDate: productDraftLock.hopeOnSaleDate,
         payloadHash: productDraftLock.payloadHash,
+        sourceDetailHash: productDraftLock.sourceDetailHash || '',
+        sourceDetailLock: productDraftLock.sourceDetailLock || null,
         runId: productDraftLock.runId,
       } : null,
     },
@@ -4388,9 +5493,16 @@ if (process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST !== '1') main().catch(err => {
 });
 
 export const __testHooks = {
+  exactCopySourceLock,
+  exactSourceRequiresHazardTemplateDerivation,
+  shouldIssuePublishOrEdit,
+  applyExactSourceLockedInputCurrentOverride,
+  applyExplicitEmptyDescriptionProjection,
+  mergeExactSourceDestinationBindings,
   applySafeDefaults,
   applyManualAttributeOverrides,
   applyAttributeTemplateRules,
+  sourcePayloadSupplierCodesForProvenance,
   inspectTargetDuplicateProducts,
   resolveLockedSourceScope,
   resolveSourceSpuByExactSkc,
@@ -4409,6 +5521,7 @@ export const __testHooks = {
   publishPreValidMessages,
   compactPublishResultForStorage,
   matchProductReadbackRows,
+  descriptionReadbackLanguageList,
   readbackPublishedProduct,
   sha256Stable,
   buildProductExecutionHashScope,

@@ -14,8 +14,10 @@ Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
-Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_FILE=/opt/shein-bi/app/state/portal-section-queue/queue.json
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_FILE=/data/shein-bi/state/portal-section-queue/queue.json
 Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC=900
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=420
+Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC=450
 Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC=1200
 TimeoutStartSec=900
 TimeoutStopSec=30
@@ -26,6 +28,6 @@ IOWeight=20
 MemoryHigh=900M
 MemoryMax=1400M
 OOMPolicy=stop
-ExecCondition=/usr/bin/bash -c 'case "$(date +%%H)" in 01|06|08) exit 1;; esac'
+ExecCondition=/usr/bin/bash -c 'case "$(date +%%H):$(date +%%M)" in 01:*|02:0[1-4]|03:0[1-4]|07:0[1-4]) exit 1;; *:0[1-4]|*:3[1-4]) exit 0;; *) exit 1;; esac'
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_portal_section_queue_slot.sh
 SuccessExitStatus=75

@@ -17,6 +17,7 @@ import {
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-bi-pipeline-marker-'));
 const moduleFile = fileURLToPath(new URL('./pipeline_marker.mjs', import.meta.url));
+const markerSource = fs.readFileSync(moduleFile, 'utf8');
 
 function sha256Text(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex');
@@ -65,6 +66,59 @@ async function main() {
     })?.completedAt, completedAt);
     const latest = JSON.parse(fs.readFileSync(path.join(root, 'morning-links-ready.latest.json'), 'utf8'));
     assert.deepEqual(latest.evidence, written.evidence);
+
+    // A restrictive service umask must not remove the cross-service directory contract.
+    // The second write exercises atomic replacement by another invocation under the
+    // current user; POSIX mode assertions are skipped only on Windows, where Node
+    // cannot represent setgid/group-write bits in stat().
+    assert.match(markerSource, /MARKER_DIRECTORY_MODE = 0o2770/);
+    assert.match(markerSource, /PIPELINE_MARKER_DIRECTORY_MODE_FIX_FAILED/);
+    const permissionRoot = path.join(root, 'umask-0027');
+    const priorUmask = process.umask(0o027);
+    let firstPermissionWrite;
+    let secondPermissionWrite;
+    try {
+      firstPermissionWrite = await writeMarker({
+        root: permissionRoot,
+        stage: 'shared-group',
+        date: '2026-08-05',
+        status: 'done',
+        message: 'first',
+        evidence: [chunkA],
+        completedAt,
+      });
+      secondPermissionWrite = await writeMarker({
+        root: permissionRoot,
+        stage: 'shared-group',
+        date: '2026-08-05',
+        status: 'done',
+        message: 'second',
+        evidence: [chunkA],
+        completedAt,
+      });
+    } finally {
+      process.umask(priorUmask);
+    }
+    assert.equal(firstPermissionWrite.message, 'first');
+    assert.equal(secondPermissionWrite.message, 'second');
+    assert.deepEqual(secondPermissionWrite.evidence, written.evidence.slice(0, 1));
+    assert.equal(readMarker({
+      root: permissionRoot,
+      stage: 'shared-group',
+      date: '2026-08-05',
+    })?.message, 'second');
+    if (process.platform === 'win32') {
+      console.log(JSON.stringify({markerDirectoryModeCheck: 'skipped-posix-mode-on-windows'}));
+    } else {
+      const rootMode = fs.statSync(permissionRoot).mode & 0o7777;
+      const dateMode = fs.statSync(path.join(permissionRoot, '2026-08-05')).mode & 0o7777;
+      assert.equal(rootMode, 0o2770);
+      assert.equal(dateMode, 0o2770);
+      assert.equal(rootMode & 0o2000, 0o2000);
+      assert.equal(rootMode & 0o0070, 0o0070);
+      assert.equal(dateMode & 0o2000, 0o2000);
+      assert.equal(dateMode & 0o0070, 0o0070);
+    }
 
     // write fails closed on missing / non-file evidence and writes no marker
     const missingPath = path.join(root, 'no-such-evidence.json');

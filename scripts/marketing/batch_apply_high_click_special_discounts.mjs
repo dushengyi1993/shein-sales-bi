@@ -26,6 +26,20 @@ import {
   loadExactHighClickSpecialPlan,
   loadExactManualRepairPlan,
 } from '../../lib/marketing_repair_manifest.mjs';
+import {
+  classifyHighClickRestoreResult,
+  highClickItemKey,
+  isHighClickResultSettled,
+  planHighClickStageResume,
+} from '../../lib/marketing_high_click_stage_resume.mjs';
+import {
+  assertBeforeOuter,
+  assertCanStartUnit,
+  boundedRecoveryTimeoutMs,
+  boundedTimeoutMs,
+  createDeadlineContract,
+  isMarketingDeadlineError,
+} from '../../lib/cloud_marketing_deadline_contract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const POLICY_PATH = path.join(ROOT, 'config', 'marketing_pricing_policy.json');
@@ -40,6 +54,9 @@ function parseArgs(argv) {
     maxItems: 0,
     result: '',
     expectedWorkFingerprint: '',
+    gracefulCutoffEpochRaw: '',
+    outerHardDeadlineEpochRaw: '',
+    continuation: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -51,6 +68,9 @@ function parseArgs(argv) {
     else if (arg === '--max-items') args.maxItems = Number(argv[++i] || 0);
     else if (arg === '--result') args.result = path.resolve(argv[++i] || '');
     else if (arg === '--expected-work-fingerprint') args.expectedWorkFingerprint = String(argv[++i] || '').trim().toLowerCase();
+    else if (arg === '--graceful-cutoff-epoch') args.gracefulCutoffEpochRaw = String(argv[++i] || '').trim();
+    else if (arg === '--outer-hard-deadline-epoch') args.outerHardDeadlineEpochRaw = String(argv[++i] || '').trim();
+    else if (arg === '--continuation') args.continuation = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) throw new Error(`Invalid --date: ${args.date || 'missing'}`);
@@ -61,6 +81,11 @@ function parseArgs(argv) {
   if (args.expectedWorkFingerprint && !/^[a-f0-9]{64}$/.test(args.expectedWorkFingerprint)) {
     throw new Error('--expected-work-fingerprint must be a SHA256 hash');
   }
+  args.deadline = createDeadlineContract({
+    gracefulCutoffEpoch: args.gracefulCutoffEpochRaw,
+    outerHardDeadlineEpoch: args.outerHardDeadlineEpochRaw,
+  });
+  if (args.continuation && !args.execute) throw new Error('--continuation requires --execute');
   return args;
 }
 
@@ -68,7 +93,12 @@ function rel(file) {
   return path.relative(ROOT, file).replaceAll(path.sep, '/');
 }
 
-async function run(command, commandArgs, {timeoutMs = 900000, env = {}} = {}) {
+async function run(command, commandArgs, {timeoutMs = 900000, env = {}, recovery = false, label = 'bounded operation'} = {}) {
+  const boundedMs = args?.deadline
+    ? (recovery
+      ? boundedRecoveryTimeoutMs(args.deadline, {capMs: timeoutMs, label})
+      : boundedTimeoutMs(args.deadline, {capMs: timeoutMs, label}))
+    : timeoutMs;
   return await new Promise(resolve => {
     const child = spawn(command, commandArgs, {
       cwd: ROOT,
@@ -82,7 +112,7 @@ async function run(command, commandArgs, {timeoutMs = 900000, env = {}} = {}) {
     const timer = setTimeout(() => {
       timedOut = true;
       try { child.kill('SIGKILL'); } catch {}
-    }, timeoutMs);
+    }, boundedMs);
     child.stdout.on('data', chunk => { stdout += chunk.toString(); process.stdout.write(chunk); });
     child.stderr.on('data', chunk => { stderr += chunk.toString(); process.stderr.write(chunk); });
     child.on('error', error => {
@@ -279,15 +309,37 @@ const previousResults = previous.workFingerprint === exactPlan.workFingerprint
   && Array.isArray(previous.results)
   ? previous.results
   : [];
-const successful = new Map(previousResults
-  .filter(row => row?.ok === true)
-  .map(row => [manualLimitedDiscountKey(row.storeKey, row.skc), row]));
-const pending = exactPlan.entries.filter(row => !successful.has(row.key));
-const selected = args.maxItems > 0 ? pending.slice(0, args.maxItems) : pending;
+const currentRunId = String(process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID || process.env.SHEIN_BI_MARKETING_RUN_ID || '').trim();
+const resume = planHighClickStageResume({entries: exactPlan.entries, previousResults, currentRunId});
+let continuationEligible = resume.eligible;
+if (args.continuation) {
+  const continuationRegistry = await loadManualLimitedDiscountRegistry();
+  const continuationIndex = buildManualLimitedDiscountIndex(continuationRegistry, new Date());
+  continuationEligible = resume.eligible.filter(row => {
+    const active = continuationIndex.activeByKey.get(row.key) || null;
+    return active
+      && String(active.sourceArtifact || '') === immutablePlanArtifact
+      && Math.abs(Number(active.specialPrice) - Number(row.specialPrice)) <= 0.01;
+  });
+}
+const selected = args.maxItems > 0 ? continuationEligible.slice(0, args.maxItems) : continuationEligible;
 const processedThisRun = [];
 const restoreKeys = new Set();
+let deadlineDeferred = args.continuation && resume.eligible.length > 0 && selected.length === 0;
 
 for (const row of selected) {
+  try {
+    assertCanStartUnit(args.deadline, {
+      continuation: args.continuation,
+      label: `high-click item ${row.storeKey}::${row.skc}`,
+    });
+  } catch (error) {
+    if (isMarketingDeadlineError(error)) {
+      deadlineDeferred = true;
+      break;
+    }
+    throw error;
+  }
   const record = {
     storeKey: row.storeKey,
     skc: row.skc,
@@ -302,6 +354,7 @@ for (const row of selected) {
     reason: '',
     currentActivityId: null,
     restoreResult: null,
+    attemptRunId: currentRunId || null,
   };
   let active = null;
   let sameAutomatedRegistration = false;
@@ -330,6 +383,10 @@ for (const row of selected) {
       restoreKeys.add(row.key);
       processedThisRun.push(record);
       continue;
+    }
+    if (args.continuation) {
+      deadlineDeferred = true;
+      break;
     }
   }
   const latestRow = liveRowsByKey.get(row.key);
@@ -367,7 +424,20 @@ for (const row of selected) {
     continue;
   }
 
-  const registration = await registerCandidate(row, exactPlan, immutablePlanArtifact);
+  let registration;
+  try {
+    assertBeforeOuter(args.deadline, {
+      reserveSec: args.deadline?.minFinalizationBudgetSec || 0,
+      label: `high-click registry write ${row.storeKey}::${row.skc}`,
+    });
+    registration = await registerCandidate(row, exactPlan, immutablePlanArtifact);
+  } catch (error) {
+    if (isMarketingDeadlineError(error)) {
+      deadlineDeferred = true;
+      break;
+    }
+    throw error;
+  }
   record.registration = {
     ok: registration.ok,
     exitCode: registration.exitCode,
@@ -386,6 +456,16 @@ for (const row of selected) {
 }
 
 if (args.execute && restoreKeys.size > 0) {
+  try {
+    assertCanStartUnit(args.deadline, {
+      continuation: true,
+      label: 'high-click restore continuation',
+    });
+  } catch (error) {
+    if (!isMarketingDeadlineError(error)) throw error;
+    deadlineDeferred = true;
+  }
+  if (!deadlineDeferred) {
   const sourceGuard = await readJson(args.guard);
   const outDir = path.join(ROOT, 'tmp', 'marketing-signup', 'high-click-special', args.date);
   const syntheticGuard = await writeSyntheticGuard({sourceGuard, selectedKeys: restoreKeys, outDir});
@@ -404,6 +484,10 @@ if (args.execute && restoreKeys.size > 0) {
     date: args.date,
   });
   const restoreResultPath = path.join(outDir, 'high-click-special-restore-result.json');
+  const childDeadlineArgs = args.deadline ? [
+    '--graceful-cutoff-epoch', String(args.deadline.gracefulCutoffEpoch),
+    '--outer-hard-deadline-epoch', String(args.deadline.outerHardDeadlineEpoch),
+  ] : [];
   const restore = await run(process.execPath, [
     'scripts/marketing/batch_restore_manual_limited_discounts.mjs',
     '--guard', syntheticGuard,
@@ -412,8 +496,13 @@ if (args.execute && restoreKeys.size > 0) {
     '--execute',
     '--result', restoreResultPath,
     '--expected-work-fingerprint', exactManual.workFingerprint,
+    '--max-items', '1',
+    '--continuation',
+    ...childDeadlineArgs,
   ], {
     timeoutMs: 30 * 60_000,
+    recovery: true,
+    label: 'high-click inventory restore/readback continuation',
     env: {SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH: exactManual.workFingerprint},
   });
   const restoreDoc = await readJson(restoreResultPath, {results: []});
@@ -428,6 +517,10 @@ if (args.execute && restoreKeys.size > 0) {
     record.restoreResult = restored ? {
       status: restored.status,
       ok: restored.ok === true,
+      terminal: restored.terminal === true,
+      classification: restored.classification || '',
+      writeAttempted: restored.writeAttempted === true,
+      loginRecovery: restored.loginRecovery || null,
       dryRun: restored.dryRun,
       inventoryTransactionPlan: restored.inventoryTransactionPlan || null,
       inventoryTransaction: restored.inventoryTransaction || null,
@@ -440,30 +533,46 @@ if (args.execute && restoreKeys.size > 0) {
     record.ok = restored?.ok === true;
     record.reason = restored?.error || (record.ok ? 'live_readback_exact' : 'restore_failed');
     record.currentActivityId = restored?.readback?.activityId || null;
+    const disposition = classifyHighClickRestoreResult(restored || {});
+    record.terminal = disposition.terminal;
+    record.writeAttempted = disposition.writeAttempted;
+    record.classification = disposition.classification;
+    if (!disposition.settled) record.status = 'recoverable_pending';
   }
   if (!restore.ok && !processedThisRun.some(record => record.ok === false)) {
     throw new Error(`High-click restore batch failed without item-level evidence: ${restore.stderr || restore.stdout}`);
   }
+  }
 }
 
-const merged = new Map(successful);
-for (const record of processedThisRun) merged.set(manualLimitedDiscountKey(record.storeKey, record.skc), record);
-const results = exactPlan.entries.map(row => merged.get(row.key)).filter(Boolean);
-const successfulKeys = new Set(results.filter(row => row.ok === true).map(row => manualLimitedDiscountKey(row.storeKey, row.skc)));
-const remainingItems = exactPlan.entries.filter(row => !successfulKeys.has(row.key)).length;
+for (const record of processedThisRun) {
+  if (record.ok !== true && !record.classification) {
+    record.classification = 'recoverable_pending';
+    record.terminal = false;
+    record.writeAttempted = false;
+  }
+}
+const merged = new Map(resume.priorByKey);
+for (const record of processedThisRun) merged.set(highClickItemKey(record), record);
+const results = exactPlan.entries.map(row => merged.get(highClickItemKey(row))).filter(Boolean);
+const successfulKeys = new Set(results
+  .filter(isHighClickResultSettled)
+  .map(highClickItemKey));
+const remainingItems = exactPlan.entries.filter(row => !successfulKeys.has(highClickItemKey(row))).length;
 if (args.execute) await updateLedger(exactPlan, processedThisRun, immutablePlanArtifact);
 const totals = {
   planned: exactPlan.entries.length,
   processed: results.length,
   processedThisRun: processedThisRun.length,
-  resumedItems: successful.size,
+  resumedItems: resume.settledByKey.size,
   remainingItems,
   restored: results.filter(row => row.status === 'restored').length,
   alreadyCovered: results.filter(row => row.status === 'already_covered_exact').length,
   skippedNoLongerQualifies: results.filter(row => row.status === 'no_longer_qualifies').length,
   protectedByConcurrentManualSpecial: results.filter(row => row.status === 'protected_by_concurrent_manual_special').length,
-  blocked: results.filter(row => row.ok === false && /blocked|inventory|platform/i.test(`${row.status} ${row.reason}`)).length,
-  failed: results.filter(row => row.ok === false && !/blocked|inventory|platform/i.test(`${row.status} ${row.reason}`)).length,
+  recoverablePending: results.filter(row => row.classification === 'recoverable_pending').length,
+  blocked: results.filter(row => row.terminal === true).length,
+  failed: results.filter(row => row.ok === false && row.terminal !== true && row.classification !== 'recoverable_pending').length,
 };
 const output = {
   createdAt: new Date().toISOString(),
@@ -473,13 +582,17 @@ const output = {
   immutablePlanArtifact,
   workFingerprint: exactPlan.workFingerprint,
   execute: args.execute,
+  gracefulCutoffEpoch: args.deadline?.gracefulCutoffEpoch || null,
+  outerHardDeadlineEpoch: args.deadline?.outerHardDeadlineEpoch || null,
+  deadlineDeferred,
   authorization,
   totals,
   results,
 };
 await writeJsonAtomic(args.result, output);
-const attemptedFailure = processedThisRun.some(row => row.ok === false);
+const attemptedFailure = processedThisRun.some(row => row.ok === false && row.terminal !== true && row.classification !== 'recoverable_pending');
 const ok = !attemptedFailure && remainingItems === 0;
 console.log(JSON.stringify({ok, out: rel(args.result), workFingerprint: exactPlan.workFingerprint, totals}, null, 2));
 if (attemptedFailure) process.exitCode = 2;
+else if ((deadlineDeferred || resume.deferredSameRun) && processedThisRun.length === 0 && remainingItems > 0) process.exitCode = 4;
 else if (remainingItems > 0) process.exitCode = 3;

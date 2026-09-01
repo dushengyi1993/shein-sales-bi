@@ -16,6 +16,17 @@ LARK_REPORT_LOCK_WAIT_SEC="${SHEIN_BI_DAILY_WAIT_LARK_REPORT_LOCK_SEC:-3600}"
 BUSY_WRITER_SERVICES="${SHEIN_BI_DAILY_WAIT_SERVICES:-shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-lark-report.service}"
 PORTAL_REFRESH_LOCK_FILE="${SHEIN_BI_PORTAL_REFRESH_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-refresh.lock}"
 PORTAL_REFRESH_LOCK_WAIT_SEC="${SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC:-1800}"
+# The morning coordinator supplies a fixed pre-inventory epoch and run key.
+# Standalone daily refreshes keep this opt-in disabled, so the existing
+# finalize-only behavior remains unchanged outside the morning run.
+DAILY_METRIC_REFETCH_ON_NOT_READY="${SHEIN_BI_DAILY_METRIC_REFETCH_ON_NOT_READY:-0}"
+DAILY_REFRESH_DEADLINE_EPOCH="${SHEIN_BI_DAILY_REFRESH_DEADLINE_EPOCH:-${SHEIN_LINK_BUSINESS_METRIC_REFETCH_DEADLINE_EPOCH:-0}}"
+DAILY_REFRESH_RUN_KEY="${SHEIN_BI_DAILY_REFRESH_RUN_KEY:-${SHEIN_LINK_BUSINESS_METRIC_REFETCH_RUN_KEY:-}}"
+DAILY_METRIC_REFETCH_BROWSER_WRAPPER="${SHEIN_BI_DAILY_METRIC_REFETCH_BROWSER_WRAPPER:-1}"
+MORNING_REFETCH_STATE_FILE="${SHEIN_LINK_BUSINESS_METRIC_REFETCH_STATE_FILE:-$ROOT/state/cloud_ops_alerts/link-business-metric-refetch.json}"
+MORNING_PHASE_JOURNAL=0
+MORNING_SOURCE_FINGERPRINT=""
+MORNING_STATE_STATUS=""
 
 resolve_date() {
   local target="$1"
@@ -34,6 +45,191 @@ resolve_date() {
       exit 64
       ;;
   esac
+}
+
+morning_phase_status() {
+  local phase="$1"
+  STATE_FILE="$MORNING_REFETCH_STATE_FILE" PHASE="$phase" node - <<'NODE'
+const fs = require('node:fs');
+let state = {};
+try { state = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8')); } catch {}
+process.stdout.write(String(state?.phases?.[process.env.PHASE]?.status || ''));
+NODE
+}
+
+update_morning_phase() {
+  local phase="$1" status="$2" detail="${3:-}"
+  (( MORNING_PHASE_JOURNAL == 1 )) || return 0
+  STATE_FILE="$MORNING_REFETCH_STATE_FILE" PHASE="$phase" PHASE_STATUS="$status" PHASE_DETAIL="$detail" \
+    DATE="$DATE" RUN_KEY="$DAILY_REFRESH_RUN_KEY" node - <<'NODE'
+const fs = require('node:fs');
+const file = process.env.STATE_FILE;
+const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (state.date !== process.env.DATE || state.runKey !== process.env.RUN_KEY
+  || state.source?.status !== 'source_committed') throw new Error('daily phase requires matching source_committed journal');
+state.phases ||= {};
+const prior = state.phases[process.env.PHASE] || {};
+state.phases[process.env.PHASE] = {
+  ...prior, status: process.env.PHASE_STATUS, detail: process.env.PHASE_DETAIL || '',
+  attempts: process.env.PHASE_STATUS === 'running' ? Number(prior.attempts || 0) + 1 : Number(prior.attempts || 0),
+  updatedAt: new Date().toISOString(),
+};
+if (process.env.PHASE_STATUS === 'failed') state.status = 'downstream_incomplete';
+state.updatedAt = new Date().toISOString();
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(tmp, file);
+NODE
+}
+
+portal_core_input_fingerprint() {
+  SOURCE_FINGERPRINT="$MORNING_SOURCE_FINGERPRINT" RUN_KEY="$DAILY_REFRESH_RUN_KEY" DATE="$DATE" node - <<'NODE'
+const crypto = require('node:crypto');
+process.stdout.write(crypto.createHash('sha256')
+  .update(`portal-core\0${process.env.RUN_KEY || ''}\0${process.env.DATE || ''}\0${process.env.SOURCE_FINGERPRINT || ''}`)
+  .digest('hex'));
+NODE
+}
+
+invalidate_morning_source() {
+  local reason="$1"
+  STATE_FILE="$MORNING_REFETCH_STATE_FILE" DATE="$DATE" RUN_KEY="$DAILY_REFRESH_RUN_KEY" REASON="$reason" node - <<'NODE'
+const fs = require('node:fs');
+const file = process.env.STATE_FILE;
+const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (state.date !== process.env.DATE || state.runKey !== process.env.RUN_KEY) throw new Error('daily source invalidation run mismatch');
+state.status = 'source_revalidation_required';
+state.ready = false;
+state.source = {...(state.source || {}), status: 'source_revalidation_required', invalidatedAt: new Date().toISOString(), invalidationReason: process.env.REASON};
+state.phases = {};
+state.updatedAt = new Date().toISOString();
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(tmp, file);
+NODE
+  MORNING_PHASE_JOURNAL=0
+}
+
+verify_morning_source_fingerprint() {
+  (( MORNING_PHASE_JOURNAL == 1 )) || return 0
+  local status=0
+  set +e
+  ROOT="$ROOT" STATE_FILE="$MORNING_REFETCH_STATE_FILE" DATE="$DATE" RUN_KEY="$DAILY_REFRESH_RUN_KEY" node - <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const root = fs.realpathSync(process.env.ROOT || '');
+const state = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
+const date = process.env.DATE;
+const canonical = 'CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL'.split(' ');
+if (state.date !== date || state.runKey !== process.env.RUN_KEY || state.source?.status !== 'source_committed') {
+  throw new Error('source journal identity is not committed');
+}
+const expectedFingerprint = String(state.source?.fingerprint || '');
+if (!/^[a-f0-9]{64}$/.test(expectedFingerprint)) throw new Error('source journal fingerprint invalid');
+const transactionInput = path.resolve(String(state.source?.transactionRoot || state.transactionRoot || ''));
+if (!fs.existsSync(transactionInput) || fs.lstatSync(transactionInput).isSymbolicLink()) throw new Error('transaction root missing or symlink');
+const transactionRoot = fs.realpathSync(transactionInput);
+if (path.dirname(transactionRoot) !== fs.realpathSync(path.join(root, 'state'))
+  || !path.basename(transactionRoot).startsWith('.link-business-metric-refetch.')) throw new Error('transaction root invalid');
+const manifest = JSON.parse(fs.readFileSync(path.join(transactionRoot, 'manifest.json'), 'utf8'));
+if (manifest.date !== date || manifest.status !== 'source_committed' || !Array.isArray(manifest.records)
+  || manifest.records.length !== canonical.length) throw new Error('source manifest invalid');
+const seen = new Set();
+const hashes = [];
+for (const [index, row] of manifest.records.entries()) {
+  const store = canonical[index];
+  const target = path.join(root, 'outputs', 'shein_links', store, `${date}.json`);
+  const backup = path.join(transactionRoot, 'backups', store, `${date}.json`);
+  if (!row || row.store !== store || seen.has(row.store) || row.target !== target || row.backup !== backup) {
+    throw new Error(`manifest record mapping invalid for ${store}`);
+  }
+  seen.add(store);
+  if (!fs.existsSync(target) || fs.lstatSync(target).isSymbolicLink() || !fs.lstatSync(target).isFile()) {
+    throw new Error(`formal artifact invalid for ${store}`);
+  }
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+  if (actual !== row.posthash) throw new Error(`formal artifact hash drift for ${store}`);
+  hashes.push(`${store}:${actual}`);
+}
+if (seen.size !== canonical.length) throw new Error('manifest record set incomplete');
+const aggregate = crypto.createHash('sha256').update(hashes.sort().join('\n')).digest('hex');
+if (aggregate !== manifest.fingerprint || aggregate !== expectedFingerprint) throw new Error('source aggregate fingerprint mismatch');
+NODE
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    invalidate_morning_source "canonical 19 formal artifact fingerprint drift"
+    echo "[cloud_daily_refresh] source fingerprint drift; downstream receipts invalidated and publication blocked" >&2
+    return 70
+  fi
+  return 0
+}
+
+verify_portal_core_identity() {
+  (( MORNING_PHASE_JOURNAL == 1 )) || return 0
+  local input_fingerprint
+  input_fingerprint="$(portal_core_input_fingerprint)"
+  PORTAL_DATA_PATH="$PORTAL_DATA_PATH" SOURCE_RUN_KEY="${DAILY_REFRESH_RUN_KEY}:portal-core" INPUT_FINGERPRINT="$input_fingerprint" node - <<'NODE'
+const fs = require('node:fs');
+const payload = JSON.parse(fs.readFileSync(process.env.PORTAL_DATA_PATH, 'utf8'));
+const generatedAt = String(payload?.generatedAt || '');
+const commit = payload?.sourceCommit;
+if (!generatedAt || commit?.status !== 'terminal'
+  || String(commit?.sourceRunKey || '') !== process.env.SOURCE_RUN_KEY
+  || String(commit?.inputFingerprint || '').toLowerCase() !== process.env.INPUT_FINGERPRINT
+  || String(commit?.generatedAt || '') !== generatedAt
+  || (payload.__sections && String(payload.__sections.generatedAt || '') !== generatedAt)) {
+  throw new Error('Portal core terminal identity/readback mismatch');
+}
+NODE
+}
+
+invalidate_portal_core_receipt() {
+  local reason="$1"
+  (( MORNING_PHASE_JOURNAL == 1 )) || return 0
+  STATE_FILE="$MORNING_REFETCH_STATE_FILE" DATE="$DATE" RUN_KEY="$DAILY_REFRESH_RUN_KEY" REASON="$reason" node - <<'NODE'
+const fs = require('node:fs');
+const file = process.env.STATE_FILE;
+const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (state.date !== process.env.DATE || state.runKey !== process.env.RUN_KEY || state.source?.status !== 'source_committed') {
+  throw new Error('Portal core invalidation requires matching source_committed journal');
+}
+state.phases ||= {};
+const prior = state.phases['portal-core'] || {};
+state.phases['portal-core'] = {...prior, status: 'failed', detail: process.env.REASON, updatedAt: new Date().toISOString()};
+delete state.phases.linksData;
+delete state.phases['daily-continuation'];
+state.status = 'downstream_incomplete';
+state.ready = false;
+state.updatedAt = new Date().toISOString();
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(tmp, file);
+NODE
+}
+
+complete_morning_publication() {
+  (( MORNING_PHASE_JOURNAL == 1 )) || return 0
+  STATE_FILE="$MORNING_REFETCH_STATE_FILE" DATE="$DATE" RUN_KEY="$DAILY_REFRESH_RUN_KEY" node - <<'NODE'
+const fs = require('node:fs');
+const file = process.env.STATE_FILE;
+const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+const required = ['dashboard', 'warehouse', 'business-domain-load', 'marketing-export',
+  'cost-ledger', 'portal-core', 'linksData', 'daily-continuation'];
+if (state.date !== process.env.DATE || state.runKey !== process.env.RUN_KEY
+  || state.source?.status !== 'source_committed'
+  || required.some(phase => state.phases?.[phase]?.status !== 'completed')) {
+  throw new Error('cannot mark publish_completed: required phase receipt missing');
+}
+state.status = 'publish_completed';
+state.ready = true;
+state.publishCompletedAt ||= new Date().toISOString();
+state.updatedAt = new Date().toISOString();
+const tmp = `${file}.${process.pid}.tmp`;
+fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o660});
+fs.renameSync(tmp, file);
+NODE
 }
 
 check_portal_health() {
@@ -179,6 +375,8 @@ export SHEIN_BI_PORTAL_TIMEOUT_MS="${SHEIN_BI_PORTAL_TIMEOUT_MS:-1800000}"
 export SHEIN_BI_PORTAL_DATA_MODE="${SHEIN_BI_PORTAL_DATA_MODE:-api}"
 
 DAILY_WARNINGS=()
+CRITICAL_QUEUE_IDENTITY_ARGS=()
+NONCRITICAL_QUEUE_IDENTITY_ARGS=()
 LINK_BUSINESS_MODE="${SHEIN_BI_DAILY_LINK_BUSINESS_MODE:-full}"
 LINK_BUSINESS_STATUS=0
 # Homepage-critical Portal sections (homeRankings..homeProfit) belong to the
@@ -222,7 +420,12 @@ case "$LINK_BUSINESS_MODE" in
     ;;
   finalize)
     echo "[cloud_daily_refresh] step=link-business mode=finalize date=$DATE"
-    if SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
+    if SHEIN_LINK_BUSINESS_FINALIZE_ONLY=1 \
+      SHEIN_LINK_BUSINESS_METRIC_REFETCH_ON_NOT_READY="$DAILY_METRIC_REFETCH_ON_NOT_READY" \
+      SHEIN_LINK_BUSINESS_METRIC_REFETCH_DEADLINE_EPOCH="$DAILY_REFRESH_DEADLINE_EPOCH" \
+      SHEIN_LINK_BUSINESS_METRIC_REFETCH_RUN_KEY="${DAILY_REFRESH_RUN_KEY:-$DATE}" \
+      SHEIN_LINK_BUSINESS_PER_STORE_BROWSER_WRAPPER="$DAILY_METRIC_REFETCH_BROWSER_WRAPPER" \
+      SHEIN_LINK_BUSINESS_REFRESH_PORTAL=0 \
       bash scripts/cloud_link_business_sync.sh "$DATE"; then
       LINK_BUSINESS_STATUS=0
     else
@@ -270,6 +473,39 @@ NODE
     exit 75
   fi
 fi
+if [[ -n "$DAILY_REFRESH_RUN_KEY" && -s "$MORNING_REFETCH_STATE_FILE" ]]; then
+  MORNING_STATE_IDENTITY="$({
+    STATE_FILE="$MORNING_REFETCH_STATE_FILE" DATE="$DATE" RUN_KEY="$DAILY_REFRESH_RUN_KEY" node - <<'NODE'
+const fs = require('node:fs');
+const state = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
+if (state.date === process.env.DATE && state.runKey === process.env.RUN_KEY
+  && state.source?.status === 'source_committed') {
+  const fingerprint = String(state.source?.fingerprint || '');
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error('source_committed fingerprint invalid');
+  process.stdout.write(`${fingerprint}|${String(state.status || '')}|${state.ready === true ? '1' : '0'}`);
+}
+NODE
+  })"
+  IFS='|' read -r MORNING_SOURCE_FINGERPRINT MORNING_STATE_STATUS MORNING_STATE_READY <<< "$MORNING_STATE_IDENTITY"
+  if [[ -n "$MORNING_SOURCE_FINGERPRINT" ]]; then
+    MORNING_PHASE_JOURNAL=1
+    CRITICAL_QUEUE_IDENTITY_ARGS=(--idempotency-key "${DAILY_REFRESH_RUN_KEY}:critical-sections")
+    NONCRITICAL_QUEUE_IDENTITY_ARGS=(--idempotency-key "${DAILY_REFRESH_RUN_KEY}:noncritical-sections")
+    echo "[cloud_daily_refresh] resume journal active runKey=$DAILY_REFRESH_RUN_KEY sourceFingerprint=$MORNING_SOURCE_FINGERPRINT"
+    verify_morning_source_fingerprint || exit 70
+    if [[ "$MORNING_STATE_STATUS" == "publish_completed" && "$MORNING_STATE_READY" == "1" ]]; then
+      if verify_portal_core_identity; then
+        check_portal_health
+        echo "[cloud_daily_refresh] same-run publish_completed source/core receipts revalidated; no downstream operation repeated"
+        exit 0
+      fi
+      invalidate_portal_core_receipt "terminal replay identity/readback mismatch"
+      MORNING_STATE_STATUS="downstream_incomplete"
+      MORNING_STATE_READY=0
+      echo "[cloud_daily_refresh] terminal Portal core receipt invalidated; resume core generation under same source identity" >&2
+    fi
+  fi
+fi
 if [[ "$LINK_BUSINESS_MODE" != "skip" ]]; then
   if [[ -s "$ROOT/state/cloud_ops_alerts/link-business-last-partial.json" ]]; then
     DAILY_WARNINGS+=("link-business partial")
@@ -283,10 +519,15 @@ fi
 
 echo "[cloud_daily_refresh] marketing current-price evidence is owned by cloud_marketing_live_guard; skip duplicate all-store scan"
 
-node scripts/marketing/export_marketing_price_leads_for_bi.mjs || {
-  DAILY_WARNINGS+=("marketing price export failed")
-  echo "[cloud_daily_refresh] WARN marketing price lead export failed; continue portal generation with existing snapshot" >&2
-}
+if (( MORNING_PHASE_JOURNAL == 1 )); then verify_morning_source_fingerprint || exit 70; fi
+if (( MORNING_PHASE_JOURNAL == 1 )) && [[ "$(morning_phase_status marketing-export)" == "completed" ]]; then
+  echo "[cloud_daily_refresh] marketing export receipt reused from link publication phase"
+else
+  node scripts/marketing/export_marketing_price_leads_for_bi.mjs || {
+    DAILY_WARNINGS+=("marketing price export failed")
+    echo "[cloud_daily_refresh] WARN marketing price lead export failed; continue portal generation with existing snapshot" >&2
+  }
+fi
 
 if [[ "${SHEIN_BI_DAILY_OPENAPI_RECONCILIATION:-0}" == "1" || "${SHEIN_BI_DAILY_OPENAPI_RECONCILIATION:-0}" == "true" ]]; then
   echo "[cloud_daily_refresh] step=openapi-reconciliation date=$DATE"
@@ -350,6 +591,7 @@ fi
 
 COST_LEDGER_STATUS=0
 CRITICAL_PORTAL_STATUS=0
+DAILY_CONTINUATION_STATUS=0
 # Inventory-critical linksData synchronous publication status.  It starts
 # UNPROVEN (nonzero) so any queue-mode run that never reaches a successful
 # linksData publish -- portal lock timeout, prewarm failure, or an entire
@@ -361,10 +603,24 @@ CRITICAL_PORTAL_STATUS=0
 INVENTORY_LINKS_STATUS=75
 if [[ "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "1" || "${SHEIN_BI_DAILY_INVENTORY_COST_REFRESH:-1}" == "true" ]]; then
   echo "[cloud_daily_refresh] step=inventory-cost-ledger"
-  if bash scripts/refresh_inventory_cost_ledger.sh; then
+  if (( MORNING_PHASE_JOURNAL == 1 )); then verify_morning_source_fingerprint || exit 70; fi
+  if (( MORNING_PHASE_JOURNAL == 1 )) && [[ "$(morning_phase_status cost-ledger)" == "completed" ]]; then
     COST_LEDGER_STATUS=0
+    echo "[cloud_daily_refresh] inventory cost ledger receipt reused for runKey=$DAILY_REFRESH_RUN_KEY"
   else
-    COST_LEDGER_STATUS=$?
+    update_morning_phase "cost-ledger" "running" "logicalRunKey=${DAILY_REFRESH_RUN_KEY}:inventory-cost"
+    if SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY="${DAILY_REFRESH_RUN_KEY:+${DAILY_REFRESH_RUN_KEY}:inventory-cost}" \
+      bash scripts/refresh_inventory_cost_ledger.sh; then
+      COST_LEDGER_STATUS=0
+      if [[ "${SHEIN_BI_DAILY_TEST_CRASH_AFTER_PHASE:-}" == "cost-ledger" ]]; then
+        echo "[cloud_daily_refresh] injected crash after cost-ledger DB commit before receipt" >&2
+        exit 75
+      fi
+      update_morning_phase "cost-ledger" "completed" "authoritative module readback exit=0"
+    else
+      COST_LEDGER_STATUS=$?
+      update_morning_phase "cost-ledger" "failed" "exit=$COST_LEDGER_STATUS"
+    fi
   fi
   if [[ "$COST_LEDGER_STATUS" -ne 0 ]]; then
     DAILY_WARNINGS+=("inventory cost ledger refresh failed status=$COST_LEDGER_STATUS")
@@ -401,11 +657,41 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
       echo "[cloud_daily_refresh] BI audit finished with status=$AUDIT_STATUS; continue portal generation so the page can show the audit result" >&2
     fi
 
-    node scripts/generate_bi_portal.mjs \
-      --metabase-url "$METABASE_URL" \
-      --data-mode "$SHEIN_BI_PORTAL_DATA_MODE"
-
-    node scripts/generate_bi_portal_shell.mjs
+    PORTAL_CORE_REUSE=0
+    PORTAL_INPUT_FINGERPRINT="$(portal_core_input_fingerprint)"
+    if (( MORNING_PHASE_JOURNAL == 1 )); then
+      verify_morning_source_fingerprint || exit 70
+      if [[ "$(morning_phase_status portal-core)" == "completed" ]]; then
+        if verify_portal_core_identity; then
+          PORTAL_CORE_REUSE=1
+          echo "[cloud_daily_refresh] Portal core receipt revalidated for runKey=$DAILY_REFRESH_RUN_KEY"
+        else
+          invalidate_portal_core_receipt "completed receipt identity/readback mismatch"
+          echo "[cloud_daily_refresh] Portal core completed receipt invalidated; rerun/fail closed under same identity" >&2
+        fi
+      fi
+    fi
+    if (( PORTAL_CORE_REUSE == 0 )); then
+      update_morning_phase "portal-core" "running" "inputFingerprint=$PORTAL_INPUT_FINGERPRINT"
+      if (( MORNING_PHASE_JOURNAL == 1 )); then
+        node scripts/generate_bi_portal.mjs \
+          --metabase-url "$METABASE_URL" \
+          --data-mode "$SHEIN_BI_PORTAL_DATA_MODE" \
+          --source-run-key "${DAILY_REFRESH_RUN_KEY}:portal-core" \
+          --input-fingerprint "$PORTAL_INPUT_FINGERPRINT"
+      else
+        node scripts/generate_bi_portal.mjs \
+          --metabase-url "$METABASE_URL" \
+          --data-mode "$SHEIN_BI_PORTAL_DATA_MODE"
+      fi
+      if [[ "${SHEIN_BI_DAILY_TEST_CRASH_AFTER_PHASE:-}" == "portal-core" ]]; then
+        echo "[cloud_daily_refresh] injected crash after Portal core commit before receipt" >&2
+        exit 75
+      fi
+      node scripts/generate_bi_portal_shell.mjs
+      if (( MORNING_PHASE_JOURNAL == 1 )); then verify_portal_core_identity; fi
+      update_morning_phase "portal-core" "completed" "terminal core identity verified; shell generated"
+    fi
 
     if command -v systemctl >/dev/null 2>&1; then
       systemctl is-active --quiet shein-bi-portal.service || systemctl start shein-bi-portal.service || true
@@ -414,16 +700,30 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
     if [[ "$SHEIN_BI_PORTAL_DATA_MODE" == "api" && "${SHEIN_BI_PORTAL_PREWARM_DISABLED:-0}" != "1" ]]; then
       if [[ "$LINK_BUSINESS_MODE" != "skip" ]]; then
         echo "[cloud_daily_refresh] refresh inventory-critical linksData section synchronously"
-        if SHEIN_BI_PORTAL_PREWARM_SECTIONS=linksData \
-          SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
-          SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
-          bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+        if (( MORNING_PHASE_JOURNAL == 1 )); then verify_morning_source_fingerprint || exit 70; fi
+        if (( MORNING_PHASE_JOURNAL == 1 )) && [[ "$(morning_phase_status linksData)" == "completed" ]]; then
           INVENTORY_LINKS_STATUS=0
-          echo "[cloud_daily_refresh] inventory-critical linksData section refreshed"
+          echo "[cloud_daily_refresh] inventory-critical linksData receipt reused"
         else
-          INVENTORY_LINKS_STATUS=$?
-          DAILY_WARNINGS+=("linksData section refresh failed")
-          echo "[cloud_daily_refresh] WARN linksData section refresh failed; inventory guard will fail closed or retry its own source preparation" >&2
+          update_morning_phase "linksData" "running" "stableRefreshToken=${DAILY_REFRESH_RUN_KEY}:linksData"
+          if SHEIN_BI_PORTAL_PREWARM_SECTIONS=linksData \
+            SHEIN_BI_PORTAL_PREWARM_ASYNC=0 \
+            SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED=1 \
+            SHEIN_BI_PORTAL_PREWARM_REFRESH_TOKEN="${DAILY_REFRESH_RUN_KEY:+${DAILY_REFRESH_RUN_KEY}:linksData}" \
+            bash scripts/prewarm_bi_portal_sections.sh 8>&-; then
+            INVENTORY_LINKS_STATUS=0
+            if [[ "${SHEIN_BI_DAILY_TEST_CRASH_AFTER_PHASE:-}" == "linksData" ]]; then
+              echo "[cloud_daily_refresh] injected crash after linksData terminal publish before receipt" >&2
+              exit 75
+            fi
+            update_morning_phase "linksData" "completed" "stable refresh token terminal exit=0"
+            echo "[cloud_daily_refresh] inventory-critical linksData section refreshed"
+          else
+            INVENTORY_LINKS_STATUS=$?
+            update_morning_phase "linksData" "failed" "exit=$INVENTORY_LINKS_STATUS"
+            DAILY_WARNINGS+=("linksData section refresh failed")
+            echo "[cloud_daily_refresh] WARN linksData section refresh failed; source_committed is retained for same-run downstream resume" >&2
+          fi
         fi
       else
         INVENTORY_LINKS_STATUS=0
@@ -460,9 +760,11 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
         if bash scripts/enqueue_bi_portal_sections.sh \
             --sections "$CRITICAL_PORTAL_SECTIONS" \
             --priority "${SHEIN_BI_DAILY_CRITICAL_PORTAL_QUEUE_PRIORITY:-10}" \
-            --reason "daily-refresh-$DATE"; then
+            --reason "daily-refresh-$DATE" \
+            "${CRITICAL_QUEUE_IDENTITY_ARGS[@]}"; then
           echo "[cloud_daily_refresh] homepage-critical sections queued"
         else
+          DAILY_CONTINUATION_STATUS=75
           DAILY_WARNINGS+=("homepage-critical section enqueue failed")
           echo "[cloud_daily_refresh] WARN homepage-critical section enqueue failed; the queue worker will not refresh these sections this run" >&2
         fi
@@ -471,9 +773,11 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
       if bash scripts/enqueue_bi_portal_sections.sh \
           --sections actions,productState,productSalesDaily,productTrafficDaily,comments,rtvData,waybills,rankings \
           --priority 50 \
-          --reason "daily-refresh-$DATE"; then
+          --reason "daily-refresh-$DATE" \
+          "${NONCRITICAL_QUEUE_IDENTITY_ARGS[@]}"; then
         echo "[cloud_daily_refresh] non-critical portal sections queued for bounded host-locked refresh"
       else
+        DAILY_CONTINUATION_STATUS=75
         DAILY_WARNINGS+=("portal section queue failed")
         echo "[cloud_daily_refresh] WARN portal section queue enqueue failed" >&2
       fi
@@ -500,4 +804,28 @@ if [[ "$CRITICAL_PORTAL_STATUS" -ne 0 \
   && "${SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS:-0}" == "1" ]]; then
   echo "[cloud_daily_refresh] critical Portal sections are incomplete; unified coordinator must retry before marking the daily publish complete" >&2
   exit 75
+fi
+
+if (( MORNING_PHASE_JOURNAL == 1 )); then
+  verify_morning_source_fingerprint || exit 70
+  if [[ "$COST_LEDGER_STATUS" -ne 0 || "$INVENTORY_LINKS_STATUS" -ne 0 || "$DAILY_CONTINUATION_STATUS" -ne 0 ]]; then
+    update_morning_phase "daily-continuation" "failed" \
+      "cost=$COST_LEDGER_STATUS linksData=$INVENTORY_LINKS_STATUS continuation=$DAILY_CONTINUATION_STATUS"
+    echo "[cloud_daily_refresh] source_committed downstream remains incomplete; same run will resume without refetch" >&2
+    exit 75
+  fi
+  update_morning_phase "daily-continuation" "running" "queues and health terminal"
+  if [[ "${SHEIN_BI_DAILY_TEST_CRASH_AFTER_PHASE:-}" == "daily-continuation" ]]; then
+    echo "[cloud_daily_refresh] injected crash after daily continuation before receipt" >&2
+    exit 75
+  fi
+  update_morning_phase "daily-continuation" "completed" "queues accepted with stable identities; portal health passed"
+  verify_morning_source_fingerprint || exit 70
+  if ! verify_portal_core_identity; then
+    invalidate_portal_core_receipt "final ready identity/readback mismatch"
+    echo "[cloud_daily_refresh] final ready blocked: Portal core identity/readback mismatch" >&2
+    exit 70
+  fi
+  complete_morning_publication
+  echo "[cloud_daily_refresh] publish_completed runKey=$DAILY_REFRESH_RUN_KEY"
 fi

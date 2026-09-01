@@ -30,12 +30,13 @@ function splitStores(value) {
 }
 
 function parseArgs(argv) {
-  const out = {stores: [], noLaunch: false, noClose: false};
+  const out = {stores: [], noLaunch: false, noClose: false, noLoginRecovery: false};
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--stores') out.stores.push(...splitStores(argv[++i]));
     else if (a === '--no-launch') out.noLaunch = true;
     else if (a === '--no-close' || a === '--keep-open') out.noClose = true;
+    else if (a === '--no-login-recovery') out.noLoginRecovery = true;
     else if (!a.startsWith('--')) out.stores.push(...splitStores(a));
   }
   out.stores = [...new Set(out.stores.map(s => s.toUpperCase()))];
@@ -238,7 +239,7 @@ async function auditStore(store, args) {
     await sleep(2500);
     let page = await readPage(cdp);
     result.beforeLogin = {href: page.href, title: page.title, isLogin: page.isLogin};
-    if (page.isLogin) {
+    if (page.isLogin && !args.noLoginRecovery) {
       result.loginRecovery = await recoverSheinLoginIfNeeded({
         evaluate: (body, arg) => cdp.eval(body, arg),
         reload: () => cdp.call('Page.reload', {ignoreCache: true}).catch(() => cdp.eval(`location.reload(); return {href: location.href};`)),

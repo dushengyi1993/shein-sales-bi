@@ -10,11 +10,15 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {
   createBiLiveUpdateBridge,
+  isOrdinaryCurrentDayAccountingEvent,
   liveAccountingEnabled,
   liveAccountingQueuePlan,
   liveSectionsForBiUpdate,
+  mergeBiLiveAccountingRefreshEvent,
   normalizeBiLiveUpdatePayload,
+  reevaluateBiLiveAccountingRefreshEvent,
 } from './serve_bi_portal.mjs';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -44,8 +48,8 @@ const order = normalizeBiLiveUpdatePayload(JSON.stringify({
 }), fixedNow);
 assert.deepEqual(order, {
   kind: 'order', receiptId: '', storeKey: 'TZ', entityId: 'GSH18A51T000BED',
-  businessDate: '', orderStatus: '', orderStatusDesc: '', cancelledBeforePickup: false,
-  salesQuantity: 0, salesSar: 0, occurredAt: '2026-07-23T11:59:59.000Z',
+    businessDate: '', orderStatus: '', orderStatusDesc: '', cancelledBeforePickup: false,
+    salesQuantity: 0, salesSar: 0, occurredAt: '2026-07-23T11:59:59.000Z', receivedAt: fixedNow.toISOString(),
 });
 assert.deepEqual(liveSectionsForBiUpdate('return'), ['liveSalesToday', 'orders', 'afterSales']);
 assert.deepEqual(
@@ -75,13 +79,19 @@ assert.deepEqual(liveSectionsForBiUpdate('product'), ['productState']);
 assert.deepEqual(liveSectionsForBiUpdate('inventory'), ['inventoryStock']);
 assert.deepEqual(liveSectionsForBiUpdate('platform'), []);
 assert.deepEqual(
+  liveAccountingQueuePlan({
+    kind: 'order',
+    businessDate: '2026-08-18',
+    occurredAt: '2026-08-18T12:00:00.000Z',
+    receivedAt: '2026-08-18T12:00:01.000Z',
+  }),
+  [],
+  'a current-day order must stay on the live overlay instead of advancing a multi-minute durable queue revision',
+);
+assert.deepEqual(
   liveAccountingQueuePlan({kind: 'order'}),
-  [
-    {section: 'profit', priority: 5},
-    {section: 'homeRankings', priority: 5},
-    {section: 'homeProfit', priority: 5},
-  ],
-  'a current-day order must advance canonical accounting before its live overlay rolls into history',
+  liveAccountingQueuePlan({kind: 'return', refreshHistoricalSections: true}),
+  'an order with missing date evidence must fail closed into the full historical invalidation plan',
 );
 assert.deepEqual(
   liveAccountingQueuePlan({kind: 'return', refreshHistoricalSections: true}),
@@ -115,6 +125,55 @@ const cancelled = normalizeBiLiveUpdatePayload(JSON.stringify({
 }), fixedNow);
 assert.equal(cancelled.entityId, 'GSH18V0390000KF');
 assert.equal(cancelled.businessDate, '2026-07-27');
+const invalidDate = normalizeBiLiveUpdatePayload(JSON.stringify({
+  kind: 'order', businessDate: '2026-07-27garbage', occurredAt: '2026-07-27T10:00:00.000Z',
+}), fixedNow);
+assert.equal(invalidDate.businessDate, '', 'a valid-looking date prefix with trailing garbage must fail closed');
+const ordinaryAfterUncertain = normalizeBiLiveUpdatePayload(JSON.stringify({
+  kind: 'order', businessDate: '2026-07-23', occurredAt: '2026-07-23T12:00:01.000Z',
+}), fixedNow);
+const mergedUncertain = mergeBiLiveAccountingRefreshEvent(invalidDate, ordinaryAfterUncertain, fixedNow);
+assert.equal(mergedUncertain.refreshHistoricalSections, true,
+  'an uncertain date followed by an ordinary order in one debounce window must retain full historical scope');
+assert.deepEqual(liveAccountingQueuePlan(mergedUncertain), liveAccountingQueuePlan({kind: 'return'}));
+const delayedAcrossMidnight = {
+  kind: 'order',
+  businessDate: '2026-08-21',
+  occurredAt: '2026-08-21T23:59:59+08:00',
+  receivedAt: '2026-08-22T00:00:05+08:00',
+};
+assert.equal(isOrdinaryCurrentDayAccountingEvent(delayedAcrossMidnight), false,
+  'classification must use the processing date rather than the delayed event timestamp');
+assert.deepEqual(liveAccountingQueuePlan(delayedAcrossMidnight), liveAccountingQueuePlan({kind: 'return'}));
+const beforeMidnight = mergeBiLiveAccountingRefreshEvent(null, {
+  kind: 'order',
+  businessDate: '2026-08-21',
+  occurredAt: '2026-08-21T23:59:49+08:00',
+  receivedAt: '2026-08-21T23:59:50+08:00',
+}, new Date('2026-08-21T23:59:50+08:00'));
+assert.equal(beforeMidnight.refreshHistoricalSections, false);
+const executedAfterMidnight = reevaluateBiLiveAccountingRefreshEvent(
+  beforeMidnight,
+  new Date('2026-08-22T00:00:35+08:00'),
+);
+assert.equal(executedAfterMidnight.refreshHistoricalSections, true,
+  'a debounce that crosses midnight must upgrade the prior-day mutation to sticky historical scope');
+assert.deepEqual(liveAccountingQueuePlan(executedAfterMidnight), liveAccountingQueuePlan({kind: 'return'}));
+const afterMidnightOrder = {
+  kind: 'order',
+  businessDate: '2026-08-22',
+  occurredAt: '2026-08-22T00:00:09+08:00',
+  receivedAt: '2026-08-22T00:00:10+08:00',
+};
+const crossMidnightBurst = mergeBiLiveAccountingRefreshEvent(
+  beforeMidnight,
+  afterMidnightOrder,
+  new Date('2026-08-22T00:00:10+08:00'),
+);
+assert.equal(crossMidnightBurst.refreshHistoricalSections, true,
+  'a post-midnight order joining the debounce burst must make the pre-midnight pending order sticky historical');
+assert.equal(crossMidnightBurst.accountingEventIdentities.length, 2);
+assert.deepEqual(liveAccountingQueuePlan(crossMidnightBurst), liveAccountingQueuePlan({kind: 'return'}));
 assert.equal(cancelled.cancelledBeforePickup, true);
 
 const bridge = createBiLiveUpdateBridge({
@@ -179,8 +238,10 @@ assert.match(productionClient, /if\(n==='liveSalesToday'\|\|n==='priceScatter'\)
 assert.match(productionClient, /home:\['homeRankings','afterSales','homeProfit','homeTrafficDaily','liveSalesToday'\]/, 'the homepage must load the current-day profit overlay even before a new SSE event');
 assert.match(productionClient, /if\(!\['liveSalesToday','productState'\]\.includes\(n\)\)params\.set\('async','1'\)/,
   'the lightweight today-sales and product-state sections must refresh synchronously');
-assert.match(productionClient, /params\.set\('refreshToken',LIVE_REFRESH_TOKEN\)/,
-  'all open pages must identify the same live event when requesting a section refresh');
+assert.match(productionClient, /LIVE_REFRESH_RUNNING&&LIVE_REFRESH_TOKEN\?LIVE_REFRESH_TOKEN:manualSectionRefreshToken\(n\)/,
+  'all open pages must identify the same live event while manual retries receive a distinct intent token');
+assert.match(productionClient, /params\.set\('refreshToken',refreshToken\)/,
+  'every forced section request must carry its selected live-event or manual intent token');
 assert.match(productionClient, /queueLiveRefresh\(\{kind:'order',receivedAt:at,sections:LIVE_ORDER_SECTIONS\}\)/, 'a newly opened page must catch up from the persisted last order receipt');
 assert.match(productionClient, /profitStoreRows/, 'the current-day store profit rows must replace the stale cached day');
 assert.match(productionClient, /订单变动已计入销售；利润正在同步/,
@@ -216,6 +277,14 @@ assert.match(portalServer, /liveAccountingRefreshStopped[\s\S]*!liveAccountingEn
   'disabled live updates must not leave a startup accounting timer or generator behind');
 assert.match(portalServer, /enqueueHostLockedBiSection\(section, generatedAt,[\s\S]*live-accounting-/,
   'returns and historical mutations must queue canonical accounting behind the shared host lock');
+assert.match(portalServer, /persistHomepageAccountingCatchupOnce[\s\S]*persistHostLockedBiSectionPlan\(\[[\s\S]*section: 'profit'[\s\S]*section: 'homeProfit'[\s\S]*homepage-accounting-stale-/,
+  'the stale-homepage discriminator must retain a bounded canonical profit catch-up after ordinary orders leave the heavy queue');
+assert.match(portalServer, /SHEIN_BI_CANONICAL_ACCOUNTING_CATCHUP_MS \|\| 15 \* 60_000/,
+  'ordinary orders must receive a browser-independent bounded canonical accounting catch-up');
+assert.match(portalServer, /liveCanonicalAccountingCatchupNeeded = true;[\s\S]*liveCanonicalAccountingCatchupRevision \+= 1/,
+  'every ordinary order must preserve eventual accounting intent without directly advancing the heavy queue');
+assert.match(portalServer, /runCanonicalAccountingCatchup[\s\S]*readProfitAccountingState\(args, generatedAt, \{forceFresh: true\}\)[\s\S]*persistHomepageAccountingCatchupOnce/,
+  'the bounded catch-up must check authoritative accounting freshness and persist the existing durable plan');
 assert.match(portalServer, /await persistHostLockedBiSectionPlan\(accountingQueue, generatedAt,[\s\S]*live-accounting-/,
   'live accounting must wait for durable queue persistence before reporting that work is queued');
 assert.match(portalServer, /live accounting queue persistence failed/,
@@ -232,10 +301,10 @@ assert.match(portalServer, /'accountingInputUpdatedAt', greatest\([\s\S]*fact\.a
   'return and after-sales mutations must invalidate profit without masquerading as new sales');
 assert.match(portalServer, /refreshHistoricalSections:[\s\S]*eventNeedsHistoricalRefresh/,
   'a webhook burst must preserve prior-day cancellation and return invalidation scope');
-assert.match(portalServer, /section === 'homeProfit'[\s\S]*deriveHomeProfitSectionFromProfitCache\(root, generatedAt\)[\s\S]*return derived/,
+assert.match(portalServer, /section === 'homeProfit'[\s\S]*getOrCreateBiSectionInFlight\([\s\S]*ownerSignal => deriveHomeProfitSectionFromProfitCache\(root, meta\.generatedAt, ownerSignal\)[\s\S]*const derived = await biSectionInFlight\.get\(deriveKey\)/,
   'forced historical profit refreshes must derive homeProfit instead of calling a nonexistent SQL section');
 assert.match(portalServer, /accountingQueued: true/,
-  'clients must be told that canonical accounting was queued without delaying live sales');
+  'historical and return clients must be told that canonical accounting was queued without delaying live sales');
 assert.match(portalServer, /BI_INLINE_FAST_SECTIONS = new Set\(\['liveSalesToday', 'productState', 'inventoryStock'\]\)/,
   'only genuinely lightweight live sections may generate inside the Portal process');
 assert.match(portalServer, /x-shein-bi-host-locked-worker/,
@@ -251,12 +320,16 @@ assert.match(portalServer, /refreshToken !== activeToken[\s\S]*biSectionPendingR
   'duplicate refreshes for the same live event must not queue another expensive rebuild');
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-bi-live-events-'));
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const port = await freePort();
 const authFile = path.join(temp, 'users.json');
+const portalDir = path.join(temp, 'portal');
+await fs.mkdir(portalDir, {recursive: true});
+await fs.writeFile(path.join(portalDir, 'index.html'), '<!doctype html><title>live events fixture</title>');
 await fs.writeFile(authFile, JSON.stringify({users: [{username: 'live-test', password: 'correct-password', role: 'admin'}]}));
 const server = spawn(process.execPath, [
   path.join(ROOT, 'scripts', 'serve_bi_portal.mjs'),
-  '--host', '127.0.0.1', '--port', String(port), '--dir', path.join(ROOT, 'outputs', 'bi-portal'),
+  '--host', '127.0.0.1', '--port', String(port), '--dir', portalDir,
   '--auth-file', authFile, '--htpasswd-file', path.join(temp, 'missing.htpasswd'),
   '--session-secret-file', path.join(temp, 'session-secret'), '--state-file', path.join(temp, 'state.json'),
   '--link-ops-task-file', path.join(temp, 'tasks.json'), '--link-ops-chat-file', path.join(temp, 'chats.json'),

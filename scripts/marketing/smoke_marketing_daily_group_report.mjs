@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   assessMarketingDailyDeliveryReadiness,
   buildMarketingDailyFinalMarkdown,
@@ -8,7 +11,7 @@ import {
   countOutstandingGuardRepairs,
   larkSendAccepted,
 } from './send_marketing_daily_group_report.mjs';
-import {resolveEffectiveCloudBiSsh} from './build_marketing_daily_guard_report.mjs';
+import {latestCurrentMarketingLiveScanFile, resolveEffectiveCloudBiSsh} from './build_marketing_daily_guard_report.mjs';
 
 const guardMarkdown = `# report
 ## 先看结论
@@ -29,6 +32,73 @@ assert.equal(resolveEffectiveCloudBiSsh({
 assert.equal(resolveEffectiveCloudBiSsh({
   root: '/workspace/local', cloudBiRoot: '/opt/shein-bi/app', cloudBiSsh: 'shein-bi-tencent',
 }), 'shein-bi-tencent', 'a workstation may still use the configured cloud SSH alias');
+
+const selectorTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'marketing-live-scan-selector-'));
+try {
+  const storesConfig = {stores: ['A', 'B', 'C'].map(storeKey => ({storeKey, enabled: true}))};
+  const writeScan = async (name, doc, mtime) => {
+    const file = path.join(selectorTmp, name);
+    await fs.writeFile(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+    fsSync.utimesSync(file, mtime, mtime);
+    return file;
+  };
+  const oldComplete = await writeScan('current-marketing-price-live-old-complete.json', {
+    ok: true,
+    partial: false,
+    createdAt: '2026-07-15T09:00:00+08:00',
+    stores: ['A', 'B', 'C'].map(store => ({store, ok: true, rows: [{store_key: store}]})),
+    rows: ['A', 'B', 'C'].map(store => ({store_key: store})),
+  }, new Date('2026-07-15T09:00:00+08:00'));
+  const todayPartial = await writeScan('current-marketing-price-live-today-partial.json', {
+    ok: false,
+    partial: true,
+    createdAt: '2026-07-16T09:00:00+08:00',
+    stores: [
+      {store: 'A', ok: true, rows: [{store_key: 'A'}]},
+      {store: 'B', ok: true, rows: [{store_key: 'B'}]},
+      {store: 'C', ok: false, rows: []},
+    ],
+    rows: [{store_key: 'A'}, {store_key: 'B'}],
+  }, new Date('2026-07-16T09:00:00+08:00'));
+  assert.equal(latestCurrentMarketingLiveScanFile(selectorTmp, /^current-marketing-price-live-.*\.json$/, storesConfig), todayPartial,
+    'today partial evidence must be selected over an older complete scan so guard fails closed');
+  const todayMerged = await writeScan('current-marketing-price-live-today-merged.json', {
+    ok: true,
+    partial: false,
+    createdAt: '2026-07-16T10:00:00+08:00',
+    mergeEvidence: {businessDate: '2026-07-16'},
+    stores: ['A', 'B', 'C'].map(store => ({store, ok: true, rows: [{store_key: store}]})),
+    rows: ['A', 'B', 'C'].map(store => ({store_key: store})),
+  }, new Date('2026-07-16T10:00:00+08:00'));
+  assert.equal(latestCurrentMarketingLiveScanFile(selectorTmp, /^current-marketing-price-live-.*\.json$/, storesConfig), todayMerged,
+    'same-day merged complete evidence must be selected after precise supplements close coverage');
+  const laterPartial = await writeScan('current-marketing-price-live-later-partial.json', {
+    ok: false,
+    partial: true,
+    createdAt: '2026-07-16T11:00:00+08:00',
+    stores: [
+      {store: 'A', ok: true, rows: [{store_key: 'A'}]},
+      {store: 'B', ok: true, rows: [{store_key: 'B'}]},
+      {store: 'C', ok: false, rows: []},
+    ],
+    rows: [{store_key: 'A'}, {store_key: 'B'}],
+  }, new Date('2026-07-14T09:00:00+08:00'));
+  assert.equal(latestCurrentMarketingLiveScanFile(selectorTmp, /^current-marketing-price-live-.*\.json$/, storesConfig), laterPartial,
+    'an 11:00 partial document must supersede a 10:00 complete merged document regardless of file mtime');
+  const latestMerged = await writeScan('current-marketing-price-live-latest-merged.json', {
+    ok: true,
+    partial: false,
+    createdAt: '2026-07-16T12:00:00+08:00',
+    mergeEvidence: {businessDate: '2026-07-16'},
+    stores: ['A', 'B', 'C'].map(store => ({store, ok: true, rows: [{store_key: store}]})),
+    rows: ['A', 'B', 'C'].map(store => ({store_key: store})),
+  }, new Date('2026-07-13T09:00:00+08:00'));
+  assert.equal(latestCurrentMarketingLiveScanFile(selectorTmp, /^current-marketing-price-live-.*\.json$/, storesConfig), latestMerged,
+    'a complete merged document may supersede partial evidence only when its document time is at least as new');
+  assert.notEqual(todayMerged, oldComplete);
+} finally {
+  await fs.rm(selectorTmp, {recursive: true, force: true});
+}
 const executionMarkdown = `# execution
 ## 结论
 - 计划可处理 9 个链接；本次实际新建/重建 7 个。
@@ -93,6 +163,7 @@ const queue = {
   updatedAt: '2026-07-31T04:02:00.000Z',
   counts: {totalRows: 9},
 };
+const guardSha256 = 'a'.repeat(64);
 assert.equal(assessMarketingDailyDeliveryReadiness({
   queue,
   guardReport: {createdAt: '2026-07-31T04:01:00.000Z'},
@@ -103,6 +174,29 @@ assert.equal(assessMarketingDailyDeliveryReadiness({
   guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
   executionReport,
 }).ready, true, 'a post-terminal final guard is deliverable');
+const hashBoundQueue = {
+  ...queue,
+  updatedAt: '2026-07-31T04:06:00.000Z',
+  sourceGuardHash: guardSha256,
+};
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: hashBoundQueue,
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+  executionReport,
+  guardSha256,
+}).ready, true, 'a matching guard hash permits queue updates after guard creation');
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: {...hashBoundQueue, sourceGuardHash: 'b'.repeat(64)},
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+  executionReport,
+  guardSha256,
+}).ready, false, 'a mismatched guard hash must fail closed');
+assert.equal(assessMarketingDailyDeliveryReadiness({
+  queue: hashBoundQueue,
+  guardReport: {createdAt: '2026-07-31T04:05:00.000Z'},
+  executionReport: {...executionReport, finishedAt: '2026-07-31T04:06:00.000Z'},
+  guardSha256,
+}).ready, false, 'a matching guard hash cannot bypass a later execution result');
 
 assert.equal(assessMarketingDailyDeliveryReadiness({
   queue: null,
@@ -213,7 +307,7 @@ const workerSource = await fs.readFile(
 );
 assert.match(
   workerSource,
-  /if \[\[ "\$QUEUE_STATUS" == "blocked" \]\]; then[\s\S]*?run_terminal_final_snapshot[\s\S]*?send_daily_group_report/,
+  /if \[\[ "\$QUEUE_STATUS" == "blocked" \]\]; then[\s\S]*?run_final_readback[\s\S]*?send_daily_group_report/,
   'terminal blockers must refresh final evidence before delivery',
 );
 assert.match(workerSource, /DEFER TO LOCAL before browser lease or SHEIN mutation/);

@@ -4,7 +4,7 @@ import {spawnSync} from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {
   buildBiOpsQueryContext,
   loadBiOpsQueryData,
@@ -236,6 +236,215 @@ try {
     });
     assert.equal(secret.status, 0, secret.stderr || secret.stdout);
     assert.match(secret.stdout, /敏感信息/);
+  }
+
+  {
+    // Core data that itself exceeds the aggregate object budget must fail
+    // closed; it must never be silently accepted under the per-file limit.
+    const fixture = await makeFixture('core-over-aggregate');
+    let threw = false;
+    try {
+      await loadBiOpsQueryData({question: '今天销售多少', dataPath: fixture.dataPath, maxAggregateBytes: 16});
+    } catch (error) {
+      threw = /aggregate budget/.test(String(error?.message || ''));
+    }
+    assert.equal(threw, true, 'core data exceeding the aggregate byte budget must fail closed');
+  }
+
+  {
+    // The second section must be rejected on the cumulative aggregate budget
+    // even though it fits its own per-file limit. The first section is truly
+    // loaded and the rejected one must not leak into data or loadedSections.
+    const fixture = await makeFixture('aggregate-budget');
+    const coreRow = {date: SALES_DATE, store_key: 'HL', gross_sales_sar: 10, gross_orders: 1, gross_quantity: 1};
+    await writeSection(fixture, 'homeRankings', {
+      rankings: {dailyStores: [{...coreRow, gross_sales_sar: 20}]},
+      pad: 'x'.repeat(20_000),
+    });
+    await writeSection(fixture, 'rankings', {
+      rankings: {dailyStores: [{...coreRow, gross_sales_sar: 30}]},
+      pad: 'x'.repeat(60_000),
+      leakMarker: 'rejected-rankings-must-not-merge',
+    });
+    const loaded = await loadBiOpsQueryData({
+      question: '销售排行',
+      dataPath: fixture.dataPath,
+      sectionsDir: fixture.sectionsDir,
+      sections: ['homeRankings', 'rankings'],
+      maxAggregateBytes: 40 * 1024,
+    });
+    assert.deepEqual(loaded.meta.loadedSections, ['homeRankings'], 'the second section must be skipped once the cumulative aggregate budget is exhausted');
+    const rejected = loaded.meta.attemptedSections.find(item => item.section === 'rankings');
+    assert.equal(rejected?.status, 'aggregate_too_large', 'a budget-exceeded section must be reported as aggregate_too_large, not loaded');
+    assert.equal(rejected?.maxBytes, undefined, 'aggregate rejection must carry no per-file maxBytes');
+    assert.ok(rejected?.size >= 60_000, 'aggregate evidence must carry the section file size');
+    assert.equal(rejected?.maxAggregateBytes, 40 * 1024);
+    assert.ok(Number.isInteger(rejected?.remaining) && rejected.remaining >= 0 && rejected.remaining < rejected.size, 'remaining budget must be recorded in evidence');
+    assert.equal(loaded.data.rankings.dailyStores.length, 1, 'the rejected section must not leak rows into data');
+    assert.equal(loaded.data.rankings.dailyStores[0].gross_sales_sar, 20, 'the rejected section must not override already merged data');
+    assert.equal(loaded.data.leakMarker, undefined, 'the rejected section payload must never be merged');
+  }
+
+  {
+    // per-file too_large and aggregate_too_large must stay distinguishable for
+    // the same fixture: one is the per-file cap, the other only a cumulative cap.
+    const fixture = await makeFixture('per-file-vs-aggregate');
+    const coreRow = {date: SALES_DATE, store_key: 'HL', gross_sales_sar: 10, gross_orders: 1, gross_quantity: 1};
+    await writeSection(fixture, 'homeRankings', {
+      rankings: {dailyStores: [{...coreRow, gross_sales_sar: 20}]},
+      pad: 'x'.repeat(4_000),
+    });
+    await writeSection(fixture, 'rankings', {
+      rankings: {dailyStores: [{...coreRow, gross_sales_sar: 30}]},
+      pad: 'x'.repeat(60_000),
+    });
+    const perFile = await loadBiOpsQueryData({
+      question: '销售排行',
+      dataPath: fixture.dataPath,
+      sectionsDir: fixture.sectionsDir,
+      sections: ['homeRankings', 'rankings'],
+      maxSectionBytes: 16 * 1024,
+    });
+    const perFileRejected = perFile.meta.attemptedSections.find(item => item.section === 'rankings');
+    assert.equal(perFileRejected?.status, 'too_large', 'a section beyond its own per-file cap must be too_large');
+    assert.equal(perFileRejected?.maxBytes, 16 * 1024);
+    assert.equal(perFileRejected?.maxAggregateBytes, undefined);
+    assert.deepEqual(perFile.meta.loadedSections, ['homeRankings']);
+
+    const agg = await loadBiOpsQueryData({
+      question: '销售排行',
+      dataPath: fixture.dataPath,
+      sectionsDir: fixture.sectionsDir,
+      sections: ['homeRankings', 'rankings'],
+      maxAggregateBytes: 24 * 1024,
+    });
+    const aggRejected = agg.meta.attemptedSections.find(item => item.section === 'rankings');
+    assert.equal(aggRejected?.status, 'aggregate_too_large', 'the same section must be aggregate_too_large when only the cumulative budget is exceeded');
+    assert.equal(aggRejected?.maxBytes, undefined);
+    assert.equal(aggRejected?.maxAggregateBytes, 24 * 1024);
+    assert.deepEqual(agg.meta.loadedSections, ['homeRankings']);
+  }
+
+  {
+    // A pre-aborted signal must fail fast with AbortError before any file is
+    // read, so a cancelled client never pays the cost of a heap-heavy query.
+    const fixture = await makeFixture('abort-before-read');
+    await writeSection(fixture, 'homeRankings', {rankings: {dailyStores: []}});
+    const controller = new AbortController();
+    controller.abort();
+    let aborted = false;
+    try {
+      await loadBiOpsQueryData({question: '今天销售多少', dataPath: fixture.dataPath, sectionsDir: fixture.sectionsDir, signal: controller.signal});
+    } catch (error) {
+      aborted = error?.name === 'AbortError';
+    }
+    assert.equal(aborted, true, 'a pre-aborted signal must fail fast with AbortError before any file is read');
+  }
+
+  {
+    // Cancellation while a large section is still being read must surface as
+    // AbortError (native readFile signal) instead of returning the section as
+    // available data. The file is large enough that read+parse cannot finish
+    // within the 5ms abort window.
+    const fixture = await makeFixture('abort-mid-read');
+    await writeSection(fixture, 'homeRankings', {
+      rankings: {dailyStores: []},
+      pad: 'x'.repeat(64 * 1024 * 1024),
+    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5);
+    let aborted = false;
+    try {
+      await loadBiOpsQueryData({
+        question: '今天销售多少',
+        dataPath: fixture.dataPath,
+        sectionsDir: fixture.sectionsDir,
+        maxSectionBytes: 96 * 1024 * 1024,
+        maxAggregateBytes: 96 * 1024 * 1024,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      aborted = error?.name === 'AbortError';
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal(aborted, true, 'aborting during a large section read must surface AbortError instead of completing');
+  }
+
+  {
+    // Peak regression: the Query path must load several large sections in a
+    // small V8 heap without OOM, serially, while preserving priority semantics.
+    const fixture = await makeFixture('small-heap-query');
+    const coreRow = {date: SALES_DATE, store_key: 'HL', gross_sales_sar: 10, gross_orders: 1, gross_quantity: 1};
+    await writeSection(fixture, 'homeRankings', {
+      rankings: {dailyStores: [{...coreRow, gross_sales_sar: 20}]},
+      pad: 'x'.repeat(20 * 1024 * 1024),
+    });
+    await writeSection(fixture, 'rankings', {
+      rankings: {dailyStores: [{...coreRow, gross_sales_sar: 30}]},
+      pad: 'x'.repeat(36 * 1024 * 1024),
+    });
+    const libUrl = pathToFileURL(path.join(ROOT, 'lib', 'bi_ops_query_context.mjs')).href;
+    const childLines = [
+      'import {loadBiOpsQueryData} from ' + JSON.stringify(libUrl) + ';',
+      'const fixture = JSON.parse(process.env.FIXTURE_JSON);',
+      'const loaded = await loadBiOpsQueryData({',
+      "  question: '销售排行',",
+      '  dataPath: fixture.dataPath,',
+      '  sectionsDir: fixture.sectionsDir,',
+      "  sections: ['homeRankings', 'rankings'],",
+      '  maxAggregateBytes: 64 * 1024 * 1024,',
+      '  maxSectionBytes: 64 * 1024 * 1024,',
+      '});',
+      "if (loaded.meta.loadedSections.length !== 2) throw new Error('expected both sections under the aggregate budget');",
+      "if (loaded.data.rankings.dailyStores[0].gross_sales_sar !== 30) throw new Error('priority semantics regressed');",
+      "if (loaded.data.pad.length !== 36 * 1024 * 1024) throw new Error('fully ranked section did not merge');",
+      "console.log('SMALL_HEAP_OK');",
+      '',
+    ];
+    const child = spawnSync(process.execPath, ['--max-old-space-size=256', '--input-type=module', '-e', childLines.join('\n')], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 60_000,
+      maxBuffer: 4 * 1024 * 1024,
+      env: {...process.env, FIXTURE_JSON: JSON.stringify(fixture)},
+    });
+    assert.equal(child.status, 0, child.stderr || child.stdout);
+    assert.match(child.stdout, /SMALL_HEAP_OK/);
+  }
+
+  {
+    // The parsed object must be the exact content of the file that was
+    // fstat-checked: because the check and the read now share one open
+    // FileHandle, a file that replaced the path after the size check could
+    // never be picked up by the read.
+    const fixture = await makeFixture('same-file-identity');
+    const expectedRow = {date: SALES_DATE, store_key: 'HL', gross_sales_sar: 7, gross_orders: 1, gross_quantity: 1};
+    await writeSection(fixture, 'homeRankings', {rankings: {dailyStores: [expectedRow]}});
+    const loaded = await loadBiOpsQueryData({question: '今天销售多少', dataPath: fixture.dataPath, sectionsDir: fixture.sectionsDir});
+    const entry = loaded.meta.attemptedSections.find(item => item.section === 'homeRankings');
+    assert.equal(entry?.status, 'loaded');
+    assert.deepEqual(loaded.data.rankings.dailyStores, [expectedRow], 'the loaded object must be exactly the content of the file that was checked');
+    assert.equal(loaded.data.rankings.dailyStores[0].gross_sales_sar, 7);
+    assert.ok(entry?.size > 0, 'the loaded size reflects the bytes actually read from the same handle');
+  }
+
+  {
+    // Invalid UTF-8 must fail closed even when the fstat size fits the cap;
+    // replacement decoding is not acceptable for business data.
+    const fixture = await makeFixture('actual-bytes-recheck');
+    await fs.writeFile(path.join(fixture.sectionsDir, 'homeRankings.json'), Buffer.alloc(700, 0xff));
+    const loaded = await loadBiOpsQueryData({
+      question: '今天销售多少',
+      dataPath: fixture.dataPath,
+      sectionsDir: fixture.sectionsDir,
+      sections: ['homeRankings'],
+      maxSectionBytes: 1000,
+    });
+    const entry = loaded.meta.attemptedSections.find(item => item.section === 'homeRankings');
+    assert.equal(entry?.status, 'invalid_utf8', 'invalid UTF-8 must be rejected explicitly');
+    assert.equal(entry?.size, 700, 'the rejection must carry the bytes actually read');
+    assert.deepEqual(loaded.meta.loadedSections, [], 'an oversized-by-actual-bytes section must not be treated as loaded data');
   }
 
   console.log('bi_ops_query_context: missing/stale shards, link metric filters, generation priority, deterministic trimming, and --answer checks passed');

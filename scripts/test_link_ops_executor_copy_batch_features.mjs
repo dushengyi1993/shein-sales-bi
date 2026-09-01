@@ -557,6 +557,17 @@ const exactSourceContext = {
   standardGoodsSn: 'HL-03012-SN',
   sourcePayloadSupplierCodes: ['HL-03012-SN'],
 };
+const mergedTargetIdentityPayload = {
+  ...clone(wallPlugPayload),
+  skc_list: [{supplier_code: 'TARGET-B', sale_name: 'Wall Plug'}],
+};
+check('exact source provenance uses pre-merge source identity', __testHooks.sourcePayloadSupplierCodesForProvenance({
+  exactSourceLock: true,
+  sourcePayloadSupplierCodes: ['SOURCE-A'],
+}, mergedTargetIdentityPayload), value => JSON.stringify(value) === JSON.stringify(['SOURCE-A']));
+check('exact source provenance fails closed when pre-merge identity is missing', __testHooks.sourcePayloadSupplierCodesForProvenance({
+  exactSourceLock: true,
+}, mergedTargetIdentityPayload), value => Array.isArray(value) && value.length === 0);
 // Locked owner authorization: the locked copy payload itself (exact DL
 // sourceSkc) already carries official Plug(Voltage)=220-240V, so the
 // deterministic range inference fills 1002322 without any live lookup.
@@ -614,6 +625,36 @@ const guardMismatchBlocked = await __testHooks.applyAttributeTemplateRules(
 check('source payload goods A with task goods B blocks provenance', guardMismatchBlocked.blockers.some(text => /与任务目标标准货号/.test(text)), true);
 check('goods-number mismatch does not fill payload', guardMismatchBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
 
+const explicitAliasPayload = {
+  ...clone(wallPlugPayload),
+  skc_list: [{supplier_code: 'SK-15032', sale_name: 'Wall Plug'}],
+};
+const explicitAliasApplied = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  explicitAliasPayload,
+  {
+    ...exactSourceContext,
+    standardGoodsSn: 'SK-15032',
+    sourcePayloadSupplierCodes: ['SK-15032热风梳'],
+  },
+);
+check('explicit reviewed alias allows same-product input voltage provenance', explicitAliasApplied.blockers.length, 0);
+check('explicit reviewed alias fills input voltage', explicitAliasApplied.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322 && row.attribute_extra_value === '220-240'), true);
+check('explicit reviewed alias records canonical identity', explicitAliasApplied.evidence.inputVoltageProvenance?.canonicalCode, 'SK-15032热风梳');
+check('explicit reviewed alias records registry mode', explicitAliasApplied.evidence.inputVoltageProvenance?.identityResolutionMode, 'explicit_alias_registry');
+
+const nearAliasBlocked = await __testHooks.applyAttributeTemplateRules(
+  provenanceClient({searchRows: [], spuInfoBySpu: {}}),
+  explicitAliasPayload,
+  {
+    ...exactSourceContext,
+    standardGoodsSn: 'SK-15032',
+    sourcePayloadSupplierCodes: ['SK15032'],
+  },
+);
+check('unregistered near-match alias remains blocked', nearAliasBlocked.blockers.some(text => /与任务目标标准货号/.test(text)), true);
+check('unregistered near-match alias does not fill payload', nearAliasBlocked.payload.product_attribute_list.some(row => Number(row.attribute_id) === 1002322), false);
+
 const guardPunctuationMismatchBlocked = await __testHooks.applyAttributeTemplateRules(
   provenanceClient({searchRows: [], spuInfoBySpu: {}}),
   clone(wallPlugPayload),
@@ -653,6 +694,11 @@ check('scope hash differs when source store/skc drift', __testHooks.sha256Stable
 const scopeOtherGoods = {payload: clone(wallPlugPayload), sourceStore: 'DL', sourceSkc: 'A', standardGoodsSn: 'HL-OTHER-SN'};
 check('scope hash differs when target goods number drifts', __testHooks.sha256Stable(scopeDl) !== __testHooks.sha256Stable(scopeOtherGoods), true);
 check('scope hash is stable for identical scope', __testHooks.sha256Stable(scopeDl), __testHooks.sha256Stable({...scopeDl}));
+const scopeAliasRegistryA = {...scopeDl, productAliasRegistryFingerprint: 'a'.repeat(64), productCatalogFingerprint: 'c'.repeat(64)};
+const scopeAliasRegistryB = {...scopeDl, productAliasRegistryFingerprint: 'b'.repeat(64), productCatalogFingerprint: 'c'.repeat(64)};
+const scopeCatalogB = {...scopeDl, productAliasRegistryFingerprint: 'a'.repeat(64), productCatalogFingerprint: 'd'.repeat(64)};
+check('scope hash changes when explicit alias registry fingerprint drifts', __testHooks.sha256Stable(scopeAliasRegistryA) !== __testHooks.sha256Stable(scopeAliasRegistryB), true);
+check('scope hash changes when product catalog fingerprint drifts', __testHooks.sha256Stable(scopeAliasRegistryA) !== __testHooks.sha256Stable(scopeCatalogB), true);
 
 const voltageConflictTemplateResponse = {
   code: '0',

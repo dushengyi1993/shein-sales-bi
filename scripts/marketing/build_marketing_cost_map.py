@@ -7,6 +7,7 @@ script is committed so the workflow can be reproduced on another machine.
 """
 
 import json
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -175,9 +176,11 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
     detail is unitized upstream (including box-item CaseQuantity fallback) and
     remains the denominator because its scope matches the fee numerator.  A
     fresh, matched operational sellable + damaged quantity is only a bounded
-    cross-check: stale evidence or a relative mismatch above 15% makes the
-    storage unit cost unavailable instead of silently diluting it with newly
-    arrived or otherwise unbilled stock.
+    cross-check: stale evidence or a relative mismatch above 15% keeps the
+    allocation blocked, but does not erase the direct billed unit price.  The
+    direct unit price remains the inventory cost balance divided by the latest
+    positive billed quantity; operational inventory is never used to dilute
+    the fee denominator.
     """
 
     rows = (bi.get("profit") or {}).get("productStorageDaily") or []
@@ -209,6 +212,7 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
             "currentQuantity": None,
             "inventoryCostBalanceSar": 0.0,
             "nonpositiveQuantityFeeDays": 0,
+            "hasBilledFeeEvidence": False,
             "methods": set(),
             "maxDate": None,
             "minDate": None,
@@ -244,6 +248,7 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
                 rec["totalFeeSar"] += fee
                 if previous_quantity > 0:
                     inventory_cost_balance += fee
+                    rec["hasBilledFeeEvidence"] = True
             if quantity:
                 rec["quantityDays"] += quantity
             if unit is not None:
@@ -272,7 +277,14 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
 
         candidate_unit = (
             rec["inventoryCostBalanceSar"] / billed_current_quantity
-            if billed_current_quantity > 0
+            if billed_current_quantity > 0 and rec["hasBilledFeeEvidence"]
+            else None
+        )
+        valid_candidate_unit = (
+            candidate_unit
+            if candidate_unit is not None
+            and math.isfinite(candidate_unit)
+            and candidate_unit >= 0
             else None
         )
         quantity_ratio = (
@@ -313,16 +325,30 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
                 allocation_source = "unitized_storage_daily_billed_current_quantity"
                 evidence_status = "fresh_quantity_crosscheck_passed"
 
-        unit = candidate_unit if allocation_quantity is not None else None
+        # `candidate_unit` is the direct billing evidence.  Allocation is a
+        # separate, deliberately fail-closed cross-check and must not decide
+        # whether this direct unit price is present.
+        unit = valid_candidate_unit
         storage_unit_basis = (
             "moving_average_remaining_inventory_storage_cost_over_unitized_billed_inventory"
-            if unit is not None
-            else "suspect_quantity_evidence_fail_closed"
+            if unit is not None and evidence_status == "fresh_quantity_crosscheck_passed"
+            else (
+                "billing_unit_cost_over_billed_current_quantity_with_crosscheck_warning"
+                if unit is not None
+                else "missing_billed_unit_cost_evidence"
+            )
         )
+        storage_method = " / ".join(sorted(rec["methods"]))
+        if unit is not None and storage_method.lower() in {"missing", "unknown"}:
+            storage_method = "billing_unit_cost"
+        if not storage_method and unit is not None:
+            storage_method = "billing_unit_cost"
+        if not storage_method:
+            storage_method = "missing"
         out[key] = {
             "standard": rec["standard"],
             "storageUnitCostSar": None if unit is None else round(unit, 4),
-            "storageUnitCostCandidateSar": None if candidate_unit is None else round(candidate_unit, 4),
+            "storageUnitCostCandidateSar": None if valid_candidate_unit is None else round(valid_candidate_unit, 4),
             "storageRecent30UnitCostSar": round(rec["recent30UnitSar"], 4) if rec["recent30Days"] else None,
             "storageAllHistoryUnitCostSar": round(rec["allUnitSar"], 4) if rec["allDays"] else None,
             "storageFeeSar": round(rec["totalFeeSar"], 4),
@@ -347,7 +373,7 @@ def build_storage_unit_map(bi: dict) -> dict[str, dict]:
             "storageQuantityDays": round(rec["quantityDays"], 4),
             "storageRecent30Days": rec["recent30Days"],
             "storageAllDays": rec["allDays"],
-            "storageMethod": " / ".join(sorted(rec["methods"])) or "missing",
+            "storageMethod": storage_method,
             "storageSourceDateMin": rec["minDate"].isoformat() if rec["minDate"] else None,
             "storageSourceDateMax": rec["maxDate"].isoformat() if rec["maxDate"] else None,
             "storageUnitBasis": storage_unit_basis,

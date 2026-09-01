@@ -15,7 +15,23 @@ import {
   executeLimitedDiscountWithInventoryTransaction,
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
+import {createMarketingActivityInventoryOpenApiAdapter} from '../../lib/marketing_activity_inventory_openapi.mjs';
 import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {
+  classifyUnifiedLoginRecovery,
+  hasConcreteStoreIdentityConflict,
+  isMarketingLoginRedirect,
+} from '../../lib/marketing_unified_login_recovery_contract.mjs';
+import {
+  assertBeforeOuter,
+  assertCanStartUnit,
+  boundedRecoveryTimeoutMs,
+  boundedTimeoutMs,
+  createDeadlineContract,
+  deadlineBoundAdapterFactory,
+  findPersistedMarketingTransactionContinuation,
+  isMarketingDeadlineError,
+} from '../../lib/cloud_marketing_deadline_contract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -29,6 +45,9 @@ function parseArgs(argv) {
     maxItems: 0,
     result: '',
     expectedWorkFingerprint: '',
+    gracefulCutoffEpochRaw: '',
+    outerHardDeadlineEpochRaw: '',
+    continuation: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -41,6 +60,9 @@ function parseArgs(argv) {
     else if (arg === '--max-items') args.maxItems = Number(argv[++i] || 0);
     else if (arg === '--result') args.result = path.resolve(argv[++i] || '');
     else if (arg === '--expected-work-fingerprint') args.expectedWorkFingerprint = String(argv[++i] || '').trim().toLowerCase();
+    else if (arg === '--graceful-cutoff-epoch') args.gracefulCutoffEpochRaw = String(argv[++i] || '').trim();
+    else if (arg === '--outer-hard-deadline-epoch') args.outerHardDeadlineEpochRaw = String(argv[++i] || '').trim();
+    else if (arg === '--continuation') args.continuation = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.guard) throw new Error('Missing --guard');
@@ -50,6 +72,12 @@ function parseArgs(argv) {
   if (args.expectedWorkFingerprint && !/^[a-f0-9]{64}$/.test(args.expectedWorkFingerprint)) {
     throw new Error('--expected-work-fingerprint must be a SHA256 hash');
   }
+  if (args.continuation && args.dryRunOnly) throw new Error('--continuation requires --execute');
+  args.date = date;
+  args.deadline = createDeadlineContract({
+    gracefulCutoffEpoch: args.gracefulCutoffEpochRaw,
+    outerHardDeadlineEpoch: args.outerHardDeadlineEpochRaw,
+  });
   return args;
 }
 
@@ -86,6 +114,19 @@ async function run(command, args, timeoutMs = 900000) {
   });
 }
 
+let ACTIVE_DEADLINE = null;
+
+function deadlineTimeout(timeoutMs, {recovery = false, label = 'bounded operation'} = {}) {
+  if (!ACTIVE_DEADLINE) return timeoutMs;
+  return recovery
+    ? boundedRecoveryTimeoutMs(ACTIVE_DEADLINE, {capMs: timeoutMs, label})
+    : boundedTimeoutMs(ACTIVE_DEADLINE, {capMs: timeoutMs, label});
+}
+
+async function runBounded(command, args, timeoutMs, options = {}) {
+  return await run(command, args, deadlineTimeout(timeoutMs, options));
+}
+
 function lastJson(text) {
   const source = String(text || '').trim();
   for (let i = source.lastIndexOf('{'); i >= 0; i = source.lastIndexOf('{', i - 1)) {
@@ -105,7 +146,9 @@ async function loadCommandOutput(result) {
 }
 
 async function launchStore(storeKey) {
-  return await run(process.execPath, ['scripts/launch_store_browser.mjs', storeKey, '--headless'], 60000);
+  return await runBounded(process.execPath, ['scripts/launch_store_browser.mjs', storeKey, '--headless'], 60000, {
+    label: `launch ${storeKey}`,
+  });
 }
 
 async function closeStore(storeKey) {
@@ -116,26 +159,91 @@ async function closeStore(storeKey) {
   return await run(process.execPath, cleanupArgs, 90000);
 }
 
-async function applyRescue(storeKey, port, rescuePath, execute) {
-  return await loadCommandOutput(await run(process.execPath, [
+async function applyRescue(storeKey, port, rescuePath, execute, {recovery = false} = {}) {
+  return await loadCommandOutput(await runBounded(process.execPath, [
     'scripts/marketing/apply_hl_limited_discount_rescue.mjs',
     '--store', storeKey,
     '--port', String(port),
     '--rescue', rescuePath,
     execute ? '--execute' : '--dry-run',
-  ], execute ? 1200000 : 900000));
+  ], execute ? 1200000 : 900000, {
+    recovery,
+    label: `${execute ? 'inventory restore/readback' : 'inventory preflight'} ${storeKey}`,
+  }));
 }
 
-async function replaceTransactionally(storeKey, port, rescuePath, execute) {
+function reportPathFromOutput(text, field) {
+  const summary = lastJson(text);
+  const value = String(summary?.[field] || '').trim();
+  return value ? path.resolve(ROOT, value) : '';
+}
+
+async function recoverMarketingLogin(storeKey, date) {
+  const reloginRun = await runBounded(process.execPath, [
+    'scripts/auto_relogin_shein_store.mjs',
+    storeKey,
+    '--date', date,
+    '--headless',
+  ], 240000, {label: `login recovery ${storeKey}`});
+  const reloginPath = reportPathFromOutput(reloginRun.stdout, 'reportFile');
+  const reloginReport = await readJsonIfExists(reloginPath);
+  const relogin = reloginReport?.results?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey)
+    || {ok: reloginRun.ok, blocker: '', blockerReason: reloginRun.stderr || ''};
+  if (relogin.ok !== true) {
+    return {
+      ok: false,
+      relogin: {ok: false, blocker: relogin.blocker || '', reason: relogin.blockerReason || relogin.reason || ''},
+      identity: null,
+      assessment: classifyUnifiedLoginRecovery({relogin}),
+    };
+  }
+
+  const identityRun = await runBounded(process.execPath, [
+    'scripts/marketing/check_store_profile_identity.mjs',
+    '--stores', storeKey,
+    '--no-launch',
+    '--no-close',
+    '--no-login-recovery',
+  ], 180000, {label: `identity readback ${storeKey}`});
+  const identityMatch = String(identityRun.stdout || '').match(/^JSON\s+(.+)$/m);
+  const identityReport = await readJsonIfExists(identityMatch?.[1] ? path.resolve(identityMatch[1].trim()) : '');
+  const identityRow = identityReport?.rows?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey) || null;
+  const identity = {
+    ok: identityRun.ok && identityRow?.ok === true,
+    mismatch: hasConcreteStoreIdentityConflict(identityRow),
+    reason: identityRow?.reason || identityRun.stderr || 'identity audit did not return an exact store match',
+  };
+  return {
+    ok: identity.ok,
+    relogin: {ok: true, blocker: '', reason: ''},
+    identity,
+    assessment: classifyUnifiedLoginRecovery({relogin, identity}),
+  };
+}
+
+async function replaceTransactionally(storeKey, port, rescuePath, execute, continuation = false, sourceRescuePath = rescuePath) {
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescuePath)).digest('hex');
-  return await loadCommandOutput(await run(process.execPath, [
+  const sourceRescueHash = crypto.createHash('sha256').update(await fs.readFile(sourceRescuePath)).digest('hex');
+  const deadlineArgs = execute && ACTIVE_DEADLINE ? [
+    '--graceful-cutoff-epoch', String(ACTIVE_DEADLINE.gracefulCutoffEpoch),
+    '--outer-hard-deadline-epoch', String(ACTIVE_DEADLINE.outerHardDeadlineEpoch),
+    '--min-finalization-budget-sec', String(ACTIVE_DEADLINE.minFinalizationBudgetSec),
+  ] : [];
+  return await loadCommandOutput(await runBounded(process.execPath, [
     'scripts/marketing/replace_limited_discount_transactionally.mjs',
     '--store', storeKey,
     '--port', String(port),
     '--rescue', rescuePath,
     '--expected-rescue-hash', rescueHash,
+    '--source-rescue', sourceRescuePath,
+    '--expected-source-rescue-hash', sourceRescueHash,
+    ...deadlineArgs,
+    ...(execute && continuation ? ['--continuation'] : []),
     execute ? '--execute' : '--dry-run',
-  ], execute ? 1200000 : 900000));
+  ], execute ? 1200000 : 900000, {
+    recovery: execute,
+    label: `${execute ? 'activity submit' : 'activity dry-run'} ${storeKey}`,
+  }));
 }
 
 function mixedConflicts(full) {
@@ -191,11 +299,12 @@ function exactReadback(full, expectedSkc, expectedPrice) {
 }
 
 async function updateRegistry(storeKey, skc, activityId, artifact) {
-  return await run(process.execPath, [
+  assertBeforeOuter(ACTIVE_DEADLINE, {label: `manual registry update ${storeKey}::${skc}`});
+  return await runBounded(process.execPath, [
     'scripts/marketing/manage_manual_limited_discount_override.mjs',
     'update-activity', '--store', storeKey, '--skc', skc,
     '--activity-id', String(activityId), '--readback-artifact', artifact,
-  ], 30000);
+  ], 30000, {label: `manual registry update ${storeKey}::${skc}`});
 }
 
 async function processOne(file, storeMap, args) {
@@ -204,9 +313,29 @@ async function processOne(file, storeMap, args) {
   const row = rescue.rows?.[0];
   const storeKey = String(rescue.storeKey || row?.storeKey || '').toUpperCase();
   const store = storeMap.get(storeKey);
-  const record = {storeKey, skc: row?.skc || '', specialPrice: row?.limitedDiscountPrice, rescuePath: rel(rescuePath), dryRun: null, lowEtFastSellerPricePullbackRevalidation: null, inventoryTransactionPlan: null, inventoryTransaction: null, transaction: null, execute: null, readback: null, registryUpdate: null, close: null, status: 'pending', ok: false, error: ''};
+  const record = {storeKey, skc: row?.skc || '', specialPrice: row?.limitedDiscountPrice, rescuePath: rel(rescuePath), dryRun: null, lowEtFastSellerPricePullbackRevalidation: null, inventoryTransactionPlan: null, inventoryTransaction: null, transaction: null, execute: null, readback: null, registryUpdate: null, close: null, status: 'pending', ok: false, terminalBlocked: false, recoverableDeferred: false, error: ''};
   try {
+    assertCanStartUnit(ACTIVE_DEADLINE, {
+      continuation: args.continuation,
+      label: `manual limited-discount item ${storeKey}::${row?.skc || ''}`,
+    });
     if (!store) throw new Error(`Unknown store ${storeKey}`);
+    if (args.continuation) {
+      const persisted = await findPersistedMarketingTransactionContinuation({
+        root: ROOT,
+        storeKey,
+        workFingerprint: args.expectedWorkFingerprint || process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+        rescuePath,
+      });
+      if (!persisted) {
+        record.status = 'deadline_deferred';
+        record.deferred = true;
+        record.recoverableDeferred = true;
+        record.error = 'continuation mode found no persisted transaction; no new item was started';
+        return record;
+      }
+      record.persistedContinuation = rel(persisted.file);
+    }
     record.lowEtFastSellerPricePullbackRevalidation = await revalidateLowEtFastSellerRescueArtifact({
       root: ROOT,
       rescue,
@@ -214,17 +343,58 @@ async function processOne(file, storeMap, args) {
     });
     if (!record.lowEtFastSellerPricePullbackRevalidation.ok) {
       record.status = 'manual_special_low_et_review_blocked';
+      record.terminalBlocked = true;
       record.error = record.lowEtFastSellerPricePullbackRevalidation.reason;
       return record;
     }
     const launch = await launchStore(storeKey);
     if (!launch.ok) throw new Error(`launch failed: ${launch.stderr || launch.stdout}`);
     let dry = await applyRescue(storeKey, store.port, rescuePath, false);
+    if (isMarketingLoginRedirect(dry)) {
+      const date = String(args.guard).match(/20\d{2}-\d{2}-\d{2}/)?.[0] || new Date().toISOString().slice(0, 10);
+      const recovery = await recoverMarketingLogin(storeKey, date);
+      record.loginRecovery = recovery;
+      if (recovery.assessment.terminal) {
+        record.status = 'login_terminal_blocker';
+        record.classification = 'login_terminal_blocker';
+        record.terminalBlocked = true;
+        record.terminal = true;
+        record.writeAttempted = false;
+        record.error = recovery.assessment.blocker;
+        return record;
+      }
+      if (!recovery.ok) {
+        record.status = 'recoverable_login_pending';
+        record.classification = 'recoverable_pending';
+        record.recoverableDeferred = true;
+        record.deferred = true;
+        record.writeAttempted = false;
+        record.error = recovery.assessment.blocker || 'login recovery incomplete';
+        return record;
+      }
+      dry = await applyRescue(storeKey, store.port, rescuePath, false);
+      const retryAssessment = classifyUnifiedLoginRecovery({
+        relogin: recovery.relogin,
+        identity: recovery.identity,
+        retry: dry,
+      });
+      record.loginRecovery = {...recovery, retryAssessment};
+      if (isMarketingLoginRedirect(dry)) {
+        record.status = 'recoverable_login_pending';
+        record.classification = 'recoverable_pending';
+        record.recoverableDeferred = true;
+        record.deferred = true;
+        record.writeAttempted = false;
+        record.error = retryAssessment.blocker || 'login redirect remained after one controlled recovery';
+        return record;
+      }
+    }
     record.dryRun = summarizeDryRun(dry.full, dry.outPath);
     if (!dry.full) throw new Error('dry-run produced no readable output');
     let dryAssessment = assessRecoverableDryRun(dry.full);
     if (!dryAssessment.ok && !dryAssessment.recoverable) {
       record.status = 'dry_run_blocked';
+      record.terminalBlocked = true;
       record.error = dryAssessment.reasons.join('; ');
       return record;
     }
@@ -255,6 +425,7 @@ async function processOne(file, storeMap, args) {
       });
       if (!record.inventoryTransactionPlan.ok) {
         record.status = 'inventory_transaction_plan_blocked';
+        record.terminalBlocked = true;
         record.error = record.inventoryTransactionPlan.blockers?.map(item => item.error || item.reason).join('; ') || 'inventory transaction plan blocked';
         return record;
       }
@@ -263,19 +434,49 @@ async function processOne(file, storeMap, args) {
       record.ok = true;
       return record;
     }
+    assertCanStartUnit(ACTIVE_DEADLINE, {
+      continuation: args.continuation,
+      label: `manual inventory transaction ${storeKey}::${row.skc}`,
+    });
     const activityInventoryTransaction = await executeLimitedDiscountWithInventoryTransaction({
       root: ROOT,
       storeKey,
       rescue,
       preflightFull: dry.full,
       transactionHash,
-      runSubmit: async () => await replaceTransactionally(storeKey, store.port, rescuePath, true),
-      runEnrollmentReadback: async () => await applyRescue(storeKey, store.port, rescuePath, false),
+      adapterFactory: deadlineBoundAdapterFactory(createMarketingActivityInventoryOpenApiAdapter, ACTIVE_DEADLINE, {
+        label: `manual inventory ${storeKey}::${row.skc}`,
+      }),
+      runSubmit: async () => {
+        assertBeforeOuter(ACTIVE_DEADLINE, {
+          reserveSec: ACTIVE_DEADLINE?.minFinalizationBudgetSec || 0,
+          label: `manual activity submit ${storeKey}::${row.skc}`,
+        });
+        return await replaceTransactionally(storeKey, store.port, rescuePath, true, args.continuation);
+      },
+      runEnrollmentReadback: async context => await applyRescue(
+        storeKey,
+        store.port,
+        rescuePath,
+        false,
+        {recovery: context?.phase === 'after_submit_without_inventory_transaction'
+          || context?.phase === 'after_submit_before_restore'
+          || context?.phase === 'after_restore'},
+      ),
     });
     record.inventoryTransaction = activityInventoryTransaction;
     const transaction = activityInventoryTransaction.commandResult;
     if (!activityInventoryTransaction.ok) {
       record.status = classifyActivityInventoryFailureStatus(activityInventoryTransaction);
+      const deadlineDeferred = (activityInventoryTransaction.blockers || [])
+        .some(blocker => isMarketingDeadlineError({
+          code: blocker?.code,
+          message: blocker?.error || blocker?.reason,
+        }));
+      record.deferred = deadlineDeferred;
+      record.recoverableDeferred = deadlineDeferred;
+      record.terminalBlocked = !deadlineDeferred && (activityInventoryTransaction.safe === true
+        || activityInventoryTransaction.writeAttempted !== true);
       record.error = activityInventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
         || 'activity inventory transaction failed';
       return record;
@@ -289,6 +490,10 @@ async function processOne(file, storeMap, args) {
       desiredCoveredSkcs: transaction.full?.desiredCoveredSkcs || [],
       restoredCoveredSkcs: transaction.full?.compensation?.restoredCoveredSkcs || [],
       uncoveredSkcs: transaction.full?.uncoveredSkcs || [],
+      writeAttempted: transaction.full?.writeAttempted === true,
+      mutationsStarted: transaction.full?.mutationsStarted === true,
+      submittedWithoutExactReadback: transaction.full?.submittedWithoutExactReadback === true
+        || transaction.full?.classification === 'submitted_without_exact_readback',
     };
     record.execute = record.transaction;
     if (!transaction.full) throw new Error(`transaction produced no readable output: ${transaction.stderr || transaction.stdout || ''}`);
@@ -306,7 +511,7 @@ async function processOne(file, storeMap, args) {
       rows: transaction.full.desiredCoveredSkcs || [],
     };
     if (record.readback.ok && !record.readback.activityId) {
-      const finalDryRun = await applyRescue(storeKey, store.port, rescuePath, false);
+      const finalDryRun = await applyRescue(storeKey, store.port, rescuePath, false, {recovery: true});
       record.readback = exactReadback(finalDryRun.full, row.skc, row.limitedDiscountPrice);
     }
     if (!record.readback.ok || !record.readback.activityId) throw new Error('execute readback did not prove exact special price/activity');
@@ -317,7 +522,14 @@ async function processOne(file, storeMap, args) {
     record.ok = true;
     return record;
   } catch (error) {
-    record.status = 'failed';
+    if (isMarketingDeadlineError(error)) {
+      record.status = 'deadline_deferred';
+      record.classification = 'recoverable_pending';
+      record.deferred = true;
+      record.recoverableDeferred = true;
+    } else {
+      record.status = 'failed';
+    }
     record.error = error.message;
     return record;
   } finally {
@@ -326,7 +538,47 @@ async function processOne(file, storeMap, args) {
   }
 }
 
+export function hasManualSubmittedPendingEvidence(result) {
+  return result?.classification === 'submitted_without_exact_readback'
+    || result?.status === 'submitted_without_exact_readback'
+    || result?.inventoryTransaction?.submitAttempted === true
+    || result?.transaction?.writeAttempted === true
+    || result?.transaction?.mutationsStarted === true
+    || result?.execute?.writeAttempted === true
+    || result?.execute?.mutationsStarted === true
+    || Number(result?.readback?.activityId || 0) > 0;
+}
+
+export function normalizeManualResumeResult(result) {
+  if (!result || result.ok === true || result.terminalBlocked === true
+    || !hasManualSubmittedPendingEvidence(result)) return result;
+  return {
+    ...result,
+    ok: false,
+    terminal: true,
+    terminalBlocked: true,
+    deferred: false,
+    recoverableDeferred: false,
+    writeAttempted: true,
+    status: 'submitted_without_exact_readback',
+    classification: 'submitted_without_exact_readback',
+  };
+}
+
+export function isManualResumeResultSettled(result) {
+  return result?.ok === true
+    || result?.terminalBlocked === true
+    || result?.classification === 'submitted_without_exact_readback';
+}
+
+export function manualResultDocumentMatches(previous, workFingerprint, dryRunOnly) {
+  return previous?.workFingerprint === workFingerprint
+    && previous?.dryRunOnly === dryRunOnly
+    && Array.isArray(previous?.results);
+}
+
 const args = parseArgs(process.argv.slice(2));
+ACTIVE_DEADLINE = args.deadline;
 let automationAuthorization = null;
 await fs.mkdir(args.outDir, {recursive: true});
 if (!args.skipBuild) {
@@ -352,21 +604,39 @@ const filter = new Set(args.stores);
 const files = (plan.rescueFiles || []).filter(file => !filter.size || filter.has(String(file.storeKey).toUpperCase()));
 const resultPath = args.result || path.join(args.outDir, `manual-limited-discount-restore-result-${Date.now()}.json`);
 const previous = await readJsonIfExists(resultPath);
-const previousResults = previous?.workFingerprint === workFingerprint && Array.isArray(previous.results)
-  ? previous.results
+const previousResults = manualResultDocumentMatches(previous, workFingerprint, args.dryRunOnly)
+  ? previous.results.map(normalizeManualResumeResult)
   : [];
-const successfulByPath = new Map(previousResults
-  .filter(row => row?.ok === true && row?.rescuePath)
+const settledByPath = new Map(previousResults
+  .filter(row => isManualResumeResultSettled(row) && row?.rescuePath)
   .map(row => [String(row.rescuePath), row]));
-const pendingFiles = files.filter(file => !successfulByPath.has(String(file.path)));
-const selectedFiles = args.maxItems > 0 ? pendingFiles.slice(0, args.maxItems) : pendingFiles;
+const pendingFiles = files.filter(file => !settledByPath.has(String(file.path)));
+let continuationFiles = pendingFiles;
+if (args.continuation) {
+  continuationFiles = [];
+  for (const file of pendingFiles) {
+    const persisted = await findPersistedMarketingTransactionContinuation({
+      root: ROOT,
+      storeKey: file.storeKey,
+      workFingerprint,
+      rescuePath: path.resolve(ROOT, file.path),
+    });
+    if (persisted) continuationFiles.push(file);
+  }
+}
+const continuationDeferredWithoutMatch = args.continuation && pendingFiles.length > 0 && continuationFiles.length === 0;
+const selectedFiles = args.maxItems > 0 ? continuationFiles.slice(0, args.maxItems) : continuationFiles;
 const processedThisRun = [];
-for (const file of selectedFiles) processedThisRun.push(await processOne(file, storeMap, args));
-const resultByPath = new Map(successfulByPath);
+for (const file of selectedFiles) {
+  processedThisRun.push(normalizeManualResumeResult(await processOne(file, storeMap, args)));
+}
+const resultByPath = new Map(settledByPath);
 for (const row of processedThisRun) resultByPath.set(String(row.rescuePath), row);
 const results = files.map(file => resultByPath.get(String(file.path))).filter(Boolean);
-const successfulPaths = new Set(results.filter(row => row?.ok === true).map(row => String(row.rescuePath)));
-const remainingItems = files.filter(file => !successfulPaths.has(String(file.path))).length;
+const settledPaths = new Set(results
+  .filter(isManualResumeResultSettled)
+  .map(row => String(row.rescuePath)));
+const remainingItems = files.filter(file => !settledPaths.has(String(file.path))).length;
 const output = {
   createdAt: new Date().toISOString(),
   guard: rel(args.guard),
@@ -377,17 +647,24 @@ const output = {
   totals: {
     processed: results.length,
     processedThisRun: processedThisRun.length,
-    resumedItems: successfulByPath.size,
+    resumedItems: settledByPath.size,
     remainingItems,
     restored: results.filter(row => row.status === 'restored').length,
     alreadyCovered: results.filter(row => row.status === 'already_covered_exact').length,
     blocked: results.filter(row => !row.ok).length,
+    deadlineDeferred: processedThisRun.filter(row => row.deferred === true).length + (continuationDeferredWithoutMatch ? 1 : 0),
+    recoverableDeferred: processedThisRun.filter(row => row.recoverableDeferred === true).length,
+    terminalBlocked: processedThisRun.filter(row => row.terminalBlocked === true).length,
   },
+  processedThisRunResults: processedThisRun,
   results,
 };
 await writeJsonAtomic(resultPath, output);
-const attemptedFailure = processedThisRun.some(row => !row.ok);
+const deadlineDeferred = continuationDeferredWithoutMatch || processedThisRun.some(row => row.deferred === true);
+const recoverableDeferred = processedThisRun.some(row => row.recoverableDeferred === true);
+const attemptedFailure = processedThisRun.some(row => !row.ok && !row.deferred && !row.terminalBlocked);
 const ok = !attemptedFailure && remainingItems === 0 && results.length === files.length && results.every(row => row.ok);
 console.log(JSON.stringify({ok, out: rel(resultPath), totals: output.totals}, null, 2));
 if (attemptedFailure) process.exitCode = 2;
+else if (deadlineDeferred || recoverableDeferred) process.exitCode = 4;
 else if (remainingItems > 0) process.exitCode = 3;

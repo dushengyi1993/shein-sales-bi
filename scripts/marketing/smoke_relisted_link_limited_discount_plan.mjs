@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,12 +91,14 @@ await fs.writeFile(priceOverridesPath, `${JSON.stringify({
     isTopExposureLink: true,
   }],
 }, null, 2)}\n`, 'utf8');
+const priceOverridesSha256 = crypto.createHash('sha256').update(await fs.readFile(priceOverridesPath)).digest('hex');
 
 const result = spawnSync(process.execPath, [
   'scripts/marketing/build_new_listing_limited_discount_plan.mjs',
   '--date', '2026-07-11',
   '--links-data', linksDataPath,
   '--price-overrides', priceOverridesPath,
+  '--expected-price-overrides-sha256', priceOverridesSha256,
   '--current-marketing-live-scan', liveScanPath,
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
@@ -140,6 +143,7 @@ const currentResult = spawnSync(process.execPath, [
   '--date', '2026-07-11',
   '--links-data', linksDataPath,
   '--price-overrides', priceOverridesPath,
+  '--expected-price-overrides-sha256', priceOverridesSha256,
   '--current-marketing-live-scan', liveScanPath,
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,
@@ -173,6 +177,7 @@ const futureFallbackResult = spawnSync(process.execPath, [
   '--date', '2026-07-11',
   '--links-data', linksDataPath,
   '--price-overrides', priceOverridesPath,
+  '--expected-price-overrides-sha256', priceOverridesSha256,
   '--current-marketing-live-scan', liveScanPath,
   '--link-history-dir', historyDir,
   '--stores-config', storesConfigPath,

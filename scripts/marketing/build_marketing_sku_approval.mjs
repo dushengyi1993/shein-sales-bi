@@ -6,6 +6,7 @@ import { normalizeGoodsSnDetailed } from '../../lib/product_sku_normalizer.mjs';
 import {
   buildSharedStorageCostIndex,
   findSharedStorageCost,
+  storageMethodForEvidence,
   storageEvidenceBlocksSharedFallback,
 } from '../../lib/marketing_shared_storage_cost.mjs';
 import {
@@ -208,6 +209,7 @@ for (const [sku, group] of bySku.entries()) {
   const oldSuggested = group.map(r => numValue(r['本次建议普通活动价SAR'])).filter(isNum);
   const couponRows = group.filter(r => String(r['优惠券活动ID/名称'] || '').trim());
   const limitRows = group.filter(r => String(r['限时折扣名称'] || '').trim());
+  const storageEvidenceStatuses = uniq(group.map(r => r._cloudCost.storageQuantityEvidenceStatus).filter(Boolean));
   const skuReviewReasons = uniq(group.map(r => r._approvalNormalized?.needsReview ? r._approvalNormalized.reviewReason : '').filter(Boolean));
   const skuNeedsReview = skuReviewReasons.length > 0;
   const missingCost = productCostValues.length === 0;
@@ -398,6 +400,8 @@ for (const [sku, group] of bySku.entries()) {
     status = '缺仓储口径，需复核';
     actionParts.push('云端未给出仓储/件，不能按0安全通过');
   } else {
+    const storageWarnings = storageEvidenceStatuses.filter(status => status !== 'fresh_quantity_crosscheck_passed');
+    if (storageWarnings.length) actionParts.push(`仓储计费单价已保留，交叉核验提示：${storageWarnings.join(' / ')}`);
     if (storageMissing && !storageRequiredForSelection) {
       actionParts.push('仓储费缺失不作为本轮自动剔除条件；筛选红线按不含仓储成本利润率');
     }
@@ -502,8 +506,15 @@ for (const [sku, group] of bySku.entries()) {
           ].filter(Boolean).join('；'),
       cost: roundOrNull(productCost, 4),
       storageUnitCostSar: roundOrNull(r._cloudCost.storageUnitCostSar, 4),
+      storageMethod: r._cloudCost.storageMethod || '',
       storageQuantityEvidenceStatus: r._cloudCost.storageQuantityEvidenceStatus || '',
       storageAllocationQuantitySource: r._cloudCost.storageAllocationQuantitySource || '',
+      storageQuantityDateGapDays: r._cloudCost.storageQuantityDateGapDays ?? null,
+      storageQuantityRatioOperationalToBilled: r._cloudCost.storageQuantityRatioOperationalToBilled ?? null,
+      storageQuantityRelativeDifference: r._cloudCost.storageQuantityRelativeDifference ?? null,
+      storageOperationalInventorySnapshotDate: r._cloudCost.storageOperationalInventorySnapshotDate || '',
+      storageSourceDateMin: r._cloudCost.storageSourceDateMin || '',
+      storageSourceDateMax: r._cloudCost.storageSourceDateMax || '',
       fullCost: roundOrNull(fullCost, 4),
       marginBeforeStorage: roundOrNull(marginBeforeStorage, 4),
       marginAfterStorage: roundOrNull(marginAfterStorage, 4),
@@ -540,7 +551,6 @@ for (const [sku, group] of bySku.entries()) {
   const cloudProfit = mostCommonObject(group.map(r => r._cloudCost.profitRow).filter(Boolean));
   const storageFeeTotals = group.map(r => r._cloudCost.storageFeeSar).filter(v => v !== null && v !== undefined && Number(v) >= 0);
   const storageQtyBases = group.map(r => r._cloudCost.quantityBasis).filter(v => v !== null && v !== undefined && Number(v) >= 0);
-  const storageEvidenceStatuses = uniq(group.map(r => r._cloudCost.storageQuantityEvidenceStatus).filter(Boolean));
   const sourceLabels = uniq(group.map(r => r._cloudCost.source).filter(Boolean));
   approvalRows.push({
     '系统结论': status,
@@ -967,6 +977,9 @@ const signupRows = executionRows.map(r => {
   const sourceRow = sourceRowByKey.get(`${r.storeKey}::${r.activityId}::${r.skc}`) || {};
   const exposureTreatment = r.isTopExposureLink ? '最新7日全店曝光Top5力度' : '普通力度';
   const storageText = r.storageUnitCostSar === null || r.storageUnitCostSar === undefined ? '仓储展示缺失' : '';
+  const storageWarningText = r.storageQuantityEvidenceStatus && r.storageQuantityEvidenceStatus !== 'fresh_quantity_crosscheck_passed'
+    ? `数量差异提示:${r.storageQuantityEvidenceStatus}`
+    : '';
   return [
     r.activityId, sourceRow['活动名称'] || '', sourceRow['报名截止'] || '', r.storeKey, r.canonical,
     String(r.canonical || '').replace(/^[A-Z0-9-]+/i, '') || r.canonical, r.skc, r.supplierNo, r.currentPrice,
@@ -974,7 +987,7 @@ const signupRows = executionRows.map(r => {
     r.storageUnitCostSar, r.fullCost, r.marginBeforeStorage, r.marginAfterStorage, exposureTreatment,
     r.newListingTopTreatment ? `是（上架${r.newListingShelfAgeDays ?? ''}天，按Top5力度）` : '否',
     r.selected ? '待用户确认，未提交' : '剔除/阻塞',
-    [r.excludeReason, storageText, r.note].filter(Boolean).join('；'), '',
+    [r.excludeReason, storageText, storageWarningText, r.note].filter(Boolean).join('；'), '',
   ];
 });
 const signupSheet = workbook.worksheets.add('报名明细');
@@ -1050,7 +1063,7 @@ const riskSourceRows = executionRows.filter(r =>
   || (isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin));
 const riskRows = riskSourceRows.length ? riskSourceRows.map(r => [
   r.storeKey, r.activityId, r.canonical, r.skc,
-  [r.platformAdjusted ? '平台最低降幅压价' : '', r.storageUnitCostSar === null || r.storageUnitCostSar === undefined ? '仓储展示缺失' : '', r.storageQuantityEvidenceStatus && r.storageQuantityEvidenceStatus !== 'fresh_quantity_crosscheck_passed' ? `仓储证据冲突:${r.storageQuantityEvidenceStatus}` : '', isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin ? '含仓储利润率低于15%' : ''].filter(Boolean).join('；'),
+  [r.platformAdjusted ? '平台最低降幅压价' : '', r.storageUnitCostSar === null || r.storageUnitCostSar === undefined ? '仓储展示缺失' : '', r.storageQuantityEvidenceStatus && r.storageQuantityEvidenceStatus !== 'fresh_quantity_crosscheck_passed' ? `数量差异提示:${r.storageQuantityEvidenceStatus}` : '', isNum(r.marginAfterStorage) && r.marginAfterStorage < targetFloorMargin ? '含仓储利润率低于15%' : ''].filter(Boolean).join('；'),
   r.targetPrice, r.marginBeforeStorage, r.marginAfterStorage,
   r.selected ? '商品成本边界通过，可进入普通活动待确认；仓储风险单列展示。' : '已阻塞，不进入报名。', r.storageAllocationQuantitySource || '',
 ]) : [['','','','','无风险项','','','','','']];
@@ -1305,11 +1318,12 @@ function lookupCloudCostInfo(keys) {
   const fullUnitCostSar = positiveOrNull(trueCost?.trueUnitCostSar)
     ?? (productUnitCostSar !== null && storageUnitCostSar !== null ? Number(productUnitCostSar) + Number(storageUnitCostSar) : null);
   const mappedStorageMethod = /^(?:missing|unknown)$/i.test(String(trueCost?.storageMethod || '').trim()) ? '' : trueCost?.storageMethod;
-  const storageMethodRaw = String(
-    storageEvidenceBlocked
-      ? `blocked:${trueCost.storageQuantityEvidenceStatus}`
-      : (mappedStorageMethod || profitRow?.storage_fee_method || sharedStorageCost?.storageMethod || ''),
-  ).trim() || (storageUnitCostSar === 0 ? 'cloud_zero_storage_fee' : 'missing');
+  const storageQuantityEvidenceStatus = trueCost?.storageQuantityEvidenceStatus || '';
+  const storageMethodRaw = storageMethodForEvidence({
+    storageUnitCostSar,
+    storageQuantityEvidenceStatus,
+    baseMethod: mappedStorageMethod || (storageEvidenceBlocked ? '' : (profitRow?.storage_fee_method || sharedStorageCost?.storageMethod || '')),
+  });
   const storageMethod = trueCost?.storageUnitBasis ? `${storageMethodRaw} / ${trueCost.storageUnitBasis}` : storageMethodRaw;
   const source = sharedStorageCost && !mappedStorageMethod
     ? sharedStorageCost.source
@@ -1323,8 +1337,14 @@ function lookupCloudCostInfo(keys) {
     storageRecent30FeeSar: roundOrNull(trueCost?.storageRecent30FeeSar, 4),
     storageRecent30Days: roundOrNull(trueCost?.storageRecent30Days, 4),
     storageUnitBasis: trueCost?.storageUnitBasis || '',
-    storageQuantityEvidenceStatus: trueCost?.storageQuantityEvidenceStatus || '',
+    storageQuantityEvidenceStatus,
     storageAllocationQuantitySource: trueCost?.storageAllocationQuantitySource || '',
+    storageQuantityDateGapDays: roundOrNull(trueCost?.storageQuantityDateGapDays, 4),
+    storageQuantityRatioOperationalToBilled: roundOrNull(trueCost?.storageQuantityRatioOperationalToBilled, 4),
+    storageQuantityRelativeDifference: roundOrNull(trueCost?.storageQuantityRelativeDifference, 4),
+    storageOperationalInventorySnapshotDate: trueCost?.storageOperationalInventorySnapshotDate || '',
+    storageSourceDateMin: trueCost?.storageSourceDateMin || '',
+    storageSourceDateMax: trueCost?.storageSourceDateMax || '',
     storageMethod,
     source,
     profitRow,
@@ -1342,6 +1362,7 @@ function costInfoFromActivityRow(row) {
     ?? positiveOrNull(rawCost.trueUnitCostSar)
     ?? (productUnitCostSar !== null && storageUnitCostSar !== null ? Number(productUnitCostSar) + Number(storageUnitCostSar) : productUnitCostSar);
   if (productUnitCostSar === null) return null;
+  const storageQuantityEvidenceStatus = rawCost.storageQuantityEvidenceStatus || '';
   return {
     productUnitCostSar: roundOrNull(productUnitCostSar, 4),
     storageUnitCostSar: roundOrNull(storageUnitCostSar, 4),
@@ -1351,9 +1372,19 @@ function costInfoFromActivityRow(row) {
     storageRecent30FeeSar: roundOrNull(rawCost.storageRecent30FeeSar, 4),
     storageRecent30Days: roundOrNull(rawCost.storageRecent30Days, 4),
     storageUnitBasis: rawCost.storageUnitBasis || '',
-    storageQuantityEvidenceStatus: rawCost.storageQuantityEvidenceStatus || '',
+    storageQuantityEvidenceStatus,
     storageAllocationQuantitySource: rawCost.storageAllocationQuantitySource || '',
-    storageMethod: rawCost.storageMethod || (storageUnitCostSar === null ? 'missing' : 'activity_review_row_cost'),
+    storageQuantityDateGapDays: roundOrNull(rawCost.storageQuantityDateGapDays, 4),
+    storageQuantityRatioOperationalToBilled: roundOrNull(rawCost.storageQuantityRatioOperationalToBilled, 4),
+    storageQuantityRelativeDifference: roundOrNull(rawCost.storageQuantityRelativeDifference, 4),
+    storageOperationalInventorySnapshotDate: rawCost.storageOperationalInventorySnapshotDate || '',
+    storageSourceDateMin: rawCost.storageSourceDateMin || '',
+    storageSourceDateMax: rawCost.storageSourceDateMax || '',
+    storageMethod: storageMethodForEvidence({
+      storageUnitCostSar,
+      storageQuantityEvidenceStatus,
+      baseMethod: rawCost.storageMethod || 'activity_review_row_cost',
+    }),
     source: rawCost.source ? `activity_review_row:${rawCost.source}` : 'activity_review_row_cost',
     profitRow: null,
   };

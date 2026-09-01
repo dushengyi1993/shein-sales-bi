@@ -12,6 +12,7 @@ WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_OPENAPI_PRODUCT_CACHE_DIR=/srv/shein-bi/runtime/openapi-product-cache
 Environment=SHEIN_BI_DAILY_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-daily-refresh.lock
 Environment=SHEIN_LARK_REPORT_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-daily-lark-report.lock
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-portal-refresh.lock
@@ -38,5 +39,6 @@ MemoryHigh=2200M
 MemoryMax=2800M
 OOMPolicy=stop
 KillMode=control-group
+ExecStartPre=+/usr/bin/install -d -o sheinops -g sheinops -m 0750 /srv/shein-bi/runtime/openapi-product-cache
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain daily-refresh --class browser --lock-wait-sec 120 --defer-state /srv/shein-bi/runtime/host-scheduler/daily-refresh.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_daily_refresh.sh yesterday
 SuccessExitStatus=75

@@ -766,7 +766,7 @@ function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
     diff: null,
     source: fillEvidence?.exists ? 'enrolled_goods_missing_price_and_fill_result_not_clean' : 'enrolled_goods_missing_price_and_no_fill_result',
     usedFillFallback: false,
-    unavailableButFillVerified: true,
+    unavailableButFillVerified: false,
     priceUnavailableNoFillEvidence: true,
     fillTargetPrice: fillRow?.targetPrice ?? null,
     fillEvidenceReason: fillEvidence?.reason || '',
@@ -977,6 +977,10 @@ for (const store of selectedStores) {
 }
 
 const allRows = storeResults.flatMap(store => store.rows || []);
+const plannedRowsByStore = new Map(args.stores.map(storeKey => [
+  storeKey,
+  plan.rows.filter(row => row.storeKey === storeKey).length,
+]));
 const summary = {
   ok: storeResults.every(store => store.ok),
   createdAt: new Date().toISOString(),
@@ -998,11 +1002,20 @@ const summary = {
     store.storeKey,
     {
       ok: store.ok,
-      plannedRows: (store.rows || []).length,
+      identityOk: store.identity?.ok === true,
+      loginRecoveryOk: store.loginRecovery?.ok === true,
+      approvedRowsOk: store.identity?.ok === true
+        && store.loginRecovery?.ok === true
+        && (store.rows || []).length === (plannedRowsByStore.get(store.storeKey) || 0)
+        && (store.rows || []).every(row => row.enrolledOrUnderReview && row.priceOk)
+        && (store.activities || []).every(activity => Number(activity.badPacketCount || 0) === 0),
+      plannedRows: plannedRowsByStore.get(store.storeKey) || 0,
+      checkedRows: (store.rows || []).length,
       missingRows: (store.rows || []).filter(row => !row.enrolledOrUnderReview).length,
       priceMismatchRows: (store.rows || []).filter(row => row.enrolledOrUnderReview && !row.priceOk).length,
       priceUnavailableButFillVerifiedRows: (store.rows || []).filter(row => row.priceUnavailableButFillVerified).length,
       priceUnavailableNoFillEvidenceRows: (store.rows || []).filter(row => row.priceUnavailableNoFillEvidence).length,
+      badPacketActivities: (store.activities || []).filter(activity => Number(activity.badPacketCount || 0) > 0).length,
       extraAvailableRows: (store.activities || []).reduce((sum, activity) => sum + Number(activity.extraAvailableCount || 0), 0),
       activityListGapRows: (store.activities || []).reduce((sum, activity) => sum + Number(activity.activityListGapCount || 0), 0),
       reason: store.reason || '',

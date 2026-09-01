@@ -517,6 +517,9 @@ function openApiSalesLoadSpecs(sales) {
 export function buildOpenApiSalesAtomicSql(sales) {
   let script = 'BEGIN;\n';
   script += `${buildStoreLoadLocksSql(sales.pairs)}\n`;
+  // Only the bulk staging transaction bypasses the AFTER mirror triggers.
+  // Targeted Webhook replacement deliberately uses its immediate mirror path.
+  script += "SET LOCAL shein_bi.bulk_openapi_sales_reconcile = 'on';\n";
   script += buildCleanupSql(sales.pairs);
   const results = [];
   for (const spec of openApiSalesLoadSpecs(sales)) {

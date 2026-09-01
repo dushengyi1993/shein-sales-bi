@@ -1,6 +1,6 @@
 # SHEIN 销售统计与 BI 经营系统
 
-SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / 自动运营工作区。生产以云端 BI、PostgreSQL warehouse、Metabase、DL 单一半托 OpenAPI App 下的 19 店授权与受控执行链为准。
+SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / 自动运营工作区。生产以云端 BI、PostgreSQL warehouse、Metabase、19 店独立半托 OpenAPI App 授权、DL 中央 Webhook 验签与受控执行链为准。
 
 ## 核心规则
 
@@ -8,7 +8,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - **本地 BI 已封存**：本地 `8787`、`SHEIN-*` Windows 计划任务和本地抓数任务只作回滚参考，除非明确回滚不得恢复。
 - **飞书 Base / 原生看板写入暂停**：`state/feishu-base-sync-paused.flag` 存在时不写 Base/看板；异常提醒保留，日报只保留手动入口，问数走 BI 网页或 CLI。飞书只读问数 service 必须保持暂停。
 - **SHEIN 写操作受控**：普通任务默认 dry-run，真实提交须满足账号权限、人+店+动作、确认与回读审计；云端营销 timer 是负责人长期策略授权的有限例外，不逐次索要人工确认或人工提供 hash，但系统仍必须为每轮自动计算、锁定并校验精确 payload/work hash，且只能执行策略白名单内的限时折扣动作，并强制实时证据、预校验和写后回读。
-- **云端部署纪律**：GitHub release 是源码基线，不等于已部署；稳定发布完成时，本机/GitHub/云端 tracked source 必须收敛到同一 commit，云端热修必须在同一事故内回填 GitHub。Portal 生成物和可变运行态不进入 Git。
+- **云端部署纪律**：GitHub release 是源码基线，不等于已部署；稳定发布完成时，本机/GitHub/云端 tracked source 必须收敛到同一 attested commit，生产 deployment marker 只能是 schema v3 的 `shein-bi-deployed-release/v3`，还要绑定 repository id、trust policy SHA-256、annotated tag object、attestation SHA-256、精确 main-push CI run/attempt 与 jobs SHA-256，以及 exact source fingerprint；旧 v2 marker 只作迁移读取兼容，不满足运行态健康门。云端热修必须在同一事故内回填 GitHub；Portal 生成物和可变运行态不进入 Git。
+- **单一维护总闸**：systemd、watchdog 与 Codex heartbeat 统一读取 `/var/lib/shein-bi-control/cloud-maintenance.json`；通过 generation/hash CAS 切换，禁止创建第二套 timer、queue 或巡检副本。canonical 控制目录和 marker 由 root 持有，业务服务只读，pause/resume 必须由 root 执行。
 - **负责人经验单向继承**：负责人本机 Codex Desktop/CLI 与负责人 BI 会话的长期经验自动进入网页；其他账号只消费，不能反向覆盖。普通同事界面不展示无业务意义的规则包版本号。
 
 ## 关键入口
@@ -18,6 +19,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 | 店铺范围 | 19 店：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL` |
 | 分组 | DSY：`DL DX FY LQ NM HL JY ZL TS MZ`；LGM：`CX YJ XL QY QH TZ JSH TZZ XC` |
 | BI 入口 | `https://sa.dushengyi.cc/`（应用内登录 + `bi_session`） |
+| 云端进程 | Portal `8787`；认证只读 Query `8791`；Webhook `8792`（均仅 loopback） |
 | 云端维护入口 | `https://sa.dushengyi.cc/cloud-login-maintenance` |
 | 云端代码目录 | `/opt/shein-bi/app` |
 | 云端 SSH | `ssh shein-bi-tencent` |
@@ -52,9 +54,10 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 - 同步/回灌 ET 仓储费：`bash scripts/cloud_et_storage_fee_sync.sh daily [YYYY-MM-DD]` / `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`
 - 仓储费利润对账：`node scripts/check_storage_fee_profit.mjs --mode local --start YYYY-MM-DD --end YYYY-MM-DD`
 - 跑云端 watchdog：`node scripts/cloud_ops_watchdog.mjs --dry-run`（systemd 状态已合并为一次批量读取）
+- 查看维护总闸：`node scripts/manage_cloud_maintenance_mode.mjs status`（pause/resume 必须使用 fresh generation/hash CAS）
 - 生成紧凑云端运行态证据：`node scripts/capture_ops_runtime_snapshot.mjs --out-dir <全新目录> --expected-commit <release-tag>`；后续用 `node scripts/inspect_ops_run.mjs --manifest <目录>/manifest.json` 先读摘要，再按 blocker 定向展开。
 - OpenAPI 商品/链接运营 CLI：`node scripts/bi_ops_cli.mjs --help`
-- 团队自动运营：普通成员使用 BI 网页；Owner/合伙人的只读经营问题统一用 `node scripts/bi_ops_cli.mjs query --text "..." --out <json>`。CLI 最多等待 30 秒收口正在生成的 section，原子写完整数据和相邻 `<json>.manifest.json`；当前 Codex 先检查 manifest 的 outcome/coverage/hash，再按需读取 `data`。`chat` 只用于受控运营动作或显式测试网页会话产品，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划；旧 `ask` 只是 `query` 兼容别名。`--scope-all` 仅全局只读，不扩大写权限。
+- 团队自动运营：普通成员使用 BI 网页；Owner/合伙人的只读经营问题统一用 `node scripts/bi_ops_cli.mjs query --text "..." --out <json>`。CLI 默认在 90 秒总预算内等待 section readiness；Query 429 忙碌时按 `Retry-After` 有界重试。它原子写完整数据和相邻 `<json>.manifest.json`；当前 Codex 先检查 manifest 的 outcome/coverage/hash，再按需读取 `data`。`chat` 只用于受控运营动作或显式测试网页会话产品，并用 `jobs` / `job` / `wait-job` 查看可恢复后台规划；旧 `ask` 只是 `query` 兼容别名。`--scope-all` 仅全局只读，不扩大写权限。
 - 负责人经验同步：`npm run owner-knowledge:scan`、`npm run owner-knowledge:sync`、`npm run owner-knowledge:status`；本机采用事件驱动 + 60 分钟兜底，active 规则发布到 GitHub `owner-knowledge` 分支。合伙人 CLI 用 `node scripts/bi_ops_cli.mjs knowledge-status` 检查任务前原子缓存；运行边界见 `docs/owner-knowledge-sync.md`。
 - 构建合伙人最小 CLI 包：`npm run partner-cli:package`；ZIP 与 SHA-256 写入忽略目录 `outputs/releases/`，不包含凭证和生产运行态。
 - 批量复制商品到多店：`node scripts/link_ops_hl_openapi_executor.mjs --help`（支持 `supplyPriceRange`、`shuffleImages`、`inferInputCurrentOverride`；价格/图片洗牌在同一任务内确定性复现，真实写仍须预演、精确 payload hash、确认和回读）
@@ -86,8 +89,9 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 
 | 主题 | 文档 |
 |---|---|
-| 2026.07.30.6 当前正式发布 | `docs/bi-ops-release-2026-07-30-6.md` |
-| 2026.07.30.5 上一正式发布 | `docs/bi-ops-release-2026-07-30-5.md` |
+| 2026.08.17.7 V4 稳定性源码发布 | `docs/bi-ops-release-2026-08-17-7.md` |
+| 2026-08-17 V4 稳定性审计与整改 | `docs/bi-v4-stability-audit-2026-08-17.md` |
+| 2026.08.17.6 整改前生产基线 | GitHub Release `2026.08.17.6` |
 | 2026.07.30 半托19店独立应用切回 | `docs/openapi-per-store-production-cutback-2026-07-30.md` |
 | 2026.07.30.4 上一正式发布 | `docs/bi-ops-release-2026-07-30-4.md` |
 | 2026.07.30.3 共享商品详情额度与持续门禁 | `docs/bi-ops-release-2026-07-30-3.md` |

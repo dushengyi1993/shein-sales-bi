@@ -77,10 +77,26 @@ assert.match(launcher, /--disk-cache-size=104857600/);
 assert.match(hygiene, /return `--disable-features=/);
 assert.match(hygiene, /OptimizationGuideOnDeviceModel/);
 assert.match(hygiene, /on_device_foundational_model_user_settings/);
+assert.match(hygiene, /openSync\(temporary, 'wx'/,
+  'profile metadata publication must use an exclusive same-directory temporary');
+assert.match(hygiene, /fs\.fsyncSync\(fd\)/,
+  'profile metadata publication must fsync the completed temporary file');
+assert.match(hygiene, /fs\.renameSync\(temporary, target\)/,
+  'profile metadata publication must publish through atomic rename');
+assert.match(hygiene, /Chrome profile metadata JSON is invalid/,
+  'malformed profile JSON must fail closed instead of becoming an empty object');
 assert.match(launcher, /LocalNetworkAccessChecks/);
 for (const source of [launcher, mainLauncher, etLauncher, manualLoginLauncher]) {
   assert.match(source, /disableChromeOnDeviceAiForProfile/);
   assert.match(source, /chromeDisabledFeaturesArg/);
+}
+for (const source of [launcher, mainLauncher]) {
+  assert.match(source, /writeJsonFileAtomicSync/,
+    'launcher Preferences and Local State writes must use the synchronous atomic JSON helper');
+  assert.match(source, /writeTextFileAtomicSync/,
+    'launcher PROFILE_NAME.txt writes must use the synchronous atomic text helper');
+  assert.doesNotMatch(source, /writeFileSync\(prefsPath|writeFileSync\(localStatePath/,
+    'launcher must not directly overwrite Chrome JSON metadata');
 }
 
 await fs.rm(root, {recursive: true, force: true});

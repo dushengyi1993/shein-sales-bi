@@ -114,6 +114,80 @@ for (const purpose of [
   assert.equal(state.stock.totalUsableInventory, 6, purpose);
 }
 
+const yjEvents = [];
+const yjState = fakeAdapterState();
+const yjRescue = {
+  purpose: 'high_click_special_via_manual_restore',
+  activityStock: 10,
+  endTime: '2026-08-25 23:59:59',
+  rows: [{
+    storeKey: 'YJ',
+    skc: 'sv260202233956355340972',
+    canonical: 'PA4-6L',
+    limitedDiscountPrice: 100,
+    activityStock: 10,
+  }],
+};
+const yjPreflight = {
+  validation: {
+    invalid: [
+      {skc: yjRescue.rows[0].skc, reason: 'query_goods error_code', error_code: 'mrs-simple_platform_limit_discounts-0006'},
+      {skc: yjRescue.rows[0].skc, reason: 'inventory below configured activity stock', inventory: 6, attendNum: 10},
+    ],
+  },
+};
+const yjTransaction = await executeLimitedDiscountWithInventoryTransaction({
+  root: ROOT,
+  storeKey: 'YJ',
+  rescue: yjRescue,
+  preflightFull: yjPreflight,
+  transactionHash: crypto.createHash('sha256').update('yj-inventory-before-terminal').digest('hex'),
+  adapterFactory: async () => ({
+    resolveTargets: async targets => targets.map(target => ({...target, skuCode: 'sku-yj'})),
+    acquireLock: async () => {
+      yjEvents.push('lock');
+      return async () => { yjEvents.push('release'); };
+    },
+    readStock: async () => {
+      yjEvents.push('stock-read');
+      return {...yjState.stock, skuCode: 'sku-yj'};
+    },
+    writeStock: async ({overwriteQuantity}) => {
+      yjEvents.push(overwriteQuantity > yjState.stock.totalInventoryQuantity ? 'temporary-raise' : 'restore');
+      const unavailable = Math.max(
+        yjState.stock.totalLockedQuantity,
+        yjState.stock.totalInventoryQuantity - yjState.stock.totalUsableInventory,
+      );
+      yjState.stock.totalInventoryQuantity = overwriteQuantity;
+      yjState.stock.totalUsableInventory = overwriteQuantity - unavailable;
+      return {ok: true};
+    },
+  }),
+  runSubmit: async () => {
+    yjEvents.push('activity-submit');
+    return {ok: true, full: limitedReadback(yjRescue)};
+  },
+  runEnrollmentReadback: async context => {
+    yjEvents.push(`activity-readback:${context.phase}`);
+    return {ok: true, full: limitedReadback(yjRescue)};
+  },
+});
+assert.equal(yjTransaction.ok, true);
+assert.equal(yjTransaction.extractedTargets.length, 1);
+assert.equal(yjTransaction.extractedTargets[0].minimumUsableInventory, 10);
+assert.deepEqual(yjTransaction.rows[0].before, {
+  skuCode: 'sku-yj',
+  totalInventoryQuantity: 8,
+  totalUsableInventory: 6,
+  totalLockedQuantity: 2,
+});
+assert.ok(yjEvents.indexOf('temporary-raise') < yjEvents.indexOf('activity-submit'));
+assert.ok(yjEvents.indexOf('activity-submit') < yjEvents.indexOf('activity-readback:after_submit_before_restore'));
+assert.ok(yjEvents.indexOf('activity-readback:after_submit_before_restore') < yjEvents.indexOf('restore'));
+assert.ok(yjEvents.indexOf('restore') < yjEvents.indexOf('activity-readback:after_restore'));
+assert.ok(yjEvents.indexOf('activity-readback:after_restore') < yjEvents.indexOf('release'));
+assert.equal(yjState.stock.totalUsableInventory, 6);
+
 const partialRescue = {
   purpose: 'target_price_drift_partial_platform_block',
   activityStock: 10,
@@ -217,7 +291,7 @@ assert.match(sources.legacy, /Legacy persistent marketing inventory top-up is di
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 50,
+  checks: 61,
   ordinaryRunners: 3,
   limitedDiscountPaths: 4,
   legacyPersistentTopUpExecutable: false,

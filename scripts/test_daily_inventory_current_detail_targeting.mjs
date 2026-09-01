@@ -4,9 +4,10 @@
  *
  * The first daily build must not block on cached detail for rows outside the
  * inventory-relevant set, and it must emit deduplicated, sorted
- * detailRefreshTargets for every inventory-relevant store+SPU so the guard can
- * refresh exactly those rows with current detail. A cached inventory-relevant
- * row still fails closed and still appears in the targets. The second daily
+ * detailRefreshTargets only for rows that can produce an inventory mutation so
+ * the guard can refresh exactly those rows with current detail. A cached
+ * actionable row still fails closed and still appears in the targets, while a
+ * non-actionable alert remains visible without blocking independent work. The second daily
  * build (--required-detail-targets, schema daily-inventory-detail-targets/v1)
  * re-validates each manifest target: missing from the refreshed snapshot, not
  * current, or missing supplierCode all block. The ET manifest schema
@@ -47,26 +48,26 @@ const completeness = {
 
 // One row per skc. r4 and r5 share store+SPU (dedup target case).
 const rows = {
-  r1: ['A', 'spu-rel-current', 'skc-rel-current', 'REL-1产品', '1', 'current'],
-  r2: ['A', 'spu-rel-cached', 'skc-rel-cached', 'CACHED-1产品', '1', 'cached'],
-  r3: ['A', 'spu-off-cached', 'skc-off-cached', 'OFF-1产品', '2', 'cached'],
-  r4: ['A', 'spu-rel-dup', 'skc-rel-dup-a', 'DUP-1产品', '1', 'current'],
-  r5: ['A', 'spu-rel-dup', 'skc-rel-dup-b', 'DUP-1产品', '1', 'current'],
-  r6: ['B', 'spu-b-current', 'skc-b-current', 'REL-2产品', '1', 'current'],
-  r7: ['A', 'spu-nocode', 'skc-nocode', '', '1', 'current'],
-  r8: ['A', 'spu-new-current', 'skc-new-current', 'NEW-1产品', '1', 'current'],
-  r9: ['A', 'spu-new-off', 'skc-new-off', 'NEWOFF-1产品', '2', 'cached'],
+  r1: ['A', 'spu-rel-current', 'skc-rel-current', 'REL-1产品', '1', 'current', 0],
+  r2: ['A', 'spu-rel-cached', 'skc-rel-cached', 'CACHED-1产品', '1', 'cached', 0],
+  r3: ['A', 'spu-off-cached', 'skc-off-cached', 'OFF-1产品', '2', 'cached', 100],
+  r4: ['A', 'spu-rel-dup', 'skc-rel-dup-a', 'DUP-1产品', '1', 'current', 0],
+  r5: ['A', 'spu-rel-dup', 'skc-rel-dup-b', 'DUP-1产品', '1', 'current', 0],
+  r6: ['B', 'spu-b-current', 'skc-b-current', 'REL-2产品', '1', 'current', 0],
+  r7: ['A', 'spu-nocode', 'skc-nocode', '', '1', 'current', 0],
+  r8: ['A', 'spu-new-current', 'skc-new-current', 'NEW-1产品', '1', 'current', 0],
+  r9: ['A', 'spu-new-off', 'skc-new-off', 'NEWOFF-1产品', '2', 'cached', 100],
 };
 
-const row = ([store, spu, skc, supplierCode, shelfStatusCode, source], sourceOverride) => ({
+const row = ([store, spu, skc, supplierCode, shelfStatusCode, source, usable], sourceOverride) => ({
   storeKey: store,
   spu,
   skc,
   skuCodes: [skc.replace(/^skc-/, 'sku-')],
   supplierCode,
   shelfStatusCode,
-  sheinUsableInventory: 100,
-  sheinInventoryQuantity: 100,
+  sheinUsableInventory: usable,
+  sheinInventoryQuantity: usable,
   sheinLockedQuantity: 0,
   sourceCompleteness: completeness[sourceOverride || source],
 });
@@ -89,6 +90,7 @@ await fs.writeFile(biFile, JSON.stringify({
         {match_key: 'OFF1', standard_goods_sn: 'OFF-1产品', current_sellable_quantity: 50, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 150},
         {match_key: 'DUP1', standard_goods_sn: 'DUP-1产品', current_sellable_quantity: 50, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 150},
         {match_key: 'REL2', standard_goods_sn: 'REL-2产品', current_sellable_quantity: 50, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 150},
+        {match_key: 'NEW1', standard_goods_sn: 'NEW-1产品', current_sellable_quantity: 50, et_store_snapshot_date: date, inventory_match_status: 'matched', days_of_supply_on_hand: 150},
       ],
     },
   },
@@ -96,7 +98,7 @@ await fs.writeFile(biFile, JSON.stringify({
 await fs.writeFile(linksFile, JSON.stringify({
   cachedAt: now,
   data: {
-    storeLinks: ['r1', 'r2', 'r3', 'r4', 'r5', 'r6'].map(key => {
+    storeLinks: ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r8'].map(key => {
       const [store, , skc, supplierCode] = rows[key];
       return {
         store_key: store,
@@ -261,14 +263,16 @@ assert.ok(missingSupplierCodeTarget.blockers.includes(
   'daily current-detail target has incomplete canonical evidence after refresh: store=A spu=spu-nocode',
 ));
 
-// 6b. The first build also fails closed when an inventory-relevant row lacks
-// canonical identity, even though no manifest exists yet.
+// 6b. A row that cannot produce an inventory mutation remains an item-scoped
+// alert even when canonical identity is unavailable; it must not block the
+// independent actionable rows in the first build.
 const missingSupplierCodeFirstBuild = await buildPlan('missing-supplier-code-first-build');
-assert.equal(missingSupplierCodeFirstBuild.executable, false);
-assert.equal(missingSupplierCodeFirstBuild.blockers.length, 1);
-assert.ok(missingSupplierCodeFirstBuild.blockers.includes(
-  'A OpenAPI product canonical evidence is incomplete: store=A spu=spu-nocode skc=skc-nocode',
-));
+assert.equal(missingSupplierCodeFirstBuild.executable, true);
+assert.equal(missingSupplierCodeFirstBuild.blockers.length, 0);
+assert.ok(missingSupplierCodeFirstBuild.linkAlerts.some(item => item.spu === 'spu-nocode'),
+  'the non-actionable canonical alert must remain visible');
+assert.ok(!missingSupplierCodeFirstBuild.detailRefreshTargets.some(item => item.spu === 'spu-nocode'),
+  'the non-actionable canonical alert must not become a detail target');
 
 // 6c. Every row under a manifest store+SPU target must have current canonical
 // evidence. Map insertion order must not allow a valid sibling SKC to hide a
@@ -416,7 +420,7 @@ assert.equal(stockEvidenceMissing.sourceEvidence.find(source => source.store ===
 // 11. Source contract: targets stay in the payload hash, both manifest schemas
 // are wired, and the current-detail gate applies only to inventory-relevant
 // rows after evaluatedRows is known; the second build must enforce full
-// manifest coverage of the re-computed target set.
+// manifest coverage of the re-computed actionable target set.
 const plannerSource = await fs.readFile(
   path.join(ROOT, 'scripts', 'inventory', 'build_daily_inventory_replenishment_plan.mjs'),
   'utf8',
@@ -427,8 +431,10 @@ assert.match(plannerSource, /daily-inventory-detail-targets\/v1/,
   'the daily manifest schema must be accepted and validated');
 assert.match(plannerSource, /et-low-inventory-detail-targets\/v1/,
   'the ET manifest schema compatibility must be retained');
-assert.match(plannerSource, /if \(!item\.inventoryRelevant\) continue;[\s\S]*?hasCurrentDetail !== true/,
-  'the current-detail gate must apply only after inventory relevance is known and only to relevant rows');
+assert.match(plannerSource, /const requiresDailyCurrentDetail = item => \{[\s\S]*?candidate\.action === 'set_exact'/,
+  'the current-detail target predicate must be tied to possible inventory mutations');
+assert.match(plannerSource, /if \(!requiresDailyCurrentDetail\(item\)\) continue;[\s\S]*?hasCurrentDetail !== true/,
+  'the current-detail gate must apply only to rows selected by the mutation predicate');
 assert.match(plannerSource, /not fully covered by manifest/,
   'the second daily build must fail closed when re-computed targets are not fully covered by the manifest');
 

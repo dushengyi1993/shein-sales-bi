@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'daily-inventory-plan-'));
 const date = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 const now = new Date().toISOString();
 const productsDir = path.join(tmp, 'products');
+const fileHash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 await fs.mkdir(path.join(productsDir, 'A'), {recursive: true});
 await fs.mkdir(path.join(productsDir, 'B'), {recursive: true});
 
@@ -181,6 +183,19 @@ assert.equal(plan.counts.soldOutLinksIgnoredSameStoreOnShelf, 1);
 assert.equal(plan.counts.etTotalRows, 9);
 assert.equal(plan.counts.etMatchedCurrentDayRows, 9);
 assert.equal(plan.sourceEvidence.find(row => row.store === 'ET')?.matchedCurrentDayEtRows, 9);
+for (const store of ['A', 'B']) {
+  const evidence = plan.sourceEvidence.find(row => row.store === store);
+  const legacyLatest = path.join(productsDir, store, 'latest.json');
+  assert.ok(evidence, `missing OpenAPI source evidence for ${store}`);
+  assert.equal(evidence.sourceFile, legacyLatest);
+  assert.notEqual(evidence.file, legacyLatest);
+  assert.match(evidence.file.replaceAll(path.sep, '/'), new RegExp(`source-evidence/${date}/openapi-product-cache/${store}/[a-f0-9]{64}\\.json$`));
+  assert.equal(evidence.sha256, await fileHash(evidence.file));
+  const originalLegacyLatest = await fs.readFile(legacyLatest);
+  await fs.writeFile(legacyLatest, JSON.stringify({fetchedAt: now, summary: {stockFailedChunkCount: 0}, normalizedRows: []}));
+  assert.equal(evidence.sha256, await fileHash(evidence.file), 'plan-private OpenAPI artifact must survive latest replacement');
+  await fs.writeFile(legacyLatest, originalLegacyLatest);
+}
 assert.deepEqual(plan.lowEtAllocations.map(row => row.targetUsableInventory), [2, 2, 2, 1, 1, 0]);
 assert.equal(plan.actionable.find(row => row.skc === 'skc-scarce')?.targetUsableInventory, 10);
 assert.equal(plan.ignored.find(row => row.skc === 'skc-stable')?.decision, 'recent_sale_scarcity_inventory_within_band');
@@ -192,6 +207,26 @@ assert.deepEqual(plan.crossStoreSoldOutFindings.map(row => row.skc), ['skc-cross
 assert.deepEqual(plan.actionable.filter(row => row.matchKey === 'ALLSOLD-1产品').map(row => [row.storeKey, row.targetUsableInventory]), [['A', 100], ['B', 10]]);
 assert.equal(plan.ignored.some(row => row.matchKey === 'ALLSOLD-1产品'), false);
 assert.match(plan.payloadHash, /^[a-f0-9]{64}$/);
+assert.equal(plan.payloadHash, stableInventoryHash(buildDailyInventoryPlanHashPayload(plan)));
+const builderVolatileAgePlan = {
+  ...plan,
+  sourceEvidence: plan.sourceEvidence.map(evidence => ({
+    ...evidence,
+    ageHours: 99,
+    manifestAgeSeconds: 999,
+    endpointAgeSeconds: {store_stock: 888, box_stock: 777},
+  })),
+};
+assert.equal(
+  stableInventoryHash(buildDailyInventoryPlanHashPayload(builderVolatileAgePlan)),
+  plan.payloadHash,
+  'builder hash must exclude all three volatile sourceEvidence age fields',
+);
+assert.notEqual(
+  stableInventoryHash(buildDailyInventoryPlanHashPayload({...plan, etFactSource: {kind: 'builder-hash-drift'}})),
+  plan.payloadHash,
+  'builder hash must bind etFactSource',
+);
 
 const conflictingLinksFile = path.join(tmp, 'linksData-conflict.json');
 const conflictingLinks = JSON.parse(await fs.readFile(path.join(tmp, 'linksData.json'), 'utf8'));
@@ -313,7 +348,16 @@ const executorPlan = {
   date,
   policyVersion: executorPolicyVersion,
   generatedAt: now,
-  sourceEvidence: [],
+  etFactSource: {kind: 'portal_projection', fixture: 'daily-plan-hash-contract'},
+  sourceEvidence: [{
+    store: 'ET',
+    file: 'outputs/bi-portal/sections/inventoryTrend.json',
+    fetchedAt: now,
+    ageHours: 0.125,
+    manifestAgeSeconds: 12,
+    endpointAgeSeconds: {store_stock: 11, box_stock: 12},
+  }],
+  executionConstraints: {mode: 'daily', decreaseOnly: false},
   blockers: [],
   executable: true,
   actionable: executorActions,
@@ -325,15 +369,7 @@ const executorPlan = {
   etAlerts: [],
   counts: {actionable: executorActions.length},
 };
-executorPlan.payloadHash = stableInventoryHash({
-  schemaVersion: executorPlan.schemaVersion,
-  date: executorPlan.date,
-  policyVersion: executorPlan.policyVersion,
-  actionable: executorPlan.actionable,
-  lowEtAllocations: executorPlan.lowEtAllocations,
-  detailRefreshTargets: executorPlan.detailRefreshTargets,
-  sourceEvidence: [],
-});
+executorPlan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(executorPlan));
 await fs.writeFile(executorPlanFile, JSON.stringify(executorPlan));
 await fs.writeFile(path.join(tmp, 'executor-bi.json'), JSON.stringify({cachedAt: now, data: {}}));
 await fs.writeFile(path.join(tmp, 'executor-links.json'), JSON.stringify({cachedAt: now, data: {}}));
@@ -360,8 +396,73 @@ try {
   process.argv = originalArgv;
 }
 assert.ok(executorError, 'the executor must fail when actionable rows exceed --max-rows');
+assert.doesNotMatch(String(executorError?.message || ''), /Plan payload hash mismatch/,
+  'the executor must accept the builder-compatible hash before enforcing the row ceiling');
 assert.match(String(executorError?.message || ''), /exceed the per-run row ceiling/);
 await assert.rejects(fs.access(executorOut), 'no result file may be written for a ceiling failure');
 await assert.rejects(fs.access(`${executorOut}.journal.ndjson`), 'no journal may be written for a ceiling failure');
 
-console.log(JSON.stringify({ok: true, checks: 59}, null, 2));
+const volatileAgeExecutorPlan = {
+  ...executorPlan,
+  sourceEvidence: executorPlan.sourceEvidence.map(evidence => ({
+    ...evidence,
+    ageHours: 99,
+    manifestAgeSeconds: 999,
+    endpointAgeSeconds: {store_stock: 888, box_stock: 777},
+  })),
+};
+await fs.writeFile(executorPlanFile, JSON.stringify(volatileAgeExecutorPlan));
+let volatileAgeExecutorError = null;
+process.argv = [
+  process.execPath,
+  path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'),
+  '--plan', executorPlanFile,
+  '--config', path.join(tmp, 'executor-config.json'),
+  '--bi-data', path.join(tmp, 'executor-bi.json'),
+  '--links-data', path.join(tmp, 'executor-links.json'),
+  '--out', executorOut,
+  '--dry-run',
+  '--max-rows', '1000',
+];
+try {
+  await import(`./inventory/execute_daily_inventory_replenishment_plan.mjs?volatileAges=${Date.now()}`);
+} catch (error) {
+  volatileAgeExecutorError = error;
+} finally {
+  process.exitCode = 0;
+  process.argv = originalArgv;
+}
+assert.ok(volatileAgeExecutorError);
+assert.doesNotMatch(String(volatileAgeExecutorError?.message || ''), /Plan payload hash mismatch/,
+  'executor must use the same canonical exclusions for all three volatile age fields');
+assert.match(String(volatileAgeExecutorError?.message || ''), /exceed the per-run row ceiling/);
+
+const etFactSourceDriftExecutorPlan = {
+  ...executorPlan,
+  etFactSource: {...executorPlan.etFactSource, fixture: 'executor-hash-drift'},
+};
+await fs.writeFile(executorPlanFile, JSON.stringify(etFactSourceDriftExecutorPlan));
+let etFactSourceExecutorError = null;
+process.argv = [
+  process.execPath,
+  path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'),
+  '--plan', executorPlanFile,
+  '--config', path.join(tmp, 'executor-config.json'),
+  '--bi-data', path.join(tmp, 'executor-bi.json'),
+  '--links-data', path.join(tmp, 'executor-links.json'),
+  '--out', executorOut,
+  '--dry-run',
+  '--max-rows', '1000',
+];
+try {
+  await import(`./inventory/execute_daily_inventory_replenishment_plan.mjs?etFactSourceDrift=${Date.now()}`);
+} catch (error) {
+  etFactSourceExecutorError = error;
+} finally {
+  process.exitCode = 0;
+  process.argv = originalArgv;
+}
+assert.match(String(etFactSourceExecutorError?.message || ''), /Plan payload hash mismatch/,
+  'executor must bind etFactSource through the shared daily hash helper');
+
+console.log(JSON.stringify({ok: true, checks: 62}, null, 2));

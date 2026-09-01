@@ -13,11 +13,13 @@ import net from 'node:net';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-chat-maintenance-flow-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(tmpRoot, 'inventory-v2-cutover.lock');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function freePort() {
@@ -178,11 +180,47 @@ const fakeOpenApi = http.createServer(async (request, response) => {
       code: '0',
       msg: 'OK',
       traceId: 'fake-stock-readback-trace',
-      info: [{goodsInventory: [{
-        skcName: 'sv-maint-skc',
-        skuList: [{skuCode: 'sku-maint-001', totalUsableInventory: 111}],
-      }]}],
+      info: [{
+        warehouseCode: 'PS-MAINT-SA',
+        goodsInventory: [{
+          skcName: 'sv-maint-skc',
+          skuList: [{
+            skuCode: 'sku-maint-001',
+            totalInventoryQuantity: 111,
+            totalUsableInventory: 111,
+            totalLockedQuantity: 0,
+            temporaryInventoryQuantity: 0,
+          }],
+        }],
+      }],
     });
+  }
+  if (pathname === '/open-api/goods/spu-info') {
+    const requestedSpu = String(body.json?.spuName || '');
+    const spuInfos = {
+      'spu-maint': {
+        spuName: 'spu-maint',
+        productMultiNameList: [{language: 'en', productName: 'Old Title Before Submit'}],
+        skcInfoList: [{
+          skcName: 'sv-maint-skc',
+          productMultiNameList: [{language: 'en', productName: 'Old Title Before Submit'}],
+          skuInfoList: [{skuCode: 'sku-maint-001', costInfoList: [{currency: 'SAR', costPrice: 70}]}],
+          shelfStatusInfoList: [{siteAbbr: 'shein-sa', shelfStatus: '1'}],
+        }],
+      },
+      'spu-maint-inactive': {
+        spuName: 'spu-maint-inactive',
+        productMultiNameList: [{language: 'en', productName: 'Old Inactive Title'}],
+        skcInfoList: [{
+          skcName: 'sv-maint-inactive-skc',
+          skuInfoList: [{skuCode: 'sku-maint-002', costInfoList: [{currency: 'SAR', costPrice: 80}]}],
+          shelfStatusInfoList: [{siteAbbr: 'shein-sa', shelfStatus: '0'}],
+        }],
+      },
+    };
+    const info = spuInfos[requestedSpu] || null;
+    if (!info) return sendJson(response, {code: '400', msg: 'unexpected spu-info fixture spu: ' + requestedSpu});
+    return sendJson(response, {code: '0', msg: 'OK', traceId: 'fake-spu-info-readback-trace', info});
   }
   if (pathname === '/open-api/openapi-business-backend/product/query') {
     return sendJson(response, {
@@ -205,6 +243,13 @@ function check(label, actual, expected) {
 
 let portal = null;
 try {
+  const portalSource = await fs.readFile(path.join(ROOT, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
+  check('chat execution uncertainty never invites a blind retry', portalSource, text => (
+    !String(text).includes('这件事没有被重复提交；你可以继续在聊天里补充或让我重试')
+    && String(text).includes('当前是否已经提交不能只凭这次报错判断')
+    && String(text).includes('不要直接重试')
+    && String(text).includes('必须由全店管理账号人工核销')
+  ));
   const authFile = await writeJson('auth.json', {
     users: [{
       username: 'owner_chat_maintenance',
@@ -332,6 +377,7 @@ try {
   const chatFile = path.join(tmpRoot, 'chats.json');
   const auditFile = path.join(tmpRoot, 'audit.jsonl');
   const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+  await provisionBiSessionSecret(sessionSecretFile);
   const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
   const portalPort = await freePort();
   const baseUrl = `http://127.0.0.1:${portalPort}`;
@@ -449,34 +495,35 @@ try {
       intent: 'update_inventory',
       endpoint: '/open-api/stock/change-inventory/v2',
       readbackEndpoint: '/open-api/stock/stock-query',
+      expectExactReadback: true,
     },
     {
       label: 'execute supply price',
       message: '把 DX 的 SK-1234 供货价改成 80 SAR',
       intent: 'update_supply_price',
       endpoint: '/open-api/goods/update-cost',
-      readbackEndpoint: '/open-api/openapi-business-backend/product/query',
+      readbackEndpoint: '/open-api/goods/spu-info',
     },
     {
       label: 'execute product price',
       message: '把 DX 的 SK-1234 售价改成 99 SAR',
       intent: 'update_product_price',
       endpoint: '/open-api/openapi-business-backend/product/price/save',
-      readbackEndpoint: '/open-api/openapi-business-backend/product/query',
+      readbackEndpoint: null,
     },
     {
       label: 'execute title',
       message: '把 DX 的 SK-1234 标题改成 New Smoke Title',
       intent: 'update_title',
       endpoint: '/open-api/goods/product/partialEdit',
-      readbackEndpoint: '/open-api/openapi-business-backend/product/query',
+      readbackEndpoint: '/open-api/goods/spu-info',
     },
     {
       label: 'execute image',
       message: '给 DX 的 SK-1234 换主图',
       intent: 'update_images',
       endpoint: '/open-api/goods/product/partialEdit',
-      readbackEndpoint: '/open-api/openapi-business-backend/product/query',
+      readbackEndpoint: '/open-api/goods/spu-info',
       files: [{
         name: 'image-partial-edit.json',
         type: 'application/json',
@@ -503,14 +550,14 @@ try {
       message: '把 DX 的 SK-1234 下架',
       intent: 'retire_link',
       endpoint: '/open-api/goods/modify-skc-shelf',
-      readbackEndpoint: '/open-api/openapi-business-backend/product/query',
+      readbackEndpoint: '/open-api/goods/spu-info',
     },
     {
       label: 'execute activate',
       message: '把 DX 的 SK-5678 重新上架',
       intent: 'activate_link',
       endpoint: '/open-api/goods/modify-skc-shelf',
-      readbackEndpoint: '/open-api/openapi-business-backend/product/query',
+      readbackEndpoint: '/open-api/goods/spu-info',
     },
     {
       label: 'execute certificate',
@@ -564,6 +611,9 @@ try {
       body: {sessionId: executeSessionId, message: '干吧', askAgent: false},
     });
     const confirmedTask = executeConfirm.json?.autoTask || {};
+    const rawTaskStore = JSON.parse(await fs.readFile(taskFile, 'utf8'));
+    const rawConfirmedTask = asArray(rawTaskStore?.tasks).find(task => String(task?.id || '') === String(executeTask.id || '')) || {};
+    const persistedWriteClaim = rawConfirmedTask?.execution?.writeClaim || null;
     const confirmAnswer = asArray(executeConfirm.json?.session?.messages).at(-1)?.content || '';
     const writeAudit = confirmedTask.execution?.writeAudit || {};
     const maintenanceRun = asArray(confirmedTask.execution?.linkMaintenanceExecutors || confirmedTask.execution?.linkMaintenancePrechecks)[0] || {};
@@ -584,6 +634,8 @@ try {
       maintenanceMode: maintenanceRun.mode || '',
       maintenanceState: maintenanceRun.state || maintenanceRun.result?.state || '',
       operations: maintenanceRun.payload?.summary?.operations || maintenanceRun.result?.payload?.summary?.operations || [],
+      writeClaimState: persistedWriteClaim?.state || '',
+      writeClaimOperations: persistedWriteClaim?.operations || [],
       callsAfterExecute,
       answer: confirmAnswer,
     };
@@ -607,18 +659,26 @@ try {
     check(`${item.label} child mode execute`, summary.maintenanceMode, 'execute');
     check(`${item.label} child state submitted`, summary.maintenanceState, 'submitted');
     check(`${item.label} operation matches`, summary.operations, xs => asArray(xs).includes(item.intent));
+    check(`${item.label} durable claim binds exact operation`, summary.writeClaimOperations, xs => JSON.stringify(asArray(xs)) === JSON.stringify([item.intent]));
+    check(`${item.label} durable claim binds exact store`, persistedWriteClaim?.storeKey, 'DX');
+    check(`${item.label} durable claim keeps 32-byte nonce server-side`, String(persistedWriteClaim?.nonce || '').length, 32);
+    check(`${item.label} client projection does not expose write claim`, confirmedTask.execution?.writeClaim, undefined);
     check(`${item.label} called fake write endpoint`, callsAfterExecute.some(path => path === item.endpoint), true);
     if (item.readbackEndpoint) {
       check(`${item.label} called fake readback endpoint`, callsAfterExecute.some(path => path === item.readbackEndpoint), true);
+    }
+    if (item.expectExactReadback) {
       check(`${item.label} completed by readback`, summary.lifecycleStatus, 'submitted_readback_matched');
+      check(`${item.label} completed readback closes durable claim`, summary.writeClaimState, 'completed');
       check(`${item.label} chat answer reports success`, confirmAnswer, text => /提交成功/.test(String(text)) && /回读/.test(String(text)));
     } else {
-      check(`${item.label} no fake readback endpoint required`, item.expectManualResolve, true);
       check(`${item.label} remains manual resolve after submit`, summary.lifecycleStatus, 'submitted_readback_failed');
+      check(`${item.label} manual resolve keeps durable claim unconfirmed`, summary.writeClaimState, 'unconfirmed');
       check(`${item.label} chat answer reports submitted pending confirmation`, confirmAnswer, text => /提交成功/.test(String(text)) && /确认|核对|审核|回读/.test(String(text)));
     }
     check(`${item.label} chat answer is user-facing`, confirmAnswer, text => !/飞书|只读建议|回到 BI|SHEIN_OPENAPI_SUBMIT|确认文本|dry-run|payload hash|审计/.test(String(text)));
   }
+  check('maintenance executes never recreate weak product/query readback', executeSummaries.some(row => asArray(row.callsAfterExecute).includes('/open-api/openapi-business-backend/product/query')), false);
   result.summary.executeCases = executeSummaries;
   result.summary = {...result.summary, cases: summaries, fakeCalls: fakeCalls.map(call => call.path)};
   result.ok = result.checks.every(row => row.pass);

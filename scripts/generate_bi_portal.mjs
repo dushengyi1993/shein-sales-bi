@@ -11,6 +11,14 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {writeFileAtomic} from '../lib/atomic_file_publish.mjs';
+import {
+  invalidateBiProfitBundleManifest,
+  publishBiProfitBundleManifest,
+  readBiSectionArtifactIntegrityMetadata,
+  readBiSectionIntegrityMetadata,
+  writeBiSectionArtifact,
+  writeBiSectionCache,
+} from '../lib/bi_section_cache.mjs';
 import {resolveBiPortalDataMode} from '../lib/bi_portal_data_mode.mjs';
 import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
 import {getAliasConfig} from '../lib/product_sku_normalizer.mjs';
@@ -18,6 +26,18 @@ import {mergeRankedMarketingPriceLead} from '../lib/marketing_price_lead_merge.m
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORTAL_GENERATE_TIMEOUT_MS = Number(process.env.SHEIN_BI_PORTAL_TIMEOUT_MS || 900_000);
+const BI_DB_APPLICATION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/;
+
+function validateBiDbApplicationName(value) {
+  const name = String(value ?? '');
+  if (!name) return '';
+  if (name !== name.trim() || Buffer.byteLength(name, 'utf8') > 63 || !BI_DB_APPLICATION_NAME_RE.test(name)) {
+    throw new Error('SHEIN_BI_DB_APPLICATION_NAME must be 1-63 safe ASCII characters');
+  }
+  return name;
+}
+
+const BI_DB_APPLICATION_NAME = validateBiDbApplicationName(process.env.SHEIN_BI_DB_APPLICATION_NAME || '');
 // Canonical profit views are the calculation source for the cache refresh, not a
 // serving surface.  Falling back to them here silently recomputes the full
 // order/after-sales/storage dependency tree and turned a small portal refresh
@@ -66,6 +86,82 @@ async function writeFileWithRetry(file, data, encoding = 'utf8', attempts = 8) {
   }
 }
 
+export function normalizePortalCoreSourceIdentity(sourceRunKey, inputFingerprint) {
+  const runKey = String(sourceRunKey || '').trim();
+  const fingerprint = String(inputFingerprint || '').trim().toLowerCase();
+  if (!runKey && !fingerprint) return null;
+  if (!runKey || runKey.length > 200 || /[\u0000-\u001f\u007f]/.test(runKey)) {
+    throw new Error('Portal core source run key must be 1-200 printable characters');
+  }
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
+    throw new Error('Portal core input fingerprint must be sha256');
+  }
+  return {sourceRunKey: runKey, inputFingerprint: fingerprint};
+}
+
+export function portalCoreRunIdentityDecision(payload, identity) {
+  if (!identity) return {action: 'generate'};
+  if (!payload || typeof payload !== 'object') return {action: 'generate'};
+  const commit = payload.sourceCommit;
+  if (!commit || typeof commit !== 'object') return {action: 'generate'};
+  if (String(commit.sourceRunKey || '') !== identity.sourceRunKey) return {action: 'generate'};
+  if (String(commit.inputFingerprint || '').toLowerCase() !== identity.inputFingerprint) {
+    return {action: 'conflict', reason: 'same_source_run_key_input_fingerprint_mismatch'};
+  }
+  const generatedAt = String(payload.generatedAt || '');
+  const terminal = commit.status === 'terminal'
+    && generatedAt
+    && String(commit.generatedAt || '') === generatedAt
+    && (!payload.__sections || String(payload.__sections.generatedAt || '') === generatedAt);
+  return terminal
+    ? {action: 'reuse_terminal', generatedAt}
+    : {action: 'conflict', reason: 'same_source_run_key_core_not_terminal'};
+}
+
+const PORTAL_SERIALIZED_OVERLAY_KEYS = Object.freeze([
+  'audit',
+  'pipeline',
+  'briefing',
+  'firstRunCheck',
+]);
+
+function isPortalRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Keep the formal core identity at the bounded scanner's front door. The
+ * Portal core can be hundreds of MiB, so cloud_bi_refresh.sh is intentionally
+ * allowed to read only the first 64 KiB. Rebuilding the top-level object here
+ * makes generatedAt the first field and binds __sections.generatedAt to that
+ * exact value without parsing or reserializing the file in the refresh path.
+ */
+export function serializePortalData(data, overlays = {}) {
+  if (!isPortalRecord(data)) throw new Error('PORTAL_DATA_OBJECT_REQUIRED');
+  const sourceSections = isPortalRecord(data.__sections) ? data.__sections : {};
+  const generatedAt = String(
+    data.generatedAt || sourceSections.generatedAt || overlays.generatedAt || '',
+  ).trim();
+  if (!generatedAt) throw new Error('PORTAL_GENERATED_AT_REQUIRED');
+
+  const serialized = {
+    generatedAt,
+    __sections: {
+      ...sourceSections,
+      generatedAt,
+    },
+  };
+  for (const [key, value] of Object.entries(data)) {
+    if (key === 'generatedAt' || key === '__sections' || PORTAL_SERIALIZED_OVERLAY_KEYS.includes(key)) continue;
+    serialized[key] = value;
+  }
+  for (const key of PORTAL_SERIALIZED_OVERLAY_KEYS) {
+    if (Object.hasOwn(overlays, key)) serialized[key] = overlays[key];
+    else if (Object.hasOwn(data, key)) serialized[key] = data[key];
+  }
+  return serialized;
+}
+
 function parseArgs(argv) {
   const envDataMode = String(process.env.SHEIN_BI_PORTAL_DATA_MODE || '').trim();
   const args = {
@@ -80,10 +176,14 @@ function parseArgs(argv) {
     section: '',
     sqlOnly: false,
     jsonOnly: false,
+    directCachePublish: false,
+    generatedAt: '',
     homeVariant: process.env.SHEIN_BI_HOME_VARIANT || 'no-groups',
     previewVariant: '',
     htmlOnlyFromData: '',
     htmlFile: '',
+    sourceRunKey: process.env.SHEIN_BI_PORTAL_SOURCE_RUN_KEY || '',
+    inputFingerprint: process.env.SHEIN_BI_PORTAL_INPUT_FINGERPRINT || '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -97,10 +197,14 @@ function parseArgs(argv) {
     else if (a === '--section') args.section = argv[++i];
     else if (a === '--sql-only') args.sqlOnly = true;
     else if (a === '--json-only') args.jsonOnly = true;
+    else if (a === '--direct-cache-publish') args.directCachePublish = true;
+    else if (a === '--generated-at') args.generatedAt = argv[++i];
     else if (a === '--home-variant') args.homeVariant = argv[++i];
     else if (a === '--preview-variant') args.previewVariant = argv[++i];
     else if (a === '--html-only-from-data') args.htmlOnlyFromData = path.resolve(argv[++i]);
     else if (a === '--html-file') args.htmlFile = path.resolve(argv[++i]);
+    else if (a === '--source-run-key') args.sourceRunKey = argv[++i];
+    else if (a === '--input-fingerprint') args.inputFingerprint = argv[++i];
   }
   const resolvedDataMode = resolveBiPortalDataMode({
     cliMode: args.cliDataMode,
@@ -111,11 +215,382 @@ function parseArgs(argv) {
   args.dataMode = resolvedDataMode.mode;
   args.dataModeSource = resolvedDataMode.source;
   args.section = String(args.section || '').trim();
+  args.generatedAt = String(args.generatedAt || '').trim();
+  if (args.directCachePublish && !args.section) {
+    throw new Error('--direct-cache-publish requires --section');
+  }
+  if (args.directCachePublish && !args.generatedAt) {
+    throw new Error('--direct-cache-publish requires --generated-at');
+  }
+  args.sourceIdentity = normalizePortalCoreSourceIdentity(args.sourceRunKey, args.inputFingerprint);
+  if (args.section && args.sourceIdentity) {
+    throw new Error('Portal core source identity is only valid for full core generation');
+  }
   args.homeVariant = String(args.homeVariant || '').trim().toLowerCase();
   if (args.homeVariant === 'legacy') args.homeVariant = 'classic';
   if (!['classic', 'no-groups'].includes(args.homeVariant)) throw new Error(`Invalid --home-variant: ${args.homeVariant}`);
   args.previewVariant = String(args.previewVariant || '').trim();
   return args;
+}
+
+/** Keep the Portal home rankings payload contract while dropping display-only
+ * fields that are not consumed by the home view. This runs in the generator
+ * child before the cache is published, so the parent never owns both copies. */
+export function compactHomeRankingsSectionData(data) {
+  if (!data?.rankings || typeof data.rankings !== 'object') return data;
+  const compact = {...data, rankings: {...data.rankings}};
+  for (const key of ['dailyProducts', 'dailyStoreProducts']) {
+    const rows = Array.isArray(compact.rankings[key]) ? compact.rankings[key] : null;
+    if (!rows) continue;
+    compact.rankings[key] = rows.map(row => {
+      if (!row || typeof row !== 'object') return row;
+      const {
+        product_display_name_source: _productDisplayNameSource,
+        ...rest
+      } = row;
+      return rest;
+    });
+  }
+  return compact;
+}
+
+/**
+ * The query artifact intentionally has one stable, explicit omission list.
+ * Shallow copies keep the full Portal profit object untouched for publication
+ * and make it impossible for query projection to mutate the normal cache.
+ */
+export function buildProfitQueryProjection(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Profit query projection requires an object payload');
+  }
+  const profit = data.profit;
+  if (!profit || typeof profit !== 'object' || Array.isArray(profit)) {
+    throw new Error('Profit query projection requires data.profit');
+  }
+  const projectedProfit = {...profit};
+  delete projectedProfit.productStorageDaily;
+  delete projectedProfit.productStoreStorageDaily;
+  return {...data, profit: projectedProfit};
+}
+
+function roundHomeProfitNumber(value, digits = 2) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  const m = 10 ** digits;
+  return Math.round(n * m) / m;
+}
+
+function homeProfitScopeOrder(scopeValue) {
+  const scope = String(scopeValue || '').toUpperCase();
+  if (!scope) return 0;
+  if (scope.startsWith('GROUP:')) return 1;
+  return 2;
+}
+
+function emptyHomeProfitScopeRow(date, scopeValue) {
+  return {
+    date,
+    scope_value: scopeValue,
+    scope_order: homeProfitScopeOrder(scopeValue),
+    gross_revenue_sar: 0,
+    net_revenue_sar: 0,
+    quantity: 0,
+    order_lines: 0,
+    orders: 0,
+    product_cost_sar: 0,
+    return_delivery_fee_sar: 0,
+    rtv_recoverable_cost_sar: 0,
+    rtv_09_recoverable_cost_sar: 0,
+    rtv_received_quantity: 0,
+    rtv_received_to_09_quantity: 0,
+    profit_before_storage_sar: 0,
+    storage_fee_sar: 0,
+    storage_matched: 0,
+    storage_fee_estimated_sar: 0,
+    storage_fee_provisional_rows: 0,
+    storage_fee_settled_rows: 0,
+    fallback_storage_fee_sar: 0,
+    profit_if_rtv_received_resellable_sar: 0,
+    profit_if_rtv_09_resellable_sar: 0,
+    known_net_revenue_sar: 0,
+    known_gross_revenue_sar: 0,
+    missing_cost_revenue_sar: 0,
+    missing_cost_quantity: 0,
+    missing_cost_lines: 0,
+    estimated_cost_revenue_sar: 0,
+    estimated_cost_quantity: 0,
+    estimated_cost_lines: 0,
+    legacy_estimated_cost_revenue_sar: 0,
+    legacy_estimated_cost_quantity: 0,
+    legacy_estimated_cost_lines: 0,
+    reversal_lines: 0,
+    risk_adjusted_net_revenue_sar: 0,
+    known_risk_adjusted_net_revenue_sar: 0,
+    pending_revenue_risk_sar: 0,
+    risk_adjusted_profit_before_storage_sar: 0,
+    pending_revenue_risk_lines: 0,
+    pending_impact_quantity: 0,
+    pending_impact_amount_sar: 0,
+    actual_return_cost_sar: 0,
+    estimated_return_delivery_fee_sar: 0,
+  };
+}
+
+/**
+ * Derive the homepage profit summary from the same source rows as the
+ * existing server-side fallback. Keeping this calculation in the generator
+ * child makes direct publication single-pass for both profit artifacts.
+ */
+export function buildHomeProfitSummaryFromProfitData(profitData, sourceMeta = {}) {
+  const profit = profitData?.profit && typeof profitData.profit === 'object' ? profitData.profit : {};
+  const rows = Array.isArray(profit.dailyStoreProducts) ? profit.dailyStoreProducts : [];
+  const storageRows = Array.isArray(profit.storeStorageDaily) ? profit.storeStorageDaily : [];
+  const map = new Map();
+  const getRow = (date, scopeValue) => {
+    const key = `${date}|${scopeValue}`;
+    if (!map.has(key)) map.set(key, emptyHomeProfitScopeRow(date, scopeValue));
+    return map.get(key);
+  };
+  const addProfitRow = (scopeValue, r) => {
+    const date = String(r?.date || '').slice(0, 10);
+    if (!date) return;
+    const row = getRow(date, scopeValue);
+    row.gross_revenue_sar += Number(r.gross_revenue_sar || 0);
+    row.net_revenue_sar += Number(r.net_revenue_sar || 0);
+    row.quantity += Number(r.quantity || 0);
+    row.order_lines += Number(r.order_lines || 0);
+    row.orders += Number(r.orders || 0);
+    row.product_cost_sar += Number(r.product_cost_sar || 0);
+    row.return_delivery_fee_sar += Number(r.return_delivery_fee_sar || 0);
+    row.rtv_recoverable_cost_sar += Number(r.rtv_recoverable_cost_sar || 0);
+    row.rtv_09_recoverable_cost_sar += Number(r.rtv_09_recoverable_cost_sar || 0);
+    row.rtv_received_quantity += Number(r.rtv_received_quantity || 0);
+    row.rtv_received_to_09_quantity += Number(r.rtv_received_to_09_quantity || 0);
+    row.profit_before_storage_sar += Number(r.profit_before_storage_sar || 0);
+    row.fallback_storage_fee_sar += Number(r.storage_fee_sar || 0);
+    row.profit_if_rtv_received_resellable_sar += Number(r.profit_if_rtv_received_resellable_sar ?? r.profit_before_storage_sar ?? 0);
+    row.profit_if_rtv_09_resellable_sar += Number(r.profit_if_rtv_09_resellable_sar ?? r.profit_before_storage_sar ?? 0);
+    row.known_net_revenue_sar += Number(r.known_net_revenue_sar ?? r.known_gross_revenue_sar ?? 0);
+    row.known_gross_revenue_sar += Number(r.known_gross_revenue_sar ?? 0);
+    row.missing_cost_revenue_sar += Number(r.missing_cost_revenue_sar || 0);
+    row.missing_cost_quantity += Number(r.missing_cost_quantity || 0);
+    row.missing_cost_lines += Number(r.missing_cost_lines || 0);
+    row.estimated_cost_revenue_sar += Number(r.estimated_cost_revenue_sar || 0);
+    row.estimated_cost_quantity += Number(r.estimated_cost_quantity || 0);
+    row.estimated_cost_lines += Number(r.estimated_cost_lines || 0);
+    row.legacy_estimated_cost_revenue_sar += Number(r.legacy_estimated_cost_revenue_sar || 0);
+    row.legacy_estimated_cost_quantity += Number(r.legacy_estimated_cost_quantity || 0);
+    row.legacy_estimated_cost_lines += Number(r.legacy_estimated_cost_lines || 0);
+    row.reversal_lines += Number(r.reversal_lines || 0);
+    row.risk_adjusted_net_revenue_sar += Number(r.risk_adjusted_net_revenue_sar ?? r.net_revenue_sar ?? 0);
+    row.known_risk_adjusted_net_revenue_sar += Number(r.known_risk_adjusted_net_revenue_sar ?? r.known_net_revenue_sar ?? 0);
+    row.pending_revenue_risk_sar += Number(r.pending_revenue_risk_sar || 0);
+    row.risk_adjusted_profit_before_storage_sar += Number(r.risk_adjusted_profit_before_storage_sar ?? r.profit_before_storage_sar ?? 0);
+    row.pending_revenue_risk_lines += Number(r.pending_revenue_risk_lines || 0);
+    row.pending_impact_quantity += Number(r.pending_impact_quantity || 0);
+    row.pending_impact_amount_sar += Number(r.pending_impact_amount_sar || 0);
+    row.actual_return_cost_sar += Number(r.actual_return_cost_sar || 0);
+    row.estimated_return_delivery_fee_sar += Number(r.estimated_return_delivery_fee_sar || 0);
+  };
+  const addStorageRow = (scopeValue, r) => {
+    const date = String(r?.date || '').slice(0, 10);
+    if (!date) return;
+    const row = getRow(date, scopeValue);
+    row.storage_fee_sar += Number(r.storage_fee_sar || 0);
+    row.storage_fee_estimated_sar += Number(r.storage_fee_estimated_sar || 0);
+    const storageStatus = String(r.storage_fee_status || '').trim();
+    if (storageStatus === 'provisional') row.storage_fee_provisional_rows += 1;
+    else if (storageStatus === 'settled') row.storage_fee_settled_rows += 1;
+    row.storage_matched += 1;
+  };
+  for (const r of rows) {
+    const store = String(r?.store_key || '').trim().toUpperCase();
+    if (!store) continue;
+    const group = String(r?.group_key || 'OTHER').trim().toUpperCase() || 'OTHER';
+    addProfitRow('', r);
+    addProfitRow(`GROUP:${group}`, r);
+    addProfitRow(store, r);
+  }
+  for (const r of storageRows) {
+    const store = String(r?.store_key || '').trim().toUpperCase();
+    if (!store) continue;
+    const group = String(r?.group_key || 'OTHER').trim().toUpperCase() || 'OTHER';
+    addStorageRow('', r);
+    addStorageRow(`GROUP:${group}`, r);
+    addStorageRow(store, r);
+  }
+  const moneyFields = [
+    'gross_revenue_sar',
+    'net_revenue_sar',
+    'product_cost_sar',
+    'return_delivery_fee_sar',
+    'rtv_recoverable_cost_sar',
+    'rtv_09_recoverable_cost_sar',
+    'profit_before_storage_sar',
+    'storage_fee_sar',
+    'storage_fee_estimated_sar',
+    'fallback_storage_fee_sar',
+    'profit_if_rtv_received_resellable_sar',
+    'profit_if_rtv_09_resellable_sar',
+    'known_net_revenue_sar',
+    'known_gross_revenue_sar',
+    'missing_cost_revenue_sar',
+    'estimated_cost_revenue_sar',
+    'legacy_estimated_cost_revenue_sar',
+    'risk_adjusted_net_revenue_sar',
+    'known_risk_adjusted_net_revenue_sar',
+    'pending_revenue_risk_sar',
+    'risk_adjusted_profit_before_storage_sar',
+    'pending_impact_amount_sar',
+    'actual_return_cost_sar',
+    'estimated_return_delivery_fee_sar',
+  ];
+  const countFields = ['quantity', 'order_lines', 'orders', 'rtv_received_quantity', 'rtv_received_to_09_quantity', 'missing_cost_quantity', 'missing_cost_lines', 'estimated_cost_quantity', 'estimated_cost_lines', 'legacy_estimated_cost_quantity', 'legacy_estimated_cost_lines', 'reversal_lines', 'pending_revenue_risk_lines', 'pending_impact_quantity', 'storage_matched', 'storage_fee_provisional_rows', 'storage_fee_settled_rows'];
+  const dailyScopes = Array.from(map.values()).map(row => {
+    const effectiveStorage = Number(row.storage_matched || 0) > 0 ? Number(row.storage_fee_sar || 0) : Number(row.fallback_storage_fee_sar || 0);
+    const out = {...row};
+    out.storage_fee_status = Number(out.storage_fee_provisional_rows || 0) > 0
+      ? 'provisional'
+      : (Number(out.storage_fee_settled_rows || 0) > 0 ? 'settled' : 'missing');
+    out.profit_after_storage_sar = Number(out.profit_before_storage_sar || 0) - effectiveStorage;
+    out.risk_adjusted_profit_after_storage_sar = Number(out.risk_adjusted_profit_before_storage_sar || 0) - effectiveStorage;
+    out.profit_if_rtv_received_resellable_after_storage_sar = Number(out.profit_if_rtv_received_resellable_sar || 0) - effectiveStorage;
+    out.profit_if_rtv_09_resellable_after_storage_sar = Number(out.profit_if_rtv_09_resellable_sar || 0) - effectiveStorage;
+    out.cost_coverage_revenue_rate = Number(out.net_revenue_sar || 0) > 0 ? roundHomeProfitNumber(Number(out.known_net_revenue_sar || 0) / Number(out.net_revenue_sar || 0), 4) : null;
+    out.profit_margin_after_storage = Number(out.known_net_revenue_sar || 0) > 0 ? roundHomeProfitNumber(out.profit_after_storage_sar / Number(out.known_net_revenue_sar || 0), 4) : null;
+    out.risk_adjusted_profit_margin_after_storage = Number(out.known_risk_adjusted_net_revenue_sar || 0) > 0 ? roundHomeProfitNumber(out.risk_adjusted_profit_after_storage_sar / Number(out.known_risk_adjusted_net_revenue_sar || 0), 4) : null;
+    for (const field of moneyFields) out[field] = roundHomeProfitNumber(out[field], 2);
+    for (const field of ['profit_after_storage_sar', 'risk_adjusted_profit_after_storage_sar', 'profit_if_rtv_received_resellable_after_storage_sar', 'profit_if_rtv_09_resellable_after_storage_sar']) out[field] = roundHomeProfitNumber(out[field], 2);
+    for (const field of countFields) out[field] = roundHomeProfitNumber(out[field], 0);
+    return out;
+  }).sort((a, b) => String(a.date).localeCompare(String(b.date)) || Number(a.scope_order || 0) - Number(b.scope_order || 0) || String(a.scope_value || '').localeCompare(String(b.scope_value || '')));
+  return {
+    homeProfitSummary: {
+      dailyScopes,
+      source: 'profit_section_cache',
+      sourceGeneratedAt: String(sourceMeta.sourceGeneratedAt || ''),
+      sourceCachedAt: String(sourceMeta.sourceCachedAt || ''),
+      staleSource: Boolean(sourceMeta.staleSource),
+    },
+  };
+}
+
+function directArtifactReceipt(integrity) {
+  if (!integrity?.ok) throw new Error('Direct BI section publication has no strict integrity readback');
+  return {
+    artifact: integrity.artifact,
+    file: integrity.file,
+    section: integrity.section,
+    generatedAt: integrity.generatedAt,
+    cachedAt: integrity.cachedAt,
+    publishedAt: integrity.publishedAt,
+    generationIdentity: integrity.generationIdentity,
+    bindingSha256: integrity.bindingSha256,
+    raw: {
+      file: integrity.raw?.file,
+      sha256: integrity.raw?.sha256,
+      byteSize: integrity.raw?.byteSize,
+    },
+    gzip: {
+      file: integrity.gzip?.file,
+      sha256: integrity.gzip?.sha256,
+      byteSize: integrity.gzip?.byteSize,
+      sourceRawSha256: integrity.gzip?.sourceRawSha256,
+      sourceGenerationIdentity: integrity.gzip?.sourceGenerationIdentity,
+    },
+  };
+}
+
+async function readDirectArtifactIntegrity(root, artifact, generatedAt) {
+  if (artifact === 'profit.query') {
+    return readBiSectionArtifactIntegrityMetadata(root, artifact, artifact, generatedAt);
+  }
+  return readBiSectionIntegrityMetadata(root, artifact, generatedAt);
+}
+
+/**
+ * Publish a section and its internal dependent artifacts from the generator
+ * process. The returned object is deliberately a receipt only: it contains no
+ * section data and is safe for the bounded parent stdout channel.
+ */
+export async function publishDirectPortalSection(args, sectionData) {
+  const section = String(args?.section || '').trim();
+  const generatedAt = String(args?.generatedAt || '').trim();
+  const root = path.resolve(args?.outDir || '');
+  if (!section || !generatedAt || !root) throw new Error('Direct BI publication requires section, generatedAt and outDir');
+  const run = {code: 0, timedOut: false, stderr: ''};
+  const published = [];
+  if (section === 'profit') {
+    // Invalidate the previous commit marker before replacing any member. A
+    // child crash therefore leaves a deliberately unreadable partial bundle;
+    // the next successful three-artifact readback publishes the marker last.
+    await invalidateBiProfitBundleManifest(root);
+  }
+  const primaryData = section === 'homeRankings'
+    ? compactHomeRankingsSectionData(sectionData)
+    : sectionData;
+  const primary = await writeBiSectionCache(root, section, generatedAt, primaryData, run, {
+    requireIntegrity: true,
+  });
+  const primaryIntegrity = await readDirectArtifactIntegrity(root, section, generatedAt);
+  if (!primaryIntegrity) throw new Error(`Direct BI section ${section} integrity readback failed`);
+  published.push(primaryIntegrity);
+
+  if (section === 'profit') {
+    const queryData = buildProfitQueryProjection(sectionData);
+    await writeBiSectionArtifact(
+      root,
+      'profit.query',
+      'profit.query',
+      generatedAt,
+      queryData,
+      run,
+      {
+        requireIntegrity: true,
+        artifactMeta: {
+          kind: 'profit-query-compact-v1',
+          logicalSection: 'profit',
+          sourceArtifact: 'profit',
+          sourceGeneratedAt: generatedAt,
+          retainedPaths: [
+            'profit.dailyStoreProducts',
+            'profit.monthGroups',
+            'profit.products',
+            'profit.storeStorageDaily',
+          ],
+          omittedPaths: [
+            'profit.productStorageDaily',
+            'profit.productStoreStorageDaily',
+          ],
+        },
+      },
+    );
+    const queryIntegrity = await readDirectArtifactIntegrity(root, 'profit.query', generatedAt);
+    if (!queryIntegrity) throw new Error('Direct BI profit query artifact integrity readback failed');
+    published.push(queryIntegrity);
+
+    const homeProfitData = buildHomeProfitSummaryFromProfitData(sectionData, {
+      sourceGeneratedAt: generatedAt,
+      sourceCachedAt: primary.cachedAt,
+      staleSource: false,
+    });
+    await writeBiSectionCache(root, 'homeProfit', generatedAt, homeProfitData, run, {
+      requireIntegrity: true,
+    });
+    const homeIntegrity = await readDirectArtifactIntegrity(root, 'homeProfit', generatedAt);
+    if (!homeIntegrity) throw new Error('Direct BI homeProfit artifact integrity readback failed');
+    published.push(homeIntegrity);
+    await publishBiProfitBundleManifest(root, generatedAt);
+  }
+
+  return {
+    ok: true,
+    mode: 'direct-cache-publish',
+    section,
+    generatedAt,
+    coreGeneratedAt: generatedAt,
+    artifacts: published.map(directArtifactReceipt),
+  };
 }
 
 function isFormalPortalIndexPath(file, outDir) {
@@ -783,7 +1258,10 @@ function dockerPrefix() {
 }
 
 function psqlSpawnCommand(args, extraFlags = '') {
-  const psql = `${dockerPrefix()}docker exec -i ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
+  const applicationEnv = BI_DB_APPLICATION_NAME
+    ? ` -e ${shellQuote(`PGAPPNAME=${BI_DB_APPLICATION_NAME}`)}`
+    : '';
+  const psql = `${dockerPrefix()}docker exec -i${applicationEnv} ${shellQuote(args.container)} psql -U ${shellQuote(args.user)} -d ${shellQuote(args.database)} -v ON_ERROR_STOP=1${extraFlags}`;
   if (process.platform === 'win32') {
     return {
       command: 'wsl',
@@ -7906,7 +8384,13 @@ async function startLinkOpsExecutor(id, options = {}){
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) throw new Error(payload.error || ('HTTP ' + res.status));
-    linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    if (payload?.task?.id) {
+      const taskIndex = linkOpsStore.tasks.findIndex(task => task?.id === payload.task.id);
+      if (taskIndex >= 0) linkOpsStore.tasks.splice(taskIndex, 1, payload.task);
+      else linkOpsStore.tasks.unshift(payload.task);
+    } else if (payload?.data?.partial !== true) {
+      linkOpsStore.tasks = Array.isArray(payload?.data?.tasks) ? payload.data.tasks : [];
+    }
     const state = payload?.execution?.state || '';
     const blockers = payload?.execution?.preflight?.blockers || payload?.task?.execution?.preflight?.blockers || [];
     if (state === 'blocked') showToast('执行器已启动但被预检阻断：' + (blockers[0] || '请查看任务详情'));
@@ -17094,12 +17578,44 @@ async function main() {
     if (args.section !== 'productTrafficDaily') sectionData = enrichProductDisplayNames(sectionData);
     markStage(`section:${args.section}:done`);
     clearTimeout(portalGenerateTimer);
+    if (args.directCachePublish) {
+      const receipt = await publishDirectPortalSection(args, sectionData);
+      process.stdout.write(JSON.stringify(receipt));
+      return;
+    }
     if (args.jsonOnly) {
       process.stdout.write(JSON.stringify(sectionData));
       return;
     }
     console.log(JSON.stringify({ok: true, section: args.section, data: sectionData}, null, 2));
     return;
+  }
+  if (args.sourceIdentity) {
+    const existingFile = path.join(args.outDir, 'data.json');
+    let existing = null;
+    try {
+      existing = JSON.parse(await fs.readFile(existingFile, 'utf8'));
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw new Error(`Portal core identity readback failed: ${error?.message || error}`);
+      }
+    }
+    const decision = portalCoreRunIdentityDecision(existing, args.sourceIdentity);
+    if (decision.action === 'conflict') {
+      throw new Error(`PORTAL_CORE_SOURCE_IDENTITY_CONFLICT: ${decision.reason}`);
+    }
+    if (decision.action === 'reuse_terminal') {
+      clearTimeout(portalGenerateTimer);
+      console.log(JSON.stringify({
+        ok: true,
+        reused: true,
+        sourceRunKey: args.sourceIdentity.sourceRunKey,
+        inputFingerprint: args.sourceIdentity.inputFingerprint,
+        generatedAt: decision.generatedAt,
+        data: existingFile,
+      }, null, 2));
+      return;
+    }
   }
   markStage('metabase:url');
   const metabaseUrl = (args.metabaseUrl || await readMetabaseUrl() || 'http://localhost:3000').replace(/\/$/, '');
@@ -17167,6 +17683,26 @@ async function main() {
   const safePipeline = deepSanitize(pipeline);
   const safeBriefing = deepSanitize(briefing);
   const safeFirstRunCheck = deepSanitize(firstRunCheck);
+  const coreGeneratedAt = String(
+    data.generatedAt || data.__sections?.generatedAt || '',
+  ).trim();
+  const dataWithCanonicalGeneration = {
+    ...data,
+    generatedAt: coreGeneratedAt,
+    __sections: {
+      ...(isPortalRecord(data.__sections) ? data.__sections : {}),
+      generatedAt: coreGeneratedAt,
+    },
+  };
+  const publishedData = args.sourceIdentity ? {
+    ...dataWithCanonicalGeneration,
+    sourceCommit: {
+      status: 'terminal',
+      sourceRunKey: args.sourceIdentity.sourceRunKey,
+      inputFingerprint: args.sourceIdentity.inputFingerprint,
+      generatedAt: coreGeneratedAt,
+    },
+  } : dataWithCanonicalGeneration;
   let noGroupsPreviewFile = '';
   if (shouldWriteNoGroupsPreview(args)) {
     noGroupsPreviewFile = noGroupsPreviewHtmlFile(args);
@@ -17178,10 +17714,23 @@ async function main() {
   await fs.mkdir(args.outDir, {recursive: true});
   const jsonFile = path.join(args.outDir, 'data.json');
   markStage('write:data');
-  await writeFileWithRetry(jsonFile, JSON.stringify({...data, audit: safeAudit, pipeline: safePipeline, briefing: safeBriefing, firstRunCheck: safeFirstRunCheck}, null, 2), 'utf8');
+  const serializedPortalData = serializePortalData(publishedData, {
+    audit: safeAudit,
+    pipeline: safePipeline,
+    briefing: safeBriefing,
+    firstRunCheck: safeFirstRunCheck,
+  });
+  await writeFileWithRetry(jsonFile, JSON.stringify(serializedPortalData, null, 2), 'utf8');
+  if (args.sourceIdentity) {
+    const written = JSON.parse(await fs.readFile(jsonFile, 'utf8'));
+    const decision = portalCoreRunIdentityDecision(written, args.sourceIdentity);
+    if (decision.action !== 'reuse_terminal') {
+      throw new Error(`Portal core terminal identity readback failed: ${JSON.stringify(decision)}`);
+    }
+  }
   if (noGroupsPreviewFile) {
     markStage('build:preview:no-groups');
-    const noGroupsPreviewHtml = buildHtml(data, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: 'no-groups', previewVariant: 'no-groups'});
+    const noGroupsPreviewHtml = buildHtml(publishedData, metabaseUrl, safeAudit, safePipeline, safeBriefing, safeFirstRunCheck, {homeVariant: 'no-groups', previewVariant: 'no-groups'});
     markStage('write:preview:no-groups');
     await writeFileWithRetry(noGroupsPreviewFile, noGroupsPreviewHtml, 'utf8');
   }
@@ -17189,6 +17738,9 @@ async function main() {
   clearTimeout(portalGenerateTimer);
   console.log(JSON.stringify({
     ok: true,
+    reused: false,
+    sourceRunKey: args.sourceIdentity?.sourceRunKey || '',
+    inputFingerprint: args.sourceIdentity?.inputFingerprint || '',
     dataMode: args.dataMode,
     homeVariant: args.homeVariant,
     html: null,
@@ -17258,7 +17810,10 @@ async function main() {
   }, null, 2));
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+const direct = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (direct) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

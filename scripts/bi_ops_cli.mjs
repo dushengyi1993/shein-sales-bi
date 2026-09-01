@@ -18,6 +18,7 @@ import {
   DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR,
   ensurePartnerKnowledgeCurrent,
 } from '../lib/partner_knowledge_cache.mjs';
+import {validateOwnerKnowledgeDistribution} from '../lib/owner_knowledge_distribution.mjs';
 import {
   checkAndInstallPartnerCliUpdate,
   findManagedPartnerCliInstallRoot,
@@ -25,11 +26,17 @@ import {
 } from '../lib/partner_cli_updater.mjs';
 import {planLinkOpsImageRoles} from '../lib/link_ops_image_role_planner.mjs';
 import {ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT} from '../lib/link_ops_duplicate_publish_override.mjs';
+import {isSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {
   buildPrepareDescriptionsCliOutput,
   describeDescriptionMaterial,
   descriptionBindingRequestKey,
+  DESCRIPTION_SOURCE_PROOF,
+  DESCRIPTION_SOURCE_PROOF_S9,
+  DESCRIPTION_SOURCE_PROOF_DOCX,
+  EMPTY_DESCRIPTION_CONFIRM_TEXT,
   validateDescriptionMaterialJson,
+  verifyDescriptionMaterialAgainstDocx,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {verifyDescriptionMaterialAgainstHtml} from '../lib/link_ops_description_material_extract.mjs';
 import {
@@ -42,9 +49,22 @@ import {
   productAttributeBindingRequestKey,
   productAttributeBindingRequestKeyV2,
 } from '../lib/link_ops_product_attribute_binding.mjs';
+import {RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT} from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
 import {writeJsonFileAtomic} from '../lib/atomic_file_publish.mjs';
-import {buildOpsRun, compactOpsRun, invalidateOpsRunManifest, writeOpsJsonArtifactAtomic, writeOpsRunManifest} from '../lib/ops_run_bundle.mjs';
-import {biQueryRequestTimeoutMs, isIncompleteBiQueryError, runBiQueryWithWait} from '../lib/bi_ops_query_retry.mjs';
+import {
+  OPS_EXIT_CODES,
+  buildOpsRun,
+  compactOpsRun,
+  invalidateOpsRunManifest,
+  writeOpsJsonArtifactAtomic,
+  writeOpsRunManifest,
+} from '../lib/ops_run_bundle.mjs';
+import {
+  biQueryRequestTimeoutMs,
+  fetchWithIdempotentNetworkRetry,
+  isIncompleteBiQueryError,
+  runBiQueryWithWait,
+} from '../lib/bi_ops_query_retry.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_BASE_URL = process.env.SHEIN_BI_BASE_URL || 'https://sa.dushengyi.cc';
@@ -53,6 +73,23 @@ const DEFAULT_SESSION_FILE = process.env.SHEIN_BI_OPS_SESSION_FILE
 const SUBMIT_CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 const LOCAL_OPENAPI_TEST_OVERRIDE = process.env.SHEIN_BI_ALLOW_LOCAL_OPENAPI_EXECUTOR === '1';
 const PARTNER_CHECK_TTL_MS = Math.max(0, Number(process.env.SHEIN_BI_PARTNER_CHECK_TTL_MS || 5 * 60_000));
+let activeOwnerKnowledge = null;
+
+function parseUploadedImageArgument(value) {
+  const raw = String(value ?? '').trim();
+  const parts = raw.split('|');
+  if (parts.length !== 3) {
+    throw new Error('--uploaded-image 必须使用精确格式 name|url|sha256');
+  }
+  const [name, imageUrl, rawSha256] = parts.map(part => part.trim());
+  const sha256 = rawSha256.toLowerCase();
+  let parsedUrl;
+  try { parsedUrl = new URL(imageUrl); } catch { throw new Error(`--uploaded-image URL 无效：${imageUrl || '(missing)'}`); }
+  if (!name || !['http:', 'https:'].includes(parsedUrl.protocol) || !/^[a-f0-9]{64}$/.test(sha256)) {
+    throw new Error('--uploaded-image 必须包含非空 name、HTTP(S) URL 和 64 位十六进制 sha256');
+  }
+  return {name, imageUrl, sha256};
+}
 
 function parseArgs(argv) {
   const args = {
@@ -64,6 +101,8 @@ function parseArgs(argv) {
     taskId: '',
     sourceTaskId: '',
     reuseApprovedBinding: false,
+    allowEmptyDescription: false,
+    emptyDescriptionConfirm: '',
     jobId: '',
     chatSessionId: '',
     text: '',
@@ -98,6 +137,7 @@ function parseArgs(argv) {
     imageUrl: '',
     imageType: 0,
     imageDir: '',
+    uploadedImages: [],
     assetFiles: [],
     approvedAssets: false,
     standardGoodsSn: '',
@@ -105,11 +145,15 @@ function parseArgs(argv) {
     productPrice: null,
     inventory: null,
     inputCurrentMa: null,
+    inputCurrentA: null,
+    inputCurrentValueId: '',
+    titleGroup: '',
     titleAr: '',
     titleEn: '',
     outputFile: '',
     materialJsonFile: '',
     sourceFile: '',
+    section: '',
     expectedRevision: null,
     donorStore: '',
     donorSkc: '',
@@ -117,6 +161,7 @@ function parseArgs(argv) {
     adoptExisting: false,
     refreshBinding: false,
     expectedBindingRequestKey: '',
+    expectedPrepareBatchId: '',
     openapiConfigFile: '',
     openapiStoreTruthFile: '',
     format: '',
@@ -157,6 +202,8 @@ function parseArgs(argv) {
     else if (a === '--task-id' || a === '--id') args.taskId = String(argv[++i] || '').trim();
     else if (a === '--source-task-id' || a === '--source-publish-task-id') args.sourceTaskId = String(argv[++i] || '').trim();
     else if (a === '--reuse-approved-binding' || a === '--reuse-binding') args.reuseApprovedBinding = true;
+    else if (a === '--allow-empty-description') args.allowEmptyDescription = true;
+    else if (a === '--empty-description-confirm') args.emptyDescriptionConfirm = String(argv[++i] || '').trim();
     else if (a === '--job-id') args.jobId = String(argv[++i] || '').trim();
     else if (a === '--chat-session' || a === '--chat-session-id') args.chatSessionId = String(argv[++i] || '').trim();
     else if (a === '--text' || a === '--command') args.text = String(argv[++i] || '').trim();
@@ -198,18 +245,21 @@ function parseArgs(argv) {
     else if (a === '--url' || a === '--image-url') args.imageUrl = String(argv[++i] || '').trim();
     else if (a === '--image-type' || a === '--type') args.imageType = Number(argv[++i] || 0);
     else if (a === '--image-dir' || a === '--dir') args.imageDir = path.resolve(String(argv[++i] || ''));
+    else if (a === '--uploaded-image') args.uploadedImages.push(parseUploadedImageArgument(argv[++i]));
     else if (a === '--approved-assets' || a === '--source-approved') args.approvedAssets = true;
     else if (a === '--standard-goods-sn' || a === '--supplier-code') args.standardGoodsSn = String(argv[++i] || '').trim();
     else if (a === '--supply-price') args.supplyPrice = Number(argv[++i]);
     else if (a === '--product-price' || a === '--sale-price' || a === '--shop-price') args.productPrice = Number(argv[++i]);
     else if (a === '--inventory' || a === '--stock-qty') args.inventory = Number(argv[++i]);
     else if (a === '--input-current-ma') args.inputCurrentMa = Number(argv[++i]);
+    else if (a === '--input-current-a') args.inputCurrentA = Number(argv[++i]);
+    else if (a === '--input-current-value-id') args.inputCurrentValueId = String(argv[++i] || '').trim();
+    else if (a === '--title-group') args.titleGroup = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--title-ar') args.titleAr = String(argv[++i] || '').trim();
     else if (a === '--title-en') args.titleEn = String(argv[++i] || '').trim();
     else if (a === '--out' || a === '--output') args.outputFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--material-json') args.materialJsonFile = path.resolve(String(argv[++i] || '').trim());
     else if (a === '--source-file') args.sourceFile = path.resolve(String(argv[++i] || '').trim());
-    else if (a === '--section') args.section = String(argv[++i] || '').trim().toLowerCase();
     else if (a === '--expected-revision') args.expectedRevision = Number(argv[++i]);
     else if (a === '--donor-store') args.donorStore = String(argv[++i] || '').trim();
     else if (a === '--donor-skc') args.donorSkc = String(argv[++i] || '').trim();
@@ -217,6 +267,7 @@ function parseArgs(argv) {
     else if (a === '--adopt-existing') args.adoptExisting = true;
     else if (a === '--refresh-binding') args.refreshBinding = true;
     else if (a === '--expected-binding-request-key') args.expectedBindingRequestKey = String(argv[++i] || '').trim();
+    else if (a === '--expected-prepare-batch-id' || a === '--prepare-batch-id') args.expectedPrepareBatchId = String(argv[++i] || '').trim();
     else if (a === '--format') args.format = String(argv[++i] || '').trim();
     else if (a === '--openapi-config') args.openapiConfigFile = path.resolve(String(argv[++i] || ''));
     else if (a === '--store-truth' || a === '--openapi-store-truth') args.openapiStoreTruthFile = path.resolve(String(argv[++i] || ''));
@@ -244,7 +295,21 @@ function parseArgs(argv) {
     else if (a === '--knowledge-cache-dir') args.knowledgeCacheDir = path.resolve(String(argv[++i] || ''));
     else if (a === '--query-json') args.queryJson = String(argv[++i] || '');
     else if (a === '--query-file') args.queryFile = path.resolve(String(argv[++i] || ''));
-    else if (a === '--section' || a === '--sections') args.sections.push(...String(argv[++i] || '').split(/[,\s，、]+/).map(x => x.trim()).filter(Boolean));
+    else if (a === '--section' || a === '--sections') {
+      const rawValue = String(argv[++i] || '');
+      const values = rawValue
+        .split(/[,\s，、]+/)
+        .map(x => x.trim())
+        .filter(Boolean);
+      for (const value of values) {
+        if (!args.sections.includes(value)) args.sections.push(value);
+      }
+      // --section is also used by description preparation. Keep the
+      // singular compatibility value while treating both spellings as the
+      // same repeatable query-section input.
+      if (a === '--section') args.section = rawValue.trim().toLowerCase();
+      else if (!args.section && values.length === 1) args.section = values[0].toLowerCase();
+    }
     else if (a === '--help' || a === '-h') {
       args.command = 'help';
     } else if (!args.command) {
@@ -320,13 +385,16 @@ Usage:
   node scripts/bi_ops_cli.mjs maintenance-readiness --operation retire_link --doc-evidence <schema.json> --store-probe <probe.json> --readback-evidence <readback.json> --expect pilot_ready
   node scripts/bi_ops_cli.mjs plan-images --image-dir <图片文件夹> [--store JSH] [--out roles.json]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <id> --store JSH --image-dir <已审可用图片目录> --approved-assets --standard-goods-sn "(全)SK-999食品料理机" --supply-price 210 --inventory 100
-  node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV-SKC> [--sku-code <SKU>]
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --spu <SPU> --skc <SB/SV/SH-SKC> [--sku-code <SKU>]
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <update_images任务id> --store HL --image-dir <已审可用图片目录> --approved-assets --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --supply-price 210 --inventory 100 --input-current-ma 700
-  node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store FY --reuse-approved-binding --supply-price 172.22 --inventory 100 --input-current-a 0.18 --input-current-value-id 304301999
+  node scripts/bi_ops_cli.mjs prepare-publish --task-id <copy_product_draft任务id> --store JSH --reuse-approved-binding --standard-goods-sn SK-999 --supply-price 210 --inventory 100 --allow-empty-description --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}
+  node scripts/bi_ops_cli.mjs prepare-descriptions --task-id <copy_product_draft任务id> --store HL --source-file <实际审核资料HTML或普通OOXML DOCX> [--section auto|s09|s9] [--material-json <可选：待核验material.json>] [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --adopt-existing --task-id <copy_product_draft任务id> --store FY --donor-store YJ --donor-skc <同货号donor SKC> --attribute-id 1002328 [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs prepare-product-attribute --refresh-binding --task-id <copy_product_draft任务id> --store FY [--expected-revision <n>] [--expected-binding-request-key <64位sha256>]
+  node scripts/bi_ops_cli.mjs recover-uploaded-asset-binding --task-id <copy_product_draft任务id> --prepare-batch-id <64位sha256> --uploaded-image "main.jpg|https://...|<sha256>" <重复共6次> --confirm ${RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT} [--expected-revision <n>]
   node scripts/bi_ops_cli.mjs update-description --source-task-id <历史发布任务id> --store HL --spu <SPU> [--skc <SKC>] --source-file <实际审核资料HTML> [--section auto|s09|s9] [--material-json <可选>]
   node scripts/bi_ops_cli.mjs prepare-pending-image-correction --task-id <update_images任务id> --store HL --source-task-id <刚发布任务id>
   node scripts/bi_ops_cli.mjs retire-candidates --file <query.json|enriched.csv> --performance-date 2026-07-04 [--out <dir>]
@@ -387,11 +455,13 @@ Options:
   --expect         maintenance-readiness 用；blocked / schema_ready / pilot_ready
   --image-dir      plan-images 用；只扫描本地图包并输出角色规划，不上传、不提交
   --approved-assets  prepare-publish 用；确认图片目录已经过人工审核，AI 不得按语义擅自剔图
+  --allow-empty-description prepare-publish 用；仅在用户当前明确要求描述留空时使用，默认关闭
+  --empty-description-confirm prepare-publish 空描述授权精确确认词：${EMPTY_DESCRIPTION_CONFIRM_TEXT}
   --reuse-approved-binding
                    prepare-publish 用；同一 copy_product_draft 任务已有服务端已审图片绑定时，仅复用该绑定并更新
                    publishPreparation（如 --input-current-ma），不扫描/读取/上传本地图片；与 --image-dir 互斥，
                    不能与 update_images 维护模式的 --source-task-id 组合
-  --source-file     prepare-descriptions 必填；实际审核资料 HTML（唯一 section#s09），工具从文件字节计算 SHA 并逐字提取三语各5行
+  --source-file     prepare-descriptions 必填；审核资料 HTML（唯一 section#s09/s9）或普通 OOXML DOCX 固定标题/卖点结构；工具从文件字节计算 SHA 并逐字提取三语各5行
   --material-json   prepare-descriptions 可选；提供时逐字核验其 ar/en/zh-cn 行与实际 section#s09 一致，任一字节不同即拒绝
   --expected-revision prepare-descriptions 用；任务当前 repository revision，可选项，绑定前做 CAS 校验
   --donor-store / --donor-skc / --attribute-id
@@ -405,8 +475,8 @@ Options:
                       prepare-pending-image-correction 会复用任务中现有已审图片绑定，不重复上传图片
   --standard-goods-sn / --supply-price / --inventory
                    prepare-publish 用；把货号、供货价和库存锁到同一任务
-  --supplier-sku / --input-current-ma
-                   prepare-publish 用；同店重复链接时锁定唯一 Seller SKU，并补输入电流属性
+  --supplier-sku / --input-current-ma / --input-current-a / --input-current-value-id
+                   prepare-publish 用；同店重复链接时锁定唯一 Seller SKU，并按平台官方单位和值ID补输入电流属性
   --title-ar / --title-en / --category-id
                    prepare-publish 用；可选的精确标题与末级分类覆盖
   --performance-date retire-candidates 用；按该表现日期计算首次上架 15 天保护窗
@@ -573,7 +643,7 @@ async function request(args, pathname, {method = 'GET', body, auth = true, allow
     const session = await readSession(args.sessionFile);
     if (session.cookie) headers.cookie = session.cookie;
   }
-  const res = await fetch(`${args.baseUrl}${pathname}`, {
+  const res = await fetchWithIdempotentNetworkRetry(fetch, `${args.baseUrl}${pathname}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -595,9 +665,86 @@ async function request(args, pathname, {method = 'GET', body, auth = true, allow
     const err = new Error(json.error || `HTTP ${res.status}`);
     err.status = res.status;
     err.response = json;
+    const retryAfterSeconds = Number(res.headers.get('retry-after') || 0);
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      err.retryAfterMs = Math.min(30_000, Math.ceil(retryAfterSeconds * 1_000));
+    }
     throw err;
   }
   return {json, res};
+}
+
+const LINK_OPS_DEFERRED_OUTCOMES = new Set(['blocked', 'incomplete', 'unconfirmed']);
+
+function linkOpsExecutionResponse(json, {fallbackTask = null} = {}) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) {
+    const error = new Error('Link Ops execution returned an invalid JSON response');
+    error.code = 'LINK_OPS_EXECUTION_PROTOCOL_INVALID';
+    throw error;
+  }
+  const task = json.task && typeof json.task === 'object' && !Array.isArray(json.task)
+    ? json.task
+    : fallbackTask;
+  const execution = json.execution && typeof json.execution === 'object' && !Array.isArray(json.execution)
+    ? json.execution
+    : null;
+  if (!task || !execution) {
+    const error = new Error('Link Ops execution response is missing the persisted task or execution evidence');
+    error.code = 'LINK_OPS_EXECUTION_PROTOCOL_INVALID';
+    throw error;
+  }
+  const declaredOk = json.ok === true;
+  const partial = json.partial === true;
+  const rawOutcome = String(json.outcome || '').trim().toLowerCase();
+  const deferredOutcome = LINK_OPS_DEFERRED_OUTCOMES.has(rawOutcome);
+  // A contradictory service response must fail closed. In particular, an
+  // HTTP-200 body cannot claim top-level success while also declaring that
+  // the durable execution is partial or its business outcome is unconfirmed.
+  const ok = declaredOk && !partial && !deferredOutcome;
+  const outcome = rawOutcome || (partial ? 'incomplete' : (ok ? '' : 'failed'));
+  if (!ok && (partial || LINK_OPS_DEFERRED_OUTCOMES.has(outcome)) && json.committed !== true) {
+    const error = new Error(`Link Ops ${outcome} response did not prove that its execution evidence was persisted`);
+    error.code = 'LINK_OPS_EXECUTION_COMMIT_UNPROVEN';
+    throw error;
+  }
+  return {
+    ok,
+    committed: json.committed === true,
+    ...(outcome ? {outcome} : {}),
+    ...(ok ? {} : {
+      partial: partial || deferredOutcome,
+      error: String(json.error || 'Link Ops execution did not reach a confirmed business outcome'),
+    }),
+    commitRecovered: json.commitRecovered === true,
+    auditPending: json.auditPending === true,
+    stage: String(json.stage || ''),
+    warning: String(json.warning || ''),
+    task,
+    execution,
+  };
+}
+
+function linkOpsExecutionSummary(response) {
+  return {
+    ok: response.ok,
+    committed: response.committed,
+    ...(response.outcome ? {outcome: response.outcome} : {}),
+    ...(response.ok ? {} : {
+      partial: response.partial,
+      error: response.error,
+    }),
+    commitRecovered: response.commitRecovered,
+    auditPending: response.auditPending,
+    stage: response.stage,
+    warning: response.warning,
+  };
+}
+
+function applyLinkOpsExecutionExitCode(output) {
+  if (output?.ok === true) return;
+  process.exitCode = LINK_OPS_DEFERRED_OUTCOMES.has(String(output?.outcome || '').toLowerCase())
+    ? OPS_EXIT_CODES.blocked
+    : OPS_EXIT_CODES.failed;
 }
 
 const KNOWLEDGE_CHECK_COMMANDS = new Set([
@@ -608,6 +755,7 @@ const KNOWLEDGE_CHECK_COMMANDS = new Set([
   'prepare-publish', 'prepare_publish',
   'prepare-descriptions', 'prepare_descriptions',
   'prepare-product-attribute', 'prepare_product_attribute',
+  'recover-uploaded-asset-binding', 'recover_uploaded_asset_binding',
   'update-description', 'update_description',
   'prepare-pending-image-correction', 'prepare_pending_image_correction',
 ]);
@@ -644,10 +792,15 @@ async function refreshPartnerCliAndRelaunchIfNeeded(args, {force = false} = {}) 
   return {relaunched: true, result, relaunched};
 }
 
-async function refreshPartnerKnowledge(args, {strict = false, force = false} = {}) {
+async function refreshPartnerKnowledge(args, {
+  strict = false,
+  force = false,
+  allowTransientCacheFallback = !strict,
+} = {}) {
   const session = await readSession(args.sessionFile);
   if (!session.cookie) {
     if (strict) throw new Error('尚未登录 BI，无法检查负责人规则版本');
+    activeOwnerKnowledge = null;
     return {ok: false, skipped: true, warning: '尚未登录 BI'};
   }
   const result = await ensurePartnerKnowledgeCurrent({
@@ -657,12 +810,15 @@ async function refreshPartnerKnowledge(args, {strict = false, force = false} = {
     cliVersion: BI_OPS_CLI_VERSION,
     strict,
     maxAgeMs: force ? 0 : PARTNER_CHECK_TTL_MS,
+    allowTransientCacheFallback,
   });
+  activeOwnerKnowledge = result;
   if (result.updated && !args.json) {
     process.stderr.write(`负责人规则已更新并校验：${String(result.manifest?.sourceCommit || result.manifest?.fingerprint || '').slice(0, 12)}\n`);
   }
   if (result.warning && !args.json) {
-    process.stderr.write(`负责人规则检查提示：${result.warning}\n`);
+    const source = result.source === 'stale-verified-cache' ? `source=${result.source}；` : '';
+    process.stderr.write(`负责人规则检查提示：${source}${result.warning}\n`);
   }
   if (result.cliUpdateRecommended && !args.json) {
     process.stderr.write(`CLI 有推荐更新：当前 ${BI_OPS_CLI_VERSION}，推荐 ${result.recommendedCliVersion}\n`);
@@ -670,7 +826,139 @@ async function refreshPartnerKnowledge(args, {strict = false, force = false} = {
   return result;
 }
 
+async function readJsonForQueryDiagnostic(file) {
+  try {
+    return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
+  } catch {
+    return null;
+  }
+}
+
+async function readVerifiedOwnerKnowledgeCacheDiagnostic(args) {
+  const cacheDir = path.resolve(args.knowledgeCacheDir || DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR);
+  const pointer = await readJsonForQueryDiagnostic(path.join(cacheDir, 'manifest.json'));
+  const data = pointer?.data && typeof pointer.data === 'object' ? pointer.data : null;
+  if (!data) {
+    return {
+      ok: false,
+      verified: false,
+      source: 'none',
+      errorCode: 'OWNER_KNOWLEDGE_CACHE_MISSING',
+    };
+  }
+  const generation = String(pointer.generation || data.bundleSha256 || '').trim().toLowerCase();
+  const bundleFiles = /^[a-f0-9]{64}$/u.test(generation)
+    ? [path.join(cacheDir, 'generations', generation, 'bundle.json'), path.join(cacheDir, 'bundle.json')]
+    : [path.join(cacheDir, 'bundle.json')];
+  let bundle = null;
+  for (const bundleFile of bundleFiles) {
+    bundle = await readJsonForQueryDiagnostic(bundleFile);
+    if (bundle) break;
+  }
+  if (!bundle) {
+    return {
+      ok: false,
+      verified: false,
+      source: 'invalid-cache',
+      errorCode: 'OWNER_KNOWLEDGE_CACHE_BUNDLE_MISSING',
+    };
+  }
+  try {
+    validateOwnerKnowledgeDistribution({
+      manifest: {
+        schemaVersion: Number(data.schemaVersion || 0),
+        authorityId: String(data.authorityId || ''),
+        fingerprint: String(data.fingerprint || ''),
+        publishedAt: data.publishedAt ? String(data.publishedAt) : null,
+        ruleCount: Number(data.ruleCount || 0),
+        bundlePath: String(data.bundlePath || ''),
+        bundleSha256: String(data.bundleSha256 || ''),
+      },
+      bundle,
+    });
+  } catch {
+    return {
+      ok: false,
+      verified: false,
+      source: 'invalid-cache',
+      errorCode: 'OWNER_KNOWLEDGE_CACHE_VALIDATION_FAILED',
+    };
+  }
+  return {
+    ok: true,
+    verified: true,
+    source: 'verified-cache',
+    current: data.current !== false,
+    fingerprint: String(data.fingerprint || ''),
+    sourceCommit: String(data.sourceCommit || ''),
+    checkedAt: String(pointer.checkedAt || ''),
+  };
+}
+
+async function readLocalPartnerCliDiagnostic() {
+  try {
+    const installRoot = await findManagedPartnerCliInstallRoot({entryRoot: ROOT});
+    if (!installRoot) {
+      return {managed: false, available: false, source: 'none', refreshAttempted: false};
+    }
+    const pointer = await readJsonForQueryDiagnostic(path.join(installRoot, 'current.json'));
+    const version = String(pointer?.version || '').trim();
+    return {
+      managed: true,
+      available: Boolean(version),
+      source: version ? 'managed-pointer' : 'invalid-pointer',
+      version,
+      refreshAttempted: false,
+    };
+  } catch (error) {
+    return {
+      managed: false,
+      available: false,
+      source: 'diagnostic-error',
+      refreshAttempted: false,
+      errorCode: String(error?.code || 'PARTNER_CLI_LOCAL_DIAGNOSTIC_FAILED'),
+    };
+  }
+}
+
+async function readReadOnlyPartnerDiagnostics(args, refreshedKnowledge = null) {
+  const [cachedOwnerKnowledge, partnerCli] = await Promise.all([
+    readVerifiedOwnerKnowledgeCacheDiagnostic(args).catch(error => ({
+      ok: false,
+      verified: false,
+      source: 'diagnostic-error',
+      errorCode: String(error?.code || 'OWNER_KNOWLEDGE_CACHE_DIAGNOSTIC_FAILED'),
+    })),
+    readLocalPartnerCliDiagnostic(),
+  ]);
+  const ownerKnowledge = refreshedKnowledge?.source === 'stale-verified-cache'
+    ? {
+        ...cachedOwnerKnowledge,
+        source: refreshedKnowledge.source,
+        stale: true,
+        checkedAt: refreshedKnowledge.checkedAt || cachedOwnerKnowledge.checkedAt,
+      }
+    : cachedOwnerKnowledge;
+  return {
+    refreshAttempted: Boolean(refreshedKnowledge),
+    refreshPolicy: refreshedKnowledge ? 'live-then-verified-cache' : 'read-only-verified-cache',
+    ownerKnowledge,
+    partnerCli,
+  };
+}
+
 function print(data, pretty = false) {
+  if (activeOwnerKnowledge?.source === 'stale-verified-cache'
+    && data && typeof data === 'object' && !Array.isArray(data)) {
+    data = {
+      ...data,
+      ownerKnowledge: {
+        source: activeOwnerKnowledge.source,
+        stale: true,
+        checkedAt: activeOwnerKnowledge.checkedAt || null,
+      },
+    };
+  }
   if (!pretty) {
     console.log(JSON.stringify(data, null, 2));
     return;
@@ -794,14 +1082,18 @@ async function runLockSource(args) {
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_lock_source'},
+    allowJsonFailure: true,
   });
+  const preflightResponse = linkOpsExecutionResponse(preflightJson, {fallbackTask: json.task});
   print({
     ok: true,
     aiInvoked: false,
     taskId: args.taskId,
     lockedSource: {sourceStore: sourceStores[0], sourceSkc: sourceSkcs[0]},
-    task: preflightJson.task || json.task,
-    execution: preflightJson.execution,
+    preflightReady: preflightResponse.ok,
+    preflightResult: linkOpsExecutionSummary(preflightResponse),
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
     safety: {realPublishOccurred: false, nextStep: '核对精确源链接证据与新 payloadHash；用户确认前不得 execute。'},
   });
 }
@@ -1111,9 +1403,24 @@ function publishPreparationFromArgs(args) {
   if (args.inputCurrentMa !== null && (!Number.isFinite(args.inputCurrentMa) || args.inputCurrentMa <= 0)) {
     throw new Error('--input-current-ma must be a positive number');
   }
+  if (args.inputCurrentA !== null && (!Number.isFinite(args.inputCurrentA) || args.inputCurrentA <= 0)) {
+    throw new Error('--input-current-a must be a positive number');
+  }
+  if (args.inputCurrentMa !== null && args.inputCurrentA !== null) {
+    throw new Error('--input-current-ma and --input-current-a are mutually exclusive');
+  }
+  if (args.inputCurrentValueId && !/^[1-9]\d*$/.test(args.inputCurrentValueId)) {
+    throw new Error('--input-current-value-id must be a positive integer');
+  }
+  if (args.inputCurrentValueId && args.inputCurrentMa === null && args.inputCurrentA === null) {
+    throw new Error('--input-current-value-id requires --input-current-ma or --input-current-a');
+  }
   const categoryId = String(args.categoryId || '').trim();
   if (categoryId && (!/^\d+$/.test(categoryId) || Number(categoryId) <= 0)) throw new Error('--category-id must be a positive integer');
+  const titleGroup = String(args.titleGroup || '').trim().toLowerCase();
+  if (titleGroup && !/^title[123]$/.test(titleGroup)) throw new Error('--title-group must be title1, title2 or title3');
   return {
+    titleGroup,
     standardGoodsSn: args.standardGoodsSn || '',
     supplierSku: args.supplierSkuList[0] || '',
     supplyPrice: args.supplyPrice,
@@ -1121,10 +1428,13 @@ function publishPreparationFromArgs(args) {
     categoryId: categoryId ? Number(categoryId) : null,
     titleAr: args.titleAr || '',
     titleEn: args.titleEn || '',
-    attributeOverrides: args.inputCurrentMa === null ? [] : [{
+    attributeOverrides: args.inputCurrentMa === null && args.inputCurrentA === null ? [] : [{
       attribute_id: 1002323,
-      attribute_extra_value: String(Math.round(args.inputCurrentMa)),
-      attribute_unit: 'mA',
+      attribute_extra_value: args.inputCurrentA !== null
+        ? String(args.inputCurrentA)
+        : String(Math.round(args.inputCurrentMa)),
+      attribute_unit: args.inputCurrentA !== null ? 'A' : 'mA',
+      ...(args.inputCurrentValueId ? {attribute_value_id: args.inputCurrentValueId} : {}),
       label: '输入电流',
       source: 'explicit_prepare_publish',
     }],
@@ -1163,6 +1473,13 @@ function preparedImageAssignments(plan) {
 
 async function runPreparePublish(args) {
   if (!args.taskId) throw new Error('prepare-publish requires --task-id <id>');
+  if (args.allowEmptyDescription) {
+    if (args.emptyDescriptionConfirm !== EMPTY_DESCRIPTION_CONFIRM_TEXT) {
+      throw new Error(`--allow-empty-description 必须同时携带 --empty-description-confirm ${EMPTY_DESCRIPTION_CONFIRM_TEXT}`);
+    }
+  } else if (args.emptyDescriptionConfirm) {
+    throw new Error('--empty-description-confirm 只能与 --allow-empty-description 同时使用');
+  }
   if (args.reuseApprovedBinding) {
     if (args.imageDir) throw new Error('--reuse-approved-binding 与 --image-dir 互斥：复用服务端已审绑定时不扫描、不读取、不上传本地图片');
     if (args.sourceTaskId) throw new Error('--reuse-approved-binding 仅服务 copy_product_draft 发布准备；不能用于 update_images 维护任务的 --source-task-id 模式');
@@ -1185,6 +1502,10 @@ async function runPreparePublish(args) {
         reuseApprovedBinding: true,
         bindings: [],
         publishPreparation,
+        ...(args.allowEmptyDescription ? {
+          allowEmptyDescription: true,
+          emptyDescriptionConfirm: args.emptyDescriptionConfirm,
+        } : {}),
       },
     }));
   } else {
@@ -1227,6 +1548,10 @@ async function runPreparePublish(args) {
         sourceDirLabel: path.basename(args.imageDir),
         bindings: uploaded,
         publishPreparation,
+        ...(args.allowEmptyDescription ? {
+          allowEmptyDescription: true,
+          emptyDescriptionConfirm: args.emptyDescriptionConfirm,
+        } : {}),
         sourceTaskId: args.sourceTaskId || '',
         productIdentity: {
           spuName: args.spuList[0] || '',
@@ -1240,7 +1565,9 @@ async function runPreparePublish(args) {
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_publish'},
+    allowJsonFailure: true,
   });
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
   const reused = args.reuseApprovedBinding;
   print({
     ok: true,
@@ -1266,13 +1593,17 @@ async function runPreparePublish(args) {
     },
     uploaded: uploaded.map(row => ({name: row.name, role: row.role, imageType: row.imageType, width: row.width, height: row.height, sha256: row.sha256})),
     binding: bindingJson.binding,
-    task: preflightJson.task,
-    execution: preflightJson.execution,
+    preflightReady: preflightResponse.ok,
+    preflightResult: linkOpsExecutionSummary(preflightResponse),
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
     safety: {
       sameTask: true,
       payloadSource: bindingJson.binding.payloadSource,
       realPublishOccurred: false,
+      uploadedImageCount: uploaded.length,
       reusedApprovedBinding: reused,
+      emptyDescriptionAuthorized: bindingJson?.binding?.emptyDescriptionAuthorization?.ok === true,
       nextStep: '核对新预演的 payloadHash 和字段；只有用户明确确认后才调用 execute。',
     },
   });
@@ -1280,7 +1611,7 @@ async function runPreparePublish(args) {
 
 async function runPrepareDescriptions(args) {
   if (!args.taskId) throw new Error('prepare-descriptions requires --task-id <id>');
-  if (!args.sourceFile) throw new Error('prepare-descriptions requires --source-file <实际审核资料HTML>');
+  if (!args.sourceFile) throw new Error('prepare-descriptions requires --source-file <实际审核资料HTML或普通OOXML DOCX>');
   const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
   if (!store) throw new Error('prepare-descriptions requires --store <target store>');
   const section = String(args.section || 'auto').trim().toLowerCase();
@@ -1299,22 +1630,32 @@ async function runPrepareDescriptions(args) {
   } catch {
     throw new Error(`无法读取审核资料文件：${path.basename(args.sourceFile) || '(unknown)'}`);
   }
-  const htmlText = sourceBytes.toString('utf8');
+  const isDocx = /\.docx$/i.test(path.basename(args.sourceFile));
+  const htmlText = isDocx ? '' : sourceBytes.toString('utf8');
   let providedMaterial = null;
   if (args.materialJsonFile) {
     providedMaterial = JSON.parse(await fs.readFile(args.materialJsonFile, 'utf8'));
   }
-  const verified = verifyDescriptionMaterialAgainstHtml(htmlText, sourceBytes, {
-    material: providedMaterial,
-    sourceFileBasename: path.basename(args.sourceFile),
-    sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
-    section,
-  });
+  const verified = isDocx
+    ? verifyDescriptionMaterialAgainstDocx(sourceBytes, {
+        material: providedMaterial,
+        sourceFileBasename: path.basename(args.sourceFile),
+        sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
+        section,
+      })
+    : verifyDescriptionMaterialAgainstHtml(htmlText, sourceBytes, {
+        material: providedMaterial,
+        sourceFileBasename: path.basename(args.sourceFile),
+        sourceFileSha256: providedMaterial?.sourceFileSha256 || '',
+        section,
+      });
   const material = validateDescriptionMaterialJson(verified.material);
   const summary = describeDescriptionMaterial(material);
-  const sourceProof = verified.sectionUsed === 's9'
-    ? 'server_verified_html_section_s9'
-    : 'server_verified_html_section_s09';
+  const sourceProof = verified.sectionUsed === 'docx'
+    ? DESCRIPTION_SOURCE_PROOF_DOCX
+    : verified.sectionUsed === 's9'
+      ? DESCRIPTION_SOURCE_PROOF_S9
+      : DESCRIPTION_SOURCE_PROOF;
   const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
   const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
   if (!currentTask) throw new Error('当前账号无法精确读取目标 task，描述未绑定');
@@ -1365,7 +1706,7 @@ async function runPrepareDescriptions(args) {
         sourceProof,
       })
     : '';
-  const existingLegacyS09BindingRequestKey = sourceProof === 'server_verified_html_section_s09'
+  const existingLegacyS09BindingRequestKey = sourceProof === DESCRIPTION_SOURCE_PROOF
     && Number.isSafeInteger(existingBaseRevision) && existingBaseRevision > 0
     ? descriptionBindingRequestKey({
         taskId: args.taskId,
@@ -1494,6 +1835,7 @@ async function runPrepareDescriptions(args) {
     ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_descriptions'},
+      allowJsonFailure: true,
     }));
   } catch (error) {
     print({
@@ -1526,7 +1868,8 @@ async function runPrepareDescriptions(args) {
     process.exitCode = 1;
     return;
   }
-  const execution = preflightJson.execution || {};
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const execution = preflightResponse.execution;
   const productExecutor = execution.openApiProductExecutors?.[0] || execution.hlOpenApiExecutor || {};
   const payloadSummary = productExecutor.payload?.summary || {};
   const dryRun = {
@@ -1542,15 +1885,22 @@ async function runPrepareDescriptions(args) {
   };
   // Terminal output carries hashes/counts/languages only. Full description text
   // never leaves the local source file into CLI stdout.
-  const output = buildPrepareDescriptionsCliOutput({
+  const preparedOutput = buildPrepareDescriptionsCliOutput({
     summary,
     binding: {...binding, sameTask: true},
     dryRun,
     taskId: args.taskId,
     store,
   });
+  const output = {
+    ...preparedOutput,
+    ...linkOpsExecutionSummary(preflightResponse),
+    ok: preparedOutput.ok === true && preflightResponse.ok,
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
+  };
   print(output);
-  if (!output.ok) process.exitCode = 1;
+  applyLinkOpsExecutionExitCode(output);
 }
 
 async function runRefreshProductAttributeBinding(args, store) {
@@ -1658,6 +2008,107 @@ async function runRefreshProductAttributeBinding(args, store) {
   if (!output.ok) process.exitCode = 1;
 }
 
+
+async function runRecoverUploadedAssetBinding(args) {
+  if (!args.taskId) throw new Error('recover-uploaded-asset-binding requires --task-id <id>');
+  const confirm = String(args.confirm || '').trim();
+  if (confirm !== RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT) {
+    throw new Error(`recover-uploaded-asset-binding 必须携带 --confirm ${RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT}`);
+  }
+  const expectedPrepareBatchId = String(args.expectedPrepareBatchId || '').trim();
+  if (!expectedPrepareBatchId || !/^[a-f0-9]{64}$/.test(expectedPrepareBatchId)) {
+    throw new Error('recover-uploaded-asset-binding requires --prepare-batch-id <64位十六进制哈希>');
+  }
+  const uploadedImages = Array.isArray(args.uploadedImages) ? args.uploadedImages : [];
+  if (uploadedImages.length !== 6) {
+    throw new Error(`recover-uploaded-asset-binding requires exactly 6 repeated --uploaded-image name|url|sha256 parameters; received ${uploadedImages.length}`);
+  }
+  for (const [field, code] of [['name', 'filename'], ['imageUrl', 'URL'], ['sha256', 'SHA-256']]) {
+    if (new Set(uploadedImages.map(row => row[field])).size !== 6) {
+      throw new Error(`recover-uploaded-asset-binding --uploaded-image ${code} values must be unique`);
+    }
+  }
+  const expectedRevisionProvided = args.expectedRevision !== null;
+  if (expectedRevisionProvided
+    && (!Number.isSafeInteger(args.expectedRevision) || args.expectedRevision <= 0)) {
+    throw new Error('recover-uploaded-asset-binding --expected-revision 必须是正安全整数');
+  }
+  let recoverJson;
+  try {
+    ({json: recoverJson} = await request(args, '/api/link-ops-recover-uploaded-asset-binding', {
+      method: 'POST',
+      body: {
+        taskId: args.taskId,
+        confirm,
+        expectedPrepareBatchId,
+        uploadedImages,
+        ...(expectedRevisionProvided ? {expectedRevision: args.expectedRevision} : {}),
+      },
+      allowJsonFailure: true,
+    }));
+  } catch (error) {
+    const response = error?.response && typeof error.response === 'object' ? error.response : {};
+    const committedBinding = response.binding && typeof response.binding === 'object' ? response.binding : {};
+    print({
+      ok: false,
+      aiInvoked: false,
+      command: 'recover-uploaded-asset-binding',
+      taskId: args.taskId,
+      stage: String(response.stage || 'binding_not_recovered'),
+      bindingCommitted: response.bindingCommitted === true,
+      readbackVerified: response.readbackVerified === true,
+      auditPending: response.auditPending === true,
+      persistedRevision: response.persistedRevision ?? null,
+      bindingFingerprint: String(committedBinding.bindingFingerprint || response.bindingFingerprint || ''),
+      imageCount: Number(committedBinding.imageCount || (Array.isArray(committedBinding.images) ? committedBinding.images.length : 0)),
+      roles: Array.isArray(committedBinding.images) ? committedBinding.images.map(image => image.role) : [],
+      prepareBatchId: String(committedBinding.prepareBatchId || expectedPrepareBatchId),
+      authority: String(committedBinding.authority || ''),
+      code: error?.code || response.code || null,
+      status: error?.status || null,
+      error: String(error?.message || '已上传素材绑定恢复失败').slice(0, 500),
+      safety: {realPublishOccurred: false, newUploadTriggered: false, newTaskCreated: false},
+    });
+    process.exitCode = 1;
+    return;
+  }
+
+  const binding = recoverJson.binding || {};
+  const output = {
+    ok: recoverJson.ok === true
+      && recoverJson.bindingCommitted === true
+      && recoverJson.readbackVerified === true
+      && recoverJson.auditPending !== true,
+    aiInvoked: false,
+    command: 'recover-uploaded-asset-binding',
+    taskId: args.taskId,
+    idempotentReplay: recoverJson.idempotentReplay === true,
+    bindingCommitted: recoverJson.bindingCommitted === true,
+    readbackVerified: recoverJson.readbackVerified === true,
+    auditPending: recoverJson.auditPending === true,
+    persistedRevision: recoverJson.persistedRevision ?? null,
+    stage: String(recoverJson.stage || 'binding_not_recovered'),
+    code: String(recoverJson.code || ''),
+    error: String(recoverJson.error || '').slice(0, 500),
+    bindingFingerprint: String(binding.bindingFingerprint || recoverJson.bindingFingerprint || ''),
+    imageCount: Number(binding.imageCount || (Array.isArray(binding.images) ? binding.images.length : 0)),
+    roles: Array.isArray(binding.images) ? binding.images.map(img => img.role) : [],
+    prepareBatchId: String(binding.prepareBatchId || expectedPrepareBatchId),
+    authority: String(binding.authority || ''),
+    nextStep: recoverJson.nextStep || {command: 'preflight', note: '图片绑定已恢复，旧预演已作废，请重新执行 preflight。', realPublish: false},
+    safety: {
+      realPublishOccurred: false,
+      newUploadTriggered: false,
+      newTaskCreated: false,
+      sameTask: true,
+      preflightInvalidated: true,
+    },
+  };
+  print(output);
+  if (!output.ok) process.exitCode = 1;
+}
+
+
 async function runPrepareProductAttribute(args) {
   if (!args.taskId) throw new Error('prepare-product-attribute requires --task-id <id>');
   const storeCandidates = [...new Set(
@@ -1678,8 +2129,8 @@ async function runPrepareProductAttribute(args) {
     throw new Error('prepare-product-attribute requires --donor-store <同货号 donor 店铺代码>');
   }
   const donorSkc = String(args.donorSkc || '').trim();
-  if (!donorSkc || donorSkc.length > 160 || !/^s[abv]\d{8,}$/i.test(donorSkc)) {
-    throw new Error('prepare-product-attribute --donor-skc 必须是区分大小写的 SHEIN SKC（s[abv] + 8 位以上数字）');
+  if (!donorSkc || donorSkc.length > 160 || !isSheinSkc(donorSkc) || !/\d{8,}$/.test(donorSkc)) {
+    throw new Error('prepare-product-attribute --donor-skc 必须是完整 SHEIN SKC（sv/sb/sh + 8 位以上数字，大小写不敏感）');
   }
   const attributeId = normalizeProductAttributeId(args.attributeId);
   if (attributeId === null || attributeId !== 1002328) {
@@ -1883,6 +2334,7 @@ async function runPrepareProductAttribute(args) {
     ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_product_attribute'},
+      allowJsonFailure: true,
     }));
   } catch (error) {
     print({
@@ -1911,7 +2363,8 @@ async function runPrepareProductAttribute(args) {
     process.exitCode = 1;
     return;
   }
-  const execution = preflightJson.execution || {};
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const execution = preflightResponse.execution;
   const productExecutor = execution.openApiProductExecutors?.[0] || execution.hlOpenApiExecutor || {};
   // Re-read the task after dry-run: the binding lock must still be KNOWN,
   // current and ok against the persisted payload, proving the bound attribute
@@ -1983,6 +2436,10 @@ async function runPrepareProductAttribute(args) {
       rawTaskCode: String(binding.rawTaskCode || ''),
       rawDonorCode: String(binding.rawDonorCode || ''),
     },
+    preflightReady: preflightResponse.ok,
+    preflightResult: linkOpsExecutionSummary(preflightResponse),
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
     dryRun,
     nextStep: bindJson.nextStep || {
       command: 'prepare-descriptions',
@@ -2219,6 +2676,7 @@ async function runUpdateDescription(args) {
     ({json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: taskId, mode: 'dry-run', source: 'codex_desktop_cli_update_description'},
+      allowJsonFailure: true,
     }));
   } catch (error) {
     print({
@@ -2252,7 +2710,8 @@ async function runUpdateDescription(args) {
     process.exitCode = 1;
     return;
   }
-  const execution = preflightJson.execution || {};
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const execution = preflightResponse.execution;
   const maintenanceExecutor = (execution.linkMaintenanceExecutors || [])[0] || {};
   const executorSummary = maintenanceExecutor.payload?.summary || {};
   const descriptionUpdate = executorSummary.descriptionUpdate || {};
@@ -2267,7 +2726,7 @@ async function runUpdateDescription(args) {
     descriptionBindingLocked: Number(descriptionUpdate.descriptionCount || 0) === 2
       && String(descriptionUpdate.payloadHash || '').toLowerCase() === String(binding.newPayloadHash || '').toLowerCase(),
   };
-  const output = {
+  const preparedOutput = {
     ok: dryRun.ok && dryRun.descriptionBindingLocked
       && dryRun.descriptionCount === 2
       && dryRun.payloadHash.length === 64,
@@ -2302,8 +2761,15 @@ async function runUpdateDescription(args) {
       nextStep: '核对新预演的 payloadHash 和描述 hash；只有用户明确确认后才调用 execute。',
     },
   };
+  const output = {
+    ...preparedOutput,
+    ...linkOpsExecutionSummary(preflightResponse),
+    ok: preparedOutput.ok === true && preflightResponse.ok,
+    task: preflightResponse.task,
+    execution: preflightResponse.execution,
+  };
   print(output);
-  if (!output.ok) process.exitCode = 1;
+  applyLinkOpsExecutionExitCode(output);
 }
 
 async function runPreparePendingImageCorrection(args) {
@@ -2327,22 +2793,24 @@ async function runPreparePendingImageCorrection(args) {
   const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
     method: 'POST',
     body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_pending_image_correction'},
+    allowJsonFailure: true,
   });
-  print({
-    ok: true,
+  const preflightResponse = linkOpsExecutionResponse(preflightJson);
+  const output = {
+    ...preflightResponse,
     taskId: args.taskId,
     sourceTaskId: args.sourceTaskId,
     store,
     binding: bindingJson.binding,
-    task: preflightJson.task,
-    execution: preflightJson.execution,
     safety: {
       imagesReused: true,
       imagesUploadedAgain: false,
       realWriteOccurred: false,
       nextStep: '核对撤回+完整重提计划及 payloadHash；只有用户明确确认后才调用 execute。',
     },
-  });
+  };
+  print(output);
+  applyLinkOpsExecutionExitCode(output);
 }
 
 function operatorGuide() {
@@ -2479,6 +2947,7 @@ async function waitForLinkOpsJob(args, jobId) {
 async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
   if (!args.text) throw new Error(`${legacyAlias ? 'ask' : 'query'} requires --text`);
   const startedAt = new Date().toISOString();
+  const diagnostics = await readReadOnlyPartnerDiagnostics(args);
   const query = new URLSearchParams({q: args.text, source: 'codex_desktop_cli'});
   const stores = [...new Set([...(args.stores || []), ...(args.sourceStores || [])])];
   if (stores.length) query.set('stores', stores.join(','));
@@ -2532,6 +3001,7 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
         command: legacyAlias ? 'ask' : 'query',
         legacyAlias,
         note: '失败证据已原子覆盖输出文件，未沿用旧查询结果',
+        diagnostics,
       },
     };
     const finishedAt = new Date().toISOString();
@@ -2565,6 +3035,7 @@ async function runDirectBiQuery(args, {legacyAlias = false} = {}) {
       note: legacyAlias
         ? 'ask 已改为 query 兼容别名；本次没有调用云端问数模型'
         : '当前 Codex 应直接分析 data，不得再转发给其他问数模型',
+      diagnostics,
     },
   };
   if (!args.outputFile) {
@@ -2691,12 +3162,17 @@ async function main() {
     print({ok: true, version: BI_OPS_CLI_VERSION, update: update.result});
     return;
   }
-  if (AUTO_UPDATE_COMMANDS.has(args.command)) {
+  const readOnlyQuery = args.command === 'query' || args.command === 'ask';
+  if (!readOnlyQuery && AUTO_UPDATE_COMMANDS.has(args.command)) {
     const update = await refreshPartnerCliAndRelaunchIfNeeded(args, {force: args.command === 'execute'});
     if (update.relaunched) return;
   }
-  if (KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
-    await refreshPartnerKnowledge(args, {strict: args.command === 'execute', force: args.command === 'execute'});
+  if (!readOnlyQuery && KNOWLEDGE_CHECK_COMMANDS.has(args.command)) {
+    await refreshPartnerKnowledge(args, {
+      strict: args.command === 'execute',
+      force: args.command === 'execute',
+      allowTransientCacheFallback: true,
+    });
   }
   if (args.command === 'doctor') {
     const report = await runDoctor(args);
@@ -2726,6 +3202,10 @@ async function main() {
   }
   if (args.command === 'prepare-product-attribute' || args.command === 'prepare_product_attribute') {
     await runPrepareProductAttribute(args);
+    return;
+  }
+  if (args.command === 'recover-uploaded-asset-binding' || args.command === 'recover_uploaded_asset_binding') {
+    await runRecoverUploadedAssetBinding(args);
     return;
   }
   if (args.command === 'update-description' || args.command === 'update_description') {
@@ -2867,15 +3347,18 @@ async function main() {
     const {json: preflightJson} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: taskId, mode: 'dry-run', source: 'codex_desktop_cli_structured'},
+      allowJsonFailure: true,
     });
-    print({
-      ok: true,
+    const output = {
+      ...linkOpsExecutionResponse(preflightJson, {fallbackTask: json.task}),
       aiInvoked: false,
       mode: 'structured-operation',
-      task: preflightJson.task || json.task,
-      execution: preflightJson.execution,
-      nextStep: '核对系统检查结果；只有用户明确确认后才调用 execute。',
-    });
+      nextStep: preflightJson.ok === false
+        ? '任务已保留；请按 task ID 处理 blockers 后重跑 preflight，勿重复 operate 创建任务。'
+        : '核对系统检查结果；只有用户明确确认后才调用 execute。',
+    };
+    print(output);
+    applyLinkOpsExecutionExitCode(output);
     return;
   }
   if (args.command === 'authorize-duplicate-publish') {
@@ -2908,8 +3391,11 @@ async function main() {
     const {json} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'dry-run', source: 'codex_desktop_cli'},
+      allowJsonFailure: true,
     });
-    print({ok: true, task: json.task, execution: json.execution});
+    const output = linkOpsExecutionResponse(json);
+    print(output);
+    applyLinkOpsExecutionExitCode(output);
     return;
   }
   if (args.command === 'execute') {
@@ -2918,8 +3404,11 @@ async function main() {
     const {json} = await request(args, '/api/link-ops-execute', {
       method: 'POST',
       body: {id: args.taskId, mode: 'execute', confirm: args.confirm, source: 'codex_desktop_cli'},
+      allowJsonFailure: true,
     });
-    print({ok: true, task: json.task, execution: json.execution});
+    const output = linkOpsExecutionResponse(json);
+    print(output);
+    applyLinkOpsExecutionExitCode(output);
     return;
   }
   if (args.command === 'resolve') {

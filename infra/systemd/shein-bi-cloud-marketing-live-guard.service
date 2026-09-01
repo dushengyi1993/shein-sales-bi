@@ -5,18 +5,23 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-Slice=shein-host-heavy-bi.slice
 User=sheinops
 Group=sheinops
 WorkingDirectory=/opt/shein-bi/app
 Environment=HOME=/home/sheinops
 Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
+Environment=SHEIN_BI_HOST_RESOURCE_LANE=api-light
 Environment=SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY=/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json
 Environment=SHEIN_BI_MARKETING_LIVE_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-marketing-live-guard.lock
+Environment=SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE=/opt/shein-bi/app/state/locks/shein-bi-cloud-marketing-artifact-publication.lock
+Environment=SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_WAIT_SEC=30
 Environment=SHEIN_BI_MARKETING_LIVE_LOG_DIR=/srv/shein-bi/logs/cloud-marketing-live-guard
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC=900
 Environment=SHEIN_BI_MARKETING_LIVE_SCAN_KILL_AFTER_SEC=60
+Environment=SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_RETRY_INTERVAL_SEC=15
+Environment=SHEIN_BI_MARKETING_LIVE_LOW_MEMORY_MAX_WAIT_SEC=600
+Environment=SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE=/srv/shein-bi/runtime/marketing-plans/current.json
 Environment=SHEIN_BI_MARKETING_PRICE_STORE_ATTEMPTS=3
 Environment=SHEIN_BI_MARKETING_PRICE_SESSION_CONCURRENCY=3
 Environment=SHEIN_BI_MARKETING_STAGE_ATTEMPTS=3
@@ -35,5 +40,4 @@ MemoryHigh=1000M
 MemoryMax=1400M
 OOMPolicy=stop
 KillMode=control-group
-ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_host_heavy_job.sh --domain marketing-live --class openapi --lock-wait-sec 0 --deadline-minute 27 --defer-state /srv/shein-bi/runtime/host-scheduler/marketing-live.latest.json -- /usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_live_guard.sh
-SuccessExitStatus=75
+ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/cloud_marketing_live_guard.sh

@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 OUTPUT_DIR="${SHEIN_BI_OUTPUT_DIR:-$ROOT/outputs}"
 PROFILES_DIR="${SHEIN_BI_PROFILES_DIR:-$ROOT/profiles}"
+OFFSITE_ENABLED="${SHEIN_BI_BACKUP_OFFSITE_ENABLED:-1}"
 COS_MOUNT="${SHEIN_BI_COS_MOUNT:-/lhcos-data}"
 COS_ARCHIVE_ROOT="${SHEIN_BI_COS_ARCHIVE_ROOT:-$COS_MOUNT/shein-bi-archive}"
 LOG_DIR="${SHEIN_BI_DISK_MAINTENANCE_LOG_DIR:-/srv/shein-bi/logs/disk-maintenance}"
@@ -24,6 +25,14 @@ for arg in "$@"; do
     *) echo "Unknown argument: $arg" >&2; exit 64 ;;
   esac
 done
+
+case "$OFFSITE_ENABLED" in
+  0|1) ;;
+  *)
+    echo "[cloud_disk_maintenance] invalid SHEIN_BI_BACKUP_OFFSITE_ENABLED=$OFFSITE_ENABLED; expected 0 or 1" >&2
+    exit 64
+    ;;
+esac
 
 if [[ ! -d "$ROOT" || ! -d "$OUTPUT_DIR" || ! -d "$PROFILES_DIR" ]]; then
   echo "Required runtime directory is missing under $ROOT" >&2
@@ -141,6 +150,10 @@ PY
 archive_old_outputs() {
   local archive_day archive_dir list_file manifest_file archive partial_archive delete_report
   local selected_count archive_sha output_relative first_old skipped_count
+  if [[ "$OFFSITE_ENABLED" == "0" ]]; then
+    echo "[outputs] skip COS archive in local-only mode; old outputs retained"
+    return 0
+  fi
   first_old="$(find "$OUTPUT_DIR" -xdev -type f -mtime +"$OUTPUT_RETENTION_DAYS" -print -quit)"
   if (( ! FORCE_ARCHIVE )) && [[ -z "$first_old" ]]; then
     echo "[outputs] skip no files older than ${OUTPUT_RETENTION_DAYS} days"
@@ -286,7 +299,7 @@ cleanup_stale_tmp() {
   fi
 }
 
-echo "[cloud_disk_maintenance] start stamp=$STAMP disk=$(disk_percent)% dry_run=$DRY_RUN"
+echo "[cloud_disk_maintenance] start stamp=$STAMP disk=$(disk_percent)% dry_run=$DRY_RUN offsite_enabled=$OFFSITE_ENABLED"
 cleanup_profile_caches
 archive_old_outputs
 cleanup_stale_tmp

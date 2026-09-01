@@ -19,6 +19,7 @@ import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmpBase = path.join(ROOT, 'tmp');
@@ -96,6 +97,7 @@ const taskFile = path.join(tmpRoot, 'tasks.json');
 const chatFile = path.join(tmpRoot, 'chats.json');
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const sessionSecretFile = path.join(tmpRoot, 'session_secret');
+await provisionBiSessionSecret(sessionSecretFile);
 const manualLoginStateFile = path.join(tmpRoot, 'manual_login.json');
 
 const port = await getFreePort();
@@ -398,7 +400,7 @@ try {
           mode: 'dry-run',
           payload: {
             payloadHash: 'a'.repeat(64),
-            payloadHashAlgorithm: 'sha256-stable-json-scope-v3',
+            payloadHashAlgorithm: 'sha256-stable-json-scope-v4',
           },
         },
       ],

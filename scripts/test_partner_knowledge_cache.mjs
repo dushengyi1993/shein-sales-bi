@@ -143,6 +143,10 @@ try {
   try { await ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, strict: true}); } catch (error) { oldCliBlocked = /低于最低版本/.test(String(error?.message || error)); }
   if (!oldCliBlocked) throw new Error('minimum CLI version was not enforced');
 
+  minimumVersion = BI_OPS_CLI_VERSION;
+  const restoredCurrentCache = await ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, strict: true});
+  assert.equal(restoredCurrentCache.current, true, 'the fixture cache must be current before fallback checks');
+
   const manifestCache = JSON.parse(await fs.readFile(path.join(temp, 'manifest.json'), 'utf8'));
   const bundleCache = JSON.parse(await fs.readFile(path.join(temp, 'generations', manifestCache.generation, 'bundle.json'), 'utf8'));
   if (manifestCache.data.sourceCommit !== sourceCommit || bundleCache.ruleCount !== 2) throw new Error('atomic partner cache contents are inconsistent');
@@ -222,7 +226,92 @@ try {
   assert.equal(recoveredManifest.data.sourceCommit, sourceCommit);
   await assert.rejects(fs.access(staleLockFile), {code: 'ENOENT'});
 
-  console.log(JSON.stringify({ok: true, manifestHits, bundleHits, sourceCommit, concurrentSourceCommit: concurrentManifest.data.sourceCommit, staleRecoveryMaxActiveRequests: maxActiveRequests}));
+  current = true;
+  minimumVersion = BI_OPS_CLI_VERSION;
+  const transientFetches = [
+    ['fetch failed', async () => { throw new TypeError('fetch failed'); }],
+    ['ECONNRESET', async () => { throw Object.assign(new Error('socket reset'), {code: 'ECONNRESET'}); }],
+    ['ETIMEDOUT', async () => { throw Object.assign(new Error('connect timed out'), {code: 'ETIMEDOUT'}); }],
+  ];
+  const staleSources = [];
+  for (const [label, fetchImpl] of transientFetches) {
+    const stale = await ensurePartnerKnowledgeCurrent({
+      baseUrl,
+      cookie: 'bi_session=test',
+      cacheDir: temp,
+      strict: true,
+      fetchImpl,
+      fetchTimeoutMs: 5_000,
+      allowTransientCacheFallback: true,
+    });
+    assert.equal(stale.source, 'stale-verified-cache', `${label} should use the verified recent cache`);
+    assert.equal(stale.stale, true);
+    staleSources.push(stale.source);
+  }
+
+  const unknownNetwork = async () => {
+    throw Object.assign(new Error('unknown network failure'), {code: 'ERR_UNKNOWN_NETWORK'});
+  };
+  const fetchFailed = async () => { throw new TypeError('fetch failed'); };
+  await assert.rejects(
+    ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, strict: true, fetchImpl: unknownNetwork}),
+    error => error?.code === 'ERR_UNKNOWN_NETWORK',
+    'unknown network errors must not use the cache',
+  );
+  await assert.rejects(
+    ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, strict: true, fetchImpl: unknownNetwork}),
+    error => error?.code === 'ERR_UNKNOWN_NETWORK',
+    'strict knowledge checks must not use the cache by default',
+  );
+  const unknownFetchFailed = async () => {
+    throw Object.assign(new TypeError('fetch failed'), {code: 'ERR_UNKNOWN_NETWORK'});
+  };
+  await assert.rejects(
+    ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, fetchImpl: unknownFetchFailed, allowTransientCacheFallback: true}),
+    error => error?.code === 'ERR_UNKNOWN_NETWORK',
+    'an unknown network code must remain fatal even with a fetch failed message',
+  );
+
+  const responseFailure = status => async () => new Response(JSON.stringify({ok: false, error: `HTTP ${status}`}), {
+    status,
+    headers: {'content-type': 'application/json'},
+  });
+  await assert.rejects(
+    ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, fetchImpl: responseFailure(401), allowTransientCacheFallback: true}),
+    error => error?.status === 401,
+    '401 responses must remain fatal',
+  );
+  await assert.rejects(
+    ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, fetchImpl: responseFailure(500), allowTransientCacheFallback: true}),
+    error => error?.status === 500,
+    'received HTTP errors must remain fatal',
+  );
+
+  const manifestFile = path.join(temp, 'manifest.json');
+  const originalManifestText = await fs.readFile(manifestFile, 'utf8');
+  const originalManifest = JSON.parse(originalManifestText);
+  const bundleFile = path.join(temp, 'generations', originalManifest.generation, 'bundle.json');
+  const originalBundleText = await fs.readFile(bundleFile, 'utf8');
+  await fs.writeFile(bundleFile, '{}\n', 'utf8');
+  await assert.rejects(
+    ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, fetchImpl: fetchFailed, allowTransientCacheFallback: true}),
+    error => error?.code === 'BI_TRANSIENT_NETWORK_RETRY_EXHAUSTED',
+    'a damaged cache must not be used',
+  );
+  await fs.writeFile(bundleFile, originalBundleText, 'utf8');
+
+  await fs.writeFile(manifestFile, JSON.stringify({
+    ...originalManifest,
+    checkedAt: new Date(Date.now() - 5 * 60_000 - 1).toISOString(),
+  }, null, 2) + '\n', 'utf8');
+  await assert.rejects(
+    ensurePartnerKnowledgeCurrent({baseUrl, cookie: 'bi_session=test', cacheDir: temp, fetchImpl: fetchFailed, allowTransientCacheFallback: true}),
+    error => error?.code === 'BI_TRANSIENT_NETWORK_RETRY_EXHAUSTED',
+    'an over-age cache must not be used',
+  );
+  await fs.writeFile(manifestFile, originalManifestText, 'utf8');
+
+  console.log(JSON.stringify({ok: true, manifestHits, bundleHits, sourceCommit, concurrentSourceCommit: concurrentManifest.data.sourceCommit, staleRecoveryMaxActiveRequests: maxActiveRequests, staleSources}));
 } finally {
   await new Promise(resolve => server.close(resolve));
   await fs.rm(temp, {recursive: true, force: true});

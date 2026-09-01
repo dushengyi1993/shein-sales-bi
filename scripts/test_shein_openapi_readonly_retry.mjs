@@ -11,12 +11,20 @@
  * - the generic request() path used by write endpoints never retries.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {isTransientFetchTransportError, SheinOpenApiClient} from '../lib/shein_openapi_client.mjs';
+
+const TEMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-openapi-readonly-retry-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(TEMP_ROOT, 'inventory-v2-cutover.lock');
+process.on('exit', () => fs.rmSync(TEMP_ROOT, {recursive: true, force: true}));
 
 const CLIENT_OPTIONS = {
   baseUrl: 'http://127.0.0.1:9',
   openKeyId: 'test-open-key',
   secretKey: 'test-secret-key',
+  inventoryStoreKey: 'TEST',
 };
 
 function transportError(message = 'fetch failed', causeCode = 'ECONNRESET') {
@@ -131,7 +139,15 @@ const tests = [];
     const {impl, calls} = sequencedFetch([transportError(), okResponse]);
     const client = new SheinOpenApiClient({...CLIENT_OPTIONS, fetchImpl: impl});
     await assert.rejects(
-      client.request('/open-api/stock/change-inventory/v2', {method: 'POST', body: {}}),
+      client.request('/open-api/stock/change-inventory/v2', {method: 'POST', body: {
+        updateSkuInventoryQuantityRequests: [{
+          idempotencyKey: 'test-write-no-retry',
+          skuCode: 'test-sku',
+          invType: 'VI',
+          changeType: 'OVERWRITE',
+          changeQuantity: 1,
+        }],
+      }}),
       error => error instanceof TypeError && /fetch failed/.test(error.message),
     );
     assert.equal(calls.length, 1, 'the generic write-path request must never retry');

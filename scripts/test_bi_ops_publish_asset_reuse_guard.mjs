@@ -3,7 +3,11 @@ import {__testHooks} from './serve_bi_portal.mjs';
 
 const {
   canonicalPublishAssetBindingFingerprint,
+  invalidateDependentPublishLocksForPreparationMigration,
+  persistedPublishPreparationLock,
+  replaceExplicitPublishPreparationTitlesInCapturePayload,
   sparseMergePublishPreparation,
+  validateExistingPublishAssetBindingForAdopt,
   validateReusedApprovedTaskBinding,
 } = __testHooks;
 
@@ -36,6 +40,7 @@ const task = {
   intents: ['copy_product_draft'],
   targets: {stores: ['JSH'], writeStores: ['JSH']},
   publishPreparation: {
+    targetStore: 'JSH',
     standardGoodsSn: 'SK-272',
     supplierSku: 'SK-272',
     supplyPrice: 414,
@@ -57,12 +62,163 @@ const task = {
     bindingFingerprint: '',
   },
 };
+task.publishAssetBinding.publishPreparation = persistedPublishPreparationLock(task.publishPreparation);
 task.publishAssetBinding.bindingFingerprint = canonicalPublishAssetBindingFingerprint(task, {
   binding: task.publishAssetBinding,
   images: task.publishAssetBinding.images,
 });
 
 check('canonical approved binding accepted', validateReusedApprovedTaskBinding(task, {targetStore: 'JSH'}) === task.publishAssetBinding, true);
+
+const legacyCompactTask = clone(task);
+legacyCompactTask.publishAssetBinding.publishPreparation = {
+  targetStore: 'JSH',
+  titleGroup: null,
+  standardGoodsSn: 'SK-272',
+  supplierSku: 'SK-272',
+  supplyPrice: 414,
+  supplyPriceCurrency: 'SAR',
+  inventory: 100,
+  categoryId: 8898,
+  titleLanguages: ['ar', 'en'],
+  attributeOverrideIds: [1002323, 2001],
+};
+legacyCompactTask.publishAssetBinding.bindingFingerprint = canonicalPublishAssetBindingFingerprint(legacyCompactTask, {
+  binding: legacyCompactTask.publishAssetBinding,
+  images: legacyCompactTask.publishAssetBinding.images,
+  publishPreparation: legacyCompactTask.publishAssetBinding.publishPreparation,
+});
+check('exact legacy compact evidence may be reused once for migration', validateReusedApprovedTaskBinding(legacyCompactTask, {targetStore: 'JSH'}) === legacyCompactTask.publishAssetBinding, true);
+check('legacy compact evidence is never accepted by adopt gate', validateExistingPublishAssetBindingForAdopt(legacyCompactTask).ok, false);
+for (const key of ['titleLanguages', 'attributeOverrideIds', 'publishPreparation']) {
+  const drifted = clone(legacyCompactTask);
+  if (key === 'publishPreparation') delete drifted.publishAssetBinding.publishPreparation;
+  else delete drifted.publishAssetBinding.publishPreparation[key];
+  try {
+    validateReusedApprovedTaskBinding(drifted, {targetStore: 'JSH'});
+    check(`legacy compact deletion ${key} fails reuse`, 'accepted', 'REUSE_APPROVED_BINDING_METADATA_INVALID');
+  } catch (error) {
+    check(`legacy compact deletion ${key} fails reuse`, error?.code || '', 'REUSE_APPROVED_BINDING_METADATA_INVALID');
+  }
+}
+
+// FY Title3 regression: an old same-task capture may contain placeholder
+// titles, but only an explicitly supplied destination title may replace the
+// matching structured row before the protected payload is rebuilt. The
+// non-title payload and an omitted title remain untouched.
+const fyCapturePayload = {
+  category_id: 123,
+  multiLanguageNameList: [
+    {language: 'ar', product_name: 'FY old Arabic title', marker: 'keep-ar'},
+    {language: 'en', product_name: 'FY old English title', marker: 'keep-en'},
+    {language: 'zh-cn', name: 'FY old Chinese title', marker: 'keep-zh'},
+  ],
+  skc_list: [{supplier_code: 'FY-SN', sku_list: [{supplier_sku: 'FY-SKU'}]}],
+};
+const fyExplicitPreparation = {
+  targetStore: 'FY',
+  titleGroup: 'title3',
+  titles: {ar: 'FY new Arabic title', en: 'FY new English title'},
+};
+const fyReplaced = replaceExplicitPublishPreparationTitlesInCapturePayload(fyCapturePayload, fyExplicitPreparation);
+check('FY Title3 explicit capture replacement covers ar/en only', fyReplaced.replacedLanguages.join(','), 'ar,en');
+check('FY Title3 replaces old Arabic title in its existing row', fyReplaced.payload.multiLanguageNameList.find(row => row.language === 'ar')?.product_name, 'FY new Arabic title');
+check('FY Title3 replaces old English title in its existing row', fyReplaced.payload.multiLanguageNameList.find(row => row.language === 'en')?.product_name, 'FY new English title');
+check('FY Title3 leaves non-target title row unchanged', fyReplaced.payload.multiLanguageNameList.find(row => row.language === 'zh-cn')?.name, 'FY old Chinese title');
+check('FY Title3 leaves protected non-title fields unchanged', JSON.stringify({category_id: fyReplaced.payload.category_id, skc_list: fyReplaced.payload.skc_list}), JSON.stringify({category_id: 123, skc_list: [{supplier_code: 'FY-SN', sku_list: [{supplier_sku: 'FY-SKU'}]}]}));
+check('FY Title3 replacement does not mutate old capture snapshot', fyCapturePayload.multiLanguageNameList.find(row => row.language === 'en')?.product_name, 'FY old English title');
+const migratedDependencies = invalidateDependentPublishLocksForPreparationMigration({
+  openapiPublishPayload: {
+    ...fyReplaced.payload,
+    multi_language_desc_list: [{language: 'en', product_desc: 'locked description'}],
+  },
+  descriptionMaterialBinding: {contentSha256: 'a'.repeat(64)},
+  productAttributeBinding: {evidenceSha256: 'b'.repeat(64)},
+});
+check('preparation migration removes bound descriptions before rebind', Object.hasOwn(migratedDependencies.task.openapiPublishPayload, 'multi_language_desc_list'), false);
+check('preparation migration removes stale description binding', Object.hasOwn(migratedDependencies.task, 'descriptionMaterialBinding'), false);
+check('preparation migration removes stale product attribute binding', Object.hasOwn(migratedDependencies.task, 'productAttributeBinding'), false);
+check('preparation migration reports both invalidated dependencies', migratedDependencies.invalidatedDescriptionBinding && migratedDependencies.invalidatedProductAttributeBinding, true);
+const fyNoExplicit = replaceExplicitPublishPreparationTitlesInCapturePayload(fyCapturePayload, {targetStore: 'FY', titleGroup: 'title3'});
+check('missing explicit FY title leaves old capture snapshot unchanged', fyNoExplicit.payload === fyCapturePayload && fyNoExplicit.replacedLanguages.length, 0);
+try {
+  replaceExplicitPublishPreparationTitlesInCapturePayload(
+    {...fyCapturePayload, multiLanguageNameList: fyCapturePayload.multiLanguageNameList.filter(row => row.language !== 'en')},
+    fyExplicitPreparation,
+  );
+  check('missing structured FY English title row fails closed', 'accepted', 'structured-title-row');
+} catch (error) {
+  check('missing structured FY English title row fails closed', error?.message || '', value => /structured title row|禁止新增|猜测/.test(value));
+}
+
+// The task and binding must both preserve the complete preparation.  Compact
+// audit evidence cannot substitute for title values or attribute rows at the
+// adopt/reuse safety gate.
+const fyFullPreparation = {
+  targetStore: 'FY',
+  titleGroup: 'title3',
+  standardGoodsSn: 'FY-SN-POST-DESC',
+  supplierSku: 'FY-SKU-POST-DESC',
+  supplyPrice: 222.22,
+  inventory: 77,
+  categoryId: 123456,
+  titles: {ar: 'FY locked Arabic title', en: 'FY locked English title'},
+  attributeOverrides: [{attribute_id: 1002328, attribute_extra_value: '1', attribute_unit: ''}],
+};
+const fyPersistedPreparation = persistedPublishPreparationLock(fyFullPreparation);
+const fyMergedPreparation = sparseMergePublishPreparation(
+  fyFullPreparation,
+  {standardGoodsSn: 'FY-SN-POST-DESC-2'},
+);
+check('sparse reuse retains target store', fyMergedPreparation.targetStore, 'FY');
+check('sparse reuse retains title group', fyMergedPreparation.titleGroup, 'title3');
+check('persisted preparation retains exact English title', fyPersistedPreparation.titles.en, fyFullPreparation.titles.en);
+check('persisted preparation retains exact Arabic title', fyPersistedPreparation.titles.ar, fyFullPreparation.titles.ar);
+check('persisted preparation retains full attribute row', JSON.stringify(fyPersistedPreparation.attributeOverrides), JSON.stringify(fyFullPreparation.attributeOverrides));
+const fyPostDescriptionTask = {
+  id: 'lot_20260821092430_a122f67f-fixture',
+  intents: ['copy_product_draft'],
+  targets: {stores: ['FY'], writeStores: ['FY'], publishPreparation: clone(fyFullPreparation)},
+  publishPreparation: clone(fyFullPreparation),
+  publishAssetBinding: {
+    ...clone(task.publishAssetBinding),
+    targetStore: 'FY',
+    publishPreparation: clone(fyPersistedPreparation),
+    images: clone(images),
+    imageCount: images.length,
+  },
+};
+fyPostDescriptionTask.publishAssetBinding.bindingFingerprint = canonicalPublishAssetBindingFingerprint(fyPostDescriptionTask, {
+  binding: fyPostDescriptionTask.publishAssetBinding,
+  images: fyPostDescriptionTask.publishAssetBinding.images,
+  publishPreparation: fyFullPreparation,
+});
+check('post-prepare-descriptions full preparation accepts full task fingerprint', validateReusedApprovedTaskBinding(fyPostDescriptionTask, {targetStore: 'FY'}) === fyPostDescriptionTask.publishAssetBinding, true);
+check('post-description full preparation passes adopt fingerprint gate', validateExistingPublishAssetBindingForAdopt(fyPostDescriptionTask).ok, true);
+for (const [label, mutate] of [
+  ['missing persisted preparation', value => { delete value.publishAssetBinding.publishPreparation; }],
+  ['missing persisted titles', value => { delete value.publishAssetBinding.publishPreparation.titles; }],
+  ['missing persisted attribute overrides', value => { delete value.publishAssetBinding.publishPreparation.attributeOverrides; }],
+]) {
+  const drifted = clone(fyPostDescriptionTask);
+  mutate(drifted);
+  check(`${label} fails adopt fingerprint gate`, validateExistingPublishAssetBindingForAdopt(drifted).ok, false);
+}
+const fyTamperedPreparationTask = clone(fyPostDescriptionTask);
+fyTamperedPreparationTask.publishPreparation.titles.en = 'FY tampered English title';
+try {
+  validateReusedApprovedTaskBinding(fyTamperedPreparationTask, {targetStore: 'FY'});
+  check('task title drift remains fail closed after compact evidence', 'accepted', 'REUSE_APPROVED_BINDING_METADATA_INVALID');
+} catch (error) {
+  check('task title drift remains fail closed after compact evidence', error?.code || '', 'REUSE_APPROVED_BINDING_METADATA_INVALID');
+}
+try {
+  validateReusedApprovedTaskBinding(fyPostDescriptionTask, {targetStore: 'LQ'});
+  check('FY binding requested from wrong store fails closed', 'accepted', 'REUSE_APPROVED_BINDING_METADATA_INVALID');
+} catch (error) {
+  check('FY binding requested from wrong store fails closed', error?.code || '', 'REUSE_APPROVED_BINDING_METADATA_INVALID');
+}
+
 expectRejected('missing binding rejected', {...task, publishAssetBinding: null}, 'REUSE_APPROVED_BINDING_MISSING');
 expectRejected('sourceApproved drift rejected', {...task, publishAssetBinding: {...task.publishAssetBinding, sourceApproved: false}}, 'REUSE_APPROVED_BINDING_METADATA_INVALID');
 expectRejected('authority drift rejected', {...task, publishAssetBinding: {...task.publishAssetBinding, authority: 'partner_uploaded'}}, 'REUSE_APPROVED_BINDING_METADATA_INVALID');

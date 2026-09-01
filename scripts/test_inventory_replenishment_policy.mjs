@@ -5,6 +5,7 @@ import {
   allocateLowEtInventory,
   assertCurrentInventoryListingIdentity,
   assertDailyInventoryExecutionAuthorization,
+  buildDailyInventoryPlanHashPayload,
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   computeInventoryOverwriteQuantity,
@@ -97,9 +98,12 @@ assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherS
 });
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', sameStoreOnShelfLinkExists: true, otherStoreOnShelfWithStock: true, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sold_out_has_same_store_on_shelf_link');
 assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 1, policy}).targetUsableInventory, 10);
-assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1}), 102);
+assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1}), 101);
 assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 100, totalUsableInventory: 100, totalLockedQuantity: 0}), 10);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 0}), 10);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 2}), 12);
 assert.equal(computeInventoryOverwriteQuantity(0, {totalInventoryQuantity: 12, totalUsableInventory: 10, totalLockedQuantity: 2}), 2);
+assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8}), 100);
 const allocations = allocateLowEtInventory([
   {storeKey: 'A', skc: '1', c7Exposure: 500, c7GoodsVisitors: 10, c7SaleCount: 0},
   {storeKey: 'B', skc: '2', c7Exposure: 400, c7GoodsVisitors: 10, c7SaleCount: 0},
@@ -116,6 +120,29 @@ assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 80, days_o
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 10, days_of_supply_on_hand: 120}, policy).reason, 'et_quantity_needs_manual_allocation');
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 11, days_of_supply_on_hand: 120}, policy).reason, 'sufficient');
 assert.equal(stableInventoryHash({b: 1, a: 2}), stableInventoryHash({a: 2, b: 1}));
+const planHashFixture = {
+  schemaVersion: 'daily-inventory-replenishment-plan/v1',
+  date: '2026-08-22',
+  policyVersion: 'policy-v1',
+  actionable: [{storeKey: 'ZZ', skuCode: 'sku-1'}],
+  lowEtAllocations: [],
+  detailRefreshTargets: [],
+  etFactSource: {kind: 'et_forwarder_manifest', manifestHash: 'a'.repeat(64)},
+  sourceEvidence: [{
+    store: 'ET', file: 'et.json', fetchedAt: '2026-08-22T00:00:00.000Z',
+    ageHours: 1, manifestAgeSeconds: 2, endpointAgeSeconds: {store_stock: 3}, totalEtRows: 1,
+  }],
+};
+const canonicalPlanHashPayload = buildDailyInventoryPlanHashPayload(planHashFixture);
+assert.deepEqual(canonicalPlanHashPayload.sourceEvidence, [{
+  store: 'ET', file: 'et.json', fetchedAt: '2026-08-22T00:00:00.000Z', totalEtRows: 1,
+}]);
+assert.equal(stableInventoryHash(canonicalPlanHashPayload), stableInventoryHash(buildDailyInventoryPlanHashPayload({...planHashFixture, sourceEvidence: [{
+  ...planHashFixture.sourceEvidence[0], ageHours: 9, manifestAgeSeconds: 99, endpointAgeSeconds: {store_stock: 88},
+}]})));
+assert.notEqual(stableInventoryHash(canonicalPlanHashPayload), stableInventoryHash(buildDailyInventoryPlanHashPayload({
+  ...planHashFixture, etFactSource: {kind: 'portal_projection'},
+})));
 const hash = 'a'.repeat(64);
 assert.deepEqual(assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: hash}).mode, 'manual_review');
 assert.throws(() => assertDailyInventoryExecutionAuthorization({policy, payloadHash: hash, confirmHash: 'b'.repeat(64)}), /confirm-hash/);
@@ -183,7 +210,7 @@ assert.match(guardScript, /api\/bi\/section\/linksData\?refresh=1/);
 assert.match(guardScript, /refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=/);
 assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$max_targets"/);
 assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1/);
-assert.match(guardScript, /^ensure_inventory_trend_fresh 1$/m);
+assert.match(guardScript, /^[ \t]+ensure_inventory_trend_fresh 1$/m);
 assert.doesNotMatch(guardScript, /ensure_inventory_trend_fresh 1 \|\| true/,
   'an inventoryTrend refresh failure must abort the guard instead of being swallowed');
 assert.match(guardScript, /--max-rows "\$MAX_ROWS" \\/);
@@ -197,7 +224,7 @@ assert.match(guardScript, /state:"already_completed"/);
 assert.match(guardScript, /automatic inventory executor did not produce a complete result[\s\S]*exit 1/);
 assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=${livePolicy.execution.automaticExecution.allowedContext}`));
 assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=${livePolicy.execution.automaticExecution.authorizationId}`));
-assert.match(guardService, /^Wants=.*shein-bi-cloud-morning-chain\.service$/m);
+assert.match(guardService, /^Wants=network-online\.target$/m);
 assert.match(guardService, /^After=.*shein-bi-cloud-morning-chain\.service.*shein-bi-cloud-et-forwarder\.service$/m);
 assert.match(guardService, /^Environment=SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS=1800$/m);
 assert.match(guardService, /--deadline-at 15:27/);
@@ -218,7 +245,8 @@ assert.match(executorScript, /planActionableRows\.length > args\.maxRows/, 'the 
 assert.doesNotMatch(executorScript, /bootstrap/i);
 assert.match(builderScript, /target_inventory_already_satisfied/);
 assert.match(builderScript, /requireCurrentDayEtSnapshot === true/);
-assert.match(builderScript, /BI\/ET projection has no matched current-day operational rows/);
+assert.match(builderScript, /etSource \? 'ET manifest' : 'BI\/ET projection'/);
+assert.match(builderScript, /has no matched current-day operational rows/);
 assert.doesNotMatch(builderScript, /bootstrap/i);
 assert.match(etSafetyGuard, /--execution-mode automatic/);
 assert.match(etSafetyGuard, /--confirm-hash "\$HASH"/);

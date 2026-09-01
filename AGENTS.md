@@ -41,10 +41,21 @@ Preserve the selected title group as a structured per-store task fact and verify
 
 Real SHEIN writes still require cloud permissions, dry-run/preflight, an exact payload hash, explicit user confirmation, audit, and readback.
 
+## Operation risk tiers
+
+- A read-only business query does not create a payload hash, worktree, release, or repository test run. Use the deterministic query/read source and report unavailable data as unavailable.
+- A routine authorized business write uses exactly the business safety boundary: one fresh preflight, one exact payload hash, the existing authorization, narrow serial execution, and terminal live readback. It does not run `npm test`, create a Git release, or test unrelated product attributes merely because the business action is important.
+- If a routine task discovers a code defect, stop that business item at the write boundary and hand the defect to the V4 integration task. The business task must not silently become a second development/release lane.
+- A local code patch runs syntax/diff checks plus only the registered focused tests for the changed behavior. The full local suite is reserved for genuine cross-module integration or a formal release gate; GitHub CI is not a prerequisite for an already authorized business operation that changes no code.
+- `docs/operation-risk-tiers.md` is the human-readable runbook for these tiers. Task prompts and automation instructions must not broaden them.
+
 ## Release and production source discipline
 
-- Treat GitHub `main` plus the published release tag as the source baseline and `/opt/shein-bi/app` as a deployed checkout, not a second development workspace.
-- Do not leave tracked source edits on the cloud host. Emergency production fixes must be backed up, reproduced locally, committed, pushed, released, and redeployed in the same incident.
+- Treat GitHub `main` plus the published release tag as the formal source baseline when the v3 release audit is valid, and treat `/opt/shein-bi/app` as a deployed checkout, not a second development workspace.
+- Before any production-sensitive write, check the formal v3 marker, attestation, annotated tag, and exact CI provenance first. If formal release evidence is invalid, check the valid local emergency receipt at `/srv/shein-bi/runtime/emergency_local_release.json` (or the explicitly configured path) next. If neither establishes the exact production baseline, stop before writes. A valid emergency receipt is temporary, does not make `releaseAuditReady` true, and must bind the exact commit, baseline commit, bundle SHA-256, creation time, non-secret reason, and canonical receipt hash.
+- While a local emergency receipt is active, never create a task worktree from `origin/main`; use the selected local exact commit and independently verified bundle. Do not treat a local receipt as a v3 GitHub release or CI attestation.
+- Invalid formal marker/attestation/CI provenance is a release-audit advisory, not a business/infrastructure issue or recovery trigger. Dirty tracked files, hidden index entries, missing tracked files, source inspection errors, and production HEAD drift from the selected exact commit remain actionable and fail closed. Business commands that require no code release may proceed only when business health is green.
+- Do not leave tracked source edits on the cloud host. Under the normal release path, emergency production fixes must be backed up, reproduced locally, committed, pushed, formally released, and redeployed in the same incident; the temporary local-emergency path must preserve its exact bundle and receipt until formal release is restored.
 - Runtime-generated Portal files, caches, profiles, logs, sessions, backups, and mutable marketing registries stay outside tracked source. Do not add them merely to make a release look complete.
 - A release is complete only after the target commit passes CI, the cloud checkout is exactly at that commit with no tracked source changes, required migrations/units are applied, and production health/readback succeeds.
 - Cloud acceptance must run `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>`; watchdog continuously checks that marker. Plain `git status` is insufficient because `skip-worktree` or `assume-unchanged` can hide missing source.

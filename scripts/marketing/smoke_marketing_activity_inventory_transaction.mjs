@@ -71,6 +71,8 @@ assert.match(lockedChangeFailure.result.blockers.map(row => row.reason).join(','
 const restoreFailure = await scenario({restoreWriteFails: true});
 assert.equal(restoreFailure.result.ok, false);
 assert.equal(restoreFailure.result.safe, false);
+assert.equal(restoreFailure.writeCalls, 2, 'one temporary raise plus exactly one restore write');
+assert.equal(restoreFailure.result.rows[0].restoreAttempt.attempts.length, 1);
 assert.match(restoreFailure.result.blockers.map(row => row.reason).join(','), /restore_failed_or_original_usable_not_exact/);
 
 const invalidAfterRestore = await scenario({invalidAfterRestore: true});
@@ -94,7 +96,7 @@ assert.equal(eventuallyConsistentRestore.state.totalUsableInventory, 7);
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 35,
+  checks: 37,
   scenarios: [
     'dry_run_zero_write',
     'submit_success_restore',

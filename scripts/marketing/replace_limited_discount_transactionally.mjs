@@ -16,11 +16,16 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
+import {
+  assertBeforeOuter,
+  createDeadlineContract,
+  DEADLINE_FINALIZATION_RESERVE_SEC,
+} from '../../lib/cloud_marketing_deadline_contract.mjs';
 
 const ROOT = path.resolve(
   process.env.SHEIN_BI_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..'),
@@ -30,16 +35,88 @@ const DEFAULT_JOURNAL_DIR = path.join(ROOT, 'state/marketing-replacement-transac
 const APPLY_SCRIPT = process.env.SHEIN_MARKETING_APPLY_SCRIPT || 'scripts/marketing/apply_hl_limited_discount_rescue.mjs';
 const REMOVE_SCRIPT = process.env.SHEIN_MARKETING_REMOVE_SCRIPT || 'scripts/marketing/remove_skc_from_limited_discount.mjs';
 
+export class MarketingTransactionJournalError extends Error {
+  constructor(message, code, options = {}) {
+    super(message, options);
+    this.name = 'MarketingTransactionJournalError';
+    this.code = code;
+  }
+}
+
+function failJournal(message, code, cause) {
+  throw new MarketingTransactionJournalError(message, code, cause ? {cause} : {});
+}
+
+export async function loadMarketingTransactionJournal(journalPath, {readFile = fs.readFile} = {}) {
+  let text;
+  try {
+    text = await readFile(journalPath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    failJournal(`transaction journal read failed (${error?.code || 'I/O'}): ${journalPath}`,
+      'MARKETING_TRANSACTION_JOURNAL_READ_FAILED', error);
+  }
+  let journal;
+  try {
+    journal = JSON.parse(text);
+  } catch (error) {
+    failJournal(`transaction journal JSON is truncated or invalid: ${journalPath}`,
+      'MARKETING_TRANSACTION_JOURNAL_PARSE_FAILED', error);
+  }
+  if (!journal || typeof journal !== 'object' || Array.isArray(journal)) {
+    failJournal(`transaction journal must contain one JSON object: ${journalPath}`,
+      'MARKETING_TRANSACTION_JOURNAL_SCHEMA_INVALID');
+  }
+  if (journal.schemaVersion !== 1) {
+    failJournal(`transaction journal schemaVersion is unsupported or missing: ${journalPath}`,
+      'MARKETING_TRANSACTION_JOURNAL_SCHEMA_INVALID');
+  }
+  return journal;
+}
+
+function assertMarketingTransactionJournalBinding(journal, {
+  journalPath,
+  transactionId,
+  storeKey,
+  sourceRescueHash,
+} = {}) {
+  const invalid = [];
+  if (String(journal.transactionId || '') !== transactionId) invalid.push('transactionId');
+  if (String(journal.storeKey || '').toUpperCase() !== storeKey) invalid.push('storeKey');
+  if (!String(journal.rescuePath || '').trim()) invalid.push('rescuePath');
+  if (!/^[a-f0-9]{64}$/.test(String(journal.rescueHash || '').toLowerCase())) invalid.push('rescueHash');
+  if (!String(journal.phase || '').trim()) invalid.push('phase');
+  if (typeof journal.mutationsStarted !== 'boolean') invalid.push('mutationsStarted');
+  if (!Array.isArray(journal.snapshots)) invalid.push('snapshots');
+  if (journal.result != null && (typeof journal.result !== 'object' || Array.isArray(journal.result))) invalid.push('result');
+  if (journal.createAttempt != null
+    && (typeof journal.createAttempt !== 'object' || Array.isArray(journal.createAttempt))) invalid.push('createAttempt');
+  if (invalid.length) {
+    failJournal(`transaction journal schema/binding is invalid (${invalid.join(', ')}): ${journalPath}`,
+      'MARKETING_TRANSACTION_JOURNAL_SCHEMA_INVALID');
+  }
+  if (String(journal.rescueHash).toLowerCase() !== sourceRescueHash) {
+    failJournal(`transaction journal rescueHash collides with another exact transaction: ${journalPath}`,
+      'MARKETING_TRANSACTION_JOURNAL_BINDING_MISMATCH');
+  }
+}
+
 function parseArgs(argv) {
   const args = {
     storeKey: '',
     port: 0,
     rescue: '',
+    sourceRescue: '',
     execute: false,
     expectedRescueHash: '',
+    expectedSourceRescueHash: '',
     outDir: DEFAULT_OUT_DIR,
     journalDir: DEFAULT_JOURNAL_DIR,
     transactionId: '',
+    gracefulCutoffEpoch: undefined,
+    outerHardDeadlineEpoch: undefined,
+    minFinalizationBudgetSec: DEADLINE_FINALIZATION_RESERVE_SEC,
+    continuation: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -50,25 +127,56 @@ function parseArgs(argv) {
     else if (arg.startsWith('--port=')) args.port = Number(arg.slice('--port='.length));
     else if (arg === '--rescue') args.rescue = path.resolve(argv[++i] || '');
     else if (arg.startsWith('--rescue=')) args.rescue = path.resolve(arg.slice('--rescue='.length));
+    else if (arg === '--source-rescue') args.sourceRescue = path.resolve(argv[++i] || '');
+    else if (arg.startsWith('--source-rescue=')) args.sourceRescue = path.resolve(arg.slice('--source-rescue='.length));
     else if (arg === '--execute') args.execute = true;
     else if (arg === '--dry-run') args.execute = false;
     else if (arg === '--expected-rescue-hash') args.expectedRescueHash = String(argv[++i] || '').trim().toLowerCase();
     else if (arg.startsWith('--expected-rescue-hash=')) args.expectedRescueHash = String(arg.slice('--expected-rescue-hash='.length)).trim().toLowerCase();
+    else if (arg === '--expected-source-rescue-hash') args.expectedSourceRescueHash = String(argv[++i] || '').trim().toLowerCase();
+    else if (arg.startsWith('--expected-source-rescue-hash=')) args.expectedSourceRescueHash = String(arg.slice('--expected-source-rescue-hash='.length)).trim().toLowerCase();
     else if (arg === '--out-dir') args.outDir = path.resolve(argv[++i] || '');
     else if (arg.startsWith('--out-dir=')) args.outDir = path.resolve(arg.slice('--out-dir='.length));
     else if (arg === '--journal-dir') args.journalDir = path.resolve(argv[++i] || '');
     else if (arg.startsWith('--journal-dir=')) args.journalDir = path.resolve(arg.slice('--journal-dir='.length));
     else if (arg === '--transaction-id') args.transactionId = String(argv[++i] || '').trim();
     else if (arg.startsWith('--transaction-id=')) args.transactionId = String(arg.slice('--transaction-id='.length)).trim();
+    else if (arg === '--graceful-cutoff-epoch') args.gracefulCutoffEpoch = argv[++i];
+    else if (arg.startsWith('--graceful-cutoff-epoch=')) args.gracefulCutoffEpoch = arg.slice('--graceful-cutoff-epoch='.length);
+    else if (arg === '--outer-hard-deadline-epoch') args.outerHardDeadlineEpoch = argv[++i];
+    else if (arg.startsWith('--outer-hard-deadline-epoch=')) args.outerHardDeadlineEpoch = arg.slice('--outer-hard-deadline-epoch='.length);
+    else if (arg === '--min-finalization-budget-sec') args.minFinalizationBudgetSec = Number(argv[++i]);
+    else if (arg.startsWith('--min-finalization-budget-sec=')) args.minFinalizationBudgetSec = Number(arg.slice('--min-finalization-budget-sec='.length));
+    else if (arg === '--continuation') args.continuation = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.storeKey) throw new Error('Missing --store');
   if (!Number.isFinite(args.port) || args.port <= 0) throw new Error('Missing/invalid --port');
   if (!args.rescue) throw new Error('Missing --rescue');
+  args.sourceRescue = args.sourceRescue || args.rescue;
   if (args.expectedRescueHash && !/^[a-f0-9]{64}$/.test(args.expectedRescueHash)) {
     throw new Error(`Invalid --expected-rescue-hash: ${args.expectedRescueHash}`);
   }
+  if (args.expectedSourceRescueHash && !/^[a-f0-9]{64}$/.test(args.expectedSourceRescueHash)) {
+    throw new Error(`Invalid --expected-source-rescue-hash: ${args.expectedSourceRescueHash}`);
+  }
+  args.deadline = createDeadlineContract({
+    gracefulCutoffEpoch: args.gracefulCutoffEpoch,
+    outerHardDeadlineEpoch: args.outerHardDeadlineEpoch,
+    minFinalizationBudgetSec: args.minFinalizationBudgetSec,
+    // This child must be able to load a terminal/in-flight journal after outer.
+    // Every new irreversible mutation is still rejected by the adjacent
+    // assertCanBeginIrreversibleMutation checks below.
+    allowExpiredOuter: true,
+  });
   return args;
+}
+
+function assertCanBeginIrreversibleMutation(args, label) {
+  return assertBeforeOuter(args.deadline, {
+    reserveSec: args.deadline?.minFinalizationBudgetSec || 0,
+    label,
+  });
 }
 
 function rel(file) {
@@ -81,6 +189,55 @@ function sha256(value) {
 
 function unique(values) {
   return [...new Set(values.map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+async function validateCreateAttemptFence({journal, args, rescueHash, sourceRescueHash}) {
+  const errors = [];
+  const attempt = journal?.createAttempt;
+  const scope = attempt?.exactScope;
+  const expectedWorkFingerprint = String(process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH || rescueHash).toLowerCase();
+  if (!attempt || typeof attempt !== 'object' || Array.isArray(attempt)) errors.push('createAttempt_missing_or_invalid');
+  if (attempt?.schemaVersion !== 1) errors.push('createAttempt_schemaVersion');
+  if (attempt?.operation !== 'limited_discount_create') errors.push('createAttempt_operation');
+  if (!['create_only', 'replacement_desired'].includes(attempt?.role)) errors.push('createAttempt_role');
+  if (attempt?.state !== 'create_started') errors.push('createAttempt_state');
+  if (String(attempt?.workFingerprint || '').toLowerCase() !== expectedWorkFingerprint) errors.push('createAttempt_workFingerprint');
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) errors.push('exactScope_missing_or_invalid');
+  if (String(scope?.storeKey || '').toUpperCase() !== args.storeKey) errors.push('exactScope_storeKey');
+  if (String(scope?.transactionId || '') !== args.transactionId) errors.push('exactScope_transactionId');
+  if (!/^[a-f0-9]{64}$/.test(String(scope?.rescueHash || '').toLowerCase())) errors.push('exactScope_rescueHash');
+  const targetSkcs = Array.isArray(scope?.targetSkcs)
+    ? [...new Set(scope.targetSkcs.map(value => String(value || '').trim()).filter(Boolean))].sort()
+    : [];
+  if (!targetSkcs.length || JSON.stringify(scope?.targetSkcs) !== JSON.stringify(targetSkcs)) errors.push('exactScope_targetSkcs');
+  const operationId = sha256(JSON.stringify({
+    role: attempt?.role,
+    workFingerprint: attempt?.workFingerprint,
+    exactScope: scope,
+  }));
+  if (String(attempt?.operationId || '') !== operationId) errors.push('createAttempt_operationId');
+  if (String(journal?.transactionId || '') !== args.transactionId) errors.push('journal_transactionId');
+  if (String(journal?.rescueHash || '').toLowerCase() !== sourceRescueHash) errors.push('journal_rescueHash');
+  if (String(journal?.operationRescueHash || rescueHash).toLowerCase() !== rescueHash) errors.push('journal_operationRescueHash');
+  if (String(journal?.runPayloadHash || '').toLowerCase() !== expectedWorkFingerprint) errors.push('journal_workFingerprint');
+
+  let fencedRescuePath = null;
+  try {
+    fencedRescuePath = path.resolve(ROOT, String(scope?.rescuePath || ''));
+    const relative = path.relative(ROOT, fencedRescuePath);
+    if (!String(scope?.rescuePath || '').trim()
+      || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error('scope path escapes root');
+    }
+    const fencedBytes = await fs.readFile(fencedRescuePath);
+    if (sha256(fencedBytes) !== String(scope?.rescueHash || '').toLowerCase()) errors.push('exactScope_rescue_bytes');
+    const fencedRescue = JSON.parse(fencedBytes.toString('utf8'));
+    const fencedSkcs = unique((fencedRescue?.rows || []).map(row => row?.skc)).sort();
+    if (JSON.stringify(fencedSkcs) !== JSON.stringify(targetSkcs)) errors.push('exactScope_rescue_rows');
+  } catch {
+    errors.push('exactScope_rescuePath');
+  }
+  return {ok: errors.length === 0, errors: unique(errors), fencedRescuePath, operationId};
 }
 
 function parseDate(value) {
@@ -185,6 +342,13 @@ function commandSummary(result) {
     timedOut: result?.timedOut === true,
     out: result?.outPath ? rel(result.outPath) : (result?.parsed?.out || ''),
     createdActivityId: result?.full?.createdActivityId || null,
+    writeAttempted: result?.full?.writeAttempted === true
+      || result?.full?.submitAttempted === true
+      || result?.full?.mutationsStarted === true,
+    mutationsStarted: result?.full?.mutationsStarted === true,
+    submittedWithoutExactReadback: result?.full?.submittedWithoutExactReadback === true
+      || result?.full?.status === 'submitted_without_exact_readback',
+    status: result?.full?.status || '',
     reason: result?.full?.reason || result?.full?.error?.message || result?.stderr?.slice(-1200) || '',
   };
 }
@@ -406,7 +570,12 @@ async function main() {
   const rescue = JSON.parse(rescueText);
   const rows = (rescue.rows || []).filter(row => row && row.needsLimitedDiscount !== false);
   if (!rows.length) throw new Error('Transaction rescue has no rows');
-  args.transactionId = args.transactionId || sha256(`${args.storeKey}\n${rescueHash}`).slice(0, 24);
+  const sourceRescueText = args.sourceRescue === args.rescue ? rescueText : await fs.readFile(args.sourceRescue, 'utf8');
+  const sourceRescueHash = sha256(sourceRescueText);
+  if (args.expectedSourceRescueHash && sourceRescueHash !== args.expectedSourceRescueHash) {
+    throw new Error(`Source rescue hash mismatch: expected=${args.expectedSourceRescueHash} actual=${sourceRescueHash}`);
+  }
+  args.transactionId = args.transactionId || sha256(`${args.storeKey}\n${sourceRescueHash}`).slice(0, 24);
   const journalPath = path.join(args.journalDir, `limited-discount-tx-${args.storeKey}-${args.transactionId}.json`);
   const outputPath = path.join(args.outDir, `limited-discount-transaction-${args.execute ? 'execute' : 'dry-run'}-${args.storeKey}-${args.transactionId}.json`);
   const automationAuthorization = args.execute ? await assertMarketingAutomationAuthorization({
@@ -414,16 +583,21 @@ async function main() {
     storeKey: args.storeKey,
     payloadHash: process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH || rescueHash,
   }) : null;
-  let journal = await fs.readFile(journalPath, 'utf8').then(JSON.parse).catch(() => null);
-  if (journal && journal.rescueHash !== rescueHash) {
-    throw new Error(`Transaction id collision with another rescue hash: ${args.transactionId}`);
-  }
+  let journal = await loadMarketingTransactionJournal(journalPath);
+  if (journal) assertMarketingTransactionJournalBinding(journal, {
+    journalPath,
+    transactionId: args.transactionId,
+    storeKey: args.storeKey,
+    sourceRescueHash,
+  });
   journal = journal || {
     schemaVersion: 1,
     transactionId: args.transactionId,
     storeKey: args.storeKey,
-    rescuePath: rel(args.rescue),
-    rescueHash,
+    rescuePath: rel(args.sourceRescue),
+    rescueHash: sourceRescueHash,
+    operationRescuePath: rel(args.rescue),
+    operationRescueHash: rescueHash,
     runPayloadHash: process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH || null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -446,12 +620,156 @@ async function main() {
     await writeJsonAtomic(journalPath, journal);
   };
 
-  if (args.execute && journal.phase === 'completed' && journal.result) {
+  const armCreateAttempt = async ({role, rescuePath: createRescuePath, rescueHash: createRescueHash, targetRows}) => {
+    const exactScope = {
+      storeKey: args.storeKey,
+      transactionId: args.transactionId,
+      rescuePath: rel(createRescuePath),
+      rescueHash: createRescueHash,
+      targetSkcs: unique((targetRows || []).map(row => row?.skc)).sort(),
+    };
+    const workFingerprint = process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH || rescueHash;
+    journal.createAttempt = {
+      schemaVersion: 1,
+      operation: 'limited_discount_create',
+      operationId: sha256(JSON.stringify({role, workFingerprint, exactScope})),
+      role,
+      state: 'create_started',
+      attempt: Number(journal.attempt || 1),
+      startedAt: new Date().toISOString(),
+      workFingerprint,
+      exactScope,
+    };
+    journal.mutationsStarted = true;
+    journal.currentMutation = {
+      type: 'create',
+      operationId: journal.createAttempt.operationId,
+      startedAt: journal.createAttempt.startedAt,
+    };
+    await persistJournal('desired_create_started');
+  };
+
+  if (args.execute && journal.result && (
+    journal.phase === 'completed'
+    || journal.result.classification === 'submitted_without_exact_readback'
+  )) {
     const result = {...journal.result, resumedFromTerminalJournal: true};
     await writeJsonAtomic(outputPath, result);
     console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
     if (!result.ok) process.exitCode = result.safe === true ? 2 : 4;
     return;
+  }
+
+  // Empty-snapshot journals cannot prove that an accepted create is
+  // compensable. Any phase that says a mutation may have started therefore
+  // requires a complete, self-authenticating create fence. Old, truncated, or
+  // malicious journals are terminally fenced before any readback or write.
+  const mutationBearingPhases = new Set([
+    'deleting_old_protection',
+    'old_protection_removed',
+    'post_delete_preflight',
+    'desired_create_started',
+    'desired_create_readback',
+    'compensating',
+    'compensation_failed',
+    'unsafe_uncovered',
+    'uncertain_readback_only',
+  ]);
+  const journalSignalsUnresolvedMutation = journal.mutationsStarted === true
+    || mutationBearingPhases.has(String(journal.phase || ''))
+    || journal.currentMutation != null
+    || journal.createAttempt != null;
+  const emptySnapshotsWithUnresolvedMutation = args.execute
+    && !journal.result
+    && journalSignalsUnresolvedMutation
+    && (!Array.isArray(journal.snapshots) || journal.snapshots.length === 0);
+  let validatedCreateFence = null;
+  if (emptySnapshotsWithUnresolvedMutation) {
+    validatedCreateFence = await validateCreateAttemptFence({journal, args, rescueHash, sourceRescueHash});
+    if (!validatedCreateFence.ok) {
+      const result = {
+        ok: false,
+        safe: false,
+        terminal: true,
+        status: 'submitted_without_exact_readback',
+        classification: 'submitted_without_exact_readback',
+        submittedWithoutExactReadback: true,
+        uncertainCreate: true,
+        readbackOnly: true,
+        readbackSkipped: true,
+        execute: true,
+        writeAttempted: true,
+        mutationsStarted: true,
+        transactionId: args.transactionId,
+        rescueHash,
+        sourceRescueHash,
+        workFingerprint: process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH || rescueHash,
+        journalIntegrityErrors: validatedCreateFence.errors,
+        journalPath: rel(journalPath),
+      };
+      journal.result = result;
+      journal.terminal = true;
+      journal.currentMutation = null;
+      await persistJournal('uncertain_journal_integrity_terminal');
+      await writeJsonAtomic(outputPath, result);
+      console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
+      process.exitCode = 4;
+      return;
+    }
+  }
+
+  // If the process stopped after the remote request was accepted but before
+  // its result was journaled, the validated durable create_started fence is
+  // terminal: perform readback only and never issue the create again.
+  if (args.execute
+    && validatedCreateFence?.ok
+    && !journal.result) {
+    const fencedScope = journal.createAttempt.exactScope || {};
+    const fencedRescuePath = validatedCreateFence.fencedRescuePath;
+    let uncertainReadback = null;
+    try {
+      uncertainReadback = commandSummary(await applyRescue({
+        args,
+        rescuePath: fencedRescuePath,
+        execute: false,
+      }));
+    } catch (error) {
+      uncertainReadback = {ok: false, error: String(error?.message || error)};
+    }
+    const result = {
+      ok: false,
+      safe: true,
+      terminal: true,
+      status: 'submitted_without_exact_readback',
+      classification: 'submitted_without_exact_readback',
+      submittedWithoutExactReadback: true,
+      uncertainCreate: true,
+      readbackOnly: true,
+      execute: true,
+      writeAttempted: true,
+      mutationsStarted: true,
+      transactionId: args.transactionId,
+      rescueHash,
+      sourceRescueHash,
+      workFingerprint: journal.createAttempt.workFingerprint,
+      operation: journal.createAttempt,
+      journalPath: rel(journalPath),
+      uncertainReadback,
+    };
+    journal.result = result;
+    journal.terminal = true;
+    journal.currentMutation = null;
+    await persistJournal('uncertain_readback_only');
+    await writeJsonAtomic(outputPath, result);
+    console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+
+  if (args.execute && args.continuation && !journal.mutationsStarted) {
+    const error = new Error('continuation requires an existing persisted mutation; refusing to start a new transaction');
+    error.code = 'MARKETING_CONTINUATION_NOT_FOUND';
+    throw error;
   }
 
   // A terminated process may have deleted goods after the last journal update.
@@ -473,6 +791,8 @@ async function main() {
       terminal: !recovery.ok,
       status: recovery.ok ? 'recovered_after_interruption' : 'unsafe_uncovered',
       execute: true,
+      writeAttempted: true,
+      mutationsStarted: true,
       transactionId: args.transactionId,
       rescueHash,
       journalPath: rel(journalPath),
@@ -506,6 +826,7 @@ async function main() {
     journal.restoredCoveredSkcs = [];
     journal.compensationAttempts = [];
     journal.currentMutation = null;
+    journal.createAttempt = null;
     journal.recovery = null;
     journal.result = null;
     journal.terminal = false;
@@ -517,7 +838,9 @@ async function main() {
   }
 
   const initial = await applyRescue({args, rescuePath: args.rescue, execute: false});
-  if (!initial.full) throw new Error('Initial transactional preflight did not produce a readable artifact');
+  if (!initial.full) {
+    throw new Error(`Initial transactional preflight did not produce a readable artifact: ${initial.stderr || initial.stdout || 'no child output'}`);
+  }
   const initialConflicts = conflictActivities(initial.full);
   const initialInvalid = initialInvalidBySkc(initial.full, initialConflicts);
   const initiallyBlockedSkcs = [...initialInvalid.keys()];
@@ -528,6 +851,9 @@ async function main() {
     terminal: false,
     status: 'pending',
     execute: args.execute,
+    deadline: args.deadline,
+    writeAttempted: false,
+    mutationsStarted: false,
     transactionId: args.transactionId,
     rescuePath: rel(args.rescue),
     rescueHash,
@@ -606,18 +932,45 @@ async function main() {
       console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
       return;
     }
+    assertCanBeginIrreversibleMutation(args, `limited-discount create ${args.storeKey}`);
+    result.mutationsStarted = true;
+    await armCreateAttempt({
+      role: 'create_only',
+      rescuePath: prepared.file,
+      rescueHash: prepared.hash,
+      targetRows: eligibleRows,
+    });
+    try {
+      assertCanBeginIrreversibleMutation(args, `limited-discount create ${args.storeKey}`);
+    } catch (error) {
+      journal.mutationsStarted = false;
+      journal.currentMutation = null;
+      journal.createAttempt = null;
+      result.mutationsStarted = false;
+      await persistJournal('pre_mutation_deadline_deferred');
+      throw error;
+    }
+    result.writeAttempted = true;
     const created = await applyRescue({args, rescuePath: prepared.file, execute: true});
+    if (process.env.SHEIN_MARKETING_FAULT_AFTER_CREATE_RETURN_BEFORE_JOURNAL === '1') {
+      throw new Error('fault injection after create return before journal result persistence');
+    }
     const covered = exactCoveredSkcs(created.full, eligibleRows, prepared.value);
     result.desiredCreate = commandSummary(created);
     result.desiredCoveredSkcs = [...covered].sort();
     result.ok = created.full?.ok === true && covered.size === eligibleRows.length && initiallyBlockedSkcs.length === 0;
-    result.status = result.ok ? 'created_without_replacement' : 'create_failed_without_deletion';
+    result.status = result.ok ? 'created_without_replacement' : 'submitted_without_exact_readback';
+    result.classification = result.ok ? 'completed' : 'submitted_without_exact_readback';
+    result.submittedWithoutExactReadback = !result.ok;
     result.safe = true;
-    result.terminal = initiallyBlockedSkcs.length > 0;
+    result.terminal = !result.ok || initiallyBlockedSkcs.length > 0;
     journal.result = result;
+    journal.createAttempt.state = 'result_persisted';
+    journal.createAttempt.resultPersistedAt = new Date().toISOString();
+    journal.currentMutation = null;
     journal.desiredCoveredSkcs = result.desiredCoveredSkcs;
     journal.terminal = result.terminal;
-    await persistJournal(result.ok ? 'completed' : (result.terminal ? 'safe_blocked' : 'create_failed_without_deletion'));
+    await persistJournal(result.ok ? 'completed' : 'safe_blocked');
     await writeJsonAtomic(outputPath, result);
     console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
     if (!result.ok) process.exitCode = 2;
@@ -662,8 +1015,19 @@ async function main() {
     return;
   }
 
+  assertCanBeginIrreversibleMutation(args, `limited-discount replacement ${args.storeKey}`);
   journal.mutationsStarted = true;
+  result.mutationsStarted = true;
   await persistJournal('delete_started');
+  try {
+    assertCanBeginIrreversibleMutation(args, `limited-discount replacement ${args.storeKey}`);
+  } catch (error) {
+    journal.mutationsStarted = false;
+    result.mutationsStarted = false;
+    await persistJournal('pre_mutation_deadline_deferred');
+    throw error;
+  }
+  result.writeAttempted = true;
   for (const snapshot of snapshots) {
     journal.currentMutation = {activityId: snapshot.activityId, skcs: snapshot.plannedSkcs, startedAt: new Date().toISOString()};
     await persistJournal('deleting_old_protection');
@@ -702,6 +1066,7 @@ async function main() {
   const postBlockedSkcs = [...postInvalid.keys()];
   result.postDeleteBlockedSkcs = postBlockedSkcs;
   let desiredCovered = new Set();
+  let desiredCreateAttempted = false;
 
   if (executableRows.length) {
     const executable = executableRows.length === eligibleRows.length
@@ -712,13 +1077,23 @@ async function main() {
       : await applyRescue({args, rescuePath: executable.file, execute: false});
     result.executablePreflight = commandSummary(executablePreflight);
     if (executablePreflight.full?.ok && !executablePreflight.full?.requiresTransactionalReplacement) {
-      await persistJournal('desired_create_started');
+      await armCreateAttempt({
+        role: 'replacement_desired',
+        rescuePath: executable.file,
+        rescueHash: executable.hash,
+        targetRows: executableRows,
+      });
+      desiredCreateAttempted = true;
       const created = await applyRescue({args, rescuePath: executable.file, execute: true});
       result.desiredCreate = commandSummary(created);
       desiredCovered = exactCoveredSkcs(created.full, executableRows, executable.value);
     }
   }
   journal.desiredCoveredSkcs = [...desiredCovered].sort();
+  if (journal.createAttempt?.role === 'replacement_desired') {
+    journal.createAttempt.state = 'result_persisted';
+    journal.createAttempt.resultPersistedAt = new Date().toISOString();
+  }
   result.desiredCoveredSkcs = [...desiredCovered].sort();
   await persistJournal('desired_create_readback');
 
@@ -739,6 +1114,12 @@ async function main() {
   else if (postBlockedSkcs.length || initiallyBlockedSkcs.length) result.status = 'platform_blocked_old_protection_restored';
   else result.status = 'replacement_failed_old_protection_restored';
   result.terminal = result.status === 'platform_blocked_old_protection_restored' || !result.safe;
+  if (!result.ok && desiredCreateAttempted && desiredCovered.size !== executableRows.length) {
+    result.status = 'submitted_without_exact_readback';
+    result.classification = 'submitted_without_exact_readback';
+    result.submittedWithoutExactReadback = true;
+    result.terminal = true;
+  }
   journal.result = result;
   journal.terminal = result.terminal;
   journal.restoredCoveredSkcs = compensation.restoredCoveredSkcs;
@@ -748,7 +1129,16 @@ async function main() {
   if (!result.ok) process.exitCode = result.safe ? 2 : 4;
 }
 
-main().catch(async error => {
-  console.error(JSON.stringify({ok: false, safe: false, error: error.message, stack: error.stack}, null, 2));
-  process.exitCode = 4;
-});
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';
+if (invokedPath && import.meta.url === invokedPath) {
+  main().catch(async error => {
+    console.error(JSON.stringify({
+      ok: false,
+      safe: false,
+      code: error?.code || 'MARKETING_TRANSACTION_FAILED',
+      error: error.message,
+      stack: error.stack,
+    }, null, 2));
+    process.exitCode = 4;
+  });
+}

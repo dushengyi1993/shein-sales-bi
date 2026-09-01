@@ -2,7 +2,7 @@
 
 
 
-> 当前权威状态：2026-08-04。V2 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托出站 OpenAPI 为19店独立 App；Webhook 入站由 DL 中央 App 统一验签。半托与全托共用主机的当前时间轴、共享锁、Portal 单队列和让路规则统一见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)；本文中的历史时刻不得覆盖该合同。
+> 当前权威状态：2026-08-17。V2/V4 是唯一正式 BI 入口；本地 BI 已封存，V1 仅保留 GitHub archive 恢复点。半托出站 OpenAPI 为19店独立 App；Webhook 入站由 DL 中央 App 统一验签。半托与全托共用主机的当前时间轴、共享锁、Portal 单队列和让路规则统一见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)；本文中的历史时刻不得覆盖该合同。
 
 
 ## 1. 当前入口
@@ -15,17 +15,51 @@
 
 - 云服务器：腾讯云 Lighthouse 东京，Ubuntu 24.04 x86_64，代码目录 `/opt/shein-bi/app`。
 
-- 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS，Nginx 在服务器本机 `127.0.0.1:8080` 反代到 BI Portal `127.0.0.1:8787`；身份认证由 BI Portal 应用内登录承担，PostgreSQL + Metabase 由 Docker Compose 承载。
+- 服务组成：HAProxy/Caddy 负责公网 443 分流与 TLS；Nginx `127.0.0.1:8080` 把页面/写路由送往 Portal `8787`，把 9 个精确认证只读路由送往 Query `8791`，把官方回调送往 Webhook `8792`。身份认证继续使用同一 `bi_session`，但三个 Node 进程、heap 与 cgroup 隔离；PostgreSQL + Metabase 由 Docker Compose 承载。
 
 - 域名入口：`https://sa.dushengyi.cc/`；服务器内部仍由 Nginx `127.0.0.1:8080` 转发到 BI Portal。
 
 - GitHub `main` 和正式 release tag 是源码恢复基线；云端 `/opt/shein-bi/app` 是该 commit 的部署工作树，不再作为第二个开发分支。Portal 页面、section cache、profile、session、日志和可变运营登记属于运行态，必须在忽略目录、`/srv`、`/data` 或数据库中保存。
 - `outputs/bi-portal/index.html`、`data.json` 和 `sections/` 自 2026-07-30 起不再纳入 Git。部署代码后必须重新生成 Portal；禁止把历史静态快照覆盖到生产。
 - 人工特殊限时折扣生产登记为 `/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json`，systemd guard/repair 通过 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY` 读取。仓库同名 `config` 文件只作本地/首次迁移种子；数据库备份会把生产登记一并纳入校验和与 COS 保留链。
+- 营销 current baseline 是持久 registry，不是 `tmp` 文件名：生产 unit 固定通过 `SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE=/srv/shein-bi/runtime/marketing-plans/current.json` 读取。current pointer 必须指向 `/srv/shein-bi/runtime/marketing-plans/baselines/<baselineId>/` 下不可变的 `selection-plan.json` 与 `price-overrides.json`，并通过 SHA-256、19 店覆盖、pair key/row 对齐、payload hash、work fingerprint、完成态和 current-baseline 元数据校验；`tmp` 只保留本地无 registry 的兼容扫描，不是生产恢复材料。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 指向 `/home/sheinops/.ssh/shein_bi_deploy`。若出现源码热修，先备份并回填 GitHub；在完成清单、回滚点和 hash 核对前，不得 `git add -A`、`git reset --hard`、`git clean -fdx`。
 - 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
 - 部署纪律：云端不得长期停在老 commit 上手动漂移。任何云端源码热修必须在同一事故内回填 GitHub；任何 GitHub release 必须写明“已部署云端”或“仅源码基线未部署”。交接前确认云端 `HEAD` 等于 release target SHA、tracked worktree 为空、关键服务和 BI health 已验证。完整规则见 [release-and-deployment-version-policy.md](release-and-deployment-version-policy.md)。
 - 当前 GitHub 发布边界：V2 是正式 release 线；V1 只保留 GitHub final/archive 纪念版 `2026.06.18-v1-final-archive`，线上 `/v1/` 不再提供访问，也不再纳入日常刷新或后续功能更新。
+
+### 2026-08-17 稳定性控制面
+
+- Query 只读面：`shein-bi-query.service` 固定 `SHEIN_BI_SURFACE=query`、`SHEIN_BI_QUERY_MAX_CONCURRENT=1`、`SHEIN_BI_QUERY_MAX_QUEUED=3`，V8 old space 1024MiB，cgroup `MemoryHigh=1024M` / `MemoryMax=1400M`。`/api/health` 仍属于 Portal；Query 自检直接访问 `http://127.0.0.1:8791/api/health`，要求 `surface=query` 且 `sideEffectsStarted=[]`。429 `QUERY_SURFACE_BUSY` 由受管 CLI 在既有等待预算内按 `Retry-After` 重试，不无限循环。请求 deadline/断连必须把 AbortSignal 传到文件读取；执行槽只能在实际 work 收口后释放，非协作 work 超过 grace 时由 Query 进程 fail-fast 并交给 systemd 重启，禁止旧解析与下一查询重叠。
+- 维护总闸：`/var/lib/shein-bi-control/cloud-maintenance.json` 是唯一 marker。canonical 目录固定 `root:root 0755`、marker 固定 `root:root 0644`，仅存放通过 secret-like 检查的非敏感控制元数据；服务用户可读但不能替换或删除，canonical `pause/resume` 只允许 root。`scheduled` 在 `business|all` 下阻断，`infrastructure` 仅在 `all` 下阻断，`always` 不阻断；marker 缺失表示正常，祖先路径、owner、mode、symlink、hard-link、JSON 或 schema 非法则 scheduled 与 infrastructure fail closed。canonical 死 owner 锁禁止自动回收，必须核对 marker、PID/process-start 与当前进程后人工处置，避免回收竞态误删新 owner；若命令报告 marker 已提交但锁清理未确认，先以 status 精确回读 generation/hash，再核验锁，禁止盲重试。每次 transition 以完整序列化字节的 SHA-256 回读，不只比较 generation。systemd 共 28 个 service、18 个 timer、1 个 path 必须与 `lib/cloud_runtime_inventory.mjs` 一致；不得新建第二套 timer、队列或 heartbeat。CLI `pause` 在 CAS 写 marker 前先审计 23 个 guard；runtime snapshot/watchdog 同时核对文件安装状态与有效 `ExecCondition`，guard 漂移时不允许 marker 把异常静默抑制。
+- 运行态 namespace：canonical 目录为 `/data/shein-bi/{profiles,state,outputs}`。宿主 `/opt/shein-bi/app/profiles` 与 `state` 是只读兼容 bind，宿主 `outputs` 不再挂载；每个 service 通过 `50-runtime-paths.conf` 获得独立最小权限。Query 对两处 profile 路径均为 `InaccessiblePaths`。runtime snapshot/watchdog 必须批量回读 28 个 service 的有效 `BindPaths`、`BindReadOnlyPaths`、`ReadOnlyPaths`、`InaccessiblePaths`、`RequiresMountsFor`；只看 drop-in 文件或当前进程健康不算通过。
+- layout 迁移恢复：迁移器把 v2 journal 和 underlay 备份写在 `/var/lib/shein-bi-layout-migration-backups`；该 root 专用目录位于 Git 工作树外，并必须和 `/opt/shein-bi/app` 同一文件系统，保证 state/outputs 使用原子 rename。普通失败或 SIGKILL 不自动回滚；无参数审计必须显示唯一 `recovery.action=resume` 后，才可用同一 `--apply` 恢复。`--rollback` 只允许针对该 active journal 显式确认执行，禁止另起 run 或手工搬移运行态。
+- 部署证明：`deployed_release.json` 必须是 schema v3 的 `shein-bi-deployed-release/v3`，同时绑定 repository id、trust policy SHA-256、annotated tag object、commit、attestation/checksum SHA-256、CI run/attempt 与 jobs SHA-256、source workflow 和 exact source fingerprint；旧 v2 marker 只作迁移读取兼容，不满足健康门。`capture_ops_runtime_snapshot.mjs` 和 watchdog 不只检查 marker 格式，还会从 `/srv/shein-bi/runtime/release-attestations/<tag>/` 重新读取两份证明、复算 hash，并核对本地 annotated tag object/message/peeled commit；marker 自己声明的 commit 不能给自己作证。
+- Profile/session 灾备：仓库保留 AES-256-GCM v2 的 create/verify/empty-staging restore 能力，但当前生产数据库备份 unit 默认关闭该可选项，不生成密钥，也不把 5GB 级 Profile 纳入数据库备份 SLA。以后若单独启用，必须先实测 entry/byte 总量、另行保管异机密钥副本并完成恢复演练；恢复仍只能落到不存在的 staging 目录。
+
+维护变更必须先读 status，把回读的 `generation` 与 `hash` 原样带入下一次 CAS；不得猜值或直接改 JSON：
+
+```bash
+node scripts/manage_cloud_maintenance_mode.mjs status
+sudo node scripts/manage_cloud_maintenance_mode.mjs pause --mode all \
+  --reason '<change-ticket>' --requested-by '<operator>' \
+  --expected-generation '<status.generation>' --expected-hash '<status.hash>'
+
+# 只读审计；真正 apply 仍需 exact confirmation，且 layout migration 要求
+# mode=all、全部 shein-bi service inactive、无 Chrome、备份在 source tree 外。
+sudo bash scripts/install_cloud_maintenance_guards.sh --systemd-root /etc/systemd/system
+sudo bash scripts/install_cloud_runtime_path_namespaces.sh \
+  --root /opt/shein-bi/app --systemd-dir /etc/systemd/system
+sudo bash scripts/migrate_cloud_runtime_mount_layout.sh
+# 只读审计为 fresh 才开始；若返回 resume，复核 phase/stamp 后仍使用同一 apply 恢复。
+# rollback 仅在审阅 active journal/fstab/备份指纹后显式执行。
+
+sudo node scripts/manage_cloud_maintenance_mode.mjs resume \
+  --reason '<verified-change-complete>' --requested-by '<operator>' \
+  --expected-generation '<fresh-status.generation>' --expected-hash '<fresh-status.hash>'
+```
+
+`--apply` 命令及 exact confirmation 以各脚本 `--help` 为准，必须串行执行并在每一步重新审计；不能把示例命令改成批量 `enable --now`。
 
 
 ### SSH 运维入口
@@ -73,13 +107,13 @@
 | --- | --- | --- |
 
 | 半托订单 Webhook + OpenAPI 按单同步 | 实时事件触发 | 更新当天正式销售事实并通过 SSE 通知在线 BI；旧 `shein-bi-cloud-today.timer` 已停用并删除 |
-| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:12/:45` | 轻量刷新19店当前商品库存；`07:12` 主轮另按每店32条有界轮转补齐商品详情，其余轮复用缓存；每轮成功后发布库存守卫依赖 marker |
+| `shein-bi-cloud-openapi-stock-refresh.timer` | 每小时 `:18/:48` | 轻量刷新19店当前商品库存，避开 `:00/:15/:30/:45` 销售 reconciliation 同刻启动；`07:18` 主轮另按每店32条有界轮转补齐商品详情，其余轮复用缓存；每轮成功后发布库存守卫依赖 marker |
 | `shein-bi-cloud-today-sales-reconcile.timer` | 每 15 分钟 | 在 Webhook 之外用19店 OpenAPI 纠偏当天销售，只刷新 `liveSalesToday`；属于轻量快车道 |
 | `shein-bi-cloud-yesterday.timer` | 北京时间 `02:45` | 依赖 session/backup marker，刷新前一天最终销售并复核稳定日 |
 
-| `shein-bi-db-backup.timer` | 北京时间 `01:45` | 备份业务库和 Metabase 元数据库到 `/srv/shein-bi/backups/auto`；01:52 前释放给全托备份 |
+| `shein-bi-db-backup.timer` | 北京时间 `01:45`，宿主 deadline `02:37` | 备份业务库、Metabase 元数据库和生产登记；Profile + WebAPI session 加密归档为保留但默认关闭的独立可选项；COS 内容级校验完成前不删本地 |
 
-| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:12/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
+| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
 
 | `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:20` | 只读同步 ET 仓储费最终账单与 SKU 明细，14:27 前完成利润 cache 与对账 |
 | 每日经营 run 内库存阶段 | `07:10` 统一 coordinator 的末段 | 19店慢变数据及补充域完整发布后，先刷新当前 OpenAPI 库存，再生成当天计划并按常驻授权自动执行；不再另建主/重试 timer |
@@ -91,9 +125,11 @@
 | `shein-bi-cloud-browser-cleanup.timer` | 每天 `03:20/09:25/21:20` | 在共享 host 锁和租约保护下回收半托孤儿浏览器；不与全托 supply/home 同窗 |
 | `shein-bi-cloud-disk-maintenance.timer` | 每天 `00:10` | 旧抓数校验归档到 COS、清理 7 天前临时文件；00:27 前释放 |
 
-| `shein-bi-cloud-watchdog.timer` | 每小时 | 检查云端服务、timer 和 BI 数据新鲜度，异常时发飞书提醒 |
+| `shein-bi-cloud-watchdog.timer` | 每小时 | 检查完整 unit inventory、schema v3 部署 marker（`shein-bi-deployed-release/v3`）、维护状态、服务和 BI 新鲜度；合并同轮恢复通知并用 outbox/idempotency 有界重试 |
 
 | `shein-bi-lark-sales-qa.service` | **主动暂停** | 飞书只读问数机器人代码与 unit 保留，但生产必须保持 `disabled + inactive`；网页问数与 CLI 不依赖它 |
+
+- 每日库存与 ET 低库存 journal 共同构成由 `SHEIN_BI_INVENTORY_JOURNAL_DIRS` 配置的 durable 审计/恢复域；guard 与 validator 必须用 `includeAll` 跨该域发现 journal，缺失 referenced intent 直接 fail closed。若在 ET journal 中找到 successor，只做只读核验，不修正 journal，也不发送 inventory POST。
 
 
 
@@ -113,16 +149,16 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 |---|---|---|---|---|
 | 实时事件 | 半托订单 Webhook + 按单 OpenAPI 同步 | Webhook 触发，只查发生变化的订单 | 更新当天正式销售事实、日汇总并通知在线 BI | 旧每小时 `today` timer 已删除；失败进入 Webhook 重试/dead-letter 与 watchdog。 |
 | `03:00` | 昨日最终销售与前两天稳定日复核 `shein-bi-cloud-yesterday.service` | 19 店官方 OpenAPI 全量 | 逐店 fetch/load/每日行完整性通过后原子晋升 OpenAPI 日切片 | 任一失败、缺店或缺少每日行都禁止晋升，避免用不完整日覆盖正式事实。 |
-| `07:10` | 每日经营统一协调器 `shein-bi-cloud-morning-chain.service` | wrapper 持久化 active run；同日失败恢复同一日期与绝对 deadline；跨日不执行旧 child，留存失败证据后推进当天；前序阶段不得侵占最后4500秒库存窗口 | 不重复抓当天销售；内部最多两个受门禁的只读浏览器 worker | 单 timer；终态非零且禁止无限重启。 |
+| `07:10` | 每日经营统一协调器 `shein-bi-cloud-morning-chain.service` | wrapper 持久化 active run；同日失败恢复同一日期与绝对 deadline；跨日不执行旧 child，留存失败证据后推进当天；生产 unit 前序阶段不得侵占最后2700秒库存窗口 | 不重复抓当天销售；内部最多两个受门禁的只读浏览器 worker | 单 timer；终态非零且禁止无限重启。 |
 | 晨间链路之后，每日一次 | 统一日更补采 `shein-bi-cloud-daily-refresh.service` / `cloud_daily_refresh.sh yesterday` | 混合：WebAPI/headless + OpenAPI 来源/对账层 | 写链接/业务域、SBN 营销概览线索、RTV 复核等慢变数据；其中的销售步骤不直接写正式事实 | 不再重复执行 MBRs 全店营销价格栈扫描；该实时扫描只属于独立 guard。商品四档状态、SBN 经营/流量等仍需 WebAPI/headless。 |
 | 晨间日更内每日一次，跑 D-1 | 销售/退货/商品 OpenAPI reconciliation | OpenAPI | 更新 `fact.openapi_*` 和 `mart.openapi_*_reconciliation`，不直接对正式事实表做原始 DML | 销售最终日晋升只属于 `03:00` 的 19/19 深度匹配门禁；退货/商品继续按各自隔离对账和切源门禁处理。 |
-| `01:20/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
+| `01:12/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | ET 货代仓/出库单 `shein-bi-cloud-et-forwarder.service` | ET headless/API | 写 ET 仓库、出库单，并轻量刷新订单/物流/售后 section | 不是 SHEIN OpenAPI；异常不应中断已成功店铺数据。 |
 | `14:10` | ET 仓储费 `shein-bi-cloud-et-storage-fee.service` | ET headless/API，只读 `IncomeBill(sort=2)` + `ExportStoreFee` | 写仓储费事实、canonical 账单与利润 cache | 与通用 ET 共用 profile 锁但隔离输出；只预热利润，不刷新无关库存趋势。 |
 | `00:45–01:27` | 登录态管家 `shein-bi-cloud-session-manager.service` | 单一 coordinator 按共享锁/pressure 门禁取得短生命周期 headless browser，再执行 WebAPI/SBN 探针 | 不写销售事实 | 外层 defer(75) 在同一 run 内持续退避到 deadline；只有当日 `done` marker 与同日启用店铺19/19报告同时成立才完成，到截止仍不可运行则写 marker/alert 并返回真实失败。 |
 | `06:52` | 订单闭环复查 `shein-bi-cloud-order-closure.service` | OpenAPI + Webhook/售后/ET 既有证据 | 一个 coordinator 完成当天整轮，只更新订单生命周期状态，不重写历史销售事实 | 瞬时资源压力在同一 run 内每60秒重试，最晚07:27前启动；不再因一次门禁延期整天漏跑，也不再因店铺后台 Cookie 过期整批失败。 |
 | `11:00` | 每日营销检查 `shein-bi-cloud-marketing-live-guard.service` | session HTTP 只读直连 | 单一 coordinator 读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，生成待处理营销清单；不持有写授权 | 不启动浏览器；瞬时失败只在同一 run 内重试失败阶段，不再于 13:00/16:00 重跑整套。 |
 | 本机 `11:10/13:10/16:10` | 本地后台营销执行 | Windows headless Chrome，默认 4 店一批、负载较高时 3 店一批 | 只执行负责人长期授权内的限时折扣修复；批内跨店并行、同店 dry-run→hash→事务→库存恢复→定点回读严格串行；整批终态后关闭本批 Profile 再开下一批 | `11:10` 主执行；后两次只续跑未终态队列。本机离线时保留队列，不把 WAITING 报成故障。 |
-| `20:45/21:15` | 云端营销应急兜底 `shein-bi-cloud-marketing-repair.service` | 受控浏览器写入 | 先做全店只读重扫，只有本机当天未闭环的长期授权缺口才执行 | 两段分别在 `20:57/21:27` 停止派新组，每段最多 1 店/1组；`21:02–21:13` 全托核心首页车道绝不占用。 |
+| `20:45/21:15` | 云端营销应急兜底 `shein-bi-cloud-marketing-repair.service` | 受控浏览器写入 | 先做全店只读重扫，只有本机当天未闭环的长期授权缺口才执行 | 首次运行按 exact queue 串行处理最多 32 组，`22:55` 停止派新组；外层 hard deadline 为 `23:10`，为当前组的库存恢复/终态回读保留 15 分钟；第二次 timer 仅做幂等 catch-up。 |
 | `03:45/09:50/21:00` | 浏览器残留清理 `shein-bi-cloud-browser-cleanup.service` | 本机进程清理 | 不写业务数据 | 避开日更和营销窗口，只回收无有效租约保护的孤儿浏览器。 |
 | 每小时 `:50` | watchdog `shein-bi-cloud-watchdog.service` | 只读巡检 | 不写业务数据 | 检查服务、timer、BI 新鲜度、销售/页面过期、浏览器残留并发提醒。 |
 | `02:40` | 数据库备份 `shein-bi-db-backup.service` | PostgreSQL dump/备份 | 备份 | 默认保留 14 天。 |
@@ -131,6 +167,8 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 仓储费回灌/补跑使用 `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`。完成标准不是“抓到文件”，而是 `check_storage_fee_profit.mjs` 四层守恒、`audit_bi_warehouse.mjs` 无 errors、timer/service success 和 profile Chrome 为 0。
 
 - 营销 live guard 临时补跑必须避开 ET `:20`、晨间/日更、登录态管家、备份和订单闭环。`2026-07-18 21:06` 的 19 店生产实测为 `157s`、Chrome `0 -> 0`；若正常巡检再次升到十几分钟或数小时，应视为重复抓取、浏览器回退或扫描夹带写入的故障。
+- `cloud_marketing_live_guard` 不支持也不启用 same-run resume：下游 fallback/drift planner 会读取可变的 `linksData`、`inventoryTrend` 和 raw history，而旧报告没有绑定完整不可变的 downstream-input manifest。任何 `SHEIN_BI_MARKETING_RESUME_*`、`SHEIN_BI_MARKETING_LIVE_RESUME_*` 或 `SHEIN_BI_MARKETING_LIVE_GUARD_RESUME_*` 请求，都必须在 collectors/builders/planners/queue 之前失败；旧 guard/report 只能保留为 warning，不能恢复。
+- 恢复规则是保留旧 run 的 warning 证据，绝不从日志重建 queue，也不重放旧 hash；下一次 scheduled daily run 必须从头开始一次 fresh、coherent 的 scan + plan + queue。已创建 exact queue 的 repair stage-level resume 仍然有效，但它只续跑该精确 queue，不能混同为 guard-run resume。
 - 本地和云端登录态是两套独立运行态：本地 Profile 只服务本机后台执行，云端 session manager 继续独立维护服务器 Profile/session HTTP。任一侧恢复成功都不能冒充另一侧已恢复；验证码或协议弹窗只在该侧自动恢复失败后才打开可见维护窗口。
 - 本机持久 Profile 只保留登录必需状态。`launch_store_browser.mjs` 把磁盘缓存放到 `%LOCALAPPDATA%/SheinBI/browser-cache` 并限制为 100MB，同时写入固定 disposable-root marker；批次结束且无本项目 Chrome 后运行 `cleanup_local_shein_browser_profile_cache.mjs --apply`。清理器只接受 basename 为 `browser-cache`、非文件系统根、非符号链接且 marker 内容精确匹配的缓存根；任一门禁不满足即 fail closed，永不删除 Cookies、Login Data、Local/Session Storage 或 IndexedDB。
 
@@ -144,6 +182,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - `daily-refresh`、ET、登录态管家、销售刷新、昨日销售、订单闭环、RTV 校验均有 `MemoryHigh` / `MemoryMax` / `OOMPolicy=stop` 护栏；如果单个任务越界，应失败并告警，不能把整台服务器拖到 OOM。
 - 销售、日更、ET、营销巡检、晨间链路、日报、Portal 刷新和预热锁统一放在 `/opt/shein-bi/app/state/locks`，所有脚本在 `flock` 前调用 `scripts/lib/shared_lock.sh` 的 `prepare_shared_lock_file`。目录必须是 `2770`，锁文件必须是 `0660` 且 group 为 `sheinops`；禁止恢复 `chmod 0666`、`umask 000` 或可预测的 `/tmp/*.lock`。历史 `/tmp` 残留曾导致任务权限冲突，修复后应 `systemctl daemon-reload`、`systemctl reset-failed`，并确认 app 内 `worldWritableNonSymlinks=0`。
+- Pipeline marker 的跨服务目录由 `scripts/pipeline_marker.mjs` 只维护 marker root/日期两级 `02770`，不递归改任意 state 路径。canonical marker root 是 `/data/shein-bi/state/pipeline-markers`，属主保持 `sheinops:sheinops`；`/opt/shein-bi/app/state` 是只读 bind/兼容路径，禁止从那里写入。仅在 canonical root 模式不是 `2770` 时精确执行一次 `sudo -n chmod 2770 /data/shein-bi/state/pipeline-markers`；现有 `2026-08-23` 日期目录已经是 `sheinops:sheinops 2770`，无需改动。禁止 `chmod -R`、任何 `chown` 或盲目递归修权限，marker 文件内容/哈希契约保持不变。
 - 2026-06-20 已确认旧 `financeData` section 下线：线上 `/api/bi/section/financeData` 应返回 `404`；`/v1/` 应返回 `410`，`/v2/` 只跳转到根路径。不要为 V1/旧财务页面恢复预热、缓存或 timer。
 
 - `inventoryTrend` 不是 ET 实盘库存，而是 SHEIN 前台展示库存趋势。2026-06-20 云端实测 `inventoryTrend.json` 约 `242KB`、gzip 约 `20KB`；若后续怀疑 21MB 大 section，先查线上 `outputs/bi-portal/sections/` 真实体积，不按旧印象处理。
@@ -167,7 +206,7 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 - 当天人工灾备入口：`scripts/cloud_bi_refresh.sh today intraday`。日常当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实，不安装每小时 timer；只有实时链路故障并明确决定灾备时才手动运行。
 - 前一天最终版入口：`scripts/cloud_bi_refresh.sh yesterday final`。切换日以后直接收齐19店 OpenAPI 完整日切片；逐店 fetch/load/每日行门禁通过后才调用 `ops.promote_openapi_sales_slice` 原子晋升。
 
-- Portal section 已改为一条 host-locked 队列：core、页面或 SSE 只把 `orders/profit/linksData` 等重 section 合并入队，不再 `nohup` 扇出 16 个后台生成任务。`shein-bi-cloud-portal-section-queue.service` 持 `/run/lock/shein-host-heavy.lock` 后逐个同步生成；旧 JSON 在新结果原子发布前继续可读。队列按请求序号而不是 section 名排序，同批 `profit,homeProfit` 必须先生成利润源；运行中再次入队会提高请求修订号，旧租约不能删除新请求；失败带退避，但人工/页面重新入队会立即解除旧退避。worker 只有在 HTTP `200`、无 stale/refresh-failed 响应头，且落盘 section 与当前 core 同代并通过终态校验后才完成租约，`202` 绝不能当成功。只有 `liveSalesToday`、`productState`、`inventoryStock` 可在 Portal 轻量快车道直接生成。首页精简流量和成交价散点随每日 core 一起按首页优先级入队；页面“强制刷新”使用最高优先级。后台项等待越久会逐步提升有效优先级，防止被持续到来的订单/利润刷新永久饿死。完整边界见 [shared-host-resource-schedule.md](shared-host-resource-schedule.md)。
+- Portal section 队列只有一个 `:02/:32` timer：`:02` 为 `HEAVY_ALLOWED=0` 的 light-only 槽，deadline `:14`、最多一个轻 section；`:32` 为 heavy 槽，deadline `:44`。unit、slot、worker 三层均拒绝 `01:*`，并静态拒绝 `02:02/03:02/07:02` 特殊维护窗口；其余小时只接受 `:01–04/:31–34` 起跑。晨链 active/activating/reloading 或状态未知时，slot wrapper 继续动态让路并 fail-closed；这只是调度优化，不改变数据库 promotion 根修、锁、section 优先级或队列语义。
 - Portal 实时链路不做 60 秒轮询：订单 Webhook 入仓后先通过 PostgreSQL `NOTIFY` + SSE 推送销售；可见页面仅每 5 分钟做一次兜底检查。普通当天订单只刷新 `liveSalesToday`，不会等待移动加权成本；退货和历史订单变动把 `orders/afterSales/profit/homeProfit` 等 canonical accounting section 加入 host-locked 队列，并在页面标注利润待同步。Portal 进程本身不得直接启动成本台账重算。
 - 营销修复队列必须区分“系统失败”和“业务条件不满足”。库存不足、平台明确拒绝且旧活动保护仍完整的链接，在当天不可变 manifest 内记为 `blocked`，不得每个窗口重复执行或把 worker 标成 `failed`；下一天的新 guard/fingerprint 会自动重新评估。网络、浏览器、鉴权、读回失败仍记为 `failed` 并重试/告警。某阶段存在安全业务阻塞时，worker 仍应继续处理后续互不重叠的修复阶段，最后以人话报告未执行原因。
 - 实时销售直接查询当天 `fact.order_item`，利润只读取同一次原子发布的 `mart.profit_order_item_cache` 与仓储费 cache。新订单尚未进入 cache，或已有订单行的金额/数量与 cache 不一致时，API 都返回 `accountingPending=true`，实时销售先采用正式事实行，页面显示利润正在补成本；相同内容的幂等 Webhook 重放不会误报待补账。禁止用静态单位成本、旧利润或零值掩盖这个时间差。
@@ -178,7 +217,12 @@ ET、统一日更补采和异常通知 watchdog 等 Linux systemd 入口已启�
 
 - 飞书日报云端入口：`scripts/cloud_daily_lark_report.sh today` 仅保留为手动临时发送；正式自动发送当前关闭，`scripts/cloud_morning_chain.sh` 默认跳过日报后直接启动慢变日更。
 
-- 晨间生产入口是 `run_cloud_morning_chain_job.sh`，其 child 为 `cloud_morning_chain.sh all`。wrapper 负责 mutex、active context 与 first-start 绝对 deadline；exit 0 只表示 `daily-operating-refresh` final marker 的日期和所有直接 evidence hash 均通过，deadline/数据/配置终态使用非零码并由 `RestartPreventExitStatus` 停止循环。19店抓取与 supplements 在库存前置截止前完成；库存阶段拥有最后4500秒，`inventory-started` checkpoint 允许同日重启直接续跑库存。final marker 直接绑定19店结果、库存 marker、plan 与 result；watchdog 在 service 成功后仍持续回验这些证据。跨日旧 child 不执行，只保留旧失败后启动当天独立窗口。
+- 统一自动化团队报告投递入口：本地自动化只能调用 `node scripts/send_cloud_team_report.mjs --automation-id <id> --business-date <YYYY-MM-DD> --summary-file <outputs-file> --attachment <outputs-file> --expected-attachment-sha256 <sha256> --cloud-ssh shein-bi-tencent`。该入口只把固定 bundle 经 SSH stdin 交给云端 `scripts/cloud_team_report_delivery.mjs deliver-stdin`，本机不读取群目标、不接受 `recipientChatId`，也不调用本机 `lark-cli`；本地文件必须是 `outputs/` 下的普通非软链文件。
+
+- 云端投递脚本自行读取 `/opt/shein-bi/app/config/lark_report.json`，只接受 `recipientChatId=oc_...` 群目标和 `defaultIdentity=bot`，再以 `lark-cli im +messages-send --as bot` 串行发送摘要与附件。落点固定为 `/srv/shein-bi/runtime/automation-delivery/<automation>/<date>/<fingerprint>/`；附件 SHA、自动化 ID、业务日期和状态原子保存。幂等键由三者绑定，部分回执只补未接受项；只有 `ok=true` 且存在非空 `message_id` 才接受。状态和输出不保存群 ID、消息 ID、token 或 app secret；`230002` 只分类为 `caller_identity_not_in_chat`，未独立验证执行身份时不得推断云端 bot 的群成员关系。
+
+- 晨间生产入口是 `run_cloud_morning_chain_job.sh`，其 child 为 `cloud_morning_chain.sh all`。wrapper 负责 mutex、active context 与 first-start 绝对 deadline；exit 0 只表示 `daily-operating-refresh` final marker 的日期和所有直接 evidence hash 均通过，deadline/数据/配置终态使用非零码并由 `RestartPreventExitStatus` 停止循环。19店抓取与 supplements 在库存前置截止前完成；生产 unit 的库存阶段拥有最后2700秒（脚本直跑保守默认4500秒），`inventory-started` checkpoint 允许同日重启直接续跑库存。final marker 直接绑定19店结果、库存 marker、plan 与 result；watchdog 在 service 成功后仍持续回验这些证据。跨日旧 child 不执行，只保留旧失败后启动当天独立窗口。
+- 同日恢复只能由显式一次性 `scripts/authorize_cloud_morning_chain_recovery.mjs --run-date ... --new-deadline-epoch ... --reason ... --confirm AUTHORIZE_MORNING_CHAIN_RECOVERY` 授权；工具在既有 morning-chain 锁内重新读取维护状态、service/timer 的 `systemctl show`、active/latest、marker 与库存 plan/result/journal，要求维护 inactive、服务无运行/排队 job、旧 deadline 已过期且 inventory 尚未落盘。它只先原子写同日 recovery receipt，再原子更新现有 `active.json`，不会删除旧证据、启动 service、运行 child、创建 timer/queue 或发库存请求；同一精确 receipt 可幂等重放，任何 deadline/reason/文件漂移都拒绝。
 
 - 云端异常通知入口：`scripts/cloud_ops_watchdog.mjs`。`config/lark_report.json` 配置 `recipientChatId` 后，watchdog、同步异常、营销提醒和 Webhook P0 都统一发送到团队运营群，不再向负责人个人私聊；个人 `recipientUserId` 只保留为显式移除群目标后的灾备。对于内容精确等于 `marketing price scan failed` 的单一日更 warning，watchdog 只有在后续 guard 状态引用一份比 warning 更新、24 小时内、`ok=true` / `partial=false`、与当前 enabled store 集合完全一致且行数自洽的扫描时，才在 `recoveries` 中记录恢复并停止重复告警。原 `daily-refresh-last.json` 和历史日志必须保留；混合 warning、过期/未来时间、路径越界、缺店、重复店、失败店或残缺 payload 一律不能自动变绿。晨间链路失败 service 的退出只有同日 `done` 的 `morning-links-ready` marker（`ok=true`）且完成时间晚于单元退出时，才在 `recoveries` 中记为业务恢复；`warning` 状态（即使管线层 `ok=true`）或 done 但 `ok=false` 一律不算恢复。当日晨链已收敛为 failed/partial/deferred 终态且单元已退出时，watchdog 直接以“晨链当日失败”告警。
 
@@ -298,7 +342,7 @@ GitHub 应保存：
 
 - 服务器本机访问 `/api/health` 或带有效 BI 登录会话访问应返回 `200` 且 `ok=true`；未登录公网访问应返回 `401` 或跳转登录。
 
-- 发布或综合巡检验收先运行 `node scripts/capture_ops_runtime_snapshot.mjs --out-dir <全新目录> --expected-commit <release-tag>`。它在一次 `systemctl show` 中读取全部受管 unit/timer，并同时核对部署标记、源码与 Portal/Webhook health；先看相邻 manifest 的紧凑结果，只对 blocker 再做单项探针。
+- 发布或综合巡检验收先运行 `node scripts/capture_ops_runtime_snapshot.mjs --out-dir <全新目录> --expected-commit <release-tag>`。它在一次 `systemctl show` 中读取全部受管 unit/timer 及 28-service 有效隔离/guard 属性（`BindPaths`/`BindReadOnlyPaths`/`ReadOnlyPaths`/`InaccessiblePaths`/`RequiresMountsFor`/`ExecCondition`），并同时重验本地 release attestation、annotated tag、部署标记、源码与 Portal/Query/Webhook health；先看相邻 manifest 的紧凑结果，只对 blocker 再做单项探针。
 
 - `shein-bi-cloud-today.timer` 应为 `not-found/disabled/inactive`；`shein-bi-cloud-today.service` 只作人工灾备，不在 watchdog 必需 unit 清单中。
 - 所有 `state/locks/*.lock` 应为 `0660 root|sheinops:sheinops`，同时可被 root / sheinops 写入但不能 world-write。
@@ -320,7 +364,7 @@ GitHub 应保存：
 
 - `ssh shein-bi-tencent` 应能直接登录服务器并具有免密 `sudo` 运维能力；如果后续 HTTPS 占用 443，先迁移 SSH 端口。
 
-- `shein-bi-cloud-watchdog.timer` 应保持 active；销售数据过期按 12 小时、页面底稿按 30 小时、链接/业务域按 48 小时提醒，并检查 Portal 的 SSE/LISTEN 连接。若报告通过恢复证据收口历史营销扫描 warning，必须同时看到 `issues=[]`、`recoveries[].type=daily_marketing_price_scan_recovery` 和原始 `dailyRefresh.status=warning`，不能只看进程退出码。
+- `shein-bi-cloud-watchdog.timer` 应保持 active；销售数据过期按 12 小时、页面底稿按 30 小时、链接/业务域按 48 小时提醒，并检查 Portal 的 SSE/LISTEN 连接。它每轮只读一次维护 marker；维护期只压住对应 class，不压住 Portal/Query/Webhook 与源码完整性。业务告警恢复与维护结束同轮发生时合并为一次 `cloud-watchdog-recovery`，发送失败保留同一 idempotency/outbox 重试，不能再各发一条。若报告通过恢复证据收口历史营销扫描 warning，必须同时看到 `issues=[]`、`recoveries[].type=daily_marketing_price_scan_recovery` 和原始 `dailyRefresh.status=warning`，不能只看进程退出码。
 
 - `shein-bi-cloud-morning-chain.timer` 应保持 active；慢变日更由它启动 `shein-bi-cloud-daily-refresh.service`。手动复跑用 `scripts/cloud_daily_refresh.sh yesterday`。若单店卡在 SBN `x-gw-auth`，优先看该店 attempt 重试日志；若 RTV 子步骤失败，先看底层脚本日志。当天销售由半托订单 Webhook 触发按单 OpenAPI 写正式事实，`03:00` 全店 OpenAPI 在19店逐店 fetch/load/每日行完整性通过后原子晋升最终日切片；退货退款、商品/链接等其它数据域仍按各自 OpenAPI、WebAPI/headless 与日更边界处理。不要回退到本机补抓冒充云端日更。旧的 `shein-bi-cloud-link-business.timer`、`shein-bi-cloud-openapi-hl.timer`、`shein-bi-cloud-rtv-verify.timer` 应保持 masked，避免日更补采重复跑。
 

@@ -65,8 +65,8 @@ require_run_budget() {
   if (( remaining <= 0 )); then
     write_state "failed" "the single daily run exhausted its ${RUN_BUDGET_SEC}s safety budget during $phase; prior complete BI snapshot remains active"
     write_marker "daily-operating-refresh" "failed" "run safety budget exhausted during $phase" "$LOG_FILE" >/dev/null || true
-    echo "[cloud_morning_chain] ERROR safety budget exhausted phase=$phase" >&2
-    exit 75
+    echo "[cloud_morning_chain] ERROR safety budget exhausted phase=$phase terminal=restart-prevented" >&2
+    exit 76
   fi
 }
 
@@ -244,7 +244,7 @@ run_nightly_session_readiness_gate() {
   recovery_deadline="$(session_recovery_deadline_epoch)"
   now="$(date +%s)"
   if (( recovery_deadline <= now )); then
-    write_state "failed" "nightly session recovery cannot start without consuming the reserved ${LINK_COLLECTION_RESERVE_SEC}s link-collection budget; link collection was not started"
+    write_state "failed" "nightly session recovery cannot start without consuming the reserved ${LINK_COLLECTION_RESERVE_SEC}s link-collection budget; link collection was not started; manual login or scheduled session manager run required"
     write_marker "morning-all" "failed" "nightly-session recovery had no safe budget before link collection" "$LOG_FILE" >/dev/null || true
     echo "[cloud_morning_chain] ERROR session recovery has no safe budget runDeadline=$RUN_DEADLINE_EPOCH linkReserveSec=$LINK_COLLECTION_RESERVE_SEC" >&2
     return 79
@@ -274,10 +274,10 @@ run_nightly_session_readiness_gate() {
   fi
 
   if [[ "$recovery_status" != "0" ]]; then
-    write_state "failed" "nightly session recovery failed status=$recovery_status; link collection was not started"
+    write_state "failed" "nightly session recovery failed status=$recovery_status; manual login or scheduled session manager run required before link collection; all-store fetch skipped"
     write_marker "morning-all" "failed" "nightly-session recovery failed status=$recovery_status before link collection" "$LOG_FILE" >/dev/null || true
     echo "[cloud_morning_chain] ERROR session recovery failed status=$recovery_status; all-store fetch skipped" >&2
-    return "$recovery_status"
+    return 79
   fi
 
   # Re-verify through the same strong helper; never trust the recovery exit
@@ -293,7 +293,7 @@ run_nightly_session_readiness_gate() {
     return 0
   fi
 
-  write_state "failed" "nightly session recovery exited 0 but completion evidence (done marker + same-day 19/19 report) is missing; link collection was not started"
+  write_state "failed" "nightly session recovery exited 0 but completion evidence (done marker + same-day 19/19 report) is missing; manual login or scheduled session manager run required before link collection; all-store fetch skipped"
   write_marker "morning-all" "failed" "nightly-session recovery evidence missing after exit 0" "$LOG_FILE" >/dev/null || true
   echo "[cloud_morning_chain] ERROR session recovery evidence missing after exit 0; all-store fetch skipped" >&2
   return 79
@@ -433,6 +433,10 @@ run_supplements_stage() {
   SHEIN_BI_DAILY_REQUIRE_COMPLETE_LINK_BUSINESS=1 \
   SHEIN_BI_DAILY_REQUIRE_CRITICAL_PORTAL_SECTIONS=0 \
   SHEIN_BI_DAILY_CRITICAL_PORTAL_PREWARM=queue \
+  SHEIN_BI_DAILY_METRIC_REFETCH_ON_NOT_READY="${SHEIN_BI_MORNING_METRIC_REFETCH_ON_NOT_READY:-1}" \
+  SHEIN_BI_DAILY_REFRESH_DEADLINE_EPOCH="$PRE_INVENTORY_DEADLINE_EPOCH" \
+  SHEIN_BI_DAILY_REFRESH_RUN_KEY="${RUN_DATE}:${DATA_DATE}" \
+  SHEIN_BI_DAILY_METRIC_REFETCH_BROWSER_WRAPPER=1 \
   SHEIN_BI_DAILY_RTV_VERIFY=0 \
   SHEIN_BI_PORTAL_PREWARM_DISABLED=0 \
     timeout --signal=TERM --kill-after=30s "${remaining}s" bash scripts/cloud_daily_refresh.sh "$DATA_DATE"
@@ -604,6 +608,13 @@ case "$STAGE" in
     node scripts/build_morning_resume_evidence.mjs --date "$DATA_DATE" --out "$RESULT_FILE"
 
     if pipeline_marker_done "morning-supplements"; then
+      # RESULT_FILE was rebuilt above from the exact-date store evidence.  A
+      # restart may therefore invalidate the previous links-ready evidence
+      # hash even though supplements/Portal are already complete.  Re-sign
+      # only this marker with the current bundle before entering inventory;
+      # the exact-store gate above still forbids incomplete data here.
+      write_marker "morning-links-ready" "done" "all 19 stores merged and published in the unified daily run" \
+        "$RESULT_FILE" >/dev/null
       echo "[cloud_morning_chain] resume-skip completed supplements/Portal checkpoint; continuing with inventory in the same logical daily run"
     else
       SUPPLEMENT_RETRY_ROUND=0

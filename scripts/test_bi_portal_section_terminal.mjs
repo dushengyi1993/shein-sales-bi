@@ -8,11 +8,12 @@ import {spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 import {validateTerminalArtifact} from './check_bi_portal_section_terminal.mjs';
+import {publishBiProfitBundleManifest, writeBiSectionArtifact, writeBiSectionCache} from '../lib/bi_section_cache.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const generatedAt = '2026-08-11T08:36:30.27274+08:00';
 
-function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt, extra = {}} = {}) {
+async function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt, extra = {}} = {}) {
   fs.mkdirSync(path.join(dir, 'sections'), {recursive: true});
   if (core) {
     fs.writeFileSync(path.join(dir, 'data.json'), JSON.stringify({
@@ -21,14 +22,21 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     }));
   }
   if (section) {
-    fs.writeFileSync(path.join(dir, 'sections', `${section}.json`), JSON.stringify({
-      ok: true,
-      section,
-      generatedAt: sectionGeneratedAt,
-      cachedAt: '2026-08-11T02:56:46.613Z',
-      data: extra.data ?? {},
-      run: {code: 0, timedOut: false, stderrTail: ''},
-    }));
+    const run = {code: 0, timedOut: false, stderr: ''};
+    if (['profit', 'homeProfit'].includes(section) && sectionGeneratedAt === generatedAt) {
+      const profitData = section === 'profit'
+        ? (extra.data ?? {})
+        : {profit: {dailyStoreProducts: []}};
+      await writeBiSectionCache(dir, 'profit', generatedAt, profitData, run, {requireIntegrity: true});
+      await writeBiSectionArtifact(dir, 'profit.query', 'profit.query', generatedAt, profitData, run, {requireIntegrity: true});
+      const homeProfitData = section === 'homeProfit'
+        ? (extra.data ?? {})
+        : {homeProfitSummary: {dailyScopes: [], source: 'profit_section_cache', sourceGeneratedAt: generatedAt, staleSource: false}};
+      await writeBiSectionCache(dir, 'homeProfit', generatedAt, homeProfitData, run, {requireIntegrity: true});
+      await publishBiProfitBundleManifest(dir, generatedAt);
+      return;
+    }
+    await writeBiSectionCache(dir, section, sectionGeneratedAt, extra.data ?? {}, run, {requireIntegrity: true});
   }
 }
 
@@ -36,20 +44,27 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-current-'));
   try {
-    makePortal(dir, {section: 'orders', extra: {data: {rows: []}}});
+    await makePortal(dir, {section: 'orders', extra: {data: {rows: []}}});
     const result = await validateTerminalArtifact({root: dir, section: 'orders'});
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.coreGeneratedAt, generatedAt);
     assert.equal(result.sectionGeneratedAt, generatedAt);
 
-    makePortal(dir, {section: 'profit', extra: {data: {profit: {dailyStoreProducts: []}}}});
+    await makePortal(dir, {section: 'profit', extra: {data: {profit: {dailyStoreProducts: []}}}});
     assert.equal((await validateTerminalArtifact({root: dir, section: 'profit'})).ok, true, 'profit with dailyStoreProducts must be terminal');
 
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], source: 'profit_section_cache', sourceGeneratedAt: generatedAt, staleSource: false}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).ok, true, 'fresh homeProfit must be terminal');
+
+    const ordersFile = path.join(dir, 'sections', 'orders.json');
+    const ordersRaw = fs.readFileSync(ordersFile);
+    fs.writeFileSync(ordersFile, ordersRaw.subarray(0, Math.max(1, ordersRaw.length - 8)));
+    const truncated = await validateTerminalArtifact({root: dir, section: 'orders'});
+    assert.equal(truncated.ok, false, 'a truncated file with a valid metadata head must fail strict integrity');
+    assert.equal(truncated.reason, 'section_integrity_unverified');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
   }
@@ -59,7 +74,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-stale-'));
   try {
-    makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T08:36:30.27274+08:00'});
+    await makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T08:36:30.27274+08:00'});
     const result = await validateTerminalArtifact({root: dir, section: 'orders'});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'section_generated_at_mismatch');
@@ -73,7 +88,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-expected-'));
   const otherGeneration = '2026-08-10T00:00:00.000Z';
   try {
-    makePortal(dir, {section: 'orders'});
+    await makePortal(dir, {section: 'orders'});
     const exact = await validateTerminalArtifact({
       root: dir,
       section: 'orders',
@@ -132,25 +147,25 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-home-profit-'));
   try {
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: '2026-08-10T19:09:04.52205+08:00', staleSource: false}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_source_mismatch');
 
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: true}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_stale_source');
 
-    makePortal(dir, {
+    await makePortal(dir, {
       section: 'homeProfit',
       extra: {data: {homeProfitSummary: {sourceGeneratedAt: generatedAt, staleSource: false}}},
     });
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_daily_scopes_missing');
 
-    makePortal(dir, {section: 'homeProfit', extra: {data: {other: true}}});
+    await makePortal(dir, {section: 'homeProfit', extra: {data: {other: true}}});
     assert.equal((await validateTerminalArtifact({root: dir, section: 'homeProfit'})).reason, 'home_profit_summary_missing');
   } finally {
     fs.rmSync(dir, {recursive: true, force: true});
@@ -162,7 +177,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-profit-'));
   try {
-    makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: []}}}});
+    await makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: []}}}});
     const result = await validateTerminalArtifact({root: dir, section: 'profit'});
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'profit_daily_store_products_missing');
@@ -176,7 +191,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
       standard_goods_sn: `ABC-${String(index).padStart(6, '0')}`,
       net_revenue_sar: index,
     }));
-    makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: rows, dailyStoreProducts: []}}}});
+    await makePortal(dir, {section: 'profit', extra: {data: {profit: {monthGroups: rows, dailyStoreProducts: []}}}});
     const reordered = await validateTerminalArtifact({root: dir, section: 'profit'});
     assert.equal(reordered.ok, true, 'large reordered profit must validate via streaming key scan');
     assert.ok(reordered.profitScanBytes > 1024 * 1024,
@@ -199,7 +214,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     assert.equal((await validateTerminalArtifact({root: dir, section: 'orders'})).reason, 'section_file_missing');
     assert.equal((await validateTerminalArtifact({root: dir, section: '../escape'})).reason, 'section_invalid');
 
-    makePortal(dir, {core: false, section: 'orders'});
+    await makePortal(dir, {core: false, section: 'orders'});
     fs.writeFileSync(path.join(dir, 'data.json'), `{"generatedAt":"${generatedAt}","corrupt":truX}`);
     assert.equal((await validateTerminalArtifact({root: dir, section: 'orders'})).reason, 'core_file_missing',
       'a structurally invalid unrequested core field must fail closed');
@@ -212,13 +227,13 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-cli-'));
   try {
-    makePortal(dir, {section: 'orders'});
+    await makePortal(dir, {section: 'orders'});
     const script = path.join(root, 'scripts', 'check_bi_portal_section_terminal.mjs');
     const okRun = spawnSync(process.execPath, [script, '--root', dir, '--section', 'orders'], {encoding: 'utf8'});
     assert.equal(okRun.status, 0, okRun.stderr);
     assert.equal(JSON.parse(okRun.stdout).ok, true);
 
-    makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T00:00:00.000Z'});
+    await makePortal(dir, {section: 'orders', sectionGeneratedAt: '2026-08-10T00:00:00.000Z'});
     const staleRun = spawnSync(process.execPath, [script, '--root', dir, '--section', 'orders'], {encoding: 'utf8'});
     assert.equal(staleRun.status, 1, 'a non-terminal artifact must exit non-zero');
     assert.equal(JSON.parse(staleRun.stdout).ok, false);
@@ -246,7 +261,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     fs.writeSync(handle, `","generatedAt":"${generatedAt}","__sections":{"mode":"api","generatedAt":"${generatedAt}"}}`);
     fs.closeSync(handle);
     handle = undefined;
-    makePortal(dir, {core: false, section: 'orders'});
+    await makePortal(dir, {core: false, section: 'orders'});
 
     const script = path.join(root, 'scripts', 'check_bi_portal_section_terminal.mjs');
     const boundedRun = spawnSync(process.execPath, [
@@ -275,18 +290,44 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
   assert.match(worker, /\[\[ "\$HTTP_CODE" != "200" \]\]/, 'worker must reject every non-200 response');
   assert.match(worker, /queue_command fail --section "\$SECTION" --lease-id "\$LEASE_ID"[\s\S]*non-200 never completes/,
     'a 202/403/503/500 must fail the lease instead of completing it');
-  assert.match(worker, /X-BI-Section-\(Stale\|Refresh-Failed\):\[\[:space:\]\]\*true/,
-    'worker must treat a stale or failed-refresh 2xx as a failed section');
+  assert.match(worker, /X-BI-Section-Refresh-Failed:\[\[:space:\]\]\*true/,
+    'worker must detect a failed-refresh 2xx before generic non-200 handling');
+  assert.match(worker, /response_header_value 'X-BI-Section-Refresh-Error' "\$REFRESH_ERROR_MAX_ENCODED"[\s\S]*response_header_value 'X-BI-Section-Refresh-Failed-At' 64/,
+    'worker must extract the URL-encoded primary error and failure timestamp headers with bounded reads');
+  assert.match(worker, /REFRESH_ERROR_MAX_ENCODED=12288[\s\S]*bounded_refresh_failure_reason[\s\S]*completeEncoded[\s\S]*TextDecoder[\s\S]*Array\.from\(safeError\)/,
+    'worker must decode bounded complete escapes, preserve Unicode code points, sanitize to one line, and cap the persisted reason');
+  for (const pattern of [/Authorization/u, /Basic\|Bearer/u, /Cookie\|Set-Cookie/u, /sensitiveKeys/u, /session_id/u, /access_token/u, /redactKeyValues/u, /consumeValue/u, /:\\\/\\\//u, /\[redacted\]/u]) {
+    assert.match(worker, pattern,
+      'worker must redact authorization, cookie/session/token/password, and URL/DSN credentials');
+  }
+  assert.match(worker, /queue_command fail --section "\$SECTION" --lease-id "\$LEASE_ID"[\s\S]*--error "\$REFRESH_FAILURE_REASON"/,
+    'worker must persist the exact bounded decoded reason in the queue failure');
   assert.match(worker, /check_bi_portal_section_terminal\.mjs[\s\S]*--root "\$PORTAL_ROOT" --section "\$SECTION"/,
     'worker must verify the terminal artifact before completing');
+  assert.match(worker, /timeout --signal=TERM --kill-after=1s "\$\{remaining_sec\}s"[\s\S]*check_bi_portal_section_terminal\.mjs/,
+    'worker terminal validation must be bounded by the effective claim deadline');
   assert.match(worker, /TERMINAL_STATUS" -eq 0[\s\S]*queue_command complete --section "\$SECTION" --lease-id "\$LEASE_ID"/,
     'worker may only complete after a passing terminal readback');
+  assert.match(worker, /--not-after-epoch "\$CLAIM_DEADLINE_EPOCH"/,
+    'worker completion must pass the immutable slot/lease deadline to the manager');
+  assert.match(worker, /if \[\[ "\$CURL_STATUS" -ne 0 \]\]; then\s*fail_terminal_claim "\$CURL_STATUS"/,
+    'a transport failure must fail the lease without terminal reconciliation');
+  assert.doesNotMatch(worker, /TERMINAL_RECONCILIATION|pre_request_terminal_probe|classify_terminal_report|--identity-only/,
+    'worker must not retain transport reconciliation or a pre-request identity probe');
   assert.match(worker, /CLAIMED_SECTIONS=\(\)[\s\S]*--exclude-sections[\s\S]*CLAIMED_SECTIONS\+=\("\$SECTION"\)/,
     'one worker run must claim distinct sections so a hot entry cannot consume every bounded slot');
   assert.match(worker, /PROFIT_MIN_RUNTIME_SEC[\s\S]*REMAINING_SEC < PROFIT_MIN_RUNTIME_SEC[\s\S]*EXCLUDED_SECTIONS\+=\(profit\)/,
     'a short queue slot must not claim the profit section that cannot finish before its deadline');
   assert.match(worker, /HEAVY_SECTION_DEFERRED[\s\S]*queue_command status[\s\S]*PENDING_COUNT > 0[\s\S]*exit 75/,
     'a short slot that leaves heavy work pending must report a defer, never a false empty success');
+  assert.match(worker, /HEAVY_ALLOWED="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-1\}"/,
+    'the worker must receive an explicit heavy-section budget from the slot');
+  assert.match(worker, /HEAVY_ALLOWED.*0[\s\S]*EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily\)/,
+    'a short reserved slot must exclude every heavy section before claiming');
+  assert.match(worker, /publishedRevision=\$PUBLISHED_REVISION follow-up pending/,
+    'a successful claim with a newer request must report the published snapshot and follow-up');
+  assert.match(worker, /Number\.isSafeInteger\(published\)[\s\S]*Number\.isSafeInteger\(desired\)[\s\S]*follow===true \? desired>published : follow===false && desired<=published/,
+    'completion acceptance must validate both revisions and the exact follow-up relation');
   assert.match(worker, /if \[\[ "\$\{#FAILED_SECTIONS\[@\]\}" -gt 0 \]\]; then[\s\S]*failed sections=[\s\S]*exit 1/,
     'any failed lease must remain alert-worthy; an older terminal artifact cannot prove the requested revision recovered');
   assert.match(worker, /trap '\[\[ -n "\$\{HEADERS_FILE:-\}" \]\] && rm -f "\$HEADERS_FILE"' EXIT/,
@@ -312,6 +353,10 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     'a busy prewarm lock in critical sync mode must exit retryable 75');
   assert.match(prewarm, /another prewarm is running; skip[\s\S]*exit 0/,
     'a busy prewarm lock in async mode must keep the skip 0 behavior');
+  assert.match(prewarm, /SHEIN_BI_PORTAL_PREWARM_REFRESH_TOKEN:-prewarm:/,
+    'one prewarm invocation must own a stable refresh intent token');
+  assert.match(prewarm, /\?refresh=1&refreshToken=\$\{REFRESH_RUN_TOKEN\}/,
+    'every forced prewarm request must carry the run token required by host-locked sections');
 
   assert.match(prewarm, /-w '%\{http_code\}'/, 'prewarm must capture the explicit HTTP status code');
   assert.match(prewarm, /\[\[ "\$HTTP_CODE" != "200" \]\]/, 'prewarm must reject every non-200 response');
@@ -335,6 +380,7 @@ function makePortal(dir, {core = true, section, sectionGeneratedAt = generatedAt
     console.log('SKIP bi_portal_section_terminal: prewarm integration needs bash+flock+mktemp+node');
   } else {
     await runPrewarmStubTests(root);
+    await runWorkerRefreshFailureHeaderTest(root);
   }
 }
 
@@ -350,6 +396,235 @@ async function runPrewarmStubTests(repoRoot) {
   ];
   for (const testCase of cases) {
     await runPrewarmCase(repoRoot, testCase);
+  }
+}
+
+async function runWorkerRefreshFailureHeaderTest(repoRoot) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-terminal-worker-refresh-error-'));
+  const lockDir = `/tmp/bi-terminal-worker-${Date.now()}`;
+  const lockFile = `${lockDir}/queue.lock`;
+  const posix = value => {
+    const text = String(value).replace(/\\/g, '/');
+    return /^[A-Za-z]:\//.test(text)
+      ? `/mnt/${text[0].toLowerCase()}${text.slice(2)}`
+      : text;
+  };
+  const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
+  try {
+    const binDir = path.join(dir, 'bin');
+    const queueFile = path.join(dir, 'queue.json');
+    fs.mkdirSync(binDir, {recursive: true});
+    fs.writeFileSync(queueFile, `${JSON.stringify({
+      version: 1,
+      updatedAt: '',
+      nextSequence: 1,
+      entries: [{
+        section: 'profit',
+        sequence: 1,
+        priority: 10,
+        requestRevision: 1,
+        claimedRevision: 0,
+        rerun: false,
+        rerunPriority: null,
+        dependencyYield: false,
+        idempotencyKey: 'core-warmup:G1::profit',
+        coalesceKey: 'portal-generation:G1',
+        coreGeneratedAt: 'G1',
+        status: 'pending',
+        requestedAt: '2026-08-22T07:31:00.000+08:00',
+        updatedAt: '2026-08-22T07:31:00.000+08:00',
+        reasons: ['core-warmup-G1'],
+        attempts: 0,
+        leaseId: '',
+        leaseExpiresAt: '',
+        nextAttemptAt: '',
+        lastError: '',
+      }],
+      completedIdempotency: [],
+      generationCompletion: null,
+    }, null, 2)}\n`);
+    const writeDate = deadlineEpoch => fs.writeFileSync(path.join(binDir, 'date'), `#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  +%H) printf '07' ;;
+  +%M) printf '32' ;;
+  +%s) printf '1000' ;;
+  +%Y-%m-%dT%H) printf '2026-08-22T07' ;;
+  -d) printf '${deadlineEpoch}' ;;
+  *) printf '2026-08-22T07:32:00+08:00' ;;
+esac
+`);
+    writeDate(2000);
+    const usefulError = '利润查询失败：字段 sku/day 缺失 🔥 Authorization: Bearer abc123 password=hunter postgres://dbuser:dbpass@db.example/profit ';
+    let rawError = '';
+    let encodedError = '';
+    for (let pad = 0; pad < 12; pad += 1) {
+      rawError = `${usefulError}${'x'.repeat(pad)}${'界'.repeat(2000)}`;
+      encodedError = encodeURIComponent(rawError);
+      if (/%(?:[0-9A-F])?$/u.test(encodedError.slice(0, 12_288))) break;
+    }
+    assert.ok(encodedError.length > 12_288, 'fixture must exceed the bounded encoded-header input');
+    assert.match(encodedError.slice(0, 12_288), /%(?:[0-9A-F])?$/u,
+      'fixture must cut through a percent escape to guard against decode-all fallback loss');
+    const failedAt = '2026-08-22T07:32:31.125+08:00';
+    const writeCurl = encoded => fs.writeFileSync(path.join(binDir, 'curl'), `#!/usr/bin/env bash
+set -euo pipefail
+headers=''
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -D) headers="$2"; shift 2 ;;
+    -o|-w|--max-time|-H) shift 2 ;;
+    -sS) shift ;;
+    *) shift ;;
+  esac
+done
+{
+  printf 'HTTP/1.1 200 OK\\r\\n'
+  printf 'X-BI-Section-Refresh-Failed: true\\r\\n'
+  printf 'X-BI-Section-Refresh-Failed-At: ${failedAt}\\r\\n'
+  printf '%s\\r\\n' 'X-BI-Section-Refresh-Error: ${encoded}'
+  printf '\\r\\n'
+} > "$headers"
+printf '200'
+`);
+    writeCurl(encodedError);
+    const overrides = [
+      ['SHEIN_BI_ROOT', posix(repoRoot)],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_FILE', posix(queueFile)],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE', lockFile],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC', '10'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC', '31'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC', '60'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE', '59'],
+    ].map(([key, value]) => `export ${key}=${shellQuote(value)}`).join('; ');
+    const worker = posix(path.join(repoRoot, 'scripts', 'cloud_portal_section_queue_worker.sh'));
+    const fakeBin = posix(binDir);
+    const runWorker = () => spawnCapture('bash', ['-c',
+      `mkdir -p ${shellQuote(lockDir)} && chmod 2770 ${shellQuote(lockDir)}; `
+      + `chmod +x ${shellQuote(posix(path.join(binDir, 'date')))} ${shellQuote(posix(path.join(binDir, 'curl')))}; `
+      + `${overrides}; PATH=${shellQuote(fakeBin)}:"$PATH"; export PATH; exec ${shellQuote(worker)}`],
+    {timeout: 30_000});
+    writeDate(1100);
+    const guardRun = await runWorker();
+    assert.equal(guardRun.status, 0,
+      `worker must stop cleanly before a new claim below 120 seconds: ${guardRun.stderr}`);
+    assert.match(`${guardRun.stdout}\n${guardRun.stderr}`,
+      /stop before next section remainingSec=100 requiredSec=120/,
+      'worker must report the generic minimum remaining-time guard');
+    assert.equal(JSON.parse(fs.readFileSync(queueFile, 'utf8')).entries[0].status, 'pending',
+      'the minimum remaining-time guard must leave the queue claimable');
+    writeDate(2000);
+    const run = await runWorker();
+    const sanitizedError = rawError
+      .replace(/Authorization: Bearer abc123/u, 'Authorization=[redacted]')
+      .replace(/password=hunter/u, 'password=[redacted]')
+      .replace(/postgres:\/\/dbuser:dbpass@/u, 'postgres://[redacted]@');
+    const reasonPrefix = `portal refresh failed at=${failedAt} error=`;
+    const expectedReason = reasonPrefix
+      + Array.from(sanitizedError).slice(0, 900 - Array.from(reasonPrefix).length).join('');
+    assert.equal(run.timedOut, false, `worker refresh-error case timed out: ${run.stderr}`);
+    assert.equal(run.status, 1, `worker refresh-error case must remain alert-worthy: ${run.stdout}\n${run.stderr}`);
+    const queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    assert.equal(queue.entries[0].lastError, expectedReason,
+      `queue_command fail must preserve the exact bounded decoded primary error and timestamp; stdout=${run.stdout}; stderr=${run.stderr}`);
+    const expectedJournalReason = expectedReason.slice(0, 240);
+    assert.match(run.stderr, new RegExp(expectedJournalReason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      'journal output must carry the exact concise prefix of the primary reason');
+    assert.doesNotMatch(`${queue.entries[0].lastError}\n${run.stderr}`, /abc123|topsecret|hunter|dbuser|dbpass/u,
+      'queue and journal diagnostics must redact credentials');
+    assert.doesNotMatch(`${run.stdout}\n${run.stderr}`, /response-body-secret/,
+      'worker diagnostics must never include response body data');
+
+    const secretError = 'Basic QWxhZGRpbjpvcGVu Authorization: Bearer bearer-value password=pw-value session_id=session-value token=token-value mysql://dbuser:dbpass@db.example/profit Cookie: sid=cookie-value';
+    writeCurl(encodeURIComponent(secretError));
+    queue.entries[0].status = 'pending';
+    queue.entries[0].claimedRevision = 0;
+    queue.entries[0].attempts = 0;
+    queue.entries[0].leaseId = '';
+    queue.entries[0].leaseExpiresAt = '';
+    queue.entries[0].nextAttemptAt = '';
+    queue.entries[0].lastError = '';
+    fs.writeFileSync(queueFile, `${JSON.stringify(queue, null, 2)}\n`);
+    const secretRun = await runWorker();
+    assert.equal(secretRun.status, 1, secretRun.stderr);
+    const secretQueue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+    const expectedSecretError = 'Basic [redacted] Authorization=[redacted] password=[redacted] session_id=[redacted] token=[redacted] mysql://[redacted]@db.example/profit Cookie=[redacted]';
+    assert.equal(secretQueue.entries[0].lastError, `${reasonPrefix}${expectedSecretError}`,
+      'all supported credential families must be redacted while preserving useful context');
+    assert.doesNotMatch(`${secretQueue.entries[0].lastError}\n${secretRun.stderr}`,
+      /QWxhZGRpb|bearer-value|pw-value|session-value|token-value|dbuser|dbpass|cookie-value/u,
+      'credential values must not reach queue state or journal output');
+
+    const resetQueue = () => {
+      const current = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+      current.entries[0].status = 'pending';
+      current.entries[0].claimedRevision = 0;
+      current.entries[0].attempts = 0;
+      current.entries[0].leaseId = '';
+      current.entries[0].leaseExpiresAt = '';
+      current.entries[0].nextAttemptAt = '';
+      current.entries[0].lastError = '';
+      fs.writeFileSync(queueFile, `${JSON.stringify(current, null, 2)}\n`);
+    };
+    const reviewerJsonFixture = '{"password":"review-password","passwd":"review-passwd","pwd":"review-pwd","token":"review-token","access_token":"review-access","refresh_token":"review-refresh","session":"review-session","session_id":"review-session-id","cookie":"review-cookie","authorization":"Bearer review-auth","api_key":"review-api","secret":"review-secret","message":"利润查询失败：保留中文"}';
+    const sanitizerCases = [
+      {
+        name: 'reviewer-json',
+        raw: reviewerJsonFixture,
+        useful: '利润查询失败：保留中文',
+        secrets: ['review-password', 'review-passwd', 'review-pwd', 'review-token', 'review-access', 'review-refresh', 'review-session', 'review-session-id', 'review-cookie', 'review-auth', 'review-api', 'review-secret'],
+      },
+      {
+        name: 'nested-spacing-and-bare-values',
+        raw: '{ "outer" : { "PaSsWoRd" : 4815162342, "TOKEN" : bare-token-value, "SESSION_ID" = nested-session-value }, "API_KEY" : 123456789, "message" : "利润嵌套错误仍可读" }',
+        useful: '利润嵌套错误仍可读',
+        secrets: ['4815162342', 'bare-token-value', 'nested-session-value', '123456789'],
+      },
+      {
+        name: 'escaped-json',
+        raw: '{\\"ACCESS_TOKEN\\":\\"escaped-access-value\\",\\"nested\\":{\\"refresh_token\\" : 987654321,\\"Authorization\\":\\"Basic escaped-auth-value\\",\\"cookie\\":\\"escaped-cookie-value\\"},\\"message\\":\\"中文转义原因保留\\"}',
+        useful: '中文转义原因保留',
+        secrets: ['escaped-access-value', '987654321', 'escaped-auth-value', 'escaped-cookie-value'],
+      },
+      {
+        name: 'object-log-keys',
+        raw: '中文日志上下文保留 PWD = log-pwd-value SECRET:log-secret-value session = 246813579 api_key: bare-api-value authorization: Bearer log-auth-value cookie: sid=log-cookie-value',
+        useful: '中文日志上下文保留',
+        secrets: ['log-pwd-value', 'log-secret-value', '246813579', 'bare-api-value', 'log-auth-value', 'log-cookie-value'],
+      },
+    ];
+    for (const testCase of sanitizerCases) {
+      writeCurl(encodeURIComponent(testCase.raw));
+      resetQueue();
+      const sanitizedRun = await runWorker();
+      assert.equal(sanitizedRun.timedOut, false, `${testCase.name} timed out: ${sanitizedRun.stderr}`);
+      assert.equal(sanitizedRun.status, 1, `${testCase.name} must fail the queue lease: ${sanitizedRun.stderr}`);
+      const sanitizedQueue = JSON.parse(fs.readFileSync(queueFile, 'utf8'));
+      const persistedReason = sanitizedQueue.entries[0].lastError;
+      assert.match(persistedReason, new RegExp(testCase.useful, 'u'),
+        `${testCase.name} must preserve useful nonsecret Unicode`);
+      for (const secret of testCase.secrets) {
+        for (const [surface, diagnostic] of [
+          ['queue', persistedReason],
+          ['journal', sanitizedRun.stderr],
+          ['log', sanitizedRun.stdout],
+        ]) {
+          assert.equal(diagnostic.includes(secret), false,
+            `${testCase.name} leaked a secret fixture to ${surface}`);
+        }
+      }
+      assert.doesNotMatch(`${sanitizedRun.stdout}\n${sanitizedRun.stderr}`, /response-body-secret/u,
+        `${testCase.name} must not log response body data`);
+    }
+  } finally {
+    await spawnCapture('bash', ['-c',
+      `rm -f ${shellQuote(lockFile)}; rmdir ${shellQuote(lockDir)} 2>/dev/null || true`], {timeout: 10_000});
+    fs.rmSync(dir, {recursive: true, force: true});
   }
 }
 
@@ -385,6 +660,13 @@ async function runPrewarmCase(repoRoot, {section, expectedExit, marker}) {
     fs.mkdirSync(path.join(portalRoot, 'sections'), {recursive: true});
     fs.mkdirSync(logDir, {recursive: true});
     fs.mkdirSync(binDir, {recursive: true});
+    const posixPath = value => {
+      const text = String(value).replace(/\\/g, '/');
+      return /^[A-Za-z]:\//.test(text)
+        ? `/mnt/${text[0].toLowerCase()}${text.slice(2)}`
+        : text;
+    };
+    const shellQuotePath = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
     fs.writeFileSync(path.join(binDir, 'curl'), `#!/usr/bin/env bash
 set -euo pipefail
 headers=''
@@ -419,13 +701,44 @@ printf '%s' "$code"
       : section === 'homeProfit'
         ? {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: generatedAt, staleSource: false}}
         : {};
-    fs.writeFileSync(path.join(portalRoot, 'sections', `${section}.json`), JSON.stringify({
-      ok: true,
-      section,
-      generatedAt: section === 'linksData' ? '2026-08-10T00:00:00.000Z' : generatedAt,
-      cachedAt: '2026-08-11T02:56:46.613Z',
-      data: terminalData,
-    }));
+    const publishRun = {code: 0, timedOut: false, stderr: ''};
+    const artifactGeneratedAt = section === 'linksData' ? '2026-08-10T00:00:00.000Z' : generatedAt;
+    if (['profit', 'homeProfit'].includes(section) && artifactGeneratedAt === generatedAt) {
+      const profitData = {profit: {dailyStoreProducts: []}};
+      await writeBiSectionCache(portalRoot, 'profit', generatedAt, profitData, publishRun, {requireIntegrity: true});
+      await writeBiSectionArtifact(portalRoot, 'profit.query', 'profit.query', generatedAt, profitData, publishRun, {requireIntegrity: true});
+      await writeBiSectionCache(portalRoot, 'homeProfit', generatedAt, terminalData, publishRun, {requireIntegrity: true});
+      await publishBiProfitBundleManifest(portalRoot, generatedAt);
+    } else {
+      await writeBiSectionCache(portalRoot, section, artifactGeneratedAt, terminalData, publishRun, {requireIntegrity: true});
+    }
+    if (process.platform === 'win32') {
+      // The prewarm contract runs under WSL. Re-publish the fixture there so
+      // Linux-side stat/inode bindings in the strict sidecar match the
+      // validator; native Windows and WSL report different bindings for the
+      // same drvfs file.
+      const seedFile = path.join(binDir, 'seed_terminal_artifact.mjs');
+      const cacheModule = posixPath(path.join(repoRoot, 'lib', 'bi_section_cache.mjs'));
+      fs.writeFileSync(seedFile, `import {publishBiProfitBundleManifest, writeBiSectionArtifact, writeBiSectionCache} from ${JSON.stringify(cacheModule)};
+const root = ${JSON.stringify(posixPath(portalRoot))};
+const section = ${JSON.stringify(section)};
+const generatedAt = ${JSON.stringify(generatedAt)};
+const artifactGeneratedAt = ${JSON.stringify(artifactGeneratedAt)};
+const data = ${JSON.stringify(terminalData)};
+const run = {code: 0, timedOut: false, stderr: ''};
+if (section === 'profit' || section === 'homeProfit') {
+  const profitData = {profit: {dailyStoreProducts: []}};
+  await writeBiSectionCache(root, 'profit', generatedAt, profitData, run, {requireIntegrity: true});
+  await writeBiSectionArtifact(root, 'profit.query', 'profit.query', generatedAt, profitData, run, {requireIntegrity: true});
+  await writeBiSectionCache(root, 'homeProfit', generatedAt, data, run, {requireIntegrity: true});
+  await publishBiProfitBundleManifest(root, generatedAt);
+} else {
+  await writeBiSectionCache(root, section, artifactGeneratedAt, data, run, {requireIntegrity: true});
+}
+`);
+      const seeded = await spawnCapture('bash', ['-c', `node ${shellQuotePath(posixPath(seedFile))}`], {timeout: 60_000});
+      assert.equal(seeded.status, 0, `WSL strict-sidecar fixture seed failed: ${seeded.stderr}`);
+    }
     // The prewarm runs under the host bash (WSL2 here, Linux on the cloud).
     // Windows drive paths must become /mnt/<drive>/... inside WSL; plain
     // POSIX paths (cloud checkout) pass through unchanged. WSL interop does
@@ -436,33 +749,26 @@ printf '%s' "$code"
     // dedicated 2770 lock directory is created first.
     const lockDir = `/tmp/bi-terminal-prewarm-${Date.now()}-${section}`;
     const lockFile = `${lockDir}/prewarm.lock`;
-    const posix = value => {
-      const text = String(value).replace(/\\/g, '/');
-      return /^[A-Za-z]:\//.test(text)
-        ? `/mnt/${text[0].toLowerCase()}${text.slice(2)}`
-        : text;
-    };
-    const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
     const overrides = [
-      ['SHEIN_BI_ROOT', posix(repoRoot)],
+      ['SHEIN_BI_ROOT', posixPath(repoRoot)],
       ['SHEIN_BI_PORTAL_URL', 'http://127.0.0.1:9'],
-      ['SHEIN_BI_PORTAL_ROOT', posix(portalRoot)],
-      ['SHEIN_BI_PREWARM_LOG_DIR', posix(logDir)],
+      ['SHEIN_BI_PORTAL_ROOT', posixPath(portalRoot)],
+      ['SHEIN_BI_PREWARM_LOG_DIR', posixPath(logDir)],
       ['SHEIN_BI_PORTAL_PREWARM_LOCK_FILE', lockFile],
       ['SHEIN_BI_PORTAL_PREWARM_SECTIONS', section],
       ['SHEIN_BI_PORTAL_PREWARM_ASYNC', '0'],
       ['SHEIN_BI_PORTAL_PREWARM_HOST_LOCKED', '1'],
       ['SHEIN_BI_PREWARM_SECTION_TIMEOUT_SECONDS', '15'],
-    ].map(([key, value]) => `export ${key}=${shellQuote(value)}`).join('; ');
-    const scriptPath = posix(path.join(repoRoot, 'scripts', 'prewarm_bi_portal_sections.sh'));
-    const stubPath = posix(path.join(binDir, 'curl'));
-    const stubBin = posix(binDir);
+    ].map(([key, value]) => `export ${key}=${shellQuotePath(value)}`).join('; ');
+    const scriptPath = posixPath(path.join(repoRoot, 'scripts', 'prewarm_bi_portal_sections.sh'));
+    const stubPath = posixPath(path.join(binDir, 'curl'));
+    const stubBin = posixPath(binDir);
     const run = await spawnCapture('bash', ['-c',
-      `mkdir -p ${shellQuote(lockDir)} && chmod 2770 ${shellQuote(lockDir)}; ` +
-      `chmod +x ${shellQuote(stubPath)}; ${overrides}; PATH=${shellQuote(stubBin)}:"$PATH"; export PATH; ` +
-      `exec ${shellQuote(scriptPath)}`], {timeout: 60_000});
+      `mkdir -p ${shellQuotePath(lockDir)} && chmod 2770 ${shellQuotePath(lockDir)}; ` +
+      `chmod +x ${shellQuotePath(stubPath)}; ${overrides}; PATH=${shellQuotePath(stubBin)}:"$PATH"; export PATH; ` +
+      `exec ${shellQuotePath(scriptPath)}`], {timeout: 60_000});
     await spawnCapture('bash', ['-c',
-      `rm -f ${shellQuote(lockFile)}; rmdir ${shellQuote(lockDir)} 2>/dev/null || true`], {timeout: 10_000});
+      `rm -f ${shellQuotePath(lockFile)}; rmdir ${shellQuotePath(lockDir)} 2>/dev/null || true`], {timeout: 10_000});
     assert.equal(run.timedOut, false, `${section}: prewarm timed out (stdout=${run.stdout} stderr=${run.stderr})`);
     const logs = fs.readdirSync(logDir).filter(name => name.endsWith('.log'));
     const log = logs.map(name => fs.readFileSync(path.join(logDir, name), 'utf8')).join('\n');

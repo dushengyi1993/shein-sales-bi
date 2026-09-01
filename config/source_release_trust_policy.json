@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "shein-bi-source-release-trust-policy/v1",
+  "repository": {
+    "id": 1228612468,
+    "fullName": "dushengyi1993/shein-sales-bi",
+    "defaultBranch": "main"
+  },
+  "ci": {
+    "workflowPath": ".github/workflows/ci.yml",
+    "workflowApiId": "ci.yml",
+    "event": "push",
+    "branch": "main",
+    "requiredRunConclusion": "success",
+    "requiredJobNames": [
+      "Source checks",
+      "Deterministic shard 1/4",
+      "Deterministic shard 2/4",
+      "Deterministic shard 3/4",
+      "Deterministic shard 4/4",
+      "Release gate",
+      "CI terminal gate"
+    ],
+    "allowedJobConclusions": [
+      "success"
+    ]
+  },
+  "sourceRelease": {
+    "workflowPath": ".github/workflows/source-release.yml",
+    "releaseTitlePrefix": "SHEIN BI Ops ",
+    "assetNames": [
+      "release-attestation.json",
+      "release-attestation.json.sha256"
+    ],
+    "requireImmutableReleases": true,
+    "requireOwnerEnforcement": false
+  }
+}

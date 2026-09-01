@@ -54,7 +54,12 @@ for (const patch of patches) {
     byStore.set(store.storeKey, store);
   }
 }
-const stores = orderedStoreKeys.map(storeKey => byStore.get(storeKey)).filter(Boolean);
+const stores = orderedStoreKeys.map(storeKey => byStore.get(storeKey)).filter(Boolean).map(store => ({
+  ...store,
+  rows: (store.rows || []).map(row => row.priceUnavailableNoFillEvidence
+    ? {...row, priceUnavailableButFillVerified: false}
+    : row),
+}));
 const rows = stores.flatMap(store => store.rows || []);
 const activities = stores.flatMap(store => store.activities || []);
 const patchSelectionPlans = [...new Set(patches.map(patch => patch.summary?.selectionPlan).filter(Boolean))];

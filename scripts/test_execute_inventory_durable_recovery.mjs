@@ -17,8 +17,8 @@
 // payloadHash matches the executor's exact stable hash, real policy and real
 // durable journal semantics:
 //
-//   A. first run: change-inventory responses missing explicit code=0 /
-//      info.success=true -> two needs_manual_resolve rows, both durable
+//   A. first run: a missing code remains ambiguous while code=0 with missing
+//      info.success enters readback and remains pending when the target drifts
 //      intents retained, no ReferenceError crash;
 //   B. rerun of A: readback-only recovery, target matched -> write_outcome +
 //      updated_readback_matched, target not matched ->
@@ -27,7 +27,9 @@
 //      (durable intent retained), the catch must NOT crash with
 //      ReferenceError;
 //   D. rerun of C: readback-only recovery with matched target -> write_outcome
-//      + updated_readback_matched, zero second POST.
+//      + updated_readback_matched, zero second POST;
+//   E. code=0 with missing success performs a matching readback and writes the
+//      terminal outcome, while explicit success=false stays ambiguous.
 
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
@@ -37,10 +39,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {
+  buildDailyInventoryPlanHashPayload,
+  stableInventoryHash,
+} from '../lib/inventory_replenishment_policy.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'execute-inventory-durable-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 const policyFile = path.join(ROOT, 'config', 'inventory_replenishment_policy.json');
 const policy = JSON.parse(await fs.readFile(policyFile, 'utf8'));
 
@@ -101,14 +107,7 @@ const planBody = {
   lowEtAllocations: [],
   sourceEvidence,
 };
-const payloadHash = stableInventoryHash({
-  schemaVersion: planBody.schemaVersion,
-  date: planBody.date,
-  policyVersion: planBody.policyVersion,
-  actionable: planBody.actionable,
-  lowEtAllocations: planBody.lowEtAllocations,
-  sourceEvidence: sourceEvidence.map(({ageHours: _ageHours, ...evidence}) => evidence),
-});
+const payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(planBody));
 const plan = {...planBody, payloadHash};
 
 const planFile = path.join(temp, 'plan.json');
@@ -145,7 +144,7 @@ await Promise.all([
 ]);
 
 let server;
-let serverState = {mode: 'ambiguous', postCount: 0};
+let serverState = {mode: 'ambiguous', postCount: 0, requestCount: 0};
 
 function sendJson(response, payload, status = 200) {
   response.writeHead(status, {'content-type': 'application/json'});
@@ -155,6 +154,9 @@ function sendJson(response, payload, status = 200) {
 function stockUsableFor(skuCode) {
   const row = ROWS.find(candidate => candidate.skuCode === skuCode);
   if (!row) return 0;
+  if (serverState.mode === 'code0-readback-matrix' && serverState.readbackSkus?.has(skuCode)) {
+    return row.targetUsableInventory;
+  }
   if (serverState.mode === 'recovery-mixed') {
     return row.storeKey === 'ZZ' ? row.targetUsableInventory : 3;
   }
@@ -170,6 +172,7 @@ const serverReady = new Promise((resolve, reject) => {
     let raw = '';
     request.on('data', chunk => { raw += chunk; });
     request.on('end', () => {
+      serverState.requestCount += 1;
       let body = null;
       try { body = raw ? JSON.parse(raw) : null; } catch {}
       const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
@@ -193,6 +196,10 @@ const serverReady = new Promise((resolve, reject) => {
       }
       if (request.method === 'POST' && pathname === '/open-api/stock/stock-query') {
         const skuCode = body?.skuCodeList?.[0] || '';
+        if (serverState.mode === 'code0-readback-matrix' && serverState.postedSkus?.has(skuCode)) {
+          if (!serverState.readbackSkus) serverState.readbackSkus = new Set();
+          serverState.readbackSkus.add(skuCode);
+        }
         const usable = stockUsableFor(skuCode);
         return sendJson(response, {
           code: '0',
@@ -211,6 +218,9 @@ const serverReady = new Promise((resolve, reject) => {
       }
       if (request.method === 'POST' && pathname === '/open-api/stock/change-inventory/v2') {
         serverState.postCount += 1;
+        const skuCode = body?.updateSkuInventoryQuantityRequests?.[0]?.skuCode;
+        if (!serverState.postedSkus) serverState.postedSkus = new Set();
+        serverState.postedSkus.add(skuCode);
         if (serverState.mode === 'transport-error') {
           request.socket.destroy();
           return;
@@ -223,6 +233,10 @@ const serverReady = new Promise((resolve, reject) => {
           }
           // explicit code missing entirely -> ambiguous
           return sendJson(response, {msg: 'ok'});
+        }
+        if (serverState.mode === 'code0-readback-matrix') {
+          if (skuCode === ROWS[0].skuCode) return sendJson(response, {code: '0', info: {}});
+          return sendJson(response, {code: '0', info: {success: false}});
         }
         return sendJson(response, {code: '0', info: {success: true}});
       }
@@ -242,7 +256,7 @@ await fs.writeFile(configFile, `${JSON.stringify({
   stores: ROWS.map(row => ({storeKey: row.storeKey, enabled: true, openKeyId: `${row.storeKey}-key`, secretKey: `${row.storeKey}-secret`})),
 }, null, 2)}\n`);
 
-async function runExecutor(outFile) {
+async function runExecutor(outFile, {reconcilePendingOnly = false} = {}) {
   const child = spawn(process.execPath, [
     'scripts/inventory/execute_daily_inventory_replenishment_plan.mjs',
     '--plan', planFile,
@@ -255,6 +269,7 @@ async function runExecutor(outFile) {
     '--execution-mode', 'automatic',
     '--confirm-hash', payloadHash,
     '--max-rows', '10',
+    ...(reconcilePendingOnly ? ['--reconcile-pending-only'] : []),
   ], {
     cwd: ROOT,
     env: {
@@ -306,9 +321,10 @@ const pendingIntentCount = entries => {
 
 try {
   // -------------------------------------------------------------------------
-  // A) first run: responses missing explicit code=0 / info.success=true
+  // A) first run: missing code remains ambiguous; code=0 with missing
+  //    info.success enters readback but this fixture keeps the target unequal.
   // -------------------------------------------------------------------------
-  serverState = {mode: 'ambiguous', postCount: 0};
+  serverState = {mode: 'ambiguous', postCount: 0, requestCount: 0};
   const outA = path.join(temp, 'a-result.json');
   const runA = await runExecutor(outA);
   assert.equal(runA.status, 1, `run A must exit 1 (blocked), got ${runA.status}\nstdout:\n${runA.stdout}\nstderr:\n${runA.stderr}`);
@@ -318,19 +334,24 @@ try {
   assert.equal(resultA.results.length, 2);
   assert.deepEqual(
     resultA.results.map(row => row.state).sort(),
-    ['needs_manual_resolve', 'needs_manual_resolve'],
-    'missing explicit code/success must record needs_manual_resolve for every action',
+    ['needs_manual_resolve', 'submitted_but_readback_pending'],
+    'missing code stays manual while code=0 with missing success is readback-pending',
   );
   const journalA = await journalEntries(`${outA}.journal.ndjson`);
   assert.equal(journalA.filter(entry => entry.kind === 'intent').length, 2, 'both durable intents must be retained');
   assert.equal(journalA.filter(entry => entry.kind === 'write_outcome').length, 0, 'ambiguous responses must not write any write_outcome');
   assert.equal(finalStdoutJson(runA.stdout)?.counts?.blocked, 2);
 
+  const originalBiDocument = await readJson(biFile);
+  const originalLinksDocument = await readJson(linksFile);
+  await fs.writeFile(biFile, `${JSON.stringify({...originalBiDocument, cachedAt: new Date(Date.now() + 1000).toISOString()}, null, 2)}\n`);
+  await fs.writeFile(linksFile, `${JSON.stringify({...originalLinksDocument, cachedAt: new Date(Date.now() + 1000).toISOString()}, null, 2)}\n`);
+
   // -------------------------------------------------------------------------
   // B) rerun of A: readback-only recovery, no second POST
   // -------------------------------------------------------------------------
-  serverState = {mode: 'recovery-mixed', postCount: 0};
-  const runB = await runExecutor(outA);
+  serverState = {mode: 'recovery-mixed', postCount: 0, requestCount: 0};
+  const runB = await runExecutor(outA, {reconcilePendingOnly: true});
   assert.equal(runB.status, 1, `run B must exit 1 (one pending readback), got ${runB.status}\nstdout:\n${runB.stdout}\nstderr:\n${runB.stderr}`);
   assert.doesNotMatch(runB.stderr, /ReferenceError/, 'run B must not crash with ReferenceError');
   assert.equal(serverState.postCount, 0, 'rerun must never POST a second write');
@@ -350,10 +371,49 @@ try {
   assert.equal(finalStdoutJson(runB.stdout)?.counts?.updated, 1);
 
   // -------------------------------------------------------------------------
+  // B2) recovery-only must reject a plan that is a strict superset of the
+  //     pending scopes before any OpenAPI request, not merely before a write.
+  // -------------------------------------------------------------------------
+  // This is an independent fixture, so isolate its result directory. The
+  // production executor now discovers every journal sidecar in one result
+  // directory; copying an intentId beside A would correctly be treated as a
+  // conflicting journal instead of this intended scope-set precondition case.
+  const b2Dir = path.join(temp, 'b2');
+  await fs.mkdir(b2Dir);
+  const outB2 = path.join(b2Dir, 'result.json');
+  const firstIntent = journalA.find(entry => entry.kind === 'intent');
+  await fs.writeFile(`${outB2}.journal.ndjson`, `${JSON.stringify(firstIntent)}\n`);
+  serverState = {mode: 'recovery-matched', postCount: 0, requestCount: 0};
+  const runB2 = await runExecutor(outB2, {reconcilePendingOnly: true});
+  assert.equal(runB2.status, 1, `run B2 must fail closed, got ${runB2.status}\nstdout:\n${runB2.stdout}\nstderr:\n${runB2.stderr}`);
+  assert.match(runB2.stderr, /INVENTORY_RECONCILE_PENDING_ONLY_PRECONDITION_FAILED/);
+  assert.equal(serverState.requestCount, 0, 'scope-set mismatch must fail before every OpenAPI request');
+  assert.equal(serverState.postCount, 0, 'scope-set mismatch must never create a new inventory write');
+
+  // A later recovery pass must accept the full immutable lifecycle: one scope
+  // is already closed by readback_matched and one remains pending. It freshly
+  // reads both, never submits, and closes only the remaining intent.
+  serverState = {mode: 'recovery-matched', postCount: 0, requestCount: 0};
+  const runB3 = await runExecutor(outA, {reconcilePendingOnly: true});
+  assert.equal(runB3.status, 0, `run B3 must complete mixed lifecycle recovery, got ${runB3.status}\nstdout:\n${runB3.stdout}\nstderr:\n${runB3.stderr}`);
+  assert.equal(serverState.postCount, 0, 'mixed closed/pending lifecycle recovery must never POST');
+  const resultB3 = await readJson(outA);
+  assert.deepEqual(
+    resultB3.results.map(row => row.state).sort(),
+    ['skipped_terminal_readback_recorded', 'updated_readback_matched'],
+  );
+  const alreadyTerminalB3 = resultB3.results.find(row => row.state === 'skipped_terminal_readback_recorded');
+  assert.equal(alreadyTerminalB3.terminalDisposition, 'readback_matched');
+  assert.equal(alreadyTerminalB3.currentLiveUsableInventory, alreadyTerminalB3.before.totalUsableInventory);
+  assert.equal(pendingIntentCount(await journalEntries(`${outA}.journal.ndjson`)), 0);
+  await fs.writeFile(biFile, `${JSON.stringify(originalBiDocument, null, 2)}\n`);
+  await fs.writeFile(linksFile, `${JSON.stringify(originalLinksDocument, null, 2)}\n`);
+
+  // -------------------------------------------------------------------------
   // C) fresh run: transport error while POSTing must not be masked by
   //    ReferenceError; durable intent is retained as suspicious
   // -------------------------------------------------------------------------
-  serverState = {mode: 'transport-error', postCount: 0};
+  serverState = {mode: 'transport-error', postCount: 0, requestCount: 0};
   const outC = path.join(temp, 'c-result.json');
   const runC = await runExecutor(outC);
   assert.equal(runC.status, 1, `run C must exit 1 (suspicious write), got ${runC.status}\nstdout:\n${runC.stdout}\nstderr:\n${runC.stderr}`);
@@ -373,8 +433,8 @@ try {
   // -------------------------------------------------------------------------
   // D) rerun of C: readback-only recovery with matched target
   // -------------------------------------------------------------------------
-  serverState = {mode: 'recovery-matched', postCount: 0};
-  const runD = await runExecutor(outC);
+  serverState = {mode: 'recovery-matched', postCount: 0, requestCount: 0};
+  const runD = await runExecutor(outC, {reconcilePendingOnly: true});
   assert.equal(runD.status, 0, `run D must exit 0 (recovered matched), got ${runD.status}\nstdout:\n${runD.stdout}\nstderr:\n${runD.stderr}`);
   assert.doesNotMatch(runD.stderr, /ReferenceError/);
   assert.equal(serverState.postCount, 0, 'rerun must never POST a second write');
@@ -391,7 +451,33 @@ try {
   assert.equal(pendingIntentCount(journalD), 0, 'the recovered intent must be cleared by its readback_matched outcome');
   assert.equal(finalStdoutJson(runD.stdout)?.counts?.updated, 2);
 
-  console.log('execute_inventory_durable_recovery: ambiguous responses -> needs_manual_resolve, transport error -> suspicious_write_attempted, rerun is readback-only with zero second POST');
+  // -------------------------------------------------------------------------
+  // E) HTTP 2xx + code=0 with missing success enters readback; explicit
+  //    success=false remains ambiguous and never writes a terminal outcome.
+  // -------------------------------------------------------------------------
+  serverState = {mode: 'code0-readback-matrix', postCount: 0, requestCount: 0};
+  const outE = path.join(temp, 'e-code0-readback-matrix-result.json');
+  const runE = await runExecutor(outE);
+  assert.equal(runE.status, 1, `run E must retain the explicit-false intent as blocked, got ${runE.status}\nstdout:\n${runE.stdout}\nstderr:\n${runE.stderr}`);
+  assert.doesNotMatch(runE.stderr, /ReferenceError/);
+  assert.equal(serverState.postCount, 2, 'the matrix must issue exactly one POST per intent');
+  assert.ok(serverState.readbackSkus?.has(ROWS[0].skuCode), 'code=0 with missing success must issue a live stock readback');
+  assert.equal(serverState.readbackSkus?.has(ROWS[1].skuCode), false, 'explicit success=false must not enter readback');
+  const resultE = await readJson(outE);
+  assert.deepEqual(
+    resultE.results.map(row => row.state).sort(),
+    ['needs_manual_resolve', 'updated_readback_matched'],
+    'code=0 missing success can complete by exact readback while explicit false stays ambiguous',
+  );
+  const journalE = await journalEntries(`${outE}.journal.ndjson`);
+  const outcomesE = journalE.filter(entry => entry.kind === 'write_outcome');
+  assert.deepEqual(outcomesE.map(entry => entry.disposition), ['readback_matched']);
+  assert.equal(outcomesE[0].intentId, journalE.find(entry => entry.kind === 'intent' && entry.storeKey === ROWS[0].storeKey)?.intentId);
+  assert.equal(journalE.some(entry => entry.kind === 'write_outcome' && entry.intentId === journalE.find(intent => intent.kind === 'intent' && intent.storeKey === ROWS[1].storeKey)?.intentId), false,
+    'explicit success=false must not write a terminal readback outcome');
+  assert.equal(pendingIntentCount(journalE), 1);
+
+  console.log('execute_inventory_durable_recovery: ambiguous/transport outcomes stay durable, code=0 readback closes only exact matches, rerun is readback-only with zero second POST');
   console.log(JSON.stringify({ok: true}));
 } finally {
   server.close();

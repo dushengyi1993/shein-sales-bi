@@ -114,23 +114,38 @@ async function navigate(send, url, waitMs) {
 }
 
 async function exportStorage(send) {
-  const result = await send('Runtime.evaluate', {
+  const keyResult = await send('Runtime.evaluate', {
     awaitPromise: true,
     returnByValue: true,
-    expression: `(() => {
-      const dump = area => {
-        const out = {};
-        for (let i = 0; i < area.length; i++) {
-          const key = area.key(i);
-          out[key] = area.getItem(key);
-        }
-        return out;
-      };
-      return {localStorage: dump(localStorage), sessionStorage: dump(sessionStorage)};
-    })()`,
+    expression: `(() => ({
+      localStorage: Array.from({length: localStorage.length}, (_, i) => localStorage.key(i)),
+      sessionStorage: Array.from({length: sessionStorage.length}, (_, i) => sessionStorage.key(i))
+    }))()`,
   });
-  if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
-  return result.result.value || {localStorage: {}, sessionStorage: {}};
+  if (keyResult.exceptionDetails) throw new Error(JSON.stringify(keyResult.exceptionDetails));
+  const keySets = keyResult.result.value || {localStorage: [], sessionStorage: []};
+  const readArea = async (areaName, keys) => {
+    const out = {};
+    for (let offset = 0; offset < keys.length; offset += 8) {
+      const chunk = keys.slice(offset, offset + 8);
+      const result = await send('Runtime.evaluate', {
+        awaitPromise: true,
+        returnByValue: true,
+        expression: `(() => {
+          const area = ${areaName};
+          const keys = ${JSON.stringify(chunk)};
+          return Object.fromEntries(keys.map(key => [key, area.getItem(key)]));
+        })()`,
+      });
+      if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+      Object.assign(out, result.result.value || {});
+    }
+    return out;
+  };
+  return {
+    localStorage: await readArea('localStorage', keySets.localStorage || []),
+    sessionStorage: await readArea('sessionStorage', keySets.sessionStorage || []),
+  };
 }
 
 function normalizeCookie(cookie) {
@@ -226,79 +241,101 @@ async function writeJsonAtomic(file, payload) {
 async function exportStore(store, args) {
   const browser = await launchStore(store, args);
   if (browser.error) return {storeKey: store.storeKey, ok: false, stage: 'browser', browser};
-  const {send, close} = await connectCdp(store.port, {targetTimeoutMs: 4000});
-  await send('Network.enable');
-  try {
-    await navigate(send, ORDER_URL, args.waitMs);
-    const cookies = (await send('Network.getAllCookies')).cookies
-      .filter(c => /(^|\.)geiwohuo\.com$/i.test(String(c.domain || '').replace(/^\./, '')))
-      .map(normalizeCookie);
-    const storage = await exportStorage(send);
-    const browserInfo = await send('Runtime.evaluate', {
-      returnByValue: true,
-      expression: `(() => ({
-        userAgent: navigator.userAgent,
-        language: navigator.language || '',
-        languages: Array.from(navigator.languages || []),
-        platform: navigator.userAgentData?.platform || navigator.platform || '',
-        mobile: Boolean(navigator.userAgentData?.mobile),
-        brands: navigator.userAgentData?.brands || []
-      }))()`,
-    });
-    const hints = browserInfo.result?.value || {};
-    const exportedAt = new Date().toISOString();
-    const payload = {
-      version: 1,
-      storeKey: store.storeKey,
-      shopName: store.shopName,
-      exportedAt,
-      pageUrl: ORDER_URL,
-      userAgent: hints.userAgent || '',
-      cookieCount: cookies.length,
-      localStorageCount: Object.keys(storage.localStorage || {}).length,
-      sessionStorageCount: Object.keys(storage.sessionStorage || {}).length,
-      cookies,
-      localStorage: storage.localStorage || {},
-      sessionStorage: storage.sessionStorage || {},
-    };
-    const webApiPayload = {
-      version: 1,
-      storeKey: store.storeKey,
-      shopName: store.shopName,
-      source: 'export_shein_browser_session.cdp',
-      exportedAt,
-      pageUrl: ORDER_URL,
-      cookieCount: cookies.length,
-      cookieHeader: cookieHeaderFromCookies(cookies),
-      userAgent: hints.userAgent || '',
-      acceptLanguage: Array.isArray(hints.languages) && hints.languages.length
-        ? hints.languages.join(',')
-        : (hints.language || 'zh-CN,zh;q=0.9,en;q=0.8'),
-      clientHints: {
-        secChUa: formatSecChUa(hints.brands),
-        secChUaMobile: hints.mobile ? '?1' : '?0',
-        secChUaPlatform: hints.platform ? `"${String(hints.platform).replace(/"/g, '')}"` : '',
-      },
-    };
-    if (!webApiPayload.cookieHeader) throw new Error('exported_webapi_session_has_no_geiwohuo_cookies');
-    const webApiProbe = await validateWebApiSession(webApiPayload);
-    const file = path.join(args.outDir, `${store.storeKey}.local.json`);
-    const webApiFile = path.join(args.webApiOutDir, `${store.storeKey}.local.json`);
-    await writeJsonAtomic(file, payload);
-    await writeJsonAtomic(webApiFile, webApiPayload);
-    return {
-      storeKey: store.storeKey,
-      ok: true,
-      file,
-      webApiFile,
-      webApiProbe,
-      cookieCount: payload.cookieCount,
-      localStorageCount: payload.localStorageCount,
-      sessionStorageCount: payload.sessionStorageCount,
-    };
-  } finally {
-    close();
+  let lastError = null;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    let connection = null;
+    let stage = 'connect';
+    try {
+      connection = await connectCdp(store.port, {targetTimeoutMs: 4000});
+      const {send} = connection;
+      stage = 'network-enable';
+      await send('Network.enable');
+      stage = 'navigate';
+      await navigate(send, ORDER_URL, args.waitMs);
+      stage = 'cookies';
+      const cookies = (await send('Network.getAllCookies')).cookies
+        .filter(c => /(^|\.)geiwohuo\.com$/i.test(String(c.domain || '').replace(/^\./, '')))
+        .map(normalizeCookie);
+      stage = 'storage';
+      const storage = await exportStorage(send);
+      stage = 'browser-info';
+      const browserInfo = await send('Runtime.evaluate', {
+        returnByValue: true,
+        expression: `(() => ({
+          userAgent: navigator.userAgent,
+          language: navigator.language || '',
+          languages: Array.from(navigator.languages || []),
+          platform: navigator.userAgentData?.platform || navigator.platform || '',
+          mobile: Boolean(navigator.userAgentData?.mobile),
+          brands: navigator.userAgentData?.brands || []
+        }))()`,
+      });
+      const hints = browserInfo.result?.value || {};
+      const exportedAt = new Date().toISOString();
+      const payload = {
+        version: 1,
+        storeKey: store.storeKey,
+        shopName: store.shopName,
+        exportedAt,
+        pageUrl: ORDER_URL,
+        userAgent: hints.userAgent || '',
+        cookieCount: cookies.length,
+        localStorageCount: Object.keys(storage.localStorage || {}).length,
+        sessionStorageCount: Object.keys(storage.sessionStorage || {}).length,
+        cookies,
+        localStorage: storage.localStorage || {},
+        sessionStorage: storage.sessionStorage || {},
+      };
+      const webApiPayload = {
+        version: 1,
+        storeKey: store.storeKey,
+        shopName: store.shopName,
+        source: 'export_shein_browser_session.cdp',
+        exportedAt,
+        pageUrl: ORDER_URL,
+        cookieCount: cookies.length,
+        cookieHeader: cookieHeaderFromCookies(cookies),
+        userAgent: hints.userAgent || '',
+        acceptLanguage: Array.isArray(hints.languages) && hints.languages.length
+          ? hints.languages.join(',')
+          : (hints.language || 'zh-CN,zh;q=0.9,en;q=0.8'),
+        clientHints: {
+          secChUa: formatSecChUa(hints.brands),
+          secChUaMobile: hints.mobile ? '?1' : '?0',
+          secChUaPlatform: hints.platform ? `"${String(hints.platform).replace(/"/g, '')}"` : '',
+        },
+      };
+      if (!webApiPayload.cookieHeader) throw new Error('exported_webapi_session_has_no_geiwohuo_cookies');
+      stage = 'webapi-probe';
+      const webApiProbe = await validateWebApiSession(webApiPayload);
+      stage = 'write-session';
+      const file = path.join(args.outDir, `${store.storeKey}.local.json`);
+      const webApiFile = path.join(args.webApiOutDir, `${store.storeKey}.local.json`);
+      await writeJsonAtomic(file, payload);
+      await writeJsonAtomic(webApiFile, webApiPayload);
+      return {
+        storeKey: store.storeKey,
+        ok: true,
+        file,
+        webApiFile,
+        webApiProbe,
+        cookieCount: payload.cookieCount,
+        localStorageCount: payload.localStorageCount,
+        sessionStorageCount: payload.sessionStorageCount,
+        cdpAttempts: attempt,
+      };
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error);
+      const retryable = /CDP websocket|CDP target list|No Chrome page target|not open on port|open timed out/i.test(message);
+      if (retryable) console.error(`[${store.storeKey}] CDP retry ${attempt}/5 stage=${stage} error=${message}`);
+      if (!retryable || attempt >= 5) throw error;
+      await sleep(attempt * 750);
+    } finally {
+      connection?.close();
+    }
   }
+  throw lastError || new Error(`CDP export failed on port ${store.port}`);
 }
 
 const args = parseArgs(process.argv.slice(2));

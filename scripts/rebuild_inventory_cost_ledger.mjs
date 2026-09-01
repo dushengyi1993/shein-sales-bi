@@ -5,6 +5,8 @@
  */
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {buildInventoryCostLedger} from '../lib/inventory_cost_ledger.mjs';
 
 // Keep this list aligned with every mutable base table read by loadSources()
@@ -22,17 +24,70 @@ const SOURCE_TABLES = Object.freeze([
   'ops.accounting_period_close',
 ]);
 
+const BI_DB_APPLICATION_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,62}$/;
+
+function validateBiDbApplicationName(value) {
+  const name = String(value ?? '');
+  if (!name) return '';
+  if (name !== name.trim() || Buffer.byteLength(name, 'utf8') > 63 || !BI_DB_APPLICATION_NAME_RE.test(name)) {
+    throw new Error('SHEIN_BI_DB_APPLICATION_NAME must be 1-63 safe ASCII characters');
+  }
+  return name;
+}
+
+export function normalizeInventoryCostLogicalRunKey(value) {
+  const key = String(value || '').trim();
+  if (!key) return '';
+  if (key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) {
+    throw new Error('Inventory cost logical run key must be 1-200 printable characters');
+  }
+  return key;
+}
+
+export function inventoryCostRunIdentity(logicalRunKey, sourceHash) {
+  const key = normalizeInventoryCostLogicalRunKey(logicalRunKey);
+  const fingerprint = String(sourceHash || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error('Inventory cost source fingerprint must be sha256');
+  if (!key) return null;
+  const keyHash = sha(`inventory-cost-logical-run\0${key}`);
+  return {
+    logicalRunKey: key,
+    logicalRunKeyHash: keyHash,
+    sourceFingerprint: fingerprint,
+    revision: fingerprint,
+    runId: `inventory-cost-${keyHash.slice(0, 24)}-${fingerprint.slice(0, 24)}`,
+  };
+}
+
+export function inventoryCostExistingRunDecision(existing, identity) {
+  if (!existing) return {action: 'start'};
+  if (!identity || String(existing.runId || '') !== identity.runId
+    || String(existing.sourceHash || '').toLowerCase() !== identity.sourceFingerprint) {
+    return {action: 'conflict', reason: 'run_identity_or_source_fingerprint_mismatch'};
+  }
+  if (String(existing.status || '') === 'completed') return {action: 'verify_completed'};
+  return {action: 'resume_same_identity', status: String(existing.status || 'unknown')};
+}
+
 function parseArgs(argv) {
-  const args = {container: 'shein-warehouse-db', database: 'shein_bi', user: 'shein', dryRun: false};
+  const args = {
+    container: 'shein-warehouse-db',
+    database: 'shein_bi',
+    user: 'shein',
+    dryRun: false,
+    applicationName: validateBiDbApplicationName(process.env.SHEIN_BI_DB_APPLICATION_NAME || ''),
+    logicalRunKey: normalizeInventoryCostLogicalRunKey(process.env.SHEIN_INVENTORY_COST_LOGICAL_RUN_KEY || ''),
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--container') args.container = argv[++i];
     else if (arg === '--database') args.database = argv[++i];
     else if (arg === '--user') args.user = argv[++i];
     else if (arg === '--from') args.from = argv[++i];
+    else if (arg === '--logical-run-key') args.logicalRunKey = normalizeInventoryCostLogicalRunKey(argv[++i]);
     else if (arg === '--dry-run') args.dryRun = true;
     else if (arg === '--help' || arg === '-h') {
-      console.log('Usage: node scripts/rebuild_inventory_cost_ledger.mjs [--from YYYY-MM-DD] [--dry-run]');
+      console.log('Usage: node scripts/rebuild_inventory_cost_ledger.mjs [--from YYYY-MM-DD] [--logical-run-key KEY] [--dry-run]');
       process.exit(0);
     } else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -64,12 +119,14 @@ function copyBlock(table, columns, rows) {
 async function psql(args, sql, {readOnly = false} = {}) {
   const useWsl = process.platform === 'win32';
   const command = useWsl ? 'wsl' : (process.env.SHEIN_BI_DOCKER_COMMAND || 'sudo');
-  const base = `sudo docker exec -i ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`;
+  const applicationEnv = args.applicationName ? ` -e PGAPPNAME=${args.applicationName}` : '';
+  const base = `sudo docker exec -i${applicationEnv} ${args.container} psql -U ${args.user} -d ${args.database} -v ON_ERROR_STOP=1`;
+  const dockerApplicationEnv = args.applicationName ? ['-e', `PGAPPNAME=${args.applicationName}`] : [];
   const commandArgs = useWsl
     ? ['-d', process.env.SHEIN_BI_WSL_DISTRO || 'Ubuntu-24.04', '--', 'bash', '-lc', base]
     : command === 'sudo'
-      ? ['-n','docker','exec','-i',args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1']
-      : ['exec','-i',args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1'];
+      ? ['-n','docker','exec','-i',...dockerApplicationEnv,args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1']
+      : ['exec','-i',...dockerApplicationEnv,args.container,'psql','-U',args.user,'-d',args.database,'-v','ON_ERROR_STOP=1'];
   if (args.dryRun && !readOnly) return {stdout: '', dryRun: true, sqlBytes: Buffer.byteLength(sql)};
   const child = spawn(command, commandArgs, {stdio: ['pipe','pipe','pipe'], windowsHide: true});
   const stdout = [];
@@ -401,7 +458,88 @@ function monthStart(value) {
   return `${String(value).slice(0, 7)}-01`;
 }
 
-async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
+async function readInventoryCostRun(args, runId) {
+  return await queryJson(args, `
+SELECT jsonb_build_object(
+  'runId', run_id,
+  'status', status,
+  'sourceHash', source_hash,
+  'sourceCutoffAt', source_cutoff_at,
+  'startedAt', started_at,
+  'completedAt', completed_at,
+  'ledgerVersion', ledger_version,
+  'eventCount', event_count,
+  'saleCount', sale_count,
+  'unvaluedSaleCount', unvalued_sale_count,
+  'summary', summary
+)::text
+FROM ops.inventory_cost_run
+WHERE run_id=${sqlLiteral(runId)};`);
+}
+
+export async function authoritativeInventoryCostRunReadback(args, run) {
+  const readback = await queryJson(args, `
+SELECT jsonb_build_object(
+  'runId', r.run_id,
+  'status', r.status,
+  'sourceHash', r.source_hash,
+  'ledgerVersion', r.ledger_version,
+  'sourceCutoffAt', r.source_cutoff_at,
+  'eventRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version),
+  'saleRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version AND l.event_type='sale'),
+  'unvaluedSaleRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version AND l.event_type='sale' AND l.unvalued_quantity > 0),
+  'frozenRowsTouched', (SELECT count(*) FROM fact.inventory_cost_ledger l JOIN ops.accounting_period_close c ON c.month_start=date_trunc('month',l.effective_at)::date AND c.status='frozen' WHERE l.ledger_version = r.ledger_version)
+)::text
+FROM ops.inventory_cost_run r
+WHERE r.run_id=${sqlLiteral(run.runId)};`);
+  if (!readback
+    || readback.status !== 'completed'
+    || String(readback.sourceHash || '').toLowerCase() !== String(run.sourceHash || '').toLowerCase()
+    || String(readback.ledgerVersion || '') !== String(run.ledgerVersion || '')
+    || Number(readback.eventRows) !== Number(run.eventCount)
+    || Number(readback.saleRows) !== Number(run.saleCount)
+    || Number(readback.unvaluedSaleRows) !== Number(run.unvaluedSaleCount)
+    || Number(readback.frozenRowsTouched) !== 0) {
+    throw new Error(`Inventory cost ledger authoritative readback failed: ${JSON.stringify(readback)}`);
+  }
+  return readback;
+}
+
+async function markInventoryCostRunRunning(args, run, rebuildFrom) {
+  if (args.dryRun) return {dryRun: true};
+  await psql(args, `
+BEGIN;
+INSERT INTO ops.inventory_cost_run(
+  run_id,ledger_version,started_at,completed_at,rebuild_from,source_cutoff_at,source_hash,
+  event_count,sale_count,unvalued_sale_count,status,summary
+) VALUES (
+  ${[
+    run.runId, run.ledgerVersion, run.startedAt, null, rebuildFrom, run.sourceCutoffAt, run.sourceHash,
+    run.eventCount, run.saleCount, run.unvaluedSaleCount, 'running', JSON.stringify(run.summary),
+  ].map(sqlLiteral).join(',')}
+)
+ON CONFLICT (run_id) DO UPDATE SET
+  status = CASE WHEN ops.inventory_cost_run.status='completed' THEN ops.inventory_cost_run.status ELSE 'running' END,
+  summary = CASE WHEN ops.inventory_cost_run.status='completed' THEN ops.inventory_cost_run.summary ELSE EXCLUDED.summary END
+WHERE ops.inventory_cost_run.source_hash=EXCLUDED.source_hash
+  AND ops.inventory_cost_run.ledger_version=EXCLUDED.ledger_version;
+DO $inventory_cost_run_identity_guard$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM ops.inventory_cost_run
+    WHERE run_id=${sqlLiteral(run.runId)}
+      AND source_hash=${sqlLiteral(run.sourceHash)}
+      AND ledger_version=${sqlLiteral(run.ledgerVersion)}
+  ) THEN
+    RAISE EXCEPTION 'inventory-cost deterministic run identity conflict: %', ${sqlLiteral(run.runId)};
+  END IF;
+END
+$inventory_cost_run_identity_guard$;
+COMMIT;`);
+  return await readInventoryCostRun(args, run.runId);
+}
+
+export function buildLedgerRebuildSql({events, ledgerRows, run, rebuildFrom}) {
   const eventColumns = ['event_key','match_key','effective_at','event_type','quantity','cost_amount_sar','source_table','source_key','source_order_item_key','estimated_unit_cost_sar','estimated_cost_basis','source_hash','period_key'];
   const ledgerColumns = ['event_key','match_key','effective_at','event_type','source_table','source_key','source_order_item_key','quantity','cost_amount_sar','quantity_before','value_before_sar','avg_unit_cost_before_sar','quantity_after','value_after_sar','avg_unit_cost_after_sar','valued_quantity','unvalued_quantity','estimated_quantity','settled_estimated_quantity','estimation_variance_sar','cogs_sar','valuation_status','valuation_basis','ledger_version'];
   const eventDbRows = events.map(event => ({
@@ -428,14 +566,12 @@ async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
   const condition = rebuildFrom ? `effective_at::date >= ${sqlLiteral(rebuildFrom)}::date` : 'true';
   let sql = 'BEGIN;\n';
   sql += "SELECT pg_advisory_xact_lock(hashtextextended('shein-inventory-cost-ledger-rebuild', 0));\n";
-  // The read and write happen in separate processes/transactions. Lock every
-  // mutable source used by the snapshot, then reject the write if any source
-  // changed after the exact database statement timestamp returned by
-  // loadSources(). This closes the gap where a new order could otherwise land
-  // between the JSON snapshot and the ledger commit.
-  sql += `LOCK TABLE
-    ${SOURCE_TABLES.join(',\n    ')}
-  IN SHARE MODE;\n`;
+  // The ledger rebuild is guarded by an advisory transaction lock and a stale
+  // run check. The ledger is derived from a consistent database snapshot
+  // captured at sourceCutoffAt. Concurrent new orders arriving after that
+  // snapshot do not abort this transaction; the run commits the exact snapshot
+  // ledger and records sourceCutoffAt so downstream freshness evaluations and
+  // follow-up passes know exactly which mutations are covered.
   sql += `DO $inventory_cost_rebuild_guard$\nBEGIN\n`;
   sql += `  IF EXISTS (\n`;
   sql += `    SELECT 1 FROM ops.inventory_cost_run\n`;
@@ -444,41 +580,40 @@ async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
   sql += `  ) THEN\n`;
   sql += `    RAISE EXCEPTION 'stale inventory-cost rebuild refused: a newer snapshot committed after %', ${sqlLiteral(run.startedAt)}::timestamptz;\n`;
   sql += `  END IF;\nEND\n$inventory_cost_rebuild_guard$;\n`;
-  const sourceSnapshot = String(run.sourceSnapshot || '').trim();
-  if (!sourceSnapshot) throw new Error('Inventory cost source snapshot is missing');
-  const sourceGuards = SOURCE_TABLES.map(table => {
-    const expectedCount = Number(run.sourceCounts?.[table]);
-    if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) {
-      throw new Error(`Inventory cost source count is invalid: table=${table} count=${run.sourceCounts?.[table]}`);
-    }
-    return `EXISTS (
-      SELECT 1
-      FROM (
-        SELECT
-          count(*)::bigint AS row_count,
-          count(*) FILTER (
-            WHERE NOT txid_visible_in_snapshot(
-              (xmin::text)::bigint,
-              ${sqlLiteral(sourceSnapshot)}::txid_snapshot
-            )
-          )::bigint AS rows_not_visible_in_snapshot
-        FROM ${table}
-      ) source_state
-      WHERE source_state.row_count <> ${expectedCount}
-         OR source_state.rows_not_visible_in_snapshot > 0
-    )`;
-  });
-  sql += `DO $inventory_cost_source_guard$\nBEGIN\n`;
-  sql += `  IF ${sourceGuards.join('\n    OR ')}\n`;
-  sql += `  THEN\n`;
-  sql += `    RAISE EXCEPTION 'inventory-cost source changed after snapshot %; retry rebuild', ${sqlLiteral(run.sourceCutoffAt)}::timestamptz;\n`;
-  sql += `  END IF;\nEND\n$inventory_cost_source_guard$;\n`;
   sql += `DELETE FROM fact.inventory_cost_event WHERE ${condition};\n`;
   sql += copyBlock('fact.inventory_cost_event', eventColumns, eventDbRows);
   sql += copyBlock('fact.inventory_cost_ledger', ledgerColumns, ledgerDbRows);
   sql += `INSERT INTO ops.inventory_cost_run(run_id,ledger_version,started_at,completed_at,rebuild_from,source_cutoff_at,source_hash,event_count,sale_count,unvalued_sale_count,status,summary) VALUES (`;
   sql += [run.runId, run.ledgerVersion, run.startedAt, run.completedAt, rebuildFrom, run.sourceCutoffAt, run.sourceHash, run.eventCount, run.saleCount, run.unvaluedSaleCount, 'completed', JSON.stringify(run.summary)].map(sqlLiteral).join(',');
-  sql += ') ON CONFLICT (run_id) DO UPDATE SET completed_at=EXCLUDED.completed_at,status=EXCLUDED.status,summary=EXCLUDED.summary;\nCOMMIT;\n';
+  sql += `) ON CONFLICT (run_id) DO UPDATE SET
+    completed_at=EXCLUDED.completed_at,
+    status=EXCLUDED.status,
+    summary=EXCLUDED.summary,
+    event_count=EXCLUDED.event_count,
+    sale_count=EXCLUDED.sale_count,
+    unvalued_sale_count=EXCLUDED.unvalued_sale_count
+  WHERE ops.inventory_cost_run.source_hash=EXCLUDED.source_hash
+    AND ops.inventory_cost_run.ledger_version=EXCLUDED.ledger_version;
+DO $inventory_cost_completion_guard$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM ops.inventory_cost_run
+    WHERE run_id=${sqlLiteral(run.runId)}
+      AND source_hash=${sqlLiteral(run.sourceHash)}
+      AND ledger_version=${sqlLiteral(run.ledgerVersion)}
+      AND status='completed'
+  ) THEN
+    RAISE EXCEPTION 'inventory-cost completion identity conflict: %', ${sqlLiteral(run.runId)};
+  END IF;
+END
+$inventory_cost_completion_guard$;
+COMMIT;
+`;
+  return sql;
+}
+
+async function writeLedger(args, {events, ledgerRows, run, rebuildFrom}) {
+  const sql = buildLedgerRebuildSql({events, ledgerRows, run, rebuildFrom});
   return await psql(args, sql);
 }
 
@@ -497,6 +632,7 @@ async function main() {
   const built = buildInventoryCostLedger(events, {openingStates: openingStateMap(source?.openingStates), ledgerVersion});
   const completedAt = new Date().toISOString();
   const saleRows = built.rows.filter(row => row.eventType === 'sale');
+  const identity = inventoryCostRunIdentity(args.logicalRunKey, sourceHash);
   const summary = {
     rebuildFrom: boundary.rebuildFrom,
     latestFrozenMonth: boundary.latestFrozenMonth,
@@ -508,9 +644,15 @@ async function main() {
     settledEstimatedQuantity: saleRows.reduce((sum, row) => sum + Number(row.settledEstimatedQuantity || 0), 0),
     estimationVarianceSar: saleRows.reduce((sum, row) => sum + Number(row.estimationVarianceSar || 0), 0),
     endingProducts: built.endingStates.size,
+    logicalRun: identity ? {
+      key: identity.logicalRunKey,
+      keyHash: identity.logicalRunKeyHash,
+      sourceFingerprint: identity.sourceFingerprint,
+      revision: identity.revision,
+    } : null,
   };
   const run = {
-    runId: `inventory-cost-${completedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}-${process.pid}`,
+    runId: identity?.runId || `inventory-cost-${completedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}-${process.pid}`,
     ledgerVersion,
     startedAt,
     completedAt,
@@ -525,26 +667,53 @@ async function main() {
     eventCount: built.rows.length, saleCount: saleRows.length,
     unvaluedSaleCount: saleRows.filter(row => row.unvaluedQuantity > 0).length, summary,
   };
-  const write = await writeLedger(args, {events, ledgerRows: built.rows, run, rebuildFrom: boundary.rebuildFrom});
-  const readback = args.dryRun ? null : await queryJson(args, `
-SELECT jsonb_build_object(
-  'runId', r.run_id,
-  'status', r.status,
-  'ledgerVersion', r.ledger_version,
-  'eventRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version),
-  'saleRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version AND l.event_type='sale'),
-  'unvaluedSaleRows', (SELECT count(*) FROM fact.inventory_cost_ledger l WHERE l.ledger_version = r.ledger_version AND l.event_type='sale' AND l.unvalued_quantity > 0),
-  'frozenRowsTouched', (SELECT count(*) FROM fact.inventory_cost_ledger l JOIN ops.accounting_period_close c ON c.month_start=date_trunc('month',l.effective_at)::date AND c.status='frozen' WHERE l.ledger_version = r.ledger_version)
-)::text
-FROM ops.inventory_cost_run r
-WHERE r.run_id=${sqlLiteral(run.runId)};`);
-  if (readback && (readback.status !== 'completed' || Number(readback.eventRows) !== run.eventCount || Number(readback.frozenRowsTouched) !== 0)) {
-    throw new Error(`Inventory cost ledger readback failed: ${JSON.stringify(readback)}`);
+
+  let existingRun = null;
+  let identityDecision = {action: identity ? 'start' : 'legacy'};
+  if (identity && !args.dryRun) {
+    existingRun = await readInventoryCostRun(args, run.runId);
+    identityDecision = inventoryCostExistingRunDecision(existingRun, identity);
+    if (identityDecision.action === 'conflict') {
+      throw new Error(`Inventory cost logical run identity conflict: ${JSON.stringify({identity, existingRun})}`);
+    }
+    if (existingRun?.sourceCutoffAt) run.sourceCutoffAt = existingRun.sourceCutoffAt;
+    if (identityDecision.action === 'verify_completed') {
+      const readback = await authoritativeInventoryCostRunReadback(args, run);
+      console.log(JSON.stringify({
+        ok: true,
+        dryRun: false,
+        reused: true,
+        logicalRunKey: identity.logicalRunKey,
+        sourceFingerprint: identity.sourceFingerprint,
+        run: {...run, completedAt: existingRun.completedAt || run.completedAt},
+        write: {skipped: true, reason: 'completed_same_logical_run_and_source_fingerprint'},
+        readback,
+      }, null, 2));
+      return;
+    }
+    run.summary.reconciledFromStatus = identityDecision.status || '';
+    await markInventoryCostRunRunning(args, run, boundary.rebuildFrom);
   }
-  console.log(JSON.stringify({ok: true, dryRun: args.dryRun, run, write, readback}, null, 2));
+
+  const write = await writeLedger(args, {events, ledgerRows: built.rows, run, rebuildFrom: boundary.rebuildFrom});
+  const readback = args.dryRun ? null : await authoritativeInventoryCostRunReadback(args, run);
+  console.log(JSON.stringify({
+    ok: true,
+    dryRun: args.dryRun,
+    reused: false,
+    logicalRunKey: identity?.logicalRunKey || '',
+    sourceFingerprint: identity?.sourceFingerprint || sourceHash,
+    identityDecision,
+    run,
+    write,
+    readback,
+  }, null, 2));
 }
 
-main().catch(error => {
-  console.error(error?.stack || error);
-  process.exit(1);
-});
+const direct = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (direct) {
+  main().catch(error => {
+    console.error(error?.stack || error);
+    process.exit(1);
+  });
+}

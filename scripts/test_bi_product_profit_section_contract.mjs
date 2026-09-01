@@ -6,6 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
+import {
+  invalidateBiProfitBundleManifest,
+  publishBiProfitBundleManifest,
+  writeBiSectionArtifact,
+  writeBiSectionCache,
+} from '../lib/bi_section_cache.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const server = fs.readFileSync(path.join(root, 'scripts', 'serve_bi_portal.mjs'), 'utf8');
@@ -56,8 +63,8 @@ assert.doesNotMatch(productSection, /data: \{[\s\S]*monthGroups|data: \{[\s\S]*'
   'the productProfit response must never include the large monthGroups/products/storage arrays');
 
 // ---- Server: homeProfit is fail-closed against stale sources.
-assert.match(server, /const currentProfitCache = await readBiSectionCache\(root, 'profit', generatedAt\);[\s\S]*if \(!isCurrentProfitSectionCache\(currentProfitCache, generatedAt\)\) return null;/,
-  'deriveHomeProfitSectionFromProfitCache must read only the current-generation profit cache');
+assert.match(server, /const currentProfitCache = await readCurrentProfitSource\(root, generatedAt\);[\s\S]*if \(!isCurrentProfitSectionCache\(currentProfitCache, generatedAt\)\) return null;/,
+  'deriveHomeProfitSectionFromProfitCache must prefer the exact-generation compact profit source');
 assert.doesNotMatch(server, /deriveHomeProfitSectionFromProfitCache[\s\S]{0,400}readBiSectionCacheAnyGeneratedAt/,
   'deriveHomeProfitSectionFromProfitCache must not fall back to anyGeneratedAt');
 assert.match(server, /const sourceFresh = Boolean\([\s\S]*cachedSourceGeneratedAt === String\(meta\.generatedAt \|\| ''\)[\s\S]*cachedSummary\?\.staleSource === false[\s\S]*Array\.isArray\(cachedSummary\?\.dailyScopes\)/,
@@ -74,6 +81,8 @@ assert.match(server, /if \(force \|\| options\.hostLockedWorker === true\) \{[\s
   'host-locked/force homeProfit without current profit must fail with 503');
 assert.match(server, /status: 202,[\s\S]*error: 'homeProfit requires a current profit section cache/,
   'a normal homeProfit request without current profit must return 202 pending instead of stale data');
+assert.match(server, /'--direct-cache-publish',[\s\S]*'--generated-at', generatedAt,[\s\S]*parseDirectCacheReceipt\(run\.stdout, section, generatedAt\)[\s\S]*verifyDirectCacheReceipt\(root, receipt, section, generatedAt\)/,
+  'a successful section publish must use a bounded direct-cache receipt and exact readback before success');
 
 // ---- Server: the HTTP route passes q and actor into the section loader.
 assert.match(server, /const q = String\(url\.searchParams\.get\('q'\) \|\| ''\)\.trim\(\);/,
@@ -171,12 +180,7 @@ await fs.promises.writeFile(path.join(portalDir, 'data.json'), JSON.stringify({
   generatedAt,
   __sections: {mode: 'api', generatedAt},
 }));
-await fs.promises.writeFile(path.join(sectionsDir, 'profit.json'), JSON.stringify({
-  ok: true,
-  section: 'profit',
-  generatedAt,
-  cachedAt: '2026-08-11T02:56:46.613Z',
-  data: {profit: {
+const initialProfit = {
     dailyStoreProducts: [
       {date: '2026-08-10', store_key: 'JSH', standard_goods_sn: 'ABC-100', net_revenue_sar: 100, known_net_revenue_sar: 100, profit_after_storage_sar: 25},
       {date: '2026-08-10', store_key: 'DL', standard_goods_sn: 'ABC-100', net_revenue_sar: 200, known_net_revenue_sar: 200, profit_after_storage_sar: 50},
@@ -188,15 +192,8 @@ await fs.promises.writeFile(path.join(sectionsDir, 'profit.json'), JSON.stringif
     productStorageDaily: [{sentinel: 'must-not-leak'}],
     productStoreStorageDaily: [{sentinel: 'must-not-leak'}],
     storeStorageDaily: [],
-  }},
-}));
-await fs.promises.writeFile(path.join(sectionsDir, 'homeProfit.json'), JSON.stringify({
-  ok: true,
-  section: 'homeProfit',
-  generatedAt,
-  cachedAt: '2026-08-11T02:14:03.722Z',
-  data: {homeProfitSummary: {dailyScopes: [], sourceGeneratedAt: '2026-08-10T19:09:04.52205+08:00', staleSource: true}},
-}));
+};
+await publishProfitBundleFixture(portalDir, generatedAt, initialProfit);
 await fs.promises.writeFile(authFile, JSON.stringify({users: [
   {username: 'scoped-test', password: 'correct-password', role: 'admin', readStores: ['JSH']},
   {username: 'empty-test', password: 'correct-password', role: 'admin', readStores: []},
@@ -216,6 +213,7 @@ const isolatedPortalEnv = {
   SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR: '',
 };
 
+await provisionBiSessionSecret(path.join(temp, 'session-secret'));
 const child = spawn(process.execPath, [
   path.join(root, 'scripts', 'serve_bi_portal.mjs'),
   '--host', '127.0.0.1', '--port', String(port), '--dir', portalDir,
@@ -248,10 +246,18 @@ try {
   rewrittenProfit.cachedAt = '2026-08-11T03:20:00.000Z';
   rewrittenProfit.data.profit.dailyStoreProducts[0].net_revenue_sar = 999;
   await fs.promises.writeFile(path.join(sectionsDir, 'profit.json'), JSON.stringify(rewrittenProfit));
-  const rewrittenResponse = await fetch(`${base}/api/bi/section/productProfit?q=ABC-100`, {headers: {cookie: scopedCookie}});
-  assert.equal(rewrittenResponse.status, 200);
-  const rewrittenRows = (await rewrittenResponse.json()).data.productProfit.rows;
-  assert.equal(rewrittenRows[0].net_revenue_sar, 999, 'same-generation profit rewrites must invalidate the in-memory index');
+  const tamperedResponse = await fetch(`${base}/api/bi/section/productProfit?q=ABC-100`, {headers: {cookie: scopedCookie}});
+  assert.notEqual(tamperedResponse.status, 200, 'a raw-only same-generation rewrite must fail closed without matching sidecars and bundle');
+  const tamperedPayload = await tamperedResponse.json();
+  assert.equal(JSON.stringify(tamperedPayload).includes('999'), false, 'an uncommitted raw rewrite must not leak business rows');
+
+  const updatedProfit = structuredClone(initialProfit);
+  updatedProfit.dailyStoreProducts[0].net_revenue_sar = 999;
+  await publishProfitBundleFixture(portalDir, generatedAt, updatedProfit);
+  const republishedResponse = await fetch(`${base}/api/bi/section/productProfit?q=ABC-100`, {headers: {cookie: scopedCookie}});
+  assert.equal(republishedResponse.status, 200, 'a controlled complete same-generation bundle republish must become readable');
+  const republishedRows = (await republishedResponse.json()).data.productProfit.rows;
+  assert.equal(republishedRows[0].net_revenue_sar, 999, 'the in-memory index must observe the newly committed bundle identity');
 
   const emptyCookie = await login(base, 'empty-test');
   const emptyResponse = await fetch(`${base}/api/bi/section/productProfit?q=ABC-100`, {headers: {cookie: emptyCookie}});
@@ -324,6 +330,52 @@ try {
 }
 
 console.log('bi_product_profit_section_contract: request-state productProfit, q isolation, and fail-closed homeProfit passed');
+
+async function publishProfitBundleFixture(portalRoot, expectedGeneratedAt, profit) {
+  const run = {code: 0, timedOut: false, stderr: ''};
+  await invalidateBiProfitBundleManifest(portalRoot);
+  const full = await writeBiSectionCache(
+    portalRoot,
+    'profit',
+    expectedGeneratedAt,
+    {profit},
+    run,
+    {requireIntegrity: true},
+  );
+  await writeBiSectionArtifact(
+    portalRoot,
+    'profit.query',
+    'profit.query',
+    expectedGeneratedAt,
+    {
+      profit: {
+        dailyStoreProducts: profit.dailyStoreProducts,
+        monthGroups: profit.monthGroups,
+        products: profit.products,
+        storeStorageDaily: profit.storeStorageDaily,
+      },
+    },
+    run,
+    {requireIntegrity: true},
+  );
+  await writeBiSectionCache(
+    portalRoot,
+    'homeProfit',
+    expectedGeneratedAt,
+    {
+      homeProfitSummary: {
+        dailyScopes: [],
+        source: 'profit_section_cache',
+        sourceGeneratedAt: expectedGeneratedAt,
+        sourceCachedAt: full.cachedAt,
+        staleSource: false,
+      },
+    },
+    run,
+    {requireIntegrity: true},
+  );
+  await publishBiProfitBundleManifest(portalRoot, expectedGeneratedAt);
+}
 
 async function freePort() {
   const probe = net.createServer();

@@ -25,6 +25,10 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {scanBoundedTopLevelJson} from '../lib/bounded_top_level_json.mjs';
+import {
+  readBiProfitBundleManifest,
+  readBiSectionIntegrityMetadata,
+} from '../lib/bi_section_cache.mjs';
 
 const SECTION_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,79}$/;
 const DEFAULT_HEAD_BYTES = 64 * 1024;
@@ -219,6 +223,36 @@ async function validateTerminalArtifactInner({root, section, headBytes, expected
     return {ok: false, reason: 'section_data_missing', section: normalizedSection, coreGeneratedAt, sectionGeneratedAt};
   }
 
+  const integrity = await readBiSectionIntegrityMetadata(root, normalizedSection, coreGeneratedAt).catch(() => null);
+  if (!integrity
+    || integrity.section !== normalizedSection
+    || integrity.generatedAt !== coreGeneratedAt
+    || integrity.raw?.byteSize !== head.size
+    || !/^[a-f0-9]{64}$/u.test(String(integrity.generationIdentity || ''))
+    || !/^[a-f0-9]{64}$/u.test(String(integrity.raw?.sha256 || ''))) {
+    return {
+      ok: false,
+      reason: 'section_integrity_unverified',
+      section: normalizedSection,
+      coreGeneratedAt,
+      sectionGeneratedAt,
+    };
+  }
+
+  const bundle = ['profit', 'homeProfit'].includes(normalizedSection)
+    ? await readBiProfitBundleManifest(root, coreGeneratedAt).catch(() => null)
+    : null;
+  if (['profit', 'homeProfit'].includes(normalizedSection) && !bundle) {
+    return {
+      ok: false,
+      reason: 'profit_bundle_unverified',
+      section: normalizedSection,
+      coreGeneratedAt,
+      sectionGeneratedAt,
+      generationIdentity: integrity.generationIdentity,
+    };
+  }
+
   let profitScanBytes = 0;
   if (normalizedSection === 'profit') {
     // Production profit key order is not fixed. Scan incrementally without
@@ -269,8 +303,13 @@ async function validateTerminalArtifactInner({root, section, headBytes, expected
     section: normalizedSection,
     coreGeneratedAt,
     sectionGeneratedAt,
+    generatedAt: coreGeneratedAt,
+    generationIdentity: integrity.generationIdentity,
+    rawSha256: integrity.raw.sha256,
+    rawByteSize: integrity.raw.byteSize,
     size: head.size,
     headBytes,
+    ...(bundle ? {bundleGeneratedAt: bundle.generatedAt, bundleIdentity: bundle.manifestIdentity} : {}),
     ...(normalizedSection === 'profit' ? {profitScanBytes} : {}),
   };
 }

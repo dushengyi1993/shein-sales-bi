@@ -33,6 +33,7 @@ import {fileURLToPath} from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'planner-kj102-separation-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(tmp, 'inventory-v2-cutover.lock');
 const date = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 const now = new Date().toISOString();
 const policyFile = path.join(ROOT, 'config', 'inventory_replenishment_policy.json');
