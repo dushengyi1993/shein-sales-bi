@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.SOURCE_RELEASE_ADMIN_TOKEN || github.token }}
       DEPLOY_URL: https://sa.dushengyi.cc/api/partner-cli/release/deploy
       STATUS_URL: https://sa.dushengyi.cc/api/partner-cli/release/status
     steps:
