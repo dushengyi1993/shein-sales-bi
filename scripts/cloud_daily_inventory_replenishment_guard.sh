@@ -23,11 +23,10 @@ LINKS_REFRESH_TIMEOUT_SECONDS="${SHEIN_BI_INVENTORY_LINKS_REFRESH_TIMEOUT_SECOND
 # inventoryTrend asynchronously, so the guard performs exactly one bounded
 # synchronous inventoryTrend refresh before the first plan build, always
 # forced (force=1) because a freshly published cache can still carry an old
-# ET business day. The refresh must succeed over HTTP, must publish a cachedAt
-# strictly later than the request start, and must contain at least one matched
-# current-day ET operational row; any failure aborts the guard (fail closed,
-# no inventory write, no swallowed error) and the write interface is never
-# retried.
+# ET business day. The refresh must return a terminal inventoryTrend JSON ack
+# and leave a cache no older than 1800 seconds with at least one matched
+# current-day ET operational row; any failure aborts the guard (fail closed, no
+# inventory write, no swallowed error) and the write interface is never retried.
 INVENTORY_TREND_FILE="${SHEIN_BI_INVENTORY_TREND_FILE:-$ROOT/outputs/bi-portal/sections/inventoryTrend.json}"
 INVENTORY_TREND_MAX_AGE_SECONDS="${SHEIN_BI_INVENTORY_TREND_MAX_AGE_SECONDS:-1800}"
 INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS="${SHEIN_BI_INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS:-1200}"
@@ -372,15 +371,6 @@ inventory_trend_age_seconds() {
   printf '%s\n' "$((now_epoch - cached_epoch))"
 }
 
-inventory_trend_published_epoch_seconds() {
-  local cached_at cached_epoch
-  [[ -s "$INVENTORY_TREND_FILE" ]] || return 1
-  cached_at="$(jq -r '.cachedAt // .generatedAt // empty' "$INVENTORY_TREND_FILE")"
-  [[ -n "$cached_at" ]] || return 1
-  cached_epoch="$(date -d "$cached_at" +%s 2>/dev/null)" || return 1
-  printf '%s\n' "$cached_epoch"
-}
-
 # Mirror the planner's current-day gate on the refreshed artifact: count
 # inventoryDepletion.products rows whose inventory_match_status is "matched"
 # and whose per-row warehouse-position operational date equals today's
@@ -408,36 +398,36 @@ inventory_trend_matched_current_day_rows() {
 }
 
 # Bounded synchronous inventoryTrend refresh, symmetric with linksData, plus
-# three hard post-conditions: HTTP success, cachedAt strictly advanced past
-# the request start, and at least one matched current-day ET operational row.
-# This write interface is called at most once per run and is never retried.
+# hard post-conditions: a terminal section ack, a cache age within the limit,
+# and at least one matched current-day ET operational row. This write
+# interface is called at most once per run and is never retried.
 ensure_inventory_trend_fresh() {
   local force="${1:-0}"
-  local age request_start_epoch published_epoch matched_current_day
+  local age refresh_ack matched_current_day
   age="$(inventory_trend_age_seconds 2>/dev/null || true)"
   if [[ "$force" != "1" && "$age" =~ ^[0-9]+$ ]] && (( age <= INVENTORY_TREND_MAX_AGE_SECONDS )); then
     echo "[daily_inventory_guard] inventoryTrend fresh ageSeconds=$age; skip duplicate refresh"
     return 0
   fi
-  request_start_epoch="$(date +%s)"
   echo "[daily_inventory_guard] refresh inventoryTrend synchronously force=$force previousAgeSeconds=${age:-unknown}"
-  if ! curl -fsS --max-time "$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \
+  if ! refresh_ack="$(curl -fsS --max-time "$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \
     -H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \
-    "$PORTAL_URL/api/bi/section/inventoryTrend?refresh=1&refreshToken=${REFRESH_RUN_TOKEN}" >/dev/null; then
+    "$PORTAL_URL/api/bi/section/inventoryTrend?refresh=1&refreshToken=${REFRESH_RUN_TOKEN}")"; then
     echo "[daily_inventory_guard] inventoryTrend HTTP refresh failed; blocking the daily inventory guard" >&2
+    return 1
+  fi
+  if ! jq -e '
+    type == "object"
+    and .ok == true
+    and .section == "inventoryTrend"
+    and .terminal == true
+  ' <<<"$refresh_ack" >/dev/null; then
+    echo "[daily_inventory_guard] inventoryTrend refresh returned an invalid, non-terminal, or wrong-section JSON ack; blocking the daily inventory guard" >&2
     return 1
   fi
   age="$(inventory_trend_age_seconds 2>/dev/null || true)"
   if [[ ! "$age" =~ ^[0-9]+$ ]] || (( age > INVENTORY_TREND_MAX_AGE_SECONDS )); then
     echo "[daily_inventory_guard] inventoryTrend refresh did not publish a fresh cache ageSeconds=${age:-unknown}" >&2
-    return 1
-  fi
-  published_epoch="$(inventory_trend_published_epoch_seconds)" || {
-    echo "[daily_inventory_guard] inventoryTrend published timestamp is unreadable after refresh" >&2
-    return 1
-  }
-  if (( published_epoch <= request_start_epoch )); then
-    echo "[daily_inventory_guard] inventoryTrend cachedAt did not advance past request start publishedEpoch=$published_epoch requestStartEpoch=$request_start_epoch; blocking" >&2
     return 1
   fi
   matched_current_day="$(inventory_trend_matched_current_day_rows)" || {
@@ -448,7 +438,7 @@ ensure_inventory_trend_fresh() {
     echo "[daily_inventory_guard] inventoryTrend has no matched current-day operational rows date=$DATE matched=${matched_current_day:-unknown}; blocking" >&2
     return 1
   fi
-  echo "[daily_inventory_guard] inventoryTrend refresh complete ageSeconds=$age cachedAtAdvanced=1 matchedCurrentDayRows=$matched_current_day"
+  echo "[daily_inventory_guard] inventoryTrend refresh complete terminalAck=1 ageSeconds=$age matchedCurrentDayRows=$matched_current_day"
 }
 
 build_plan() {
@@ -591,9 +581,9 @@ plan_blocked_with_budget_failure() {
 # refreshed here before hashing; never depend on a detached prewarm process
 # surviving a oneshot systemd unit. inventoryTrend is always force-refreshed
 # once per daily run (a fresh cachedAt can still hide an old ET business day);
-# HTTP failure, a cachedAt that did not advance, or zero matched current-day
-# ET rows aborts the guard before the plan build. The error is not swallowed
-# and the write interface is never retried.
+# HTTP/ack failure, a stale cache, or zero matched current-day ET rows aborts
+# the guard before the plan build. The error is not swallowed and the write
+# interface is never retried.
 if (( RECONCILE_PENDING_ONLY == 0 )); then
   ensure_links_data_fresh || true
   ensure_inventory_trend_fresh 1

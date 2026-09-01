@@ -95,9 +95,16 @@ assert.doesNotMatch(dailyInventoryGuardWants, /\bshein-bi-cloud-morning-chain\.s
   'manual start of inventory guard must not pull in morning-chain through Wants');
 assert.match(dailyInventoryGuardAfter, /\bshein-bi-cloud-morning-chain\.service\b/,
   'inventory guard must still order after morning-chain when both are active');
+assert.match(dailyInventoryGuardExecStart, /run_host_heavy_job\.sh/,
+  'standalone inventory guard must retain the host-heavy-job wrapper');
+assert.doesNotMatch(dailyInventoryGuardExecStart, /\brun_pipeline_stage\.sh\b/,
+  'standalone inventory guard must not add an outer pipeline-stage wrapper');
 assert.match(dailyInventoryGuardExecStart,
-  /run_pipeline_stage\.sh --stage inventory-guard --run-date today --business-date yesterday\b/,
-  'standalone inventory guard must bind runDate=today and businessDate=yesterday explicitly');
+  /-- \/usr\/bin\/env bash \/opt\/shein-bi\/app\/scripts\/cloud_daily_inventory_replenishment_guard\.sh$/,
+  'standalone inventory guard must directly invoke the guard script');
+assert.match(dailyInventoryGuardSource,
+  /^Environment=SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1$/mu,
+  'the direct guard unit must retain its own DATE-bound marker gate');
 const dependencyRequireSource = runPipelineStageSource.slice(
   runPipelineStageSource.indexOf('for required_stage in'),
   runPipelineStageSource.indexOf('echo "[pipeline-stage] start'),
