@@ -98,6 +98,14 @@ try {
   assert.match(releaseWorkflow, /^  contents: write\s*$/m);
   assert.match(releaseWorkflow, /actions\/checkout@[0-9a-f]{40}/);
   assert.match(releaseWorkflow, /actions\/setup-node@[0-9a-f]{40}/);
+  const credentialPriorityExpression = 'GH_TOKEN: ${{ secrets.SOURCE_RELEASE_ADMIN_TOKEN || github.token }}';
+  const credentialDeclarations = releaseWorkflow.match(/GH_TOKEN: \$\{\{[^}]*\}\}/g) || [];
+  assert.ok(credentialDeclarations.length > 0, 'partner CLI workflow must declare GH_TOKEN');
+  assert.ok(
+    credentialDeclarations.every(expression => expression === credentialPriorityExpression),
+    'every partner CLI GH_TOKEN declaration must prefer SOURCE_RELEASE_ADMIN_TOKEN with github.token fallback',
+  );
+  assert.doesNotMatch(releaseWorkflow, /GH_TOKEN: \$\{\{ github\.token \}\}/);
   assert.doesNotMatch(releaseWorkflow, /^\s+npm test\s*$/m);
   for (const command of [
     'npm run check:generated',

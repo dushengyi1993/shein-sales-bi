@@ -617,6 +617,27 @@ assert.ok(
 assert.doesNotMatch(releaseSource, /\bgh\s+release\s+create\b/u);
 assert.doesNotMatch(releaseSource, /run\.completed_at|candidate\.completed_at|exactAttempt\.completed_at/u);
 assert.ok(evidenceSource.includes('/immutable-releases'));
+const partnerWorkflowPath = path.join(repoRoot, '.github', 'workflows', 'partner-cli-release.yml');
+const partnerWorkflowSource = fs.readFileSync(partnerWorkflowPath, 'utf8');
+const releaseCredentialPriorityExpression = 'GH_TOKEN: ${{ secrets.SOURCE_RELEASE_ADMIN_TOKEN || github.token }}';
+const credentialDeclaration = /GH_TOKEN: \$\{\{[^}]*\}\}/gu;
+const releaseCredentialDeclarations = releaseSource.match(credentialDeclaration) || [];
+const partnerCredentialDeclarations = partnerWorkflowSource.match(credentialDeclaration) || [];
+assert.ok(releaseCredentialDeclarations.length > 0, 'source-release.yml must declare GH_TOKEN');
+assert.ok(
+  releaseCredentialDeclarations.every(expression => expression === releaseCredentialPriorityExpression),
+  'every source-release GH_TOKEN declaration must prefer SOURCE_RELEASE_ADMIN_TOKEN with github.token fallback',
+);
+assert.ok(
+  partnerCredentialDeclarations.length > 0,
+  'partner-cli-release.yml must declare GH_TOKEN',
+);
+assert.ok(
+  partnerCredentialDeclarations.every(expression => expression === releaseCredentialPriorityExpression),
+  'partner-cli-release.yml must use the exact same credential priority expression as source-release.yml',
+);
+assert.doesNotMatch(releaseSource, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+assert.doesNotMatch(partnerWorkflowSource, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
 assert.ok(evidenceSource.includes('/attempts/${runAttempt}/jobs?filter=all'));
 assert.equal((releaseSource.match(/--request PATCH/g) || []).length, 1, 'only one irreversible publish PATCH may exist');
 assert.ok(releaseSource.indexOf('journal PUBLISH_OUTCOME_UNKNOWN') < releaseSource.indexOf('--request PATCH'));
