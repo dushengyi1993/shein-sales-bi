@@ -643,6 +643,255 @@ assert.equal((releaseSource.match(/--request PATCH/g) || []).length, 1, 'only on
 assert.ok(releaseSource.indexOf('journal PUBLISH_OUTCOME_UNKNOWN') < releaseSource.indexOf('--request PATCH'));
 testCount += 1;
 
+// ---- evaluateInspectRelease contract & regression tests ----
+const evaluateInspectRelease = loadFunction(extractMarked(
+  releaseSource,
+  '// INSPECT_RELEASE_EVALUATOR_BEGIN',
+  '// INSPECT_RELEASE_EVALUATOR_END',
+), 'evaluateInspectRelease');
+const readExpectedReleaseIdentityFiles = loadFunction(extractMarked(
+  releaseSource,
+  '// EXPECTED_RELEASE_IDENTITY_READER_BEGIN',
+  '// EXPECTED_RELEASE_IDENTITY_READER_END',
+), 'readExpectedReleaseIdentityFiles');
+
+const defaultExpectedTitle = `SHEIN BI Ops ${version}`;
+const baseInspectParams = {
+  version,
+  expectedCommit: commit,
+  expectedTitle: defaultExpectedTitle,
+  expectedAssets,
+  expectedUnknownBody: armedUnknownBody,
+};
+
+// Test Case 1: Normal exact-tag path (published and draft)
+const normalExactPublished = {
+  id: 700,
+  tag_name: version,
+  name: defaultExpectedTitle,
+  body: armedUnknownBody,
+  draft: false,
+  prerelease: false,
+  immutable: true,
+  published_at: '2026-08-17T02:00:00Z',
+  html_url: `https://github.com/dushengyi1993/shein-sales-bi/releases/tag/${version}`,
+  assets,
+};
+const inspectedPublished = evaluateInspectRelease({...baseInspectParams, releases: [normalExactPublished]});
+assert.equal(inspectedPublished.exists, true);
+assert.equal(inspectedPublished.id, 700);
+assert.equal(inspectedPublished.tagName, version);
+assert.equal(inspectedPublished.draft, false);
+testCount += 1;
+
+const normalExactDraft = {
+  id: 700,
+  tag_name: version,
+  name: defaultExpectedTitle,
+  body: armedUnknownBody,
+  draft: true,
+  prerelease: false,
+  immutable: false,
+  published_at: null,
+  html_url: `https://github.com/dushengyi1993/shein-sales-bi/releases/tag/${version}`,
+  assets,
+};
+const inspectedExactDraft = evaluateInspectRelease({...baseInspectParams, releases: [normalExactDraft]});
+assert.equal(inspectedExactDraft.exists, true);
+assert.equal(inspectedExactDraft.id, 700);
+assert.equal(inspectedExactDraft.tagName, version);
+assert.equal(inspectedExactDraft.draft, true);
+testCount += 1;
+
+// Test Case 2: Duplicate exact-tag releases fail closed
+assert.throws(
+  () => evaluateInspectRelease({
+    ...baseInspectParams,
+    releases: [normalExactDraft, {...normalExactDraft, id: 701}],
+  }),
+  /duplicate GitHub Releases for exact tag/u,
+  'duplicate exact tag releases must throw duplicate error',
+);
+testCount += 1;
+
+// Test Case 3: Unique immutable untagged draft recovery
+const untaggedDraft = {
+  id: 750,
+  tag_name: 'untagged-abcdef0123456789',
+  target_commitish: commit,
+  name: defaultExpectedTitle,
+  body: armedUnknownBody,
+  draft: true,
+  prerelease: false,
+  immutable: false,
+  published_at: null,
+  html_url: `https://github.com/dushengyi1993/shein-sales-bi/releases/tag/untagged-abcdef0123456789`,
+  assets,
+};
+const inspectedUntagged = evaluateInspectRelease({...baseInspectParams, releases: [untaggedDraft]});
+assert.equal(inspectedUntagged.exists, true);
+assert.equal(inspectedUntagged.id, 750);
+assert.equal(inspectedUntagged.tagName, version, 'recovered draft tagName must be normalized to expected version');
+assert.equal(inspectedUntagged.draft, true);
+assert.equal(inspectedUntagged.title, defaultExpectedTitle);
+assert.equal(inspectedUntagged.body, armedUnknownBody);
+assert.equal(inspectedUntagged.assets.length, 2);
+
+// Feed recovered draft into armed draft state machine
+const armedGateFromUntagged = decideArmedDraftSourceReleaseState(armedState(inspectedUntagged, {expectedReleaseId: 750}));
+assert.equal(armedGateFromUntagged.mode, 'armed-draft');
+assert.equal(armedGateFromUntagged.publish, true);
+assert.equal(armedGateFromUntagged.releaseId, 750);
+testCount += 1;
+
+const exactDraftReady = {
+  ...normalExactDraft,
+  target_commitish: commit,
+  body: journal(SOURCE_RELEASE_PUBLISH_STATES.DRAFT_READY),
+};
+assert.throws(
+  () => evaluateInspectRelease({...baseInspectParams, releases: [exactDraftReady, untaggedDraft]}),
+  /exact release has an ambiguous immutable untagged sibling/u,
+  'an exact DRAFT_READY release must not hide a same-identity untagged UNKNOWN sibling',
+);
+testCount += 1;
+
+const titleDriftedUntaggedSibling = {
+  ...untaggedDraft,
+  id: 753,
+  name: 'SHEIN BI Ops drifted sibling title',
+};
+assert.throws(
+  () => evaluateInspectRelease({...baseInspectParams, releases: [exactDraftReady, titleDriftedUntaggedSibling]}),
+  /exact release has an ambiguous immutable untagged sibling/u,
+  'an exact DRAFT_READY release must reject an untagged sibling anchored by exact UNKNOWN body and assets',
+);
+testCount += 1;
+
+// Test Case 4: Ambiguous / duplicate untagged drafts fail closed
+assert.throws(
+  () => evaluateInspectRelease({
+    ...baseInspectParams,
+    releases: [untaggedDraft, {...untaggedDraft, id: 751, tag_name: 'untagged-other123456789'}],
+  }),
+  /duplicate or ambiguous release drafts/u,
+  'multiple untagged drafts with same title must fail closed',
+);
+assert.throws(
+  () => evaluateInspectRelease({
+    ...baseInspectParams,
+    releases: [untaggedDraft, {...untaggedDraft, id: 752, name: 'SHEIN BI Ops other', tag_name: 'untagged-other2'}],
+  }),
+  /duplicate or ambiguous release drafts/u,
+  'multiple untagged drafts with same armed body must fail closed',
+);
+testCount += 1;
+
+// Test Case 5: Unmatched / drifted untagged drafts fail closed
+const untaggedDriftCases = [
+  ['target commit drifted', {...untaggedDraft, target_commitish: 'e'.repeat(40)}],
+  ['title and body drifted while target and assets remain exact', {
+    ...untaggedDraft,
+    name: 'SHEIN BI Ops drifted',
+    body: 'drifted body',
+  }],
+  ['tag_name is wrong explicit non-untagged tag', {...untaggedDraft, tag_name: 'v2026.08.17.99'}],
+  ['tag_name is bare untagged prefix without suffix', {...untaggedDraft, tag_name: 'untagged-'}],
+  ['tag_name is empty string', {...untaggedDraft, tag_name: ''}],
+  ['tag_name is null/non-string', {...untaggedDraft, tag_name: null}],
+  ['body drifted outside journal', {...untaggedDraft, body: armedUnknownBody + ' trailing'}],
+  ['journal state is draft-ready instead of unknown', {...untaggedDraft, body: journal(SOURCE_RELEASE_PUBLISH_STATES.DRAFT_READY)}],
+  ['assets missing', {...untaggedDraft, assets: [assets[0]]}],
+  ['asset size mismatched', {...untaggedDraft, assets: [{...assets[0], size: 999}, assets[1]]}],
+  ['asset digest mismatched', {...untaggedDraft, assets: [{...assets[0], digest: 'sha256:bad'}, assets[1]]}],
+  ['draft is false on untagged', {...untaggedDraft, draft: false}],
+  ['prerelease is true on untagged', {...untaggedDraft, prerelease: true}],
+  ['exact body remains related even when release is not a draft', {
+    ...untaggedDraft,
+    draft: false,
+    name: 'SHEIN BI Ops unrelated title',
+    target_commitish: 'e'.repeat(40),
+    assets: [],
+  }],
+];
+for (const [label, driftedRelease] of untaggedDriftCases) {
+  assert.throws(
+    () => evaluateInspectRelease({...baseInspectParams, releases: [driftedRelease]}),
+    /does not satisfy exact immutable draft contract/u,
+    'drifted untagged draft must fail closed: ' + label,
+  );
+  testCount += 1;
+}
+
+// Test Case 6: Non-existent release
+assert.deepEqual(evaluateInspectRelease({...baseInspectParams, releases: []}), {exists: false});
+assert.deepEqual(evaluateInspectRelease({
+  ...baseInspectParams,
+  releases: [{
+    ...normalExactPublished,
+    tag_name: '2026.08.16.1',
+    name: 'SHEIN BI Ops 2026.08.16.1',
+    body: 'historical release body',
+    assets: [],
+  }],
+}), {exists: false});
+testCount += 1;
+
+const targetOnlyHistoricalRelease = {
+  ...normalExactPublished,
+  id: 699,
+  tag_name: '2026.08.16.2',
+  target_commitish: commit,
+  name: 'SHEIN BI Ops 2026.08.16.2',
+  body: 'unrelated historical release body',
+  assets: [],
+};
+assert.deepEqual(
+  evaluateInspectRelease({...baseInspectParams, releases: [targetOnlyHistoricalRelease]}),
+  {exists: false},
+  'target_commitish alone must not make a historical release related',
+);
+testCount += 1;
+
+const expectedFileFixture = {
+  readFileSync(file) {
+    if (file === 'valid-assets.json') return JSON.stringify(expectedAssets);
+    if (file === 'invalid-assets.json') return '{invalid json';
+    if (file === 'unknown-body.md') return armedUnknownBody;
+    throw new Error('ENOENT: ' + file);
+  },
+};
+assert.throws(
+  () => readExpectedReleaseIdentityFiles('invalid-assets.json', 'unknown-body.md', expectedFileFixture),
+  /Expected assets file is invalid JSON/u,
+  'damaged expected-assets JSON must throw instead of degrading to no recovery identity',
+);
+assert.throws(
+  () => readExpectedReleaseIdentityFiles('missing-assets.json', 'unknown-body.md', expectedFileFixture),
+  /Expected assets file cannot be read/u,
+  'a non-empty missing expected-assets path must throw',
+);
+assert.throws(
+  () => readExpectedReleaseIdentityFiles('valid-assets.json', 'missing-body.md', expectedFileFixture),
+  /Expected unknown body file cannot be read/u,
+  'a non-empty missing expected-body path must throw',
+);
+testCount += 1;
+
+// Test Case 7: Do not duplicate publish (terminal read-only outcome-unknown)
+const recoveredDraftState = decideSourceReleaseState(stateFixture(inspectedUntagged));
+assert.equal(
+  recoveredDraftState.publishState,
+  SOURCE_RELEASE_PUBLISH_STATES.PUBLISH_OUTCOME_UNKNOWN,
+  'recovered armed draft must remain PUBLISH_OUTCOME_UNKNOWN to prevent duplicate publish on rerun',
+);
+assert.equal(recoveredDraftState.createDraft, false);
+assert.equal(recoveredDraftState.uploadAssets, false);
+assert.equal(recoveredDraftState.armPublish, false);
+assert.equal(recoveredDraftState.publish, false);
+assert.equal(recoveredDraftState.terminalReadOnly, true);
+testCount += 1;
+
 const bash = resolveGitBash();
 const blocks = [
   ...extractYamlLiteralRuns(ciSource).map(block => ({...block, file: ciPath})),
