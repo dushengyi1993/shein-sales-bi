@@ -1215,6 +1215,7 @@ process.kill(process.pid, 'SIGKILL');
   if (useNativeWslHarness) wslCopy(harnessAuthorizationRuntimePath, harnessAuthorizationFile);
   assert.deepEqual(JSON.parse(await fsp.readFile(harnessAuthorizationFile, 'utf8')), staleHarness,
     'ordinary scheduled stale authorization must remain immutable audit evidence');
+  await fsp.rm(harnessHostMarker, {force: true});
 
   const explicitStaleWrapperRun = bashExec(`bash ${bashQuote(shellPath(wrapperPath))}`, {
     environment: {...harnessEnv, SHEIN_BI_MARKETING_IMMEDIATE_RUN: 'true'},

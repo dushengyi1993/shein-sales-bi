@@ -177,8 +177,20 @@ match('inventoryTrend age reads cachedAt/generatedAt like linksData',
   'freshness derives from the published cache timestamp');
 match('inventoryTrend refresh is host-locked and section-scoped',
   guard,
-  /curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \\\n\s*-H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \\\n\s*"\$PORTAL_URL\/api\/bi\/section\/inventoryTrend\?refresh=1&refreshToken=\$\{REFRESH_RUN_TOKEN\}" >\/dev\/null/,
+  /refresh_ack="\$\(curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS" \\\n\s*-H 'X-SHEIN-BI-HOST-LOCKED-WORKER: 1' \\\n\s*"\$PORTAL_URL\/api\/bi\/section\/inventoryTrend\?refresh=1&refreshToken=\$\{REFRESH_RUN_TOKEN\}"\)";/,
   'the sync refresh must reuse the host-locked worker header on the section endpoint');
+match('inventoryTrend refresh requires a terminal JSON ack',
+  guard,
+  /jq -e [\s\S]*type == "object"[\s\S]*\.ok == true[\s\S]*\.section == "inventoryTrend"[\s\S]*\.terminal == true/,
+  'HTTP success alone must not promote a nonterminal or wrong-section response');
+const refreshAckValidation = guard.slice(
+  guard.indexOf("if ! jq -e '\n    type == \"object\""),
+  guard.indexOf("' <<<\"$refresh_ack\""),
+);
+noMatch('terminal acknowledgement does not require generatedAt',
+  refreshAckValidation,
+  /generatedAt/,
+  'the real raw-cache host-locked acknowledgement may carry an empty generatedAt');
 match('fresh inventoryTrend skips duplicate refresh',
   guard,
   /inventoryTrend fresh ageSeconds=\$age; skip duplicate refresh/,
@@ -207,18 +219,12 @@ noMatch('inventoryTrend refresh failure is never swallowed',
   'a failed refresh must abort the guard, not fall through to a stale plan');
 match('inventoryTrend HTTP failure blocks the guard',
   guard,
-  /if ! curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS"[\s\S]*inventoryTrend HTTP refresh failed; blocking the daily inventory guard[\s\S]*return 1/,
+  /if ! refresh_ack="\$\(curl -fsS --max-time "\$INVENTORY_TREND_REFRESH_TIMEOUT_SECONDS"[\s\S]*inventoryTrend HTTP refresh failed; blocking the daily inventory guard[\s\S]*return 1/,
   'a non-success HTTP refresh must stop the guard before any plan build or write');
-check('request start is recorded before the refresh request', () => {
-  const requestStartAt = guard.indexOf('request_start_epoch="$(date +%s)"');
-  const refreshAt = guard.indexOf('inventoryTrend?refresh=1');
-  assert.ok(requestStartAt >= 0 && refreshAt >= 0 && requestStartAt < refreshAt,
-    'cachedAt advancement must be measured against a timestamp taken before the HTTP call');
-});
-match('cachedAt that did not advance past request start blocks the guard',
+noMatch('cachedAt advancement is not required after a terminal ack',
   guard,
-  /\(\( published_epoch <= request_start_epoch \)\)[\s\S]*cachedAt did not advance past request start[\s\S]*return 1/,
-  'a refresh that re-serves the old cache must stop the guard');
+  /request_start_epoch|published_epoch|cachedAt did not advance past request start/,
+  'a terminal refresh ack may legitimately leave identical cache content and cachedAt');
 match('matched current-day row count uses the planner row rule',
   guard,
   /select\(\(\( \.inventory_match_status \/\/ ""\) == "matched"\)\)[\s\S]*contains\("01_full_carton_exception"\)[\s\S]*et_box_snapshot_date[\s\S]*et_store_snapshot_date[\s\S]*\.\[0:10\]/,
@@ -227,6 +233,191 @@ match('zero matched current-day rows blocks the guard',
   guard,
   /\(\( matched_current_day <= 0 \)\)[\s\S]*inventoryTrend has no matched current-day operational rows[\s\S]*return 1/,
   'an artifact without any matched current-day ET row must stop the guard');
+
+// Exercise the actual shell refresh gate with a local curl stub. The terminal
+// case intentionally leaves inventoryTrend bytes unchanged: a valid terminal
+// ack plus a fresh cache and one current-day row is sufficient.
+check('inventoryTrend ack and cache postconditions fail closed without retries', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'inventory-trend-ack-'));
+  const runDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
+  const businessDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'})
+    .format(new Date(Date.now() - 86_400_000));
+  const trendFile = path.join(temp, 'inventoryTrend.json');
+  const linksFile = path.join(temp, 'linksData.json');
+  const countFile = path.join(temp, 'curl-count');
+  const setupDirs = [
+    path.join(temp, 'bin'),
+    path.join(temp, 'scripts', 'lib'),
+    path.join(temp, 'scripts', 'inventory'),
+    path.join(temp, 'lib'),
+  ];
+  try {
+    for (const dir of setupDirs) fs.mkdirSync(dir, {recursive: true});
+    fs.writeFileSync(path.join(temp, 'scripts', 'cloud_daily_inventory_replenishment_guard.sh'), guard);
+    fs.writeFileSync(path.join(temp, 'scripts', 'lib', 'shared_lock.sh'),
+      'prepare_shared_lock_file(){ mkdir -p "$(dirname "$1")"; touch "$1"; }\n');
+    fs.writeFileSync(path.join(temp, 'lib', 'durable_inventory_write.mjs'), `
+export async function discoverInventoryJournalFiles(file) { return [file]; }
+export async function readInventoryIntentLifecycle() {
+  return {intents: new Map(), pending: new Map(), terminalOutcomes: new Map()};
+}
+export async function readInventoryIntentJournals(files) {
+  return {
+    files,
+    records: [],
+    pending: new Map(),
+    terminalOutcomes: new Map(),
+    manualResolutions: new Map(),
+    fences: new Map(),
+    tombstonedIdempotencyKeys: new Set(),
+  };
+}
+`);
+    fs.writeFileSync(path.join(temp, 'scripts', 'inventory', 'build_daily_inventory_replenishment_plan.mjs'), `
+import fs from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+const value = flag => args[args.indexOf(flag) + 1];
+const output = value('--out');
+fs.appendFileSync(process.env.SHEIN_TEST_PHASE_FILE, 'planner\\n');
+fs.mkdirSync(path.dirname(output), {recursive: true});
+fs.writeFileSync(output, JSON.stringify({
+  date: value('--date'),
+  payloadHash: 'a'.repeat(64),
+  executable: true,
+  blockers: [],
+  actionable: [],
+}) + '\\n');
+`);
+    fs.writeFileSync(path.join(temp, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'), `
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+const value = flag => args[args.indexOf(flag) + 1];
+fs.appendFileSync(process.env.SHEIN_TEST_PHASE_FILE, 'executor\\n');
+const plan = JSON.parse(fs.readFileSync(value('--plan'), 'utf8'));
+const output = value('--out');
+fs.writeFileSync(output + '.tmp', JSON.stringify({
+  planHash: plan.payloadHash,
+  execute: true,
+  executionMode: 'automatic',
+  generatedAt: new Date().toISOString(),
+  results: [],
+}) + '\\n');
+fs.renameSync(output + '.tmp', output);
+`);
+    fs.writeFileSync(path.join(temp, 'scripts', 'pipeline_marker.mjs'), 'process.exit(0);\n');
+    fs.writeFileSync(path.join(temp, 'scripts', 'validate_daily_operating_refresh.mjs'), 'process.exit(0);\n');
+    const ack = {
+      terminal: JSON.stringify({ok: true, section: 'inventoryTrend', generatedAt: '', terminal: true}),
+      nonterminal: JSON.stringify({ok: true, section: 'inventoryTrend', generatedAt: '2026-09-01T00:00:00.000Z', terminal: false}),
+      wrongSection: JSON.stringify({ok: true, section: 'linksData', generatedAt: '2026-09-01T00:00:00.000Z', terminal: true}),
+      notOk: JSON.stringify({ok: false, section: 'inventoryTrend', generatedAt: '2026-09-01T00:00:00.000Z', terminal: true}),
+    };
+    fs.writeFileSync(path.join(temp, 'bin', 'curl'), [
+      '#!/usr/bin/env bash',
+      'set -u',
+      'is_inventory_trend=0',
+      'for arg in "$@"; do [[ "$arg" == *"/inventoryTrend?"* ]] && is_inventory_trend=1; done',
+      'if [[ "$is_inventory_trend" != "1" ]]; then printf "%s\\n" "{}"; exit 0; fi',
+      'count_file="${SHEIN_TEST_CURL_COUNT_FILE:?}"',
+      'if [[ -f "$count_file" ]]; then count=$(<"$count_file"); else count=0; fi',
+      'count=$((count + 1))',
+      'printf "%s\\n" "$count" >"$count_file"',
+      'case "${SHEIN_TEST_CURL_MODE:-terminal}" in',
+      '  http-500) exit 22 ;;',
+      `  nonjson) printf '%s\\n' 'not-json' ;;`,
+      `  not-ok) printf '%s\\n' '${ack.notOk}' ;;`,
+      `  http-202-nonterminal|nonterminal) printf '%s\\n' '${ack.nonterminal}' ;;`,
+      `  wrong-section) printf '%s\\n' '${ack.wrongSection}' ;;`,
+      `  terminal) printf '%s\\n' '${ack.terminal}' ;;`,
+      '  *) exit 99 ;;',
+      'esac',
+      '',
+    ].join('\n'));
+    fs.chmodSync(path.join(temp, 'bin', 'curl'), 0o755);
+
+    const writeSources = (cacheAgeSeconds, rowDate) => {
+      const cachedAt = new Date(Date.now() - cacheAgeSeconds * 1000).toISOString();
+      fs.writeFileSync(linksFile, JSON.stringify({cachedAt, generatedAt: cachedAt}) + '\n');
+      fs.writeFileSync(trendFile, JSON.stringify({
+        cachedAt,
+        generatedAt: cachedAt,
+        data: {
+          inventoryDepletion: {
+            products: [{inventory_match_status: 'matched', et_store_snapshot_date: rowDate}],
+          },
+        },
+      }) + '\n');
+    };
+    const wslTemp = temp
+      .replace(/^([A-Za-z]):/, (_match, drive) => `/mnt/${drive.toLowerCase()}`)
+      .replaceAll('\\', '/');
+    const wslBin = `${wslTemp}/bin`;
+    const runGuard = (mode, cacheAgeSeconds = 60, rowDate = runDate) => {
+      fs.rmSync(path.join(temp, 'runtime'), {recursive: true, force: true});
+      writeSources(cacheAgeSeconds, rowDate);
+      fs.rmSync(countFile, {force: true});
+      fs.rmSync(path.join(temp, 'phase.log'), {force: true});
+      const before = fs.readFileSync(trendFile);
+      const run = spawnSync('bash', ['-lc', [
+        `cd '${wslTemp}' &&`,
+        'env',
+        'SHEIN_BI_ROOT=.',
+        'SHEIN_BI_INVENTORY_RUNTIME_ROOT=runtime',
+        `SHEIN_BI_INVENTORY_RUN_DATE=${runDate}`,
+        `SHEIN_BI_INVENTORY_BUSINESS_DATE=${businessDate}`,
+        'SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH=0',
+        'SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=0',
+        'SHEIN_BI_INVENTORY_MAX_ROWS=10',
+        'SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS=1800',
+        'SHEIN_BI_INVENTORY_TREND_MAX_AGE_SECONDS=1800',
+        'SHEIN_BI_INVENTORY_REFRESH_TIMEOUT_SECONDS=5',
+        'SHEIN_BI_INVENTORY_REFRESH_TOKEN=fixture',
+        'SHEIN_BI_INVENTORY_LINKS_DATA_FILE=linksData.json',
+        'SHEIN_BI_INVENTORY_TREND_FILE=inventoryTrend.json',
+        'SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787',
+        `SHEIN_TEST_CURL_MODE=${mode}`,
+        'SHEIN_TEST_CURL_COUNT_FILE=curl-count',
+        'SHEIN_TEST_PHASE_FILE=phase.log',
+        `PATH='${wslBin}':"$PATH"`,
+        'bash scripts/cloud_daily_inventory_replenishment_guard.sh',
+      ].join(' ')], {encoding: 'utf8'});
+      const calls = fs.existsSync(countFile)
+        ? Number.parseInt(fs.readFileSync(countFile, 'utf8').trim(), 10)
+        : 0;
+      const phases = fs.existsSync(path.join(temp, 'phase.log'))
+        ? fs.readFileSync(path.join(temp, 'phase.log'), 'utf8').trim().split(/\r?\n/).filter(Boolean)
+        : [];
+      return {run, calls, phases, before, after: fs.readFileSync(trendFile)};
+    };
+
+    for (const testCase of [
+      {name: 'HTTP non-2xx', mode: 'http-500', cacheAgeSeconds: 60, rowDate: runDate, status: 1},
+      {name: 'non-JSON response', mode: 'nonjson', cacheAgeSeconds: 60, rowDate: runDate, status: 1},
+      {name: 'ok=false response', mode: 'not-ok', cacheAgeSeconds: 60, rowDate: runDate, status: 1},
+      {name: 'HTTP 202 nonterminal response', mode: 'http-202-nonterminal', cacheAgeSeconds: 60, rowDate: runDate, status: 1},
+      {name: 'wrong section response', mode: 'wrong-section', cacheAgeSeconds: 60, rowDate: runDate, status: 1},
+      {name: 'stale cache after terminal ack', mode: 'terminal', cacheAgeSeconds: 1801, rowDate: runDate, status: 1},
+      {name: 'zero current-day rows after terminal ack', mode: 'terminal', cacheAgeSeconds: 60, rowDate: businessDate, status: 1},
+      {name: 'same-content terminal ack', mode: 'terminal', cacheAgeSeconds: 60, rowDate: runDate, status: 0, unchanged: true},
+    ]) {
+      const result = runGuard(testCase.mode, testCase.cacheAgeSeconds, testCase.rowDate);
+      assert.equal(result.run.status, testCase.status,
+        `${testCase.name} status=${result.run.status}\nstdout=${result.run.stdout}\nstderr=${result.run.stderr}`);
+      assert.equal(result.calls, 1,
+        `${testCase.name} must issue exactly one inventoryTrend curl\nstdout=${result.run.stdout}\nstderr=${result.run.stderr}`);
+      assert.deepEqual(result.phases, testCase.status === 0 ? ['planner', 'executor'] : [],
+        `${testCase.name} must ${testCase.status === 0 ? 'reach' : 'stop before'} planner and executor`);
+      if (testCase.unchanged) {
+        assert.deepEqual(result.after, result.before,
+          'a terminal ack must allow identical cache bytes without cachedAt advancement');
+      }
+    }
+  } finally {
+    fs.rmSync(temp, {recursive: true, force: true});
+  }
+});
+
 check('stale ET projection never selects a targeted refresh reason', () => {
   const reasonStart = guard.indexOf('REFRESH_REASON=""');
   const reasonEnd = guard.indexOf('if [[ -n "$REFRESH_REASON" ]]; then', reasonStart);
