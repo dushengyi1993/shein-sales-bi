@@ -322,8 +322,8 @@ async function makePortal(dir, {core = true, section, sectionGeneratedAt = gener
     'a short slot that leaves heavy work pending must report a defer, never a false empty success');
   assert.match(worker, /HEAVY_ALLOWED="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-1\}"/,
     'the worker must receive an explicit heavy-section budget from the slot');
-  assert.match(worker, /HEAVY_ALLOWED.*0[\s\S]*EXCLUDED_SECTIONS\+=\(profit homeRankings\)/,
-    'a short reserved slot must exclude both heavy sections before claiming');
+  assert.match(worker, /HEAVY_ALLOWED.*0[\s\S]*EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily\)/,
+    'a short reserved slot must exclude every heavy section before claiming');
   assert.match(worker, /publishedRevision=\$PUBLISHED_REVISION follow-up pending/,
     'a successful claim with a newer request must report the published snapshot and follow-up');
   assert.match(worker, /Number\.isSafeInteger\(published\)[\s\S]*Number\.isSafeInteger\(desired\)[\s\S]*follow===true \? desired>published : follow===false && desired<=published/,
@@ -495,6 +495,8 @@ printf '200'
       ['SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS', '1'],
       ['SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC', '10'],
       ['SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC', '1'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC', '31'],
+      ['SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC', '1'],
       ['SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC', '1'],
       ['SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC', '60'],
       ['SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED', '1'],

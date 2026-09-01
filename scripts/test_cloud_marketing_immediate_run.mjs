@@ -28,7 +28,26 @@ import {
 } from '../lib/cloud_marketing_deadline_contract.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tempRoot = await fsp.mkdtemp(path.join(root, 'tmp', 'cloud-marketing-immediate-contract-'));
+const POSIX_SECURE_TMP_MARKER = 'SHEIN_TEST_CLOUD_MARKETING_IMMEDIATE_SECURE_TMP';
+if (process.platform !== 'win32'
+  && typeof process.getuid === 'function'
+  && process.getuid() !== 0
+  && process.env[POSIX_SECURE_TMP_MARKER] !== '1') {
+  const isolated = spawnSync('sudo', [
+    '-n', 'env', `${POSIX_SECURE_TMP_MARKER}=1`, process.execPath, fileURLToPath(import.meta.url),
+  ], {
+    cwd: root,
+    env: process.env,
+    encoding: 'utf8',
+    timeout: 120_000,
+  });
+  if (isolated.stdout) process.stdout.write(isolated.stdout);
+  if (isolated.stderr) process.stderr.write(isolated.stderr);
+  if (isolated.error) throw isolated.error;
+  process.exit(isolated.status ?? 1);
+}
+const tempBase = process.platform === 'win32' ? path.join(root, 'tmp') : '/run';
+const tempRoot = await fsp.mkdtemp(path.join(tempBase, 'cloud-marketing-immediate-contract-'));
 const nativeWslHarnessRoots = [];
 
 function sha256(value) {
@@ -69,6 +88,23 @@ function wslExec(args, {environment = {}, extraKeys = [], timeout = 120000} = {}
   ], {
     cwd: root,
     env: process.env,
+    encoding: 'utf8',
+    timeout,
+  });
+}
+
+function bashExec(command, {environment = {}, timeout = 120000} = {}) {
+  if (process.platform === 'win32') {
+    return wslExec(['bash', '-lc', command], {environment, timeout});
+  }
+  const nativeEnvironment = {...process.env};
+  for (const [key, value] of Object.entries(environment)) {
+    if (value === undefined) delete nativeEnvironment[key];
+    else nativeEnvironment[key] = String(value);
+  }
+  return spawnSync('bash', ['-c', command], {
+    cwd: root,
+    env: nativeEnvironment,
     encoding: 'utf8',
     timeout,
   });
@@ -306,7 +342,7 @@ try {
     '--max-groups', '7',
     '--ttl-sec', '3600',
     '--reason', IMMEDIATE_CONFIRMATION_TOKEN,
-    '--authorization-file', path.join(tempRoot, 'runtime', 'cli-confirmation.json'),
+    '--authorization-file', path.join(authorizationDir, 'cli-confirmation.json'),
     '--root', tempRoot,
     '--now-epoch', String(issueEpoch),
     '--time-zone', 'Asia/Shanghai',
@@ -315,13 +351,13 @@ try {
     runImmediateAuthorizationCli(baseIssueArgs),
     'IMMEDIATE_AUTHORIZATION_CONFIRMATION_REQUIRED',
   );
-  assert.equal(await exists(path.join(tempRoot, 'runtime', 'cli-confirmation.json')), false,
+  assert.equal(await exists(path.join(authorizationDir, 'cli-confirmation.json')), false,
     'missing confirmation token must fail before creating an authorization file');
   await expectReject(
     runImmediateAuthorizationCli([...baseIssueArgs, '--confirm-token', 'WRONG_CONFIRMATION']),
     'IMMEDIATE_AUTHORIZATION_CONFIRMATION_REQUIRED',
   );
-  assert.equal(await exists(path.join(tempRoot, 'runtime', 'cli-confirmation.json')), false,
+  assert.equal(await exists(path.join(authorizationDir, 'cli-confirmation.json')), false,
     'wrong confirmation token must fail before creating an authorization file');
 
   if (process.platform !== 'win32') {
@@ -507,7 +543,7 @@ try {
 
   await expectReject(
     issueImmediateAuthorization({
-      authorizationFile: path.join(tempRoot, 'runtime', 'bad-max-groups.json'),
+      authorizationFile: path.join(authorizationDir, 'bad-max-groups.json'),
       queueFile,
       root: tempRoot,
       sourceGuardFile: hostSourceGuardFile,
@@ -524,7 +560,7 @@ try {
 
   await expectReject(
     issueImmediateAuthorization({
-      authorizationFile: path.join(tempRoot, 'runtime', 'bad-guard-namespace.json'),
+      authorizationFile: path.join(authorizationDir, 'bad-guard-namespace.json'),
       queueFile,
       root: tempRoot,
       sourceGuardFile: differentHostSourceGuardFile,
@@ -538,11 +574,11 @@ try {
     }),
     /sourceGuardHash mismatch/,
   );
-  assert.equal(await exists(path.join(tempRoot, 'runtime', 'bad-guard-namespace.json')), false,
+  assert.equal(await exists(path.join(authorizationDir, 'bad-guard-namespace.json')), false,
     'a source guard SHA mismatch must not create an authorization file');
 
   const deadlineIssue = options => issueImmediateAuthorization({
-    authorizationFile: path.join(tempRoot, 'runtime', options.name),
+    authorizationFile: path.join(authorizationDir, options.name),
     queueFile,
     root: tempRoot,
     sourceGuardFile: hostSourceGuardFile,
@@ -1133,25 +1169,13 @@ process.kill(process.pid, 'SIGKILL');
     SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC: '900',
     SHEIN_BI_MARKETING_RUN_ID: 'immediate-wrapper-75-harness',
   };
-  const harnessProbe = spawnSync('wsl.exe', [
-    '--exec', 'env', ...wslEnvironmentArgs(harnessEnv),
-    'bash', '-lc', 'if [[ -e "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE" ]]; then printf yes; else printf "no path=%s dir=%s\\n" "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE" "$(dirname "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE")"; ls -ld "$(dirname "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE")" 2>&1 || true; fi',
-  ], {
-    cwd: root,
-    env: process.env,
-    encoding: 'utf8',
-  });
+  const harnessProbe = bashExec(
+    'if [[ -e "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE" ]]; then printf yes; else printf "no path=%s dir=%s\\n" "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE" "$(dirname "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE")"; ls -ld "$(dirname "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE")" 2>&1 || true; fi',
+    {environment: harnessEnv},
+  );
   assert.match(harnessProbe.stdout, /^yes$/, `bash harness path probe failed: ${harnessProbe.stdout} ${harnessProbe.stderr}`);
   const wrapperPath = path.join(root, 'scripts', 'run_cloud_marketing_fallback_slot.sh');
-  const wrapperRun = spawnSync('wsl.exe', [
-    '--exec', 'env', ...wslEnvironmentArgs(harnessEnv),
-    'bash', '-lc', `bash ${bashQuote(shellPath(wrapperPath))}`,
-  ], {
-    cwd: root,
-    env: process.env,
-    encoding: 'utf8',
-    timeout: 120000,
-  });
+  const wrapperRun = bashExec(`bash ${bashQuote(shellPath(wrapperPath))}`, {environment: harnessEnv});
   assert.equal(wrapperRun.error, undefined, `wrapper harness spawn failed: ${wrapperRun.error?.message || ''}`);
   assert.equal(wrapperRun.status, 75, `stub host-heavy runner must return 75: ${wrapperRun.stderr || wrapperRun.stdout}`);
   if (useNativeWslHarness) wslCopy(harnessAuthorizationRuntimePath, harnessAuthorizationFile);
@@ -1179,14 +1203,8 @@ process.kill(process.pid, 'SIGKILL');
   await fsp.writeFile(harnessAuthorizationFile, `${JSON.stringify(staleHarness, null, 2)}\n`, 'utf8');
   if (useNativeWslHarness) wslCopy(harnessAuthorizationFile, harnessAuthorizationRuntimePath);
   await fsp.rm(harnessHostMarker, {force: true});
-  const ordinaryStaleWrapperRun = spawnSync('wsl.exe', [
-    '--exec', 'env', ...wslEnvironmentArgs({...harnessEnv, SHEIN_BI_MARKETING_IMMEDIATE_RUN: undefined}),
-    'bash', '-lc', `bash ${bashQuote(shellPath(wrapperPath))}`,
-  ], {
-    cwd: root,
-    env: process.env,
-    encoding: 'utf8',
-    timeout: 120000,
+  const ordinaryStaleWrapperRun = bashExec(`bash ${bashQuote(shellPath(wrapperPath))}`, {
+    environment: {...harnessEnv, SHEIN_BI_MARKETING_IMMEDIATE_RUN: undefined},
   });
   assert.equal(ordinaryStaleWrapperRun.error, undefined,
     `ordinary stale wrapper harness spawn failed: ${ordinaryStaleWrapperRun.error?.message || ''}`);
@@ -1198,14 +1216,8 @@ process.kill(process.pid, 'SIGKILL');
   assert.deepEqual(JSON.parse(await fsp.readFile(harnessAuthorizationFile, 'utf8')), staleHarness,
     'ordinary scheduled stale authorization must remain immutable audit evidence');
 
-  const explicitStaleWrapperRun = spawnSync('wsl.exe', [
-    '--exec', 'env', ...wslEnvironmentArgs({...harnessEnv, SHEIN_BI_MARKETING_IMMEDIATE_RUN: 'true'}),
-    'bash', '-lc', `bash ${bashQuote(shellPath(wrapperPath))}`,
-  ], {
-    cwd: root,
-    env: process.env,
-    encoding: 'utf8',
-    timeout: 120000,
+  const explicitStaleWrapperRun = bashExec(`bash ${bashQuote(shellPath(wrapperPath))}`, {
+    environment: {...harnessEnv, SHEIN_BI_MARKETING_IMMEDIATE_RUN: 'true'},
   });
   assert.equal(explicitStaleWrapperRun.error, undefined,
     `explicit stale wrapper harness spawn failed: ${explicitStaleWrapperRun.error?.message || ''}`);
@@ -1304,15 +1316,10 @@ process.kill(process.pid, 'SIGKILL');
     SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION: 'local',
     SHEIN_BI_MARKETING_REPAIR_BUSY_SERVICES: '',
   };
-  const workerRun = spawnSync('wsl.exe', [
-    '--exec', 'env', ...wslEnvironmentArgs(workerEnv),
-    'bash', '-lc', `bash ${bashQuote(useNativeWslHarness ? `${harnessRoot}/scripts/worker-verifier-harness.sh` : shellPath(workerHarnessPath))}`,
-  ], {
-    cwd: root,
-    env: process.env,
-    encoding: 'utf8',
-    timeout: 120000,
-  });
+  const workerRun = bashExec(
+    `bash ${bashQuote(useNativeWslHarness ? `${harnessRoot}/scripts/worker-verifier-harness.sh` : shellPath(workerHarnessPath))}`,
+    {environment: workerEnv},
+  );
   assert.equal(workerRun.error, undefined, `worker verifier harness spawn failed: ${workerRun.error?.message || ''}`);
   assert.equal(workerRun.status, 75,
     `worker verifier must receive the expected metadata on the node side of the pipeline: ${workerRun.stderr || workerRun.stdout}`);
@@ -1387,7 +1394,7 @@ process.kill(process.pid, 'SIGKILL');
       '--exec', 'env', ...wslEnvironmentArgs(leaseFailureEnv, ['SHEIN_TEST_LEASE_MARKER']),
       'bash', '-lc', `bash ${bashQuote(`${harnessRoot}/scripts/worker-lease-failure-harness.sh`)}`,
     ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
-    : spawnSync('bash', ['-lc', `bash ${bashQuote(shellPath(leaseFailureWorkerPath))}`], {
+    : spawnSync('bash', ['-c', `bash ${bashQuote(shellPath(leaseFailureWorkerPath))}`], {
       cwd: root,
       env: {...process.env, ...leaseFailureEnv},
       encoding: 'utf8',
@@ -1449,7 +1456,7 @@ process.kill(process.pid, 'SIGKILL');
       '--exec', 'env', ...wslEnvironmentArgs(busyProbeEnv, ['PATH', 'SHEIN_TEST_LEASE_MARKER']),
       'bash', '-lc', `bash ${bashQuote(`${harnessRoot}/scripts/worker-busy-probe-harness.sh`)}`,
     ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
-    : spawnSync('bash', ['-lc', `bash ${bashQuote(busyProbeWorkerPath)}`], {
+    : spawnSync('bash', ['-c', `bash ${bashQuote(busyProbeWorkerPath)}`], {
       cwd: root,
       env: {...process.env, ...busyProbeEnv},
       encoding: 'utf8',
@@ -1681,6 +1688,7 @@ process.kill(process.pid, 'SIGKILL');
     'exit 66',
   ].join('\n') + '\n';
   await fsp.writeFile(loopStageFakeNode, loopFakeNodeSource, 'utf8');
+  if (process.platform !== 'win32') await fsp.chmod(loopStageFakeNode, 0o755);
   await fsp.copyFile(path.join(root, 'lib', 'atomic_file_publish.mjs'), path.join(loopStageRoot, 'lib', 'atomic_file_publish.mjs'));
   const workerSourceForLoop = await fsp.readFile(path.join(root, 'scripts', 'cloud_marketing_repair_worker.sh'), 'utf8');
   const loopWorkerStamp = 'STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"';
@@ -1830,7 +1838,7 @@ process.kill(process.pid, 'SIGKILL');
         'SHEIN_TEST_FALLBACK_RESULT', 'SHEIN_TEST_ACCOUNTING_MODE',
       ]), 'bash', '-lc', loopWorkerCommand,
     ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
-    : spawnSync('bash', ['-lc', loopWorkerCommand], {
+    : spawnSync('bash', ['-c', loopWorkerCommand], {
       cwd: root,
       env: {...process.env, ...loopEnv},
       encoding: 'utf8',
@@ -1918,7 +1926,7 @@ process.kill(process.pid, 'SIGKILL');
       ? spawnSync('wsl.exe', [
         '--exec', 'env', ...wslEnvironmentArgs(environment, extraKeys), 'bash', '-lc', loopWorkerCommand,
       ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
-      : spawnSync('bash', ['-lc', loopWorkerCommand], {
+      : spawnSync('bash', ['-c', loopWorkerCommand], {
         cwd: root,
         env: {...process.env, ...environment},
         encoding: 'utf8',
@@ -2069,7 +2077,7 @@ process.kill(process.pid, 'SIGKILL');
         'SHEIN_TEST_FALLBACK_RESULT', 'SHEIN_TEST_ACCOUNTING_MODE',
       ]), 'bash', '-lc', releaseFailureCommand,
     ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
-    : spawnSync('bash', ['-lc', releaseFailureCommand], {
+    : spawnSync('bash', ['-c', releaseFailureCommand], {
       cwd: root,
       env: {...process.env, ...loopEnv},
       encoding: 'utf8',

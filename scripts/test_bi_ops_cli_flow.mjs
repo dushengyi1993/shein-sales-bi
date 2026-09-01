@@ -19,9 +19,11 @@ if (cliSource.includes('shein-bi.dushengyi.xyz')) {
   throw new Error('bi_ops_cli still references the retired BI hostname');
 }
 const KEEP_TEMP = process.argv.includes('--keep-temp');
-const tmpBase = path.join(ROOT, 'tmp');
+const tmpBase = process.platform === 'win32' ? path.join(ROOT, 'tmp') : '/tmp';
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-cli-flow-smoke-'));
+if (process.platform !== 'win32') await fs.chmod(tmpRoot, 0o700);
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(tmpRoot, 'inventory-v2-cutover.lock');
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const portalDir = path.join(tmpRoot, 'portal');
 const portalSectionsDir = path.join(portalDir, 'sections');

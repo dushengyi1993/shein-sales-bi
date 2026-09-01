@@ -18,6 +18,7 @@
  *  13. Rejection if any write slot is not false or publishResult is not null.
  */
 import assert from 'node:assert/strict';
+import {createRequire} from 'node:module';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
@@ -32,9 +33,10 @@ import {
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmpBase = path.join(ROOT, 'tmp');
+const tmpBase = process.platform === 'win32' ? path.join(ROOT, 'tmp') : '/tmp';
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'test-recover-e2e-'));
+if (process.platform !== 'win32') await fs.chmod(tmpRoot, 0o700);
 const auditFile = path.join(tmpRoot, 'audit.jsonl');
 const taskFile = path.join(tmpRoot, 'tasks.json');
 const sessionFile = path.join(tmpRoot, 'session.json');
@@ -46,14 +48,12 @@ const recoveryPostCommitFailFile = path.join(tmpRoot, 'fail-recovery-post-commit
 const recoveryLockGateDir = path.join(tmpRoot, 'recovery-lock-gates');
 const portalDir = path.join(tmpRoot, 'portal');
 const knowledgeCacheDir = path.join(tmpRoot, 'knowledge-cache');
-const testNodeModulesDir = path.join(tmpRoot, 'node_modules');
-const sharedPgModuleDir = path.resolve(ROOT, '..', 'Shein销售统计', 'node_modules', 'pg');
+const requireFromTest = createRequire(import.meta.url);
+const sharedPgEntryPath = requireFromTest.resolve('pg');
+const sharedPgEntryUrl = pathToFileURL(sharedPgEntryPath).href;
 const pgLoaderFile = path.join(tmpRoot, 'pg-loader.mjs');
 
 await fs.mkdir(portalDir, {recursive: true});
-await fs.mkdir(testNodeModulesDir, {recursive: true});
-await fs.symlink(sharedPgModuleDir, path.join(testNodeModulesDir, 'pg'), 'junction');
-const sharedPgEntryUrl = pathToFileURL(path.join(sharedPgModuleDir, 'lib', 'index.js')).href;
 await fs.writeFile(pgLoaderFile, [
   'export async function resolve(specifier, context, nextResolve) {',
   '  if (specifier === \'pg\') {',
@@ -241,7 +241,6 @@ const portalProc = spawn(process.execPath, [
     SHEIN_BI_TEST_RECOVERY_AUDIT_FAIL_FILE: recoveryAuditFailFile,
     SHEIN_BI_TEST_RECOVERY_POST_COMMIT_FAIL_FILE: recoveryPostCommitFailFile,
     SHEIN_BI_TEST_RECOVERY_LOCK_GATE_DIR: recoveryLockGateDir,
-    NODE_PATH: testNodeModulesDir,
     NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --experimental-loader=${pathToFileURL(pgLoaderFile).href}`.trim(),
   },
   stdio: ['ignore', 'pipe', 'pipe'],

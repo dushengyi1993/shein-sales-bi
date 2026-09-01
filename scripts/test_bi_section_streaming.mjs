@@ -18,6 +18,7 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const GENERATION = 'gen-2026-08-17';
+const LARGE_SECTION = 'profitStreaming';
 const BI_SECTION_HEAD_COUNTEREXAMPLE_BYTES = 12 * 1024;
 
 async function collect(stream) {
@@ -64,30 +65,30 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'bi-section-streaming-'));
 try {
   const sectionsDir = path.join(tmp, 'sections');
   await fs.mkdir(sectionsDir, {recursive: true});
-  const bigFile = path.join(sectionsDir, 'profit.json');
+  const bigFile = path.join(sectionsDir, `${LARGE_SECTION}.json`);
   // ~96MB synthetic profit cache (near the historical 98MB production bound).
   const rowCount = 520000;
-  const payload = buildLargePayload(rowCount, {trailing: '\n\n  \n'});
+  const payload = buildLargePayload(rowCount, {section: LARGE_SECTION, trailing: '\n\n  \n'});
   assert.ok(Buffer.byteLength(payload, 'utf8') >= 88 * 1024 * 1024,
     'fixture must be near-limit 88MB+, got ' + Buffer.byteLength(payload, 'utf8'));
   await fs.writeFile(bigFile, payload, 'utf8');
 
   // ---- Bounded metadata/identity API on the near-limit artifact ------------
-  const meta = await readBiSectionMetadata(tmp, 'profit');
+  const meta = await readBiSectionMetadata(tmp, LARGE_SECTION);
   assert.ok(meta && meta.ok === true, 'bounded metadata must resolve');
   assert.equal(meta.generatedAt, GENERATION);
   assert.equal(meta.hasData, true);
   assert.ok(meta.size >= 88 * 1024 * 1024);
   assert.equal(meta.cacheKey,
-    [path.resolve(tmp), 'profit', GENERATION, meta.cachedAt, meta.size, meta.mtimeMs].join('|'),
+    [path.resolve(tmp), LARGE_SECTION, GENERATION, meta.cachedAt, meta.size, meta.mtimeMs].join('|'),
     'metadata cacheKey must mirror the artifact identity contract');
   assert.equal((await readBiSectionMetadata(tmp, 'missing')), null, 'missing section metadata is null');
 
-  assert.equal(await biSectionIdentityMatches(tmp, 'profit', GENERATION), true);
-  assert.equal(await biSectionIdentityMatches(tmp, 'profit', 'gen-other'), false);
+  assert.equal(await biSectionIdentityMatches(tmp, LARGE_SECTION, GENERATION), true);
+  assert.equal(await biSectionIdentityMatches(tmp, LARGE_SECTION, 'gen-other'), false);
   const bigIntegrity = await readIntegritySidecar(bigFile);
   assert.equal(bigIntegrity.version, 1, 'integrity sidecar schema must be versioned');
-  assert.equal(bigIntegrity.section, 'profit');
+  assert.equal(bigIntegrity.section, LARGE_SECTION);
   assert.equal(bigIntegrity.generatedAt, GENERATION);
   assert.equal(bigIntegrity.raw.byteSize, meta.size);
   assert.match(bigIntegrity.raw.sha256, /^[a-f0-9]{64}$/);
@@ -100,7 +101,7 @@ try {
 
   // ---- Identity stream with tail cacheHit/extraFields ----------------------
   const identityOptions = {extraFields: {cacheStale: true, coreGeneratedAt: 'gen-other'}};
-  const identity = await readBiSectionRawStream(tmp, 'profit', GENERATION, true, identityOptions);
+  const identity = await readBiSectionRawStream(tmp, LARGE_SECTION, GENERATION, true, identityOptions);
   assert.ok(identity, 'identity stream descriptor required');
   assert.equal(identity.headers['X-BI-Section-Mode'], 'raw-cache');
   assert.equal(identity.headers['Content-Length'], undefined, 'streamed identity must not claim a precomputed length');
@@ -112,7 +113,7 @@ try {
   assert.equal(identityPayload.data.profit.dailyStoreProducts.length, rowCount);
 
   // ---- gzip with the same metadata decodes byte-identical -----------------
-  const gzMeta = await readBiSectionRawStream(tmp, 'profit', GENERATION, true, {
+  const gzMeta = await readBiSectionRawStream(tmp, LARGE_SECTION, GENERATION, true, {
     gzip: true,
     extraFields: identityOptions.extraFields,
   });
@@ -124,9 +125,9 @@ try {
     'gzip metadata variant must decode byte-identical to the identity metadata variant');
 
   // ---- Generation mismatch fails closed on both encodings -----------------
-  assert.equal(await readBiSectionRawStream(tmp, 'profit', 'gen-other', true), null);
-  assert.equal(await readBiSectionRawStream(tmp, 'profit', 'gen-other', true, {gzip: true}), null);
-  const stale = await readBiSectionStaleRaw(tmp, 'profit', 'gen-other', {gzip: true, refreshScheduled: true});
+  assert.equal(await readBiSectionRawStream(tmp, LARGE_SECTION, 'gen-other', true), null);
+  assert.equal(await readBiSectionRawStream(tmp, LARGE_SECTION, 'gen-other', true, {gzip: true}), null);
+  const stale = await readBiSectionStaleRaw(tmp, LARGE_SECTION, 'gen-other', {gzip: true, refreshScheduled: true});
   assert.ok(stale, 'stale raw must serve any-generation artifact with stale metadata');
   const stalePayload = JSON.parse(gunzipSync(await collect(stale.stream)).toString('utf8'));
   assert.equal(stalePayload.staleSection, true);
@@ -262,7 +263,7 @@ try {
 
   // ---- fd release on early cancellation ------------------------------------
   const preOpen = getBiSectionOpenStreamCount();
-  const drop = await readBiSectionRawStream(tmp, 'profit', GENERATION, true, {
+  const drop = await readBiSectionRawStream(tmp, LARGE_SECTION, GENERATION, true, {
     gzip: true,
     extraFields: {cacheStale: true},
   });
@@ -272,7 +273,7 @@ try {
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(getBiSectionOpenStreamCount(), preOpen, 'destroying the gzip stream must release the section handle');
 
-  const dropIdentity = await readBiSectionRawStream(tmp, 'profit', GENERATION, true);
+  const dropIdentity = await readBiSectionRawStream(tmp, LARGE_SECTION, GENERATION, true);
   assert.equal(getBiSectionOpenStreamCount(), preOpen + 1, 'a live identity stream owns exactly one section handle');
   await dropIdentity.stream.destroy();
   await new Promise(resolve => setTimeout(resolve, 150));
@@ -336,7 +337,7 @@ try {
     '        res.pause();',
     '        if (gunzip) gunzip.write(chunk);',
     '        else emit(chunk);',
-    '        setTimeout(() => res.resume(), 1);',
+    '        setImmediate(() => res.resume());',
     '      });',
     "      gunzip && gunzip.on('data', part => emit(part));",
     "      res.on('end', () => { if (gunzip) gunzip.end(); });",
@@ -409,7 +410,7 @@ try {
   const childResult = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
       '--max-old-space-size=96', '--expose-gc', '--input-type=module', '-e', childProbe,
-      path.resolve(tmp), ROOT, 'profit', GENERATION,
+      path.resolve(tmp), ROOT, LARGE_SECTION, GENERATION,
     ], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],

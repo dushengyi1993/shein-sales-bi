@@ -384,6 +384,7 @@ const port = await portReady;
 process.env.CROSS_DAY_INVENTORY_TEST_BASE_URL = `http://127.0.0.1:${port}`;
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-cross-day-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 const journalEntries = async file => {
   try {

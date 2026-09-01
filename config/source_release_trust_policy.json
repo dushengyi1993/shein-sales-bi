@@ -32,6 +32,6 @@
       "release-attestation.json.sha256"
     ],
     "requireImmutableReleases": true,
-    "requireOwnerEnforcement": true
+    "requireOwnerEnforcement": false
   }
 }

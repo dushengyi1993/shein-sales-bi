@@ -19,6 +19,7 @@ const KEEP_TEMP = process.argv.includes('--keep-temp');
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-maintenance-executor-smoke-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(tmpRoot, 'inventory-v2-cutover.lock');
 const CONFIRM_TEXT = 'SHEIN_OPENAPI_SUBMIT';
 
 async function freePort() {

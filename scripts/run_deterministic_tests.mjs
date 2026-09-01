@@ -70,6 +70,7 @@ const tests = [
   'scripts/test_marketing_unified_login_recovery_contract.mjs',
   'scripts/test_new_listing_limited_discount_plan_price_source.mjs',
   'scripts/test_cloud_marketing_live_guard_resume.mjs',
+  'scripts/test_cloud_marketing_source_contracts.mjs',
   'scripts/test_marketing_scan_resilience.mjs',
   'scripts/test_marketing_price_lead_merge.mjs',
   'scripts/test_cloud_watchdog_recovery.mjs',
@@ -88,6 +89,7 @@ const tests = [
   'scripts/test_bi_frontend_accessibility.mjs',
   'scripts/test_bi_home_period_comparison.mjs',
   'scripts/test_bi_section_cache.mjs',
+  'scripts/test_bi_section_parse_slot.mjs',
   'scripts/test_bi_core_stream_reuse.mjs',
   'scripts/test_bi_query_reader_lifecycle.mjs',
   'scripts/test_bi_response_completeness.mjs',
@@ -132,6 +134,7 @@ const tests = [
   'scripts/test_partner_cli_portal_release.mjs',
   'scripts/test_partner_cli_release_pipeline.mjs',
   'scripts/test_link_ops_publish_asset_binding.mjs',
+  'scripts/test_link_business_audit_nonblocking.mjs',
   'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs',
   'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs',
   'scripts/test_link_ops_product_descriptions.mjs',
@@ -209,9 +212,20 @@ const tests = [
   'scripts/test_bi_product_profit_section_contract.mjs',
   'scripts/test_inventory_projection_contract.mjs',
   'scripts/test_inventory_replenishment_policy.mjs',
+  'scripts/test_inventory_compatibility_preflight_cli.mjs',
+  'scripts/test_inventory_compatibility_rotation.mjs',
+  'scripts/test_inventory_default_cutover_lock.mjs',
+  'scripts/test_inventory_detail_manifest_terminal.mjs',
   'scripts/test_inventory_identity_alias_guard.mjs',
+  'scripts/test_inventory_manual_resolution.mjs',
+  'scripts/test_inventory_manual_resolution_executor_fence.mjs',
+  'scripts/test_inventory_minimal_compatibility_normal_flows.mjs',
+  'scripts/test_inventory_owner_confirmed_same_target_resume.mjs',
   'scripts/test_inventory_planner_alias_identity.mjs',
   'scripts/test_inventory_planner_kj102_separation.mjs',
+  'scripts/test_inventory_reconcile_extra_scope.mjs',
+  'scripts/test_inventory_v2_fence_entrypoints.mjs',
+  'scripts/test_inventory_write_cutover_activation.mjs',
   'scripts/test_daily_inventory_replenishment_plan.mjs',
   'scripts/test_daily_inventory_current_detail_targeting.mjs',
   'scripts/test_daily_inventory_guard_targeted_detail.mjs',
@@ -238,6 +252,7 @@ const tests = [
   'scripts/smoke_cloud_marketing_live_guard_resilience.mjs',
   'scripts/test_marketing_api_light_lane.mjs',
   'scripts/test_marketing_artifact_publication_lock.mjs',
+  'scripts/test_marketing_virtual_last_row_fill.mjs',
   'scripts/test_marketing_visible_fast_path_contract.mjs',
   'scripts/test_openapi_sales_loader_validity.mjs',
   'scripts/test_openapi_sales_mapping_contract.mjs',
@@ -249,6 +264,7 @@ const tests = [
   'scripts/test_link_ops_source_skc_precedence.mjs',
   'scripts/test_fetch_shein_openapi_products_stock_retry.mjs',
   'scripts/test_cloud_bi_refresh_lock_handoff.mjs',
+  'scripts/test_portal_section_queue_recovery.mjs',
   'scripts/test_portal_security.mjs',
   'scripts/test_portal_http_security.mjs',
   'scripts/test_owner_knowledge_portal_flow.mjs',
@@ -306,6 +322,7 @@ const TEST_ESTIMATES_MS = {
   'scripts/test_morning_coordinator_portal_async.mjs': 120_000,
   'scripts/test_bi_ops_cli_flow.mjs': 90_000,
   'scripts/test_partner_cli_version_change.mjs': 30_000,
+  'scripts/test_partner_cli_updater.mjs': 35_000,
   'scripts/test_link_ops_executor_source_detail_lock.mjs': 60_000,
   'scripts/test_et_forwarder_runtime_contract.mjs': 60_000,
   'scripts/test_migrate_cloud_runtime_mount_layout.mjs': 1_800_000,
@@ -460,7 +477,9 @@ for (const file of selectedTests) {
   // local runner, then the four-shard replay was SIGTERMed at 30013ms with no
   // stdout, stderr, or assertion failure while other shards were active. Give
   // that integration test a bounded 60s outer tier and a measured 30s shard
-  // estimate; unclassified tests still keep the default 30s fail-fast budget.
+  // estimate. The updater crash/recovery matrix also needs just over the
+  // default tier (31042ms locally), so it gets the same bounded 60s tier and a
+  // measured 35s estimate; unclassified tests keep the 30s fail-fast budget.
   const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     ? 300_000
     : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs'
@@ -488,6 +507,8 @@ for (const file of selectedTests) {
               : file === 'scripts/test_bi_ops_cli_flow.mjs'
               ? 90_000
               : file === 'scripts/test_partner_cli_version_change.mjs'
+                ? 60_000
+              : file === 'scripts/test_partner_cli_updater.mjs'
                 ? 60_000
               : file === 'scripts/test_cloud_marketing_immediate_run.mjs'
                 ? 90_000

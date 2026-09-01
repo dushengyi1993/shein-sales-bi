@@ -11,7 +11,14 @@
  * - the generic request() path used by write endpoints never retries.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {isTransientFetchTransportError, SheinOpenApiClient} from '../lib/shein_openapi_client.mjs';
+
+const TEMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-openapi-readonly-retry-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(TEMP_ROOT, 'inventory-v2-cutover.lock');
+process.on('exit', () => fs.rmSync(TEMP_ROOT, {recursive: true, force: true}));
 
 const CLIENT_OPTIONS = {
   baseUrl: 'http://127.0.0.1:9',

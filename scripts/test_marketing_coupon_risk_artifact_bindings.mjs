@@ -69,6 +69,40 @@ function runNode(script, args, env) {
   });
 }
 
+
+function restoreFixturePermissions(root) {
+  let rootStat;
+  try {
+    rootStat = fs.lstatSync(root);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error('fixture cleanup root must be a real directory: ' + root);
+  }
+
+  const restoreOwnerAccess = current => {
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      fs.chmodSync(current, (stat.mode & 0o777) | 0o700);
+      for (const entry of fs.readdirSync(current, {withFileTypes: true})) {
+        restoreOwnerAccess(path.join(current, entry.name));
+      }
+      return;
+    }
+    if (stat.isFile()) fs.chmodSync(current, (stat.mode & 0o777) | 0o600);
+  };
+
+  restoreOwnerAccess(root);
+}
 function snapshotDir(dir) {
   return fs.existsSync(dir) ? new Set(fs.readdirSync(dir)) : null;
 }
@@ -250,5 +284,6 @@ try {
   console.log('marketing coupon risk artifact bindings: forged/offline rejection, byte-drift rejection, and current-registry dry-run passed');
 } finally {
   for (const [dir, before] of outputBefore) removeNewFiles(dir, before);
+  restoreFixturePermissions(tempRoot);
   fs.rmSync(tempRoot, {recursive: true, force: true});
 }

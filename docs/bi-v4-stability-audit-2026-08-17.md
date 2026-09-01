@@ -67,7 +67,7 @@
 
 源码发布必须使用可恢复 draft 状态机，并把 attestation 摘要绑定进 annotated tag；部署时还要独立回读 Tag peeled commit、main push CI run/attempt、Release 终态和生产 commit，不能只信可替换资产。
 
-本轮整改把不可变发布设为硬门而非可选加固：trust policy 强制 `requireImmutableReleases=true` 与 `requireOwnerEnforcement=true`；发布前须串行启用/确认 GitHub immutable releases policy，并权威 GET 回读 `enabled=true` 且 `enforced_by_owner=true`，不能只信 mutation 响应；创建/确认的正式 Release 终态必须 `immutable=true`。源码 attestation 升级为 schema v3（绑定 repository id、trust policy SHA-256、exact CI attempt 的 job count/jobs SHA-256），生产 deployment marker 只看 schema v3 的 `shein-bi-deployed-release/v3`，v2 仅迁移读取兼容、不满足终态。
+本轮整改当时把不可变发布设为硬门而非可选加固：正式 Release 终态必须 `immutable=true`。2026-09-01 恢复正式发布链时确认个人仓库的 `enforced_by_owner=false` 不可由仓库级设置提升，因此当前 trust policy 保持 `requireImmutableReleases=true`、改为 `requireOwnerEnforcement=false`；发布前仍须权威 GET 回读 `enabled=true`，不能只信 mutation 响应。源码 attestation 使用 schema v3（绑定 repository id、trust policy SHA-256、exact CI attempt 的 job count/jobs SHA-256），生产 deployment marker 只看 schema v3 的 `shein-bi-deployed-release/v3`，v2 仅迁移读取兼容、不满足终态。
 
 最终审查质疑 watchdog 只复验本地 attestation/tag cache、没有每轮联网重验 GitHub。复核 [GitHub 官方 immutable Release 语义](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases) 后不把它列为缺陷：正式 Release 存在期间，关联 tag 被锁定到特定 commit，不能移动或删除；即使管理员删除 Release 后再删除 tag，同名 tag 也不能复用。因此“tag 静默改指向另一 commit、watchdog 无感”的反例不成立。发布与部署门仍必须每次 fresh 回读 GitHub；日常 watchdog 则只核验当前运行字节、本地 annotated tag、固定 attestation 与 marker，避免 GitHub/token 故障反向把健康生产判死。管理员主动撤回 Release 属于远端审计事件，会在下一次发布/部署门 fail closed，不冒充当前运行字节漂移。
 
@@ -132,7 +132,7 @@ Query 大响应随后又按真实响应路径完成了有界性复核：独立 1
 
 源码冻结前对 GitHub 官方 immutable Release 语义做交叉检查时，发现既有 Partner CLI 工作流由 `release: published` 触发，却在 Release 已发布后才构建并上传 ZIP/SHA256。旧仓库尚未启用 immutable policy 时这条链偶尔能跑通；一旦按本轮设计启用不可变发布，GitHub 会拒绝发布后的资产 mutation，工作流必然失败。这不是 DeepSeek 或 CLI 命令本身的问题，而是发布状态机顺序与平台约束直接矛盾，也解释了为什么“上个包/链接”会在发布阶段反复补洞。
 
-现已删除自动 published 触发，改为唯一的 manual draft-first 链：输入 exact `tag + expected_commit`，先验证部署凭据、当前 main、annotated tag、manifest、同 SHA main-push CI 与 owner-enforced immutable policy；只在 draft 中构建、上传并逐字节下载回读两份资产，发布前再 fresh 复验全部事实，只发一次 publish PATCH。PATCH 结果不明时只轮询权威终态，不自动重发。当前 main 的自动化 checkout 与 tag 对应的 release-source checkout 已分离：draft 仍必须等于当前 main；已发布且 `immutable=true` 的版本即使 main 后续前进，也能按原 exact commit 只读复验资产并幂等部署，绝不上传、覆盖或删除资产。BI 部署前还会再次读取 main/tag/Release/CI/policy，部署后回读 managed version/source commit。静态契约与全部 Bash run block 语法已加入回归；最终效力仍以合并后的 GitHub Actions 与真实 draft 发布终验为准。
+现已删除自动 published 触发，改为唯一的 manual draft-first 链：输入 exact `tag + expected_commit`，先验证部署凭据、当前 main、annotated tag、manifest、同 SHA main-push CI 与 tracked policy 要求的 immutable release 状态；只在 draft 中构建、上传并逐字节下载回读两份资产，发布前再 fresh 复验全部事实，只发一次 publish PATCH。PATCH 结果不明时只轮询权威终态，不自动重发。当前 main 的自动化 checkout 与 tag 对应的 release-source checkout 已分离：draft 仍必须等于当前 main；已发布且 `immutable=true` 的版本即使 main 后续前进，也能按原 exact commit 只读复验资产并幂等部署，绝不上传、覆盖或删除资产。BI 部署前还会再次读取 main/tag/Release/CI/policy，部署后回读 managed version/source commit。静态契约与全部 Bash run block 语法已加入回归；最终效力仍以合并后的 GitHub Actions 与真实 draft 发布终验为准。
 
 ## 3. 为什么每次修复耗时很长、下次仍出问题
 

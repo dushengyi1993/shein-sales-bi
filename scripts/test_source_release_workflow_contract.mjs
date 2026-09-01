@@ -124,7 +124,7 @@ assert.deepEqual(policy.ci.requiredJobNames, SOURCE_RELEASE_REQUIRED_CI_JOB_NAME
 assert.deepEqual(policy.ci.allowedJobConclusions, ['success']);
 assert.equal(policy.sourceRelease.workflowPath, '.github/workflows/source-release.yml');
 assert.equal(policy.sourceRelease.requireImmutableReleases, true);
-assert.equal(policy.sourceRelease.requireOwnerEnforcement, true);
+assert.equal(policy.sourceRelease.requireOwnerEnforcement, false);
 testCount += 1;
 
 const {requiredJobNames: omittedRequiredJobNames, ...ciWithoutRequiredJobNames} = policy.ci;
@@ -155,6 +155,16 @@ assert.throws(
   }),
   /Tracked source release trust policy is invalid/u,
   'source releases must reject any skipped CI job instead of treating it as a terminal success',
+);
+testCount += 1;
+
+assert.throws(
+  () => validateSourceReleaseTrustPolicy({
+    ...policy,
+    sourceRelease: {...policy.sourceRelease, requireOwnerEnforcement: 'false'},
+  }),
+  /Tracked source release trust policy is invalid/u,
+  'owner enforcement policy must remain an explicit boolean',
 );
 testCount += 1;
 

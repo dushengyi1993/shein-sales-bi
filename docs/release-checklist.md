@@ -19,7 +19,7 @@
 
 - [ ] 固定目标 commit SHA；源码版本不低于 fresh 远端最新 `YYYY.MM.DD.N`，Tag/Release 只通过 `source-release.yml` 状态机创建或恢复，不人工创建轻量 Tag。
 - [ ] 确认 annotated tag message、peeled commit、schema v3 attestation（repository id、trust policy SHA-256、CI job count/jobs SHA-256）、checksum、Release asset API digest/size/state 和下载字节全部一致；正式 Release 必须 `immutable=true`；release note 写清变更范围、回滚点和已知限制。
-- [ ] 发布前串行启用/确认 GitHub immutable releases policy，并权威 GET 回读 `enabled=true` 且 `enforced_by_owner=true`；不能只信 mutation 响应。
+- [ ] 发布前串行启用/确认 GitHub immutable releases policy，并权威 GET 回读 `enabled=true`；`enforced_by_owner` 仅在 tracked trust policy 明确要求时才是硬门（当前个人仓库不要求）；不能只信 mutation 响应。
 - [ ] release note 明确“仅源码发布”或“已部署生产”；不得把 GitHub tag 自动等同于生产版本。
 - [ ] PR CI 与合并后同一 SHA 的 main-push CI 均完成；源码发布绑定后者的精确 run ID + run attempt，并在 publish 前后重新回读。失败、未配置或未运行的检查必须如实列出。
 - [ ] 若发布 Partner CLI，先创建指向同一 `origin/main` commit 的 annotated `partner-cli-vYYYY.MM.DD.N` tag 和 draft Release；只以 `tag + expected_commit` 手动触发 `partner-cli-release.yml`，不得手工先 publish。工作流必须在 draft 阶段上传并回读唯一 ZIP/SHA256，fresh 复验 CI/immutable policy 后单次 publish；已发布 immutable 重跑不得修改资产。

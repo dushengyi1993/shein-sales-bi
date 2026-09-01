@@ -67,7 +67,7 @@ gh release create $tag --repo dushengyi1993/shein-sales-bi --draft --verify-tag 
 gh workflow run "Partner CLI release to BI" --repo dushengyi1993/shein-sales-bi -f tag=$tag -f expected_commit=$commit
 ```
 
-工作流先检查部署凭据、当前 `origin/main`、annotated tag peeled commit、manifest 版本、GitHub repository identity、精确同 SHA main-push CI，以及 immutable releases policy 的 `enabled=true` / `enforced_by_owner=true`。它只跑静态门、Portal shell 构建和 Partner CLI 聚焦测试，不在 45 分钟发布工作流内嵌套整套长测试；整套覆盖由同 SHA main CI 证明。
+工作流先检查部署凭据、当前 `origin/main`、annotated tag peeled commit、manifest 版本、GitHub repository identity、精确同 SHA main-push CI，以及 immutable releases policy 的 `enabled=true`；`enforced_by_owner` 仅在 tracked trust policy 要求时校验。它只跑静态门、Portal shell 构建和 Partner CLI 聚焦测试，不在 45 分钟发布工作流内嵌套整套长测试；整套覆盖由同 SHA main CI 证明。
 
 draft 路径在 Release 尚可修改时构建并上传唯一 ZIP/SHA256，逐字节下载回读，同时核对 asset API 的 `state`、size 和服务端 digest；发布前再次 fresh 核对 main、tag、CI、policy 和两份资产，只发送一次 `draft=false` PATCH。无论 PATCH 响应是否明确，都只轮询权威 Release 终态，不自动重发发布请求；只有 `draft=false`、`prerelease=false`、`immutable=true` 和两份精确资产全部成立后，才构建部署 envelope、原子激活 BI 并读取状态端点。
 
@@ -75,9 +75,9 @@ draft 路径在 Release 尚可修改时构建并上传唯一 ZIP/SHA256，逐字
 
 `.github/workflows/source-release.yml` 只发布源码版本 `YYYY.MM.DD.N`，是正式源码 Tag / Release 的唯一支持路径；它不会创建 `partner-cli-v*` Release，也不会调用 BI Partner CLI 部署端点。反过来，`.github/workflows/partner-cli-release.yml` 只负责 `partner-cli-v*` draft-first 资产发布、不可变终验、BI 原子激活和回读，两条链路不得相互替代。
 
-源码 release workflow 是可恢复状态机：它把确定性 schema v3 attestation 的 SHA-256、commit 和精确 main push CI `runId + runAttempt` 写进 annotated tag；只复用完整精确的 annotated tag、tag-only 或 draft 中间态，draft 两资产可重传，已经正式发布的精确 Release 只做只读终态验证。发布前紧邻 `draft=false` PATCH 会重查 `origin/main` 与最新 CI attempt，并核对 immutable releases policy（`enabled=true` 且 `enforced_by_owner=true`）；漂移时保留 Tag/draft并拒绝发布旧 HEAD。该流程不创建或替代 `partner-cli-v*` 发布链。
+源码 release workflow 是可恢复状态机：它把确定性 schema v3 attestation 的 SHA-256、commit 和精确 main push CI `runId + runAttempt` 写进 annotated tag；只复用完整精确的 annotated tag、tag-only 或 draft 中间态，draft 两资产可重传，已经正式发布的精确 Release 只做只读终态验证。发布前紧邻 `draft=false` PATCH 会重查 `origin/main` 与最新 CI attempt，并核对 immutable releases policy（`enabled=true`，owner enforcement 按 tracked policy 条件校验）；漂移时保留 Tag/draft并拒绝发布旧 HEAD。该流程不创建或替代 `partner-cli-v*` 发布链。
 
-生产部署源码时，必须从对应源码 Release 下载并逐字节核对 `release-attestation.json` 与 `release-attestation.json.sha256`，同时核对 asset API 的 `state=uploaded`、size 和服务端 SHA-256 digest；再确认 schema v3 attestation 中 repository id、commit、trustPolicySha256、CI workflow/event/branch/run id/run attempt/URL/`completedAt`/`jobCount`/`jobsSha256`、source workflow path，与最新 main push CI 的 attempt-specific API 回读一致。Tag 必须是 annotated tag，peeled commit 与完整 tag message 中的 attestation hash 必须精确；Release 必须非 draft、非 prerelease 且 `immutable=true`，CI 时间早于发布时间，且 immutable releases policy 已 `enabled=true` 与 `enforced_by_owner=true`（发布前串行启用并以权威 GET 回读）。任一项缺失或漂移都停止部署。
+生产部署源码时，必须从对应源码 Release 下载并逐字节核对 `release-attestation.json` 与 `release-attestation.json.sha256`，同时核对 asset API 的 `state=uploaded`、size 和服务端 SHA-256 digest；再确认 schema v3 attestation 中 repository id、commit、trustPolicySha256、CI workflow/event/branch/run id/run attempt/URL/`completedAt`/`jobCount`/`jobsSha256`、source workflow path，与最新 main push CI 的 attempt-specific API 回读一致。Tag 必须是 annotated tag，peeled commit 与完整 tag message 中的 attestation hash 必须精确；Release 必须非 draft、非 prerelease 且 `immutable=true`，CI 时间早于发布时间，且 immutable releases policy 已 `enabled=true`（owner enforcement 按 tracked policy 条件校验；发布前串行启用并以权威 GET 回读）。任一项缺失或漂移都停止部署。
 
 ## 完成标准
 

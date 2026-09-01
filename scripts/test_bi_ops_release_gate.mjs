@@ -7,6 +7,7 @@
  * they do not touch production tasks and do not enable real SHEIN writes.
  */
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -299,7 +300,7 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // Deterministic registrations added after that snapshot are tracked with an
 // explicit count so the exact-equality assertions below stay source-
 // explainable instead of drifting silently or being loosened to >=.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 43;
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 59;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   - 1
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
@@ -369,10 +370,10 @@ function countDirectProductAttributeFlowInvocations(source) {
   return [...String(source || '').matchAll(directInvocationPattern)].length;
 }
 
-function run(command, args, {allowFailure = false} = {}) {
+function run(command, args, {allowFailure = false, env = process.env} = {}) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
-    const child = spawn(command, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
+    const child = spawn(command, args, {cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe']});
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', d => { stdout += d.toString(); });
@@ -623,6 +624,13 @@ async function checkBiOpsV2DeploymentBoundary() {
 
 async function main() {
   const results = [];
+  const inventoryTestEnv = {
+    ...process.env,
+    SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE: path.join(
+      os.tmpdir(),
+      `shein-bi-release-gate-${process.pid}-${Date.now()}.lock`,
+    ),
+  };
   const missing = [];
   for (const rel of [...CHECK_FILES, ...BI_OPS_V2_REQUIRED_ARTIFACTS]) {
     if (!(await pathExists(rel))) missing.push(rel);
@@ -641,7 +649,11 @@ async function main() {
   results.push({name: 'local OpenAPI boundary smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_local_openapi_boundary.mjs']))});
   results.push({name: 'cloud image asset through BI session smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_cloud_image_asset.mjs']))});
   results.push({name: 'bad transcript replay smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_bad_transcript_replay.mjs']))});
-  results.push({name: 'chat maintenance flow smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_chat_maintenance_flow.mjs']))});
+  results.push({name: 'chat maintenance flow smoke', ...(await run(
+    process.execPath,
+    ['scripts/test_bi_ops_chat_maintenance_flow.mjs'],
+    {env: inventoryTestEnv},
+  ))});
   results.push({name: 'source candidate policy smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_source_candidate_policy.mjs']))});
   results.push({name: 'OpenAPI product-detail payload mapper smoke', ...(await run(process.execPath, ['scripts/test_link_ops_product_draft_openapi_detail.mjs']))});
   results.push({name: 'account writeStores scope smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_write_whitelist_scope.mjs']))});
@@ -657,7 +669,11 @@ async function main() {
   results.push({name: 'copy_product_draft weak-readback guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--weak-readback']))});
   results.push({name: 'copy_product_draft chat locked lifecycle guard smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_success_flow.mjs', '--chat-natural', '--weak-readback']))});
   results.push({name: 'copy_product_draft all-stores capability smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_copy_product_all_stores_capability.mjs']))});
-  results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(process.execPath, ['scripts/test_bi_ops_maintenance_executor_flow.mjs']))});
+  results.push({name: 'maintenance executor fake OpenAPI smoke', ...(await run(
+    process.execPath,
+    ['scripts/test_bi_ops_maintenance_executor_flow.mjs'],
+    {env: inventoryTestEnv},
+  ))});
   const hasSk5110LocalArtifacts = (await Promise.all(SK5110_LOCAL_ARTIFACTS.map(pathExists))).every(Boolean);
   if (hasSk5110LocalArtifacts) {
     results.push({name: 'SK-5110 batch draft static guard', ...(await run(process.execPath, ['scripts/test_sk5110_batch_draft_plan.mjs']))});

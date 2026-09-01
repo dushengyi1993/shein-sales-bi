@@ -22,7 +22,7 @@ const date = new Intl.DateTimeFormat('en-CA', {
   day: '2-digit',
 }).format(new Date());
 const stores = Array.from({length: 19}, (_, index) => `S${String(index + 1).padStart(2, '0')}`);
-const fixtureRoot = fs.mkdtempSync(path.join(repoRoot, 'tmp', `marketing-repair-worker-registry-${process.pid}-`));
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), `marketing-repair-worker-registry-${process.pid}-`));
 const stateDir = path.join(fixtureRoot, 'state', 'cloud_marketing_live_guard');
 const registryRoot = path.join(fixtureRoot, 'runtime', 'marketing-plans');
 const registryFile = path.join(registryRoot, 'current.json');
@@ -282,7 +282,7 @@ function runWorker({pointerBytes, missingRegistry = false, switchDuringExecutor 
     SHEIN_TEST_QUEUE_PATH: toBashPath(queuePath),
     SHEIN_TEST_RESULT_PATH: toBashPath(resultPath),
     SHEIN_TEST_LEASE_ACTION_MARKER: toBashPath(leaseActionMarker),
-    PATH: `${toBashPath(binDir)}:/usr/bin:/bin`,
+    PATH: `${toBashPath(binDir)}:${toBashPath(path.dirname(process.execPath))}:/usr/bin:/bin`,
   };
   if (switchDuringExecutor) values.SHEIN_TEST_SWITCH_REGISTRY_TO = toBashPath(registryBPointer);
   const input = [

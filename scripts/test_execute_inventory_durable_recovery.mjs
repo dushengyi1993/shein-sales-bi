@@ -46,6 +46,7 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'execute-inventory-durable-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 const policyFile = path.join(ROOT, 'config', 'inventory_replenishment_policy.json');
 const policy = JSON.parse(await fs.readFile(policyFile, 'utf8'));
 

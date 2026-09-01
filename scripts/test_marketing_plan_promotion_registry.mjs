@@ -19,6 +19,40 @@ const stores = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'stores.json
 assert.equal(stores.length, 19, 'fixture must bind the fixed config/stores.json enabled set');
 assert.equal(new Set(stores).size, 19, 'fixed enabled store keys must be unique');
 
+function restoreFixturePermissions(root) {
+  let rootStat;
+  try {
+    rootStat = fs.lstatSync(root);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error('fixture cleanup root must be a real directory: ' + root);
+  }
+
+  const restoreOwnerAccess = current => {
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) return;
+    if (stat.isDirectory()) {
+      fs.chmodSync(current, (stat.mode & 0o777) | 0o700);
+      for (const entry of fs.readdirSync(current, {withFileTypes: true})) {
+        restoreOwnerAccess(path.join(current, entry.name));
+      }
+      return;
+    }
+    if (stat.isFile()) fs.chmodSync(current, (stat.mode & 0o777) | 0o600);
+  };
+
+  restoreOwnerAccess(root);
+}
+
 function sha256Text(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
@@ -658,5 +692,6 @@ try {
     'composite_registry_failure_preserves_sources_and_previous_current',
   ]}, null, 2));
 } finally {
+  restoreFixturePermissions(tempRoot);
   fs.rmSync(tempRoot, {recursive: true, force: true});
 }

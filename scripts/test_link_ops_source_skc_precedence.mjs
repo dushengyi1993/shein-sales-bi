@@ -8,6 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
@@ -26,19 +27,18 @@ import {
   normalizePublishPayloadImageProjection,
 } from '../lib/link_ops_publish_asset_binding.mjs';
 
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const TEMP_ROOT = await fs.mkdtemp(path.join(os.tmpdir(), 'link-ops-source-skc-precedence-'));
+const OUTPUT_ROOT = path.join(TEMP_ROOT, 'outputs');
 process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
+process.env.SHEIN_BI_OUTPUT_DIR = OUTPUT_ROOT;
+process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = path.join(OUTPUT_ROOT, 'shein_openapi_products');
 const {findOrBuildPublishPayload} = await import('./link_ops_hl_openapi_executor.mjs');
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORE = 'SRC';
 const DATE = '2099-01-02';
 const SOURCE_SKC = 'sv20990102000000001';
 const SPU = 'v209901020000';
-const fixtureRoots = [
-  path.join(ROOT, 'outputs', 'shein_links', STORE),
-  path.join(ROOT, 'outputs', 'shein_links_raw', STORE),
-  path.join(ROOT, 'outputs', 'shein_openapi_products', STORE),
-];
 const checks = [];
 
 function check(label, actual, expected) {
@@ -344,7 +344,7 @@ function setPayloadTitles(task, {ar, en}) {
 }
 
 async function setup() {
-  await writeJson(path.join(ROOT, 'outputs', 'shein_links', STORE, `${DATE}.json`), {
+  await writeJson(path.join(OUTPUT_ROOT, 'shein_links', STORE, `${DATE}.json`), {
     linkRows: [{
       storeKey: STORE,
       skc: SOURCE_SKC,
@@ -355,7 +355,7 @@ async function setup() {
     inventoryRows: [],
     performanceRows: [],
   });
-  await writeOpenApiProductCacheAtomically(path.join(ROOT, 'outputs', 'shein_openapi_products', STORE, 'latest.json'), {
+  await writeOpenApiProductCacheAtomically(path.join(OUTPUT_ROOT, 'shein_openapi_products', STORE, 'latest.json'), {
     ok: true,
     storeKey: STORE,
     fetchedAt: new Date().toISOString(),
@@ -366,7 +366,7 @@ async function setup() {
 }
 
 async function cleanup() {
-  for (const dir of fixtureRoots) await fs.rm(dir, {recursive: true, force: true});
+  await fs.rm(TEMP_ROOT, {recursive: true, force: true});
 }
 
 try {
@@ -539,7 +539,7 @@ try {
   check('unlocked destination fields fail closed', unbound.payload, null);
   check('unlocked destination fields report a structured-lock blocker', unbound.generationError, value => /structured|lock/i.test(String(value)));
 
-  await writeOpenApiProductCacheAtomically(path.join(ROOT, 'outputs', 'shein_openapi_products', STORE, 'latest.json'), {
+  await writeOpenApiProductCacheAtomically(path.join(OUTPUT_ROOT, 'shein_openapi_products', STORE, 'latest.json'), {
     ok: true,
     storeKey: STORE,
     fetchedAt: new Date().toISOString(),
@@ -554,7 +554,7 @@ try {
   check('cache source detail drift fails closed after preflight lock', drifted.payload, null);
   check('cache source detail drift has explicit source blocker', drifted.source, 'exact_source_cache_drifted');
 
-  await writeOpenApiProductCacheAtomically(path.join(ROOT, 'outputs', 'shein_openapi_products', STORE, 'latest.json'), {
+  await writeOpenApiProductCacheAtomically(path.join(OUTPUT_ROOT, 'shein_openapi_products', STORE, 'latest.json'), {
     ok: true,
     storeKey: STORE,
     fetchedAt: new Date().toISOString(),

@@ -9,6 +9,7 @@ import {
   DEFAULT_OPENAPI_PRODUCT_CACHE_DIR,
   OPENAPI_PRODUCT_CACHE_ENV,
   OPENAPI_PRODUCT_CACHE_MAX_AGE_ENV,
+  OPENAPI_PRODUCT_CACHE_RELATIVE_DIR,
   OPENAPI_PRODUCT_CACHE_SCHEMA_VERSION,
   OPENAPI_PRODUCT_CACHE_METADATA_SCHEMA_VERSION,
   readOpenApiProductCache,
@@ -21,7 +22,7 @@ import {parseArgs as parseFetchArgs} from './fetch_shein_openapi_products.mjs';
 import {parseArgs as parseReconciliationArgs} from './run_shein_openapi_products_reconciliation.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXPECTED_LOCAL_DIR = path.join(ROOT, 'outputs', 'shein_openapi_products');
+const EXPECTED_LOCAL_DIR = path.join(ROOT, OPENAPI_PRODUCT_CACHE_RELATIVE_DIR);
 const EXPECTED_RUNTIME_DIR = '/srv/shein-bi/runtime/openapi-product-cache';
 const configuredCacheDir = path.resolve(ROOT, '..', 'shein-openapi-runtime-cache');
 const NOW = new Date('2026-08-21T12:00:00.000Z');

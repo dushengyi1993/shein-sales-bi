@@ -11,6 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP_BASE = path.join(ROOT, 'tmp');
 await fs.mkdir(TMP_BASE, {recursive: true});
 const tmp = await fs.mkdtemp(path.join(TMP_BASE, 'link-ops-maintenance-inventory-durable-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(tmp, 'inventory-v2-cutover.lock');
 const pgLoaderFile = path.join(tmp, 'stub-pg-loader.mjs');
 await fs.writeFile(pgLoaderFile, "export async function resolve(specifier, context, nextResolve) { if (specifier === 'pg') return {url: 'data:text/javascript,export class Pool { constructor() {} async connect() { throw new Error(\\\"pg stub is test-only\\\"); } async end() {} } export default {Pool};', shortCircuit: true}; return nextResolve(specifier, context); }\n", 'utf8');
 const CONFIRM = 'SHEIN_OPENAPI_SUBMIT';

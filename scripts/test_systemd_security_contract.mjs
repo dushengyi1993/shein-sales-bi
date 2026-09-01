@@ -341,8 +341,8 @@ assert.doesNotMatch(yesterday, /--require nightly-(session|backup)/,
 assert.match(yesterday, /--work-fingerprint-scope yesterday-final/);
 assert.match(yesterday, /--work-semantic-version yesterday-final\/v1-openapi-finalization/);
 assert.match(yesterday, /--workset-digest-program \/usr\/bin\/printf/);
-assert.doesNotMatch(yesterday, /^SuccessExitStatus=75$/m,
-  'missing nightly-backup must remain a failed yesterday-final unit result');
+assert.match(yesterday, /^SuccessExitStatus=75$/m,
+  'a bounded dependency defer must remain retryable without marking the yesterday-final unit failed');
 assert.deepEqual(
   [...dbBackupTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim()),
   ['*-*-* 01:45:00', '*-*-* 02:05:00', '*-*-* 02:25:00'],

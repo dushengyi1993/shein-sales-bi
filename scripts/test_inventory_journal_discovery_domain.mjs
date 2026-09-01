@@ -175,7 +175,8 @@ try {
   ]);
   assert.match(guardSource, /String\(process\.env\.SHEIN_BI_INVENTORY_JOURNAL_DIRS \|\| ''\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal, \{[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories: inventoryJournalDirectories/);
   assert.match(validatorSource, /discoverInventoryJournalAuditFiles\(currentJournal, environment = process\.env\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories/);
-  assert.match(validatorSource, /skipped_terminal_readback_recorded[\s\S]*?discoverInventoryJournalAuditFiles\(currentJournal\)[\s\S]*?readInventoryIntentJournals/);
+  assert.match(validatorSource, /const journalFiles = await discoverInventoryJournalAuditFiles\(currentJournal\);[\s\S]*?const lifecycle = await readInventoryValidationLifecycle\(journalFiles, \{currentJournal, maxRunDate: runDate\}\);/);
+  assert.match(validatorSource, /async function readInventoryValidationLifecycle\(journalFiles,[\s\S]*?readInventoryIntentJournals\(journalFiles, \{maxRunDate\}\)/);
   assert.match(morningUnit, /^Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results:\/srv\/shein-bi\/runtime\/et-low-inventory-guard\/results$/m);
 
   console.log(JSON.stringify({

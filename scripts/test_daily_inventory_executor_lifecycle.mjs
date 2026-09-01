@@ -370,6 +370,7 @@ async function writeHardLinkedHistoricalIntent({
 }
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-executor-lifecycle-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 try {
   // ---------------------------------------------------------------------
   // Scenario 1: error before the durable intent -> blocked, no ReferenceError

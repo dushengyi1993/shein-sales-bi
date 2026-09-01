@@ -91,7 +91,7 @@ function sourcePolicy() {
       releaseTitlePrefix: 'SHEIN BI Ops ',
       assetNames: ['release-attestation.json', 'release-attestation.json.sha256'],
       requireImmutableReleases: true,
-      requireOwnerEnforcement: true,
+      requireOwnerEnforcement: false,
     },
   });
 }
@@ -150,7 +150,7 @@ function buildRemoteRoutes(fixture, overrides = {}) {
   }));
   routes.set(routeKey(`/repos/${repo}/immutable-releases`), response(overrides.immutable || {
     enabled: true,
-    enforced_by_owner: true,
+    enforced_by_owner: false,
   }));
   const boundRun = overrides.boundRun || ciRun({commit, runId: ci.runId, attempt: ci.runAttempt});
   const boundJobs = overrides.boundJobs || ciJobs({runId: ci.runId, attempt: ci.runAttempt});

@@ -24,6 +24,7 @@ import {
 } from '../lib/inventory_replenishment_policy.mjs';
 
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'durable-inventory-write-'));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 const journal = path.join(temp, 'result.journal.ndjson');
 const intent = {
   kind: 'intent',
