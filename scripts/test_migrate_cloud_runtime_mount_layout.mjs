@@ -9,7 +9,9 @@ import {fileURLToPath} from 'node:url';
 
 import {
   CLOUD_MAINTENANCE_POLICY_BY_SERVICE,
+  INVENTORY_WRITER_COMPATIBILITY_SERVICES,
   expectedCloudMaintenanceExecCondition,
+  expectedInventoryWriterCompatibilityCommand,
 } from '../lib/cloud_runtime_inventory.mjs';
 import {
   CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE,
@@ -558,6 +560,9 @@ async function buildFixture(tempDir) {
       ExecCondition: unitClass === 'always'
         ? ''
         : expectedCloudMaintenanceExecCondition(service, unitClass, '%n'),
+      ExecStartPre: INVENTORY_WRITER_COMPATIBILITY_SERVICES.includes(service)
+        ? expectedInventoryWriterCompatibilityCommand(service)
+        : '',
       // Production systemd appends base-unit/implicit mount dependencies (for
       // example WorkingDirectory and PrivateTmp). They are legitimate extras;
       // the canonical runtime mount set remains mandatory.

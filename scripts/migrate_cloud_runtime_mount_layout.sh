@@ -585,7 +585,7 @@ assert_effective_systemd_controls() {
   (( ${#installed_services[@]} > 0 )) || fail "effective systemd readback has no installed services at $label"
   show_output="$({
     "$SYSTEMCTL_BIN" show "${installed_services[@]}" --no-pager \
-      --property=Id,LoadState,ActiveState,SubState,Result,StateChangeTimestamp,ActiveEnterTimestamp,ExecMainCode,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,NRestarts,ExecCondition,RequiresMountsFor,BindPaths,BindReadOnlyPaths,ReadOnlyPaths,InaccessiblePaths
+      --property=Id,LoadState,ActiveState,SubState,Result,StateChangeTimestamp,ActiveEnterTimestamp,ExecMainCode,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,NRestarts,ExecCondition,ExecStartPre,RequiresMountsFor,BindPaths,BindReadOnlyPaths,ReadOnlyPaths,InaccessiblePaths
   })" || fail "effective systemd property query failed at $label"
   validation_output="$({
     EFFECTIVE_SYSTEMD_SHOW="$show_output" node --input-type=module - \
