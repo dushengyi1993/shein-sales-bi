@@ -434,10 +434,19 @@ const fake = http.createServer(async (req, res) => {
     return sendJson(res, {code: '0', msg: 'OK', traceId: 'trace-certificate'});
   }
   if (pathname === '/open-api/stock/stock-query') {
-    return sendJson(res, {code: '0', msg: 'OK', info: [{goodsInventory: [{
-      skcName: 'sv-smoke-skc',
-      skuList: [{skuCode: 'sku-smoke-001', totalUsableInventory: 100}],
-    }]}]});
+    return sendJson(res, {code: '0', msg: 'OK', info: [{
+      warehouseCode: 'PS-SMOKE-SA',
+      goodsInventory: [{
+        skcName: 'sv-smoke-skc',
+        skuList: [{
+          skuCode: 'sku-smoke-001',
+          totalInventoryQuantity: 100,
+          totalUsableInventory: 100,
+          totalLockedQuantity: 0,
+          temporaryInventoryQuantity: 0,
+        }],
+      }],
+    }]});
   }
   if (pathname === '/open-api/openapi-business-backend/product/query') {
     return sendJson(res, {code: '0', msg: 'OK', info: {data: [
@@ -565,7 +574,7 @@ try {
   check('dry-run does not misclassify CDN /80/ path as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /high-resolution-sku-main/.test(String(x))));
   check('dry-run does not misclassify numeric 80 filename as tiny SKU', dry.json?.blockers || [], xs => !asArray(xs).some(x => /\/80\.jpg/.test(String(x))));
   check('dry-run does not call write endpoint', dryPaths.some(p => ['/open-api/goods/modify-skc-shelf','/open-api/stock/change-inventory/v2','/open-api/goods/update-cost','/open-api/openapi-business-backend/product/price/save','/open-api/goods/product/partialEdit'].includes(p)), false);
-  check('dry-run validates exact current inventory through OpenAPI', dry.json?.adapterEvidence?.inventoryPreflight?.ok, true);
+  check('dry-run defers live inventory preflight to execute', dry.json?.adapterEvidence?.inventoryPreflight ?? null, null);
   check('dry-run records exact current inventory gate', dry.json?.safety?.inventoryPreflightRequired, true);
 
   const driftTask = {
@@ -579,11 +588,19 @@ try {
   const driftTaskFile = await writeJson('task-inventory-drift.json', {version: 1, tasks: [driftTask]});
   calls.length = 0;
   const driftDry = await runNode([...commonArgs, '--task-id', driftTask.id, '--task-json', driftTaskFile, '--dry-run']);
-  check('inventory drift gate exits without exception', driftDry.code, 0);
-  check('inventory drift gate blocks mismatched current stock', driftDry.json?.ok, false);
-  check('inventory drift gate reports exact mismatch', driftDry.json?.blockers || [], xs => asArray(xs).some(x => /期望当前可用 99/.test(String(x))));
-  check('inventory drift gate uses official stock query', calls.some(c => c.path === '/open-api/stock/stock-query'), true);
-  check('inventory drift gate never calls write endpoint', calls.some(c => c.path === '/open-api/stock/change-inventory/v2'), false);
+  check('inventory drift dry-run exits without exception', driftDry.code, 0);
+  check('inventory drift dry-run stays ready', driftDry.json?.state, 'ready_for_submit');
+  check('inventory drift dry-run does not call live stock preflight', calls.some(c => c.path === '/open-api/stock/stock-query'), false);
+  const driftHash = driftDry.json?.payload?.payloadHash || '';
+  const driftExecuteSnapshot = await writeExecuteSnapshot('task-inventory-drift-execute.json', driftTask, driftHash, {nonce: `claim-${driftTask.id}-drift`});
+  calls.length = 0;
+  const driftExecute = await runNode([...commonArgs, '--task-id', driftTask.id, '--task-json', driftExecuteSnapshot.file, '--execute', '--confirm', CONFIRM_TEXT, '--claim-nonce', driftExecuteSnapshot.nonce]);
+  check('inventory drift blocked execute exits 1', driftExecute.code, 1);
+  check('inventory drift execute blocks mismatched current stock', driftExecute.json?.state, 'blocked');
+  check('inventory drift execute makes no write attempt', driftExecute.json?.adapterEvidence?.writeAttempted, false);
+  check('inventory drift execute reports exact SKU mismatch', driftExecute.json?.blockers || [], xs => asArray(xs).some(x => /INVENTORY_FRESH_STOCK_ROW_REQUIRED/.test(String(x)) && /"mismatchedSkuCodes":\["sku-smoke-001"\]/.test(String(x))));
+  check('inventory drift execute uses official stock query', calls.some(c => c.path === '/open-api/stock/stock-query'), true);
+  check('inventory drift execute never calls write endpoint', calls.some(c => c.path === '/open-api/stock/change-inventory/v2'), false);
 
   const manyDetailTask = {
     id: 'many-detail-image-smoke',
@@ -778,6 +795,7 @@ try {
   check('execute exits 0', exec.code, 0);
   check('execute state submitted', exec.json?.state, 'submitted');
   check('execute publishResult code', exec.json?.publishResult?.code, '0');
+  check('execute validates exact current inventory through OpenAPI', exec.json?.adapterEvidence?.inventoryPreflight?.ok, true);
   check('execute mixed readback stays pending because product price has no approved exact field', exec.json?.readback?.ok, false);
   check('execute readback includes stock', exec.json?.readback?.status || '', s => String(s).includes('matched_stock_query'));
   check('execute product price stays explicitly unconfirmed', exec.json?.readback?.status || '', s => String(s).includes('product_price_unconfirmed'));

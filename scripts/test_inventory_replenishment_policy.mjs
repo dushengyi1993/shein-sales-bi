@@ -224,7 +224,7 @@ assert.match(guardScript, /state:"already_completed"/);
 assert.match(guardScript, /automatic inventory executor did not produce a complete result[\s\S]*exit 1/);
 assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=${livePolicy.execution.automaticExecution.allowedContext}`));
 assert.match(guardService, new RegExp(`SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION=${livePolicy.execution.automaticExecution.authorizationId}`));
-assert.match(guardService, /^Wants=.*shein-bi-cloud-morning-chain\.service$/m);
+assert.match(guardService, /^Wants=network-online\.target$/m);
 assert.match(guardService, /^After=.*shein-bi-cloud-morning-chain\.service.*shein-bi-cloud-et-forwarder\.service$/m);
 assert.match(guardService, /^Environment=SHEIN_BI_INVENTORY_LINKS_MAX_AGE_SECONDS=1800$/m);
 assert.match(guardService, /--deadline-at 15:27/);

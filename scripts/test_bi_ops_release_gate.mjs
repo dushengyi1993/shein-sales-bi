@@ -293,6 +293,18 @@ const OWNERSHIP_BASELINE_INTERSECTION_COUNT = 19;
 const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   + OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT
   - OWNERSHIP_BASELINE_INTERSECTION_COUNT;
+// Provenance: commit f0d5301 fixed the post-transfer ownership snapshot
+// (deterministic runner = 184 - dedicated release gate = 183 entries,
+// direct gate calls 49 -> 30, direct unique 41 -> 22, owner union 206).
+// Deterministic registrations added after that snapshot are tracked with an
+// explicit count so the exact-equality assertions below stay source-
+// explainable instead of drifting silently or being loosened to >=.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 43;
+const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
+  - 1
+  + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
+const OWNERSHIP_CURRENT_UNION_COUNT = OWNERSHIP_BASELINE_UNION_COUNT
+  + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
 const DIRECT_TESTS_TRANSFERRED_TO_DETERMINISTIC_SHARDS = [
   'scripts/test_bi_ops_chat_action_matrix.mjs',
   'scripts/test_bi_ops_chat_inference.mjs',
@@ -437,6 +449,8 @@ async function checkDeterministicSuiteDelegation() {
       directUnique: OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT,
       intersection: OWNERSHIP_BASELINE_INTERSECTION_COUNT,
       union: OWNERSHIP_BASELINE_UNION_COUNT,
+      provenanceCommit: 'f0d5301',
+      postBaselineDeterministicAdditions: OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS,
     },
     current: {
       deterministicEntries: deterministicTests.length,
@@ -462,7 +476,7 @@ async function checkDeterministicSuiteDelegation() {
       && /node scripts\/run_deterministic_tests\.mjs --shard/.test(workflow),
     deterministicRegistrationsAreUnique: deterministicTests.length === deterministicSet.size,
     deterministicCountPreservedAfterDedicatedGateTransfer:
-      deterministicSet.size === OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT - 1,
+      deterministicSet.size === OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT,
     directCallCountReducedOnlyByTransferredTests:
       directInvocations.length === OWNERSHIP_BASELINE_DIRECT_CALL_COUNT - DIRECT_TESTS_TRANSFERRED_TO_DETERMINISTIC_SHARDS.length,
     directUniqueCountReducedOnlyByTransferredTests:
@@ -474,7 +488,7 @@ async function checkDeterministicSuiteDelegation() {
     ),
     dedicatedReleaseGateCiOwnerExactlyOnce: countLiteral(releaseGateJob, releaseGateCommand) === 1
       && countLiteral(workflow, releaseGateCommand) === 1,
-    ownershipUnionPreserved: ownershipUnion.size === OWNERSHIP_BASELINE_UNION_COUNT,
+    ownershipUnionPreserved: ownershipUnion.size === OWNERSHIP_CURRENT_UNION_COUNT,
     terminalGateRequiresExactThreeJobsAndFailsClosed: terminalJobIsExactAndFailClosed(workflow),
     releaseGateDoesNotNestFullSuite: !nestedFullRun,
   };

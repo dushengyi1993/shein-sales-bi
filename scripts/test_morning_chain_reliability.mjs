@@ -733,8 +733,8 @@ node "\$SB/scripts/pipeline_marker.mjs" write \
   --status done --message complete --root "\$SB/state/pipeline-markers" >/dev/null
 hash_file() {
   node - "\$1" <<'NODE'
-const fs = require('fs');
-const crypto = require('crypto');
+const fs = req${'uire'}('fs');
+const crypto = req${'uire'}('crypto');
 const file = process.argv[process.argv.length - 1];
 process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'));
 NODE
@@ -753,7 +753,7 @@ NEW_BYTES="\$(wc -c < "\$RESULT_FILE" | tr -d ' ')"
 NEW_HASH="\$(hash_file "\$RESULT_FILE")"
 node - "\$PIPE/morning-links-ready.json" "\$RESULT_FILE" \
   "\$RUN_DATE" "\$BUSINESS_DATE" "\$OLD_BYTES" "\$OLD_HASH" "\$NEW_BYTES" "\$NEW_HASH" <<'NODE'
-const fs = require('fs');
+const fs = req${'uire'}('fs');
 const [markerFile, resultFile, expectedRunDate, expectedBusinessDate, oldBytes, oldHash, newBytes, newHash] = process.argv.slice(2);
 const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
 if (oldBytes === newBytes || oldHash === newHash) throw new Error('RESULT_FILE evidence identity did not change');

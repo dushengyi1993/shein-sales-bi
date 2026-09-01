@@ -296,6 +296,7 @@ const TEST_ESTIMATES_MS = {
   'scripts/test_morning_metric_refetch.mjs': 120_000,
   'scripts/test_cloud_session_manager_reliability.mjs': 120_000,
   'scripts/test_bi_query_surface_isolation.mjs': 120_000,
+  'scripts/test_cloud_marketing_immediate_run.mjs': 90_000,
   'scripts/test_bi_section_streaming.mjs': 120_000,
   'scripts/test_bi_section_portal_streaming.mjs': 120_000,
   'scripts/test_bi_portal_section_queue_window.mjs': 60_000,
@@ -488,6 +489,8 @@ for (const file of selectedTests) {
               ? 90_000
               : file === 'scripts/test_partner_cli_version_change.mjs'
                 ? 60_000
+              : file === 'scripts/test_cloud_marketing_immediate_run.mjs'
+                ? 90_000
               : file === 'scripts/test_link_ops_executor_source_detail_lock.mjs'
                 ? 60_000
                 : file === 'scripts/test_et_forwarder_runtime_contract.mjs'

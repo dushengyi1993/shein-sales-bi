@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,6 +33,7 @@ await fs.writeFile(linksData, JSON.stringify({storeLinks: [{
   original_supply_price_range_sar: '273.52', activity_label: '',
 }]}));
 await fs.writeFile(priceOverrides, JSON.stringify({items: []}));
+const priceOverridesSha256 = crypto.createHash('sha256').update(await fs.readFile(priceOverrides)).digest('hex');
 await fs.writeFile(costMap, JSON.stringify({
   costMap: {'SK-13034': 95, [canonical]: 95},
   trueCostMap: {[canonical]: {
@@ -57,6 +59,7 @@ const result = spawnSync(process.execPath, [
   '--date', '2026-07-12',
   '--links-data', linksData,
   '--price-overrides', priceOverrides,
+  '--expected-price-overrides-sha256', priceOverridesSha256,
   '--cost-map', costMap,
   '--current-marketing-live-scan', liveScan,
   '--link-history-dir', historyDir,

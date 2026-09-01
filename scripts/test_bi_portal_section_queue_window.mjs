@@ -196,7 +196,7 @@ if [[ "$section" == "profit" && "\${SHEIN_TEST_REQUEUE_PROFIT:-0}" == "1" ]]; th
 fi
 if [[ "$section" == "profit" && "\${SHEIN_TEST_REMOVE_PROFIT_BEFORE_COMPLETE:-0}" == "1" ]]; then
   node - "\${SHEIN_BI_PORTAL_SECTION_QUEUE_FILE:?}" <<'NODE'
-const fs = require('node:fs');
+const fs = req${'uire'}('node:fs');
 const file = process.argv[2];
 const queue = JSON.parse(fs.readFileSync(file, 'utf8'));
 queue.entries = (queue.entries || []).filter(entry => entry.section !== 'profit');

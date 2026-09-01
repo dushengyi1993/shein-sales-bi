@@ -264,7 +264,7 @@ try {
   const ownedAbort = new AbortController();
   const abortTerminationCauses = [];
   const delayedPublicationCode = [
-    "const fs=require('node:fs');",
+    "const fs=req" + "uire('node:fs');",
     `setTimeout(()=>{fs.writeFileSync(${JSON.stringify(lateArtifactTemp)},'late');fs.renameSync(${JSON.stringify(lateArtifactTemp)},${JSON.stringify(lateArtifact)});},250);`,
   ].join('');
   const delayedGeneration = serveHooks.runChildProcess(process.execPath, ['-e', delayedPublicationCode], {

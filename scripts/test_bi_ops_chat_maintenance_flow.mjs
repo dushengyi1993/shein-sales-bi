@@ -179,10 +179,19 @@ const fakeOpenApi = http.createServer(async (request, response) => {
       code: '0',
       msg: 'OK',
       traceId: 'fake-stock-readback-trace',
-      info: [{goodsInventory: [{
-        skcName: 'sv-maint-skc',
-        skuList: [{skuCode: 'sku-maint-001', totalUsableInventory: 111}],
-      }]}],
+      info: [{
+        warehouseCode: 'PS-MAINT-SA',
+        goodsInventory: [{
+          skcName: 'sv-maint-skc',
+          skuList: [{
+            skuCode: 'sku-maint-001',
+            totalInventoryQuantity: 111,
+            totalUsableInventory: 111,
+            totalLockedQuantity: 0,
+            temporaryInventoryQuantity: 0,
+          }],
+        }],
+      }],
     });
   }
   if (pathname === '/open-api/goods/spu-info') {

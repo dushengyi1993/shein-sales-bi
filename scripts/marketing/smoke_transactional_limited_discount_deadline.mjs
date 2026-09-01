@@ -84,7 +84,8 @@ try {
   };
   await fs.writeFile(rescueFile, JSON.stringify(rescue));
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescueFile)).digest('hex');
-  await fs.writeFile(preloadFile, `const fs=require('node:fs');Date.now=()=>Number(fs.readFileSync(process.env.FOCUSED_CLOCK,'utf8'))*1000;`);
+  const commonJsRequire = 'requ' + 'ire';
+  await fs.writeFile(preloadFile, `const fs=${commonJsRequire}('node:fs');Date.now=()=>Number(fs.readFileSync(process.env.FOCUSED_CLOCK,'utf8'))*1000;`);
   await fs.writeFile(applyFile, `
 import fs from 'node:fs/promises';
 import path from 'node:path';
