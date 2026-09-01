@@ -221,24 +221,133 @@ jobs:
             local pages="${output}.pages"
             gh_json --paginate --slurp \
               "/repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$pages"
-            jq -c --arg tag "$version" '
-              [ .[][] | select(.tag_name == $tag) ]
-              | if length == 0 then {exists:false}
-                elif length != 1 then error("duplicate GitHub Releases for exact tag")
-                else .[0] | {
-                  exists:true,
-                  id:.id,
-                  tagName:.tag_name,
-                  title:.name,
-                  body:.body,
-                  draft:.draft,
-                  prerelease:.prerelease,
-                  immutable:.immutable,
-                  publishedAt:.published_at,
-                  url:.html_url,
-                  assets:[.assets[] | {id:.id,name:.name,state:.state,size:.size,digest:.digest}]
-                } end
-            ' "$pages" > "$output"
+            node - "$pages" "$version" "$expected_commit" "$release_title" "$output" "${expected_assets_file:-}" "${unknown_body_file:-}" <<'NODE'
+          // INSPECT_RELEASE_EVALUATOR_BEGIN
+          function evaluateInspectRelease({releases, version, expectedCommit, expectedTitle, expectedAssets, expectedUnknownBody}) {
+            if (!Array.isArray(releases)) {
+              throw new Error('GitHub releases payload must be an array');
+            }
+            const normalize = (r, overrideTagName) => ({
+              exists: true,
+              id: r.id,
+              tagName: overrideTagName || r.tag_name,
+              title: r.name,
+              body: r.body,
+              draft: r.draft,
+              prerelease: r.prerelease,
+              immutable: r.immutable,
+              publishedAt: r.published_at,
+              url: r.html_url,
+              assets: Array.isArray(r.assets) ? r.assets.map(a => ({
+                id: a.id,
+                name: a.name,
+                state: a.state,
+                size: a.size,
+                digest: a.digest,
+              })) : [],
+            });
+            const exactMatches = releases.filter(r => r && r.tag_name === version);
+            if (exactMatches.length > 1) {
+              throw new Error('duplicate GitHub Releases for exact tag');
+            }
+            if (!expectedUnknownBody || !expectedAssets) {
+              return exactMatches.length === 1 ? normalize(exactMatches[0]) : {exists: false};
+            }
+            const expectedNames = Object.keys(expectedAssets || {}).sort();
+            const isMatchingAssets = assets => {
+              if (!Array.isArray(assets)) return false;
+              const byName = new Map();
+              for (const a of assets) byName.set(a?.name, (byName.get(a?.name) || 0) + 1);
+              for (const name of expectedNames) {
+                if (byName.get(name) !== 1) return false;
+              }
+              if (assets.some(a => !Object.hasOwn(expectedAssets, a?.name))) return false;
+              for (const name of expectedNames) {
+                const a = assets.find(row => row?.name === name);
+                const exp = expectedAssets[name];
+                if (!a || a.state !== 'uploaded' || a.size !== exp.size || a.digest !== exp.digest) return false;
+              }
+              return true;
+            };
+            const candidateDrafts = releases.filter(r => (
+              r && r.draft === true && r.prerelease === false &&
+              typeof r.tag_name === 'string' && /^untagged-[A-Za-z0-9._-]+$/.test(r.tag_name) &&
+              r.name === expectedTitle && r.target_commitish === expectedCommit &&
+              r.body === expectedUnknownBody && isMatchingAssets(r.assets)
+            ));
+            const strongRelatedReleases = releases.filter(r => (
+              r && (
+                r.name === expectedTitle ||
+                r.body === expectedUnknownBody ||
+                isMatchingAssets(r.assets)
+              )
+            ));
+            if (exactMatches.length === 1) {
+              const exactRelease = exactMatches[0];
+              const ambiguousSiblings = strongRelatedReleases.filter(r => (
+                r !== exactRelease && (
+                  (typeof r.tag_name === 'string' && /^untagged-[A-Za-z0-9._-]+$/.test(r.tag_name)) ||
+                  r.body === expectedUnknownBody
+                )
+              ));
+              if (ambiguousSiblings.length > 0) {
+                throw new Error('exact release has an ambiguous immutable untagged sibling for ' + version);
+              }
+              return normalize(exactRelease);
+            }
+            const relatedReleases = strongRelatedReleases;
+            if (relatedReleases.length === 0) {
+              return {exists: false};
+            }
+            if (relatedReleases.length !== 1 || candidateDrafts.length > 1) {
+              throw new Error('duplicate or ambiguous release drafts for ' + version);
+            }
+            if (candidateDrafts.length !== 1 || relatedReleases[0] !== candidateDrafts[0]) {
+              throw new Error('Existing related release for ' + version + ' does not satisfy exact immutable draft contract');
+            }
+            return normalize(candidateDrafts[0], version);
+          }
+          // INSPECT_RELEASE_EVALUATOR_END
+          // EXPECTED_RELEASE_IDENTITY_READER_BEGIN
+          function readExpectedReleaseIdentityFiles(expectedAssetsFile, unknownBodyFile, fileSystem) {
+            const readRequired = (file, label) => {
+              try {
+                return fileSystem.readFileSync(file, 'utf8');
+              } catch (error) {
+                throw new Error(label + ' cannot be read: ' + error.message);
+              }
+            };
+            let expectedAssets = null;
+            if (expectedAssetsFile) {
+              const raw = readRequired(expectedAssetsFile, 'Expected assets file');
+              try {
+                expectedAssets = JSON.parse(raw);
+              } catch (error) {
+                throw new Error('Expected assets file is invalid JSON: ' + error.message);
+              }
+              if (!expectedAssets || typeof expectedAssets !== 'object' || Array.isArray(expectedAssets)) {
+                throw new Error('Expected assets file must contain an object');
+              }
+            }
+            let expectedUnknownBody = null;
+            if (unknownBodyFile) {
+              expectedUnknownBody = readRequired(unknownBodyFile, 'Expected unknown body file');
+              if (!expectedUnknownBody) {
+                throw new Error('Expected unknown body file is empty');
+              }
+            }
+            return {expectedAssets, expectedUnknownBody};
+          }
+          // EXPECTED_RELEASE_IDENTITY_READER_END
+          const fs = require('fs');
+          const [pagesFile, version, expectedCommit, expectedTitle, output, expectedAssetsFile, unknownBodyFile] = process.argv.slice(2);
+          const pages = JSON.parse(fs.readFileSync(pagesFile, 'utf8'));
+          const releases = Array.isArray(pages) ? pages.flat() : [];
+          const {expectedAssets, expectedUnknownBody} =
+            readExpectedReleaseIdentityFiles(expectedAssetsFile, unknownBodyFile, fs);
+          const result = evaluateInspectRelease({releases, version, expectedCommit, expectedTitle, expectedAssets, expectedUnknownBody});
+          fs.writeFileSync(output, `${JSON.stringify(result)}\n`);
+          NODE
           }
 
           parse_tag_binding() {
@@ -485,6 +594,7 @@ jobs:
           if (!body.includes(from)) throw new Error('Draft body journal is missing');
           fs.writeFileSync(output, body.replace(from, to));
           NODE
+          inspect_release "$release_json"
 
           initial_state="$temp_dir/state-initial.json"
           initial_plan="$temp_dir/plan-initial.json"
