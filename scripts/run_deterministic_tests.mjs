@@ -137,6 +137,7 @@ const tests = [
   'scripts/test_link_business_audit_nonblocking.mjs',
   'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs',
   'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs',
+  'scripts/test_link_ops_reuse_normal_binding_payload.mjs',
   'scripts/test_link_ops_product_descriptions.mjs',
   'scripts/test_link_ops_empty_description_authorization.mjs',
   'scripts/test_link_ops_duplicate_publish_override.mjs',
@@ -304,6 +305,7 @@ const tests = [
 const TEST_ESTIMATES_MS = {
   'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs': 2_000,
   'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs': 5_000,
+  'scripts/test_link_ops_reuse_normal_binding_payload.mjs': 5_000,
   'scripts/test_link_ops_prepare_product_attribute_flow.mjs': 1_200_000,
   'scripts/test_link_ops_prepare_descriptions_flow.mjs': 300_000,
   'scripts/test_link_ops_update_description_flow.mjs': 240_000,
@@ -490,6 +492,8 @@ for (const file of selectedTests) {
     : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs'
       ? 30_000
       : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs'
+        ? 60_000
+      : file === 'scripts/test_link_ops_reuse_normal_binding_payload.mjs'
         ? 60_000
     : file === 'scripts/test_link_ops_update_description_flow.mjs'
       ? 240_000
