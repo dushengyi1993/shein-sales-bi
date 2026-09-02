@@ -150,10 +150,27 @@ const finalized = await finalizeInventoryCompatibilityRotation({...finalizeOptio
 assert.equal(finalized.state, 'rotation_finalize_receipt_recovered');
 assert.equal(finalized.record.authority.sourceFingerprint, authorityN1.sourceFingerprint);
 await assert.rejects(requireCurrentInventoryCutoverActivation({...commonPaths, authorityReader: async () => restartN}), /ROLLBACK_OR_DEPLOYMENT_DRIFT/);
+const fingerprintMismatchN1 = {...authorityN1, sourceFingerprint: candidate.sourceFingerprint};
+assert.equal((await requireCurrentInventoryCutoverActivation({
+  ...commonPaths,
+  authorityReader: async () => fingerprintMismatchN1,
+})).compatibility.activeGeneration, 2);
+for (const [field, value] of [
+  ['deployedCommit', 'f'.repeat(40)],
+  ['bundleSha256', 'e'.repeat(64)],
+  ['releaseReceiptKind', 'emergency'],
+  ['releaseReceiptHash', 'd'.repeat(64)],
+  ['releaseReceiptFile', path.join(temp, 'unexpected-release.json')],
+]) {
+  await assert.rejects(requireCurrentInventoryCutoverActivation({
+    ...commonPaths,
+    authorityReader: async () => ({...authorityN1, [field]: value}),
+  }), /ROLLBACK_OR_DEPLOYMENT_DRIFT/);
+}
 await assert.rejects(requireCurrentInventoryCutoverActivation({
   ...commonPaths,
-  authorityReader: async () => ({...authorityN1, sourceFingerprint: candidate.sourceFingerprint}),
-}), /ROLLBACK_OR_DEPLOYMENT_DRIFT/);
+  authorityReader: async () => ({...authorityN1, trackedSourceClean: false}),
+}), /INVENTORY_CUTOVER_DEPLOYMENT_AUTHORITY_INVALID/);
 const restartN1 = {...authorityN1, writerServices: service('7'.repeat(64)), capturedAt: '2026-08-27T01:25:00.000Z'};
 assert.equal((await requireCurrentInventoryCutoverActivation({...commonPaths, authorityReader: async () => restartN1})).compatibility.activeGeneration, 2);
 
@@ -205,7 +222,7 @@ console.log(JSON.stringify({
     'fingerprint_only_migration_finalizes_to_live_authority',
     'rotation_finalize_append_crash_recovers_same_hash',
     'generation_n_plus_one_finalizes_and_old_n_rolls_back_fail_closed',
-    'finalized_active_authority_restores_strict_fingerprint_comparison',
+    'finalized_active_authority_permits_fingerprint_mismatch_and_rejects_core_release_identity_drift',
     'new_generation_restart_remains_compatible',
     'compatibility_records_are_append_only_and_status_cli_reads_generation',
     'stage_and_finalize_current_state_hash_require_hex64',
