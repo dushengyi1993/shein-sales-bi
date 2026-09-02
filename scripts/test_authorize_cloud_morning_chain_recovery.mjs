@@ -43,6 +43,25 @@ const STOCK_REFRESH_MARKER = {
   runDate: RUN_DATE,
   businessDate: RUN_DATE,
 };
+const NESTED_METRIC_DEADLINE = OLD_DEADLINE - 31_623;
+const METRIC_REFETCH_STATE = {
+  schemaVersion: 'cloud-link-business-metric-refetch/v2',
+  date: BUSINESS_DATE,
+  runKey: `${RUN_DATE}:${BUSINESS_DATE}`,
+  status: 'deadline',
+  attempts: 1,
+  maxAttempts: 12,
+  deadlineEpoch: NESTED_METRIC_DEADLINE,
+  targetStores: Array.from({length: 19}, (_, index) => `STORE_${index + 1}`),
+  replacedStores: [],
+  failedStores: [],
+  deferredStores: [],
+  startedAt: '2026-08-24T01:30:00.000Z',
+  updatedAt: '2026-08-24T02:00:00.000Z',
+  transactionRoot: '',
+  source: {status: 'rolled_back', fingerprint: '', transactionRoot: ''},
+  phases: {},
+};
 
 async function writeJson(file, value) {
   await fs.mkdir(path.dirname(file), {recursive: true});
@@ -59,6 +78,9 @@ async function makeFixture({
   dailyOperatingRefresh = null,
   inventoryStarted = true,
   stockRefresh = null,
+  metricRefetch = null,
+  metricManifest = false,
+  metricJournal = [{event: 'transaction_created'}],
   dailyInventoryGuard = null,
   artifact = '',
   writer = writeJsonFileAtomic,
@@ -121,6 +143,23 @@ async function makeFixture({
   if (stockRefresh !== null) {
     await writeJson(path.join(markerRoot, 'stock-refresh.json'), stockRefresh);
   }
+  if (metricRefetch !== null) {
+    const metricTransactionRoot = metricRefetch.transactionRoot
+      || path.join(stateRoot, '.link-business-metric-refetch.fixture');
+    await fs.mkdir(metricTransactionRoot, {recursive: true});
+    if (metricManifest) {
+      await writeJson(path.join(metricTransactionRoot, 'manifest.json'), {status: 'created'});
+    }
+    await fs.writeFile(
+      path.join(metricTransactionRoot, 'journal.ndjson'),
+      `${metricJournal.map(event => JSON.stringify(event)).join('\n')}\n`,
+      'utf8',
+    );
+    await writeJson(path.join(stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json'), {
+      ...metricRefetch,
+      transactionRoot: metricRefetch.transactionRoot || metricTransactionRoot,
+    });
+  }
   if (dailyInventoryGuard !== null) {
     await writeJson(path.join(markerRoot, 'daily-inventory-guard.json'), dailyInventoryGuard);
   }
@@ -146,6 +185,7 @@ async function makeFixture({
     };
   };
   const lockCalls = [];
+  const writerCalls = [];
   const withExclusiveLock = async (lockPath, callback) => {
     lockCalls.push(lockPath);
     if (lock) throw new MorningChainRecoveryError('lock is already held', {code: 'MORNING_CHAIN_RECOVERY_LOCK_CONFLICT', exitCode: 75});
@@ -162,7 +202,10 @@ async function makeFixture({
     maintenanceStatusReader: async () => maintenance,
     systemctlRunner,
     withExclusiveLock,
-    writeJsonFileAtomic: writer,
+    writeJsonFileAtomic: async (file, value, options) => {
+      writerCalls.push(path.basename(file));
+      return writer(file, value, options);
+    },
   };
   return {
     root,
@@ -173,11 +216,13 @@ async function makeFixture({
     inventoryPlanFile,
     inventoryResultFile,
     inventoryJournalFile,
+    writerCalls,
     systemctlCalls,
     lockCalls,
     deps,
     readActive: () => fs.readFile(path.join(cloudState, 'active.json'), 'utf8'),
     readReceipt: () => fs.readFile(path.join(cloudState, 'recovery', `${RUN_DATE}.json`), 'utf8'),
+    readMetricRefetch: () => fs.readFile(path.join(stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json'), 'utf8'),
     readActiveStat: () => fs.stat(path.join(cloudState, 'active.json')),
     readReceiptStat: () => fs.stat(path.join(cloudState, 'recovery', `${RUN_DATE}.json`)),
   };
@@ -427,6 +472,137 @@ async function main() {
         ...option,
       }); fixtures.push(fx);
       await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), expectedCode);
+    }
+
+    // The nested metric deadline is advanced atomically to the outer recovery
+    // deadline.  The stale candidate root is unbound but never deleted, and
+    // attempts/max/target identity are preserved.
+    {
+      const fx = await makeFixture({metricRefetch: METRIC_REFETCH_STATE}); fixtures.push(fx);
+      const candidateRoot = path.join(fx.stateRoot, '.link-business-metric-refetch.fixture');
+      const result = await authorizeCloudMorningChainRecovery(fx.deps);
+      const receipt = JSON.parse(await fx.readReceipt());
+      const active = JSON.parse(await fx.readActive());
+      const metric = JSON.parse(await fx.readMetricRefetch());
+      assert.equal(result.status, 'authorized');
+      assert.deepEqual(fx.writerCalls, ['link-business-metric-refetch.json', `${RUN_DATE}.json`, 'active.json']);
+      assert.equal(metric.status, 'recovery_authorized');
+      assert.equal(metric.previousDeadlineEpoch, NESTED_METRIC_DEADLINE);
+      assert.equal(metric.deadlineEpoch, NEW_DEADLINE);
+      assert.equal(metric.morningRecoveryReceiptHash, receipt.canonicalHash);
+      assert.equal(metric.transactionRoot, '');
+      assert.equal(metric.source.transactionRoot, '');
+      assert.equal(metric.attempts, 1);
+      assert.equal(metric.maxAttempts, 12);
+      assert.equal(metric.targetStores.length, 19);
+      assert.equal(active.deadlineEpoch, NEW_DEADLINE);
+      assert.equal(active.receiptHash, receipt.canonicalHash);
+      assert.equal(await fs.stat(candidateRoot).then(() => true, () => false), true);
+      assert.equal(await fs.stat(path.join(candidateRoot, 'manifest.json')).then(() => true, () => false), false);
+      const replay = await authorizeCloudMorningChainRecovery(fx.deps);
+      assert.equal(replay.status, 'already-authorized');
+      assert.equal(JSON.parse(await fx.readMetricRefetch()).attempts, 1);
+      assert.deepEqual(JSON.parse(await fx.readReceipt()), receipt);
+    }
+
+    // Production compatibility: an older-version outer authorization may
+    // already be bound when the nested metric deadline appears later.  The
+    // next authorize call must backfill only the nested state.
+    {
+      const fx = await makeFixture(); fixtures.push(fx);
+      await authorizeCloudMorningChainRecovery(fx.deps);
+      const outerReceipt = await fx.readReceipt();
+      const outerActive = await fx.readActive();
+      const candidateRoot = path.join(fx.stateRoot, '.link-business-metric-refetch.late');
+      await fs.mkdir(candidateRoot, {recursive: true});
+      await fs.writeFile(
+        path.join(candidateRoot, 'journal.ndjson'),
+        `${JSON.stringify({event: 'transaction_created'})}\n`,
+        'utf8',
+      );
+      await writeJson(path.join(fx.stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json'), {
+        ...METRIC_REFETCH_STATE,
+        transactionRoot: candidateRoot,
+      });
+      fx.writerCalls.length = 0;
+      const lateBinding = await authorizeCloudMorningChainRecovery(fx.deps);
+      const receipt = JSON.parse(outerReceipt);
+      const metric = JSON.parse(await fx.readMetricRefetch());
+      assert.equal(lateBinding.status, 'already-authorized');
+      assert.deepEqual(fx.writerCalls, ['link-business-metric-refetch.json']);
+      assert.equal(await fx.readReceipt(), outerReceipt);
+      assert.equal(await fx.readActive(), outerActive);
+      assert.equal(metric.status, 'recovery_authorized');
+      assert.equal(metric.previousDeadlineEpoch, NESTED_METRIC_DEADLINE);
+      assert.equal(metric.deadlineEpoch, receipt.newDeadlineEpoch);
+      assert.equal(metric.morningRecoveryReceiptHash, receipt.canonicalHash);
+      assert.equal(metric.transactionRoot, '');
+      assert.equal(metric.attempts, 1);
+      assert.equal(await fs.stat(candidateRoot).then(() => true, () => false), true);
+      fx.writerCalls.length = 0;
+      const replay = await authorizeCloudMorningChainRecovery(fx.deps);
+      assert.equal(replay.status, 'already-authorized');
+      assert.deepEqual(fx.writerCalls, []);
+    }
+
+    // If crash occurs after nested publication but before receipt, the exact
+    // retry reconstructs the same receipt from nested.updatedAt and finishes
+    // without changing attempts or touching the candidate directory.
+    {
+      const calls = [];
+      const fx = await makeFixture({
+        metricRefetch: METRIC_REFETCH_STATE,
+        writer: async (file, value, options) => {
+          const name = path.basename(file);
+          calls.push(name);
+          if (name === `${RUN_DATE}.json`) throw new Error('injected receipt atomic failure');
+          return writeJsonFileAtomic(file, value, options);
+        },
+      }); fixtures.push(fx);
+      const beforeActive = await fx.readActive();
+      await assert.rejects(() => authorizeCloudMorningChainRecovery(fx.deps), /injected receipt atomic failure/u);
+      assert.deepEqual(calls, ['link-business-metric-refetch.json', `${RUN_DATE}.json`]);
+      assert.equal(await fx.readActive(), beforeActive);
+      assert.equal(await fx.readReceipt().then(() => true, () => false), false);
+      const candidateRoot = path.join(fx.stateRoot, '.link-business-metric-refetch.fixture');
+      assert.equal(await fs.stat(candidateRoot).then(() => true, () => false), true);
+      const retry = await authorizeCloudMorningChainRecovery({...fx.deps, writeJsonFileAtomic});
+      const receipt = JSON.parse(await fx.readReceipt());
+      const metric = JSON.parse(await fx.readMetricRefetch());
+      assert.equal(retry.status, 'authorized');
+      assert.equal(metric.morningRecoveryReceiptHash, receipt.canonicalHash);
+      assert.equal(metric.attempts, 1);
+      assert.equal(await fs.stat(candidateRoot).then(() => true, () => false), true);
+    }
+
+    // Every forbidden nested identity/state/transaction condition fails
+    // closed before receipt, active, or nested publication.
+    const nestedFailures = [
+      ['wrong date', {...METRIC_REFETCH_STATE, date: RUN_DATE}],
+      ['wrong runKey', {...METRIC_REFETCH_STATE, runKey: `${BUSINESS_DATE}:${RUN_DATE}`}],
+      ['wrong status', {...METRIC_REFETCH_STATE, status: 'running'}],
+      ['attempts exhausted', {...METRIC_REFETCH_STATE, attempts: 12}],
+      ['future nested deadline', {...METRIC_REFETCH_STATE, deadlineEpoch: NEW_DEADLINE}],
+      ['committed source', {...METRIC_REFETCH_STATE, source: {...METRIC_REFETCH_STATE.source, status: 'source_committed'}}],
+      ['source fingerprint', {...METRIC_REFETCH_STATE, source: {...METRIC_REFETCH_STATE.source, fingerprint: 'a'.repeat(64)}}],
+      ['non-empty phases', {...METRIC_REFETCH_STATE, phases: {fetch: {status: 'done'}}}],
+      ['failed result array', {...METRIC_REFETCH_STATE, failedStores: ['STORE_1']}],
+      ['candidate manifest', {...METRIC_REFETCH_STATE}, {manifest: true}],
+      ['dangerous journal', {...METRIC_REFETCH_STATE}, {journal: [{event: 'transaction_created'}, {event: 'source_committed'}]}],
+    ];
+    for (const [label, state, options = {}] of nestedFailures) {
+      const fx = await makeFixture({
+        metricRefetch: state,
+        metricManifest: options.manifest === true,
+        metricJournal: options.journal || [{event: 'transaction_created'}],
+      }); fixtures.push(fx);
+      const beforeActive = await fx.readActive();
+      const beforeMetric = await fx.readMetricRefetch();
+      await assert.rejects(() => authorizeCloudMorningChainRecovery(fx.deps));
+      assert.equal(await fx.readActive(), beforeActive, label);
+      assert.equal(await fx.readMetricRefetch(), beforeMetric, label);
+      assert.deepEqual(fx.writerCalls, [], label);
+      assert.equal(await fx.readReceipt().then(() => true, () => false), false, label);
     }
 
     console.log('authorize_cloud_morning_chain_recovery: focused safety and idempotency cases passed');

@@ -155,6 +155,7 @@ function pathsFor({stateRoot, inventoryRuntimeRoot, runDate}) {
     activeFile: path.join(cloudState, 'active.json'),
     latestFile: path.join(cloudState, 'latest.json'),
     terminalDeadlineAlertFile: path.join(stateRoot, 'cloud_ops_alerts', 'morning-chain-last.json'),
+    metricRefetchStateFile: path.join(stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json'),
     morningAllMarkerFile: path.join(markerDirectory, 'morning-all.json'),
     receiptFile: path.join(cloudState, 'recovery', `${runDate}.json`),
     dailyOperatingRefreshMarker: path.join(markerDirectory, 'daily-operating-refresh.json'),
@@ -564,6 +565,168 @@ function assertRecoveryCheckpoint({inventoryStarted, stockRefresh, runDate, busi
   return 'stock-refresh';
 }
 
+const METRIC_REFETCH_SCHEMA = 'cloud-link-business-metric-refetch/v2';
+const METRIC_REFETCH_RECEIPT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
+
+function assertNestedMetricRefetchBase(state, {runDate, businessDate}) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)
+    || state.schemaVersion !== METRIC_REFETCH_SCHEMA
+    || state.date !== businessDate || state.runKey !== `${runDate}:${businessDate}`
+    || !Number.isSafeInteger(state.attempts) || state.attempts < 0
+    || !Number.isSafeInteger(state.maxAttempts) || state.maxAttempts <= 0
+    || state.attempts >= state.maxAttempts
+    || !Number.isSafeInteger(state.deadlineEpoch) || state.deadlineEpoch <= 0
+    || !Array.isArray(state.targetStores)
+    || !['replacedStores', 'failedStores', 'deferredStores'].every(key => Array.isArray(state[key]) && state[key].length === 0)
+    || !state.source || typeof state.source !== 'object' || Array.isArray(state.source)
+    || state.source.status !== 'rolled_back'
+    || state.source.fingerprint !== '' || state.source.transactionRoot !== ''
+    || !state.phases || typeof state.phases !== 'object' || Array.isArray(state.phases)
+    || Object.keys(state.phases).length !== 0) {
+    fail('nested metric refetch state is not an exact recoverable same-run deadline state', {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_STATE_INVALID',
+      detail: {runDate, businessDate, expectedDate: businessDate, runKey: `${runDate}:${businessDate}`},
+    });
+  }
+}
+
+async function assertMetricCandidateTransactionRoot(root, label) {
+  const resolved = path.resolve(String(root || ''));
+  if (!resolved || !path.isAbsolute(resolved)
+    || !/^\.link-business-metric-refetch\.[^/\\]+$/u.test(path.basename(resolved))) {
+    fail(`${label} must be one absolute link-business-metric-refetch candidate root`, {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_TRANSACTION_ROOT_INVALID',
+      detail: {transactionRoot: resolved},
+    });
+  }
+  let stat;
+  try {
+    stat = await fs.lstat(resolved);
+  } catch (error) {
+    fail(`${label} is missing or unreadable: ${error?.code || error?.message || error}`, {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_TRANSACTION_ROOT_UNREADABLE',
+      detail: {transactionRoot: resolved},
+    });
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    fail(`${label} must be a real non-symlink directory`, {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_TRANSACTION_ROOT_UNSAFE',
+      detail: {transactionRoot: resolved},
+    });
+  }
+  await assertAbsent(path.join(resolved, 'manifest.json'), `${label} manifest`);
+  const journalFile = path.join(resolved, 'journal.ndjson');
+  const journal = await readRegularFile(journalFile, `${label} journal`);
+  const events = journal.bytes.toString('utf8').split(/\r?\n/u).filter(line => line.trim() !== '');
+  if (events.length !== 1) {
+    fail(`${label} journal must contain exactly one transaction_created event`, {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_JOURNAL_UNSAFE',
+      detail: {journalFile, eventCount: events.length},
+    });
+  }
+  let event;
+  try { event = JSON.parse(events[0]); } catch (error) {
+    fail(`${label} journal is not valid NDJSON: ${error?.message || error}`, {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_JOURNAL_UNSAFE',
+      detail: {journalFile},
+    });
+  }
+  if (!event || typeof event !== 'object' || Array.isArray(event) || event.event !== 'transaction_created') {
+    fail(`${label} journal contains a forbidden post-creation event`, {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_JOURNAL_UNSAFE',
+      detail: {journalFile, event: event?.event || null},
+    });
+  }
+}
+
+async function inspectNestedMetricRefetchState({metricRefetch, runDate, businessDate, nowEpoch, newDeadlineEpoch}) {
+  if (!metricRefetch) return null;
+  const state = metricRefetch.value;
+  assertNestedMetricRefetchBase(state, {runDate, businessDate});
+  if (state.status === 'deadline') {
+    if (state.deadlineEpoch >= nowEpoch || state.deadlineEpoch >= newDeadlineEpoch) {
+      fail('nested metric refetch deadline is not an expired earlier deadline', {
+        code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_DEADLINE_MISMATCH',
+        detail: {deadlineEpoch: state.deadlineEpoch, nowEpoch, newDeadlineEpoch},
+      });
+    }
+    if (!state.transactionRoot || typeof state.transactionRoot !== 'string') {
+      fail('nested metric deadline state must retain its candidate transaction root', {
+        code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_TRANSACTION_ROOT_INVALID',
+        detail: {transactionRoot: state.transactionRoot || ''},
+      });
+    }
+    await assertMetricCandidateTransactionRoot(state.transactionRoot, 'nested metric candidate transaction root');
+    return {state, mode: 'deadline'};
+  }
+  if (state.status === 'recovery_authorized') {
+    if (state.transactionRoot !== '' || state.source.transactionRoot !== ''
+      || !Number.isSafeInteger(state.previousDeadlineEpoch) || state.previousDeadlineEpoch <= 0
+      || !METRIC_REFETCH_RECEIPT_HASH_PATTERN.test(String(state.morningRecoveryReceiptHash || ''))) {
+      fail('nested metric recovery-authorized state is malformed', {
+        code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_STATE_INVALID',
+        detail: {runDate, businessDate},
+      });
+    }
+    return {state, mode: 'authorized'};
+  }
+  fail(`nested metric refetch status is not recoverable: ${String(state.status || '')}`, {
+    code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_STATE_INVALID',
+    detail: {status: state.status || null, runDate, businessDate},
+  });
+}
+
+function assertNestedMetricRefetchBound(state, receipt, file, {previousDeadlineEpoch} = {}) {
+  if (!state || state.status !== 'recovery_authorized'
+    || (previousDeadlineEpoch !== undefined && state.previousDeadlineEpoch !== previousDeadlineEpoch)
+    || state.deadlineEpoch !== receipt.newDeadlineEpoch
+    || state.morningRecoveryReceiptHash !== receipt.canonicalHash
+    || state.transactionRoot !== '' || state.source?.transactionRoot !== '') {
+    fail('nested metric state is not bound to the exact morning recovery receipt', {
+      code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_RECEIPT_MISMATCH',
+      detail: {file},
+    });
+  }
+}
+
+async function applyOrVerifyNestedMetricRefetch({
+  nestedMetric, receipt, paths, writeJsonFileAtomic,
+}) {
+  if (!nestedMetric) return;
+  if (nestedMetric.mode === 'deadline') {
+    const updatedMetricState = {
+      ...nestedMetric.state,
+      previousDeadlineEpoch: nestedMetric.state.deadlineEpoch,
+      deadlineEpoch: receipt.newDeadlineEpoch,
+      status: 'recovery_authorized',
+      morningRecoveryReceiptHash: receipt.canonicalHash,
+      transactionRoot: '',
+      source: {
+        ...nestedMetric.state.source,
+        transactionRoot: '',
+      },
+      updatedAt: receipt.createdAt,
+    };
+    await writeJsonFileAtomic(paths.metricRefetchStateFile, updatedMetricState, {mode: 0o660});
+    const committedMetricEvidence = await readJson(
+      paths.metricRefetchStateFile,
+      'published nested metric state',
+    );
+    assertNestedMetricRefetchBound(
+      committedMetricEvidence.value,
+      receipt,
+      paths.metricRefetchStateFile,
+      {previousDeadlineEpoch: nestedMetric.state.deadlineEpoch},
+    );
+    return;
+  }
+  assertNestedMetricRefetchBound(
+    nestedMetric.state,
+    receipt,
+    paths.metricRefetchStateFile,
+  );
+}
+
 function receiptMatchesRequest(receipt, {runDate, businessDate, newDeadlineEpoch, reason}) {
   return receipt.runDate === runDate
     && receipt.businessDate === businessDate
@@ -707,9 +870,10 @@ async function readFreshEvidence(paths) {
   const dailyOperatingRefresh = await readJson(paths.dailyOperatingRefreshMarker, 'daily-operating-refresh marker', {required: false});
   const inventoryStarted = await readJson(paths.inventoryStartedMarker, 'inventory-started marker', {required: false});
   const stockRefresh = await readJson(paths.stockRefreshMarkerFile, 'stock-refresh marker', {required: false});
+  const metricRefetch = await readJson(paths.metricRefetchStateFile, 'nested metric refetch state', {required: false});
   const dailyInventoryGuard = await readJson(paths.dailyInventoryGuardMarker, 'daily-inventory-guard marker', {required: false});
   const receipt = await readJson(paths.receiptFile, 'recovery receipt', {required: false});
-  return {active, latest, terminalDeadlineAlert, morningAllMarker, dailyOperatingRefresh, inventoryStarted, stockRefresh, dailyInventoryGuard, receipt};
+  return {active, latest, terminalDeadlineAlert, morningAllMarker, dailyOperatingRefresh, inventoryStarted, stockRefresh, metricRefetch, dailyInventoryGuard, receipt};
 }
 
 function assertRequestedDeadline({runDate, nowEpoch, oldDeadlineEpoch, newDeadlineEpoch}) {
@@ -870,6 +1034,14 @@ export async function authorizeCloudMorningChainRecovery({
       });
     }
 
+    const nestedMetric = await inspectNestedMetricRefetchState({
+      metricRefetch: evidence.metricRefetch,
+      runDate: normalizedRunDate,
+      businessDate,
+      nowEpoch,
+      newDeadlineEpoch: normalizedDeadline,
+    });
+
     const existingReceipt = evidence.receipt
       ? validateReceiptShape(evidence.receipt.value, paths.receiptFile)
       : null;
@@ -916,6 +1088,14 @@ export async function authorizeCloudMorningChainRecovery({
       await assertAbsent(paths.inventoryPlanFile, 'same-day inventory plan');
       await assertAbsent(paths.inventoryResultFile, 'same-day inventory result');
       await assertAbsent(paths.inventoryJournalFile, 'same-day current inventory journal');
+      if (nestedMetric) {
+        await applyOrVerifyNestedMetricRefetch({
+          nestedMetric,
+          receipt: existingReceipt,
+          paths,
+          writeJsonFileAtomic,
+        });
+      }
       return publicResult({
         status: 'already-authorized',
         paths,
@@ -956,6 +1136,14 @@ export async function authorizeCloudMorningChainRecovery({
       await assertAbsent(paths.inventoryPlanFile, 'same-day inventory plan');
       await assertAbsent(paths.inventoryResultFile, 'same-day inventory result');
       await assertAbsent(paths.inventoryJournalFile, 'same-day current inventory journal');
+      if (nestedMetric) {
+        await applyOrVerifyNestedMetricRefetch({
+          nestedMetric,
+          receipt: existingReceipt,
+          paths,
+          writeJsonFileAtomic,
+        });
+      }
       const rebuiltActive = {
         runDate: normalizedRunDate,
         businessDate,
@@ -1010,7 +1198,16 @@ export async function authorizeCloudMorningChainRecovery({
     await assertAbsent(paths.inventoryResultFile, 'same-day inventory result');
     await assertAbsent(paths.inventoryJournalFile, 'same-day current inventory journal');
 
-    const createdAt = new Date(nowEpoch * 1_000).toISOString();
+    let createdAt = new Date(nowEpoch * 1_000).toISOString();
+    if (nestedMetric) {
+      createdAt = String(nestedMetric.state.updatedAt || '');
+      if (!createdAt || Number.isNaN(Date.parse(createdAt))) {
+        fail('nested metric state has no deterministic recovery timestamp', {
+          code: 'MORNING_CHAIN_RECOVERY_NESTED_METRIC_STATE_INVALID',
+          detail: {file: paths.metricRefetchStateFile},
+        });
+      }
+    }
     const receipt = existingReceipt || buildReceipt({
       runDate: normalizedRunDate,
       businessDate,
@@ -1028,9 +1225,15 @@ export async function authorizeCloudMorningChainRecovery({
       });
     }
 
-    // Receipt first, then active context.  If the second atomic publish is
-    // interrupted, the old active bytes remain intact and the exact receipt
-    // makes the next invocation a bounded idempotent replay.
+    // With nested metric state, publish it first so a crash before receipt
+    // is a deterministic retry bound to the same receipt timestamp.  Without
+    // it, preserve the original receipt-first crash-continuation order.
+    await applyOrVerifyNestedMetricRefetch({
+      nestedMetric,
+      receipt,
+      paths,
+      writeJsonFileAtomic,
+    });
     if (!existingReceipt) {
       await writeJsonFileAtomic(paths.receiptFile, receipt, publishMetadata.writeOptions);
     }
@@ -1057,6 +1260,10 @@ export async function authorizeCloudMorningChainRecovery({
       paths.activeFile,
     );
     assertActiveBoundToReceipt(committedActive, committedReceipt, paths.activeFile);
+    if (nestedMetric) {
+      const committedMetricEvidence = await readJson(paths.metricRefetchStateFile, 'published nested metric state');
+      assertNestedMetricRefetchBound(committedMetricEvidence.value, committedReceipt, paths.metricRefetchStateFile);
+    }
     if (committedReceipt.canonicalHash !== receipt.canonicalHash
       || committedReceipt.beforeHash !== activeBeforeHash) {
       fail('published recovery receipt readback drifted', {
