@@ -251,7 +251,12 @@ const files = await discoverInventoryJournalFiles(currentJournal, {
   includeAll: true,
   additionalDirectories: inventoryJournalDirectories,
 });
-const lifecycle = await readInventoryIntentJournals(files, {maxRunDate});
+const lifecycle = await readInventoryIntentJournals(files, {
+  maxRunDate,
+  allowMultiplePendingByScope: true,
+  currentJournalFile: currentJournal,
+  quarantineHistoricalDanglingSupersedes: true,
+});
 let currentPending = 0;
 let currentReadbackMatched = 0;
 let historicalPending = 0;
@@ -274,6 +279,7 @@ process.stdout.write(JSON.stringify({
   manualResolutionCount: lifecycle.manualResolutions?.size || 0,
   manualResolutionFenceCount: lifecycle.fences?.size || 0,
   manualResolutionTombstoneCount: lifecycle.tombstonedIdempotencyKeys?.size || 0,
+  quarantinedSupersedeCount: lifecycle.quarantinedSupersedes?.length || 0,
 }));
 NODE
 )"
@@ -284,7 +290,8 @@ HISTORICAL_PENDING_INTENT_COUNT="$(jq -r '.historicalPending // -1' <<<"$LIFECYC
 READBACK_MATCHED_INTENT_COUNT="$(jq -r '.readbackMatched // -1' <<<"$LIFECYCLE_JSON")"
 MANUAL_RESOLUTION_COUNT="$(jq -r '.manualResolutionCount // -1' <<<"$LIFECYCLE_JSON")"
 MANUAL_RESOLUTION_TOMBSTONE_COUNT="$(jq -r '.manualResolutionTombstoneCount // -1' <<<"$LIFECYCLE_JSON")"
-for count in "$PENDING_INTENT_COUNT" "$CURRENT_PENDING_INTENT_COUNT" "$CURRENT_READBACK_MATCHED_INTENT_COUNT" "$HISTORICAL_PENDING_INTENT_COUNT" "$READBACK_MATCHED_INTENT_COUNT" "$MANUAL_RESOLUTION_COUNT" "$MANUAL_RESOLUTION_TOMBSTONE_COUNT"; do
+QUARANTINED_SUPERSEDE_COUNT="$(jq -r '.quarantinedSupersedeCount // -1' <<<"$LIFECYCLE_JSON")"
+for count in "$PENDING_INTENT_COUNT" "$CURRENT_PENDING_INTENT_COUNT" "$CURRENT_READBACK_MATCHED_INTENT_COUNT" "$HISTORICAL_PENDING_INTENT_COUNT" "$READBACK_MATCHED_INTENT_COUNT" "$MANUAL_RESOLUTION_COUNT" "$MANUAL_RESOLUTION_TOMBSTONE_COUNT" "$QUARANTINED_SUPERSEDE_COUNT"; do
   [[ "$count" =~ ^[0-9]+$ ]] || {
     echo "[daily_inventory_guard] durable inventory journal lifecycle count is invalid" >&2
     exit 65
@@ -292,6 +299,9 @@ for count in "$PENDING_INTENT_COUNT" "$CURRENT_PENDING_INTENT_COUNT" "$CURRENT_R
 done
 if (( MANUAL_RESOLUTION_COUNT > 0 )); then
   echo "[daily_inventory_guard] manual-resolution permanent fences discovered count=$MANUAL_RESOLUTION_COUNT tombstones=$MANUAL_RESOLUTION_TOMBSTONE_COUNT; matching scopes remain blocked and no new inventory POST is allowed"
+fi
+if (( QUARANTINED_SUPERSEDE_COUNT > 0 )); then
+  echo "[daily_inventory_guard] quarantined legacy dangling supersede count=$QUARANTINED_SUPERSEDE_COUNT; affected historical SKU scopes remain pending and blocked without stopping unrelated current readback"
 fi
 # PENDING_INTENT_COUNT > 0 || READBACK_MATCHED_INTENT_COUNT > 0 is the total
 # journal signal. Only current-date lifecycle rows select reconcile-only;

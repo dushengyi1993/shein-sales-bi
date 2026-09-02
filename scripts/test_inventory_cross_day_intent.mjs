@@ -850,8 +850,10 @@ try {
   assert.equal(state.postCount, 0);
   assert.equal((await readJson(currentPending.resultFile)).results[0].state, 'submitted_but_readback_pending');
 
-  // Exact supersede shape is mandatory and references are proven across the
-  // complete journal set before any identity or stock request.
+  // A legacy supersede whose referenced intent was never persisted is
+  // quarantined as an item-scoped historical pending intent.  It may trigger
+  // readback, but it must never produce a new inventory POST or be accepted as
+  // terminal success for the old request.
   const forgedRoot = path.join(temp, 'forged-supersede-reference');
   const forgedOlder = makeIntent({runDate: priorDate, row: ROWS[0], planHash: '6'.repeat(64), intentId: 'forged-older-1'});
   const forged = await writeFixture(forgedRoot, {rows: [ROWS[0]], oldIntent: forgedOlder});
@@ -866,8 +868,22 @@ try {
   state.requestCount = 0;
   const forgedRun = await runExecutor(forged, {reconcilePendingOnly: true});
   assert.notEqual(forgedRun.code, 0);
-  assert.match(forgedRun.stderr, /INVENTORY_JOURNAL_SUPERSEDE_INVALID:.*:referencedIntentMissing/);
-  assert.equal(state.requestCount, 0);
+  assert.equal(state.postCount, 0);
+  assert.equal((await readJson(forged.resultFile)).results[0].state, 'submitted_but_readback_pending');
+  const forgedLifecycle = await readInventoryIntentJournals(
+    await discoverInventoryJournalFiles(forged.currentIntentFile, {includeAll: true}),
+    {
+      maxRunDate: today,
+      allowMultiplePendingByScope: true,
+      currentJournalFile: forged.currentIntentFile,
+      quarantineHistoricalDanglingSupersedes: true,
+    },
+  );
+  assert.equal(
+    [...forgedLifecycle.pending.values()].some(intent => intent.intentId === forgedOlder.intentId),
+    true,
+    'the dangling historical intent must remain pending after reconcile-only readback',
+  );
 
   const supersedeShapeRoot = path.join(temp, 'supersede-extra-key');
   const shapeOlder = makeIntent({runDate: priorDate, row: ROWS[0], planHash: '5'.repeat(64), intentId: 'shape-older-1'});

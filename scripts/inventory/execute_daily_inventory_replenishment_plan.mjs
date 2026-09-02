@@ -603,6 +603,8 @@ const journalFiles = await discoverInventoryJournalFiles(journalFile, {
 const journalBundle = await readInventoryIntentJournals(journalFiles, {
   maxRunDate: today,
   allowMultiplePendingByScope: true,
+  currentJournalFile: journalFile,
+  quarantineHistoricalDanglingSupersedes: true,
 });
 manualResolutionFences = [...journalBundle.fences.values()].map(candidate => ({
   resolutionId: candidate.event?.resolutionId || '',
@@ -962,6 +964,8 @@ for (const row of rows) {
       const freshJournalBundle = await readInventoryIntentJournals(freshJournalFiles, {
         maxRunDate: today,
         allowMultiplePendingByScope: true,
+        currentJournalFile: journalFile,
+        quarantineHistoricalDanglingSupersedes: true,
       });
       const freshScopeIntents = freshJournalBundle.pendingByScope.get(recoveryScopeKey) || [];
       const ownerConfirmedSameTargetPredecessors = [...freshJournalBundle.terminalOutcomes.entries()]
