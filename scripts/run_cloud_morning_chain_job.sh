@@ -484,7 +484,6 @@ run_one_date() {
   fi
   if deadline_expired "$deadline"; then
     write_terminal_deadline_failure "$run_date" "$business_date" "$deadline"
-    clear_active_context "$run_date"
     return 76
   fi
   ATTEMPT=$((ATTEMPT + 1))

@@ -154,9 +154,12 @@ function pathsFor({stateRoot, inventoryRuntimeRoot, runDate}) {
   return {
     activeFile: path.join(cloudState, 'active.json'),
     latestFile: path.join(cloudState, 'latest.json'),
+    terminalDeadlineAlertFile: path.join(stateRoot, 'cloud_ops_alerts', 'morning-chain-last.json'),
+    morningAllMarkerFile: path.join(markerDirectory, 'morning-all.json'),
     receiptFile: path.join(cloudState, 'recovery', `${runDate}.json`),
     dailyOperatingRefreshMarker: path.join(markerDirectory, 'daily-operating-refresh.json'),
     inventoryStartedMarker: path.join(markerDirectory, 'inventory-started.json'),
+    stockRefreshMarkerFile: path.join(markerDirectory, 'stock-refresh.json'),
     dailyInventoryGuardMarker: path.join(markerDirectory, 'daily-inventory-guard.json'),
     inventoryPlanFile: path.join(inventoryRuntimeRoot, 'plans', `daily-inventory-replenishment-${runDate}.json`),
     inventoryResultFile: resultFile,
@@ -461,6 +464,76 @@ function assertMarkerNotDone(marker, label) {
   }
 }
 
+async function publishMetadataForCreatedActive(directory) {
+  let stat;
+  try {
+    stat = await fs.lstat(directory);
+  } catch (error) {
+    fail(`active context parent directory is missing or unreadable: ${error?.code || error?.message || error}`, {
+      code: 'MORNING_CHAIN_RECOVERY_ACTIVE_DIRECTORY_UNAVAILABLE',
+      detail: {directory},
+    });
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    fail('active context parent directory must be a real directory', {
+      code: 'MORNING_CHAIN_RECOVERY_ACTIVE_DIRECTORY_UNSAFE',
+      detail: {directory},
+    });
+  }
+  const mode = process.platform === 'win32' ? 0o666 : 0o660;
+  const writeOptions = {mode};
+  const expected = {mode};
+  if (process.platform !== 'win32') {
+    writeOptions.uid = stat.uid;
+    writeOptions.gid = stat.gid;
+    expected.uid = stat.uid;
+    expected.gid = stat.gid;
+  }
+  return {writeOptions, expected};
+}
+
+function assertSameDayTerminalRebuildEvidence({
+  terminalDeadlineAlert, morningAllMarker, runDate, businessDate,
+}) {
+  const alert = terminalDeadlineAlert?.value;
+  if (!alert || typeof alert !== 'object' || Array.isArray(alert)
+    || alert.status !== 'failed' || alert.stage !== 'all'
+    || alert.date !== runDate || alert.businessDate !== businessDate
+    || !Number.isSafeInteger(alert.deadlineEpoch) || alert.deadlineEpoch <= 0) {
+    fail('active context can be rebuilt only from an exact same-day structured terminal deadline alert', {
+      code: 'MORNING_CHAIN_RECOVERY_REBUILD_EVIDENCE_MISMATCH',
+      detail: {file: terminalDeadlineAlert?.file, runDate, businessDate},
+    });
+  }
+  const marker = morningAllMarker?.value;
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker)
+    || marker.stage !== 'morning-all' || marker.status !== 'failed'
+    || marker.runDate !== runDate || marker.businessDate !== businessDate) {
+    fail('active context can be rebuilt only with the exact same-day failed morning-all marker', {
+      code: 'MORNING_CHAIN_RECOVERY_REBUILD_EVIDENCE_MISMATCH',
+      detail: {file: morningAllMarker?.file, runDate, businessDate},
+    });
+  }
+  const message = String(marker.message || '');
+  const match = message.match(/^first-start absolute deadline expired deadlineEpoch=(\d+) runDate=([^\s]+) businessDate=([^\s]+); no further automatic attempts in this window$/u);
+  if (!match || Number(match[1]) !== alert.deadlineEpoch
+    || match[2] !== runDate || match[3] !== businessDate) {
+    fail('morning-all marker deadline binding does not match the structured terminal alert', {
+      code: 'MORNING_CHAIN_RECOVERY_REBUILD_DEADLINE_MISMATCH',
+      detail: {deadlineEpoch: alert.deadlineEpoch, markerMessage: message.slice(0, 500)},
+    });
+  }
+  return {oldDeadlineEpoch: alert.deadlineEpoch};
+}
+
+function rebuildEvidenceHash({terminalDeadlineAlert, morningAllMarker, latest}) {
+  return sha256(canonicalJson({
+    latest: latest.value,
+    morningAllMarker: morningAllMarker.value,
+    terminalDeadlineAlert: terminalDeadlineAlert.value,
+  }));
+}
+
 function assertDoneMarker(marker, {stage, runDate, businessDate, label}) {
   if (!marker?.value || marker.value.ok !== true || marker.value.stage !== stage
     || marker.value.status !== 'done' || marker.value.runDate !== runDate
@@ -470,6 +543,25 @@ function assertDoneMarker(marker, {stage, runDate, businessDate, label}) {
       detail: {file: marker?.file, stage, runDate, businessDate},
     });
   }
+}
+
+function assertRecoveryCheckpoint({inventoryStarted, stockRefresh, runDate, businessDate}) {
+  if (inventoryStarted) {
+    assertDoneMarker(inventoryStarted, {
+      stage: 'inventory-started',
+      runDate,
+      businessDate,
+      label: 'inventory-started marker',
+    });
+    return 'inventory-started';
+  }
+  assertDoneMarker(stockRefresh, {
+    stage: 'stock-refresh',
+    runDate,
+    businessDate: runDate,
+    label: 'stock-refresh checkpoint marker',
+  });
+  return 'stock-refresh';
 }
 
 function receiptMatchesRequest(receipt, {runDate, businessDate, newDeadlineEpoch, reason}) {
@@ -608,13 +700,16 @@ function defaultLockPath(stateRoot) {
 }
 
 async function readFreshEvidence(paths) {
-  const active = await readJson(paths.activeFile, 'active context');
+  const active = await readJson(paths.activeFile, 'active context', {required: false});
   const latest = await readJson(paths.latestFile, 'morning latest state');
+  const terminalDeadlineAlert = await readJson(paths.terminalDeadlineAlertFile, 'terminal deadline alert', {required: false});
+  const morningAllMarker = await readJson(paths.morningAllMarkerFile, 'morning-all marker', {required: false});
   const dailyOperatingRefresh = await readJson(paths.dailyOperatingRefreshMarker, 'daily-operating-refresh marker', {required: false});
   const inventoryStarted = await readJson(paths.inventoryStartedMarker, 'inventory-started marker', {required: false});
+  const stockRefresh = await readJson(paths.stockRefreshMarkerFile, 'stock-refresh marker', {required: false});
   const dailyInventoryGuard = await readJson(paths.dailyInventoryGuardMarker, 'daily-inventory-guard marker', {required: false});
   const receipt = await readJson(paths.receiptFile, 'recovery receipt', {required: false});
-  return {active, latest, dailyOperatingRefresh, inventoryStarted, dailyInventoryGuard, receipt};
+  return {active, latest, terminalDeadlineAlert, morningAllMarker, dailyOperatingRefresh, inventoryStarted, stockRefresh, dailyInventoryGuard, receipt};
 }
 
 function assertRequestedDeadline({runDate, nowEpoch, oldDeadlineEpoch, newDeadlineEpoch}) {
@@ -739,15 +834,34 @@ export async function authorizeCloudMorningChainRecovery({
     // All state below is read only after the exclusive lock is held.  No
     // pre-lock snapshot is trusted for either the preflight or the write.
     const evidence = await readFreshEvidence(paths);
-    const active = validateActiveObject(evidence.active.value, paths.activeFile);
-    const activeBeforeHash = evidence.active.hash;
-    const publishMetadata = publishMetadataFromEvidence(evidence.active, 'active context');
-    const businessDate = String(active.businessDate);
-    if (active.runDate !== normalizedRunDate) {
-      fail('active context runDate does not match today/request', {
-        code: 'MORNING_CHAIN_RECOVERY_RUN_DATE_MISMATCH',
-        detail: {activeRunDate: active.runDate, runDate: normalizedRunDate},
+    let active = null;
+    let oldDeadlineEpoch;
+    let activeBeforeHash;
+    let publishMetadata;
+    let businessDate;
+    if (evidence.active) {
+      active = validateActiveObject(evidence.active.value, paths.activeFile);
+      activeBeforeHash = evidence.active.hash;
+      publishMetadata = publishMetadataFromEvidence(evidence.active, 'active context');
+      businessDate = String(active.businessDate);
+      oldDeadlineEpoch = active.deadlineEpoch;
+      if (active.runDate !== normalizedRunDate) {
+        fail('active context runDate does not match today/request', {
+          code: 'MORNING_CHAIN_RECOVERY_RUN_DATE_MISMATCH',
+          detail: {activeRunDate: active.runDate, runDate: normalizedRunDate},
+        });
+      }
+    } else {
+      const rebuild = assertSameDayTerminalRebuildEvidence({
+        terminalDeadlineAlert: evidence.terminalDeadlineAlert,
+        morningAllMarker: evidence.morningAllMarker,
+        runDate: normalizedRunDate,
+        businessDate: expectedBusinessDate,
       });
+      businessDate = expectedBusinessDate;
+      oldDeadlineEpoch = rebuild.oldDeadlineEpoch;
+      activeBeforeHash = rebuildEvidenceHash(evidence);
+      publishMetadata = await publishMetadataForCreatedActive(path.dirname(paths.activeFile));
     }
     if (businessDate !== expectedBusinessDate) {
       fail('active context businessDate must equal runDate minus one day', {
@@ -776,8 +890,8 @@ export async function authorizeCloudMorningChainRecovery({
       });
     }
 
-    const alreadyBound = Boolean(active.receiptHash || active.recoveryGeneration || active.previousDeadline !== undefined);
-    if (existingReceipt && active.receiptHash === existingReceipt.canonicalHash) {
+    const alreadyBound = Boolean(active && (active.receiptHash || active.recoveryGeneration || active.previousDeadline !== undefined));
+    if (active && existingReceipt && active.receiptHash === existingReceipt.canonicalHash) {
       assertActiveBoundToReceipt(active, existingReceipt, paths.activeFile);
       assertRequestedDeadline({
         runDate: normalizedRunDate,
@@ -787,8 +901,11 @@ export async function authorizeCloudMorningChainRecovery({
       });
       assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate);
       assertMarkerNotDone(evidence.dailyOperatingRefresh, 'daily-operating-refresh marker');
-      assertDoneMarker(evidence.inventoryStarted, {
-        stage: 'inventory-started', runDate: normalizedRunDate, businessDate, label: 'inventory-started marker',
+      assertRecoveryCheckpoint({
+        inventoryStarted: evidence.inventoryStarted,
+        stockRefresh: evidence.stockRefresh,
+        runDate: normalizedRunDate,
+        businessDate,
       });
       if (evidence.dailyInventoryGuard) {
         fail('daily-inventory-guard marker already exists; recovery refuses replay', {
@@ -808,6 +925,60 @@ export async function authorizeCloudMorningChainRecovery({
         beforeHash: existingReceipt.beforeHash,
       });
     }
+    if (!active && existingReceipt) {
+      if (!existingReceipt || existingReceipt.oldDeadlineEpoch !== oldDeadlineEpoch
+        || existingReceipt.beforeHash !== activeBeforeHash) {
+        fail('recovery receipt is missing or does not bind the exact structured terminal evidence', {
+          code: 'MORNING_CHAIN_RECOVERY_DRIFT',
+          detail: {receiptFile: paths.receiptFile},
+        });
+      }
+      assertRequestedDeadline({
+        runDate: normalizedRunDate,
+        nowEpoch: Math.min(nowEpoch, existingReceipt.newDeadlineEpoch - 1),
+        oldDeadlineEpoch: existingReceipt.oldDeadlineEpoch,
+        newDeadlineEpoch: existingReceipt.newDeadlineEpoch,
+      });
+      assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate);
+      assertMarkerNotDone(evidence.dailyOperatingRefresh, 'daily-operating-refresh marker');
+      assertRecoveryCheckpoint({
+        inventoryStarted: evidence.inventoryStarted,
+        stockRefresh: evidence.stockRefresh,
+        runDate: normalizedRunDate,
+        businessDate,
+      });
+      if (evidence.dailyInventoryGuard) {
+        fail('daily-inventory-guard marker already exists; recovery refuses replay', {
+          code: 'MORNING_CHAIN_RECOVERY_EVIDENCE_EXISTS',
+          detail: {file: paths.dailyInventoryGuardMarker},
+        });
+      }
+      await assertAbsent(paths.inventoryPlanFile, 'same-day inventory plan');
+      await assertAbsent(paths.inventoryResultFile, 'same-day inventory result');
+      await assertAbsent(paths.inventoryJournalFile, 'same-day current inventory journal');
+      const rebuiltActive = {
+        runDate: normalizedRunDate,
+        businessDate,
+        deadlineEpoch: existingReceipt.newDeadlineEpoch,
+        previousDeadline: existingReceipt.oldDeadlineEpoch,
+        recoveryGeneration: existingReceipt.recoveryGeneration,
+        receiptHash: existingReceipt.canonicalHash,
+        updatedAt: existingReceipt.createdAt,
+      };
+      await writeJsonFileAtomic(paths.activeFile, rebuiltActive, publishMetadata.writeOptions);
+      const committedActiveEvidence = await readJson(paths.activeFile, 'published active context');
+      assertPublishedMetadata(committedActiveEvidence, publishMetadata.expected, 'published active context');
+      const committedActive = validateActiveObject(committedActiveEvidence.value, paths.activeFile);
+      assertActiveBoundToReceipt(committedActive, existingReceipt, paths.activeFile);
+      return publicResult({
+        status: 'already-authorized',
+        paths,
+        receipt: existingReceipt,
+        oldDeadlineEpoch: existingReceipt.oldDeadlineEpoch,
+        newDeadlineEpoch: existingReceipt.newDeadlineEpoch,
+        beforeHash: existingReceipt.beforeHash,
+      });
+    }
     if (alreadyBound || (existingReceipt && activeBeforeHash !== existingReceipt.beforeHash)) {
       fail('active context or recovery receipt drifted; refusing to overwrite it', {
         code: 'MORNING_CHAIN_RECOVERY_DRIFT',
@@ -818,13 +989,16 @@ export async function authorizeCloudMorningChainRecovery({
     assertRequestedDeadline({
       runDate: normalizedRunDate,
       nowEpoch,
-      oldDeadlineEpoch: active.deadlineEpoch,
+      oldDeadlineEpoch,
       newDeadlineEpoch: normalizedDeadline,
     });
     assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate);
     assertMarkerNotDone(evidence.dailyOperatingRefresh, 'daily-operating-refresh marker');
-    assertDoneMarker(evidence.inventoryStarted, {
-      stage: 'inventory-started', runDate: normalizedRunDate, businessDate, label: 'inventory-started marker',
+    assertRecoveryCheckpoint({
+      inventoryStarted: evidence.inventoryStarted,
+      stockRefresh: evidence.stockRefresh,
+      runDate: normalizedRunDate,
+      businessDate,
     });
     if (evidence.dailyInventoryGuard) {
       fail('daily-inventory-guard marker already exists; recovery refuses replay', {
@@ -840,14 +1014,14 @@ export async function authorizeCloudMorningChainRecovery({
     const receipt = existingReceipt || buildReceipt({
       runDate: normalizedRunDate,
       businessDate,
-      oldDeadlineEpoch: active.deadlineEpoch,
+      oldDeadlineEpoch,
       newDeadlineEpoch: normalizedDeadline,
       beforeHash: activeBeforeHash,
       createdAt,
       reason: normalizedReason,
     });
     validateReceiptShape(receipt, paths.receiptFile);
-    if (receipt.oldDeadlineEpoch !== active.deadlineEpoch || receipt.beforeHash !== activeBeforeHash) {
+    if (receipt.oldDeadlineEpoch !== oldDeadlineEpoch || receipt.beforeHash !== activeBeforeHash) {
       fail('recovery receipt does not match the freshly locked active context', {
         code: 'MORNING_CHAIN_RECOVERY_DRIFT',
         detail: {activeBeforeHash, receiptBeforeHash: receipt.beforeHash},
@@ -861,7 +1035,7 @@ export async function authorizeCloudMorningChainRecovery({
       await writeJsonFileAtomic(paths.receiptFile, receipt, publishMetadata.writeOptions);
     }
     const updatedActive = {
-      ...active,
+      ...(active || {runDate: normalizedRunDate, businessDate}),
       deadlineEpoch: receipt.newDeadlineEpoch,
       previousDeadline: receipt.oldDeadlineEpoch,
       recoveryGeneration: receipt.recoveryGeneration,

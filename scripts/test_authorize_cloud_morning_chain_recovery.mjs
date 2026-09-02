@@ -18,6 +18,31 @@ const NOW = Math.floor(Date.parse('2026-08-24T10:30:00+08:00') / 1_000);
 const OLD_DEADLINE = Math.floor(Date.parse('2026-08-24T10:00:00+08:00') / 1_000);
 const NEW_DEADLINE = Math.floor(Date.parse('2026-08-24T12:30:00+08:00') / 1_000);
 const REASON = 'root fix deployed; resume the same-day morning chain';
+const TERMINAL_ALERT = {
+  date: RUN_DATE,
+  businessDate: BUSINESS_DATE,
+  stage: 'all',
+  status: 'failed',
+  message: 'first-start absolute deadline expired (deadlineEpoch=' + OLD_DEADLINE + ') before runDate=' + RUN_DATE + ' businessDate=' + BUSINESS_DATE + ' could complete; no further automatic attempts in this window',
+  deadlineEpoch: OLD_DEADLINE,
+};
+const MORNING_ALL_MARKER = {
+  schema: 4,
+  schemaVersion: 4,
+  ok: false,
+  stage: 'morning-all',
+  status: 'failed',
+  runDate: RUN_DATE,
+  businessDate: BUSINESS_DATE,
+  message: 'first-start absolute deadline expired deadlineEpoch=' + OLD_DEADLINE + ' runDate=' + RUN_DATE + ' businessDate=' + BUSINESS_DATE + '; no further automatic attempts in this window',
+};
+const STOCK_REFRESH_MARKER = {
+  ok: true,
+  stage: 'stock-refresh',
+  status: 'done',
+  runDate: RUN_DATE,
+  businessDate: RUN_DATE,
+};
 
 async function writeJson(file, value) {
   await fs.mkdir(path.dirname(file), {recursive: true});
@@ -26,11 +51,14 @@ async function writeJson(file, value) {
 
 async function makeFixture({
   active = {},
+  terminalDeadlineAlert = null,
+  morningAllMarker = null,
   latest = {},
   maintenance = {ok: true, active: false, mode: 'none'},
   systemd = {},
   dailyOperatingRefresh = null,
   inventoryStarted = true,
+  stockRefresh = null,
   dailyInventoryGuard = null,
   artifact = '',
   writer = writeJsonFileAtomic,
@@ -54,15 +82,17 @@ async function makeFixture({
   const inventoryJournalFile = `${inventoryResultFile}.journal.ndjson`;
   await fs.mkdir(path.join(cloudState, 'recovery'), {recursive: true});
   await fs.mkdir(markerRoot, {recursive: true});
-  await writeJson(path.join(cloudState, 'active.json'), {
-    runDate: RUN_DATE,
-    businessDate: BUSINESS_DATE,
-    deadlineEpoch: OLD_DEADLINE,
-    startedAt: '2026-08-24T01:00:00.000Z',
-    attempt: 3,
-    ...active,
-  });
-  await fs.chmod(path.join(cloudState, 'active.json'), 0o600);
+  if (active !== null) {
+    await writeJson(path.join(cloudState, 'active.json'), {
+      runDate: RUN_DATE,
+      businessDate: BUSINESS_DATE,
+      deadlineEpoch: OLD_DEADLINE,
+      startedAt: '2026-08-24T01:00:00.000Z',
+      attempt: 3,
+      ...active,
+    });
+    await fs.chmod(path.join(cloudState, 'active.json'), 0o600);
+  }
   await writeJson(path.join(cloudState, 'latest.json'), {
     date: RUN_DATE,
     businessDate: BUSINESS_DATE,
@@ -70,17 +100,26 @@ async function makeFixture({
     message: 'inventory guard failed before the inventory plan/result boundary',
     ...latest,
   });
+  if (terminalDeadlineAlert !== null) {
+    await writeJson(path.join(stateRoot, 'cloud_ops_alerts', 'morning-chain-last.json'), terminalDeadlineAlert);
+  }
+  if (morningAllMarker !== null) {
+    await writeJson(path.join(markerRoot, 'morning-all.json'), morningAllMarker);
+  }
   if (dailyOperatingRefresh !== null) {
     await writeJson(path.join(markerRoot, 'daily-operating-refresh.json'), dailyOperatingRefresh);
   }
   if (inventoryStarted) {
-    await writeJson(path.join(markerRoot, 'inventory-started.json'), {
+    await writeJson(path.join(markerRoot, 'inventory-started.json'), inventoryStarted === true ? {
       ok: true,
       stage: 'inventory-started',
       status: 'done',
       runDate: RUN_DATE,
       businessDate: BUSINESS_DATE,
-    });
+    } : inventoryStarted);
+  }
+  if (stockRefresh !== null) {
+    await writeJson(path.join(markerRoot, 'stock-refresh.json'), stockRefresh);
   }
   if (dailyInventoryGuard !== null) {
     await writeJson(path.join(markerRoot, 'daily-inventory-guard.json'), dailyInventoryGuard);
@@ -208,6 +247,20 @@ async function main() {
       const fx = await makeFixture({inventoryStarted: false}); fixtures.push(fx);
       await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_MARKER_MISSING');
     }
+    for (const [label, marker] of [
+      ['wrong runDate', {...STOCK_REFRESH_MARKER, runDate: BUSINESS_DATE}],
+      ['wrong businessDate', {...STOCK_REFRESH_MARKER, businessDate: BUSINESS_DATE}],
+      ['non-done status', {...STOCK_REFRESH_MARKER, status: 'warning'}],
+      ['inventory-started exists but is not done', null],
+    ]) {
+      const fx = await makeFixture({
+        inventoryStarted: label === 'inventory-started exists but is not done'
+          ? {ok: false, stage: 'inventory-started', status: 'running', runDate: RUN_DATE, businessDate: BUSINESS_DATE}
+          : false,
+        stockRefresh: marker,
+      }); fixtures.push(fx);
+      await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_MARKER_MISSING');
+    }
     {
       const fx = await makeFixture({latest: {phase: 'inventory-plan'}}); fixtures.push(fx);
       await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_FAILURE_AFTER_INVENTORY');
@@ -286,6 +339,94 @@ async function main() {
       const replay = await authorizeCloudMorningChainRecovery(fx.deps);
       assert.equal(replay.status, 'already-authorized');
       assert.deepEqual(JSON.parse(await fx.readReceipt()), receipt);
+    }
+
+    // An absent active context can be rebuilt only from the exact same-day
+    // structured deadline alert, failed morning-all marker, and matching
+    // pre-inventory latest failure.  Its checkpoint accepts either the
+    // original inventory-started done marker or the exact same-day
+    // stock-refresh done marker.  The rebuild is idempotent.
+    {
+      const fx = await makeFixture({
+        active: null,
+        terminalDeadlineAlert: TERMINAL_ALERT,
+        morningAllMarker: MORNING_ALL_MARKER,
+        inventoryStarted: false,
+        stockRefresh: STOCK_REFRESH_MARKER,
+      }); fixtures.push(fx);
+      const result = await authorizeCloudMorningChainRecovery(fx.deps);
+      const receipt = JSON.parse(await fx.readReceipt());
+      const active = JSON.parse(await fx.readActive());
+      assert.equal(result.status, 'authorized');
+      assert.equal(receipt.oldDeadlineEpoch, OLD_DEADLINE);
+      assert.equal(receipt.newDeadlineEpoch, NEW_DEADLINE);
+      assert.equal(active.runDate, RUN_DATE);
+      assert.equal(active.businessDate, BUSINESS_DATE);
+      assert.equal(active.deadlineEpoch, NEW_DEADLINE);
+      assert.equal(active.previousDeadline, OLD_DEADLINE);
+      assert.equal(active.recoveryGeneration, 1);
+      assert.equal(active.receiptHash, receipt.canonicalHash);
+      assert.ok(fx.systemctlCalls.every(call => call.args[0] === 'show'));
+      assert.ok(fx.systemctlCalls.every(call => !call.args.includes('start')));
+      const durableReceipt = await fx.readReceipt();
+      await fs.unlink(path.join(fx.cloudState, 'active.json'));
+      const crashContinuation = await authorizeCloudMorningChainRecovery(fx.deps);
+      assert.equal(crashContinuation.status, 'already-authorized');
+      const rebuiltActive = JSON.parse(await fx.readActive());
+      assert.equal(rebuiltActive.deadlineEpoch, NEW_DEADLINE);
+      assert.equal(rebuiltActive.previousDeadline, OLD_DEADLINE);
+      assert.equal(rebuiltActive.receiptHash, receipt.canonicalHash);
+      assert.equal(await fx.readReceipt(), durableReceipt);
+      const replay = await authorizeCloudMorningChainRecovery(fx.deps);
+      assert.equal(replay.status, 'already-authorized');
+      assert.deepEqual(JSON.parse(await fx.readReceipt()), receipt);
+    }
+
+    // Missing or mismatched structured terminal evidence fails closed.
+    {
+      const fx = await makeFixture({active: null}); fixtures.push(fx);
+      await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_REBUILD_EVIDENCE_MISMATCH');
+    }
+    {
+      const fx = await makeFixture({
+        active: null,
+        terminalDeadlineAlert: {...TERMINAL_ALERT, date: BUSINESS_DATE},
+        morningAllMarker: MORNING_ALL_MARKER,
+      }); fixtures.push(fx);
+      await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_REBUILD_EVIDENCE_MISMATCH');
+    }
+    {
+      const fx = await makeFixture({
+        active: null,
+        terminalDeadlineAlert: TERMINAL_ALERT,
+        morningAllMarker: {...MORNING_ALL_MARKER, message: MORNING_ALL_MARKER.message.replace(String(OLD_DEADLINE), String(OLD_DEADLINE - 1))},
+      }); fixtures.push(fx);
+      await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_REBUILD_DEADLINE_MISMATCH');
+    }
+    {
+      const fx = await makeFixture({
+        active: null,
+        terminalDeadlineAlert: TERMINAL_ALERT,
+        morningAllMarker: MORNING_ALL_MARKER,
+        latest: {date: BUSINESS_DATE},
+      }); fixtures.push(fx);
+      await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_LATEST_DATE_MISMATCH');
+    }
+
+    // Structured-evidence rebuild still refuses any inventory write evidence.
+    for (const [option, expectedCode] of [
+      [{dailyInventoryGuard: {status: 'failed'}}, 'MORNING_CHAIN_RECOVERY_EVIDENCE_EXISTS'],
+      [{artifact: 'plan'}, 'MORNING_CHAIN_RECOVERY_EVIDENCE_EXISTS'],
+      [{artifact: 'result'}, 'MORNING_CHAIN_RECOVERY_EVIDENCE_EXISTS'],
+      [{artifact: 'journal'}, 'MORNING_CHAIN_RECOVERY_EVIDENCE_EXISTS'],
+    ]) {
+      const fx = await makeFixture({
+        active: null,
+        terminalDeadlineAlert: TERMINAL_ALERT,
+        morningAllMarker: MORNING_ALL_MARKER,
+        ...option,
+      }); fixtures.push(fx);
+      await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), expectedCode);
     }
 
     console.log('authorize_cloud_morning_chain_recovery: focused safety and idempotency cases passed');

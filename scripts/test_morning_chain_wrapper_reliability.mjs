@@ -336,14 +336,18 @@ check t6_latest_failed "failed" "\$(latest_status)"
 printf '%s' "\$(latest_message)" | grep -q 'deadline' && echo 'PASS[t6 latest reason mentions deadline]' || { echo 'FAIL[t6 latest reason]'; FAIL=1; }
 [[ -f "\$SB/state/cloud_ops_alerts/morning-chain-last.json" ]] && echo 'PASS[t6 alert file written]' || { echo 'FAIL[t6 alert file]'; FAIL=1; }
 check t6_marker_failed "failed" "\$(morning_all_marker_status "\$TODAY")"
+[[ -f "\$STATE/active.json" ]] && echo 'PASS[t6 terminal deadline context retained]' || { echo 'FAIL[t6 terminal deadline context]'; FAIL=1; }
+check t6_context_deadline "\$EXPIRED" "\$(ctx_deadline)"
 
-# t7: a later explicit activation after terminal convergence is a new same-day
-# attempt and may run the child; it cannot be silently suppressed as success.
+# t7: an expired terminal context is retained and remains the exact recovery
+# binding.  A later wrapper activation is not authorization and still refuses
+# to reset the deadline or start the child.
 rm -f "\$CALLS_LOG"
 bash "\$WRAPPER" >/dev/null 2>&1
-check t7_rc 0 "\$?"
-check t7_child "1" "\$(wc -l < "\$CALLS_LOG")"
-check t7_pair "\$TODAY \$YESTERDAY" "\$(cut -d' ' -f1-2 "\$CALLS_LOG")"
+check t7_rc 76 "\$?"
+check t7_no_child "0" "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t7_ctx_today "\$TODAY \$YESTERDAY" "\$(ctx_of)"
+check t7_ctx_deadline "\$EXPIRED" "\$(ctx_deadline)"
 
 # t8: malformed active context is ignored; a fresh correct today run replaces
 # it (single call, correct pair).
