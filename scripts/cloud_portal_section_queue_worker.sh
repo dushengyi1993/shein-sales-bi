@@ -8,10 +8,12 @@ QUEUE_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_FILE:-$ROOT/state/portal-section-que
 LOCK_FILE="${SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE:-$ROOT/state/locks/shein-bi-portal-section-queue.lock}"
 MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-3}"
 SECTION_TIMEOUT="${SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC:-900}"
-PRODUCT_SALES_DAILY_TIMEOUT_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-420}"
-PROFIT_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC:-480}"
-PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-450}"
-HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC:-540}"
+PRODUCT_SALES_DAILY_TIMEOUT_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-600}"
+PROFIT_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC:-630}"
+PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-630}"
+HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC:-630}"
+RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_RANKINGS_MIN_RUNTIME_SEC:-630}"
+INVENTORY_TREND_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_INVENTORY_TREND_MIN_RUNTIME_SEC:-630}"
 POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC:-60}"
 MIN_REMAINING_RUNTIME_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC:-120}"
 LEASE_SECONDS="${SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC:-1200}"
@@ -37,6 +39,8 @@ trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 [[ "$PROFIT_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
+[[ "$RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
+[[ "$INVENTORY_TREND_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$MIN_REMAINING_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$DEADLINE_MINUTE" =~ ^[0-9]+$ ]] && (( DEADLINE_MINUTE >= 0 && DEADLINE_MINUTE <= 59 )) || exit 64
@@ -320,6 +324,7 @@ echo "[portal-section-worker] start maxSections=$MAX_SECTIONS heavyAllowed=$HEAV
 FAILED_SECTIONS=()
 CLAIMED_SECTIONS=()
 HEAVY_SECTION_DEFERRED=0
+GENERIC_STOP=0
 PROFIT_ATTEMPTED_THIS_RUN=0
 PROFIT_COMPLETED_THIS_RUN=0
 PROFIT_FOLLOW_UP_PENDING=0
@@ -345,9 +350,9 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     fi
   fi
   if [[ "$HEAVY_ALLOWED" == 0 ]]; then
-    EXCLUDED_SECTIONS+=(profit homeRankings productSalesDaily)
+    EXCLUDED_SECTIONS+=(profit homeRankings productSalesDaily rankings inventoryTrend)
     HEAVY_SECTION_DEFERRED=1
-    echo "[portal-section-worker] defer heavy sections=profit,homeRankings,productSalesDaily reason=short_reserved_window remainingSec=$REMAINING_SEC"
+    echo "[portal-section-worker] defer heavy sections=profit,homeRankings,productSalesDaily,rankings,inventoryTrend reason=short_reserved_window remainingSec=$REMAINING_SEC"
   elif (( REMAINING_SEC < PROFIT_MIN_RUNTIME_SEC )); then
     EXCLUDED_SECTIONS+=(profit)
     HEAVY_SECTION_DEFERRED=1
@@ -357,6 +362,16 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     EXCLUDED_SECTIONS+=(productSalesDaily)
     HEAVY_SECTION_DEFERRED=1
     echo "[portal-section-worker] defer heavy section=productSalesDaily remainingSec=$REMAINING_SEC requiredSec=$PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC"
+  fi
+  if [[ "$HEAVY_ALLOWED" != 0 ]] && (( REMAINING_SEC < RANKINGS_MIN_RUNTIME_SEC )); then
+    EXCLUDED_SECTIONS+=(rankings)
+    HEAVY_SECTION_DEFERRED=1
+    echo "[portal-section-worker] defer heavy section=rankings remainingSec=$REMAINING_SEC requiredSec=$RANKINGS_MIN_RUNTIME_SEC"
+  fi
+  if [[ "$HEAVY_ALLOWED" != 0 ]] && (( REMAINING_SEC < INVENTORY_TREND_MIN_RUNTIME_SEC )); then
+    EXCLUDED_SECTIONS+=(inventoryTrend)
+    HEAVY_SECTION_DEFERRED=1
+    echo "[portal-section-worker] defer heavy section=inventoryTrend remainingSec=$REMAINING_SEC requiredSec=$INVENTORY_TREND_MIN_RUNTIME_SEC"
   fi
   # Any profit claim that is not a quiet, fully accepted completion is a
   # same-run dependency barrier. This includes a superseded publication and a
@@ -382,6 +397,7 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   fi
   if (( REMAINING_SEC < MIN_REMAINING_RUNTIME_SEC )); then
     echo "[portal-section-worker] stop before next section remainingSec=$REMAINING_SEC requiredSec=$MIN_REMAINING_RUNTIME_SEC"
+    GENERIC_STOP=1
     break
   fi
   set +e
@@ -533,7 +549,7 @@ if [[ "${#FAILED_SECTIONS[@]}" -gt 0 ]]; then
   echo "[portal-section-worker] failed sections=$(IFS=,; echo "${FAILED_SECTIONS[*]}")" >&2
   exit 1
 fi
-if [[ "$HEAVY_SECTION_DEFERRED" -eq 1 ]]; then
+if [[ "$HEAVY_SECTION_DEFERRED" -eq 1 && "$GENERIC_STOP" -eq 0 ]]; then
   QUEUE_STATUS="$(queue_command status)"
   PENDING_COUNT="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.counts?.pending||0))' "$QUEUE_STATUS")"
   if (( PENDING_COUNT > 0 )); then

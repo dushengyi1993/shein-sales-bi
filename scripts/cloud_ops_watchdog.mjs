@@ -154,8 +154,10 @@ export function resolveWatchdogReleaseAudit({
   const formalCommit = String(deploymentEvidence.commit || '').trim();
   const formalCommitValid = /^[0-9a-f]{40}$/u.test(formalCommit);
   const formalReady = formalMarkerReady && formalEvidenceReady && formalCommitValid;
-  const emergencyValid = emergencyLocalRelease.ok === true
-    && /^[0-9a-f]{40}$/u.test(String(emergencyLocalRelease.receipt?.commit || ''));
+  const emergencyCommit = String(emergencyLocalRelease.receipt?.commit || '').trim();
+  const emergencyValid = emergencyLocalRelease.exists === true
+    && emergencyLocalRelease.ok === true
+    && /^[0-9a-f]{40}$/u.test(emergencyCommit);
   const releaseAuditIssues = [];
   if (!formalMarkerReady) {
     releaseAuditIssues.push(`formal_marker_invalid:${issueText(deployedReleaseValidation.issues, 'marker_invalid')}`);
@@ -166,16 +168,16 @@ export function resolveWatchdogReleaseAudit({
   if (formalMarkerReady && formalEvidenceReady && !formalCommitValid) {
     releaseAuditIssues.push('formal_commit_invalid');
   }
-  if (!formalReady && emergencyLocalRelease.exists === true && !emergencyValid) {
+  if (emergencyLocalRelease.exists === true && !emergencyValid) {
     releaseAuditIssues.push(`emergency_local_receipt_invalid:${issueText(emergencyLocalRelease.issues, 'receipt_invalid')}`);
   }
   return Object.freeze({
     releaseAuditReady: formalReady,
     releaseAuditIssues: Object.freeze(releaseAuditIssues),
-    expectedCommit: formalReady
-      ? formalCommit
-      : emergencyValid ? String(emergencyLocalRelease.receipt.commit) : '',
-    sourceBinding: formalReady ? 'formal-v3' : emergencyValid ? 'emergency-local-receipt-v1' : 'none',
+    expectedCommit: emergencyValid
+      ? emergencyCommit
+      : formalReady ? formalCommit : '',
+    sourceBinding: emergencyValid ? 'emergency-local-receipt-v1' : formalReady ? 'formal-v3' : 'none',
     emergencyValid,
   });
 }

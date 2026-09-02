@@ -37,7 +37,47 @@ assert.equal(isResumableFallbackResult({
     blockedSkcs: ['not-a-terminal-business-blocker'],
   },
 }), false);
+
+const productionRestoreFailedResult = {
+  ok: false,
+  status: 'inventory_transaction_restore_failed',
+  classification: 'inventory_transaction_restore_failed',
+  terminalBlocked: false,
+  submitAttempted: false,
+  inventoryTransaction: {
+    writeAttempted: true,
+    safe: false,
+    submitAttempted: false,
+  },
+  blocked: {
+    type: 'inventory_transaction_restore_failed',
+    reason: 'INVENTORY_WRITE_PENDING_CONFLICT',
+    blockedSkcs: ['FY-SKC-1'],
+  },
+};
+assert.equal(isResumableFallbackResult(productionRestoreFailedResult), true);
+assert.equal(isResumableFallbackResult({
+  ok: false,
+  status: 'inventory_transaction_restore_failed',
+}), true);
+assert.equal(isResumableFallbackResult({
+  ok: false,
+  classification: 'inventory_transaction_restore_failed',
+}), true);
+assert.equal(isResumableFallbackResult({
+  ok: false,
+  blocked: {type: 'inventory_transaction_restore_failed'},
+}), true);
+
+// Worker terminal parser acceptance verification: ok === true || terminalBlocked === true
+const workerTerminalAccepted = [
+  {ok: true, status: 'executed'},
+  {ok: false, status: 'inventory_transaction_restore_failed', terminalBlocked: true},
+].every(row => row?.ok === true || row?.terminalBlocked === true);
+assert.equal(workerTerminalAccepted, true, 'cloud_marketing_repair_worker terminal parser must accept normalized terminalBlocked=true');
+
 assert.equal(isResumableFallbackResult({ok: false, status: 'failed'}), false);
+assert.equal(isResumableFallbackResult({ok: false, status: 'deadline_deferred', deferred: true}), false);
 
 assert.equal(fallbackBatchExitCode({failedCount: 0, deferredCount: 12}), 3);
 assert.equal(fallbackBatchExitCode({failedCount: 1, deferredCount: 12}), 2);

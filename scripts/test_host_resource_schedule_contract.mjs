@@ -610,13 +610,13 @@ assert.match(unit('shein-bi-cloud-portal-section-queue.timer'), /^\s*OnCalendar=
 const portalQueueUnit = unit('shein-bi-cloud-portal-section-queue.service');
 const portalQueueWorker = read('scripts/cloud_portal_section_queue_worker.sh');
 const portalQueueSlot = read('scripts/run_cloud_portal_section_queue_slot.sh');
-assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=420$/m,
-  'productSalesDaily timeout must cover the observed 337s success with volatility headroom while preserving terminal-readback budget');
-assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC=450$/m,
-  'productSalesDaily min runtime must preserve 30s terminal-readback budget after the 420s curl cap');
-assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-420\}"/,
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=600$/m,
+  'productSalesDaily timeout must cover the observed ledger refresh plus volatility headroom');
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC=630$/m,
+  'productSalesDaily min runtime must preserve 30s terminal-readback budget after the 600s curl cap');
+assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-600\}"/,
   'worker default productSalesDaily timeout must match the unit');
-assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-450\}"/,
+assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-630\}"/,
   'worker default productSalesDaily min runtime must match the unit');
 assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC \+ 30 <= PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC/,
   'productSalesDaily timeout must retain at least 30s for terminal evidence');
@@ -651,8 +651,8 @@ assert.match(portalQueueSlot, /MINUTE >= 31 && MINUTE <= 34/);
 assert.match(portalQueueSlot, /--lock-wait-sec 0/);
 assert.match(portalQueueWorker, /for \(\(index=1; index<=MAX_SECTIONS; index\+=1\)\);/,
   'the section worker must consume the bounded batch serially');
-assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily\)/,
-  'the light slot must keep profit, homeRankings and productSalesDaily excluded');
+assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily rankings inventoryTrend\)/,
+  'the light slot must keep all five accounting-heavy sections excluded');
 const hostWrapperExec = portalQueueSlot.indexOf('exec "$ROOT/scripts/run_host_heavy_job.sh"');
 assert.ok(
   hostWrapperExec > portalQueueSlot.indexOf('yield_to_daily_coordinator'),
@@ -959,6 +959,18 @@ assert.match(portalQueueWorker,
   'the worker must stop before a new claim below the generic 120-second budget');
 assert.match(portalQueueWorker, /if \(\( REMAINING_SEC <= 10 \)\); then/,
   'the hard deadline guard must remain in place');
+
+for (const sec of ['PROFIT', 'PRODUCT_SALES_DAILY', 'HOME_RANKINGS', 'RANKINGS', 'INVENTORY_TREND']) {
+  const envName = `SHEIN_BI_PORTAL_SECTION_QUEUE_${sec}_MIN_RUNTIME_SEC`;
+  assert.match(portalQueueUnit, new RegExp(`^Environment=${envName}=630$`, 'm'));
+  assert.ok(portalQueueWorker.includes(`${sec}_MIN_RUNTIME_SEC="\${${envName}:-630}"`));
+}
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=600$/m);
+assert.ok(portalQueueWorker.includes('PRODUCT_SALES_DAILY_TIMEOUT_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-600}"'));
+assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily rankings inventoryTrend\)/,
+  'the light slot must exclude all accounting-heavy sections');
+assert.match(portalQueueWorker, /REMAINING_SEC < RANKINGS_MIN_RUNTIME_SEC[\s\S]*EXCLUDED_SECTIONS\+=\(rankings\)/);
+assert.match(portalQueueWorker, /REMAINING_SEC < INVENTORY_TREND_MIN_RUNTIME_SEC[\s\S]*EXCLUDED_SECTIONS\+=\(inventoryTrend\)/);
 
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
 const repairSlot = read('scripts/run_cloud_marketing_fallback_slot.sh');
