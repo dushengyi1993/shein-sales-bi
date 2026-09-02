@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {
   discoverInventoryJournalFiles,
   findInventoryWriteFence,
+  INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
   readInventoryIntentLifecycle,
   readInventoryIntentJournals,
 } from '../lib/durable_inventory_write.mjs';
@@ -107,6 +108,12 @@ async function readInventoryValidationLifecycle(journalFiles, {currentJournal, m
         if (lifecycle.pending.has(intentId)) pending.set(key, intent);
         const outcome = lifecycle.terminalOutcomes.get(intentId);
         if (outcome) terminalOutcomes.set(key, {...outcome, journalFile: path.resolve(journalFile)});
+        if (outcome?.disposition === INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION && rawIntent.idempotencyKey) {
+          if (tombstonedIdempotencyKeys.has(rawIntent.idempotencyKey)) {
+            throw new Error(`INVENTORY_JOURNAL_TOMBSTONE_CONFLICT:${journalFile}:duplicate_global_idempotencyKey=${rawIntent.idempotencyKey}`);
+          }
+          tombstonedIdempotencyKeys.set(rawIntent.idempotencyKey, {key, intent, event: {...outcome, journalFile: path.resolve(journalFile)}});
+        }
         const resolution = lifecycle.manualResolutions.get(intentId);
         if (!resolution) continue;
         manualResolutions.set(key, resolution);

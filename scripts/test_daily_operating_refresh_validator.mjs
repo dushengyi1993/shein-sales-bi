@@ -12,6 +12,9 @@ import {
   computeInventoryOverwriteQuantity,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
+import {
+  INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
+} from '../lib/durable_inventory_write.mjs';
 import {writeMorningResumeEvidence} from '../lib/morning_resume_evidence.mjs';
 import {writeMarker} from './pipeline_marker.mjs';
 import {validateDailyOperatingRefresh, validateInventoryArtifacts} from './validate_daily_operating_refresh.mjs';
@@ -383,6 +386,69 @@ try {
   await writeJson(resultFile, goodResult);
   await writeMarkers();
   assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'a legacy dangling supersede must be quarantined from later-day completion validation');
+
+  const ownerSupersedeRunDate = '2026-08-01';
+  const ownerSupersedeLogicalActionKey = stableInventoryHash({
+    runDate: ownerSupersedeRunDate,
+    store: actionable[0].storeKey,
+    skc: actionable[0].skc,
+    sku: actionable[0].skuCode,
+    target: 10,
+    actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+    policyVersion: plan.policyVersion,
+    authorizationId: goodResult.authorizationId,
+  });
+  const ownerSupersedeRequest = {
+    ...terminalRequest,
+    body: {updateSkuInventoryQuantityRequests: [{
+      ...terminalRequest.body.updateSkuInventoryQuantityRequests[0],
+      skuCode: actionable[0].skuCode,
+      changeQuantity: computeInventoryOverwriteQuantity(10, terminalBefore),
+      idempotencyKey: `bi-inv-${ownerSupersedeLogicalActionKey.slice(0, 42)}`,
+    }]},
+  };
+  const ownerSupersedeIntent = {
+    ...terminalIntent,
+    intentId: 'validator-owner-supersede-intent-1',
+    logicalActionKey: ownerSupersedeLogicalActionKey,
+    runDate: ownerSupersedeRunDate,
+    storeKey: actionable[0].storeKey,
+    skc: actionable[0].skc,
+    skuCode: actionable[0].skuCode,
+    targetUsableInventory: 10,
+    idempotencyKey: ownerSupersedeRequest.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
+    requestPayloadHash: stableInventoryHash(ownerSupersedeRequest),
+    request: ownerSupersedeRequest,
+    recordedAt: '2026-08-01T07:55:00.000Z',
+  };
+  const ownerSupersedeOutcome = {
+    kind: 'write_outcome',
+    intentId: ownerSupersedeIntent.intentId,
+    logicalActionKey: ownerSupersedeIntent.logicalActionKey,
+    disposition: INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
+    oldRunDate: ownerSupersedeRunDate,
+    newRunDate: runDate,
+    targetUsableInventory: 10,
+    freshUsableInventory: 9,
+    originalEffectUnknown: true,
+    ownerConfirmationText: '补到10',
+    recordedAt: '2026-08-14T08:00:00.000Z',
+  };
+  const ownerSupersedeJournalFile = path.join(path.dirname(resultFile), `daily-inventory-replenishment-${ownerSupersedeRunDate}.json.journal.ndjson`);
+  await fs.writeFile(
+    ownerSupersedeJournalFile,
+    `${JSON.stringify(ownerSupersedeIntent)}\n${JSON.stringify(ownerSupersedeOutcome)}\n`,
+  );
+  await writeJson(resultFile, {...goodResult, manualResolutionTombstoneCount: 1});
+  await writeMarkers();
+  assert.equal(
+    (await validateDailyOperatingRefresh(options)).ok,
+    true,
+    'fallback validation must count owner-confirmed supersede tombstones',
+  );
+  await fs.unlink(ownerSupersedeJournalFile);
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
 
   await writeJson(resultFile, {...goodResult, unresolvedIntents: [{intentId:'orphan-1',recoveryScopeKey:'scope-1',state:'needs_manual_resolve'}]});
   await writeMarkers();
