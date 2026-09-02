@@ -429,8 +429,8 @@ function phaseProofIsAfterInventory(latest) {
   return false;
 }
 
-function assertLatestIsPreInventoryFailure(latest, runDate, businessDate) {
-  if (latest?.status !== 'failed') {
+function assertLatestIsPreInventoryFailure(latest, runDate, businessDate, {allowWaiting = false} = {}) {
+  if (latest?.status !== 'failed' && !(allowWaiting && latest?.status === 'waiting')) {
     fail('latest.json must be failed before recovery authorization', {
       code: latest?.status === 'done'
         ? 'MORNING_CHAIN_RECOVERY_COMPLETION_DONE'
@@ -442,6 +442,12 @@ function assertLatestIsPreInventoryFailure(latest, runDate, businessDate) {
     fail('latest.json date pair does not match the requested same-day run', {
       code: 'MORNING_CHAIN_RECOVERY_LATEST_DATE_MISMATCH',
       detail: {latestDate: latest?.date, latestBusinessDate: latest?.businessDate, runDate, businessDate},
+    });
+  }
+  if (latest?.status === 'waiting' && latest?.stage !== 'all') {
+    fail('waiting latest state must be the exact morning chain all-stage state', {
+      code: 'MORNING_CHAIN_RECOVERY_LATEST_STAGE_MISMATCH',
+      detail: {stage: latest?.stage || null, runDate, businessDate},
     });
   }
   if (phaseProofIsAfterInventory(latest)) {
@@ -1071,7 +1077,9 @@ export async function authorizeCloudMorningChainRecovery({
         oldDeadlineEpoch: existingReceipt.oldDeadlineEpoch,
         newDeadlineEpoch: existingReceipt.newDeadlineEpoch,
       });
-      assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate);
+      assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate, {
+        allowWaiting: Boolean(nestedMetric),
+      });
       assertMarkerNotDone(evidence.dailyOperatingRefresh, 'daily-operating-refresh marker');
       assertRecoveryCheckpoint({
         inventoryStarted: evidence.inventoryStarted,

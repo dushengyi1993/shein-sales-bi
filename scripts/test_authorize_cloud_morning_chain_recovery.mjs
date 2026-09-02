@@ -289,6 +289,12 @@ async function main() {
       await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_COMPLETION_DONE');
     }
     {
+      const fx = await makeFixture({
+        latest: {status: 'waiting', date: RUN_DATE, businessDate: BUSINESS_DATE, stage: 'all'},
+      }); fixtures.push(fx);
+      await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_LATEST_NOT_FAILED');
+    }
+    {
       const fx = await makeFixture({inventoryStarted: false}); fixtures.push(fx);
       await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_MARKER_MISSING');
     }
@@ -538,6 +544,63 @@ async function main() {
       assert.equal(metric.morningRecoveryReceiptHash, receipt.canonicalHash);
       assert.equal(metric.transactionRoot, '');
       assert.equal(metric.attempts, 1);
+      assert.equal(await fs.stat(candidateRoot).then(() => true, () => false), true);
+      fx.writerCalls.length = 0;
+      const replay = await authorizeCloudMorningChainRecovery(fx.deps);
+      assert.equal(replay.status, 'already-authorized');
+      assert.deepEqual(fx.writerCalls, []);
+    }
+
+    // Production replay may legitimately observe waiting while the exact
+    // nested metric deadline is pending.  Outer receipt/active bytes must not
+    // move; only the nested state is backfilled.  Waiting without nested, or
+    // with the wrong stage, still fails closed.
+    {
+      const fx = await makeFixture(); fixtures.push(fx);
+      await authorizeCloudMorningChainRecovery(fx.deps);
+      const outerReceipt = await fx.readReceipt();
+      const outerActive = await fx.readActive();
+      const candidateRoot = path.join(fx.stateRoot, '.link-business-metric-refetch.waiting');
+      await fs.mkdir(candidateRoot, {recursive: true});
+      await fs.writeFile(
+        path.join(candidateRoot, 'journal.ndjson'),
+        `${JSON.stringify({event: 'transaction_created'})}\n`,
+        'utf8',
+      );
+      const nestedState = {...METRIC_REFETCH_STATE, transactionRoot: candidateRoot};
+      const nestedFile = path.join(fx.stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json');
+      const latestFile = path.join(fx.cloudState, 'latest.json');
+      await writeJson(nestedFile, nestedState);
+      await writeJson(latestFile, {
+        date: RUN_DATE,
+        businessDate: BUSINESS_DATE,
+        stage: 'link-sync',
+        status: 'waiting',
+      });
+      fx.writerCalls.length = 0;
+      await expectCode(
+        () => authorizeCloudMorningChainRecovery(fx.deps),
+        'MORNING_CHAIN_RECOVERY_LATEST_STAGE_MISMATCH',
+      );
+      assert.deepEqual(fx.writerCalls, []);
+      assert.equal(await fx.readReceipt(), outerReceipt);
+      assert.equal(await fx.readActive(), outerActive);
+      assert.equal(JSON.parse(await fx.readMetricRefetch()).status, 'deadline');
+      await writeJson(latestFile, {
+        date: RUN_DATE,
+        businessDate: BUSINESS_DATE,
+        stage: 'all',
+        status: 'waiting',
+      });
+      const waitingRecovery = await authorizeCloudMorningChainRecovery(fx.deps);
+      const metric = JSON.parse(await fx.readMetricRefetch());
+      assert.equal(waitingRecovery.status, 'already-authorized');
+      assert.deepEqual(fx.writerCalls, ['link-business-metric-refetch.json']);
+      assert.equal(await fx.readReceipt(), outerReceipt);
+      assert.equal(await fx.readActive(), outerActive);
+      assert.equal(metric.status, 'recovery_authorized');
+      assert.equal(metric.previousDeadlineEpoch, NESTED_METRIC_DEADLINE);
+      assert.equal(metric.morningRecoveryReceiptHash, JSON.parse(outerReceipt).canonicalHash);
       assert.equal(await fs.stat(candidateRoot).then(() => true, () => false), true);
       fx.writerCalls.length = 0;
       const replay = await authorizeCloudMorningChainRecovery(fx.deps);
