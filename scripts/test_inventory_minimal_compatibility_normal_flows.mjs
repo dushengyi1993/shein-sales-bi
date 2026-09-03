@@ -39,7 +39,11 @@ try {
   assert.equal((await readServiceState({
     LoadState: 'loaded', ActiveState: 'inactive', SubState: 'dead', MainPID: '0', NRestarts: '0',
   })).activeState, 'inactive');
+  assert.equal((await readServiceState({
+    LoadState: 'loaded', ActiveState: 'failed', SubState: 'failed', MainPID: '0', ControlPID: '0', NRestarts: '0',
+  })).activeState, 'failed');
   for (const raw of [
+    {LoadState: 'loaded', ActiveState: 'failed', SubState: 'failed', MainPID: '0', ControlPID: '12', ExecMainStartTimestamp: 'x', NRestarts: '0'},
     {LoadState: 'loaded', ActiveState: 'failed', SubState: 'failed', MainPID: '0', ExecMainStartTimestamp: 'x', NRestarts: '0'},
     {LoadState: 'loaded', ActiveState: 'deactivating', SubState: 'stop', MainPID: '123', ExecMainStartTimestamp: 'x', NRestarts: '0'},
     {LoadState: 'loaded', ActiveState: 'activating', SubState: 'start', MainPID: '0', ExecMainStartTimestamp: 'x', NRestarts: '0'},
