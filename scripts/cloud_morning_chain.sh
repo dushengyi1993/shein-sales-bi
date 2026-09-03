@@ -707,10 +707,11 @@ case "$STAGE" in
       require_pre_inventory_budget "inventory-stage-dispatch"
       write_marker "inventory-started" "done" "inventory reserve entered; restarts may resume this stage until the absolute run deadline" "$RESULT_FILE" >/dev/null
     fi
-    set +e
-    run_inventory_stage
-    INVENTORY_STAGE_STATUS=$?
-    set -e
+    if run_inventory_stage; then
+      INVENTORY_STAGE_STATUS=0
+    else
+      INVENTORY_STAGE_STATUS=$?
+    fi
     if [[ "$INVENTORY_STAGE_STATUS" -ne 0 && "$INVENTORY_STAGE_STATUS" -ne 102 ]]; then
       exit "$INVENTORY_STAGE_STATUS"
     fi

@@ -486,6 +486,8 @@ assert.match(morning, /inventory_marker_warning/,
   'the coordinator must recognize inventory guard warning markers on exit 2');
 assert.match(morning, /if inventory_marker_warning; then[\s\S]*bypassing expired catch-up startup window/,
   'a completed inventory warning must bypass the expired startup window during final-marker convergence');
+assert.match(morning, /if run_inventory_stage; then\s+INVENTORY_STAGE_STATUS=0\s+else\s+INVENTORY_STAGE_STATUS=\$\?/,
+  'the expected inventory warning exit must be captured conditionally instead of tripping the ERR trap before marker publication');
 assert.match(morning, /write_marker "daily-operating-refresh" "warning"/,
   'the coordinator must record daily-operating-refresh warning when inventory completed with item-level blockers');
 assert.match(morning, /write_state "warning"/,
