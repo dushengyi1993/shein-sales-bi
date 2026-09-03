@@ -601,6 +601,29 @@ function assertQueueFileUnchanged(file, before, label) {
   assert.equal(profitAgain.section, 'profit', 'after productSalesDaily completes, remaining heavy work continues normally');
 }
 
+// ---- A pending linksData refresh wins the first critical claim, while the
+// ordinary heavy preference resumes after it is complete.
+{
+  const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: []};
+  enqueueSections(queue, {sections: ['profit'], priority: 5, now: at(0)});
+  enqueueSections(queue, {sections: ['linksData'], priority: 50, now: at(1_000)});
+  const critical = claimNext(queue, {
+    leaseSeconds: 60,
+    leaseId: 'critical-links-data',
+    preferSections: ['linksData'],
+    now: at(2_000),
+  });
+  assert.equal(critical.section, 'linksData', 'pending linksData must win the first critical claim');
+  completeClaim(queue, {section: 'linksData', leaseId: 'critical-links-data', now: at(3_000)});
+  const ordinary = claimNext(queue, {
+    leaseSeconds: 60,
+    leaseId: 'ordinary-profit',
+    preferSections: ['profit', 'productSalesDaily', 'homeRankings'],
+    now: at(4_000),
+  });
+  assert.equal(ordinary.section, 'profit', 'ordinary heavy preference resumes after linksData completes');
+}
+
 // ---- Heavy cursor is persisted through the CLI queue file and does not leak
 // into the light slot, where heavy sections are explicitly excluded.
 {

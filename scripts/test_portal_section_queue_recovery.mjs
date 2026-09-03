@@ -116,6 +116,21 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
     'worker must reserve >=30s for terminal readback and completion before deadline');
 }
 
+// 3b) The first heavy-slot claim gives a pending linksData refresh a chance
+// before the expensive profit lane, while retaining the old preference when
+// linksData is absent.
+{
+  const workerText = fs.readFileSync(path.join(root, 'scripts', 'cloud_portal_section_queue_worker.sh'), 'utf8');
+  assert.match(workerText, /FIRST_QUEUE_STATUS="\$\(queue_command status\)"/,
+    'worker must inspect queue state before its first claim');
+  assert.match(workerText, /FIRST_LINKS_DATA_PENDING/,
+    'worker must detect a pending linksData entry');
+  assert.match(workerText, /CLAIM_ARGS\+=\(--prefer-sections linksData\)/,
+    'worker must prioritize linksData when it is pending');
+  assert.match(workerText, /elif \[\[ "\$HEAVY_FIRST" == "1" && "\$HEAVY_ALLOWED" == "1" \]\]/,
+    'worker must retain the original heavy preference when linksData is absent');
+}
+
 // 4) Idempotency / Crash Recovery: no duplicate same revision execution.
 {
   const queue = {version: 1, updatedAt: '', nextSequence: 0, entries: [], publishedSnapshots: []};
