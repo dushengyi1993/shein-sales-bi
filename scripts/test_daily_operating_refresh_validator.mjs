@@ -279,7 +279,9 @@ try {
   await writeJson(resultFile, {...goodResult, planHash: historicalPlan.payloadHash});
   await writeMarkers(completionAt);
   assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'immutable final evidence must remain valid hours after completion');
-  await assert.rejects(validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false}), /sourceEvidence is stale/, 'write-time validation must still reject the same evidence now');
+  assert.equal((await validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker: false})).ok, true, 'post-audit with valid marker present must remain valid hours after completion');
+  await fs.rm(inventoryMarkerFile, {force: true});
+  await assert.rejects(validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker: false}), /sourceEvidence is stale/, 'write-time validation without marker must still reject stale evidence now');
   await writeJson(planFile, plan);
   await writeJson(resultFile, goodResult);
   await writeMarkers();
@@ -555,7 +557,77 @@ try {
   await writeJson(resultFile, goodResult);
   await writeMarkers();
 
-  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected']}, null, 2));
+  // 8. requireMarker=false with valid terminal warning marker freezes sourceReferenceTime to marker.completedAt
+  const planOldFetchedAt = "2026-08-16T07:00:00.000Z";
+  const markerCompletedAt = "2026-08-16T07:05:00.000Z";
+  const planWithHistoricalFreshness = {
+    ...plan,
+    sourceEvidence: plan.sourceEvidence.map(ev => ({...ev, fetchedAt: planOldFetchedAt})),
+  };
+  planWithHistoricalFreshness.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(planWithHistoricalFreshness));
+  await writeJson(planFile, planWithHistoricalFreshness);
+  const resultMatchingHistoricalPlan = {
+    ...goodResult,
+    planHash: planWithHistoricalFreshness.payloadHash,
+  };
+  await writeJson(resultFile, resultMatchingHistoricalPlan);
+
+  // Write valid inventory warning marker completed at 07:05:00Z (within maxMinutesAgo of planOldFetchedAt)
+  await writeMarker({
+    root: markerRoot,
+    stage: "daily-inventory-guard",
+    date: runDate,
+    businessDate,
+    status: "warning",
+    ok: true,
+    evidence: [planFile, resultFile],
+    completedAt: markerCompletedAt,
+  });
+
+  const inventoryOptions = {
+    root: tempRoot,
+    markerRoot,
+    inventoryRuntimeRoot: runtimeRoot,
+    runDate,
+    businessDate,
+    enabledStores: storeKeys,
+    requireMarker: false,
+  };
+
+  // With valid warning marker present, requireMarker=false uses marker.completedAt and passes freshness
+  assert.equal((await validateInventoryArtifacts(inventoryOptions)).ok, true, "valid inventory warning marker freezes freshness in requireMarker=false");
+
+  // 9. requireMarker=false with drifted/invalid marker evidence does not freeze, falls back to Date.now() and fails freshness
+  await writeMarker({
+    root: markerRoot,
+    stage: "daily-inventory-guard",
+    date: runDate,
+    businessDate,
+    status: "failed",
+    ok: false,
+    evidence: [planFile, resultFile],
+    completedAt: markerCompletedAt,
+  });
+  await assert.rejects(
+    validateInventoryArtifacts(inventoryOptions),
+    /inventory plan sourceEvidence is stale/,
+    "bad marker status does not freeze freshness and fails closed to Date.now()",
+  );
+
+  // 10. requireMarker=false without any marker falls back to Date.now() (stale source evidence rejected)
+  await fs.rm(inventoryMarkerFile, {force: true});
+  await assert.rejects(
+    validateInventoryArtifacts(inventoryOptions),
+    /inventory plan sourceEvidence is stale/,
+    "missing marker falls back to Date.now() and rejects stale evidence",
+  );
+
+  // Restore clean plan/result baseline for final marker check
+  await writeJson(planFile, plan);
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
+
+  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected', 'inventory_only_warning_marker_freezes_freshness', 'inventory_only_corrupted_marker_uses_now', 'inventory_only_no_marker_uses_now']}, null, 2));
 } finally {
   await fs.rm(tempRoot, {recursive: true, force: true});
 }

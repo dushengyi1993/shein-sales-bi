@@ -369,6 +369,25 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     await verifyEvidenceRecords(marker.evidence, [planFile, resultFile], root, 'inventory marker');
     sourceReferenceTime = Date.parse(String(marker.completedAt || ''));
     assert(Number.isFinite(sourceReferenceTime), 'inventory marker completedAt is invalid');
+  } else {
+    try {
+      const marker = await readJson(inventoryMarkerFile);
+      if (
+        marker?.ok === true
+        && marker?.stage === 'daily-inventory-guard'
+        && (marker?.status === 'done' || marker?.status === 'warning')
+        && marker?.runDate === runDate
+        && marker?.businessDate === businessDate
+      ) {
+        await verifyEvidenceRecords(marker.evidence, [planFile, resultFile], root, 'inventory marker');
+        const parsed = Date.parse(String(marker.completedAt || ''));
+        if (Number.isFinite(parsed)) {
+          sourceReferenceTime = parsed;
+        }
+      }
+    } catch {
+      // Retain Date.now() when marker is missing, invalid, or drifted
+    }
   }
   assert(plan?.date === runDate && plan?.policyVersion === policy?.policyVersion, 'inventory plan date/policy mismatch');
   assert(plan?.executable === true && Array.isArray(plan?.blockers) && plan.blockers.length === 0, 'inventory plan is not executable');
@@ -475,6 +494,7 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   }
   assert(seen.size === planByKey.size && [...planByKey.keys()].every(key => seen.has(key)), 'inventory plan/result identity set mismatch');
   return {
+    ok: true,
     planFile,
     resultFile,
     inventoryMarkerFile,

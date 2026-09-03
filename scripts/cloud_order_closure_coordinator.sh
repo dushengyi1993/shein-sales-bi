@@ -10,11 +10,12 @@ DEFER_STATE="${SHEIN_BI_ORDER_CLOSURE_DEFER_STATE:-/srv/shein-bi/runtime/host-sc
 COORDINATOR_STATE="${SHEIN_BI_ORDER_CLOSURE_COORDINATOR_STATE:-/srv/shein-bi/runtime/host-scheduler/order-closure-coordinator.latest.json}"
 RUN_DATE_TARGET="${SHEIN_BI_ORDER_CLOSURE_RUN_DATE:-today}"
 BUSINESS_DATE_TARGET="${SHEIN_BI_ORDER_CLOSURE_BUSINESS_DATE:-yesterday}"
-MAX_PAIRS="${SHEIN_ORDER_CLOSURE_MAX_PAIRS:-500}"
+MAX_PAIRS="${SHEIN_ORDER_CLOSURE_MAX_PAIRS:-30}"
 MIN_AGE_DAYS="${SHEIN_ORDER_CLOSURE_MIN_AGE_DAYS:-2}"
 COOLDOWN_HOURS="${SHEIN_ORDER_CLOSURE_COOLDOWN_HOURS:-20}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 PORTAL_TIMEOUT_SEC="${SHEIN_ORDER_CLOSURE_PORTAL_TIMEOUT_SEC:-240}"
+OUTCOME_FILE="${SHEIN_ORDER_CLOSURE_OUTCOME_FILE:-$ROOT/state/order_closure_last_outcome.json}"
 WORK_FINGERPRINT_SCOPE="order-closure"
 # Manual semantic contract for the closure implementation, candidate SQL and
 # required Portal refresh/queue effects. Bump only when those business
@@ -57,6 +58,8 @@ NODE
 }
 
 ATTEMPT=0
+PREVIOUS_REMAINING_CANDIDATES=""
+PREVIOUS_REMAINING_PAIRS=""
 
 # The source commit is retained for audit only. It is deliberately excluded
 # from the structured work fingerprint.
@@ -165,9 +168,30 @@ while true; do
       write_state "done" "order lifecycle closure reached an authoritative empty done marker"
       exit 0
     fi
-    write_state "partial" "order closure activation incomplete; markerStatus=partial remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS; next authorized activation required"
-    echo "[order-closure-coordinator] partial runDate=$ATTEMPT_RUN_DATE remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS; next authorized activation required"
-    exit 0
+    if (( REMAINING_CANDIDATES == 0 && REMAINING_PAIRS > 0 )); then
+      write_state "partial" "order closure returned an inconsistent empty-candidate workset; remainingPairs=$REMAINING_PAIRS; next authorized activation required"
+      echo "[order-closure-coordinator] partial inconsistent workset runDate=$ATTEMPT_RUN_DATE remainingCandidates=0 remainingPairs=$REMAINING_PAIRS; next authorized activation required"
+      exit 0
+    fi
+    QUALITY_STATUS=""
+    if [[ -f "$OUTCOME_FILE" ]]; then
+      QUALITY_STATUS="$(node -e "try{const j=require(process.argv[1]); process.stdout.write(String(j.qualityStatus||''));}catch{}" "$OUTCOME_FILE")"
+    fi
+    if [[ "$QUALITY_STATUS" != "complete" ]]; then
+      write_state "partial" "order closure reached a partial batch with failed or deferred pairs; remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS; next authorized activation required"
+      echo "[order-closure-coordinator] partial batch contains non-successful pairs runDate=$ATTEMPT_RUN_DATE remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS; next authorized activation required"
+      exit 0
+    fi
+    if [[ "$REMAINING_CANDIDATES" == "$PREVIOUS_REMAINING_CANDIDATES" && "$REMAINING_PAIRS" == "$PREVIOUS_REMAINING_PAIRS" ]]; then
+      write_state "partial" "order closure made no progress in this activation; remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS; next authorized activation required"
+      echo "[order-closure-coordinator] partial no-progress runDate=$ATTEMPT_RUN_DATE remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS; next authorized activation required"
+      exit 0
+    fi
+    PREVIOUS_REMAINING_CANDIDATES="$REMAINING_CANDIDATES"
+    PREVIOUS_REMAINING_PAIRS="$REMAINING_PAIRS"
+    write_state "partial" "order closure activation continuing; markerStatus=partial remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS"
+    echo "[order-closure-coordinator] partial runDate=$ATTEMPT_RUN_DATE remainingCandidates=$REMAINING_CANDIDATES remainingPairs=$REMAINING_PAIRS; continuing inside same activation"
+    continue
   fi
   if [[ "$status" -ne 75 ]]; then
     write_state "failed" "order lifecycle closure failed with exit=$status"

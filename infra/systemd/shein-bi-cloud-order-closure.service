@@ -15,6 +15,8 @@ Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_SALES_TRANSPORT=openapi
 Environment=SHEIN_BI_ORDER_CLOSURE_RETRY_DELAY_SEC=60
 Environment=SHEIN_BI_ORDER_CLOSURE_START_DEADLINE=07:27
+Environment=SHEIN_ORDER_CLOSURE_MAX_PAIRS=30
+Environment=SHEIN_ORDER_CLOSURE_OUTCOME_FILE=/srv/shein-bi/runtime/host-scheduler/order-closure-last-outcome.json
 TimeoutStartSec=10800
 Nice=5
 IOSchedulingClass=best-effort
