@@ -472,6 +472,8 @@ assert.match(morning, /pipeline_marker_done "morning-supplements"/,
   'a restarted coordinator must resume after the completed atomic publish checkpoint instead of rebuilding it');
 assert.match(morning, /daily_operating_refresh_done/,
   'a semantically completed business date must be an idempotent no-op when the service is started again');
+assert.match(morning, /daily_operating_refresh_warning/,
+  'a date completed with warning must be an idempotent no-op and preserve warning state without re-running');
 assert.match(morning, /resume-skip all-store fetch; exact-date evidence already exists for all enabled stores/,
   'a restarted failed morning publish must reuse complete exact-date store evidence');
 assert.match(morning, /daily supplements failed status=\$SUPPLEMENT_STATUS; the previous complete BI snapshot remains active/,
@@ -480,6 +482,12 @@ assert.match(morning, /daily inventory guard is waiting for host capacity inside
   'temporary resource pressure must keep the inventory stage in the same coordinator run');
 assert.match(morning, /if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1[\s\S]*inventory_status=\$\?/,
   'the inventory scheduler command must be conditional so exit 75 is handled instead of tripping the ERR trap');
+assert.match(morning, /inventory_marker_warning/,
+  'the coordinator must recognize inventory guard warning markers on exit 2');
+assert.match(morning, /write_marker "daily-operating-refresh" "warning"/,
+  'the coordinator must record daily-operating-refresh warning when inventory completed with item-level blockers');
+assert.match(morning, /write_state "warning"/,
+  'the coordinator state must record warning instead of failing the daily operating refresh');
 const linkBusinessSync = read('scripts/cloud_link_business_sync.sh');
 assert.match(linkBusinessSync, /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
   'an internal retry must reuse exact-date completed store evidence instead of starting all stores over');
