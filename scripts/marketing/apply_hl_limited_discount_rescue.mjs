@@ -17,7 +17,10 @@ import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
-import {parseChinaBusinessDateTime} from '../../lib/marketing_datetime.mjs';
+import {
+  formatChinaBusinessDateTime,
+  parseChinaBusinessDateTime,
+} from '../../lib/marketing_datetime.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -300,6 +303,7 @@ if (!String(effectiveActivityNamePrefix || '').trim()) throw new Error('Missing 
 if (!Number.isInteger(effectiveActivityStock) || effectiveActivityStock <= 0) throw new Error(`Invalid activity stock: ${effectiveActivityStock}`);
 const end = parseChinaBusinessDateTime(effectiveEndTime);
 if (!end) throw new Error(`Invalid --end-time: ${effectiveEndTime}`);
+const effectiveEndTimeForApi = formatChinaBusinessDateTime(end);
 const store = STORES.find(s => String(s.storeKey).toUpperCase() === args.storeKey);
 if (!store) throw new Error(`Unknown store for identity guard: ${args.storeKey}`);
 
@@ -1032,7 +1036,7 @@ try {
       targetRows,
       execute: args.execute,
       targetRefToolId: TARGET_REF_TOOL_ID,
-      targetEndTime: effectiveEndTime,
+      targetEndTime: effectiveEndTimeForApi,
       targetEndTimeEpochMs: end.getTime(),
       activityStock: effectiveActivityStock,
       startDelayMinutes: args.startDelayMinutes,
@@ -1053,6 +1057,7 @@ try {
     loginRecovery,
     automationAuthorization,
     targetEndTime: effectiveEndTime,
+    targetEndTimeForApi: effectiveEndTimeForApi,
     activityNamePrefix: effectiveActivityNamePrefix,
     ...result,
   }, null, 2), 'utf8');
