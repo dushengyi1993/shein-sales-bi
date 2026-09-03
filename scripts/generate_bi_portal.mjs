@@ -5764,12 +5764,13 @@ function attachProductAliasSearch(data){
 }
 
 const DEFAULT_STORE_OWNER_GROUPS = Object.freeze([
-  {key:'GUANGHONG', name:'广洪', stores:['DL','TZZ','CX'], color:'#2563eb'},
+  {key:'GUANGHONG', name:'广洪', stores:['DL'], color:'#2563eb'},
   {key:'YANGHUAN', name:'杨欢', stores:['DX','LQ','XC'], color:'#f97316'},
   {key:'WUWEI', name:'吴薇', stores:['QY','JY','XL'], color:'#7c3aed'},
   {key:'JIAYIN', name:'嘉茵', stores:['NM','YJ','MZ'], color:'#db2777'},
   {key:'LUOFANG', name:'罗芳', stores:['FY','QH','ZL'], color:'#14b8a6'},
-  {key:'TIANHAO', name:'天浩', stores:['HL','TZ','TS'], color:'#84cc16'}
+  {key:'TIANHAO', name:'天浩', stores:['HL','TZ','TS'], color:'#84cc16'},
+  {key:'ZHENGYIHANG', name:'郑裔航', stores:['JSH','CX','TZZ'], color:'#06b6d4'}
 ]);
 
 function normalizeOwnerGroupKey(value) {
@@ -5799,7 +5800,6 @@ function normalizeStoreOwnerGroups(rawGroups, source = 'config/stores.json') {
     if (seenKeys.has(key)) throw new Error(`Duplicate ownerGroups key in ${source}: ${key}`);
     seenKeys.add(key);
     for (const store of stores) {
-      if (store === 'JSH') throw new Error(`JSH must stay unassigned and cannot be listed in ownerGroups (${source})`);
       const old = seenStores.get(store);
       if (old) throw new Error(`Store ${store} appears in multiple ownerGroups (${old}, ${key}) in ${source}`);
       seenStores.set(store, key);

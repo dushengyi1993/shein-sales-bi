@@ -54,9 +54,7 @@
       "key": "GUANGHONG",
       "name": "广洪",
       "stores": [
-        "DL",
-        "TZZ",
-        "CX"
+        "DL"
       ],
       "color": "#2563eb"
     },
@@ -109,6 +107,16 @@
         "TS"
       ],
       "color": "#84cc16"
+    },
+    {
+      "key": "ZHENGYIHANG",
+      "name": "郑裔航",
+      "stores": [
+        "JSH",
+        "CX",
+        "TZZ"
+      ],
+      "color": "#06b6d4"
     }
   ],
   "stores": [
