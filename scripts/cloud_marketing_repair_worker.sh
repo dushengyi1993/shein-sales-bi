@@ -794,6 +794,9 @@ assert_stage_current() {
 
 active_busy_services() {
   local active=() service probe_output probe_status state
+  local show_output show_status line key value
+  local active_state sub_state main_pid control_pid
+  local active_state_count sub_state_count main_pid_count control_pid_count
   if ! command -v systemctl >/dev/null 2>&1; then
     echo "[cloud_marketing_repair] ERROR systemctl is unavailable; busy-service admission cannot be proven inactive" >&2
     return 69
@@ -816,7 +819,65 @@ active_busy_services() {
       active|activating|reloading|deactivating)
         active+=("$service:$state")
         ;;
-      failed|unknown)
+      failed)
+        if (( probe_status != 3 )); then
+          echo "[cloud_marketing_repair] ERROR systemctl returned failed with unexpected status=$probe_status service=$service" >&2
+          return 69
+        fi
+        if show_output="$(systemctl show --no-pager --property=ActiveState --property=SubState --property=MainPID --property=ControlPID "$service" 2>&1)"; then
+          show_status=0
+        else
+          show_status=$?
+        fi
+        if (( show_status != 0 )); then
+          echo "[cloud_marketing_repair] ERROR systemctl show failed service=$service status=$show_status output=${show_output:-empty}" >&2
+          return 69
+        fi
+        active_state=""
+        sub_state=""
+        main_pid=""
+        control_pid=""
+        active_state_count=0
+        sub_state_count=0
+        main_pid_count=0
+        control_pid_count=0
+        while IFS= read -r line || [[ -n "$line" ]]; do
+          line="${line//$'\r'/}"
+          if [[ -z "$line" || "$line" != *=* ]]; then
+            echo "[cloud_marketing_repair] ERROR failed service show format invalid service=$service line=${line:-empty}" >&2
+            return 69
+          fi
+          key="${line%%=*}"
+          value="${line#*=}"
+          case "$key" in
+            ActiveState) active_state="$value"; active_state_count=$((active_state_count + 1)) ;;
+            SubState) sub_state="$value"; sub_state_count=$((sub_state_count + 1)) ;;
+            MainPID) main_pid="$value"; main_pid_count=$((main_pid_count + 1)) ;;
+            ControlPID) control_pid="$value"; control_pid_count=$((control_pid_count + 1)) ;;
+            *)
+              echo "[cloud_marketing_repair] ERROR failed service show returned unexpected field service=$service field=$key" >&2
+              return 69
+              ;;
+          esac
+        done <<< "$show_output"
+        if (( active_state_count != 1 || sub_state_count != 1 || main_pid_count != 1 || control_pid_count != 1 )); then
+          echo "[cloud_marketing_repair] ERROR failed service show fields missing or duplicated service=$service ActiveStateCount=$active_state_count SubStateCount=$sub_state_count MainPIDCount=$main_pid_count ControlPIDCount=$control_pid_count" >&2
+          return 69
+        fi
+        if [[ "$active_state" != "failed" || "$sub_state" != "failed" ]]; then
+          echo "[cloud_marketing_repair] ERROR failed service show state mismatch service=$service ActiveState=${active_state:-missing} SubState=${sub_state:-missing}" >&2
+          return 69
+        fi
+        if [[ ! "$main_pid" =~ ^[0-9]+$ || ! "$control_pid" =~ ^[0-9]+$ ]]; then
+          echo "[cloud_marketing_repair] ERROR failed service PID format invalid service=$service MainPID=${main_pid:-missing} ControlPID=${control_pid:-missing}" >&2
+          return 69
+        fi
+        if [[ "$main_pid" != "0" || "$control_pid" != "0" ]]; then
+          echo "[cloud_marketing_repair] ERROR failed service has non-zero PID service=$service MainPID=$main_pid ControlPID=$control_pid" >&2
+          return 69
+        fi
+        ;;
+      unknown)
         echo "[cloud_marketing_repair] ERROR busy-service probe is not trustworthy service=$service state=$state status=$probe_status" >&2
         return 69
         ;;

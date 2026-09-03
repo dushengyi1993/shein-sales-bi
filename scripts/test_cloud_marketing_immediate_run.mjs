@@ -1419,9 +1419,10 @@ process.kill(process.pid, 'SIGKILL');
   assert.deepEqual(leaseFailureReceipts, [],
     'lease acquisition failure must not publish a consumed authorization receipt');
 
-  // An abnormal systemctl result is an admission failure, not proof that the
-  // host is idle. Exercise the real busy probe before lease/consume and prove
-  // that the pending one-time authorization remains untouched.
+  // Exercise the real busy-service admission before lease/consume. Unknown
+  // states and untrustworthy failed-state readback must fail closed, while an
+  // exact failed/failed terminal state with zero PIDs may advance to the next
+  // controlled stage without resetting systemd state.
   const busyProbeMarker = path.join(harnessStageRoot, 'busy-probe-order.log');
   const busyProbeMarkerRuntimePath = useNativeWslHarness
     ? `${harnessRoot}/state/busy-probe-order.log`
@@ -1429,7 +1430,38 @@ process.kill(process.pid, 'SIGKILL');
   const fakeSystemctl = path.join(harnessStageRoot, 'bin', 'systemctl');
   const fakeSystemctlRuntime = useNativeWslHarness ? `${harnessRoot}/bin/systemctl` : fakeSystemctl;
   await fsp.mkdir(path.dirname(fakeSystemctl), {recursive: true});
-  await fsp.writeFile(fakeSystemctl, '#!/usr/bin/env bash\nprintf "failed\\n"\nexit 3\n', 'utf8');
+  await fsp.writeFile(fakeSystemctl, [
+    '#!/usr/bin/env bash',
+    'set -u',
+    'mode="${SHEIN_TEST_SYSTEMCTL_MODE:-unknown}"',
+    'case "${1:-}" in',
+    '  is-active)',
+    '    case "$mode" in',
+    '      unknown) printf "unknown\\n"; exit 4 ;;',
+    '      failed-zero-pid|failed-nonzero-pid|show-error) printf "failed\\n"; exit 3 ;;',
+    '    esac',
+    '    ;;',
+    '  show)',
+    '    case "$mode" in',
+    '      failed-zero-pid)',
+    '        printf "ActiveState=failed\\nSubState=failed\\nMainPID=0\\nControlPID=0\\n"',
+    '        exit 0',
+    '        ;;',
+    '      failed-nonzero-pid)',
+    '        printf "ActiveState=failed\\nSubState=failed\\nMainPID=321\\nControlPID=0\\n"',
+    '        exit 0',
+    '        ;;',
+    '      show-error)',
+    '        printf "show unavailable\\n" >&2',
+    '        exit 1',
+    '        ;;',
+    '    esac',
+    '    ;;',
+    'esac',
+    'printf "unexpected systemctl fixture call mode=%s command=%s\\n" "$mode" "${1:-missing}" >&2',
+    'exit 125',
+    '',
+  ].join('\n'), 'utf8');
   if (useNativeWslHarness) {
     wslMkdir(`${harnessRoot}/bin`);
     wslCopy(fakeSystemctl, fakeSystemctlRuntime);
@@ -1448,34 +1480,70 @@ process.kill(process.pid, 'SIGKILL');
     SHEIN_BI_MARKETING_REPAIR_LOG_DIR: useNativeWslHarness ? `${harnessRoot}/logs` : path.join(harnessStageRoot, 'logs'),
     SHEIN_BI_MARKETING_REPAIR_BUSY_SERVICES: 'probe.service',
     SHEIN_TEST_LEASE_MARKER: busyProbeMarkerRuntimePath,
+    SHEIN_TEST_SYSTEMCTL_MODE: 'unknown',
     PATH: useNativeWslHarness
       ? `${harnessRoot}/bin:/usr/bin:/bin`
       : `${path.dirname(fakeSystemctl)}${path.delimiter}${process.env.PATH || ''}`,
   };
-  const busyProbeRun = useNativeWslHarness
-    ? spawnSync('wsl.exe', [
-      '--exec', 'env', ...wslEnvironmentArgs(busyProbeEnv, ['PATH', 'SHEIN_TEST_LEASE_MARKER']),
-      'bash', '-lc', `bash ${bashQuote(`${harnessRoot}/scripts/worker-busy-probe-harness.sh`)}`,
-    ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
-    : spawnSync('bash', ['-c', `bash ${bashQuote(busyProbeWorkerPath)}`], {
-      cwd: root,
-      env: {...process.env, ...busyProbeEnv},
-      encoding: 'utf8',
-      timeout: 120000,
-    });
-  assert.equal(busyProbeRun.error, undefined, `busy-probe harness spawn failed: ${busyProbeRun.error?.message || ''}`);
-  assert.equal(busyProbeRun.status, 69,
-    `failed systemctl state must stop admission before lease/consume: ${busyProbeRun.stderr || busyProbeRun.stdout}`);
-  assert.equal(useNativeWslHarness ? wslExists(busyProbeMarkerRuntimePath) : await exists(busyProbeMarker), false,
-    'abnormal busy probe must stop before both lease and consume hooks');
-  if (useNativeWslHarness) wslCopy(workerHarnessAuthRuntimePath, workerHarnessAuth);
-  assert.equal(await exists(workerHarnessAuth), true,
-    'abnormal busy probe must preserve the pending one-time authorization source');
-  const busyProbeReceipts = useNativeWslHarness
-    ? wslFileNames(`${harnessRoot}/runtime/worker`).filter(name => name.startsWith('authorization.json.consumed.'))
-    : (await fsp.readdir(path.dirname(workerHarnessAuth))).filter(name => name.startsWith('authorization.json.consumed.'));
-  assert.deepEqual(busyProbeReceipts, [],
-    'abnormal busy probe must not publish a claimed or consumed receipt');
+  const resetBusyProbeMarker = async () => {
+    await fsp.rm(busyProbeMarker, {force: true});
+    if (useNativeWslHarness) {
+      const removed = wslExec(['rm', '-f', '--', busyProbeMarkerRuntimePath]);
+      assert.equal(removed.error, undefined, `busy-probe marker reset spawn failed: ${removed.error?.message || ''}`);
+      assert.equal(removed.status, 0, `busy-probe marker reset failed: ${removed.stderr || removed.stdout}`);
+    }
+  };
+  const runBusyProbe = mode => {
+    const environment = {...busyProbeEnv, SHEIN_TEST_SYSTEMCTL_MODE: mode};
+    return useNativeWslHarness
+      ? spawnSync('wsl.exe', [
+        '--exec', 'env', ...wslEnvironmentArgs(environment, [
+          'PATH', 'SHEIN_TEST_LEASE_MARKER', 'SHEIN_TEST_SYSTEMCTL_MODE',
+        ]),
+        'bash', '-lc', `bash ${bashQuote(`${harnessRoot}/scripts/worker-busy-probe-harness.sh`)}`,
+      ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
+      : spawnSync('bash', ['-c', `bash ${bashQuote(busyProbeWorkerPath)}`], {
+        cwd: root,
+        env: {...process.env, ...environment},
+        encoding: 'utf8',
+        timeout: 120000,
+      });
+  };
+  const assertAuthorizationPending = async label => {
+    if (useNativeWslHarness) wslCopy(workerHarnessAuthRuntimePath, workerHarnessAuth);
+    assert.equal(await exists(workerHarnessAuth), true,
+      `${label} must preserve the pending one-time authorization source`);
+    const receipts = useNativeWslHarness
+      ? wslFileNames(`${harnessRoot}/runtime/worker`).filter(name => name.startsWith('authorization.json.consumed.'))
+      : (await fsp.readdir(path.dirname(workerHarnessAuth))).filter(name => name.startsWith('authorization.json.consumed.'));
+    assert.deepEqual(receipts, [], `${label} must not publish a claimed or consumed receipt`);
+  };
+  const assertBusyProbeBlocked = async (mode, label) => {
+    await resetBusyProbeMarker();
+    const result = runBusyProbe(mode);
+    assert.equal(result.error, undefined, `${label} harness spawn failed: ${result.error?.message || ''}`);
+    assert.equal(result.status, 69,
+      `${label} must stop admission before lease/consume: ${result.stderr || result.stdout}`);
+    assert.equal(useNativeWslHarness ? wslExists(busyProbeMarkerRuntimePath) : await exists(busyProbeMarker), false,
+      `${label} must stop before both lease and consume hooks`);
+    await assertAuthorizationPending(label);
+  };
+
+  await assertBusyProbeBlocked('unknown', 'unknown busy-service state');
+
+  await resetBusyProbeMarker();
+  const failedZeroPidRun = runBusyProbe('failed-zero-pid');
+  assert.equal(failedZeroPidRun.error, undefined,
+    `failed-zero-pid harness spawn failed: ${failedZeroPidRun.error?.message || ''}`);
+  assert.equal(failedZeroPidRun.status, 75,
+    `trusted failed-zero-pid state must continue to the controlled lease stage: ${failedZeroPidRun.stderr || failedZeroPidRun.stdout}`);
+  if (useNativeWslHarness) wslCopy(busyProbeMarkerRuntimePath, busyProbeMarker);
+  assert.equal((await fsp.readFile(busyProbeMarker, 'utf8')).trim(), 'lease',
+    'trusted failed-zero-pid state must reach lease but not authorization consume');
+  await assertAuthorizationPending('trusted failed-zero-pid lease defer');
+
+  await assertBusyProbeBlocked('failed-nonzero-pid', 'failed service with non-zero MainPID');
+  await assertBusyProbeBlocked('show-error', 'failed service with systemctl show error');
 
   // Runtime deadline contract: once a transaction has started, crossing the
   // outer epoch cannot disable its finally/restore path, while a new write is
