@@ -484,6 +484,8 @@ assert.match(morning, /if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1[\s\S]*in
   'the inventory scheduler command must be conditional so exit 75 is handled instead of tripping the ERR trap');
 assert.match(morning, /inventory_marker_warning/,
   'the coordinator must recognize inventory guard warning markers on exit 2');
+assert.match(morning, /if inventory_marker_warning; then[\s\S]*bypassing expired catch-up startup window/,
+  'a completed inventory warning must bypass the expired startup window during final-marker convergence');
 assert.match(morning, /write_marker "daily-operating-refresh" "warning"/,
   'the coordinator must record daily-operating-refresh warning when inventory completed with item-level blockers');
 assert.match(morning, /write_state "warning"/,

@@ -614,7 +614,11 @@ case "$STAGE" in
       echo "[cloud_morning_chain] resume-skip warning daily-operating-refresh marker"
       exit 0
     fi
-    wait_for_catchup_startup_window
+    if inventory_marker_warning; then
+      echo "[cloud_morning_chain] verified inventory warning already completed; bypassing expired catch-up startup window" >&2
+    else
+      wait_for_catchup_startup_window
+    fi
     write_state "running" "one daily coordinator is refreshing all 19 stores; the previous complete BI snapshot stays visible until the run is complete"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-all.json"
     MISSING_STORES="$(missing_exact_date_stores)"
