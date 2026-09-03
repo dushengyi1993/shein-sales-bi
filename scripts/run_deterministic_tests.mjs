@@ -300,6 +300,7 @@ const tests = [
   // fails closed unless both deterministic shards and that dedicated job pass.
   'scripts/test_bi_portal_repository_crud.mjs',
   'scripts/test_bi_portal_mutation_queue.mjs',
+  'scripts/test_links_data_store_coverage.mjs',
 ];
 
 const TEST_ESTIMATES_MS = {

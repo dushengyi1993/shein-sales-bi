@@ -2893,25 +2893,58 @@ duplicate_links AS (
     LIMIT 900
   ) t
 ),
+store_links_ranked AS (
+  SELECT
+    link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+    nullif(image_url,'') AS image_url,
+    first_shelf_time, created_time, shelf_time, expect_shelf_time,
+    visible_inventory_date,
+    round(visible_usable_inventory::numeric, 0) AS visible_usable_inventory,
+    round(visible_inventory_quantity::numeric, 0) AS visible_inventory_quantity,
+    round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
+    round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
+    visible_shelf_statuses,
+    openapi_inventory_fetched_at,
+    openapi_inventory_shelf_status_code,
+    openapi_inventory_shelf_status_name,
+    round(openapi_usable_inventory::numeric, 0) AS openapi_usable_inventory,
+    round(openapi_inventory_quantity::numeric, 0) AS openapi_inventory_quantity,
+    round(openapi_locked_quantity::numeric, 0) AS openapi_locked_quantity,
+    shelf_status_name, shelf_age_days,
+    sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
+    eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,
+    c7_eps_uv, c7_goods_uv, c7_cart_uv, c7_pay_rate, c30_eps_uv, c30_goods_uv, c30_cart_uv, c30_pay_rate,
+    quality_grade, comment_count, bad_comment_rate, return_order_count,
+    same_product_on_shelf_count, retire_candidate,
+    high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
+    health_bucket, skc_label, activity_label, shein_tag_code, category4_name,
+    is_on_shelf, is_wait_shelf, is_sold_out, is_out_shelf, wait_shelf_blocked, wait_shelf_block_reason,
+    row_number() OVER (
+      PARTITION BY store_key
+      ORDER BY coalesce(c30_sale_cnt,0) DESC, coalesce(c30_goods_uv, goods_uv, 0) DESC, skc
+    ) AS store_rank
+  FROM link_health_enriched
+  WHERE coalesce(skc,'') <> ''
+),
 store_links AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
       link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
-      nullif(image_url,'') AS image_url,
+      image_url,
       first_shelf_time, created_time, shelf_time, expect_shelf_time,
       visible_inventory_date,
-      round(visible_usable_inventory::numeric, 0) AS visible_usable_inventory,
-      round(visible_inventory_quantity::numeric, 0) AS visible_inventory_quantity,
-      round(visible_order_locked_quantity::numeric, 0) AS visible_order_locked_quantity,
-      round(visible_pay_locked_quantity::numeric, 0) AS visible_pay_locked_quantity,
+      visible_usable_inventory,
+      visible_inventory_quantity,
+      visible_order_locked_quantity,
+      visible_pay_locked_quantity,
       visible_shelf_statuses,
       openapi_inventory_fetched_at,
       openapi_inventory_shelf_status_code,
       openapi_inventory_shelf_status_name,
-      round(openapi_usable_inventory::numeric, 0) AS openapi_usable_inventory,
-      round(openapi_inventory_quantity::numeric, 0) AS openapi_inventory_quantity,
-      round(openapi_locked_quantity::numeric, 0) AS openapi_locked_quantity,
+      openapi_usable_inventory,
+      openapi_inventory_quantity,
+      openapi_locked_quantity,
       shelf_status_name, shelf_age_days,
       sale_cnt, c7_sale_cnt, c30_sale_cnt, total_sale_volume, total_sale_order_count, last_sale_date, product_total_sale_volume, product_total_sale_order_count, product_last_sale_date,
       eps_uv, goods_uv, click_rate, cart_uv, cart_rate, pay_uv, pay_rate,
@@ -2921,9 +2954,8 @@ store_links AS (
       high_exposure_low_click, high_visit_low_pay, wait_shelf_block_candidate,
       health_bucket, skc_label, activity_label, shein_tag_code, category4_name,
       is_on_shelf, is_wait_shelf, is_sold_out, is_out_shelf, wait_shelf_blocked, wait_shelf_block_reason
-    FROM link_health_enriched
-    WHERE coalesce(skc,'') <> ''
-    ORDER BY store_key, coalesce(c30_sale_cnt,0) DESC, coalesce(c30_goods_uv, goods_uv, 0) DESC, skc
+    FROM store_links_ranked
+    ORDER BY store_rank, store_key
     LIMIT 2200
   ) t
 ),
