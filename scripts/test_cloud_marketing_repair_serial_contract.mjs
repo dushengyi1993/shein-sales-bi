@@ -9,6 +9,10 @@ const highClick = source.slice(
   source.indexOf('HIGH_CLICK_STATUS='),
   source.indexOf('MANUAL_STATUS='),
 );
+const manual = source.slice(
+  source.indexOf('MANUAL_STATUS='),
+  source.indexOf('DRIFT_STATUS='),
+);
 const fallback = source.slice(
   source.indexOf('FALLBACK_STATUS='),
   source.indexOf('QUEUE_STATUS=', source.indexOf('FALLBACK_STATUS=')),
@@ -26,6 +30,12 @@ assert.match(fallback, /--skip-build --execute --max-groups 1/);
 assert.match(fallback, /update_stage fallbackRepair pending/);
 assert.match(fallback, /consume_group_budget "\$PROCESSED_GROUPS"/);
 assert.doesNotMatch(fallback, /--max-groups "\$REMAINING_GROUPS"/);
+
+assert.match(manual, /"\$status" -eq 2 && "\$PROCESSED_ITEMS" == "1"/);
+assert.match(manual, /"\$REMAINING_ITEMS" =~ \^\[1-9\]\[0-9\]\*\$/);
+assert.match(manual, /preserving it for a fresh authorization while independent stages continue/);
+assert.match(manual, /\n\s+break\n/);
+assert.match(manual, /execute\/readback failed status=\$status/);
 
 function toBashPath(file) {
   const normalized = path.resolve(file).replaceAll('\\', '/');
@@ -49,4 +59,4 @@ const oldQueueProbe = spawnSync('bash', [], {
 assert.equal(oldQueueProbe.status, 75);
 assert.match(oldQueueProbe.stderr, /refusing non-current repair queue/);
 
-console.log(JSON.stringify({ok: true, checks: 13}, null, 2));
+console.log(JSON.stringify({ok: true, checks: 18}, null, 2));

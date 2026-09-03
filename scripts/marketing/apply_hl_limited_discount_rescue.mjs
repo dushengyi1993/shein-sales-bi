@@ -17,6 +17,7 @@ import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
+import {parseChinaBusinessDateTime} from '../../lib/marketing_datetime.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -297,8 +298,8 @@ const effectiveActivityNamePrefix = manualRows.length
 if (!effectiveEndTime) throw new Error('Missing --end-time "YYYY-MM-DD HH:mm:ss" for the limited-discount rescue window.');
 if (!String(effectiveActivityNamePrefix || '').trim()) throw new Error('Missing --activity-name-prefix for the limited-discount activity name.');
 if (!Number.isInteger(effectiveActivityStock) || effectiveActivityStock <= 0) throw new Error(`Invalid activity stock: ${effectiveActivityStock}`);
-const end = new Date(String(effectiveEndTime).replace(' ', 'T') + '+08:00');
-if (!Number.isFinite(end.getTime())) throw new Error(`Invalid --end-time: ${effectiveEndTime}`);
+const end = parseChinaBusinessDateTime(effectiveEndTime);
+if (!end) throw new Error(`Invalid --end-time: ${effectiveEndTime}`);
 const store = STORES.find(s => String(s.storeKey).toUpperCase() === args.storeKey);
 if (!store) throw new Error(`Unknown store for identity guard: ${args.storeKey}`);
 
@@ -319,6 +320,7 @@ try {
       execute,
       targetRefToolId,
       targetEndTime,
+      targetEndTimeEpochMs,
       startDelayMinutes,
       activityStock,
       activityNamePrefix,
@@ -331,7 +333,7 @@ try {
     const targetSet = new Set(targetSkcs);
     const targetBySkc = new Map(targetRows.map(row => [row.skc, row]));
     const replaceActivityIdSet = new Set((replaceActivityIds || []).map(Number).filter(Number.isFinite));
-    const windowEnd = new Date(targetEndTime.replace(' ', 'T') + '+08:00');
+    const windowEnd = new Date(targetEndTimeEpochMs);
 
     function pad(value) {
       return String(value).padStart(2, '0');
@@ -351,7 +353,12 @@ try {
 
     function parseChinaDate(value) {
       if (!value) return null;
-      return new Date(String(value).replace(' ', 'T') + '+08:00');
+      const raw = String(value).trim();
+      const source = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)
+        ? raw
+        : raw.replace(' ', 'T') + '+08:00';
+      const parsed = new Date(source);
+      return Number.isFinite(parsed.getTime()) ? parsed : null;
     }
 
     function round2(value) {
@@ -1026,6 +1033,7 @@ try {
       execute: args.execute,
       targetRefToolId: TARGET_REF_TOOL_ID,
       targetEndTime: effectiveEndTime,
+      targetEndTimeEpochMs: end.getTime(),
       activityStock: effectiveActivityStock,
       startDelayMinutes: args.startDelayMinutes,
       activityNamePrefix: effectiveActivityNamePrefix,

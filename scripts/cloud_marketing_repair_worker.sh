@@ -2283,6 +2283,11 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
     write_state failed "manual special single-item executor made no durable progress status=$status"
     exit 66
   fi
+  if [[ "$status" -eq 2 && "$PROCESSED_ITEMS" == "1" && "$REMAINING_ITEMS" =~ ^[1-9][0-9]*$ && "$TERMINAL_BLOCKED" != "1" ]]; then
+    update_stage manualSpecialRestore pending false "one exact manual item failed before a confirmed write; preserving it for a fresh authorization while independent stages continue" "$RESULT_PATH"
+    write_state pending "manual-special item deferred after a confirmed prewrite failure; continuing independent repair stages"
+    break
+  fi
   if [[ "$status" -eq 2 && "$TERMINAL_BLOCKED" != "1" ]]; then
     update_stage manualSpecialRestore failed false "execute/readback failed status=$status" "$RESULT_PATH"
     write_state failed "manual special restore failed status=$status"
