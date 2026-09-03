@@ -406,6 +406,12 @@ for (const name of [
   assert.doesNotMatch(content, /shein-host-heavy|run_host_heavy_job|Slice=shein-host-heavy-bi/,
     `${name} is a lightweight current-business fast lane`);
 }
+assert.match(
+  unit('shein-bi-cloud-today-sales-reconcile.service'),
+  /^TimeoutStartSec=600$/m,
+  'today-sales-reconcile service timeout must remain 600s to cover 19-store OpenAPI reconciliation without being killed at 120s',
+);
+assert.doesNotMatch(unit('shein-bi-cloud-today-sales-reconcile.service'), /^TimeoutStartSec=120$/m);
 
 assert.deepEqual(calendars(unit('shein-bi-cloud-session-manager.timer')), ['*-*-* 00:45:00']);
 assert.match(unit('shein-bi-cloud-session-manager.timer'), /^Persistent=true$/m,

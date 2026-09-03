@@ -14,7 +14,7 @@ Environment=TZ=Asia/Shanghai
 Environment=SHEIN_BI_ROOT=/opt/shein-bi/app
 Environment=SHEIN_BI_PORTAL_URL=http://127.0.0.1:8787
 Environment=SHEIN_OPENAPI_RECONCILE_CONCURRENCY=3
-TimeoutStartSec=120
+TimeoutStartSec=600
 TimeoutStopSec=15
 KillMode=control-group
 Nice=12

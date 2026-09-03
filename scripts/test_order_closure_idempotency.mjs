@@ -322,6 +322,8 @@ async function main() {
     'coordinator must consume central marker outcome validation');
   assert.doesNotMatch(coordinatorSource, /pipeline_marker\.mjs" read/,
     'coordinator must not classify a raw marker read');
+  assert.match(coordinatorSource, /export SHEIN_ORDER_CLOSURE_MAX_PAIRS="\$MAX_PAIRS"/,
+    'coordinator must export SHEIN_ORDER_CLOSURE_MAX_PAIRS for child stage and digest parity');
 
   const fixtures = [];
   try {
