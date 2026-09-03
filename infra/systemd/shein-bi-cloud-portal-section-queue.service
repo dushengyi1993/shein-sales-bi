@@ -32,6 +32,6 @@ IOWeight=20
 MemoryHigh=900M
 MemoryMax=1400M
 OOMPolicy=stop
-ExecCondition=/usr/bin/bash -c 'case "$(date +%%H):$(date +%%M)" in 01:*|02:0[1-4]|03:0[1-4]|07:0[1-4]) exit 1;; *:0[1-4]|*:3[1-4]) exit 0;; *) exit 1;; esac'
+ExecCondition=/usr/bin/bash -c 'case "$(date +%%H):$(date +%%M)" in 01:*) exit 1;; *:0[1-4]|*:3[1-4]) exit 0;; *) exit 1;; esac'
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_portal_section_queue_slot.sh
 SuccessExitStatus=75

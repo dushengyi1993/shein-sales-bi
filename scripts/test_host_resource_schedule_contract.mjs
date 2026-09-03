@@ -659,11 +659,12 @@ assert.match(portalQueueSlot, /DEADLINE_MINUTE=14[\s\S]*MAX_SECTIONS=8[\s\S]*HEA
   'the :02 slot must allow a bounded serial batch while remaining light-only');
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
 assert.match(portalQueueSlot, /daily_operating_refresh_active/);
-assert.match(portalQueueSlot, /case "\$HOUR" in\s+2\|3\|7\)/,
-  'the :02 slot must statically reject 02:02/03:02/07:02 maintenance windows');
+assert.doesNotMatch(portalQueueSlot, /case "\$HOUR" in\s+2\|3\|7\)/,
+  'the :02 slot must not retain obsolete hour-specific rejection');
 assert.match(portalQueueSlot, /HOUR == 1/,
   'the slot itself must defense-in-depth reject the full 01:00 hour');
-assert.match(portalQueueSlot, /reason=special_reserved_window/);
+assert.match(portalQueueSlot, /reason=full_hour_reserved/,
+  'the slot must retain an explicit full-hour reservation diagnostic');
 assert.match(portalQueueSlot, /MINUTE >= 1 && MINUTE <= 4/);
 assert.match(portalQueueSlot, /MINUTE >= 31 && MINUTE <= 34/);
 assert.match(portalQueueSlot, /--lock-wait-sec 0/);
@@ -686,8 +687,10 @@ const toPosixPath = value => {
 };
 
 assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
-assert.match(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/,
-  'the worker must keep 01 blocked and reject the special :02 maintenance windows');
+assert.match(portalQueueWorker, /01:\*\)/,
+  'the worker must keep the full 01:00 hour blocked');
+assert.doesNotMatch(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/,
+  'the worker must not retain obsolete hour-specific :02 rejection');
 assert.match(portalQueueWorker, /\*:0\[1-4\]\|\*:3\[1-4\]\) SAFE_START=1/,
   'the worker must allow the :02/:32 slot windows outside the special hours');
 
@@ -775,8 +778,8 @@ exit 75
 
   for (const specialHour of ['02', '03', '07']) {
     runPortalScheduleCase({
-      label: `${specialHour}:02 special maintenance rejection`, hour: specialHour, minute: '02',
-      expectedUnitExit: 1, expectedWorkerExit: 75,
+      label: `${specialHour}:02 light window`, hour: specialHour, minute: '02',
+      expectedUnitExit: 0, expectedWorkerExit: 0,
     });
   }
   runPortalScheduleCase({
@@ -944,8 +947,9 @@ const runSlotBehaviorCase = ({
   });
   for (const specialHour of [2, 3, 7]) {
     runSlotBehaviorCase({
-      label: `${String(specialHour).padStart(2, '0')}:02 special maintenance rejection`,
-      hour: specialHour, minute: 2, expectedExit: 75, expectedHost: false,
+      label: `${String(specialHour).padStart(2, '0')}:02 light-only`,
+      hour: specialHour, minute: 2, expectedExit: 0, expectedHost: true,
+      expectedDeadline: 14, expectedMax: 8, expectedHeavy: 0,
     });
   }
   runSlotBehaviorCase({
@@ -962,7 +966,8 @@ const runSlotBehaviorCase = ({
 
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
 assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
-assert.match(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/);
+assert.match(portalQueueWorker, /01:\*\)/);
+assert.doesNotMatch(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/);
 assert.match(portalQueueWorker, /\*:0\[1-4\]\|\*:3\[1-4\]\) SAFE_START=1/);
 assert.match(portalQueueWorker, /outside_safe_start_window/);
 assert.match(portalQueueWorker, /stop before next core lane/);

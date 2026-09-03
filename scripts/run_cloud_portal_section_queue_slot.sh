@@ -36,12 +36,6 @@ yield_to_daily_coordinator() {
 }
 
 if (( MINUTE >= 1 && MINUTE <= 4 )); then
-  case "$HOUR" in
-    2|3|7)
-      echo "[portal-section-slot] defer reason=special_reserved_window hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-      ;;
-  esac
   DEADLINE_MINUTE=14
   MAX_SECTIONS=8
   HEAVY_ALLOWED=0

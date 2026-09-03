@@ -53,7 +53,7 @@ if [[ "$SCHEDULED_ENTRY" != "1" ]]; then
 fi
 SAFE_START=0
 case "$START_HOUR:$START_MINUTE" in
-  01:*|02:0[1-4]|03:0[1-4]|07:0[1-4])
+  01:*)
     echo "[portal-section-worker] defer reason=special_reserved_window hour=$START_HOUR minute=$START_MINUTE" >&2
     exit 75
     ;;
