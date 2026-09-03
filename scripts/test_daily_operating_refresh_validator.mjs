@@ -498,6 +498,176 @@ try {
     });
   };
 
+  // Same-day pending is only warning-auditable when the single POST response
+  // is code=0 with success still unknown and the immutable intent remains
+  // pending in this run's journal.  Keep the original terminal fixture so the
+  // existing closed-intent checks below can be restored after this section.
+  const currentJournalFile = `${resultFile}.journal.ndjson`;
+  const originalCurrentJournal = await fs.readFile(currentJournalFile, 'utf8');
+  const pendingIntent = {
+    ...terminalIntent,
+    intentId: 'validator-same-day-pending-intent-1',
+    recordedAt: '2026-08-16T08:05:00.000Z',
+  };
+  const pendingWrite = {
+    attempt: 1,
+    overwrite: terminalRequest.body.updateSkuInventoryQuantityRequests[0].changeQuantity,
+    idempotencyKey: pendingIntent.idempotencyKey,
+    requestPayloadHash: pendingIntent.requestPayloadHash,
+    request: pendingIntent.request,
+    code: '0',
+    msg: 'accepted; readback remains unconfirmed',
+    traceId: 'pending-trace-1',
+    success: null,
+  };
+  const pendingResult = {
+    ...goodResult,
+    results: [{
+      ...actionable[0],
+      logicalActionKey: pendingIntent.logicalActionKey,
+      state: 'submitted_but_readback_pending',
+      before: pendingIntent.before,
+      after: {...pendingIntent.before, totalUsableInventory: 20},
+      writes: [pendingWrite],
+    }],
+  };
+  const pendingResultWithoutUnresolved = {...pendingResult};
+  delete pendingResultWithoutUnresolved.unresolvedIntents;
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(pendingIntent)}\n`, 'utf8');
+
+  // 11. A valid same-day warning + pending row requires the exact journal
+  // binding, but does not require unresolvedIntents=[] as its proof.
+  await writeJson(resultFile, pendingResult);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /lacks exact terminal readback.*strict mode/,
+    'default strict validation must reject same-day pending even with warning markers',
+  );
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  const pendingWarningValid = await validateDailyOperatingRefresh({...options, allowItemFencedWarning: true});
+  assert.equal(pendingWarningValid.ok, true, 'exact same-day pending warning must pass in explicit item-fenced mode');
+  assert.equal(pendingWarningValid.pendingWarningCount, 1);
+  assert.equal(pendingWarningValid.pendingReadbackCount, 1);
+  assert.equal(pendingWarningValid.warningCount, 1);
+
+  // The allowance is a warning-pair contract, not an inventory-only or
+  // operating-only escape hatch.
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'done'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /requires same-day warning markers/,
+    'same-day pending requires both inventory and operating warning markers',
+  );
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+
+  // 12. The result cannot borrow a same-day warning allowance without the
+  // corresponding current journal intent.
+  await fs.rm(currentJournalFile, {force: true});
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /durable journal intent is missing/,
+    'same-day pending without its journal must reject',
+  );
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(pendingIntent)}\n`, 'utf8');
+
+  const retriedPendingResult = {
+    ...pendingResultWithoutUnresolved,
+    results: pendingResultWithoutUnresolved.results.map(row => ({
+      ...row,
+      writes: [row.writes[0], {...row.writes[0], attempt: 2}],
+    })),
+  };
+  await writeJson(resultFile, retriedPendingResult);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /requires exactly one write attempt|retry or duplicate attempt detected/,
+    'same-day pending retry evidence must reject',
+  );
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+
+  // 13. Both result-side and journal-side immutable bindings must remain exact.
+  const driftedPendingResult = {
+    ...pendingResultWithoutUnresolved,
+    results: pendingResultWithoutUnresolved.results.map(row => ({
+      ...row,
+      writes: [{...row.writes[0], requestPayloadHash: 'a'.repeat(64)}],
+    })),
+  };
+  await writeJson(resultFile, driftedPendingResult);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /write request hash drift/,
+    'same-day pending request hash drift must reject',
+  );
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+  const driftedPendingIntent = {...pendingIntent, planHash: 'b'.repeat(64)};
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(driftedPendingIntent)}\n`, 'utf8');
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /durable journal planHash drift/,
+    'same-day pending journal plan hash drift must reject',
+  );
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(pendingIntent)}\n`, 'utf8');
+
+  const scopeDriftPendingResult = {
+    ...pendingResultWithoutUnresolved,
+    results: pendingResultWithoutUnresolved.results.map(row => ({...row, skc: 'scope-drift'})),
+  };
+  await writeJson(resultFile, scopeDriftPendingResult);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /result row identity is not bound to the current plan/,
+    'same-day pending scope drift must reject',
+  );
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+
+  // 14. A code=0 response with success=true is not an unresolved warning; it
+  // must have a terminal journal outcome before it can be accepted.
+  const falselySuccessfulPendingResult = {
+    ...pendingResultWithoutUnresolved,
+    results: pendingResultWithoutUnresolved.results.map(row => ({
+      ...row,
+      writes: [{...row.writes[0], success: true}],
+    })),
+  };
+  await writeJson(resultFile, falselySuccessfulPendingResult);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /response success is confirmed or missing/,
+    'success=true without a terminal outcome must reject',
+  );
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+
+  // 15. A terminal outcome closes the intent and therefore conflicts with a
+  // submitted_but_readback_pending result row.
+  const pendingTerminalOutcome = {
+    kind: 'write_outcome',
+    intentId: pendingIntent.intentId,
+    logicalActionKey: pendingIntent.logicalActionKey,
+    disposition: 'readback_matched',
+    recordedAt: '2026-08-16T08:10:00.000Z',
+  };
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(pendingIntent)}\n${JSON.stringify(pendingTerminalOutcome)}\n`, 'utf8');
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /durable journal has a terminal outcome/,
+    'same-day pending with a terminal journal outcome must reject',
+  );
+
+  await fs.writeFile(currentJournalFile, originalCurrentJournal, 'utf8');
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
+
   // 1. Valid warning markers with ok=true and full safe evidence must pass
   await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
   assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'valid warning markers must be accepted');
@@ -627,7 +797,7 @@ try {
   await writeJson(resultFile, goodResult);
   await writeMarkers();
 
-  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected', 'inventory_only_warning_marker_freezes_freshness', 'inventory_only_corrupted_marker_uses_now', 'inventory_only_no_marker_uses_now']}, null, 2));
+  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'same_day_pending_warning_accepted_with_exact_journal', 'same_day_pending_warning_strict_rejected', 'same_day_pending_warning_requires_both_warning_markers', 'same_day_pending_warning_journal_missing_rejected', 'same_day_pending_warning_retry_rejected', 'same_day_pending_warning_scope_drift_rejected', 'same_day_pending_warning_binding_drift_rejected', 'same_day_pending_warning_success_confirmed_rejected', 'same_day_pending_warning_terminal_conflict_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected', 'inventory_only_warning_marker_freezes_freshness', 'inventory_only_corrupted_marker_uses_now', 'inventory_only_no_marker_uses_now']}, null, 2));
 } finally {
   await fs.rm(tempRoot, {recursive: true, force: true});
 }

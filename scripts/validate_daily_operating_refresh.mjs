@@ -27,6 +27,7 @@ function parseArgs(argv) {
     runDate: '',
     businessDate: '',
     inventoryOnly: false,
+    allowItemFencedWarning: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -42,6 +43,7 @@ function parseArgs(argv) {
     else if (token === '--run-date') args.runDate = next();
     else if (token === '--business-date') args.businessDate = next();
     else if (token === '--inventory-only') args.inventoryOnly = true;
+    else if (token === '--allow-item-fenced-warning' || token === '--allow-same-day-pending-warning') args.allowItemFencedWarning = true;
     else throw new Error(`unknown argument: ${token}`);
   }
   args.root = path.resolve(args.root);
@@ -186,6 +188,137 @@ function expectedPlanHash(plan) {
   return stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
 }
 
+function expectedInventoryLogicalActionKey(planRow, plan, result) {
+  return stableInventoryHash({
+    runDate: plan.date,
+    store: planRow.storeKey,
+    skc: planRow.skc,
+    sku: planRow.skuCode,
+    target: Number(planRow.targetUsableInventory),
+    actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+    policyVersion: plan.policyVersion,
+    authorizationId: result.authorizationId || '',
+  });
+}
+
+function isWarningMarker(marker, stage, runDate, businessDate) {
+  return marker?.ok === true
+    && marker?.stage === stage
+    && marker?.status === 'warning'
+    && marker?.runDate === runDate
+    && marker?.businessDate === businessDate;
+}
+
+function isObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sameDayPendingWarningAudit(row, planRow, plan, result, {
+  allowItemFencedWarning = false,
+  warningMarkersAreValid = false,
+  lifecycle = null,
+  currentJournal = '',
+} = {}) {
+  const fail = reason => ({ok: false, reason});
+  if (!row || !planRow) return fail('result row identity is not bound to the current plan');
+  if (!allowItemFencedWarning) return fail('strict mode does not allow same-day pending warning');
+  if (!warningMarkersAreValid) return fail('requires same-day warning markers with verified evidence');
+  if (result.ok !== undefined && result.ok !== false) return fail('pending result claims successful completion');
+  if (row.historicalPending === true || row.disposition !== undefined) {
+    return fail('same-day pending row has historical or terminal disposition metadata');
+  }
+  for (const field of ['terminalIntentId', 'terminalDisposition', 'terminalRecordedAt', 'terminalOutcome']) {
+    if (row[field] !== undefined && row[field] !== null && row[field] !== '') {
+      return fail(`same-day pending row has terminal metadata: ${field}`);
+    }
+  }
+  for (const field of ['retry', 'duplicate']) {
+    if (row[field] === true) return fail(`same-day pending row records ${field}`);
+  }
+  for (const field of ['attempts', 'retryCount']) {
+    if (row[field] !== undefined && Number(row[field]) > 1) return fail(`same-day pending row records ${field}`);
+  }
+
+  const target = Number(planRow.targetUsableInventory);
+  const logicalActionKey = expectedInventoryLogicalActionKey(planRow, plan, result);
+  if (row.logicalActionKey !== logicalActionKey) return fail('logicalActionKey drift');
+  if (row.planHash !== undefined && row.planHash !== result.planHash) return fail('result planHash drift');
+  if (row.runDate !== undefined && row.runDate !== plan.date) return fail('result runDate drift');
+  if (row.after && Number(row.after.totalUsableInventory) === target) return fail('pending row claims target readback');
+
+  const writes = Array.isArray(row.writes) ? row.writes : [];
+  if (writes.length !== 1) return fail('requires exactly one write attempt');
+  const write = writes[0];
+  if (write?.attempt !== 1) return fail('write retry or duplicate attempt detected');
+  if (String(write?.code ?? '').trim() !== '0') return fail('response code is not 0');
+  if (write?.success !== null) return fail('response success is confirmed or missing');
+  const expectedIdempotencyKey = `bi-inv-${logicalActionKey.slice(0, 42)}`;
+  if (write?.idempotencyKey !== expectedIdempotencyKey) return fail('idempotencyKey drift');
+  if (row.idempotencyKey !== undefined && row.idempotencyKey !== expectedIdempotencyKey) return fail('result idempotencyKey drift');
+  if (!isObject(write?.request)) return fail('write request is missing');
+  if (write.requestPayloadHash !== stableInventoryHash(write.request)) return fail('write request hash drift');
+  if (row.requestPayloadHash !== undefined && row.requestPayloadHash !== write.requestPayloadHash) return fail('result request hash drift');
+  const requestRow = write.request?.body?.updateSkuInventoryQuantityRequests?.[0];
+  if (write.request.pathname !== '/open-api/stock/change-inventory/v2'
+    || write.request.method !== 'POST'
+    || !Array.isArray(write.request?.body?.updateSkuInventoryQuantityRequests)
+    || write.request.body.updateSkuInventoryQuantityRequests.length !== 1
+    || !isObject(requestRow)
+    || requestRow.idempotencyKey !== expectedIdempotencyKey
+    || requestRow.skuCode !== planRow.skuCode
+    || requestRow.invType !== 'VI'
+    || requestRow.changeType !== 'OVERWRITE'
+    || write.request.headers?.language !== 'en'
+    || Object.keys(write.request.headers || {}).length !== 1
+    || Number(write.overwrite) !== Number(requestRow.changeQuantity)) {
+    return fail('write request scope or payload drift');
+  }
+  if (!isObject(row.before)) return fail('result before snapshot is missing');
+
+  if (!lifecycle || !currentJournal) return fail('durable journal audit is unavailable');
+  const allLogicalMatches = [...lifecycle.intents.entries()].filter(([, intent]) => (
+    intent?.runDate === plan.date && intent?.logicalActionKey === logicalActionKey
+  ));
+  const currentScopeMatches = allLogicalMatches.filter(([, intent]) => (
+    intent?.journalFile === currentJournal
+      && String(intent?.storeKey || '').toUpperCase() === String(planRow.storeKey || '').toUpperCase()
+      && intent?.skc === planRow.skc
+      && intent?.skuCode === planRow.skuCode
+      && Number(intent?.targetUsableInventory) === target
+  ));
+  if (allLogicalMatches.length !== 1 || currentScopeMatches.length !== 1) {
+    return fail(allLogicalMatches.length === 0
+      ? 'durable journal intent is missing'
+      : 'durable journal scope or current-journal binding drift');
+  }
+  const [intentKey, intent] = currentScopeMatches[0];
+  const outcome = lifecycle.terminalOutcomes.get(intentKey);
+  if (outcome || lifecycle.manualResolutions.has(intentKey)) return fail('durable journal has a terminal outcome');
+  if (!lifecycle.pending.has(intentKey)) return fail('durable journal intent is not pending');
+  const tombstone = lifecycle.tombstonedIdempotencyKeys?.get(intent.idempotencyKey);
+  if (tombstone && tombstone.intent?.intentId !== intent.intentId) return fail('durable journal idempotency key is tombstoned');
+  if (intent.planHash !== plan.payloadHash || intent.planHash !== result.planHash) return fail('durable journal planHash drift');
+  if (intent.runDate !== plan.date) return fail('durable journal date drift');
+  if (intent.storeKey !== planRow.storeKey || intent.skc !== planRow.skc || intent.skuCode !== planRow.skuCode) {
+    return fail('durable journal scope drift');
+  }
+  if (Number(intent.targetUsableInventory) !== target) return fail('durable journal target drift');
+  if (intent.policyVersion !== plan.policyVersion || intent.authorizationId !== result.authorizationId) {
+    return fail('durable journal authorization or policy drift');
+  }
+  if (intent.idempotencyKey !== expectedIdempotencyKey || intent.idempotencyKey !== write.idempotencyKey) {
+    return fail('durable journal idempotency binding drift');
+  }
+  if (intent.requestPayloadHash !== write.requestPayloadHash
+    || !isObject(intent.request)
+    || stableInventoryHash(intent.request) !== write.requestPayloadHash) {
+    return fail('durable journal request hash binding drift');
+  }
+  if (stableInventoryHash(intent.request) !== stableInventoryHash(write.request)) return fail('durable journal request binding drift');
+  if (stableInventoryHash(intent.before) !== stableInventoryHash(row.before)) return fail('durable journal before-scope binding drift');
+  return {ok: true, intent, intentKey, write};
+}
+
 async function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now(), evidenceRoot = process.cwd(), {validateExternalFiles = true, validateFreshness = true} = {}) {
   const evidencePath = file => path.isAbsolute(String(file || ''))
     ? path.resolve(file)
@@ -249,23 +382,14 @@ async function validatePlanSourceEvidence(plan, enabledStores, policy, reference
   assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
 }
 
-function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAuditByIntentId) {
+function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAuditByIntentId, pendingWarningContext = {}) {
   if (!row || !planRow || rowKey(row) !== rowKey(planRow)) return false;
   const target = Number(planRow.targetUsableInventory);
   if (!Number.isInteger(target) || Number(row.targetUsableInventory) !== target || row.ruleClass !== planRow.ruleClass) return false;
   const before = Number(row?.before?.totalUsableInventory);
   if (row.state === 'updated_readback_matched') {
     const writes = Array.isArray(row.writes) ? row.writes : [];
-    const logicalActionKey = stableInventoryHash({
-      runDate: plan.date,
-      store: planRow.storeKey,
-      skc: planRow.skc,
-      sku: planRow.skuCode,
-      target,
-      actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
-      policyVersion: plan.policyVersion,
-      authorizationId: result.authorizationId || '',
-    });
+    const logicalActionKey = expectedInventoryLogicalActionKey(planRow, plan, result);
     return Number(row?.after?.totalUsableInventory) === target
       && row.logicalActionKey === logicalActionKey
       && writes.length > 0
@@ -322,6 +446,9 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
       && Number.isFinite(before)
       && (!Array.isArray(row.writes) || row.writes.length === 0);
   }
+  if (row.state === 'submitted_but_readback_pending') {
+    return sameDayPendingWarningAudit(row, planRow, plan, result, pendingWarningContext).ok;
+  }
   if (row.state === 'blocked_by_manual_resolution_fence') {
     const fence = row.manualResolutionFence;
     return fence?.disposition === 'manual_baseline_adopted_effect_unknown'
@@ -349,7 +476,22 @@ function isReconcileOnlyTerminalOrReadbackOnlyResultRow(row) {
   return false;
 }
 
-export async function validateInventoryArtifacts({root, markerRoot, inventoryRuntimeRoot, runDate, businessDate, enabledStores, requireMarker = true}) {
+export async function validateInventoryArtifacts({
+  root,
+  markerRoot,
+  stateDir = '',
+  inventoryRuntimeRoot,
+  runDate,
+  businessDate,
+  enabledStores,
+  requireMarker = true,
+  allowItemFencedWarning = false,
+  allowSameDayPendingWarning = false,
+  allowPendingWarning = false,
+}) {
+  const itemFencedWarningMode = allowItemFencedWarning === true
+    || allowSameDayPendingWarning === true
+    || allowPendingWarning === true;
   const previous = new Date(`${runDate}T12:00:00Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   assert(businessDate === previous.toISOString().slice(0, 10), 'businessDate must equal runDate minus one calendar day');
@@ -362,8 +504,11 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     readJson(path.join(root, 'config', 'inventory_replenishment_policy.json')),
   ]);
   let sourceReferenceTime = Date.now();
+  let inventoryMarkerStatus = '';
+  let warningMarkersAreValid = false;
   if (requireMarker) {
     const marker = await readJson(inventoryMarkerFile);
+    inventoryMarkerStatus = String(marker?.status || '');
     assert(marker?.ok === true && marker?.stage === 'daily-inventory-guard' && (marker?.status === 'done' || marker?.status === 'warning'), 'inventory marker is not done or warning');
     assert(marker?.runDate === runDate && marker?.businessDate === businessDate, 'inventory marker date mismatch');
     await verifyEvidenceRecords(marker.evidence, [planFile, resultFile], root, 'inventory marker');
@@ -389,12 +534,34 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
       // Retain Date.now() when marker is missing, invalid, or drifted
     }
   }
+  if (itemFencedWarningMode && requireMarker && inventoryMarkerStatus === 'warning') {
+    try {
+      const operatingMarkerFile = path.join(markerRoot, runDate, 'daily-operating-refresh.json');
+      const operatingMarker = await readJson(operatingMarkerFile);
+      warningMarkersAreValid = isWarningMarker(operatingMarker, 'daily-operating-refresh', runDate, businessDate);
+      if (warningMarkersAreValid) {
+        const effectiveStateDir = path.resolve(stateDir || path.join(root, 'state', 'cloud_morning_chain'));
+        await verifyEvidenceRecords(operatingMarker.evidence, [
+          path.join(effectiveStateDir, `${runDate}-all.json`),
+          inventoryMarkerFile,
+          planFile,
+          resultFile,
+        ], root, 'daily operating marker');
+      }
+    } catch {
+      warningMarkersAreValid = false;
+    }
+  }
   assert(plan?.date === runDate && plan?.policyVersion === policy?.policyVersion, 'inventory plan date/policy mismatch');
   assert(plan?.executable === true && Array.isArray(plan?.blockers) && plan.blockers.length === 0, 'inventory plan is not executable');
   assert(/^[a-f0-9]{64}$/.test(String(plan?.payloadHash || '')) && expectedPlanHash(plan) === plan.payloadHash, 'inventory plan payloadHash mismatch');
   assert(result?.planHash === plan.payloadHash && result?.policyVersion === plan.policyVersion, 'inventory result plan/policy hash mismatch');
   assert(result?.execute === true && result?.executionMode === 'automatic', 'inventory result is not an automatic execution');
-  assert(Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length === 0, 'inventory result contains unresolved durable intents');
+  if (!itemFencedWarningMode) {
+    assert(Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length === 0, 'inventory result contains unresolved durable intents');
+  } else if (result?.unresolvedIntents !== undefined) {
+    assert(Array.isArray(result.unresolvedIntents), 'inventory result unresolvedIntents is not an array');
+  }
   const automatic = policy?.execution?.automaticExecution || {};
   const allowed = new Set([...(automatic.allowedContexts || []), automatic.allowedContext].filter(Boolean).map(String));
   const expectedAuthorization = automatic?.authorizationByContext?.[result.authorizationContext]
@@ -414,6 +581,12 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
   const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);
   const lifecycle = await readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate: runDate});
+  const pendingWarningContext = {
+    allowItemFencedWarning: itemFencedWarningMode,
+    warningMarkersAreValid,
+    lifecycle,
+    currentJournal,
+  };
   for (const [intentKey, intent] of lifecycle.intents.entries()) {
     if (intent.journalFile !== currentJournal) continue;
     const outcome = lifecycle.terminalOutcomes.get(intentKey);
@@ -486,13 +659,44 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     planByKey.set(key, row);
   }
   const seen = new Set();
+  const pendingWarningAudits = [];
   for (const row of rows) {
     const key = rowKey(row);
     assert(!seen.has(key), `inventory result row identity duplicate: ${key}`);
     seen.add(key);
-    assert(resultRowIsSafe(row, planByKey.get(key), plan, result, policy, currentTerminalAuditByIntentId), `inventory result lacks exact terminal readback: ${key}`);
+    const planRow = planByKey.get(key);
+    const pendingAudit = row?.state === 'submitted_but_readback_pending'
+      ? sameDayPendingWarningAudit(row, planRow, plan, result, pendingWarningContext)
+      : null;
+    if (pendingAudit?.ok) pendingWarningAudits.push(pendingAudit);
+    assert(resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAuditByIntentId, pendingWarningContext),
+      `inventory result lacks exact terminal readback: ${key}${pendingAudit?.reason ? `: ${pendingAudit.reason}` : ''}`);
   }
   assert(seen.size === planByKey.size && [...planByKey.keys()].every(key => seen.has(key)), 'inventory plan/result identity set mismatch');
+  if (itemFencedWarningMode && Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length > 0) {
+    const seenUnresolved = new Set();
+    for (const unresolved of result.unresolvedIntents) {
+      assert(unresolved && typeof unresolved === 'object' && !Array.isArray(unresolved), 'inventory result unresolved durable intent is malformed');
+      if (unresolved.state !== undefined) {
+        assert(['pending', 'submitted_but_readback_pending'].includes(String(unresolved.state)), 'inventory result unresolved durable intent has an unsafe state');
+      }
+      assert(unresolved.retry !== true && unresolved.duplicate !== true, 'inventory result unresolved durable intent records a retry or duplicate');
+      const unresolvedIdentifiers = [unresolved.intentId, unresolved.logicalActionKey, unresolved.idempotencyKey]
+        .filter(Boolean)
+        .map(String);
+      assert(unresolvedIdentifiers.length > 0, 'inventory result unresolved durable intent has no identity');
+      const matches = pendingWarningAudits.filter(audit => unresolvedIdentifiers.every(value => [
+        audit.intent?.intentId,
+        audit.intent?.logicalActionKey,
+        audit.intent?.idempotencyKey,
+      ].filter(Boolean).map(String).includes(value)));
+      assert(matches.length === 1, 'inventory result unresolved durable intent is not bound to one exact pending warning journal intent');
+      const identity = String(matches[0].intent.intentId);
+      assert(!seenUnresolved.has(identity), 'inventory result unresolved durable intent is duplicated');
+      seenUnresolved.add(identity);
+    }
+  }
+  const pendingWarningCount = pendingWarningAudits.length;
   return {
     ok: true,
     planFile,
@@ -501,6 +705,10 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
     planHash: plan.payloadHash,
     resultCount: rows.length,
     manualResolutionFenceCount: manualResolutionFences.length,
+    pendingWarningCount,
+    pendingReadbackCount: pendingWarningCount,
+    pendingCount: pendingWarningCount,
+    warningCount: pendingWarningCount,
   };
 }
 
@@ -537,6 +745,10 @@ export async function validateDailyOperatingRefresh(options) {
     artifactCount: enabledStores.length * DOMAINS.length,
     planHash: inventory.planHash,
     resultCount: inventory.resultCount,
+    pendingWarningCount: inventory.pendingWarningCount,
+    pendingReadbackCount: inventory.pendingReadbackCount,
+    pendingCount: inventory.pendingCount,
+    warningCount: inventory.warningCount,
   };
 }
 
