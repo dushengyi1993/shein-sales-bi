@@ -77,6 +77,7 @@ YESTERDAY="\$(TZ=Asia/Shanghai date -d yesterday +%F)"
 PREV_YESTERDAY="\$(TZ=Asia/Shanghai date -d "yesterday - 1 day" +%F)"
 NOW="\$(date +%s)"
 FIXED_DEADLINE=\$(( NOW + 60000 ))
+EXPIRED=\$(( NOW - 10 ))
 
 cat > "\$SB/scripts/cloud_morning_chain.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -97,6 +98,10 @@ fi
 if [[ "\$STUB_MODE" == "resume_skip" ]]; then
   # Mirrors the real chain's marker-done resume-skip path: exits 0 without a
   # single child-side write; the wrapper must accept the pre-existing marker.
+  exit 0
+fi
+if [[ "\$STUB_MODE" == "warning_resume" ]]; then
+  node "\$SB/scripts/write_warning_bundle.mjs" "\$R" "\$B" final
   exit 0
 fi
 node "\$SB/scripts/write_valid_bundle.mjs" "\$R" "\$B"
@@ -130,6 +135,28 @@ try {
   if (!valid) process.exit(78);
 } catch {
   process.exit(78);
+}
+NODE
+cat > "\$SB/scripts/write_warning_bundle.mjs" <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+const root = process.env.SB;
+const [runDate, businessDate, mode = 'inventory-only'] = process.argv.slice(2);
+const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const write = (file, value) => { fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\\n'); };
+const evidence = files => files.map(file => ({path:file,bytes:fs.statSync(file).size,sha256:hashFile(file)}));
+const morning = path.join(root,'state','cloud_morning_chain',runDate+'-all.json');
+const planFile = path.join(root,'runtime','plans','daily-inventory-replenishment-'+runDate+'.json');
+const resultFile = path.join(root,'runtime','results','daily-inventory-replenishment-'+runDate+'.json');
+const inventoryMarker = path.join(root,'state','pipeline-markers',runDate,'daily-inventory-guard.json');
+if (!fs.existsSync(morning)) write(morning,{ok:true,date:businessDate});
+if (!fs.existsSync(planFile)) write(planFile,{date:runDate,payloadHash:'a'.repeat(64),actionable:[]});
+if (!fs.existsSync(resultFile)) write(resultFile,{planHash:'a'.repeat(64),execute:true,executionMode:'automatic',results:[]});
+write(inventoryMarker,{ok:true,stage:'daily-inventory-guard',status:'warning',runDate,businessDate,completedAt:new Date().toISOString(),message:'item blockers',evidence:evidence([planFile,resultFile])});
+if (mode === 'final') {
+  const finalMarker = path.join(root,'state','pipeline-markers',runDate,'daily-operating-refresh.json');
+  write(finalMarker,{ok:true,stage:'daily-operating-refresh',status:'warning',runDate,businessDate,completedAt:new Date().toISOString(),message:'complete with item blockers',evidence:evidence([morning,inventoryMarker,planFile,resultFile])});
 }
 NODE
 cp "\$REPO/config/inventory_replenishment_policy.json" "\$SB/config/inventory_replenishment_policy.json"
@@ -259,6 +286,52 @@ bash "\$WRAPPER" >/dev/null 2>&1
 check t2b_rc 78 "\$?"
 check t2b_child_called "1" "\$(wc -l < "\$CALLS_LOG")"
 [[ -e "\$STATE/active.json" ]] && echo 'PASS[t2b invalid marker context retained]' || { echo 'FAIL[t2b context missing]'; FAIL=1; }
+
+# t2c: an expired context with an exact inventory warning is recoverable
+# without rerunning inventory. The child converges only the final operating
+# warning, after which the wrapper clears the context and exits successfully.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+rm -rf "\$SB/state/pipeline-markers"
+mkdir -p "\$SB/state/pipeline-markers"
+node "\$SB/scripts/write_warning_bundle.mjs" "\$TODAY" "\$YESTERDAY" inventory-only
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
+JSON
+export STUB_MODE=warning_resume
+bash "\$WRAPPER" >/dev/null 2>&1
+check t2c_rc 0 "\$?"
+check t2c_child_called 1 "\$(wc -l < "\$CALLS_LOG")"
+check t2c_latest_warning warning "\$(latest_status)"
+[[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t2c warning context cleared]' || { echo 'FAIL[t2c context not cleared]'; FAIL=1; }
+
+# t2d: if either warning evidence file drifts, the expired run is not resumed
+# and converges to the original deadline failure without child invocation.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+node -e 'require("fs").appendFileSync(process.argv[1]," ")' "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json"
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
+JSON
+export STUB_MODE=warning_resume
+bash "\$WRAPPER" >/dev/null 2>&1
+check t2d_rc 76 "\$?"
+check t2d_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+
+# t2e: an already-published exact final warning is terminal evidence. It is
+# accepted idempotently even after the old deadline, with no child invocation.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+rm -rf "\$SB/state/pipeline-markers"
+mkdir -p "\$SB/state/pipeline-markers"
+rm -f "\$SB/runtime/plans/daily-inventory-replenishment-\$TODAY.json" "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json"
+node "\$SB/scripts/write_warning_bundle.mjs" "\$TODAY" "\$YESTERDAY" final
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
+JSON
+export STUB_MODE=resume_skip
+bash "\$WRAPPER" >/dev/null 2>&1
+check t2e_rc 0 "\$?"
+check t2e_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t2e_latest_warning warning "\$(latest_status)"
+[[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t2e warning context cleared]' || { echo 'FAIL[t2e context not cleared]'; FAIL=1; }
 
 # t3: an unfinished OLD runDate is never executed across midnight. The same
 # activation records its terminal evidence, then starts TODAY only.
@@ -636,6 +709,9 @@ console.log(JSON.stringify({
     'businessDate_runDate_minus_1_fail_closed',
     'no_runDate_equals_businessDate',
     'fake_completion_rejected',
+    'inventory_warning_converges_after_deadline_without_inventory_rerun',
+    'warning_evidence_drift_is_rejected',
+    'final_warning_is_idempotent_terminal_evidence',
     'malformed_context_ignored',
     'recovery_binding_preserved_across_restart',
     'malformed_recovery_binding_rejected_without_child_or_write',

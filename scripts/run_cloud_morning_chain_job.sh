@@ -258,7 +258,9 @@ clear_active_context() {
 write_completed_latest_state() {
   local run_date="$1"
   local business_date="$2"
-  STATE_DIR="$STATE_DIR" RUN_DATE="$run_date" BUSINESS_DATE="$business_date" node - <<'NODE'
+  local state_status="${3:-ok}"
+  local state_message="${4:-semantic daily-operating-refresh evidence verified by owning wrapper}"
+  STATE_DIR="$STATE_DIR" RUN_DATE="$run_date" BUSINESS_DATE="$business_date" STATE_STATUS="$state_status" STATE_MESSAGE="$state_message" node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const file = path.join(process.env.STATE_DIR, 'latest.json');
@@ -267,8 +269,8 @@ const payload = {
   businessDate: process.env.BUSINESS_DATE,
   generatedAt: new Date().toISOString(),
   stage: 'all',
-  status: 'ok',
-  message: 'semantic daily-operating-refresh evidence verified by owning wrapper',
+  status: process.env.STATE_STATUS || 'ok',
+  message: process.env.STATE_MESSAGE || 'semantic daily-operating-refresh evidence verified by owning wrapper',
 };
 fs.mkdirSync(path.dirname(file), {recursive: true});
 const temporary = `${file}.${process.pid}.tmp`;
@@ -295,6 +297,98 @@ daily_run_completed() {
     --business-date "$business_date" >/dev/null
 }
 
+daily_run_warning_completed() {
+  local run_date="$1"
+  local business_date="$2"
+  if ! RUN_DATE="$run_date" BUSINESS_DATE="$business_date" MARKER_ROOT="$MARKER_ROOT" node - <<'NODE' 2>/dev/null
+const fs = require('fs');
+const path = require('path');
+const markerRoot = process.env.MARKER_ROOT;
+const runDate = process.env.RUN_DATE;
+const businessDate = process.env.BUSINESS_DATE;
+try {
+  const file = path.join(markerRoot, runDate, 'daily-operating-refresh.json');
+  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(marker?.ok === true
+    && marker?.stage === 'daily-operating-refresh'
+    && marker?.status === 'warning'
+    && marker?.runDate === runDate
+    && marker?.businessDate === businessDate ? 0 : 1);
+} catch { process.exit(1); }
+NODE
+  then
+    return 1
+  fi
+  node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage daily-operating-refresh \
+    --date "$run_date" \
+    --business-date "$business_date" \
+    --status warning \
+    --require-evidence \
+    --root "$MARKER_ROOT" >/dev/null
+}
+
+inventory_guard_warning_recoverable() {
+  local run_date="$1"
+  local business_date="$2"
+  ROOT="$ROOT" MARKER_ROOT="$MARKER_ROOT" INVENTORY_RUNTIME_ROOT="$INVENTORY_RUNTIME_ROOT" \
+  RUN_DATE="$run_date" BUSINESS_DATE="$business_date" node - <<'NODE' 2>/dev/null
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const root = process.env.ROOT;
+const markerRoot = process.env.MARKER_ROOT;
+const inventoryRuntimeRoot = process.env.INVENTORY_RUNTIME_ROOT;
+const runDate = process.env.RUN_DATE;
+const businessDate = process.env.BUSINESS_DATE;
+
+try {
+  const markerFile = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  const marker = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+  if (!(marker?.ok === true
+    && marker?.stage === 'daily-inventory-guard'
+    && marker?.status === 'warning'
+    && marker?.runDate === runDate
+    && marker?.businessDate === businessDate)) {
+    process.exit(1);
+  }
+
+  const planFile = path.join(inventoryRuntimeRoot, 'plans', 'daily-inventory-replenishment-' + runDate + '.json');
+  const resultFile = path.join(inventoryRuntimeRoot, 'results', 'daily-inventory-replenishment-' + runDate + '.json');
+  const planStat = fs.statSync(planFile);
+  const resultStat = fs.statSync(resultFile);
+  if (!planStat.isFile() || !resultStat.isFile()) process.exit(1);
+
+  const planHash = crypto.createHash('sha256').update(fs.readFileSync(planFile)).digest('hex');
+  const resultHash = crypto.createHash('sha256').update(fs.readFileSync(resultFile)).digest('hex');
+
+  const evidence = Array.isArray(marker.evidence) ? marker.evidence : [];
+  const planEntry = evidence.find(e => path.resolve(root, e.path) === path.resolve(planFile));
+  const resultEntry = evidence.find(e => path.resolve(root, e.path) === path.resolve(resultFile));
+  if (!planEntry || !resultEntry) process.exit(1);
+  if (Number(planEntry.bytes) !== planStat.size || String(planEntry.sha256 || '') !== planHash) process.exit(1);
+  if (Number(resultEntry.bytes) !== resultStat.size || String(resultEntry.sha256 || '') !== resultHash) process.exit(1);
+
+  const plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
+  const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+  if (String(plan?.date || '') !== runDate) process.exit(1);
+  if (String(result?.planHash || '') !== String(plan?.payloadHash || '')) process.exit(1);
+  if (!/^[a-f0-9]{64}$/.test(String(result?.planHash || ''))) process.exit(1);
+  if (result?.execute !== true || result?.executionMode !== 'automatic') process.exit(1);
+
+  const actionable = Array.isArray(plan?.actionable) ? plan.actionable : [];
+  const rows = Array.isArray(result?.results) ? result.results : [];
+  if (rows.length !== actionable.length) process.exit(1);
+  const hasUnsettled = rows.some(r => r?.state === 'planned' || r?.state === 'dry_run_ready');
+  if (hasUnsettled) process.exit(1);
+
+  process.exit(0);
+} catch {
+  process.exit(1);
+}
+NODE
+}
 # Current latest.json status (missing/unreadable prints nothing).
 latest_state_status() {
   STATE_DIR="$STATE_DIR" node - <<'NODE' 2>/dev/null || true
@@ -455,13 +549,20 @@ run_chain_once() {
     echo "[cloud-morning-chain-wrapper] ERROR child chain failed runDate=$run_date businessDate=$business_date exit=$status; active context (deadlineEpoch=$deadline) kept for service Restart resume" >&2
     return "$status"
   fi
-  if ! daily_run_completed "$run_date" "$business_date"; then
-    echo "[cloud-morning-chain-wrapper] ERROR child chain exited 0 but the single completion marker (daily-operating-refresh done with matching dates) is missing runDate=$run_date businessDate=$business_date; treated as failure, context kept" >&2
-    return 78
+  if daily_run_completed "$run_date" "$business_date"; then
+    write_completed_latest_state "$run_date" "$business_date" "ok" "semantic daily-operating-refresh evidence verified by owning wrapper"
+    clear_active_context "$run_date"
+    echo "[cloud-morning-chain-wrapper] run completed with marker evidence runDate=$run_date businessDate=$business_date"
+    return 0
   fi
-  write_completed_latest_state "$run_date" "$business_date"
-  clear_active_context "$run_date"
-  echo "[cloud-morning-chain-wrapper] run completed with marker evidence runDate=$run_date businessDate=$business_date"
+  if daily_run_warning_completed "$run_date" "$business_date"; then
+    write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+    clear_active_context "$run_date"
+    echo "[cloud-morning-chain-wrapper] run completed with warning marker evidence runDate=$run_date businessDate=$business_date"
+    return 0
+  fi
+  echo "[cloud-morning-chain-wrapper] ERROR child chain exited 0 but the single completion marker (daily-operating-refresh done or verified warning with matching dates) is missing runDate=$run_date businessDate=$business_date; treated as failure, context kept" >&2
+  return 78
 }
 
 ATTEMPT=0
@@ -481,6 +582,18 @@ run_one_date() {
     clear_active_context "$run_date"
     echo "[cloud-morning-chain-wrapper] verified completion already exists runDate=$run_date businessDate=$business_date; no child started"
     return 0
+  fi
+  if daily_run_warning_completed "$run_date" "$business_date"; then
+    write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+    clear_active_context "$run_date"
+    echo "[cloud-morning-chain-wrapper] verified warning completion already exists runDate=$run_date businessDate=$business_date; no child started"
+    return 0
+  fi
+  if inventory_guard_warning_recoverable "$run_date" "$business_date"; then
+    echo "[cloud-morning-chain-wrapper] verified inventory guard warning evidence exists runDate=$run_date businessDate=$business_date; invoking child chain to converge daily-operating-refresh warning"
+    ATTEMPT=$((ATTEMPT + 1))
+    run_chain_once "$run_date" "$business_date" "$ATTEMPT" "$deadline"
+    return $?
   fi
   if deadline_expired "$deadline"; then
     write_terminal_deadline_failure "$run_date" "$business_date" "$deadline"

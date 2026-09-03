@@ -504,6 +504,10 @@ run_supplements_stage() {
 }
 
 run_inventory_stage() {
+  if inventory_marker_warning; then
+    echo "[cloud_morning_chain] verified inventory guard warning marker already exists runDate=$RUN_DATE; bypassing inventory execution" >&2
+    return 102
+  fi
   write_state "running" "refreshing current OpenAPI stock and running the one daily inventory guard"
   # OpenAPI stock is an api-light phase.  It must not reserve the exclusive
   # browser/DB lane for the whole 19-store request.
