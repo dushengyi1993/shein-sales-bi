@@ -112,6 +112,7 @@ STUB
 chmod +x "\$SB/scripts/cloud_morning_chain.sh"
 cp "\$REPO/scripts/pipeline_marker.mjs" "\$SB/scripts/pipeline_marker.mjs"
 cat > "\$SB/scripts/validate_daily_operating_refresh.mjs" <<'NODE'
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -122,16 +123,39 @@ const argument = name => {
 const markerRoot = path.resolve(argument('--marker-root'));
 const runDate = argument('--run-date');
 const businessDate = argument('--business-date');
+const preWarning = process.argv.includes('--pre-warning-audit');
+const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const verifyEvidence = (marker, files) => {
+  if (!Array.isArray(marker?.evidence) || marker.evidence.length !== files.length) return false;
+  return files.every(file => {
+    const entry = marker.evidence.find(row => path.resolve(row?.path || '') === path.resolve(file));
+    if (!entry || !fs.statSync(file).isFile()) return false;
+    return Number(entry.bytes) === fs.statSync(file).size && String(entry.sha256 || '') === hashFile(file);
+  });
+};
 try {
-  const marker = JSON.parse(fs.readFileSync(
-    path.join(markerRoot, runDate, 'daily-operating-refresh.json'),
-    'utf8',
-  ));
-  const valid = marker?.ok === true
-    && marker?.status === 'done'
-    && marker?.stage === 'daily-operating-refresh'
-    && marker?.runDate === runDate
-    && marker?.businessDate === businessDate;
+  const finalFile = path.join(markerRoot, runDate, 'daily-operating-refresh.json');
+  const inventoryFile = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  let valid = false;
+  if (preWarning) {
+    const inventory = JSON.parse(fs.readFileSync(inventoryFile, 'utf8'));
+    const plan = path.join(markerRoot, '..', '..', 'runtime', 'plans', 'daily-inventory-replenishment-' + runDate + '.json');
+    const result = path.join(markerRoot, '..', '..', 'runtime', 'results', 'daily-inventory-replenishment-' + runDate + '.json');
+    valid = !fs.existsSync(finalFile)
+      && inventory?.ok === true
+      && inventory?.status === 'warning'
+      && inventory?.stage === 'daily-inventory-guard'
+      && inventory?.runDate === runDate
+      && inventory?.businessDate === businessDate
+      && verifyEvidence(inventory, [plan, result]);
+  } else {
+    const marker = JSON.parse(fs.readFileSync(finalFile, 'utf8'));
+    valid = marker?.ok === true
+      && (marker?.status === 'done' || marker?.status === 'warning')
+      && marker?.stage === 'daily-operating-refresh'
+      && marker?.runDate === runDate
+      && marker?.businessDate === businessDate;
+  }
   if (!valid) process.exit(78);
 } catch {
   process.exit(78);
@@ -288,8 +312,8 @@ check t2b_child_called "1" "\$(wc -l < "\$CALLS_LOG")"
 [[ -e "\$STATE/active.json" ]] && echo 'PASS[t2b invalid marker context retained]' || { echo 'FAIL[t2b context missing]'; FAIL=1; }
 
 # t2c: an expired context with an exact inventory warning is recoverable
-# without rerunning inventory. The child converges only the final operating
-# warning, after which the wrapper clears the context and exits successfully.
+# without rerunning inventory. The wrapper converges the final operating
+# warning directly and clears the context without invoking a child.
 rm -f "\$CALLS_LOG" "\$STATE/latest.json"
 rm -rf "\$SB/state/pipeline-markers"
 mkdir -p "\$SB/state/pipeline-markers"
@@ -300,7 +324,7 @@ JSON
 export STUB_MODE=warning_resume
 bash "\$WRAPPER" >/dev/null 2>&1
 check t2c_rc 0 "\$?"
-check t2c_child_called 1 "\$(wc -l < "\$CALLS_LOG")"
+check t2c_child_not_called 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
 check t2c_latest_warning warning "\$(latest_status)"
 [[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t2c warning context cleared]' || { echo 'FAIL[t2c context not cleared]'; FAIL=1; }
 
@@ -313,7 +337,7 @@ cat > "\$STATE/active.json" <<JSON
 JSON
 export STUB_MODE=warning_resume
 bash "\$WRAPPER" >/dev/null 2>&1
-check t2d_rc 76 "\$?"
+check t2d_rc 78 "\$?"
 check t2d_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
 
 # t2e: an already-published exact final warning is terminal evidence. It is

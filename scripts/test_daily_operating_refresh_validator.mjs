@@ -216,7 +216,8 @@ try {
     disposition: 'readback_matched',
     recordedAt: '2026-08-16T08:00:00.000Z',
   };
-  await fs.writeFile(`${resultFile}.journal.ndjson`, `${JSON.stringify(terminalIntent)}\n${JSON.stringify(terminalOutcome)}\n`);
+  const currentJournalFile = `${resultFile}.journal.ndjson`;
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(terminalIntent)}\n${JSON.stringify(terminalOutcome)}\n`);
   const terminalDriftResult = {
     ...goodResult,
     reconcilePendingOnly: true,
@@ -257,6 +258,62 @@ try {
     'result metadata must not forge a terminal journal timestamp',
   );
   await writeJson(resultFile, goodResult);
+
+  // An updated readback is terminal only when the current journal proves the
+  // exact intent, request/before binding, and one readback_matched outcome.
+  const updatedWrite = {
+    attempt: 1,
+    overwrite: terminalRequest.body.updateSkuInventoryQuantityRequests[0].changeQuantity,
+    idempotencyKey: terminalIntent.idempotencyKey,
+    requestPayloadHash: terminalIntent.requestPayloadHash,
+    request: terminalIntent.request,
+    code: '0',
+    success: true,
+  };
+  const updatedResult = {
+    ...goodResult,
+    results: [{
+      ...actionable[0],
+      logicalActionKey: terminalIntent.logicalActionKey,
+      state: 'updated_readback_matched',
+      before: terminalBefore,
+      after: {...terminalBefore, totalUsableInventory: actionable[0].targetUsableInventory},
+      writes: [updatedWrite],
+    }],
+  };
+  await writeJson(resultFile, updatedResult);
+  await writeMarkers();
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true,
+    'updated readback must require and accept one exact current-journal intent/outcome binding');
+
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(terminalIntent)}\n`, 'utf8');
+  await writeJson(resultFile, updatedResult);
+  await writeMarkers();
+  await assert.rejects(
+    validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false}),
+    /updated readback lacks a unique readback_matched terminal outcome/,
+    'updated readback without a terminal journal outcome must reject',
+  );
+
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(terminalIntent)}\n${JSON.stringify(terminalIntent)}\n${JSON.stringify(terminalOutcome)}\n`, 'utf8');
+  await writeMarkers();
+  await assert.rejects(
+    validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false}),
+    /duplicate_intentId/,
+    'duplicate current journal intents must reject',
+  );
+
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(terminalIntent)}\n${JSON.stringify(terminalOutcome)}\n${JSON.stringify(terminalOutcome)}\n`, 'utf8');
+  await writeMarkers();
+  await assert.rejects(
+    validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), requireMarker:false}),
+    /duplicate_terminal_outcome/,
+    'duplicate current journal terminal outcomes must reject',
+  );
+
+  await fs.writeFile(currentJournalFile, `${JSON.stringify(terminalIntent)}\n${JSON.stringify(terminalOutcome)}\n`, 'utf8');
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
 
   const emptyPlan = {...plan, actionable: [], sourceEvidence: [], counts: {enabledStores: 19}};
   emptyPlan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(emptyPlan));
@@ -502,7 +559,6 @@ try {
   // is code=0 with success still unknown and the immutable intent remains
   // pending in this run's journal.  Keep the original terminal fixture so the
   // existing closed-intent checks below can be restored after this section.
-  const currentJournalFile = `${resultFile}.journal.ndjson`;
   const originalCurrentJournal = await fs.readFile(currentJournalFile, 'utf8');
   const pendingIntent = {
     ...terminalIntent,
@@ -551,6 +607,69 @@ try {
   assert.equal(pendingWarningValid.pendingWarningCount, 1);
   assert.equal(pendingWarningValid.pendingReadbackCount, 1);
   assert.equal(pendingWarningValid.warningCount, 1);
+
+  // An unfinished executor envelope may explicitly report null or false.  Both
+  // remain pending and are eligible only for the controlled warning path.
+  for (const unfinishedOk of [null, false]) {
+    await writeJson(resultFile, {...pendingResultWithoutUnresolved, ok: unfinishedOk});
+    await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+    const unfinishedWarning = await validateDailyOperatingRefresh({...options, allowItemFencedWarning: true});
+    assert.equal(unfinishedWarning.ok, true, `result.ok=${unfinishedOk} must remain an auditable pending warning`);
+  }
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+
+  // An explicit result.ok=true is a completion claim and cannot pass through
+  // the pending-warning allowance.
+  await writeJson(resultFile, {...pendingResultWithoutUnresolved, ok: true});
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh({...options, allowItemFencedWarning: true}),
+    /pending result claims successful completion/,
+    'result.ok=true must reject the same-day pending warning path',
+  );
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+
+  // The narrow pre-warning audit accepts a valid inventory warning with no
+  // operating marker yet, but the normal strict path still needs the final
+  // marker after it is written.
+  await writeMarker({
+    root: markerRoot,
+    stage: 'daily-inventory-guard',
+    date: runDate,
+    businessDate,
+    status: 'warning',
+    ok: true,
+    evidence: [planFile, resultFile],
+  });
+  await fs.rm(path.join(markerRoot, runDate, 'daily-operating-refresh.json'), {force: true});
+  await writeJson(resultFile, goodResult);
+  await writeMarker({
+    root: markerRoot,
+    stage: 'daily-inventory-guard',
+    date: runDate,
+    businessDate,
+    status: 'warning',
+    ok: true,
+    evidence: [planFile, resultFile],
+  });
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /ENOENT|daily operating marker/,
+    'strict validation must not accept a missing operating marker',
+  );
+  await writeJson(resultFile, pendingResultWithoutUnresolved);
+  await writeMarker({
+    root: markerRoot,
+    stage: 'daily-inventory-guard',
+    date: runDate,
+    businessDate,
+    status: 'warning',
+    ok: true,
+    evidence: [planFile, resultFile],
+  });
+  const preWarningValid = await validateDailyOperatingRefresh({...options, preWarningAudit: true});
+  assert.equal(preWarningValid.ok, true, 'pre-warning audit must accept valid same-day pending evidence without operating marker');
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
 
   // The allowance is a warning-pair contract, not an inventory-only or
   // operating-only escape hatch.

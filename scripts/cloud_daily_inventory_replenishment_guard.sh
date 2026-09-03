@@ -5,6 +5,7 @@ DATE="${SHEIN_BI_INVENTORY_RUN_DATE:-$(TZ=Asia/Shanghai date +%F)}"
 BUSINESS_DATE="${SHEIN_BI_INVENTORY_BUSINESS_DATE:-$(TZ=Asia/Shanghai date -d yesterday +%F)}"
 RUN_DEADLINE_EPOCH="${SHEIN_BI_INVENTORY_RUN_DEADLINE_EPOCH:-0}"
 RUNTIME_ROOT="${SHEIN_BI_INVENTORY_RUNTIME_ROOT:-/srv/shein-bi/runtime/daily-inventory-replenishment}"
+MARKER_ROOT="${SHEIN_BI_PIPELINE_MARKER_ROOT:-$ROOT/state/pipeline-markers}"
 PORTAL_URL="${SHEIN_BI_PORTAL_URL:-http://127.0.0.1:8787}"
 # Stable per-run force-refresh token: the same run reuses it (retries inside
 # this run dedupe against the Portal queue), while a later business re-run
@@ -95,10 +96,54 @@ cd "$ROOT"
 write_inventory_marker() {
   local status="$1"
   local message="$2"
-  local args=(write --stage daily-inventory-guard --date "$DATE" --business-date "$BUSINESS_DATE" --status "$status" --message "$message")
+  local args=(write --stage daily-inventory-guard --date "$DATE" --business-date "$BUSINESS_DATE" --status "$status" --message "$message" --root "$MARKER_ROOT")
   [[ -s "$PLAN" ]] && args+=(--evidence "$PLAN")
   [[ -s "$RESULT" ]] && args+=(--evidence "$RESULT")
   node scripts/pipeline_marker.mjs "${args[@]}" >/dev/null
+}
+
+inventory_warning_marker_matches() {
+  ROOT_MARKER="$MARKER_ROOT" RUN_DATE="$DATE" BUSINESS_DATE="$BUSINESS_DATE" node - <<'NODE' 2>/dev/null
+const fs = require('fs');
+const path = require('path');
+try {
+  const file = path.join(process.env.ROOT_MARKER, process.env.RUN_DATE, 'daily-inventory-guard.json');
+  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(marker?.ok === true
+    && marker?.stage === 'daily-inventory-guard'
+    && marker?.status === 'warning'
+    && marker?.runDate === process.env.RUN_DATE
+    && marker?.businessDate === process.env.BUSINESS_DATE ? 0 : 1);
+} catch { process.exit(1); }
+NODE
+}
+
+pre_warning_audit() {
+  node scripts/validate_daily_operating_refresh.mjs \
+    --pre-warning-audit \
+    --root "$ROOT" \
+    --marker-root "$MARKER_ROOT" \
+    --state-dir "$ROOT/state/cloud_morning_chain" \
+    --inventory-runtime-root "$RUNTIME_ROOT" \
+    --run-date "$DATE" \
+    --business-date "$BUSINESS_DATE" >/dev/null
+}
+
+publish_audited_inventory_warning() {
+  local message="$1"
+  # The marker is a candidate until the shared pre-warning validator has
+  # reread its exact plan/result evidence and current journal.  A failed audit
+  # is immediately downgraded to failed and never returned as warning.
+  if ! write_inventory_marker warning "$message"; then
+    echo "[daily_inventory_guard] could not publish the inventory warning candidate" >&2
+    return 1
+  fi
+  if ! pre_warning_audit; then
+    echo "[daily_inventory_guard] pre-warning audit failed; inventory warning is not promotable" >&2
+    write_inventory_marker failed "inventory warning pre-audit failed; plan/result/journal evidence is not a verified same-day warning" >/dev/null 2>&1 || true
+    return 1
+  fi
+  return 0
 }
 
 result_is_complete_and_safe() {
@@ -155,7 +200,7 @@ result_is_complete_and_safe() {
     && node scripts/validate_daily_operating_refresh.mjs \
       --inventory-only \
       --root "$ROOT" \
-      --marker-root "$ROOT/state/pipeline-markers" \
+      --marker-root "$MARKER_ROOT" \
       --state-dir "$ROOT/state/cloud_morning_chain" \
       --inventory-runtime-root "$RUNTIME_ROOT" \
       --run-date "$DATE" \
@@ -173,6 +218,16 @@ result_is_readback_pending_only() {
       .state == "submitted_but_readback_pending"
       or .state == "updated_readback_matched"
       or (.state | startswith("skipped_")))
+  ' "$RESULT" >/dev/null
+}
+
+result_has_item_warning() {
+  jq -e '
+    type == "object"
+    and ([.results[]?
+      | select((.state == "submitted_but_readback_pending" and .historicalPending != true)
+        or .state == "blocked_by_manual_resolution_fence")]
+      | length) > 0
   ' "$RESULT" >/dev/null
 }
 
@@ -323,6 +378,7 @@ if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$REQUIRE_PIPELINE_MARKERS" == "1" ||
     --date "$DATE" \
     --status done \
     --require-evidence \
+    --root "$MARKER_ROOT" \
     || {
       echo "[daily_inventory_guard] all-store morning link merge is not ready" >&2
       exit 75
@@ -333,6 +389,7 @@ if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$REQUIRE_PIPELINE_MARKERS" == "1" ||
     --status done \
     --not-before "$STOCK_NOT_BEFORE" \
     --require-evidence \
+    --root "$MARKER_ROOT" \
     || {
       echo "[daily_inventory_guard] stock refresh marker is not ready after $STOCK_NOT_BEFORE" >&2
       exit 75
@@ -778,29 +835,35 @@ if [[ "$RESULT_AFTER_FINGERPRINT" == "$RESULT_BEFORE_FINGERPRINT" ]] || [[ ! -f 
   exit 1
 fi
 
-# Row-level blockers remain terminal and auditable, but they are not a successful
-# inventory run and cannot be promoted to daily-operating-refresh done.
-if result_is_readback_pending_only; then
-  write_inventory_marker warning "automatic inventory write has an exact durable intent and is waiting for readback; same run will retry readback only"
-  jq '{ok:false,state:"submitted_but_readback_pending",planHash,executionMode,generatedAt,counts:{
-    total:(.results|length),
-    pending:([.results[]|select(.state=="submitted_but_readback_pending")]|length),
-    updated:([.results[]|select(.state=="updated_readback_matched")]|length),
-    skipped:([.results[]|select(.state|startswith("skipped_"))]|length)
-  }}' "$RESULT"
-  exit 75
+# Row-level same-day pending/fenced blockers are a narrow, auditable warning
+# outcome.  The shared validator is the promotion gate; without it the guard
+# fails closed and never returns the capacity/readback retry status.
+if result_has_item_warning || result_is_readback_pending_only; then
+  if publish_audited_inventory_warning "automatic inventory execution completed with an auditable same-day item warning; no duplicate inventory submission will be attempted"; then
+    jq '{ok:false,state:"completed_with_warning",planHash,executionMode,generatedAt,counts:{
+      total:(.results|length),
+      pending:([.results[]|select(.state=="submitted_but_readback_pending")]|length),
+      fenced:([.results[]|select(.state=="blocked_by_manual_resolution_fence")]|length),
+      updated:([.results[]|select(.state=="updated_readback_matched")]|length),
+      skipped:([.results[]|select(.state|startswith("skipped_"))]|length)
+    }}' "$RESULT"
+    exit 2
+  fi
+  echo "[daily_inventory_guard] same-day warning result failed the shared pre-warning audit; fail closed without capacity retry" >&2
+  jq '{ok:false,state:"warning_audit_failed",planHash,executionMode,generatedAt}' "$RESULT" 2>/dev/null || true
+  exit 1
 fi
 if result_is_complete_and_safe; then
   write_inventory_marker done "automatic inventory execution completed with plan/result hash and terminal readback evidence"
 else
-  write_inventory_marker warning "automatic inventory execution has terminal blockers or non-matching readback; overall morning run remains failed"
+  write_inventory_marker failed "automatic inventory execution has terminal blockers or non-matching readback; warning promotion was not auditable"
   jq '{ok:false,state:"completed_with_blockers",planHash,executionMode,generatedAt,counts:{
     total:(.results|length),
     updated:([.results[]|select(.state=="updated_readback_matched")]|length),
     skipped:([.results[]|select(.state|startswith("skipped_"))]|length),
     blocked:([.results[]|select(.state=="blocked")]|length)
   }}' "$RESULT"
-  exit 2
+  exit 1
 fi
 jq '{ok: (([.results[]|select(.state=="blocked")]|length) == 0),state:"completed",planHash,executionMode,generatedAt,counts:{
   total:(.results|length),
