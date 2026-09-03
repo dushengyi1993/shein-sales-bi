@@ -364,7 +364,7 @@ export async function validateInventoryArtifacts({root, markerRoot, inventoryRun
   let sourceReferenceTime = Date.now();
   if (requireMarker) {
     const marker = await readJson(inventoryMarkerFile);
-    assert(marker?.ok === true && marker?.stage === 'daily-inventory-guard' && marker?.status === 'done', 'inventory marker is not done');
+    assert(marker?.ok === true && marker?.stage === 'daily-inventory-guard' && (marker?.status === 'done' || marker?.status === 'warning'), 'inventory marker is not done or warning');
     assert(marker?.runDate === runDate && marker?.businessDate === businessDate, 'inventory marker date mismatch');
     await verifyEvidenceRecords(marker.evidence, [planFile, resultFile], root, 'inventory marker');
     sourceReferenceTime = Date.parse(String(marker.completedAt || ''));
@@ -501,7 +501,7 @@ export async function validateDailyOperatingRefresh(options) {
   await validateMorningEvidence({...args, file: morningFile, enabledStores});
   const finalMarkerFile = path.join(args.markerRoot, args.runDate, 'daily-operating-refresh.json');
   const marker = await readJson(finalMarkerFile);
-  assert(marker?.ok === true && marker?.stage === 'daily-operating-refresh' && marker?.status === 'done', 'daily operating marker is not done');
+  assert(marker?.ok === true && marker?.stage === 'daily-operating-refresh' && (marker?.status === 'done' || marker?.status === 'warning'), 'daily operating marker is not done or warning');
   assert(marker?.runDate === args.runDate && marker?.businessDate === args.businessDate, 'daily operating marker date mismatch');
   await verifyEvidenceRecords(marker.evidence, [
     morningFile,

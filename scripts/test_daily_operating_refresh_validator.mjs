@@ -459,7 +459,103 @@ try {
   await fs.appendFile(path.join(tempRoot, 'outputs', 'shein_links', 'DL', `${businessDate}.json`), ' ');
   await assert.rejects(validateDailyOperatingRefresh(options), /artifact size mismatch|artifact hash mismatch/);
 
-  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected']}, null, 2));
+  // Restore modified artifact to keep clean baseline
+  await writeJson(path.join(tempRoot, 'outputs', 'shein_links', 'DL', `${businessDate}.json`), {
+    ok: true,
+    date: businessDate,
+    store: {storeKey: 'DL'},
+  });
+
+  // Coverage for warning status acceptance and rejections
+  const writeWarningMarkers = async ({
+    inventoryStatus = 'warning',
+    operatingStatus = 'warning',
+    inventoryOk = true,
+    operatingOk = true,
+    completedAt = new Date().toISOString(),
+  } = {}) => {
+    await writeMarker({
+      root: markerRoot,
+      stage: 'daily-inventory-guard',
+      date: runDate,
+      businessDate,
+      status: inventoryStatus,
+      ok: inventoryOk,
+      evidence: [planFile, resultFile],
+      completedAt,
+    });
+    await writeMarker({
+      root: markerRoot,
+      stage: 'daily-operating-refresh',
+      date: runDate,
+      businessDate,
+      status: operatingStatus,
+      ok: operatingOk,
+      evidence: [morningFile, inventoryMarkerFile, planFile, resultFile],
+      completedAt,
+    });
+  };
+
+  // 1. Valid warning markers with ok=true and full safe evidence must pass
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'valid warning markers must be accepted');
+
+  // 2. Mixed: inventory warning, operating done
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'done'});
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'inventory warning with operating done must be accepted');
+
+  // 3. Mixed: inventory done, operating warning
+  await writeWarningMarkers({inventoryStatus: 'done', operatingStatus: 'warning'});
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true, 'inventory done with operating warning must be accepted');
+
+  // 4. Warning marker with evidence drift must reject
+  const originalPlanContent = await fs.readFile(planFile, 'utf8');
+  await fs.appendFile(planFile, ' ');
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /inventory marker evidence size mismatch|inventory marker evidence hash mismatch|evidence hash mismatch/,
+    'warning marker with drifted evidence must reject',
+  );
+  await fs.writeFile(planFile, originalPlanContent, 'utf8');
+
+  // 5. Failed marker must reject (both inventory and operating)
+  await writeWarningMarkers({inventoryStatus: 'failed', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /inventory marker is not done or warning/,
+    'failed inventory marker must reject',
+  );
+
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'failed'});
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /daily operating marker is not done or warning/,
+    'failed daily operating marker must reject',
+  );
+
+  // 6. Non-executable plan or missing plan/result must still reject under warning marker
+  const nonExecutablePlan = {...plan, executable: false, blockers: ['simulated_blocker']};
+  await writeJson(planFile, nonExecutablePlan);
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /inventory plan is not executable|inventory plan payloadHash mismatch/,
+    'non-executable plan must reject even with warning marker',
+  );
+  await writeJson(planFile, plan);
+
+  // 7. Unsafe result row must reject under warning marker
+  await writeJson(resultFile, {...goodResult, results: [{...actionable[0], state: 'unrecognized_state'}]});
+  await writeWarningMarkers({inventoryStatus: 'warning', operatingStatus: 'warning'});
+  await assert.rejects(
+    validateDailyOperatingRefresh(options),
+    /lacks exact terminal readback/,
+    'unsafe result row must reject even with warning marker',
+  );
+  await writeJson(resultFile, goodResult);
+  await writeMarkers();
+
+  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected']}, null, 2));
 } finally {
   await fs.rm(tempRoot, {recursive: true, force: true});
 }
