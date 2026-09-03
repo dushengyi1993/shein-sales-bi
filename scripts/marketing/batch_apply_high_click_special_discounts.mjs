@@ -38,6 +38,7 @@ import {
   boundedRecoveryTimeoutMs,
   boundedTimeoutMs,
   createDeadlineContract,
+  findPersistedMarketingTransactionContinuation,
   isMarketingDeadlineError,
 } from '../../lib/cloud_marketing_deadline_contract.mjs';
 
@@ -488,6 +489,22 @@ if (args.execute && restoreKeys.size > 0) {
     '--graceful-cutoff-epoch', String(args.deadline.gracefulCutoffEpoch),
     '--outer-hard-deadline-epoch', String(args.deadline.outerHardDeadlineEpoch),
   ] : [];
+  const manualRescueFiles = exactManual.rescueFiles || [];
+  let manualContinuation = false;
+  if (args.continuation && manualRescueFiles.length > 0) {
+    for (const rescueFile of manualRescueFiles) {
+      const persisted = await findPersistedMarketingTransactionContinuation({
+        root: ROOT,
+        storeKey: rescueFile.storeKey,
+        workFingerprint: exactManual.workFingerprint,
+        rescuePath: path.resolve(ROOT, rescueFile.path),
+      });
+      if (persisted) {
+        manualContinuation = true;
+        break;
+      }
+    }
+  }
   const restore = await run(process.execPath, [
     'scripts/marketing/batch_restore_manual_limited_discounts.mjs',
     '--guard', syntheticGuard,
@@ -497,7 +514,7 @@ if (args.execute && restoreKeys.size > 0) {
     '--result', restoreResultPath,
     '--expected-work-fingerprint', exactManual.workFingerprint,
     '--max-items', '1',
-    '--continuation',
+    ...(manualContinuation ? ['--continuation'] : []),
     ...childDeadlineArgs,
   ], {
     timeoutMs: 30 * 60_000,
@@ -531,7 +548,10 @@ if (args.execute && restoreKeys.size > 0) {
     } : {status: 'missing_restore_result', ok: false};
     record.status = restored?.status || 'missing_restore_result';
     record.ok = restored?.ok === true;
-    record.reason = restored?.error || (record.ok ? 'live_readback_exact' : 'restore_failed');
+    record.reason = restored?.error
+      || (record.ok
+        ? 'live_readback_exact'
+        : (restored?.status ? String(restored.status) : 'missing_restore_result'));
     record.currentActivityId = restored?.readback?.activityId || null;
     const disposition = classifyHighClickRestoreResult(restored || {});
     record.terminal = disposition.terminal;

@@ -172,6 +172,11 @@ const [restoreBatchSource, applySource, guardSource, registryManagerSource] = aw
   fs.readFile('scripts/cloud_marketing_live_guard.sh', 'utf8'),
   fs.readFile('scripts/marketing/manage_manual_limited_discount_override.mjs', 'utf8'),
 ]);
+const highClickSource = await fs.readFile('scripts/marketing/batch_apply_high_click_special_discounts.mjs', 'utf8');
+assert.match(highClickSource, /findPersistedMarketingTransactionContinuation/,
+  'high-click restore invocation must check for persisted transactions before passing --continuation');
+assert.match(highClickSource, /manualContinuation/);
+assert.doesNotMatch(highClickSource, /'restore_failed'/);
 assert.match(restoreBatchSource, /assessRecoverableDryRun/);
 assert.match(restoreBatchSource, /replace_limited_discount_transactionally\.mjs/);
 assert.doesNotMatch(restoreBatchSource, /remove_skc_from_limited_discount\.mjs/);
