@@ -89,7 +89,13 @@ function hashTrackedWorktree(cwd, trackedFiles, indexBytes) {
     if (!sameStat(before, after)) {
       throw fail('SOURCE_RELEASE_SOURCE_RACE', `Tracked source changed while fingerprinting: ${relative}`);
     }
-    const identity = stableJson({path: relative, type: before.isSymbolicLink() ? 'symlink' : 'file', ...statIdentity(after)});
+    // The release fingerprint is a logical source identity, not a filesystem
+    // identity.  dev/ino/mode/mtime differ between Windows, a cloud checkout,
+    // and a fresh deployment of the same commit; including them made an
+    // otherwise identical release appear to drift and left the inventory
+    // compatibility gate pinned to the previous commit.  The stat snapshots
+    // above remain intentionally in the read-time race check.
+    const identity = stableJson({path: relative, type: before.isSymbolicLink() ? 'symlink' : 'file'});
     hash.update(`${Buffer.byteLength(identity)}:${identity}\0`);
     hash.update(`${bytes.length}:`);
     hash.update(bytes);
