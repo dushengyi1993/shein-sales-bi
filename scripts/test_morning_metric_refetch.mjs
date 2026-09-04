@@ -71,12 +71,13 @@ for (const store of storesArg.split(',').filter(Boolean)) {
   if (mode === 'missing-field' && store === 'DX') row.payOrderCnt = 'unavailable';
   if (mode === 'strict-invalid' && store === 'CX') row.epsUv = '   ';
   if (mode === 'strict-invalid' && store === 'DL') row.goodsUv = [];
+  const performanceRows = sourceReady ? [row] : [];
   const file = path.join(outDir, store, date + '.json');
   fs.mkdirSync(path.dirname(file), {recursive: true});
   fs.writeFileSync(file, JSON.stringify({
     ok: true, date, fetchTime: new Date().toISOString(), store: {storeKey: store},
-    counts: {diagnoseDay: sourceReady ? 1 : 0, performanceRows: 1},
-    performanceRows: [row],
+    counts: {diagnoseDay: sourceReady ? 1 : 0, performanceRows: performanceRows.length},
+    performanceRows,
   }, null, 2) + '\\n');
   fs.appendFileSync(process.env.METRIC_CALL_LOG, store + '\\n');
 }
@@ -147,8 +148,8 @@ printf '%s\n' "$*" >> "$QUEUE_LOG"
 
   for (const store of stores) {
     writeJson(path.join(root, 'outputs', 'shein_links', store, `${date}.json`), {
-      ok: true, date, store: {storeKey: store}, counts: {diagnoseDay: 0, performanceRows: 1},
-      performanceRows: [{epsUv: 0, goodsUv: 0, saleCnt: 0, payOrderCnt: 0}],
+      ok: true, date, store: {storeKey: store}, counts: {diagnoseDay: 0, performanceRows: 0},
+      performanceRows: [],
     });
     writeJson(path.join(root, 'outputs', 'shein_business_domains', store, `${date}.json`), {ok: true, date, store: {storeKey: store}});
   }

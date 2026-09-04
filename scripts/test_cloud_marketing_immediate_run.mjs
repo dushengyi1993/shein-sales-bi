@@ -958,6 +958,40 @@ process.kill(process.pid, 'SIGKILL');
   });
   assert.equal(rotationContinuation.authorizationId, rotationB.authorizationId,
     'latest current authorization B must win continuation discovery over historical receipt A');
+  const staleQueueFile = path.join(tempRoot, 'state', 'cloud_marketing_live_guard', 'repair-queues', `marketing-repair-${date}-stale.json`);
+  await fsp.writeFile(staleQueueFile, `${JSON.stringify({...queue, queueFingerprint: sha256('queue-fingerprint-stale')}, null, 2)}\n`, 'utf8');
+  await expectReject(findImmediateAuthorizationContinuation({
+    authorizationFile: rotatingAuthorizationFile,
+    queueFile: staleQueueFile,
+    root: tempRoot,
+    date,
+    nowEpoch: issueEpoch + 5,
+    timeZone: 'Asia/Shanghai',
+  }), 'IMMEDIATE_AUTHORIZATION_BINDING_MISMATCH');
+  const scheduledStaleContinuation = await findImmediateAuthorizationContinuation({
+    authorizationFile: rotatingAuthorizationFile,
+    queueFile: staleQueueFile,
+    root: tempRoot,
+    date,
+    nowEpoch: issueEpoch + 5,
+    timeZone: 'Asia/Shanghai',
+    scheduledDiscovery: true,
+  });
+  assert.equal(scheduledStaleContinuation.stale, true,
+    'scheduled discovery must convert a structurally valid stale receipt into an auditable no-op');
+  assert.equal(scheduledStaleContinuation.continuation, false);
+  assert.equal(scheduledStaleContinuation.reason, 'current_queue_binding_mismatch');
+  const scheduledExpiredContinuation = await findImmediateAuthorizationContinuation({
+    authorizationFile: crashAuthorizationFile,
+    queueFile,
+    root: tempRoot,
+    date,
+    nowEpoch: lateOuterEpoch + 1,
+    timeZone: 'Asia/Shanghai',
+    scheduledDiscovery: true,
+  });
+  assert.equal(scheduledExpiredContinuation.reason, 'continuation_authorization_expired',
+    'scheduled discovery must defer an expired immutable receipt without executing it');
   await expectReject(consumeImmediateAuthorization({
     authorizationFile: rotatingAuthorizationFile,
     queueFile,
@@ -2191,6 +2225,10 @@ process.kill(process.pid, 'SIGKILL');
     'wrapper must only verify and forward the pending source before invoking the worker');
   assert.ok(wrapper.indexOf('find-continuation') < wrapper.indexOf('exec /usr/bin/env bash'),
     'wrapper must discover source-unlinked immutable continuation before invoking the worker');
+  assert.match(wrapper, /find-continuation[\s\S]*--scheduled-discovery/,
+    'only the scheduled wrapper path may request stale continuation discovery');
+  assert.match(wrapper, /stale===true[\s\S]*stale continuation ignored for scheduled run/,
+    'scheduled stale continuation must be an explicit no-op before host-heavy admission');
   assert.match(wrapper, /SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION/);
   assert.match(wrapper, /SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256/);
   assert.match(wrapper, /IMMEDIATE_GRACEFUL_CUTOFF_EPOCH/);

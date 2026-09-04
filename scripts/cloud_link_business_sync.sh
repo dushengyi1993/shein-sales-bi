@@ -428,10 +428,13 @@ const requiredFields = [
 const fieldsComplete = rows.every(row => requiredFields.every(names => finiteMetric(row, names) !== null));
 
 // A numeric zero in a required metric field is legitimate only after the
-// normal fetch contract proves the daily diagnose source succeeded: ok=true,
-// exact identity, a positive diagnoseDay count, and a matching row count.
-const sourceProven = Number.isInteger(diagnoseDay) && diagnoseDay > 0
-  && Number.isInteger(performanceCount) && performanceCount === rows.length
+// normal fetch contract proves the daily performance source succeeded: ok=true,
+// exact identity, a positive performance row count, and a matching row count.
+// diagnoseDay is a diagnostic count; zero is a valid empty result, but a
+// missing or malformed count is still not evidence of a successful fetch.
+const sourceProven = Number.isInteger(diagnoseDay)
+  && Number.isInteger(performanceCount)
+  && performanceCount > 0 && performanceCount === rows.length
   && rows.length > 0;
 process.exit(sourceProven && fieldsComplete ? 0 : 2);
 NODE
@@ -1660,7 +1663,7 @@ const metrics = {
   payOrderCnt: 0,
   sourceContract: {
     identity: 'ok=true and exact date/store',
-    diagnoseDay: 'present finite positive integer',
+    diagnoseDay: 'present finite nonnegative diagnostic count; zero is valid; performanceRows is the readiness proof',
     performanceRows: 'present array with counts.performanceRows equal to array length and length > 0',
     requiredFields: ['epsUv', 'goodsUv', 'saleCnt', 'payOrderCnt'],
     zeroSemantics: 'finite JSON number zero is valid only when identity and source-count contract are proven; strings/null/arrays/objects/missing are unavailable',
@@ -1697,9 +1700,7 @@ for (const store of expectedStores) {
   const diagnoseDay = finiteMetric(payload.counts, ['diagnoseDay']);
   const performanceCount = finiteMetric(payload.counts, ['performanceRows']);
   if (!diagnoseDay.ok) storeIssues.push(`counts.diagnoseDay:${diagnoseDay.reason}`);
-  else if (!Number.isInteger(diagnoseDay.value) || diagnoseDay.value <= 0) {
-    storeIssues.push('counts.diagnoseDay:source_unavailable');
-  }
+  else if (!Number.isInteger(diagnoseDay.value)) storeIssues.push('counts.diagnoseDay:invalid');
   if (!performanceCount.ok) storeIssues.push(`counts.performanceRows:${performanceCount.reason}`);
   else if (!Number.isInteger(performanceCount.value)) storeIssues.push('counts.performanceRows:not_integer');
   if (rows && rows.length === 0) storeIssues.push('performanceRows:empty');
