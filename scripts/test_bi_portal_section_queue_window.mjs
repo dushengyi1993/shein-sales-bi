@@ -444,6 +444,42 @@ if (tools.status !== 0) {
   assert.equal(clean200Unchanged.queue.entries.some(entry => entry.section === 'orders'), false,
     'a clean 200 with an unchanged pre-request terminal artifact must complete');
 
+  const largeQueueJson = await runWindowCase({
+    name: 'large-queue-json-over-argv-limit',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    sections: ['orders'],
+    artifactSections: ['orders'],
+    maxSections: 1,
+    expectedStatus: 0,
+    queueSetup: queue => {
+      // status/claim/complete all serialize the durable entries list.  This
+      // fixture is deliberately larger than Linux's argv budget so the test
+      // proves the worker keeps those JSON responses on stdin.
+      queue.entries.push(...Array.from({length: 4_200}, (_, index) => ({
+        section: `legacy${index}`,
+        status: 'pending',
+        priority: 99,
+        sequence: 10_000 + index,
+        requestRevision: 1,
+        claimedRevision: 0,
+        idempotencyKey: `legacy-${index}`,
+        coalesceKey: `legacy-${index}`,
+        coreGeneratedAt: generatedAt,
+        requestedAt: '2026-08-22T00:00:00.000Z',
+        lastError: 'x'.repeat(256),
+      })));
+    },
+  });
+  assert.deepEqual(largeQueueJson.calls, ['orders'],
+    'a large durable queue must still claim and complete the requested section');
+  assert.equal(largeQueueJson.queue.entries.some(entry => entry.section === 'orders'), false,
+    'large-queue JSON parsing must not fail before terminal completion');
+
   const quietSuccess = await runWindowCase({
     name: 'quiet-success-post-profit',
     hour: '06',

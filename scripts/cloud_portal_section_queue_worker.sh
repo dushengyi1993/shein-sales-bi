@@ -92,6 +92,17 @@ queue_command() {
   return "$status"
 }
 
+# Queue status/claim/complete responses contain the whole durable queue.  Do
+# not pass those JSON documents as argv: a normal backlog can exceed Linux's
+# per-process argument limit and turn a healthy worker into exit 126/"Argument
+# list too long".  Keep large JSON on stdin and reserve argv for small scalar
+# values only.
+json_from_stdin() {
+  local script="$1"
+  shift
+  node -e "$script" "$@"
+}
+
 response_header_value() {
   local header_name="$1"
   local max_length="${2:-4096}"
@@ -238,21 +249,20 @@ complete_terminal_claim() {
   TERMINAL_STATUS="$2"
 
   if [[ "$TERMINAL_STATUS" -eq 0 ]]; then
-    if TERMINAL_EVIDENCE="$(node - "$report_text" "$SECTION" "$CLAIMED_CORE_GENERATED_AT" <<'NODE'
-const reportText = String(process.argv[2] || '').trim();
-const section = String(process.argv[3] || '');
-const expected = String(process.argv[4] || '');
+    if TERMINAL_EVIDENCE="$(printf '%s' "$report_text" | json_from_stdin '
+const reportText = String(require("node:fs").readFileSync(0, "utf8")).trim();
+const section = String(process.argv[1] || "");
+const expected = String(process.argv[2] || "");
 let report = null;
 try {
-  const line = reportText.split(/\r?\n/u).filter(Boolean).at(-1) || '';
+  const line = reportText.split(/\r?\n/u).filter(Boolean).at(-1) || "";
   report = JSON.parse(line);
 } catch {}
 if (!report || report.ok !== true || report.section !== section
   || report.coreGeneratedAt !== expected || report.sectionGeneratedAt !== expected
-  || report.generatedAt !== expected || !/^[a-f0-9]{64}$/u.test(String(report.generationIdentity || ''))) process.exit(2);
-process.stdout.write([report.generatedAt, report.sectionGeneratedAt, report.generationIdentity].join('\t'));
-NODE
-    )"; then
+  || report.generatedAt !== expected || !/^[a-f0-9]{64}$/u.test(String(report.generationIdentity || ""))) process.exit(2);
+process.stdout.write([report.generatedAt, report.sectionGeneratedAt, report.generationIdentity].join("\t"));
+' "$SECTION" "$CLAIMED_CORE_GENERATED_AT")"; then
       TERMINAL_EVIDENCE_STATUS=0
     else
       TERMINAL_EVIDENCE_STATUS=$?
@@ -277,13 +287,13 @@ NODE
       --terminal-section-generated-at "$TERMINAL_SECTION_GENERATED_AT" \
       --terminal-generation-identity "$TERMINAL_GENERATION_IDENTITY" \
       --not-after-epoch "$CLAIM_DEADLINE_EPOCH")"
-    COMPLETED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.completed===true))' "$COMPLETE_REPORT")"
-    PUBLISHED="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.published===true))' "$COMPLETE_REPORT")"
-    PUBLISHED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.publishedRevision||""))' "$COMPLETE_REPORT")"
-    DESIRED_REVISION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.desiredRevision||""))' "$COMPLETE_REPORT")"
-    FOLLOW_UP_PENDING="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.followUpPending===true))' "$COMPLETE_REPORT")"
-    COMPLETE_REPORT_VALID="$(node -e '
-const x=JSON.parse(process.argv[1]);
+    COMPLETED="$(printf '%s' "$COMPLETE_REPORT" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.completed===true));')"
+    PUBLISHED="$(printf '%s' "$COMPLETE_REPORT" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.published===true));')"
+    PUBLISHED_REVISION="$(printf '%s' "$COMPLETE_REPORT" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.publishedRevision||""));')"
+    DESIRED_REVISION="$(printf '%s' "$COMPLETE_REPORT" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.desiredRevision||""));')"
+    FOLLOW_UP_PENDING="$(printf '%s' "$COMPLETE_REPORT" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.followUpPending===true));')"
+    COMPLETE_REPORT_VALID="$(printf '%s' "$COMPLETE_REPORT" | json_from_stdin '
+const x=JSON.parse(require("node:fs").readFileSync(0,"utf8"));
 const published=x.publishedRevision;
 const desired=x.desiredRevision;
 const follow=x.followUpPending;
@@ -291,7 +301,7 @@ const revisionsValid=Number.isSafeInteger(published) && published>0
   && Number.isSafeInteger(desired) && desired>0;
 const relationValid=follow===true ? desired>published : follow===false && desired<=published;
 process.stdout.write(String(x.completed===true && x.published===true && revisionsValid && relationValid));
-' "$COMPLETE_REPORT")"
+')"
     if [[ "$COMPLETE_REPORT_VALID" != "true" ]]; then
       if [[ "$SECTION" == "profit" ]]; then
         PROFIT_COMPLETED_THIS_RUN=0
@@ -347,7 +357,7 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     FIRST_QUEUE_STATUS_CODE=$?
     set -e
     if [[ "$FIRST_QUEUE_STATUS_CODE" -eq 0 ]]; then
-      FIRST_LINKS_DATA_PENDING="$(node -e 'try { const x=JSON.parse(process.argv[1]); const e=(x.entries||[]).find(row=>row.section==="linksData"); process.stdout.write(e && ["pending","running"].includes(e.status) ? "1" : "0"); } catch { process.stdout.write("0"); }' "$FIRST_QUEUE_STATUS")"
+      FIRST_LINKS_DATA_PENDING="$(printf '%s' "$FIRST_QUEUE_STATUS" | json_from_stdin 'try { const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); const e=(x.entries||[]).find(row=>row.section==="linksData"); process.stdout.write(e && ["pending","running"].includes(e.status) ? "1" : "0"); } catch { process.stdout.write("0"); }')"
     fi
     if [[ "$FIRST_LINKS_DATA_PENDING" == "1" ]]; then
       CLAIM_ARGS+=(--prefer-sections linksData)
@@ -361,7 +371,7 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   EXCLUDED_SECTIONS=("${CLAIMED_SECTIONS[@]}")
   if (( PROFIT_COMPLETED_THIS_RUN == 1 )); then
     PROFIT_QUEUE_STATUS="$(queue_command status)"
-    PROFIT_QUEUE_PENDING="$(node -e 'const x=JSON.parse(process.argv[1]); const e=(x.entries||[]).find(row=>row.section==="profit"); process.stdout.write(e && ["pending","running"].includes(e.status) ? "1" : "0")' "$PROFIT_QUEUE_STATUS")"
+    PROFIT_QUEUE_PENDING="$(printf '%s' "$PROFIT_QUEUE_STATUS" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); const e=(x.entries||[]).find(row=>row.section==="profit"); process.stdout.write(e && ["pending","running"].includes(e.status) ? "1" : "0")')"
     if [[ "$PROFIT_QUEUE_PENDING" == "1" ]]; then
       PROFIT_COMPLETED_THIS_RUN=0
       PROFIT_FOLLOW_UP_PENDING=1
@@ -426,7 +436,7 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   if [[ "$CLAIM_STATUS" -eq 75 ]]; then
     if [[ "$HEAVY_SECTION_DEFERRED" -eq 1 ]]; then
       QUEUE_STATUS="$(queue_command status)"
-      PENDING_COUNT="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.counts?.pending||0))' "$QUEUE_STATUS")"
+      PENDING_COUNT="$(printf '%s' "$QUEUE_STATUS" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.counts?.pending||0))')"
       if (( PENDING_COUNT > 0 )); then
         echo "[portal-section-worker] defer pending sections=$PENDING_COUNT reason=insufficient_heavy_budget"
         # Preserve a real section failure for systemd/watchdog. A failed
@@ -440,20 +450,20 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
     break
   fi
   [[ "$CLAIM_STATUS" -eq 0 ]] || exit "$CLAIM_STATUS"
-  SECTION="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.entry?.section||""))' "$CLAIM")"
-  LEASE_ID="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.entry?.leaseId||""))' "$CLAIM")"
+  SECTION="$(printf '%s' "$CLAIM" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.entry?.section||""))')"
+  LEASE_ID="$(printf '%s' "$CLAIM" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.entry?.leaseId||""))')"
   [[ -n "$SECTION" && -n "$LEASE_ID" ]] || {
     echo "[portal-section-worker] invalid claim: $CLAIM" >&2
     exit 1
   }
-  LEASE_DEADLINE_EPOCH="$(node -e '
-const x=JSON.parse(process.argv[1]);
+  LEASE_DEADLINE_EPOCH="$(printf '%s' "$CLAIM" | json_from_stdin '
+const x=JSON.parse(require("node:fs").readFileSync(0,"utf8"));
 const raw=String(x.entry?.leaseExpiresAt||"");
 const millis=Date.parse(raw);
 const epoch=Math.floor(millis/1000);
 if (!raw || !Number.isFinite(millis) || !Number.isSafeInteger(epoch) || epoch <= 0) process.exit(2);
 process.stdout.write(String(epoch));
-' "$CLAIM")" || {
+')" || {
     queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" \
       --error "claim missing valid leaseExpiresAt" >/dev/null || true
     echo "[portal-section-worker] section=$SECTION failed status=claim-lease (invalid leaseExpiresAt)" >&2
@@ -471,7 +481,7 @@ process.stdout.write(String(epoch));
       "(slot/lease deadline reached)"
     continue
   fi
-  CLAIMED_CORE_GENERATED_AT="$(node -e 'const x=JSON.parse(process.argv[1]); const value=String(x.entry?.claimedCoreGeneratedAt||""); if(!/^[\x21-\x7E]{1,1024}$/.test(value)||value==="unknown") process.exit(2); process.stdout.write(value)' "$CLAIM")" || {
+  CLAIMED_CORE_GENERATED_AT="$(printf '%s' "$CLAIM" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); const value=String(x.entry?.claimedCoreGeneratedAt||""); if(!/^[\x21-\x7E]{1,1024}$/.test(value)||value==="unknown") process.exit(2); process.stdout.write(value)')" || {
     queue_command fail --section "$SECTION" --lease-id "$LEASE_ID" --error "claim missing immutable claimedCoreGeneratedAt" >/dev/null || true
     echo "[portal-section-worker] invalid claim generation: $CLAIM" >&2
     exit 1
@@ -570,7 +580,7 @@ if [[ "${#FAILED_SECTIONS[@]}" -gt 0 ]]; then
 fi
 if [[ "$HEAVY_SECTION_DEFERRED" -eq 1 && "$GENERIC_STOP" -eq 0 ]]; then
   QUEUE_STATUS="$(queue_command status)"
-  PENDING_COUNT="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.counts?.pending||0))' "$QUEUE_STATUS")"
+  PENDING_COUNT="$(printf '%s' "$QUEUE_STATUS" | json_from_stdin 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.counts?.pending||0))')"
   if (( PENDING_COUNT > 0 )); then
     echo "[portal-section-worker] defer pending sections=$PENDING_COUNT reason=insufficient_heavy_budget"
     exit 75
