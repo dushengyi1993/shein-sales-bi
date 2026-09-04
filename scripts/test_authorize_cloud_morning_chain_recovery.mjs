@@ -189,6 +189,7 @@ async function makeFixture({
   };
   const lockCalls = [];
   const writerCalls = [];
+  const writerOptions = [];
   const withExclusiveLock = async (lockPath, callback) => {
     lockCalls.push(lockPath);
     if (lock) throw new MorningChainRecoveryError('lock is already held', {code: 'MORNING_CHAIN_RECOVERY_LOCK_CONFLICT', exitCode: 75});
@@ -207,6 +208,7 @@ async function makeFixture({
     withExclusiveLock,
     writeJsonFileAtomic: async (file, value, options) => {
       writerCalls.push(path.basename(file));
+      writerOptions.push({file: path.basename(file), options: {...(options || {})}});
       return writer(file, value, options);
     },
   };
@@ -220,6 +222,7 @@ async function makeFixture({
     inventoryResultFile,
     inventoryJournalFile,
     writerCalls,
+    writerOptions,
     systemctlCalls,
     lockCalls,
     deps,
@@ -502,8 +505,15 @@ async function main() {
       const receipt = JSON.parse(await fx.readReceipt());
       const active = JSON.parse(await fx.readActive());
       const metric = JSON.parse(await fx.readMetricRefetch());
+      const metricWrite = fx.writerOptions.find(({file}) => file === 'link-business-metric-refetch.json');
       assert.equal(result.status, 'authorized');
       assert.deepEqual(fx.writerCalls, ['link-business-metric-refetch.json', `${RUN_DATE}.json`, 'active.json']);
+      assert.equal(metricWrite.options.mode, 0o660);
+      if (process.platform !== 'win32') {
+        const activeStat = await fx.readActiveStat();
+        assert.equal(metricWrite.options.uid, activeStat.uid);
+        assert.equal(metricWrite.options.gid, activeStat.gid);
+      }
       assert.equal(metric.status, 'recovery_authorized');
       assert.equal(metric.previousDeadlineEpoch, NESTED_METRIC_DEADLINE);
       assert.equal(metric.deadlineEpoch, NEW_DEADLINE);

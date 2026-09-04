@@ -714,7 +714,7 @@ function assertNestedMetricRefetchBound(state, receipt, file, {previousDeadlineE
 }
 
 async function applyOrVerifyNestedMetricRefetch({
-  nestedMetric, receipt, paths, writeJsonFileAtomic,
+  nestedMetric, receipt, paths, writeJsonFileAtomic, writeOptions = {},
 }) {
   if (!nestedMetric) return;
   if (nestedMetric.mode === 'deadline') {
@@ -731,7 +731,11 @@ async function applyOrVerifyNestedMetricRefetch({
       },
       updatedAt: receipt.createdAt,
     };
-    await writeJsonFileAtomic(paths.metricRefetchStateFile, updatedMetricState, {mode: 0o660});
+    await writeJsonFileAtomic(
+      paths.metricRefetchStateFile,
+      updatedMetricState,
+      {...writeOptions, mode: 0o660},
+    );
     const committedMetricEvidence = await readJson(
       paths.metricRefetchStateFile,
       'published nested metric state',
@@ -1121,6 +1125,7 @@ export async function authorizeCloudMorningChainRecovery({
           receipt: existingReceipt,
           paths,
           writeJsonFileAtomic,
+          writeOptions: publishMetadata.writeOptions,
         });
       }
       return publicResult({
@@ -1171,6 +1176,7 @@ export async function authorizeCloudMorningChainRecovery({
           receipt: existingReceipt,
           paths,
           writeJsonFileAtomic,
+          writeOptions: publishMetadata.writeOptions,
         });
       }
       const rebuiltActive = {
@@ -1264,6 +1270,7 @@ export async function authorizeCloudMorningChainRecovery({
       receipt,
       paths,
       writeJsonFileAtomic,
+      writeOptions: publishMetadata.writeOptions,
     });
     if (!existingReceipt) {
       await writeJsonFileAtomic(paths.receiptFile, receipt, publishMetadata.writeOptions);
