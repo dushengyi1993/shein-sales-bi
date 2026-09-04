@@ -28,6 +28,7 @@ import {
   readCloudMaintenanceStatus,
   resumeCloudMaintenance,
 } from '../lib/cloud_maintenance_mode.mjs';
+import {assertInventoryAlignmentBeforeResume} from './manage_cloud_maintenance_mode.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'scripts', 'manage_cloud_maintenance_mode.mjs');
@@ -44,6 +45,39 @@ assert.match(maintenanceSource, /O_NOFOLLOW/);
 assert.match(maintenanceSource, /handle\.stat\(\)/);
 assert.match(maintenanceSource, /handle\.readFile/);
 assert.match(maintenanceSource, /process\.getuid\(\) !== 0/);
+const maintenanceCliSource = await fs.readFile(CLI, 'utf8');
+assert.match(maintenanceCliSource, /assertInventoryAlignmentBeforeResume/);
+assert.match(maintenanceCliSource, /resume refused: inventory writer compatibility/);
+
+assert.deepEqual(
+  await assertInventoryAlignmentBeforeResume({
+    alignmentReader: async () => ({ok: true, aligned: true, activeGeneration: 56}),
+  }),
+  {ok: true, aligned: true, activeGeneration: 56},
+);
+assert.deepEqual(
+  await assertInventoryAlignmentBeforeResume({
+    alignmentReader: async () => {
+      const error = new Error('activation missing');
+      error.code = 'INVENTORY_WRITER_ACTIVATION_MISSING';
+      throw error;
+    },
+  }),
+  {ok: true, skipped: true, reason: 'reader_first_activation_not_present'},
+);
+await assert.rejects(
+  assertInventoryAlignmentBeforeResume({
+    alignmentReader: async () => {
+      const error = new Error('pending rotation');
+      error.code = 'INVENTORY_WRITER_COMPATIBILITY_PENDING_ROTATION';
+      error.details = {generation: 57};
+      throw error;
+    },
+  }),
+  error => error instanceof CloudMaintenanceConfigurationError
+    && error.code === 'CLOUD_MAINTENANCE_CONFIGURATION_ERROR'
+    && error.detail.alignmentCode === 'INVENTORY_WRITER_COMPATIBILITY_PENDING_ROTATION',
+);
 assert.equal(cloudMaintenanceStaleLockRecoveryMode(CANONICAL_CLOUD_MAINTENANCE_FILE, {platform: 'linux'}), 'manual');
 assert.equal(cloudMaintenanceStaleLockRecoveryMode(markerFile, {platform: 'linux'}), 'automatic');
 assert.equal(cloudMaintenanceStaleLockRecoveryMode(CANONICAL_CLOUD_MAINTENANCE_FILE, {platform: 'win32'}), 'automatic');
