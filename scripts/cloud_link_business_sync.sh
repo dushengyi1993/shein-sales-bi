@@ -177,9 +177,10 @@ NODE
   case "$METRIC_REFETCH_STATE_STATUS" in
     deadline|exhausted|rolled_back)
       # A terminal/failed attempt must not poison a later retry with its old
-      # absolute deadline. Active same-run phases still reuse the original
-      # deadline so a service restart cannot extend an in-flight run.
+      # absolute deadline or attempt counter. Active same-run phases still
+      # reuse both so a service restart cannot extend an in-flight run.
       reuse_persisted_deadline=0
+      METRIC_REFETCH_ATTEMPTS=0
       ;;
   esac
   if (( reuse_persisted_deadline )) && [[ "${persisted_deadline:-0}" =~ ^[1-9][0-9]*$ ]]; then
