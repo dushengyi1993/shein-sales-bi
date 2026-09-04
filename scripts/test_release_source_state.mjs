@@ -180,16 +180,19 @@ function buildRemoteRoutes(fixture, overrides = {}) {
     message: tagMessage,
     object: {type: 'commit', sha: commit},
   }));
-  routes.set(routeKey(`/repos/${repo}/releases?per_page=100&page=1`), response([overrides.release || release]));
+  const listedReleases = overrides.releases || [overrides.release || release];
+  routes.set(routeKey(`/repos/${repo}/releases?per_page=100&page=1`), response(listedReleases));
   const remoteAssetBytes = overrides.remoteAssetBytes || {
     'release-attestation.json': attestationBytes,
     'release-attestation.json.sha256': checksumBytes,
   };
-  for (const asset of (overrides.release || release).assets) {
-    routes.set(
-      routeKey(`/repos/${repo}/releases/assets/${asset.id}`),
-      response(remoteAssetBytes[asset.name] || Buffer.from('drift\n'), 200, 'application/octet-stream'),
-    );
+  for (const listed of listedReleases) {
+    for (const asset of listed.assets || []) {
+      routes.set(
+        routeKey(`/repos/${repo}/releases/assets/${asset.id}`),
+        response(remoteAssetBytes[asset.name] || Buffer.from('drift\n'), 200, 'application/octet-stream'),
+      );
+    }
   }
   return routes;
 }
@@ -631,6 +634,106 @@ try {
   assert.equal(published.publishState, SOURCE_RELEASE_PUBLISH_STATES.PUBLISHED_VERIFIED);
   const conflict = decideSourceReleaseState(releaseStateFixture(fixture, {immutable: false}));
   assert.equal(conflict.publishState, SOURCE_RELEASE_PUBLISH_STATES.PUBLISHED_CONFLICT);
+  testCount += 1;
+
+  const publishedUntaggedRelease = {
+    ...release,
+    id: 382668782,
+    tag_name: 'untagged-cbcaba0123456789',
+    target_commitish: commit,
+    html_url: 'https://github.com/dushengyi1993/shein-sales-bi/releases/tag/untagged-cbcaba0123456789',
+  };
+  const publishedUntaggedState = decideSourceReleaseState(releaseStateFixture(fixture, {
+    id: publishedUntaggedRelease.id,
+    tagName: publishedUntaggedRelease.tag_name,
+  }));
+  assert.equal(
+    publishedUntaggedState.publishState,
+    SOURCE_RELEASE_PUBLISH_STATES.PUBLISHED_VERIFIED,
+    'raw published untagged tag_name must still be PUBLISHED_VERIFIED',
+  );
+  const remotePublishedUntagged = await verifyRemoteSourceReleaseEvidence({
+    ...fixture,
+    tag: version,
+    trustPolicySha256: policySha256,
+    client: clientFor(buildRemoteRoutes(fixture, {release: publishedUntaggedRelease})),
+    now: () => new Date('2026-08-17T03:00:00Z'),
+  });
+  assert.equal(remotePublishedUntagged.releaseId, 382668782);
+  assert.equal(remotePublishedUntagged.immutable, true);
+  testCount += 1;
+
+  await expectCode(() => verifyRemoteSourceReleaseEvidence({
+    ...fixture,
+    tag: version,
+    trustPolicySha256: policySha256,
+    client: clientFor(buildRemoteRoutes(fixture, {
+      release: {...publishedUntaggedRelease, target_commitish: 'e'.repeat(40)},
+    })),
+  }), 'SOURCE_RELEASE_RELEASE_IDENTITY_INVALID');
+  await expectCode(() => verifyRemoteSourceReleaseEvidence({
+    ...fixture,
+    tag: version,
+    trustPolicySha256: policySha256,
+    client: clientFor(buildRemoteRoutes(fixture, {
+      release: {
+        ...publishedUntaggedRelease,
+        body: publishedBody.replace(
+          buildPublicationJournal({
+            state: SOURCE_RELEASE_PUBLISH_STATES.PUBLISH_OUTCOME_UNKNOWN,
+            tag: version,
+            commit,
+            attestationSha256,
+          }),
+          buildPublicationJournal({
+            state: SOURCE_RELEASE_PUBLISH_STATES.PUBLISH_OUTCOME_UNKNOWN,
+            tag: version,
+            commit: 'e'.repeat(40),
+            attestationSha256,
+          }),
+        ),
+      },
+    })),
+  }), 'SOURCE_RELEASE_RELEASE_IDENTITY_INVALID');
+  await expectCode(() => verifyRemoteSourceReleaseEvidence({
+    ...fixture,
+    tag: version,
+    trustPolicySha256: policySha256,
+    client: clientFor(buildRemoteRoutes(fixture, {
+      release: {
+        ...publishedUntaggedRelease,
+        assets: publishedUntaggedRelease.assets.map(asset => asset.name === 'release-attestation.json'
+          ? {...asset, digest: `sha256:${'0'.repeat(64)}`}
+          : asset),
+      },
+    })),
+  }), 'SOURCE_RELEASE_RELEASE_IDENTITY_INVALID');
+  await expectCode(() => verifyRemoteSourceReleaseEvidence({
+    ...fixture,
+    tag: version,
+    trustPolicySha256: policySha256,
+    client: clientFor(buildRemoteRoutes(fixture, {
+      releases: [
+        publishedUntaggedRelease,
+        {
+          ...publishedUntaggedRelease,
+          id: 800,
+          tag_name: 'untagged-fuzzytitleonly01',
+          body: 'unrelated body',
+          target_commitish: 'e'.repeat(40),
+          assets: [],
+        },
+      ],
+    })),
+  }), 'SOURCE_RELEASE_RELEASE_IDENTITY_INVALID');
+  await expectCode(() => verifyRemoteSourceReleaseEvidence({
+    ...fixture,
+    tag: version,
+    trustPolicySha256: policySha256,
+    client: clientFor(buildRemoteRoutes(fixture, {
+      releases: [release, publishedUntaggedRelease],
+    })),
+  }), 'SOURCE_RELEASE_RELEASE_IDENTITY_INVALID');
   testCount += 1;
 
   const markerFile = path.join(tmp, '.git', 'deployed_release.json');
