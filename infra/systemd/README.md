@@ -69,6 +69,17 @@ sudo node scripts/inventory/resolve_manual_inventory_intent.mjs \
 
 Compatibility updates use the same CLI, immutable preflight artifacts, and append-only state machine. Under fresh `maintenance=all`: publish a `rotation-stage` artifact against the candidate commit/bundle/release receipt/source fingerprint and execute that exact artifact; root-deploy the staged candidate, harden it, and restart writers; then publish and execute a fresh `rotation-finalize` artifact. A staged candidate can pass the external startup guard so recovery is possible, but the in-app writer reader remains fail-closed until finalize. After finalize, generation N is permanently rejected and N+1 same-commit restarts remain valid. `status` is read-only and reports active/pending generations. An interrupted append or receipt publication is resumed by rerunning the identical artifact/hash; a different or expired artifact is rejected. Never remove activation to recover or rotate.
 
+Every release must close with a read-only source/compatibility alignment check before maintenance is released. This catches the exact failure mode where `/opt/shein-bi/app` has the new commit but the external guard still carries an older generation. The check is intentionally read-only and does not rotate state automatically:
+
+```bash
+sudo node scripts/inventory/assert_inventory_writer_release_aligned.mjs \
+  --cwd /opt/shein-bi/app \
+  --expected-commit EXACT_DEPLOYED_COMMIT \
+  --json
+```
+
+Exit 0 is the only release-close result. Any mismatch or pending rotation remains a deployment failure and must be repaired with the three-stage rotation above; it must not be deferred until the next business timer.
+
 If deployment reached the checkout before the stage journal was written, the same `rotation-stage` command is also the supported recovery path: build the candidate artifact from the exact current release receipt/source authority and execute it under `maintenance=all`, then run the normal finalize sequence. Recovery is accepted only when the current checkout matches the requested candidate in full release identity and source fingerprint; arbitrary or partially matching drift remains rejected. The release close must therefore include compatibility stage/finalize before maintenance is released, rather than leaving a new checkout behind an older active generation.
 
 ```bash
