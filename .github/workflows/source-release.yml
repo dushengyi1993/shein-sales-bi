@@ -269,11 +269,18 @@ jobs:
               }
               return true;
             };
-            const candidateDrafts = releases.filter(r => (
-              r && r.draft === true && r.prerelease === false &&
-              typeof r.tag_name === 'string' && /^untagged-[A-Za-z0-9._-]+$/.test(r.tag_name) &&
-              r.name === expectedTitle && r.target_commitish === expectedCommit &&
+            const isUntagged = tagName => typeof tagName === 'string' && /^untagged-[A-Za-z0-9._-]+$/.test(tagName);
+            const isIso = value => typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
+            const isStrongIdentity = r => (
+              r && r.name === expectedTitle && r.target_commitish === expectedCommit &&
               r.body === expectedUnknownBody && isMatchingAssets(r.assets)
+            );
+            const candidateDrafts = releases.filter(r => (
+              isStrongIdentity(r) && r.draft === true && r.prerelease === false && isUntagged(r.tag_name)
+            ));
+            const candidatePublishedUntagged = releases.filter(r => (
+              isStrongIdentity(r) && r.draft === false && r.prerelease === false &&
+              r.immutable === true && isIso(r.published_at) && isUntagged(r.tag_name)
             ));
             const strongRelatedReleases = releases.filter(r => (
               r && (
@@ -286,7 +293,7 @@ jobs:
               const exactRelease = exactMatches[0];
               const ambiguousSiblings = strongRelatedReleases.filter(r => (
                 r !== exactRelease && (
-                  (typeof r.tag_name === 'string' && /^untagged-[A-Za-z0-9._-]+$/.test(r.tag_name)) ||
+                  isUntagged(r.tag_name) ||
                   r.body === expectedUnknownBody
                 )
               ));
@@ -299,13 +306,16 @@ jobs:
             if (relatedReleases.length === 0) {
               return {exists: false};
             }
-            if (relatedReleases.length !== 1 || candidateDrafts.length > 1) {
+            if (relatedReleases.length !== 1 || candidateDrafts.length > 1 || candidatePublishedUntagged.length > 1) {
               throw new Error('duplicate or ambiguous release drafts for ' + version);
             }
-            if (candidateDrafts.length !== 1 || relatedReleases[0] !== candidateDrafts[0]) {
-              throw new Error('Existing related release for ' + version + ' does not satisfy exact immutable draft contract');
+            if (candidateDrafts.length === 1 && relatedReleases[0] === candidateDrafts[0]) {
+              return normalize(candidateDrafts[0], version);
             }
-            return normalize(candidateDrafts[0], version);
+            if (candidatePublishedUntagged.length === 1 && relatedReleases[0] === candidatePublishedUntagged[0]) {
+              return normalize(candidatePublishedUntagged[0], version);
+            }
+            throw new Error('Existing related release for ' + version + ' does not satisfy exact immutable draft contract');
           }
           // INSPECT_RELEASE_EVALUATOR_END
           // EXPECTED_RELEASE_IDENTITY_READER_BEGIN

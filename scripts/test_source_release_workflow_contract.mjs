@@ -892,6 +892,106 @@ assert.equal(recoveredDraftState.publish, false);
 assert.equal(recoveredDraftState.terminalReadOnly, true);
 testCount += 1;
 
+// Test Case 8: Unique published immutable untagged-* binds to the requested version
+const publishedUntagged = {
+  id: 382668782,
+  tag_name: 'untagged-cbcaba0123456789',
+  target_commitish: commit,
+  name: defaultExpectedTitle,
+  body: armedUnknownBody,
+  draft: false,
+  prerelease: false,
+  immutable: true,
+  published_at: '2026-09-04T02:00:00Z',
+  html_url: 'https://github.com/dushengyi1993/shein-sales-bi/releases/tag/untagged-cbcaba0123456789',
+  assets,
+};
+const inspectedPublishedUntagged = evaluateInspectRelease({
+  ...baseInspectParams,
+  releases: [publishedUntagged],
+});
+assert.equal(inspectedPublishedUntagged.exists, true);
+assert.equal(inspectedPublishedUntagged.id, 382668782);
+assert.equal(inspectedPublishedUntagged.tagName, version, 'unique published untagged tagName must bind to the requested version');
+assert.equal(inspectedPublishedUntagged.draft, false);
+assert.equal(inspectedPublishedUntagged.immutable, true);
+assert.equal(inspectedPublishedUntagged.publishedAt, '2026-09-04T02:00:00Z');
+const publishedUntaggedState = decideSourceReleaseState(stateFixture(inspectedPublishedUntagged));
+assert.equal(
+  publishedUntaggedState.publishState,
+  SOURCE_RELEASE_PUBLISH_STATES.PUBLISHED_VERIFIED,
+  'workflow inspect of unique published untagged must be PUBLISHED_VERIFIED',
+);
+assert.equal(publishedUntaggedState.publish, false);
+assert.equal(publishedUntaggedState.terminalReadOnly, true);
+const rawPublishedUntaggedState = decideSourceReleaseState(stateFixture({
+  exists: true,
+  id: 382668782,
+  tagName: publishedUntagged.tag_name,
+  title: publishedUntagged.name,
+  body: publishedUntagged.body,
+  draft: false,
+  prerelease: false,
+  immutable: true,
+  publishedAt: publishedUntagged.published_at,
+  assets,
+}));
+assert.equal(
+  rawPublishedUntaggedState.publishState,
+  SOURCE_RELEASE_PUBLISH_STATES.PUBLISHED_VERIFIED,
+  'state machine must accept the raw published untagged tag_name',
+);
+const armedGateFromPublishedUntagged = decideArmedDraftSourceReleaseState(
+  armedState(inspectedPublishedUntagged, {expectedReleaseId: 382668782}),
+);
+assert.equal(armedGateFromPublishedUntagged.publish, false, 'published untagged must not reopen draft recovery/publish');
+assert.equal(armedGateFromPublishedUntagged.mode, 'armed-draft-conflict');
+testCount += 1;
+
+assert.throws(
+  () => evaluateInspectRelease({...baseInspectParams, releases: [normalExactPublished, publishedUntagged]}),
+  /exact release has an ambiguous immutable untagged sibling/u,
+  'an exact published release plus published untagged sibling must fail closed',
+);
+testCount += 1;
+
+assert.throws(
+  () => evaluateInspectRelease({
+    ...baseInspectParams,
+    releases: [publishedUntagged, {...publishedUntagged, id: 382668783, tag_name: 'untagged-otherpublished1'}],
+  }),
+  /duplicate or ambiguous release drafts/u,
+  'duplicate published untagged strong matches must fail closed',
+);
+testCount += 1;
+
+const publishedUntaggedRejects = [
+  ['fuzzy title-only sibling', [
+    publishedUntagged,
+    {
+      ...publishedUntagged,
+      id: 800,
+      tag_name: 'untagged-fuzzytitleonly01',
+      body: 'unrelated body',
+      target_commitish: 'e'.repeat(40),
+      assets: [],
+    },
+  ]],
+  ['wrong commit', [{...publishedUntagged, target_commitish: 'e'.repeat(40)}]],
+  ['body drifted', [{...publishedUntagged, body: armedUnknownBody + ' trailing'}]],
+  ['assets drifted', [{...publishedUntagged, assets: [{...assets[0], digest: 'sha256:bad'}, assets[1]]}]],
+  ['missing published_at', [{...publishedUntagged, published_at: null}]],
+  ['not immutable', [{...publishedUntagged, immutable: false}]],
+];
+for (const [label, releases] of publishedUntaggedRejects) {
+  assert.throws(
+    () => evaluateInspectRelease({...baseInspectParams, releases}),
+    /does not satisfy exact immutable draft contract|duplicate or ambiguous release drafts/u,
+    'published untagged must fail closed: ' + label,
+  );
+  testCount += 1;
+}
+
 const bash = resolveGitBash();
 const blocks = [
   ...extractYamlLiteralRuns(ciSource).map(block => ({...block, file: ciPath})),
