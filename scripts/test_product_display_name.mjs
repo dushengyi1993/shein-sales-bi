@@ -48,4 +48,22 @@ assert.equal(enriched.inventoryDepletion.products[1].product_display_name, 'S181
 assert.equal(enriched.productDisplayNames['SM-505A'], 'SM-505A电动缝纫机');
 assert.equal(enriched.productDisplayNames['SK-10075'], 'SK-10075电油炸锅');
 
+const rawEtRow = {
+  standard_goods_sn: 'SK-GT-3065W',
+  raw_goods_sn: 'SK-GT-3065W',
+  goods_title: '3065W蒸汽熨烫机',
+};
+const rawEtEnriched = enrichProductDisplayNames({inventoryDepletion: {products: [rawEtRow]}});
+assert.equal(rawEtEnriched.inventoryDepletion.products[0].product_display_name, 'SK-GT-3065W蒸汽熨烫机');
+assert.equal(rawEtEnriched.inventoryDepletion.products[0].product_display_name_needs_review, undefined);
+assert.equal(rawEtEnriched.productDisplayNames['SK-GT-3065W'], 'SK-GT-3065W蒸汽熨烫机');
+
+const canonicalWithRaw = {
+  standard_goods_sn: 'SK-GT-3065蒸汽熨烫机',
+  raw_goods_sn: 'YJ-SK-3065熨烫机',
+};
+const canonicalEnriched = enrichProductDisplayNames({inventoryDepletion: {products: [canonicalWithRaw]}});
+assert.equal(canonicalEnriched.inventoryDepletion.products[0].product_display_name, 'SK-GT-3065蒸汽熨烫机');
+assert.equal(canonicalEnriched.productDisplayNames['YJ-SK-3065熨烫机'], 'SK-GT-3065蒸汽熨烫机');
+
 console.log(`product_display_name: ${cases.length} direct checks plus recursive enrich checks passed`);

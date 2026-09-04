@@ -173,7 +173,16 @@ NODE
   if [[ "$METRIC_REFETCH_STATE_STATUS" == "publish_completed" || "$METRIC_REFETCH_STATE_STATUS" == "ready" ]]; then
     METRIC_REFETCH_SKIP_PUBLISH=1
   fi
-  if [[ "${persisted_deadline:-0}" =~ ^[1-9][0-9]*$ ]]; then
+  local reuse_persisted_deadline=1
+  case "$METRIC_REFETCH_STATE_STATUS" in
+    deadline|exhausted|rolled_back)
+      # A terminal/failed attempt must not poison a later retry with its old
+      # absolute deadline. Active same-run phases still reuse the original
+      # deadline so a service restart cannot extend an in-flight run.
+      reuse_persisted_deadline=0
+      ;;
+  esac
+  if (( reuse_persisted_deadline )) && [[ "${persisted_deadline:-0}" =~ ^[1-9][0-9]*$ ]]; then
     if [[ "$METRIC_REFETCH_DEADLINE_EPOCH" == "0" || "$persisted_deadline" -lt "$METRIC_REFETCH_DEADLINE_EPOCH" ]]; then
       METRIC_REFETCH_DEADLINE_EPOCH="$persisted_deadline"
     fi

@@ -15896,18 +15896,29 @@ function renderProfitPage(){
   bindProfitCalculator();
   bindChartTooltips();
 }
-function compactSkuKey(value){
-  return String(value || '').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9]+/g, '');
+const KNOWN_STORE_KEYS = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+function compactSkuKeys(value, storeKey=''){
+  const compact = String(value || '').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9]+/g, '');
+  if (!compact) return [];
+  const variants = [compact];
+  const prefixes = [String(storeKey || '').toUpperCase(), ...KNOWN_STORE_KEYS].filter(Boolean);
+  for (const prefix of prefixes) {
+    if (compact.startsWith(prefix) && compact.length > prefix.length) {
+      variants.push(compact.slice(prefix.length));
+    }
+  }
+  return [...new Set(variants)];
 }
 function inventoryProductMatchesSale(productRow, saleRow){
-  const sale = compactSkuKey(saleRow?.standard_goods_sn);
-  if (!sale) return false;
+  const saleKeys = compactSkuKeys(saleRow?.standard_goods_sn, saleRow?.store_key || saleRow?.storeKey);
+  if (!saleKeys.length) return false;
   const keys = [
     productRow?.standard_goods_sn,
     ...(String(productRow?.standard_goods_sn_list || '').split('/')),
-    ...(String(productRow?.raw_goods_sn_list || '').split('/'))
-  ].map(compactSkuKey).filter(Boolean);
-  return keys.includes(sale);
+    ...(String(productRow?.raw_goods_sn_list || '').split('/')),
+    productRow?.product_display_name,
+  ].flatMap(value => compactSkuKeys(value, productRow?.store_key || productRow?.storeKey));
+  return keys.some(key => saleKeys.includes(key));
 }
 function inventoryProductVisible(row){
   const pq = productScopeQuery();

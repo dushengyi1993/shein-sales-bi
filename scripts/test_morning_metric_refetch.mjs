@@ -276,6 +276,17 @@ try {
   assert.equal(fs.readFileSync(ready.metricLog, 'utf8'), readyMetricCalls, 'same-run ready restart repeated metric refetch');
   assert.equal(fs.readFileSync(ready.publishLog, 'utf8'), readyPublishCalls, 'same-run ready restart repeated publish steps');
 
+  const expiredTerminal = await setupRoot('ready');
+  roots.push(expiredTerminal.root);
+  writeJson(path.join(expiredTerminal.root, 'state', 'cloud_ops_alerts', 'link-business-metric-refetch.json'), {
+    schemaVersion: 'cloud-link-business-metric-refetch/v2', date, runKey: 'test-run', status: 'deadline',
+    attempts: 4, maxAttempts: 12, deadlineEpoch: Math.floor(Date.now() / 1000) - 30,
+    transactionRoot: '', source: {status: 'rolled_back'}, phases: {},
+  });
+  const expiredTerminalResult = runSync({...expiredTerminal, deadline: Math.floor(Date.now() / 1000) + 60, maxAttempts: 12});
+  assert.equal(expiredTerminalResult.status, 0, `a terminal deadline must allow a fresh bounded retry\n${combined(expiredTerminalResult)}`);
+  assert.equal(fs.readFileSync(expiredTerminal.metricLog, 'utf8').trim().split(/\s+/).length, stores.length * 2);
+
   const oneReady = await setupRoot('one-ready');
   roots.push(oneReady.root);
   const oneReadyBefore = new Map(stores.map(store => [store, hash(path.join(oneReady.root, 'outputs', 'shein_links', store, `${date}.json`))]));
@@ -573,11 +584,13 @@ try {
   const zeroCallCount = fs.readFileSync(zero.metricLog, 'utf8').trim()
     ? fs.readFileSync(zero.metricLog, 'utf8').trim().split(/\s+/).length : 0;
   const zeroRestart = runSync({...zero, deadline: Math.floor(Date.now() / 1000) + 60, maxAttempts: 1, sleep: 0});
-  assert.equal(zeroRestart.status, 75, `restart must retain the prior absolute deadline\n${combined(zeroRestart)}`);
+  assert.equal(zeroRestart.status, 75, `fresh bounded retry must still fail closed when source remains unavailable\n${combined(zeroRestart)}`);
   const zeroRestartCallCount = fs.readFileSync(zero.metricLog, 'utf8').trim()
     ? fs.readFileSync(zero.metricLog, 'utf8').trim().split(/\s+/).length : 0;
-  assert.equal(zeroRestartCallCount, zeroCallCount, 'restart must not reset metric retry count');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(zero.root, 'state', 'cloud_ops_alerts', 'link-business-metric-refetch.json'))).deadlineEpoch, zeroAlert.refetch.deadlineEpoch);
+  assert.equal(zeroRestartCallCount, zeroCallCount + stores.length * 2,
+    'a terminal deadline may open one fresh bounded retry window');
+  const zeroRestartState = JSON.parse(fs.readFileSync(path.join(zero.root, 'state', 'cloud_ops_alerts', 'link-business-metric-refetch.json')));
+  assert.ok(zeroRestartState.deadlineEpoch > zeroAlert.refetch.deadlineEpoch, 'terminal deadline must not poison a fresh retry window');
 
   const blocked = await setupRoot('ready');
   roots.push(blocked.root);
@@ -612,5 +625,12 @@ try {
     'completed_business_domains_not_repeated',
   ]}, null, 2));
 } finally {
-  for (const root of roots) await fsp.rm(root, {recursive: true, force: true});
+  for (const root of roots) {
+    const symlink = path.join(root, 'state', '.link-business-metric-refetch.symlink');
+    try { await fsp.unlink(symlink); } catch {
+      const wslPath = toWslPath(symlink).replaceAll("'", "'\\''");
+      spawnSync('bash', ['-lc', `rm -f -- '${wslPath}'`], {encoding: 'utf8'});
+    }
+    await fsp.rm(root, {recursive: true, force: true});
+  }
 }

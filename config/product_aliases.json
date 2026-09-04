@@ -1,5 +1,5 @@
 {
-  "version": 27,
+  "version": 28,
   "source": "runtime_reconciliation_et_guard_identity_mismatch_2026-09-02",
   "notes": [
     "canonical 必须尽量使用 config/product_catalog.json 的标准货号。",
@@ -38,7 +38,8 @@
     "2026-06-23 用户在活动方案备注确认：YJ-SK-3065熨烫机 归并到 SK-GT-3065蒸汽熨烫机，用于普通营销活动报名和后续全局货号归并。",
     "2026-06-28 新上架链接巡检发现 SK-JBF-794 是 SK-JFB-794 的字母错位写法，且标题/品类均为卷发钳和卷发棒，统一归并到 SK-JFB-794卷发钳和卷发棒。",
     "2026-08-16 用户确认：JY 链接供方货号 20700 实际为 SK-270厨师机；将 20700/JY20700 归并到 SK-270厨师机，用于营销定价、库存与活动报名。",
-    "2026-09-02 ET guard identity mismatch 修复：OpenAPI supplierCode 全PA4-6L便携式冰箱 与 PA4-6L便携式冰箱、SK-13065地毯清洗机 与 SK-13065吸尘器 的 exact model/SKC/详情一致，BI linksData 已将相同 store+SKC 归到后者，统一归并。"
+    "2026-09-02 ET guard identity mismatch 修复：OpenAPI supplierCode 全PA4-6L便携式冰箱 与 PA4-6L便携式冰箱、SK-13065地毯清洗机 与 SK-13065吸尘器 的 exact model/SKC/详情一致，BI linksData 已将相同 store+SKC 归到后者，统一归并。",
+    "2026-09-04 用户确认：SK-GT-3065 与 SK-GT-3065W 是两个不同货号；按型号后缀区分，中文品名不改变货号身份。"
   ],
   "aliases": [
     {
@@ -137,6 +138,15 @@
         "YJSK3065熨烫机"
       ],
       "source": "user_confirmed"
+    },
+    {
+      "canonical": "SK-GT-3065W蒸汽熨烫机",
+      "aliases": [
+        "SK-GT-3065W蒸汽熨烫机",
+        "SK-GT-3065W",
+        "SKGT3065W"
+      ],
+      "source": "user_confirmed_2026-09-04"
     },
     {
       "canonical": "WK-1710-4手持搅拌器",

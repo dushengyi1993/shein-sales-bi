@@ -33,6 +33,8 @@ assert.match(lark, /ET匹配 \$\{inventoryMatchStatusLabel\(r\)\}/, 'Lark respon
 assert.match(lark, /累计到仓 \$\{r\.arrived_quantity == null \? '未知'/, 'Lark keeps arrival quantity separate from current sellable quantity');
 assert.match(generator, /et\.operational_sellable_qty AS et_estimated_available_qty/, 'portal uses the centralized operational ET stock policy');
 assert.match(generator, /et\.estimated_available_qty AS et_all_warehouse_inventory_qty/, 'all-warehouse physical stock remains separate evidence');
+assert.match(generator, /productRow\?\.product_display_name/, 'inventory joins may use the normalized display key when ET uses a raw code');
+assert.match(generator, /function compactSkuKeys\(value, storeKey='[^']*'\)/, 'inventory joins strip an explicit store prefix without collapsing model suffixes');
 const schema = fs.readFileSync(path.join(root, 'infra', 'warehouse', 'schema.sql'), 'utf8');
 assert.match(schema, /WHEN coalesce\(s\.match_key,b\.match_key\) = 'SK03038'/, 'only the approved SK-03038 exception counts 01 full-carton stock as operational sellable');
 assert.match(
