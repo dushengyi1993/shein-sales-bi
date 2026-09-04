@@ -319,6 +319,9 @@ async function checkSystemdUnit(unit, {systemctlBin, systemctlRunner}) {
     '--property=LoadState',
     '--property=ActiveState',
     '--property=SubState',
+    ...(unit.endsWith('.service')
+      ? ['--property=Result', '--property=ExecMainCode', '--property=ExecMainStatus', '--property=MainPID']
+      : []),
     '--property=Job',
     unit,
   ];
@@ -370,8 +373,22 @@ async function checkSystemdUnit(unit, {systemctlBin, systemctlRunner}) {
     loadState: values.LoadState,
     activeState: values.ActiveState,
     subState: values.SubState,
+    result: values.Result || '',
+    execMainCode: values.ExecMainCode || '',
+    execMainStatus: values.ExecMainStatus || '',
+    mainPid: values.MainPID || '',
     job: values.Job,
   };
+}
+
+function isInterruptedMorningService(service) {
+  return service?.unit === MORNING_CHAIN_RECOVERY_SERVICE
+    && service.activeState === 'failed'
+    && service.subState === 'failed'
+    && service.result === 'signal'
+    && service.execMainCode === '2'
+    && service.execMainStatus === '15'
+    && (service.mainPid === '' || service.mainPid === '0');
 }
 
 function validateReceiptShape(receipt, file) {
@@ -429,13 +446,14 @@ function phaseProofIsAfterInventory(latest) {
   return false;
 }
 
-function assertLatestIsPreInventoryFailure(latest, runDate, businessDate, {allowWaiting = false} = {}) {
-  if (latest?.status !== 'failed' && !(allowWaiting && latest?.status === 'waiting')) {
+function assertLatestIsPreInventoryFailure(latest, runDate, businessDate, {allowWaiting = false, interruptedService = null} = {}) {
+  const interruptedWaiting = latest?.status === 'waiting' && isInterruptedMorningService(interruptedService);
+  if (latest?.status !== 'failed' && !(allowWaiting && latest?.status === 'waiting') && !interruptedWaiting) {
     fail('latest.json must be failed before recovery authorization', {
       code: latest?.status === 'done'
         ? 'MORNING_CHAIN_RECOVERY_COMPLETION_DONE'
         : 'MORNING_CHAIN_RECOVERY_LATEST_NOT_FAILED',
-      detail: {status: latest?.status || 'missing'},
+      detail: {status: latest?.status || 'missing', interruptedService: interruptedService || null},
     });
   }
   if (String(latest?.date || '') !== runDate || String(latest?.businessDate || '') !== businessDate) {
@@ -998,7 +1016,7 @@ export async function authorizeCloudMorningChainRecovery({
       });
     }
 
-    await checkSystemdUnit(MORNING_CHAIN_RECOVERY_SERVICE, {systemctlBin, systemctlRunner});
+    const morningService = await checkSystemdUnit(MORNING_CHAIN_RECOVERY_SERVICE, {systemctlBin, systemctlRunner});
     await checkSystemdUnit(MORNING_CHAIN_RECOVERY_TIMER, {systemctlBin, systemctlRunner});
 
     // All state below is read only after the exclusive lock is held.  No
@@ -1079,6 +1097,7 @@ export async function authorizeCloudMorningChainRecovery({
       });
       assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate, {
         allowWaiting: Boolean(nestedMetric),
+        interruptedService: morningService,
       });
       assertMarkerNotDone(evidence.dailyOperatingRefresh, 'daily-operating-refresh marker');
       assertRecoveryCheckpoint({
@@ -1127,7 +1146,9 @@ export async function authorizeCloudMorningChainRecovery({
         oldDeadlineEpoch: existingReceipt.oldDeadlineEpoch,
         newDeadlineEpoch: existingReceipt.newDeadlineEpoch,
       });
-      assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate);
+      assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate, {
+        interruptedService: morningService,
+      });
       assertMarkerNotDone(evidence.dailyOperatingRefresh, 'daily-operating-refresh marker');
       assertRecoveryCheckpoint({
         inventoryStarted: evidence.inventoryStarted,
@@ -1188,7 +1209,9 @@ export async function authorizeCloudMorningChainRecovery({
       oldDeadlineEpoch,
       newDeadlineEpoch: normalizedDeadline,
     });
-    assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate);
+    assertLatestIsPreInventoryFailure(evidence.latest.value, normalizedRunDate, businessDate, {
+      interruptedService: morningService,
+    });
     assertMarkerNotDone(evidence.dailyOperatingRefresh, 'daily-operating-refresh marker');
     assertRecoveryCheckpoint({
       inventoryStarted: evidence.inventoryStarted,

@@ -176,6 +176,9 @@ async function makeFixture({
     if (systemd.activeService && unit.endsWith('.service')) {
       return {code: 0, stdout: 'LoadState=loaded\nActiveState=active\nSubState=running\nJob=\n'};
     }
+    if (systemd.interruptedService && unit.endsWith('.service')) {
+      return {code: 0, stdout: 'LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=signal\nExecMainCode=2\nExecMainStatus=15\nMainPID=0\nJob=\n'};
+    }
     if (systemd.job && unit.endsWith('.service')) {
       return {code: 0, stdout: 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nJob=123\n'};
     }
@@ -293,6 +296,15 @@ async function main() {
         latest: {status: 'waiting', date: RUN_DATE, businessDate: BUSINESS_DATE, stage: 'all'},
       }); fixtures.push(fx);
       await expectCode(() => authorizeCloudMorningChainRecovery(fx.deps), 'MORNING_CHAIN_RECOVERY_LATEST_NOT_FAILED');
+    }
+    {
+      const fx = await makeFixture({
+        latest: {status: 'waiting', date: RUN_DATE, businessDate: BUSINESS_DATE, stage: 'all'},
+        systemd: {interruptedService: true},
+      }); fixtures.push(fx);
+      const result = await authorizeCloudMorningChainRecovery(fx.deps);
+      assert.equal(result.status, 'authorized');
+      assert.ok(result.canonicalHash);
     }
     {
       const fx = await makeFixture({inventoryStarted: false}); fixtures.push(fx);
