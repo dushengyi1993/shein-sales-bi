@@ -331,7 +331,7 @@ check t2c_latest_warning warning "\$(latest_status)"
 # t2d: if either warning evidence file drifts, the expired run is not resumed
 # and converges to the original deadline failure without child invocation.
 rm -f "\$CALLS_LOG" "\$STATE/latest.json"
-node -e 'require("fs").appendFileSync(process.argv[1]," ")' "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json"
+node --input-type=module -e 'import fs from "node:fs"; fs.appendFileSync(process.argv[1]," ")' "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json"
 cat > "\$STATE/active.json" <<JSON
 {"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
 JSON
