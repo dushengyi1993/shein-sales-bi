@@ -185,6 +185,75 @@ const cliStatus = await runInventoryCompatibilityCli([
   '--compatibility-registry', compatibilityFile, '--compatibility-receipt', compatibilityReceiptFile,
 ]);
 assert.equal(cliStatus.activeGeneration, 2);
+
+// A release may have reached the checkout before the compatibility journal was
+// rotated.  The exact current candidate must be stageable for recovery, while
+// a different current release remains rejected.
+const recoveryTemp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-compatibility-recovery-'));
+const recoveryPaths = {
+  activationFile: path.join(recoveryTemp, 'activation.ndjson'),
+  activationReceiptFile: path.join(recoveryTemp, 'activation.receipt.json'),
+  compatibilityFile: path.join(recoveryTemp, 'compatibility.ndjson'),
+  compatibilityReceiptFile: path.join(recoveryTemp, 'compatibility.receipt.json'),
+};
+const recoveryLockFile = path.join(recoveryTemp, 'cutover.lock');
+const recoveryAuthority = {...authorityN, capturedAt: '2026-08-27T02:00:00.000Z'};
+const recoveryCandidate = {
+  ...candidate,
+  sourceFingerprint: recoveryAuthority.sourceFingerprint,
+  writerServices: service('5'.repeat(64)),
+  capturedAt: '2026-08-27T02:01:00.000Z',
+};
+const recoveryActivationDry = await controlInventoryCutoverActivation({
+  ...recoveryPaths,
+  requiredManualResolution,
+  authorityReader: async () => recoveryAuthority,
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T02:00:00.000Z'),
+  lockFile: recoveryLockFile,
+});
+const recoveryActivation = await controlInventoryCutoverActivation({
+  ...recoveryPaths,
+  requiredManualResolution,
+  authorityReader: async () => recoveryAuthority,
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T02:00:00.000Z'),
+  lockFile: recoveryLockFile,
+  mode: 'execute', expectedPreflightHash: recoveryActivationDry.preflightHash,
+});
+const recoveryStageDry = await stageInventoryCompatibilityRotation({
+  ...recoveryPaths,
+  candidateAuthority: recoveryCandidate,
+  authorityReader: async () => recoveryCandidate,
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T02:01:00.000Z'),
+  lockFile: recoveryLockFile,
+});
+assert.equal(recoveryActivation.mode, 'execute');
+assert.equal(recoveryStageDry.state, 'rotation_stage_dry_run');
+assert.equal(recoveryStageDry.authority.deployedCommit, recoveryCandidate.deployedCommit);
+await assert.rejects(stageInventoryCompatibilityRotation({
+  ...recoveryPaths,
+  candidateAuthority: recoveryCandidate,
+  authorityReader: async () => ({...recoveryCandidate, deployedCommit: 'f'.repeat(40)}),
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T02:01:00.000Z'),
+  lockFile: recoveryLockFile,
+}), error => {
+  assert.equal(error.code, 'INVENTORY_CUTOVER_ROTATION_CURRENT_AUTHORITY_INVALID');
+  return true;
+});
+await assert.rejects(stageInventoryCompatibilityRotation({
+  ...recoveryPaths,
+  candidateAuthority: recoveryCandidate,
+  authorityReader: async () => ({...recoveryCandidate, sourceFingerprint: '9'.repeat(64)}),
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T02:01:00.000Z'),
+  lockFile: recoveryLockFile,
+}), error => {
+  assert.equal(error.code, 'INVENTORY_CUTOVER_ROTATION_CURRENT_AUTHORITY_INVALID');
+  return true;
+});
 await assert.rejects(runInventoryCompatibilityCli(['rotation-finalize', '--execute']), /CONFIRMATION_REQUIRED/);
 await assert.rejects(runInventoryCompatibilityCli(['status', '--execute']), /status is read-only/);
 await assert.rejects(runInventoryCompatibilityCli(['status', '--dry-run', '--execute']), /mutually exclusive/);
@@ -217,6 +286,7 @@ console.log(JSON.stringify({
     'same_commit_portal_restart_does_not_self_lock',
     'rotation_stage_append_crash_recovers_same_hash',
     'stage_binds_full_candidate_authority_and_live_candidate_recovers_by_release_identity',
+    'stale_active_generation_recovers_only_with_exact_current_candidate',
     'staged_candidate_starts_but_writer_reader_fails_closed_until_finalize',
     'commit_bundle_receipt_and_clean_drift_rejected_before_finalize',
     'fingerprint_only_migration_finalizes_to_live_authority',
