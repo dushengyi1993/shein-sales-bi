@@ -2,7 +2,6 @@
 Description=SHEIN BI cloud ET forwarder sync
 Wants=network-online.target docker.service
 After=network-online.target docker.service systemd-tmpfiles-setup.service
-OnSuccess=shein-bi-et-low-inventory-guard.service
 
 [Service]
 Type=oneshot
@@ -23,6 +22,7 @@ Environment=SHEIN_ET_TRANSPORT=http
 Environment=SHEIN_ET_HTTP_SESSION_FILE=/srv/shein-bi/runtime/et-forwarder/session/et_forwarder_http_session.local.json
 Environment=SHEIN_ET_REFRESH_PORTAL_MODE=sections
 Environment=SHEIN_ET_REFRESH_SECTIONS=orders,waybills,afterSales,inventoryTrend
+Environment=SHEIN_ET_TRIGGER_LOW_INVENTORY_GUARD=1
 Environment=SHEIN_BI_PORTAL_REFRESH_LOCK_WAIT_SEC=120
 Environment=SHEIN_BI_PORTAL_PREWARM_ASYNC=0
 Environment="SHEIN_ET_WAIT_SERVICES=shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-session-manager.service shein-bi-db-backup.service"

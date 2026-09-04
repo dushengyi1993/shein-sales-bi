@@ -452,6 +452,7 @@ async function buildFixture(tempDir) {
   await fs.mkdir(path.join(appRoot, 'state', 'locks'), {recursive: true});
   await fs.mkdir(path.join(appRoot, 'outputs', 'nested'), {recursive: true});
   await fs.mkdir(path.join(appRoot, 'scripts'), {recursive: true});
+  await fs.mkdir(path.join(appRoot, 'scripts', 'inventory'), {recursive: true});
   await fs.mkdir(path.join(appRoot, 'infra', 'systemd'), {recursive: true});
   await fs.mkdir(path.join(appRoot, 'lib'), {recursive: true});
   await fs.mkdir(path.join(dataRoot, 'profiles'), {recursive: true});
@@ -498,6 +499,14 @@ async function buildFixture(tempDir) {
   }
   await fs.writeFile(path.join(appRoot, 'scripts', 'install_cloud_maintenance_guards.sh'), guardsContent, 'utf8');
   await fs.copyFile(MANAGER, path.join(appRoot, 'scripts', 'manage_cloud_maintenance_mode.mjs'));
+  await fs.copyFile(
+    path.join(ROOT, 'scripts', 'inventory', 'assert_inventory_writer_release_aligned.mjs'),
+    path.join(appRoot, 'scripts', 'inventory', 'assert_inventory_writer_release_aligned.mjs'),
+  );
+  await fs.copyFile(
+    path.join(ROOT, 'scripts', 'check_release_source_state.mjs'),
+    path.join(appRoot, 'scripts', 'check_release_source_state.mjs'),
+  );
   for (const lib of [
     'cloud_runtime_path_policy.mjs',
     'cloud_maintenance_mode.mjs',
@@ -506,6 +515,10 @@ async function buildFixture(tempDir) {
     'systemd_unit_snapshot.mjs',
     'source_release_attestation.mjs',
     'atomic_file_publish.mjs',
+    'cross_process_ticket_lock.mjs',
+    'emergency_local_release_receipt.mjs',
+    'source_release_github_evidence.mjs',
+    'source_release_version.mjs',
   ]) {
     await fs.copyFile(path.join(ROOT, 'lib', lib), path.join(appRoot, 'lib', lib));
   }

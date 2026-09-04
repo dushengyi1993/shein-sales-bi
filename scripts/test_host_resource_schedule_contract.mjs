@@ -406,6 +406,12 @@ for (const name of [
   assert.doesNotMatch(content, /shein-host-heavy|run_host_heavy_job|Slice=shein-host-heavy-bi/,
     `${name} is a lightweight current-business fast lane`);
 }
+assert.match(
+  unit('shein-bi-cloud-today-sales-reconcile.service'),
+  /^TimeoutStartSec=600$/m,
+  'today-sales-reconcile service timeout must remain 600s to cover 19-store OpenAPI reconciliation without being killed at 120s',
+);
+assert.doesNotMatch(unit('shein-bi-cloud-today-sales-reconcile.service'), /^TimeoutStartSec=120$/m);
 
 assert.deepEqual(calendars(unit('shein-bi-cloud-session-manager.timer')), ['*-*-* 00:45:00']);
 assert.match(unit('shein-bi-cloud-session-manager.timer'), /^Persistent=true$/m,
@@ -417,7 +423,10 @@ assert.deepEqual(calendars(unit('shein-bi-cloud-et-forwarder.timer')), [
 assert.deepEqual(calendars(unit('shein-bi-et-low-inventory-recheck.timer')), [
   '*-*-* 00,02,05,06,08,09,11,12,15,16,18,19,22:20:00',
 ]);
-assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
+assert.doesNotMatch(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m,
+  'a deferred ET sync must not be treated as a successful dependency by systemd');
+assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^Environment=SHEIN_ET_TRIGGER_LOW_INVENTORY_GUARD=1$/m,
+  'the low-ET guard is triggered only after the forwarder has completed its child');
 assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), [
   '*-*-* 01:45:00',
   '*-*-* 02:05:00',
@@ -472,6 +481,8 @@ assert.match(morning, /pipeline_marker_done "morning-supplements"/,
   'a restarted coordinator must resume after the completed atomic publish checkpoint instead of rebuilding it');
 assert.match(morning, /daily_operating_refresh_done/,
   'a semantically completed business date must be an idempotent no-op when the service is started again');
+assert.match(morning, /daily_operating_refresh_warning/,
+  'a date completed with warning must be an idempotent no-op and preserve warning state without re-running');
 assert.match(morning, /resume-skip all-store fetch; exact-date evidence already exists for all enabled stores/,
   'a restarted failed morning publish must reuse complete exact-date store evidence');
 assert.match(morning, /daily supplements failed status=\$SUPPLEMENT_STATUS; the previous complete BI snapshot remains active/,
@@ -480,6 +491,16 @@ assert.match(morning, /daily inventory guard is waiting for host capacity inside
   'temporary resource pressure must keep the inventory stage in the same coordinator run');
 assert.match(morning, /if SHEIN_BI_INVENTORY_REQUIRE_PIPELINE_MARKERS=1[\s\S]*inventory_status=\$\?/,
   'the inventory scheduler command must be conditional so exit 75 is handled instead of tripping the ERR trap');
+assert.match(morning, /inventory_marker_warning/,
+  'the coordinator must recognize inventory guard warning markers on exit 2');
+assert.match(morning, /if inventory_marker_warning; then[\s\S]*bypassing expired catch-up startup window/,
+  'a completed inventory warning must bypass the expired startup window during final-marker convergence');
+assert.match(morning, /if run_inventory_stage; then\s+INVENTORY_STAGE_STATUS=0\s+else\s+INVENTORY_STAGE_STATUS=\$\?/,
+  'the expected inventory warning exit must be captured conditionally instead of tripping the ERR trap before marker publication');
+assert.match(morning, /write_marker "daily-operating-refresh" "warning"/,
+  'the coordinator must record daily-operating-refresh warning when inventory completed with item-level blockers');
+assert.match(morning, /write_state "warning"/,
+  'the coordinator state must record warning instead of failing the daily operating refresh');
 const linkBusinessSync = read('scripts/cloud_link_business_sync.sh');
 assert.match(linkBusinessSync, /SHEIN_LINK_BUSINESS_RESUME_COMPLETED/,
   'an internal retry must reuse exact-date completed store evidence instead of starting all stores over');
@@ -610,13 +631,13 @@ assert.match(unit('shein-bi-cloud-portal-section-queue.timer'), /^\s*OnCalendar=
 const portalQueueUnit = unit('shein-bi-cloud-portal-section-queue.service');
 const portalQueueWorker = read('scripts/cloud_portal_section_queue_worker.sh');
 const portalQueueSlot = read('scripts/run_cloud_portal_section_queue_slot.sh');
-assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=420$/m,
-  'productSalesDaily timeout must cover the observed 337s success with volatility headroom while preserving terminal-readback budget');
-assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC=450$/m,
-  'productSalesDaily min runtime must preserve 30s terminal-readback budget after the 420s curl cap');
-assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-420\}"/,
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=600$/m,
+  'productSalesDaily timeout must cover the observed ledger refresh plus volatility headroom');
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC=630$/m,
+  'productSalesDaily min runtime must preserve 30s terminal-readback budget after the 600s curl cap');
+assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-600\}"/,
   'worker default productSalesDaily timeout must match the unit');
-assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-450\}"/,
+assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC:-630\}"/,
   'worker default productSalesDaily min runtime must match the unit');
 assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC \+ 30 <= PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC/,
   'productSalesDaily timeout must retain at least 30s for terminal evidence');
@@ -641,18 +662,19 @@ assert.match(portalQueueSlot, /DEADLINE_MINUTE=14[\s\S]*MAX_SECTIONS=8[\s\S]*HEA
   'the :02 slot must allow a bounded serial batch while remaining light-only');
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
 assert.match(portalQueueSlot, /daily_operating_refresh_active/);
-assert.match(portalQueueSlot, /case "\$HOUR" in\s+2\|3\|7\)/,
-  'the :02 slot must statically reject 02:02/03:02/07:02 maintenance windows');
+assert.doesNotMatch(portalQueueSlot, /case "\$HOUR" in\s+2\|3\|7\)/,
+  'the :02 slot must not retain obsolete hour-specific rejection');
 assert.match(portalQueueSlot, /HOUR == 1/,
   'the slot itself must defense-in-depth reject the full 01:00 hour');
-assert.match(portalQueueSlot, /reason=special_reserved_window/);
+assert.match(portalQueueSlot, /reason=full_hour_reserved/,
+  'the slot must retain an explicit full-hour reservation diagnostic');
 assert.match(portalQueueSlot, /MINUTE >= 1 && MINUTE <= 4/);
 assert.match(portalQueueSlot, /MINUTE >= 31 && MINUTE <= 34/);
 assert.match(portalQueueSlot, /--lock-wait-sec 0/);
 assert.match(portalQueueWorker, /for \(\(index=1; index<=MAX_SECTIONS; index\+=1\)\);/,
   'the section worker must consume the bounded batch serially');
-assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily\)/,
-  'the light slot must keep profit, homeRankings and productSalesDaily excluded');
+assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily rankings inventoryTrend\)/,
+  'the light slot must keep all five accounting-heavy sections excluded');
 const hostWrapperExec = portalQueueSlot.indexOf('exec "$ROOT/scripts/run_host_heavy_job.sh"');
 assert.ok(
   hostWrapperExec > portalQueueSlot.indexOf('yield_to_daily_coordinator'),
@@ -668,8 +690,10 @@ const toPosixPath = value => {
 };
 
 assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
-assert.match(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/,
-  'the worker must keep 01 blocked and reject the special :02 maintenance windows');
+assert.match(portalQueueWorker, /01:\*\)/,
+  'the worker must keep the full 01:00 hour blocked');
+assert.doesNotMatch(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/,
+  'the worker must not retain obsolete hour-specific :02 rejection');
 assert.match(portalQueueWorker, /\*:0\[1-4\]\|\*:3\[1-4\]\) SAFE_START=1/,
   'the worker must allow the :02/:32 slot windows outside the special hours');
 
@@ -757,8 +781,8 @@ exit 75
 
   for (const specialHour of ['02', '03', '07']) {
     runPortalScheduleCase({
-      label: `${specialHour}:02 special maintenance rejection`, hour: specialHour, minute: '02',
-      expectedUnitExit: 1, expectedWorkerExit: 75,
+      label: `${specialHour}:02 light window`, hour: specialHour, minute: '02',
+      expectedUnitExit: 0, expectedWorkerExit: 0,
     });
   }
   runPortalScheduleCase({
@@ -926,8 +950,9 @@ const runSlotBehaviorCase = ({
   });
   for (const specialHour of [2, 3, 7]) {
     runSlotBehaviorCase({
-      label: `${String(specialHour).padStart(2, '0')}:02 special maintenance rejection`,
-      hour: specialHour, minute: 2, expectedExit: 75, expectedHost: false,
+      label: `${String(specialHour).padStart(2, '0')}:02 light-only`,
+      hour: specialHour, minute: 2, expectedExit: 0, expectedHost: true,
+      expectedDeadline: 14, expectedMax: 8, expectedHeavy: 0,
     });
   }
   runSlotBehaviorCase({
@@ -944,7 +969,8 @@ const runSlotBehaviorCase = ({
 
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
 assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
-assert.match(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/);
+assert.match(portalQueueWorker, /01:\*\)/);
+assert.doesNotMatch(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/);
 assert.match(portalQueueWorker, /\*:0\[1-4\]\|\*:3\[1-4\]\) SAFE_START=1/);
 assert.match(portalQueueWorker, /outside_safe_start_window/);
 assert.match(portalQueueWorker, /stop before next core lane/);
@@ -959,6 +985,18 @@ assert.match(portalQueueWorker,
   'the worker must stop before a new claim below the generic 120-second budget');
 assert.match(portalQueueWorker, /if \(\( REMAINING_SEC <= 10 \)\); then/,
   'the hard deadline guard must remain in place');
+
+for (const sec of ['PROFIT', 'PRODUCT_SALES_DAILY', 'HOME_RANKINGS', 'RANKINGS', 'INVENTORY_TREND']) {
+  const envName = `SHEIN_BI_PORTAL_SECTION_QUEUE_${sec}_MIN_RUNTIME_SEC`;
+  assert.match(portalQueueUnit, new RegExp(`^Environment=${envName}=630$`, 'm'));
+  assert.ok(portalQueueWorker.includes(`${sec}_MIN_RUNTIME_SEC="\${${envName}:-630}"`));
+}
+assert.match(portalQueueUnit, /^Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC=600$/m);
+assert.ok(portalQueueWorker.includes('PRODUCT_SALES_DAILY_TIMEOUT_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC:-600}"'));
+assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily rankings inventoryTrend\)/,
+  'the light slot must exclude all accounting-heavy sections');
+assert.match(portalQueueWorker, /REMAINING_SEC < RANKINGS_MIN_RUNTIME_SEC[\s\S]*EXCLUDED_SECTIONS\+=\(rankings\)/);
+assert.match(portalQueueWorker, /REMAINING_SEC < INVENTORY_TREND_MIN_RUNTIME_SEC[\s\S]*EXCLUDED_SECTIONS\+=\(inventoryTrend\)/);
 
 const repair = read('scripts/cloud_marketing_repair_worker.sh');
 const repairSlot = read('scripts/run_cloud_marketing_fallback_slot.sh');

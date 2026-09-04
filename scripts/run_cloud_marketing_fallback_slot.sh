@@ -51,10 +51,18 @@ if (( AUTHORIZATION_PRESENT == 1 )); then
 elif [[ -f "$QUEUE_FILE" && -d "$(dirname "$IMMEDIATE_AUTHORIZATION_FILE")" ]]; then
   if IMMEDIATE_RESULT="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" find-continuation \
       --date "$TODAY" --queue "$QUEUE_FILE" --root "$ROOT" \
-      --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE" --time-zone "$TZ_NAME")"; then
+      --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE" --time-zone "$TZ_NAME" \
+      --scheduled-discovery)"; then
     if [[ "$(printf '%s' "$IMMEDIATE_RESULT" | node -e 'const fs=require("node:fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(v.continuation===true?"1":"0")')" == "1" ]]; then
       IMMEDIATE_RUN=true
       IMMEDIATE_CONTINUATION=1
+    elif [[ "$(printf '%s' "$IMMEDIATE_RESULT" | node -e 'const fs=require("node:fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write(v.stale===true?"1":"0")')" == "1" ]]; then
+      if [[ "$EXPLICIT_IMMEDIATE_RUN" == "true" ]]; then
+        echo "[marketing-fallback-slot] stale continuation cannot be used for explicit immediate run; no consume occurred" >&2
+        exit 64
+      fi
+      echo "[marketing-fallback-slot] stale continuation ignored for scheduled run; no marketing writes" >&2
+      IMMEDIATE_RUN=false
     elif [[ -n "$EXPLICIT_IMMEDIATE_RUN" ]]; then
       IMMEDIATE_RUN="$EXPLICIT_IMMEDIATE_RUN"
     else

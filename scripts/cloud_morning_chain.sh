@@ -165,6 +165,30 @@ daily_operating_refresh_done() {
     --business-date "$DATA_DATE" >/dev/null
 }
 
+daily_operating_refresh_warning() {
+  if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" ROOT="$ROOT" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+try {
+  const file = path.join(process.env.ROOT, 'state', 'pipeline-markers', process.env.RUN_DATE, 'daily-operating-refresh.json');
+  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(marker?.ok === true
+    && marker?.stage === 'daily-operating-refresh'
+    && marker?.status === 'warning'
+    && marker?.runDate === process.env.RUN_DATE
+    && marker?.businessDate === process.env.DATA_DATE ? 0 : 1);
+} catch { process.exit(1); }
+NODE
+  then
+    return 1
+  fi
+  node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage daily-operating-refresh \
+    --date "$RUN_DATE" \
+    --status warning \
+    --require-evidence >/dev/null
+}
+
 inventory_marker_done() {
   if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" ROOT="$ROOT" node - <<'NODE'
 const fs = require('fs');
@@ -186,6 +210,30 @@ NODE
     --stage daily-inventory-guard \
     --date "$RUN_DATE" \
     --status done \
+    --require-evidence >/dev/null
+}
+
+inventory_marker_warning() {
+  if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" ROOT="$ROOT" node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+try {
+  const file = path.join(process.env.ROOT, 'state', 'pipeline-markers', process.env.RUN_DATE, 'daily-inventory-guard.json');
+  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(marker?.ok === true
+    && marker?.stage === 'daily-inventory-guard'
+    && marker?.status === 'warning'
+    && marker?.runDate === process.env.RUN_DATE
+    && marker?.businessDate === process.env.DATA_DATE ? 0 : 1);
+} catch { process.exit(1); }
+NODE
+  then
+    return 1
+  fi
+  node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage daily-inventory-guard \
+    --date "$RUN_DATE" \
+    --status warning \
     --require-evidence >/dev/null
 }
 
@@ -456,6 +504,10 @@ run_supplements_stage() {
 }
 
 run_inventory_stage() {
+  if inventory_marker_warning; then
+    echo "[cloud_morning_chain] verified inventory guard warning marker already exists runDate=$RUN_DATE; bypassing inventory execution" >&2
+    return 102
+  fi
   write_state "running" "refreshing current OpenAPI stock and running the one daily inventory guard"
   # OpenAPI stock is an api-light phase.  It must not reserve the exclusive
   # browser/DB lane for the whole 19-store request.
@@ -509,7 +561,11 @@ run_inventory_stage() {
       return 76
     fi
     if [[ "$inventory_status" == "2" ]]; then
-      echo "[cloud_morning_chain] ERROR inventory guard completed with business blockers; overall run cannot be done" >&2
+      if inventory_marker_warning; then
+        echo "[cloud_morning_chain] inventory guard completed with item-level business blockers; verified plan/result evidence recorded with warning" >&2
+        return 102
+      fi
+      echo "[cloud_morning_chain] ERROR inventory guard exited 2 without verified date-scoped plan/result warning evidence" >&2
       return 76
     fi
     if [[ "$inventory_status" == "75" ]]; then
@@ -553,7 +609,16 @@ case "$STAGE" in
       echo "[cloud_morning_chain] resume-skip complete daily-operating-refresh marker"
       exit 0
     fi
-    wait_for_catchup_startup_window
+    if daily_operating_refresh_warning; then
+      write_state "warning" "today's daily operating run is already completed with warning; no duplicate work was started"
+      echo "[cloud_morning_chain] resume-skip warning daily-operating-refresh marker"
+      exit 0
+    fi
+    if inventory_marker_warning; then
+      echo "[cloud_morning_chain] verified inventory warning already completed; bypassing expired catch-up startup window" >&2
+    else
+      wait_for_catchup_startup_window
+    fi
     write_state "running" "one daily coordinator is refreshing all 19 stores; the previous complete BI snapshot stays visible until the run is complete"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-all.json"
     MISSING_STORES="$(missing_exact_date_stores)"
@@ -642,15 +707,31 @@ case "$STAGE" in
       require_pre_inventory_budget "inventory-stage-dispatch"
       write_marker "inventory-started" "done" "inventory reserve entered; restarts may resume this stage until the absolute run deadline" "$RESULT_FILE" >/dev/null
     fi
-    run_inventory_stage
+    if run_inventory_stage; then
+      INVENTORY_STAGE_STATUS=0
+    else
+      INVENTORY_STAGE_STATUS=$?
+    fi
+    if [[ "$INVENTORY_STAGE_STATUS" -ne 0 && "$INVENTORY_STAGE_STATUS" -ne 102 ]]; then
+      exit "$INVENTORY_STAGE_STATUS"
+    fi
     INVENTORY_PLAN="$INVENTORY_RUNTIME_ROOT/plans/daily-inventory-replenishment-$RUN_DATE.json"
     INVENTORY_RESULT="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$RUN_DATE.json"
-    write_marker "daily-operating-refresh" "done" "all 19 stores, supplements and inventory completed in one run" \
-      "$RESULT_FILE" "$ROOT/state/pipeline-markers/$RUN_DATE/daily-inventory-guard.json" \
-      "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
-    printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
-      > "$STATE_DIR/${RUN_DATE}.done"
-    write_state "ok" "all 19 stores, supplements and inventory completed; the complete daily snapshot was published once"
+    if [[ "$INVENTORY_STAGE_STATUS" -eq 102 ]]; then
+      write_marker "daily-operating-refresh" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers" \
+        "$RESULT_FILE" "$ROOT/state/pipeline-markers/$RUN_DATE/daily-inventory-guard.json" \
+        "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
+      printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
+        > "$STATE_DIR/${RUN_DATE}.done"
+      write_state "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+    else
+      write_marker "daily-operating-refresh" "done" "all 19 stores, supplements and inventory completed in one run" \
+        "$RESULT_FILE" "$ROOT/state/pipeline-markers/$RUN_DATE/daily-inventory-guard.json" \
+        "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
+      printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
+        > "$STATE_DIR/${RUN_DATE}.done"
+      write_state "ok" "all 19 stores, supplements and inventory completed; the complete daily snapshot was published once"
+    fi
     ;;
   *)
     echo "Unsupported morning stage: $STAGE" >&2

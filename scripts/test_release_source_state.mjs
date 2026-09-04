@@ -343,6 +343,19 @@ try {
   assert.match(clean.sourceFingerprint, /^[0-9a-f]{64}$/);
   testCount += 1;
 
+  // A fresh checkout on another host has different inode/mtime/mode
+  // metadata, but the same commit must retain the same logical fingerprint.
+  // This specifically guards the production failure where Windows and cloud
+  // checkouts of one commit could not pass the compatibility gate.
+  const trackedFile = path.join(tmp, 'tracked.txt');
+  const trackedStat = await fs.stat(trackedFile);
+  await fs.utimes(trackedFile, new Date(trackedStat.atimeMs + 7_000), new Date(trackedStat.mtimeMs + 7_000));
+  const sameContentDifferentStat = inspectReleaseSourceState({cwd: tmp, expectedCommit: commit});
+  assert.equal(sameContentDifferentStat.ok, true);
+  assert.equal(sameContentDifferentStat.contentFingerprint, clean.contentFingerprint);
+  assert.equal(sameContentDifferentStat.sourceFingerprint, clean.sourceFingerprint);
+  testCount += 1;
+
   for (const [name, mutatedJobs, code] of [
     ['missing required job', jobs.slice(0, -1), 'SOURCE_RELEASE_CI_REQUIRED_JOB_MISSING'],
     ['duplicate required job', [...jobs, {...jobs[0], id: 5099}], 'SOURCE_RELEASE_CI_REQUIRED_JOB_DUPLICATE'],

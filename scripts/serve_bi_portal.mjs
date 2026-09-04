@@ -9951,6 +9951,129 @@ function resolveDescriptionBindingExpectedBodyHash(executorPayload = {}) {
   return '';
 }
 
+function collectApprovedBindingReuseExecutorRuns(value) {
+  const byRunId = new Map();
+  const seen = new WeakSet();
+  const walk = (node, depth = 0) => {
+    if (depth > 14 || !node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const entry of node) walk(entry, depth + 1);
+      return;
+    }
+    if (seen.has(node)) return;
+    seen.add(node);
+    const runId = String(node.runId || node.childRunId || '').trim();
+    if (runId) {
+      const records = byRunId.get(runId) || [];
+      records.push(node);
+      byRunId.set(runId, records);
+    }
+    for (const entry of Object.values(node)) walk(entry, depth + 1);
+  };
+  walk(value);
+  return byRunId;
+}
+
+function approvedBindingReuseError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = 409;
+  error.response = {ok: false, error: message, code, ...details};
+  return error;
+}
+
+function resolveApprovedBindingReusePayloadDecision(task, targetStore) {
+  const payload = task?.openapiPublishPayload && typeof task.openapiPublishPayload === 'object'
+    && !Array.isArray(task.openapiPublishPayload)
+    ? task.openapiPublishPayload
+    : null;
+  const evidencePayloadHash = String(task?.publishAssetBinding?.evidence?.payloadHash || '').trim().toLowerCase();
+  const currentPayloadHash = payload ? canonicalRecoveredPublishPayloadHash(payload) : '';
+  const rejection = descriptionBindingExplicitPreValidRejectionEvidence(task);
+
+  if (!rejection.ok) {
+    throw approvedBindingReuseError(
+      'REUSE_APPROVED_BINDING_WRITE_EVIDENCE_UNSAFE',
+      'task has write-attempt evidence that is not one exact publish_pre_valid_failed rejection; capture fallback is forbidden',
+      {reasons: asArray(rejection.reasons)},
+    );
+  }
+
+  if (evidencePayloadHash) {
+    if (!/^[a-f0-9]{64}$/.test(evidencePayloadHash)) {
+      throw approvedBindingReuseError(
+        'REUSE_APPROVED_BINDING_PAYLOAD_HASH_INVALID',
+        'approved binding evidence.payloadHash is malformed; reuse denied',
+      );
+    }
+    if (!payload || evidencePayloadHash !== currentPayloadHash) {
+      throw approvedBindingReuseError(
+        'REUSE_APPROVED_BINDING_PAYLOAD_HASH_MISMATCH',
+        'approved binding payload hash does not match the current openapiPublishPayload; reuse denied',
+      );
+    }
+    return {directReuse: true, source: 'binding_payload_hash'};
+  }
+
+  if (rejection.neutral === true) {
+    return {directReuse: false, source: 'legacy_capture'};
+  }
+  if (!payload) {
+    throw approvedBindingReuseError(
+      'REUSE_APPROVED_BINDING_REJECTED_PAYLOAD_MISSING',
+      'explicit pre-validation rejection reuse requires the current openapiPublishPayload',
+    );
+  }
+
+  const target = String(targetStore || '').trim().toUpperCase();
+  const qualifyingGroups = [];
+  for (const [runId, records] of collectApprovedBindingReuseExecutorRuns(task)) {
+    const stores = new Set(records.map(run => String(run?.storeKey || run?.store || '').trim().toUpperCase()).filter(Boolean));
+    const modes = new Set(records.map(run => String(run?.mode || run?.requestedMode || '').trim()).filter(Boolean));
+    const states = new Set(records.map(run => String(run?.state || run?.finalState || '').trim()).filter(Boolean));
+    const exactAttempt = modes.has('execute')
+      && [...modes].every(mode => mode === 'execute')
+      && states.has('publish_pre_valid_failed')
+      && [...states].every(state => state === 'publish_pre_valid_failed');
+    if (!exactAttempt) continue;
+    if (!stores.has(target) || [...stores].some(store => store !== target)) {
+      throw approvedBindingReuseError(
+        'REUSE_APPROVED_BINDING_REJECTION_STORE_MISMATCH',
+        `explicit pre-validation rejection run ${runId} is not attributable only to target store ${target}`,
+      );
+    }
+    const hashes = new Set(records
+      .map(run => resolveDescriptionBindingExpectedBodyHash(run?.payload || {}))
+      .filter(hash => /^[a-f0-9]{64}$/i.test(hash))
+      .map(hash => hash.toLowerCase()));
+    if (hashes.size !== 1) {
+      throw approvedBindingReuseError(
+        hashes.size ? 'REUSE_APPROVED_BINDING_REJECTION_HASH_AMBIGUOUS' : 'REUSE_APPROVED_BINDING_REJECTION_HASH_MISSING',
+        `explicit pre-validation rejection run ${runId} must carry exactly one valid payload body hash`,
+      );
+    }
+    qualifyingGroups.push({runId, hash: [...hashes][0]});
+  }
+  const uniqueHashes = new Set(qualifyingGroups.map(run => run.hash));
+  if (!qualifyingGroups.length || uniqueHashes.size !== 1) {
+    throw approvedBindingReuseError(
+      uniqueHashes.size > 1 ? 'REUSE_APPROVED_BINDING_REJECTION_HASH_AMBIGUOUS' : 'REUSE_APPROVED_BINDING_REJECTION_HASH_MISSING',
+      'explicit pre-validation rejection evidence must resolve to exactly one current payload body hash',
+    );
+  }
+  if ([...uniqueHashes][0] !== currentPayloadHash) {
+    throw approvedBindingReuseError(
+      'REUSE_APPROVED_BINDING_REJECTION_HASH_MISMATCH',
+      'explicit pre-validation rejection payload body hash does not match the current openapiPublishPayload',
+    );
+  }
+  return {
+    directReuse: true,
+    source: 'explicit_prevalid_rejection',
+    runIds: qualifyingGroups.map(run => run.runId),
+  };
+}
+
 function canonicalPublishAssetBindingImages(images) {
   return asArray(images).map(row => ({
     name: String(row?.name || '').normalize('NFKC').trim(),
@@ -10366,6 +10489,13 @@ function invalidateDependentPublishLocksForPreparationMigration(task) {
 
 async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req, taskRows = []) {
   if (!task || typeof task !== 'object') throw new Error('Task not found');
+  const isReuse = body.reuseApprovedBinding === true && !asArray(body.bindings).length;
+  if (isReuse && taskCannotRepeatRealExecution(task)) {
+    throw approvedBindingReuseError(
+      'REUSE_APPROVED_BINDING_REPEAT_EXECUTION_FORBIDDEN',
+      'task is done, archived, terminal, or already submitted to a real write; approved binding reuse is forbidden',
+    );
+  }
   if (taskRequiresOwnerLifecycleResolve(task)) {
     const error = new Error('该任务已进入提交后待回读/人工处理状态，不能替换发布素材');
     error.status = 409;
@@ -10383,7 +10513,6 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     throw error;
   }
   if (body.sourceApproved !== true) throw new Error('必须明确 sourceApproved=true 才能绑定人工审核素材');
-  const isReuse = body.reuseApprovedBinding === true && !asArray(body.bindings).length;
   const bindings = asArray(body.bindings).length
     ? asArray(body.bindings)
     : isReuse
@@ -10408,6 +10537,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
   } else if (emptyDescriptionConfirmFieldPresent && emptyDescriptionConfirm) {
     throw new Error('emptyDescriptionConfirm 只能与 allowEmptyDescription=true 同时使用');
   }
+  let reusePayloadDecision = null;
   if (isReuse && !isMaintenanceImageBinding) {
     if (!intents.includes('copy_product_draft')) {
       const error = new Error('reuseApprovedBinding only supports copy_product_draft tasks');
@@ -10417,6 +10547,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       throw error;
     }
     validateReusedApprovedTaskBinding(task, {targetStore});
+    reusePayloadDecision = resolveApprovedBindingReusePayloadDecision(task, targetStore);
   }
   if (isReuse && isMaintenanceImageBinding && !String(body.sourceTaskId || '').trim()) {
     const error = new Error('update_images binding reuse requires sourceTaskId; the pure reuse path only supports copy_product_draft');
@@ -10599,22 +10730,22 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     // source images or block this explicit same-task preparation step.
     assets: asArray(taskForCapture.assets).filter(asset => !String(asset?.mime || asset?.type || '').toLowerCase().startsWith('image/')),
   };
-  const recoveredAuditReusePayload = isReuse
-    && taskForCapture.publishAssetBinding?.evidence?.recoveredFromAudit === true
+  const approvedBindingReusePayload = reusePayloadDecision?.directReuse === true
     && taskForCapture.openapiPublishPayload
     && typeof taskForCapture.openapiPublishPayload === 'object'
     && !Array.isArray(taskForCapture.openapiPublishPayload)
     ? JSON.parse(JSON.stringify(taskForCapture.openapiPublishPayload))
     : null;
-  const captured = recoveredAuditReusePayload
+  const captured = approvedBindingReusePayload
     ? {
-        capturedPublishPayload: recoveredAuditReusePayload,
+        capturedPublishPayload: approvedBindingReusePayload,
         result: {
           blockers: [],
           warnings: [],
           payload: {
             source: 'task',
-            recoveredFromAudit: true,
+            reusePayloadSource: reusePayloadDecision.source,
+            recoveredFromAudit: taskForCapture.publishAssetBinding?.evidence?.recoveredFromAudit === true,
             bindingFingerprint: String(taskForCapture.publishAssetBinding?.bindingFingerprint || ''),
           },
         },
@@ -10690,6 +10821,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       evidence: {
         ...(priorRecoveredBindingEvidence || {}),
         ...bound.evidence,
+        payloadHash: canonicalRecoveredPublishPayloadHash(preparedPublishPayload),
         preflightInvalidated: true,
         preparationMigration: requiresPreparationMigration,
         descriptionBindingInvalidated: invalidatedDescriptionBinding,
@@ -10703,7 +10835,7 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     execution: {
       ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
       state: 'needs_repreflight',
-      openApiProductExecutors: [],
+      ...(!isReuse ? {openApiProductExecutors: []} : {}),
       preflight: {
         ok: false,
         blockers: ['人工审核图片和显式发布字段已绑定到同一任务，需要基于新 payload 重新预演。'],

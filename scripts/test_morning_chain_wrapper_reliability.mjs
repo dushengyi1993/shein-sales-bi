@@ -77,6 +77,7 @@ YESTERDAY="\$(TZ=Asia/Shanghai date -d yesterday +%F)"
 PREV_YESTERDAY="\$(TZ=Asia/Shanghai date -d "yesterday - 1 day" +%F)"
 NOW="\$(date +%s)"
 FIXED_DEADLINE=\$(( NOW + 60000 ))
+EXPIRED=\$(( NOW - 10 ))
 
 cat > "\$SB/scripts/cloud_morning_chain.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -99,6 +100,10 @@ if [[ "\$STUB_MODE" == "resume_skip" ]]; then
   # single child-side write; the wrapper must accept the pre-existing marker.
   exit 0
 fi
+if [[ "\$STUB_MODE" == "warning_resume" ]]; then
+  node "\$SB/scripts/write_warning_bundle.mjs" "\$R" "\$B" final
+  exit 0
+fi
 node "\$SB/scripts/write_valid_bundle.mjs" "\$R" "\$B"
 mkdir -p "\$SB/state/cloud_morning_chain"
 printf "completed_at=now\\nbusiness_date=%s\\nlog=stub\\n" "\$B" > "\$SB/state/cloud_morning_chain/\$R.done"
@@ -107,6 +112,7 @@ STUB
 chmod +x "\$SB/scripts/cloud_morning_chain.sh"
 cp "\$REPO/scripts/pipeline_marker.mjs" "\$SB/scripts/pipeline_marker.mjs"
 cat > "\$SB/scripts/validate_daily_operating_refresh.mjs" <<'NODE'
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -117,19 +123,64 @@ const argument = name => {
 const markerRoot = path.resolve(argument('--marker-root'));
 const runDate = argument('--run-date');
 const businessDate = argument('--business-date');
+const preWarning = process.argv.includes('--pre-warning-audit');
+const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const verifyEvidence = (marker, files) => {
+  if (!Array.isArray(marker?.evidence) || marker.evidence.length !== files.length) return false;
+  return files.every(file => {
+    const entry = marker.evidence.find(row => path.resolve(row?.path || '') === path.resolve(file));
+    if (!entry || !fs.statSync(file).isFile()) return false;
+    return Number(entry.bytes) === fs.statSync(file).size && String(entry.sha256 || '') === hashFile(file);
+  });
+};
 try {
-  const marker = JSON.parse(fs.readFileSync(
-    path.join(markerRoot, runDate, 'daily-operating-refresh.json'),
-    'utf8',
-  ));
-  const valid = marker?.ok === true
-    && marker?.status === 'done'
-    && marker?.stage === 'daily-operating-refresh'
-    && marker?.runDate === runDate
-    && marker?.businessDate === businessDate;
+  const finalFile = path.join(markerRoot, runDate, 'daily-operating-refresh.json');
+  const inventoryFile = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  let valid = false;
+  if (preWarning) {
+    const inventory = JSON.parse(fs.readFileSync(inventoryFile, 'utf8'));
+    const plan = path.join(markerRoot, '..', '..', 'runtime', 'plans', 'daily-inventory-replenishment-' + runDate + '.json');
+    const result = path.join(markerRoot, '..', '..', 'runtime', 'results', 'daily-inventory-replenishment-' + runDate + '.json');
+    valid = !fs.existsSync(finalFile)
+      && inventory?.ok === true
+      && inventory?.status === 'warning'
+      && inventory?.stage === 'daily-inventory-guard'
+      && inventory?.runDate === runDate
+      && inventory?.businessDate === businessDate
+      && verifyEvidence(inventory, [plan, result]);
+  } else {
+    const marker = JSON.parse(fs.readFileSync(finalFile, 'utf8'));
+    valid = marker?.ok === true
+      && (marker?.status === 'done' || marker?.status === 'warning')
+      && marker?.stage === 'daily-operating-refresh'
+      && marker?.runDate === runDate
+      && marker?.businessDate === businessDate;
+  }
   if (!valid) process.exit(78);
 } catch {
   process.exit(78);
+}
+NODE
+cat > "\$SB/scripts/write_warning_bundle.mjs" <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+const root = process.env.SB;
+const [runDate, businessDate, mode = 'inventory-only'] = process.argv.slice(2);
+const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const write = (file, value) => { fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\\n'); };
+const evidence = files => files.map(file => ({path:file,bytes:fs.statSync(file).size,sha256:hashFile(file)}));
+const morning = path.join(root,'state','cloud_morning_chain',runDate+'-all.json');
+const planFile = path.join(root,'runtime','plans','daily-inventory-replenishment-'+runDate+'.json');
+const resultFile = path.join(root,'runtime','results','daily-inventory-replenishment-'+runDate+'.json');
+const inventoryMarker = path.join(root,'state','pipeline-markers',runDate,'daily-inventory-guard.json');
+if (!fs.existsSync(morning)) write(morning,{ok:true,date:businessDate});
+if (!fs.existsSync(planFile)) write(planFile,{date:runDate,payloadHash:'a'.repeat(64),actionable:[]});
+if (!fs.existsSync(resultFile)) write(resultFile,{planHash:'a'.repeat(64),execute:true,executionMode:'automatic',results:[]});
+write(inventoryMarker,{ok:true,stage:'daily-inventory-guard',status:'warning',runDate,businessDate,completedAt:new Date().toISOString(),message:'item blockers',evidence:evidence([planFile,resultFile])});
+if (mode === 'final') {
+  const finalMarker = path.join(root,'state','pipeline-markers',runDate,'daily-operating-refresh.json');
+  write(finalMarker,{ok:true,stage:'daily-operating-refresh',status:'warning',runDate,businessDate,completedAt:new Date().toISOString(),message:'complete with item blockers',evidence:evidence([morning,inventoryMarker,planFile,resultFile])});
 }
 NODE
 cp "\$REPO/config/inventory_replenishment_policy.json" "\$SB/config/inventory_replenishment_policy.json"
@@ -260,6 +311,52 @@ check t2b_rc 78 "\$?"
 check t2b_child_called "1" "\$(wc -l < "\$CALLS_LOG")"
 [[ -e "\$STATE/active.json" ]] && echo 'PASS[t2b invalid marker context retained]' || { echo 'FAIL[t2b context missing]'; FAIL=1; }
 
+# t2c: an expired context with an exact inventory warning is recoverable
+# without rerunning inventory. The wrapper converges the final operating
+# warning directly and clears the context without invoking a child.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+rm -rf "\$SB/state/pipeline-markers"
+mkdir -p "\$SB/state/pipeline-markers"
+node "\$SB/scripts/write_warning_bundle.mjs" "\$TODAY" "\$YESTERDAY" inventory-only
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
+JSON
+export STUB_MODE=warning_resume
+bash "\$WRAPPER" >/dev/null 2>&1
+check t2c_rc 0 "\$?"
+check t2c_child_not_called 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t2c_latest_warning warning "\$(latest_status)"
+[[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t2c warning context cleared]' || { echo 'FAIL[t2c context not cleared]'; FAIL=1; }
+
+# t2d: if either warning evidence file drifts, the expired run is not resumed
+# and converges to the original deadline failure without child invocation.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+node --input-type=module -e 'import fs from "node:fs"; fs.appendFileSync(process.argv[1]," ")' "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json"
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
+JSON
+export STUB_MODE=warning_resume
+bash "\$WRAPPER" >/dev/null 2>&1
+check t2d_rc 78 "\$?"
+check t2d_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+
+# t2e: an already-published exact final warning is terminal evidence. It is
+# accepted idempotently even after the old deadline, with no child invocation.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+rm -rf "\$SB/state/pipeline-markers"
+mkdir -p "\$SB/state/pipeline-markers"
+rm -f "\$SB/runtime/plans/daily-inventory-replenishment-\$TODAY.json" "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json"
+node "\$SB/scripts/write_warning_bundle.mjs" "\$TODAY" "\$YESTERDAY" final
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
+JSON
+export STUB_MODE=resume_skip
+bash "\$WRAPPER" >/dev/null 2>&1
+check t2e_rc 0 "\$?"
+check t2e_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t2e_latest_warning warning "\$(latest_status)"
+[[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t2e warning context cleared]' || { echo 'FAIL[t2e context not cleared]'; FAIL=1; }
+
 # t3: an unfinished OLD runDate is never executed across midnight. The same
 # activation records its terminal evidence, then starts TODAY only.
 rm -f "\$CALLS_LOG" "\$SB/failed.ran"
@@ -336,14 +433,18 @@ check t6_latest_failed "failed" "\$(latest_status)"
 printf '%s' "\$(latest_message)" | grep -q 'deadline' && echo 'PASS[t6 latest reason mentions deadline]' || { echo 'FAIL[t6 latest reason]'; FAIL=1; }
 [[ -f "\$SB/state/cloud_ops_alerts/morning-chain-last.json" ]] && echo 'PASS[t6 alert file written]' || { echo 'FAIL[t6 alert file]'; FAIL=1; }
 check t6_marker_failed "failed" "\$(morning_all_marker_status "\$TODAY")"
+[[ -f "\$STATE/active.json" ]] && echo 'PASS[t6 terminal deadline context retained]' || { echo 'FAIL[t6 terminal deadline context]'; FAIL=1; }
+check t6_context_deadline "\$EXPIRED" "\$(ctx_deadline)"
 
-# t7: a later explicit activation after terminal convergence is a new same-day
-# attempt and may run the child; it cannot be silently suppressed as success.
+# t7: an expired terminal context is retained and remains the exact recovery
+# binding.  A later wrapper activation is not authorization and still refuses
+# to reset the deadline or start the child.
 rm -f "\$CALLS_LOG"
 bash "\$WRAPPER" >/dev/null 2>&1
-check t7_rc 0 "\$?"
-check t7_child "1" "\$(wc -l < "\$CALLS_LOG")"
-check t7_pair "\$TODAY \$YESTERDAY" "\$(cut -d' ' -f1-2 "\$CALLS_LOG")"
+check t7_rc 76 "\$?"
+check t7_no_child "0" "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t7_ctx_today "\$TODAY \$YESTERDAY" "\$(ctx_of)"
+check t7_ctx_deadline "\$EXPIRED" "\$(ctx_deadline)"
 
 # t8: malformed active context is ignored; a fresh correct today run replaces
 # it (single call, correct pair).
@@ -632,6 +733,9 @@ console.log(JSON.stringify({
     'businessDate_runDate_minus_1_fail_closed',
     'no_runDate_equals_businessDate',
     'fake_completion_rejected',
+    'inventory_warning_converges_after_deadline_without_inventory_rerun',
+    'warning_evidence_drift_is_rejected',
+    'final_warning_is_idempotent_terminal_evidence',
     'malformed_context_ignored',
     'recovery_binding_preserved_across_restart',
     'malformed_recovery_binding_rejected_without_child_or_write',

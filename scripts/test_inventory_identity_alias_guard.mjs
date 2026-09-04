@@ -49,16 +49,22 @@ assert.throws(() => assertCurrentInventoryListingIdentity({
   liveSkuCodes: [INCIDENT_SKC],
 }), /canonical identity changed/);
 
-// 5. a stripped, unresolvable key still fails closed: alias merge must never
-// turn SKGT3065 into proof of identity.
-assert.throws(() => assertCurrentInventoryListingIdentity({
+// 5. a shortened model code with the same model digits is still the same
+// product; the user rule allows omitted prefixes/Chinese descriptors.
+assert.deepEqual(assertCurrentInventoryListingIdentity({
   expectedMatchKey: 'SKGT3065',
   expectedSkuCode: INCIDENT_SKC,
   liveSupplierCode: 'SK-3065蒸汽熨烫机',
   liveSkuCodes: [INCIDENT_SKC],
-}), /canonical identity changed/);
+}), {matchKey: 'SK-GT-3065蒸汽熨烫机', skuCode: INCIDENT_SKC});
 
-// 6. missing live supplier code fails closed.
+// 6. A model suffix is part of identity: 3065W must not merge with 3065.
+assert.notEqual(
+  resolveInventoryIdentityKey('SK-GT-3065W蒸汽熨烫机'),
+  resolveInventoryIdentityKey('SK-GT-3065蒸汽熨烫机'),
+);
+
+// 7. missing live supplier code fails closed.
 assert.throws(() => assertCurrentInventoryListingIdentity({
   expectedMatchKey: 'SK-GT-3065蒸汽熨烫机',
   expectedSkuCode: INCIDENT_SKC,
@@ -66,7 +72,7 @@ assert.throws(() => assertCurrentInventoryListingIdentity({
   liveSkuCodes: [INCIDENT_SKC],
 }), /canonical identity changed/);
 
-// 7. SKU gates are unchanged: cardinality change still throws.
+// 8. SKU gates are unchanged: cardinality change still throws.
 assert.throws(() => assertCurrentInventoryListingIdentity({
   expectedMatchKey: 'SK-GT-3065蒸汽熨烫机',
   expectedSkuCode: INCIDENT_SKC,
@@ -74,7 +80,7 @@ assert.throws(() => assertCurrentInventoryListingIdentity({
   liveSkuCodes: [INCIDENT_SKC, 'sku-2'],
 }), /cardinality changed/);
 
-// 8. SKU gate unchanged: a different live SKU code still throws.
+// 9. SKU gate unchanged: a different live SKU code still throws.
 assert.throws(() => assertCurrentInventoryListingIdentity({
   expectedMatchKey: 'SK-GT-3065蒸汽熨烫机',
   expectedSkuCode: 'sku-other',
@@ -82,7 +88,7 @@ assert.throws(() => assertCurrentInventoryListingIdentity({
   liveSkuCodes: [INCIDENT_SKC],
 }), /SKU mapping or cardinality changed/);
 
-// 9. alias-aware comparison must not relax a real 3065-vs-11004 conflict.
+// 10. alias-aware comparison must not relax a real 3065-vs-11004 conflict.
 assert.throws(() => assertCurrentInventoryListingIdentity({
   expectedMatchKey: 'SK-GT-3065蒸汽熨烫机',
   expectedSkuCode: INCIDENT_SKC,
@@ -95,7 +101,8 @@ console.log(JSON.stringify({ok: true, tests: [
   'incident-pair-passes',
   'reversed-pair-passes',
   'real-different-code-conflicts',
-  'stripped-key-fails-closed',
+  'short-model-key-follows-confirmed-identity-rule',
+  '3065-and-3065W-stay-distinct',
   'missing-live-code-fails-closed',
   'sku-cardinality-gate-unchanged',
   'sku-code-gate-unchanged',

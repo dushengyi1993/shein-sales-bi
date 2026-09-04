@@ -20,6 +20,7 @@ import {
   validateCloudMaintenanceEffectiveGuards,
   validateCloudServicePolicyContract,
 } from '../lib/cloud_runtime_inventory.mjs';
+import {assertInventoryWriterReleaseAligned} from './inventory/assert_inventory_writer_release_aligned.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const GUARD_INSTALL_CONFIRMATION = 'APPLY_CLOUD_MAINTENANCE_GUARDS_V1';
@@ -455,6 +456,32 @@ async function runGuardInstaller(args, stdout) {
   return 0;
 }
 
+// A deployment must not leave maintenance before the inventory writer's
+// compatibility authority has caught up with the exact checkout.  Existing
+// installations from before reader-first activation may not have the control
+// registry yet; those remain compatible, while an existing registry is a hard
+// release-close gate.  This turns stage/finalize from a checklist into the
+// operation that actually releases maintenance.
+export async function assertInventoryAlignmentBeforeResume({
+  alignmentReader = assertInventoryWriterReleaseAligned,
+} = {}) {
+  try {
+    return await alignmentReader({cwd: ROOT});
+  } catch (error) {
+    if (error?.code === 'INVENTORY_WRITER_ACTIVATION_MISSING') {
+      return {ok: true, skipped: true, reason: 'reader_first_activation_not_present'};
+    }
+    throw new CloudMaintenanceConfigurationError(
+      'resume refused: inventory writer compatibility is not aligned with the current release',
+      {
+        alignmentCode: String(error?.code || 'INVENTORY_WRITER_ALIGNMENT_FAILED'),
+        alignmentError: String(error?.message || error).slice(0, 800),
+        alignmentDetails: error?.details || {},
+      },
+    );
+  }
+}
+
 function jsonLine(stream, value) {
   stream.write(`${JSON.stringify(value)}\n`);
 }
@@ -538,6 +565,7 @@ export async function runCloudMaintenanceCli(argv, io = {}) {
         });
       }
     }
+    if (args.command === 'resume') await assertInventoryAlignmentBeforeResume();
     const status = args.command === 'pause'
       ? await pauseCloudMaintenance({...common, mode: args.mode})
       : await resumeCloudMaintenance(common);

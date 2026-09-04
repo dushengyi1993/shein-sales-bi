@@ -8,6 +8,7 @@ import {
   controlInventoryCutoverActivation,
   finalizeInventoryCompatibilityRotation,
   inventoryCompatibilityStatus,
+  readInventoryWriterServiceStates,
   requireCurrentInventoryCutoverActivation,
   stageInventoryCompatibilityRotation,
 } from '../lib/inventory_write_cutover.mjs';
@@ -18,6 +19,43 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-compat-flows-'))
 const checks = [];
 
 try {
+  const readServiceState = async raw => (await readInventoryWriterServiceStates(
+    ['oneshot.service'],
+    {execFileImpl: async () => ({stdout: `${Object.entries(raw).map(([key, value]) => `${key}=${value}`).join('\n')}\n`})},
+  ))[0];
+  const liveOneshot = await readServiceState({
+    LoadState: 'loaded',
+    ActiveState: 'activating',
+    SubState: 'start',
+    MainPID: '1234',
+    ExecMainStartTimestamp: 'Tue 2026-09-02 10:00:00 CST',
+    NRestarts: '0',
+  });
+  assert.match(liveOneshot.generationHash, /^[a-f0-9]{64}$/u);
+  assert.equal((await readServiceState({
+    LoadState: 'loaded', ActiveState: 'active', SubState: 'running',
+    MainPID: '123', ExecMainStartTimestamp: 'Tue 2026-09-02 10:00:00 CST', NRestarts: '0',
+  })).activeState, 'active');
+  assert.equal((await readServiceState({
+    LoadState: 'loaded', ActiveState: 'inactive', SubState: 'dead', MainPID: '0', NRestarts: '0',
+  })).activeState, 'inactive');
+  assert.equal((await readServiceState({
+    LoadState: 'loaded', ActiveState: 'failed', SubState: 'failed', MainPID: '0', ControlPID: '0', NRestarts: '0',
+  })).activeState, 'failed');
+  for (const raw of [
+    {LoadState: 'loaded', ActiveState: 'failed', SubState: 'failed', MainPID: '0', ControlPID: '12', ExecMainStartTimestamp: 'x', NRestarts: '0'},
+    {LoadState: 'loaded', ActiveState: 'failed', SubState: 'failed', MainPID: '0', ExecMainStartTimestamp: 'x', NRestarts: '0'},
+    {LoadState: 'loaded', ActiveState: 'deactivating', SubState: 'stop', MainPID: '123', ExecMainStartTimestamp: 'x', NRestarts: '0'},
+    {LoadState: 'loaded', ActiveState: 'activating', SubState: 'start', MainPID: '0', ExecMainStartTimestamp: 'x', NRestarts: '0'},
+    {LoadState: 'loaded', ActiveState: 'activating', SubState: 'auto-restart', MainPID: '123', ExecMainStartTimestamp: 'x', NRestarts: '0'},
+    {LoadState: 'loaded', ActiveState: 'activating', SubState: 'start', MainPID: '123', NRestarts: '0'},
+    {LoadState: 'not-found', ActiveState: 'activating', SubState: 'start', MainPID: '123', ExecMainStartTimestamp: 'x', NRestarts: '0'},
+    {LoadState: 'loaded', ActiveState: 'activating', SubState: 'start', MainPID: '123', ExecMainStartTimestamp: 'x', NRestarts: 'unknown'},
+  ]) {
+    await assert.rejects(readServiceState(raw), /INVENTORY_CUTOVER_SERVICE_STATE_INVALID/);
+  }
+  checks.push('oneshot_activating_start_is_live_generation');
+
   const activationFile = path.join(temp, 'activation.ndjson');
   const activationReceiptFile = path.join(temp, 'activation.receipt.json');
   const compatibilityFile = path.join(temp, 'compatibility.ndjson');

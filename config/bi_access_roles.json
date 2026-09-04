@@ -38,7 +38,7 @@
       "role": "operator",
       "ownerKey": "GUANGHONG",
       "readStores": ["*"],
-      "writeStores": ["DL", "TZZ", "CX"]
+      "writeStores": ["DL"]
     },
     "杨欢": {
       "displayName": "杨欢",
@@ -80,7 +80,7 @@
       "role": "operator",
       "ownerKey": "ZHENGYIHANG",
       "readStores": ["*"],
-      "writeStores": ["JSH"]
+      "writeStores": ["JSH", "CX", "TZZ"]
     }
   }
 }

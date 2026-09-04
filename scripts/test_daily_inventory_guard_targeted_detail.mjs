@@ -738,9 +738,9 @@ match('executor result freshness uses atomic identity and content evidence', gua
 check('only a fresh complete result may enter the pending classifier', () => {
   const beforeAt = guard.indexOf('RESULT_BEFORE_FINGERPRINT=');
   const afterAt = guard.indexOf('RESULT_AFTER_FINGERPRINT=');
-  const pendingAt = guard.indexOf('if result_is_readback_pending_only; then');
+  const pendingAt = guard.indexOf('if result_has_item_warning || result_is_readback_pending_only; then');
   assert.ok(beforeAt >= 0 && afterAt > beforeAt && pendingAt > afterAt,
-    'the guard must snapshot before dispatch and validate freshness before exit 75 classification');
+    'the guard must snapshot before dispatch and validate freshness before warning classification');
   assert.match(guard.slice(afterAt, pendingAt), /RESULT_AFTER_FINGERPRINT.*RESULT_BEFORE_FINGERPRINT/,
     'the post-executor gate must reject an unchanged result before pending classification');
 });
@@ -975,8 +975,9 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
       encoding: 'utf8',
     });
     const run = runGuard('default');
-    assert.equal(run.status, 75, `journal-only recovery must remain retryable\nstdout=${run.stdout}\nstderr=${run.stderr}`);
+    assert.equal(run.status, 2, `journal-only recovery must converge as an auditable warning without replay\nstdout=${run.stdout}\nstderr=${run.stderr}`);
     assert.match(run.stdout, /durable inventory journal requires lifecycle recovery pending=1 readbackMatched=0/);
+    assert.match(run.stdout, /"state":\s*"completed_with_warning"/);
     const executorArgs = JSON.parse(fs.readFileSync(executorArgsFile, 'utf8'));
     assert.ok(executorArgs.includes('--reconcile-pending-only'));
     assert.equal(executorArgs[executorArgs.indexOf('--plan') + 1], `runtime/plans/daily-inventory-replenishment-${runDate}.json`);
@@ -1027,12 +1028,12 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
     assert.deepEqual(fs.readFileSync(resultFile), priorResultBytes,
       'executor 75 fatal must preserve the old RESULT bytes');
 
-    // A new complete pending RESULT, even with executor status 1, retains the
-    // established readback-only retry contract.
+    // A new complete pending RESULT, even with executor status 1, converges as
+    // an auditable warning while the durable intent keeps duplicate writes fenced.
     const freshRun = runGuard('fresh-pending');
-    assert.equal(freshRun.status, 75,
-      `a fresh complete pending result must remain retryable\nstdout=${freshRun.stdout}\nstderr=${freshRun.stderr}`);
-    assert.match(freshRun.stdout, /submitted_but_readback_pending/);
+    assert.equal(freshRun.status, 2,
+      `a fresh complete pending result must converge as an auditable warning\nstdout=${freshRun.stdout}\nstderr=${freshRun.stderr}`);
+    assert.match(freshRun.stdout, /"state":\s*"completed_with_warning"/);
     assert.notDeepEqual(fs.readFileSync(resultFile), priorResultBytes,
       'the fresh executor result must replace the old pending RESULT');
     assert.deepEqual(fs.readFileSync(journalFile), priorJournalBytes,

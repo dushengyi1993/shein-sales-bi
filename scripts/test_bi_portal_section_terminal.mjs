@@ -322,7 +322,7 @@ async function makePortal(dir, {core = true, section, sectionGeneratedAt = gener
     'a short slot that leaves heavy work pending must report a defer, never a false empty success');
   assert.match(worker, /HEAVY_ALLOWED="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-1\}"/,
     'the worker must receive an explicit heavy-section budget from the slot');
-  assert.match(worker, /HEAVY_ALLOWED.*0[\s\S]*EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily\)/,
+  assert.match(worker, /HEAVY_ALLOWED.*0[\s\S]*EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily rankings inventoryTrend\)/,
     'a short reserved slot must exclude every heavy section before claiming');
   assert.match(worker, /publishedRevision=\$PUBLISHED_REVISION follow-up pending/,
     'a successful claim with a newer request must report the published snapshot and follow-up');

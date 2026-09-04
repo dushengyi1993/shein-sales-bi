@@ -69,6 +69,19 @@ sudo node scripts/inventory/resolve_manual_inventory_intent.mjs \
 
 Compatibility updates use the same CLI, immutable preflight artifacts, and append-only state machine. Under fresh `maintenance=all`: publish a `rotation-stage` artifact against the candidate commit/bundle/release receipt/source fingerprint and execute that exact artifact; root-deploy the staged candidate, harden it, and restart writers; then publish and execute a fresh `rotation-finalize` artifact. A staged candidate can pass the external startup guard so recovery is possible, but the in-app writer reader remains fail-closed until finalize. After finalize, generation N is permanently rejected and N+1 same-commit restarts remain valid. `status` is read-only and reports active/pending generations. An interrupted append or receipt publication is resumed by rerunning the identical artifact/hash; a different or expired artifact is rejected. Never remove activation to recover or rotate.
 
+Every release must close with a read-only source/compatibility alignment check before maintenance is released. This catches the exact failure mode where `/opt/shein-bi/app` has the new commit but the external guard still carries an older generation. The check is intentionally read-only and does not rotate state automatically:
+
+```bash
+sudo node scripts/inventory/assert_inventory_writer_release_aligned.mjs \
+  --cwd /opt/shein-bi/app \
+  --expected-commit EXACT_DEPLOYED_COMMIT \
+  --json
+```
+
+Exit 0 is the only release-close result. Any mismatch or pending rotation remains a deployment failure and must be repaired with the three-stage rotation above; it must not be deferred until the next business timer.
+
+If deployment reached the checkout before the stage journal was written, the same `rotation-stage` command is also the supported recovery path: build the candidate artifact from the exact current release receipt/source authority and execute it under `maintenance=all`, then run the normal finalize sequence. Recovery is accepted only when the current checkout matches the requested candidate in full release identity and source fingerprint; arbitrary or partially matching drift remains rejected. The release close must therefore include compatibility stage/finalize before maintenance is released, rather than leaving a new checkout behind an older active generation.
+
 ```bash
 sudo node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-stage \
   --candidate-commit EXACT_40_HEX_COMMIT \
@@ -146,7 +159,7 @@ Linux 生产健康只以 systemd、watchdog、Portal health 和云端数据审�
 - `shein-bi-session-secret.service`：Portal/Query 共享会话签名 secret 的唯一写 owner。oneshot 只在安全的 `/data/shein-bi/state` 中用 `O_EXCL` 创建 0600 普通文件并精确回读；已有文件只校验，软链、非普通文件、权限/属主或内容异常全部失败关闭，日志只记录不可逆 fingerprint，不输出 secret。Portal/Query 均只读加载，缺失时拒绝启动。
 - `shein-bi-portal.service`：BI Portal 常驻入口，必须以 `sheinops` 运行并保留 `MemoryHigh=1200M` / `MemoryMax=2200M` / `OOMPolicy=stop` / `Restart=always`，防止问数网关或 section 服务异常占满整机内存。V8 旧空间通过 `Environment=NODE_OPTIONS=--max-old-space-size=1536` 固定为 1536MiB，作为低于 cgroup 硬上限的最后一道护栏；它不能替代有界内存实现。2026-08-14 的 210,748,631 字节 core 已证明单纯提高到 1536MiB 仍会 OOM，因此 Portal 读取 core 元数据、叠加实时商品对账 warning 和返回 `/data.json` 时必须使用有界流式扫描/顶层 `audit` 替换，不得重新引入整份 `readFile + JSON.parse + JSON.stringify/gzip`。每次启动前由 `ExecStartPre` 从当前 `scripts/bi_app/client.js` / `styles.css` 原子重建正式 `outputs/bi-portal/index.html`，禁止出现源码已发布而页面仍执行旧内嵌前端的情况。Portal 仍需调用经过白名单约束的 `sudo docker` 子命令并与浏览器维护任务共享临时目录，所以不能照抄 Lark bot 的 `NoNewPrivileges` / `PrivateTmp`；其余内核、systemd、umask 护栏由 unit 固化。认证启动前必须等待 `shein-bi-session-secret.service`，运行进程不再创建或修复 secret。Portal 是 `/srv/shein-bi/partner-cli` 的唯一发布写 owner；停机信号先同步关闭 HTTP/upgrade admission 并结束 SSE，再有界排空已接收 handler；只有排空成功才依次停止 worker/bridge 和 store，超时强制断连接并以失败终态退出。
 - `shein-bi-query.service`：认证只读入口，监听 `127.0.0.1:8791`。只允许 1 个重查询、最多排队 3 个，V8 old space 1024MiB，`MemoryHigh=1024M`、`MemoryMax=1400M`；无 worker、Webhook、AI、live bridge、warmup 或生成副作用。它只读 state/outputs 与 Portal 同一 `/srv/shein-bi/partner-cli` managed store，profile 两条路径均不可见，也不暴露 release deploy 写路由。Nginx 只把精确的 9 个认证只读路由转给它，故障不得回退到 Portal。Query health 会验证 Partner CLI 当前版本可读；紧急 fallback 可维持 CLI 使用，但 snapshot 必须保留 `PARTNER_CLI_RELEASE_UNMANAGED` blocker，不能冒充正式发布。其 state namespace 保持只读，secret 缺失/无效时由 loader 明确失败，不在 Query 内补写。SIGTERM/SIGINT 使用同一 5 秒有界 admission/drain/store 关闭契约，不在活跃 handler 仍运行时提前关闭 gateway。
-- `shein-bi-cloud-portal-section-queue.timer`：唯一 timer 每小时 `:02/:32` 给 pending section 有界机会；`:02` 为 `HEAVY_ALLOWED=0` 的 light-only 槽，deadline `:14`、最多一个轻 section，`:32` 为 heavy 槽，deadline `:44`。unit、slot 与 worker 共同拒绝 `01:*`，并拒绝 `02:02/03:02/07:02` 特殊维护窗口；其余小时只接受 `:01–04/:31–34`。晨链 active、activating、reloading 或状态未知时，slot 仍动态让路并以 75 fail-closed。首页精简流量和成交价散点按首页优先级排队，页面强制刷新最高优先；后台项随等待时间老化提权，不能被连续订单/利润刷新永久饿死。SSH 直接调用 worker 或在安全窗口外启动必须返回 75；中断时 lease 回到 pending，旧 section 文件继续原子可读。
+- `shein-bi-cloud-portal-section-queue.timer`：唯一 timer 每小时 `:02/:32` 给 pending section 有界机会；`:02` 为 `HEAVY_ALLOWED=0` 的 light-only 槽，deadline `:14`、最多一个轻 section，`:32` 为 heavy 槽，deadline `:44`。unit、slot 与 worker 共同拒绝 `01:*` 全小时；其余小时接受 `:01–04/:31–34`。晨链 active、activating、reloading 或状态未知时，slot 仍动态让路并以 75 fail-closed。首页精简流量和成交价散点按首页优先级排队，页面强制刷新最高优先；后台项随等待时间老化提权，不能被连续订单/利润刷新永久饿死。SSH 直接调用 worker 或在安全窗口外启动必须返回 75；中断时 lease 回到 pending，旧 section 文件继续原子可读。
 
 ### Pipeline marker 跨服务目录一次性修复
 

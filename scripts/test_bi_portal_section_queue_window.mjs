@@ -215,6 +215,7 @@ async function runWindowCase({
   deadlineEpoch,
   deadlineMinute,
   heavyAllowed,
+  heavyFirst = 0,
   sections,
   maxSections,
   expectedStatus,
@@ -265,14 +266,19 @@ async function runWindowCase({
     SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE: lockFile,
     SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS: String(maxSections),
     SHEIN_BI_PORTAL_SECTION_QUEUE_SECTION_TIMEOUT_SEC: '10',
-    SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC: '480',
-    SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC: '540',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_TIMEOUT_SEC: '600',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_PROFIT_MIN_RUNTIME_SEC: '630',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC: '630',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC: '630',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_RANKINGS_MIN_RUNTIME_SEC: '630',
+    SHEIN_BI_PORTAL_SECTION_QUEUE_INVENTORY_TREND_MIN_RUNTIME_SEC: '630',
     SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC: '60',
     SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC: '120',
     SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC: String(leaseSeconds),
     SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED: '1',
     SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE: String(deadlineMinute),
     SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED: String(heavyAllowed),
+    SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST: String(heavyFirst),
     SHEIN_TEST_PROFIT_HTTP: String(profitHttp),
     SHEIN_TEST_REQUEUE_PROFIT: requeueProfit ? '1' : '0',
     SHEIN_TEST_REMOVE_PROFIT_BEFORE_COMPLETE: removeProfitBeforeComplete ? '1' : '0',
@@ -320,11 +326,11 @@ if (tools.status !== 0) {
     deadlineEpoch: 1_600,
     deadlineMinute: 14,
     heavyAllowed: 0,
-    sections: ['profit', 'homeRankings', 'orders', 'waybills', 'afterSales', 'inventoryTrend'],
+    sections: ['profit', 'homeRankings', 'productSalesDaily', 'rankings', 'inventoryTrend', 'orders', 'waybills', 'afterSales'],
     maxSections: 8,
     expectedStatus: 75,
   });
-  assert.deepEqual(lightWindow.calls, ['orders', 'waybills', 'afterSales', 'inventoryTrend'],
+  assert.deepEqual(lightWindow.calls, ['orders', 'waybills', 'afterSales'],
     'the :02 light window may claim multiple light sections serially but never heavy sections');
   assert.equal(new Set(lightWindow.calls).size, lightWindow.calls.length,
     'the :02 batch must not claim any section twice or run parallel duplicate work');
@@ -332,13 +338,33 @@ if (tools.status !== 0) {
     'the :02 light window must leave heavy profit pending');
   assert.equal(lightWindow.queue.entries.some(entry => entry.section === 'homeRankings' && entry.status === 'pending'), true,
     'the :02 light window must leave heavy homeRankings pending');
-  for (const section of ['orders', 'waybills', 'afterSales', 'inventoryTrend']) {
+  for (const section of ['productSalesDaily', 'rankings', 'inventoryTrend']) {
+    assert.equal(lightWindow.queue.entries.some(entry => entry.section === section && entry.status === 'pending'), true,
+      `the :02 light window must leave heavy ${section} pending`);
+  }
+  for (const section of ['orders', 'waybills', 'afterSales']) {
     assert.equal(lightWindow.queue.entries.some(entry => entry.section === section), false,
       `the :02 light window must complete the light section it claimed: ${section}`);
   }
   assert.match(`${lightWindow.run.stdout}\n${lightWindow.run.stderr}`,
     /reason=short_reserved_window/,
     'the :02 worker must report the explicit light-only heavy deferral');
+
+  const heavyInsufficientBudget = await runWindowCase({
+    name: 'heavy-insufficient-budget',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 1_500,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    sections: ['productSalesDaily', 'rankings', 'inventoryTrend'],
+    maxSections: 1,
+    expectedStatus: 75,
+  });
+  assert.deepEqual(heavyInsufficientBudget.calls, [],
+    'a heavy slot with less than 630 seconds must not claim accounting-heavy sections');
+  assert.equal(heavyInsufficientBudget.queue.entries.every(entry => entry.status === 'pending'), true);
 
   const heavyWindow = await runWindowCase({
     name: 'heavy-32',
@@ -356,6 +382,38 @@ if (tools.status !== 0) {
     'a dedicated :32 window with sufficient remaining time may claim profit');
   assert.equal(heavyWindow.queue.entries.some(entry => entry.section === 'profit'), false,
     'the heavy profit claim must complete in the sufficient window');
+
+  const heavyBeatsLinksData = await runWindowCase({
+    name: 'heavy-beats-links-data',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    heavyFirst: 1,
+    sections: ['linksData', 'profit'],
+    maxSections: 1,
+    expectedStatus: 0,
+  });
+  assert.deepEqual(heavyBeatsLinksData.calls, ['profit'],
+    'the dedicated heavy slot must not spend its first claim on linksData');
+
+  const lightPrioritizesLinksData = await runWindowCase({
+    name: 'light-prioritizes-links-data',
+    hour: '06',
+    minute: '02',
+    nowEpoch: 1_000,
+    deadlineEpoch: 1_600,
+    deadlineMinute: 14,
+    heavyAllowed: 0,
+    heavyFirst: 0,
+    sections: ['orders', 'linksData'],
+    maxSections: 1,
+    expectedStatus: 75,
+  });
+  assert.deepEqual(lightPrioritizesLinksData.calls, ['linksData'],
+    'the light slot must keep the homepage linksData refresh responsive');
 
   const rolloverWindow = await runWindowCase({
     name: 'immutable-slot-rollover',
@@ -420,6 +478,42 @@ if (tools.status !== 0) {
   assert.equal(clean200Unchanged.queue.entries.some(entry => entry.section === 'orders'), false,
     'a clean 200 with an unchanged pre-request terminal artifact must complete');
 
+  const largeQueueJson = await runWindowCase({
+    name: 'large-queue-json-over-argv-limit',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    sections: ['orders'],
+    artifactSections: ['orders'],
+    maxSections: 1,
+    expectedStatus: 0,
+    queueSetup: queue => {
+      // status/claim/complete all serialize the durable entries list.  This
+      // fixture is deliberately larger than Linux's argv budget so the test
+      // proves the worker keeps those JSON responses on stdin.
+      queue.entries.push(...Array.from({length: 4_200}, (_, index) => ({
+        section: `legacy${index}`,
+        status: 'pending',
+        priority: 99,
+        sequence: 10_000 + index,
+        requestRevision: 1,
+        claimedRevision: 0,
+        idempotencyKey: `legacy-${index}`,
+        coalesceKey: `legacy-${index}`,
+        coreGeneratedAt: generatedAt,
+        requestedAt: '2026-08-22T00:00:00.000Z',
+        lastError: 'x'.repeat(256),
+      })));
+    },
+  });
+  assert.deepEqual(largeQueueJson.calls, ['orders'],
+    'a large durable queue must still claim and complete the requested section');
+  assert.equal(largeQueueJson.queue.entries.some(entry => entry.section === 'orders'), false,
+    'large-queue JSON parsing must not fail before terminal completion');
+
   const quietSuccess = await runWindowCase({
     name: 'quiet-success-post-profit',
     hour: '06',
@@ -467,11 +561,11 @@ if (tools.status !== 0) {
     'follow-up pending must leave homeRankings pending for a later run');
 
   const followUpFreshRun = await runWindowCase({
-    name: 'follow-up-fresh-run-normal-540-budget',
+    name: 'follow-up-fresh-run-normal-630-budget',
     hour: '06',
     minute: '32',
     nowEpoch: 1_000,
-    deadlineEpoch: 1_545,
+    deadlineEpoch: 1_635,
     deadlineMinute: 44,
     heavyAllowed: 1,
     sections: ['profit', 'homeRankings'],
@@ -495,7 +589,7 @@ if (tools.status !== 0) {
     'a later run may claim homeRankings after dependencyYield, before the queued profit follow-up');
   assert.doesNotMatch(`${followUpFreshRun.run.stdout}\n${followUpFreshRun.run.stderr}`,
     /post-profit homeRankings budgetSec=60/,
-    'the later dependency-yield run must retain the normal 540-second budget');
+    'the later dependency-yield run must retain the normal 630-second budget');
 
   for (const failure of [
     {

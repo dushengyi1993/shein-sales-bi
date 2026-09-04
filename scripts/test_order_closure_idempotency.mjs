@@ -150,6 +150,7 @@ function runCoordinator({
       SHEIN_BI_ORDER_CLOSURE_COORDINATOR_STATE: toPosixPath(path.join(root, `coordinator-${runDate}.json`)),
       SHEIN_BI_ORDER_CLOSURE_DEFER_STATE: toPosixPath(path.join(root, `defer-${runDate}.json`)),
       SHEIN_ORDER_CLOSURE_MAX_PAIRS: String(maxPairs),
+      SHEIN_ORDER_CLOSURE_OUTCOME_FILE: toPosixPath(path.join(root, 'state', 'order_closure_last_outcome.json')),
       SHEIN_TEST_DOMAIN_LOCK: toPosixPath(path.join(root, 'domain.lock')),
       SHEIN_TEST_LOCK_HELD: toPosixPath(path.join(root, 'domain-lock-held')),
       SHEIN_TEST_CANDIDATES: toPosixPath(paths.candidates),
@@ -196,7 +197,19 @@ function installFixture(root) {
   writeExecutable(path.join(scripts, 'cloud_order_closure.sh'), [
     '#!/usr/bin/env bash',
     'set -Eeuo pipefail',
-    'node scripts/recheck_order_statuses.mjs --max-pairs "${SHEIN_ORDER_CLOSURE_MAX_PAIRS:-500}"',
+    'set +e',
+    'node scripts/recheck_order_statuses.mjs --max-pairs "${SHEIN_ORDER_CLOSURE_MAX_PAIRS:-30}"',
+    'status=$?',
+    'set -e',
+    'STATUS="$status" OUTCOME_FILE="${SHEIN_ORDER_CLOSURE_OUTCOME_FILE:?}" FAILED_FILE="${SHEIN_TEST_FAILED_PAIRS:?}" node --input-type=module - <<\'NODE\'',
+    'import fs from "node:fs";',
+    'import path from "node:path";',
+    'const failed = JSON.parse(fs.readFileSync(process.env.FAILED_FILE, "utf8"));',
+    'const payload = {qualityStatus: failed.length ? "partial" : "complete", ok: Number(process.env.STATUS) === 0, finishedAt: new Date().toISOString()};',
+    'fs.mkdirSync(path.dirname(process.env.OUTCOME_FILE), {recursive: true});',
+    'fs.writeFileSync(process.env.OUTCOME_FILE, JSON.stringify(payload) + "\\n");',
+    'NODE',
+    'if [[ "$status" -ne 0 ]]; then exit "$status"; fi',
     'printf \'portal-refresh\\n\' >> "${SHEIN_TEST_PORTAL_LOG:?}"',
     'printf \'enqueue\\n\' >> "${SHEIN_TEST_QUEUE_LOG:?}"',
     'sleep 0.15',
@@ -309,6 +322,8 @@ async function main() {
     'coordinator must consume central marker outcome validation');
   assert.doesNotMatch(coordinatorSource, /pipeline_marker\.mjs" read/,
     'coordinator must not classify a raw marker read');
+  assert.match(coordinatorSource, /export SHEIN_ORDER_CLOSURE_MAX_PAIRS="\$MAX_PAIRS"/,
+    'coordinator must export SHEIN_ORDER_CLOSURE_MAX_PAIRS for child stage and digest parity');
 
   const fixtures = [];
   try {
@@ -449,13 +464,11 @@ async function main() {
     const boundedFirst = await runCoordinator({...bounded, maxPairs: 1, deadlineEpoch: futureDeadline()});
     assert.equal(boundedFirst.status, 0, `${boundedFirst.stdout}\n${boundedFirst.stderr}`);
     let marker = readMarker({root: bounded.paths.markerRoot, stage: STAGE, date: RUN_DATE});
-    assert.equal(marker?.status, 'partial', 'maxPairs remainder must withhold done marker');
-    assert.equal(marker?.worksetCandidateCount, 1);
-    assert.equal(readJson(bounded.paths.candidates).length, 1);
+    assertDoneMarker(marker);
+    assert.equal(readJson(bounded.paths.candidates).length, 0, 'same activation must continue bounded batches to completion');
     let coordinatorState = readCoordinatorState(bounded.root);
-    assert.equal(coordinatorState.status, 'partial', 'maxPairs remainder coordinator state must be partial');
-    assert.equal(coordinatorState.ok, false, 'maxPairs remainder coordinator state must be incomplete');
-    assert.match(coordinatorState.message, /remainingCandidates=1/);
+    assert.equal(coordinatorState.status, 'done', 'same activation must finish all bounded batches');
+    assert.equal(coordinatorState.ok, true);
     const boundedSecond = await runCoordinator({...bounded, maxPairs: 1, deadlineEpoch: futureDeadline()});
     assert.equal(boundedSecond.status, 0, `${boundedSecond.stdout}\n${boundedSecond.stderr}`);
     assertDoneMarker(readMarker({root: bounded.paths.markerRoot, stage: STAGE, date: RUN_DATE}));

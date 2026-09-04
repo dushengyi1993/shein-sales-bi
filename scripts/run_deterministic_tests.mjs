@@ -137,6 +137,7 @@ const tests = [
   'scripts/test_link_business_audit_nonblocking.mjs',
   'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs',
   'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs',
+  'scripts/test_link_ops_reuse_normal_binding_payload.mjs',
   'scripts/test_link_ops_product_descriptions.mjs',
   'scripts/test_link_ops_empty_description_authorization.mjs',
   'scripts/test_link_ops_duplicate_publish_override.mjs',
@@ -194,6 +195,7 @@ const tests = [
   'scripts/test_pipeline_marker.mjs',
   'scripts/test_morning_resume_evidence.mjs',
   'scripts/test_morning_metric_refetch.mjs',
+  'scripts/test_cloud_link_metric_readiness.mjs',
   'scripts/test_systemd_unit_snapshot.mjs',
   'scripts/test_systemd_unit_inventory_contract.mjs',
   'scripts/test_install_cloud_maintenance_guards.mjs',
@@ -226,6 +228,7 @@ const tests = [
   'scripts/test_inventory_reconcile_extra_scope.mjs',
   'scripts/test_inventory_v2_fence_entrypoints.mjs',
   'scripts/test_inventory_write_cutover_activation.mjs',
+  'scripts/test_inventory_writer_release_alignment.mjs',
   'scripts/test_daily_inventory_replenishment_plan.mjs',
   'scripts/test_daily_inventory_current_detail_targeting.mjs',
   'scripts/test_daily_inventory_guard_targeted_detail.mjs',
@@ -299,11 +302,13 @@ const tests = [
   // fails closed unless both deterministic shards and that dedicated job pass.
   'scripts/test_bi_portal_repository_crud.mjs',
   'scripts/test_bi_portal_mutation_queue.mjs',
+  'scripts/test_links_data_store_coverage.mjs',
 ];
 
 const TEST_ESTIMATES_MS = {
   'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs': 2_000,
   'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs': 5_000,
+  'scripts/test_link_ops_reuse_normal_binding_payload.mjs': 5_000,
   'scripts/test_link_ops_prepare_product_attribute_flow.mjs': 1_200_000,
   'scripts/test_link_ops_prepare_descriptions_flow.mjs': 300_000,
   'scripts/test_link_ops_update_description_flow.mjs': 240_000,
@@ -490,6 +495,8 @@ for (const file of selectedTests) {
     : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs'
       ? 30_000
       : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs'
+        ? 60_000
+      : file === 'scripts/test_link_ops_reuse_normal_binding_payload.mjs'
         ? 60_000
     : file === 'scripts/test_link_ops_update_description_flow.mjs'
       ? 240_000

@@ -258,7 +258,9 @@ clear_active_context() {
 write_completed_latest_state() {
   local run_date="$1"
   local business_date="$2"
-  STATE_DIR="$STATE_DIR" RUN_DATE="$run_date" BUSINESS_DATE="$business_date" node - <<'NODE'
+  local state_status="${3:-ok}"
+  local state_message="${4:-semantic daily-operating-refresh evidence verified by owning wrapper}"
+  STATE_DIR="$STATE_DIR" RUN_DATE="$run_date" BUSINESS_DATE="$business_date" STATE_STATUS="$state_status" STATE_MESSAGE="$state_message" node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const file = path.join(process.env.STATE_DIR, 'latest.json');
@@ -267,8 +269,8 @@ const payload = {
   businessDate: process.env.BUSINESS_DATE,
   generatedAt: new Date().toISOString(),
   stage: 'all',
-  status: 'ok',
-  message: 'semantic daily-operating-refresh evidence verified by owning wrapper',
+  status: process.env.STATE_STATUS || 'ok',
+  message: process.env.STATE_MESSAGE || 'semantic daily-operating-refresh evidence verified by owning wrapper',
 };
 fs.mkdirSync(path.dirname(file), {recursive: true});
 const temporary = `${file}.${process.pid}.tmp`;
@@ -292,9 +294,123 @@ daily_run_completed() {
     --state-dir "$STATE_DIR" \
     --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
     --run-date "$run_date" \
+    --business-date "$business_date" >/dev/null || return 1
+  node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage daily-operating-refresh \
+    --date "$run_date" \
+    --business-date "$business_date" \
+    --status done \
+    --require-ok \
+    --require-evidence \
+    --root "$MARKER_ROOT" >/dev/null
+}
+
+daily_run_warning_completed() {
+  local run_date="$1"
+  local business_date="$2"
+  # Keep the ordinary warning marker on the full strict validator path first.
+  # Only its explicit same-day pending/fence allowance may use the controlled
+  # warning mode; that mode still validates every plan/result/journal binding.
+  if ! node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
+    --root "$ROOT" \
+    --marker-root "$MARKER_ROOT" \
+    --state-dir "$STATE_DIR" \
+    --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
+    --run-date "$run_date" \
+    --business-date "$business_date" >/dev/null; then
+    node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
+      --allow-item-fenced-warning \
+      --root "$ROOT" \
+      --marker-root "$MARKER_ROOT" \
+      --state-dir "$STATE_DIR" \
+      --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
+      --run-date "$run_date" \
+      --business-date "$business_date" >/dev/null || return 1
+  fi
+  node "$ROOT/scripts/pipeline_marker.mjs" require \
+    --stage daily-operating-refresh \
+    --date "$run_date" \
+    --business-date "$business_date" \
+    --status warning \
+    --require-ok \
+    --require-evidence \
+    --root "$MARKER_ROOT" >/dev/null
+}
+
+daily_run_pre_warning_audit() {
+  local run_date="$1"
+  local business_date="$2"
+  node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
+    --pre-warning-audit \
+    --root "$ROOT" \
+    --marker-root "$MARKER_ROOT" \
+    --state-dir "$STATE_DIR" \
+    --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
+    --run-date "$run_date" \
     --business-date "$business_date" >/dev/null
 }
 
+inventory_warning_marker_present() {
+  local run_date="$1"
+  local business_date="$2"
+  RUN_DATE="$run_date" BUSINESS_DATE="$business_date" MARKER_ROOT="$MARKER_ROOT" node - <<'NODE' 2>/dev/null
+const fs = require('fs');
+const path = require('path');
+const markerRoot = process.env.MARKER_ROOT;
+const runDate = process.env.RUN_DATE;
+const businessDate = process.env.BUSINESS_DATE;
+try {
+  const file = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  process.exit(marker?.ok === true
+    && marker?.stage === 'daily-inventory-guard'
+    && marker?.status === 'warning'
+    && marker?.runDate === runDate
+    && marker?.businessDate === businessDate ? 0 : 1);
+} catch { process.exit(1); }
+NODE
+}
+
+complete_inventory_warning_without_child() {
+  local run_date="$1"
+  local business_date="$2"
+  if ! inventory_warning_marker_present "$run_date" "$business_date"; then
+    return 1
+  fi
+  # This is the only pre-final-marker escape hatch.  It checks the warning
+  # marker, immutable plan/result hashes, the current journal, all 38 morning
+  # artifacts, exact dates, and the absence of the operating marker.
+  if ! daily_run_pre_warning_audit "$run_date" "$business_date"; then
+    echo "[cloud-morning-chain-wrapper] inventory warning pre-audit failed; child not started and warning not promoted runDate=$run_date businessDate=$business_date" >&2
+    return 78
+  fi
+  local morning_file="$STATE_DIR/${run_date}-all.json"
+  local inventory_marker_file="$MARKER_ROOT/$run_date/daily-inventory-guard.json"
+  local plan_file="$INVENTORY_RUNTIME_ROOT/plans/daily-inventory-replenishment-$run_date.json"
+  local result_file="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$run_date.json"
+  if ! node "$ROOT/scripts/pipeline_marker.mjs" write \
+    --stage daily-operating-refresh \
+    --date "$run_date" \
+    --business-date "$business_date" \
+    --status warning \
+    --message "all 19 stores and supplements completed; inventory completed with an audited same-day item warning" \
+    --root "$MARKER_ROOT" \
+    --evidence "$morning_file" \
+    --evidence "$inventory_marker_file" \
+    --evidence "$plan_file" \
+    --evidence "$result_file" >/dev/null; then
+    echo "[cloud-morning-chain-wrapper] could not write the daily operating warning marker; child not started" >&2
+    return 78
+  fi
+  if ! daily_run_warning_completed "$run_date" "$business_date"; then
+    echo "[cloud-morning-chain-wrapper] post-write warning evidence audit failed; active context retained and child not started runDate=$run_date businessDate=$business_date" >&2
+    return 78
+  fi
+  write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with an audited same-day item warning"
+  clear_active_context "$run_date"
+  echo "[cloud-morning-chain-wrapper] converged audited inventory warning without child or inventory rerun runDate=$run_date businessDate=$business_date"
+  return 0
+}
 # Current latest.json status (missing/unreadable prints nothing).
 latest_state_status() {
   STATE_DIR="$STATE_DIR" node - <<'NODE' 2>/dev/null || true
@@ -455,13 +571,20 @@ run_chain_once() {
     echo "[cloud-morning-chain-wrapper] ERROR child chain failed runDate=$run_date businessDate=$business_date exit=$status; active context (deadlineEpoch=$deadline) kept for service Restart resume" >&2
     return "$status"
   fi
-  if ! daily_run_completed "$run_date" "$business_date"; then
-    echo "[cloud-morning-chain-wrapper] ERROR child chain exited 0 but the single completion marker (daily-operating-refresh done with matching dates) is missing runDate=$run_date businessDate=$business_date; treated as failure, context kept" >&2
-    return 78
+  if daily_run_completed "$run_date" "$business_date"; then
+    write_completed_latest_state "$run_date" "$business_date" "ok" "semantic daily-operating-refresh evidence verified by owning wrapper"
+    clear_active_context "$run_date"
+    echo "[cloud-morning-chain-wrapper] run completed with marker evidence runDate=$run_date businessDate=$business_date"
+    return 0
   fi
-  write_completed_latest_state "$run_date" "$business_date"
-  clear_active_context "$run_date"
-  echo "[cloud-morning-chain-wrapper] run completed with marker evidence runDate=$run_date businessDate=$business_date"
+  if daily_run_warning_completed "$run_date" "$business_date"; then
+    write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+    clear_active_context "$run_date"
+    echo "[cloud-morning-chain-wrapper] run completed with warning marker evidence runDate=$run_date businessDate=$business_date"
+    return 0
+  fi
+  echo "[cloud-morning-chain-wrapper] ERROR child chain exited 0 but the single completion marker (daily-operating-refresh done or verified warning with matching dates) is missing runDate=$run_date businessDate=$business_date; treated as failure, context kept" >&2
+  return 78
 }
 
 ATTEMPT=0
@@ -482,9 +605,21 @@ run_one_date() {
     echo "[cloud-morning-chain-wrapper] verified completion already exists runDate=$run_date businessDate=$business_date; no child started"
     return 0
   fi
+  if daily_run_warning_completed "$run_date" "$business_date"; then
+    write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+    clear_active_context "$run_date"
+    echo "[cloud-morning-chain-wrapper] verified warning completion already exists runDate=$run_date businessDate=$business_date; no child started"
+    return 0
+  fi
+  if inventory_warning_marker_present "$run_date" "$business_date"; then
+    # A warning marker without the final operating marker is a recoverable
+    # terminal warning, not a reason to start another child/capacity attempt.
+    # The helper performs the complete pre/post shared-validator audit.
+    complete_inventory_warning_without_child "$run_date" "$business_date"
+    return $?
+  fi
   if deadline_expired "$deadline"; then
     write_terminal_deadline_failure "$run_date" "$business_date" "$deadline"
-    clear_active_context "$run_date"
     return 76
   fi
   ATTEMPT=$((ATTEMPT + 1))

@@ -44,6 +44,7 @@ assert.ok(`${path.resolve(tempDir)}${path.sep}`.toLowerCase().startsWith(resolve
 try {
   const fixtureRoot = path.join(tempDir, 'repo');
   const fixtureScripts = path.join(fixtureRoot, 'scripts');
+  const fixtureInventory = path.join(fixtureScripts, 'inventory');
   const fixtureLib = path.join(fixtureRoot, 'lib');
   const fixtureSystemdSource = path.join(fixtureRoot, 'infra', 'systemd');
   const fixtureManager = path.join(fixtureScripts, 'manage_cloud_maintenance_mode.mjs');
@@ -54,6 +55,7 @@ try {
   const fakeDaemonReload = path.join(tempDir, 'daemon-reload');
   const fakeShow = path.join(tempDir, 'show');
   await fs.mkdir(fixtureScripts, {recursive: true});
+  await fs.mkdir(fixtureInventory, {recursive: true});
   await fs.mkdir(fixtureLib, {recursive: true});
   await fs.mkdir(fixtureSystemdSource, {recursive: true});
   await fs.mkdir(systemdRoot);
@@ -65,10 +67,23 @@ try {
   }
   await fs.writeFile(fixtureInstaller, fixtureInstallerSource, 'utf8');
   await fs.copyFile(MANAGER, fixtureManager);
+  await fs.copyFile(
+    path.join(ROOT, 'scripts', 'inventory', 'assert_inventory_writer_release_aligned.mjs'),
+    path.join(fixtureInventory, 'assert_inventory_writer_release_aligned.mjs'),
+  );
+  await fs.copyFile(
+    path.join(ROOT, 'scripts', 'check_release_source_state.mjs'),
+    path.join(fixtureScripts, 'check_release_source_state.mjs'),
+  );
   for (const moduleName of [
     'atomic_file_publish.mjs',
     'cloud_maintenance_mode.mjs',
     'cloud_runtime_inventory.mjs',
+    'cross_process_ticket_lock.mjs',
+    'emergency_local_release_receipt.mjs',
+    'source_release_attestation.mjs',
+    'source_release_github_evidence.mjs',
+    'source_release_version.mjs',
   ]) {
     await fs.copyFile(path.join(ROOT, 'lib', moduleName), path.join(fixtureLib, moduleName));
   }

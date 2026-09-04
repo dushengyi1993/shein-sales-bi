@@ -344,7 +344,11 @@ const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random
     'hasDriftSubmittedPendingEvidence', 'normalizeDriftResumeResult', 'isDriftResumeResultSettled',
   ], {isSettledDriftRepairResult: driftSettled});
   const fallbackSource = await fs.readFile(path.join(ROOT, 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs'), 'utf8');
-  const fallbackSettled = value => value?.ok === true || value?.blocked?.type === 'platform_or_inventory_blocked';
+  const fallbackSettled = value => value?.ok === true
+    || value?.blocked?.type === 'platform_or_inventory_blocked'
+    || value?.blocked?.type === 'inventory_transaction_restore_failed'
+    || value?.status === 'inventory_transaction_restore_failed'
+    || value?.classification === 'inventory_transaction_restore_failed';
   const fallback = loadResumeFunctions(fallbackSource, [
     'hasFallbackSubmittedPendingEvidence', 'normalizeFallbackResumeResult', 'isFallbackResumeResultSettled',
   ], {isResumableFallbackResult: fallbackSettled});
@@ -369,6 +373,50 @@ const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random
   assert.equal(manual.manualResultDocumentMatches({workFingerprint: 'same', dryRunOnly: true, results: []}, 'same', false), false,
     'same-fingerprint dry-run result must never satisfy execute resume');
   assert.equal(manual.manualResultDocumentMatches({workFingerprint: 'same', dryRunOnly: false, results: []}, 'same', false), true);
+
+  const restoreFailedProductionShape = {
+    storeKey: 'FY',
+    sourceRescuePath: 'tmp/marketing-signup/limited-discount-rescue/rescue-FY-group-1.json',
+    rescuePath: 'tmp/marketing-signup/limited-discount-rescue/rescue-FY-group-1.json',
+    targetSkcs: ['FY-SKC-1'],
+    ok: false,
+    status: 'inventory_transaction_restore_failed',
+    classification: 'inventory_transaction_restore_failed',
+    terminalBlocked: false,
+    submitAttempted: false,
+    inventoryTransaction: {
+      writeAttempted: true,
+      safe: false,
+      submitAttempted: false,
+    },
+    blocked: {
+      type: 'inventory_transaction_restore_failed',
+      reason: 'INVENTORY_WRITE_PENDING_CONFLICT',
+      blockedSkcs: ['FY-SKC-1'],
+    },
+  };
+  const normalizedRestoreFailed = fallback.normalizeFallbackResumeResult(restoreFailedProductionShape);
+  assert.equal(normalizedRestoreFailed.classification, 'inventory_transaction_restore_failed',
+    'inventory_transaction_restore_failed must not be upgraded to submitted_without_exact_readback when submitAttempted is false');
+  assert.equal(normalizedRestoreFailed.status, 'inventory_transaction_restore_failed');
+  assert.equal(normalizedRestoreFailed.terminal, true);
+  assert.equal(normalizedRestoreFailed.terminalBlocked, true);
+  assert.equal(normalizedRestoreFailed.deferred, false);
+  assert.equal(normalizedRestoreFailed.recoverableDeferred, false);
+  assert.equal(normalizedRestoreFailed.writeAttempted, true);
+  assert.equal(normalizedRestoreFailed.blocked?.type, 'inventory_transaction_restore_failed');
+  assert.equal(normalizedRestoreFailed.blocked?.reason, 'INVENTORY_WRITE_PENDING_CONFLICT');
+  assert.deepEqual(normalizedRestoreFailed.blocked?.blockedSkcs, ['FY-SKC-1']);
+  assert.equal(fallback.isFallbackResumeResultSettled(normalizedRestoreFailed), true,
+    'inventory_transaction_restore_failed must be settled and not replay');
+  assert.equal(fallback.isFallbackResumeResultSettled({
+    status: 'inventory_transaction_restore_failed',
+    inventoryTransaction: {writeAttempted: true, safe: false, submitAttempted: false},
+  }), true, 'inventory_transaction_restore_failed status must be settled');
+  assert.equal(fallback.isFallbackResumeResultSettled({status: 'failed'}), false,
+    'ordinary failed must remain unsettled');
+  assert.equal(fallback.isFallbackResumeResultSettled({status: 'deadline_deferred', deferred: true}), false,
+    'deadline deferred must remain unsettled');
 
   console.log(JSON.stringify({
     ok: true,

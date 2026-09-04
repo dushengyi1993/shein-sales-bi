@@ -12,6 +12,19 @@ import {
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 import {buildLimitedDiscountDriftRescuePlan} from './build_limited_discount_drift_rescue_plan.mjs';
 import {buildManualLimitedDiscountRestorePlan} from './build_manual_limited_discount_restore_plan.mjs';
+import {
+  formatChinaBusinessDateTime,
+  parseChinaBusinessDateTime,
+} from '../../lib/marketing_datetime.mjs';
+
+assert.equal(parseChinaBusinessDateTime('2026-09-10 23:59:59')?.toISOString(), '2026-09-10T15:59:59.000Z');
+assert.equal(parseChinaBusinessDateTime('2026-09-10T23:59:59+08:00')?.toISOString(), '2026-09-10T15:59:59.000Z');
+assert.equal(parseChinaBusinessDateTime('2026-09-10T15:59:59Z')?.toISOString(), '2026-09-10T15:59:59.000Z');
+assert.equal(formatChinaBusinessDateTime(parseChinaBusinessDateTime('2026-09-10T23:59:59+08:00')), '2026-09-10 23:59:59');
+assert.equal(formatChinaBusinessDateTime(parseChinaBusinessDateTime('2026-09-10T15:59:59Z')), '2026-09-10 23:59:59');
+for (const invalid of ['', null, 'invalid-date', '2026-02-30 23:59:59', '2026-99-99 99:99:99']) {
+  assert.equal(parseChinaBusinessDateTime(invalid), null);
+}
 
 const activeAt = new Date('2026-07-13T12:00:00+08:00');
 const expiredAt = new Date('2026-07-21T12:00:00+08:00');
@@ -159,6 +172,11 @@ const [restoreBatchSource, applySource, guardSource, registryManagerSource] = aw
   fs.readFile('scripts/cloud_marketing_live_guard.sh', 'utf8'),
   fs.readFile('scripts/marketing/manage_manual_limited_discount_override.mjs', 'utf8'),
 ]);
+const highClickSource = await fs.readFile('scripts/marketing/batch_apply_high_click_special_discounts.mjs', 'utf8');
+assert.match(highClickSource, /findPersistedMarketingTransactionContinuation/,
+  'high-click restore invocation must check for persisted transactions before passing --continuation');
+assert.match(highClickSource, /manualContinuation/);
+assert.doesNotMatch(highClickSource, /'restore_failed'/);
 assert.match(restoreBatchSource, /assessRecoverableDryRun/);
 assert.match(restoreBatchSource, /replace_limited_discount_transactionally\.mjs/);
 assert.doesNotMatch(restoreBatchSource, /remove_skc_from_limited_discount\.mjs/);

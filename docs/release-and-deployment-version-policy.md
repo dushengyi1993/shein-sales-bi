@@ -66,6 +66,7 @@ Partner CLI 的 `partner-cli-v*` Release 与 BI 自动激活走独立的 `.githu
    - 不得用 `skip-worktree` / `assume-unchanged` 隐藏缺失或被改写的 tracked 文件；
    - CI 成功；
    - Portal health、关键 service/timer、数据库和业务读回通过。
+   - Inventory writer 兼容门与当前 checkout 使用同一 commit/source fingerprint/bundle/release receipt：执行 `node scripts/inventory/assert_inventory_writer_release_aligned.mjs --cwd /opt/shein-bi/app --expected-commit <exact commit> --json` 必须 exit 0；未通过前不得释放 maintenance。
 
 ## 4. 运行态与源码隔离
 

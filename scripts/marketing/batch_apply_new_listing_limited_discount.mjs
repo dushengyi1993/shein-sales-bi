@@ -318,7 +318,38 @@ export function hasFallbackSubmittedPendingEvidence(result) {
 }
 
 export function normalizeFallbackResumeResult(result) {
-  if (!result || isResumableFallbackResult(result) || !hasFallbackSubmittedPendingEvidence(result)) return result;
+  if (!result) return result;
+  const status = String(result?.status || '');
+  const classification = String(result?.classification || '');
+  const isInventoryRestoreFailed = status === 'inventory_transaction_restore_failed'
+    || classification === 'inventory_transaction_restore_failed'
+    || result?.blocked?.type === 'inventory_transaction_restore_failed';
+  if (isInventoryRestoreFailed) {
+    const blockedSkcs = Array.isArray(result?.blocked?.blockedSkcs) && result.blocked.blockedSkcs.length > 0
+      ? result.blocked.blockedSkcs
+      : Array.isArray(result?.targetSkcs) ? result.targetSkcs : [];
+    const reason = result?.blocked?.reason
+      || result?.error
+      || 'inventory transaction temporary raise or restore failed';
+    return {
+      ...result,
+      ok: false,
+      terminal: true,
+      terminalBlocked: true,
+      deferred: false,
+      recoverableDeferred: false,
+      writeAttempted: true,
+      status: 'inventory_transaction_restore_failed',
+      classification: 'inventory_transaction_restore_failed',
+      blocked: {
+        ...(result?.blocked || {}),
+        type: 'inventory_transaction_restore_failed',
+        reason,
+        blockedSkcs,
+      },
+    };
+  }
+  if (isResumableFallbackResult(result) || !hasFallbackSubmittedPendingEvidence(result)) return result;
   const blockedSkcs = Array.isArray(result.targetSkcs) ? result.targetSkcs : [];
   return {
     ...result,
@@ -340,7 +371,8 @@ export function normalizeFallbackResumeResult(result) {
 
 export function isFallbackResumeResultSettled(result) {
   return isResumableFallbackResult(result)
-    || result?.classification === 'submitted_without_exact_readback';
+    || result?.classification === 'submitted_without_exact_readback'
+    || result?.classification === 'inventory_transaction_restore_failed';
 }
 
 function storeConfigByKey() {

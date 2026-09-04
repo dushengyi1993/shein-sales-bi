@@ -138,6 +138,34 @@ try {
     /referencedIntentMissing/,
     'daily-only discovery must continue to fail closed when its supersede reference is outside the scanned domain',
   );
+  const quarantinedLifecycle = await readInventoryIntentJournals(narrowFiles, {
+    maxRunDate: currentRunDate,
+    allowMultiplePendingByScope: true,
+    currentJournalFile: currentJournal,
+    quarantineHistoricalDanglingSupersedes: true,
+  });
+  const quarantinedIntent = [...quarantinedLifecycle.pending.values()]
+    .find(intent => intent.intentId === olderIntent.intentId);
+  assert.ok(quarantinedIntent, 'a dangling historical supersede must restore the old intent as an item-scoped pending fence');
+  assert.equal(
+    [...quarantinedLifecycle.terminalOutcomes.values()].some(outcome => outcome.intentId === olderIntent.intentId),
+    false,
+    'a dangling supersede must never be accepted as a terminal outcome',
+  );
+  assert.deepEqual(
+    quarantinedLifecycle.quarantinedSupersedes.map(row => ({intentId: row.intentId, reason: row.reason})),
+    [{intentId: olderIntent.intentId, reason: 'referencedIntentMissing'}],
+  );
+  await assert.rejects(
+    readInventoryIntentJournals(narrowFiles, {
+      maxRunDate: currentRunDate,
+      allowMultiplePendingByScope: true,
+      currentJournalFile: olderJournal,
+      quarantineHistoricalDanglingSupersedes: true,
+    }),
+    /referencedIntentMissing/,
+    'a dangling supersede in the selected current journal must remain a hard failure',
+  );
 
   const configuredFiles = await discoverInventoryJournalAuditFiles(currentJournal, {
     SHEIN_BI_INVENTORY_JOURNAL_DIRS: `${dailyResults}${path.delimiter}${etResults}`,
@@ -168,12 +196,15 @@ try {
     'an unconfigured validator must remain local and fail closed rather than masking the missing reference',
   );
 
-  const [guardSource, validatorSource, morningUnit] = await Promise.all([
+  const [guardSource, executorSource, validatorSource, morningUnit] = await Promise.all([
     fs.readFile(path.join(ROOT, 'scripts', 'cloud_daily_inventory_replenishment_guard.sh'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'), 'utf8'),
     fs.readFile(path.join(ROOT, 'scripts', 'validate_daily_operating_refresh.mjs'), 'utf8'),
     fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-cloud-morning-chain.service'), 'utf8'),
   ]);
   assert.match(guardSource, /String\(process\.env\.SHEIN_BI_INVENTORY_JOURNAL_DIRS \|\| ''\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal, \{[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories: inventoryJournalDirectories/);
+  assert.match(guardSource, /currentJournalFile: currentJournal,[\s\S]*?quarantineHistoricalDanglingSupersedes: true/);
+  assert.equal((executorSource.match(/currentJournalFile: journalFile,[\s\S]{0,120}?quarantineHistoricalDanglingSupersedes: true/g) || []).length, 2, 'executor startup and locked fresh reread must share the quarantine contract');
   assert.match(validatorSource, /discoverInventoryJournalAuditFiles\(currentJournal, environment = process\.env\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories/);
   assert.match(validatorSource, /const journalFiles = await discoverInventoryJournalAuditFiles\(currentJournal\);[\s\S]*?const lifecycle = await readInventoryValidationLifecycle\(journalFiles, \{currentJournal, maxRunDate: runDate\}\);/);
   assert.match(validatorSource, /async function readInventoryValidationLifecycle\(journalFiles,[\s\S]*?readInventoryIntentJournals\(journalFiles, \{maxRunDate\}\)/);
@@ -183,6 +214,8 @@ try {
     ok: true,
     checks: [
       'daily_only_reference_missing_fails_closed',
+      'historical_dangling_supersede_is_item_scope_quarantined',
+      'current_journal_dangling_supersede_still_fails_closed',
       'complete_daily_and_et_domain_validates_supersede',
       'validator_env_domain_discovers_et_terminal',
       'validator_without_env_stays_local_and_safe',

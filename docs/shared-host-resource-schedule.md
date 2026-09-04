@@ -53,7 +53,7 @@
 - `browser-read`：全机最多2个不同 Profile。第2槽仅在 `MemAvailable >= 4GiB` 且负载/PSI门禁通过时准入。
 - `browser-write`：写 repair worker 使用的全机排他 lane，最多1个；事务中不中杀，店铺终态后才释放。营销只读 guard 不进入此 lane。
 - `db-projection`：全机1个，只覆盖最终成本/利润/Portal投影阶段。
-- Portal section 队列只保留一个 timer，错峰在每小时 `:02/:32` 触发：`:02` 是 `HEAVY_ALLOWED=0` 的 light-only 槽，deadline `:14`、最多一个轻 section；`:32` 是 heavy 槽，deadline `:44`。unit、slot wrapper 与 worker 都拒绝 `01:*`，并静态拒绝 `02:02`、`03:02`、`07:02` 的维护/昨日重试/晨链前窗口；其它小时只接受 `:01–04` / `:31–34` 起跑。08 时若晨链正在运行或状态未知，仍由既有 slot wrapper 动态 guard 让路并 fail-closed；timer、锁、section 优先级与 deadline 不因该静态门改变。
+- Portal section 队列只保留一个 timer，错峰在每小时 `:02/:32` 触发：`:02` 是 `HEAVY_ALLOWED=0` 的 light-only 槽，deadline `:14`、最多一个轻 section；`:32` 是 heavy 槽，deadline `:44`。unit、slot wrapper 与 worker 只拒绝 `01:*` 全小时；其它小时接受 `:01–04` / `:31–34` 起跑。晨链 active、activating、reloading 或状态未知时，仍由既有 slot wrapper 动态 guard 让路并 fail-closed；timer、锁、section 优先级与 deadline 不因该静态门改变。
 - Pipeline marker 跨服务目录只允许 `scripts/pipeline_marker.mjs` 维护 root/日期两级 `02770`，不递归改任意 state 路径。canonical root 为 `/data/shein-bi/state/pipeline-markers`，保持 `sheinops:sheinops`；`/opt/shein-bi/app/state` 是只读 bind/兼容路径，禁止写入。仅当 canonical root 不是 `2770` 时按需执行一次 `sudo -n chmod 2770 /data/shein-bi/state/pipeline-markers`；`2026-08-23` 日期目录已是 `sheinops:sheinops 2770`，无需改动。禁止 `chmod -R`、任何 `chown` 或递归修权限。
 - `io-heavy`：全机1个，备份、恢复测试、大归档不与大物化并行。
 - coordinator 按阶段拿取并释放令牌，禁止在HTTP等待、平台未ready或整个多店循环期间长期占有不需要的重令牌。
