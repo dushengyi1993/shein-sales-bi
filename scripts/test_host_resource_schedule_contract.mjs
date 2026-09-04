@@ -423,7 +423,10 @@ assert.deepEqual(calendars(unit('shein-bi-cloud-et-forwarder.timer')), [
 assert.deepEqual(calendars(unit('shein-bi-et-low-inventory-recheck.timer')), [
   '*-*-* 00,02,05,06,08,09,11,12,15,16,18,19,22:20:00',
 ]);
-assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
+assert.doesNotMatch(unit('shein-bi-cloud-et-forwarder.service'), /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m,
+  'a deferred ET sync must not be treated as a successful dependency by systemd');
+assert.match(unit('shein-bi-cloud-et-forwarder.service'), /^Environment=SHEIN_ET_TRIGGER_LOW_INVENTORY_GUARD=1$/m,
+  'the low-ET guard is triggered only after the forwarder has completed its child');
 assert.deepEqual(calendars(unit('shein-bi-db-backup.timer')), [
   '*-*-* 01:45:00',
   '*-*-* 02:05:00',

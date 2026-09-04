@@ -36,6 +36,7 @@ import {
   watchdogIssueMaintenanceClass,
   watchdogMaintenanceConfigurationIssue,
   withWatchdogSingleInstance,
+  watchdogExitCode,
 } from './cloud_ops_watchdog.mjs';
 import {
   NO_KEY_RETRY_PROTECTED_KINDS,
@@ -1008,6 +1009,15 @@ assert.match(watchdogSource, /assessDailyOpenapiSalesRecovery/);
 assert.match(watchdogSource, /daily_link_openapi_sales_recovery/);
 assert.match(watchdogSource, /resolveMarketingScanEvidencePath/);
 assert.match(watchdogSource, /recoveries,/);
+assert.equal(watchdogExitCode({dryRun: true, notificationOutcomes: []}), 0);
+assert.equal(watchdogExitCode({notificationOutcomes: [{ok: true, code: 0}]}), 0,
+  'a successfully delivered issue report must not make systemd red');
+assert.equal(watchdogExitCode({notificationOutcomes: []}), 0,
+  'an already-acknowledged issue episode must remain a healthy watchdog run');
+assert.equal(watchdogExitCode({notificationOutcomes: [{ok: false, code: 1}]}), 1,
+  'notification delivery failure must remain a retryable service failure');
+assert.match(watchdogSource, /process\.exitCode = watchdogExitCode\(/,
+  'watchdog exit status must follow delivery outcome, not issue presence');
 
 // Source integrity must fail closed for every kind of tracked-source drift,
 // including the dirty/hidden cases the old logic silently downgraded to a

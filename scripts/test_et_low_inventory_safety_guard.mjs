@@ -266,7 +266,14 @@ assert.match(executor, /const fields = \['matchKey', 'canonical', 'etSellableInv
 assert.doesNotMatch(executor, /aggregateEtStockRows|normalizeEtManifestProduct/,
   'the executor must not duplicate the builder ET normalization/aggregation loader');
 assert.match(forwarder, /orders,waybills,afterSales,inventoryTrend/);
-assert.match(forwarderService, /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m);
+assert.doesNotMatch(forwarderService, /^OnSuccess=shein-bi-et-low-inventory-guard\.service$/m,
+  'a deferred ET forwarder must not trigger the guard through systemd OnSuccess');
+assert.match(forwarderService, /^Environment=SHEIN_ET_TRIGGER_LOW_INVENTORY_GUARD=1$/m,
+  'the ET guard must be triggered only by a completed forwarder child');
+assert.match(forwarder, /SHEIN_ET_TRIGGER_LOW_INVENTORY_GUARD_DISABLED/,
+  'the forwarder trigger must remain explicitly disableable for controlled recovery');
+assert.match(forwarder, /systemctl start --no-block shein-bi-et-low-inventory-guard\.service/,
+  'the ET guard must start only after the forwarder has produced its manifest');
 assert.match(guardService, /SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT=cloud_et_low_inventory_guard/);
 assert.match(guard, /--operation-mode et_low_inventory_safety/);
 assert.match(guard, /--et-manifest "\$ET_MANIFEST_FILE"/);

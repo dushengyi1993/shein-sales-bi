@@ -1169,6 +1169,15 @@ async function notify(args, message, logFile, {kind = 'cloud-watchdog', idempote
   return await run(process.execPath, argv);
 }
 
+// A reported business issue is not itself a failed watchdog run.  The
+// scheduler must stay green when the report and notification were delivered;
+// a non-zero service result is reserved for an undelivered notification (or
+// an exception, handled by main()).
+export function watchdogExitCode({dryRun = false, notificationOutcomes = []} = {}) {
+  if (dryRun) return 0;
+  return notificationOutcomes.some(outcome => outcome?.ok !== true) ? 1 : 0;
+}
+
 async function acquireWatchdogSingleInstance(args, {lockTimeoutMs = SINGLE_INSTANCE_LOCK_TIMEOUT_MS} = {}) {
   const stateDir = String(args?.stateDir || '').trim();
   if (!stateDir) throw new TypeError('watchdog single-instance lock requires args.stateDir');
@@ -1943,7 +1952,10 @@ async function runWatchdog(args) {
   };
   if (!args.dryRun) await fs.writeFile(logFile, JSON.stringify(finalReport, null, 2), 'utf8');
   console.log(JSON.stringify({...finalReport, logFile}, null, 2));
-  if (issues.length) process.exitCode = args.dryRun ? 0 : 1;
+  process.exitCode = watchdogExitCode({
+    dryRun: args.dryRun,
+    notificationOutcomes,
+  });
 }
 
 async function main() {

@@ -113,7 +113,7 @@ sudo node scripts/manage_cloud_maintenance_mode.mjs resume \
 
 | `shein-bi-db-backup.timer` | 北京时间 `01:45`，宿主 deadline `02:37` | 备份业务库、Metabase 元数据库和生产登记；Profile + WebAPI session 加密归档为保留但默认关闭的独立可选项；COS 内容级校验完成前不删本地 |
 
-| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列 |
+| `shein-bi-cloud-et-forwarder.timer` | 北京时间 `01:12/04:20/07:20/10:20/13:20/17:20/20:20/23:20` | 按经营检查点抓取 ET 货代仓/出库单、入仓；同步刷新轻量 section，重 section 进入 host-locked 队列；只有本次同步真正完成后才触发低 ET 守卫，资源 defer 不触发 |
 
 | `shein-bi-cloud-et-storage-fee.timer` | 北京时间 `14:20` | 只读同步 ET 仓储费最终账单与 SKU 明细，14:27 前完成利润 cache 与对账 |
 | 每日经营 run 内库存阶段 | `07:10` 统一 coordinator 的末段 | 19店慢变数据及补充域完整发布后，先刷新当前 OpenAPI 库存，再生成当天计划并按常驻授权自动执行；不再另建主/重试 timer |

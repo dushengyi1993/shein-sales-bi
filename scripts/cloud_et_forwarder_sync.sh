@@ -305,3 +305,18 @@ if [[ "${SHEIN_ET_REFRESH_PORTAL:-1}" == "1" ]]; then
 fi
 
 echo "[cloud_et_forwarder_sync] done date=$DATE mode=$MODE target=$TARGET manifest=$MANIFEST_PATH log=$LOG_FILE"
+# Only a completed sync may launch the dependent low-ET guard.  The host
+# wrapper can defer before this script starts (exit 75), so the old systemd
+# OnSuccess edge incorrectly launched the guard after a defer.  Starting it
+# here keeps the dependency tied to this exact successful manifest.
+if [[ "${SHEIN_ET_TRIGGER_LOW_INVENTORY_GUARD:-0}" == "1" \
+  && "${SHEIN_BI_HOST_HEAVY_WRAPPED:-0}" == "1" \
+  && "${SHEIN_BI_HOST_HEAVY_DOMAIN:-}" == "et-forwarder" \
+  && "${SHEIN_ET_TRIGGER_LOW_INVENTORY_GUARD_DISABLED:-0}" != "1" ]]; then
+  if /usr/bin/systemctl start --no-block shein-bi-et-low-inventory-guard.service; then
+    echo "[cloud_et_forwarder_sync] low-ET guard queued after completed ET sync"
+  else
+    TRIGGER_STATUS=$?
+    echo "[cloud_et_forwarder_sync] WARN low-ET guard trigger failed status=$TRIGGER_STATUS; ET manifest remains committed and recheck will retry" >&2
+  fi
+fi
