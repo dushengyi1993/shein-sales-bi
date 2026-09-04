@@ -347,26 +347,30 @@ for ((index=1; index<=MAX_SECTIONS; index+=1)); do
   fi
   CLAIM_ARGS=(claim --lease-seconds "$LEASE_SECONDS")
   if (( index == 1 )); then
-    # linksData feeds the Portal homepage and must not wait behind a long
-    # profit/materialization attempt. Only change the first claim's preference;
-    # lease, deadline, exclusion and terminal publication gates stay intact.
-    FIRST_QUEUE_STATUS=""
-    FIRST_LINKS_DATA_PENDING=0
-    set +e
-    FIRST_QUEUE_STATUS="$(queue_command status)"
-    FIRST_QUEUE_STATUS_CODE=$?
-    set -e
-    if [[ "$FIRST_QUEUE_STATUS_CODE" -eq 0 ]]; then
-      FIRST_LINKS_DATA_PENDING="$(printf '%s' "$FIRST_QUEUE_STATUS" | json_from_stdin 'try { const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); const e=(x.entries||[]).find(row=>row.section==="linksData"); process.stdout.write(e && ["pending","running"].includes(e.status) ? "1" : "0"); } catch { process.stdout.write("0"); }')"
-    fi
-    if [[ "$FIRST_LINKS_DATA_PENDING" == "1" ]]; then
-      CLAIM_ARGS+=(--prefer-sections linksData)
-      echo "[portal-section-worker] first claim prioritizes pending linksData"
-    elif [[ "$HEAVY_FIRST" == "1" && "$HEAVY_ALLOWED" == "1" ]]; then
-      CLAIM_ARGS+=(--prefer-sections profit,productSalesDaily,homeRankings)
+    if [[ "$HEAVY_FIRST" == "1" && "$HEAVY_ALLOWED" == "1" ]]; then
+      # The :32 slot is the only window with enough budget for accounting-heavy
+      # materialization. Do not spend its first minutes on linksData: the :02
+      # light slot serves that homepage cache. If no heavy entry is runnable,
+      # claimNext naturally falls back to the remaining light queue.
+      CLAIM_ARGS+=(--prefer-sections profit,productSalesDaily,homeRankings,rankings,inventoryTrend)
+      echo "[portal-section-worker] first claim prioritizes pending heavy sections"
+    else
+      FIRST_QUEUE_STATUS=""
+      FIRST_LINKS_DATA_PENDING=0
+      set +e
+      FIRST_QUEUE_STATUS="$(queue_command status)"
+      FIRST_QUEUE_STATUS_CODE=$?
+      set -e
+      if [[ "$FIRST_QUEUE_STATUS_CODE" -eq 0 ]]; then
+        FIRST_LINKS_DATA_PENDING="$(printf '%s' "$FIRST_QUEUE_STATUS" | json_from_stdin 'try { const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); const e=(x.entries||[]).find(row=>row.section==="linksData"); process.stdout.write(e && ["pending","running"].includes(e.status) ? "1" : "0"); } catch { process.stdout.write("0"); }')"
+      fi
+      if [[ "$FIRST_LINKS_DATA_PENDING" == "1" ]]; then
+        CLAIM_ARGS+=(--prefer-sections linksData)
+        echo "[portal-section-worker] first light claim prioritizes pending linksData"
+      fi
     fi
   elif [[ "$HEAVY_FIRST" == "1" && "$HEAVY_ALLOWED" == "1" ]]; then
-    CLAIM_ARGS+=(--prefer-sections profit,productSalesDaily,homeRankings)
+    CLAIM_ARGS+=(--prefer-sections profit,productSalesDaily,homeRankings,rankings,inventoryTrend)
   fi
   EXCLUDED_SECTIONS=("${CLAIMED_SECTIONS[@]}")
   if (( PROFIT_COMPLETED_THIS_RUN == 1 )); then

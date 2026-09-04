@@ -215,6 +215,7 @@ async function runWindowCase({
   deadlineEpoch,
   deadlineMinute,
   heavyAllowed,
+  heavyFirst = 0,
   sections,
   maxSections,
   expectedStatus,
@@ -277,6 +278,7 @@ async function runWindowCase({
     SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED: '1',
     SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE: String(deadlineMinute),
     SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED: String(heavyAllowed),
+    SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST: String(heavyFirst),
     SHEIN_TEST_PROFIT_HTTP: String(profitHttp),
     SHEIN_TEST_REQUEUE_PROFIT: requeueProfit ? '1' : '0',
     SHEIN_TEST_REMOVE_PROFIT_BEFORE_COMPLETE: removeProfitBeforeComplete ? '1' : '0',
@@ -380,6 +382,38 @@ if (tools.status !== 0) {
     'a dedicated :32 window with sufficient remaining time may claim profit');
   assert.equal(heavyWindow.queue.entries.some(entry => entry.section === 'profit'), false,
     'the heavy profit claim must complete in the sufficient window');
+
+  const heavyBeatsLinksData = await runWindowCase({
+    name: 'heavy-beats-links-data',
+    hour: '06',
+    minute: '32',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    deadlineMinute: 44,
+    heavyAllowed: 1,
+    heavyFirst: 1,
+    sections: ['linksData', 'profit'],
+    maxSections: 1,
+    expectedStatus: 0,
+  });
+  assert.deepEqual(heavyBeatsLinksData.calls, ['profit'],
+    'the dedicated heavy slot must not spend its first claim on linksData');
+
+  const lightPrioritizesLinksData = await runWindowCase({
+    name: 'light-prioritizes-links-data',
+    hour: '06',
+    minute: '02',
+    nowEpoch: 1_000,
+    deadlineEpoch: 1_600,
+    deadlineMinute: 14,
+    heavyAllowed: 0,
+    heavyFirst: 0,
+    sections: ['orders', 'linksData'],
+    maxSections: 1,
+    expectedStatus: 75,
+  });
+  assert.deepEqual(lightPrioritizesLinksData.calls, ['linksData'],
+    'the light slot must keep the homepage linksData refresh responsive');
 
   const rolloverWindow = await runWindowCase({
     name: 'immutable-slot-rollover',
