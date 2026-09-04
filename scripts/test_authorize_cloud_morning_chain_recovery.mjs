@@ -229,6 +229,7 @@ async function makeFixture({
     readActive: () => fs.readFile(path.join(cloudState, 'active.json'), 'utf8'),
     readReceipt: () => fs.readFile(path.join(cloudState, 'recovery', `${RUN_DATE}.json`), 'utf8'),
     readMetricRefetch: () => fs.readFile(path.join(stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json'), 'utf8'),
+    readMetricRefetchStat: () => fs.stat(path.join(stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json')),
     readActiveStat: () => fs.stat(path.join(cloudState, 'active.json')),
     readReceiptStat: () => fs.stat(path.join(cloudState, 'recovery', `${RUN_DATE}.json`)),
   };
@@ -510,9 +511,19 @@ async function main() {
       assert.deepEqual(fx.writerCalls, ['link-business-metric-refetch.json', `${RUN_DATE}.json`, 'active.json']);
       assert.equal(metricWrite.options.mode, 0o660);
       if (process.platform !== 'win32') {
-        const activeStat = await fx.readActiveStat();
-        assert.equal(metricWrite.options.uid, activeStat.uid);
-        assert.equal(metricWrite.options.gid, activeStat.gid);
+        const [activeStat, metricStat] = await Promise.all([
+          fx.readActiveStat(),
+          fx.readMetricRefetchStat(),
+        ]);
+        assert.equal(metricStat.uid, activeStat.uid);
+        assert.equal(metricStat.gid, activeStat.gid);
+        if (process.getuid?.() === 0) {
+          assert.equal(metricWrite.options.uid, activeStat.uid);
+          assert.equal(metricWrite.options.gid, activeStat.gid);
+        } else {
+          assert.equal(metricWrite.options.uid, undefined);
+          assert.equal(metricWrite.options.gid, undefined);
+        }
       }
       assert.equal(metric.status, 'recovery_authorized');
       assert.equal(metric.previousDeadlineEpoch, NESTED_METRIC_DEADLINE);

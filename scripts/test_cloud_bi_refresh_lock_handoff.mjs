@@ -120,7 +120,7 @@ assert.match(
 );
 assert.match(
   queueWorkerSource,
-  /HOME_RANKINGS_MIN_RUNTIME_SEC=.*540[\s\S]*EXCLUDED_SECTIONS\+=\(homeRankings\)[\s\S]*defer heavy section=homeRankings/,
+  /HOME_RANKINGS_MIN_RUNTIME_SEC=.*630[\s\S]*EXCLUDED_SECTIONS\+=\(homeRankings\)[\s\S]*defer heavy section=homeRankings/,
   'the measured multi-minute homeRankings rebuild must not enter a short ET queue window',
 );
 assert.match(

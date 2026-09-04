@@ -300,7 +300,7 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // Deterministic registrations added after that snapshot are tracked with an
 // explicit count so the exact-equality assertions below stay source-
 // explainable instead of drifting silently or being loosened to >=.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 59;
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 63;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   - 1
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
