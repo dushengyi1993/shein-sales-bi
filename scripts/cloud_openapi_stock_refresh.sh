@@ -108,6 +108,7 @@ jq -n \
   }' > "$TMP_FILE"
 mv -f "$TMP_FILE" "$STATE_FILE"
 node "$ROOT/scripts/pipeline_marker.mjs" write \
+  --snapshot-evidence \
   --stage stock-refresh \
   --date "$RUN_DATE" \
   --business-date "$RUN_DATE" \

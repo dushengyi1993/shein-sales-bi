@@ -12,6 +12,7 @@ import {
   buildDailyInventoryPlanHashPayload,
   computeInventoryOverwriteQuantity,
   INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+  INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
   INVENTORY_LEGACY_UNVERSIONED_CUTOFF_DATE,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
@@ -113,6 +114,7 @@ function makeIntent({
   beforeUsable = 2,
   beforeTotal = beforeUsable,
   beforeLocked = 0,
+  beforeTemporary = 0,
   changeQuantity,
   policyVersion = policy.policyVersion,
   recordedAt = new Date().toISOString(),
@@ -126,6 +128,7 @@ function makeIntent({
     totalInventoryQuantity: beforeTotal,
     totalUsableInventory: beforeUsable,
     totalLockedQuantity: beforeLocked,
+    temporaryInventoryQuantity: beforeTemporary,
     stockRowMissing: false,
     warehouseCodes: [],
   };
@@ -137,7 +140,7 @@ function makeIntent({
       skuCode: row.skuCode,
       invType: 'VI',
       changeType: 'OVERWRITE',
-      changeQuantity: changeQuantity ?? computeInventoryOverwriteQuantity(target, before),
+      changeQuantity: changeQuantity ?? computeInventoryOverwriteQuantity(target, before, overwriteComputationVersion || INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION),
       changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard',
     }]},
     headers: {language: 'en'},
@@ -363,6 +366,7 @@ const server = http.createServer((request, response) => {
         totalInventoryQuantity: usable,
         totalUsableInventory: usable,
         totalLockedQuantity: 0,
+        totalTempLockQuantity: 0,
         warehouseInventoryList: [],
       }]}]}]});
     }
@@ -589,7 +593,7 @@ try {
   assert.equal(state.postCount, 1, 'the independent current scope still posts once');
   assert.deepEqual(state.postSkus, [ROWS[1].skuCode], 'absent historical ZX scope must receive zero POSTs');
 
-  // 3) Exact old target visible: close the original journal and defer current ZX.
+  // 3) Exact old target visible: bind a new reconciliation record without rewriting the original journal.
   const secondRoot = path.join(temp, 'historical-matched');
   const secondIntent = makeIntent({runDate: priorDate, row: ROWS[0], planHash: 'e'.repeat(64), intentId: 'historical-matched-1'});
   const second = await writeFixture(secondRoot, {oldIntent: secondIntent});
@@ -607,7 +611,11 @@ try {
   assert.equal(closedResult.historicalIntentClosed, true);
   assert.equal(closedResult.deferred, true);
   const secondJournal = await journalEntries(path.join(secondRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`));
-  assert.deepEqual(secondJournal.filter(row => row.kind === 'write_outcome').map(row => row.disposition), ['readback_matched']);
+  assert.deepEqual(secondJournal, [secondIntent], 'historical journal remains byte-equivalent JSON without appended outcomes');
+  const crossResolutions = (await journalEntries(second.currentIntentFile)).filter(row => row.kind === 'cross_journal_resolution');
+  assert.deepEqual(crossResolutions.map(row => row.event.disposition), ['readback_matched']);
+  const reconciled = await readInventoryIntentJournals(await discoverInventoryJournalFiles(second.currentIntentFile, {includeAll: true}), {allowMultiplePendingByScope: true});
+  assert.equal([...reconciled.terminalOutcomes.values()].find(row => row.intentId === secondIntent.intentId)?.disposition, 'readback_matched');
   assert.equal((await journalEntries(second.currentIntentFile)).filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 0, 'historical close must not create a current corrective intent');
 
   // 3b) The generic executor must not synthesize a supersede outcome from a
@@ -1097,6 +1105,7 @@ try {
     beforeTotal: 9,
     beforeUsable: 8,
     beforeLocked: 0,
+    beforeTemporary: 1,
     policyVersion: historicalPolicyVersion,
   });
   await fs.writeFile(reconcile.currentIntentFile, `${JSON.stringify(reconcileIntent)}\n`);

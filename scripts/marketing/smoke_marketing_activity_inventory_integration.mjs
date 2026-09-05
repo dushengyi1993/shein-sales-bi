@@ -180,6 +180,7 @@ assert.deepEqual(yjTransaction.rows[0].before, {
   totalInventoryQuantity: 8,
   totalUsableInventory: 6,
   totalLockedQuantity: 2,
+  temporaryInventoryQuantity: 0,
 });
 assert.ok(yjEvents.indexOf('temporary-raise') < yjEvents.indexOf('activity-submit'));
 assert.ok(yjEvents.indexOf('activity-submit') < yjEvents.indexOf('activity-readback:after_submit_before_restore'));
@@ -250,7 +251,7 @@ assert.doesNotMatch(
   partialResult.blockers.map(row => row.reason).join(','),
   /activity_invalid_or_withdrawn_after_inventory_restore/,
 );
-assert.equal(classifyActivityInventoryFailureStatus(partialResult), 'inventory_transaction_or_enrollment_blocked');
+assert.equal(classifyActivityInventoryFailureStatus(partialResult), 'activity_submission_status_unknown');
 assert.equal(classifyActivityInventoryFailureStatus({
   ok: false,
   safe: false,
@@ -304,6 +305,7 @@ function fakeAdapterState() {
       totalInventoryQuantity: 8,
       totalUsableInventory: 6,
       totalLockedQuantity: 2,
+      temporaryInventoryQuantity: 0,
     },
   };
 }

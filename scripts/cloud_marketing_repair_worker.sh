@@ -3,9 +3,23 @@ set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 source "$ROOT/scripts/lib/shared_lock.sh"
+runtime_location() {
+  node "$ROOT/scripts/resolve_cloud_runtime_artifact.mjs" --location "$1"
+}
+runtime_read() {
+  node "$ROOT/scripts/resolve_cloud_runtime_artifact.mjs" "$1"
+}
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 DATE="${SHEIN_BI_MARKETING_REPAIR_DATE:-$(TZ="$TZ_NAME" date +%F)}"
 CURRENT_DATE="$(TZ="$TZ_NAME" date +%F)"
+ACTIVATION_DATE="${SHEIN_BI_MARKETING_REPAIR_ACTIVATION_DATE:-}"
+if [[ -n "$ACTIVATION_DATE" ]]; then
+  if [[ ! "$ACTIVATION_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then exit 64; fi
+  if [[ "$DATE" < "$ACTIVATION_DATE" ]]; then
+    echo "[cloud_marketing_repair] queue predates activation; existing business evidence preserved without execution"
+    exit 75
+  fi
+fi
 if [[ "$DATE" != "$CURRENT_DATE" ]]; then
   echo "[cloud_marketing_repair] refusing non-current repair queue date=$DATE current=$CURRENT_DATE" >&2
   exit 75
@@ -18,6 +32,14 @@ LOCK_FILE="${SHEIN_BI_MARKETING_REPAIR_LOCK_FILE:-$ROOT/state/locks/shein-bi-clo
 ARTIFACT_PUBLICATION_LOCK_FILE="${SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-marketing-artifact-publication.lock}"
 ARTIFACT_PUBLICATION_LOCK_WAIT_SEC="${SHEIN_BI_MARKETING_ARTIFACT_PUBLICATION_LOCK_WAIT_SEC:-30}"
 GUARD_OUT="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"
+if [[ "$ROOT" == "/opt/shein-bi/app" ]]; then
+  STATE_DIR="$(runtime_location "$STATE_DIR")"
+  ALERT_DIR="$(runtime_location "$ALERT_DIR")"
+  QUEUE_FILE="$STATE_DIR/repair-queues/marketing-repair-${DATE}.json"
+  LOCK_FILE="$(runtime_location "$LOCK_FILE")"
+  ARTIFACT_PUBLICATION_LOCK_FILE="$(runtime_location "$ARTIFACT_PUBLICATION_LOCK_FILE")"
+  GUARD_OUT="$(runtime_location "$GUARD_OUT")"
+fi
 GUARD_INPUT_OUT="$GUARD_OUT"
 MARKETING_PLAN_REGISTRY_FILE="${SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE:-/srv/shein-bi/runtime/marketing-plans/current.json}"
 export SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE="$MARKETING_PLAN_REGISTRY_FILE"
@@ -40,6 +62,7 @@ MAX_GROUPS="${MAX_GROUPS_OVERRIDE:-32}"
 AUTOMATION_CONTEXT="${SHEIN_BI_MARKETING_AUTOMATION_CONTEXT:-}"
 EXECUTION_LOCATION="${SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION:-cloud}"
 CLOUD_FALLBACK_ENABLED="${SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED:-false}"
+CLOUD_PRIMARY_ENABLED="${SHEIN_BI_MARKETING_CLOUD_PRIMARY_ENABLED:-false}"
 FALLBACK_MIN_START_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC:-900}"
 FALLBACK_GRACEFUL_CUTOFF_EPOCH="${SHEIN_BI_MARKETING_REPAIR_GRACEFUL_CUTOFF_EPOCH:-}"
 FALLBACK_OUTER_HARD_DEADLINE_EPOCH="${SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_EPOCH:-}"
@@ -99,7 +122,6 @@ STACK_REVIEW_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_KILL_AFTER_SEC:-6
 GUARD_MAX_AGE_HOURS="${SHEIN_BI_MARKETING_LIVE_GUARD_MAX_AGE_HOURS:-96}"
 GUARD_CLOUD_BI_SSH="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_SSH:-local}"
 GUARD_CLOUD_BI_ROOT="${SHEIN_BI_MARKETING_LIVE_CLOUD_BI_ROOT:-$ROOT}"
-BUSY_SERVICES="${SHEIN_BI_MARKETING_REPAIR_BUSY_SERVICES:-shein-bi-cloud-marketing-live-guard.service shein-bi-cloud-today.service shein-bi-cloud-yesterday.service shein-bi-cloud-et-forwarder.service shein-bi-cloud-daily-refresh.service shein-bi-cloud-session-manager.service shein-bi-cloud-morning-chain.service shein-bi-cloud-order-closure.service shein-bi-db-backup.service}"
 ARTIFACT_PUBLICATION_LOCK_ACQUIRED=0
 REGISTRY_PUBLISH_LOCK_ACQUIRED=0
 QUEUE_MUTATION_LOCK_HELD=0
@@ -792,104 +814,6 @@ assert_stage_current() {
   return "$status"
 }
 
-active_busy_services() {
-  local active=() service probe_output probe_status state
-  local show_output show_status line key value
-  local active_state sub_state main_pid control_pid
-  local active_state_count sub_state_count main_pid_count control_pid_count
-  if ! command -v systemctl >/dev/null 2>&1; then
-    echo "[cloud_marketing_repair] ERROR systemctl is unavailable; busy-service admission cannot be proven inactive" >&2
-    return 69
-  fi
-  for service in $BUSY_SERVICES; do
-    if probe_output="$(systemctl is-active "$service" 2>&1)"; then
-      probe_status=0
-    else
-      probe_status=$?
-    fi
-    state="${probe_output%%$'\n'*}"
-    state="${state//$'\r'/}"
-    case "$state" in
-      inactive)
-        if (( probe_status != 3 )); then
-          echo "[cloud_marketing_repair] ERROR systemctl returned inactive with unexpected status=$probe_status service=$service" >&2
-          return 69
-        fi
-        ;;
-      active|activating|reloading|deactivating)
-        active+=("$service:$state")
-        ;;
-      failed)
-        if (( probe_status != 3 )); then
-          echo "[cloud_marketing_repair] ERROR systemctl returned failed with unexpected status=$probe_status service=$service" >&2
-          return 69
-        fi
-        if show_output="$(systemctl show --no-pager --property=ActiveState --property=SubState --property=MainPID --property=ControlPID "$service" 2>&1)"; then
-          show_status=0
-        else
-          show_status=$?
-        fi
-        if (( show_status != 0 )); then
-          echo "[cloud_marketing_repair] ERROR systemctl show failed service=$service status=$show_status output=${show_output:-empty}" >&2
-          return 69
-        fi
-        active_state=""
-        sub_state=""
-        main_pid=""
-        control_pid=""
-        active_state_count=0
-        sub_state_count=0
-        main_pid_count=0
-        control_pid_count=0
-        while IFS= read -r line || [[ -n "$line" ]]; do
-          line="${line//$'\r'/}"
-          if [[ -z "$line" || "$line" != *=* ]]; then
-            echo "[cloud_marketing_repair] ERROR failed service show format invalid service=$service line=${line:-empty}" >&2
-            return 69
-          fi
-          key="${line%%=*}"
-          value="${line#*=}"
-          case "$key" in
-            ActiveState) active_state="$value"; active_state_count=$((active_state_count + 1)) ;;
-            SubState) sub_state="$value"; sub_state_count=$((sub_state_count + 1)) ;;
-            MainPID) main_pid="$value"; main_pid_count=$((main_pid_count + 1)) ;;
-            ControlPID) control_pid="$value"; control_pid_count=$((control_pid_count + 1)) ;;
-            *)
-              echo "[cloud_marketing_repair] ERROR failed service show returned unexpected field service=$service field=$key" >&2
-              return 69
-              ;;
-          esac
-        done <<< "$show_output"
-        if (( active_state_count != 1 || sub_state_count != 1 || main_pid_count != 1 || control_pid_count != 1 )); then
-          echo "[cloud_marketing_repair] ERROR failed service show fields missing or duplicated service=$service ActiveStateCount=$active_state_count SubStateCount=$sub_state_count MainPIDCount=$main_pid_count ControlPIDCount=$control_pid_count" >&2
-          return 69
-        fi
-        if [[ "$active_state" != "failed" || "$sub_state" != "failed" ]]; then
-          echo "[cloud_marketing_repair] ERROR failed service show state mismatch service=$service ActiveState=${active_state:-missing} SubState=${sub_state:-missing}" >&2
-          return 69
-        fi
-        if [[ ! "$main_pid" =~ ^[0-9]+$ || ! "$control_pid" =~ ^[0-9]+$ ]]; then
-          echo "[cloud_marketing_repair] ERROR failed service PID format invalid service=$service MainPID=${main_pid:-missing} ControlPID=${control_pid:-missing}" >&2
-          return 69
-        fi
-        if [[ "$main_pid" != "0" || "$control_pid" != "0" ]]; then
-          echo "[cloud_marketing_repair] ERROR failed service has non-zero PID service=$service MainPID=$main_pid ControlPID=$control_pid" >&2
-          return 69
-        fi
-        ;;
-      unknown)
-        echo "[cloud_marketing_repair] ERROR busy-service probe is not trustworthy service=$service state=$state status=$probe_status" >&2
-        return 69
-        ;;
-      *)
-        echo "[cloud_marketing_repair] ERROR busy-service probe failed service=$service status=$probe_status output=${state:-empty}" >&2
-        return 69
-        ;;
-    esac
-  done
-  printf '%s\n' "${active[*]}"
-}
-
 cleanup_store_browsers() {
   cd "$ROOT"
   local owned_args=()
@@ -901,7 +825,9 @@ cleanup_store_browsers() {
 
 new_groups_in_result() {
   local result_path="$1"
-  JSON_FILE="$ROOT/$result_path" node <<'NODE'
+  local result_file
+  result_file="$(runtime_read "$result_path")" || return 1
+  JSON_FILE="$result_file" node <<'NODE'
 const fs = require('node:fs');
 try {
   const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
@@ -916,7 +842,9 @@ NODE
 
 processed_items_this_run() {
   local result_path="$1"
-  JSON_FILE="$ROOT/$result_path" node <<'NODE'
+  local result_file
+  result_file="$(runtime_read "$result_path")" || return 1
+  JSON_FILE="$result_file" node <<'NODE'
 const fs = require('node:fs');
 try {
   const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
@@ -929,7 +857,9 @@ NODE
 
 processed_result_value() {
   local result_path="$1" field="$2" default_value="${3:-}"
-  JSON_FILE="$ROOT/$result_path" JSON_FIELD="$field" JSON_DEFAULT="$default_value" node <<'NODE'
+  local result_file
+  result_file="$(runtime_read "$result_path")" || return 1
+  JSON_FILE="$result_file" JSON_FIELD="$field" JSON_DEFAULT="$default_value" node <<'NODE'
 const fs = require('node:fs');
 try {
   const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
@@ -947,7 +877,9 @@ NODE
 
 result_top_level_value() {
   local result_path="$1" field="$2" default_value="${3:-}"
-  JSON_FILE="$ROOT/$result_path" JSON_FIELD="$field" JSON_DEFAULT="$default_value" node <<'NODE'
+  local result_file
+  result_file="$(runtime_read "$result_path")" || return 1
+  JSON_FILE="$result_file" JSON_FIELD="$field" JSON_DEFAULT="$default_value" node <<'NODE'
 const fs = require('node:fs');
 try {
   const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
@@ -962,7 +894,9 @@ NODE
 
 result_total() {
   local result_path="$1" field="$2"
-  JSON_FILE="$ROOT/$result_path" JSON_FIELD="$field" node <<'NODE'
+  local result_file
+  result_file="$(runtime_read "$result_path")" || return 1
+  JSON_FILE="$result_file" JSON_FIELD="$field" node <<'NODE'
 const fs = require('node:fs');
 try {
   const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
@@ -975,7 +909,9 @@ NODE
 
 settled_result_disposition() {
   local stage="$1" result_path="$2" expected_fingerprint="$3"
-  JSON_FILE="$ROOT/$result_path" RESULT_STAGE="$stage" EXPECTED_FINGERPRINT="$expected_fingerprint" node <<'NODE'
+  local result_file
+  result_file="$(runtime_read "$result_path")" || return 1
+  JSON_FILE="$result_file" RESULT_STAGE="$stage" EXPECTED_FINGERPRINT="$expected_fingerprint" node <<'NODE'
 const fs = require('node:fs');
 
 function count(value) {
@@ -1268,6 +1204,18 @@ update_stage() {
   if (( command_status == QUEUE_CONFLICT_STATUS )); then
     mark_queue_conflict "$stage" after-execution "$result_path"
   fi
+  if (( command_status == 0 )) && [[ -n "$result_path" && "$ROOT" == "/opt/shein-bi/app" && "${SHEIN_OPS_BUSINESS_DELIVERY_ENABLED:-1}" == "1" ]]; then
+    local report_file
+    if report_file="$(node scripts/resolve_cloud_runtime_artifact.mjs "$result_path")"; then
+      timeout -k 2 50 node scripts/cloud_team_report_delivery.mjs \
+        --business-result "$report_file" --automation-id "marketing-$stage" \
+        --business-date "$DATE" --attachment-file "$report_file" \
+        --attachment-name "marketing-$stage-$DATE.json" >/dev/null \
+        || echo "[cloud_marketing_repair] stage result persisted; notification pending in shared delivery state" >&2
+    else
+      echo "[cloud_marketing_repair] stage notification artifact unavailable: $result_path" >&2
+    fi
+  fi
   return "$command_status"
 }
 
@@ -1362,8 +1310,8 @@ validate_cloud_fallback_window() {
       exit 75
     fi
   fi
-  if [[ "$IMMEDIATE_MODE" == "1" ]]; then
-    echo "[cloud_marketing_repair] immediate authorization bypasses only the 20:45-22:55 clock gate; absolute deadline and group budget remain enforced"
+  if [[ "$IMMEDIATE_MODE" == "1" || "$CLOUD_PRIMARY_ENABLED" == "true" ]]; then
+    echo "[cloud_marketing_repair] current cloud run uses absolute deadlines and exact group budget"
     return 0
   fi
   hour=$((10#$(TZ="$TZ_NAME" date +%H)))
@@ -1999,30 +1947,10 @@ if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" != "true" ]]; t
   echo "[cloud_marketing_repair] DEFER TO LOCAL before browser lease or SHEIN mutation; the final report waits for local execution and terminal readback"
   exit 75
 fi
-ACTIVE_BUSY=""
-if (( IS_CLOUD_EXECUTION == 1 || IMMEDIATE_MODE == 1 )); then
-  if ACTIVE_BUSY="$(active_busy_services)"; then
-    :
-  else
-    status=$?
-    write_state deferred_to_local "busy-service admission probe failed closed status=$status; exact queue and immediate authorization preserved"
-    echo "[cloud_marketing_repair] DEFER TO LOCAL busy-service admission probe failed status=$status" >&2
-    exit "$status"
-  fi
-  if [[ -n "$ACTIVE_BUSY" ]]; then
-    write_state deferred_to_local "cloud host is busy; keep the exact queue for local-browser continuation: $ACTIVE_BUSY"
-    echo "[cloud_marketing_repair] DEFER TO LOCAL busy services active: $ACTIVE_BUSY"
-    exit 75
-  fi
-fi
-CURRENT_MINUTE="$(TZ="$TZ_NAME" date +%M)"
-CURRENT_MINUTE=$((10#$CURRENT_MINUTE))
+# Host capacity, the marketing domain, exact artifact/queue locks and actual
+# browser Profile leases own admission. Unrelated running services and wall
+# clock minutes do not conflict with this transaction.
 if (( IS_CLOUD_EXECUTION == 1 )); then
-  if (( CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42 )); then
-    write_state deferred_to_local "reserved :32-:43 core-data lane is too close; exact repair queue preserved for local-browser continuation"
-    echo "[cloud_marketing_repair] DEFER TO LOCAL outside safe start window minute=$CURRENT_MINUTE context=${AUTOMATION_CONTEXT:-unknown}"
-    exit 75
-  fi
   echo "[cloud_marketing_repair] cloud repair batch max groups=$MAX_GROUPS; group writes remain serial context=${AUTOMATION_CONTEXT:-unknown}"
   export SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1
 fi
@@ -2135,14 +2063,14 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$HIGH_CLICK_STATUS" != "not_required" &&
   ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.highClickSpecial?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
-  GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
-  HIGH_CLICK_PLAN_PATH="$ROOT/$(queue_value 'j.stages?.highClickSpecial?.planPath' '')"
+  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
+  HIGH_CLICK_PLAN_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.stages?.highClickSpecial?.planPath' '')")"
   RESULT_PATH="outputs/reports/high-click-low-conversion-special-execution-${DATE}.json"
   begin_stage_critical_section highClickSpecial || { status=$?; exit "$status"; }
   set +e
   node scripts/marketing/batch_apply_high_click_special_discounts.mjs \
     --date "$DATE" --guard "$GUARD_PATH" --plan "$HIGH_CLICK_PLAN_PATH" \
-    --execute --max-items 1 --result "$ROOT/$RESULT_PATH" \
+    --execute --max-items 1 --result "$(runtime_location "$RESULT_PATH")" \
     --expected-work-fingerprint "$WORK_FINGERPRINT" \
     "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
   status=$?
@@ -2221,15 +2149,15 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
   refresh_executor_continuation_args
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint || j.stages?.manualSpecialRestore?.inputFingerprint' '')"
   WORK_FINGERPRINT="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint' '')"
-  GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
-  MANUAL_PLAN_PATH="$ROOT/$(queue_value 'j.stages?.manualSpecialRestore?.planPath' '')"
+  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
+  MANUAL_PLAN_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.stages?.manualSpecialRestore?.planPath' '')")"
   MANUAL_OUT_DIR="$(dirname "$MANUAL_PLAN_PATH")"
   RESULT_PATH="tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-result.json"
   begin_stage_critical_section manualSpecialRestore || { status=$?; exit "$status"; }
   set +e
   node scripts/marketing/batch_restore_manual_limited_discounts.mjs \
     --guard "$GUARD_PATH" --out-dir "$MANUAL_OUT_DIR" --skip-build --execute \
-    --max-items 1 --result "$ROOT/$RESULT_PATH" \
+    --max-items 1 --result "$(runtime_location "$RESULT_PATH")" \
     --expected-work-fingerprint "$WORK_FINGERPRINT" \
     "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
   status=$?
@@ -2319,7 +2247,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$DRIFT_STATUS" != "not_required" && "$DR
   refresh_executor_continuation_args
   WORK_FINGERPRINT="$(queue_value 'j.stages?.driftRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
-  GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
+  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
   RESULT_PATH="tmp/marketing-signup/limited-discount-rescue/batch-drift-fix-result-${DATE}.json"
   begin_stage_critical_section driftRepair || { status=$?; exit "$status"; }
   set +e
@@ -2408,7 +2336,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "
   refresh_executor_continuation_args
   WORK_FINGERPRINT="$(queue_value 'j.stages?.fallbackRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
-  GUARD_PATH="$ROOT/$(queue_value 'j.sourceGuard' '')"
+  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
   RESULT_PATH="outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
   begin_stage_critical_section fallbackRepair || { status=$?; exit "$status"; }
   set +e

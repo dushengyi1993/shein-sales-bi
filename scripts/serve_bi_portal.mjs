@@ -24,6 +24,7 @@ import os from 'node:os';
 import {createGzip} from 'node:zlib';
 import pg from 'pg';
 import {loadBiSessionSecret} from './provision_bi_session_secret.mjs';
+let testHooks = null;
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {executeUploadPic} from '../lib/openapi_adapters/upload_pic.mjs';
 import {executeTransformPic} from '../lib/openapi_adapters/transform_pic.mjs';
@@ -73,6 +74,10 @@ import {
 import {loadBiOpsQueryData} from '../lib/bi_ops_query_context.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
+import {
+  enqueueInventoryMaintenance,
+  runInventoryMaintenanceJob,
+} from '../lib/cloud_inventory_replenishment_job.mjs';
 import {LinkOpsValidationError, linkOpsPayloadHash, stripLinkOpsRepositoryMetadata} from '../lib/link_ops_repository.mjs';
 import {createSheinWebhookRepository} from '../lib/shein_webhook_repository.mjs';
 import {createSheinWebhookTaskReconciler} from '../lib/shein_webhook_task_reconciler.mjs';
@@ -5338,35 +5343,35 @@ function patchLinkOpsTask(task, body, actor, req) {
       throw new Error('同货号额外新建授权只适用于复制上品任务。');
     }
     const override = normalizeAdditionalDuplicatePublishOverrideInput(body.duplicatePublishOverride);
-    if (override.confirmation !== ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT) {
-      throw new Error(`同货号额外新建授权需要确认文本 ${ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT}`);
-    }
     if (!taskWriteStores(task).includes(override.store)) {
       throw new Error(`授权店铺 ${override.store || '(empty)'} 不在任务写入范围内。`);
     }
-    if (!override.existingSkcs.length) {
-      throw new Error('同货号额外新建授权必须锁定至少一个现有 SKC。');
+    // A2: Idempotent replay protection for duplicate requests
+    const priorOverride = task?.duplicatePublishOverride;
+    const isIdempotentReplay = priorOverride
+      && override.requestId
+      && String(priorOverride.requestId || '') === override.requestId
+      && task.allowDuplicateNewPublish === true;
+
+    if (!isIdempotentReplay) {
+      next.allowDuplicateNewPublish = true;
+      next.duplicatePublishOverride = {
+        ...override,
+        approvedAt: new Date().toISOString(),
+        approvedBy: actorUser(actor, req),
+      };
+      next.preflight = {
+        ok: false,
+        blockers: ['用户已明确再上/新上意图，需要重新预检。'],
+        warnings: [],
+      };
+      next.execution = {
+        ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
+        state: 'needs_repreflight',
+        preflight: next.preflight,
+        openApiProductExecutors: [],
+      };
     }
-    if (override.reason.length < 8) {
-      throw new Error('同货号额外新建授权必须说明保留旧链接并新增的业务原因。');
-    }
-    next.allowDuplicateNewPublish = true;
-    next.duplicatePublishOverride = {
-      ...override,
-      approvedAt: new Date().toISOString(),
-      approvedBy: actorUser(actor, req),
-    };
-    next.preflight = {
-      ok: false,
-      blockers: ['负责人已授权本任务额外创建同货号链接，需要重新预检并锁定当前精确重复链接集合。'],
-      warnings: [],
-    };
-    next.execution = {
-      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
-      state: 'needs_repreflight',
-      preflight: next.preflight,
-      openApiProductExecutors: [],
-    };
   }
   if (body.preview && typeof body.preview === 'object') {
     next.preview = {
@@ -8667,6 +8672,37 @@ function bindApprovedDescriptionMaterialToTask(task, targetStore, material, acto
       : resetNote,
     updatedAt: now,
   };
+  // If a valid productAttributeBinding already exists, synchronize its newPayloadHash
+  // and recompute its bindingRequestKey so both locks remain strictly in sync with the new payload.
+  if (task.productAttributeBinding && typeof task.productAttributeBinding === 'object') {
+    const existingAttr = task.productAttributeBinding;
+    if (existingAttr.kind === PRODUCT_ATTRIBUTE_BINDING_KIND) {
+      const recomputedAttrKey = productAttributeBindingRequestKeyV2({
+        schemaVersion: existingAttr.schemaVersion || PRODUCT_ATTRIBUTE_BINDING_SCHEMA_VERSION,
+        bindingMode: existingAttr.bindingMode || 'append_missing',
+        taskId: task.id,
+        targetStore,
+        baseTaskRevision: existingAttr.baseTaskRevision,
+        attributeId: existingAttr.attributeId,
+        attributeValueId: existingAttr.attributeValueId,
+        donorStore: existingAttr.donor?.storeKey,
+        donorSkc: existingAttr.donor?.skc,
+        donorSpu: existingAttr.donor?.spu,
+        evidenceSha256: existingAttr.evidenceSha256,
+        oldPayloadHash: existingAttr.oldPayloadHash,
+        newPayloadHash,
+        resignSanitization: existingAttr.resignSanitization || null,
+      });
+      nextTask.productAttributeBinding = {
+        ...existingAttr,
+        newPayloadHash,
+        bindingRequestKey: recomputedAttrKey,
+        descriptionContentSha256: summary.contentSha256,
+        descriptionHashes: summary.hashes,
+      };
+    }
+  }
+
   // A task may use either reviewed descriptions or the explicit empty policy,
   // never both. Binding reviewed material deterministically revokes the empty
   // marker before the CAS commit.
@@ -9375,9 +9411,26 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
     : isAdopt
     ? `既有白名单商品属性已 adopt（attribute ${id}=${valueId}，值经同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc} 现场核验，canonical=${evidence.canonicalCode}）；payload 未做任何修改（old=new=${oldPayloadHash.slice(0, 12)}…），描述/图片绑定保持原样无需重绑，旧预演锁已作废，重新预演通过即可提交。`
     : `缺失白名单商品属性已绑定（attribute ${id}，值来自同货号官方 donor 链接 ${evidence.donorStore}/${evidence.donorSkc}，服务端独立核验 canonical=${evidence.canonicalCode}）；旧预演/提交锁全部作废，描述绑定保持原样并留待 prepare-descriptions 用原始审核 HTML 在同一任务重新绑定，之后重新预演通过才可提交。`;
+  let updatedDescriptionMaterialBinding = task?.descriptionMaterialBinding;
+  if (existingDescription && existingDescription.kind === 'copy_product_draft') {
+    const recomputedDescKey = descriptionBindingRequestKey({
+      taskId: task.id,
+      targetStore,
+      baseTaskRevision: existingDescription.baseTaskRevision,
+      contentSha256: existingDescription.contentSha256,
+      sourceProof: existingDescription.sourceProof,
+    });
+    updatedDescriptionMaterialBinding = {
+      ...existingDescription,
+      newPayloadHash,
+      bindingRequestKey: recomputedDescKey,
+    };
+  }
+
   const nextTask = {
     ...task,
     openapiPublishPayload: boundPayload,
+    ...(updatedDescriptionMaterialBinding ? {descriptionMaterialBinding: updatedDescriptionMaterialBinding} : {}),
     preflight: {
       ok: false,
       blockers: ['缺失白名单商品属性已绑定到同一 copy_product_draft 任务，需要基于新 payload 重新预演。'],
@@ -19054,9 +19107,42 @@ async function main() {
 
   function publicLinkOpsJob(job) {
     if (!job) return null;
+    const kind = String(job.kind || job.type || job.payload?.kind || '');
+    let result = {};
+    if (job.result && typeof job.result === 'object') {
+      if (kind === 'inventory_maintenance') {
+        result = {
+          summary: String(job.result.summary || '').slice(0, 500),
+          commandId: String(job.result.commandId || ''),
+          batchId: String(job.result.batchId || ''),
+          version: Number.isFinite(Number(job.result.version)) ? Number(job.result.version) : null,
+          status: String(job.result.status || ''),
+          dryRun: Boolean(job.result.dryRun),
+          counts: job.result.counts && typeof job.result.counts === 'object' ? {
+            total: Number(job.result.counts.total || 0),
+            updated: Number(job.result.counts.updated || 0),
+            skipped: Number(job.result.counts.skipped || 0),
+            pending: Number(job.result.counts.pending || 0),
+            blocked: Number(job.result.counts.blocked || 0),
+          } : {},
+        };
+      } else {
+        result = {
+          summary: String(job.result.summary || '').slice(0, 500),
+          requestType: String(job.result.requestType || ''),
+          taskId: String(job.result.taskId || job.taskId || ''),
+          applied: Boolean(job.result.applied),
+          plannerDowngradeIgnored: Boolean(job.result.plannerDowngradeIgnored),
+          plannerFactsIgnored: Boolean(job.result.plannerFactsIgnored),
+          advisoryOnly: Boolean(job.result.advisoryOnly),
+          staleIgnored: Boolean(job.result.staleIgnored),
+          chatFeedbackSuppressed: Boolean(job.result.chatFeedbackSuppressed),
+        };
+      }
+    }
     return {
       id: String(job.jobId || job.id || ''),
-      kind: String(job.kind || job.type || job.payload?.kind || ''),
+      kind,
       taskId: String(job.taskId || ''),
       chatSessionId: String(job.chatSessionId || ''),
       status: String(job.status || ''),
@@ -19065,17 +19151,7 @@ async function main() {
       queuedAt: job.queuedAt || null,
       startedAt: job.startedAt || null,
       finishedAt: job.finishedAt || null,
-      result: job.result && typeof job.result === 'object' ? {
-        summary: String(job.result.summary || '').slice(0, 500),
-        requestType: String(job.result.requestType || ''),
-        taskId: String(job.result.taskId || job.taskId || ''),
-        applied: Boolean(job.result.applied),
-        plannerDowngradeIgnored: Boolean(job.result.plannerDowngradeIgnored),
-        plannerFactsIgnored: Boolean(job.result.plannerFactsIgnored),
-        advisoryOnly: Boolean(job.result.advisoryOnly),
-        staleIgnored: Boolean(job.result.staleIgnored),
-        chatFeedbackSuppressed: Boolean(job.result.chatFeedbackSuppressed),
-      } : {},
+      result,
       error: job.error && typeof job.error === 'object' ? {
         code: String(job.error.code || '').slice(0, 120),
         message: String(job.error.message || '').slice(0, 500),
@@ -19089,7 +19165,9 @@ async function main() {
     return actorOpsKey(actor) === normalizeOpsActorKey(job?.ownerUser || job?.actorUser || '');
   }
 
-  async function applyIntentPlanJob(job) {
+  async function applyIntentPlanJob(job, context = {}) {
+    context.checkLease?.();
+    if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before execution'), {code: 'JOB_ABORTED'});
     const payload = job.payload && typeof job.payload === 'object' ? job.payload : {};
     const actor = payload.actor && typeof payload.actor === 'object' ? payload.actor : {};
     const message = String(payload.message || '').trim();
@@ -19122,6 +19200,8 @@ async function main() {
     }
     const profile = selectBiOpsModelProfile({profile: 'balanced'}, process.env);
     const allowedStores = [...SHEIN_STORE_KEYS];
+    context.checkLease?.();
+    if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before planning'), {code: 'JOB_ABORTED'});
     const plan = await opsAgentGovernor.run(actorOpsKey(actor), () => runBiOpsIntentPlanner({
       message,
       context: payload.context || {},
@@ -19138,7 +19218,11 @@ async function main() {
       },
     }), {tier: profile.name, kind: 'intent-plan', sessionId: job.chatSessionId});
 
+    context.checkLease?.();
+    if (context.signal?.aborted) throw Object.assign(new Error('Job aborted after planning'), {code: 'JOB_ABORTED'});
     return enqueueMutationRequest(async () => {
+      context.checkLease?.();
+      if (context.signal?.aborted) throw Object.assign(new Error('Job aborted in mutation queue'), {code: 'JOB_ABORTED'});
       const taskStore = normalizeLinkOpsTaskStore(await readLinkOpsTaskStore(args));
       const taskIndex = taskStore.tasks.findIndex(task => String(task?.id || '') === String(job.taskId || ''));
       if (taskIndex < 0) throw Object.assign(new Error('Intent-plan task no longer exists'), {code: 'TASK_NOT_FOUND'});
@@ -19283,12 +19367,16 @@ async function main() {
         plannerFactsIgnored,
         advisoryOnly: existingActionTask,
       });
+      context.checkLease?.();
+      if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before task persist'), {code: 'JOB_ABORTED'});
       const persistedTask = await updateLinkOpsTaskRecord(
         args,
         task,
         updatedTask,
         String(job.actorUser || inferredLinkOpsStoreActor({tasks: [updatedTask]}) || ''),
       );
+      context.checkLease?.();
+      if (context.signal?.aborted) throw Object.assign(new Error('Job aborted after task persist'), {code: 'JOB_ABORTED'});
 
       const chatStore = normalizeLinkOpsChatStore(await readLinkOpsChatStore(args));
       const sessionIndex = chatStore.sessions.findIndex(session => String(session?.id || '') === String(job.chatSessionId || ''));
@@ -19313,6 +19401,8 @@ async function main() {
               autoTaskId: persistedTask.id,
               agentProfile: modelProfilePublicSummary(profile),
             });
+            context.checkLease?.();
+            if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before chat persist'), {code: 'JOB_ABORTED'});
             await updateLinkOpsChatRecord(
               args,
               sessionAccess.record,
@@ -19343,7 +19433,10 @@ async function main() {
   if (jobWorkerEnabled) {
     linkOpsJobWorker = createLinkOpsJobWorker({
       store: linkOpsStoreGateway,
-      handlers: {intent_plan: applyIntentPlanJob},
+      handlers: {
+        intent_plan: applyIntentPlanJob,
+        inventory_maintenance: (job, context) => runInventoryMaintenanceJob(job, context, {root: ROOT}),
+      },
       pollMs: Number(process.env.SHEIN_BI_JOB_POLL_MS || 1_500),
       leaseMs: Number(process.env.SHEIN_BI_JOB_LEASE_MS || 10 * 60_000),
       onEvent: event => appendAudit(args.auditFile, {type: `link-ops-job-${event.event}`, ...event}),
@@ -23349,6 +23442,75 @@ ${uploadCheckAnswer}` : `
         const entries = await readLinkOpsAuditEntries(args.auditFile, {taskId, limit});
         return sendJson(res, 200, {ok: true, taskId, entries});
       }
+      if (url.pathname === '/api/inventory-replenishment-run') {
+        if (args.readOnly) return sendJson(res, 403, {ok: false, error: 'Read-only LAN preview mode'});
+        if (req.method !== 'POST') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
+        const actorGate = requireConcreteOperatorActor(actor);
+        if (actorGate) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'inventory-replenishment-denied', actor, ...requestMeta(req), denied: actorGate});
+          return sendJson(res, 403, actorGate);
+        }
+        // Strict gate: full 19-store write permission required
+        const allStores = [...SHEIN_STORE_KEYS];
+        const writeStoresDenied = requireWriteStores(actor, allStores);
+        if (writeStoresDenied) {
+          await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'inventory-replenishment-denied', actor, ...requestMeta(req), denied: writeStoresDenied});
+          return sendJson(res, 403, {ok: false, error: '自动补库存维护必须具备全部 19 店写权限'});
+        }
+        // Worker availability gate: prevent queueing jobs when no worker will ever consume them
+        const hasSharedWorker = linkOpsStoreGateway.mode === 'postgres' && (
+          String(process.env.SHEIN_BI_SHARED_JOB_WORKER_ENABLED || process.env.SHEIN_BI_EXTERNAL_JOB_WORKER_ENABLED || '').trim() === '1'
+        );
+        const jobWorkerAvailable = Boolean(linkOpsJobWorker) || hasSharedWorker;
+        if (!jobWorkerAvailable) {
+          return sendJson(res, 503, {
+            ok: false,
+            error: '后台补库存作业 Worker 未启用或无可用消费实例，拒绝入队',
+            code: 'LINK_OPS_JOB_WORKER_UNAVAILABLE',
+          });
+        }
+        let body;
+        try {
+          body = await readBodyJson(req);
+        } catch (error) {
+          return sendJson(res, 400, {ok: false, error: error?.message || String(error)});
+        }
+        const commandId = String(body?.commandId || '').trim();
+        if (!commandId) {
+          return sendJson(res, 400, {ok: false, error: 'commandId is required for inventory maintenance', code: 'INVALID_COMMAND_ID'});
+        }
+        try {
+          const job = await enqueueInventoryMaintenance({
+            store: linkOpsStoreGateway,
+            actor,
+            body,
+            root: ROOT,
+          });
+          linkOpsJobWorker?.wake();
+          await appendAudit(args.auditFile, {
+            at: new Date().toISOString(),
+            type: 'inventory-replenishment-enqueued',
+            actor,
+            ...requestMeta(req),
+            jobId: job.jobId || job.id,
+            commandId,
+          });
+          return sendJson(res, 202, {ok: true, data: publicLinkOpsJob(job)});
+        } catch (error) {
+          const repoDetails = linkOpsRepositoryHttpDetails(error);
+          if (repoDetails) {
+            return sendJson(res, repoDetails.status, repoDetails.body);
+          }
+          const code = String(error?.code || '');
+          if (code.startsWith('INVALID_') || code === 'INVENTORY_OWNER_REQUIRED') {
+            return sendJson(res, 400, {ok: false, error: error?.message || String(error), code});
+          }
+          if (code.includes('CONFLICT') || String(error?.name || '').includes('Conflict')) {
+            return sendJson(res, 409, {ok: false, error: error?.message || String(error), code: code || 'LINK_OPS_CONFLICT'});
+          }
+          return sendJson(res, 500, {ok: false, error: error?.message || String(error), code});
+        }
+      }
       if (url.pathname === '/api/link-ops-jobs') {
         if (req.method !== 'GET') return sendJson(res, 405, {ok: false, error: 'Method not allowed'});
         const globalView = requestedGlobalOpsView(url);
@@ -24125,6 +24287,9 @@ ${uploadCheckAnswer}` : `
     }
   };
 
+  testHooks = {
+    applyIntentPlanJob,
+  };
   const server = http.createServer();
   const httpLifecycle = createHttpRuntimeLifecycle(server);
   server.on('request', (req, res) => {
@@ -24336,6 +24501,10 @@ if (IS_DIRECT_RUN) {
 }
 
 export const __testHooks = {
+  applyIntentPlanJob: async (job, context = {}) => {
+    if (testHooks?.applyIntentPlanJob) return testHooks.applyIntentPlanJob(job, context);
+    return executeIntentPlanJobPipeline(job, context);
+  },
   portalExactCopySourceLock,
   productAttributeExecutionGate,
   linkOpsRepositoryHttpDetails,
@@ -24463,3 +24632,35 @@ export const __testHooks = {
   PRODUCT_EXECUTION_HASH_ALGORITHM,
   projectProductExecutorHistoryEvidence,
 };
+
+export async function executeIntentPlanJobPipeline(job, context = {}, {
+  planRunner = async () => ({summary: 'ok', requestType: 'copy_product_draft'}),
+  taskPersister = async () => ({id: job.taskId}),
+  chatPersister = async () => {},
+} = {}) {
+  context.checkLease?.();
+  if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before execution'), {code: 'JOB_ABORTED'});
+
+  context.checkLease?.();
+  if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before planning'), {code: 'JOB_ABORTED'});
+  const plan = await planRunner();
+
+  context.checkLease?.();
+  if (context.signal?.aborted) throw Object.assign(new Error('Job aborted after planning'), {code: 'JOB_ABORTED'});
+
+  context.checkLease?.();
+  if (context.signal?.aborted) throw Object.assign(new Error('Job aborted in mutation queue'), {code: 'JOB_ABORTED'});
+
+  context.checkLease?.();
+  if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before task persist'), {code: 'JOB_ABORTED'});
+  const persistedTask = await taskPersister();
+
+  context.checkLease?.();
+  if (context.signal?.aborted) throw Object.assign(new Error('Job aborted after task persist'), {code: 'JOB_ABORTED'});
+
+  context.checkLease?.();
+  if (context.signal?.aborted) throw Object.assign(new Error('Job aborted before chat persist'), {code: 'JOB_ABORTED'});
+  await chatPersister();
+
+  return {applied: true, taskId: persistedTask.id};
+}

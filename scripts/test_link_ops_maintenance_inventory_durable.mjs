@@ -27,7 +27,26 @@ function readBody(req) { return new Promise((resolve, reject) => { const chunks 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 async function writeJson(file, value) { await fs.mkdir(path.dirname(file), {recursive: true}); await fs.writeFile(file, JSON.stringify(value, null, 2) + '\n', 'utf8'); return file; }
 async function journalLines(outDir, taskId = 'durable-task') { const file = path.join(outDir, 'maintenance-inventory-ZL-' + taskId + '.json.journal.ndjson'); try { const text = await fs.readFile(file, 'utf8'); return text.trim() ? text.trim().split(/\r?\n/).map(line => JSON.parse(line)) : []; } catch (error) { if (error.code === 'ENOENT') return []; throw error; } }
-function runNode(args, extraEnv = {}) { return new Promise(resolve => { const child = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, NODE_ENV: 'test', NODE_OPTIONS: (process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : '') + '--experimental-loader=' + pathToFileURL(pgLoaderFile).href, SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1', SHEIN_BI_MAINTENANCE_INVENTORY_JOURNAL_DIR: currentOutDir, SHEIN_BI_INVENTORY_JOURNAL_DIRS: '', ...extraEnv} }); let stdout = '', stderr = ''; child.stdout.on('data', d => { stdout += d.toString(); }); child.stderr.on('data', d => { stderr += d.toString(); }); child.on('close', code => { let json = null; try { json = stdout.trim() ? JSON.parse(stdout) : null; } catch {} resolve({code, stdout, stderr, json}); }); }); }
+const activeChildren = new Map();
+function runNode(args, extraEnv = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: {...process.env, NODE_ENV: 'test', NODE_OPTIONS: (process.env.NODE_OPTIONS ? process.env.NODE_OPTIONS + ' ' : '') + '--experimental-loader=' + pathToFileURL(pgLoaderFile).href, SHEIN_BI_TEST_ALLOW_FAKE_WEBHOOK_GATE: '1', SHEIN_BI_MAINTENANCE_INVENTORY_JOURNAL_DIR: currentOutDir, SHEIN_BI_INVENTORY_JOURNAL_DIRS: '', ...extraEnv} });
+    let markClosed;
+    activeChildren.set(child, new Promise(done => { markClosed = done; }));
+    let stdout = '', stderr = '', spawnError = null;
+    child.stdout.on('data', d => { stdout += d.toString(); });
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('error', err => { spawnError = err; });
+    child.on('close', code => {
+      activeChildren.delete(child);
+      markClosed();
+      if (spawnError) { reject(spawnError); return; }
+      let json = null;
+      try { json = stdout.trim() ? JSON.parse(stdout) : null; } catch {}
+      resolve({code, stdout, stderr, json});
+    });
+  });
+}
 
 const server = http.createServer(async (req, res) => {
   const body = await readBody(req);
@@ -60,6 +79,7 @@ let currentTaskId = '';
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const port = server.address().port;
 
+let testError = null;
 try {
   const configFile = await writeJson(path.join(tmp, 'openapi.json'), {apiBaseUrls: {prodSemiManaged: 'http://127.0.0.1:' + port}, stores: [{storeKey: 'ZL', enabled: true, openKeyId: 'dummy-open', secretKey: 'dummy-secret'}]});
   const biDir = path.join(tmp, 'bi-portal');
@@ -269,7 +289,30 @@ try {
   assert.match(JSON.stringify(crossDomainRun.json), /INVENTORY_WRITE_PENDING_CONFLICT/);
 
   console.log(JSON.stringify({ok: true, checks: ['dry-run zero journal and zero POST', 'production warehouseInventoryList schema is flattened by exact warehouse', 'execute without expected still stock-queries', 'live before row drives locked overwrite', 'zero stock row 0/0/0/0 remains valid baseline', 'intent precedes POST', 'inventoryScope-bound durable success readback', 'terminal same-scope history allows new task', 'explicit nonzero business code terminalizes rejected', 'missing stock row blocks pre-network', 'missing inventory field blocks pre-network', 'ambiguous warehouse blocks pre-network', 'expected inventory drift blocks pre-network', 'pre-network blocked zero POST', 'post-intent transport unknown retained pending', 'pending same-scope blocks new task', 'reconcile-only never re-POSTs', 'cross-domain pending blocks before POST', 'rerun never re-POSTs']}, null, 2));
+} catch (err) {
+  testError = err;
 } finally {
-  await new Promise(resolve => server.close(resolve));
-  await fs.rm(tmp, {recursive: true, force: true});
+  try {
+    const children = [...activeChildren];
+    for (const [child] of children) {
+      try { child.kill('SIGKILL'); } catch {}
+    }
+    let closeTimer;
+    try {
+      await Promise.race([
+        Promise.all(children.map(([, closed]) => closed)),
+        new Promise((_, reject) => { closeTimer = setTimeout(() => reject(new Error('Child close unconfirmed; preserving fixture ' + tmp)), 2000); }),
+      ]);
+    } finally {
+      clearTimeout(closeTimer);
+    }
+    await new Promise(resolve => server.close(resolve));
+    await fs.rm(tmp, {recursive: true, force: true, maxRetries: 10, retryDelay: 100});
+  } catch (cleanupErr) {
+    server.closeAllConnections();
+    server.close();
+    if (!testError) testError = cleanupErr;
+    else console.error('Cleanup also failed; fixture preserved:', cleanupErr.message);
+  }
 }
+if (testError) throw testError;

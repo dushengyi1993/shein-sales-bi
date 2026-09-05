@@ -1382,7 +1382,6 @@ process.kill(process.pid, 'SIGKILL');
     assert.equal(removed.status, 0, `lease-failure marker reset failed: ${removed.stderr || removed.stdout}`);
   }
   const leaseFailureOverrides = [
-    'active_busy_services() { :; }',
     'write_state() { :; }',
     'run_final_readback() { return 0; }',
     'send_daily_group_report() { return 0; }',
@@ -1453,10 +1452,9 @@ process.kill(process.pid, 'SIGKILL');
   assert.deepEqual(leaseFailureReceipts, [],
     'lease acquisition failure must not publish a consumed authorization receipt');
 
-  // Exercise the real busy-service admission before lease/consume. Unknown
-  // states and untrustworthy failed-state readback must fail closed, while an
-  // exact failed/failed terminal state with zero PIDs may advance to the next
-  // controlled stage without resetting systemd state.
+  // Unrelated service states no longer own admission. Keep the actual worker
+  // entry and pending authorization verifier; every service state must reach
+  // the real lease helper, whose controlled conflict still prevents consume.
   const busyProbeMarker = path.join(harnessStageRoot, 'busy-probe-order.log');
   const busyProbeMarkerRuntimePath = useNativeWslHarness
     ? `${harnessRoot}/state/busy-probe-order.log`
@@ -1471,6 +1469,7 @@ process.kill(process.pid, 'SIGKILL');
     'case "${1:-}" in',
     '  is-active)',
     '    case "$mode" in',
+    '      active) printf "active\\n"; exit 0 ;;',
     '      unknown) printf "unknown\\n"; exit 4 ;;',
     '      failed-zero-pid|failed-nonzero-pid|show-error) printf "failed\\n"; exit 3 ;;',
     '    esac',
@@ -1503,7 +1502,7 @@ process.kill(process.pid, 'SIGKILL');
   } else {
     await fsp.chmod(fakeSystemctl, 0o755);
   }
-  const busyProbeOverrides = leaseFailureOverrides.replace('active_busy_services() { :; }\n', '');
+  const busyProbeOverrides = leaseFailureOverrides;
   const busyProbeWorkerSource = workerSource.replace(workerStamp,
     `${busyProbeOverrides}\n${workerStamp}`);
   const busyProbeWorkerPath = path.join(harnessStageRoot, 'scripts', 'worker-busy-probe-harness.sh');
@@ -1552,32 +1551,17 @@ process.kill(process.pid, 'SIGKILL');
       : (await fsp.readdir(path.dirname(workerHarnessAuth))).filter(name => name.startsWith('authorization.json.consumed.'));
     assert.deepEqual(receipts, [], `${label} must not publish a claimed or consumed receipt`);
   };
-  const assertBusyProbeBlocked = async (mode, label) => {
+  for (const mode of ['active', 'unknown', 'failed-zero-pid', 'failed-nonzero-pid', 'show-error']) {
     await resetBusyProbeMarker();
     const result = runBusyProbe(mode);
-    assert.equal(result.error, undefined, `${label} harness spawn failed: ${result.error?.message || ''}`);
-    assert.equal(result.status, 69,
-      `${label} must stop admission before lease/consume: ${result.stderr || result.stdout}`);
-    assert.equal(useNativeWslHarness ? wslExists(busyProbeMarkerRuntimePath) : await exists(busyProbeMarker), false,
-      `${label} must stop before both lease and consume hooks`);
-    await assertAuthorizationPending(label);
-  };
-
-  await assertBusyProbeBlocked('unknown', 'unknown busy-service state');
-
-  await resetBusyProbeMarker();
-  const failedZeroPidRun = runBusyProbe('failed-zero-pid');
-  assert.equal(failedZeroPidRun.error, undefined,
-    `failed-zero-pid harness spawn failed: ${failedZeroPidRun.error?.message || ''}`);
-  assert.equal(failedZeroPidRun.status, 75,
-    `trusted failed-zero-pid state must continue to the controlled lease stage: ${failedZeroPidRun.stderr || failedZeroPidRun.stdout}`);
-  if (useNativeWslHarness) wslCopy(busyProbeMarkerRuntimePath, busyProbeMarker);
-  assert.equal((await fsp.readFile(busyProbeMarker, 'utf8')).trim(), 'lease',
-    'trusted failed-zero-pid state must reach lease but not authorization consume');
-  await assertAuthorizationPending('trusted failed-zero-pid lease defer');
-
-  await assertBusyProbeBlocked('failed-nonzero-pid', 'failed service with non-zero MainPID');
-  await assertBusyProbeBlocked('show-error', 'failed service with systemctl show error');
+    assert.equal(result.error, undefined, mode + ': ' + (result.error?.message || ''));
+    assert.equal(result.status, 75,
+      mode + ' unrelated service must reach the conflicting lease: ' + result.stderr + result.stdout);
+    if (useNativeWslHarness) wslCopy(busyProbeMarkerRuntimePath, busyProbeMarker);
+    assert.equal((await fsp.readFile(busyProbeMarker, 'utf8')).trim(), 'lease',
+      mode + ' must reach lease and leave consume unreachable');
+    await assertAuthorizationPending(mode + ' actual lease defer');
+  }
 
   // Runtime deadline contract: once a transaction has started, crossing the
   // outer epoch cannot disable its finally/restore path, while a new write is
@@ -1599,7 +1583,8 @@ process.kill(process.pid, 'SIGKILL');
     async resolveTargets(targets) { return targets; },
     async acquireLock() { return async () => {}; },
     async readStock(target) {
-      return {skuCode: target.skuCode, totalInventoryQuantity: usableInventory, totalUsableInventory: usableInventory, totalLockedQuantity: 0};
+      return {skuCode: target.skuCode, totalInventoryQuantity: usableInventory, totalUsableInventory: usableInventory,
+        totalLockedQuantity: 0, temporaryInventoryQuantity: 0};
     },
     async writeStock(input) {
       phases.push(input.phase);
@@ -1689,16 +1674,22 @@ process.kill(process.pid, 'SIGKILL');
   await fsp.mkdir(path.join(loopStageRoot, 'scripts', 'lib'), {recursive: true});
   await fsp.mkdir(path.join(loopStageRoot, 'lib'), {recursive: true});
   await fsp.mkdir(path.dirname(loopStageFakeNode), {recursive: true});
+  const loopGuardBytes = Buffer.from(JSON.stringify({date, fixture: 'isolated worker loop'}) + '\n');
+  await fsp.writeFile(path.join(loopStageRoot, 'guard.json'), loopGuardBytes);
+  await fsp.writeFile(path.join(loopStageRoot, 'plan.json'), JSON.stringify({date, items: []}) + '\n');
+  for (const relative of ['scripts/resolve_cloud_runtime_artifact.mjs', 'lib/cloud_runtime_path_policy.mjs']) {
+    await fsp.copyFile(path.join(root, relative), path.join(loopStageRoot, relative));
+  }
   const loopQueue = {
     schemaVersion: 1,
     date,
     sourceGuard: 'guard.json',
-    sourceGuardHash: '0'.repeat(64),
+    sourceGuardHash: sha256(loopGuardBytes),
     queueFingerprint: '1'.repeat(64),
     status: 'pending',
     stages: {
       highClickSpecial: {status: 'not_required', workFingerprint: 'h'.repeat(64)},
-      manualSpecialRestore: {status: 'pending', workFingerprint: 'm'.repeat(64)},
+      manualSpecialRestore: {status: 'pending', planPath: 'plan.json', workFingerprint: 'm'.repeat(64)},
       driftRepair: {status: 'pending', workFingerprint: 'd'.repeat(64)},
       fallbackRepair: {status: 'completed', workFingerprint: 'f'.repeat(64)},
     },
@@ -1797,7 +1788,6 @@ process.kill(process.pid, 'SIGKILL');
   const loopWorkerStamp = 'STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"';
   assert.equal(workerSourceForLoop.includes(loopWorkerStamp), true, 'worker loop harness injection anchor must remain unique');
   const loopOverrides = [
-    'active_busy_services() { :; }',
     'ensure_browser_lease() { return 0; }',
     'consume_group_budget() {',
     '  local count="${1:-0}"',
@@ -1873,6 +1863,9 @@ process.kill(process.pid, 'SIGKILL');
     wslMkdir(`${loopRoot}/lib`);
     wslMkdir(`${loopRoot}/registry`);
     wslCopy(loopStageQueueFile, loopRuntimeQueueFile);
+    for (const relative of ['guard.json', 'plan.json', 'scripts/resolve_cloud_runtime_artifact.mjs', 'lib/cloud_runtime_path_policy.mjs']) {
+      wslCopy(path.join(loopStageRoot, relative), loopRoot + '/' + relative);
+    }
     wslCopy(path.join(loopStageRoot, 'scripts', 'lib', 'shared_lock.sh'), `${loopRoot}/scripts/lib/shared_lock.sh`);
     wslCopy(path.join(loopStageRoot, 'lib', 'atomic_file_publish.mjs'), `${loopRoot}/lib/atomic_file_publish.mjs`);
     wslCopy(loopStageFakeNode, `${loopRoot}/bin/node`);
@@ -2040,7 +2033,7 @@ process.kill(process.pid, 'SIGKILL');
     ...loopQueue,
     stages: {
       highClickSpecial: {status: 'not_required', workFingerprint: 'h'.repeat(64)},
-      manualSpecialRestore: {status: 'pending', workFingerprint: 'm'.repeat(64)},
+      manualSpecialRestore: {status: 'pending', planPath: 'plan.json', workFingerprint: 'm'.repeat(64)},
       driftRepair: {status: 'pending', workFingerprint: 'd'.repeat(64)},
       fallbackRepair: {status: 'pending', workFingerprint: 'f'.repeat(64)},
     },
@@ -2103,8 +2096,8 @@ process.kill(process.pid, 'SIGKILL');
   const settledResumeQueue = {
     ...loopQueue,
     stages: {
-      highClickSpecial: {status: 'pending', workFingerprint: 'h'.repeat(64)},
-      manualSpecialRestore: {status: 'pending', workFingerprint: 'm'.repeat(64)},
+      highClickSpecial: {status: 'pending', planPath: 'plan.json', workFingerprint: 'h'.repeat(64)},
+      manualSpecialRestore: {status: 'pending', planPath: 'plan.json', workFingerprint: 'm'.repeat(64)},
       driftRepair: {status: 'pending', workFingerprint: 'd'.repeat(64)},
       fallbackRepair: {status: 'pending', workFingerprint: 'f'.repeat(64)},
     },
@@ -2262,14 +2255,14 @@ process.kill(process.pid, 'SIGKILL');
     'immediate mode must not bind the graceful cutoff and hard deadline to the same epoch');
   const verifyIndex = worker.indexOf('if verify_immediate_authorization; then');
   const consumeIndex = worker.indexOf('if consume_immediate_authorization_locked; then');
-  const busyAdmissionIndex = worker.indexOf('ACTIVE_BUSY="$(active_busy_services)"');
-  const reservedMinuteIndex = worker.indexOf('CURRENT_MINUTE="$(TZ="$TZ_NAME" date +%M)"');
+  assert.doesNotMatch(worker, /ACTIVE_BUSY="\$\(active_busy_services\)"/);
+  assert.doesNotMatch(worker, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
   const leaseIndex = worker.indexOf('\nensure_browser_lease\n');
   const firstExecutorIndex = worker.indexOf('node scripts/marketing/batch_apply_high_click_special_discounts.mjs');
   assert.ok(verifyIndex >= 0 && leaseIndex > verifyIndex && consumeIndex > leaseIndex && firstExecutorIndex > consumeIndex,
     'immediate authorization order must be verify < lease < consume < first executor');
-  assert.ok(consumeIndex > busyAdmissionIndex && consumeIndex > reservedMinuteIndex,
-    'authorization consume must be after busy/reserved-minute admission');
+  assert.ok(consumeIndex > initialQueueCapture,
+    'authorization consume must remain after exact queue capture and lease admission');
   const consumeLockIndex = worker.lastIndexOf('if acquire_repair_critical_locks; then', consumeIndex);
   const consumeReleaseIndex = worker.indexOf('release_repair_critical_locks || true', consumeIndex);
   assert.ok(consumeLockIndex > leaseIndex && consumeReleaseIndex > consumeIndex,
@@ -2304,7 +2297,7 @@ process.kill(process.pid, 'SIGKILL');
       'authorization_owner_ancestor_symlink_and_directory_identity_fail_closed',
       'worker_revalidates_before_service_lock_and_consumes_after_lease_before_executor',
       'lease_failure_leaves_one_time_authorization_pending',
-      'busy_probe_abnormal_state_fails_closed_without_consuming_authorization',
+      'unrelated_service_states_reach_actual_lease_conflict_without_consuming_authorization',
       'lease_release_failure_changes_nominal_success_to_explicit_failure_without_replay',
       'worker_serial_manual_and_drift_loops_consume_multiple_units_without_replay',
       'processed_one_deadline_recoverable_units_consume_budget_for_manual_drift_fallback',

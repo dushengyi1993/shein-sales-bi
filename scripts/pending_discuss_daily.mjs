@@ -36,6 +36,9 @@ import {
   resolveDailyRecipientChatId,
   verifyScanHash,
 } from '../lib/pending_discuss_daily.mjs';
+import {stageAndDeliverBusinessResult} from '../lib/ops_business_result_pipeline.mjs';
+import {runLocalCloudTeamReport} from '../lib/cloud_team_report_local.mjs';
+import {CLOUD_TEAM_REPORT_CLOUD_HOST, sha256Bytes} from '../lib/cloud_team_report_common.mjs';
 import {runPendingDiscussScan} from './pending_discuss_batch.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,6 +70,7 @@ function parseArgs(argv) {
     else if (token === '--read-delay-ms') args.readDelayMs = Number(argv[++index]);
     else if (token === '--request-timeout-ms') args.requestTimeoutMs = Number(argv[++index]);
     else if (token === '--send') args.send = true;
+    else if (token === '--stage-delivery') args.stageDelivery = true;
     else if (token === '--quiet') args.quiet = true;
     else if (token === '--help' || token === '-h') args.command = 'help';
     else throw new Error(`unknown argument: ${token}`);
@@ -286,16 +290,46 @@ async function runDailyCommand(args, outDir) {
     });
   } else {
     try {
-      const config = await readJson(args.larkConfig);
-      const chatId = resolveDailyRecipientChatId(config);
-      const identity = resolveDailyIdentity(config);
-      const idempotencyKey = buildIdempotencyKey(verifiedScan.businessDate);
-      const sent = await sendLarkReport({chatId, identity, idempotencyKey, markdown: reportText});
-      if (!sent.ok) throw sent.error;
-      delivery = buildDeliveryDocument({
-        status: 'ok', businessDate: verifiedScan.businessDate, idempotencyKey, at,
-        scanHash: verifiedScan.scanHash, reportSha256,
-      });
+      if (process.env.PENDING_DISCUSS_DAILY_LARK_BIN) {
+        const config = await readJson(args.larkConfig);
+        const chatId = resolveDailyRecipientChatId(config);
+        const identity = resolveDailyIdentity(config);
+        const idempotencyKey = buildIdempotencyKey(verifiedScan.businessDate);
+        const sent = await sendLarkReport({chatId, identity, idempotencyKey, markdown: reportText});
+        if (!sent.ok) throw sent.error;
+        delivery = buildDeliveryDocument({
+          status: 'ok', businessDate: verifiedScan.businessDate, idempotencyKey, at,
+          scanHash: verifiedScan.scanHash, reportSha256,
+        });
+      } else {
+        // Default local path: use shared cloud team report channel (runLocalCloudTeamReport)
+        const scanBytes = await fs.readFile(scanFile);
+        const actualScanFileSha = sha256Bytes(scanBytes);
+        const sshBin = process.env.CLOUD_TEAM_REPORT_SSH_BIN;
+        const sshSpawnImpl = sshBin
+          ? (bin, a, o) => {
+              if (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(sshBin)) {
+                return spawn(process.env.ComSpec || 'cmd.exe', ['/c', sshBin, ...a], o);
+              }
+              return spawn(sshBin, a, o);
+            }
+          : undefined;
+        const cloudResult = await runLocalCloudTeamReport({
+          automationId: 'pending-discuss-daily',
+          businessDate: verifiedScan.businessDate,
+          summaryFile: reportFile,
+          attachment: scanFile,
+          expectedAttachmentSha256: actualScanFileSha,
+          cloudSsh: process.env.CLOUD_TEAM_REPORT_SSH_HOST || CLOUD_TEAM_REPORT_CLOUD_HOST,
+          ...(sshSpawnImpl ? { spawnImpl: sshSpawnImpl } : {}),
+        });
+        if (!cloudResult.ok) throw Object.assign(new Error(cloudResult.reason || 'cloud delivery failed'), {code: cloudResult.errorCode});
+        delivery = buildDeliveryDocument({
+          status: 'ok', businessDate: verifiedScan.businessDate,
+          idempotencyKey: buildIdempotencyKey(verifiedScan.businessDate), at,
+          scanHash: verifiedScan.scanHash, reportSha256,
+        });
+      }
     } catch (error) {
       delivery = buildDeliveryDocument({
         status: 'failed', businessDate: verifiedScan.businessDate,
@@ -307,9 +341,32 @@ async function runDailyCommand(args, outDir) {
 
   const deliveryFile = await writeArtifact(outDir, 'delivery.json', delivery);
   const deliveryOk = delivery.status === 'ok' || delivery.status === 'skipped';
+
+  // F1 hook: stage into shared automation delivery staging area if requested via env or flag
+  let stagedResult = null;
+  if (process.env.STAGE_OPS_DELIVERY === '1' || args.stageDelivery) {
+    try {
+      stagedResult = await stageAndDeliverBusinessResult({
+        automationId: 'pending-discuss-daily',
+        businessDate: verifiedScan.businessDate,
+        result: {
+          action: '待议价每日巡检扫描',
+          ok: true,
+          mode: 'daily',
+          rowCount: verifiedScan.rowCount,
+          coverage: verifiedScan.coverage,
+          summary: verifiedScan.summary,
+        },
+        attachmentName: 'scan.json',
+        attachmentContent: JSON.stringify(verifiedScan, null, 2),
+      });
+    } catch {}
+  }
+
   const manifest = await writeManifest(outDir, [scanFile, reportFile, deliveryFile], {
     businessDate: verifiedScan.businessDate, ok: deliveryOk, scanHash: verifiedScan.scanHash,
     delivery: delivery.status,
+    ...(stagedResult ? { stagedDelivery: stagedResult.status } : {}),
   });
   return {
     result: {

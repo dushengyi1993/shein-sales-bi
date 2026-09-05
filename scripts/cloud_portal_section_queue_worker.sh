@@ -43,7 +43,9 @@ trap '[[ -n "${HEADERS_FILE:-}" ]] && rm -f "$HEADERS_FILE"' EXIT
 [[ "$INVENTORY_TREND_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
 [[ "$MIN_REMAINING_RUNTIME_SEC" =~ ^[1-9][0-9]*$ ]] || exit 64
-[[ "$DEADLINE_MINUTE" =~ ^[0-9]+$ ]] && (( DEADLINE_MINUTE >= 0 && DEADLINE_MINUTE <= 59 )) || exit 64
+if [[ -n "$DEADLINE_MINUTE" ]]; then
+  [[ "$DEADLINE_MINUTE" =~ ^[0-9]+$ ]] && (( DEADLINE_MINUTE >= 0 && DEADLINE_MINUTE <= 59 )) || exit 64
+fi
 [[ "$HEAVY_ALLOWED" == 0 || "$HEAVY_ALLOWED" == 1 ]] || exit 64
 [[ "$HEAVY_FIRST" == 0 || "$HEAVY_FIRST" == 1 ]] || exit 64
 (( PRODUCT_SALES_DAILY_TIMEOUT_SEC + 30 <= PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC )) || exit 64
@@ -51,24 +53,17 @@ if [[ "$SCHEDULED_ENTRY" != "1" ]]; then
   echo "[portal-section-worker] defer reason=unscheduled_direct_entry; use shein-bi-cloud-portal-section-queue.service" >&2
   exit 75
 fi
-SAFE_START=0
-case "$START_HOUR:$START_MINUTE" in
-  01:*)
-    echo "[portal-section-worker] defer reason=special_reserved_window hour=$START_HOUR minute=$START_MINUTE" >&2
-    exit 75
-    ;;
-  *:0[1-4]|*:3[1-4]) SAFE_START=1 ;;
-esac
-if (( SAFE_START == 0 )); then
-  echo "[portal-section-worker] defer reason=outside_safe_start_window hour=$START_HOUR minute=$START_MINUTE" >&2
-  exit 75
-fi
-
 # Resolve the slot boundary once. A later wall-clock hour must not extend a
 # worker that started in the previous slot; every claim is capped again by its
 # own lease expiry below.
 START_CURRENT_HOUR="$(date +%Y-%m-%dT%H)"
-SLOT_DEADLINE_EPOCH="$(date -d "${START_CURRENT_HOUR}:${DEADLINE_MINUTE}:00" +%s)"
+if [[ -n "${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH:-}" ]]; then
+  SLOT_DEADLINE_EPOCH="$SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH"
+elif [[ -n "$DEADLINE_MINUTE" ]]; then
+  SLOT_DEADLINE_EPOCH="$(date -d "${START_CURRENT_HOUR}:${DEADLINE_MINUTE}:00" +%s)"
+else
+  SLOT_DEADLINE_EPOCH=$(( $(date +%s) + 1800 ))
+fi
 [[ "$SLOT_DEADLINE_EPOCH" =~ ^[0-9]+$ ]] || exit 64
 readonly SLOT_DEADLINE_EPOCH
 

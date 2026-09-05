@@ -128,7 +128,9 @@ function extractTimeoutChain(source) {
 function evaluateRunnerTimeout(source, file, platform) {
   const chain = extractTimeoutChain(source);
   assert.ok(chain, 'timeout tier chain must be extractable from the deterministic runner');
-  return new Function('file', 'process', 'return (' + chain + ');')(file, {platform});
+  const overrides = source.match(/const V6_TEST_TIMEOUTS = (\{[\s\S]*?\n\});/u)?.[1];
+  assert.ok(overrides, 'V6 per-file timeout overrides must be extracted from the actual runner');
+  return new Function('file', 'process', 'const V6_TEST_TIMEOUTS = ' + overrides + '; return (' + chain + ');')(file, {platform});
 }
 
 const testsBlock = runner.match(/const tests = \[([\s\S]*?)\n\];/u)?.[1] || '';
@@ -384,7 +386,7 @@ assert.match(ciTerminalJob, /^          RELEASE_GATE_RESULT: \$\{\{ needs\.relea
 assert.match(ciTerminalJob,
   /if \[ "\$SOURCE_CHECKS_RESULT" != 'success' \] \|\| \[ "\$DETERMINISTIC_SHARDS_RESULT" != 'success' \] \|\| \[ "\$RELEASE_GATE_RESULT" != 'success' \]; then[\s\S]*?^            exit 1$/mu,
   'ci-terminal must fail closed unless all three exact dependencies succeed');
-assert.match(runner, /:\s*30_000;/,
+assert.match(runner, /:\s*30_000\)?;/,
   'unclassified deterministic tests must retain the default 30s fail-fast budget');
 assert.match(runner, /spawnSync\(process\.execPath,[\s\S]*?timeout,/,
   'the per-test timeout must remain wired into spawnSync');

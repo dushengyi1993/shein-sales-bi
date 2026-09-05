@@ -118,7 +118,7 @@ function sleep(ms) {
 }
 
 function parseArgs(argv) {
-  const args = {visible: true, date: null, timeoutMs: 120000, checkOnly: false, closeAfter: false};
+  const args = {visible: true, date: null, timeoutMs: 120000, checkOnly: false, closeAfter: false, requireMarketing: false};
   const stores = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -128,6 +128,7 @@ function parseArgs(argv) {
     else if (a === '--visible') args.visible = true;
     else if (a === '--check-only') args.checkOnly = true;
     else if (a === '--close-after') args.closeAfter = true;
+    else if (a === '--require-marketing') args.requireMarketing = true;
     else if (!a.startsWith('--')) stores.push(...a.split(',').map(s => s.trim().toUpperCase()).filter(Boolean));
   }
   args.stores = stores;
@@ -428,10 +429,12 @@ async function restoreOne(store, opts) {
     if (probe.code === '0') {
       const marketing = await marketingProbe(send);
       steps.push({step: 'initial-marketing-probe', marketing});
-      if (marketing.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
-      const sbn = await sbnProbe(send);
-      steps.push({step: 'initial-sbn-probe', sbn});
-      if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
+      if (marketing.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, marketingEndpointVerified: true, steps};
+      if (!opts.requireMarketing) {
+        const sbn = await sbnProbe(send);
+        steps.push({step: 'initial-sbn-probe', sbn});
+        if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: true, steps};
+      }
     }
     if (opts.checkOnly) return {storeKey: store.storeKey, ok: false, reason: 'current_profile_not_logged_in', checkOnly: true, steps};
 
@@ -500,10 +503,12 @@ async function restoreOne(store, opts) {
       if (probe.code === '0') {
         const marketing = await marketingProbe(send);
         steps.push({step: 'marketing-probe-after-url', url, marketing});
-        if (marketing.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
-        const sbn = await sbnProbe(send);
-        steps.push({step: 'sbn-probe-after-url', url, sbn});
-        if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
+        if (marketing.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, marketingEndpointVerified: true, steps};
+        if (!opts.requireMarketing) {
+          const sbn = await sbnProbe(send);
+          steps.push({step: 'sbn-probe-after-url', url, sbn});
+          if (sbn.ok) return {storeKey: store.storeKey, ok: true, alreadyOk: false, steps};
+        }
       }
     }
     const blocker = classifyLoginBlocker({pages: observedPages, probeCodes});

@@ -35,6 +35,8 @@ Environment=SHEIN_WEBHOOK_INGRESS_BUDGET_MS=1200
 Environment=SHEIN_WEBHOOK_RECEIPT_STATEMENT_TIMEOUT_MS=800
 Environment=SHEIN_OPENAPI_REQUEST_TIMEOUT_MS=30000
 Environment=SHEIN_SYNC_ISSUE_OUT_DIR=/srv/shein-bi/logs/webhook-alerts
+Environment=SHEIN_OPS_BUSINESS_DELIVERY_ENABLED=1
+Environment=SHEIN_OPS_BUSINESS_DELIVERY_ROOT=/srv/shein-bi/runtime/automation-delivery
 ExecStart=/usr/bin/node scripts/serve_shein_webhook.mjs
 Restart=always
 RestartSec=5
@@ -54,7 +56,7 @@ RestrictRealtime=true
 NoNewPrivileges=true
 RestrictSUIDSGID=true
 PrivateTmp=true
-ReadWritePaths=-/srv/shein-bi/logs/webhook-alerts -/home/sheinops/.lark-cli -/home/sheinops/.local/share/lark-cli
+ReadWritePaths=-/srv/shein-bi/logs/webhook-alerts -/home/sheinops/.lark-cli -/home/sheinops/.local/share/lark-cli -/srv/shein-bi/runtime/automation-delivery
 
 [Install]
 WantedBy=multi-user.target

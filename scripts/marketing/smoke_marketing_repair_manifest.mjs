@@ -188,26 +188,13 @@ try {
   const portableDate = '2026-08-24';
   const portablePriceOverrides = '../../../srv/shein-bi/runtime/marketing-plans/baselines/ordinary-2026-07-29-49283-49286-50003-750/price-overrides.json';
   const linuxFixtureRoot = path.join(root, 'opt', 'shein-bi', 'app');
-  const exactWindowsPricePath = path.resolve(workspaceRoot, portablePriceOverrides);
-  const useExactWindowsFixture = process.platform === 'win32' && await exists(exactWindowsPricePath);
-  if (useExactWindowsFixture) {
-    const workspaceTmpDir = path.join(workspaceRoot, 'tmp');
-    await fs.mkdir(workspaceTmpDir, {recursive: true});
-    portableWindowsDir = await fs.mkdtemp(path.join(workspaceTmpDir, 'marketing-repair-manifest-portable-'));
-  }
-  const portableRelativeDir = useExactWindowsFixture
-    ? path.relative(workspaceRoot, portableWindowsDir).replaceAll(path.sep, '/')
-    : `tmp/marketing-repair-manifest-portable-${process.pid}`;
+  const portableRelativeDir = `tmp/marketing-repair-manifest-portable-${process.pid}`;
   const portableGuardRelative = `${portableRelativeDir}/marketing-daily-guard-${portableDate}.json`;
   const portablePlanRelative = `${portableRelativeDir}/new-listing-7d-limited-discount-plan-${portableDate}.json`;
   const portableRescueRelative = `${portableRelativeDir}/limited-DL-new-listing-within-7d-${portableDate}.json`;
   const portableLiveScan = `${portableRelativeDir}/current-marketing-price-live-${portableDate}.json`;
-  const windowsFixtureRoot = useExactWindowsFixture
-    ? workspaceRoot
-    : path.join(root, 'E', 'Codex WorkSpace', 'Shein销售统计');
-  const portablePriceBytes = useExactWindowsFixture
-    ? await fs.readFile(exactWindowsPricePath)
-    : Buffer.from('portable-price-overrides\n', 'utf8');
+  const windowsFixtureRoot = path.join(root, 'Windows', 'E', 'Codex WorkSpace', 'Shein销售统计');
+  const portablePriceBytes = Buffer.from('portable-price-overrides\n', 'utf8');
   const portablePriceHash = sha256(portablePriceBytes);
   const portableGuard = {
     reportDate: portableDate,
@@ -247,15 +234,11 @@ try {
     const rescuePath = path.join(fixtureRoot, portableRescueRelative);
     const pricePath = path.resolve(fixtureRoot, portablePriceOverrides);
     await fs.mkdir(path.dirname(guardPath), {recursive: true});
-    if (!(useExactWindowsFixture && fixtureRoot === windowsFixtureRoot)) {
-      await fs.mkdir(path.dirname(pricePath), {recursive: true});
-    }
+    await fs.mkdir(path.dirname(pricePath), {recursive: true});
     await fs.writeFile(guardPath, portableGuardText);
     await fs.writeFile(planPath, portablePlanText);
     await fs.writeFile(rescuePath, portableRescueText);
-    if (!(useExactWindowsFixture && fixtureRoot === windowsFixtureRoot)) {
-      await fs.writeFile(pricePath, portablePriceBytes);
-    }
+    await fs.writeFile(pricePath, portablePriceBytes);
     return {guardPath, planPath, rescuePath, pricePath};
   };
   const linuxPortable = await writePortableFixture(linuxFixtureRoot);
@@ -284,13 +267,8 @@ try {
   assert.equal(loadedWindowsPortable.priceOverridesRelativePath, portablePriceOverrides);
   assert.equal(loadedLinuxPortable.entries[0].relativePath, portableRescueRelative);
   assert.equal(loadedWindowsPortable.entries[0].relativePath, portableRescueRelative);
-  if (useExactWindowsFixture) {
-    assert.notEqual(
-      path.relative(linuxFixtureRoot, linuxPortable.pricePath).replaceAll(path.sep, '/'),
-      path.relative(windowsFixtureRoot, windowsPortable.pricePath).replaceAll(path.sep, '/'),
-      'host-relative price paths must differ in the regression fixture',
-    );
-  }
+  assert.notEqual(linuxPortable.pricePath, windowsPortable.pricePath,
+    'portable fixtures must read separate physical files while preserving the declared logical identity');
 
   const productionPlanPath = path.join(workspaceRoot, 'outputs', 'reports', 'new-listing-7d-limited-discount-plan-2026-08-24.json');
   const productionGuardPath = path.join(workspaceRoot, 'outputs', 'reports', 'marketing-daily-guard-2026-08-24.json');

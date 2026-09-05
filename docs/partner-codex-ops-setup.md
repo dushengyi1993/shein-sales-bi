@@ -551,3 +551,10 @@ node scripts/bi_ops_cli.mjs openapi-call --doc-id <docId> --store FY --body-json
 ### WebHook
 
 运行说明见 `docs/shein-webhook-receiver-design.md`。接收端、密文队列、异步 worker 和 BI“平台动态”子页面已实现；真实事件是否开始进入，以各 SHEIN App 的回调订阅/审核状态为准。普通动态只在 BI 展示，飞书仅接收 P0 摘要；飞书不是事件事实源，已暂停的问数服务也不因此恢复。
+# 即时库存维护命令
+
+用户明确要求“现在跑一轮库存”时，受管 CLI 使用 `maintain-inventory --out <回执文件>` 提交云端库存作业，按现有自动库存策略生成本次计划。调用者须具备全部配置店铺的权限；本机不直接向平台写库存。
+
+CLI 在请求前保存并显示 commandId。连接中断时以 `maintain-inventory --command-id <原编号>` 重试同一请求；新的用户指令使用新编号。相同编号的参数发生变化会被拒绝。`--dry-run` 只执行云端预演。
+
+返回 queued 只表示已入队。使用 `job --job-id <作业编号>` 或 `wait-job --job-id <作业编号> --wait-seconds 120` 查询终态，并核对该命令的完整计划、结果、流水和标记版本。报告分别列明已回读、仍待回读、人工处理隔离和提交前拦截，禁止把不确定写入当作成功或重新提交。

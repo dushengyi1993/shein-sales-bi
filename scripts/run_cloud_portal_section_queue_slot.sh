@@ -2,65 +2,23 @@
 set -Eeuo pipefail
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
-HOUR=$((10#$(date +%H)))
-MINUTE=$((10#$(date +%M)))
-DEADLINE_MINUTE=""
-MAX_SECTIONS=8
-HEAVY_ALLOWED=0
-HEAVY_FIRST=0
+RUN_BUDGET_SEC="${SHEIN_BI_PORTAL_SECTION_QUEUE_RUN_BUDGET_SEC:-1800}"
+[[ "$RUN_BUDGET_SEC" =~ ^[0-9]+$ ]] && (( RUN_BUDGET_SEC >= 120 && RUN_BUDGET_SEC <= 1800 )) || exit 64
+DEADLINE_EPOCH=$(( $(date +%s) + RUN_BUDGET_SEC ))
 
-if (( HOUR == 1 )); then
-  echo "[portal-section-slot] defer reason=full_hour_reserved hour=$HOUR minute=$MINUTE" >&2
-  exit 75
-fi
-
-yield_to_daily_coordinator() {
-  # Portal materialization is cache maintenance. The daily business refresh is
-  # now one coordinator rather than several timer slots, so only yield while
-  # that single run is active. The previous complete cache remains available.
-  local active_state
-  active_state="$(systemctl show --no-pager --property=ActiveState --value shein-bi-cloud-morning-chain.service 2>/dev/null || true)"
-  case "$active_state" in
-    active|activating|reloading)
-      echo "[portal-section-slot] defer reason=daily_operating_refresh_active state=$active_state hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-      ;;
-    inactive|failed)
-      return 0
-      ;;
-    *)
-      echo "[portal-section-slot] defer reason=daily_operating_refresh_state_unknown state=${active_state:-unknown} hour=$HOUR minute=$MINUTE" >&2
-      exit 75
-      ;;
-  esac
-}
-
-if (( MINUTE >= 1 && MINUTE <= 4 )); then
-  DEADLINE_MINUTE=14
-  MAX_SECTIONS=8
-  HEAVY_ALLOWED=0
-elif (( MINUTE >= 31 && MINUTE <= 34 )); then
-  DEADLINE_MINUTE=44
-  MAX_SECTIONS=8
-  HEAVY_ALLOWED=1
-  HEAVY_FIRST=1
-else
-  echo "[portal-section-slot] defer reason=outside_portal_slot hour=$HOUR minute=$MINUTE" >&2
-  exit 75
-fi
-
-yield_to_daily_coordinator
-
+# The existing timer starts work; resource availability determines admission.
+# The same service retries deferred work without discarding the durable queue.
+# Per-section leases and atomic publication retain their existing ownership.
 export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1
-export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE="$DEADLINE_MINUTE"
-export SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS="$MAX_SECTIONS"
-export SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED="$HEAVY_ALLOWED"
-export SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST="$HEAVY_FIRST"
+export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH="$DEADLINE_EPOCH"
+export SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS="${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-8}"
+export SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED=1
+export SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST=1
 
 exec "$ROOT/scripts/run_host_heavy_job.sh" \
   --domain portal-sections \
   --class materializer \
   --lock-wait-sec 0 \
-  --deadline-minute "$DEADLINE_MINUTE" \
+  --deadline-epoch "$DEADLINE_EPOCH" \
   --defer-state /srv/shein-bi/runtime/host-scheduler/portal-sections.latest.json \
   -- /usr/bin/env bash "$ROOT/scripts/cloud_portal_section_queue_worker.sh"

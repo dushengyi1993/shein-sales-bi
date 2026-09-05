@@ -15,14 +15,17 @@ for (const invalid of ['sr260607203410692590516', 's123', 'sa1', 's9', 'sh', 'sh
   assert.equal(normalizeSheinSkc(invalid), '', `invalid SKC normalized: ${invalid}`);
 }
 
+// 1. Backward-compatible normalization with existing fields + new requestId/businessIntent
 const input = normalizeAdditionalDuplicatePublishOverrideInput({
   store: 'nm',
   existingSkcs: ['SV260714225544971215796', 'SB260806202334303501938', 'SH260607203410692590516', 'invalid', 'sv260714225544971215796', 'sb260806202334303501938', 'sh260607203410692590516'],
-  reason: '旧链接议价成功并保留，本任务明确额外新增一条。',
-  confirmation: ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT,
+  reason: '再上一次',
+  confirmation: 'CONFIRM',
+  requestId: 'req-dup-001',
 });
 assert.deepEqual(input.existingSkcs, ['sv260714225544971215796', 'sb260806202334303501938', 'sh260607203410692590516']);
 assert.equal(input.store, 'NM');
+assert.equal(input.requestId, 'req-dup-001');
 
 const task = {
   allowDuplicateNewPublish: true,
@@ -32,6 +35,8 @@ const task = {
     approvedBy: {username: 'owner'},
   },
 };
+
+// 2. Exact match passes
 const exact = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [
   {skcName: 'sv260714225544971215796'},
   {skcName: 'SB260806202334303501938'},
@@ -50,30 +55,35 @@ const stringOwner = evaluateAdditionalDuplicatePublishOverride({
 ]);
 assert.equal(stringOwner.allowed, true);
 
+// 3. A2: Drifted existing links set does NOT invalidate authorization
 const driftedSh = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [
   {skcName: 'sv260714225544971215796'},
   {skcName: 'sb260806202334303501938'},
   {skcName: 'sh260607203410692590517'},
 ]);
-assert.equal(driftedSh.allowed, false);
-assert.equal(driftedSh.status, 'authorization_mismatch');
+assert.equal(driftedSh.allowed, true, 'Drifted SKC set must not invalidate user business authorization');
+assert.equal(driftedSh.status, 'authorized_additional_link');
 
+// 4. A2: Another task adding a duplicate link does NOT invalidate authorization
 const newUnexpectedDuplicate = evaluateAdditionalDuplicatePublishOverride(task, 'NM', [
   {skcName: 'sv260714225544971215796'},
   {skcName: 'sb260806202334303501938'},
   {skcName: 'sh260607203410692590516'},
   {skcName: 'sv260723000000000000001'},
 ]);
-assert.equal(newUnexpectedDuplicate.allowed, false);
-assert.equal(newUnexpectedDuplicate.status, 'authorization_mismatch');
+assert.equal(newUnexpectedDuplicate.allowed, true, 'New duplicate link from other tasks must not revoke authorization');
+assert.equal(newUnexpectedDuplicate.status, 'authorized_additional_link');
 
+// 5. Wrong store fails closed
 const wrongStore = evaluateAdditionalDuplicatePublishOverride(task, 'HL', [
   {skcName: 'sv260714225544971215796'},
   {skcName: 'sb260806202334303501938'},
   {skcName: 'sh260607203410692590516'},
 ]);
 assert.equal(wrongStore.allowed, false);
+assert.equal(wrongStore.status, 'store_mismatch');
 
+// 6. Missing owner / unapproved fails closed
 const missingOwner = evaluateAdditionalDuplicatePublishOverride({
   ...task,
   duplicatePublishOverride: {...task.duplicatePublishOverride, approvedBy: {}},

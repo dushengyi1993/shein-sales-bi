@@ -23,7 +23,7 @@ Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_HOME_RANKINGS_MIN_RUNTIME_SEC=630
 Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_RANKINGS_MIN_RUNTIME_SEC=630
 Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_INVENTORY_TREND_MIN_RUNTIME_SEC=630
 Environment=SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC=1200
-TimeoutStartSec=900
+TimeoutStartSec=2100
 TimeoutStopSec=30
 KillMode=control-group
 Nice=15
@@ -32,6 +32,6 @@ IOWeight=20
 MemoryHigh=900M
 MemoryMax=1400M
 OOMPolicy=stop
-ExecCondition=/usr/bin/bash -c 'case "$(date +%%H):$(date +%%M)" in 01:*) exit 1;; *:0[1-4]|*:3[1-4]) exit 0;; *) exit 1;; esac'
 ExecStart=/usr/bin/env bash /opt/shein-bi/app/scripts/run_cloud_portal_section_queue_slot.sh
-SuccessExitStatus=75
+Restart=on-failure
+RestartSec=60

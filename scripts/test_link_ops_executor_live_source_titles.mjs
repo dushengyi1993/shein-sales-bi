@@ -380,7 +380,9 @@ try {
     '--out-dir', path.join(tmpRoot, 'logs'),
   ]);
   let output = null;
-  try { output = JSON.parse(run.stdout); } catch {}
+  try {
+    output = JSON.parse(run.stdout);
+  } catch {}
   check('executor exit code', run.code, 0);
   check('executor parsed output', Boolean(output), true);
   check('dry-run ready for submit', output?.state || '', 'ready_for_submit');

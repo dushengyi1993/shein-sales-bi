@@ -837,6 +837,9 @@ async function main() {
     await resetSafeAttempt(`retry after safe prior phase ${journal.phase}`);
   }
 
+  // A thrown preflight/snapshot error must have durable evidence proving no
+  // create/delete attempt occurred. Never reset an existing mutation journal.
+  if (!journal.mutationsStarted && !journal.currentMutation && !journal.createAttempt) await persistJournal('initialized');
   const initial = await applyRescue({args, rescuePath: args.rescue, execute: false});
   if (!initial.full) {
     throw new Error(`Initial transactional preflight did not produce a readable artifact: ${initial.stderr || initial.stdout || 'no child output'}`);
@@ -999,7 +1002,8 @@ async function main() {
     });
   }
   const snapshottedSkcs = new Set(snapshots.flatMap(snapshot => snapshot.plannedSkcs));
-  const missingSnapshot = eligibleRows.map(row => String(row.skc)).filter(skc => !snapshottedSkcs.has(skc));
+  const conflictingTargetSkcs = new Set(conflicts.flatMap(c => c.targetSkcs || []).filter(skc => eligibleRows.some(row => String(row.skc) === skc)));
+  const missingSnapshot = [...conflictingTargetSkcs].filter(skc => !snapshottedSkcs.has(skc));
   if (missingSnapshot.length) throw new Error(`Target SKCs have conflicts but no complete pre-delete snapshot: ${missingSnapshot.join(',')}`);
   result.snapshots = snapshots;
   journal.snapshots = snapshots;

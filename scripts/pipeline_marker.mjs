@@ -18,7 +18,7 @@ function usage(message = '') {
   console.error(`Usage:
   pipeline_marker.mjs write --stage NAME --date YYYY-MM-DD [--business-date YYYY-MM-DD]
     [--status done|warning|failed|deferred|partial] [--message TEXT]
-    [--evidence PATH] [--work-fingerprint HEX] [--work-fingerprint-scope NAME]
+    [--evidence PATH] [--snapshot-evidence] [--work-fingerprint HEX] [--work-fingerprint-scope NAME]
     [--work-semantic-version VERSION] [--work-parameter KEY=VALUE]
     [--workset-digest HEX] [--workset-candidate-count N] [--workset-pair-count N]
     [--source-commit COMMIT] [--root PATH]
@@ -144,6 +144,7 @@ function parseArgs(argv) {
     else if (token === '--status') options.status = next();
     else if (token === '--message') options.message = next();
     else if (token === '--evidence') options.evidence.push(next());
+    else if (token === '--snapshot-evidence' && command === 'write') options.snapshotEvidence = true;
     else if (token === '--work-fingerprint') options.workFingerprint = next();
     else if (token === '--work-fingerprint-scope') options.workFingerprintScope = next();
     else if (token === '--work-semantic-version' || token === '--semantic-version') options.workSemanticVersion = next();
@@ -446,7 +447,7 @@ async function sha256File(file) {
   return hash.digest('hex');
 }
 
-async function resolveEvidenceRecords(evidence = []) {
+async function resolveEvidenceRecords(evidence = [], snapshotDirectory = '', captureDependencies = true) {
   const records = [];
   const seen = new Set();
   for (const value of evidence || []) {
@@ -461,7 +462,43 @@ async function resolveEvidenceRecords(evidence = []) {
       throw error;
     }
     if (!stats.isFile()) throw evidenceError('PIPELINE_MARKER_EVIDENCE_NOT_FILE', candidate);
-    records.push({path: candidate, bytes: stats.size, sha256: await sha256File(candidate)});
+    const raw = await fs.promises.readFile(candidate);
+    const record = {path: candidate, bytes: raw.length, sha256: createHash('sha256').update(raw).digest('hex')};
+    if (snapshotDirectory) {
+      fs.mkdirSync(snapshotDirectory, {recursive: true, mode: MARKER_DIRECTORY_MODE});
+      record.snapshotPath = path.join(snapshotDirectory, record.sha256);
+      let handle;
+      try {
+        handle = await fs.promises.open(record.snapshotPath, 'wx', 0o660);
+        await handle.writeFile(raw);
+        await handle.sync();
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        const existing = await fs.promises.lstat(record.snapshotPath);
+        if (!existing.isFile() || existing.isSymbolicLink() || !(await fs.promises.readFile(record.snapshotPath)).equals(raw)) {
+          throw evidenceError('PIPELINE_MARKER_SNAPSHOT_CONFLICT', candidate);
+        }
+      } finally { await handle?.close(); }
+      if (process.platform !== 'win32') {
+        const directory = await fs.promises.open(snapshotDirectory, 'r');
+        try { await directory.sync(); } finally { await directory.close(); }
+      }
+      // The morning manifest refers to 38 mutable store/domain files. Capture
+      // their exact bytes too; a snapshot of the manifest alone is incomplete.
+      let document;
+      try { document = JSON.parse(raw); } catch {}
+      if (captureDependencies && document?.schemaVersion === 'shein-morning-resume-evidence/v1') {
+        record.dependencies = [];
+        for (const artifact of document.artifacts || []) {
+          const [saved] = await resolveEvidenceRecords([artifact.path], snapshotDirectory, false);
+          if (!saved || saved.sha256 !== artifact.sha256 || saved.bytes !== artifact.bytes) {
+            throw evidenceError('PIPELINE_MARKER_DEPENDENCY_DRIFT', artifact.path);
+          }
+          record.dependencies.push(saved);
+        }
+      }
+    }
+    records.push(record);
   }
   return records;
 }
@@ -474,6 +511,7 @@ export async function writeMarker({
   status = 'done',
   message = '',
   evidence = [],
+  snapshotEvidence = false,
   workFingerprint = '',
   workFingerprintScope = '',
   workSemanticVersion = '',
@@ -523,7 +561,8 @@ export async function writeMarker({
     }
   }
   const completed = parseIso(completedAt, 'PIPELINE_MARKER_COMPLETED_AT_INVALID').text;
-  const evidenceRecords = await resolveEvidenceRecords(evidence);
+  const evidenceRecords = await resolveEvidenceRecords(evidence, snapshotEvidence
+    ? path.resolve(root, 'evidence', normalizedDate, normalizedStage) : '');
   const payload = {
     schema: PIPELINE_MARKER_SCHEMA,
     schemaVersion: PIPELINE_MARKER_SCHEMA,
@@ -760,7 +799,7 @@ async function verifyEvidenceRecords(entries) {
     return {reason: 'evidence_missing', path: null};
   }
   for (const entry of entries) {
-    const candidate = entry?.path;
+    const candidate = entry?.snapshotPath || entry?.path;
     const expectedBytes = entry?.bytes;
     const expectedSha256 = entry?.sha256;
     if (
@@ -781,6 +820,10 @@ async function verifyEvidenceRecords(entries) {
     if (stats.size !== expectedBytes) return {reason: 'evidence_size_mismatch', path: candidate};
     const digest = await sha256File(candidate);
     if (digest !== expectedSha256) return {reason: 'evidence_hash_mismatch', path: candidate};
+    if (entry.dependencies) {
+      const failure = await verifyEvidenceRecords(entry.dependencies);
+      if (failure) return failure;
+    }
   }
   return null;
 }

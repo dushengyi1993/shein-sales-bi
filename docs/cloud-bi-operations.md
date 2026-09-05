@@ -24,7 +24,7 @@
 - 人工特殊限时折扣生产登记为 `/srv/shein-bi/runtime/marketing_manual_limited_discount_overrides.json`，systemd guard/repair 通过 `SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY` 读取。仓库同名 `config` 文件只作本地/首次迁移种子；数据库备份会把生产登记一并纳入校验和与 COS 保留链。
 - 营销 current baseline 是持久 registry，不是 `tmp` 文件名：生产 unit 固定通过 `SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE=/srv/shein-bi/runtime/marketing-plans/current.json` 读取。current pointer 必须指向 `/srv/shein-bi/runtime/marketing-plans/baselines/<baselineId>/` 下不可变的 `selection-plan.json` 与 `price-overrides.json`，并通过 SHA-256、19 店覆盖、pair key/row 对齐、payload hash、work fingerprint、完成态和 current-baseline 元数据校验；`tmp` 只保留本地无 registry 的兼容扫描，不是生产恢复材料。
 - 云端 Git 同步红线：`/opt/shein-bi/app` 必须由 `sheinops:sheinops` 持有，不要用 `sudo git pull`。仓库 remote 使用 `git@github.com:dushengyi1993/shein-sales-bi.git`，`core.sshCommand` 指向 `/home/sheinops/.ssh/shein_bi_deploy`。若出现源码热修，先备份并回填 GitHub；在完成清单、回滚点和 hash 核对前，不得 `git add -A`、`git reset --hard`、`git clean -fdx`。
-- 发布顺序：BI 用户可见改动先在云端页面或云端服务输出验证，用户确认后再进入 GitHub `main` / release。本地验证只能证明开发产物可运行，不能替代云端最终审核。
+- 发布顺序：按正式发布策略完成本地验证、PR 与合并后同 SHA 的 CI，再通过受管工作流创建正式源码版本；在已有部署授权下部署该精确版本，最后验证云端页面与服务。云端检出不是开发工作区，本地通过也不能替代云端最终验收。具体门禁以 [release-and-deployment-version-policy.md](release-and-deployment-version-policy.md) 为准。
 - 部署纪律：云端不得长期停在老 commit 上手动漂移。任何云端源码热修必须在同一事故内回填 GitHub；任何 GitHub release 必须写明“已部署云端”或“仅源码基线未部署”。交接前确认云端 `HEAD` 等于 release target SHA、tracked worktree 为空、关键服务和 BI health 已验证。完整规则见 [release-and-deployment-version-policy.md](release-and-deployment-version-policy.md)。
 - 当前 GitHub 发布边界：V2 是正式 release 线；V1 只保留 GitHub final/archive 纪念版 `2026.06.18-v1-final-archive`，线上 `/v1/` 不再提供访问，也不再纳入日常刷新或后续功能更新。
 

@@ -11,9 +11,9 @@
  *     explicit alias equality (task raw 'SK-13015', donor raw
  *     'SK-13015杆式吸尘器', canonical 'SK-13015杆式吸尘器'), appends exactly
  *     one row to the SAME task, invalidates the old preflight and returns
- *     binding_committed_needs_description_rebind WITHOUT mutating the
- *     existing description binding;
- *   - titles, price, inventory, images and the description binding stay
+ *     binding_committed_needs_description_rebind while atomically updating
+ *     description binding newPayloadHash and requestKey for the same task;
+ *   - titles, price, inventory, images and the description content hashes stay
  *     byte-identical (attribute-area fingerprint + binding fingerprints);
  *   - failure modes fail closed without any task write: alias mismatch
  *     (other product), unregistered descriptive variant, ignored alias,
@@ -24,9 +24,9 @@
  *     body key, stale revision, missing attribute list, already-present
  *     target rows and multi-SKC payloads;
  *   - step 2: the existing prepare-descriptions command rebinds the SAME
- *     reviewed HTML at the current revision (no new task, no image
- *     re-upload), the attribute lock stays valid (description content
- *     pinning), and the dry-run then becomes ready;
+ *     reviewed HTML at the current revision (idempotent replay, no new task, no
+ *     image re-upload), keeping attribute and description locks valid,
+ *     and the dry-run ready;
  *   - the execution gate blocks dry-run on tampered donor-bound payloads,
  *     unbound whitelisted rows and alias registry drift;
  *   - the managed CLI exits 0 only when binding/readback/audit are verified,
@@ -68,6 +68,7 @@ import {
   descriptionBindingRequestKey,
   sha256StableJson,
   sha256Utf8,
+  validateDescriptionBindingLock,
 } from '../lib/link_ops_product_descriptions.mjs';
 import {readOpenApiProductCache, writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
@@ -1141,7 +1142,10 @@ try {
   check('success stock unchanged', JSON.stringify(successRaw.openapiPublishPayload.skc_list[0].sku_list[0].stock_info_list), beforeSnapshot.stock);
   check('success image binding fingerprint unchanged', String(successRaw.publishAssetBinding?.bindingFingerprint || ''), beforeSnapshot.imageFingerprint);
   check('success publish asset binding unchanged', JSON.stringify(successRaw.publishAssetBinding), beforeSnapshot.publishAssetBinding);
-  check('success description binding untouched by step 1', JSON.stringify(successRaw.descriptionMaterialBinding), beforeSnapshot.descriptionBinding);
+  check('success description binding synchronizes newPayloadHash', String(successRaw.descriptionMaterialBinding?.newPayloadHash || ''), sha256StableJson(successRaw.openapiPublishPayload));
+  check('success description binding preserves content hash', String(successRaw.descriptionMaterialBinding?.contentSha256 || ''), descContentSha);
+  check('success description binding preserves sourceProof', String(successRaw.descriptionMaterialBinding?.sourceProof || ''), 'server_verified_html_section_s09');
+  check('success description binding lock valid', validateDescriptionBindingLock(successRaw, successRaw.openapiPublishPayload).ok, true);
   const successLock = validateProductAttributeBindingLock(successRaw, successRaw.openapiPublishPayload);
   check('success persisted lock ok', successLock.ok, true);
   check('success lock pins old payload hash', /^[a-f0-9]{64}$/.test(String(successRaw?.productAttributeBinding?.oldPayloadHash || '')), true);
@@ -1183,9 +1187,8 @@ try {
     cookie,
     body: {id: successTaskId, mode: 'dry-run', source: 'codex_desktop_cli_prepare_product_attribute'},
   });
-  check('step-1 dry-run blocked by stale description lock', String(step1DryRun.json?.execution?.state || ''), 'blocked');
-  check('step-1 dry-run blocker mentions description drift', asArray(step1DryRun.json?.execution?.preflight?.blockers)
-    .some(row => /descriptionMaterialBinding|destination descriptions|newPayloadHash 与任务当前 openapiPublishPayload 不一致|hash 与审核资料绑定不一致/.test(String(row))), true);
+  check('step-1 dry-run ready after attribute append', String(step1DryRun.json?.execution?.state || ''), 'openapi_product_preflight_ready');
+  check('step-1 dry-run carries no blockers', asArray(step1DryRun.json?.execution?.preflight?.blockers).length, 0);
   check('step-1 dry-run carries no attribute gate blocker', asArray(step1DryRun.json?.execution?.preflight?.blockers)
     .some(row => /PRODUCT_ATTRIBUTE/.test(String(row))), false);
 
@@ -1374,7 +1377,9 @@ try {
   check('stale append preserves price', JSON.stringify(resignAppendRaw.openapiPublishPayload.skc_list[0].sku_list[0].cost_info), resignAppendSnapshot.cost);
   check('stale append preserves inventory', JSON.stringify(resignAppendRaw.openapiPublishPayload.skc_list[0].sku_list[0].stock_info_list), resignAppendSnapshot.stock);
   check('stale append preserves image binding', JSON.stringify(resignAppendRaw.publishAssetBinding), resignAppendSnapshot.assetBinding);
-  check('stale append preserves description binding object', JSON.stringify(resignAppendRaw.descriptionMaterialBinding), resignAppendSnapshot.descriptionBinding);
+  check('stale append synchronizes description binding newPayloadHash', String(resignAppendRaw.descriptionMaterialBinding?.newPayloadHash || ''), sha256StableJson(resignAppendRaw.openapiPublishPayload));
+  check('stale append preserves description contentSha256', String(resignAppendRaw.descriptionMaterialBinding?.contentSha256 || ''), descContentSha);
+  check('stale append description binding lock valid', validateDescriptionBindingLock(resignAppendRaw, resignAppendRaw.openapiPublishPayload).ok, true);
   check('stale append history records one re-sign', asArray(resignAppendRaw.history).filter(row => row?.event === 'product_attribute_resigned').length, 1);
   const resignAppendAuditEntry = (await fs.readFile(auditFile, 'utf8')).split(/\r?\n/).filter(Boolean)
     .map(line => JSON.parse(line))
@@ -1393,8 +1398,7 @@ try {
   const resignAppendDryRun = await req('/api/link-ops-execute', {
     method: 'POST', cookie, body: {id: resignAppendTaskId, mode: 'dry-run', source: 'test'},
   });
-  check('stale append dry-run requires description rebind', asArray(resignAppendDryRun.json?.execution?.preflight?.blockers)
-    .some(row => /descriptionMaterialBinding|destination descriptions|newPayloadHash 与任务当前 openapiPublishPayload 不一致|hash 与审核资料绑定不一致/.test(String(row))), true);
+  check('stale append dry-run ready after resign sanitization', String(resignAppendDryRun.json?.execution?.state || ''), 'openapi_product_preflight_ready');
   const resignAppendBindingKey = String(resignAppendRaw.productAttributeBinding?.bindingRequestKey || '');
   const resignAppendAfterStaleDryRun = await rawTaskById(resignAppendTaskId);
   const resignAppendRebind = await req('/api/link-ops-prepare-descriptions', {
@@ -2060,13 +2064,15 @@ try {
   check('cli step-1 same task', String(cliRun.json?.taskId || ''), cliTaskId);
   check('cli step-1 binding value', cliRun.json?.binding?.attributeValueId, DONOR_VALUE_ID);
   check('cli step-1 canonical', String(cliRun.json?.binding?.canonicalCode || ''), DONOR_FULL_CODE);
-  check('cli step-1 dry-run expected blocked', String(cliRun.json?.dryRun?.state || ''), 'blocked');
+  check('cli step-1 dry-run ready', String(cliRun.json?.dryRun?.state || ''), 'openapi_product_preflight_ready');
   check('cli step-1 binding lock ok', cliRun.json?.dryRun?.bindingLocked, true);
   check('cli step-1 realPublishOccurred false', cliRun.json?.safety?.realPublishOccurred, false);
   const cliRaw = await rawTaskById(cliTaskId);
   check('cli area fingerprint unchanged', productAttributeAreaFingerprint(cliRaw.openapiPublishPayload), cliBeforeSnapshot.areaHash);
   check('cli image fingerprint unchanged', String(cliRaw.publishAssetBinding?.bindingFingerprint || ''), cliBeforeSnapshot.imageFingerprint);
-  check('cli description binding untouched by step 1', JSON.stringify(cliRaw.descriptionMaterialBinding), cliBeforeSnapshot.descriptionBinding);
+  check('cli description binding synchronizes newPayloadHash', String(cliRaw.descriptionMaterialBinding?.newPayloadHash || ''), sha256StableJson(cliRaw.openapiPublishPayload));
+  check('cli description binding keeps content hash', String(cliRaw.descriptionMaterialBinding?.contentSha256 || ''), descContentSha);
+  check('cli description binding lock valid', validateDescriptionBindingLock(cliRaw, cliRaw.openapiPublishPayload).ok, true);
   check('cli actualWriteSubmitted false', Boolean(cliRaw?.execution?.actualWriteSubmitted), false);
   check('cli publish never called', publishAttemptCount, 0);
   const cliBindingKey = String(cliRaw?.productAttributeBinding?.bindingRequestKey || '');
@@ -2086,8 +2092,8 @@ try {
   check('cli step-2 exits zero', cliStep2.code, 0);
   check('cli step-2 ok', cliStep2.json?.ok, true);
   const cliStep2Raw = await rawTaskById(cliTaskId);
-  check('step-2 rebases description binding revision', Number(cliStep2Raw?.descriptionMaterialBinding?.baseTaskRevision || 0) > cliDescriptionBaseBefore, true);
-  check('step-2 description request key changed', String(cliStep2Raw?.descriptionMaterialBinding?.bindingRequestKey || ''), key => key !== cliDescriptionKeyBefore && /^[a-f0-9]{64}$/.test(String(key)));
+  check('step-2 replays description binding idempotently', Number(cliStep2Raw?.descriptionMaterialBinding?.baseTaskRevision || 0), cliDescriptionBaseBefore);
+  check('step-2 description request key preserved', String(cliStep2Raw?.descriptionMaterialBinding?.bindingRequestKey || ''), cliDescriptionKeyBefore);
   check('step-2 keeps description content hash', String(cliStep2Raw?.descriptionMaterialBinding?.contentSha256 || ''), descContentSha);
   check('step-2 attribute lock still ok after rebind', validateProductAttributeBindingLock(cliStep2Raw, cliStep2Raw.openapiPublishPayload).ok, true);
   check('step-2 attribute binding key unchanged', String(cliStep2Raw?.productAttributeBinding?.bindingRequestKey || ''), cliBindingKey);

@@ -20,6 +20,7 @@ import {
 import {withInventoryCutoverLock} from '../lib/inventory_write_cutover.mjs';
 import {
   INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+  INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
 
@@ -115,6 +116,7 @@ try {
     policyVersion: INVENTORY_MAINTENANCE_WRITE_PROFILE,
     changeQuantity: 69,
     overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    overwriteComputationVersion: INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
     intentId: 'maintenance-existing-row-warehouse-ok',
     inventoryWriteProfile: INVENTORY_MAINTENANCE_WRITE_PROFILE,
     warehouseCode: 'PS299807325817',
@@ -137,6 +139,7 @@ try {
     policyVersion: '2026-08-23.1',
     changeQuantity: 69,
     overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    overwriteComputationVersion: INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
     intentId: 'daily-existing-row-still-rejects-warehouse',
     warehouseCode: 'PS299807325817',
   });
@@ -149,6 +152,7 @@ try {
     policyVersion: '2026-08-23.1',
     changeQuantity: 69,
     overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    overwriteComputationVersion: INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
     intentId: 'mixed-et-inventory-intent',
   });
   await appendDurableJournalRecord(mixedEtJournal, {
@@ -201,6 +205,7 @@ try {
     policyVersion: '2026-08-23.1',
     changeQuantity: 69,
     overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    overwriteComputationVersion: INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
     intentId: 'post-response-lock-release-intent',
   });
   let releaseReadback;
@@ -292,7 +297,7 @@ try {
     }]},
     headers: {language: 'en'},
   };
-  const exactIntent = {...intent, recoveryScopeKey: inventoryRecoveryScopeKey({runDate:intent.runDate,storeKey:intent.storeKey,skc:intent.skc,skuCode:intent.skuCode}), planHash: expected.plan.payloadHash, policyVersion: expected.plan.policyVersion, overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION, authorizationId: expected.authorizationId, before: {totalInventoryQuantity: 20, totalUsableInventory: 20, totalLockedQuantity: 0, stockRowMissing:false}, request: exactRequest, requestPayloadHash: stableInventoryHash(exactRequest)};
+  const exactIntent = {...intent, recoveryScopeKey: inventoryRecoveryScopeKey({runDate:intent.runDate,storeKey:intent.storeKey,skc:intent.skc,skuCode:intent.skuCode}), planHash: expected.plan.payloadHash, policyVersion: expected.plan.policyVersion, overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION, authorizationId: expected.authorizationId, before: {totalInventoryQuantity: 20, totalUsableInventory: 20, totalLockedQuantity: 0, temporaryInventoryQuantity: 0, stockRowMissing:false}, request: exactRequest, requestPayloadHash: stableInventoryHash(exactRequest)};
   assert.equal(recoveredInventoryIntentMismatch(exactIntent, expected), '');
   assert.equal(recoveredInventoryIntentMismatch({...exactIntent, planHash: '2'.repeat(64)}, expected), 'planHash', 'cross-planHash intent must never upgrade to current success');
   assert.equal(recoveredInventoryIntentMismatch({...exactIntent, authorizationId: 'other'}, expected), 'authorizationId');
@@ -390,13 +395,35 @@ try {
     runDate: '2026-08-23',
     policyVersion: '2026-08-23.1',
     changeQuantity: 69,
-    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    overwriteComputationVersion: INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
     intentId: 'current-locked-only-1',
   });
   const currentVersionJournal = path.join(temp, 'daily-inventory-replenishment-2026-08-23.json.journal.ndjson');
   await appendDurableJournalRecord(currentVersionJournal, currentVersionIntent);
   const currentVersionLifecycle = await readInventoryIntentLifecycle(currentVersionJournal, {strict: true, maxRunDate: '2026-08-23'});
   assert.equal(currentVersionLifecycle.pending.has(currentVersionIntent.intentId), true, 'current version with locked-only quantity must pass strict read');
+
+  // Verify that new ordinary-plus-temporary/v2 version requires explicit temp lock and conservation
+  const currentV2Intent = buildStrictIntent({
+    runDate: '2026-08-23',
+    policyVersion: '2026-08-23.1',
+    changeQuantity: 70,
+    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    intentId: 'current-ordinary-plus-temp-1',
+  });
+  currentV2Intent.before = {
+    totalInventoryQuantity: 9,
+    totalUsableInventory: 8,
+    totalLockedQuantity: 0,
+    temporaryInventoryQuantity: 1,
+    stockRowMissing: false,
+  };
+  currentV2Intent.request.body.updateSkuInventoryQuantityRequests[0].changeQuantity = 70;
+  currentV2Intent.requestPayloadHash = stableInventoryHash(currentV2Intent.request);
+  const currentV2Journal = path.join(temp, 'daily-inventory-replenishment-2026-08-23-v2.json.journal.ndjson');
+  await appendDurableJournalRecord(currentV2Journal, currentV2Intent);
+  const currentV2Lifecycle = await readInventoryIntentLifecycle(currentV2Journal, {strict: true, maxRunDate: '2026-08-23'});
+  assert.equal(currentV2Lifecycle.pending.has(currentV2Intent.intentId), true, 'v2 version with ordinary+temp quantity passes strict read');
 
   const currentUnversionedJournal = path.join(temp, 'daily-inventory-replenishment-2026-08-23-unversioned.journal.ndjson');
   const currentUnversionedIntent = {...currentVersionIntent, intentId: 'current-unversioned-1'};

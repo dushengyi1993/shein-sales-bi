@@ -68,6 +68,7 @@ try {
       totalUsableInventory: 5,
       totalInventoryQuantity: 7,
       totalLockedQuantity: 2,
+      temporaryInventoryQuantity: 0,
     }),
     targets: [{
       storeKey: 'LQ',

@@ -319,6 +319,12 @@ EOF
 cp "\$REPO/scripts/pipeline_marker.mjs" "\$SB/scripts/pipeline_marker.mjs"
 cp "\$REPO/scripts/run_pipeline_stage.sh" "\$SB/scripts/run_pipeline_stage.sh"
 cp "\$REPO/scripts/run_cloud_session_manager_job.sh" "\$SB/scripts/run_cloud_session_manager_job.sh"
+mkdir -p "\$SB/scripts/inventory" "\$SB/lib"
+cp -r "\$REPO/lib/." "\$SB/lib/"
+cp "\$REPO/scripts/validate_daily_operating_refresh.mjs" "\$SB/scripts/validate_daily_operating_refresh.mjs"
+cp "\$REPO/scripts/inventory/daily_inventory_version_publisher.mjs" "\$SB/scripts/inventory/daily_inventory_version_publisher.mjs"
+cp "\$REPO/scripts/check_release_source_state.mjs" "\$SB/scripts/check_release_source_state.mjs"
+cp "\$REPO/config/inventory_replenishment_policy.json" "\$SB/config/inventory_replenishment_policy.json"
 cat > "\$SB/scripts/build_morning_resume_evidence.mjs" <<'EOF'
 #!/usr/bin/env node
 import fs from 'node:fs';

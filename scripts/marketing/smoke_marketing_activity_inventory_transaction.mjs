@@ -21,14 +21,16 @@ assert.equal(computeActivityStockOverwriteQuantity(10, {
   totalInventoryQuantity: 9,
   totalUsableInventory: 7,
   totalLockedQuantity: 1,
+  temporaryInventoryQuantity: 1,
 }), 12);
 assert.equal(computeActivityStockOverwriteQuantity(0, {
   totalInventoryQuantity: 2,
   totalUsableInventory: 0,
   totalLockedQuantity: 2,
+  temporaryInventoryQuantity: 0,
 }), 2);
 
-const dryState = stock(9, 7, 1);
+const dryState = stock(9, 7, 1, 1);
 let dryWrites = 0;
 const dryPlan = await planActivityInventoryTransaction({
   targets: [target],
@@ -59,7 +61,8 @@ assert.match(submitFailure.result.blockers.map(row => row.reason).join(','), /su
 const lockedChangeFailure = await scenario({
   afterSubmit(state) {
     state.totalLockedQuantity = 4;
-    state.totalInventoryQuantity = state.totalUsableInventory + 4;
+    state.temporaryInventoryQuantity = 1;
+    state.totalInventoryQuantity = state.totalUsableInventory + state.totalLockedQuantity + state.temporaryInventoryQuantity;
   },
   forceRestoreUsable: 6,
 });
@@ -80,7 +83,7 @@ assert.equal(invalidAfterRestore.result.ok, false);
 assert.equal(invalidAfterRestore.result.safe, false);
 assert.match(invalidAfterRestore.result.blockers.map(row => row.reason).join(','), /activity_invalid_or_withdrawn_after_inventory_restore/);
 
-const zeroUsableRestore = await scenario({initialState: stock(0, 0, 0)});
+const zeroUsableRestore = await scenario({initialState: stock(0, 0, 0, 0)});
 assert.equal(zeroUsableRestore.result.ok, true);
 assert.equal(zeroUsableRestore.result.safe, true);
 assert.equal(zeroUsableRestore.state.totalInventoryQuantity, 0);
@@ -115,7 +118,7 @@ async function scenario({
   forceRestoreUsable = null,
   restoreWriteFails = false,
   invalidAfterRestore = false,
-  initialState = stock(9, 7, 1),
+  initialState = stock(9, 7, 1, 1),
   staleReadbacksAfterWrite = 0,
 } = {}) {
   const state = {...initialState};
@@ -138,7 +141,7 @@ async function scenario({
       writeCalls += 1;
       if (phase === 'restore' && restoreWriteFails) return {ok: false, error: 'forced restore failure'};
       staleSnapshot = {...state};
-      const unavailable = Math.max(state.totalLockedQuantity, state.totalInventoryQuantity - state.totalUsableInventory);
+      const unavailable = state.totalLockedQuantity + (state.temporaryInventoryQuantity || 0);
       state.totalInventoryQuantity = overwriteQuantity;
       state.totalUsableInventory = phase === 'restore' && forceRestoreUsable !== null
         ? forceRestoreUsable
@@ -170,11 +173,12 @@ async function scenario({
   return {result, state, writeCalls};
 }
 
-function stock(totalInventoryQuantity, totalUsableInventory, totalLockedQuantity) {
+function stock(totalInventoryQuantity, totalUsableInventory, totalLockedQuantity, temporaryInventoryQuantity = 0) {
   return {
     skuCode: 'sku-test',
     totalInventoryQuantity,
     totalUsableInventory,
     totalLockedQuantity,
+    temporaryInventoryQuantity,
   };
 }

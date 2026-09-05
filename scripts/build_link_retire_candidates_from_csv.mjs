@@ -8,6 +8,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {evaluateLowExposureZeroSalesRetireCandidate} from '../lib/link_retire_candidate_policy.mjs';
+import {stageAndDeliverBusinessResult} from '../lib/ops_business_result_pipeline.mjs';
+import {runLocalCloudTeamReport} from '../lib/cloud_team_report_local.mjs';
+import {CLOUD_TEAM_REPORT_CLOUD_HOST, sha256Bytes} from '../lib/cloud_team_report_common.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -24,6 +27,8 @@ function parseArgs(argv) {
     else if (a === '--out-dir') args.outDir = path.resolve(String(argv[++i] || ''));
     else if (a === '--performance-date' || a === '--perf-date') args.performanceDate = String(argv[++i] || '').trim();
     else if (a === '--prefix') args.prefix = String(argv[++i] || '').trim() || args.prefix;
+    else if (a === '--stage-delivery') args.stageDelivery = true;
+    else if (a === '--send') args.send = true;
   }
   if (!args.input) throw new Error('build_link_retire_candidates_from_csv requires --input <enriched candidate csv or query json>');
   return args;
@@ -304,7 +309,60 @@ async function main() {
     ...candidates.map(r => `| ${r.store || ''} | ${r.standard_goods_sn || ''} | ${r.skc || ''} | ${r.link_created_time || ''} | ${r.first_shelf_time || ''} | ${r.shelf_age_days_at_perf_date || ''} | ${r.c7_exposure ?? r.c7EpsUv ?? ''} | ${r.c7_sale_cnt ?? r.c7SaleCnt ?? ''} | ${r.suggested_waste_goods_sn || ''} |`),
   ].join('\n');
   await fs.writeFile(outMd, md, 'utf8');
-  console.log(JSON.stringify({ok: true, outCsv, outMd, outJson, outSummary, counts: summary.counts, targetSkcCheck}, null, 2));
+
+  // F1 hook: stage into shared automation delivery staging area if requested via env or flag
+  let stagedResult = null;
+  if (process.env.STAGE_OPS_DELIVERY === '1' || args.stageDelivery) {
+    try {
+      stagedResult = await stageAndDeliverBusinessResult({
+        automationId: 'link-retire-candidates',
+        businessDate: performanceDate,
+        result: {
+          action: '待下架链接候选报告筛选',
+          ok: true,
+          counts: summary.counts,
+          performanceDate,
+          summary,
+        },
+        attachmentName: 'candidates.json',
+        attachmentContent: JSON.stringify({summary, rows: candidates}, null, 2),
+      });
+    } catch {}
+  }
+
+  let cloudDeliveryOutcome = null;
+  if (args.send) {
+    try {
+      const jsonBytes = await fs.readFile(outJson);
+      const expectedSha = sha256Bytes(jsonBytes);
+      const sshBin = process.env.CLOUD_TEAM_REPORT_SSH_BIN;
+      const sshSpawnImpl = sshBin
+        ? (bin, a, o) => {
+            if (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(sshBin)) {
+              return spawn(process.env.ComSpec || 'cmd.exe', ['/c', sshBin, ...a], o);
+            }
+            return spawn(sshBin, a, o);
+          }
+        : undefined;
+      cloudDeliveryOutcome = await runLocalCloudTeamReport({
+        automationId: 'link-retire-candidates',
+        businessDate: performanceDate,
+        summaryFile: outMd,
+        attachment: outJson,
+        expectedAttachmentSha256: expectedSha,
+        cloudSsh: process.env.CLOUD_TEAM_REPORT_SSH_HOST || CLOUD_TEAM_REPORT_CLOUD_HOST,
+        ...(sshSpawnImpl ? { spawnImpl: sshSpawnImpl } : {}),
+      });
+    } catch (err) {
+      cloudDeliveryOutcome = { ok: false, error: err.message };
+    }
+  }
+
+  console.log(JSON.stringify({
+    ok: true, outCsv, outMd, outJson, outSummary, counts: summary.counts, targetSkcCheck,
+    ...(stagedResult ? { stagedDelivery: stagedResult.status } : {}),
+    ...(cloudDeliveryOutcome ? { sendDelivery: cloudDeliveryOutcome } : {}),
+  }, null, 2));
 }
 
 await main();

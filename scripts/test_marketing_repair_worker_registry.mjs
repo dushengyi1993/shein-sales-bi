@@ -190,6 +190,8 @@ function installFixtureScripts() {
   ].join('\n'));
   fs.copyFileSync(path.join(repoRoot, 'lib', 'marketing_plan_registry.mjs'), path.join(fixtureRoot, 'lib', 'marketing_plan_registry.mjs'));
   fs.copyFileSync(path.join(repoRoot, 'lib', 'atomic_file_publish.mjs'), path.join(fixtureRoot, 'lib', 'atomic_file_publish.mjs'));
+  fs.copyFileSync(path.join(repoRoot, 'scripts', 'resolve_cloud_runtime_artifact.mjs'), path.join(fixtureRoot, 'scripts', 'resolve_cloud_runtime_artifact.mjs'));
+  fs.copyFileSync(path.join(repoRoot, 'lib', 'cloud_runtime_path_policy.mjs'), path.join(fixtureRoot, 'lib', 'cloud_runtime_path_policy.mjs'));
   writeJson(storesConfig, {stores: stores.map(storeKey => ({storeKey}))});
   writeExecutable(path.join(binDir, 'systemctl'), '#!/usr/bin/env bash\nexit 1\n');
   writeExecutable(path.join(fixtureRoot, 'scripts', 'manage_browser_task_leases.mjs'), [

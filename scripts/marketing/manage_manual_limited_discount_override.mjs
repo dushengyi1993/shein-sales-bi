@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
 import {
   DEFAULT_MANUAL_LIMITED_DISCOUNT_OVERRIDES_PATH,
+  MANUAL_LIMITED_DISCOUNT_SEED_PATH,
   formatShanghaiDateTime,
   loadManualLimitedDiscountRegistry,
   manualLimitedDiscountKey,
@@ -11,8 +11,7 @@ import {
   validateManualLimitedDiscountRegistry,
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock.mjs';
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+import {writeFileAtomic, writeJsonFileAtomic} from '../../lib/atomic_file_publish.mjs';
 
 function parseArgs(argv) {
   const args = {command: argv[0] || 'validate', registry: DEFAULT_MANUAL_LIMITED_DISCOUNT_OVERRIDES_PATH};
@@ -32,18 +31,7 @@ async function writeRegistry(file, doc) {
   const validation = validateManualLimitedDiscountRegistry(doc);
   if (!validation.ok) throw new Error(validation.errors.join('; '));
   const output = {...doc, updatedAt: new Date().toISOString(), entries: validation.entries};
-  const temp = `${file}.tmp-${process.pid}`;
-  const content = `${JSON.stringify(output, null, 2)}\n`;
-  try {
-    await fs.writeFile(temp, content, 'utf8');
-    await fs.rename(temp, file);
-  } catch (error) {
-    await fs.rm(temp, {force: true}).catch(() => {});
-    if (!['EACCES', 'EPERM'].includes(error?.code)) throw error;
-    // Production keeps config/ root-owned while this specific registry file is
-    // writable by sheinops. Fall back to a guarded in-place replacement.
-    await fs.writeFile(file, content, 'utf8');
-  }
+  await writeJsonFileAtomic(file, output, {mode: 0o660});
   return output;
 }
 
@@ -53,9 +41,9 @@ function required(args, names) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const mutating = new Set(['register', 'update-activity', 'disable']).has(args.command);
+  const mutating = new Set(['register', 'update-activity', 'disable', 'migrate']).has(args.command);
   const lockFile = process.env.SHEIN_BI_MANUAL_LIMITED_DISCOUNT_LOCK_FILE
-    || path.join(ROOT, 'state', 'locks', 'manual-limited-discount-registry.lock');
+    || `${args.registry}.lock`;
   const release = mutating ? await acquireCrossProcessTicketLock(lockFile, {
     timeoutMs: 30_000,
     staleMs: 10 * 60_000,
@@ -63,6 +51,27 @@ async function main() {
     timeoutCode: 'MANUAL_LIMITED_DISCOUNT_REGISTRY_LOCK_TIMEOUT',
   }) : null;
   try {
+    if (args.command === 'migrate') {
+      // Existing runtime always wins. Never merge stale business values during
+      // deployment or roll back a registry together with tracked source.
+      try {
+        const current = JSON.parse((await fs.readFile(args.registry, 'utf8')).replace(/^\uFEFF/, ''));
+        const validation = validateManualLimitedDiscountRegistry(current);
+        if (!validation.ok) throw new Error(validation.errors.join('; '));
+        console.log(JSON.stringify({ok: true, action: 'preserved_existing', registry: args.registry, entries: validation.entries.length}));
+        return;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      const seed = path.resolve(String(args.seed || MANUAL_LIMITED_DISCOUNT_SEED_PATH));
+      if (seed === args.registry) throw new Error('Migration requires distinct seed and runtime paths');
+      const bytes = await fs.readFile(seed);
+      const validation = validateManualLimitedDiscountRegistry(JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')));
+      if (!validation.ok) throw new Error(validation.errors.join('; '));
+      await writeFileAtomic(args.registry, bytes, {mode: 0o660});
+      console.log(JSON.stringify({ok: true, action: 'migrated', registry: args.registry, entries: validation.entries.length}));
+      return;
+    }
     // Mutating commands intentionally load only after acquiring the lock. This
     // prevents two timer/CLI processes from both reading an old registry and
     // then silently overwriting each other's updates.

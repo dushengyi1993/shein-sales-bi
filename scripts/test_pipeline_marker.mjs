@@ -7,6 +7,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {writeMorningResumeEvidence} from '../lib/morning_resume_evidence.mjs';
 
 import {
   markerPath,
@@ -15,7 +16,8 @@ import {
   writeMarker,
 } from './pipeline_marker.mjs';
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-bi-pipeline-marker-'));
+const tempParent = path.resolve(process.env.SHEIN_TEST_TMP_ROOT || os.tmpdir());
+const root = fs.mkdtempSync(path.join(tempParent, 'shein-bi-pipeline-marker-'));
 const moduleFile = fileURLToPath(new URL('./pipeline_marker.mjs', import.meta.url));
 const markerSource = fs.readFileSync(moduleFile, 'utf8');
 
@@ -31,7 +33,8 @@ function writeEvidenceFile(relative, content) {
 }
 
 function runCli(args) {
-  return spawnSync(process.execPath, [moduleFile, ...args], {encoding: 'utf8'});
+  // Morning manifest paths are relative to the business root, just as in the real CLI.
+  return spawnSync(process.execPath, [moduleFile, ...args], {encoding: 'utf8', cwd: root});
 }
 
 async function main() {
@@ -259,9 +262,90 @@ async function main() {
     assert.equal(run.status, 1, run.stdout);
     assert.match(run.stderr, /PIPELINE_MARKER_EVIDENCE_MISSING/);
 
-    console.log(JSON.stringify({ok: true}));
+    const mutableLog = writeEvidenceFile('mutable.log', 'first record\n');
+    const captured = runCli(['write', '--stage', 'frozen', '--date', '2026-09-05', '--root', cliRoot,
+      '--snapshot-evidence', '--evidence', mutableLog]);
+    assert.equal(captured.status, 0, captured.stderr);
+    const frozen = JSON.parse(captured.stdout);
+    fs.appendFileSync(mutableLog, 'later record\n');
+    assert.equal((await requireMarker({root: cliRoot, stage: 'frozen', date: '2026-09-05', requireEvidence: true})).ok, true,
+      'later log append must not invalidate the immutable evidence captured for a stage');
+    assert.equal(fs.readFileSync(frozen.evidence[0].snapshotPath, 'utf8'), 'first record\n');
+    fs.appendFileSync(frozen.evidence[0].snapshotPath, 'tamper');
+    assert.equal((await requireMarker({root: cliRoot, stage: 'frozen', date: '2026-09-05', requireEvidence: true})).ok, false);
+    const stores = Array.from({length: 19}, (_, index) => `FIXTURE${index + 1}`);
+    writeEvidenceFile('config/stores.json', JSON.stringify({stores: stores.map(storeKey => ({storeKey, enabled: true}))}));
+    for (const storeKey of stores) {
+      for (const domain of ['shein_links', 'shein_business_domains']) {
+        writeEvidenceFile(`outputs/${domain}/${storeKey}/2026-09-04.json`,
+          `${JSON.stringify({ok: true, date: '2026-09-04', store: {storeKey}, domain})}\n`);
+      }
+    }
+    const manifest = path.join(root, 'state', 'morning-manifest.json');
+    await writeMorningResumeEvidence({root, date: '2026-09-04', outputFile: manifest});
+    const morning = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    assert.equal(morning.artifactCount, 38);
+    assert(morning.artifacts.every(artifact => !path.isAbsolute(artifact.path)), 'exercise the real relative-path contract');
+    const captureMorning = stage => runCli(['write', '--stage', stage, '--date', '2026-09-05',
+      '--business-date', '2026-09-04', '--root', cliRoot, '--snapshot-evidence', '--evidence', manifest]);
+    const capturedMorning = captureMorning('closed');
+    assert.equal(capturedMorning.status, 0, capturedMorning.stderr);
+    const closure = JSON.parse(capturedMorning.stdout);
+    const savedManifest = closure.evidence[0];
+    assert.equal(savedManifest.path, manifest, 'snapshotting must preserve the logical evidence path');
+    assert.notEqual(savedManifest.snapshotPath, manifest);
+    assert.equal(savedManifest.dependencies.length, 38);
+    assert.deepEqual(savedManifest.dependencies.map(record => record.path), morning.artifacts.map(artifact => artifact.path),
+      'dependency logical paths must remain business-root-relative');
+    for (const [index, dependency] of savedManifest.dependencies.entries()) {
+      const artifact = morning.artifacts[index];
+      assert.equal(dependency.sha256, artifact.sha256);
+      assert.equal(dependency.bytes, artifact.bytes);
+      assert.deepEqual(fs.readFileSync(dependency.snapshotPath), fs.readFileSync(path.resolve(root, artifact.path)));
+    }
+    const checkClosure = () => requireMarker({root: cliRoot, stage: 'closed', date: '2026-09-05', requireEvidence: true});
+    assert.equal((await checkClosure()).ok, true);
+    // Valid JSON with equal byte length: this must exercise hashing, not just file size or parsing.
+    const firstOriginal = path.resolve(root, morning.artifacts[0].path);
+    const firstBytes = fs.readFileSync(firstOriginal);
+    fs.writeFileSync(firstOriginal, Buffer.concat([firstBytes.subarray(0, -1), Buffer.from(' ')]));
+    const driftCapture = captureMorning('drifted');
+    assert.equal(driftCapture.status, 1, 'capturing a manifest whose dependency already drifted must fail');
+    assert.match(driftCapture.stderr, /PIPELINE_MARKER_DEPENDENCY_DRIFT/);
+    assert.equal(fs.existsSync(markerPath(cliRoot, '2026-09-05', 'drifted')), false,
+      'failed capture must not publish a completion marker');
+    for (const artifact of morning.artifacts) {
+      fs.writeFileSync(path.resolve(root, artifact.path), '{"ok":false,"laterRun":true}\n');
+    }
+    fs.writeFileSync(manifest, '{"ok":false,"laterRun":true}\n');
+    assert.equal((await checkClosure()).ok, true, 'all 38 original files and their manifest may change after capture');
+    const requiredMorning = runCli(['require', '--stage', 'closed', '--date', '2026-09-05', '--root', cliRoot, '--require-evidence']);
+    assert.equal(requiredMorning.status, 0, requiredMorning.stderr || requiredMorning.stdout);
+    const snapshotRecords = [savedManifest, ...savedManifest.dependencies];
+    assert.equal(new Set(snapshotRecords.map(record => record.snapshotPath)).size, 39, 'exercise every distinct saved file');
+    for (const [index, record] of snapshotRecords.entries()) {
+      const original = fs.readFileSync(record.snapshotPath);
+      fs.writeFileSync(record.snapshotPath, Buffer.concat([original.subarray(0, -1), Buffer.from(' ')]));
+      try {
+        const rejected = await checkClosure();
+        assert.equal(rejected.ok, false, `snapshot ${index} tamper must be rejected`);
+        assert.equal(rejected.reason, 'evidence_hash_mismatch', `snapshot ${index} must be hash-checked`);
+      } finally { fs.writeFileSync(record.snapshotPath, original); }
+      assert.equal((await checkClosure()).ok, true, `restored snapshot ${index} must recover`);
+    }
+    const missingSnapshot = savedManifest.dependencies[0];
+    const savedBytes = fs.readFileSync(missingSnapshot.snapshotPath);
+    fs.unlinkSync(missingSnapshot.snapshotPath);
+    try { assert.equal((await checkClosure()).reason, 'evidence_missing', 'mutable original must not replace a missing snapshot'); }
+    finally { fs.writeFileSync(missingSnapshot.snapshotPath, savedBytes); }
+    assert.equal((await checkClosure()).ok, true);
+    console.log(JSON.stringify({ok: true, frozenEvidenceAndMorningClosure: true,
+      morningDependencies: 38, originalFilesChanged: 39, snapshotHashTamperRejections: snapshotRecords.length,
+      relativePathCli: true, dependencyDriftRejected: true, missingSnapshotRejected: true}));
   } finally {
-    fs.rmSync(root, {recursive: true, force: true});
+    assert.equal(path.dirname(path.resolve(root)), tempParent);
+    assert(path.basename(root).startsWith('shein-bi-pipeline-marker-'));
+    fs.rmSync(root, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
   }
 }
 

@@ -9,18 +9,23 @@ import {fileURLToPath} from 'node:url';
 
 import {
   buildDailyInventoryPlanHashPayload,
-  computeInventoryOverwriteQuantity,
+  computeInventoryOverwriteQuantity as computeVersionedInventoryOverwriteQuantity,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
 import {
   INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
+  inventoryLogicalActionKey,
 } from '../lib/durable_inventory_write.mjs';
 import {writeMorningResumeEvidence} from '../lib/morning_resume_evidence.mjs';
 import {writeMarker} from './pipeline_marker.mjs';
 import {validateDailyOperatingRefresh, validateInventoryArtifacts} from './validate_daily_operating_refresh.mjs';
 
+// These fixture intents were recorded on 2026-08-16, before the v2 cutover.
+const computeInventoryOverwriteQuantity = (target, before) => computeVersionedInventoryOverwriteQuantity(target, before, 'locked-only/v1');
+
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'daily-operating-validator-'));
+const tempParent = path.resolve(process.env.SHEIN_TEST_TMP_ROOT || os.tmpdir());
+const tempRoot = await fs.mkdtemp(path.join(tempParent, 'daily-operating-validator-'));
 const runDate = '2026-08-16';
 const businessDate = '2026-08-15';
 const storeKeys = ['CX', 'DL', 'DX', 'FY', 'HL', 'JSH', 'JY', 'LQ', 'MZ', 'NM', 'QH', 'QY', 'TS', 'TZ', 'TZZ', 'XC', 'XL', 'YJ', 'ZL'];
@@ -438,8 +443,9 @@ try {
     supersededByRecordedAt: '2026-08-16T07:59:00.000Z',
     recordedAt: '2026-08-16T08:00:00.000Z',
   };
+  const danglingJournalFile = path.join(path.dirname(resultFile), `daily-inventory-replenishment-${danglingRunDate}.json.journal.ndjson`);
   await fs.writeFile(
-    path.join(path.dirname(resultFile), `daily-inventory-replenishment-${danglingRunDate}.json.journal.ndjson`),
+    danglingJournalFile,
     `${JSON.stringify(danglingIntent)}\n${JSON.stringify(danglingOutcome)}\n`,
   );
   await writeJson(resultFile, goodResult);
@@ -503,11 +509,31 @@ try {
   assert.equal(
     (await validateDailyOperatingRefresh(options)).ok,
     true,
-    'fallback validation must count owner-confirmed supersede tombstones',
+    'quarantined-history validation must count owner-confirmed supersede tombstones',
   );
   await fs.unlink(ownerSupersedeJournalFile);
   await writeJson(resultFile, goodResult);
   await writeMarkers();
+
+  // Quarantine preserves an invalid historical supersede as pending for its
+  // scope. It must reject a second pending intent for the same entity, while
+  // leaving the historical journal bytes immutable. End this scenario before
+  // the later independent single-pending and pre-submit fixtures begin.
+  const beforeDanglingConflict = await fs.readFile(currentJournalFile);
+  const historicalJournalBytes = await fs.readFile(danglingJournalFile);
+  try {
+    await fs.writeFile(currentJournalFile, `${JSON.stringify(terminalIntent)}\n`, 'utf8');
+    await assert.rejects(
+      validateInventoryArtifacts({...options, enabledStores: storeKeys.slice().sort(), allowItemFencedWarning: true}),
+      /INVENTORY_JOURNAL_PENDING_SCOPE_CONFLICT/,
+      'quarantined historical pending must not disappear when another same-scope intent is pending',
+    );
+    assert.deepEqual(await fs.readFile(danglingJournalFile), historicalJournalBytes,
+      'quarantine must not rewrite the historical source journal');
+  } finally {
+    await fs.writeFile(currentJournalFile, beforeDanglingConflict);
+    await fs.unlink(danglingJournalFile); // Only this run's synthetic scenario fixture.
+  }
 
   await writeJson(resultFile, {...goodResult, unresolvedIntents: [{intentId:'orphan-1',recoveryScopeKey:'scope-1',state:'needs_manual_resolve'}]});
   await writeMarkers();
@@ -911,12 +937,208 @@ try {
     "missing marker falls back to Date.now() and rejects stale evidence",
   );
 
-  // Restore clean plan/result baseline for final marker check
+  // Pre-submit exclusions are warning evidence only when the exact result was
+  // journaled before any related intent. Exercise the real artifact validator,
+  // including its marker and lifecycle loading, rather than just the predicate.
+  const exclusionPlan = {
+    ...plan,
+    commandId: `morning:${runDate}`,
+    actionable: [{...actionable[0], shelfStatusCode: '3', sameStoreOnShelfSkcs: ['planned-on-shelf']}],
+  };
+  exclusionPlan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(exclusionPlan));
+  const excludedRow = {
+    ...exclusionPlan.actionable[0],
+    state: 'pre_submit_blocked',
+    preSubmitExclusion: {
+      schemaVersion: 'inventory-pre-submit-exclusion/v1',
+      planHash: exclusionPlan.payloadHash,
+      commandId: exclusionPlan.commandId,
+      inventoryPostAttempted: false,
+      reasonCode: 'same_store_on_shelf_changed',
+      capturedAt: '2026-08-16T08:00:00.000Z',
+      plannedOnShelfSkcs: ['planned-on-shelf'],
+      observedOnShelfSkcs: ['new-on-shelf'],
+    },
+  };
+  const resultEvent = row => ({kind: 'result', planHash: exclusionPlan.payloadHash,
+    recordedAt: '2026-08-16T08:00:01.000Z', sequence: 1, row});
+  const installExclusion = async ({row = excludedRow, entries = [resultEvent(row)], markers = {}} = {}) => {
+    await writeJson(planFile, exclusionPlan);
+    await writeJson(resultFile, {...goodResult, planHash: exclusionPlan.payloadHash, results: [row]});
+    await fs.writeFile(currentJournalFile, entries.map(entry => `${JSON.stringify(entry)}\n`).join(''), 'utf8');
+    await writeWarningMarkers(markers);
+  };
+  const exclusionOptions = {...options, enabledStores: storeKeys.slice().sort(), allowItemFencedWarning: true};
+  const expectExclusion = async () => {
+    const accepted = await validateInventoryArtifacts(exclusionOptions);
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.planHash, exclusionPlan.payloadHash);
+    assert.equal(accepted.resultCount, 1);
+    assert.equal(accepted.preSubmitBlockedCount, 1);
+    assert.equal(accepted.pendingCount, 0, 'a pre-submit exclusion is not a submitted/pending inventory write');
+    assert.equal((await validateDailyOperatingRefresh({...options, allowItemFencedWarning: true})).ok, true);
+    assert.equal(JSON.parse(await fs.readFile(inventoryMarkerFile, 'utf8')).status, 'warning');
+  };
+  await installExclusion();
+  await expectExclusion();
+  const excludedResultBeforeValidation = await fs.readFile(resultFile);
+  await assert.rejects(validateInventoryArtifacts({...exclusionOptions, allowItemFencedWarning: false}),
+    /inventory result lacks exact terminal readback/, 'strict completion must not promote an exclusion to a readback');
+  assert.deepEqual(await fs.readFile(resultFile), excludedResultBeforeValidation, 'validation must not rewrite the result state');
+  const operatingMarkerFile = path.join(markerRoot, runDate, 'daily-operating-refresh.json');
+  await fs.unlink(operatingMarkerFile);
+  assert.equal((await validateInventoryArtifacts({...exclusionOptions, preWarningAudit: true})).preSubmitBlockedCount, 1,
+    'pre-warning audit must work before the final operating marker exists');
+  assert.equal((await validateDailyOperatingRefresh({...options, preWarningAudit: true})).ok, true);
+  await installExclusion({row: {...excludedRow, preSubmitExclusion: {...excludedRow.preSubmitExclusion, reasonCode: 'sold_out_superseded'}}});
+  await expectExclusion();
+
+  const preSubmitRejections = [];
+  const rejectExclusion = async (name, fixture, message = /inventory result lacks exact terminal readback/) => {
+    await installExclusion(fixture);
+    await assert.rejects(validateInventoryArtifacts(exclusionOptions), message, name);
+    preSubmitRejections.push(name);
+  };
+  const rowMutations = [
+    ['missing_proof', row => { delete row.preSubmitExclusion; }],
+    ['forged_schema', row => { row.preSubmitExclusion.schemaVersion = 'unproven/v1'; }],
+    ['wrong_plan_binding', row => { row.preSubmitExclusion.planHash = '0'.repeat(64); }],
+    ['wrong_command_binding', row => { row.preSubmitExclusion.commandId = 'other-command'; }],
+    ['post_already_attempted', row => { row.preSubmitExclusion.inventoryPostAttempted = true; }],
+    ['unapproved_reason', row => { row.preSubmitExclusion.reasonCode = 'arbitrary_block'; }],
+    ['missing_capture_time', row => { delete row.preSubmitExclusion.capturedAt; }],
+    ['invalid_capture_time', row => { row.preSubmitExclusion.capturedAt = 'not-a-time'; }],
+    ['planned_scope_drift', row => { row.preSubmitExclusion.plannedOnShelfSkcs = ['other-planned']; }],
+    ['no_observed_change', row => { row.preSubmitExclusion.observedOnShelfSkcs = ['planned-on-shelf']; }],
+    ['malformed_observed_identity', row => { row.preSubmitExclusion.observedOnShelfSkcs = ['']; }],
+    ['target_drift', row => { row.targetUsableInventory = 101; }],
+    ['store_drift', row => { row.storeKey = 'CX'; }],
+    ['skc_drift', row => { row.skc = 'another-skc'; }],
+    ['sku_drift', row => { row.skuCode = 'another-sku'; }],
+    ['rule_drift', row => { row.ruleClass = 'another-rule'; }],
+    ['write_record_present', row => { row.writes = [{attempt: 1}]; }],
+    ['intent_id_present', row => { row.intentId = 'already-started'; }],
+    ['idempotency_key_present', row => { row.idempotencyKey = 'already-started'; }],
+    ['logical_action_present', row => { row.logicalActionKey = 'already-started'; }],
+    ['generic_blocked_with_proof', row => { row.state = 'blocked'; }],
+    ['generic_blocked_only', row => { row.state = 'blocked'; delete row.preSubmitExclusion; }],
+  ];
+  for (const [name, mutate] of rowMutations) {
+    const row = structuredClone(excludedRow);
+    mutate(row);
+    // Even a re-hashed warning marker and an identical journal result must not
+    // make an invalid proof or a generic blocked row safe.
+    await rejectExclusion(name, {row});
+  }
+  await rejectExclusion('empty_journal', {entries: []});
+  await rejectExclusion('journal_wrong_plan', {entries: [{...resultEvent(excludedRow), planHash: '0'.repeat(64)}]});
+  await rejectExclusion('journal_original_result_mismatch', {
+    entries: [resultEvent({...excludedRow, preSubmitExclusion: {...excludedRow.preSubmitExclusion, capturedAt: '2026-08-16T07:59:59.000Z'}})],
+  });
+  await installExclusion();
+  await fs.unlink(currentJournalFile);
+  await assert.rejects(validateInventoryArtifacts(exclusionOptions), /inventory result lacks exact terminal readback/,
+    'result and marker alone cannot replace a missing original journal');
+  preSubmitRejections.push('missing_journal');
+
+  // These are valid historical intents, not malformed stand-ins that would
+  // fail journal parsing before the no-related-intent exclusion rule runs.
+  const relatedIntent = {...terminalIntent, planHash: exclusionPlan.payloadHash};
+  await rejectExclusion('same_plan_pending_intent', {entries: [relatedIntent, resultEvent(excludedRow)]});
+  await rejectExclusion('same_plan_closed_intent', {entries: [relatedIntent, terminalOutcome, resultEvent(excludedRow)]});
+  const commandLogicalKey = inventoryLogicalActionKey({...terminalIntent, commandId: exclusionPlan.commandId});
+  const commandRequest = structuredClone(terminalRequest);
+  commandRequest.body.updateSkuInventoryQuantityRequests[0].idempotencyKey = `bi-inv-${commandLogicalKey.slice(0, 42)}`;
+  const commandIntent = {...terminalIntent, commandId: exclusionPlan.commandId, logicalActionKey: commandLogicalKey,
+    idempotencyKey: commandRequest.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
+    request: commandRequest, requestPayloadHash: stableInventoryHash(commandRequest)};
+  await rejectExclusion('same_command_other_plan_closed_intent', {entries: [commandIntent,
+    {...terminalOutcome, logicalActionKey: commandLogicalKey}, resultEvent(excludedRow)]});
+  await rejectExclusion('other_plan_same_scope_pending_intent', {entries: [terminalIntent, resultEvent(excludedRow)]});
+  // A closed historical intent from a different plan/command is not a pending
+  // write in this batch, and must not globally block a legitimate exclusion.
+  await installExclusion({entries: [terminalIntent, terminalOutcome, resultEvent(excludedRow)]});
+  await expectExclusion();
+  await rejectExclusion('inventory_done_is_not_warning', {markers: {inventoryStatus: 'done'}});
+  await rejectExclusion('operating_done_is_not_warning', {markers: {operatingStatus: 'done'}});
+  for (const [name, file, mutate, message] of [
+    ['forged_inventory_marker_hash', inventoryMarkerFile, marker => { marker.evidence[0].sha256 = '0'.repeat(64); }, /inventory marker evidence hash mismatch/],
+    ['forged_inventory_marker_date', inventoryMarkerFile, marker => { marker.businessDate = runDate; }, /inventory marker date mismatch/],
+    ['forged_operating_marker_hash', operatingMarkerFile, marker => { marker.evidence[0].sha256 = '0'.repeat(64); }, /inventory result lacks exact terminal readback/],
+  ]) {
+    await installExclusion();
+    const marker = JSON.parse(await fs.readFile(file, 'utf8'));
+    mutate(marker);
+    await writeJson(file, marker);
+    await assert.rejects(validateInventoryArtifacts(exclusionOptions), message, name);
+    preSubmitRejections.push(name);
+  }
+
+  // Restore the successful historical baseline before testing frozen morning
+  // evidence through the complete daily validator, not requireMarker alone.
+  await fs.writeFile(currentJournalFile, originalCurrentJournal, 'utf8');
   await writeJson(planFile, plan);
   await writeJson(resultFile, goodResult);
   await writeMarkers();
+  for (const storeKey of storeKeys) {
+    for (const domain of ['shein_links', 'shein_business_domains']) {
+      await writeJson(path.join(tempRoot, 'outputs', domain, storeKey, `${businessDate}.json`),
+        {ok: true, date: businessDate, store: {storeKey}, domain});
+    }
+  }
+  const morning = await writeMorningResumeEvidence({root: tempRoot, date: businessDate, outputFile: morningFile});
+  assert.equal(morning.artifacts.length, 38);
+  assert(morning.artifacts.every(artifact => !path.isAbsolute(artifact.path)));
+  const originalCwd = process.cwd();
+  let snapshotMarker;
+  try {
+    process.chdir(tempRoot); // Same business-root cwd used by the actual morning CLI.
+    snapshotMarker = await writeMarker({root: markerRoot, stage: 'daily-operating-refresh', date: runDate,
+      businessDate, status: 'done', evidence: [morningFile, inventoryMarkerFile, planFile, resultFile], snapshotEvidence: true});
+  } finally { process.chdir(originalCwd); }
+  assert.deepEqual(snapshotMarker.evidence.map(record => record.path), [morningFile, inventoryMarkerFile, planFile, resultFile]);
+  const savedMorning = snapshotMarker.evidence.find(record => record.path === morningFile);
+  assert.equal(savedMorning.dependencies.length, 38);
+  assert.deepEqual(savedMorning.dependencies.map(record => record.path), morning.artifacts.map(artifact => artifact.path));
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true);
+  for (const artifact of morning.artifacts) {
+    await writeJson(path.resolve(tempRoot, artifact.path), {ok: false, laterRun: true});
+  }
+  await writeJson(morningFile, {ok: false, laterRun: true});
+  const frozenValid = await validateDailyOperatingRefresh(options);
+  assert.equal(frozenValid.ok, true, 'later changes to all original morning sources must not invalidate the saved run');
+  assert.equal(frozenValid.artifactCount, 38);
+  assert.equal(frozenValid.storeCount, 19);
+  const savedRecords = [...snapshotMarker.evidence, ...savedMorning.dependencies];
+  assert.equal(new Set(savedRecords.map(record => record.snapshotPath)).size, 42);
+  for (const [index, record] of savedRecords.entries()) {
+    const original = await fs.readFile(record.snapshotPath);
+    // Equal-size, JSON-preserving mutation forces SHA verification of every
+    // manifest, dependency and top-level evidence snapshot independently.
+    await fs.writeFile(record.snapshotPath, Buffer.concat([original.subarray(0, -1), Buffer.from(' ')]));
+    try {
+      await assert.rejects(validateDailyOperatingRefresh(options), /hash mismatch/,
+        `complete validator must reject tampered snapshot ${index}`);
+    } finally { await fs.writeFile(record.snapshotPath, original); }
+    assert.equal((await validateDailyOperatingRefresh(options)).ok, true, `restored snapshot ${index} must recover`);
+  }
+  const incompleteClosure = structuredClone(snapshotMarker);
+  incompleteClosure.evidence.find(record => record.path === morningFile).dependencies.pop();
+  await writeJson(operatingMarkerFile, incompleteClosure);
+  await assert.rejects(validateDailyOperatingRefresh(options), /morning evidence snapshot closure missing/,
+    'the manifest snapshot alone must not stand in for all 38 dependencies');
+  await writeJson(operatingMarkerFile, snapshotMarker);
+  assert.equal((await validateDailyOperatingRefresh(options)).ok, true);
+  console.log(JSON.stringify({ok: true, historicalQuarantine: {
+    sameScopePendingConflictRejected: true, originalJournalUnchanged: true, scenarioIsolated: true}, preSubmitExclusion: {
+    exactJournalWarningAccepted: true, preWarningWithoutFinalMarker: true, bothReasonsAccepted: true,
+    strictCompletionRejected: true, rejected: preSubmitRejections}, immutableMorning: {
+    artifactCount: 38, changedOriginalFiles: 39, snapshotHashTamperRejections: savedRecords.length,
+    completeDailyValidator: true, incompleteClosureRejected: true}}));
 
   console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'same_day_pending_warning_accepted_with_exact_journal', 'same_day_pending_warning_strict_rejected', 'same_day_pending_warning_requires_both_warning_markers', 'same_day_pending_warning_journal_missing_rejected', 'same_day_pending_warning_retry_rejected', 'same_day_pending_warning_scope_drift_rejected', 'same_day_pending_warning_binding_drift_rejected', 'same_day_pending_warning_success_confirmed_rejected', 'same_day_pending_warning_terminal_conflict_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected', 'inventory_only_warning_marker_freezes_freshness', 'inventory_only_corrupted_marker_uses_now', 'inventory_only_no_marker_uses_now']}, null, 2));
 } finally {
-  await fs.rm(tempRoot, {recursive: true, force: true});
+  assert.equal(path.dirname(path.resolve(tempRoot)), tempParent);
+  assert(path.basename(tempRoot).startsWith('daily-operating-validator-'));
+  await fs.rm(tempRoot, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
 }

@@ -184,6 +184,7 @@ async function recoverMarketingLogin(storeKey, date) {
     storeKey,
     '--date', date,
     '--headless',
+    '--require-marketing',
   ], 240000, {label: `login recovery ${storeKey}`});
   const reloginPath = reportPathFromOutput(reloginRun.stdout, 'reportFile');
   const reloginReport = await readJsonIfExists(reloginPath);
@@ -307,7 +308,8 @@ async function updateRegistry(storeKey, skc, activityId, artifact) {
   ], 30000, {label: `manual registry update ${storeKey}::${skc}`});
 }
 
-async function processOne(file, storeMap, args) {
+async function processOne(file, storeMap, args, browserSession = {}) {
+  const keepOpen = Boolean(browserSession.keepOpen);
   const rescuePath = path.resolve(ROOT, file.path);
   const rescue = JSON.parse(await fs.readFile(rescuePath, 'utf8'));
   const row = rescue.rows?.[0];
@@ -347,7 +349,7 @@ async function processOne(file, storeMap, args) {
       record.error = record.lowEtFastSellerPricePullbackRevalidation.reason;
       return record;
     }
-    const launch = await launchStore(storeKey);
+    const launch = (browserSession?.launchSummary) || await launchStore(storeKey);
     if (!launch.ok) throw new Error(`launch failed: ${launch.stderr || launch.stdout}`);
     let dry = await applyRescue(storeKey, store.port, rescuePath, false);
     if (isMarketingLoginRedirect(dry)) {
@@ -447,6 +449,7 @@ async function processOne(file, storeMap, args) {
       adapterFactory: deadlineBoundAdapterFactory(createMarketingActivityInventoryOpenApiAdapter, ACTIVE_DEADLINE, {
         label: `manual inventory ${storeKey}::${row.skc}`,
       }),
+      readMutationEvidence: () => readLimitedDiscountMutationEvidence({root: ROOT, storeKey, sourceRescuePath: rescuePath}),
       runSubmit: async () => {
         assertBeforeOuter(ACTIVE_DEADLINE, {
           reserveSec: ACTIVE_DEADLINE?.minFinalizationBudgetSec || 0,
@@ -533,8 +536,12 @@ async function processOne(file, storeMap, args) {
     record.error = error.message;
     return record;
   } finally {
-    const close = await closeStore(storeKey);
-    record.close = {ok: close.ok, stderr: close.stderr || '', stdout: close.stdout?.slice(-1000) || ''};
+    if (!keepOpen) {
+      const close = await closeStore(storeKey);
+      record.close = {ok: close.ok, stderr: close.stderr || '', stdout: close.stdout?.slice(-1000) || ''};
+    } else {
+      record.close = {ok: true, keptOpenForNextItem: true};
+    }
   }
 }
 
@@ -577,8 +584,12 @@ export function manualResultDocumentMatches(previous, workFingerprint, dryRunOnl
     && Array.isArray(previous?.results);
 }
 
-const args = parseArgs(process.argv.slice(2));
-ACTIVE_DEADLINE = args.deadline;
+export async function runManualRestoreBatch(customArgs, customOverrides = {}) {
+  const args = customArgs || parseArgs(process.argv.slice(2));
+  ACTIVE_DEADLINE = args.deadline;
+  const effectiveLaunchStore = customOverrides.launchStore || launchStore;
+  const effectiveCloseStore = customOverrides.closeStore || closeStore;
+  const effectiveProcessOne = customOverrides.processOne || processOne;
 let automationAuthorization = null;
 await fs.mkdir(args.outDir, {recursive: true});
 if (!args.skipBuild) {
@@ -626,9 +637,27 @@ if (args.continuation) {
 }
 const continuationDeferredWithoutMatch = args.continuation && pendingFiles.length > 0 && continuationFiles.length === 0;
 const selectedFiles = args.maxItems > 0 ? continuationFiles.slice(0, args.maxItems) : continuationFiles;
-const processedThisRun = [];
+// Sequence by storeKey so consecutive items for the same store reuse one Chrome session
+const filesByStore = new Map();
 for (const file of selectedFiles) {
-  processedThisRun.push(normalizeManualResumeResult(await processOne(file, storeMap, args)));
+  const sk = String(file.storeKey || '').toUpperCase();
+  if (!filesByStore.has(sk)) filesByStore.set(sk, []);
+  filesByStore.get(sk).push(file);
+}
+
+const processedThisRun = [];
+for (const [storeKey, storeFiles] of filesByStore.entries()) {
+  let launchSummary = null;
+  try {
+    launchSummary = await effectiveLaunchStore(storeKey);
+    for (let i = 0; i < storeFiles.length; i += 1) {
+      const file = storeFiles[i];
+      const res = await effectiveProcessOne(file, storeMap, args, {keepOpen: true, launchSummary});
+      processedThisRun.push(normalizeManualResumeResult(res));
+    }
+  } finally {
+    await effectiveCloseStore(storeKey).catch(() => null);
+  }
 }
 const resultByPath = new Map(settledByPath);
 for (const row of processedThisRun) resultByPath.set(String(row.rescuePath), row);
@@ -665,6 +694,11 @@ const recoverableDeferred = processedThisRun.some(row => row.recoverableDeferred
 const attemptedFailure = processedThisRun.some(row => !row.ok && !row.deferred && !row.terminalBlocked);
 const ok = !attemptedFailure && remainingItems === 0 && results.length === files.length && results.every(row => row.ok);
 console.log(JSON.stringify({ok, out: rel(resultPath), totals: output.totals}, null, 2));
-if (attemptedFailure) process.exitCode = 2;
-else if (deadlineDeferred || recoverableDeferred) process.exitCode = 4;
-else if (remainingItems > 0) process.exitCode = 3;
+  if (attemptedFailure) process.exitCode = 2;
+  else if (deadlineDeferred || recoverableDeferred) process.exitCode = 4;
+  else if (remainingItems > 0) process.exitCode = 3;
+  return {ok, output, results, processedThisRun};
+}
+if (import.meta.url === `file://${process.argv[1]?.replaceAll('\\', '/')}` || process.argv[1]?.endsWith('batch_restore_manual_limited_discounts.mjs')) {
+  runManualRestoreBatch().catch(err => { console.error(err); process.exit(1); });
+}

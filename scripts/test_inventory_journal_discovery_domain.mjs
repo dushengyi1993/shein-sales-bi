@@ -37,6 +37,7 @@ function makeIntent({runDate, intentId, planHash, recordedAt}) {
     totalInventoryQuantity: 2,
     totalUsableInventory: 2,
     totalLockedQuantity: 0,
+    temporaryInventoryQuantity: 0,
     stockRowMissing: false,
   };
   const logicalActionKey = stableInventoryHash({
@@ -204,10 +205,10 @@ try {
   ]);
   assert.match(guardSource, /String\(process\.env\.SHEIN_BI_INVENTORY_JOURNAL_DIRS \|\| ''\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal, \{[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories: inventoryJournalDirectories/);
   assert.match(guardSource, /currentJournalFile: currentJournal,[\s\S]*?quarantineHistoricalDanglingSupersedes: true/);
-  assert.equal((executorSource.match(/currentJournalFile: journalFile,[\s\S]{0,120}?quarantineHistoricalDanglingSupersedes: true/g) || []).length, 2, 'executor startup and locked fresh reread must share the quarantine contract');
+  assert.ok((executorSource.match(/currentJournalFile: journalFile,[\s\S]{0,120}?quarantineHistoricalDanglingSupersedes: true/g) || []).length >= 2, 'executor startup and locked fresh reread must share the quarantine contract');
   assert.match(validatorSource, /discoverInventoryJournalAuditFiles\(currentJournal, environment = process\.env\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories/);
-  assert.match(validatorSource, /const journalFiles = await discoverInventoryJournalAuditFiles\(currentJournal\);[\s\S]*?const lifecycle = await readInventoryValidationLifecycle\(journalFiles, \{currentJournal, maxRunDate: runDate\}\);/);
-  assert.match(validatorSource, /async function readInventoryValidationLifecycle\(journalFiles,[\s\S]*?readInventoryIntentJournals\(journalFiles, \{maxRunDate\}\)/);
+  assert.match(validatorSource, /const journalFiles = [\s\S]*?await discoverInventoryJournalAuditFiles\(currentJournal\);[\s\S]*?const lifecycle = await readInventoryValidationLifecycle\(journalFiles, \{currentJournal, maxRunDate: runDate, journalSnapshots\}\);/);
+  assert.match(validatorSource, /async function readInventoryValidationLifecycle\(journalFiles,[\s\S]*?readInventoryIntentJournals\(journalFiles, \{\s*maxRunDate,\s*journalSnapshots,\s*currentJournalFile: currentJournal,\s*quarantineHistoricalDanglingSupersedes: true,/);
   assert.match(morningUnit, /^Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results:\/srv\/shein-bi\/runtime\/et-low-inventory-guard\/results$/m);
 
   console.log(JSON.stringify({

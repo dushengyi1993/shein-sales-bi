@@ -213,8 +213,9 @@ async function runWindowCase({
   minute,
   nowEpoch,
   deadlineEpoch,
-  deadlineMinute,
+  deadlineMinute = undefined,
   heavyAllowed,
+  scheduled = '1',
   heavyFirst = 0,
   sections,
   maxSections,
@@ -275,8 +276,9 @@ async function runWindowCase({
     SHEIN_BI_PORTAL_SECTION_QUEUE_POST_PROFIT_HOME_RANKINGS_MIN_RUNTIME_SEC: '60',
     SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC: '120',
     SHEIN_BI_PORTAL_SECTION_QUEUE_LEASE_SEC: String(leaseSeconds),
-    SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED: '1',
-    SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE: String(deadlineMinute),
+    SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED: String(scheduled),
+    SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH: String(deadlineEpoch + epochOffset),
+    ...(deadlineMinute !== undefined ? {SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE: String(deadlineMinute)} : {}),
     SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED: String(heavyAllowed),
     SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST: String(heavyFirst),
     SHEIN_TEST_PROFIT_HTTP: String(profitHttp),
@@ -318,6 +320,39 @@ const tools = spawnSync('bash', ['-lc', 'command -v flock >/dev/null && command 
 if (tools.status !== 0) {
   console.log('SKIP bi_portal_section_queue_window: worker integration needs bash+flock+mktemp+node');
 } else {
+  const unscheduledEntry = await runWindowCase({
+    name: 'unscheduled-direct-entry',
+    hour: '14',
+    minute: '17',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    scheduled: '0',
+    heavyAllowed: 1,
+    sections: ['orders'],
+    maxSections: 1,
+    expectedStatus: 75,
+  });
+  assert.deepEqual(unscheduledEntry.calls, [],
+    'direct unscheduled worker invocation must defer with exit 75');
+  assert.match(`${unscheduledEntry.run.stdout}\n${unscheduledEntry.run.stderr}`,
+    /reason=unscheduled_direct_entry/,
+    'direct unscheduled worker invocation must report explicit unscheduled diagnostic');
+
+  const arbitraryMinuteHeavy = await runWindowCase({
+    name: 'arbitrary-minute-1417',
+    hour: '14',
+    minute: '17',
+    nowEpoch: 1_000,
+    deadlineEpoch: 2_000,
+    heavyAllowed: 1,
+    sections: ['profit'],
+    maxSections: 1,
+    expectedStatus: 0,
+  });
+  assert.deepEqual(arbitraryMinuteHeavy.calls, ['profit'],
+    'at arbitrary minute (14:17) outside legacy :32 slots, worker runs heavy section when scheduled and budget sufficient');
+  assert.equal(arbitraryMinuteHeavy.queue.entries.some(entry => entry.section === 'profit'), false);
+
   const lightWindow = await runWindowCase({
     name: 'light-02',
     hour: '06',
@@ -631,5 +666,5 @@ if (tools.status !== 0) {
       `${failure.name}: homeRankings must remain pending`);
   }
 
-  console.log('bi_portal_section_queue_window: :02/:32 scheduling, quiet-success budget, follow-up normal budget, and failed-profit HR barriers passed');
+  console.log('bi_portal_section_queue_window: arbitrary-time queue admission, deadline-epoch propagation, quiet-success budget, follow-up normal budget, and failed-profit HR barriers passed');
 }
