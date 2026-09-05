@@ -36,6 +36,7 @@ const policy = JSON.parse(await fs.readFile(POLICY_FILE, 'utf8'));
 const today = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 const now = new Date().toISOString();
 const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'inventory-manual-resolution-executor-fence-')));
+process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = path.join(temp, 'inventory-v2-cutover.lock');
 const planFile = path.join(temp, 'plan.json');
 const intentRunDate = '2026-08-17';
 const resultFile = path.join(temp, `daily-inventory-replenishment-${intentRunDate}.json`);
@@ -338,6 +339,7 @@ function runExecutor(args = []) {
         SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION: authorizationId,
         SHEIN_BI_INVENTORY_JOURNAL_DIRS: '',
         SHEIN_BI_INVENTORY_SKU_LOCK_DIR: lockDir,
+        SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE: path.join(temp, 'inventory-v2-cutover.lock'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

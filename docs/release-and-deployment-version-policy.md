@@ -58,7 +58,7 @@ Partner CLI 的 `partner-cli-v*` Release 与 BI 自动激活走独立的 `.githu
 2. 读取 schema v3 attestation，确认 `repository{id,fullName}`、`version`、`tag`、`commit`、`trustPolicySha256`、CI `workflow/event/branch/runId/runAttempt/url/completedAt/jobCount/jobsSha256` 和 `sourceWorkflow.path` 均精确，且 `repository.id` 等于 trust policy 的 repository id；查询最新该 SHA 的 main push CI 及 attempt-specific endpoint，必须仍与 attestation 完全一致。Tag 必须是 annotated tag、peeled commit 等于 attested commit、完整 message 中的 attestation SHA-256 精确；Release 必须非 draft、非 prerelease 且 `immutable=true`，CI `completedAt` 必须早于 Release `publishedAt`；immutable releases policy 必须已 `enabled=true`，并按 tracked policy 条件核对 `enforced_by_owner`，以权威 GET 回读为据。
 3. 先备份 tracked diff、关键运行态和当前 Portal 输出。
 4. 确认热修均已回填 GitHub；运行态文件已经迁出 tracked source。
-5. 以 `sheinops` fetch，并让 `/opt/shein-bi/app` 精确落到 attested commit；禁止长期靠逐文件 `scp` 维持生产。
+5. 若 checkout 已由库存写入守卫加固为 root 持有，先在维护全停与相关服务停止状态下，用冻结的精确源码路径清单临时交接写权；运行态、外部挂载和非源码路径不进入权限变更。以 `sheinops` fetch，让 `/opt/shein-bi/app` 精确落到 attested commit；禁止 `sudo git`、递归 chown 整个 app 或长期靠逐文件 `scp` 维持生产。新源码代际必须使用新的权限 plan、receipt 和 completion 文件重新加固；旧 completed receipt 仅作历史证据，不能授权另一代源码。
 6. 应用 schema、systemd unit、服务重启和 section 预热。
 7. 验收：
    - `git rev-parse HEAD` 等于 attestation 的 `commit`；
@@ -67,6 +67,48 @@ Partner CLI 的 `partner-cli-v*` Release 与 BI 自动激活走独立的 `.githu
    - CI 成功；
    - Portal health、关键 service/timer、数据库和业务读回通过。
    - Inventory writer 兼容门与当前 checkout 使用同一 commit/source fingerprint/bundle/release receipt：执行 `node scripts/inventory/assert_inventory_writer_release_aligned.mjs --cwd /opt/shein-bi/app --expected-commit <exact commit> --json` 必须 exit 0；未通过前不得释放 maintenance。
+
+### 正式库存凭据与源码轮转
+
+库存写入器的正式身份使用不可变 `release-attestation.json` 原始字节 SHA-256 及其 canonical 路径；不得使用含动态时间的 `deployed_release.json` 全文件 SHA。真实 Git bundle 的 SHA-256 单独绑定，两者不能互相替代。
+
+在目标源码发布证明、精确 commit 与 source fingerprint 已核验后，构建含目标 annotated tag 的自足 bundle（无需额外 HEAD ref），保存并锁定其实际 SHA。维护全停且 writer 已停止时，使用旧部署的真实 CLI 先生成 stage 预检文件：
+
+```bash
+node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-stage \
+  --candidate-commit "$COMMIT" --candidate-source-fingerprint "$SOURCE_FINGERPRINT" \
+  --candidate-bundle-sha256 "$BUNDLE_SHA256" --candidate-release-receipt-kind formal \
+  --candidate-release-receipt-hash "$ATTESTATION_SHA256" \
+  --candidate-release-receipt-file "/srv/shein-bi/runtime/release-attestations/$VERSION/release-attestation.json" \
+  --out "$STAGE_ARTIFACT"
+
+node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-stage --execute \
+  --preflight-artifact "$STAGE_ARTIFACT" --expected-artifact-sha256 "$STAGE_ARTIFACT_SHA256" \
+  --expected-preflight-hash "$STAGE_PREFLIGHT_HASH" \
+  --confirm STAGE_INVENTORY_COMPATIBILITY_ROTATION_V1
+```
+
+两个 stage hash 分别来自实际预检文件的原始 SHA 和文件中的 `preflightHash`，不是 payload 的替代值；execute 的对象与路径绑定只能来自该不可变工件。过期或运行状态漂移必须重新预检，不能改写旧工件。
+
+stage 已权威读回后检出目标 commit、应用必要运行配置并完成新代际源码加固，再签发带库存身份的正式 marker：
+
+```bash
+node scripts/check_release_source_state.mjs --expected-commit "$VERSION" --record-deployment "$VERSION" \
+  --source-bundle "$SOURCE_BUNDLE" --expected-source-bundle-sha256 "$BUNDLE_SHA256"
+
+node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-finalize --out "$FINALIZE_ARTIFACT"
+node scripts/inventory/manage_inventory_writer_compatibility.mjs rotation-finalize --execute \
+  --preflight-artifact "$FINALIZE_ARTIFACT" --expected-artifact-sha256 "$FINALIZE_ARTIFACT_SHA256" \
+  --expected-preflight-hash "$FINALIZE_PREFLIGHT_HASH" \
+  --confirm FINALIZE_INVENTORY_COMPATIBILITY_ROTATION_V1
+
+node scripts/inventory/assert_inventory_writer_release_aligned.mjs --cwd /opt/shein-bi/app \
+  --expected-commit "$COMMIT" --json
+```
+
+`--source-bundle` 与 `--expected-source-bundle-sha256` 必须成对。验证器在独立裸仓库恢复 bundle 对象，拒绝损坏包、伪造 header、缺目标 commit 或 tag 的包，不向生产 Git 写入验证对象。marker 的可选 `inventoryWriterAuthority` 绑定 bundle SHA、canonical receipt 路径和 attestation SHA；两个库存读端重新核验 checksum、trust policy、仓库来源和 annotated tag。有效新正式绑定优先于旧 emergency；存在但损坏的新绑定直接拒绝。无新绑定时保留旧兼容行为；不带 bundle 参数的旧审计命令不代表库存写入器已经就绪。
+
+只在 finalize、最终对齐及运行快照验收通过后恢复 maintenance。生产 receipt 路径使用 Linux 绝对路径；系统级 Python 守卫按同一 commit/fingerprint/bundle/receipt 身份校验轮转记录。
 
 ## 4. 运行态与源码隔离
 

@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import cp from 'node:child_process';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-a1-builder-'));
 const dateTag = '2026-09-05';
@@ -101,7 +102,57 @@ const args = [
   '--execution-output-dir', path.join(outDir, 'exec'),
 ];
 
-cp.execFileSync(process.execPath, args, { encoding: 'utf8' });
+// CI fixture adapter for @oai/artifact-tool:
+// In CI environments where the proprietary local-only @oai/artifact-tool is unavailable,
+// provide an isolated test fixture loader to adapt Workbook/SpreadsheetFile export and preview.
+// Detect absence strictly via import.meta.resolve failure so installed packages with broken
+// transitive dependencies fail fast rather than triggering a false fallback.
+// This preserves the real builder execution, full price-stack calculations, scope/hash/remarks,
+// and business JSON outputs while safely stubbing unverified spreadsheet rendering.
+let extraNodeOptions = '';
+let artifactToolInstalled = true;
+try {
+  import.meta.resolve('@oai/artifact-tool');
+} catch (err) {
+  if (err && err.code === 'ERR_MODULE_NOT_FOUND') {
+    artifactToolInstalled = false;
+  } else {
+    throw err;
+  }
+}
+
+if (!artifactToolInstalled) {
+  const fixtureDir = path.join(tmpDir, 'v6-ci-marketing-fixtures-artifact-stub');
+  await fs.mkdir(fixtureDir, { recursive: true });
+  const stubModulePath = path.join(fixtureDir, 'artifact-stub.mjs');
+  const loaderPath = path.join(fixtureDir, 'loader.mjs');
+
+  const stubSource = "\nimport fs from 'node:fs/promises';\n\nexport class RangeStub {\n  constructor(ref = '') {\n    this.ref = ref;\n    this._values = [];\n    this.format = {};\n    this.conditionalFormats = {\n      add: (type, options) => {\n        if (!type || !options) throw new Error('conditionalFormats.add requires type and options');\n        return { type, options };\n      }\n    };\n  }\n  get values() { return this._values; }\n  set values(val) { this._values = val; }\n}\n\nexport class WorksheetStub {\n  constructor(name) {\n    this.name = name;\n    this.showGridLines = true;\n    this.freezePanes = {\n      freezeRows: (count) => {\n        if (!Number.isInteger(count) || count < 0) throw new TypeError('freezeRows requires non-negative integer');\n      },\n      freezeColumns: (count) => {\n        if (!Number.isInteger(count) || count < 0) throw new TypeError('freezeColumns requires non-negative integer');\n      }\n    };\n    this.tables = {\n      add: (range, hasHeaders, tableName) => {\n        if (!range || typeof tableName !== 'string') throw new Error('tables.add requires range and tableName');\n        return { style: 'default' };\n      }\n    };\n  }\n  getRangeByIndexes(row, col, rowCount = 1, colCount = 1) {\n    return new RangeStub(`R${row}C${col}:R${row + rowCount - 1}C${col + colCount - 1}`);\n  }\n  getRange(a1Ref) {\n    return new RangeStub(a1Ref);\n  }\n  mergeCells(a1Ref) {\n    if (typeof a1Ref !== 'string') throw new TypeError('mergeCells requires string reference');\n  }\n}\n\nexport class Workbook {\n  static create() { return new Workbook(); }\n  constructor() {\n    this.worksheets = {\n      add: (name) => {\n        if (typeof name !== 'string' || !name.trim()) throw new TypeError('worksheets.add requires sheet name');\n        return new WorksheetStub(name);\n      }\n    };\n  }\n  async render({sheetName, range, scale, format}) {\n    if (!sheetName || !range || !format) throw new TypeError('render requires sheetName, range and format');\n    return { arrayBuffer: async () => new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).buffer };\n  }\n  async inspect({kind, range, searchTerm}) {\n    if (!kind) throw new TypeError('inspect requires kind');\n    return { ndjson: '' };\n  }\n}\n\nexport class SpreadsheetFile {\n  static async exportXlsx(wb) {\n    if (!(wb instanceof Workbook)) throw new TypeError('exportXlsx requires Workbook instance');\n    return {\n      save: async (targetPath) => {\n        const fixtureMark = '/* CI-FIXTURE-STUB: @oai/artifact-tool absent in environment - mock export only, not verified xlsx */\\n';\n        await fs.writeFile(targetPath, Buffer.from(fixtureMark + 'PK\\x03\\x04[MOCK_XLSX_FIXTURE_NOT_FOR_PRODUCTION_INSPECTION]'), 'utf8');\n      }\n    };\n  }\n}\n";
+  await fs.writeFile(stubModulePath, stubSource, 'utf8');
+  const stubUrl = pathToFileURL(stubModulePath).href;
+  const loaderSource = [
+    'export async function resolve(specifier, context, nextResolve) {',
+    '  if (specifier === "@oai/artifact-tool") {',
+    '    return {',
+    '      url: ' + JSON.stringify(stubUrl) + ',',
+    '      shortCircuit: true,',
+    '    };',
+    '  }',
+    '  return nextResolve(specifier, context);',
+    '}',
+  ].join('\n');
+
+  await fs.writeFile(loaderPath, loaderSource, 'utf8');
+  extraNodeOptions = ' --no-warnings --experimental-loader=' + pathToFileURL(loaderPath).href;
+}
+
+cp.execFileSync(process.execPath, args, {
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    NODE_OPTIONS: ((process.env.NODE_OPTIONS || "") + extraNodeOptions).trim(),
+  },
+});
 
 // 3. Inspect generated execution payload
 const overridesFile = path.join(outDir, 'exec', 'price-overrides-' + dateTag + '-v7-all-safe.json');

@@ -279,6 +279,93 @@ try {
   await fs.writeFile(compatibilityFile, validCompatibilityBytes);
 }
 
+
+// --- Formal inventory authority rotation test with stable attestation receipt ---
+const formalAttestationSha = 'e1'.repeat(32);
+const formalBundleSha = 'e2'.repeat(32);
+const formalCandidate = {
+  deployedCommit: '3'.repeat(40),
+  sourceFingerprint: '4'.repeat(64),
+  bundleSha256: formalBundleSha,
+  trackedSourceClean: true,
+  releaseReceiptKind: 'formal',
+  releaseReceiptHash: formalAttestationSha,
+  releaseReceiptFile: path.join(temp, 'formal-release-attestation.json'),
+};
+
+// Stage the formal candidate
+const formalStageDry = await stageInventoryCompatibilityRotation({
+  ...commonPaths,
+  candidateAuthority: formalCandidate,
+  authorityReader: async () => restartN1,
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T02:00:00.000Z'),
+  lockFile,
+});
+assert.equal(formalStageDry.state, 'rotation_stage_dry_run');
+assert.equal(formalStageDry.record.candidateAuthority.releaseReceiptKind, 'formal');
+assert.equal(formalStageDry.record.candidateAuthority.releaseReceiptHash, formalAttestationSha);
+assert.equal(formalStageDry.record.candidateAuthority.bundleSha256, formalBundleSha);
+
+const formalStaged = await stageInventoryCompatibilityRotation({
+  ...commonPaths,
+  candidateAuthority: formalCandidate,
+  authorityReader: async () => restartN1,
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T02:00:00.000Z'),
+  lockFile,
+  mode: 'execute',
+  expectedPreflightHash: formalStageDry.preflightHash,
+});
+assert.equal(formalStaged.state, 'rotation_staged');
+assert.equal(formalStaged.record.candidateAuthority.releaseReceiptKind, 'formal');
+
+// Live authority matches formalCandidate, with services
+const formalLiveAuthority = {
+  ...formalCandidate,
+  writerServices: service('7'.repeat(64)),
+  capturedAt: '2026-08-27T03:00:00.000Z',
+};
+
+// Finalize formal candidate
+const formalFinalizeDry = await finalizeInventoryCompatibilityRotation({
+  ...commonPaths,
+  authorityReader: async () => formalLiveAuthority,
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T03:00:00.000Z'),
+  lockFile,
+});
+assert.equal(formalFinalizeDry.state, 'rotation_finalize_dry_run');
+assert.equal(formalFinalizeDry.record.authority.releaseReceiptKind, 'formal');
+assert.equal(formalFinalizeDry.record.authority.releaseReceiptHash, formalAttestationSha);
+
+const formalFinalized = await finalizeInventoryCompatibilityRotation({
+  ...commonPaths,
+  authorityReader: async () => formalLiveAuthority,
+  maintenanceReader: async () => maintenance,
+  now: () => new Date('2026-08-27T03:00:00.000Z'),
+  lockFile,
+  mode: 'execute',
+  expectedPreflightHash: formalFinalizeDry.preflightHash,
+});
+assert.equal(formalFinalized.state, 'rotation_finalized');
+
+// Verify active authority
+const formalStatus = await inventoryCompatibilityStatus(commonPaths);
+assert.equal(formalStatus.activeAuthority.releaseReceiptKind, 'formal');
+assert.equal(formalStatus.activeAuthority.releaseReceiptHash, formalAttestationSha);
+assert.equal(formalStatus.activeAuthority.bundleSha256, formalBundleSha);
+
+// Verify activation requirement succeeds
+const formalActivation = await requireCurrentInventoryCutoverActivation({
+  ...commonPaths,
+  authorityReader: async () => formalLiveAuthority,
+});
+assert.equal(formalActivation.activated, true);
+assert.equal(formalActivation.activeAuthority.releaseReceiptKind, 'formal');
+assert.equal(formalActivation.compatibility.activeGeneration, 3);
+
+
 console.log(JSON.stringify({
   ok: true,
   checks: [
@@ -298,5 +385,6 @@ console.log(JSON.stringify({
     'stage_and_finalize_current_state_hash_require_hex64',
     'execute_cli_requires_exact_confirmation',
     'status_is_read_only_and_cli_modes_are_mutually_exclusive',
+    'formal_inventory_authority_rotation_stages_and_finalizes_with_stable_receipt',
   ],
 }, null, 2));

@@ -166,3 +166,29 @@ E2 正在集成：命令身份纳入计划及逻辑写入键；旧 locked-only/v
 - Fermat 最终文件的官方单文件回归 147396ms 退出 0，19 项检查齐全；见 `tmp/v6-metric-refetch-final-evidence/official-test-stdout.log`。主控直接核对源码及原始日志，确认先 TERM 后 KILL、两段有界 close 等待、无法确认时保留夹具并失败。代理已交还所有权并关闭。
 - 当前 320 个注册文件均已有通过证据，逐项汇总 `tmp/v6-final-test-coverage-20260905/main-current-coverage.json`。这是一组初轮与修复后专项记录，最终提交仍须完整 PR CI 以及合并后同 SHA 的 main-push CI。
 - 自动审批拒绝过的清理对象保持原位，并从候选文件集明确排除；没有借导出或后续清理绕过拒绝。候选冻结、正式提交和云端部署分别留证，不能互相替代。
+
+## 2026-09-05 20:45 首轮正式 CI 与部署契约修正
+
+- 首个提交 `88d61408fce61dd28cd5dadf57d2f39260b9aca5` 纳入 149 文件；最终暂存与候选 1388 文件哈希核对通过。新增文件的五处末尾空白已清理并重新冻结，见 `tmp/v6-stage-final-receipt.json`。Partner CLI 版本边界校验通过。PR 为 `https://github.com/dushengyi1993/shein-sales-bi/pull/120`。
+- 首轮 PR CI `33966143870` 已失败：源码检查及 deterministic 1/4、4/4 通过；2/4 为 89/90，人工基线 fixture 未隔离全局锁，在 Linux 尝试写 `/srv` 时被权限阻断；3/4 为 105/107，A1 计算测试依赖未安装的本地绘表组件，marketing primary fixture 的固定 PATH 丢失 GitHub Node 路径。独立 release gate 的测试所有权统计也遗漏新注册格式和新增数量。日志在 `tmp/v6-ci-pr120-attempt1/`。不能用此前本地通过记录替代本次失败。
+- Tesla 仅补齐人工基线 fixture 的隔离锁路径，九项原断言不变；Windows 1246ms、Linux 2642ms 退出 0，主控正式入口另验 1388ms 通过。证据 `tmp/v6-ci-manual-fence-evidence/`，主控已核对源码哈希及原始结果并关闭代理。其他 CI 夹具和所有权统计分别由 Pascal、Banach 独占。
+- 部署准备发现正式凭证与库存兼容门的既有契约缺口：v3 marker 生成器不绑定 bundle，而库存 authority 要求 bundle；inventory receipt 又采用含动态校验时间的 marker 全文件 SHA，不能在部署前锁定未来值。只读咨询提供线索，主控直接核对生成器、两个读端、轮转 identity 以及云端实际文件后确认。采用真实 git bundle 加不可变 release-attestation 原始 SHA 的稳定身份，保留 exact commit、source fingerprint、正式证明、原轮转顺序、CAS 和未知写防重门；Raman 独占受影响发布模块及专项测试，尚未验收。
+- 20:37 云端受管快照仍在 `7d5e38756e519e9daa76854925e7b2ee0b321b50`，三个 health、正式发布审计与运行健康均通过，维护关闭 generation 273。快照 manifest SHA `6aff91842ceb2ff0040f1bb189b8ed082061ca66e5ccb367f0d0963737b56eba`。进一步精确读回确认该 formal marker 无 bundle 字段，而库存兼容 active authority 使用同 commit 的有效 emergency receipt。这是当前状态说明，未变更云端凭证或生产源码。
+- 四个现有自动化的统一交付文案已准备并备份，保留任务绑定、排班、状态，尚未应用；需待新交付代码上线后同步。没有创建重复自动化或发送真实测试消息。
+
+### 21:16 CI 所有权统计与部署准备
+
+- Banach 在 release gate 统计修复中出现 provider 终态错误，主控披露并关闭后接回。实际 Git 基线核算为转移后 232 个注册文件，后续新增 64 和 24，共 320；转移前等价基线为 233。旧提取器仅接受 `scripts/test_*.mjs`，漏计 marketing 子目录 smoke 文件。修复后逐行解析完整注册数组，未知格式拒绝，继续严格检查重复、独立发布门和最终依赖关系。
+- `node scripts/test_bi_ops_release_gate.mjs --ci-ownership-only` 的 14 项检查通过：320 个唯一分片文件，22 个唯一直接调用，独立门 1 个，交集 0、并集 343。漏注册、重复注册、发布门重复归属、缺最终依赖四个反例全部拒绝；证据 `tmp/v6-ci-release-ownership-focus/main-final.json`。隔离候选正式 timeout contract 与 test shards 两项通过。完整 release gate 和新提交 CI 尚待重新运行，不能将该专项作为整套通过。
+- Pascal 返回 A1 缺依赖与 primary PATH 修复，但主控拒绝会静默接受未知调用的通用 Proxy 替身，要求只开放真实使用的绘表接口，并精确区分包缺失与已安装包内部异常。30 项真实 Linux primary 检查已通过；A1 最终版本仍待核验。
+- 正式 inventory authority 初版仍有任意 receipt 路径、无正式证明核验、畸形新绑定被旧 emergency 掩盖、bundle 仅看 header 等反例，已交回 Raman 限定修复。未执行代理输出中未经源码证实的 CLI 示例。
+- 主控直接核对现有源码加固器：它只支持 apply/rollback；已完成 receipt 不能授权另一源码代际。云端 root 所有的源码必须先按精确路径临时交接，部署后以新代际、新 receipt、新冻结 plan 重新加固。只读咨询中的递归 chown、相对路径 xargs 及不存在参数均未采纳；临时交接工具仅在隔离目录准备和测试，尚未变更生产权限。
+
+- A1 最终夹具已采用显式绘表接口和精确包解析判断。主控将最终文件放入确实没有 `@oai/artifact-tool` 的隔离候选，原测试 365ms 退出 0，真实 builder 的报价、作用域和执行 payload 断言全部保留，见 `tmp/v6-main-shard3-final-20260905-2130/result.json`。已安装组件路径另验 3475ms 通过，非法替身调用的反例通过；该缺依赖分支不证明 XLSX 视觉质量。primary 的 Linux 30 项结果及最终源码 SHA 一致，Pascal 已交还并关闭。
+
+### 21:40 正式凭据真实链路核验
+
+- Raman 出现上游空响应重试后仍失败的终态错误，主控披露并关闭后接回原范围。再次读回确认两个读端现均拒绝坏的新 formal 绑定，marker 读取上限恢复原值；仓库来源或 tag 对象读失败不会被跳过。主控移除未使用的跳过 tag 校验参数，并将 bundle 验证改为独立裸仓库解包及逐个 advertised object 校验，支持合法 annotated-tag-only 包，Git 子进程保留有界时限。
+- 主控补齐真实连贯验收：旧 emergency 精确 checkout 上用真实 CLI 参数和不可变工件 stage；实际 checkout 到新 commit；真实 recordDeploymentRelease 生成 marker；真实库存读端读取 marker/attestation/tag；finalize 前对齐按预期拒绝；真实 CLI finalize 后对齐通过；重 record 改变时间后仍对齐。仅 GitHub 和操作系统服务/维护观察为隔离 fixture，未伪造 formal authority 对象替代读端。
+- 首三次新夹具运行分别暴露 ISO 时间格式、工件过期、初始预检时间不一致，保留为失败；只修夹具时间，未放宽生产门。最终正式 Linux source-state 回归在原 30000ms 上限内 4071ms 退出 0，见 `tmp/v6-main-formal-chain-20260905-2137/official-linux-source-04.log`；两个库存专项分别 872ms、509ms 通过。主控直接核对 Python 系统级守卫只把 receipt 路径/hash 用作精确身份，Linux canonical 路径兼容。
+- 临时源码权限交接工具初步 10 项测试通过，但主控和独立复核发现维护检查空操作、可省略服务集、计划 hash 的或条件、root Git 和基于路径的异常恢复等缺陷，已退回其独占范围补修。工具未进入生产，旧初测不能作为执行凭证。

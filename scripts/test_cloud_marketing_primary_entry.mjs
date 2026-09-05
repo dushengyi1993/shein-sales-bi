@@ -174,7 +174,7 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
 `);
     const lockFiles = ['host.lock', 'slot0.lock', 'slot1.lock'];
     lockFiles.forEach(file => write(file, ''));
-    const env = {PATH: path.join(temp, 'bin') + ':/usr/bin:/bin', HOME: temp, TZ: 'Asia/Shanghai',
+    const env = {PATH: path.join(temp, 'bin') + ':' + path.dirname(process.execPath) + ':/usr/bin:/bin', HOME: temp, TZ: 'Asia/Shanghai',
       FIXTURE_DATE: date, FIXTURE_HOUR: '14', FIXTURE_MINUTE: '30', FIXTURE_EPOCH: String(epoch),
       SHEIN_BI_ROOT: temp, SHEIN_BI_TZ: 'Asia/Shanghai',
       SHEIN_HOST_HEAVY_LOCK_FILE: path.join(temp, 'host.lock'),
