@@ -192,3 +192,10 @@ E2 正在集成：命令身份纳入计划及逻辑写入键；旧 locked-only/v
 - 主控补齐真实连贯验收：旧 emergency 精确 checkout 上用真实 CLI 参数和不可变工件 stage；实际 checkout 到新 commit；真实 recordDeploymentRelease 生成 marker；真实库存读端读取 marker/attestation/tag；finalize 前对齐按预期拒绝；真实 CLI finalize 后对齐通过；重 record 改变时间后仍对齐。仅 GitHub 和操作系统服务/维护观察为隔离 fixture，未伪造 formal authority 对象替代读端。
 - 首三次新夹具运行分别暴露 ISO 时间格式、工件过期、初始预检时间不一致，保留为失败；只修夹具时间，未放宽生产门。最终正式 Linux source-state 回归在原 30000ms 上限内 4071ms 退出 0，见 `tmp/v6-main-formal-chain-20260905-2137/official-linux-source-04.log`；两个库存专项分别 872ms、509ms 通过。主控直接核对 Python 系统级守卫只把 receipt 路径/hash 用作精确身份，Linux canonical 路径兼容。
 - 临时源码权限交接工具初步 10 项测试通过，但主控和独立复核发现维护检查空操作、可省略服务集、计划 hash 的或条件、root Git 和基于路径的异常恢复等缺陷，已退回其独占范围补修。工具未进入生产，旧初测不能作为执行凭证。
+
+### 22:20 第二轮 CI 与权限交接复验
+
+- 第二轮 PR CI `33969925873`（`ea1bbb5`）终态失败：Source checks、Release gate、第 2 与第 4 分片通过；第 1 与第 3 分片的两个隔离夹具均漏复制新增的 `source_release_inventory_authority.mjs`。分别补入迁移和维护守卫安装测试的显式依赖列表，未修改生产逻辑、断言或超时。完整日志保留在 `tmp/v6-ci-pr120-attempt2/`，该失败不能改记为成功。
+- 权限工具子代理出现上游断流终态错误，主控披露并接管。V3 改为真实 bundle 的基线到目标路径校验，目标不得改动运行目录；历史 tracked outputs 只读核对内容与权限。通过 root 保护的官方维护读取器和非 root 子进程读取维护状态，强制静止服务集、精确原始计划 SHA、文件集合与 inode 核对，并保留不可变预写证据。
+- 主控真实 Linux 隔离验证 22 项通过，包含 chown 后 chmod 失败、回执发布失败、路径置换的持有 FD 恢复，以及非 root Git checkout 后调用既有 hardener 的新 generation 计划、执行和终态审计。证据 `tmp/v6-source-permission-handoff-20260905T132058/v3-attempt3.log`；独立审查仍是执行前门禁，未运行云端权限交接。
+- 前一 V2 测试在本机 WSL 安装的假 `systemctl` 经逐字节确认后移除，副本保留为 `quarantined-global-systemctl.sh`；命令解析已恢复 `/usr/bin/systemctl`。生产主机未受该测试影响。

@@ -83,6 +83,7 @@ try {
     'emergency_local_release_receipt.mjs',
     'source_release_attestation.mjs',
     'source_release_github_evidence.mjs',
+    'source_release_inventory_authority.mjs',
     'source_release_version.mjs',
   ]) {
     await fs.copyFile(path.join(ROOT, 'lib', moduleName), path.join(fixtureLib, moduleName));

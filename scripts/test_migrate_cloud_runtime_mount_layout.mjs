@@ -514,6 +514,7 @@ async function buildFixture(tempDir) {
     'cloud_runtime_snapshot.mjs',
     'systemd_unit_snapshot.mjs',
     'source_release_attestation.mjs',
+    'source_release_inventory_authority.mjs',
     'atomic_file_publish.mjs',
     'cross_process_ticket_lock.mjs',
     'emergency_local_release_receipt.mjs',
