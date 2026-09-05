@@ -1,0 +1,75 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {readCloudRuntimeArtifact, runtimeArtifactLocation} from '../lib/cloud_runtime_path_policy.mjs';
+import {inspectMarketingRepairArtifacts, exportMarketingRepairArtifacts, importMarketingRepairArtifacts} from '../lib/marketing_repair_artifacts.mjs';
+
+const repo = fileURLToPath(new URL('../', import.meta.url));
+const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'shein-v6-artifacts-'));
+const root = path.join(temp, 'source');
+const env = {SHEIN_BI_OUTPUTS_ROOT: path.join(temp, 'data', 'outputs'), SHEIN_BI_STATE_ROOT: path.join(temp, 'data', 'state'), SHEIN_BI_MARKETING_PLAN_ROOT: path.join(temp, 'data', 'marketing-plans')};
+const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const queue = 'state/cloud_marketing_live_guard/repair-queues/marketing-repair-2026-09-05.json';
+const guard = 'outputs/reports/marketing-daily-guard-2026-09-05.json';
+const plan = 'outputs/reports/fallback-2026-09-05.json';
+const rescue = 'tmp/marketing-signup/rescue-FY.json';
+const prices = '../../../srv/shein-bi/runtime/marketing-plans/baselines/test/price-overrides.json';
+const scan = 'outputs/reports/marketing-live-scan.json';
+async function write(logical, value) {
+  const file = runtimeArtifactLocation({root, file: logical, env}).path;
+  const bytes = Buffer.from(`${JSON.stringify(value)}\r\n`);
+  await fs.mkdir(path.dirname(file), {recursive: true});
+  await fs.writeFile(file, bytes);
+  return hash(bytes);
+}
+try {
+  await fs.mkdir(root, {recursive: true});
+  const priceHash = await write(prices, {items: [{storeKey: 'FY', price: 37}]});
+  await write(scan, {rows: []});
+  const guardHash = await write(guard, {reportDate: '2026-09-05', targetPlanSelection: {priceOverrides: prices, priceOverridesHash: priceHash}, limitedDiscountTargetPriceDrift: {source: scan}});
+  await write(rescue, {sourceGuard: guard, sourcePriceOverrides: prices, sourcePriceOverridesSha256: priceHash, rows: [{storeKey: 'FY', skc: 'example'}]});
+  await write(plan, {sourceGuard: guard, sourceGuardHash: guardHash, sourcePriceOverrides: prices, sourcePriceOverridesSha256: priceHash, sourceCurrentMarketingLiveScan: scan, rescueFiles: [{path: rescue}]});
+  const fingerprint = hash('unchanged business queue');
+  const queueHash = await write(queue, {date: '2026-09-05', queueFingerprint: fingerprint, sourceGuard: guard, sourceGuardHash: guardHash, stages: {fallbackRepair: {planPath: plan, status: 'submitted_without_exact_readback'}}});
+  const inspected = await inspectMarketingRepairArtifacts({root, queue, env});
+  assert.equal(inspected.files.length, 6);
+  assert.equal(inspected.queueStateSha256, queueHash);
+  assert.equal(inspected.queueFingerprint, fingerprint);
+  assert.equal((await readCloudRuntimeArtifact({root, file: guard, env})).sha256, guardHash, 'SSH sees canonical bytes without service bind');
+  const legacyGuard = path.join(root, guard);
+  await fs.mkdir(path.dirname(legacyGuard), {recursive: true});
+  const guardBytes = (await readCloudRuntimeArtifact({root, file: guard, env})).bytes;
+  await fs.writeFile(legacyGuard, guardBytes);
+  assert.equal((await readCloudRuntimeArtifact({root, file: legacyGuard, env})).sha256, guardHash, 'service source view resolves the same exact bytes');
+  const command = spawnSync(process.execPath, ['scripts/marketing/manage_marketing_repair_queue.mjs', 'inspect-artifacts', '--root', root, '--queue', queue], {cwd: repo, env: {...process.env, ...env}, encoding: 'utf8'});
+  assert.equal(command.status, 0, command.stderr);
+  assert.equal(JSON.parse(command.stdout).queueStateSha256, queueHash, 'real diagnostic CLI uses the resolver');
+  const bundleFile = path.join(temp, 'bundle.json');
+  const bundle = await exportMarketingRepairArtifacts({root, queue, env, out: bundleFile});
+  const imported = await importMarketingRepairArtifacts({bundleFile, destination: path.join(temp, 'imported')});
+  assert.equal(imported.queueStateSha256, queueHash);
+  assert.equal(imported.queueFingerprint, fingerprint);
+  assert.deepEqual(imported.files.map(f => [f.logicalPath, f.sha256]), inspected.files.map(f => [f.logicalPath, f.sha256]));
+  assert.equal(JSON.parse(imported.files.find(f => f.logicalPath === queue).bytes).stages.fallbackRepair.status, 'submitted_without_exact_readback');
+  await assert.rejects(importMarketingRepairArtifacts({bundleFile, destination: path.join(temp, 'imported')}), /EEXIST/);
+  const incomplete = {...bundle, files: bundle.files.filter(f => f.logicalPath !== rescue)};
+  const incompleteFile = path.join(temp, 'incomplete.json');
+  await fs.writeFile(incompleteFile, JSON.stringify(incomplete));
+  await assert.rejects(importMarketingRepairArtifacts({bundleFile: incompleteFile, destination: path.join(temp, 'rejected')}), /Bundled artifact missing/);
+  await assert.rejects(fs.stat(path.join(temp, 'rejected')), {code: 'ENOENT'});
+  await fs.writeFile(legacyGuard, '{}');
+  await assert.rejects(readCloudRuntimeArtifact({root, file: guard, env}), /namespace conflict/);
+  await fs.writeFile(legacyGuard, guardBytes);
+  const canonicalGuard = runtimeArtifactLocation({root, file: guard, env}).path;
+  await fs.unlink(canonicalGuard);
+  await assert.rejects(inspectMarketingRepairArtifacts({root, queue, env}), /Artifact unavailable: outputs\/reports\/marketing-daily-guard-2026-09-05.json/);
+  assert.throws(() => runtimeArtifactLocation({root, file: 'outputs/../../secrets.json', env}), /escapes/);
+  assert.equal(hash(await fs.readFile(runtimeArtifactLocation({root, file: queue, env}).path)), queueHash, 'diagnostics and transfer never mutate the existing queue');
+  console.log('PASS: canonical/service/import identities, exact closure and bytes, CLI, missing/conflicting files, isolated import, unchanged queue');
+} finally {
+  await fs.rm(temp, {recursive: true, force: true});
+}

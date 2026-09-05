@@ -503,7 +503,10 @@ assert.match(marketingRepairScript, /consume_group_budget/,
 assert.match(marketingRepairScript, /--graceful-cutoff-epoch "\$FALLBACK_GRACEFUL_CUTOFF_EPOCH"/);
 assert.match(marketingRepairScript, /new_groups_in_result/);
 assert.match(marketingRepairScript, /cloud repair batch max groups=\$MAX_GROUPS; group writes remain serial/);
-assert.match(marketingRepairScript, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
+assert.doesNotMatch(marketingRepairScript, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/,
+  'authorized repair admission must use resource ownership and bounded deadlines rather than the retired minute window');
+assert.match(marketingRepairScript, /FALLBACK_OUTER_HARD_DEADLINE_EPOCH <= FALLBACK_GRACEFUL_CUTOFF_EPOCH/,
+  'removing the minute window must retain the strict graceful and hard deadline ordering');
 assert.match(marketingRepairScript, /defer_remaining_work/);
 assert.match(marketingRepairScript, /IS_CLOUD_EXECUTION=1/);
 assert.match(marketingRepairScript, /EXECUTION_LOCATION.*== "local".*ROOT.*!= "\/opt\/shein-bi\/app"/);

@@ -18,6 +18,10 @@ import {
   verifySourceReleaseAttestationFiles,
 } from '../lib/source_release_attestation.mjs';
 import {
+  verifySourceReleaseBundle,
+  validateInventoryWriterAuthority,
+} from '../lib/source_release_inventory_authority.mjs';
+import {
   readRegularBoundedFile,
   readRegularBoundedFileAsync,
   statIdentity,
@@ -273,6 +277,20 @@ export function inspectRecordedDeploymentReleaseEvidence(options = {}) {
   if (marker.schemaVersion === DEPLOYED_RELEASE_SCHEMA_VERSION_V3) {
     if (marker.repositoryId !== verified.repositoryId) issues.push('repository_id_evidence_mismatch');
     if (marker.trustPolicy?.sha256 !== verified.trustPolicySha256) issues.push('trust_policy_sha_evidence_mismatch');
+    if (marker.inventoryWriterAuthority !== undefined) {
+      const authValidation = validateInventoryWriterAuthority(marker.inventoryWriterAuthority, marker);
+      if (!authValidation.ok) {
+        issues.push('inventory_writer_authority_invalid');
+      } else {
+        if (marker.inventoryWriterAuthority.receiptSha256 !== verified.attestationSha256) {
+          issues.push('inventory_writer_authority_receipt_sha_mismatch');
+        }
+        const canonicalAttestationFile = path.resolve(path.join(releaseDir, 'release-attestation.json'));
+        if (path.resolve(marker.inventoryWriterAuthority.receiptFile) !== canonicalAttestationFile) {
+          issues.push('inventory_writer_authority_receipt_file_mismatch');
+        }
+      }
+    }
   }
   return Object.freeze({
     ok: issues.length === 0,
@@ -483,6 +501,22 @@ export async function recordDeploymentRelease(options = {}) {
       throw fail('SOURCE_RELEASE_SOURCE_TOCTOU', 'Source changed before deployment marker preflight');
     }
     const markerCas = await captureFileCas(deploymentStateFile);
+    const hasSourceBundle = Boolean(options.sourceBundle);
+    const hasExpectedBundleSha = Boolean(options.expectedSourceBundleSha256);
+    if ((hasSourceBundle && !hasExpectedBundleSha) || (!hasSourceBundle && hasExpectedBundleSha)) {
+      throw fail('SOURCE_RELEASE_BUNDLE_PARAMS_UNPAIRED', '--source-bundle and --expected-source-bundle-sha256 must be provided together');
+    }
+    let verifiedBundle = null;
+    if (hasSourceBundle) {
+      verifiedBundle = verifySourceReleaseBundle({
+        bundleFile: options.sourceBundle,
+        cwd,
+        targetCommit: initial.head,
+        targetTag: tag,
+        expectedSha256: options.expectedSourceBundleSha256,
+      });
+    }
+
     await options.hooks?.beforeMarkerWrite?.();
     const writeGate = inspectReleaseSourceState({cwd, expectedCommit: initial.head});
     if (!sameSourceSnapshot(preMarker, writeGate)) {
@@ -506,6 +540,13 @@ export async function recordDeploymentRelease(options = {}) {
       remoteEvidence: remote,
       sourceFingerprint: writeGate.sourceFingerprint,
       recordedAt: (options.now?.() || new Date()).toISOString(),
+      ...(verifiedBundle ? {
+        inventoryWriterAuthority: {
+          receiptFile: path.resolve(options.attestationFile),
+          receiptSha256: local.attestationSha256,
+          bundleSha256: verifiedBundle.sha256,
+        },
+      } : {}),
     });
     const validation = validateDeployedReleaseMarker(marker, {requireV3: true});
     if (!validation.ok) throw fail('SOURCE_RELEASE_MARKER_INVALID', `Generated marker v3 is invalid: ${validation.issues.join(',')}`);
@@ -577,6 +618,8 @@ function parseArgs(argv) {
     trustPolicyFile: process.env.SHEIN_BI_SOURCE_RELEASE_TRUST_POLICY || '',
     deploymentLockFile: process.env.SHEIN_BI_DEPLOYMENT_TRANSACTION_LOCK || '',
     lockTimeoutMs: Number(process.env.SHEIN_BI_DEPLOYMENT_LOCK_TIMEOUT_MS || 30_000),
+    sourceBundle: process.env.SHEIN_BI_SOURCE_RELEASE_BUNDLE || '',
+    expectedSourceBundleSha256: process.env.SHEIN_BI_EXPECTED_SOURCE_RELEASE_BUNDLE_SHA256 || '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--cwd') args.cwd = argv[++i];
@@ -589,6 +632,8 @@ function parseArgs(argv) {
     else if (argv[i] === '--trust-policy') args.trustPolicyFile = path.resolve(argv[++i]);
     else if (argv[i] === '--deployment-lock') args.deploymentLockFile = path.resolve(argv[++i]);
     else if (argv[i] === '--lock-timeout-ms') args.lockTimeoutMs = Number(argv[++i]);
+    else if (argv[i] === '--source-bundle') args.sourceBundle = path.resolve(argv[++i]);
+    else if (argv[i] === '--expected-source-bundle-sha256') args.expectedSourceBundleSha256 = argv[++i];
     else throw new Error(`Unknown argument: ${argv[i]}`);
   }
   if (args.recordDeployment && !args.expectedCommit) args.expectedCommit = args.recordDeployment;
@@ -620,6 +665,8 @@ if (isMain) {
         trustPolicyFile: args.trustPolicyFile,
         lockPath: args.deploymentLockFile || undefined,
         lockTimeoutMs: args.lockTimeoutMs,
+        sourceBundle: args.sourceBundle || undefined,
+        expectedSourceBundleSha256: args.expectedSourceBundleSha256 || undefined,
       });
       console.log(JSON.stringify({
         ok: true,

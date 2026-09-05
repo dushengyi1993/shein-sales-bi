@@ -1,0 +1,542 @@
+{
+  "meta": {
+    "generated_at": "2026-09-05T04:04:47.324Z",
+    "purpose": "V6 primary cleanup classification suggestions for main task review",
+    "disclaimer": "本文件仅为建议待主任务验收清单，不是删除授权，未执行任何删除或修改操作。",
+    "baseline_commit": "7d5e38756e519e9daa76854925e7b2ee0b321b50",
+    "backup_manifest_count": 52,
+    "temporary_scripts_credentials_check": {
+      "has_credentials": false,
+      "result": "所有检查的一次性/怪异临时脚本均无嵌入 credential"
+    },
+    "summary_by_recommendation": {
+      "already_included": 10,
+      "stale_historical_version": 30,
+      "uniquely_useful_delta": 6,
+      "temporary_throwaway": 6
+    },
+    "last_updated": "2026-09-05T04:05:58.546Z"
+  },
+  "items": [
+    {
+      "path": ".js",
+      "recommendation": "temporary_throwaway",
+      "backup_bytes": 4166,
+      "backup_sha256": "1adecac14d1e34712dc2813599dcc1ec3d48fc0d083b201fd452928d5980085d",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "排查 2026-08-20 至 2026-09-03 期间 15 天补货计划缺口的一次性脚本，无凭据，临时文件。"
+    },
+    {
+      "path": "AGENTS.md",
+      "recommendation": "uniquely_useful_delta",
+      "backup_bytes": 10219,
+      "backup_sha256": "efd2b3d72dc7cf3d8ac3507f3f5a42133ea05a0ef7a05ff371fc5e7df97b5901",
+      "baseline_blob": "29b5f3af0b7628c45d72cec38c1df7224d88abdf",
+      "baseline_bytes": 10084,
+      "baseline_sha256": "28c85a2926ff934eb6d041402e937bd8d4a3a2c35200d79449d892d1ce55e4f4",
+      "note": "单行修改：将日常缺陷移交对象更新为 BI自动运营系统开发V6 (thread 01a06fa4-06e3-7253-a51f-65336ca1f837)。"
+    },
+    {
+      "path": "baseline_guard.py",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 42982,
+      "backup_sha256": "4e23af14a131ae566d2d3a794170973250a10d1339941ccdfeb30565a82ddbe0",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "完全匹配历史提交 66de3bb 的 infra/inventory_writer_compatibility_guard.py，根目录孤立副本，无凭据。"
+    },
+    {
+      "path": "config/marketing_manual_limited_discount_overrides.json",
+      "recommendation": "uniquely_useful_delta",
+      "backup_bytes": 30429,
+      "backup_sha256": "e0c0824221921db1ccfcad10890ccf1566b1b9b0388c79673400d2c3663a83de",
+      "baseline_blob": "c600425a9568037923f2178f692c3e0c9738b9d4",
+      "baseline_bytes": 25777,
+      "baseline_sha256": "1262c9ce7309e87ed8b5a7cb55f69bf509157eb17618ad0497e6e67108b8a93b",
+      "note": "包含 2026-09-02 线上写入回读的 6 个新增有效 SKC（至 2026-09-09）与 DL/FY/TZZ 最新活动 ID，基准停留在 07-30。"
+    },
+    {
+      "path": "config/product_aliases.json",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 25905,
+      "backup_sha256": "3c7de09c0c2aae48d77d44eba792e2eb17fd42f71c8c01028c77b28404f7b20c",
+      "baseline_blob": "b4d42d8499a88072b646891c85b6e20db0475f02",
+      "baseline_bytes": 26201,
+      "baseline_sha256": "3ecd360ac2560168beb48921e15ce1f10f48c934378bb116295779ed0761d9da",
+      "note": "备份为 v27 版本，官方基准已推进至 v28 并补齐 2026-09-02 ET 归并；备份 67 个货号在基准中全覆盖。"
+    },
+    {
+      "path": "config/product_catalog.json",
+      "recommendation": "already_included",
+      "backup_bytes": 4014,
+      "backup_sha256": "a731cd0d6b9353a5bdf03ec94e5850085dbda2b49221935eb8bcf163716e02cd",
+      "baseline_blob": "d6798918e69e31a9327f12b3beaa1a1f2de9519f",
+      "baseline_bytes": 4014,
+      "baseline_sha256": "a731cd0d6b9353a5bdf03ec94e5850085dbda2b49221935eb8bcf163716e02cd",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "docs/active-development-task.md",
+      "recommendation": "uniquely_useful_delta",
+      "backup_bytes": 2830,
+      "backup_sha256": "060f140d4d309363d9f1828c4d47f4d6f35a335c05f8586df2eef259a0d2df52",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "V6 当前开发与修复负责人声明文件，记录新任务路由，建议保留。"
+    },
+    {
+      "path": "docs/cloud-bi-operations.md",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 69198,
+      "backup_sha256": "30ad0a440511dfd31da7f294829baf61f29f65916b4c5c319dc7aab66aee91e7",
+      "baseline_blob": "0641137770733bf8f0b7beedb54d3dd3058e013b",
+      "baseline_bytes": 69368,
+      "baseline_sha256": "0a2bbbba3c4974aa084d44f77c3d82ea21fb50887c4ef989160187079d77ca5f",
+      "note": "仅包含两处向旧版回退的陈旧描述（删除了 ET 守卫触发条件、将 32 组 22:55 截止回退为 1 店 1 组 20:57），属旧副本。"
+    },
+    {
+      "path": "docs/marketing-campaign-signup-pricing-rules.md",
+      "recommendation": "uniquely_useful_delta",
+      "backup_bytes": 81903,
+      "backup_sha256": "27952ff2e7921b04c94c74c44b4673f5db62526db513e97d5c91c75d32b09306",
+      "baseline_blob": "e6dc683077975c0a82ff48645037788f5388edbd",
+      "baseline_bytes": 80562,
+      "baseline_sha256": "9e78013dcba421cf1167bebfde6d3d626161f599c33e01c7b3e9457d6ec78a3a",
+      "note": "包含可见 Profile 强刷、ET 仓储及在途库存汇总展示等有用规则。必须严格排除“业务定价唯一基准是目标利润率”及任何试图用利润率取代用户明确价的描述，仅提取纯增量操作规则。"
+    },
+    {
+      "path": "docs/marketing-daily-inspection-handoff.md",
+      "recommendation": "uniquely_useful_delta",
+      "backup_bytes": 39855,
+      "backup_sha256": "ecfe3b2792929169f2150bc42dc7fc351659b788f66744e7566248b804e121e9",
+      "baseline_blob": "b32023935c05eaafb61a3c6827506c8f5334a1ae",
+      "baseline_bytes": 38274,
+      "baseline_sha256": "1ce39e715593264f1280cdb63ca5859015cdf37d9490bd110d2d759d818752c4",
+      "note": "包含用户确认的人话版版式、标准货号仓储证据与禁止报错等新增现场规范，建议选择性合入。"
+    },
+    {
+      "path": "docs/reviews/2026-09-05-v5-audit-and-repair-plan.md",
+      "recommendation": "uniquely_useful_delta",
+      "backup_bytes": 35571,
+      "backup_sha256": "9e8a116e60ba6486ee4b90b2767ca77b7c2cec57083267788bc027592a99d4a6",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "V5 全项目审查与修复方案，记录根因与移交授权，建议保留。"
+    },
+    {
+      "path": "infra/systemd/shein-bi-cloud-portal-section-queue.service",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 1668,
+      "backup_sha256": "b22c33382210a8758fe8d5b15cba6c2263ea859757d298313ca7d3a61bd5f330",
+      "baseline_blob": "0297afb3cd6be0d177ab7822dc854788863ddc58",
+      "baseline_bytes": 1551,
+      "baseline_sha256": "1f9fbd6d4845216b6abe7ad712ef1b9b7fbb9d189cbc05d222bd096232756ad1",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "infra/warehouse/schema.sql",
+      "recommendation": "already_included",
+      "backup_bytes": 325103,
+      "backup_sha256": "3a4996f1614f4fa35222db0bdc9c74fac3506f96a847318974fd13eaeb38a29d",
+      "baseline_blob": "c237eeb90e9f1eae336128f0928e1a59c0582b9c",
+      "baseline_bytes": 325103,
+      "baseline_sha256": "3a4996f1614f4fa35222db0bdc9c74fac3506f96a847318974fd13eaeb38a29d",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "inputs/costs/成本.xlsx",
+      "recommendation": "already_included",
+      "backup_bytes": 32413,
+      "backup_sha256": "aa76a68afd261fa1fd74728ffe79aa1e6b33bbc2107be3efc977980c2e7627c3",
+      "baseline_blob": "8d8d3b8fa18d2e6cf063be5e9917637cba4fbd01",
+      "baseline_bytes": 32413,
+      "baseline_sha256": "aa76a68afd261fa1fd74728ffe79aa1e6b33bbc2107be3efc977980c2e7627c3",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "lib/cloud_team_report_cloud.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 15766,
+      "backup_sha256": "22bfb909fed8a1d5131833515034ba3f208e2b7c7658eb8ab769e5eeae4a814e",
+      "baseline_blob": "ebe0dcf70fcf94b4539dcfcedc0f5b2b7880f37d",
+      "baseline_bytes": 18222,
+      "baseline_sha256": "dccab83a2133aa9597ded9c879ca987b5df57d31dc42b730ee5bf0ffedd27370",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "lib/cloud_team_report_common.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 10608,
+      "backup_sha256": "94512fc19731261bfe51f91af17b75e4c444f174637bb0bd54ea47d9c6ddf02e",
+      "baseline_blob": "9d5309c6cbe03340ab8f2ebd0bc0eb1becaece87",
+      "baseline_bytes": 12902,
+      "baseline_sha256": "5c359095759ae7ff789b93ad3aed859e7f9ea32369b6aa712970f9656ecbbfa5",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "lib/cloud_team_report_local.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 8568,
+      "backup_sha256": "6d7b337d99c323e8ee3699bdf54c6f84fc06b51ec9d8b8fe5792ca017646e990",
+      "baseline_blob": "a90fc6373e8848ee0165ec98f3b55617c6f1e54e",
+      "baseline_bytes": 9492,
+      "baseline_sha256": "cac671c11edae75feb79180dd34eabde5cd23c73ece8d424d7fbb97c7093eaac",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "lib/durable_inventory_write.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 33449,
+      "backup_sha256": "e753d210da8bd13e86107763fdb290a8b93204aa9e420a9f4e4f553745a44b7d",
+      "baseline_blob": "3337aac0b1bb9d2b4176bbdea7f25765b676c357",
+      "baseline_bytes": 69390,
+      "baseline_sha256": "6a32d804d127f94a36d5de7d3779c606de4bbc59c1636d736b47fb6f1bb4ba94",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "lib/link_ops_uploaded_asset_binding_recovery.mjs",
+      "recommendation": "already_included",
+      "backup_bytes": 53200,
+      "backup_sha256": "97a4672d0208216e6c3651002748fc8b5ccf14ed29966e314923657f3a2d032a",
+      "baseline_blob": "c7cde14ca9b217ceb5091f61c83ec73e9c6d5b78",
+      "baseline_bytes": 53200,
+      "baseline_sha256": "97a4672d0208216e6c3651002748fc8b5ccf14ed29966e314923657f3a2d032a",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "lib/marketing_repair_manifest.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 21824,
+      "backup_sha256": "ab19d48ee42143d968aa1dee8f62584c81b952aec81170336f3f95ebe4f08c9e",
+      "baseline_blob": "0ebca5bb76a776454b3d62438f009172d2342163",
+      "baseline_bytes": 22065,
+      "baseline_sha256": "0cb589c6d89d2d3b78302e7b74d2ec273656727d4ca1d9f1282485297fdcdf12",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "lib/product_display_name.mjs",
+      "recommendation": "already_included",
+      "backup_bytes": 8355,
+      "backup_sha256": "08d71f6517a17fc4b80362abf5854e24d064aecf9f9e1a34575c4bddefdbaa02",
+      "baseline_blob": "549013eedcfa988e87ef8e93f43ea3d3b4634999",
+      "baseline_bytes": 8355,
+      "baseline_sha256": "08d71f6517a17fc4b80362abf5854e24d064aecf9f9e1a34575c4bddefdbaa02",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "lib/product_sku_normalizer.mjs",
+      "recommendation": "already_included",
+      "backup_bytes": 10584,
+      "backup_sha256": "168481cb5856441609841ddadfda94affe02518f44711478d9ee436f0499628a",
+      "baseline_blob": "cf36e5c665e6ee4ee18041ce54a7fc978036e116",
+      "baseline_bytes": 10584,
+      "baseline_sha256": "168481cb5856441609841ddadfda94affe02518f44711478d9ee436f0499628a",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "scripts/authorize_cloud_morning_chain_recovery.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 35028,
+      "backup_sha256": "daae60c81578aedaf20961cfc4687a898283b12fc254d19b6d1558e6eee524b6",
+      "baseline_blob": "d637fb906373ed1df7ca74980edd7cdeaaf988e6",
+      "baseline_bytes": 55958,
+      "baseline_sha256": "dc83d9f0dde1d9765bddaeeede0d44678138e28854daf3b09dd18ece57fbeed8",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/cloud_link_business_sync.sh",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 89622,
+      "backup_sha256": "ecfbf2fc040bf82e943572cdf7528ab0053e45fba5b6c259c21d15eb2f5afc1a",
+      "baseline_blob": "792d0669e59101752b21f044b9e4074a330ad670",
+      "baseline_bytes": 89839,
+      "baseline_sha256": "0ce8e10fd21b7aaa0383c4ee2b9286b25b5bf310d5869ef37be88540bd46fc55",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/cloud_ops_watchdog.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 87542,
+      "backup_sha256": "bd86a7c379bdf7b3e44adac8689e9cace575747a1a763c214d6c0d8e1f15c123",
+      "baseline_blob": "7b7de35d75623d8d3038ba8612fccdc059ef87a8",
+      "baseline_bytes": 89878,
+      "baseline_sha256": "a7d95bf2168f3f35e255246eeb9831aea2ab3bab8ddfe6d07ed546952cdc4a96",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/cloud_portal_section_queue_worker.sh",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 26578,
+      "backup_sha256": "7e4f7bb806abc90c07184f47b75adf8611d96a533fe5dc2685ef5d6a6718af63",
+      "baseline_blob": "f5a5bdb2b6a44f807ac11c099ec2d3d7ada6cc46",
+      "baseline_bytes": 29676,
+      "baseline_sha256": "6a0d84b0344b26b818a9e089f5f8dd1e18eac4920db86a2d0438e59b8030a523",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/cloud_team_report_delivery.mjs",
+      "recommendation": "already_included",
+      "backup_bytes": 1511,
+      "backup_sha256": "60b303ba4756a345a143fedb56dba09ab1d66ae6c798d9ab69b891a005baeab1",
+      "baseline_blob": "1aec0e63fcfaa1955c208e1fdfc6d4a173a81097",
+      "baseline_bytes": 1511,
+      "baseline_sha256": "60b303ba4756a345a143fedb56dba09ab1d66ae6c798d9ab69b891a005baeab1",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "scripts/generate_bi_portal.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 1055993,
+      "backup_sha256": "085fa4f6251998f226ffb7879503c6f65854aab9747ad139662b75c09d78cbbf",
+      "baseline_blob": "6b52cc15db3ce880f724f36c40363dcc8e0008f9",
+      "baseline_bytes": 1057471,
+      "baseline_sha256": "3e1e0c680393b0bcfef9dee0d978da68166420ae93405f72c594beca4c7bfb2f",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/inventory/assert_inventory_writer_release_aligned.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 23647,
+      "backup_sha256": "237a0f25d96a94395abfd63f4e12052a96c4c6f5a00565639dc57eabdf249b70",
+      "baseline_blob": "9d3aa57a7ee32bf3a0bb644eea1d072995651f16",
+      "baseline_bytes": 17861,
+      "baseline_sha256": "55a1da8d80a0d788920a7f91b7a4bb0f4c086072ab35b92859fbdf8ec9e8abd6",
+      "note": "基准 345 行 vs 备份 592 行。备份系 04e897f 提交前的未发布复杂控制草稿，包含过多冗余实现；正式基准在 04e897f 中收敛了标准化预检逻辑，属旧控制稿，无需合入。"
+    },
+    {
+      "path": "scripts/marketing/smoke_marketing_repair_manifest.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 16717,
+      "backup_sha256": "da1b8ca206e84926e530aa3efbd2b06c8820d1bebbc8e1aa070644893e12ed10",
+      "baseline_blob": "b7ff38f18098e8c4aca40ee370a81a258fc31fc7",
+      "baseline_bytes": 18184,
+      "baseline_sha256": "e463350a249bc5e6f77f33d61d3c35c6ee4c8be43cbfa02adfd52d76f8f2ef3d",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/run_cloud_morning_chain_job.sh",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 20614,
+      "backup_sha256": "a7a1258ce3a1b6aaeef0ed819e890338932d788c890701b7381385eb742001a6",
+      "baseline_blob": "0c05c944b70f9ed18886e3c75a5525a14ebcf9c3",
+      "baseline_bytes": 30695,
+      "baseline_sha256": "066d58ec95cdc9ac73ff0035ec76db31f30d3438557c80528cd8211688e3432d",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/run_deterministic_tests.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 27861,
+      "backup_sha256": "d4ad09f60a04f55bf7419c44e5a08c538ebc285af5630d2c61fe2e02ef175f83",
+      "baseline_blob": "0e2f0f6b0aa10e3ee343026775521478781a3ce6",
+      "baseline_bytes": 31042,
+      "baseline_sha256": "22ed489af68700818570250cdecd8c4148d2bdd1f0f3e268ed28f4279e1001a7",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/send_cloud_team_report.mjs",
+      "recommendation": "already_included",
+      "backup_bytes": 2880,
+      "backup_sha256": "98d2b84fdd7f6bbe7a01ca1ae4d9037692f01b453e0e068ce2253e58bf3d7290",
+      "baseline_blob": "402092f12d6ff30c82fcaa51a88b49c25ce3e973",
+      "baseline_bytes": 2880,
+      "baseline_sha256": "98d2b84fdd7f6bbe7a01ca1ae4d9037692f01b453e0e068ce2253e58bf3d7290",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "scripts/test_authorize_cloud_morning_chain_recovery.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 12577,
+      "backup_sha256": "b6e0c5b1d2b68d041599d4a7674e25b8c3a85a94615881386999154cbfb424c1",
+      "baseline_blob": "a385615653d8c7285dc9a5e0abbb003b273afa15",
+      "baseline_bytes": 34010,
+      "baseline_sha256": "4aa50bc5c9672570d6ea70d18be33b2e2532a83a3446758cb75d0922d01c9101",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_bi_portal_section_queue_window.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 23555,
+      "backup_sha256": "08597321cc17b5b38bf4d4f742bb5c1d4e3215e4170e6283bfc4c3423ceb85d7",
+      "baseline_blob": "cf96b3f89105d728faaf027337d35f6e871ac059",
+      "baseline_bytes": 24695,
+      "baseline_sha256": "492c9ceb429c0283502ad396db17a318087b243431abcddc25797f701196b6d5",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_cloud_marketing_immediate_run.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 115788,
+      "backup_sha256": "0a45236659f0ee1d5aa09e6949f7092deb9542d7e92c2d1259b8dbd272b42961",
+      "baseline_blob": "3441535332ffaba1e13dae259a4a311314c20f5d",
+      "baseline_bytes": 121266,
+      "baseline_sha256": "e571c270d8b9ad1278dd21a753ee56d04ee17ffea591efe9bbc5ed322d2a37bc",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_cloud_team_report_delivery.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 15279,
+      "backup_sha256": "2f314e988f7d1ebaf7f70416bda36e66625c81a458f4ba5414b59886be201e98",
+      "baseline_blob": "bf60acb3a14f8584b1524c25cf4d8edfc8cb29cf",
+      "baseline_bytes": 23446,
+      "baseline_sha256": "44715cc6d6f6cdaf3c59623f82684bc4e3b7d2d26d9bfb73b547b14423b24e73",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_cloud_watchdog_release_audit.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 6450,
+      "backup_sha256": "96b95eea4827a717ed69127c2324d63ddbc40c14b0639114734c2b31eb101c20",
+      "baseline_blob": "a0bdae5154ee852d02c66fd3ea6d5c2a3ea405d0",
+      "baseline_bytes": 5542,
+      "baseline_sha256": "699b5b8410ac9d0ba37cf44de2a3a4e07702fb7fd6b1d5f785d1f9a1802c3702",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_durable_inventory_write.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 32611,
+      "backup_sha256": "75861b7bb3ca690a62be2c4289d3c540e2f28df5c229c1f9d92cf05beda3a869",
+      "baseline_blob": "bedd8913821ba309267b473b130cc7e9c6d3a450",
+      "baseline_bytes": 40941,
+      "baseline_sha256": "b8a8a6af4d3a308d28c35326acc418b94e5dd1e0b4383acd1acbbe084ae598b5",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_host_resource_schedule_contract.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 62023,
+      "backup_sha256": "95b46c91e9ecf7e0d1411185d7bab9e955a8e3cf5597a0974fb480deef7cf35a",
+      "baseline_blob": "c88f2591783920a8badbd887e766cc145a083f2c",
+      "baseline_bytes": 68426,
+      "baseline_sha256": "2afe5ef61a8b5bf22b6ada7bee0a6c5cbc6ff42223ea3cf6b11a4569c4a968be",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_inventory_projection_contract.mjs",
+      "recommendation": "already_included",
+      "backup_bytes": 6158,
+      "backup_sha256": "1d114a55b76b37a4a67d8fc211b5daf3b59a3b5b75c040a2f21b777c27e13a3c",
+      "baseline_blob": "c1f61c5d448a31ed6f44e6b9829843d91f2a9eee",
+      "baseline_bytes": 6158,
+      "baseline_sha256": "1d114a55b76b37a4a67d8fc211b5daf3b59a3b5b75c040a2f21b777c27e13a3c",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "scripts/test_inventory_writer_release_alignment.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 26419,
+      "backup_sha256": "bb776f0b2d8ff73978619993bed7f017242f0eb8143494a9107802667ce858b6",
+      "baseline_blob": "02567b45f12d4d8448460bd9a896ba27c6d32f5b",
+      "baseline_bytes": 2001,
+      "baseline_sha256": "5350d880432a15d9b579c17e746a25da6f695f99c192870abd33876124b18ea2",
+      "note": "基准 67 行 vs 备份 680 行。备份系冗长模拟草稿；正式基准以紧凑 67 行断言覆盖核心边界。属旧草稿，无需合入。"
+    },
+    {
+      "path": "scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 34066,
+      "backup_sha256": "eedcbca8275f55e463844da3189434f3850e14a2b3b2d01b5fe01c487cf92872",
+      "baseline_blob": "be38689aad35307cf919188f1720213ea26ffb85",
+      "baseline_bytes": 33964,
+      "baseline_sha256": "6568060631382190a652e4c8137f31811769dd58b07f6daf6ce4064960ec4280",
+      "note": "备份新增硬编码相对路径 sharedPgModuleDir 及 junction 变通，删除了正式 createRequire.resolve(\"pg\") 与 Linux chmod，系特定旧环境变通，劣于正式基准实现，列为过时，不合入。"
+    },
+    {
+      "path": "scripts/test_link_ops_uploaded_asset_binding_recovery.mjs",
+      "recommendation": "temporary_throwaway",
+      "backup_bytes": 15,
+      "backup_sha256": "78a8394f2be53bdfd5e726e3e49f778153433c5a2dcb4832b2bac16684f9c6c4",
+      "baseline_blob": "40401eeccce0e1402a1a1c94da89607f136588d9",
+      "baseline_bytes": 14660,
+      "baseline_sha256": "60a234512ae52278cdc4701c0d2eb695f9eef5649e00d774bcb60e52b80f48c5",
+      "note": "15 字节损坏残卷（内容仅为 PowerShell -NoNewline 输出），基准拥有完整 316 行实现。"
+    },
+    {
+      "path": "scripts/test_marketing_repair_worker_registry.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 20220,
+      "backup_sha256": "bf50cf54af3bd97e1b11b385dbe8cc74f66c98703a65d0da95f51d3b457e4fcf",
+      "baseline_blob": "726c3f663244c45cb4eb211da10e39db27fe4541",
+      "baseline_bytes": 20262,
+      "baseline_sha256": "4731b88b37d71507dd4497e35fec01e87564c2209829c90014b86ed2e3e8df2d",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_morning_metric_refetch.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 42753,
+      "backup_sha256": "0b610aabbad2a8e1d725051b22fbda866b2a8e4026176b49d21c6be824ecd4db",
+      "baseline_blob": "9ae35e523aefda4bfeac05ae46779699e0508060",
+      "baseline_bytes": 42538,
+      "baseline_sha256": "c26cf17789a0a51b5ed09098418eaf214922987e549fcfb3c9f3045028b633b6",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "scripts/test_product_display_name.mjs",
+      "recommendation": "already_included",
+      "backup_bytes": 3367,
+      "backup_sha256": "0dec9200a95e1e84adf1c9e3c11567c9825744e8135be05b8c64fe6770343ea8",
+      "baseline_blob": "6bed9003a252c44a415dacfefbfbe6f605f2f2c2",
+      "baseline_bytes": 3367,
+      "baseline_sha256": "0dec9200a95e1e84adf1c9e3c11567c9825744e8135be05b8c64fe6770343ea8",
+      "note": "与官方基准 Commit 7d5e387 内容及哈希完全一致。"
+    },
+    {
+      "path": "scripts/test_product_sku_normalizer.mjs",
+      "recommendation": "stale_historical_version",
+      "backup_bytes": 2592,
+      "backup_sha256": "f66d7e5b081dccdaad6dcbc994f086462539585cf29cef32938bb9052cadc4b7",
+      "baseline_blob": "e537c289ab67bb5721b9696ce34ca572fe8777f8",
+      "baseline_bytes": 2770,
+      "baseline_sha256": "3fb71d6e2c3df107f53220ea7e391681fe9a018e8ded9262fc7cffc0c0432050",
+      "note": "备份为旧 HEAD 1fa32b3 或中间提交的陈旧版本，官方基准已在后续提交中重构并覆盖。"
+    },
+    {
+      "path": "temp_check_dates.py",
+      "recommendation": "temporary_throwaway",
+      "backup_bytes": 875,
+      "backup_sha256": "dc0625f7a14f446f22fa3caef48b43cf5229831286d1262629a202f43d723a16",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "一次性数据库日期字段极大值诊断脚本，无凭据，临时文件。"
+    },
+    {
+      "path": "tmp_check_db.cjs",
+      "recommendation": "temporary_throwaway",
+      "backup_bytes": 913,
+      "backup_sha256": "e3a121a9132a326b4122df5bc35688e48aa12395f0aaf2da9f7e606de21a48cd",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "一次性远程数据库列统计诊断脚本，无凭据，临时文件。"
+    },
+    {
+      "path": "tmp_gen.js",
+      "recommendation": "temporary_throwaway",
+      "backup_bytes": 0,
+      "backup_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "0 字节空文件，临时垃圾。"
+    },
+    {
+      "path": "tmp_listing_bind_helpers.fragment.js",
+      "recommendation": "temporary_throwaway",
+      "backup_bytes": 305,
+      "backup_sha256": "ad8563e8d713c26737523b8d74c8604bbf08320a06c6c3b065243101b3d8e2f6",
+      "baseline_blob": null,
+      "baseline_bytes": null,
+      "baseline_sha256": null,
+      "note": "listingBindRecoveryError 函数片段，已并入 lib/link_ops_uploaded_asset_binding_recovery.mjs，无凭据。"
+    }
+  ]
+}

@@ -29,7 +29,7 @@ function actionKey(runDate, row) {
 
 function makeIntent(runDate, row, intentId) {
   const logicalActionKey = actionKey(runDate, row);
-  const before = {skuCode: row.skuCode, totalInventoryQuantity: 2, totalUsableInventory: 2, totalLockedQuantity: 0, stockRowMissing: false, warehouseCodes: []};
+  const before = {skuCode: row.skuCode, totalInventoryQuantity: 2, totalUsableInventory: 2, totalLockedQuantity: 0, temporaryInventoryQuantity: 0, stockRowMissing: false, warehouseCodes: []};
   const request = {pathname: '/open-api/stock/change-inventory/v2', method: 'POST', body: {updateSkuInventoryQuantityRequests: [{idempotencyKey: 'bi-inv-' + logicalActionKey.slice(0, 42), skuCode: row.skuCode, invType: 'VI', changeType: 'OVERWRITE', changeQuantity: computeInventoryOverwriteQuantity(10, before), changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard'}]}, headers: {language: 'en'}};
   return {kind: 'intent', intentId, logicalActionKey, recoveryScopeKey: inventoryRecoveryScopeKey({runDate, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode}), planHash: 'd'.repeat(64), runDate, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode, targetUsableInventory: 10, policyVersion: policy.policyVersion, overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION, authorizationId, idempotencyKey: request.body.updateSkuInventoryQuantityRequests[0].idempotencyKey, requestPayloadHash: stableInventoryHash(request), request, before, recordedAt: runDate + 'T01:00:00.000Z'};
 }
@@ -90,7 +90,7 @@ const server = http.createServer((request, response) => {
     }
     if (request.method === 'POST' && pathname === '/open-api/stock/stock-query') {
       const skuCode = body?.skuCodeList?.[0] || ''; const usable = Number(state.stock.get(skuCode) ?? 2);
-      return sendJson(response, {code: '0', info: [{goodsInventory: [{skuList: [{skuCode, totalInventoryQuantity: usable, totalUsableInventory: usable, totalLockedQuantity: 0, warehouseInventoryList: []}]}]}]});
+      return sendJson(response, {code: '0', info: [{goodsInventory: [{skuList: [{skuCode, totalInventoryQuantity: usable, totalUsableInventory: usable, totalLockedQuantity: 0, temporaryInventoryQuantity: 0, warehouseInventoryList: []}]}]}]});
     }
     if (request.method === 'POST' && pathname === '/open-api/stock/change-inventory/v2') {
       state.postCount += 1; state.postBodies.push(body);

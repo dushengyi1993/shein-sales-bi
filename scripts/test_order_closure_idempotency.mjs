@@ -25,6 +25,24 @@ const toPosixPath = value => {
 };
 const readLines = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean) : [];
 
+if (process.platform === 'win32' && process.env.SHEIN_TEST_WSL_RELAY !== '1') {
+  const result = spawnSync('wsl.exe', [
+    '--cd', toPosixPath(ROOT),
+    '--exec', '/usr/bin/env',
+    'SHEIN_TEST_WSL_RELAY=1',
+    '/usr/bin/node', 'scripts/test_order_closure_idempotency.mjs',
+  ], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+    killSignal: 'SIGKILL',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exit(result.status ?? 1);
+}
+
 function copyScript(source, target) {
   fs.mkdirSync(path.dirname(target), {recursive: true});
   fs.copyFileSync(source, target);

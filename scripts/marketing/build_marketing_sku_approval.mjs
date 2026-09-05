@@ -62,7 +62,9 @@ const signupPricingPolicy = withSignupCliOverrides(pricingPolicy, cli);
 const requestedActivityIds = new Set(
   String(cli.activities || '')
     .split(',')
-    .map(value => Number(value.trim()))
+    .map(value => value.trim())
+    .filter(Boolean)
+    .map(Number)
     .filter(Number.isFinite),
 );
 const rawActivityRows = (activityDoc.detailRows || []).filter(row => (
@@ -310,7 +312,15 @@ for (const [sku, group] of bySku.entries()) {
       ? fixed
       : (rowIsTopExposure(row) && topExposureTargetFinal !== null ? topExposureTargetFinal : targetFinal);
   const rowStrategyFor = row => {
-    const rawRowIntendedFinal = rowTargetFinalFor(row);
+    const rowStore = String(row['店铺'] || '').trim().toUpperCase();
+    const hasStoreExplicitPrice = Boolean(baselineRule?.storePrices?.[rowStore] !== undefined || (baselineRule?.storeKey && baselineRule.storeKey === rowStore));
+    const storeExplicitPrice = hasStoreExplicitPrice
+      ? (baselineRule.storePrices?.[rowStore] ?? baselineRule.otherPrice)
+      : null;
+    const isExplicitPriceForRow = Boolean(hasStoreExplicitPrice || (!baselineRule?.storePrices && !baselineRule?.storeKey && baselineRule?.isUserExplicitPrice));
+    const explicitPriceVal = hasStoreExplicitPrice ? storeExplicitPrice : (isExplicitPriceForRow ? (rowTargetFinalFor(row) ?? baselineRule?.otherPrice) : null);
+
+    const rawRowIntendedFinal = isExplicitPriceForRow ? explicitPriceVal : rowTargetFinalFor(row);
     const current = numValue(row['当前售价SAR']);
     const minDiscount = numValue(row['平台最低降幅%']) ?? 0;
     const cap = isNum(current) ? floor2(current * (1 - minDiscount / 100)) : null;
@@ -318,25 +328,35 @@ for (const [sku, group] of bySku.entries()) {
     const rowCanUse15Coupon = false;
     const couponFactor = 1;
     const uncappedActivityPrice = rawRowIntendedFinal;
-    const initialTargetPrice = uncappedActivityPrice === null
-      ? null
-      : (cap === null ? uncappedActivityPrice : Math.min(uncappedActivityPrice, cap));
-    const jittered = jitterIntegerTargetPrice(initialTargetPrice, {
+
+    // When explicit user price is specified, preserve user price as initial target price without platform cap clamping;
+    // cap conflicts indicate platform constraints instead of silently altering the price
+    const initialTargetPrice = isExplicitPriceForRow
+      ? uncappedActivityPrice
+      : (uncappedActivityPrice === null
+          ? null
+          : (cap === null ? uncappedActivityPrice : Math.min(uncappedActivityPrice, cap)));
+
+    const jittered = isExplicitPriceForRow
+      ? {value: initialTargetPrice, adjusted: false, from: null}
+      : jitterIntegerTargetPrice(initialTargetPrice, {
       key: `${row['店铺'] || ''}:${row['活动ID'] || ''}:${row['SKC'] || ''}`,
       platformCap: cap,
       cost: selectionMarginBasis === 'product_cost_excluding_storage'
         ? row._cloudCost.productUnitCostSar
         : row._cloudCost.fullUnitCostSar,
-      minMargin: baselineRule?.allowBelowFloor ? null : targetFloorMargin,
+      minMargin: (baselineRule?.allowBelowFloor || baselineRule?.allowBelowFloorLinkKeys?.has(exposureLinkKey(row['店铺'], row['SKC']))) ? null : targetFloorMargin,
     });
     const targetPrice = jittered.value;
     const finalTargetPrice = targetPrice === null ? null : round2(targetPrice);
-    const rowIntendedFinal = jittered.adjusted
-      && initialTargetPrice !== null
-      && rawRowIntendedFinal !== null
-      && Math.abs(initialTargetPrice - rawRowIntendedFinal) < 0.001
-        ? targetPrice
-        : rawRowIntendedFinal;
+    const rowIntendedFinal = isExplicitPriceForRow
+      ? rawRowIntendedFinal
+      : (jittered.adjusted
+          && initialTargetPrice !== null
+          && rawRowIntendedFinal !== null
+          && Math.abs(initialTargetPrice - rawRowIntendedFinal) < 0.001
+            ? targetPrice
+            : rawRowIntendedFinal);
     return {
       rowIntendedFinal,
       rowPriceFor15Coupon,
@@ -349,6 +369,7 @@ for (const [sku, group] of bySku.entries()) {
       minDiscount,
       platformConstrained: cap !== null && uncappedActivityPrice !== null && cap < uncappedActivityPrice - 0.001,
       priceJitteredFrom: jittered.adjusted ? jittered.from : null,
+      isExplicitPriceForRow,
     };
   };
   const rowStrategies = group.map(rowStrategyFor);
@@ -415,7 +436,14 @@ for (const [sku, group] of bySku.entries()) {
   }
   if (!missingCost && !(storageRequiredForSelection && storageMissing) && !safeNoCouponAll) status = '部分店需系统处理';
   if (!missingCost && !(storageRequiredForSelection && storageMissing) && limitRows.length) status = status === '可按货号确认' ? '限时折扣需注意' : `${status}+限时折扣`;
-  if (!missingCost && targetSafetyMargins.length && Math.min(...targetSafetyMargins) < targetFloorMargin) status = '利润低于红线/需确认';
+  const isExplicitPrice = Boolean(baselineRule?.isUserExplicitPrice || (baselineIsFixedPrice && baselineRule?.sourceRules?.includes('baseline_user_remark_fixed_price')));
+  if (!missingCost && targetSafetyMargins.length && Math.min(...targetSafetyMargins) < targetFloorMargin) {
+    if (!isExplicitPrice) {
+      status = '利润低于红线/需确认';
+    } else {
+      actionParts.push("用户明确指定价低于红线(" + pctRatioText(Math.min(...targetSafetyMargins)) + ")，按指定价保留执行");
+    }
+  }
 
   const needConfirm = missingCost
     ? (skuNeedsReview ? '先确认这到底是什么货号' : '请填最终成交价或补云端成本')
@@ -423,6 +451,8 @@ for (const [sku, group] of bySku.entries()) {
       ? '先确认这到底是什么货号'
       : storageMissing && storageRequiredForSelection
       ? '请确认仓储口径后再报'
+      : isExplicitPrice
+        ? `已明确指定价 ${fmt(targetFinal)} SAR，直接执行`
       : hasFixedPrice
         ? `确认固定最终价 ${fmt(targetFinal)} SAR 是否继续`
       : hasExposureRanking
@@ -476,13 +506,14 @@ for (const [sku, group] of bySku.entries()) {
     if (!activityId) excludeReasons.push('missing_activity_id');
     if (!skc) excludeReasons.push('missing_skc');
     if (skuNeedsReview) excludeReasons.push('canonical_needs_review');
-    if (missingCost) excludeReasons.push('missing_cloud_product_cost');
-    if (storageMissing && storageRequiredForSelection) excludeReasons.push('missing_cloud_storage_unit_cost');
+    const isExplicitPriceForRow = Boolean(strategy.isExplicitPriceForRow);
+    if (missingCost && !isExplicitPriceForRow) excludeReasons.push('missing_cloud_product_cost');
+    if (storageMissing && storageRequiredForSelection && !isExplicitPriceForRow) excludeReasons.push('missing_cloud_storage_unit_cost');
     if (rowIntendedFinal === null) excludeReasons.push('missing_target_final_price');
     if (targetPrice === null || finalTargetPrice === null) excludeReasons.push('missing_row_target_price');
-    const baselineAllowsBelowFloor = Boolean(baselineRule?.allowBelowFloor || baselineRule?.allowBelowFloorLinkKeys?.has(exposureLinkKey(storeKey, skc)));
+    const baselineAllowsBelowFloor = Boolean(isExplicitPriceForRow || baselineRule?.allowBelowFloor || baselineRule?.allowBelowFloorLinkKeys?.has(exposureLinkKey(storeKey, skc)));
     if (!baselineAllowsBelowFloor && marginForSelection !== null && marginForSelection < targetFloorMargin - 1e-9) excludeReasons.push(`row_${selectionMarginBasis}_margin_below_floor`);
-    if (marginForSelection === null && !missingCost && !(storageRequiredForSelection && storageMissing)) excludeReasons.push(`missing_row_${selectionMarginBasis}_margin`);
+    if (marginForSelection === null && !missingCost && !isExplicitPriceForRow && !(storageRequiredForSelection && storageMissing)) excludeReasons.push(`missing_row_${selectionMarginBasis}_margin`);
     executionRows.push({
       selected: excludeReasons.length === 0,
       excludeReason: excludeReasons.join(';'),
@@ -585,8 +616,8 @@ for (const [sku, group] of bySku.entries()) {
     '平台允许活动价上限范围SAR': range(platformCaps),
     '推荐活动组合': actionParts.join('；'),
     '组合后预计最终价SAR': missingCost ? '' : range(recFinals),
-    '不含仓储利润率': missingCost ? '' : (targetProductMargins.length ? pct(Math.min(...targetProductMargins)) : ''),
-    '含仓储利润率': missingCost ? '' : (targetFullMargins.length ? pct(Math.min(...targetFullMargins)) : ''),
+    '不含仓储利润率': missingCost ? '利润暂算不出' : (targetProductMargins.length ? pct(Math.min(...targetProductMargins)) : ''),
+    '含仓储利润率': (missingCost || storageMissing) ? '利润暂算不出' : (targetFullMargins.length ? pct(Math.min(...targetFullMargins)) : ''),
     '平台压价后最低不含仓储利润率': missingCost ? '' : (cappedProductMargins.length ? pct(Math.min(...cappedProductMargins)) : ''),
     '平台压价后最低含仓储利润率': missingCost ? '' : (cappedFullMargins.length ? pct(Math.min(...cappedFullMargins)) : ''),
     '优惠券/可选流量券候选行数': couponRows.length,
@@ -1263,16 +1294,22 @@ function normalizeReviewRow(row) {
   // Inventory is shared across stores, so product and storage cost both belong to
   // the canonical SKU. A link-level activity response may omit storage fields and
   // must not turn the same shared stock into different per-store costs.
-  const cloudCost = cloudCostFromMap?.productUnitCostSar !== null && cloudCostFromMap?.productUnitCostSar !== undefined
+  const cloudCost = (cloudCostFromMap?.productUnitCostSar !== null && cloudCostFromMap?.productUnitCostSar !== undefined)
     ? cloudCostFromMap
-    : activityRowCost;
+    : (activityRowCost || {
+        productUnitCostSar: null,
+        storageUnitCostSar: null,
+        fullUnitCostSar: null,
+        storageMethod: 'missing',
+        source: 'missing',
+      });
   return {
     ...row,
     '供方货号': rawSupplier || row['供方货号'] || '',
     '标准货号': canonical,
-    '商品完整成本SAR': fmt(cloudCost.productUnitCostSar),
-    '仓储费摊销SAR/件': cloudCost.storageUnitCostSar === null ? '' : fmt(cloudCost.storageUnitCostSar),
-    '含仓储费成本SAR': fmt(cloudCost.fullUnitCostSar),
+    '商品完整成本SAR': fmt(cloudCost?.productUnitCostSar),
+    '仓储费摊销SAR/件': (cloudCost?.storageUnitCostSar === null || cloudCost?.storageUnitCostSar === undefined) ? '' : fmt(cloudCost.storageUnitCostSar),
+    '含仓储费成本SAR': fmt(cloudCost?.fullUnitCostSar),
     _approvalNormalized: {
       input: rawSupplier,
       canonical,
@@ -1687,14 +1724,44 @@ async function loadUserRemarkRules(filePath) {
   }
   return out;
 }
+const KNOWN_STORE_KEYS = new Set([
+  'DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL',
+  'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ',
+  'JSH', 'TZZ', 'XC',
+]);
+
 function parseRemarkRule(canonical, remark) {
   const text = String(remark || '').trim();
   const name = String(canonical || '').trim();
   if (!name || !text) return null;
-  const fixed = text.match(/前五\s*([0-9]+(?:\.[0-9]+)?)\s*SAR\s*[\/／]\s*其他\s*([0-9]+(?:\.[0-9]+)?)\s*SAR/i);
-  if (fixed) return {canonical: name, remark: text, type: 'fixedPrice', top: Number(fixed[1]), other: Number(fixed[2])};
-  const margin = text.match(/前五\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*[\/／]\s*其他\s*([0-9]+(?:\.[0-9]+)?)\s*%/i);
-  if (margin) return {canonical: name, remark: text, type: 'margin', top: Number(margin[1]) / 100, other: Number(margin[2]) / 100};
+
+  // Detect storeKey in canonical or remark (e.g. "FY 37 SAR", "FY: 37", "FY店 37 SAR", or canonical is "FY")
+  const storeMatch = text.match(/\b(DL|DX|FY|LQ|NM|HL|JY|ZL|TS|MZ|CX|YJ|XL|QY|QH|TZ|JSH|TZZ|XC)\b/i)
+    || (KNOWN_STORE_KEYS.has(name.toUpperCase()) ? [name, name] : null);
+  const explicitStoreKey = storeMatch ? storeMatch[1].toUpperCase() : null;
+
+  // 1. Two-tier fixed: 前五 35 SAR / 其他 37 SAR
+  const fixedTier = text.match(/(?:前五|Top5?)\s*([0-9]+(?:\.[0-9]+)?)\s*SAR?\s*[\/／,，;；]\s*(?:其他|其余|Other)\s*([0-9]+(?:\.[0-9]+)?)\s*SAR?/i);
+  if (fixedTier) return {canonical: name, remark: text, type: 'fixedPrice', top: Number(fixedTier[1]), other: Number(fixedTier[2]), storeKey: explicitStoreKey, isUserExplicit: true};
+
+  // 2. Two-tier margin: 前五 25% / 其他 30%
+  const marginTier = text.match(/(?:前五|Top5?)\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*[\/／,，;；]\s*(?:其他|其余|Other)\s*([0-9]+(?:\.[0-9]+)?)\s*%/i);
+  if (marginTier) return {canonical: name, remark: text, type: 'margin', top: Number(marginTier[1]) / 100, other: Number(marginTier[2]) / 100, storeKey: explicitStoreKey, isUserExplicit: true};
+
+  // 3. Single fixed price: "FY 37 SAR", "37 SAR", "37", "固定价 37 SAR", "报 37"
+  const singleFixed = text.match(/(?:(?:[A-Za-z0-9_-]+)\s+)?(?:固定价|目标价|最终价|确认最终价|执行价|一口价|按|报)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:SAR|沙特里亚尔|元)?/i);
+  if (singleFixed) {
+    const val = Number(singleFixed[1]);
+    return {canonical: name, remark: text, type: 'fixedPrice', top: val, other: val, storeKey: explicitStoreKey, isSingleFixed: true, isUserExplicit: true};
+  }
+
+  // 4. Single margin: 25%, 利润率25%
+  const singleMargin = text.match(/^(?:利润率|目标利润率|确认利润率|按)?\s*([0-9]+(?:\.[0-9]+)?)\s*%$/i);
+  if (singleMargin) {
+    const val = Number(singleMargin[1]) / 100;
+    return {canonical: name, remark: text, type: 'margin', top: val, other: val, storeKey: explicitStoreKey, isUserExplicit: true};
+  }
+
   return null;
 }
 
@@ -1720,13 +1787,23 @@ function inferBaselineRule(canonical, rowsForCanonical, userRemarkRule = null, a
     (isNum(r.marginForSelection) && r.marginForSelection < targetFloorMargin - 1e-9) ||
     (isNum(r.marginBeforeStorage) && r.marginBeforeStorage < targetFloorMargin - 1e-9)
   );
-  const allowBelowFloor = userRemarkBelowFloor || baselineSelectedBelowFloor || meaningful.some(r =>
+  const isUserExplicitPrice = Boolean(userRemarkRule?.isUserExplicit || userRemarkRule?.type === 'fixedPrice');
+  const explicitStoreKey = userRemarkRule?.storeKey || null;
+  // If user explicitly specified price for a store, do NOT grant global allowBelowFloor;
+  // global allowBelowFloor is reserved only for explicit all-canonical user approval or all-canonical below floor remarks.
+  const allowBelowFloor = (isUserExplicitPrice && !explicitStoreKey) || userRemarkBelowFloor || (!explicitStoreKey && baselineSelectedBelowFloor) || meaningful.some(r =>
     /user_approved_platform_margin_below_15/i.test(String(r.rule || '')) ||
     /低于15%|低于 15%|低于.*红线.*允许|用户明确同意/i.test(String(r.note || '')),
   );
-  const allowBelowFloorLinkKeys = new Set(meaningful
-    .filter(r => /user_approved_platform_margin_below_15/i.test(String(r.rule || '')) || /用户明确同意/i.test(String(r.note || '')))
-    .map(r => exposureLinkKey(r.storeKey, r.skc)));
+  const allowBelowFloorLinkKeys = new Set(
+    isUserExplicitPrice
+      ? (explicitStoreKey
+          ? meaningful.filter(r => String(r.storeKey || '').toUpperCase() === explicitStoreKey).map(r => exposureLinkKey(r.storeKey, r.skc))
+          : meaningful.map(r => exposureLinkKey(r.storeKey, r.skc)))
+      : meaningful
+          .filter(r => /user_approved_platform_margin_below_15/i.test(String(r.rule || '')) || /用户明确同意/i.test(String(r.note || '')))
+          .map(r => exposureLinkKey(r.storeKey, r.skc))
+  );
   const notes = uniq(meaningful.map(r => r.note).filter(Boolean)).slice(0, 3);
   const summaryParts = [];
   if (userRemarkRule?.remark) summaryParts.push(`用户备注：${userRemarkRule.remark}`);
@@ -1738,10 +1815,15 @@ function inferBaselineRule(canonical, rowsForCanonical, userRemarkRule = null, a
       canonical,
       topPrice: userRemarkRule.top,
       otherPrice: userRemarkRule.other,
+      storeKey: explicitStoreKey,
+      storePrices: explicitStoreKey ? { [explicitStoreKey]: userRemarkRule.other } : null,
       allowBelowFloor,
       allowBelowFloorLinkKeys,
+      isUserExplicitPrice: true,
       sourceRules: ['baseline_user_remark_fixed_price'],
-      summary: summaryParts[0] || `用户备注固定价：前五 ${fmt(userRemarkRule.top)} / 其他 ${fmt(userRemarkRule.other)} SAR`,
+      summary: summaryParts[0] || (explicitStoreKey
+        ? `用户备注${explicitStoreKey}固定价：${fmt(userRemarkRule.other)} SAR`
+        : `用户备注固定价：前五 ${fmt(userRemarkRule.top)} / 其他 ${fmt(userRemarkRule.other)} SAR`),
     };
   }
   if (userRemarkRule?.type === 'margin') {

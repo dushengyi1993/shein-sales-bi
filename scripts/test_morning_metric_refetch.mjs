@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -19,6 +19,24 @@ const nodeStub = body => `#!/usr/bin/env node\n${body}\n`;
 const toWslPath = value => String(value)
   .replace(/^([A-Za-z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`)
   .replaceAll('\\', '/');
+
+if (process.platform === 'win32' && process.env.SHEIN_TEST_WSL_RELAY !== '1') {
+  const result = spawnSync('wsl.exe', [
+    '--cd', toWslPath(repo),
+    '--exec', '/usr/bin/env',
+    'SHEIN_TEST_WSL_RELAY=1',
+    '/usr/bin/node', 'scripts/test_morning_metric_refetch.mjs',
+    ...process.argv.slice(2),
+  ], {
+    cwd: repo,
+    encoding: 'utf8',
+    timeout: 180_000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exit(result.status ?? 1);
+}
 
 async function setupRoot(mode) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'shein-metric-refetch-'));
@@ -253,10 +271,210 @@ assert.equal(spawnSync('bash', ['-n', 'scripts/cloud_link_business_sync.sh'], {c
 assert.match(fs.readFileSync(path.join(repo, 'scripts', 'cloud_morning_chain.sh'), 'utf8'), /SHEIN_BI_DAILY_REFRESH_DEADLINE_EPOCH/);
 assert.match(fs.readFileSync(path.join(repo, 'scripts', 'cloud_daily_refresh.sh'), 'utf8'), /SHEIN_LINK_BUSINESS_METRIC_REFETCH_ON_NOT_READY/);
 
+async function cleanupRoots(roots) {
+  for (const root of roots) {
+    const symlink = path.join(root, 'state', '.link-business-metric-refetch.symlink');
+    try { await fsp.unlink(symlink); } catch {
+      const wslPath = toWslPath(symlink).replaceAll("'", "'\\''");
+      spawnSync('bash', ['-lc', `rm -f -- '${wslPath}'`], {encoding: 'utf8'});
+    }
+    await fsp.rm(root, {recursive: true, force: true});
+  }
+}
+
+const envSlice = process.env.SHEIN_MORNING_REFETCH_SLICE || null;
+const cliSliceArg = process.argv.find(a => a.startsWith('--slice='));
+const cliSlice = cliSliceArg ? cliSliceArg.split('=')[1] : null;
+const targetSlice = envSlice || cliSlice;
+
+if (process.env.SHEIN_MORNING_REFETCH_TEST_ONLY && process.env.SHEIN_MORNING_REFETCH_TEST_ONLY !== 'daily') {
+  console.error(`Invalid SHEIN_MORNING_REFETCH_TEST_ONLY value: ${process.env.SHEIN_MORNING_REFETCH_TEST_ONLY}`);
+  process.exit(1);
+}
+
+if (targetSlice && !['1', '2', '3'].includes(targetSlice)) {
+  console.error(`Invalid slice identifier: ${targetSlice} (must be 1, 2, or 3)`);
+  process.exit(1);
+}
+
+if (!targetSlice && process.env.SHEIN_MORNING_REFETCH_TEST_ONLY !== 'daily') {
+  // Coordinator: run 3 slices in parallel subprocesses with POSIX process groups and bounded budget
+  const activeChildren = new Map();
+
+  function killProcessGroup(child, signal) {
+    if (child && child.pid) {
+      try {
+        process.kill(-child.pid, signal);
+      } catch (err) {
+        try { child.kill(signal); } catch {}
+      }
+    }
+  }
+
+  async function terminateAllChildren(reason) {
+    if (activeChildren.size === 0) return;
+    for (const [num, child] of activeChildren) {
+      killProcessGroup(child, 'SIGTERM');
+    }
+    let waitStart = Date.now();
+    while (activeChildren.size > 0 && (Date.now() - waitStart) < 3500) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    for (const [num, child] of activeChildren) {
+      killProcessGroup(child, 'SIGKILL');
+    }
+    waitStart = Date.now();
+    while (activeChildren.size > 0 && (Date.now() - waitStart) < 3500) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (activeChildren.size > 0) {
+      console.error(`Warning: ${activeChildren.size} child process groups could not be confirmed closed during ${reason}; test roots preserved for diagnostics`);
+    }
+  }
+
+  let coordinatorTimedOut = false;
+  const coordinatorDeadline = setTimeout(async () => {
+    coordinatorTimedOut = true;
+    console.error('Coordinator 170s budget reached; terminating child process groups...');
+    await terminateAllChildren('timeout');
+  }, 170_000);
+  coordinatorDeadline.unref();
+
+  const forwardSignal = async (sig) => {
+    console.error(`Coordinator received ${sig}; terminating children...`);
+    await terminateAllChildren(sig);
+    process.exit(1);
+  };
+  process.on('SIGTERM', () => forwardSignal('SIGTERM'));
+  process.on('SIGINT', () => forwardSignal('SIGINT'));
+
+  function runSliceChild(num) {
+    return new Promise((resolve, reject) => {
+      const cp = spawn(process.execPath, [
+        fileURLToPath(import.meta.url),
+        `--slice=${num}`,
+      ], {
+        cwd: repo,
+        env: {...process.env, SHEIN_MORNING_REFETCH_SLICE: String(num)},
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      });
+      activeChildren.set(num, cp);
+      let stdout = '';
+      let stderr = '';
+      let spawnError = null;
+      cp.stdout.on('data', d => { stdout += d; });
+      cp.stderr.on('data', d => { stderr += d; });
+      cp.on('error', err => { spawnError = err; });
+      cp.on('close', (code, signal) => {
+        activeChildren.delete(num);
+        if (spawnError) {
+          resolve({num, code: code ?? 1, signal, stdout, stderr: `${stderr}\nSpawn error: ${spawnError.message}`});
+        } else {
+          resolve({num, code, signal, stdout, stderr});
+        }
+      });
+    });
+  }
+
+  const results = await Promise.allSettled([
+    runSliceChild(1),
+    runSliceChild(2),
+    runSliceChild(3),
+  ]);
+  clearTimeout(coordinatorDeadline);
+
+  const allChecks = new Set();
+  const flatChecks = [];
+  const errors = [];
+  const seenSlices = new Set();
+
+  if (coordinatorTimedOut) {
+    errors.push('Coordinator timed out within 170s budget');
+  }
+
+  for (const r of results) {
+    if (r.status === 'rejected') {
+      errors.push(`Slice failed: ${r.reason}`);
+      continue;
+    }
+    const {num, code, signal, stdout, stderr} = r.value;
+    if (code !== 0) {
+      errors.push(`Slice ${num} exited with code ${code} signal ${signal}\n${stderr}\n${stdout}`);
+      continue;
+    }
+    try {
+      const m = stdout.match(/\{[\s\S]*?\}/);
+      const parsed = m ? JSON.parse(m[0]) : null;
+      if (parsed && parsed.ok === true && parsed.slice === num && Array.isArray(parsed.checks)) {
+        seenSlices.add(num);
+        for (const c of parsed.checks) {
+          flatChecks.push(c);
+          allChecks.add(c);
+        }
+      } else {
+        errors.push(`Slice ${num} returned invalid json structure:\n${stdout}`);
+      }
+    } catch (e) {
+      errors.push(`Slice ${num} json parse error: ${e.message}\n${stdout}`);
+    }
+  }
+
+  if (!errors.length) {
+    if (seenSlices.size !== 3) {
+      errors.push(`Expected 3 distinct slices, saw ${seenSlices.size}`);
+    }
+    if (flatChecks.length !== 19) {
+      errors.push(`Expected exactly 19 total checks across slices, got ${flatChecks.length}`);
+    }
+    if (allChecks.size !== 19) {
+      errors.push(`Expected exactly 19 unique checks, got ${allChecks.size} (possible duplicate or missing)`);
+    }
+  }
+
+  if (errors.length > 0) {
+    console.error(errors.join('\n\n'));
+    process.exit(1);
+  }
+
+  const expected = [
+    'zero_to_full_batch_metrics_refetch_to_source_committed_once',
+    'exact_canonical_nineteen_store_config_required',
+    'strict_finite_json_number_semantics_and_proven_zero',
+    'transaction_paths_reject_symlink_redirection',
+    'missing_backup_and_rollback_write_failure_are_rollback_failed',
+    'same_run_source_and_completed_phases_are_reused',
+    'one_of_nineteen_ready_preserves_all_formal_artifacts',
+    'missing_null_string_whitespace_array_fields_preserve_all_formal_artifacts',
+    'downstream_failure_preserves_source_committed_and_resumes',
+    'each_link_phase_crash_window_reconciles_same_identity',
+    'source_fingerprint_revalidated_before_each_phase_and_drift_invalidates_receipts',
+    'interrupted_source_commit_recovers_from_complete_hash_journal',
+    'recovery_manifest_wrong_exact_path_rejected_before_rollback_write',
+    'daily_linksdata_failure_resumes_without_refetch_or_core_ledger_repeat',
+    'completed_portal_core_identity_revalidated_and_repaired_before_ready',
+    'stable_queue_and_linksdata_idempotency_keys',
+    'zero_until_absolute_deadline_preserves_artifacts',
+    'non_metric_blocker_does_not_refetch',
+    'completed_business_domains_not_repeated',
+  ];
+
+  for (const c of expected) {
+    assert.ok(allChecks.has(c), `Missing check: ${c}`);
+  }
+  assert.equal(allChecks.size, 19, `Expected 19 checks, got ${allChecks.size}`);
+
+  console.log(JSON.stringify({ok: true, checks: expected}, null, 2));
+  process.exit(0);
+}
+
 const roots = [];
 try {
-  const onlyDaily = process.env.SHEIN_MORNING_REFETCH_TEST_ONLY === 'daily';
-  if (!onlyDaily) {
+  const runSlice1 = targetSlice === '1';
+  const runSlice2 = targetSlice === '2';
+  const runSlice3 = targetSlice === '3' || process.env.SHEIN_MORNING_REFETCH_TEST_ONLY === 'daily';
+
+  if (runSlice1) {
   const ready = await setupRoot('ready');
   roots.push(ready.root);
   const before = new Map(stores.map(store => [store, hash(path.join(ready.root, 'outputs', 'shein_links', store, `${date}.json`))]));
@@ -323,11 +541,21 @@ try {
   const configDriftResult = runSync({...configDrift, deadline: Math.floor(Date.now() / 1000) + 60});
   assert.notEqual(configDriftResult.status, 0, `18-store config must fail closed\n${combined(configDriftResult)}`);
   assert.equal(fs.existsSync(configDrift.metricLog), false);
-  assert.equal(fs.existsSync(configDrift.publishLog), false);
-  for (const store of stores) assert.equal(hash(path.join(configDrift.root, 'outputs', 'shein_links', store, `${date}.json`)), configDriftBefore.get(store));
+    assert.equal(fs.existsSync(configDrift.publishLog), false);
+    for (const store of stores) assert.equal(hash(path.join(configDrift.root, 'outputs', 'shein_links', store, `${date}.json`)), configDriftBefore.get(store));
+    console.log(JSON.stringify({ok: true, slice: 1, checks: [
+      'zero_to_full_batch_metrics_refetch_to_source_committed_once',
+      'same_run_source_and_completed_phases_are_reused',
+      'one_of_nineteen_ready_preserves_all_formal_artifacts',
+      'missing_null_string_whitespace_array_fields_preserve_all_formal_artifacts',
+      'strict_finite_json_number_semantics_and_proven_zero',
+      'exact_canonical_nineteen_store_config_required',
+    ]}));
+  }
 
-  const symlinkRoot = await setupRoot('ready');
-  roots.push(symlinkRoot.root);
+  if (runSlice2) {
+    const symlinkRoot = await setupRoot('ready');
+    roots.push(symlinkRoot.root);
   const realTransaction = path.join(symlinkRoot.root, 'state', '.link-business-metric-refetch.real');
   const linkedTransaction = path.join(symlinkRoot.root, 'state', '.link-business-metric-refetch.symlink');
   await fsp.mkdir(realTransaction, {recursive: true});
@@ -422,9 +650,16 @@ try {
   assert.equal(sourceDriftState.status, 'source_revalidation_required');
   assert.equal(sourceDriftState.source.status, 'source_revalidation_required');
   assert.deepEqual(sourceDriftState.phases, {});
+  console.log(JSON.stringify({ok: true, slice: 2, checks: [
+    'transaction_paths_reject_symlink_redirection',
+    'missing_backup_and_rollback_write_failure_are_rollback_failed',
+    'downstream_failure_preserves_source_committed_and_resumes',
+    'each_link_phase_crash_window_reconciles_same_identity',
+    'source_fingerprint_revalidated_before_each_phase_and_drift_invalidates_receipts',
+  ]}));
+}
 
-  }
-
+if (runSlice3) {
   const dailyResume = await setupRoot('ready');
   roots.push(dailyResume.root);
   const dailyFirst = runDailySync(dailyResume);
@@ -481,8 +716,6 @@ try {
   assert.equal(repairedPortalState.status, 'publish_completed');
   assert.equal(repairedPortalState.phases['portal-core'].status, 'completed');
   assert.equal(repairedPortalState.phases.linksData.status, 'completed');
-
-  if (!onlyDaily) {
 
   const interrupted = await setupRoot('ready');
   roots.push(interrupted.root);
@@ -602,36 +835,17 @@ try {
   assert.equal(fs.existsSync(blocked.publishLog), false, 'non-metric blocker must not publish');
   const partial = JSON.parse(fs.readFileSync(path.join(blocked.root, 'state', 'cloud_ops_alerts', 'link-business-last-partial.json')));
   assert.equal(partial.failedStores, 'CX');
-  }
-
-  console.log(JSON.stringify({ok: true, checks: [
-    'zero_to_full_batch_metrics_refetch_to_source_committed_once',
-    'exact_canonical_nineteen_store_config_required',
-    'strict_finite_json_number_semantics_and_proven_zero',
-    'transaction_paths_reject_symlink_redirection',
-    'missing_backup_and_rollback_write_failure_are_rollback_failed',
-    'same_run_source_and_completed_phases_are_reused',
-    'one_of_nineteen_ready_preserves_all_formal_artifacts',
-    'missing_null_string_whitespace_array_fields_preserve_all_formal_artifacts',
-    'downstream_failure_preserves_source_committed_and_resumes',
-    'each_link_phase_crash_window_reconciles_same_identity',
-    'source_fingerprint_revalidated_before_each_phase_and_drift_invalidates_receipts',
-    'interrupted_source_commit_recovers_from_complete_hash_journal',
-    'recovery_manifest_wrong_exact_path_rejected_before_rollback_write',
+  console.log(JSON.stringify({ok: true, slice: 3, checks: [
     'daily_linksdata_failure_resumes_without_refetch_or_core_ledger_repeat',
     'completed_portal_core_identity_revalidated_and_repaired_before_ready',
     'stable_queue_and_linksdata_idempotency_keys',
+    'interrupted_source_commit_recovers_from_complete_hash_journal',
+    'recovery_manifest_wrong_exact_path_rejected_before_rollback_write',
     'zero_until_absolute_deadline_preserves_artifacts',
     'non_metric_blocker_does_not_refetch',
     'completed_business_domains_not_repeated',
-  ]}, null, 2));
+  ]}));
+}
 } finally {
-  for (const root of roots) {
-    const symlink = path.join(root, 'state', '.link-business-metric-refetch.symlink');
-    try { await fsp.unlink(symlink); } catch {
-      const wslPath = toWslPath(symlink).replaceAll("'", "'\\''");
-      spawnSync('bash', ['-lc', `rm -f -- '${wslPath}'`], {encoding: 'utf8'});
-    }
-    await fsp.rm(root, {recursive: true, force: true});
-  }
+  await cleanupRoots(roots);
 }

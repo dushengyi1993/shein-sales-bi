@@ -29,6 +29,30 @@ import {fileURLToPath} from 'node:url';
 import {classifyLoginBlocker} from './auto_relogin_shein_store.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+const toWslPath = value => {
+  const match = /^([A-Za-z]):\\(.*)$/.exec(value);
+  return match ? `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, '/')}` : value.replace(/\\/g, '/');
+};
+
+if (process.platform === 'win32' && process.env.SHEIN_TEST_WSL_RELAY !== '1') {
+  const result = spawnSync('wsl.exe', [
+    '--cd', toWslPath(root),
+    '--exec', '/usr/bin/env',
+    'SHEIN_TEST_WSL_RELAY=1',
+    '/usr/bin/node', 'scripts/test_cloud_session_manager_reliability.mjs',
+  ], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: 120_000,
+    killSignal: 'SIGKILL',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exit(result.status ?? 1);
+}
+
 const nodeBin = process.execPath;
 let passed = 0;
 
@@ -46,10 +70,6 @@ function shanghaiDate() {
   }).format(new Date());
 }
 
-function toWslPath(value) {
-  const match = /^([A-Za-z]):\\(.*)$/.exec(value);
-  return match ? `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, '/')}` : value.replace(/\\/g, '/');
-}
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));

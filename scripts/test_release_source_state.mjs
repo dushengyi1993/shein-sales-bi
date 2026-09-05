@@ -5,6 +5,18 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {buildEmergencyLocalReleaseReceipt} from '../lib/emergency_local_release_receipt.mjs';
+import {
+  captureInventoryCutoverDeploymentAuthority,
+  controlInventoryCutoverActivation,
+  readInventoryWriterServiceStates,
+} from '../lib/inventory_write_cutover.mjs';
+import {runInventoryCompatibilityCli} from './inventory/manage_inventory_writer_compatibility.mjs';
+import {assertInventoryWriterReleaseAligned} from './inventory/assert_inventory_writer_release_aligned.mjs';
+import {
+  hashSourceReleaseBundle,
+  verifySourceReleaseBundle,
+} from '../lib/source_release_inventory_authority.mjs';
 import {
   DEPLOYMENT_MARKER_MAX_BYTES,
   inspectDeploymentReleaseEvidence,
@@ -241,6 +253,8 @@ try {
   git(tmp, ['remote', 'add', 'origin', 'https://github.com/dushengyi1993/shein-sales-bi.git']);
   git(tmp, ['add', 'tracked.txt', 'config/source_release_trust_policy.json']);
   git(tmp, ['commit', '-q', '-m', 'fixture']);
+  const previousCommit = git(tmp, ['rev-parse', 'HEAD']);
+  git(tmp, ['commit', '-q', '--allow-empty', '-m', 'released fixture generation']);
   const commit = git(tmp, ['rev-parse', 'HEAD']);
   const version = '2026.08.17.7';
   const run = ciRun({commit});
@@ -804,6 +818,187 @@ try {
   });
   assert.notEqual(forgedMarker.remoteEvidence.releaseId, freshRemote.releaseId, 'live remote evidence defeats whole local marker forgery');
   testCount += 1;
+
+  // --- Test source bundle verification and inventoryWriterAuthority binding ---
+  const validBundleFile = path.join(tmp, '.git', 'valid-source.bundle');
+  // A self-contained annotated-tag-only bundle must work without a HEAD ref.
+  git(tmp, ['bundle', 'create', validBundleFile, `refs/tags/${version}`]);
+  const validBundleHash = hashSourceReleaseBundle(validBundleFile).sha256;
+
+  // Unpaired parameters must fail
+  await expectCode(() => recordDeploymentRelease({
+    ...recordOptions,
+    sourceBundle: validBundleFile,
+  }), 'SOURCE_RELEASE_BUNDLE_PARAMS_UNPAIRED');
+  await expectCode(() => recordDeploymentRelease({
+    ...recordOptions,
+    expectedSourceBundleSha256: validBundleHash,
+  }), 'SOURCE_RELEASE_BUNDLE_PARAMS_UNPAIRED');
+  testCount += 2;
+
+  // Mismatched expected hash must fail
+  await expectCode(() => recordDeploymentRelease({
+    ...recordOptions,
+    sourceBundle: validBundleFile,
+    expectedSourceBundleSha256: '0'.repeat(64),
+  }), 'SOURCE_RELEASE_BUNDLE_HASH_MISMATCH');
+  testCount += 1;
+
+  // Unrelated bundle (without target commit) must fail
+  const unrelatedRepo = path.join(tmp, '.git', 'unrelated-repo');
+  await fs.mkdir(unrelatedRepo);
+  git(unrelatedRepo, ['init', '-b', 'main']);
+  git(unrelatedRepo, ['config', 'user.name', 'Unrelated']);
+  git(unrelatedRepo, ['config', 'user.email', 'unrelated@test.local']);
+  await fs.writeFile(path.join(unrelatedRepo, 'unrelated.txt'), 'unrelated');
+  git(unrelatedRepo, ['add', 'unrelated.txt']);
+  git(unrelatedRepo, ['commit', '-m', 'unrelated commit']);
+  const unrelatedCommit = git(unrelatedRepo, ['rev-parse', 'HEAD']);
+  const unrelatedBundleFile = path.join(tmp, '.git', 'unrelated.bundle');
+  git(unrelatedRepo, ['bundle', 'create', unrelatedBundleFile, 'HEAD']);
+  const unrelatedBundleHash = hashSourceReleaseBundle(unrelatedBundleFile).sha256;
+  await expectCode(() => recordDeploymentRelease({
+    ...recordOptions,
+    sourceBundle: unrelatedBundleFile,
+    expectedSourceBundleSha256: unrelatedBundleHash,
+  }), 'SOURCE_RELEASE_BUNDLE_TARGET_NOT_IN_PACK');
+  testCount += 1;
+
+  // Forged header bundle: header points to target commit, but actual pack lacks object
+  const unrelatedBytes = await fs.readFile(unrelatedBundleFile);
+  const forgedHeaderBytes = Buffer.from(unrelatedBytes.toString('binary').replace(unrelatedCommit, commit), 'binary');
+  const forgedHeaderBundleFile = path.join(tmp, '.git', 'forged-header.bundle');
+  await fs.writeFile(forgedHeaderBundleFile, forgedHeaderBytes);
+  const forgedHeaderBundleHash = hashSourceReleaseBundle(forgedHeaderBundleFile).sha256;
+  await expectCode(() => recordDeploymentRelease({
+    ...recordOptions,
+    sourceBundle: forgedHeaderBundleFile,
+    expectedSourceBundleSha256: forgedHeaderBundleHash,
+  }), 'SOURCE_RELEASE_BUNDLE_OBJECTS_MISSING');
+  testCount += 1;
+
+  // Valid bundle record deployment succeeds and embeds inventoryWriterAuthority
+  const bundleMarkerFile = path.join(tmp, '.git', 'deployed-with-bundle.json');
+  const bundleRecordOptions = {
+    ...recordOptions,
+    deploymentStateFile: bundleMarkerFile,
+    sourceBundle: validBundleFile,
+    expectedSourceBundleSha256: validBundleHash,
+  };
+  // Connect the real CLI/artifact and source-reader boundaries. Only the remote
+  // GitHub API and OS service/maintenance observations use deterministic fixtures.
+  // The Git checkout, bundle, attestation, marker and compatibility journal are real.
+  const flowRoot = path.join(tmp, '.git', 'formal-rotation-flow');
+  await fs.mkdir(flowRoot);
+  const flowPaths = {
+    activationFile: path.join(flowRoot, 'activation.ndjson'),
+    activationReceiptFile: path.join(flowRoot, 'activation.receipt.json'),
+    compatibilityFile: path.join(flowRoot, 'compatibility.ndjson'),
+    compatibilityReceiptFile: path.join(flowRoot, 'compatibility.receipt.json'),
+  };
+  const flowEmergencyFile = path.join(flowRoot, 'emergency.json');
+  const flowLockFile = path.join(flowRoot, 'inventory.lock');
+  const flowTimestamp = new Date().toISOString();
+  const flowClock = () => new Date(flowTimestamp);
+  const services = await readInventoryWriterServiceStates(undefined, {
+    execFileImpl: async () => ({stdout: 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nExecMainStartTimestamp=\nNRestarts=0\n'}),
+  });
+  const flowAuthorityOptions = {
+    cwd: tmp,
+    deploymentStateFile: bundleMarkerFile,
+    emergencyReceiptFile: flowEmergencyFile,
+    releaseAttestationRoot: attestationRoot,
+    trustPolicyFile: recordOptions.trustPolicyFile,
+    serviceStateReader: async () => services,
+    now: flowClock,
+  };
+  const flowAuthorityReader = () => captureInventoryCutoverDeploymentAuthority(flowAuthorityOptions);
+  const maintenanceReader = async () => ({ok:true,active:true,mode:'all',generation:19,hash:'9'.repeat(64)});
+  const flowDependencies = {authorityReader:flowAuthorityReader,maintenanceReader,now:flowClock};
+  const priorCwd = process.cwd();
+  const priorLock = process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE;
+  let bundleRecorded;
+  try {
+    process.chdir(tmp);
+    process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE = flowLockFile;
+    git(tmp, ['checkout', '-q', '--detach', previousCommit]);
+    const priorBundle = path.join(flowRoot, 'previous.bundle');
+    git(tmp, ['bundle', 'create', priorBundle, 'HEAD']);
+    await fs.writeFile(flowEmergencyFile, JSON.stringify(buildEmergencyLocalReleaseReceipt({
+      commit:previousCommit,baselineCommit:previousCommit,
+      bundleSha256:hashSourceReleaseBundle(priorBundle).sha256,
+      createdAt:'2026-08-17T02:30:00.000Z',reason:'isolated formal rotation fixture',
+    })));
+    const oldAuthority = await flowAuthorityReader();
+    assert.equal(oldAuthority.releaseReceiptKind, 'emergency');
+    assert.equal(oldAuthority.deployedCommit, previousCommit);
+    const initialOptions = {
+      ...flowPaths,authorityReader:flowAuthorityReader,maintenanceReader,now:flowClock,lockFile:flowLockFile,
+      requiredManualResolution:{intentId:'e07f999c-96b2-460c-bfa9-fa924f410ec3',scopeKey:'d'.repeat(64),journalFile:path.join(flowRoot,'journal.ndjson'),receiptFile:path.join(flowRoot,'manual.receipt.json')},
+    };
+    const initialDry = await controlInventoryCutoverActivation(initialOptions);
+    await controlInventoryCutoverActivation({...initialOptions,mode:'execute',expectedPreflightHash:initialDry.preflightHash});
+    const cliPaths = [
+      '--activation-registry',flowPaths.activationFile,'--activation-receipt',flowPaths.activationReceiptFile,
+      '--compatibility-registry',flowPaths.compatibilityFile,'--compatibility-receipt',flowPaths.compatibilityReceiptFile,
+    ];
+    const stage = await runInventoryCompatibilityCli([
+      'rotation-stage',...cliPaths,'--out',path.join(flowRoot,'stage.json'),
+      '--candidate-commit',commit,'--candidate-source-fingerprint',clean.sourceFingerprint,
+      '--candidate-bundle-sha256',validBundleHash,'--candidate-release-receipt-kind','formal',
+      '--candidate-release-receipt-hash',attestationSha256,'--candidate-release-receipt-file',attestationFile,
+    ], flowDependencies);
+    const executeArgs = (command,dry,confirm) => [command,'--execute','--preflight-artifact',dry.preflightArtifactFile,
+      '--expected-artifact-sha256',dry.preflightArtifactFileSha256,'--expected-preflight-hash',dry.preflightHash,'--confirm',confirm];
+    assert.equal(await fs.stat(bundleMarkerFile).then(()=>true,()=>false),false,'stage precedes marker publication');
+    await runInventoryCompatibilityCli(executeArgs('rotation-stage',stage,'STAGE_INVENTORY_COMPATIBILITY_ROTATION_V1'),flowDependencies);
+    assert.equal(git(tmp,['rev-parse','HEAD']),previousCommit,'stage precedes actual deployment');
+    git(tmp,['checkout','-q','--detach',commit]);
+    bundleRecorded = await recordDeploymentRelease(bundleRecordOptions);
+    const liveFormal = await flowAuthorityReader();
+    assert.equal(liveFormal.deployedCommit,commit);
+    assert.equal(liveFormal.releaseReceiptKind,'formal');
+    assert.equal(liveFormal.releaseReceiptHash,attestationSha256);
+    assert.equal(liveFormal.bundleSha256,validBundleHash);
+    await expectCode(()=>assertInventoryWriterReleaseAligned({...flowAuthorityOptions,...flowPaths}), 'INVENTORY_WRITER_COMPATIBILITY_PENDING_ROTATION');
+    const finalize = await runInventoryCompatibilityCli(['rotation-finalize',...cliPaths,'--out',path.join(flowRoot,'finalize.json')],flowDependencies);
+    await runInventoryCompatibilityCli(executeArgs('rotation-finalize',finalize,'FINALIZE_INVENTORY_COMPATIBILITY_ROTATION_V1'),flowDependencies);
+    assert.equal((await assertInventoryWriterReleaseAligned({...flowAuthorityOptions,...flowPaths})).aligned,true);
+    testCount += 1;
+  } finally {
+    git(tmp,['checkout','-q','--detach',commit]);
+    process.chdir(priorCwd);
+    if(priorLock===undefined) delete process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE;
+    else process.env.SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE=priorLock;
+  }
+  assert.equal(bundleRecorded.deploymentMarker.inventoryWriterAuthority?.schemaVersion, 'shein-bi-inventory-writer-authority/v1');
+  assert.equal(bundleRecorded.deploymentMarker.inventoryWriterAuthority?.bundleSha256, validBundleHash);
+  assert.equal(bundleRecorded.deploymentMarker.inventoryWriterAuthority?.receiptSha256, attestationSha256);
+  assert.equal(bundleRecorded.deploymentMarker.inventoryWriterAuthority?.receiptFile, path.resolve(attestationFile));
+
+  const recordedWithBundle = inspectRecordedDeploymentReleaseEvidence({
+    cwd: tmp,
+    marker: bundleRecorded.deploymentMarker,
+    releaseAttestationRoot: attestationRoot,
+    trustPolicyFile: path.join(tmp, 'config', 'source_release_trust_policy.json'),
+  });
+  assert.equal(recordedWithBundle.ok, true, JSON.stringify(recordedWithBundle));
+  testCount += 1;
+
+  // Re-recording at a later timestamp preserves stable inventoryWriterAuthority
+  const laterBundleRecorded = await recordDeploymentRelease({
+    ...bundleRecordOptions,
+    now: () => new Date('2026-08-17T03:30:00Z'),
+  });
+  assert.notEqual(bundleRecorded.deploymentMarker.recordedAt, laterBundleRecorded.deploymentMarker.recordedAt);
+  assert.deepEqual(
+    bundleRecorded.deploymentMarker.inventoryWriterAuthority,
+    laterBundleRecorded.deploymentMarker.inventoryWriterAuthority
+  );
+  assert.equal((await assertInventoryWriterReleaseAligned({...flowAuthorityOptions,...flowPaths})).aligned,true,
+    'later marker timestamps preserve completed real CLI rotation identity');
+  testCount += 1;
+
 
   let releaseFirst;
   const firstHeld = new Promise(resolve => { releaseFirst = resolve; });

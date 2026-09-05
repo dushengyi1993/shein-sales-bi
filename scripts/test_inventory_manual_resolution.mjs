@@ -18,7 +18,7 @@ import {
   readInventoryIntentLifecycle,
 } from '../lib/durable_inventory_write.mjs';
 import {SheinOpenApiClient} from '../lib/shein_openapi_client.mjs';
-import {INVENTORY_OVERWRITE_COMPUTATION_VERSION, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {INVENTORY_OVERWRITE_COMPUTATION_VERSION, INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 import {
   MANUAL_READBACK_EVIDENCE_CONTRACT,
   parseArgs,
@@ -89,7 +89,7 @@ function buildIntent({
     skuCode,
     targetUsableInventory: target,
     policyVersion,
-    overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+    overwriteComputationVersion: INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
     authorizationId,
     idempotencyKey: request.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
     requestPayloadHash: stableInventoryHash(request),

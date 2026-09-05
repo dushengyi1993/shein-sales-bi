@@ -128,6 +128,7 @@ write_marker() {
     --business-date "$DATA_DATE"
     --status "$status"
     --message "$message"
+    --snapshot-evidence
   )
   local evidence
   for evidence in "$@"; do
@@ -189,12 +190,29 @@ NODE
     --require-evidence >/dev/null
 }
 
+resolve_inventory_artifacts() {
+  local entry
+  entry="$(node "$ROOT/scripts/inventory/daily_inventory_version_publisher.mjs" read "$INVENTORY_RUNTIME_ROOT" "$RUN_DATE" "" "morning:$RUN_DATE")" || return 1
+  if [[ "$entry" != "null" ]]; then
+    INVENTORY_PLAN="$(jq -r '.planFile' <<<"$entry")"
+    INVENTORY_RESULT="$(jq -r '.file' <<<"$entry")"
+    INVENTORY_MARKER="$(jq -r '.markerFile' <<<"$entry")"
+  elif [[ ! -f "$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$RUN_DATE.index.json" ]]; then
+    INVENTORY_PLAN="$INVENTORY_RUNTIME_ROOT/plans/daily-inventory-replenishment-$RUN_DATE.json"
+    INVENTORY_RESULT="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$RUN_DATE.json"
+    INVENTORY_MARKER="$ROOT/state/pipeline-markers/$RUN_DATE/daily-inventory-guard.json"
+  else
+    return 1
+  fi
+}
+
 inventory_marker_done() {
-  if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" ROOT="$ROOT" node - <<'NODE'
+  resolve_inventory_artifacts || return 1
+  if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" INVENTORY_MARKER_FILE="$INVENTORY_MARKER" node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
 try {
-  const file = path.join(process.env.ROOT, 'state', 'pipeline-markers', process.env.RUN_DATE, 'daily-inventory-guard.json');
+  const file = process.env.INVENTORY_MARKER_FILE;
   const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
   process.exit(marker?.ok === true
     && marker?.stage === 'daily-inventory-guard'
@@ -208,17 +226,19 @@ NODE
   fi
   node "$ROOT/scripts/pipeline_marker.mjs" require \
     --stage daily-inventory-guard \
+    --root "$(dirname "$(dirname "$INVENTORY_MARKER")")" \
     --date "$RUN_DATE" \
     --status done \
     --require-evidence >/dev/null
 }
 
 inventory_marker_warning() {
-  if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" ROOT="$ROOT" node - <<'NODE'
+  resolve_inventory_artifacts || return 1
+  if ! RUN_DATE="$RUN_DATE" DATA_DATE="$DATA_DATE" INVENTORY_MARKER_FILE="$INVENTORY_MARKER" node - <<'NODE'
 const fs = require('fs');
 const path = require('path');
 try {
-  const file = path.join(process.env.ROOT, 'state', 'pipeline-markers', process.env.RUN_DATE, 'daily-inventory-guard.json');
+  const file = process.env.INVENTORY_MARKER_FILE;
   const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
   process.exit(marker?.ok === true
     && marker?.stage === 'daily-inventory-guard'
@@ -232,6 +252,7 @@ NODE
   fi
   node "$ROOT/scripts/pipeline_marker.mjs" require \
     --stage daily-inventory-guard \
+    --root "$(dirname "$(dirname "$INVENTORY_MARKER")")" \
     --date "$RUN_DATE" \
     --status warning \
     --require-evidence >/dev/null
@@ -504,7 +525,7 @@ run_supplements_stage() {
 }
 
 run_inventory_stage() {
-  if inventory_marker_warning; then
+  if [[ "${SHEIN_BI_INVENTORY_FORCE_RECHECK:-0}" != "1" ]] && inventory_marker_warning; then
     echo "[cloud_morning_chain] verified inventory guard warning marker already exists runDate=$RUN_DATE; bypassing inventory execution" >&2
     return 102
   fi
@@ -578,6 +599,18 @@ run_inventory_stage() {
   done
 }
 
+if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
+  echo "[cloud_morning_chain] start stage=$STAGE runDate=$RUN_DATE businessDate=$DATA_DATE dryRun=$DRY_RUN"
+  case "$STAGE" in
+    all) echo "[cloud_morning_chain] dry-run: one coordinator fetches all 19 stores, publishes once, then runs supplements and inventory" ;;
+    inventory|replenishment) echo "[cloud_morning_chain] dry-run: inventory stage only" ;;
+    *) exit 64 ;;
+  esac
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  write_state "ok" "dry-run stage validated"
+  exit 0
+fi
+
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 trap 'on_error "$LINENO" "$?"' ERR
@@ -593,16 +626,18 @@ export SHEIN_HOST_BROWSER_READ_DEADLINE_EPOCH="$PRE_INVENTORY_DEADLINE_EPOCH"
 
 echo "[cloud_morning_chain] start stage=$STAGE runDate=$RUN_DATE businessDate=$DATA_DATE dryRun=$DRY_RUN"
 
-if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
-  case "$STAGE" in
-    all) echo "[cloud_morning_chain] dry-run: one coordinator fetches all 19 stores, publishes once, then runs supplements and inventory" ;;
-    *) exit 64 ;;
-  esac
-  write_state "ok" "dry-run stage validated"
-  exit 0
-fi
-
 case "$STAGE" in
+  inventory|replenishment)
+    echo "[cloud_morning_chain] running standalone inventory replenishment stage runDate=$RUN_DATE"
+    if run_inventory_stage; then
+      echo "[cloud_morning_chain] standalone inventory stage completed successfully"
+      exit 0
+    else
+      local_status=$?
+      echo "[cloud_morning_chain] standalone inventory stage finished with status=$local_status"
+      exit "$local_status"
+    fi
+    ;;
   all)
     if daily_operating_refresh_done; then
       write_state "ok" "today's complete daily operating run is already published; no duplicate work was started"
@@ -715,18 +750,17 @@ case "$STAGE" in
     if [[ "$INVENTORY_STAGE_STATUS" -ne 0 && "$INVENTORY_STAGE_STATUS" -ne 102 ]]; then
       exit "$INVENTORY_STAGE_STATUS"
     fi
-    INVENTORY_PLAN="$INVENTORY_RUNTIME_ROOT/plans/daily-inventory-replenishment-$RUN_DATE.json"
-    INVENTORY_RESULT="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$RUN_DATE.json"
+    resolve_inventory_artifacts
     if [[ "$INVENTORY_STAGE_STATUS" -eq 102 ]]; then
       write_marker "daily-operating-refresh" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers" \
-        "$RESULT_FILE" "$ROOT/state/pipeline-markers/$RUN_DATE/daily-inventory-guard.json" \
+        "$RESULT_FILE" "$INVENTORY_MARKER" \
         "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
       printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
         > "$STATE_DIR/${RUN_DATE}.done"
       write_state "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
     else
       write_marker "daily-operating-refresh" "done" "all 19 stores, supplements and inventory completed in one run" \
-        "$RESULT_FILE" "$ROOT/state/pipeline-markers/$RUN_DATE/daily-inventory-guard.json" \
+        "$RESULT_FILE" "$INVENTORY_MARKER" \
         "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
       printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
         > "$STATE_DIR/${RUN_DATE}.done"

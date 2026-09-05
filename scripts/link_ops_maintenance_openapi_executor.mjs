@@ -55,6 +55,7 @@ import {
 import {withInventoryCutoverLock} from '../lib/inventory_write_cutover.mjs';
 import {
   computeInventoryOverwriteQuantity,
+  normalizeInventoryOccupancy,
   INVENTORY_OVERWRITE_COMPUTATION_VERSION,
   stableInventoryHash,
 } from '../lib/inventory_replenishment_policy.mjs';
@@ -1770,14 +1771,9 @@ function inventoryInteger(value){
   const n=Number(value);
   return Number.isSafeInteger(n)&&n>=0?n:null;
 }
-function normalizedInventoryFields({total,usable,locked,tempLocked}){
-  const fields={
-    totalInventoryQuantity:inventoryInteger(total),
-    totalUsableInventory:inventoryInteger(usable),
-    totalLockedQuantity:inventoryInteger(locked),
-    temporaryInventoryQuantity:inventoryInteger(tempLocked),
-  };
-  return {...fields,inventoryFieldsValid:Object.values(fields).every(Number.isSafeInteger)};
+function normalizedInventoryFields(raw){
+  try { return {...normalizeInventoryOccupancy(raw),inventoryFieldsValid:true}; }
+  catch(error) { return {totalInventoryQuantity:null,totalUsableInventory:null,totalLockedQuantity:null,temporaryInventoryQuantity:null,inventoryFieldsValid:false,inventoryFieldsError:error.message}; }
 }
 async function readbackStock(client, matches, calls, expectedInventory, expectedWarehouseCode=''){
   const skuCodes=unique(matches.flatMap(m=>m.skuCodes));
@@ -1794,23 +1790,13 @@ async function readbackStock(client, matches, calls, expectedInventory, expected
         return nested.map(warehouseRow=>({
           ...row,
           warehouseCode: stockRowWarehouseCode(warehouseRow,groupWarehouse),
-          ...normalizedInventoryFields({
-            total:warehouseRow?.inventoryQuantity??warehouseRow?.inventory_quantity??warehouseRow?.totalInventoryQuantity??warehouseRow?.total_inventory_quantity,
-            usable:warehouseRow?.usableInventory??warehouseRow?.usable_inventory??warehouseRow?.totalUsableInventory??warehouseRow?.total_usable_inventory,
-            locked:warehouseRow?.lockedQuantity??warehouseRow?.locked_quantity??warehouseRow?.totalLockedQuantity??warehouseRow?.total_locked_quantity,
-            tempLocked:warehouseRow?.tempLockQuantity??warehouseRow?.temp_lock_quantity??warehouseRow?.totalTempLockQuantity??warehouseRow?.total_temp_lock_quantity??warehouseRow?.temporaryInventoryQuantity??warehouseRow?.temporary_inventory_quantity,
-          }),
+          ...normalizedInventoryFields(warehouseRow),
         }));
       }
       return [{
         ...row,
         warehouseCode: stockRowWarehouseCode(row,groupWarehouse),
-        ...normalizedInventoryFields({
-          total:row?.totalInventoryQuantity??row?.total_inventory_quantity??row?.inventoryQuantity??row?.inventory_quantity,
-          usable:row?.totalUsableInventory??row?.total_usable_inventory??row?.usableInventory??row?.usable_inventory,
-          locked:row?.totalLockedQuantity??row?.total_locked_quantity??row?.lockedInventory??row?.locked_inventory,
-          tempLocked:row?.totalTempLockQuantity??row?.total_temp_lock_quantity??row?.temporaryInventoryQuantity??row?.temporary_inventory_quantity??row?.temporaryLockedQuantity??row?.temporary_locked_quantity,
-        }),
+        ...normalizedInventoryFields(row),
       }];
     });
   }));

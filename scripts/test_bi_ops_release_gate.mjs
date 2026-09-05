@@ -287,7 +287,7 @@ const SK5110_LOCAL_ARTIFACTS = [
 const PRODUCT_ATTRIBUTE_FLOW_TEST = 'scripts/test_link_ops_prepare_product_attribute_flow.mjs';
 const PRODUCT_ATTRIBUTE_FLOW_TIMEOUT_MS = 1_800_000;
 const RELEASE_GATE_TEST = 'scripts/test_bi_ops_release_gate.mjs';
-const OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT = 184;
+const OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT = 233;
 const OWNERSHIP_BASELINE_DIRECT_CALL_COUNT = 49;
 const OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT = 41;
 const OWNERSHIP_BASELINE_INTERSECTION_COUNT = 19;
@@ -295,12 +295,15 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
   + OWNERSHIP_BASELINE_DIRECT_UNIQUE_TEST_COUNT
   - OWNERSHIP_BASELINE_INTERSECTION_COUNT;
 // Provenance: commit f0d5301 fixed the post-transfer ownership snapshot
-// (deterministic runner = 184 - dedicated release gate = 183 entries,
-// direct gate calls 49 -> 30, direct unique 41 -> 22, owner union 206).
+// (deterministic runner = 233 - dedicated release gate = 232 entries,
+// direct gate calls 49 -> 30, direct unique 41 -> 22, owner union 255).
+// The old parser omitted 49 scripts/marketing/smoke_ entries in this baseline.
 // Deterministic registrations added after that snapshot are tracked with an
 // explicit count so the exact-equality assertions below stay source-
 // explainable instead of drifting silently or being loosened to >=.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 63;
+// Exact list comparison: f0d5301 -> PR119 2fb4afa adds 64 (including one smoke),
+// and 2fb4afa -> PR120 88d6140 adds 24; neither interval removes a registration.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 88;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   - 1
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
@@ -329,8 +332,14 @@ const DIRECT_TESTS_TRANSFERRED_TO_DETERMINISTIC_SHARDS = [
 ];
 
 function extractDeterministicRunnerTests(source) {
-  const testsBlock = String(source || '').match(/const tests = \[([\s\S]*?)\r?\n\];/u)?.[1] || '';
-  return [...testsBlock.matchAll(/['"](scripts\/test_[^'"]+\.mjs)['"]/gu)].map(match => match[1]);
+  const testsBlock = String(source || '').match(/const tests = \[([\s\S]*?)\r?\n\];/u)?.[1];
+  if (!testsBlock) throw new Error('Deterministic registration array is missing');
+  return testsBlock.split(/\r?\n/u).flatMap(line => {
+    if (!line.trim() || /^\s*\/\//u.test(line)) return [];
+    const entry = line.match(/^\s*(['"])(scripts\/[^'"]+\.mjs)\1\s*,?\s*(?:\/\/.*)?$/u);
+    if (!entry) throw new Error('Unrecognized deterministic registration: ' + line.trim());
+    return [entry[2]];
+  });
 }
 
 function extractDirectReleaseGateTestInvocations(source) {
@@ -421,9 +430,9 @@ async function checkDeterministicProductAttributeRegistration() {
   };
 }
 
-async function checkDeterministicSuiteDelegation() {
+async function checkDeterministicSuiteDelegation(sources) {
   const startedAt = Date.now();
-  const [runner, workflow, releaseGateSource] = await Promise.all([
+  const [runner, workflow, releaseGateSource] = sources || await Promise.all([
     fs.readFile(path.join(ROOT, 'scripts/run_deterministic_tests.mjs'), 'utf8'),
     fs.readFile(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8'),
     fs.readFile(path.join(ROOT, 'scripts/test_bi_ops_release_gate.mjs'), 'utf8'),
@@ -623,6 +632,27 @@ async function checkBiOpsV2DeploymentBoundary() {
 }
 
 async function main() {
+  if (process.argv.includes('--ci-ownership-only')) {
+    const sources = await Promise.all([
+      fs.readFile(path.join(ROOT, 'scripts/run_deterministic_tests.mjs'), 'utf8'),
+      fs.readFile(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8'),
+      fs.readFile(path.join(ROOT, 'scripts/test_bi_ops_release_gate.mjs'), 'utf8'),
+    ]);
+    const positive = await checkDeterministicSuiteDelegation(sources);
+    const smoke = "  'scripts/marketing/smoke_coupon_budget_guard.mjs',";
+    if (!sources[0].includes(smoke)) throw new Error('Ownership regression smoke fixture is missing');
+    const variants = [
+      [sources[0].replace(smoke, ''), sources[1], sources[2]],
+      [sources[0].replace(smoke, smoke + '\n' + smoke), sources[1], sources[2]],
+      [sources[0].replace(smoke, smoke + "\n  'scripts/test_bi_ops_release_gate.mjs',"), sources[1], sources[2]],
+      [sources[0], sources[1].replace('needs: [source-checks, deterministic-shards, release-gate]', 'needs: [source-checks, deterministic-shards]'), sources[2]],
+    ];
+    const negatives = await Promise.all(variants.map(variant => checkDeterministicSuiteDelegation(variant)));
+    const ok = positive.ok && negatives.every(result => !result.ok);
+    console.log(JSON.stringify({ok, ...JSON.parse(positive.stdout || positive.stderr), negativeCasesRejected: negatives.map(result => !result.ok)}, null, 2));
+    if (!ok) process.exitCode = 1;
+    return;
+  }
   const results = [];
   const inventoryTestEnv = {
     ...process.env,

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
@@ -11,6 +10,26 @@ import {fileURLToPath} from 'node:url';
 import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const toWslPath = value => String(value).replace(/^([A-Za-z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`).replaceAll('\\', '/');
+
+if (process.platform === 'win32' && process.env.SHEIN_TEST_WSL_RELAY !== '1') {
+  const result = spawnSync('wsl.exe', [
+    '--cd', toWslPath(repo),
+    '--exec', '/usr/bin/env',
+    'SHEIN_TEST_WSL_RELAY=1',
+    '/usr/bin/node', 'scripts/test_morning_chain_final_resume.mjs',
+  ], {
+    cwd: repo,
+    encoding: 'utf8',
+    timeout: 60_000,
+    killSignal: 'SIGKILL',
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exit(result.status ?? 1);
+}
+
 const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'morning-final-resume-'));
 const runDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
 const date = new Date(`${runDate}T12:00:00Z`);
@@ -22,14 +41,13 @@ const markerRoot = path.join(root, 'state', 'pipeline-markers');
 const stateDir = path.join(root, 'state', 'cloud_morning_chain');
 const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`); };
-const toWslPath = value => String(value).replace(/^([A-Za-z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`).replaceAll('\\', '/');
-const evidence = files => files.map(file => ({path:toWslPath(file),bytes:fs.statSync(file).size,sha256:hashFile(file)}));
 
 try {
-  fs.mkdirSync(path.join(root, 'scripts'), {recursive:true});
+  fs.mkdirSync(path.join(root, 'scripts', 'inventory'), {recursive:true});
   fs.mkdirSync(path.join(root, 'config'), {recursive:true});
   fs.cpSync(path.join(repo, 'lib'), path.join(root, 'lib'), {recursive:true});
   fs.copyFileSync(path.join(repo, 'scripts', 'validate_daily_operating_refresh.mjs'), path.join(root, 'scripts', 'validate_daily_operating_refresh.mjs'));
+  fs.copyFileSync(path.join(repo, 'scripts', 'inventory', 'daily_inventory_version_publisher.mjs'), path.join(root, 'scripts', 'inventory', 'daily_inventory_version_publisher.mjs'));
   fs.copyFileSync(path.join(repo, 'scripts', 'build_morning_resume_evidence.mjs'), path.join(root, 'scripts', 'build_morning_resume_evidence.mjs'));
   fs.copyFileSync(path.join(repo, 'scripts', 'pipeline_marker.mjs'), path.join(root, 'scripts', 'pipeline_marker.mjs'));
   fs.copyFileSync(path.join(repo, 'scripts', 'check_release_source_state.mjs'), path.join(root, 'scripts', 'check_release_source_state.mjs'));
@@ -56,19 +74,48 @@ try {
   const resultFile = path.join(runtime,'results',`daily-inventory-replenishment-${runDate}.json`);
   write(planFile,plan);
   write(resultFile,{schemaVersion:'daily-inventory-replenishment-result/v1',generatedAt:fetchedAt,planHash:plan.payloadHash,policyVersion:plan.policyVersion,execute:true,executionMode:'automatic',reconcilePendingOnly:true,authorizationId:policy.execution.automaticExecution.authorizationId,authorizationContext:policy.execution.automaticExecution.allowedContext,unresolvedIntents:[],manualResolutionFences:[],manualResolutionTombstoneCount:0,results:[]});
-  const inventoryMarker = path.join(markerRoot,runDate,'daily-inventory-guard.json');
-  write(inventoryMarker,{ok:true,stage:'daily-inventory-guard',status:'done',runDate,businessDate,completedAt:fetchedAt,evidence:evidence([planFile,resultFile])});
-  write(path.join(markerRoot,runDate,'daily-operating-refresh.json'),{ok:true,stage:'daily-operating-refresh',status:'done',runDate,businessDate,completedAt:fetchedAt,evidence:evidence([morningFile,inventoryMarker,planFile,resultFile])});
+
+  const markerCli = path.join(root, 'scripts', 'pipeline_marker.mjs');
+  const invRes = spawnSync(process.execPath, [
+    markerCli, 'write',
+    '--stage', 'daily-inventory-guard',
+    '--date', runDate,
+    '--business-date', businessDate,
+    '--status', 'done',
+    '--message', 'complete',
+    '--root', markerRoot,
+    '--snapshot-evidence',
+    '--evidence', planFile,
+    '--evidence', resultFile,
+  ], {cwd: root, encoding: 'utf8'});
+  assert.equal(invRes.status, 0, `inventory marker write failed: ${invRes.stderr}`);
+
+  const inventoryMarker = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  const opRes = spawnSync(process.execPath, [
+    markerCli, 'write',
+    '--stage', 'daily-operating-refresh',
+    '--date', runDate,
+    '--business-date', businessDate,
+    '--status', 'done',
+    '--message', 'complete',
+    '--root', markerRoot,
+    '--snapshot-evidence',
+    '--evidence', morningFile,
+    '--evidence', inventoryMarker,
+    '--evidence', planFile,
+    '--evidence', resultFile,
+  ], {cwd: root, encoding: 'utf8'});
+  assert.equal(opRes.status, 0, `operating refresh marker write failed: ${opRes.stderr}`);
 
   const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
   const command = [
-    `export SHEIN_BI_ROOT=${shellQuote(toWslPath(root))}`,
+    `export SHEIN_BI_ROOT=${shellQuote(root)}`,
     `export SHEIN_BI_MORNING_RUN_DATE=${shellQuote(runDate)}`,
     `export SHEIN_BI_MORNING_BUSINESS_DATE=${shellQuote(businessDate)}`,
-    `export SHEIN_BI_MORNING_CHAIN_STATE_DIR=${shellQuote(toWslPath(stateDir))}`,
-    `export SHEIN_BI_INVENTORY_RUNTIME_ROOT=${shellQuote(toWslPath(runtime))}`,
-    `export SHEIN_BI_MORNING_CHAIN_LOG_DIR=${shellQuote(toWslPath(path.join(root,'logs')))}`,
-    `bash ${shellQuote(toWslPath(path.join(repo, 'scripts', 'cloud_morning_chain.sh')))} all`,
+    `export SHEIN_BI_MORNING_CHAIN_STATE_DIR=${shellQuote(stateDir)}`,
+    `export SHEIN_BI_INVENTORY_RUNTIME_ROOT=${shellQuote(runtime)}`,
+    `export SHEIN_BI_MORNING_CHAIN_LOG_DIR=${shellQuote(path.join(root,'logs'))}`,
+    `bash ${shellQuote(path.join(repo, 'scripts', 'cloud_morning_chain.sh'))} all`,
   ].join('; ');
   const result = spawnSync('bash', ['-lc', command], {
     cwd: repo,

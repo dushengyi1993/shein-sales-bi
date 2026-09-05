@@ -2,6 +2,7 @@
 Description=SHEIN BI cloud marketing live guard scan
 Wants=network-online.target
 After=network-online.target
+OnSuccess=shein-bi-cloud-marketing-repair.service
 
 [Service]
 Type=oneshot

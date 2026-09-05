@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {inspectMarketingRepairArtifacts, exportMarketingRepairArtifacts, importMarketingRepairArtifacts} from '../../lib/marketing_repair_artifacts.mjs';
 import {
   loadExactHighClickSpecialPlan,
   loadExactManualRepairPlan,
@@ -604,7 +605,21 @@ async function releaseQueueLockCommand(args) {
 
 try {
   const args = parseArgs(process.argv.slice(2));
-  if (args.command === 'build') await buildQueue(args);
+  if (['inspect-artifacts', 'export-artifacts', 'import-artifacts'].includes(args.command)) {
+    let inspected;
+    if (args.command === 'import-artifacts') {
+      if (!args.bundle || !args.destination) throw new Error('Missing --bundle or --destination');
+      inspected = await importMarketingRepairArtifacts({bundleFile: args.bundle, destination: args.destination});
+    } else {
+      if (!args.queue) throw new Error('Missing --queue');
+      if (args.command === 'export-artifacts' && !args.out) throw new Error('Missing --out');
+      const options = {root: args.root ? path.resolve(args.root) : ROOT, queue: args.queue, out: args.out};
+      inspected = args.command === 'export-artifacts'
+        ? await exportMarketingRepairArtifacts(options) : await inspectMarketingRepairArtifacts(options);
+    }
+    console.log(JSON.stringify({...inspected, files: inspected.files.map(({logicalPath, sizeBytes, sha256}) => ({logicalPath, sizeBytes, sha256}))}, null, 2));
+  }
+  else if (args.command === 'build') await buildQueue(args);
   else if (args.command === 'update-stage') await updateStage(args);
   else if (args.command === 'handoff-local') await handoffLocal(args);
   else if (args.command === 'acquire-lock') await acquireQueueLockCommand(args);

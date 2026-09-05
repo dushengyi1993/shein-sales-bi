@@ -124,6 +124,7 @@ NODE
 }
 
 release_locks() {
+  exec 6>&- 2>/dev/null || true
   exec 7>&- 2>/dev/null || true
   exec 8>&- 2>/dev/null || true
   exec 9>&- 2>/dev/null || true
@@ -205,17 +206,19 @@ defer_lock_busy() {
 DEADLINE_EPOCH_INPUT="$DEADLINE_EPOCH"
 resolve_effective_deadline
 
-if [[ -L "$HOST_LOCK" || ! -f "$HOST_LOCK" || ! -r "$HOST_LOCK" || ! -w "$HOST_LOCK" ]]; then
+if [[ "$RESOURCE_CLASS" != "openapi" ]] && [[ -L "$HOST_LOCK" || ! -f "$HOST_LOCK" || ! -r "$HOST_LOCK" || ! -w "$HOST_LOCK" ]]; then
   echo "[host-heavy] invalid shared host lock: $HOST_LOCK" >&2
   record_defer "host_lock_invalid"
   exit 73
 fi
 
-# Cross-project contract: host -> project -> domain -> pressure -> command.
+# Share maintenance locks across independent domains. OpenAPI owns no browser
+# capacity; exact inventory-object locks remain with the existing writers.
 source "$ROOT/scripts/lib/shared_lock.sh"
 prepare_shared_lock_file "$PROJECT_LOCK"
 prepare_shared_lock_file "$DOMAIN_LOCK"
 
+if [[ "$RESOURCE_CLASS" != "openapi" ]]; then
 exec 9<>"$HOST_LOCK"
 CURRENT_LOCK_WAIT="$(lock_wait_for_current_deadline)" || {
   echo "[host-heavy] defer domain=$DOMAIN reason=deadline_elapsed before_host_lock" >&2
@@ -223,7 +226,7 @@ CURRENT_LOCK_WAIT="$(lock_wait_for_current_deadline)" || {
   record_defer "${DEFER_REASON}:deadline_elapsed"
   exit 75
 }
-if ! flock -w "$CURRENT_LOCK_WAIT" 9; then
+if ! flock -s -w "$CURRENT_LOCK_WAIT" 9; then
   defer_lock_busy "host_lock_busy"
 fi
 
@@ -234,8 +237,10 @@ CURRENT_LOCK_WAIT="$(lock_wait_for_current_deadline)" || {
   record_defer "${DEFER_REASON}:deadline_elapsed"
   exit 75
 }
-if ! flock -w "$CURRENT_LOCK_WAIT" 8; then
+if ! flock -s -w "$CURRENT_LOCK_WAIT" 8; then
   defer_lock_busy "project_lock_busy"
+fi
+
 fi
 
 exec 7<>"$DOMAIN_LOCK"
@@ -249,8 +254,31 @@ if ! flock -w "$CURRENT_LOCK_WAIT" 7; then
   defer_lock_busy "domain_lock_busy"
 fi
 
+PRESSURE_CLASS="$RESOURCE_CLASS"
+if [[ "$RESOURCE_CLASS" == "browser" ]]; then
+  BROWSER_SLOT_0="${SHEIN_BROWSER_READ_SLOT_0:-/run/lock/shein-browser-read-0.lock}"
+  BROWSER_SLOT_1="${SHEIN_BROWSER_READ_SLOT_1:-/run/lock/shein-browser-read-1.lock}"
+  for slot_file in "$BROWSER_SLOT_0" "$BROWSER_SLOT_1"; do
+    if [[ -L "$slot_file" || ! -f "$slot_file" || ! -r "$slot_file" || ! -w "$slot_file" ]]; then
+      record_defer "browser_slot_invalid"
+      exit 73
+    fi
+  done
+  exec 6<>"$BROWSER_SLOT_1"
+  OTHER_SLOT_FILE="$BROWSER_SLOT_0"
+  if ! flock -n 6; then
+    exec 6>&-
+    exec 6<>"$BROWSER_SLOT_0"
+    if ! flock -n 6; then defer_lock_busy "browser_slots_busy"; fi
+    OTHER_SLOT_FILE="$BROWSER_SLOT_1"
+  fi
+  exec 5<>"$OTHER_SLOT_FILE"
+  if flock -n 5; then flock -u 5; else PRESSURE_CLASS=browser-secondary; fi
+  exec 5>&-
+fi
+
 set +e
-node "$ROOT/scripts/check_host_resource_pressure.mjs" "--class=$RESOURCE_CLASS"
+node "$ROOT/scripts/check_host_resource_pressure.mjs" "--class=$PRESSURE_CLASS"
 PRESSURE_STATUS=$?
 set -e
 if [[ "$PRESSURE_STATUS" -ne 0 ]]; then
@@ -277,7 +305,7 @@ fi
 echo "[host-heavy] start domain=$DOMAIN class=$RESOURCE_CLASS command=$1"
 export SHEIN_BI_HOST_HEAVY_WRAPPED=1
 export SHEIN_BI_HOST_HEAVY_DOMAIN="$DOMAIN"
-CHILD_FD_CLEAN_COMMAND=(/usr/bin/env bash -c 'exec 7>&- 8>&- 9>&-; exec "$@"' --)
+CHILD_FD_CLEAN_COMMAND=(/usr/bin/env bash -c 'exec 6>&- 7>&- 8>&- 9>&-; exec "$@"' --)
 set +e
 if [[ "${#TIMEOUT_ARGS[@]}" -gt 0 ]]; then
   "${TIMEOUT_ARGS[@]}" "${CHILD_FD_CLEAN_COMMAND[@]}" "$@"

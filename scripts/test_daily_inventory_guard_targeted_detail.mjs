@@ -21,6 +21,7 @@
  * This test pins that contract against the tracked sources.
  */
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
@@ -33,6 +34,62 @@ const guard = read('scripts/cloud_daily_inventory_replenishment_guard.sh');
 const reconciliation = read('scripts/cloud_openapi_product_reconciliation.sh');
 const planner = read('scripts/inventory/build_daily_inventory_replenishment_plan.mjs');
 const executor = read('scripts/inventory/execute_daily_inventory_replenishment_plan.mjs');
+function runFixtureShell(script, temp) {
+  if (process.platform !== 'win32') {
+    return spawnSync('bash', ['--noprofile', '--norc'], {input: script + '\n', encoding: 'utf8', timeout: 60_000});
+  }
+  // DrvFS without metadata reports mode 0777 even after chmod(0600). Execute
+  // the real atomic publisher on Linux tmpfs/ext4, then return fixture evidence
+  // to the Windows harness. Feed stdin to avoid Windows -c quote translation.
+  const relative = path.relative(path.resolve(os.tmpdir()), path.resolve(temp));
+  assert.ok(/^inventory-(trend-ack|guard-journal-only)-[A-Za-z0-9]+$/.test(relative));
+  const mounted = temp.replace(/^([A-Za-z]):/, (_match, drive) => `/mnt/${drive.toLowerCase()}`).replaceAll('\\', '/');
+  const isolated = script.replaceAll(`'${mounted}/bin'`, '"$fixture_root/bin"').replaceAll(`'${mounted}'`, '"$fixture_root"');
+  const input = [
+    'set -eu',
+    `windows_fixture='${mounted}'`,
+    'fixture_root=$(mktemp -d /tmp/inventory-guard-fixture-XXXXXXXX)',
+    'finish_fixture() {',
+    '  fixture_status=$?',
+    '  trap - EXIT',
+    '  cd /',
+    '  cp -R -- "$fixture_root/." "$windows_fixture/" || fixture_status=1',
+    '  case "$fixture_root" in /tmp/inventory-guard-fixture-*) rm -rf -- "$fixture_root" ;; *) exit 99 ;; esac',
+    '  exit "$fixture_status"',
+    '}',
+    'trap finish_fixture EXIT',
+    'cp -R -- "$windows_fixture/." "$fixture_root/"',
+    isolated,
+    '',
+  ].join('\n');
+  return spawnSync('wsl.exe', ['--cd', '/', '--exec', '/bin/bash', '--noprofile', '--norc'], {
+    input, encoding: 'utf8', timeout: 60_000,
+  });
+}
+
+// The shell fixture writes a real, hash-bound marker so its exit trap exercises
+// the copied production publisher with the same contract as pipeline_marker.
+const markerFixtureScript = String.raw`
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+fs.appendFileSync('marker-args.ndjson', JSON.stringify(args) + '\n');
+if (args[0] === 'write') {
+  const value = flag => args[args.indexOf(flag) + 1];
+  const status = value('--status');
+  const evidence = args.flatMap((arg, index) => {
+    if (arg !== '--evidence') return [];
+    const file = path.resolve(args[index + 1]);
+    const bytes = fs.readFileSync(file);
+    return [{path: file, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length}];
+  });
+  const file = path.join(value('--root'), value('--date'), value('--stage') + '.json');
+  fs.mkdirSync(path.dirname(file), {recursive: true});
+  fs.writeFileSync(file, JSON.stringify({stage: value('--stage'), runDate: value('--date'),
+    businessDate: value('--business-date'), status, ok: ['done', 'warning'].includes(status), evidence}) + '\n');
+}
+`;
 
 let checks = 0;
 const check = (name, fn) => {
@@ -254,6 +311,19 @@ check('inventoryTrend ack and cache postconditions fail closed without retries',
   try {
     for (const dir of setupDirs) fs.mkdirSync(dir, {recursive: true});
     fs.writeFileSync(path.join(temp, 'scripts', 'cloud_daily_inventory_replenishment_guard.sh'), guard);
+    fs.copyFileSync(
+      path.resolve('scripts', 'inventory', 'daily_inventory_version_publisher.mjs'),
+      path.join(temp, 'scripts', 'inventory', 'daily_inventory_version_publisher.mjs')
+    );
+    fs.copyFileSync(path.resolve('lib', 'inventory_journal_discovery.mjs'), path.join(temp, 'lib', 'inventory_journal_discovery.mjs'));
+    fs.copyFileSync(
+      path.resolve('lib', 'atomic_file_publish.mjs'),
+      path.join(temp, 'lib', 'atomic_file_publish.mjs')
+    );
+    fs.copyFileSync(
+      path.resolve('lib', 'cross_process_ticket_lock.mjs'),
+      path.join(temp, 'lib', 'cross_process_ticket_lock.mjs')
+    );
     fs.writeFileSync(path.join(temp, 'scripts', 'lib', 'shared_lock.sh'),
       'prepare_shared_lock_file(){ mkdir -p "$(dirname "$1")"; touch "$1"; }\n');
     fs.writeFileSync(path.join(temp, 'lib', 'durable_inventory_write.mjs'), `
@@ -305,7 +375,7 @@ fs.writeFileSync(output + '.tmp', JSON.stringify({
 }) + '\\n');
 fs.renameSync(output + '.tmp', output);
 `);
-    fs.writeFileSync(path.join(temp, 'scripts', 'pipeline_marker.mjs'), 'process.exit(0);\n');
+    fs.writeFileSync(path.join(temp, 'scripts', 'pipeline_marker.mjs'), markerFixtureScript);
     fs.writeFileSync(path.join(temp, 'scripts', 'validate_daily_operating_refresh.mjs'), 'process.exit(0);\n');
     const ack = {
       terminal: JSON.stringify({ok: true, section: 'inventoryTrend', generatedAt: '', terminal: true}),
@@ -359,7 +429,7 @@ fs.renameSync(output + '.tmp', output);
       fs.rmSync(countFile, {force: true});
       fs.rmSync(path.join(temp, 'phase.log'), {force: true});
       const before = fs.readFileSync(trendFile);
-      const run = spawnSync('bash', ['-lc', [
+      const run = runFixtureShell([
         `cd '${wslTemp}' &&`,
         'env',
         'SHEIN_BI_ROOT=.',
@@ -381,7 +451,7 @@ fs.renameSync(output + '.tmp', output);
         'SHEIN_TEST_PHASE_FILE=phase.log',
         `PATH='${wslBin}':"$PATH"`,
         'bash scripts/cloud_daily_inventory_replenishment_guard.sh',
-      ].join(' ')], {encoding: 'utf8'});
+      ].join(' '), temp);
       const calls = fs.existsSync(countFile)
         ? Number.parseInt(fs.readFileSync(countFile, 'utf8').trim(), 10)
         : 0;
@@ -703,7 +773,7 @@ match('business date is exact previous day', guard,
   /BUSINESS_DATE="\$\{SHEIN_BI_INVENTORY_BUSINESS_DATE:-[\s\S]*EXPECTED_BUSINESS_DATE=/,
   'runDate/businessDate drift must fail closed');
 match('inventory mutex contention is retryable not success', guard,
-  /if ! flock -n 9; then[\s\S]*exit 75/,
+  /if ! flock (-n|-w [^;]+) 9; then[\s\S]*exit 75/,
   'lock contention must never produce a false done marker');
 match('done marker binds plan and result evidence', guard,
   /write_inventory_marker\(\)[\s\S]*--evidence "\$PLAN"[\s\S]*--evidence "\$RESULT"/,
@@ -783,7 +853,7 @@ match('deadline prevents executor dispatch', guard,
   /run deadline reached before executor dispatch; no inventory request was submitted[\s\S]*exit 76/,
   'no new inventory batch may start after the reserved window expires');
 match('platform idempotency survives plan evidence refresh', executor,
-  /logicalActionKey = stableInventoryHash\(\{[\s\S]*runDate: plan\.date[\s\S]*target: approvedTarget[\s\S]*actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET'[\s\S]*policyVersion: plan\.policyVersion[\s\S]*authorizationId:/,
+  /logicalActionKey = (stableInventoryHash|inventoryLogicalActionKey)\(\{[\s\S]*runDate: plan\.date[\s\S]*(target|targetUsableInventory): approvedTarget[\s\S]*policyVersion: plan\.policyVersion[\s\S]*authorizationId:/,
   'the same logical daily action must reuse its SHEIN idempotency key after a crash');
 match('recovery lookup cannot be bypassed by target or authorization drift', executor,
   /acquireCrossProcessTicketLock\(lockFile[\s\S]*discoverInventoryJournalFiles\(journalFile,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories[\s\S]*?\}\)[\s\S]*readInventoryIntentJournals\(freshJournalFiles,\s*\{[\s\S]*?maxRunDate:\s*today[\s\S]*?allowMultiplePendingByScope:\s*true[\s\S]*?\}\)[\s\S]*pendingByScope\.get\(recoveryScopeKey\)[\s\S]*activeIntent\s*=\s*\{/,
@@ -865,8 +935,11 @@ check('journal-only crash recovery bypasses result and planning', () => {
   const runtime = path.join(temp, 'runtime');
   const runDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date());
   const businessDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date(Date.now() - 86_400_000));
-  const planFile = path.join(runtime, 'plans', `daily-inventory-replenishment-${runDate}.json`);
-  const resultFile = path.join(runtime, 'results', `daily-inventory-replenishment-${runDate}.json`);
+  const commandId = `morning:${runDate}`;
+  const commandHash = crypto.createHash('sha256').update(commandId).digest('hex');
+  const runDir = path.join(runtime, 'runs', runDate, commandHash);
+  const planFile = path.join(runDir, 'plans', `daily-inventory-replenishment-${runDate}.json`);
+  const resultFile = path.join(runDir, 'results', `daily-inventory-replenishment-${runDate}.json`);
   const journalFile = `${resultFile}.journal.ndjson`;
   const executorArgsFile = path.join(temp, 'executor-args.json');
   const markerArgsFile = path.join(temp, 'marker-args.ndjson');
@@ -880,6 +953,19 @@ check('journal-only crash recovery bypasses result and planning', () => {
       path.dirname(resultFile),
     ]) fs.mkdirSync(dir, {recursive: true});
     fs.writeFileSync(path.join(temp, 'scripts', 'cloud_daily_inventory_replenishment_guard.sh'), guard);
+    fs.copyFileSync(
+      path.resolve('scripts', 'inventory', 'daily_inventory_version_publisher.mjs'),
+      path.join(temp, 'scripts', 'inventory', 'daily_inventory_version_publisher.mjs')
+    );
+    fs.copyFileSync(path.resolve('lib', 'inventory_journal_discovery.mjs'), path.join(temp, 'lib', 'inventory_journal_discovery.mjs'));
+    fs.copyFileSync(
+      path.resolve('lib', 'atomic_file_publish.mjs'),
+      path.join(temp, 'lib', 'atomic_file_publish.mjs')
+    );
+    fs.copyFileSync(
+      path.resolve('lib', 'cross_process_ticket_lock.mjs'),
+      path.join(temp, 'lib', 'cross_process_ticket_lock.mjs')
+    );
     fs.writeFileSync(path.join(temp, 'scripts', 'lib', 'shared_lock.sh'), 'prepare_shared_lock_file(){ mkdir -p "$(dirname "$1")"; touch "$1"; }\n');
     fs.writeFileSync(path.join(temp, 'lib', 'durable_inventory_write.mjs'), `
 import fs from 'node:fs/promises';
@@ -933,19 +1019,16 @@ const value = flag => args[args.indexOf(flag) + 1];
 const plan = JSON.parse(fs.readFileSync(value('--plan'), 'utf8'));
 const journal = fs.readFileSync(value('--out')+'.journal.ndjson', 'utf8');
 const closed = journal.includes('readback_matched');
-const result = {planHash:plan.payloadHash,execute:true,executionMode:'automatic',results:[closed
+const result = {planHash:plan.payloadHash,execute:true,executionMode:'automatic',results:[{...plan.actionable[0], ...(closed
   ? {state:'skipped_target_already_matched',before:{totalUsableInventory:10},targetUsableInventory:10}
-  : {state:'submitted_but_readback_pending'}]};
+  : {state:'submitted_but_readback_pending'})}]};
 const output = value('--out');
 const temporary = output + '.tmp';
 fs.writeFileSync(temporary, JSON.stringify(result) + '\\n');
 fs.renameSync(temporary, output);
 if (mode === 'fresh-pending') process.exit(1);
 `);
-    fs.writeFileSync(path.join(temp, 'scripts', 'pipeline_marker.mjs'), `
-import fs from 'node:fs';
-fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\\n');
-`);
+    fs.writeFileSync(path.join(temp, 'scripts', 'pipeline_marker.mjs'), markerFixtureScript);
     fs.writeFileSync(path.join(temp, 'scripts', 'validate_daily_operating_refresh.mjs'), 'process.exit(0);\n');
     fs.writeFileSync(planFile, JSON.stringify({
       schemaVersion: 'daily-inventory-replenishment-plan/v1',
@@ -953,13 +1036,23 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
       payloadHash: 'a'.repeat(64),
       executable: true,
       blockers: [],
-      actionable: [{storeKey: 'ZZ', skc: 'ZZ-SKC', skuCode: 'ZZ-SKU'}],
+      actionable: [{storeKey: 'ZZ', skc: 'ZZ-SKC', skuCode: 'ZZ-SKU', targetUsableInventory: 10}],
     }));
     fs.writeFileSync(journalFile, `${JSON.stringify({kind:'intent',intentId:'intent-1',logicalActionKey:'logical-1'})}\n`);
     const wslTemp = temp
       .replace(/^([A-Za-z]):/, (_match, drive) => `/mnt/${drive.toLowerCase()}`)
       .replaceAll('\\', '/');
-    const runGuard = mode => spawnSync('bash', ['-lc', [
+    const runGuard = mode => {
+      // These are independent crash fixtures sharing one shell harness. Reset
+      // only their previous publication before changing the source tuple;
+      // otherwise the real same-command replay correctly bypasses execution.
+      for (const output of [path.join(runtime, 'results'), path.join(runtime, 'versions'),
+        path.join(runDir, 'markers'), journalFile + '.sealed.json']) {
+        const relative = path.relative(path.resolve(temp), path.resolve(output));
+        assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+        fs.rmSync(output, {recursive: true, force: true});
+      }
+      return runFixtureShell([
       `cd '${wslTemp}' &&`,
       'env',
       'SHEIN_BI_ROOT=.',
@@ -971,16 +1064,15 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
       'SHEIN_BI_INVENTORY_MAX_ROWS=10',
       `SHEIN_TEST_INVENTORY_EXECUTOR_MODE=${mode}`,
       'bash scripts/cloud_daily_inventory_replenishment_guard.sh',
-    ].join(' ')], {
-      encoding: 'utf8',
-    });
+      ].join(' '), temp);
+    };
     const run = runGuard('default');
     assert.equal(run.status, 2, `journal-only recovery must converge as an auditable warning without replay\nstdout=${run.stdout}\nstderr=${run.stderr}`);
     assert.match(run.stdout, /durable inventory journal requires lifecycle recovery pending=1 readbackMatched=0/);
     assert.match(run.stdout, /"state":\s*"completed_with_warning"/);
     const executorArgs = JSON.parse(fs.readFileSync(executorArgsFile, 'utf8'));
     assert.ok(executorArgs.includes('--reconcile-pending-only'));
-    assert.equal(executorArgs[executorArgs.indexOf('--plan') + 1], `runtime/plans/daily-inventory-replenishment-${runDate}.json`);
+    assert.equal(executorArgs[executorArgs.indexOf('--plan') + 1], `runtime/runs/${runDate}/${commandHash}/plans/daily-inventory-replenishment-${runDate}.json`);
     const markerCalls = fs.readFileSync(markerArgsFile, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
     assert.ok(markerCalls.every(args => args[0] !== 'require'), 'pipeline markers must not gate already-submitted intent readback');
 
@@ -1004,7 +1096,7 @@ fs.appendFileSync('marker-args.ndjson', JSON.stringify(process.argv.slice(2))+'\
       execute: true,
       executionMode: 'automatic',
       generatedAt: '2026-08-25T00:00:00.000Z',
-      results: [{state: 'submitted_but_readback_pending'}],
+      results: [{storeKey: 'ZZ', skc: 'ZZ-SKC', skuCode: 'ZZ-SKU', targetUsableInventory: 10, state: 'submitted_but_readback_pending'}],
     };
     const pendingJournal = `${JSON.stringify({kind:'intent',intentId:'intent-1',logicalActionKey:'logical-1'})}\n`;
     fs.writeFileSync(journalFile, pendingJournal);

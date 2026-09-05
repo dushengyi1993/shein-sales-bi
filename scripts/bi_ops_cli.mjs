@@ -182,6 +182,7 @@ function parseArgs(argv) {
     goodsId: '',
     goodsIds: [],
     preRequestId: '',
+    requestId: '',
     packageNo: [],
     deliveryNo: '',
     docId: '',
@@ -190,6 +191,12 @@ function parseArgs(argv) {
     bodyFile: '',
     performanceDate: '',
     knowledgeCacheDir: process.env.SHEIN_BI_KNOWLEDGE_CACHE_DIR || DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR,
+    date: '',
+    commandId: '',
+    force: false,
+    recheck: false,
+    dryRun: false,
+    maxRows: 1000,
   };
   const rest = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -285,6 +292,7 @@ function parseArgs(argv) {
     else if (a === '--goods-id') args.goodsId = String(argv[++i] || '').trim();
     else if (a === '--goods-ids') args.goodsIds.push(...splitList(argv[++i]));
     else if (a === '--pre-request-id') args.preRequestId = String(argv[++i] || '').trim();
+    else if (a === '--request-id' || a === '--request-key') args.requestId = String(argv[++i] || '').trim();
     else if (a === '--package-no' || a === '--package-nos') args.packageNo.push(...splitList(argv[++i]));
     else if (a === '--delivery-no') args.deliveryNo = String(argv[++i] || '').trim();
     else if (a === '--doc-id' || a === '--docId') args.docId = String(argv[++i] || '').trim();
@@ -310,6 +318,12 @@ function parseArgs(argv) {
       if (a === '--section') args.section = rawValue.trim().toLowerCase();
       else if (!args.section && values.length === 1) args.section = values[0].toLowerCase();
     }
+    else if (a === '--date') args.date = String(argv[++i] || '').trim();
+    else if (a === '--command-id' || a === '--commandId') args.commandId = String(argv[++i] || '').trim();
+    else if (a === '--force') args.force = true;
+    else if (a === '--recheck') args.recheck = true;
+    else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--max-rows') args.maxRows = Number(argv[++i] || 1000);
     else if (a === '--help' || a === '-h') {
       args.command = 'help';
     } else if (!args.command) {
@@ -371,6 +385,7 @@ function help() {
 Usage:
   node scripts/bi_ops_cli.mjs login --username <账号> --password <密码>
   node scripts/bi_ops_cli.mjs doctor
+  node scripts/bi_ops_cli.mjs maintain-inventory [--date YYYY-MM-DD] [--command-id <id>] [--force] [--dry-run]
   node scripts/bi_ops_cli.mjs knowledge-status
   node scripts/bi_ops_cli.mjs version
   node scripts/bi_ops_cli.mjs update
@@ -3174,6 +3189,36 @@ async function main() {
       allowTransientCacheFallback: true,
     });
   }
+  if (['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory'].includes(args.command)) {
+    const commandId = args.commandId || crypto.randomUUID();
+    const receiptFile = path.join(path.dirname(args.sessionFile), 'inventory-commands', crypto.createHash('sha256').update(commandId).digest('hex') + '.json');
+    let prior = null;
+    try { prior = JSON.parse(await fs.readFile(receiptFile, 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const payload = {
+      date: args.date || prior?.request?.date || new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date()),
+      commandId,
+      dryRun: args.mode === 'dry-run' || args.dryRun === true,
+      maxRows: args.maxRows || 1000,
+    };
+    if (prior && JSON.stringify(prior.request) !== JSON.stringify(payload)) throw new Error('This commandId already belongs to a different inventory request');
+    // Save and display identity before network dispatch, so a disconnected
+    // caller can resume the exact same request without creating another job.
+    if (!prior) await writeJsonFileAtomic(receiptFile, {commandId, request: payload, status: 'dispatch_pending'}, {mode: 0o600});
+    process.stderr.write(`Inventory commandId=${commandId}; receipt=${receiptFile}\n`);
+    const {json} = await request(args, '/api/inventory-replenishment-run', {
+      method: 'POST',
+      body: payload,
+      allowJsonFailure: true,
+    });
+    await writeJsonFileAtomic(receiptFile, {commandId, request: payload, response: json}, {mode: 0o600});
+    if (args.outputFile) {
+      await writeJsonFileAtomic(args.outputFile, json);
+    }
+    print(json, !args.json);
+    if (!json.ok) process.exitCode = 1;
+    return;
+  }
   if (args.command === 'doctor') {
     const report = await runDoctor(args);
     print(report, !args.json);
@@ -3365,11 +3410,7 @@ async function main() {
     if (!args.taskId) throw new Error('authorize-duplicate-publish requires --task-id');
     const store = [...new Set([...(args.writeStores || []), ...(args.stores || [])])][0] || '';
     if (!store) throw new Error('authorize-duplicate-publish requires --store <target store>');
-    if (!args.skcList.length) throw new Error('authorize-duplicate-publish requires --skc <existing SKC>');
-    if (!args.note) throw new Error('authorize-duplicate-publish requires --note <business reason>');
-    if (args.confirm !== ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT) {
-      throw new Error(`authorize-duplicate-publish requires --confirm ${ADDITIONAL_DUPLICATE_PUBLISH_CONFIRM_TEXT}`);
-    }
+    const requestId = args.requestId || args.idempotencyKey || crypto.randomUUID();
     const {json} = await request(args, '/api/link-ops-tasks', {
       method: 'PATCH',
       body: {
@@ -3377,13 +3418,14 @@ async function main() {
         event: 'authorize_additional_same_code_link_cli',
         duplicatePublishOverride: {
           store,
-          existingSkcs: args.skcList,
-          reason: args.note,
-          confirmation: args.confirm,
+          existingSkcs: args.skcList || [],
+          reason: args.note || '再上/新上业务意图',
+          confirmation: args.confirm || 'YES',
+          requestId,
         },
       },
     });
-    print({ok: true, task: json.task, data: json.data});
+    print({ok: true, task: json.task, data: json.data, requestId});
     return;
   }
   if (args.command === 'preflight') {

@@ -9,6 +9,7 @@ import {
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   computeInventoryOverwriteQuantity,
+  INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
   decideDailyInventoryReplenishment,
   resolveInventoryShelfStatus,
   stableInventoryHash,
@@ -98,12 +99,21 @@ assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherS
 });
 assert.deepEqual(decideDailyInventoryReplenishment({shelfStatusCode: '3', sameStoreOnShelfLinkExists: true, otherStoreOnShelfWithStock: true, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 0, policy}).reason, 'sold_out_has_same_store_on_shelf_link');
 assert.equal(decideDailyInventoryReplenishment({shelfStatusCode: '3', otherStoreOnShelfWithStock: false, skuCount: 1, platformUsableInventory: 0, etSellableInventory: 40, etSnapshotCurrentDay: true, c7SaleCount: 1, policy}).targetUsableInventory, 10);
-assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1}), 101);
-assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 100, totalUsableInventory: 100, totalLockedQuantity: 0}), 10);
-assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 0}), 10);
-assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 2}), 12);
-assert.equal(computeInventoryOverwriteQuantity(0, {totalInventoryQuantity: 12, totalUsableInventory: 10, totalLockedQuantity: 2}), 2);
-assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8}), 100);
+// Legacy locked-only v1 behavior
+assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1}, INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION), 101);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 100, totalUsableInventory: 100, totalLockedQuantity: 0}, INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION), 10);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 0}, INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION), 10);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 2}, INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION), 12);
+assert.equal(computeInventoryOverwriteQuantity(0, {totalInventoryQuantity: 12, totalUsableInventory: 10, totalLockedQuantity: 2}, INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION), 2);
+assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8}, INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION), 100);
+
+// Current ordinary-plus-temporary v2 behavior with explicit tempLock and conservation
+assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 1, totalTempLockQuantity: 1}), 102);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 100, totalUsableInventory: 100, totalLockedQuantity: 0, totalTempLockQuantity: 0}), 10);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 95, totalLockedQuantity: 0, totalTempLockQuantity: 1}), 11);
+assert.equal(computeInventoryOverwriteQuantity(10, {totalInventoryQuantity: 96, totalUsableInventory: 94, totalLockedQuantity: 2, totalTempLockQuantity: 0}), 12);
+assert.equal(computeInventoryOverwriteQuantity(0, {totalInventoryQuantity: 12, totalUsableInventory: 10, totalLockedQuantity: 2, totalTempLockQuantity: 0}), 2);
+assert.equal(computeInventoryOverwriteQuantity(100, {totalInventoryQuantity: 10, totalUsableInventory: 8, totalLockedQuantity: 0, totalTempLockQuantity: 2}), 102);
 const allocations = allocateLowEtInventory([
   {storeKey: 'A', skc: '1', c7Exposure: 500, c7GoodsVisitors: 10, c7SaleCount: 0},
   {storeKey: 'B', skc: '2', c7Exposure: 400, c7GoodsVisitors: 10, c7SaleCount: 0},
@@ -204,7 +214,7 @@ assert.equal(livePolicy.execution.automaticExecution.enabled, true);
 assert.equal(livePolicy.lowEtFastGuard.enabled, true);
 assert.equal(livePolicy.lowEtFastGuard.decreaseOnly, true);
 assert.equal(livePolicy.execution.automaticExecution.authorizationByContext.cloud_et_low_inventory_guard, 'owner-automatic-et-low-inventory-20260806-v1');
-assert.match(guardScript, /flock -n 9/);
+assert.match(guardScript, /flock (-n|-w [^;]+) 9/);
 assert.match(guardScript, /ensure_links_data_fresh/);
 assert.match(guardScript, /api\/bi\/section\/linksData\?refresh=1/);
 assert.match(guardScript, /refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=/);

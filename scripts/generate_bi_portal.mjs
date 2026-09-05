@@ -21,7 +21,7 @@ import {
 } from '../lib/bi_section_cache.mjs';
 import {resolveBiPortalDataMode} from '../lib/bi_portal_data_mode.mjs';
 import {enrichProductDisplayNames} from '../lib/product_display_name.mjs';
-import {getAliasConfig} from '../lib/product_sku_normalizer.mjs';
+import {getAliasConfig, getCatalogConfig, normalizeGoodsSnDetailed} from '../lib/product_sku_normalizer.mjs';
 import {mergeRankedMarketingPriceLead} from '../lib/marketing_price_lead_merge.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -789,8 +789,9 @@ WITH product_state_overlay AS (
       state.is_out_shelf,
       state.event_at,
       state.source_receipt_id,
-      nullif(state.product_context->>'supplierCode','') AS standard_goods_sn,
-      nullif(state.product_context->>'rawSupplierCode','') AS raw_goods_sn,
+      dim.product_canonical_sn(nullif(state.product_context->>'supplierCode','')) AS standard_goods_sn,
+      dim.product_canonical_sn(nullif(state.product_context->>'supplierCode','')) AS canonical_goods_sn,
+      coalesce(nullif(state.product_context->>'rawSupplierCode',''), nullif(state.product_context->>'supplierCode','')) AS raw_goods_sn,
       nullif(state.product_context->>'productName','') AS product_name_cn,
       nullif(state.product_context->>'spu','') AS spu,
       nullif(state.product_context->>'firstShelfTime','') AS first_shelf_time,
@@ -2546,8 +2547,9 @@ product_state_overlay AS (
       state.is_out_shelf,
       state.event_at,
       state.source_receipt_id,
-      nullif(state.product_context->>'supplierCode','') AS standard_goods_sn,
-      nullif(state.product_context->>'rawSupplierCode','') AS raw_goods_sn,
+      dim.product_canonical_sn(nullif(state.product_context->>'supplierCode','')) AS standard_goods_sn,
+      dim.product_canonical_sn(nullif(state.product_context->>'supplierCode','')) AS canonical_goods_sn,
+      coalesce(nullif(state.product_context->>'rawSupplierCode',''), nullif(state.product_context->>'supplierCode','')) AS raw_goods_sn,
       nullif(state.product_context->>'productName','') AS product_name_cn,
       nullif(state.product_context->>'spu','') AS spu,
       nullif(state.product_context->>'firstShelfTime','') AS first_shelf_time,
@@ -2609,7 +2611,8 @@ link_health_base AS (
     l.store_key,
     l.shop_name,
     dim.product_canonical_sn(l.standard_goods_sn) AS standard_goods_sn,
-    l.raw_goods_sn,
+    dim.product_canonical_sn(l.standard_goods_sn) AS canonical_goods_sn,
+    coalesce(nullif(l.raw_goods_sn,''), l.standard_goods_sn) AS raw_goods_sn,
     l.spu,
     l.skc,
     l.sale_name,
@@ -2814,7 +2817,7 @@ links AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+      link_date, store_key, group_key, standard_goods_sn, canonical_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
       nullif(image_url,'') AS image_url,
       first_shelf_time, created_time, shelf_time, expect_shelf_time,
       visible_inventory_date,
@@ -2857,7 +2860,7 @@ duplicate_links AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+      link_date, store_key, group_key, standard_goods_sn, canonical_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
       nullif(image_url,'') AS image_url,
       first_shelf_time, created_time, shelf_time, expect_shelf_time,
       visible_inventory_date,
@@ -2895,7 +2898,7 @@ duplicate_links AS (
 ),
 store_links_ranked AS (
   SELECT
-    link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+    link_date, store_key, group_key, standard_goods_sn, canonical_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
     nullif(image_url,'') AS image_url,
     first_shelf_time, created_time, shelf_time, expect_shelf_time,
     visible_inventory_date,
@@ -2930,7 +2933,7 @@ store_links AS (
   SELECT coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb) AS data
   FROM (
     SELECT
-      link_date, store_key, group_key, standard_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
+      link_date, store_key, group_key, standard_goods_sn, canonical_goods_sn, raw_goods_sn, skc, spu, sale_name, product_name_cn,
       image_url,
       first_shelf_time, created_time, shelf_time, expect_shelf_time,
       visible_inventory_date,
@@ -3975,6 +3978,8 @@ inventory_depletion_products AS (
     )
     SELECT
       dim.product_canonical_sn(standard_goods_sn) AS standard_goods_sn,
+      dim.product_canonical_sn(standard_goods_sn) AS canonical_goods_sn,
+      standard_goods_sn AS raw_goods_sn,
       match_key,
       coalesce(standard_goods_sn_list, standard_goods_sn) AS standard_goods_sn_list,
       NULL::text AS raw_goods_sn_list,
@@ -5791,8 +5796,40 @@ function buildProductAliasSearch(){
   }
   return out;
 }
+function buildProductCanonicalSnMap(data = {}) {
+  // Use the same registry/catalog and resolver as the existing normalizer.
+  // This exact lookup is a compatibility bridge for old rows without SQL canonical fields.
+  const out = Object.create(null);
+  const catalog = getCatalogConfig();
+  const standards = new Set([...(catalog.standards || []), ...(catalog.extraConfirmedStandards || [])]);
+  const candidates = new Set(standards);
+  for (const entry of getAliasConfig().aliases || []) {
+    if ((entry.status && entry.status !== 'active') || entry.needsReview || entry.ignored) continue;
+    candidates.add(entry.canonical);
+    for (const alias of entry.aliases || []) {
+      if (typeof alias === 'string') candidates.add(alias);
+      else if (!alias?.requiresAnyTitleKeyword?.length) candidates.add(alias?.value);
+    }
+  }
+  for (const rows of [data.storeLinks, data.links, data.productStateOverlay, data.inventoryDepletion?.products]) {
+    for (const row of rows || []) {
+      candidates.add(row.standard_goods_sn || row.goods_sn || row.raw_goods_sn);
+    }
+  }
+  for (const value of candidates) {
+    const sn = String(value || '').trim();
+    if (!sn) continue;
+    if (standards.has(sn)) { out[sn] = sn; continue; }
+    // No display-name or title-dependent inference in a global identity map.
+    const result = normalizeGoodsSnDetailed(sn);
+    if (result.matched && !result.ignored && !result.needsReview && standards.has(result.canonical)) {
+      out[sn] = result.canonical;
+    }
+  }
+  return out;
+}
 function attachProductAliasSearch(data){
-  return {...(data || {}), productAliasSearch: buildProductAliasSearch()};
+  return {...(data || {}), productAliasSearch: buildProductAliasSearch(), productCanonicalSnMap: buildProductCanonicalSnMap(data)};
 }
 
 const DEFAULT_STORE_OWNER_GROUPS = Object.freeze([

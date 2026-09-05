@@ -118,11 +118,23 @@ assert.match(slice, /^TasksMax=512$/m);
 const hostWrapper = read('scripts/run_host_heavy_job.sh');
 const sessionManagerCoordinator = read('scripts/run_cloud_session_manager_job.sh');
 assert.ok(
-  hostWrapper.indexOf('exec 9<>"$HOST_LOCK"') < hostWrapper.indexOf('exec 8<>"$PROJECT_LOCK"')
+  hostWrapper.indexOf('exec 9<>"\$HOST_LOCK"') < hostWrapper.indexOf('exec 8<>"$PROJECT_LOCK"')
   && hostWrapper.indexOf('exec 8<>"$PROJECT_LOCK"') < hostWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"')
   && hostWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"') < hostWrapper.indexOf('check_host_resource_pressure.mjs'),
   'lock order must remain host -> project -> domain -> pressure -> command',
 );
+assert.match(hostWrapper, /flock -s -w "\$CURRENT_LOCK_WAIT" 9/,
+  'host lock must be acquired shared across independent jobs');
+assert.match(hostWrapper, /flock -s -w "\$CURRENT_LOCK_WAIT" 8/,
+  'project lock must be acquired shared across independent domains');
+assert.match(hostWrapper, /flock -w "\$CURRENT_LOCK_WAIT" 7/,
+  'domain lock must remain exclusive for the domain');
+assert.match(hostWrapper, /if \[\[ "\$RESOURCE_CLASS" != "openapi" \]\]; then[\s\S]*exec 9<>"\$HOST_LOCK"/,
+  'openapi jobs must not acquire host or project lock');
+assert.match(hostWrapper, /shein-browser-read-0\.lock/,
+  'browser jobs must share capacity slot 0 with run_host_browser_read_job.sh');
+assert.match(hostWrapper, /shein-browser-read-1\.lock/,
+  'browser jobs must share capacity slot 1 with run_host_browser_read_job.sh');
 assert.match(hostWrapper, /--deadline-at/);
 assert.match(hostWrapper, /--deadline-epoch/,
   'the morning inventory lane needs an immutable absolute deadline');
@@ -140,14 +152,16 @@ assert.ok(
   hostWrapper.indexOf('resolve_effective_deadline') < hostWrapper.indexOf('prepare_shared_lock_file'),
   'deadline resolution must precede project/domain lock preparation');
 assert.ok(
-  hostWrapper.indexOf('resolve_effective_deadline') < hostWrapper.indexOf('exec 9<>"$HOST_LOCK"'),
+  hostWrapper.indexOf('resolve_effective_deadline') < hostWrapper.indexOf('exec 9<>"\$HOST_LOCK"'),
   'deadline resolution must precede host lock acquisition');
 assert.match(hostWrapper, /defer_lock_busy\(\)/,
   'lock contention must report deadline elapsed when the clamped wait reaches the cutoff');
 assert.match(hostWrapper, /CHILD_FD_CLEAN_COMMAND=\(/,
   'the child must run through one descriptor-sanitizing command path');
-assert.match(hostWrapper, /exec 7>&- 8>&- 9>&-/,
+assert.match(hostWrapper, /exec 6>&- 7>&- 8>&- 9>&-/,
   'the child copy of all shared lock descriptors must be closed');
+assert.match(hostWrapper, /release_locks\(\) \{[\s\S]*exec 6>&- 2>\/dev\/null[\s\S]*exec 7>&- 2>\/dev\/null[\s\S]*exec 8>&- 2>\/dev\/null[\s\S]*exec 9>&- 2>\/dev\/null/,
+  'release_locks must close slot 6 and locks 7, 8, 9');
 assert.match(hostWrapper, /"\$\{TIMEOUT_ARGS\[@\]\}" "\$\{CHILD_FD_CLEAN_COMMAND\[@\]\}" "\$@"/,
   'the timeout path must sanitize descriptors before executing the child');
 assert.match(hostWrapper, /"\$\{CHILD_FD_CLEAN_COMMAND\[@\]\}" "\$@"/,
@@ -210,11 +224,15 @@ if (hostFdBash.status === 0) {
     try {
       const scriptsLib = path.join(fdProbeRoot, 'scripts', 'lib');
       const hostLock = path.join(fdProbeRoot, 'host.lock');
+      const slot0 = path.join(fdProbeRoot, 'browser-0.lock');
+      const slot1 = path.join(fdProbeRoot, 'browser-1.lock');
       const childStarted = path.join(fdProbeRoot, 'child-started');
       const childPid = path.join(fdProbeRoot, 'child-pid');
       const secondStarted = path.join(fdProbeRoot, 'second-started');
       fs.mkdirSync(scriptsLib, {recursive: true});
       fs.writeFileSync(hostLock, '');
+      fs.writeFileSync(slot0, '');
+      fs.writeFileSync(slot1, '');
       fs.writeFileSync(path.join(scriptsLib, 'shared_lock.sh'), [
         '#!/usr/bin/env bash',
         'prepare_shared_lock_file() {',
@@ -227,6 +245,8 @@ if (hostFdBash.status === 0) {
       const probeEnv = {
         SHEIN_BI_ROOT: bashPath(fdProbeRoot),
         SHEIN_HOST_HEAVY_LOCK_FILE: bashPath(hostLock),
+        SHEIN_BROWSER_READ_SLOT_0: bashPath(slot0),
+        SHEIN_BROWSER_READ_SLOT_1: bashPath(slot1),
       };
       const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
       const runWithProbeEnv = (args, timeout) => {
@@ -318,9 +338,10 @@ for (const name of heavyUnits) {
   assert.match(content, /^Slice=shein-host-heavy-bi\.slice$/m, name);
   assert.match(content, /run_host_(?:heavy|browser_read)_job\.sh|run_cloud_(?:portal_section_queue|marketing_fallback)_slot\.sh|run_cloud_session_manager_job\.sh|cloud_order_closure_coordinator\.sh/, name);
   if (name === 'shein-bi-cloud-session-manager.service'
-    || name === 'shein-bi-db-backup.service') {
+    || name === 'shein-bi-db-backup.service'
+    || name === 'shein-bi-cloud-portal-section-queue.service') {
     assert.doesNotMatch(content, /^SuccessExitStatus=75$/m,
-      'session-manager and database backup deferrals must remain real failed unit results');
+      `${name} deferrals must remain real failed unit results instead of faking success`);
   } else {
     assert.match(content, /^SuccessExitStatus=75$/m, name);
   }
@@ -392,7 +413,7 @@ assert.match(browserReadWrapper, /shein-browser-read-1\.lock/);
 assert.match(browserReadWrapper, /PRESSURE_CLASS=browser-secondary/);
 assert.match(browserReadWrapper, /SHEIN_BI_HOST_RESOURCE_LANE=browser-read/);
 assert.ok(
-  browserReadWrapper.indexOf('exec 9<>"$HOST_LOCK"') < browserReadWrapper.indexOf('exec 8<>"$PROJECT_LOCK"')
+  browserReadWrapper.indexOf('exec 9<>"\$HOST_LOCK"') < browserReadWrapper.indexOf('exec 8<>"$PROJECT_LOCK"')
   && browserReadWrapper.indexOf('exec 8<>"$PROJECT_LOCK"') < browserReadWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"')
   && browserReadWrapper.indexOf('exec 7<>"$DOMAIN_LOCK"') < browserReadWrapper.indexOf('check_host_resource_pressure.mjs'),
   'browser read lock order must remain host -> project -> domain -> slot -> pressure',
@@ -641,72 +662,50 @@ assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC="\$\{SHEIN_
   'worker default productSalesDaily min runtime must match the unit');
 assert.match(portalQueueWorker, /PRODUCT_SALES_DAILY_TIMEOUT_SEC \+ 30 <= PRODUCT_SALES_DAILY_MIN_RUNTIME_SEC/,
   'productSalesDaily timeout must retain at least 30s for terminal evidence');
-const portalQueueConditionMatch = portalQueueUnit.match(
-  /^ExecCondition=\/usr\/bin\/bash -c '(.+)'$/m,
-);
-assert.ok(portalQueueConditionMatch, 'Portal queue unit must expose a parseable static schedule condition');
-assert.match(portalQueueUnit, /date \+%%H/,
-  'Portal queue unit must preserve systemd escaping for the hour format');
-assert.match(portalQueueUnit, /date \+%%M/,
-  'Portal queue unit must preserve systemd escaping for the minute format');
-const portalQueueCondition = portalQueueConditionMatch[1].replaceAll('%%', '%');
+assert.doesNotMatch(portalQueueUnit, /^ExecCondition=/m,
+  'the Portal queue unit must not gate admission with ExecCondition');
+assert.doesNotMatch(portalQueueUnit, /^SuccessExitStatus=75$/m,
+  'the Portal queue unit must not treat deferral as success');
+assert.match(portalQueueUnit, /^Restart=on-failure$/m,
+  'the Portal queue unit must restart on deferral/failure');
+assert.match(portalQueueUnit, /^RestartSec=60$/m,
+  'the Portal queue unit restart delay must be 60 seconds');
+assert.match(portalQueueUnit, /^TimeoutStartSec=2100$/m,
+  'the Portal queue unit timeout must be 2100 seconds');
 assert.match(portalQueueUnit, /run_cloud_portal_section_queue_slot\.sh/);
-assert.doesNotMatch(portalQueueUnit, /--deadline-next-hour/);
-assert.match(portalQueueSlot, /DEADLINE_MINUTE=14/);
-assert.match(portalQueueSlot, /DEADLINE_MINUTE=44/);
-assert.match(portalQueueSlot, /HEAVY_ALLOWED=0/);
-assert.match(portalQueueSlot, /HEAVY_ALLOWED=1/);
-assert.doesNotMatch(portalQueueSlot, /MAX_SECTIONS=1/,
-  'the managed slot must not retain the old one-section throughput cap');
-assert.match(portalQueueSlot, /DEADLINE_MINUTE=14[\s\S]*MAX_SECTIONS=8[\s\S]*HEAVY_ALLOWED=0/,
-  'the :02 slot must allow a bounded serial batch while remaining light-only');
+assert.match(portalQueueSlot, /RUN_BUDGET_SEC="\${SHEIN_BI_PORTAL_SECTION_QUEUE_RUN_BUDGET_SEC:-1800}"/);
+assert.match(portalQueueSlot, /RUN_BUDGET_SEC >= 120 && RUN_BUDGET_SEC <= 1800/);
+assert.match(portalQueueSlot, /DEADLINE_EPOCH=\$\(\(\s*\$\((date|gdate)\s+\+%s\)\s*\+\s*RUN_BUDGET_SEC\s*\)\)|DEADLINE_EPOCH=\$\(\(\s*\$\(date \+%s\) \+ RUN_BUDGET_SEC\s*\)\)/);
 assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1/);
-assert.match(portalQueueSlot, /daily_operating_refresh_active/);
-assert.doesNotMatch(portalQueueSlot, /case "\$HOUR" in\s+2\|3\|7\)/,
-  'the :02 slot must not retain obsolete hour-specific rejection');
-assert.match(portalQueueSlot, /HOUR == 1/,
-  'the slot itself must defense-in-depth reject the full 01:00 hour');
-assert.match(portalQueueSlot, /reason=full_hour_reserved/,
-  'the slot must retain an explicit full-hour reservation diagnostic');
-assert.match(portalQueueSlot, /MINUTE >= 1 && MINUTE <= 4/);
-assert.match(portalQueueSlot, /MINUTE >= 31 && MINUTE <= 34/);
+assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH="\$DEADLINE_EPOCH"/);
+assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS="\${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-8}"/);
+assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED=1/);
+assert.match(portalQueueSlot, /SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST=1/);
+assert.match(portalQueueSlot, /--domain portal-sections/);
+assert.match(portalQueueSlot, /--class materializer/);
 assert.match(portalQueueSlot, /--lock-wait-sec 0/);
+assert.match(portalQueueSlot, /--deadline-epoch "\$DEADLINE_EPOCH"/);
+assert.doesNotMatch(portalQueueSlot, /MINUTE >= 1 && MINUTE <= 4/);
+assert.doesNotMatch(portalQueueSlot, /MINUTE >= 31 && MINUTE <= 34/);
+assert.doesNotMatch(portalQueueSlot, /HOUR == 1/);
+assert.doesNotMatch(portalQueueSlot, /daily_operating_refresh_active/);
+assert.doesNotMatch(portalQueueSlot, /yield_to_daily_coordinator/);
 assert.match(portalQueueWorker, /for \(\(index=1; index<=MAX_SECTIONS; index\+=1\)\);/,
   'the section worker must consume the bounded batch serially');
-assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=\(profit homeRankings productSalesDaily rankings inventoryTrend\)/,
+assert.match(portalQueueWorker, /EXCLUDED_SECTIONS\+=(\(profit homeRankings productSalesDaily rankings inventoryTrend\))/,
   'the light slot must keep all five accounting-heavy sections excluded');
-const hostWrapperExec = portalQueueSlot.indexOf('exec "$ROOT/scripts/run_host_heavy_job.sh"');
-assert.ok(
-  hostWrapperExec > portalQueueSlot.indexOf('yield_to_daily_coordinator'),
-  'the daily coordinator guard must precede the host wrapper',
-);
 
-const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+const shellQuote = value => "'" + String(value).replaceAll("'", "'\\''") + "'";
 const toPosixPath = value => {
   const normalized = path.resolve(value).replaceAll('\\', '/');
   return /^[A-Za-z]:\//.test(normalized)
-    ? `/mnt/${normalized[0].toLowerCase()}${normalized.slice(2)}`
+    ? '/mnt/' + normalized[0].toLowerCase() + normalized.slice(2)
     : normalized;
 };
 
-assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
-assert.match(portalQueueWorker, /01:\*\)/,
-  'the worker must keep the full 01:00 hour blocked');
-assert.doesNotMatch(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/,
-  'the worker must not retain obsolete hour-specific :02 rejection');
-assert.match(portalQueueWorker, /\*:0\[1-4\]\|\*:3\[1-4\]\) SAFE_START=1/,
-  'the worker must allow the :02/:32 slot windows outside the special hours');
-
-// Execute the actual slot script with deterministic date/systemctl/host-wrapper
-// stubs. This catches a guard that is only present in an unused function, a
-// missing ET hour, and an active-path defer that happens after host execution.
-const bashProbe = spawnSync('bash', ['--version'], {encoding: 'utf8'});
-assert.equal(bashProbe.error, undefined,
-  'slot behavior contract requires bash to execute the shell entrypoint');
-
-// Execute both static schedule gates with deterministic date/queue stubs. The
-// worker must reach its queue-empty path only for the same cases accepted by
-// the unit condition; no cloud or Portal process is contacted here.
+// Dynamic regression: worker admits scheduled entry at arbitrary hours/minutes
+// when SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1 and deadline epoch is provided,
+// but rejects direct unscheduled entry.
 const portalScheduleBehaviorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-schedule-behavior-'));
 try {
   const portalScheduleBin = path.join(portalScheduleBehaviorRoot, 'bin');
@@ -721,40 +720,40 @@ try {
   fs.writeFileSync(portalScheduleDate, `#!/usr/bin/env bash
 set -Eeuo pipefail
 case "\${1:-}" in
-  +%H) printf '%s\\n' "\${SHEIN_TEST_SCHEDULE_HOUR:?}" ;;
-  +%M) printf '%s\\n' "\${SHEIN_TEST_SCHEDULE_MINUTE:?}" ;;
-  +%s) printf '0\\n' ;;
-  +%Y-%m-%dT%H) printf '2026-08-22T%s\\n' "\${SHEIN_TEST_SCHEDULE_HOUR:?}" ;;
-  -d) printf '9999\\n' ;;
+  +%H) printf '%s\n' "\${SHEIN_TEST_SCHEDULE_HOUR:?}" ;;
+  +%M) printf '%s\n' "\${SHEIN_TEST_SCHEDULE_MINUTE:?}" ;;
+  +%s) printf '0\n' ;;
+  +%Y-%m-%dT%H) printf '2026-08-22T%s\n' "\${SHEIN_TEST_SCHEDULE_HOUR:?}" ;;
+  -d) printf '9999\n' ;;
   *) exit 64 ;;
 esac
 `);
   fs.writeFileSync(path.join(portalScheduleLib, 'shared_lock.sh'), `#!/usr/bin/env bash
 prepare_shared_lock_file() {
-  mkdir -p "$(dirname "$1")"
-  : > "$1"
+  mkdir -p "\$(dirname "\$1")"
+  : > "\$1"
 }
 `);
   fs.writeFileSync(portalScheduleNode, `#!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "\${1:-}" == scripts/manage_bi_portal_section_queue.mjs ]] || exit 64
-printf '%s\\n' '{"counts":{"pending":0}}'
+printf '%s\n' '{"counts":{"pending":0}}'
 exit 75
 `);
   fs.writeFileSync(portalScheduleFlock, '#!/usr/bin/env bash\nexit 0\n');
 
-  const spawnScheduleProcess = (hour, minute, body) => spawnSync('bash', ['-c', [
+  const spawnScheduleProcess = (hour, minute, body, {scheduled = 1, deadlineEpoch = '9999'} = {}) => spawnSync('bash', ['-c', [
     'set -Eeuo pipefail',
-    `chmod +x ${shellQuote(toPosixPath(portalScheduleDate))} ${shellQuote(toPosixPath(portalScheduleNode))} ${shellQuote(toPosixPath(portalScheduleFlock))}`,
-    `export PATH=${shellQuote(toPosixPath(portalScheduleBin))}:"$PATH"`,
+    'chmod +x ' + shellQuote(toPosixPath(portalScheduleDate)) + ' ' + shellQuote(toPosixPath(portalScheduleNode)) + ' ' + shellQuote(toPosixPath(portalScheduleFlock)),
+    'export PATH=' + shellQuote(toPosixPath(portalScheduleBin)) + ':"$PATH"',
     'hash -r',
-    `export SHEIN_TEST_SCHEDULE_HOUR=${shellQuote(hour)}`,
-    `export SHEIN_TEST_SCHEDULE_MINUTE=${shellQuote(minute)}`,
-    `export SHEIN_BI_ROOT=${shellQuote(toPosixPath(portalScheduleBehaviorRoot))}`,
-    `export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=1`,
-     `export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE=14`,
-    `export SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS=1`,
-    `export SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE=${shellQuote(toPosixPath(portalScheduleLock))}`,
+    'export SHEIN_TEST_SCHEDULE_HOUR=' + shellQuote(hour),
+    'export SHEIN_TEST_SCHEDULE_MINUTE=' + shellQuote(minute),
+    'export SHEIN_BI_ROOT=' + shellQuote(toPosixPath(portalScheduleBehaviorRoot)),
+    'export SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED=' + shellQuote(scheduled),
+    'export SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH=' + shellQuote(deadlineEpoch),
+    'export SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS=1',
+    'export SHEIN_BI_PORTAL_SECTION_QUEUE_LOCK_FILE=' + shellQuote(toPosixPath(portalScheduleLock)),
     body,
   ].join('; ')], {
     cwd: path.dirname(portalScheduleWorker),
@@ -762,217 +761,136 @@ exit 75
     timeout: 30_000,
   });
 
-  const runPortalScheduleCase = ({label, hour, minute, expectedUnitExit, expectedWorkerExit}) => {
-    const unitConditionForCase = portalQueueCondition
-      .replace('$(date +%H)', hour)
-      .replace('$(date +%M)', minute);
-    const unitResult = spawnScheduleProcess(hour, minute,
-      `eval ${shellQuote(unitConditionForCase)}`);
-    assert.equal(unitResult.error, undefined, `${label}: unit condition failed to start`);
-    assert.equal(unitResult.status, expectedUnitExit,
-      `${label}: unexpected unit condition exit=${unitResult.status} condition=${portalQueueCondition} stdout=${unitResult.stdout} stderr=${unitResult.stderr}`);
-
+  const runPortalScheduleCase = ({label, hour, minute, scheduled = 1, deadlineEpoch = '9999'}, expectedWorkerExit) => {
     const workerResult = spawnScheduleProcess(hour, minute,
-      `exec bash ${shellQuote(toPosixPath(portalScheduleWorker))}`);
-    assert.equal(workerResult.error, undefined, `${label}: worker failed to start`);
+      'exec bash ' + shellQuote(toPosixPath(portalScheduleWorker)),
+      {scheduled, deadlineEpoch});
+    assert.equal(workerResult.error, undefined, label + ': worker failed to start');
     assert.equal(workerResult.status, expectedWorkerExit,
-      `${label}: unexpected worker exit=${workerResult.status} stdout=${workerResult.stdout} stderr=${workerResult.stderr}`);
+      label + ': unexpected worker exit=' + workerResult.status + ' stdout=' + workerResult.stdout + ' stderr=' + workerResult.stderr);
   };
 
-  for (const specialHour of ['02', '03', '07']) {
-    runPortalScheduleCase({
-      label: `${specialHour}:02 light window`, hour: specialHour, minute: '02',
-      expectedUnitExit: 0, expectedWorkerExit: 0,
-    });
-  }
-  runPortalScheduleCase({
-    label: '06:02 light window', hour: '06', minute: '02', expectedUnitExit: 0, expectedWorkerExit: 0,
-  });
-  runPortalScheduleCase({
-    label: '06:32 heavy window', hour: '06', minute: '32', expectedUnitExit: 0, expectedWorkerExit: 0,
-  });
-  runPortalScheduleCase({
-    label: '01:02 full-hour rejection', hour: '01', minute: '02', expectedUnitExit: 1, expectedWorkerExit: 75,
-  });
-  runPortalScheduleCase({
-    label: '06:14 outside new slots', hour: '06', minute: '14', expectedUnitExit: 1, expectedWorkerExit: 75,
-  });
+  runPortalScheduleCase({label: '06:02 scheduled entry', hour: '06', minute: '02'}, 0);
+  runPortalScheduleCase({label: '06:32 scheduled entry', hour: '06', minute: '32'}, 0);
+  runPortalScheduleCase({label: '06:14 arbitrary minute scheduled entry', hour: '06', minute: '14'}, 0);
+  runPortalScheduleCase({label: '01:02 arbitrary hour scheduled entry', hour: '01', minute: '02'}, 0);
+  runPortalScheduleCase({label: '14:27 arbitrary daytime scheduled entry', hour: '14', minute: '27'}, 0);
+  runPortalScheduleCase({label: 'unscheduled direct entry rejected', hour: '06', minute: '32', scheduled: 0}, 75);
 } finally {
   fs.rmSync(portalScheduleBehaviorRoot, {recursive: true, force: true});
 }
 
 const slotBehaviorRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-portal-slot-behavior-'));
 try {
-const slotBehaviorBin = path.join(slotBehaviorRoot, 'bin');
-const slotBehaviorScripts = path.join(slotBehaviorRoot, 'scripts');
-const slotBehaviorHostLog = path.join(slotBehaviorRoot, 'host-wrapper.log');
-const slotBehaviorSystemctlLog = path.join(slotBehaviorRoot, 'systemctl.log');
-const slotScript = path.join(path.dirname(fileURLToPath(import.meta.url)), 'run_cloud_portal_section_queue_slot.sh');
-fs.mkdirSync(slotBehaviorBin, {recursive: true});
-fs.mkdirSync(slotBehaviorScripts, {recursive: true});
-fs.writeFileSync(path.join(slotBehaviorBin, 'date'), `#!/usr/bin/env bash
+  const slotBehaviorBin = path.join(slotBehaviorRoot, 'bin');
+  const slotBehaviorScripts = path.join(slotBehaviorRoot, 'scripts');
+  const slotBehaviorHostLog = path.join(slotBehaviorRoot, 'host-wrapper.log');
+  const slotScript = path.join(path.dirname(fileURLToPath(import.meta.url)), 'run_cloud_portal_section_queue_slot.sh');
+  fs.mkdirSync(slotBehaviorBin, {recursive: true});
+  fs.mkdirSync(slotBehaviorScripts, {recursive: true});
+  fs.writeFileSync(path.join(slotBehaviorBin, 'date'), `#!/usr/bin/env bash
 set -Eeuo pipefail
 case "\${1:-}" in
-  +%H) printf '%s\\n' "\${SHEIN_TEST_SLOT_HOUR:?}" ;;
-  +%M) printf '%s\\n' "\${SHEIN_TEST_SLOT_MINUTE:?}" ;;
+  +%H) printf '%s\n' "\${SHEIN_TEST_SLOT_HOUR:?}" ;;
+  +%M) printf '%s\n' "\${SHEIN_TEST_SLOT_MINUTE:?}" ;;
+  +%s) printf '%s\n' "\${SHEIN_TEST_SLOT_EPOCH:-1788500000}" ;;
   *) exit 64 ;;
 esac
 `);
-fs.writeFileSync(path.join(slotBehaviorBin, 'systemctl'), `#!/usr/bin/env bash
-set -Eeuo pipefail
-printf '%s\\n' "$*" >> "\${SHEIN_TEST_SYSTEMCTL_LOG:?}"
-if [[ "\${1:-}" == show && "\${2:-}" == --no-pager && "\${3:-}" == --property=ActiveState && "\${4:-}" == --value && "\${5:-}" == shein-bi-cloud-morning-chain.service ]]; then
-  if [[ "\${SHEIN_TEST_MORNING_SHOW_FAILURE:-0}" == 1 ]]; then exit 1; fi
-  printf '%s\\n' "\${SHEIN_TEST_MORNING_STATE-inactive}"
-else
-  exit 64
-fi
-`);
-const slotBehaviorHostWrapper = path.join(slotBehaviorScripts, 'run_host_heavy_job.sh');
-fs.writeFileSync(slotBehaviorHostWrapper, `#!/usr/bin/env bash
+  const slotBehaviorHostWrapper = path.join(slotBehaviorScripts, 'run_host_heavy_job.sh');
+  fs.writeFileSync(slotBehaviorHostWrapper, `#!/usr/bin/env bash
 set -Eeuo pipefail
 {
   printf 'args='
   printf '%q ' "$@"
-  printf '\\n'
-  printf 'deadline=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_MINUTE:-}"
-  printf 'max=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-}"
-  printf 'scheduled=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-}"
-  printf 'heavy=%s\\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-}"
+  printf '\n'
+  printf 'deadlineEpoch=%s\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH:-}"
+  printf 'max=%s\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_MAX_SECTIONS:-}"
+  printf 'scheduled=%s\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_SCHEDULED:-}"
+  printf 'heavy=%s\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_ALLOWED:-}"
+  printf 'heavyFirst=%s\n' "\${SHEIN_BI_PORTAL_SECTION_QUEUE_HEAVY_FIRST:-}"
 } > "\${SHEIN_TEST_HOST_LOG:?}"
+exit "\${SHEIN_TEST_HOST_WRAPPER_EXIT:-0}"
 `);
 
-const runSlotBehaviorCase = ({
-  label,
-  hour,
-  minute,
-  morningState = 'inactive',
-  morningShowFailure = false,
-  expectedExit,
-  expectedHost,
-  expectedDeadline,
-  expectedMax,
-  expectedHeavy,
-  expectMorningDefer = false,
-  expectMorningUnknownDefer = false,
-}) => {
-  fs.rmSync(slotBehaviorHostLog, {force: true});
-  fs.writeFileSync(slotBehaviorSystemctlLog, '');
-  const command = [
-    'set -Eeuo pipefail',
-    `chmod +x ${shellQuote(toPosixPath(path.join(slotBehaviorBin, 'date')))} ${shellQuote(toPosixPath(path.join(slotBehaviorBin, 'systemctl')))} ${shellQuote(toPosixPath(slotBehaviorHostWrapper))}`,
-    `export PATH=${shellQuote(toPosixPath(slotBehaviorBin))}:"$PATH"`,
-    `export SHEIN_BI_ROOT=${shellQuote(toPosixPath(slotBehaviorRoot))}`,
-    `export SHEIN_TEST_SLOT_HOUR=${shellQuote(hour)}`,
-    `export SHEIN_TEST_SLOT_MINUTE=${shellQuote(minute)}`,
-    `export SHEIN_TEST_MORNING_STATE=${shellQuote(morningState)}`,
-    `export SHEIN_TEST_MORNING_SHOW_FAILURE=${shellQuote(morningShowFailure ? 1 : 0)}`,
-    `export SHEIN_TEST_HOST_LOG=${shellQuote(toPosixPath(slotBehaviorHostLog))}`,
-    `export SHEIN_TEST_SYSTEMCTL_LOG=${shellQuote(toPosixPath(slotBehaviorSystemctlLog))}`,
-    `exec bash ${shellQuote(toPosixPath(slotScript))}`,
-  ].join('; ');
-  const result = spawnSync('bash', ['-c', command], {
-    cwd: path.dirname(slotScript),
-    encoding: 'utf8',
-    timeout: 30_000,
-  });
-  assert.equal(result.error, undefined, `${label}: bash failed to start: ${result.error?.message || ''}`);
-  assert.equal(result.status, expectedExit,
-    `${label}: unexpected exit=${result.status} stdout=${result.stdout} stderr=${result.stderr}`);
-
-  const output = `${result.stdout}\n${result.stderr}`;
-  const systemctlLog = fs.readFileSync(slotBehaviorSystemctlLog, 'utf8');
-  if (expectedHost) {
-    assert.equal(fs.existsSync(slotBehaviorHostLog), true, `${label}: host wrapper must run`);
-    const hostLog = fs.readFileSync(slotBehaviorHostLog, 'utf8');
-    assert.match(hostLog, /--domain portal-sections/);
-    assert.match(hostLog, /--class materializer/);
-    assert.match(hostLog, /--lock-wait-sec 0/);
-    assert.match(hostLog, new RegExp(`--deadline-minute ${expectedDeadline}`));
-    assert.match(hostLog, new RegExp(`deadline=${expectedDeadline}`));
-    assert.match(hostLog, new RegExp(`max=${expectedMax}`));
-    assert.match(hostLog, /scheduled=1/);
-    if (expectedHeavy !== undefined) assert.match(hostLog, new RegExp(`heavy=${expectedHeavy}`));
-  } else {
-    assert.equal(fs.existsSync(slotBehaviorHostLog), false, `${label}: host wrapper must not run`);
-  }
-  if (expectMorningDefer) {
-    assert.match(result.stderr, /defer reason=daily_operating_refresh_active/,
-      `${label}: active morning chain must produce the recognizable defer reason`);
-  } else {
-    assert.doesNotMatch(output, /defer reason=daily_operating_refresh_active/,
-      `${label}: inactive morning chain must not produce the morning defer reason`);
-  }
-  if (expectMorningUnknownDefer) {
-    assert.match(result.stderr, /defer reason=daily_operating_refresh_state_unknown/,
-      `${label}: unknown or failed morning state must produce the fail-closed defer reason`);
-  } else {
-    assert.doesNotMatch(output, /defer reason=daily_operating_refresh_state_unknown/,
-      `${label}: known morning state must not produce the unknown-state defer reason`);
-  }
-};
-
-  runSlotBehaviorCase({
-    label: '06:02 light-only', hour: 6, minute: 2,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 14, expectedMax: 8, expectedHeavy: 0,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning active', hour: 8, minute: 32, morningState: 'active',
-    expectedExit: 75, expectedHost: false, expectMorningDefer: true,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning activating', hour: 8, minute: 32, morningState: 'activating',
-    expectedExit: 75, expectedHost: false, expectMorningDefer: true,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning reloading', hour: 8, minute: 32, morningState: 'reloading',
-    expectedExit: 75, expectedHost: false, expectMorningDefer: true,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning unknown state', hour: 8, minute: 32, morningState: 'deactivating',
-    expectedExit: 75, expectedHost: false, expectMorningUnknownDefer: true,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning empty state', hour: 8, minute: 32, morningState: '',
-    expectedExit: 75, expectedHost: false, expectMorningUnknownDefer: true,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning state query failure', hour: 8, minute: 32, morningShowFailure: true,
-    expectedExit: 75, expectedHost: false, expectMorningUnknownDefer: true,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning inactive', hour: 8, minute: 32,
-    expectedExit: 0, expectedHost: true, expectedDeadline: 44, expectedMax: 8, expectedHeavy: 1,
-  });
-  runSlotBehaviorCase({
-    label: '08:32 morning failed', hour: 8, minute: 32, morningState: 'failed',
-    expectedExit: 0, expectedHost: true, expectedDeadline: 44, expectedMax: 8,
-  });
-  for (const specialHour of [2, 3, 7]) {
-    runSlotBehaviorCase({
-      label: `${String(specialHour).padStart(2, '0')}:02 light-only`,
-      hour: specialHour, minute: 2, expectedExit: 0, expectedHost: true,
-      expectedDeadline: 14, expectedMax: 8, expectedHeavy: 0,
+  const runSlotBehaviorCase = ({
+    label,
+    hour,
+    minute,
+    budgetSec = null,
+    hostExit = 0,
+    expectedExit,
+    expectedHost,
+    expectedDeadlineEpoch,
+    expectedMax,
+    expectedHeavy,
+  }) => {
+    fs.rmSync(slotBehaviorHostLog, {force: true});
+    const command = [
+      'set -Eeuo pipefail',
+      'chmod +x ' + shellQuote(toPosixPath(path.join(slotBehaviorBin, 'date'))) + ' ' + shellQuote(toPosixPath(slotBehaviorHostWrapper)),
+      'export PATH=' + shellQuote(toPosixPath(slotBehaviorBin)) + ':"$PATH"',
+      'export SHEIN_BI_ROOT=' + shellQuote(toPosixPath(slotBehaviorRoot)),
+      'export SHEIN_TEST_SLOT_HOUR=' + shellQuote(hour),
+      'export SHEIN_TEST_SLOT_MINUTE=' + shellQuote(minute),
+      'export SHEIN_TEST_SLOT_EPOCH=1788500000',
+      ...(budgetSec !== null ? ['export SHEIN_BI_PORTAL_SECTION_QUEUE_RUN_BUDGET_SEC=' + shellQuote(budgetSec)] : []),
+      'export SHEIN_TEST_HOST_WRAPPER_EXIT=' + shellQuote(hostExit),
+      'export SHEIN_TEST_HOST_LOG=' + shellQuote(toPosixPath(slotBehaviorHostLog)),
+      'exec bash ' + shellQuote(toPosixPath(slotScript)),
+    ].join('; ');
+    const result = spawnSync('bash', ['-c', command], {
+      cwd: path.dirname(slotScript),
+      encoding: 'utf8',
+      timeout: 30_000,
     });
-  }
+    assert.equal(result.error, undefined, label + ': bash failed to start: ' + (result.error?.message || ''));
+    assert.equal(result.status, expectedExit,
+      label + ': unexpected exit=' + result.status + ' stdout=' + result.stdout + ' stderr=' + result.stderr);
+
+    if (expectedHost) {
+      assert.equal(fs.existsSync(slotBehaviorHostLog), true, label + ': host wrapper must run');
+      const hostLog = fs.readFileSync(slotBehaviorHostLog, 'utf8');
+      assert.match(hostLog, /--domain portal-sections/);
+      assert.match(hostLog, /--class materializer/);
+      assert.match(hostLog, /--lock-wait-sec 0/);
+      assert.match(hostLog, new RegExp('--deadline-epoch ' + expectedDeadlineEpoch));
+      assert.match(hostLog, new RegExp('deadlineEpoch=' + expectedDeadlineEpoch));
+      assert.match(hostLog, new RegExp('max=' + expectedMax));
+      assert.match(hostLog, /scheduled=1/);
+      if (expectedHeavy !== undefined) assert.match(hostLog, new RegExp('heavy=' + expectedHeavy));
+    } else {
+      assert.equal(fs.existsSync(slotBehaviorHostLog), false, label + ': host wrapper must not run');
+    }
+  };
+
   runSlotBehaviorCase({
-    label: '01:02 full-hour rejection', hour: 1, minute: 2,
-    expectedExit: 75, expectedHost: false,
+    label: 'default 1800s budget at arbitrary minute', hour: 6, minute: 14,
+    expectedExit: 0, expectedHost: true, expectedDeadlineEpoch: 1788501800, expectedMax: 8, expectedHeavy: 1,
   });
   runSlotBehaviorCase({
-    label: '06:14 old slot rejection', hour: 6, minute: 14,
-    expectedExit: 75, expectedHost: false,
+    label: 'custom 300s budget at 01:02', hour: 1, minute: 2, budgetSec: 300,
+    expectedExit: 0, expectedHost: true, expectedDeadlineEpoch: 1788500300, expectedMax: 8, expectedHeavy: 1,
+  });
+  runSlotBehaviorCase({
+    label: 'budget under 120s rejected', hour: 6, minute: 14, budgetSec: 100,
+    expectedExit: 64, expectedHost: false,
+  });
+  runSlotBehaviorCase({
+    label: 'budget over 1800s rejected', hour: 6, minute: 14, budgetSec: 1900,
+    expectedExit: 64, expectedHost: false,
+  });
+  runSlotBehaviorCase({
+    label: 'failure exit propagation', hour: 6, minute: 14, hostExit: 75,
+    expectedExit: 75, expectedHost: true, expectedDeadlineEpoch: 1788501800, expectedMax: 8, expectedHeavy: 1,
   });
 } finally {
   fs.rmSync(slotBehaviorRoot, {recursive: true, force: true});
 }
 
 assert.match(portalQueueWorker, /unscheduled_direct_entry/);
-assert.match(portalQueueWorker, /case "\$START_HOUR:\$START_MINUTE" in/);
-assert.match(portalQueueWorker, /01:\*\)/);
-assert.doesNotMatch(portalQueueWorker, /01:\*\|02:0\[1-4\]\|03:0\[1-4\]\|07:0\[1-4\]\)/);
-assert.match(portalQueueWorker, /\*:0\[1-4\]\|\*:3\[1-4\]\) SAFE_START=1/);
-assert.match(portalQueueWorker, /outside_safe_start_window/);
+assert.match(portalQueueWorker, /if \[\[ -n "\${SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH:-}" \]\]; then\s+SLOT_DEADLINE_EPOCH="\$SHEIN_BI_PORTAL_SECTION_QUEUE_DEADLINE_EPOCH"/);
+assert.doesNotMatch(portalQueueWorker, /outside_safe_start_window/);
 assert.match(portalQueueWorker, /stop before next core lane/);
 assert.match(portalQueueWorker,
   /MIN_REMAINING_RUNTIME_SEC="\$\{SHEIN_BI_PORTAL_SECTION_QUEUE_MIN_REMAINING_RUNTIME_SEC:-120\}"/,
@@ -1067,7 +985,14 @@ assert.equal(marketingRepairTimeoutStartSec, 26400,
   'marketing repair service timeout must cover the current 20:45 to 04:05 recovery contract without expanding the write window');
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_REPAIR_EXECUTION_LOCATION=cloud/);
 assert.match(unit('shein-bi-cloud-marketing-repair.service'), /SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true/);
-assert.match(repair, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/);
+assert.doesNotMatch(repair, /CURRENT_MINUTE >= 23 && CURRENT_MINUTE <= 42/,
+  'marketing admission must use actual capacity/domain/profile/queue conflicts at every minute');
+assert.doesNotMatch(repair, /ACTIVE_BUSY="\$\(active_busy_services\)"/,
+  'unrelated active services must not block marketing admission');
+assert.match(marketingRepairUnit, /^Environment=SHEIN_BI_MARKETING_CLOUD_PRIMARY_ENABLED=true$/m);
+assert.match(marketingRepairUnit, /^Environment=SHEIN_BI_MARKETING_REPAIR_RUN_BUDGET_SEC=3600$/m);
+assert.match(unit('shein-bi-cloud-marketing-live-guard.service'), /^OnSuccess=shein-bi-cloud-marketing-repair\.service$/m);
+assert.match(repairSlot, /elif \[\[ "\$CLOUD_PRIMARY_ENABLED" == "true" \]\]; then/);
 assert.match(repair, /remaining exact queue preserved for local-browser continuation/);
 assert.match(repair, /IS_CLOUD_EXECUTION=1/);
 assert.doesNotMatch(repair, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
@@ -1081,8 +1006,10 @@ assert.match(fallbackBatch, /DEFAULT_MIN_START_BUDGET_SEC = 15 \* 60/);
 assert.match(fallbackBatch, /--graceful-cutoff-epoch|--deadline-epoch/);
 assert.match(fallbackBatch, /Absolute graceful cutoff epoch must be a future safe integer/);
 const groupGateAt = fallbackBatch.indexOf('const startBudget = groupStartBudget(args);');
-const groupLaunchAt = fallbackBatch.indexOf('launchSummary = summarizeRaw(await launchStore(storeKey));');
-const groupProcessAt = fallbackBatch.indexOf('const result = await processStore({');
+assert.match(fallbackBatch, /effectiveLaunchStore = customOverrides\.launchStore \|\| launchStore/);
+assert.match(fallbackBatch, /effectiveProcessStore = customOverrides\.processStore \|\| processStore/);
+const groupLaunchAt = fallbackBatch.indexOf('launchSummary = summarizeRaw(await effectiveLaunchStore(storeKey));');
+const groupProcessAt = fallbackBatch.indexOf('const result = await effectiveProcessStore({');
 assert.ok(groupGateAt >= 0 && groupGateAt < groupLaunchAt && groupGateAt < groupProcessAt,
   'graceful cutoff must gate every group before browser launch and transaction entry');
 assert.match(fallbackBatch, /processedSelectedKeys/);
@@ -1090,7 +1017,7 @@ assert.match(fallbackBatch, /selectedEntries\.filter\(entry => \{[\s\S]*!process
   'groups skipped by the graceful cutoff must be selected by explicit unprocessed keys');
 assert.doesNotMatch(fallbackBatch, /selectedEntries\.slice\(selectedCursor\)/,
   'deferred accounting must not depend on a store-group cursor');
-assert.match(fallbackBatch, /for \(const file of storeEntries\)[\s\S]*await processStore/,
+assert.match(fallbackBatch, /for \(const file of storeEntries\)[\s\S]*await effectiveProcessStore/,
   'multiple groups must remain serial through one awaited processStore path');
 const processStoreStart = fallbackBatch.indexOf('async function processStore(');
 const processStoreEnd = fallbackBatch.indexOf('\n}\n\nfunction summarizeTotals', processStoreStart);

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,11 +15,21 @@ import {
   submitDurableInventoryWriteOnce,
 } from '../lib/durable_inventory_write.mjs';
 import {inventoryCutoverLockFile} from '../lib/inventory_write_cutover.mjs';
-import {INVENTORY_OVERWRITE_COMPUTATION_VERSION, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 import {SheinOpenApiClient} from '../lib/shein_openapi_client.mjs';
 import {resolveManualInventoryIntent} from './inventory/resolve_manual_inventory_intent.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
+// This regression verifies a production Linux absolute lock across cwd
+// changes. Run the complete test in Linux instead of interpreting /srv as
+// a drive-relative Windows path or weakening that lock-domain assertion.
+if (process.platform === 'win32') {
+  const linuxSelf = SELF.replace(/^([A-Za-z]):/, (_, drive) => `/mnt/${drive.toLowerCase()}`).replaceAll('\\', '/');
+  const result = spawnSync('wsl', ['--exec', '/usr/bin/node', linuxSelf, ...process.argv.slice(2)],
+    {stdio: 'inherit', timeout: 60_000, windowsHide: true});
+  if (result.error) console.error(result.error.message);
+  process.exit(Number.isInteger(result.status) ? result.status : 1);
+}
 const DEFAULT_LOCK = '/srv/shein-bi/runtime/locks/inventory-v2-cutover.lock';
 const scope = {
   storeKey: 'XL', skc: 'sb260606205087254179320', skuCode: 'I0mq2cw2khzt47',
@@ -153,7 +163,7 @@ async function parent() {
       recoveryScopeKey: inventoryRecoveryScopeKey({runDate: '2026-08-17', storeKey: scope.storeKey, skc: scope.skc, skuCode: scope.skuCode}),
       planHash, runDate: '2026-08-17', storeKey: scope.storeKey, skc: scope.skc, skuCode: scope.skuCode,
       targetUsableInventory: 100, policyVersion: '2026-08-26-test',
-      overwriteComputationVersion: INVENTORY_OVERWRITE_COMPUTATION_VERSION,
+      overwriteComputationVersion: INVENTORY_LEGACY_LOCKED_ONLY_COMPUTATION_VERSION,
       authorizationId: 'owner-manual-resolution-test',
       idempotencyKey: request.body.updateSkuInventoryQuantityRequests[0].idempotencyKey,
       requestPayloadHash: stableInventoryHash(request), request,

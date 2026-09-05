@@ -10,7 +10,7 @@ import {
   assertInventoryWriteAllowed,
   inventoryWriteScopeKey,
 } from '../lib/durable_inventory_write.mjs';
-import {createMarketingActivityInventoryOpenApiAdapter} from '../lib/marketing_activity_inventory_openapi.mjs';
+import {createMarketingActivityInventoryOpenApiAdapter, writeMarketingInventoryOnce} from '../lib/marketing_activity_inventory_openapi.mjs';
 import {stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
 import {SheinOpenApiClient} from '../lib/shein_openapi_client.mjs';
 
@@ -410,7 +410,16 @@ try {
     overwriteQuantity: 50,
     idempotencyKey: 'adapter-new-key',
     phase: 'temporary_raise',
-  }), /INVENTORY_WRITE_FENCE_DOMAIN_INVALID/);
+  }), /Marketing inventory adapter is read-only/);
+  await assert.rejects(writeMarketingInventoryOnce({
+    client: {inventoryJournalDomainDirectories: () => [adapterJournalDir],
+      request: () => { throw new Error('unexpected inventory transport'); }},
+    storeKey: 'XL', target: {skc: exactScope.skc, skuCode: exactScope.skuCode},
+    journalFile: path.join(adapterJournalDir, 'new-marketing.journal.ndjson'),
+    transactionHash: 'a'.repeat(64), runDate: '2026-09-05', phase: 'temporary_raise',
+    desiredUsableInventory: 50, overwriteQuantity: 50,
+    readStock: () => { throw new Error('malformed journal must be rejected before stock read'); },
+  }), /INVENTORY_JOURNAL_SCHEMA_UNSUPPORTED/);
   assert.equal(adapterTransportCalls, callsBeforeAdapterWrite, 'real marketing adapter must fail before inventory transport');
 } finally {
   globalThis.fetch = previousFetch;

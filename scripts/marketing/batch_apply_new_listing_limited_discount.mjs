@@ -29,6 +29,7 @@ import {
   isResumableFallbackResult,
 } from '../../lib/marketing_bounded_batch_resume.mjs';
 import {loadExactFallbackRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
+import {readLimitedDiscountMutationEvidence} from '../../lib/marketing_transaction_attempt_evidence.mjs';
 import {
   activityExecutionTransactionHash,
   classifyActivityInventoryFailureStatus,
@@ -37,6 +38,7 @@ import {
 } from '../../lib/marketing_activity_inventory_integration.mjs';
 import {createMarketingActivityInventoryOpenApiAdapter} from '../../lib/marketing_activity_inventory_openapi.mjs';
 import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {classifyUnifiedLoginRecovery, isMarketingLoginRedirect} from '../../lib/marketing_unified_login_recovery_contract.mjs';
 import {
   assertBeforeOuter,
   assertCanStartUnit,
@@ -404,6 +406,51 @@ async function closeStore(storeKey) {
   );
 }
 
+async function recoverMarketingLogin(storeKey, date) {
+  const reloginRun = await runBounded(process.execPath, [
+    'scripts/auto_relogin_shein_store.mjs',
+    storeKey,
+    '--date', date,
+    '--headless',
+    '--require-marketing',
+  ], {timeoutMs: 240000, label: 'login recovery ' + storeKey});
+  const parsed = parseLastJson(reloginRun.stdout) || parseLastJson(reloginRun.stderr);
+  const outPath = parsed?.reportFile ? path.resolve(ROOT, parsed.reportFile) : '';
+  const reloginReport = outPath && (await pathExists(outPath)) ? await readJson(outPath) : null;
+  const relogin = reloginReport?.results?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey)
+    || {ok: reloginRun.ok, blocker: '', blockerReason: reloginRun.stderr || ''};
+  if (relogin.ok !== true) {
+    return {
+      ok: false,
+      relogin: {ok: false, blocker: relogin.blocker || '', reason: relogin.blockerReason || relogin.reason || ''},
+      identity: null,
+      assessment: classifyUnifiedLoginRecovery({relogin}),
+    };
+  }
+  const identityRun = await runBounded(process.execPath, [
+    'scripts/marketing/check_store_profile_identity.mjs',
+    '--stores', storeKey,
+    '--no-launch',
+    '--no-close',
+    '--no-login-recovery',
+  ], {timeoutMs: 180000, label: 'identity readback ' + storeKey});
+  const identityMatch = String(identityRun.stdout || '').match(/^JSON\s+(.+)$/m);
+  const identityPath = identityMatch?.[1] ? path.resolve(identityMatch[1].trim()) : '';
+  const identityReport = identityPath && (await pathExists(identityPath)) ? await readJson(identityPath) : null;
+  const identityRow = identityReport?.rows?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey) || null;
+  const identity = {
+    ok: identityRun.ok && identityRow?.ok === true,
+    mismatch: Boolean((identityRow?.identity?.accountConflicts || []).length || (identityRow?.identity?.merchantConflicts || []).length),
+    reason: identityRow?.reason || identityRun.stderr || 'identity audit did not return an exact store match',
+  };
+  return {
+    ok: identity.ok,
+    relogin: {ok: true, blocker: '', reason: ''},
+    identity,
+    assessment: classifyUnifiedLoginRecovery({relogin, identity}),
+  };
+}
+
 async function applyRescue({storeKey, port, rescuePath, execute, recovery = false}) {
   const result = await runBounded(process.execPath, [
     'scripts/marketing/apply_hl_limited_discount_rescue.mjs',
@@ -626,7 +673,35 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       ? (browserSession.launchSummary || {ok: true, reused: true})
       : summarizeRaw(await launchStore(storeKey));
     if (!record.launched.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${record.launched.stderr || record.launched.stdout || record.launched.error}`);
-    const dryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+    let dryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+    if (isMarketingLoginRedirect(dryRun.full || dryRun.parsed || dryRun.stdout || dryRun.stderr)) {
+      const recovery = await recoverMarketingLogin(storeKey, args.date);
+      record.loginRecovery = recovery;
+      if (recovery.assessment?.terminal) {
+        record.status = 'login_terminal_blocker';
+        record.classification = 'login_terminal_blocker';
+        record.terminalBlocked = true;
+        record.error = recovery.assessment.blocker;
+        return record;
+      }
+      if (!recovery.ok) {
+        record.status = 'recoverable_login_pending';
+        record.classification = 'recoverable_pending';
+        record.recoverableDeferred = true;
+        record.deferred = true;
+        record.error = recovery.assessment?.blocker || 'login recovery incomplete';
+        return record;
+      }
+      dryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+      if (isMarketingLoginRedirect(dryRun.full || dryRun.parsed || dryRun.stdout || dryRun.stderr)) {
+        record.status = 'recoverable_login_pending';
+        record.classification = 'recoverable_pending';
+        record.recoverableDeferred = true;
+        record.deferred = true;
+        record.error = 'login redirect remained after one controlled recovery';
+        return record;
+      }
+    }
     record.dryRun = {
       ...summarizeRaw(dryRun),
       out: dryRun.outPath ? rel(dryRun.outPath) : '',
@@ -748,6 +823,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       adapterFactory: deadlineBoundAdapterFactory(createMarketingActivityInventoryOpenApiAdapter, ACTIVE_DEADLINE, {
         label: `new-listing inventory ${storeKey}`,
       }),
+      readMutationEvidence: () => readLimitedDiscountMutationEvidence({root: ROOT, storeKey, sourceRescuePath}),
       runSubmit: async () => {
         assertBeforeOuter(ACTIVE_DEADLINE, {
           reserveSec: ACTIVE_DEADLINE?.minFinalizationBudgetSec || 0,
@@ -945,8 +1021,12 @@ async function writeExecutionProgress({outputJson, outputMd, common, results, pl
   return doc;
 }
 
-const args = parseArgs(process.argv.slice(2));
-ACTIVE_DEADLINE = args.deadline;
+export async function runNewListingFallbackBatch(customArgs, customOverrides = {}) {
+  const args = customArgs || parseArgs(process.argv.slice(2));
+  ACTIVE_DEADLINE = args.deadline;
+  const effectiveLaunchStore = customOverrides.launchStore || launchStore;
+  const effectiveCloseStore = customOverrides.closeStore || closeStore;
+  const effectiveProcessStore = customOverrides.processStore || processStore;
 let automationAuthorization = null;
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
@@ -1084,10 +1164,10 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
         break;
       }
       if (!launchSummary) {
-        launchSummary = summarizeRaw(await launchStore(storeKey));
+        launchSummary = summarizeRaw(await effectiveLaunchStore(storeKey));
         if (!launchSummary.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${launchSummary.stderr || launchSummary.stdout || launchSummary.error}`);
       }
-      const result = await processStore({
+      const result = await effectiveProcessStore({
         file: {...file, path: file.path},
         storeMap,
         args,
@@ -1132,7 +1212,7 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
     common.storeBrowserSessions.push({
       storeKey,
       launch: launchSummary,
-      close: launchSummary ? summarizeRaw(await closeStore(storeKey)) : null,
+      close: launchSummary ? summarizeRaw(await effectiveCloseStore(storeKey)) : null,
       groupCount: processedInStore,
     });
   }
@@ -1168,7 +1248,12 @@ console.log(JSON.stringify({
   deferredGroups: deferredEntries.length,
   deadlineDeferred,
 }, null, 2));
-process.exitCode = fallbackBatchExitCode({
-  failedCount: doc.totals.storesFailed,
-  deferredCount: deferredEntries.length,
-});
+  process.exitCode = fallbackBatchExitCode({
+    failedCount: doc.totals.storesFailed,
+    deferredCount: deferredEntries.length,
+  });
+  return {ok: fullyClear, doc, results, plan, deferredEntries};
+}
+if (import.meta.url === 'file://' + process.argv[1]?.replaceAll('\\', '/') || process.argv[1]?.endsWith('batch_apply_new_listing_limited_discount.mjs')) {
+  runNewListingFallbackBatch().catch(err => { console.error(err); process.exit(1); });
+}

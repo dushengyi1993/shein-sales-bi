@@ -24,6 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {isInventoryPreSubmitExclusion, readInventoryIntentJournals} from '../lib/durable_inventory_write.mjs';
 
 import {
   buildDailyInventoryPlanHashPayload,
@@ -145,6 +146,7 @@ function createMockOpenApiServer({onChangeInventory, onQueryStoreInfo, onStockQu
               totalInventoryQuantity: currentUsable,
               totalUsableInventory: currentUsable,
               totalLockedQuantity: 0,
+              temporaryInventoryQuantity: 0,
               warehouseInventoryList: [],
             }],
           }],
@@ -276,6 +278,7 @@ function buildJournalIntent({
     totalInventoryQuantity: beforeUsableInventory,
     totalUsableInventory: beforeUsableInventory,
     totalLockedQuantity: 0,
+              temporaryInventoryQuantity: 0,
     stockRowMissing: false,
     warehouseCodes: [],
   };
@@ -414,6 +417,40 @@ try {
     et_operational_stock_policy: '',
   };
   const {plan: planB} = await buildPlanFixture(dirB, {etProducts: [etRow]});
+  // Production regression: one new same-store link blocks this row before
+  // clients/POST. Reconcile-only must retain that exclusion, not demand an intent.
+  const excludedDir = path.join(temp, 'pre-submit');
+  await fs.mkdir(excludedDir);
+  const {plan: excludedPlan} = await buildPlanFixture(excludedDir, {etProducts: [etRow]});
+  const excludedLinks = JSON.parse(await fs.readFile(path.join(excludedDir, 'links.json'), 'utf8'));
+  excludedLinks.data.storeLinks.push({...excludedLinks.data.storeLinks[0], skc: 'NEW-SAME-STORE-LINK'});
+  await fs.writeFile(path.join(excludedDir, 'links.json'), JSON.stringify(excludedLinks));
+  const excludedOut = path.join(excludedDir, 'result.json');
+  const excludedArgs = ['--plan', path.join(excludedDir, 'plan.json'), '--policy', path.join(excludedDir, 'policy.json'),
+    '--config', path.join(excludedDir, 'config.json'), '--bi-data', path.join(excludedDir, 'bi.json'),
+    '--links-data', path.join(excludedDir, 'links.json'), '--out', excludedOut, '--execute',
+    '--execution-mode', 'automatic', '--confirm-hash', excludedPlan.payloadHash];
+  const excludedEnv = {SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT: AUTOMATION_CONTEXT,
+    SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION: AUTOMATION_AUTHORIZATION};
+  const excludedRun = await runExecutor(excludedArgs, excludedEnv);
+  assert.equal(excludedRun.code, 1, excludedRun.stderr);
+  const excludedRow = JSON.parse(await fs.readFile(excludedOut, 'utf8')).results[0];
+  assert.equal(excludedRow.state, 'pre_submit_blocked', JSON.stringify(excludedRow));
+  const excludedEntries = await readJournalEntries(excludedOut + '.journal.ndjson');
+  const excludedLifecycle = await readInventoryIntentJournals([excludedOut + '.journal.ndjson']);
+  const exclusionCheck = {row: excludedRow, planRow: excludedPlan.actionable[0], planHash: excludedPlan.payloadHash,
+    lifecycle: excludedLifecycle, entries: excludedEntries};
+  assert.equal(excludedLifecycle.intents.size, 0);
+  assert.equal(isInventoryPreSubmitExclusion(exclusionCheck), true);
+  assert.equal(isInventoryPreSubmitExclusion({...exclusionCheck, entries: []}), false, 'no durable evidence is not a proven exclusion');
+  assert.equal(isInventoryPreSubmitExclusion({...exclusionCheck, row: {...excludedRow, writes: [{}]}}), false);
+  assert.equal(isInventoryPreSubmitExclusion({...exclusionCheck, lifecycle: {...excludedLifecycle,
+    intents: new Map([['attempt', {...excludedPlan.actionable[0], planHash: excludedPlan.payloadHash}]])}}), false);
+  const excludedRecovery = await runExecutor([...excludedArgs, '--reconcile-pending-only'], excludedEnv);
+  assert.equal(excludedRecovery.code, 1, excludedRecovery.stderr);
+  assert.doesNotMatch(excludedRecovery.stderr, /PRECONDITION_FAILED/);
+  assert.deepEqual(JSON.parse(await fs.readFile(excludedOut, 'utf8')).results[0], excludedRow);
+  assert.equal((await readJournalEntries(excludedOut + '.journal.ndjson')).filter(e => e.kind === 'intent').length, 0);
   const configB = {
     stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
   };
@@ -507,6 +544,7 @@ try {
               totalInventoryQuantity: String(currentUsable),
               totalUsableInventory,
               totalLockedQuantity: '0',
+              totalTempLockQuantity: '0',
               warehouseInventoryList: [],
             }],
           }],
@@ -1096,8 +1134,8 @@ try {
   // building a write request. Blank string and NaN-like strings are not zero.
   // ---------------------------------------------------------------------
   for (const [label, stockPatch, expectedError] of [
-    ['blank_usable_inventory', {totalUsableInventory: ''}, /invalid totalUsableInventory/],
-    ['nan_usable_inventory', {totalUsableInventory: 'NaN'}, /invalid totalUsableInventory/],
+    ['blank_usable_inventory', {totalUsableInventory: ''}, /INVENTORY_RAW_FIELD_MISSING/],
+    ['nan_usable_inventory', {totalUsableInventory: 'NaN'}, /INVENTORY_RAW_FIELD_INVALID/],
   ]) {
     const dirInvalid = path.join(temp, 'invalid-stock-' + label);
     await fs.mkdir(dirInvalid);
@@ -1112,6 +1150,7 @@ try {
               totalInventoryQuantity: currentUsable,
               totalUsableInventory: currentUsable,
               totalLockedQuantity: 0,
+              temporaryInventoryQuantity: 0,
               warehouseInventoryList: [],
               ...stockPatch,
             }],
@@ -1186,7 +1225,7 @@ try {
     assert.equal(runP.code, 1, `ten unmatched readbacks must exit blocked, stderr=${runP.stderr}`);
     const resultP = JSON.parse(await fs.readFile(outP, 'utf8'));
     assert.equal(resultP.results[0].state, 'submitted_but_readback_pending');
-    assert.match(resultP.results[0].error, /readback usable inventory 10 does not match target 15; duplicate submission forbidden/);
+    assert.match(resultP.results[0].error, /readback usable inventory 10 does not match target 15; ordinary lock 0 -> 0, temporary lock 0 -> 0; duplicate submission forbidden/);
     assert.equal(mockP.getChangeInventoryPosts(), 1);
     assert.equal(mockP.counts.stockQuery, 11, 'one before-read plus ten bounded readbacks');
     const entriesP = (await fs.readFile(`${outP}.journal.ndjson`, 'utf8')).split(/\r?\n/).filter(Boolean).map(JSON.parse);
@@ -1300,6 +1339,7 @@ try {
       totalInventoryQuantity: 10,
       totalUsableInventory: 10,
       totalLockedQuantity: 0,
+              temporaryInventoryQuantity: 0,
       stockRowMissing: false,
       warehouseCodes: [],
     };
@@ -1367,6 +1407,7 @@ try {
     ok: true,
     scenarios: [
       'pre_durable_error_records_blocked_without_reference_error',
+      'same_store_pre_submit_exclusion_is_durable_and_reconcile_only_preserves_zero_post',
       'durable_transport_error_records_suspicious_write_attempted',
       'durable_intent_recovery_is_readback_only_no_second_post',
       'successful_write_readback_matched_one_post',

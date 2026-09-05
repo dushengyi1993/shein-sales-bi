@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
+import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage, waitForChromeDebugPort} from '../lib/chrome_profile_startup.mjs';
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
@@ -114,8 +115,7 @@ const logDir = path.join(ROOT, 'logs');
 fs.mkdirSync(profileDir, {recursive: true});
 fs.mkdirSync(cacheDir, {recursive: true});
 fs.mkdirSync(logDir, {recursive: true});
-ensureProfileName(profileDir);
-const onDeviceAi = disableChromeOnDeviceAiForProfile(profileDir);
+let onDeviceAi = {disabled: readJsonFileSync(path.join(profileDir, 'Local State'), {allowMissing: true})?.optimization_guide?.on_device_foundational_model_user_settings === false};
 
 const chromeArgs = [
   `--user-data-dir=${profileDir}`,
@@ -153,6 +153,13 @@ function quoteWindowsArg(value) {
   return `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/g, '$&$&')}"`;
 }
 
+const startup = await withChromeProfileStartup({
+  root: ROOT, profileDir, port: cliArgs.port,
+  probe: () => probeChromeDebugPort(cliArgs.port),
+  prepare: () => { ensureProfileName(profileDir); onDeviceAi = disableChromeOnDeviceAiForProfile(profileDir); },
+  reuse: () => openExistingChromePage(cliArgs.port, cliArgs.url),
+  waitReady: () => waitForChromeDebugPort(cliArgs.port),
+  launch: async () => {
 if (process.platform === 'win32') {
   const result = spawnSync('powershell.exe', [
       '-NoProfile',
@@ -162,7 +169,7 @@ if (process.platform === 'win32') {
       Buffer.from([
         "$ErrorActionPreference = 'Stop'",
         `$argsForChrome = ${psSingleQuote(chromeArgs.map(quoteWindowsArg).join(' '))}`,
-        `Start-Process -FilePath ${psSingleQuote(chrome)} -ArgumentList $argsForChrome${cliArgs.background || cliArgs.headless ? ' -WindowStyle Minimized' : ''}`,
+        `Start-Process -FilePath ${psSingleQuote(chrome)} -ArgumentList $argsForChrome${cliArgs.background || cliArgs.headless ? ' -WindowStyle Hidden' : ''}`,
       ].join('\n'), 'utf16le').toString('base64'),
     ], {
     cwd: ROOT,
@@ -180,9 +187,12 @@ if (process.platform === 'win32') {
   });
   child.unref();
 }
+  },
+});
 
 console.log(JSON.stringify({
   profileName: PROFILE_NAME,
+  reused: startup.reused,
   port: cliArgs.port,
   profileDir,
   cacheDir,

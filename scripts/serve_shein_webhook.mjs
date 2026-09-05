@@ -24,6 +24,7 @@ import {createSheinWebhookEventProcessor, humanizeSheinWebhookEvent} from '../li
 import {createSheinWebhookAuditContextProvider} from '../lib/shein_webhook_audit_context.mjs';
 import {syncWebhookOrder, syncWebhookReturn} from '../lib/shein_webhook_order_return_sync.mjs';
 import {createWarehousePgPool, withPgClient} from '../lib/warehouse_pg.mjs';
+import {retryPendingBusinessDeliveries, OPS_BUSINESS_STAGING_ROOT} from '../lib/ops_business_result_pipeline.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CALLBACK_PATH = '/api/shein/webhook/v1/events';
@@ -241,6 +242,11 @@ export function createSheinWebhookService({
   workerMaxAttempts = 8,
   ingressBudgetMs = 1_200,
   receiptStatementTimeoutMs = 800,
+  deliveryRetryIntervalMs = 60_000,
+  deliveryShutdownBudgetMs = 5_000,
+  deliveryLandingRoot = process.env.SHEIN_OPS_BUSINESS_DELIVERY_ROOT || OPS_BUSINESS_STAGING_ROOT,
+  deliveryEnabled = flag(process.env.SHEIN_OPS_BUSINESS_DELIVERY_ENABLED, false),
+  deliveryRetryImpl = retryPendingBusinessDeliveries,
   now = () => Date.now(),
   logger = console,
 } = {}) {
@@ -250,6 +256,29 @@ export function createSheinWebhookService({
   let timer = null;
   let working = false;
   let stopping = false;
+  let deliveryInFlight = false;
+  let lastDeliveryRetryAt = 0;
+  let deliveryAbortController = null;
+
+  async function maybeRetryDeliveries() {
+    if (!deliveryEnabled || deliveryInFlight || stopping) return;
+    const current = now();
+    if (current - lastDeliveryRetryAt < deliveryRetryIntervalMs) return;
+    deliveryInFlight = true;
+    lastDeliveryRetryAt = current;
+    deliveryAbortController = new AbortController();
+    try {
+      await deliveryRetryImpl({
+        landingRoot: deliveryLandingRoot,
+        signal: deliveryAbortController.signal,
+      });
+    } catch {
+      // Background delivery retry must never fail the webhook process or leak secrets
+    } finally {
+      deliveryInFlight = false;
+      deliveryAbortController = null;
+    }
+  }
   const counters = {accepted: 0, duplicates: 0, retired: 0, rejected: 0, processed: 0, failed: 0};
 
   async function ingress(req, res) {
@@ -351,6 +380,9 @@ export function createSheinWebhookService({
   }
 
   async function processOne() {
+    // Check pending delivery retries asynchronously without delaying or blocking webhook event processing
+    void maybeRetryDeliveries();
+
     if (working || stopping) return;
     working = true;
     let receipt = null;
@@ -523,8 +555,15 @@ export function createSheinWebhookService({
     async stop() {
       stopping = true;
       if (timer) clearInterval(timer);
+      if (deliveryAbortController) {
+        try { deliveryAbortController.abort(); } catch {}
+      }
       await new Promise(resolve => server.close(resolve));
-      while (working) await new Promise(resolve => setTimeout(resolve, 25));
+      const budgetMs = positiveInt(deliveryShutdownBudgetMs, 5_000, {min: 100, max: 30_000});
+      const stopDeadline = performance.now() + budgetMs;
+      while ((working || deliveryInFlight) && performance.now() < stopDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
     },
   });
 }

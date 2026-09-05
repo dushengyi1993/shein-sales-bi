@@ -14,6 +14,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import http from 'node:http';
+import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage} from '../lib/chrome_profile_startup.mjs';
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
@@ -172,8 +173,8 @@ if (process.platform === 'win32') {
 }
 fs.mkdirSync(cacheDir, {recursive: true});
 fs.mkdirSync(logDir, {recursive: true});
-const profileName = ensureProfileName(profileDir, store);
-const onDeviceAi = disableChromeOnDeviceAiForProfile(profileDir);
+let profileName = store.profileName || `${store.storeKey} - ${store.shopName}`;
+let onDeviceAi = {disabled: loadJson(path.join(profileDir, 'Local State'))?.optimization_guide?.on_device_foundational_model_user_settings === false};
 
 const args = [
   `--user-data-dir=${profileDir}`,
@@ -351,6 +352,19 @@ async function forceRefreshMarketingPage(port, maxAttempts = 3) {
   return {ok: false, attempts: maxAttempts, state: lastState};
 }
 
+const startup = await withChromeProfileStartup({
+  root: ROOT, profileDir, storeKey: store.storeKey, port: store.port,
+  probe: () => probeChromeDebugPort(store.port),
+  prepare: () => {
+    profileName = ensureProfileName(profileDir, store);
+    onDeviceAi = disableChromeOnDeviceAiForProfile(profileDir);
+  },
+  reuse: () => openExistingChromePage(store.port, customUrl),
+  waitReady: async () => {
+    const debugPort = await waitForDebugPort(store.port);
+    if (!debugPort.ok) throw new Error(`Chrome remote debugging port not ready for ${store.storeKey}: ${debugPort.error}`);
+  },
+  launch: async () => {
 if (process.platform === 'win32') {
   const result = spawnSync('powershell.exe', [
       '-NoProfile',
@@ -360,7 +374,7 @@ if (process.platform === 'win32') {
       Buffer.from([
         "$ErrorActionPreference = 'Stop'",
         `$argsForChrome = ${psSingleQuote(args.map(quoteWindowsArg).join(' '))}`,
-        `Start-Process -FilePath ${psSingleQuote(CHROME)} -ArgumentList $argsForChrome${cliArgs.background || cliArgs.headless ? ' -WindowStyle Minimized' : ''}`,
+        `Start-Process -FilePath ${psSingleQuote(CHROME)} -ArgumentList $argsForChrome${cliArgs.background || cliArgs.headless ? ' -WindowStyle Hidden' : ''}`,
       ].join('\n'), 'utf16le').toString('base64'),
     ], {
     cwd: ROOT,
@@ -378,6 +392,8 @@ if (process.platform === 'win32') {
   });
   child.unref();
 }
+  },
+});
 
 const debugPort = await waitForDebugPort(store.port);
 if (!debugPort.ok) {
@@ -395,6 +411,7 @@ if (marketingRefresh && !marketingRefresh.ok) {
 
 console.log(JSON.stringify({
   storeKey: store.storeKey,
+  reused: startup.reused,
   shopName: store.shopName,
   profileName,
   port: store.port,

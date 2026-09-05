@@ -8,12 +8,22 @@ import {fileURLToPath} from 'node:url';
 import {
   discoverInventoryJournalFiles,
   findInventoryWriteFence,
+  isForeignInventoryIntent,
+  isInventoryPreSubmitExclusion,
   INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
+  inventoryIntentScopeKey,
+  inventoryScopeFromIntent,
+  inventoryLogicalActionKey,
+  inventoryRecoveryScopeKey,
   readInventoryIntentLifecycle,
   readInventoryIntentJournals,
 } from '../lib/durable_inventory_write.mjs';
 import {inventoryDetailRefreshWindow} from '../lib/inventory_detail_refresh_window.mjs';
-import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {buildDailyInventoryPlanHashPayload, normalizeInventoryOccupancy, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {
+  resolveResultEvidenceArtifact,
+  readDailyInventoryVersionIndex,
+} from './inventory/daily_inventory_version_publisher.mjs';
 
 const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DOMAINS = Object.freeze(['shein_business_domains', 'shein_links']);
@@ -58,7 +68,6 @@ function parseArgs(argv) {
   const previous = new Date(`${args.runDate}T12:00:00Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   if (args.businessDate !== previous.toISOString().slice(0, 10)) throw new Error('businessDate must equal runDate minus one calendar day');
-  if (args.preWarningAudit && args.inventoryOnly) throw new Error('--pre-warning-audit cannot be combined with --inventory-only');
   return args;
 }
 
@@ -81,59 +90,13 @@ export async function discoverInventoryJournalAuditFiles(currentJournal, environ
   });
 }
 
-async function readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate}) {
-  try {
-    return await readInventoryIntentJournals(journalFiles, {maxRunDate});
-  } catch (error) {
-    const match = /^INVENTORY_JOURNAL_SUPERSEDE_INVALID:(.+):([^:]+):referencedIntentMissing$/.exec(String(error?.message || ''));
-    if (!match || path.resolve(match[1]) === path.resolve(currentJournal)) throw error;
-
-    // A legacy cross-day supersede with a missing referenced intent is invalid
-    // audit history, but it must not hide independently valid manual fences or
-    // invalidate a later day's fully read-back result.  Keep every original
-    // journal immutable and rebuild only the validator's read model from each
-    // file's strict local lifecycle.
-    const records = [];
-    const intents = new Map();
-    const pending = new Map();
-    const terminalOutcomes = new Map();
-    const manualResolutions = new Map();
-    const fences = new Map();
-    const tombstonedIdempotencyKeys = new Map();
-    for (const journalFile of journalFiles) {
-      const lifecycle = await readInventoryIntentLifecycle(journalFile, {strict: true, maxRunDate});
-      records.push({journalFile, ...lifecycle});
-      for (const [intentId, rawIntent] of lifecycle.intents) {
-        const key = `${path.resolve(journalFile)}\u0000${intentId}`;
-        const intent = {...rawIntent, journalFile: path.resolve(journalFile)};
-        if ([...intents.values()].some(candidate => candidate.intentId === intentId)) {
-          throw new Error(`INVENTORY_JOURNAL_CONFLICT:${journalFile}:duplicate_global_intentId=${intentId}`);
-        }
-        intents.set(key, intent);
-        if (lifecycle.pending.has(intentId)) pending.set(key, intent);
-        const outcome = lifecycle.terminalOutcomes.get(intentId);
-        if (outcome) terminalOutcomes.set(key, {...outcome, journalFile: path.resolve(journalFile)});
-        if (outcome?.disposition === INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION && rawIntent.idempotencyKey) {
-          if (tombstonedIdempotencyKeys.has(rawIntent.idempotencyKey)) {
-            throw new Error(`INVENTORY_JOURNAL_TOMBSTONE_CONFLICT:${journalFile}:duplicate_global_idempotencyKey=${rawIntent.idempotencyKey}`);
-          }
-          tombstonedIdempotencyKeys.set(rawIntent.idempotencyKey, {key, intent, event: {...outcome, journalFile: path.resolve(journalFile)}});
-        }
-        const resolution = lifecycle.manualResolutions.get(intentId);
-        if (!resolution) continue;
-        manualResolutions.set(key, resolution);
-        const scopeKey = String(resolution?.scope?.scopeKey || '');
-        if (!scopeKey || fences.has(scopeKey)) throw new Error(`INVENTORY_JOURNAL_FENCE_CONFLICT:${journalFile}:duplicate_global_scope=${scopeKey}`);
-        fences.set(scopeKey, {key, intent, event: resolution, journalFile: path.resolve(journalFile)});
-        const idempotencyKey = String(resolution.idempotencyKey || '');
-        if (idempotencyKey) {
-          if (tombstonedIdempotencyKeys.has(idempotencyKey)) throw new Error(`INVENTORY_JOURNAL_TOMBSTONE_CONFLICT:${journalFile}:duplicate_global_idempotencyKey=${idempotencyKey}`);
-          tombstonedIdempotencyKeys.set(idempotencyKey, {key, intent, event: resolution});
-        }
-      }
-    }
-    return {files: journalFiles, records, intents, pending, terminalOutcomes, manualResolutions, fences, tombstonedIdempotencyKeys};
-  }
+async function readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate, journalSnapshots = new Map()}) {
+  return await readInventoryIntentJournals(journalFiles, {
+    maxRunDate,
+    journalSnapshots,
+    currentJournalFile: currentJournal,
+    quarantineHistoricalDanglingSupersedes: true,
+  });
 }
 
 function storedPath(root, value) {
@@ -147,16 +110,17 @@ async function verifyEvidenceRecords(entries, expectedFiles, root, label) {
   const actual = entries.map(entry => storedPath(root, entry?.path)).sort();
   assert(JSON.stringify(actual) === JSON.stringify(expected), `${label} evidence path set mismatch`);
   for (const entry of entries) {
-    const file = storedPath(root, entry.path);
+    const file = storedPath(root, entry.snapshotPath || entry.path);
     const stat = await fs.lstat(file);
     assert(stat.isFile() && !stat.isSymbolicLink(), `${label} evidence is not a regular file: ${file}`);
+    const actualHash = await fileHash(file);
     assert(Number(entry.bytes) === stat.size, `${label} evidence size mismatch: ${file}`);
-    assert(String(entry.sha256 || '') === await fileHash(file), `${label} evidence hash mismatch: ${file}`);
+    assert(String(entry.sha256 || '') === actualHash, `${label} evidence hash mismatch: ${file}`);
   }
 }
 
-async function validateMorningEvidence({root, businessDate, file, enabledStores}) {
-  const document = await readJson(file);
+async function validateMorningEvidence({root, businessDate, file, enabledStores, evidenceRecord}) {
+  const document = await readJson(evidenceRecord?.snapshotPath || file);
   assert(document?.schemaVersion === 'shein-morning-resume-evidence/v1', 'morning evidence schema mismatch');
   assert(document?.ok === true && document?.date === businessDate, 'morning evidence date/status mismatch');
   assert(document?.expectedStoreCount === 19, 'morning evidence expectedStoreCount must be 19');
@@ -176,11 +140,15 @@ async function validateMorningEvidence({root, businessDate, file, enabledStores}
     const expected = path.resolve(root, 'outputs', domain, storeKey, `${businessDate}.json`);
     const actual = storedPath(root, artifact?.path);
     assert(actual === expected, `morning evidence artifact path mismatch: ${key}`);
-    const stat = await fs.lstat(actual);
+    const saved = evidenceRecord?.dependencies?.find(entry => storedPath(root, entry.path) === actual);
+    if (evidenceRecord?.snapshotPath) assert(saved?.snapshotPath && saved.sha256 === artifact.sha256
+      && saved.bytes === artifact.bytes, `morning evidence snapshot closure missing: ${key}`);
+    const source = saved?.snapshotPath || actual;
+    const stat = await fs.lstat(source);
     assert(stat.isFile() && !stat.isSymbolicLink(), `morning evidence artifact is not a regular file: ${key}`);
     assert(Number(artifact.bytes) === stat.size, `morning evidence artifact size mismatch: ${key}`);
-    assert(String(artifact.sha256 || '') === await fileHash(actual), `morning evidence artifact hash mismatch: ${key}`);
-    const payload = await readJson(actual);
+    assert(String(artifact.sha256 || '') === await fileHash(source), `morning evidence artifact hash mismatch: ${key}`);
+    const payload = await readJson(source);
     assert(payload?.ok === true && payload?.date === businessDate, `morning evidence payload date/status mismatch: ${key}`);
     assert(String(payload?.store?.storeKey || '').toUpperCase() === storeKey, `morning evidence payload store mismatch: ${key}`);
   }
@@ -192,13 +160,13 @@ function expectedPlanHash(plan) {
 }
 
 function expectedInventoryLogicalActionKey(planRow, plan, result) {
-  return stableInventoryHash({
+  return inventoryLogicalActionKey({
+    commandId: plan.commandId || '',
     runDate: plan.date,
-    store: planRow.storeKey,
+    storeKey: planRow.storeKey,
     skc: planRow.skc,
-    sku: planRow.skuCode,
-    target: Number(planRow.targetUsableInventory),
-    actionType: 'VI_OVERWRITE_TO_EXACT_USABLE_TARGET',
+    skuCode: planRow.skuCode,
+    targetUsableInventory: Number(planRow.targetUsableInventory),
     policyVersion: plan.policyVersion,
     authorizationId: result.authorizationId || '',
   });
@@ -398,10 +366,11 @@ function updatedReadbackAudit(row, planRow, plan, result, {
   return {ok: true, intent, intentKey, outcome};
 }
 
-async function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now(), evidenceRoot = process.cwd(), {validateExternalFiles = true, validateFreshness = true} = {}) {
-  const evidencePath = file => path.isAbsolute(String(file || ''))
+async function validatePlanSourceEvidence(plan, enabledStores, policy, referenceTime = Date.now(), evidenceRoot = process.cwd(), {validateExternalFiles = true, validateFreshness = true, sourceSnapshots = new Map()} = {}) {
+  const originalPath = file => path.isAbsolute(String(file || ''))
     ? path.resolve(file)
     : path.resolve(evidenceRoot, String(file || ''));
+  const evidencePath = file => sourceSnapshots.get(originalPath(file)) || originalPath(file);
   const evidence = Array.isArray(plan?.sourceEvidence) ? plan.sourceEvidence : [];
   const et = evidence.filter(row => row?.store === 'ET');
   const links = evidence.filter(row => row?.store === 'BI_LINKS');
@@ -461,11 +430,55 @@ async function validatePlanSourceEvidence(plan, enabledStores, policy, reference
   assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
 }
 
+function foreignInventoryWarningAudit(row, planRow, plan, result, context = {}) {
+  const fail = reason => ({ok: false, reason});
+  if (!context.allowItemFencedWarning || !context.warningMarkersAreValid) return fail('foreign-batch reconciliation requires verified warning evidence');
+  if (!row || !planRow || rowKey(row) !== rowKey(planRow)) return fail('foreign-batch scope drift');
+  const matches = [...(context.lifecycle?.intents || [])].filter(([, intent]) => intent.intentId === row.historicalIntentId);
+  if (matches.length !== 1) return fail('foreign-batch durable intent missing or ambiguous');
+  const [key, intent] = matches[0];
+  const scope = inventoryScopeFromIntent(intent);
+  try { normalizeInventoryOccupancy(row.before); } catch { return fail('foreign-batch raw inventory fields invalid'); }
+  if (!isForeignInventoryIntent(intent, {runDate: plan.date, commandId: result.commandId || plan.commandId || '', journalFile: context.currentJournal})
+    || intent.runDate !== row.historicalRunDate || intent.runDate > plan.date
+    || intent.storeKey !== planRow.storeKey || intent.skc !== planRow.skc || intent.skuCode !== planRow.skuCode
+    || intent.logicalActionKey !== row.logicalActionKey
+    || intent.targetUsableInventory !== row.historicalTargetUsableInventory
+    || row.historicalCommandId !== (intent.commandId || '')
+    || !row.historicalJournalFile || path.resolve(row.historicalJournalFile) !== path.resolve(intent.journalFile)
+    || !Number.isSafeInteger(row.before?.totalUsableInventory) || row.before.totalUsableInventory < 0
+    || row.before.ok !== true || row.before.stockRowMissing !== false || row.before.skuCode !== planRow.skuCode
+    || (scope.warehouseCode && (row.before.warehouseCodes?.length !== 1
+      || String(row.before.warehouseCodes[0]).toUpperCase() !== scope.warehouseCode))
+    || (row.writes !== undefined && (!Array.isArray(row.writes) || row.writes.length !== 0))) return fail('foreign-batch readback identity or no-write proof drift');
+  if (!(context.resultEntries || []).some(entry => entry.kind === 'result' && entry.planHash === result.planHash
+    && stableInventoryHash(entry.row) === stableInventoryHash(row))) return fail('foreign-batch exact result journal evidence missing');
+  const outcome = context.lifecycle.terminalOutcomes.get(key);
+  if (row.state === 'historical_readback_matched') {
+    if (row.historicalIntentClosed !== true || row.deferred !== true || row.disposition !== 'readback_matched'
+      || outcome?.disposition !== 'readback_matched'
+      || outcome.resolutionJournalFile !== context.currentJournal
+      || row.before.totalUsableInventory !== intent.targetUsableInventory
+      || row.after?.totalUsableInventory !== intent.targetUsableInventory
+      || intent.targetUsableInventory === Number(planRow.targetUsableInventory)) return fail('foreign-batch terminal resolution drift');
+  } else if (row.state !== 'submitted_but_readback_pending' || row.historicalPending !== true || row.disposition !== 'skipped'
+    || !context.lifecycle.pending.has(key) || outcome
+    || row.before.totalUsableInventory === intent.targetUsableInventory
+    || row.idempotencyKey !== intent.idempotencyKey || row.requestPayloadHash !== intent.requestPayloadHash) {
+    return fail('foreign-batch pending evidence drift');
+  }
+  return {ok: true, intent, foreignBatch: true, pending: row.state === 'submitted_but_readback_pending'};
+}
+
 function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAuditByIntentId, pendingWarningContext = {}) {
   if (!row || !planRow || rowKey(row) !== rowKey(planRow)) return false;
   const target = Number(planRow.targetUsableInventory);
   if (!Number.isInteger(target) || Number(row.targetUsableInventory) !== target || row.ruleClass !== planRow.ruleClass) return false;
   const before = Number(row?.before?.totalUsableInventory);
+  if (row.state === 'pre_submit_blocked') return pendingWarningContext.allowItemFencedWarning
+    && pendingWarningContext.warningMarkersAreValid
+    && isInventoryPreSubmitExclusion({row, planRow, planHash: plan.payloadHash, commandId: plan.commandId || '',
+      lifecycle: pendingWarningContext.lifecycle, entries: pendingWarningContext.resultEntries});
   if (row.state === 'updated_readback_matched') {
     const writes = Array.isArray(row.writes) ? row.writes : [];
     const logicalActionKey = expectedInventoryLogicalActionKey(planRow, plan, result);
@@ -487,6 +500,41 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
       && updatedReadbackAudit(row, planRow, plan, result, pendingWarningContext).ok;
   }
   if (row.state === 'skipped_target_already_matched') return before === target;
+  if (row.state === 'skipped_owner_confirmed_same_target_above_target') {
+    if (!Number.isFinite(before) || before <= target) return false;
+    if (Array.isArray(row.writes) && row.writes.length > 0) return false;
+    const lifecycle = pendingWarningContext?.lifecycle;
+    if (!lifecycle?.terminalOutcomes || !lifecycle?.intents) return false;
+    const recoveryScopeKey = inventoryRecoveryScopeKey({
+      runDate: plan.date,
+      storeKey: planRow.storeKey,
+      skc: planRow.skc,
+      skuCode: planRow.skuCode,
+    });
+    const matchingPredecessors = [...lifecycle.terminalOutcomes.entries()]
+      .filter(([intentKey, outcome]) => {
+        const predecessor = lifecycle.intents.get(intentKey);
+        return outcome?.disposition === INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION
+          && outcome.newRunDate === plan.date
+          && Number(outcome.targetUsableInventory) === target
+          && predecessor
+          && predecessor.storeKey === planRow.storeKey
+          && predecessor.skc === planRow.skc
+          && predecessor.skuCode === planRow.skuCode
+          && Number(predecessor.targetUsableInventory) === target
+          && inventoryIntentScopeKey(predecessor) === recoveryScopeKey;
+      });
+    if (matchingPredecessors.length !== 1) return false;
+    const [predecessorKey, outcome] = matchingPredecessors[0];
+    const predecessor = lifecycle.intents.get(predecessorKey);
+    if (!predecessor?.idempotencyKey) return false;
+    if (!lifecycle.tombstonedIdempotencyKeys?.has(predecessor.idempotencyKey)) return false;
+    const tombstone = lifecycle.tombstonedIdempotencyKeys.get(predecessor.idempotencyKey);
+    if (tombstone?.intent?.intentId !== predecessor.intentId) return false;
+    if (outcome.oldRunDate && predecessor.runDate && outcome.oldRunDate !== predecessor.runDate) return false;
+    if (predecessor.runDate >= plan.date) return false;
+    return true;
+  }
   if (row.state === 'skipped_terminal_readback_recorded') {
     const audit = currentTerminalAuditByIntentId.get(String(row.terminalIntentId || ''));
     return result.reconcilePendingOnly === true
@@ -518,6 +566,7 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
       && before > Number(policy?.triggerUsableInventoryAtOrBelow ?? 20);
   }
   if (row.state === 'submitted_but_readback_pending' && row.historicalPending === true) {
+    if (row.historicalRunDate === plan.date) return foreignInventoryWarningAudit(row, planRow, plan, result, pendingWarningContext).ok;
     return row.disposition === 'skipped'
       && typeof row.historicalIntentId === 'string' && row.historicalIntentId.length > 0
       && /^\d{4}-\d{2}-\d{2}$/.test(String(row.historicalRunDate || ''))
@@ -526,6 +575,7 @@ function resultRowIsSafe(row, planRow, plan, result, policy, currentTerminalAudi
       && Number.isFinite(before)
       && (!Array.isArray(row.writes) || row.writes.length === 0);
   }
+  if (row.state === 'historical_readback_matched') return foreignInventoryWarningAudit(row, planRow, plan, result, pendingWarningContext).ok;
   if (row.state === 'submitted_but_readback_pending') {
     return sameDayPendingWarningAudit(row, planRow, plan, result, pendingWarningContext).ok;
   }
@@ -552,7 +602,9 @@ function isReconcileOnlyTerminalOrReadbackOnlyResultRow(row) {
   if (row.state === 'skipped_terminal_readback_recorded') return true;
   if (row.state === 'skipped_target_already_matched') return true;
   if (row.state === 'submitted_but_readback_pending' && row.historicalPending === true) return true;
+  if (row.state === 'historical_readback_matched') return true;
   if (row.state === 'blocked_by_manual_resolution_fence') return true;
+  if (row.state === 'pre_submit_blocked') return true;
   return false;
 }
 
@@ -569,6 +621,7 @@ export async function validateInventoryArtifacts({
   allowSameDayPendingWarning = false,
   allowPendingWarning = false,
   preWarningAudit = false,
+  inventoryCommandId = '',
 }) {
   const preWarningMode = preWarningAudit === true;
   const itemFencedWarningMode = preWarningMode
@@ -581,9 +634,12 @@ export async function validateInventoryArtifacts({
   const previous = new Date(`${runDate}T12:00:00Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   assert(businessDate === previous.toISOString().slice(0, 10), 'businessDate must equal runDate minus one calendar day');
-  const planFile = path.join(inventoryRuntimeRoot, 'plans', `daily-inventory-replenishment-${runDate}.json`);
-  const resultFile = path.join(inventoryRuntimeRoot, 'results', `daily-inventory-replenishment-${runDate}.json`);
-  const inventoryMarkerFile = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  const index = preWarningMode ? null : await readDailyInventoryVersionIndex({inventoryRuntimeRoot, date: runDate});
+  const version = index ? await resolveResultEvidenceArtifact({inventoryRuntimeRoot, date: runDate, commandId: inventoryCommandId, preferActive: !inventoryCommandId}) : null;
+  assert(!index || version, 'inventory version index has no matching complete batch');
+  const planFile = version?.planFile || path.join(inventoryRuntimeRoot, 'plans', `daily-inventory-replenishment-${runDate}.json`);
+  const resultFile = version?.file || path.join(inventoryRuntimeRoot, 'results', `daily-inventory-replenishment-${runDate}.json`);
+  const inventoryMarkerFile = version?.markerFile || path.join(markerRoot, runDate, 'daily-inventory-guard.json');
   const [plan, result, policy] = await Promise.all([
     readJson(planFile),
     readJson(resultFile),
@@ -602,8 +658,15 @@ export async function validateInventoryArtifacts({
     if (preWarningMode) {
       assert(inventoryMarkerStatus === 'warning', 'pre-warning audit requires an inventory warning marker');
       try {
-        await fs.lstat(operatingMarkerFile);
-        throw new Error('pre-warning audit requires the operating marker to be absent');
+        const existingOperating = await readJson(operatingMarkerFile);
+        const operatingValid = existingOperating?.ok === true
+          && existingOperating?.stage === 'daily-operating-refresh'
+          && (existingOperating?.status === 'done' || existingOperating?.status === 'warning')
+          && existingOperating?.runDate === runDate
+          && existingOperating?.businessDate === businessDate;
+        if (!operatingValid) {
+          throw new Error('pre-warning audit requires the operating marker to be absent or a verified existing daily completion marker');
+        }
       } catch (error) {
         if (error?.code !== 'ENOENT') throw error;
       }
@@ -675,16 +738,22 @@ export async function validateInventoryArtifacts({
   await validatePlanSourceEvidence(plan, enabledStores, policy, sourceReferenceTime, root, {
     validateExternalFiles: externalSourceEvidenceRequired,
     validateFreshness: externalSourceEvidenceRequired,
+    sourceSnapshots: new Map((version?.sourceArtifacts || []).map(a => [a.file, path.resolve(inventoryRuntimeRoot, a.snapshot)])),
   });
   const currentTerminalAuditByIntentId = new Map();
   const currentJournal = path.resolve(`${resultFile}.journal.ndjson`);
-  const journalFiles = await discoverInventoryJournalAuditFiles(currentJournal);
-  const lifecycle = await readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate: runDate});
+  const journalFiles = version?.journalArtifacts?.length ? version.journalArtifacts.map(a => a.file) : await discoverInventoryJournalAuditFiles(currentJournal);
+  const journalSnapshots = new Map((version?.journalArtifacts || []).map(a => [path.resolve(a.file), path.resolve(inventoryRuntimeRoot, a.snapshot)]));
+  const lifecycle = await readInventoryValidationLifecycle(journalFiles, {currentJournal, maxRunDate: runDate, journalSnapshots});
+  const resultEntries = (await fs.readFile(journalSnapshots.get(currentJournal) || currentJournal, 'utf8')
+    .catch(error => { if (error.code === 'ENOENT' && !version) return ''; throw error; }))
+    .split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
   const pendingWarningContext = {
     allowItemFencedWarning: itemFencedWarningMode,
     warningMarkersAreValid,
     lifecycle,
     currentJournal,
+    resultEntries,
   };
   for (const [intentKey, intent] of lifecycle.intents.entries()) {
     if (intent.journalFile !== currentJournal) continue;
@@ -725,11 +794,16 @@ export async function validateInventoryArtifacts({
   const manualResolutionFences = [];
   const resultByKey = new Map(rows.map(row => [rowKey(row), row]));
   for (const planRow of actionable) {
+    const logicalActionKey = expectedInventoryLogicalActionKey(planRow, plan, result);
+    const idempotencyKey = `bi-inv-${logicalActionKey.slice(0, 42)}`;
+    const adoption = lifecycle.baselineAdoptions?.get(idempotencyKey);
     const fence = findInventoryWriteFence(lifecycle, {
+      idempotencyKey,
       scope: {
         storeKey: planRow.storeKey,
         skc: planRow.skc,
         skuCode: planRow.skuCode,
+        warehouseCode: adoption?.scope?.warehouseCode || '',
         invType: 'VI',
       },
     });
@@ -764,9 +838,12 @@ export async function validateInventoryArtifacts({
     assert(!seen.has(key), `inventory result row identity duplicate: ${key}`);
     seen.add(key);
     const planRow = planByKey.get(key);
-    const pendingAudit = row?.state === 'submitted_but_readback_pending'
-      ? sameDayPendingWarningAudit(row, planRow, plan, result, pendingWarningContext)
-      : null;
+    const pendingAudit = row?.state === 'historical_readback_matched'
+      || (row?.state === 'submitted_but_readback_pending' && row.historicalPending === true && row.historicalRunDate === plan.date)
+      ? foreignInventoryWarningAudit(row, planRow, plan, result, pendingWarningContext)
+      : row?.state === 'submitted_but_readback_pending'
+        ? sameDayPendingWarningAudit(row, planRow, plan, result, pendingWarningContext)
+        : null;
     const updatedAudit = row?.state === 'updated_readback_matched'
       ? updatedReadbackAudit(row, planRow, plan, result, pendingWarningContext)
       : null;
@@ -776,8 +853,8 @@ export async function validateInventoryArtifacts({
   }
   assert(seen.size === planByKey.size && [...planByKey.keys()].every(key => seen.has(key)), 'inventory plan/result identity set mismatch');
   if (preWarningMode) {
-    assert(pendingWarningAudits.length > 0 || rows.some(row => row?.state === 'blocked_by_manual_resolution_fence'),
-      'pre-warning audit requires a same-day pending or fenced result row');
+    assert(pendingWarningAudits.length > 0 || rows.some(row => ['blocked_by_manual_resolution_fence', 'pre_submit_blocked'].includes(row?.state)),
+      'pre-warning audit requires a same-day pending, fenced, or proven pre-submit excluded result row');
   }
   if (itemFencedWarningMode && Array.isArray(result?.unresolvedIntents) && result.unresolvedIntents.length > 0) {
     const seenUnresolved = new Set();
@@ -791,7 +868,7 @@ export async function validateInventoryArtifacts({
         .filter(Boolean)
         .map(String);
       assert(unresolvedIdentifiers.length > 0, 'inventory result unresolved durable intent has no identity');
-      const matches = pendingWarningAudits.filter(audit => unresolvedIdentifiers.every(value => [
+      const matches = pendingWarningAudits.filter(audit => audit.pending !== false && unresolvedIdentifiers.every(value => [
         audit.intent?.intentId,
         audit.intent?.logicalActionKey,
         audit.intent?.idempotencyKey,
@@ -802,7 +879,7 @@ export async function validateInventoryArtifacts({
       seenUnresolved.add(identity);
     }
   }
-  const pendingWarningCount = pendingWarningAudits.length;
+  const pendingWarningCount = pendingWarningAudits.filter(audit => audit.pending !== false).length;
   return {
     ok: true,
     planFile,
@@ -811,10 +888,11 @@ export async function validateInventoryArtifacts({
     planHash: plan.payloadHash,
     resultCount: rows.length,
     manualResolutionFenceCount: manualResolutionFences.length,
+    preSubmitBlockedCount: rows.filter(row => row.state === 'pre_submit_blocked').length,
     pendingWarningCount,
     pendingReadbackCount: pendingWarningCount,
     pendingCount: pendingWarningCount,
-    warningCount: pendingWarningCount,
+    warningCount: pendingWarningAudits.length,
   };
 }
 
@@ -831,42 +909,48 @@ export async function validateDailyOperatingRefresh(options) {
     .sort();
   assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
   const morningFile = path.join(args.stateDir, `${args.runDate}-all.json`);
+  const finalMarkerFile = path.join(args.markerRoot, args.runDate, 'daily-operating-refresh.json');
+  const marker = args.preWarningAudit === true ? null : await readJson(finalMarkerFile);
   const inventory = await validateInventoryArtifacts({
     ...args,
+    inventoryCommandId: args.preWarningAudit ? '' : `morning:${args.runDate}`,
     enabledStores,
     requireMarker: true,
     preWarningAudit: args.preWarningAudit === true,
   });
-  await validateMorningEvidence({...args, file: morningFile, enabledStores});
+  await validateMorningEvidence({...args, file: morningFile, enabledStores,
+    evidenceRecord: marker?.evidence?.find(entry => storedPath(args.root, entry.path) === morningFile)});
   if (args.preWarningAudit === true) {
-    // Pre-warning is deliberately a one-way audit gate: the inventory marker
-    // is valid, the full morning evidence is valid, and the final operating
-    // marker is not present yet.  No completion marker is accepted here.
     try {
-      await fs.lstat(path.join(args.markerRoot, args.runDate, 'daily-operating-refresh.json'));
-    } catch (error) {
-      if (error?.code === 'ENOENT') {
-        return {
-          ok: true,
-          preWarningAudit: true,
-          runDate: args.runDate,
-          businessDate: args.businessDate,
-          storeCount: enabledStores.length,
-          artifactCount: enabledStores.length * DOMAINS.length,
-          planHash: inventory.planHash,
-          resultCount: inventory.resultCount,
-          pendingWarningCount: inventory.pendingWarningCount,
-          pendingReadbackCount: inventory.pendingReadbackCount,
-          pendingCount: inventory.pendingCount,
-          warningCount: inventory.warningCount,
-        };
+      const existingOperating = await readJson(path.join(args.markerRoot, args.runDate, 'daily-operating-refresh.json'));
+      const operatingValid = existingOperating?.ok === true
+        && existingOperating?.stage === 'daily-operating-refresh'
+        && (existingOperating?.status === 'done' || existingOperating?.status === 'warning')
+        && existingOperating?.runDate === args.runDate
+        && existingOperating?.businessDate === args.businessDate;
+      if (!operatingValid) {
+        throw new Error('pre-warning audit requires the operating marker to be absent or a verified existing daily completion marker');
       }
-      throw error;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw error;
+      }
     }
-    throw new Error('pre-warning audit requires the operating marker to be absent');
+    return {
+      ok: true,
+      preWarningAudit: true,
+      runDate: args.runDate,
+      businessDate: args.businessDate,
+      storeCount: enabledStores.length,
+      artifactCount: enabledStores.length * DOMAINS.length,
+      planHash: inventory.planHash,
+      resultCount: inventory.resultCount,
+      pendingWarningCount: inventory.pendingWarningCount,
+      pendingReadbackCount: inventory.pendingReadbackCount,
+      pendingCount: inventory.pendingCount,
+      warningCount: inventory.warningCount,
+    };
   }
-  const finalMarkerFile = path.join(args.markerRoot, args.runDate, 'daily-operating-refresh.json');
-  const marker = await readJson(finalMarkerFile);
   assert(marker?.ok === true && marker?.stage === 'daily-operating-refresh' && (marker?.status === 'done' || marker?.status === 'warning'), 'daily operating marker is not done or warning');
   assert(marker?.runDate === args.runDate && marker?.businessDate === args.businessDate, 'daily operating marker date mismatch');
   await verifyEvidenceRecords(marker.evidence, [
@@ -901,7 +985,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         .filter(Boolean)
         .sort();
       assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
-      console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({...args, enabledStores, requireMarker: false}))}, null, 2));
+      console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({...args, enabledStores, requireMarker: args.preWarningAudit === true}))}, null, 2));
     } else {
       console.log(JSON.stringify(await validateDailyOperatingRefresh(args), null, 2));
     }

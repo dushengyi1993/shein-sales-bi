@@ -3,6 +3,30 @@ import {spawnSync} from 'node:child_process';
 import {selectDeterministicTestShard} from '../lib/deterministic_test_shards.mjs';
 
 const tests = [
+  'scripts/test_pending_discuss_shared_delivery_entry.mjs',
+  'scripts/test_cloud_team_report_process_lifecycle.mjs',
+  'scripts/test_inventory_v6_owner_resume_validation.mjs',
+  'scripts/test_bi_v6_d1_d2_identity_and_display.mjs',
+  'scripts/test_inventory_v6_e3_e4.mjs',
+  'scripts/test_inventory_v6_cross_journal.mjs',
+  'scripts/test_inventory_sealed_batch_reconciliation.mjs',
+  'scripts/test_inventory_v6_occupancy.mjs',
+  'scripts/test_inventory_guard_process_group.mjs',
+  'scripts/test_link_ops_a2_c1_integrated.mjs',
+  'scripts/test_link_ops_job_worker_heartbeat.mjs',
+  'scripts/test_pending_discuss_a3.mjs',
+  'scripts/test_marketing_a1_explicit_pricing.mjs',
+  'scripts/test_marketing_b2_session_lifecycle.mjs',
+  'scripts/test_marketing_transaction_mutation_evidence.mjs',
+  'scripts/test_marketing_inventory_durable.mjs',
+  'scripts/test_ops_business_result_formatter.mjs',
+  'scripts/test_ops_business_result_pipeline.mjs',
+  'scripts/test_ops_business_delivery_hooks.mjs',
+  'scripts/test_cloud_marketing_primary_entry.mjs',
+  'scripts/test_host_v6_resource_concurrency.mjs',
+  'scripts/test_manual_discount_runtime.mjs',
+  'scripts/test_marketing_runtime_artifacts.mjs',
+  'scripts/test_chrome_profile_startup.mjs',
   'scripts/marketing/smoke_coupon_budget_guard.mjs',
   'scripts/marketing/smoke_known_ordinary_price_guard.mjs',
   'scripts/marketing/smoke_limited_discount_drift_rescue_files.mjs',
@@ -305,7 +329,25 @@ const tests = [
   'scripts/test_links_data_store_coverage.mjs',
 ];
 
+const V6_TEST_TIMEOUTS = {
+  'scripts/test_cloud_team_report_process_lifecycle.mjs': 60000,
+  'scripts/test_inventory_v6_e3_e4.mjs': 120000,
+  'scripts/test_inventory_v6_cross_journal.mjs': 60000,
+  'scripts/test_inventory_sealed_batch_reconciliation.mjs': 60000,
+  'scripts/test_inventory_guard_process_group.mjs': 90000,
+  'scripts/test_link_ops_a2_c1_integrated.mjs': 120000,
+  'scripts/test_link_ops_job_worker_heartbeat.mjs': 60000,
+  'scripts/test_marketing_b2_session_lifecycle.mjs': 120000,
+  'scripts/test_marketing_transaction_mutation_evidence.mjs': 120000,
+  'scripts/test_marketing_inventory_durable.mjs': 120000,
+  'scripts/test_ops_business_delivery_hooks.mjs': 90000,
+  'scripts/test_cloud_marketing_primary_entry.mjs': 120000,
+  'scripts/test_host_v6_resource_concurrency.mjs': 90000,
+  'scripts/test_chrome_profile_startup.mjs': 60000,
+};
+
 const TEST_ESTIMATES_MS = {
+  ...V6_TEST_TIMEOUTS,
   'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs': 2_000,
   'scripts/test_link_ops_uploaded_asset_binding_recovery_e2e.mjs': 5_000,
   'scripts/test_link_ops_reuse_normal_binding_payload.mjs': 5_000,
@@ -490,7 +532,7 @@ for (const file of selectedTests) {
   // without an assertion failure; its WSL pass measured 85.21s, so it uses a
   // bounded 180s tier and a 90s shard estimate. Unclassified tests keep the
   // 30s fail-fast budget.
-  const timeout = file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
+  const timeout = V6_TEST_TIMEOUTS[file] || (file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     ? 300_000
     : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs'
       ? 30_000
@@ -548,7 +590,7 @@ for (const file of selectedTests) {
                             'scripts/test_morning_chain_wrapper_reliability.mjs',
                             'scripts/test_cloud_session_manager_reliability.mjs'].includes(file)
                             ? 120_000
-                          : 30_000;
+                          : 30_000);
   console.error(`START ${file} timeoutMs=${timeout}`);
   const result = spawnSync(process.execPath, [file], {
     cwd: process.cwd(),

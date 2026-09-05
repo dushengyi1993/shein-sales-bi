@@ -117,7 +117,6 @@ function validateArgs(args) {
   if (args.command === 'preflight' && !args.decisions) throw new Error('preflight requires --decisions');
   if (args.command === 'execute') {
     if (!args.preflight) throw new Error('execute requires --preflight');
-    if (!args.batchHash) throw new Error('execute requires --batch-hash');
     if (args.confirm !== PENDING_DISCUSS_CONFIRM_TEXT) throw new Error(`execute requires --confirm ${PENDING_DISCUSS_CONFIRM_TEXT}`);
     if (process.env.SHEIN_PENDING_DISCUSS_WRITE_ENABLED !== '1') throw new Error('execute requires SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1');
   }
@@ -125,6 +124,90 @@ function validateArgs(args) {
 
 async function readJson(file) {
   return JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
+}
+
+export function extractPendingDiscussConfig(parsed) {
+  if (!parsed || typeof parsed !== 'object') return {};
+  return {
+    baseUrl: parsed?.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged,
+  };
+}
+
+export function extractTargetScope({preflight, decisions} = {}) {
+  const stores = new Set();
+  const canonicals = new Set();
+  if (preflight) {
+    for (const store of (preflight.stores || [])) {
+      if (store.storeKey) stores.add(storeKey(store.storeKey));
+      for (const item of (store.items || [])) {
+        if (item.lockedRow?.canonicalGoodsSn) canonicals.add(String(item.lockedRow.canonicalGoodsSn).trim());
+      }
+    }
+  }
+  if (decisions && Array.isArray(decisions.decisions)) {
+    for (const d of decisions.decisions) {
+      if (d.storeKey) stores.add(storeKey(d.storeKey));
+      if (d.canonicalGoodsSn) canonicals.add(String(d.canonicalGoodsSn).trim());
+    }
+  }
+  return {
+    stores: stores.size ? [...stores].sort() : null,
+    canonicals: canonicals.size ? [...canonicals].sort() : null,
+  };
+}
+
+export function extractTargetScopeFromScanAndDecisions(scan, decisions) {
+  const canonicals = new Set();
+  for (const d of (decisions?.decisions || [])) {
+    if (d.canonicalGoodsSn) canonicals.add(String(d.canonicalGoodsSn).trim());
+  }
+  const stores = new Set();
+  for (const row of (scan?.rows || [])) {
+    if (canonicals.has(row.canonicalGoodsSn) && row.storeKey) {
+      stores.add(storeKey(row.storeKey));
+    }
+  }
+  return {
+    stores: stores.size ? [...stores].sort() : null,
+    canonicals: canonicals.size ? [...canonicals].sort() : null,
+  };
+}
+
+export async function hashTargetedCommercialConfig(filePath, key, scope = {}) {
+  try {
+    const raw = await readJson(filePath);
+    if (!raw || typeof raw !== 'object') return sha256File(filePath);
+    if (key === 'openApiConfig') {
+      return sha256Json(extractPendingDiscussConfig(raw));
+    }
+    if (key === 'storesConfig' && scope.stores) {
+      const all = Array.isArray(raw.stores) ? raw.stores : Object.values(raw.stores || {});
+      const filtered = all.filter(s => scope.stores.includes(storeKey(s.storeKey || s.key || s.store)));
+      return sha256Json(filtered.sort((a, b) => String(a.storeKey).localeCompare(String(b.storeKey))));
+    }
+    if (key === 'storeTruth' && scope.stores) {
+      const truthMap = raw.stores || raw;
+      const filtered = {};
+      for (const k of scope.stores) {
+        if (truthMap[k]) filtered[k] = truthMap[k];
+      }
+      return sha256Json(filtered);
+    }
+    if (key === 'productAliases' && scope.canonicals) {
+      const entries = Object.entries(raw).filter(([k]) => scope.canonicals.includes(k));
+      return sha256Json(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))));
+    }
+    if (key === 'productCatalog' && scope.canonicals) {
+      const list = Array.isArray(raw) ? raw : Object.values(raw);
+      const filtered = list.filter(item => scope.canonicals.includes(item?.canonicalGoodsSn || item?.spuName));
+      return sha256Json(filtered);
+    }
+  } catch {}
+  return sha256File(filePath);
+}
+
+export async function hashPendingDiscussConfig(file) {
+  return hashTargetedCommercialConfig(file, 'openApiConfig');
 }
 
 async function sha256File(file) {
@@ -315,24 +398,33 @@ export async function runPendingDiscussScan(args, runtime = null) {
 }
 
 async function collectSourceHashes(args) {
+  return collectSourceHashesWithScope(args, {});
+}
+
+export async function collectSourceHashesWithScope(args, scope = {}) {
   const files = {
+    // 不可变源代码与平台 Schema 规则：严格全文哈希比对
     domainSource: path.join(ROOT, 'lib', 'pending_discuss_batch.mjs'),
     runnerSource: path.join(ROOT, 'scripts', 'pending_discuss_batch.mjs'),
     querySchema: path.join(ROOT, 'outputs', 'shein-openapi-doc-catalog', 'api-details', '3001891.json'),
     processSchema: path.join(ROOT, 'outputs', 'shein-openapi-doc-catalog', 'api-details', '3001892.json'),
-    productAliases: path.join(ROOT, 'config', 'product_aliases.json'),
-    productCatalog: path.join(ROOT, 'config', 'product_catalog.json'),
-    storesConfig: args.storesConfig,
-    storeTruth: args.storeTruth,
-    openApiConfig: args.config,
     openApiClient: path.join(ROOT, 'lib', 'shein_openapi_client.mjs'),
     storeIdentity: path.join(ROOT, 'lib', 'shein_store_identity.mjs'),
     skuNormalizer: path.join(ROOT, 'lib', 'product_sku_normalizer.mjs'),
     ticketLock: path.join(ROOT, 'lib', 'cross_process_ticket_lock.mjs'),
     atomicPublish: path.join(ROOT, 'lib', 'atomic_file_publish.mjs'),
+    // 可变商业配置：仅提取当前涉及的店铺或商品的真实依赖
+    productAliases: path.join(ROOT, 'config', 'product_aliases.json'),
+    productCatalog: path.join(ROOT, 'config', 'product_catalog.json'),
+    storesConfig: args.storesConfig,
+    storeTruth: args.storeTruth,
+    openApiConfig: args.config,
   };
   const output = {};
-  for (const [key, file] of Object.entries(files)) output[key] = await sha256File(file);
+  for (const [key, file] of Object.entries(files)) {
+    const isCommercialConfig = ['openApiConfig', 'storesConfig', 'storeTruth', 'productAliases', 'productCatalog'].includes(key);
+    output[key] = isCommercialConfig ? await hashTargetedCommercialConfig(file, key, scope) : await sha256File(file);
+  }
   return output;
 }
 
@@ -355,13 +447,15 @@ async function runPreflightCommand(args, outDir) {
   const decisions = await readJson(args.decisions);
   const currentBusinessDate = businessDateShanghai();
   if (String(decisions?.businessDate || '') !== currentBusinessDate) throw new Error(`decisions businessDate must equal current Asia/Shanghai date ${currentBusinessDate}`);
-  const [runtime, sourceHashes] = await Promise.all([loadPendingDiscussRuntime(args), collectSourceHashes(args)]);
+  const runtime = await loadPendingDiscussRuntime(args);
   const scan = await runPendingDiscussScan(args, runtime);
   const scanFile = await writeArtifact(outDir, 'scan.json', scan);
   if (!scan.ok) {
     const manifest = await writeManifest(outDir, 'preflight', [scanFile], {businessDate: scan.businessDate, ok: false, scanHash: scan.scanHash});
     return {result: {...compactScan(scan), mode: 'preflight', manifestFile: manifest.manifestFile, manifestHash: manifest.manifestHash}, exitCode: 3};
   }
+  const targetScope = extractTargetScopeFromScanAndDecisions(scan, decisions);
+  const sourceHashes = await collectSourceHashesWithScope(args, targetScope);
   const generatedAt = new Date();
   const preflight = buildPreflightDocument({
     scan, decisions, sourceHashes, generatedAt: generatedAt.toISOString(),
@@ -438,9 +532,11 @@ async function pollTerminal(runtime, item, client, args) {
 
 async function runExecuteCommand(args, outDir) {
   const preflight = await readJson(args.preflight);
-  const [runtime, sourceHashes] = await Promise.all([loadPendingDiscussRuntime(args), collectSourceHashes(args)]);
+  const targetBatchHash = args.batchHash || preflight?.batchHash;
+  const targetScope = extractTargetScope({preflight});
+  const [runtime, sourceHashes] = await Promise.all([loadPendingDiscussRuntime(args), collectSourceHashesWithScope(args, targetScope)]);
   const verification = verifyPreflightDocument(preflight, {
-    businessDate: businessDateShanghai(), now: new Date(), sourceHashes, batchHash: args.batchHash,
+    businessDate: businessDateShanghai(), now: new Date(), sourceHashes, batchHash: targetBatchHash,
   });
   const safeWriteGate = verifySafeWriteGate(runtime, preflight);
   verification.blockers.push(...safeWriteGate.blockers);
@@ -467,10 +563,10 @@ async function runExecuteCommand(args, outDir) {
     for (let index = 0; index < allItems.length; index += 1) {
       const item = allItems[index];
       try {
-        const currentSourceHashes = await collectSourceHashes(args);
+        const currentSourceHashes = await collectSourceHashesWithScope(args, targetScope);
         const currentGate = verifyPreflightDocument(preflight, {
           businessDate: businessDateShanghai(), now: new Date(), sourceHashes: currentSourceHashes,
-          batchHash: args.batchHash,
+          batchHash: targetBatchHash,
         });
         const currentSafeWriteGate = verifySafeWriteGate(runtime, preflight);
         currentGate.blockers.push(...currentSafeWriteGate.blockers);

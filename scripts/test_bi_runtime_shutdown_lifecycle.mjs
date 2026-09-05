@@ -268,11 +268,23 @@ let childNeverClosesWallMs = 0;
       job.status = 'running';
       job.leaseOwner = workerId;
       job.leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString();
+      job.repositoryRevision = Number(job.repositoryRevision || 1);
       return {...job};
     },
     async advanceJobWriteBoundary(jobId, writeBoundary) {
       const job = portalJobs.get(jobId);
-      if (job) job.writeBoundary = writeBoundary;
+      if (job) {
+        job.writeBoundary = writeBoundary;
+        job.repositoryRevision = Number(job.repositoryRevision || 1) + 1;
+      }
+      return {...(job || {})};
+    },
+    async heartbeatJob(jobId, {leaseMs} = {}) {
+      const job = portalJobs.get(jobId);
+      if (job) {
+        job.repositoryRevision = Number(job.repositoryRevision || 1) + 1;
+        if (leaseMs) job.leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString();
+      }
       return {...(job || {})};
     },
     async finishJob(jobId, changes) {
@@ -282,12 +294,13 @@ let childNeverClosesWallMs = 0;
         job.result = changes.result ?? null;
         job.leaseOwner = null;
         job.leaseExpiresAt = null;
+        job.repositoryRevision = Number(job.repositoryRevision || 1) + 1;
       }
       return {...(job || {})};
     },
     async getJob(jobId) { return {...(portalJobs.get(jobId) || null)}; },
     async close() { portalOrder.push('store-closed'); },
-    enqueue(id) { portalJobs.set(id, {jobId: id, kind: 'intent_plan', payload: {}, status: 'queued', writeBoundary: 'none', attempt: 0}); },
+    enqueue(id) { portalJobs.set(id, {jobId: id, kind: 'intent_plan', payload: {}, status: 'queued', writeBoundary: 'none', attempt: 0, repositoryRevision: 1}); },
   };
   portalStore.enqueue('portal-job');
   const portalWorker = createLinkOpsJobWorker({

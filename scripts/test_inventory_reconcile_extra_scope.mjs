@@ -64,7 +64,7 @@ function createMockOpenApiServer() {
       return;
     }
     if (pathname === '/open-api/stock/stock-query') {
-      json({code: '0', info: [{goodsInventory: [{skuList: [{skuCode: SKU_CODE, totalInventoryQuantity: currentUsable, totalUsableInventory: currentUsable, totalLockedQuantity: 0, warehouseInventoryList: []}]}]}]});
+      json({code: '0', info: [{goodsInventory: [{skuList: [{skuCode: SKU_CODE, totalInventoryQuantity: currentUsable, totalUsableInventory: currentUsable, totalLockedQuantity: 0, temporaryInventoryQuantity: 0, warehouseInventoryList: []}]}]}]});
       return;
     }
     if (pathname === '/open-api/stock/change-inventory/v2') {
@@ -79,7 +79,7 @@ function createMockOpenApiServer() {
 }
 
 function buildIntent({plan, skc, skuCode, targetUsableInventory, intentId}) {
-  const before = {skuCode, totalInventoryQuantity: 10, totalUsableInventory: 10, totalLockedQuantity: 0, stockRowMissing: false, warehouseCodes: []};
+  const before = {skuCode, totalInventoryQuantity: 10, totalUsableInventory: 10, totalLockedQuantity: 0, temporaryInventoryQuantity: 0, stockRowMissing: false, warehouseCodes: []};
   const logicalActionKey = stableInventoryHash({
     runDate: TODAY,
     store: STORE_KEY,

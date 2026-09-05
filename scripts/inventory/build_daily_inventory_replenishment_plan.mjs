@@ -16,6 +16,7 @@ import {
 import {inventoryDetailRefreshWindow} from '../../lib/inventory_detail_refresh_window.mjs';
 import {normalizeGoodsSnDetailed} from '../../lib/product_sku_normalizer.mjs';
 import {resolveOpenApiProductCacheDir, resolveOpenApiProductCacheFile} from '../../lib/shein_openapi_product_cache.mjs';
+import {writeJsonFileAtomic} from '../../lib/atomic_file_publish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -1414,6 +1415,7 @@ const crossStoreSoldOutFindings = evaluatedRows
   .sort((a, b) => a.canonical.localeCompare(b.canonical) || a.storeKey.localeCompare(b.storeKey));
 const payload = {
   schemaVersion: 'daily-inventory-replenishment-plan/v1',
+  ...(process.env.SHEIN_BI_INVENTORY_COMMAND_ID ? {commandId: process.env.SHEIN_BI_INVENTORY_COMMAND_ID} : {}),
   date: args.date,
   policyVersion: policy.policyVersion,
   generatedAt: new Date().toISOString(),
@@ -1470,7 +1472,6 @@ const report = {
     etFactSource: etSource?.factSource ? 'et_forwarder_manifest' : 'portal_projection',
   },
 };
-await fs.mkdir(path.dirname(args.out), {recursive: true});
-await fs.writeFile(args.out, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+await writeJsonFileAtomic(args.out, report);
 console.log(JSON.stringify({ok: report.executable, out: path.relative(ROOT, args.out).replaceAll(path.sep, '/'), payloadHash, counts: report.counts, blockers: report.blockers}, null, 2));
 if (!report.executable) process.exitCode = 2;

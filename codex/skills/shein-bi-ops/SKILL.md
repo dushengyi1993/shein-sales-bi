@@ -52,6 +52,20 @@ Then inspect `$result`, calculate/filter its structured `data` in the **current 
 - If direct cloud access fails, report the exact access/query error. Do not hide the failure by calling `ask` or inventing a result.
 - Use the managed CLI for controlled preflight and authorized business operations; verify final facts and write results directly from the underlying database/OpenAPI/readback.
 
+## Run inventory maintenance now
+
+For an explicit request such as “现在跑一轮库存”, use the managed cloud job:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" maintain-inventory --out <receipt.json>
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" job --job-id <returned-job-id>
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" wait-job --job-id <returned-job-id> --wait-seconds 120
+```
+
+The command creates a fresh command ID and a cloud plan under the existing automatic inventory policy. It requires permission for the complete configured store set. The CLI saves and displays its command ID and local receipt before dispatch. If the connection breaks, retry with `maintain-inventory --command-id <same-id>` and unchanged parameters; a distinct user request gets a new ID. A queued job is not a completed inventory run. `--dry-run` uses the same cloud path without inventory submission.
+
+Report success only after the job returns an exact, hash-verified plan/result/journal/marker version for that command. Preserve individual pending, manual-fence and proven pre-submit exclusions in the report. Pending requests are read back without resubmission; a new command never erases an old key's tombstone or treats an old unknown effect as confirmed. Do not run a Windows inventory POST, copy an old same-day result into the new command, or replay another business queue to test this feature.
+
 ## Structured write operations
 
 For partner/operator write requests, the current local Codex must understand the request itself and call `operate` with an explicit operation, store, product and structured parameters. Do **not** send the request to `chat`, the cloud Codex intent planner, or a keyword classifier.
@@ -137,8 +151,8 @@ unique `section#s09` or deterministically labeled/directed legacy `section#s9`, 
 uploads those actual HTML bytes to the controlled endpoint, and requires the
 server to independently recompute the file SHA and re-extract every line
 byte-for-byte. It binds fixed ar/en 5-line descriptions (zh-cn stays
-audit-only), invalidates the old preflight and reruns preflight. The binding is
-the final material mutation: complete reviewed image/publish preparation first.
+audit-only), invalidates the old preflight and reruns preflight.
+Under the C1 contract, description binding is not a strict terminal mutation that blocks subsequent parameter completion: for the same product, missing parameters (including attribute completion or cross-link Donor attribute borrowing) may be supplemented either before or after description binding, while strictly preserving reviewed image and text assets. Both the description binding lock (`descriptionBinding`) and attribute binding lock (`productAttributeBinding`) bidirectionally synchronize with the latest exact payload hash; run a fresh preflight after dual-lock synchronization.
 The command fresh-reads and CAS-locks the task repository revision; a committed
 binding whose audit/readback is pending is reported as that exact stage and is
 not blindly rebound.
@@ -158,6 +172,24 @@ store, source store/SKC, supplier code, approved image binding and payload
 hash. A later payload, source or binding change invalidates it. Never infer
 this exception merely because reviewed description material is missing or the
 source link returns an empty description.
+
+## Duplicate publishing authorization (A2: 新上与再上业务意图)
+
+When a `copy_product_draft` task preflight is blocked by same-code duplicate listing checks (同货号重复上品 / 同款在售/已存在链接), confirm the explicit business intent:
+- **明确新增链接意图 (New / Additional link intent)**: Regardless of whether existing or historical links already exist on the platform for the same product code, whenever the current business intent explicitly requires creating an additional or new link (新上或再上), proceed via duplicate publish authorization.
+- **保持已审资料实际事实**: Preserve verified material facts (reviewed images, specifications, attributes) across different sources for the same product without inventing or dropping reviewed facts.
+
+To explicitly authorize duplicate publishing, call the real CLI path with an explicit, stable request ID:
+
+```powershell
+& "$HOME\.shein-bi\cli\shein-bi-ops.cmd" authorize-duplicate-publish --task-id <id> --store <target-store> --request-id <stable-request-id> [--skc <existing-skc>] [--note "<再上/新上业务意图>"]
+```
+
+- **Explicit Request ID**: `--request-id <stable-request-id>` is mandatory in the call contract and must be explicitly provided by the caller to guarantee strict idempotency (do not omit or substitute with auto-generated magic strings). Replaying with the same `request-id` is strictly idempotent, returns the existing authorization, and never creates duplicate overrides.
+- **Confirmation**: The CLI implementation defaults `--confirm` to `YES`, so there is no need to prompt the user for an extra confirmation loop.
+- **New Intent Isolation**: A genuine new business intent, distinct batch, or modified store requires a fresh task and new `request-id`.
+- **Terminal & Pending States**: Tasks already in `submitted` or terminal readback state, or in `submitted_but_readback_pending` / `unknown`, cannot be blindly reused, retried, or overwritten.
+- **Authority Boundary (`owner_actor_required`)**: Authorizing duplicate publishing is strictly owner-only. In addition to the target store being in the account's `writeStores`, the server enforces `owner_actor_required`; standard operator/collaborator accounts without owner authority are refused. CLI arguments cannot bypass or expand these account permission boundaries.
 
 For a **historical** published product whose description must be backfilled
 from the same reviewed 审核资料 (legacy unique `section#s9` with exactly three

@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 # Read-only browser lane shared with the full-managed project.
 # Half-managed work prefers slot 1; full-managed work prefers slot 0.
-# Business writes and DB/IO-heavy jobs continue to use the host lock
-# exclusively through run_host_heavy_job.sh.
+# Browser writes share these capacity slots through run_host_heavy_job.sh.
+# Exact Profile ownership remains with the managed browser launcher.
 
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 HOST_LOCK="${SHEIN_HOST_HEAVY_LOCK_FILE:-/run/lock/shein-host-heavy.lock}"
@@ -272,7 +272,7 @@ export SHEIN_BI_HOST_HEAVY_WRAPPED=1
 export SHEIN_BI_HOST_HEAVY_DOMAIN="$DOMAIN"
 export SHEIN_BI_HOST_RESOURCE_LANE=browser-read
 set +e
-"${TIMEOUT_ARGS[@]}" "$@"
+"${TIMEOUT_ARGS[@]}" /usr/bin/env bash -c 'exec 6>&- 7>&- 8>&- 9>&-; exec "$@"' -- "$@"
 STATUS=$?
 set -e
 if [[ "$STATUS" -eq 124 || "$STATUS" -eq 137 || "$STATUS" -eq 143 ]]; then

@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT="${SHEIN_BI_ROOT:-/opt/shein-bi/app}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 MIN_START_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC:-900}"
+CLOUD_PRIMARY_ENABLED="${SHEIN_BI_MARKETING_CLOUD_PRIMARY_ENABLED:-false}"
 STACK_REVIEW_TIMEOUT_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_TIMEOUT_SEC:-900}"
 STACK_REVIEW_KILL_AFTER_SEC="${SHEIN_BI_MARKETING_STACK_REVIEW_KILL_AFTER_SEC:-60}"
 SCAN_TIMEOUT_SEC="${SHEIN_BI_MARKETING_LIVE_SCAN_TIMEOUT_SEC:-2400}"
@@ -201,8 +202,16 @@ process.stdout.write(fields.map(value => String(value)).join("\n"));
   fi
   GRACEFUL_CUTOFF_EPOCH="$IMMEDIATE_GRACEFUL_CUTOFF_EPOCH"
   OUTER_HARD_DEADLINE_EPOCH="$IMMEDIATE_OUTER_HARD_DEADLINE_EPOCH"
+elif [[ "$CLOUD_PRIMARY_ENABLED" == "true" ]]; then
+  RUN_BUDGET_SEC="${SHEIN_BI_MARKETING_REPAIR_RUN_BUDGET_SEC:-3600}"
+  if [[ ! "$RUN_BUDGET_SEC" =~ ^[1-9][0-9]*$ ]] || (( RUN_BUDGET_SEC < MIN_START_BUDGET_SEC || RUN_BUDGET_SEC > 14400 )); then
+    echo "[marketing-fallback-slot] cloud run budget must be between minimum group budget and 14400 seconds" >&2
+    exit 64
+  fi
+  GRACEFUL_CUTOFF_EPOCH=$((NOW_EPOCH + RUN_BUDGET_SEC))
+  OUTER_HARD_DEADLINE_EPOCH=$((GRACEFUL_CUTOFF_EPOCH + MIN_START_BUDGET_SEC))
 else
-  # The existing 20:45/21:15 timer remains the only scheduler. A started run
+  # The existing 20:45/21:15 timer remains a fallback. A started run
   # may continue through the same-day fallback window; the broad acceptance
   # range only matters if systemd starts the same service after a transient
   # lock/resource defer. The worker gates every new group independently.

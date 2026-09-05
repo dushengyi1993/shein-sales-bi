@@ -210,6 +210,7 @@ const serverReady = new Promise((resolve, reject) => {
                 totalInventoryQuantity: usable,
                 totalUsableInventory: usable,
                 totalLockedQuantity: 0,
+                temporaryInventoryQuantity: 0,
                 warehouseInventoryList: [],
               }],
             }],

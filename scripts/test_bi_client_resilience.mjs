@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -554,28 +555,212 @@ assert.match(source, /refreshError:transitionPending\?'':versionWarning/,
   'normal core-to-section convergence must not flash a false refresh-failed message');
 assert.doesNotMatch(source, /throw Error\(n\+' generatedAt 不匹配/, 'version mismatches must not hard-fail a usable cached page');
 assert.match(source, /history\.pushState\(null,'',hash\)/, 'normal navigation creates browser history');
-assert.match(source, /function inventoryMatchStatus\(r\)/, 'client keeps a backward-compatible inventory match-state reader');
-assert.match(source, /match==='not_matched'/, 'client must not treat an unmatched ET record as zero stock');
-assert.match(source, /match==='stale'/, 'client must surface stale ET snapshots distinctly');
-assert.match(source, /仅在 ET 快照最新且已匹配、当前可售为 0、没有有效在途时成立/, 'client out-of-stock copy keeps the fresh-match invariant');
-assert.match(source, /function inventoryMatrixLinkOnShelf\(r\)\{return String\(r\?\.openapi_inventory_shelf_status_code\?\?''\)==='1'&&!!r\?\.openapi_inventory_fetched_at\}/,
-  'inventory matrix must require a current OpenAPI on-shelf row');
-assert.match(source, /function inventoryStoreCellRows\(linkRows\)\{const m=new Map\(\);for\(const r of A\(linkRows\)\)\{if\(!inventoryMatrixLinkOnShelf\(r\)\)continue;/,
-  'inventory matrix must discard waiting, sold-out, off-shelf, and stale rows before building store cells');
-const inventoryStoreCellSource = source.match(/function inventoryStoreCell\(p,store,cellRows\)\{[\s\S]*?\nfunction inventoryLegend/)?.[0] || '';
-assert.match(inventoryStoreCellSource, /shown=saleable!=null\?saleable:display/,
-  'inventory matrix uses saleable stock when present and only falls back to display stock when saleable is unavailable');
-assert.match(inventoryStoreCellSource, /rows\.map\(inventoryMatrixStockValue\)/,
-  'inventory matrix reads current OpenAPI usable stock instead of the daily browser snapshot');
-assert.doesNotMatch(inventoryStoreCellSource, /linkStockValue|linkDisplayStockValue|visible_usable_inventory|visible_inventory_quantity/,
-  'inventory matrix must not fall back to stale browser inventory fields');
-assert.match(inventoryStoreCellSource, /待上架、售罄、已下架及过期快照不参与矩阵/,
-  'inventory matrix explains the current OpenAPI on-shelf-only scope');
-assert.doesNotMatch(inventoryStoreCellSource, /sold=|wait=|off=/,
-  'inventory matrix must not render non-on-shelf status counts or classes');
-assert.match(source, /无已上架链接<\/span>/, 'inventory legend does not expose waiting or off-shelf states');
-assert.match(source, /front=ls\.frontStockRows>0\?N\(ls\.frontSaleable\):null,frontText=inventoryVirtualQtyText\(front\)/,
-  'inventory matrix product totals stay blank when no on-shelf link has a stock value instead of fabricating zero');
+// Inventory resilience is an observable data/rendering contract, independent of
+// function spelling. Run the real client, with only network startup/DOM mounting
+// replaced by an in-memory host. All rows below are synthetic.
+{
+  let now = Date.parse('2026-09-05T03:00:00Z');
+  class InventoryClock extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
+  const listeners = new Map();
+  const context = vm.createContext({
+    Date: InventoryClock, console, URL, URLSearchParams, Intl,
+    window: {
+      __SHEIN_STORE_CONFIG__: {stores: ['SA', 'SB'].map(storeKey => ({storeKey})), ownerGroups: []},
+      addEventListener() {},
+    },
+    document: {
+      addEventListener(type, fn) {
+        if (!listeners.has(type)) listeners.set(type, []);
+        listeners.get(type).push(fn);
+      },
+      getElementById() { return null; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    },
+    location: {hash: '#inventory', search: '', pathname: '/app/'}, history: {}, navigator: {},
+    localStorage: {getItem() { return null; }, setItem() {}},
+    fetch() { throw Error('Inventory regression must stay offline'); },
+    setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; },
+    clearInterval() {}, requestAnimationFrame() { return 0; },
+  });
+  const startup = 'loadAuthUser().catch(()=>{});startLiveUpdates();core();})()';
+  assert.ok(source.trimEnd().endsWith(startup), 'VM must stop before production startup');
+  const names = [
+    'D', 'S', 'merge', 'canonicalGoodsSn', 'inventoryProductKey', 'productLinkRows',
+    'inventoryLinkRows', 'inventoryRowsForView', 'inventoryBuildLinkStats',
+    'inventoryStoreCellRows', 'inventoryStoreCell', 'inventoryProductMatrix', 'inventoryEtValue',
+  ];
+  vm.runInContext(source.replace(startup,
+    'globalThis.inventoryApi={' + names.join(',') + '};render=()=>{globalThis.renderCalls=(globalThis.renderCalls||0)+1};})()'),
+  context);
+  const api = context.inventoryApi;
+  const product = {standard_goods_sn: 'FIXTURE-MACHINE'};
+  const fresh = () => new InventoryClock().toISOString();
+  const link = (id, quantity, extra = {}) => ({
+    store_key: 'SA', skc: 'fixture-' + id, ...product,
+    is_on_shelf: true, openapi_inventory_shelf_status_code: '1',
+    openapi_inventory_fetched_at: fresh(), openapi_usable_inventory: quantity,
+    // Deliberately disagree with OpenAPI: these old browser numbers must not win.
+    visible_usable_inventory: 9001, visible_inventory_quantity: 9002,
+    ...extra,
+  });
+  const reset = data => {
+    for (const key of Object.keys(api.D)) delete api.D[key];
+    api.merge({storeLinks: [], productStateOverlay: [], inventoryStock: [],
+      inventoryDepletion: {products: []}, ...data}, 'core');
+    Object.assign(api.S, {scope: 'ALL', q: '', inventoryStatus: 'all', inventoryGroupLimit: 120});
+  };
+  const view = (storeLinks, extra = {}) => {
+    reset({storeLinks, ...extra});
+    const links = api.inventoryLinkRows();
+    const stats = api.inventoryBuildLinkStats(links);
+    const rows = api.inventoryRowsForView(links, stats);
+    const cells = api.inventoryStoreCellRows(links);
+    return {
+      links, stats, rows, cells,
+      cell: api.inventoryStoreCell(product, 'SA', cells),
+      matrix: api.inventoryProductMatrix(rows, links, stats),
+    };
+  };
+  for (const status of ['not_matched', 'stale']) {
+    assert.equal(api.inventoryEtValue({inventory_match_status: status, current_sellable_quantity: 80}), null,
+      status + ' ET inventory must remain unknown rather than zero or a stale number');
+  }
+  assert.equal(api.inventoryEtValue({inventory_match_status: 'matched', current_sellable_quantity: 0}), 0,
+    'a matched, known ET zero remains a real zero');
+
+  // A current on-shelf snapshot owns stock. Non-on-shelf rows are excluded even
+  // if a browser snapshot or webhook still claims they are on shelf.
+  const valid = view([link('fresh', 7), ...['0', '2', '3', '4'].map(code =>
+    link('excluded-' + code, 500, {openapi_inventory_shelf_status_code: code}))]);
+  assert.equal(valid.cells.get('SA|FIXTURE-MACHINE').length, 1);
+  assert.equal(valid.stats.get(product.standard_goods_sn).frontSaleable, 7);
+  assert.match(valid.cell, /<b>7<\/b>/);
+  assert.match(valid.cell, /库存读取：/);
+  assert.doesNotMatch(valid.cell, /9001|9002/);
+  const noLink = view([link('off', 500, {openapi_inventory_shelf_status_code: '4'})]);
+  assert.match(noLink.cell, /<b>—<\/b>/);
+  assert.match(noLink.matrix, /虚拟 —/);
+  assert.match(noLink.matrix, /无已上架链接/);
+
+  const partial = view([link('zero', 0), link('positive', 110)]);
+  assert.match(partial.cell, /<b>110<\/b>/);
+  assert.match(partial.cell, /部分链接缺货/);
+  assert.doesNotMatch(partial.cell, /全店该货号断货/);
+  assert.match(view([link('zero-a', 0), link('zero-b', 0)]).cell, /全店该货号断货/);
+  const unknown = view([link('known', 100), link('unknown', null)]);
+  assert.match(unknown.cell, /已知 100 \/ 另有未知/);
+  assert.equal(unknown.stats.get(product.standard_goods_sn).frontUnknownRows, 1);
+  assert.match(unknown.matrix, /虚拟 100\(含未知\)/);
+  const totalOnly = view([link('total', null, {openapi_inventory_quantity: 83})]);
+  assert.match(totalOnly.cell, /未知\(总 83\)/);
+  assert.doesNotMatch(totalOnly.cell, /<b>83<\/b>/);
+  assert.equal(totalOnly.stats.get(product.standard_goods_sn).frontStockRows, 0);
+  assert.match(totalOnly.matrix, /虚拟 未知/);
+
+  // Missing/invalid timestamps retain link identity; final-use age checks apply
+  // equally to cells and product totals, without replacing missing evidence by 0.
+  for (const timestamp of [null, 'invalid']) {
+    const missing = view([link('missing', 100, {openapi_inventory_fetched_at: timestamp})]);
+    assert.equal(missing.cells.get('SA|FIXTURE-MACHINE').length, 1);
+    assert.match(missing.cell, /<b>未知<\/b>/);
+    assert.equal(missing.stats.get(product.standard_goods_sn).frontUnknownRows, 1);
+    assert.equal(missing.stats.get(product.standard_goods_sn).frontStockRows, 0);
+    assert.match(missing.matrix, /虚拟 未知/);
+  }
+  const expiredTime = new InventoryClock(now - 45 * 60 * 1000 - 1).toISOString();
+  for (const timestamp of [expiredTime, new InventoryClock(now + 1).toISOString()]) {
+    const expired = view([link('expired', 100, {openapi_inventory_fetched_at: timestamp})]);
+    assert.equal(expired.cells.get('SA|FIXTURE-MACHINE').length, 1);
+    assert.match(expired.cell, /<b>过期<\/b>/);
+    assert.equal(expired.stats.get(product.standard_goods_sn).frontExpiredRows, 1);
+    assert.equal(expired.stats.get(product.standard_goods_sn).frontStockRows, 0);
+    assert.match(expired.matrix, /虚拟 过期/);
+  }
+  const mixed = view([link('known', 5), link('unknown', null),
+    link('expired', 300, {openapi_inventory_fetched_at: expiredTime})]);
+  assert.equal(mixed.stats.get(product.standard_goods_sn).frontSaleable, 5);
+  assert.match(mixed.cell, /已知 5 \/ 另有未知 \/ 含过期/);
+  assert.match(mixed.matrix, /虚拟 5\(含未知、含过期\)/);
+  const cached = view([link('clock', 19)]);
+  now += 45 * 60 * 1000;
+  assert.match(api.inventoryStoreCell(product, 'SA', cached.cells), /<b>19<\/b>/);
+  now += 1;
+  assert.match(api.inventoryStoreCell(product, 'SA', cached.cells), /<b>过期<\/b>/);
+  assert.equal(api.inventoryBuildLinkStats(cached.links).get(product.standard_goods_sn).frontStockRows, 0);
+  const refreshed = view([link('clock', 300, {openapi_inventory_fetched_at: expiredTime})], {
+    inventoryStock: [{store_key: 'SA', skc: 'fixture-clock', shelf_status_code: '1',
+      fetched_at: fresh(), shein_usable_inventory: 6}],
+  });
+  assert.match(refreshed.cell, /<b>6<\/b>/, 'the current inventoryStock section replaces an expired link fallback');
+
+  // Synthetic server identity map is input, not a client-side normalizer replica.
+  // Canonical provenance wins over both this map and colliding display labels.
+  reset({
+    productCanonicalSnMap: {'LEGACY-MACHINE': 'FIXTURE-MACHINE'},
+    productDisplayNames: {'FIXTURE-MACHINE': '同名', 'FIXTURE-ACCESSORY': '同名', 'UNKNOWN-A': '同名', 'UNKNOWN-B': '同名'},
+    storeLinks: [
+      link('a', 7, {standard_goods_sn: 'LEGACY-MACHINE'}),
+      link('a', 7, {standard_goods_sn: 'LEGACY-MACHINE'}),
+      link('b', 11),
+      link('a', 3, {store_key: 'SB'}),
+      link('accessory', 2, {standard_goods_sn: 'LEGACY-MACHINE', canonical_goods_sn: 'FIXTURE-ACCESSORY'}),
+      link('unknown-a', 5, {standard_goods_sn: 'UNKNOWN-A'}),
+      link('unknown-b', 6, {standard_goods_sn: 'UNKNOWN-B'}),
+    ],
+    productStateOverlay: [
+      {store_key: 'SA', skc: 'fixture-a', standard_goods_sn: 'LEGACY-MACHINE', shelf_status_code: '4', is_out_shelf: true},
+      {store_key: 'SA', skc: 'fixture-new', standard_goods_sn: 'LEGACY-MACHINE', is_wait_shelf: true},
+    ],
+  });
+  const identityLinks = api.productLinkRows();
+  assert.deepEqual(Array.from(identityLinks, row => row.store_key + '|' + row.skc).sort(),
+    ['SA|fixture-a', 'SA|fixture-b', 'SB|fixture-a', 'SA|fixture-accessory',
+      'SA|fixture-unknown-a', 'SA|fixture-unknown-b', 'SA|fixture-new'].sort(),
+  'same store+SKC collapses, but other SKCs and the same SKC in another store survive');
+  const updated = identityLinks.find(row => row.store_key === 'SA' && row.skc === 'fixture-a');
+  assert.equal(updated.is_out_shelf, true, 'old alias overlay updates the existing entity');
+  assert.equal(updated.standard_goods_sn, 'FIXTURE-MACHINE');
+  assert.equal(updated.raw_goods_sn, 'LEGACY-MACHINE');
+  const identityStats = api.inventoryBuildLinkStats(identityLinks);
+  assert.equal(identityStats.size, 4, 'same display labels cannot collapse separate canonical or unknown models');
+  assert.equal(identityStats.get('FIXTURE-MACHINE').frontSaleable, 21);
+  assert.equal(identityStats.get('FIXTURE-ACCESSORY').frontSaleable, 2);
+  assert.equal(api.inventoryRowsForView(identityLinks, identityStats).length, 4);
+  assert.match(api.inventoryStoreCell(product, 'SA', api.inventoryStoreCellRows(identityLinks)), /<b>18<\/b>/);
+  assert.equal(api.inventoryProductKey({product_display_name: '同名'}), '');
+
+  // No first-100 cap on entity counts or aggregation.
+  const manyLinks = view(Array.from({length: 137}, (_, i) => link('many-' + i, 1)));
+  assert.equal(manyLinks.links.length, 137);
+  assert.equal(manyLinks.stats.get(product.standard_goods_sn).frontStockRows, 137);
+  assert.match(manyLinks.cell, /<b>137<\/b>/);
+
+  // Several real clicks must eventually expose every product, not just a fixed
+  // first 100/120/220 rows. Do not mutate the pagination state in the test.
+  reset({});
+  const products = Array.from({length: 241}, (_, i) => ({standard_goods_sn: 'PAGE-' + String(i).padStart(3, '0')}));
+  const click = (listeners.get('click') || []).find(fn => String(fn).includes('inventoryMatrixMore'));
+  assert.ok(click, 'production inventory expand listener must be registered');
+  const renderedNames = html => Array.from(html.matchAll(/class="cell product inventory-product-cell"[^>]*><b>([^<]+)<\/b>/g), match => match[1]);
+  let html = api.inventoryProductMatrix(products, [], new Map());
+  assert.equal(renderedNames(html).length, 120, 'initial matrix includes rows beyond the first 100');
+  let clicks = 0;
+  while (html.includes('data-inventory-matrix-more')) {
+    assert.ok(clicks < 10, 'expansion must terminate after bounded clicks for a fixed fixture');
+    const previous = renderedNames(html).length;
+    click({target: {closest: selector => selector === 'button' ? {dataset: {inventoryMatrixMore: '1'}} : null}});
+    html = api.inventoryProductMatrix(products, [], new Map());
+    assert.ok(renderedNames(html).length > previous, 'each click must reveal additional products');
+    clicks += 1;
+  }
+  assert.deepEqual(renderedNames(html).sort(), products.map(row => row.standard_goods_sn).sort());
+  assert.equal(context.renderCalls, clicks, 'real clicks must request a render, not merely change hidden state');
+  console.log('bi_client_resilience inventory: canonical/store+SKC identity, stock completeness/expiry, 137 links and 241 products passed');
+}
 assert.match(source, /label:'已落定利润'.*storageNoteSar/, 'settled profit keeps storage fee as an inline supporting figure');
 assert.match(source, /label:'风险调整后利润'.*`\u5f85决售后风险 /, 'risk-adjusted profit keeps pending risk as an inline supporting figure');
 assert.doesNotMatch(source, /\{label:'(?:待决售后风险|已扣仓储费)',cells:/, 'profit summary must stay at three primary rows');

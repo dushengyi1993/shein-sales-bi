@@ -87,11 +87,76 @@ mkdir -p "$(dirname "$PLAN")" "$(dirname "$RESULT")" "$DETAIL_TARGETS_DIR"
 . "$ROOT/scripts/lib/shared_lock.sh"
 prepare_shared_lock_file "$LOCK"
 exec 9>"$LOCK"
-if ! flock -n 9; then
+if ! flock -w "${SHEIN_BI_INVENTORY_LOCK_WAIT_SECONDS:-0}" 9; then
   echo "daily inventory replenishment guard is already running" >&2
   exit 75
 fi
 cd "$ROOT"
+
+BASE_RUNTIME_ROOT="$RUNTIME_ROOT"
+SOURCE_MARKER_ROOT="$MARKER_ROOT"
+COMMAND_ID="${SHEIN_BI_INVENTORY_COMMAND_ID:-morning:$DATE}"
+if [[ ! "$COMMAND_ID" =~ ^[A-Za-z0-9._:-]{1,160}$ ]]; then
+  echo "[daily_inventory_guard] invalid command identity" >&2
+  exit 64
+fi
+COMMAND_HASH="$(printf '%s' "$COMMAND_ID" | sha256sum | cut -d ' ' -f 1)"
+BATCH_ID="${SHEIN_BI_INVENTORY_BATCH_ID:-batch-${COMMAND_HASH:0:40}}"
+if [[ ! "$BATCH_ID" =~ ^[A-Za-z0-9._:-]{1,160}$ ]]; then
+  echo "[daily_inventory_guard] invalid batch identity" >&2
+  exit 64
+fi
+INDEX_FILE="$BASE_RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.index.json"
+# Preserve the complete legacy execution without changing its original bytes.
+if [[ ! -f "$INDEX_FILE" && -f "$RESULT" ]]; then
+  node scripts/inventory/daily_inventory_version_publisher.mjs publish \
+    "$BASE_RUNTIME_ROOT" "$DATE" "legacy-$DATE" "morning:$DATE" \
+    "$PLAN" "$RESULT" "$SOURCE_MARKER_ROOT/$DATE/daily-inventory-guard.json" >/dev/null
+fi
+EXISTING_BATCH="$(node scripts/inventory/daily_inventory_version_publisher.mjs read "$BASE_RUNTIME_ROOT" "$DATE" "" "$COMMAND_ID")"
+if [[ "$EXISTING_BATCH" != "null" ]]; then
+  printf '%s\n' "$EXISTING_BATCH"
+  case "$(jq -r '.status' <<<"$EXISTING_BATCH")" in
+    done|dry_run_ready) exit 0 ;;
+    warning) exit 2 ;;
+    *) exit 1 ;;
+  esac
+fi
+# Each command owns its own artifacts. No completed date-level output is reused.
+RUNTIME_ROOT="$BASE_RUNTIME_ROOT/runs/$DATE/$COMMAND_HASH"
+MARKER_ROOT="$RUNTIME_ROOT/markers"
+PLAN="$RUNTIME_ROOT/plans/daily-inventory-replenishment-$DATE.json"
+RESULT="$RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.json"
+DETAIL_TARGETS_DIR="$RUNTIME_ROOT/detail-targets"
+DETAIL_TARGETS="$DETAIL_TARGETS_DIR/daily-inventory-detail-targets-$DATE.json"
+mkdir -p "$(dirname "$PLAN")" "$(dirname "$RESULT")" "$DETAIL_TARGETS_DIR"
+export SHEIN_BI_INVENTORY_COMMAND_ID="$COMMAND_ID"
+export SHEIN_BI_INVENTORY_JOURNAL_DIRS="${SHEIN_BI_INVENTORY_JOURNAL_DIRS:+$SHEIN_BI_INVENTORY_JOURNAL_DIRS:}$BASE_RUNTIME_ROOT/results:$BASE_RUNTIME_ROOT/runs"
+
+publish_complete_inventory_version() {
+  local status=$?
+  trap - EXIT
+  local marker="$MARKER_ROOT/$DATE/daily-inventory-guard.json"
+  if [[ -f "$PLAN" && -f "$RESULT" && -f "$marker" ]]; then
+    if [[ ! -f "$RESULT.journal.ndjson" ]] && jq -e 'all(.results[]; ((.writes // [])|length)==0 and .state!="submitted_but_readback_pending")' "$RESULT" >/dev/null; then
+      ( set -o noclobber; : > "$RESULT.journal.ndjson" )
+    fi
+    if ! node scripts/inventory/daily_inventory_version_publisher.mjs publish \
+      "$BASE_RUNTIME_ROOT" "$DATE" "$BATCH_ID" "$COMMAND_ID" \
+      "$PLAN" "$RESULT" "$marker" "$SOURCE_MARKER_ROOT" >/dev/null; then
+      echo "[daily_inventory_guard] complete immutable version publication failed" >&2
+      status=1
+    elif [[ "$ROOT" == "/opt/shein-bi/app" && "${SHEIN_OPS_BUSINESS_DELIVERY_ENABLED:-1}" == "1" ]]; then
+      timeout -k 2 50 node scripts/cloud_team_report_delivery.mjs \
+        --business-result "$RESULT" --automation-id inventory-replenishment \
+        --business-date "$DATE" --attachment-file "$RESULT" \
+        --attachment-name "inventory-$DATE.json" >/dev/null \
+        || echo "[daily_inventory_guard] business evidence published; notification remains in shared delivery state" >&2
+    fi
+  fi
+  exit "$status"
+}
+trap publish_complete_inventory_version EXIT
 
 write_inventory_marker() {
   local status="$1"
@@ -120,7 +185,7 @@ NODE
 
 pre_warning_audit() {
   node scripts/validate_daily_operating_refresh.mjs \
-    --pre-warning-audit \
+    --pre-warning-audit --inventory-only \
     --root "$ROOT" \
     --marker-root "$MARKER_ROOT" \
     --state-dir "$ROOT/state/cloud_morning_chain" \
@@ -158,6 +223,11 @@ result_is_complete_and_safe() {
         (.after.totalUsableInventory == .targetUsableInventory) and ((.writes // []) | length > 0)
       elif .state == "skipped_target_already_matched" then
         .before.totalUsableInventory == .targetUsableInventory
+      elif .state == "skipped_owner_confirmed_same_target_above_target" then
+        ((.before.totalUsableInventory | type) == "number")
+        and ((.targetUsableInventory | type) == "number")
+        and .before.totalUsableInventory > .targetUsableInventory
+        and (((.writes // []) | length) == 0)
       elif .state == "skipped_terminal_readback_recorded" then
         $result.reconcilePendingOnly == true
         and .terminalDisposition == "readback_matched"
@@ -222,11 +292,13 @@ result_is_readback_pending_only() {
 }
 
 result_has_item_warning() {
-  jq -e '
+  jq -e --arg date "$DATE" '
     type == "object"
     and ([.results[]?
-      | select((.state == "submitted_but_readback_pending" and .historicalPending != true)
-        or .state == "blocked_by_manual_resolution_fence")]
+      | select((.state == "submitted_but_readback_pending" and (.historicalPending != true or .historicalRunDate == $date))
+        or .state == "historical_readback_matched"
+        or .state == "blocked_by_manual_resolution_fence"
+        or .state == "pre_submit_blocked")]
       | length) > 0
   ' "$RESULT" >/dev/null
 }
@@ -378,7 +450,7 @@ if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$REQUIRE_PIPELINE_MARKERS" == "1" ||
     --date "$DATE" \
     --status done \
     --require-evidence \
-    --root "$MARKER_ROOT" \
+    --root "$SOURCE_MARKER_ROOT" \
     || {
       echo "[daily_inventory_guard] all-store morning link merge is not ready" >&2
       exit 75
@@ -389,7 +461,7 @@ if (( RECONCILE_PENDING_ONLY == 0 )) && [[ "$REQUIRE_PIPELINE_MARKERS" == "1" ||
     --status done \
     --not-before "$STOCK_NOT_BEFORE" \
     --require-evidence \
-    --root "$MARKER_ROOT" \
+    --root "$SOURCE_MARKER_ROOT" \
     || {
       echo "[daily_inventory_guard] stock refresh marker is not ready after $STOCK_NOT_BEFORE" >&2
       exit 75
@@ -780,6 +852,13 @@ if [[ -f "$RESULT" ]] && jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
     }}' "$RESULT"
     exit 0
   fi
+  if (( RECONCILE_PENDING_ONLY == 0 )) && result_has_item_warning; then
+    if publish_audited_inventory_warning "existing exact command completed with verified item warnings; no business item was replayed"; then
+      jq '{ok:false,state:"already_completed_with_warning",planHash,executionMode,generatedAt}' "$RESULT"
+      exit 2
+    fi
+    exit 1
+  fi
   echo "[daily_inventory_guard] prior result is not a safe current terminal readback; re-run read-only guards and executor recovery (durable intents forbid duplicate writes)" >&2
 fi
 
@@ -796,12 +875,16 @@ fi
 
 set +e
 EXECUTOR_RECOVERY_ARGS=()
+EXECUTOR_EXECUTE_ARGS=(--execute)
+if [[ "${SHEIN_BI_INVENTORY_DRY_RUN:-0}" == "1" ]]; then
+  EXECUTOR_EXECUTE_ARGS=()
+fi
 if (( RECONCILE_PENDING_ONLY == 1 )); then
   EXECUTOR_RECOVERY_ARGS+=(--reconcile-pending-only)
 fi
 node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
   --plan "$PLAN" \
-  --execute \
+  "${EXECUTOR_EXECUTE_ARGS[@]}" \
   --execution-mode automatic \
   --confirm-hash "$HASH" \
   --max-rows "$MAX_ROWS" \
@@ -809,6 +892,14 @@ node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
   --out "$RESULT"
 EXECUTOR_STATUS=$?
 set -e
+if [[ "${SHEIN_BI_INVENTORY_DRY_RUN:-0}" == "1" ]]; then
+  if (( EXECUTOR_STATUS != 0 )) || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" \
+    '.planHash==$hash and .execute==false and (.results|length)==$total and all(.results[]; .state=="dry_run_ready" or .state=="planned")' "$RESULT" >/dev/null; then
+    exit 1
+  fi
+  write_inventory_marker done "inventory dry-run completed; no inventory POST was dispatched"
+  exit 0
+fi
 # Exit 75 is the guard's capacity/readback-only contract. An executor 75
 # without a fresh complete publication is a real executor failure, not a
 # capacity defer that the morning coordinator may retry indefinitely.
@@ -844,6 +935,7 @@ if result_has_item_warning || result_is_readback_pending_only; then
       total:(.results|length),
       pending:([.results[]|select(.state=="submitted_but_readback_pending")]|length),
       fenced:([.results[]|select(.state=="blocked_by_manual_resolution_fence")]|length),
+      preSubmitBlocked:([.results[]|select(.state=="pre_submit_blocked")]|length),
       updated:([.results[]|select(.state=="updated_readback_matched")]|length),
       skipped:([.results[]|select(.state|startswith("skipped_"))]|length)
     }}' "$RESULT"

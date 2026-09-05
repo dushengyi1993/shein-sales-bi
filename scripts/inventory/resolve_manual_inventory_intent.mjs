@@ -411,9 +411,9 @@ function assertExactReadback(extracted, scope, label) {
     || normalized.warehouseCode !== scope.warehouseCode || normalized.invType !== scope.invType) {
     fail('INVENTORY_MANUAL_RESOLUTION_EVIDENCE_SCOPE_MISMATCH', `${label}:scope`);
   }
-  if (extracted.totalInventoryQuantity !== 50 || extracted.totalUsableInventory !== 49
-    || extracted.totalLockedQuantity !== 1 || extracted.temporaryInventoryQuantity !== 0) {
-    fail('INVENTORY_MANUAL_RESOLUTION_EVIDENCE_BASELINE_MISMATCH', `${label}:expected=50/49/1/0`);
+  if (!['totalInventoryQuantity', 'totalUsableInventory', 'totalLockedQuantity', 'temporaryInventoryQuantity'].every(field => Number.isSafeInteger(extracted[field]) && extracted[field] >= 0)
+    || extracted.totalInventoryQuantity !== extracted.totalUsableInventory + extracted.totalLockedQuantity + extracted.temporaryInventoryQuantity) {
+    fail('INVENTORY_MANUAL_RESOLUTION_EVIDENCE_BASELINE_MISMATCH', `${label}:invalid inventory field conservation`);
   }
 }
 
@@ -436,9 +436,9 @@ function canonicalLiveInventoryBaseline(input, scope) {
     totalLockedQuantity: Number(input.totalLockedQuantity),
     temporaryInventoryQuantity: Number(input.temporaryInventoryQuantity),
   };
-  if (baseline.totalInventoryQuantity !== 50 || baseline.totalUsableInventory !== 49
-    || baseline.totalLockedQuantity !== 1 || baseline.temporaryInventoryQuantity !== 0) {
-    fail('INVENTORY_MANUAL_RESOLUTION_BASELINE_INVALID', 'expected=50/49/1/0');
+  if (!['totalInventoryQuantity', 'totalUsableInventory', 'totalLockedQuantity', 'temporaryInventoryQuantity'].every(field => input[field] !== null && input[field] !== undefined && input[field] !== '' && Number.isSafeInteger(baseline[field]) && baseline[field] >= 0)
+    || baseline.totalInventoryQuantity !== baseline.totalUsableInventory + baseline.totalLockedQuantity + baseline.temporaryInventoryQuantity) {
+    fail('INVENTORY_MANUAL_RESOLUTION_BASELINE_INVALID', 'invalid inventory field conservation');
   }
   return baseline;
 }
@@ -639,10 +639,8 @@ export function validateManualResolutionReceipt(receipt, {
     || !Number.isSafeInteger(receipt.liveInventoryBaseline.totalUsableInventory)
     || !Number.isSafeInteger(receipt.liveInventoryBaseline.totalLockedQuantity)
     || !Number.isSafeInteger(receipt.liveInventoryBaseline.temporaryInventoryQuantity)
-    || receipt.liveInventoryBaseline.totalInventoryQuantity !== 50
-    || receipt.liveInventoryBaseline.totalUsableInventory !== 49
-    || receipt.liveInventoryBaseline.totalLockedQuantity !== 1
-    || receipt.liveInventoryBaseline.temporaryInventoryQuantity !== 0
+    || ['totalInventoryQuantity', 'totalUsableInventory', 'totalLockedQuantity', 'temporaryInventoryQuantity'].some(field => receipt.liveInventoryBaseline[field] < 0)
+    || receipt.liveInventoryBaseline.totalInventoryQuantity !== receipt.liveInventoryBaseline.totalUsableInventory + receipt.liveInventoryBaseline.totalLockedQuantity + receipt.liveInventoryBaseline.temporaryInventoryQuantity
     || !receipt.liveInventoryBaseline.scope
     || receipt.liveInventoryBaseline.scope.scopeKey !== inventoryWriteScopeKey(receipt.liveInventoryBaseline.scope)) {
     fail('INVENTORY_MANUAL_RESOLUTION_RECEIPT_INVALID', 'liveInventoryBaseline');

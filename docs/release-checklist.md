@@ -32,6 +32,8 @@
 - [ ] 云端 `HEAD` 等于 attested commit，两份证明资产位于 `/srv/shein-bi/runtime/release-attestations/<tag>/`，且 `node scripts/check_release_source_state.mjs --expected-commit <release tag> --record-deployment <release tag>` 写出有效 schema v3 的 `shein-bi-deployed-release/v3`；watchdog 持续检查 attestation/CI 绑定、commit、脏改、隐藏索引和缺失文件。
 - [ ] Portal `8787`、Query `8791`、Webhook `8792` 分别健康；重启 Portal 不改变 Query PID，Query health 的 `surface=query` 且 `sideEffectsStarted=[]`。
 - [ ] 维护 marker 已通过 fresh generation/hash CAS 恢复；只读巡检、timer、写链按阶段恢复，没有 `Persistent` catch-up 或重复 scheduler 意外拉起。
+- [ ] 已加固 checkout 的临时写权交接只涉及精确冻结的源码路径；Git 使用 `sheinops`，运行态未改权限，新源码代际已由新 plan/receipt/completion 重新加固。未复用旧 completed receipt 授权新代际，未用递归 chown 绕过守卫。
 - [ ] Inventory writer 兼容门已完成同一版本的 `rotation-stage -> deploy -> rotation-finalize`；在退出 maintenance 前执行只读对齐预检并必须通过：`node scripts/inventory/assert_inventory_writer_release_aligned.mjs --cwd /opt/shein-bi/app --expected-commit <exact-commit> --json`。若失败，发布不得收口，不能等业务任务触发时才发现旧 authority。
+- [ ] 正式库存身份绑定真实自足 Git bundle SHA 与 canonical `release-attestation.json` 原始 SHA；record-deployment 成对传入 `--source-bundle`、`--expected-source-bundle-sha256`。stage/finalize 使用真实 CLI 的 `--preflight-artifact`、文件 SHA、preflightHash 和精确确认常量。完整命令见版本治理文档，禁止把动态部署 marker 的全文件 SHA 当作预先锁定的正式 receipt。
 - [ ] 云端真实 warning、partial、stale、blocked 或 reconciliation 差异不得因发布而抹除、静默或改写为成功；在 release note/runbook 中保留其状态和下一步负责人。
 - [ ] 记录最终 target SHA、验证证据、残余风险及回滚命令/版本。

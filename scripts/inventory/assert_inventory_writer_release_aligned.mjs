@@ -14,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 
 import {inspectReleaseSourceState} from '../check_release_source_state.mjs';
 import {sha256Hex, validateDeployedReleaseMarker} from '../../lib/source_release_attestation.mjs';
+import {resolveFormalInventoryWriterAuthority} from '../../lib/source_release_inventory_authority.mjs';
 import {
   DEFAULT_EMERGENCY_LOCAL_RELEASE_FILE,
   readEmergencyLocalReleaseReceipt,
@@ -100,6 +101,8 @@ export async function captureCheckoutSourceAuthority({
   deploymentStateFile = process.env.SHEIN_BI_DEPLOYED_RELEASE_FILE || DEFAULT_DEPLOYED_RELEASE_FILE,
   emergencyReceiptFile = process.env.SHEIN_BI_EMERGENCY_LOCAL_RELEASE_FILE || DEFAULT_EMERGENCY_LOCAL_RELEASE_FILE,
   sourceInspector = inspectReleaseSourceState,
+  releaseAttestationRoot = process.env.SHEIN_BI_RELEASE_ATTESTATION_ROOT || '',
+  trustPolicyFile = process.env.SHEIN_BI_SOURCE_RELEASE_TRUST_POLICY || '',
 } = {}) {
   const resolvedCwd = path.resolve(cwd);
   const resolvedDeploymentFile = path.resolve(deploymentStateFile);
@@ -123,6 +126,31 @@ export async function captureCheckoutSourceAuthority({
     }
   }
 
+  let formalAuthority = null;
+  if (formalExists && formalJson?.inventoryWriterAuthority !== undefined) {
+    const markerValidation = validateDeployedReleaseMarker(formalJson, {requireV3: true});
+    if (!markerValidation.ok) {
+      fail(
+        'INVENTORY_WRITER_AUTHORITY_INVALID',
+        `formal deployment marker inventoryWriterAuthority is invalid: ${markerValidation.issues.join(',')}`,
+        {issues: markerValidation.issues, formalJson},
+      );
+    }
+    try {
+      formalAuthority = await resolveFormalInventoryWriterAuthority({
+        marker: formalJson,
+        markerFile: resolvedDeploymentFile,
+        cwd: resolvedCwd,
+        releaseAttestationRoot,
+        trustPolicyFile,
+      });
+    } catch (error) {
+      fail('INVENTORY_WRITER_AUTHORITY_INVALID', error.message, {error});
+    }
+    if (!formalAuthority?.ok) {
+      fail('INVENTORY_WRITER_AUTHORITY_INVALID', 'formal inventoryWriterAuthority failed resolution');
+    }
+  }
   const formalValid = formalExists && validateDeployedReleaseMarker(formalJson, {requireV3: true}).ok;
   if (!emergencyValid && !formalValid) {
     fail(
@@ -132,7 +160,14 @@ export async function captureCheckoutSourceAuthority({
     );
   }
 
-  const receiptCommit = emergencyValid ? emergency.receipt.commit : formalJson.commit;
+  let receiptCommit = '';
+  if (formalAuthority?.ok) {
+    receiptCommit = formalJson.commit;
+  } else if (emergencyValid) {
+    receiptCommit = emergency.receipt.commit;
+  } else if (formalValid) {
+    receiptCommit = formalJson.commit;
+  }
   const normalizedInputCommit = text(inputExpectedCommit).toLowerCase();
   if (normalizedInputCommit && normalizedInputCommit !== receiptCommit.toLowerCase()) {
     fail(
@@ -156,7 +191,12 @@ export async function captureCheckoutSourceAuthority({
   let releaseReceiptHash;
   let releaseReceiptFile;
   let bundleSha256;
-  if (emergencyValid && emergency.receipt.commit.toLowerCase() === source.head.toLowerCase()) {
+  if (formalAuthority?.ok && formalJson.commit.toLowerCase() === source.head.toLowerCase()) {
+    releaseReceiptKind = 'formal';
+    releaseReceiptHash = formalAuthority.releaseReceiptHash;
+    releaseReceiptFile = formalAuthority.releaseReceiptFile;
+    bundleSha256 = formalAuthority.bundleSha256;
+  } else if (emergencyValid && emergency.receipt.commit.toLowerCase() === source.head.toLowerCase()) {
     releaseReceiptKind = 'emergency';
     releaseReceiptHash = emergency.receipt.receiptHash.toLowerCase();
     releaseReceiptFile = emergency.file;
