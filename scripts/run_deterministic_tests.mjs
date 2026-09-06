@@ -570,6 +570,8 @@ for (const file of selectedTests) {
               ? 90_000
               : file === 'scripts/test_partner_cli_version_change.mjs'
                 ? 60_000
+              : file === 'scripts/test_partner_cli_package.mjs'
+                ? (process.platform === 'win32' ? 60_000 : 30_000)
               : file === 'scripts/test_partner_cli_updater.mjs'
                 ? 60_000
               : file === 'scripts/test_daily_inventory_executor_lifecycle.mjs'

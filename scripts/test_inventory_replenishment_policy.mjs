@@ -243,7 +243,7 @@ assert.match(dailyCoordinator, /run_inventory_stage/);
 assert.match(dailyCoordinator, /SHEIN_BI_INVENTORY_STOCK_NOT_BEFORE="\$\{RUN_DATE\}T00:00:00\+08:00"/);
 assert.match(dailyCoordinator, /cloud_daily_inventory_replenishment_guard\.sh/);
 assert.match(executorScript, /append-only in the journal[\s\S]*await writeResultFile\(results, dryRunSummary\);/);
-assert.equal((executorScript.match(/await writeResultFile\(results\);/g) || []).length, 1, 'inventory executor writes the full result envelope once');
+assert.equal((executorScript.match(/await writeResultFile\(results, dryRunSummary\);/g) || []).length, 1, 'inventory executor writes the full result envelope once');
 assert.match(durableWriteScript, /for \(let attempt = 1; attempt <= maxReadbackAttempts; attempt \+= 1\)[\s\S]*if \(attempt > 1\) await wait\(attempt\)/, 'inventory executor performs immediate first readback');
 assert.match(executorScript, /\.journal\.ndjson/, 'inventory executor preserves incremental progress in an append-only journal');
 assert.match(executorScript, /submit: \(\) => \{[\s\S]*return client\.request\(request\.pathname/);
