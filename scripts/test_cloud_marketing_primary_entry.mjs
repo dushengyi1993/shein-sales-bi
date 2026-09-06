@@ -410,7 +410,7 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
       const calendar = [...sources['infra/systemd/shein-bi-cloud-marketing-repair.timer'].matchAll(/^OnCalendar=(.+)$/gm)].map(row => row[1].trim());
       assert.deepEqual(calendar, ['*-*-* 20:45:00', '*-*-* 21:15:00']);
     });
-    await check('bound runtime: expired receipt to fresh queue and real manual/fallback transactions', async () => {
+    await check('bound runtime: unexpired consumed scope drift and expired issued to real manual/fallback transactions', async () => {
       const startedAt=Date.now();
       const bound = fs.mkdtempSync('/run/marketing-bound-entry-');
       const mounted = [];
@@ -516,22 +516,41 @@ const out=path.join(root,'platform-read-'+skc+'.json'); fs.writeFileSync(out,JSO
         const physicalGuard=path.join(bound,'outputs/reports',path.basename(guardRel));
         json(queueRelative,{...queue,sourceGuard:path.relative(temp,physicalGuard),sourceGuardHash:shaFile(physicalGuard)});
         const authOptions={root:temp,date,queueFile,authorizationFile:envBound.SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE,
-          nowEpoch:now-7200,timeZone:'Asia/Shanghai'};
+          nowEpoch:now-60,timeZone:'Asia/Shanghai'};
         const savedEnv={...process.env};Object.assign(process.env,envBound);
         let consumed;
         try {
           await authorization.issueImmediateAuthorization({...authOptions,sourceGuardFile:physicalGuard,maxGroups:4,ttlSec:3600,
             reason:'bound stale fixture',confirmationToken:authorization.IMMEDIATE_CONFIRMATION_TOKEN});
-          consumed=await authorization.consumeImmediateAuthorization({...authOptions,nowEpoch:now-7199});
+          consumed=await authorization.consumeImmediateAuthorization({...authOptions,nowEpoch:now-59});
+          await authorization.persistImmediateAdmissionQueueSnapshot({...authOptions,nowEpoch:now-58,
+            receiptFile:consumed.consumedReceiptFile});
         } finally { for(const key of Object.keys(process.env)) if(!(key in savedEnv)) delete process.env[key]; Object.assign(process.env,savedEnv); }
         const receiptBytes=fs.readFileSync(consumed.consumedReceiptFile);
+        assert.ok(JSON.parse(receiptBytes).outerHardDeadlineEpoch>now,'scope drift must not wait for receipt expiry');
+        const snapshotFile=consumed.consumedReceiptFile+'.queue-snapshot.json';
+        const snapshotBytes=fs.readFileSync(snapshotFile);
+        const oldGuardHash=shaFile(physicalGuard);
+        json(guardRel,{...newGuard,fixtureScanGeneration:2});
+        const freshGuardHash=shaFile(physicalGuard);
+        assert.notEqual(freshGuardHash,oldGuardHash);
+        const highPlan='outputs/reports/high-click-low-conversion-special-plan-'+date+'.json';
+        json(highPlan,{...readJson(path.join(temp,highPlan)),sourceGuardHash:freshGuardHash});
+        json(queueRelative,{...queue,queueFingerprint:hash('fresh runtime scan queue'),
+          sourceGuard:path.relative(temp,physicalGuard),sourceGuardHash:freshGuardHash});
+        assert.notEqual(readJson(queueFile).queueFingerprint,JSON.parse(snapshotBytes).queueFingerprint);
+        assert.equal(JSON.parse(snapshotBytes).sourceGuardHash,oldGuardHash);
         // The scan fixture supplies immutable facts/plans. Queue construction,
         // manifest loading, CAS, stage loops and transaction fences are real.
         const scanFixture='run_final_readback() { acquire_repair_artifact_registry_locks || return $?; rebuild_repair_queue_locked; local status=$?; if (( status == 0 )); then refresh_queue_pair_locked; fi; release_repair_artifact_registry_locks; return "$status"; }\nsend_daily_group_report() { :; }\n';
         write('scripts/cloud_marketing_repair_worker.sh',workerSource.replace(anchor,scanFixture+anchor)
           .replace('GUARD_OUT="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"','GUARD_OUT="$SHEIN_BI_OUTPUTS_ROOT/reports/marketing-daily-guard-${DATE}.json"'));
+        const explicit=run({...envBound,SHEIN_BI_MARKETING_IMMEDIATE_RUN:'true'},'run_cloud_marketing_fallback_slot.sh',60000);
+        assert.equal(explicit.status,64,explicit.stderr);
+        assert.equal(fs.readFileSync(path.join(temp,'posts.log'),'utf8'),'');
         const first=run(envBound, 'run_cloud_marketing_fallback_slot.sh', 60000);
         assert.ok([0,2,75].includes(first.status),first.stdout+'\n'+first.stderr);
+        assert.match(first.stderr,/stale continuation ignored/);
         const finalQueue=readJson(queueFile);
         assert.notEqual(finalQueue.queueFingerprint,queue.queueFingerprint,'fresh real builder must replace old fingerprint');
         assert.equal(finalQueue.stages.manualSpecialRestore.status,'completed',first.stdout+'\n'+first.stderr);
@@ -541,6 +560,7 @@ const out=path.join(root,'platform-read-'+skc+'.json'); fs.writeFileSync(out,JSO
         assert.ok([0,2,75].includes(again.status),again.stdout+'\n'+again.stderr);
         assert.deepEqual(fs.readFileSync(path.join(temp,'posts.log'),'utf8').trim().split('\n'),['manual','fixture-1'],'restart must not replay known or unknown submits');
         assert.deepEqual(fs.readFileSync(consumed.consumedReceiptFile),receiptBytes);
+        assert.deepEqual(fs.readFileSync(snapshotFile),snapshotBytes);
         // Repeat the same non-empty manual/fallback chain with an expired
         // unconsumed source. It must not switch the worker back to immediate.
         for(const file of [manualDir+'/manual-limited-discount-restore-result.json',
@@ -553,7 +573,7 @@ const out=path.join(root,'platform-read-'+skc+'.json'); fs.writeFileSync(out,JSO
         json(queueRelative,{...queue,sourceGuard:path.relative(temp,physicalGuard),sourceGuardHash:shaFile(physicalGuard)});
         Object.assign(process.env,envBound);
         try {
-          await authorization.issueImmediateAuthorization({...authOptions,sourceGuardFile:physicalGuard,maxGroups:4,ttlSec:3600,
+          await authorization.issueImmediateAuthorization({...authOptions,nowEpoch:now-7200,sourceGuardFile:physicalGuard,maxGroups:4,ttlSec:3600,
             reason:'bound stale issued fixture',confirmationToken:authorization.IMMEDIATE_CONFIRMATION_TOKEN});
         } finally { for(const key of Object.keys(process.env)) if(!(key in savedEnv)) delete process.env[key]; Object.assign(process.env,savedEnv); }
         const issuedBytes=fs.readFileSync(authOptions.authorizationFile);
@@ -566,7 +586,7 @@ const out=path.join(root,'platform-read-'+skc+'.json'); fs.writeFileSync(out,JSO
         assert.deepEqual(fs.readFileSync(path.join(temp,'posts.log'),'utf8').trim().split('\n'),['manual','fixture-1']);
         assert.deepEqual(fs.readFileSync(authOptions.authorizationFile),issuedBytes);
         assert.deepEqual(fs.readFileSync(consumed.consumedReceiptFile),receiptBytes);
-        console.log(JSON.stringify({boundChain:true,elapsedMs:Date.now()-startedAt,consumed:true,issued:true,
+        console.log(JSON.stringify({boundChain:true,elapsedMs:Date.now()-startedAt,consumed:true,consumedExpired:false,issued:true,
           realQueueBuilder:true,realBatchAndTransactions:true,unknownReplayed:0,postsPerScenario:2,restartPosts:0}));
       } catch (error) {
         console.error('bound chain failure:', error.stack); throw error;

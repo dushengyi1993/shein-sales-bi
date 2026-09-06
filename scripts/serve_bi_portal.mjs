@@ -10247,18 +10247,24 @@ function resolveApprovedBindingReusePayloadDecision(task, targetStore) {
         'approved binding evidence.payloadHash is malformed; reuse denied',
       );
     }
-    if (!payload || evidencePayloadHash !== currentPayloadHash) {
-      throw approvedBindingReuseError(
-        'REUSE_APPROVED_BINDING_PAYLOAD_HASH_MISMATCH',
-        'approved binding payload hash does not match the current openapiPublishPayload; reuse denied',
-      );
+    if (payload && evidencePayloadHash === currentPayloadHash) {
+      return {directReuse: true, source: 'binding_payload_hash'};
     }
-    return {directReuse: true, source: 'binding_payload_hash'};
   }
 
+  // Exact recovered payloads retain direct reuse. Legal preparation can make
+  // an unsubmitted task outgrow the image binding's full-payload hash; only
+  // that no-write case may use ordinary source/binding capture validation.
   if (rejection.neutral === true) {
     return {directReuse: false, source: 'legacy_capture'};
   }
+  if (evidencePayloadHash) {
+    throw approvedBindingReuseError(
+      'REUSE_APPROVED_BINDING_PAYLOAD_HASH_MISMATCH',
+      'approved binding payload hash does not match the current openapiPublishPayload; reuse denied',
+    );
+  }
+
   if (!payload) {
     throw approvedBindingReuseError(
       'REUSE_APPROVED_BINDING_REJECTED_PAYLOAD_MISSING',
@@ -10950,6 +10956,17 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       publishPreparation,
     );
     taskForCapture = {...taskForCapture, openapiPublishPayload: replaced.payload};
+  }
+  if (isReuse && reusePayloadDecision?.directReuse === false && taskForCapture.openapiPublishPayload) {
+    // Capture validates against the new preparation lock. Project only the
+    // explicitly requested price/stock first, just as explicit titles above;
+    // leave every other payload field for ordinary source/binding validation.
+    const requested = normalizePublishPreparationOverrides(body.publishPreparation || body);
+    const projected = applyExplicitPublishPreparationOverrides(taskForCapture.openapiPublishPayload, {
+      supplyPrice: requested.supplyPrice,
+      inventory: requested.inventory,
+    });
+    taskForCapture = {...taskForCapture, openapiPublishPayload: projected.payload};
   }
   const priorBindingPreparation = task?.publishAssetBinding?.publishPreparation;
   const requiresPreparationMigration = isReuse && (

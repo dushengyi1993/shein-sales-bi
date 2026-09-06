@@ -317,6 +317,56 @@ try {
     const options = await setup(value, name);
     assert.equal((await api.findImmediateAuthorizationContinuation({...options, nowEpoch:now+2})).continuation, true);
   }
+  // A persisted old queue still authenticates the receipt after the daily
+  // report is refreshed. Scheduled discovery may yield to a different scope
+  // without waiting for expiry, but cannot admit that scope as continuation.
+  for (const expired of [false, true]) {
+    const issuedAt = expired ? now-7200 : now;
+    const historical = await setup(canonical, 'snapshot-'+expired, issuedAt);
+    await api.persistImmediateAdmissionQueueSnapshot({...historical, nowEpoch:issuedAt+2});
+    const receiptBytes = await fs.readFile(historical.receiptFile);
+    const snapshotFile = historical.receiptFile+'.queue-snapshot.json';
+    const snapshotBytes = await fs.readFile(snapshotFile);
+    const discover = () => api.findImmediateAuthorizationContinuation({...historical, nowEpoch:now+3, scheduledDiscovery:true});
+    await fs.writeFile(queueFile,JSON.stringify({...queue,updatedAt:'progress'})+'\n');
+    if (!expired) assert.equal((await discover()).continuation,true,'valid saved snapshot remains usable');
+    const refreshed = Buffer.from('{"fixture":"fresh canonical scan"}\n');
+    const freshHash = crypto.createHash('sha256').update(refreshed).digest('hex');
+    await fs.writeFile(guard,refreshed);
+    const current = {...queue,queueFingerprint:'a'.repeat(64),sourceGuardHash:freshHash};
+    await fs.writeFile(queueFile,JSON.stringify(current)+'\n');
+    const staleReason = expired ? 'continuation_authorization_expired' : 'current_queue_binding_mismatch';
+    assert.equal((await discover()).reason,staleReason);
+    await assert.rejects(api.verifyImmediateAuthorizationContinuation({...historical,nowEpoch:now+3}),
+      {code:expired ? 'IMMEDIATE_AUTHORIZATION_EXPIRED' : 'IMMEDIATE_AUTHORIZATION_BINDING_MISMATCH'});
+    await fs.writeFile(snapshotFile,'{broken');
+    await assert.rejects(discover,'malformed snapshot must not become scope drift');
+    await fs.writeFile(snapshotFile,snapshotBytes);
+    await fs.writeFile(queueFile,'{broken');
+    await assert.rejects(discover);
+    await fs.writeFile(queueFile,JSON.stringify({...current,sourceGuardHash:hash})+'\n');
+    await assert.rejects(discover,/sourceGuardHash/);
+    await fs.writeFile(queueFile,JSON.stringify({...current,sourceGuard:path.join(temp,'outside.json')})+'\n');
+    await assert.rejects(discover);
+    // A valid current report at a different path must not depend on the old
+    // report remaining on disk after scope changes, even before receipt expiry.
+    const freshPath = path.join(path.dirname(guard),'fresh-guard.json');
+    await fs.writeFile(freshPath,refreshed);
+    await fs.writeFile(queueFile,JSON.stringify({...current,sourceGuard:path.relative(root,freshPath)})+'\n');
+    await fs.unlink(guard);
+    assert.equal((await discover()).reason,staleReason);
+    if (!expired) {
+      await fs.writeFile(freshPath,bytes);
+      await fs.writeFile(queueFile,JSON.stringify({...queue,sourceGuard:path.relative(root,freshPath)})+'\n');
+      await assert.rejects(discover,'same scope cannot downgrade a missing historical guard');
+    }
+    const nextDate = api.businessDateAtEpoch(now+86400,'Asia/Shanghai');
+    assert.equal((await api.findImmediateAuthorizationContinuation({...historical,date:nextDate,
+      nowEpoch:now+86400,scheduledDiscovery:true})).found,false,'prior-date receipt is not selected');
+    assert.deepEqual(await fs.readFile(historical.receiptFile),receiptBytes);
+    assert.deepEqual(await fs.readFile(snapshotFile),snapshotBytes);
+    await fs.writeFile(guard,bytes);
+  }
   // The receipt and queue retain their original bytes throughout discovery.
   const options = await setup(canonical, 'expired', now-7200);
   const savedQueue = await fs.readFile(queueFile);
