@@ -438,6 +438,7 @@ async function buildFixture(tempDir) {
   const dataRoot = path.join(tempDir, 'data', 'shein-bi');
   const dataParent = path.join(tempDir, 'data');
   const systemdDir = path.join(tempDir, 'systemd');
+  const runtimeRoot = path.join(tempDir, 'runtime');
   const backupRoot = path.join(tempDir, 'backup', 'shein-bi', 'runtime', 'layout-migration-backups');
   const fstabPath = path.join(tempDir, 'fstab');
   const markerPath = path.join(tempDir, 'maintenance.json');
@@ -450,6 +451,7 @@ async function buildFixture(tempDir) {
 
   await fs.mkdir(path.join(appRoot, 'profiles'), {recursive: true});
   await fs.mkdir(path.join(appRoot, 'state', 'locks'), {recursive: true});
+  await fs.mkdir(path.join(runtimeRoot, 'locks'), {recursive: true, mode: 0o755});
   await fs.mkdir(path.join(appRoot, 'outputs', 'nested'), {recursive: true});
   await fs.mkdir(path.join(appRoot, 'scripts'), {recursive: true});
   await fs.mkdir(path.join(appRoot, 'scripts', 'inventory'), {recursive: true});
@@ -910,6 +912,14 @@ cp -a "\${src}." "\${dst}/"
     ].join(''), 'utf8');
   }
   const bash = isWindows ? gitBash : '/bin/bash';
+  const identity = run(bash, ['-c', 'id -u; id -g']);
+  assert.equal(identity.status, 0, identity.stderr);
+  const [uid, gid] = identity.stdout.trim().split(/\s+/u);
+  Object.assign(installEnv, {
+    SHEIN_BI_RUNTIME_ROOT: m(runtimeRoot),
+    SHEIN_BI_RUNTIME_USER: uid,
+    SHEIN_BI_RUNTIME_GROUP: gid,
+  });
   const nsInstall = run(bash, [
     m(path.join(appRoot, 'scripts', 'install_cloud_runtime_path_namespaces.sh')),
     '--root', m(appRoot), '--systemd-dir', m(systemdDir),

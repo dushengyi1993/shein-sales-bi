@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -671,9 +672,34 @@ async function main() {
       assert.equal(await fs.stat(candidateRoot).then(() => true, () => false), true);
     }
 
+    const historicalMetric = {...METRIC_REFETCH_STATE,
+      date: '2026-08-22', runKey: '2026-08-23:2026-08-22'};
+    for (const status of ['deadline', 'downstream_link_completed']) {
+      const fx = await makeFixture({metricRefetch: {...historicalMetric, status}}); fixtures.push(fx);
+      const file = path.join(fx.stateRoot, 'cloud_ops_alerts', 'link-business-metric-refetch.json');
+      // Preserve formatting as well as values, and do not require old candidate files.
+      await fs.writeFile(file, `  ${await fx.readMetricRefetch()}\r\n`);
+      await fs.rm(path.join(fx.stateRoot, '.link-business-metric-refetch.fixture'), {recursive: true});
+      const before = await fs.readFile(file);
+      const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+      await authorizeCloudMorningChainRecovery(fx.deps);
+      await authorizeCloudMorningChainRecovery(fx.deps);
+      const after = await fs.readFile(file);
+      assert.deepEqual(after, before);
+      assert.equal(hash(after), hash(before));
+      assert.ok(!fx.writerCalls.includes('link-business-metric-refetch.json'));
+    }
+
     // Every forbidden nested identity/state/transaction condition fails
     // closed before receipt, active, or nested publication.
     const nestedFailures = [
+      ['future identity', {...METRIC_REFETCH_STATE, date: RUN_DATE, runKey: `2026-08-25:${RUN_DATE}`}],
+      ['invalid old date', {...historicalMetric, date: '2026-02-30', runKey: '2026-03-01:2026-02-30'}],
+      ['inconsistent old identity', {...historicalMetric, runKey: '2026-08-22:2026-08-22'}],
+      ['extra runKey segment', {...historicalMetric, runKey: `${historicalMetric.runKey}:extra`}],
+      ['corrupt old schema', {...historicalMetric, schemaVersion: 'unknown'}],
+      ['corrupt old attempts', {...historicalMetric, attempts: '1'}],
+      ['corrupt old source', {...historicalMetric, source: []}],
       ['wrong date', {...METRIC_REFETCH_STATE, date: RUN_DATE}],
       ['wrong runKey', {...METRIC_REFETCH_STATE, runKey: `${BUSINESS_DATE}:${RUN_DATE}`}],
       ['wrong status', {...METRIC_REFETCH_STATE, status: 'running'}],

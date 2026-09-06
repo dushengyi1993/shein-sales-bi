@@ -41,6 +41,7 @@ assert.equal(classifySessionFailure('connect ECONNREFUSED 127.0.0.1:9222').type,
 // ==========================================================================
 // Part 2: Real Caller Entry Lifecycle Execution (3 Batch Runners with Injected Hooks)
 // ==========================================================================
+await fs.mkdir(path.join(process.cwd(), 'tmp'), {recursive: true});
 const tmpDir = await fs.mkdtemp(path.join(process.cwd(), 'tmp', 'test-b2-runners-'));
 const date = '2026-09-05';
 
