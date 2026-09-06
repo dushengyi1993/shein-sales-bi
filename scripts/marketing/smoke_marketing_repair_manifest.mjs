@@ -323,6 +323,16 @@ try {
   await fs.writeFile(statePlan, JSON.stringify({reportDate: date, sourceGuard, restoreCount: 0, rescueFiles: []}));
   const stateMapped = await loadExactManualRepairPlan({root, planPath: statePlan, guardPath: physicalGuard, date});
   assert.equal(stateMapped.planRelativePath, 'state/empty-plan.json');
+  const physicalDriftDir = path.join(runtimeState, 'drift-plans');
+  await fs.mkdir(physicalDriftDir);
+  await fs.writeFile(path.join(physicalDriftDir, `limited-discount-target-drift-rescue-plan-${date}.json`),
+    JSON.stringify({reportDate: date, sourceGuard, rescueFiles: []}));
+  const logicalDrift = await loadExactDriftRepairManifest({root,
+    planDir: path.join(root, 'state', 'drift-plans'), guardPath, date});
+  const physicalDrift = await loadExactDriftRepairManifest({root,
+    planDir: physicalDriftDir, guardPath: physicalGuard, date});
+  assert.equal(physicalDrift.workFingerprint, logicalDrift.workFingerprint);
+  assert.equal(physicalDrift.manifestRelativePath, `state/drift-plans/limited-discount-target-drift-rescue-plan-${date}.json`);
   await assert.rejects(loadExactManualRepairPlan({
     root, planPath: manualPlanPath, guardPath: path.join(path.dirname(root), 'external-guard.json'), date,
   }), /escapes/);

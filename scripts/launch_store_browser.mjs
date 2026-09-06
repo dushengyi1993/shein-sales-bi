@@ -14,7 +14,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import http from 'node:http';
-import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage, inspectManagedStoreSession} from '../lib/chrome_profile_startup.mjs';
+import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage, inspectManagedStoreSession, validateManagedSession} from '../lib/chrome_profile_startup.mjs';
 import {cleanupManagedStoreSession} from './cleanup_shein_store_browsers.mjs';
 import {
   chromeDisabledFeaturesArg,
@@ -127,9 +127,10 @@ function parseArgs(argv) {
 // Only a newly launched, exactly identified browser is cleaned by this entry.
 export async function completeManagedLauncherStartup({start, inspect, ready, cleanup, emitOwnership}) {
   const startup = await start();
-  const managedSession = await inspect();
+  const managedSession = validateManagedSession(startup.managedSession, startup.managedSession?.storeKey);
   await emitOwnership({startup, managedSession});
   try {
+    await inspect(managedSession);
     return {startup, managedSession, ready: await ready()};
   } catch (error) {
     const cleanupReport = startup.launched === true
@@ -375,6 +376,7 @@ try {
 completion = await completeManagedLauncherStartup({
 start: () => withChromeProfileStartup({
   root: ROOT, profileDir, storeKey: store.storeKey, port: store.port,
+  captureManagedSession: true,
   probe: () => probeChromeDebugPort(store.port),
   prepare: () => {
     profileName = ensureProfileName(profileDir, store);
@@ -415,7 +417,7 @@ if (process.platform === 'win32') {
 }
   },
 }),
-inspect: () => inspectManagedStoreSession(store, null, {root: ROOT}),
+inspect: expected => inspectManagedStoreSession(store, expected, {root: ROOT}),
 emitOwnership: ({startup, managedSession}) => console.error(JSON.stringify({
   event: 'managed-session-owned', storeKey: store.storeKey, port: store.port,
   url: customUrl, reused: startup.reused, managedSession, pageReady: false,

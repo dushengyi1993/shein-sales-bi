@@ -6,7 +6,7 @@ import path from 'node:path';
 import {acquireBrowserTaskLease, releaseBrowserTaskLease} from '../lib/browser_task_lease.mjs';
 import {inspectManagedStoreSession, parseArgs, prepareReloginBrowser} from './auto_relogin_shein_store.mjs';
 import {launchStore, closeStore, recoverMarketingLogin, normalizeManualResumeResult, isManualResumeResultSettled} from './marketing/batch_restore_manual_limited_discounts.mjs';
-import {chromeProfileIdentity, readManagedChromeIdentity, runPowerShellUtf8} from '../lib/chrome_profile_startup.mjs';
+import {chromeProfileIdentity, readManagedChromeIdentity, runPowerShellUtf8, withChromeProfileStartup} from '../lib/chrome_profile_startup.mjs';
 import {cleanupManagedStoreSession, parseArgs as parseCleanupArgs} from './cleanup_shein_store_browsers.mjs';
 import {completeManagedLauncherStartup} from './launch_store_browser.mjs';
 
@@ -253,8 +253,11 @@ try {
     let failure;
     try {
       await completeManagedLauncherStartup({
-        start: async () => ({launched: !reused, reused}),
-        inspect: async () => readManagedChromeIdentity({store, profileDir, observed: current}),
+        start: async () => ({launched: !reused, reused, managedSession: exact}),
+        inspect: async expected => {
+          assert.deepEqual(expected, exact);
+          return await readManagedChromeIdentity({store, profileDir, observed: current, expected});
+        },
         emitOwnership: async receipt => { events.push('ownership'); assert.deepEqual(receipt.managedSession, exact); },
         ready: async () => { events.push('refresh'); throw new Error('fixture marketingRefresh failed'); },
         cleanup: session => cleanupManagedStoreSession(store, session, cleanupOptions),
@@ -282,6 +285,85 @@ try {
   })})});
   assert.deepEqual(interrupted.managedSession, exact, 'interrupted page work retains early stderr ownership receipt');
   assert.equal(interrupted.ok, false);
+
+  // Real startup lock interleaving: B queues while A still holds the lock.
+  // A captures 101, releases the lock, 101 exits, B launches 102, then A's
+  // post-start inspection must reject 102 instead of adopting/cleaning it.
+  current = []; signals = [];
+  const trace = [];
+  const replacement = {...target, pid: 102, startedAt: 'replacement-start'};
+  let allowB;
+  const aExited = new Promise(resolve => { allowB = resolve; });
+  let bStart;
+  let aEnumerations = 0;
+  const commonStartup = {
+    root, profileDir, storeKey: store.storeKey, port: store.port, env,
+    captureManagedSession: true,
+    probe: async () => current.some(row => row.pid === 101 || row === replacement),
+    prepare: async () => {}, reuse: async () => {},
+  };
+  const cleanupRequests = [];
+  let originalFailure;
+  try {
+    await completeManagedLauncherStartup({
+      start: async () => {
+        const first = await withChromeProfileStartup({...commonStartup,
+          processes: async () => {
+            if (++aEnumerations === 2) trace.push('A:capture101-under-lock');
+            return current;
+          },
+          launch: async () => { trace.push('A:launch101'); current = [target]; },
+          waitReady: async () => {
+            bStart = withChromeProfileStartup({...commonStartup,
+              processes: async () => { trace.push('B:enumerate-under-lock'); await aExited; return current; },
+              launch: async () => { trace.push('B:launch102'); current = [replacement]; },
+              waitReady: async () => {},
+            });
+          },
+        });
+        assert.equal(first.managedSession.browserPid, 101);
+        current = [];
+        trace.push('A:exit101-after-unlock');
+        allowB();
+        const second = await bStart;
+        assert.equal(second.managedSession.browserPid, 102);
+        return first;
+      },
+      inspect: async expected => {
+        trace.push(`A:inspect-expected${expected.browserPid}`);
+        assert.deepEqual(expected, exact);
+        return await inspectManagedStoreSession(store, expected, {root, env, processes: async () => current, probe: async () => true});
+      },
+      emitOwnership: async ({managedSession}) => { assert.deepEqual(managedSession, exact); },
+      ready: async () => { throw new Error('page work must not run after identity replacement'); },
+      cleanup: async expected => {
+        cleanupRequests.push(expected.browserPid);
+        return await cleanupManagedStoreSession(store, expected, cleanupOptions);
+      },
+    });
+  } catch (error) { originalFailure = error; }
+  assert.match(originalFailure.message, /changed since initial launcher/);
+  assert.deepEqual(originalFailure.managedSession, exact, 'failed readback retains A101; never substitutes B102');
+  assert.deepEqual(cleanupRequests, [101]);
+  assert.deepEqual(signals, [], 'A must never terminate B102');
+  assert.deepEqual(current, [replacement]);
+  assert.ok(trace.indexOf('A:capture101-under-lock') < trace.indexOf('B:enumerate-under-lock'));
+  assert.ok(trace.indexOf('B:launch102') < trace.indexOf('A:inspect-expected101'));
+  console.log(`PASS: startup ownership interleaving ${JSON.stringify({trace, cleanupRequests, signals, retainedPid: current[0].pid})}`);
+
+  // Same-lock receipt also covers legitimate reuse; old callers opt out and
+  // retain their exact two-field return protocol without another enumeration.
+  const reusedReceipt = await withChromeProfileStartup({...commonStartup,
+    processes: async () => current, launch: forbidLauncher, waitReady: async () => {},
+  });
+  assert.equal(reusedReceipt.reused, true);
+  assert.equal(reusedReceipt.managedSession.browserPid, 102);
+  let legacyEnumerations = 0;
+  const legacyReceipt = await withChromeProfileStartup({...commonStartup, captureManagedSession: false,
+    processes: async () => { legacyEnumerations++; return current; }, launch: forbidLauncher, waitReady: async () => {},
+  });
+  assert.deepEqual(legacyReceipt, {launched: false, reused: true});
+  assert.equal(legacyEnumerations, 1);
 
   assert.deepEqual(await fs.readFile(path.join(profileDir, 'Local State')), localState);
   console.log('PASS: marketing startup evidence, real profile/port/PID/lease admission, original session attachment, identity and report failures, safe cleanup, no resubmission');

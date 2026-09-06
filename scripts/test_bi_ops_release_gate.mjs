@@ -303,7 +303,8 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // explainable instead of drifting silently or being loosened to >=.
 // Exact list comparison: f0d5301 -> PR119 2fb4afa adds 64 (including one smoke),
 // and 2fb4afa -> PR120 88d6140 adds 24; neither interval removes a registration.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 88;
+// PR123 adds test_manual_discount_session_recovery.mjs; no test is removed.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 89;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   - 1
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
