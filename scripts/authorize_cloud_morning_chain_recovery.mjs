@@ -666,6 +666,22 @@ async function assertMetricCandidateTransactionRoot(root, label) {
 async function inspectNestedMetricRefetchState({metricRefetch, runDate, businessDate, nowEpoch, newDeadlineEpoch}) {
   if (!metricRefetch) return null;
   const state = metricRefetch.value;
+  // The consumer starts a new transaction across runs. Historical evidence
+  // stays untouched; only an unambiguous, well-formed older identity is ignored.
+  const priorRunDate = typeof state?.runKey === 'string' ? state.runKey.split(':')[0] : '';
+  if (state?.schemaVersion === METRIC_REFETCH_SCHEMA
+    && isValidDate(state.date) && isValidDate(priorRunDate)
+    && state.runKey === `${priorRunDate}:${state.date}`
+    && state.date === previousDate(priorRunDate)
+    && state.date < businessDate && priorRunDate < runDate
+    && typeof state.status === 'string' && state.status.length > 0
+    && Number.isSafeInteger(state.attempts) && state.attempts >= 0
+    && Number.isSafeInteger(state.maxAttempts) && state.maxAttempts > 0
+    && state.attempts <= state.maxAttempts
+    && Number.isSafeInteger(state.deadlineEpoch) && state.deadlineEpoch > 0
+    && ['targetStores', 'replacedStores', 'failedStores', 'deferredStores'].every(key => Array.isArray(state[key]))
+    && state.source && typeof state.source === 'object' && !Array.isArray(state.source)
+    && state.phases && typeof state.phases === 'object' && !Array.isArray(state.phases)) return null;
   assertNestedMetricRefetchBase(state, {runDate, businessDate});
   if (state.status === 'deadline') {
     if (state.deadlineEpoch >= nowEpoch || state.deadlineEpoch >= newDeadlineEpoch) {

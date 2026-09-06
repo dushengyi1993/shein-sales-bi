@@ -18,6 +18,11 @@ assert.match(source, /--apply requires exact --confirm/);
 assert.match(source, /50-runtime-paths\.conf/);
 assert.match(source, /runtime path drop-in template drift/);
 assert.match(source, /"\$SYSTEMCTL_BIN" daemon-reload/);
+assert.match(source, /RUNTIME_ROOT="\$\{SHEIN_BI_RUNTIME_ROOT:-\/srv\/shein-bi\/runtime\}"/);
+assert.match(source, /RUNTIME_USER="\$\{SHEIN_BI_RUNTIME_USER:-sheinops\}"/);
+assert.match(source, /RUNTIME_GROUP="\$\{SHEIN_BI_RUNTIME_GROUP:-sheinops\}"/);
+assert.match(source, /install -d -o "\$RUNTIME_USER" -g "\$RUNTIME_GROUP" -m 0750 -- "\$startup_dir"/);
+assert.doesNotMatch(source, /\bchown\b/);
 assert.doesNotMatch(source, /"\$SYSTEMCTL_BIN"\s+(?:enable|start|restart)\b/);
 assert.doesNotMatch(source, /\brm\s+-[A-Za-z]*r[A-Za-z]*f?\b|\brm\s+-[A-Za-z]*f[A-Za-z]*r\b/);
 assert.doesNotMatch(source, /\/(?:[0-4][0-9]|[6-9][0-9])-runtime-paths\.conf/);
@@ -80,10 +85,36 @@ try {
   const shellRoot = canonicalShellDirectory(fixtureRoot);
   const shellTarget = canonicalShellDirectory(fixtureTarget);
   const shellInstaller = `${shellRoot}/scripts/${path.basename(INSTALLER)}`;
+  const runtimeRoot = path.join(tempDir, 'runtime');
+  const locks = path.join(runtimeRoot, 'locks');
+  await fs.mkdir(locks, {recursive: true, mode: 0o755});
+  const parentBefore = await fs.stat(locks);
+  const shell = isWindows ? gitBash : '/bin/bash';
+  const identity = run(shell, ['-c', 'id -u; id -g']);
+  assert.equal(identity.status, 0, identity.stderr);
+  const [uid, gid] = identity.stdout.trim().split(/\s+/);
   const env = {
+    SHEIN_BI_RUNTIME_ROOT: canonicalShellDirectory(runtimeRoot),
+    SHEIN_BI_RUNTIME_USER: uid,
+    SHEIN_BI_RUNTIME_GROUP: gid,
     SHEIN_BI_SYSTEMCTL_BIN: shellPath(fakeSystemctl),
     SHEIN_BI_SYSTEMCTL_LOG: shellPath(systemctlLog),
   };
+  if (isWindows) {
+    // NTFS cannot exercise Unix chown. Check its exact arguments, then run the
+    // real directory creation; Linux runs the unmodified install command.
+    const bashEnv = path.join(tempDir, 'windows-install-fixture.sh');
+    await fs.writeFile(bashEnv, `install() {
+  if [[ "$*" == *chrome-profile-startup* ]]; then
+    [[ "$#" == 9 && "$1" == -d && "$2" == -o && "$3" == "$SHEIN_BI_RUNTIME_USER" && "$4" == -g && "$5" == "$SHEIN_BI_RUNTIME_GROUP" && "$6" == -m && "$7" == 0750 && "$8" == -- ]] || return 91
+    mkdir -p -- "\${@: -1}"
+  else
+    command install "$@"
+  fi
+}
+`);
+    env.BASH_ENV = shellPath(bashEnv);
+  }
   const invoke = args => isWindows
     ? run(gitBash, [shellInstaller, ...args], {env: {...process.env, ...env}})
     : run('/bin/bash', [shellInstaller, ...args], {env: {...process.env, ...env}});
@@ -99,6 +130,7 @@ try {
     ok: true, mode: 'audit', policyCount: 28, plannedInstall: 28, unchanged: 0, confirmation: CONFIRMATION,
   });
   assert.deepEqual(await fs.readdir(fixtureTarget), before, 'audit must not write target systemd directory');
+  assert.deepEqual(await fs.readdir(locks), [], 'audit must not provision browser directories');
 
   assert.equal(invoke([...base, '--apply']).status, 64);
   assert.equal(invoke([...base, '--apply', '--confirm', 'WRONG']).status, 64);
@@ -106,6 +138,21 @@ try {
   assert.equal(apply.status, 0, apply.stderr);
   assert.equal(JSON.parse(apply.stdout).installed, 28);
   assert.equal(await fs.readFile(systemctlLog, 'utf8'), 'daemon-reload\n');
+  const startup = path.join(locks, 'chrome-profile-startup');
+  const startupStat = await fs.stat(startup);
+  assert.ok(startupStat.isDirectory());
+  if (!isWindows) {
+    assert.equal(startupStat.uid, Number(uid));
+    assert.equal(startupStat.gid, Number(gid));
+    assert.equal(startupStat.mode & 0o777, 0o750);
+  }
+  await fs.writeFile(path.join(startup, 'retained-ticket'), 'retained');
+  const reapply = invoke([...base, '--apply', '--confirm', CONFIRMATION]);
+  assert.equal(reapply.status, 0, reapply.stderr);
+  assert.equal(await fs.readFile(path.join(startup, 'retained-ticket'), 'utf8'), 'retained');
+  const parentAfter = await fs.stat(locks);
+  assert.deepEqual([parentAfter.uid, parentAfter.gid, parentAfter.mode],
+    [parentBefore.uid, parentBefore.gid, parentBefore.mode], 'parent permissions stay unchanged');
 
   const settled = invoke(base);
   assert.equal(settled.status, 0, settled.stderr);
@@ -155,7 +202,9 @@ const sessionSecret = await fs.readFile(path.join(fixtureTarget, 'shein-bi-sessi
   assert.match(sectionQueue, /^ReadOnlyPaths=\/data\/shein-bi\/profiles \/data\/shein-bi\/outputs$/m);
   assert.match(sectionQueue, /BindPaths=\/data\/shein-bi\/state:/);
 
-  console.log(JSON.stringify({ok: true, auditNoWrite: true, installed: 28, daemonReloadOnly: true}, null, 2));
+  console.log(JSON.stringify({ok: true, auditNoWrite: true, installed: 28, daemonReloadOnly: true,
+    startupDirectory: true, parentPermissionsUnchanged: true,
+    unixOwnershipVerified: !isWindows, windowsOwnershipArgumentsOnly: isWindows}, null, 2));
 } finally {
   await fs.rm(tempDir, {recursive: true, force: true});
 }

@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 SYSTEMD_DIR="${SHEIN_BI_SYSTEMD_DIR:-/etc/systemd/system}"
 SYSTEMCTL_BIN="${SHEIN_BI_SYSTEMCTL_BIN:-systemctl}"
+RUNTIME_ROOT="${SHEIN_BI_RUNTIME_ROOT:-/srv/shein-bi/runtime}"
+RUNTIME_USER="${SHEIN_BI_RUNTIME_USER:-sheinops}"
+RUNTIME_GROUP="${SHEIN_BI_RUNTIME_GROUP:-sheinops}"
 APPLY=0
 CONFIRM=''
 seen_root=0
@@ -189,9 +192,18 @@ if [[ "$SYSTEMCTL_BIN" == */* ]]; then
 else
   command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1 || fail 'systemctl command is unavailable'
 fi
+# Provision only the browser startup leaf; never change the parent locks owner.
+[[ "$RUNTIME_ROOT" == /* && -d "$RUNTIME_ROOT/locks" && ! -L "$RUNTIME_ROOT/locks" ]] \
+  || fail 'runtime locks parent must be an existing absolute directory'
+[[ "$(cd -- "$RUNTIME_ROOT/locks" && pwd -P)" == "$RUNTIME_ROOT/locks" ]] \
+  || fail 'runtime locks parent must be canonical'
+startup_dir="$RUNTIME_ROOT/locks/chrome-profile-startup"
+[[ ! -L "$startup_dir" && ( ! -e "$startup_dir" || -d "$startup_dir" ) ]] \
+  || fail 'browser startup directory is unsafe'
 if [[ ! -e "$SYSTEMD_DIR" ]]; then
   install -d -m 0755 -- "$SYSTEMD_DIR"
 fi
+install -d -o "$RUNTIME_USER" -g "$RUNTIME_GROUP" -m 0750 -- "$startup_dir"
 
 for service in "${!profiles_by_service[@]}"; do
   target_dir="$SYSTEMD_DIR/$service.d"
