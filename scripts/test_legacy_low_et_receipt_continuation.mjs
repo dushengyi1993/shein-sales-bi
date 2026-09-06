@@ -214,7 +214,7 @@ node --input-type=module -e 'const {readImmediateAdmissionQueueFd}=await import(
     AUTH_MODULE: pathToFileURL(path.join(repo, 'lib/cloud_marketing_immediate_authorization.mjs')).href}});
   assert.equal(inherited.status, 0, inherited.stderr);
   assert.equal(inherited.stdout.trim(), hash(originalBytes), 'Bash must retain and inherit the admitted inode across CAS');
-  const {runNewListingFallbackBatch, processStore: realProcessStore} = await import(pathToFileURL(path.join(root, 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs')));
+  const {runNewListingFallbackBatch, processStore: realProcessStore, writeInventoryExecutableSubset} = await import(pathToFileURL(path.join(root, 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs')));
   let fallbackStarted = 0;
   await runNewListingFallbackBatch({guard: guardPath, date, outDir: path.join(root, 'tmp/batch'), skipBuild: true, dryRunOnly: false,
     continuation: true, stores: [], maxGroups: 29, expectedWorkFingerprint: fallback.workFingerprint, deadline,
@@ -235,6 +235,54 @@ node --input-type=module -e 'const {readImmediateAdmissionQueueFd}=await import(
     schemaVersion:1, snapshots:[], removals:[], transactionId: txId, storeKey: 'DL', rescueHash: txHash, rescuePath: txEntry.path,
     runPayloadHash: fallback.workFingerprint, mutationsStarted: true, phase: 'deleting',
   });
+  const baseTx = JSON.parse(await fs.readFile(txFile, 'utf8'));
+  const subset = await writeInventoryExecutableSubset({storeKey:'DL', rescue:txEntry.rescue, rescuePath:txEntry.path,
+    blockedSkcs:[txEntry.rescue.rows.at(-1).skc], outDir:path.join(root,'tmp/batch')});
+  const subsetBytes = await fs.readFile(subset.path);
+  assert.notEqual(subset.rescue.createdAt, txEntry.rescue.createdAt);
+  assert.notEqual(subset.rescue.purpose, txEntry.rescue.purpose);
+  assert.equal(subset.rescue.rows.length, 4);
+  const bindSubset = async () => {
+    const exactScope = {storeKey:'DL',transactionId:txId,rescuePath:subset.path,
+      rescueHash:hash(await fs.readFile(subset.path)),targetSkcs:subset.rescue.rows.map(row=>row.skc).sort()};
+    const operation = {role:'create_only',workFingerprint:fallback.workFingerprint,exactScope};
+    await fs.writeFile(txFile, JSON.stringify({...baseTx,phase:'create_submit_unknown',operationRescuePath:subset.path,
+      createAttempt:{schemaVersion:1,operation:'limited_discount_create',...operation,operationId:hash(Buffer.from(JSON.stringify(operation)))}}));
+  };
+  await bindSubset();
+  const subsetCap = await verifyLegacyLowEtReceiptContinuation(proof);
+  assert.equal((await revalidateLowEtFastSellerRescueArtifact({root,rescue:subset.rescue,reportDate:date,legacyReceiptCapability:subsetCap})).ok,true);
+  const earlySubsetTx = {...baseTx,operationRescuePath:subset.path,operationRescueHash:hash(subsetBytes)};
+  await fs.writeFile(txFile,JSON.stringify(earlySubsetTx));
+  assert.equal((await verifyLegacyLowEtReceiptContinuation(proof)).groups[0].mode,'transaction');
+  await fs.writeFile(txFile,JSON.stringify({...earlySubsetTx,operationRescueHash:'0'.repeat(64)}));
+  await assert.rejects(verifyLegacyLowEtReceiptContinuation(proof));
+  await fs.writeFile(txFile,JSON.stringify({...baseTx,operationRescuePath:subset.path}));
+  await assert.rejects(verifyLegacyLowEtReceiptContinuation(proof));
+  await bindSubset();
+  const mutations = [
+    value=>{value.rows[0].finalTargetPrice=101;},
+    value=>{value.rows[0].activityStock=11;},
+    value=>{value.activityStock=11;},
+    value=>{value.endTime='2026-09-14 23:59:59';},
+    value=>{value.purpose='unrelated_purpose';},
+    value=>{value.parentRescue='tmp/unrelated.json';},
+    value=>{value.createdAt='invalid';},
+    value=>{value.executableRowCount=5;},
+    value=>{value.rows.push(txEntry.rescue.rows.at(-1));},
+  ];
+  for (const mutate of mutations) {
+    const changed=structuredClone(subset.rescue); mutate(changed);
+    await fs.writeFile(subset.path,JSON.stringify(changed));
+    await bindSubset(); // Even a matching fence hash cannot loosen business locks.
+    await assert.rejects(verifyLegacyLowEtReceiptContinuation(proof));
+  }
+  await fs.writeFile(subset.path,subsetBytes);
+  await bindSubset();
+  await fs.appendFile(subset.path,' ');
+  await assert.rejects(verifyLegacyLowEtReceiptContinuation(proof), /exactly bind/);
+  await fs.writeFile(subset.path,subsetBytes);
+  await bindSubset();
   let persistedResumed = 0;
   await runNewListingFallbackBatch({guard: guardPath, date, outDir: path.join(root, 'tmp/batch'), skipBuild: true, dryRunOnly: false,
     continuation: true, stores: [], maxGroups: 29, expectedWorkFingerprint: fallback.workFingerprint, deadline,
@@ -243,7 +291,7 @@ node --input-type=module -e 'const {readImmediateAdmissionQueueFd}=await import(
       assert.equal(context.args.continuation, true);
       const record = await realProcessStore({...context, operations: {
         applyRescue: async request => { assert.equal(request.execute, false); return {ok:true, full:{ok:true,validation:{},after:{exactReadbackRows:context.file.rescue.rows.map(row=>({skc:row.skc,ok:true}))}}}; },
-        replaceTransactionally: async request => { assert.equal(request.continuation, true); persistedResumed++;
+        replaceTransactionally: async request => { assert.equal(request.continuation, true); assert.equal(request.rescuePath,subset.path); assert.equal(request.sourceRescuePath,txEntry.path); persistedResumed++;
           return {ok:true,full:{ok:true,terminal:true,status:'resumed_existing_transaction',writeAttempted:false}}; },
       }});
       assert.equal(record.lowEtFastSellerPricePullbackRevalidation.ok, true);
@@ -252,6 +300,7 @@ node --input-type=module -e 'const {readImmediateAdmissionQueueFd}=await import(
     },
   });
   assert.equal(persistedResumed, 1, 'real persisted transaction must reach continuation selection');
+  console.log(JSON.stringify({actualSubsetGenerator:true,retainedRows:subset.rescue.rows.length,metadataAccepted:['createdAt','purpose'],persistedSubsetResumed:persistedResumed,earlyOperationHashVerified:true,driftRejections:mutations.length+3}));
   const summaryFile = path.join(root, `outputs/reports/new-listing-7d-limited-discount-execution-summary-${date}.json`);
   const summaryBytes = await fs.readFile(summaryFile);
   const completedJournal = {schemaVersion:1,snapshots:[],removals:[], transactionId:txId,storeKey:'DL',rescueHash:txHash,rescuePath:txEntry.path,

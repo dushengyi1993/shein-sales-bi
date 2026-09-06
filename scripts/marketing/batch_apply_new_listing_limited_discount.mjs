@@ -493,7 +493,7 @@ async function replaceTransactionally({storeKey, port, rescuePath, sourceRescueP
   return await loadToolOutput(result);
 }
 
-async function writeInventoryExecutableSubset({storeKey, rescue, rescuePath, blockedSkcs, outDir}) {
+export async function writeInventoryExecutableSubset({storeKey, rescue, rescuePath, blockedSkcs, outDir}) {
   const blockedSet = new Set(blockedSkcs.map(String));
   const rows = (rescue.rows || []).filter(row => !blockedSet.has(String(row.skc || '').trim()));
   const subset = {
