@@ -43,16 +43,21 @@ IMMEDIATE_ISSUED_CURRENT=0
 if (( AUTHORIZATION_PRESENT == 1 )); then
   if IMMEDIATE_RESULT="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" verify-issued \
       --date "$TODAY" --queue "$QUEUE_FILE" --root "$ROOT" \
-      --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE" --time-zone "$TZ_NAME")"; then
-    IMMEDIATE_RUN=true
-    IMMEDIATE_ISSUED_CURRENT=1
+      --authorization-file "$IMMEDIATE_AUTHORIZATION_FILE" --time-zone "$TZ_NAME" --scheduled-discovery)"; then
+    if [[ "$(printf '%s' "$IMMEDIATE_RESULT" | node --input-type=module -e 'import fs from "node:fs"; const v=JSON.parse(fs.readFileSync(0,"utf8")); process.stdout.write(v.stale===true?"1":"0")')" == "1" ]]; then
+      if [[ "$EXPLICIT_IMMEDIATE_RUN" == "true" ]]; then
+        echo "[marketing-fallback-slot] immediate authorization verification failed: stale issued authorization; no consume occurred" >&2
+        exit 64
+      fi
+      IMMEDIATE_RUN=false
+    else
+      IMMEDIATE_RUN=true
+      IMMEDIATE_ISSUED_CURRENT=1
+    fi
   else
     status=$?
-    if [[ "$EXPLICIT_IMMEDIATE_RUN" == "true" ]]; then
-      echo "[marketing-fallback-slot] immediate authorization verification failed; no consume occurred" >&2
-      exit "$status"
-    fi
-    IMMEDIATE_RUN=false
+    echo "[marketing-fallback-slot] immediate authorization verification failed; no consume occurred" >&2
+    exit "$status"
   fi
 elif [[ -f "$QUEUE_FILE" && -d "$(dirname "$IMMEDIATE_AUTHORIZATION_FILE")" ]]; then
   if IMMEDIATE_RESULT="$(node "$ROOT/scripts/manage_cloud_marketing_immediate_run.mjs" find-continuation \
@@ -259,6 +264,7 @@ export SHEIN_BI_MARKETING_CLOUD_FALLBACK_ENABLED=true
 export SHEIN_BI_MARKETING_REPAIR_GRACEFUL_CUTOFF_EPOCH="$GRACEFUL_CUTOFF_EPOCH"
 export SHEIN_BI_MARKETING_REPAIR_SLOT_HARD_DEADLINE_EPOCH="$OUTER_HARD_DEADLINE_EPOCH"
 export SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC="$MIN_START_BUDGET_SEC"
+export SHEIN_BI_MARKETING_IMMEDIATE_RUN="$IMMEDIATE_RUN"
 if (( IMMEDIATE_MODE == 1 )); then
   export SHEIN_BI_MARKETING_IMMEDIATE_RUN=true
   export SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE="$IMMEDIATE_AUTHORIZATION_FILE"

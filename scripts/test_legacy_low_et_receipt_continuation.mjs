@@ -489,6 +489,7 @@ begin_stage_critical_section() { :; }
 write_state() { :; }
 runtime_location() { echo "$1"; }
 runtime_read() { echo "$MANUAL_RESULT"; }
+queue_source_guard_file_locked() { echo fixture; }
 queue_value() { case "$1" in *manualSpecialRestore*status*) echo "$MANUAL_STATE";; *fallbackRepair*status*) echo "$FALLBACK_STATE";; *) echo fixture;; esac; }
 update_stage() { if [[ "$1" == manualSpecialRestore ]]; then MANUAL_STATE="$2"; else FALLBACK_STATE="$2"; fi; }
 consume_group_budget() { REMAINING_GROUPS=$((REMAINING_GROUPS-$1)); }

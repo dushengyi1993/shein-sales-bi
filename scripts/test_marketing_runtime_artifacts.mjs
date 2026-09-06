@@ -65,6 +65,50 @@ try {
   await assert.rejects(readCloudRuntimeArtifact({root, file: guard, env}), /namespace conflict/);
   await fs.writeFile(legacyGuard, guardBytes);
   const canonicalGuard = runtimeArtifactLocation({root, file: guard, env}).path;
+  const queuePath = runtimeArtifactLocation({root, file: queue, env}).path;
+  const originalQueueBytes = await fs.readFile(queuePath);
+  const planPath = runtimeArtifactLocation({root, file: plan, env}).path;
+  const rescuePath = runtimeArtifactLocation({root, file: rescue, env}).path;
+  const originalPlanBytes = await fs.readFile(planPath);
+  const originalRescueBytes = await fs.readFile(rescuePath);
+  const queueDoc = JSON.parse(originalQueueBytes);
+  for (const reference of [path.relative(root, canonicalGuard), canonicalGuard]) {
+    await write(queue, {...queueDoc, sourceGuard: reference,
+      stages:{fallbackRepair:{...queueDoc.stages.fallbackRepair,planPath:path.relative(root,planPath)}}});
+    await write(plan,{...JSON.parse(originalPlanBytes),sourceGuard:reference});
+    await write(rescue,{...JSON.parse(originalRescueBytes),sourceGuard:reference});
+    const before = await fs.readFile(queuePath);
+    const canonicalCommand = spawnSync(process.execPath,
+      ['scripts/marketing/manage_marketing_repair_queue.mjs', 'inspect-artifacts', '--root', root, '--queue', queue],
+      {cwd: repo, env: {...process.env, ...env}, encoding: 'utf8'});
+    assert.equal(canonicalCommand.status, 0, canonicalCommand.stderr);
+    assert.equal(JSON.parse(canonicalCommand.stdout).queueStateSha256, hash(before));
+    const exported = await exportMarketingRepairArtifacts({root, queue, env, out: path.join(temp, `canonical-${path.isAbsolute(reference)}.json`)});
+    assert.equal(exported.files.length, 6);
+    assert.equal(exported.files.find(file => file.logicalPath === guard).sha256, guardHash);
+    assert.deepEqual(await fs.readFile(queuePath), before);
+    await fs.writeFile(legacyGuard, '{}');
+    await assert.rejects(inspectMarketingRepairArtifacts({root, queue, env}), /namespace conflict/);
+    await fs.writeFile(legacyGuard, guardBytes);
+  }
+  for (const reference of [path.join(temp, 'unrelated.json'), '../unrelated.json',
+    'outputs/reports/../reports/'+path.basename(guard), path.relative(root, canonicalGuard)+'\n']) {
+    await write(queue, {...queueDoc, sourceGuard: reference});
+    await assert.rejects(inspectMarketingRepairArtifacts({root, queue, env}));
+  }
+  await write(queue, {...queueDoc, sourceGuard: path.relative(root, canonicalGuard), sourceGuardHash:'0'.repeat(64)});
+  await assert.rejects(inspectMarketingRepairArtifacts({root, queue, env}), /SHA-256 mismatch/);
+  const outside = path.join(temp,'outside');
+  await fs.mkdir(outside);
+  await fs.writeFile(path.join(outside,'guard.json'),guardBytes);
+  const escape = path.join(env.SHEIN_BI_OUTPUTS_ROOT,'escaped');
+  await fs.symlink(outside,escape,process.platform==='win32'?'junction':'dir');
+  await write(queue,{...queueDoc,sourceGuard:path.relative(root,path.join(escape,'guard.json'))});
+  await assert.rejects(inspectMarketingRepairArtifacts({root,queue,env}),/outside its data root/);
+  await fs.unlink(escape);
+  await fs.writeFile(queuePath, originalQueueBytes);
+  await fs.writeFile(planPath,originalPlanBytes);
+  await fs.writeFile(rescuePath,originalRescueBytes);
   await fs.unlink(canonicalGuard);
   await assert.rejects(inspectMarketingRepairArtifacts({root, queue, env}), /Artifact unavailable: outputs\/reports\/marketing-daily-guard-2026-09-05.json/);
   assert.throws(() => runtimeArtifactLocation({root, file: 'outputs/../../secrets.json', env}), /escapes/);

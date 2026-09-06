@@ -8282,6 +8282,20 @@ function descriptionBindingExplicitPreValidRejectionEvidence(value) {
     }
   }
 
+  // Pure dry-run/check records are precheck evidence, not rejected write attempts.
+  // Evaluate neutrality only after inspecting every representation for ids,
+  // readback, positive flags and aggregate write attribution. Missing/unknown
+  // modes remain fail-closed; a precheck label cannot override a write signal.
+  const purePrecheckOnly = groups.size > 0 && [...groups.values()].every(attempt => (
+    !attempt.writeSignals
+    && attempt.modes.size > 0
+    && [...attempt.modes].every(mode => mode === 'dry-run' || mode === 'check')
+  ));
+  if (purePrecheckOnly && !flaggedNodes.length && !globalPositiveSeen
+    && !globalReadbackSeen && !lockedOrManualSeen && reasons.length === 0) {
+    return {ok: true, proof: [], neutral: true};
+  }
+
   const ok = provenCount > 0
     && !globalPositiveSeen
     && !globalReadbackSeen
