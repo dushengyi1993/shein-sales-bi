@@ -425,7 +425,7 @@ assert.match(marketingGuardScript, /trap release_marketing_artifact_publication_
 
 const marketingRepairTimer = readUnit('shein-bi-cloud-marketing-repair.timer');
 const marketingRepairWindows = [...marketingRepairTimer.matchAll(/^OnCalendar=(.*)$/gm)].map(match => match[1].trim());
-assert.deepEqual(marketingRepairWindows, ['*-*-* 20:45:00', '*-*-* 21:15:00']);
+assert.deepEqual(marketingRepairWindows, ['*-*-* 11..20:45:00', '*-*-* 21:15:00']);
 assert.equal(property(marketingRepairTimer, 'Persistent'), 'false');
 const marketingRepair = readUnit('shein-bi-cloud-marketing-repair.service');
 const marketingRepairScript = fs.readFileSync(new URL('./cloud_marketing_repair_worker.sh', import.meta.url), 'utf8');

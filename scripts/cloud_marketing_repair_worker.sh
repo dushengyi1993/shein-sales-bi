@@ -1046,6 +1046,13 @@ finish('incomplete');
 NODE
 }
 
+defer_stage_after_executor_status() {
+  local stage="$1"
+  write_state pending "$stage executor deferred with status=75; queue and prior receipts preserved for next service run"
+  echo "[cloud_marketing_repair] executor deferred with status=75 stage=$stage; queue and prior receipts preserved for next service run"
+  exit 75
+}
+
 consume_group_budget() {
   local count="${1:-0}"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
@@ -2105,6 +2112,9 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$HIGH_CLICK_STATUS" != "not_required" &&
     "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
   status=$?
   set -e
+  if (( status == 75 )); then
+    defer_stage_after_executor_status highClickSpecial
+  fi
   PROCESSED_ITEMS="$(processed_items_this_run "$RESULT_PATH")"
   if [[ "$PROCESSED_ITEMS" =~ ^[0-9]+$ ]] && (( PROCESSED_ITEMS == 0 )); then
     RESUME_DISPOSITION="$(settled_result_disposition highClickSpecial "$RESULT_PATH" "$WORK_FINGERPRINT")"
@@ -2192,6 +2202,9 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
     "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
   status=$?
   set -e
+  if (( status == 75 )); then
+    defer_stage_after_executor_status manualSpecialRestore
+  fi
   PROCESSED_ITEMS="$(processed_items_this_run "$RESULT_PATH")"
   DEADLINE_DEFERRED="$(result_total "$RESULT_PATH" deadlineDeferred)"
   REMAINING_ITEMS="$(result_total "$RESULT_PATH" remainingItems)"
@@ -2287,6 +2300,9 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$DRIFT_STATUS" != "not_required" && "$DR
     "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
   status=$?
   set -e
+  if (( status == 75 )); then
+    defer_stage_after_executor_status driftRepair
+  fi
   PROCESSED_GROUPS="$(new_groups_in_result "$RESULT_PATH")"
   DEADLINE_DEFERRED="$(result_top_level_value "$RESULT_PATH" deadlineDeferred 0)"
   if [[ ! "$PROCESSED_GROUPS" =~ ^[0-9]+$ ]] || (( PROCESSED_GROUPS > 1 )); then
@@ -2379,6 +2395,9 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "
     "${EXECUTOR_CONTINUATION_ARGS[@]}"
   status=$?
   set -e
+  if (( status == 75 )); then
+    defer_stage_after_executor_status fallbackRepair
+  fi
   PROCESSED_GROUPS="$(new_groups_in_result "$RESULT_PATH")"
   DEADLINE_DEFERRED="$(result_top_level_value "$RESULT_PATH" deadlineDeferred 0)"
   if [[ ! "$PROCESSED_GROUPS" =~ ^[0-9]+$ ]] || (( PROCESSED_GROUPS > 1 )); then

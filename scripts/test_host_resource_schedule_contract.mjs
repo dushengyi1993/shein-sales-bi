@@ -1027,7 +1027,7 @@ assert.match(processStoreSource, /executeLimitedDiscountWithInventoryTransaction
 assert.match(processStoreSource, /finally \{[\s\S]*closeStore\(storeKey\)/,
   'an in-progress group must retain its terminal inventory transaction and cleanup path');
 assert.deepEqual(calendars(unit('shein-bi-cloud-marketing-repair.timer')), [
-  '*-*-* 20:45:00',
+  '*-*-* 11..20:45:00',
   '*-*-* 21:15:00',
 ]);
 

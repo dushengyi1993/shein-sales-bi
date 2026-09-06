@@ -162,6 +162,23 @@ const resultBytes = JSON.stringify({workFingerprint: value('--expected-work-fing
   fs.writeFileSync(value('--result'), resultBytes);
 }
 `);
+    write('scripts/marketing/batch_restore_manual_limited_discounts.mjs', `
+import fs from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+const value = flag => args[args.indexOf(flag) + 1];
+const root = process.env.SHEIN_BI_ROOT;
+const queue = JSON.parse(fs.readFileSync(${JSON.stringify(queueFile)}, 'utf8'));
+const result = value('--result');
+if (value('--expected-work-fingerprint') !== queue.stages.manualSpecialRestore.workFingerprint) process.exit(64);
+fs.appendFileSync(path.join(root, 'events.log'), JSON.stringify({executor: 'manual', args}) + '\\n');
+const status = Number(process.env.FIXTURE_MANUAL_EXECUTOR_STATUS || 0);
+if (status !== 0) process.exit(status);
+fs.mkdirSync(path.dirname(result), {recursive: true});
+const row = {ok: true, storeKey: 'S01'};
+fs.writeFileSync(result, JSON.stringify({workFingerprint: value('--expected-work-fingerprint'), dryRunOnly: false,
+  results: [row], processedThisRunResults: [row], totals: {processed: 1, processedThisRun: 1, resumedItems: 0, remainingItems: 0}}) + '\\n');
+`);
     write('bin/date', '#!/bin/bash\ncase "${1:-}" in\n +%F) echo "$FIXTURE_DATE" ;;\n +%H) echo "$FIXTURE_HOUR" ;;\n +%M) echo "$FIXTURE_MINUTE" ;;\n +%s) echo "$FIXTURE_EPOCH" ;;\n *) exec /bin/date "$@" ;;\nesac\n', 0o755);
     write('bin/systemctl', '#!/bin/bash\nprintf "unexpected-systemctl\\n" >> "$SHEIN_BI_ROOT/events.log"\necho active\nexit 0\n', 0o755);
     for (const executable of ['ssh', 'curl', 'wget']) {
@@ -266,6 +283,49 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
       assert.equal(executors().length,1);
       assert.deepEqual(fs.readFileSync(queueFile),before);
     });
+    const manualResultRelative = 'tmp/marketing-signup/manual-limited-discount-restore/' + date + '/manual-limited-discount-restore-result.json';
+    const manualResult = path.join(temp, manualResultRelative);
+    const manualQueue = {...queue, stages: {highClickSpecial: {status: 'not_required'},
+      manualSpecialRestore: {status: 'pending', workFingerprint: workHash, planPath: 'outputs/reports/high-plan.json'},
+      driftRepair: {status: 'not_required'}, fallbackRepair: {status: 'not_required'}}};
+    const resetManual = () => {
+      reset();
+      json(queueRelative, manualQueue);
+      fs.rmSync(manualResult, {force: true});
+    };
+    await check('manual executor admission defer without result preserves queue and exits 75', async () => {
+      resetManual(); const before = fs.readFileSync(queueFile);
+      const result = run({FIXTURE_MANUAL_EXECUTOR_STATUS: '75'});
+      expectStatus(result, 75);
+      assert.equal(fs.existsSync(manualResult), false);
+      assert.deepEqual(fs.readFileSync(queueFile), before);
+      assert.doesNotMatch(result.stdout + result.stderr, /ENOENT|Artifact does not exist/);
+      const state = readJson(path.join(temp, 'state/cloud_ops_alerts/marketing-repair-last.json'));
+      assert.equal(state.status, 'pending');
+      assert.match(state.message, /executor deferred with status=75; queue and prior receipts preserved for next service run/);
+    });
+    await check('manual executor admission defer does not reuse stale result', async () => {
+      resetManual();
+      const stale = Buffer.from(JSON.stringify({workFingerprint: workHash, dryRunOnly: false,
+        results: [{ok: true, storeKey: 'stale'}], processedThisRunResults: [],
+        totals: {processed: 1, processedThisRun: 0, resumedItems: 1, remainingItems: 0}}) + '\n');
+      write(manualResultRelative, stale);
+      const before = fs.readFileSync(queueFile);
+      const result = run({FIXTURE_MANUAL_EXECUTOR_STATUS: '75'});
+      expectStatus(result, 75);
+      assert.deepEqual(fs.readFileSync(queueFile), before);
+      assert.deepEqual(fs.readFileSync(manualResult), stale);
+      assert.equal(readJson(queueFile).stages.manualSpecialRestore.status, 'pending');
+    });
+    await check('manual executor ordinary failure remains a failure', async () => {
+      resetManual(); const before = fs.readFileSync(queueFile);
+      const result = run({FIXTURE_MANUAL_EXECUTOR_STATUS: '1'});
+      expectStatus(result, 1);
+      assert.equal(fs.existsSync(manualResult), false);
+      assert.deepEqual(fs.readFileSync(queueFile), before);
+    });
+    assert.equal((workerSource.match(/defer_stage_after_executor_status (?:highClickSpecial|manualSpecialRestore|driftRepair|fallbackRepair)/g) || []).length, 4,
+      'every stage consumer must handle executor admission defer before reading a result');
     for (const [name,file] of [['guard',guard],['plan',plan]]) {
       await check('missing '+name+' stops before executor', async () => {
         reset(); const before=fs.readFileSync(queueFile), bytes=fs.readFileSync(file);
@@ -408,7 +468,7 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
       assert.match(repairUnit, /^Environment=SHEIN_BI_MARKETING_REPAIR_RUN_BUDGET_SEC=3600$/m);
       assert.match(repairUnit, /^ExecStart=.*run_cloud_marketing_fallback_slot\.sh$/m);
       const calendar = [...sources['infra/systemd/shein-bi-cloud-marketing-repair.timer'].matchAll(/^OnCalendar=(.+)$/gm)].map(row => row[1].trim());
-      assert.deepEqual(calendar, ['*-*-* 20:45:00', '*-*-* 21:15:00']);
+      assert.deepEqual(calendar, ['*-*-* 11..20:45:00', '*-*-* 21:15:00']);
     });
     await check('bound runtime: unexpired consumed scope drift and expired issued to real manual/fallback transactions', async () => {
       const startedAt=Date.now();
