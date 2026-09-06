@@ -591,7 +591,7 @@ try {
     '#!/usr/bin/env bash',
     'script="$1"',
     'shift',
-    `if [[ "$script" == *validate_et_historical_skip_warning.mjs ]]; then exec /usr/bin/node '${toBashPath(path.join(ROOT, 'scripts/inventory/validate_et_historical_skip_warning.mjs'))}' "$@"; fi`,
+    `if [[ "$script" == *validate_et_historical_skip_warning.mjs ]]; then exec '${process.platform === 'win32' ? '/usr/bin/node' : process.execPath}' '${toBashPath(path.join(ROOT, 'scripts/inventory/validate_et_historical_skip_warning.mjs'))}' "$@"; fi`,
     'out=""',
     'while (( $# > 0 )); do',
     '  if [[ "$1" == "--out" && $# -ge 2 ]]; then out="$2"; shift 2; else shift; fi',
