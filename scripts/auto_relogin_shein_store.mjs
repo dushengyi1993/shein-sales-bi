@@ -10,6 +10,8 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import fs from 'node:fs/promises';
 import {connectCdp} from '../lib/shein_browser.mjs';
+import {inspectManagedStoreSession, validateManagedSession} from '../lib/chrome_profile_startup.mjs';
+export {inspectManagedStoreSession, validateManagedSession} from '../lib/chrome_profile_startup.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -117,7 +119,7 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {visible: true, date: null, timeoutMs: 120000, checkOnly: false, closeAfter: false, requireMarketing: false};
   const stores = [];
   for (let i = 0; i < argv.length; i++) {
@@ -129,10 +131,15 @@ function parseArgs(argv) {
     else if (a === '--check-only') args.checkOnly = true;
     else if (a === '--close-after') args.closeAfter = true;
     else if (a === '--require-marketing') args.requireMarketing = true;
+    else if (a === '--managed-session-json') args.managedSession = JSON.parse(argv[++i] || 'null');
     else if (!a.startsWith('--')) stores.push(...a.split(',').map(s => s.trim().toUpperCase()).filter(Boolean));
   }
   args.stores = stores;
   if (!args.stores.length) throw new Error('Missing store key(s), e.g. DL or DL,DX');
+  if (args.managedSession !== undefined) {
+    if (args.stores.length !== 1 || args.closeAfter) throw new Error('Managed session attachment requires one store and forbids --close-after');
+    validateManagedSession(args.managedSession, args.stores[0]);
+  }
   if (args.stores.length > MAX_STORES_PER_RUN) {
     throw new Error(
       `Refusing to auto-relogin ${args.stores.length} stores in one run; ` +
@@ -168,13 +175,25 @@ function closeStoreChrome(store) {
 async function launchStore(storeKey, visible) {
   const args = [path.join(ROOT, 'scripts', 'launch_store_browser.mjs'), storeKey, visible ? '--visible' : '--headless'];
   await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe']});
+    const child = spawn(process.execPath, args, {cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: !visible});
     let stderr = '';
+    child.stdout.resume();
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', d => stderr += d);
     child.on('error', reject);
     child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `launch failed ${code}`)));
   });
+}
+
+export async function prepareReloginBrowser(store, opts, {
+  inspectSession = inspectManagedStoreSession, launch = launchStore,
+} = {}) {
+  if (opts.managedSession) {
+    const session = await inspectSession(store, opts.managedSession);
+    return {step: 'managed-session-attached', session, reused: true, launcherInvoked: false};
+  }
+  await launch(store.storeKey, opts.visible);
+  return {step: 'browser-launch', launcherInvoked: true};
 }
 
 async function fetchCdpTargets(port) {
@@ -412,7 +431,7 @@ async function restoreOne(store, opts) {
   const probeCodes = [];
   let close = null;
   try {
-    await launchStore(store.storeKey, opts.visible);
+    steps.push(await prepareReloginBrowser(store, opts));
     const connectionTimeoutMs = Math.min(opts.timeoutMs, 60_000);
     await waitForCdpTargets(store.port, connectionTimeoutMs);
     const cdp = await connectCdp(store.port, {

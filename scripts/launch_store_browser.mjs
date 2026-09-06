@@ -14,7 +14,8 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import http from 'node:http';
-import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage} from '../lib/chrome_profile_startup.mjs';
+import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage, inspectManagedStoreSession} from '../lib/chrome_profile_startup.mjs';
+import {cleanupManagedStoreSession} from './cleanup_shein_store_browsers.mjs';
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
@@ -122,7 +123,24 @@ function parseArgs(argv) {
   return args;
 }
 
-const cliArgs = parseArgs(process.argv.slice(2));
+// Ownership is emitted before page work and remains available on page failure.
+// Only a newly launched, exactly identified browser is cleaned by this entry.
+export async function completeManagedLauncherStartup({start, inspect, ready, cleanup, emitOwnership}) {
+  const startup = await start();
+  const managedSession = await inspect();
+  await emitOwnership({startup, managedSession});
+  try {
+    return {startup, managedSession, ready: await ready()};
+  } catch (error) {
+    const cleanupReport = startup.launched === true
+      ? await cleanup(managedSession).catch(() => ({ok: false, reason: 'owned_initial_session_cleanup_failed'}))
+      : {ok: false, skipped: true, reason: 'preexisting_session_retained'};
+    throw Object.assign(error, {startup, managedSession, cleanupReport});
+  }
+}
+
+async function main(argv = process.argv.slice(2)) {
+const cliArgs = parseArgs(argv);
 const storeKey = cliArgs.storeKey;
 const customUrl = cliArgs.url || ORDER_URL;
 if (!storeKey) throw new Error('Missing store key, e.g. DL');
@@ -352,7 +370,10 @@ async function forceRefreshMarketingPage(port, maxAttempts = 3) {
   return {ok: false, attempts: maxAttempts, state: lastState};
 }
 
-const startup = await withChromeProfileStartup({
+let completion;
+try {
+completion = await completeManagedLauncherStartup({
+start: () => withChromeProfileStartup({
   root: ROOT, profileDir, storeKey: store.storeKey, port: store.port,
   probe: () => probeChromeDebugPort(store.port),
   prepare: () => {
@@ -393,8 +414,14 @@ if (process.platform === 'win32') {
   child.unref();
 }
   },
-});
-
+}),
+inspect: () => inspectManagedStoreSession(store, null, {root: ROOT}),
+emitOwnership: ({startup, managedSession}) => console.error(JSON.stringify({
+  event: 'managed-session-owned', storeKey: store.storeKey, port: store.port,
+  url: customUrl, reused: startup.reused, managedSession, pageReady: false,
+})),
+cleanup: session => cleanupManagedStoreSession(store, session, {root: ROOT}),
+ready: async () => {
 const debugPort = await waitForDebugPort(store.port);
 if (!debugPort.ok) {
   throw new Error(`Chrome remote debugging port not ready for ${store.storeKey} port=${store.port}: ${debugPort.error}`);
@@ -408,8 +435,23 @@ const marketingRefresh = customUrl.includes('/#/mbrs/')
 if (marketingRefresh && !marketingRefresh.ok) {
   throw new Error(`Marketing page still failed after ${marketingRefresh.attempts} forced refresh attempts for ${store.storeKey}`);
 }
+return {debugPort, marketingRefresh};
+},
+});
+} catch (error) {
+  console.log(JSON.stringify({
+    storeKey: store.storeKey, port: store.port, url: customUrl,
+    ok: false, pageReady: false, reused: error.startup?.reused,
+    managedSession: error.managedSession || null,
+    cleanup: error.cleanupReport || null, error: String(error.message),
+  }, null, 2));
+  process.exitCode = 1;
+  return;
+}
+const {startup, managedSession, ready: {debugPort, marketingRefresh}} = completion;
 
 console.log(JSON.stringify({
+  ok: true, pageReady: true, managedSession,
   storeKey: store.storeKey,
   reused: startup.reused,
   shopName: store.shopName,
@@ -430,3 +472,8 @@ console.log(JSON.stringify({
     href: marketingRefresh.state?.href || '',
   } : null,
 }, null, 2));
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => { console.error(String(error?.message || error)); process.exitCode = 1; });
+}

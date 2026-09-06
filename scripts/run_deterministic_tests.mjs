@@ -25,6 +25,7 @@ const tests = [
   'scripts/test_cloud_marketing_primary_entry.mjs',
   'scripts/test_host_v6_resource_concurrency.mjs',
   'scripts/test_manual_discount_runtime.mjs',
+  'scripts/test_manual_discount_session_recovery.mjs',
   'scripts/test_marketing_runtime_artifacts.mjs',
   'scripts/test_chrome_profile_startup.mjs',
   'scripts/marketing/smoke_coupon_budget_guard.mjs',

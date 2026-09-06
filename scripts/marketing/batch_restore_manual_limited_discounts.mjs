@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {inspectManagedStoreSession, validateManagedSession, MANAGED_SESSION_FIELDS} from '../../lib/chrome_profile_startup.mjs';
 import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
@@ -109,8 +110,8 @@ async function run(command, args, timeoutMs = 900000) {
     }, timeoutMs);
     child.stdout.on('data', chunk => { stdout += chunk.toString(); process.stdout.write(chunk); });
     child.stderr.on('data', chunk => { stderr += chunk.toString(); process.stderr.write(chunk); });
-    child.on('error', error => { clearTimeout(timer); resolve({ok: false, exitCode: null, timedOut, stdout, stderr, error: error.message}); });
-    child.on('close', code => { clearTimeout(timer); resolve({ok: code === 0 && !timedOut, exitCode: code, timedOut, stdout, stderr}); });
+    child.on('error', error => { clearTimeout(timer); resolve({ok: false, launcherPid: child.pid || null, exitCode: null, timedOut, stdout, stderr, error: error.message}); });
+    child.on('close', code => { clearTimeout(timer); resolve({ok: code === 0 && !timedOut, launcherPid: child.pid || null, exitCode: code, timedOut, stdout, stderr}); });
   });
 }
 
@@ -145,18 +146,45 @@ async function loadCommandOutput(result) {
   return {...result, summary, outPath, full};
 }
 
-async function launchStore(storeKey) {
-  return await runBounded(process.execPath, ['scripts/launch_store_browser.mjs', storeKey, '--headless'], 60000, {
+export async function launchStore(storeKey, {runCommand = runBounded, inspectSession = inspectManagedStoreSession, store = null} = {}) {
+  const url = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
+  const result = await runCommand(process.execPath, ['scripts/launch_store_browser.mjs', storeKey, '--headless', '--url', url], 60000, {
     label: `launch ${storeKey}`,
   });
+  const summary = lastJson(result.stdout) || lastJson(result.stderr);
+  const evidence = {launcher: 'scripts/launch_store_browser.mjs', launcherPid: result.launcherPid || null,
+    storeKey, url, port: summary?.port || null, reused: summary?.reused === true, observedAt: new Date().toISOString()};
+  let managedSession = null;
+  try {
+    store ||= (JSON.parse(await fs.readFile(path.join(ROOT, 'config/stores.json'), 'utf8')).stores || [])
+      .find(row => String(row.storeKey).toUpperCase() === storeKey);
+    if (!store || summary?.storeKey !== storeKey || summary?.port !== store.port || summary?.url !== url) {
+      throw new Error('Initial launcher evidence did not match requested store/port/marketing URL');
+    }
+    // The launcher emits ownership before refresh. Even a failed page retains
+    // exact cleanup authority; never reconstruct it from a later unrelated PID.
+    managedSession = validateManagedSession(summary.managedSession, storeKey);
+    if (result.ok) await inspectSession(store, managedSession);
+    return {...result, ok: result.ok && summary.pageReady === true, managedSession, initialCleanup: summary.cleanup || null, evidence: {...evidence, ...managedSession}};
+  } catch (error) {
+    return {...result, ok: false, managedSession, stderr: String(error.message), evidence: {...evidence, ...managedSession}};
+  }
 }
 
-async function closeStore(storeKey) {
-  const cleanupArgs = ['scripts/cleanup_shein_store_browsers.mjs', '--store', storeKey, '--cleanup-chrome-tmp', '--kill-after-sec', '5'];
+export async function closeStore(storeKey, launchSummary, {runCommand = run} = {}) {
+  if (!launchSummary?.managedSession) return {ok: false, skipped: true, reason: 'no_verified_managed_session'};
+  if (launchSummary.initialCleanup?.ok === true && launchSummary.initialCleanup.exited === true) return {ok: true, exited: true, reason: 'initial_launcher_cleanup_verified'};
+  try {
+    validateManagedSession(launchSummary.managedSession, storeKey);
+  } catch {
+    return {ok: false, skipped: true, reason: 'managed_session_ownership_not_verified'};
+  }
+  const cleanupArgs = ['scripts/cleanup_shein_store_browsers.mjs', '--store', storeKey,
+    '--managed-session-json', JSON.stringify(launchSummary.managedSession), '--kill-after-sec', '5', '--json'];
   const leaseTask = String(process.env.SHEIN_BI_BROWSER_LEASE_TASK || '').trim();
   const leaseRunId = String(process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID || '').trim();
   if (leaseTask && leaseRunId) cleanupArgs.push('--owned-lease-task', leaseTask, '--owned-lease-run-id', leaseRunId);
-  return await run(process.execPath, cleanupArgs, 90000);
+  return await runCommand(process.execPath, cleanupArgs, 90000);
 }
 
 async function applyRescue(storeKey, port, rescuePath, execute, {recovery = false} = {}) {
@@ -178,28 +206,37 @@ function reportPathFromOutput(text, field) {
   return value ? path.resolve(ROOT, value) : '';
 }
 
-async function recoverMarketingLogin(storeKey, date) {
-  const reloginRun = await runBounded(process.execPath, [
+export async function recoverMarketingLogin(storeKey, date, managedSession, {runCommand = runBounded, readJson = readJsonIfExists} = {}) {
+  validateManagedSession(managedSession, storeKey);
+  const reloginRun = await runCommand(process.execPath, [
     'scripts/auto_relogin_shein_store.mjs',
     storeKey,
     '--date', date,
     '--headless',
     '--require-marketing',
+    '--managed-session-json', JSON.stringify(managedSession),
   ], 240000, {label: `login recovery ${storeKey}`});
   const reloginPath = reportPathFromOutput(reloginRun.stdout, 'reportFile');
-  const reloginReport = await readJsonIfExists(reloginPath);
+  const reloginReport = await readJson(reloginPath);
   const relogin = reloginReport?.results?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey)
-    || {ok: reloginRun.ok, blocker: '', blockerReason: reloginRun.stderr || ''};
+    || {ok: false, blocker: 'bootstrap_failed', blockerReason: 'missing login recovery report'};
+  const sessionAttachment = relogin.steps?.find(step => step.step === 'managed-session-attached');
+  const attachmentVerified = sessionAttachment?.reused === true && sessionAttachment?.launcherInvoked === false
+    && MANAGED_SESSION_FIELDS.every(key => sessionAttachment.session?.[key] === managedSession[key]);
+  if (relogin.ok === true && (!reloginRun.ok || !attachmentVerified)) {
+    Object.assign(relogin, {ok: false, blocker: 'bootstrap_failed', blockerReason: 'managed session attachment evidence missing or mismatched'});
+  }
   if (relogin.ok !== true) {
     return {
       ok: false,
       relogin: {ok: false, blocker: relogin.blocker || '', reason: relogin.blockerReason || relogin.reason || ''},
       identity: null,
+      sessionAttachment: attachmentVerified ? sessionAttachment : null,
       assessment: classifyUnifiedLoginRecovery({relogin}),
     };
   }
 
-  const identityRun = await runBounded(process.execPath, [
+  const identityRun = await runCommand(process.execPath, [
     'scripts/marketing/check_store_profile_identity.mjs',
     '--stores', storeKey,
     '--no-launch',
@@ -207,7 +244,7 @@ async function recoverMarketingLogin(storeKey, date) {
     '--no-login-recovery',
   ], 180000, {label: `identity readback ${storeKey}`});
   const identityMatch = String(identityRun.stdout || '').match(/^JSON\s+(.+)$/m);
-  const identityReport = await readJsonIfExists(identityMatch?.[1] ? path.resolve(identityMatch[1].trim()) : '');
+  const identityReport = await readJson(identityMatch?.[1] ? path.resolve(identityMatch[1].trim()) : '');
   const identityRow = identityReport?.rows?.find(row => String(row?.storeKey || '').toUpperCase() === storeKey) || null;
   const identity = {
     ok: identityRun.ok && identityRow?.ok === true,
@@ -218,6 +255,7 @@ async function recoverMarketingLogin(storeKey, date) {
     ok: identity.ok,
     relogin: {ok: true, blocker: '', reason: ''},
     identity,
+    sessionAttachment,
     assessment: classifyUnifiedLoginRecovery({relogin, identity}),
   };
 }
@@ -310,6 +348,7 @@ async function updateRegistry(storeKey, skc, activityId, artifact) {
 
 async function processOne(file, storeMap, args, browserSession = {}) {
   const keepOpen = Boolean(browserSession.keepOpen);
+  let launch = browserSession.launchSummary || null;
   const rescuePath = path.resolve(ROOT, file.path);
   const rescue = JSON.parse(await fs.readFile(rescuePath, 'utf8'));
   const row = rescue.rows?.[0];
@@ -349,12 +388,13 @@ async function processOne(file, storeMap, args, browserSession = {}) {
       record.error = record.lowEtFastSellerPricePullbackRevalidation.reason;
       return record;
     }
-    const launch = (browserSession?.launchSummary) || await launchStore(storeKey);
+    launch ||= await launchStore(storeKey);
+    record.browserLaunch = launch.evidence;
     if (!launch.ok) throw new Error(`launch failed: ${launch.stderr || launch.stdout}`);
     let dry = await applyRescue(storeKey, store.port, rescuePath, false);
     if (isMarketingLoginRedirect(dry)) {
       const date = String(args.guard).match(/20\d{2}-\d{2}-\d{2}/)?.[0] || new Date().toISOString().slice(0, 10);
-      const recovery = await recoverMarketingLogin(storeKey, date);
+      const recovery = await recoverMarketingLogin(storeKey, date, launch.managedSession);
       record.loginRecovery = recovery;
       if (recovery.assessment.terminal) {
         record.status = 'login_terminal_blocker';
@@ -537,8 +577,8 @@ async function processOne(file, storeMap, args, browserSession = {}) {
     return record;
   } finally {
     if (!keepOpen) {
-      const close = await closeStore(storeKey);
-      record.close = {ok: close.ok, stderr: close.stderr || '', stdout: close.stdout?.slice(-1000) || ''};
+      const close = await closeStore(storeKey, launch);
+      record.close = {ok: close.ok, skipped: close.skipped || false, reason: close.reason || '', stderr: close.stderr || '', stdout: close.stdout?.slice(-1000) || ''};
     } else {
       record.close = {ok: true, keptOpenForNextItem: true};
     }
@@ -656,7 +696,10 @@ for (const [storeKey, storeFiles] of filesByStore.entries()) {
       processedThisRun.push(normalizeManualResumeResult(res));
     }
   } finally {
-    await effectiveCloseStore(storeKey).catch(() => null);
+    const close = await effectiveCloseStore(storeKey, launchSummary).catch(() => ({ok: false, reason: 'cleanup_failed'}));
+    for (const row of processedThisRun.filter(row => row.storeKey === storeKey)) row.close = {
+      ok: close?.ok === true, skipped: close?.skipped === true, reason: close?.reason || '',
+    };
   }
 }
 const resultByPath = new Map(settledByPath);

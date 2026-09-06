@@ -11,10 +11,14 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {readBrowserLeases, reclaimStaleBrowserLeases} from '../lib/browser_task_lease.mjs';
 import {cleanupOwnedChromeTmpDirectories} from '../lib/chrome_tmp_hygiene.mjs';
+import {
+  assertChromeProfileLeaseOwner, chromeProfileIdentity, chromeProcessOwnsProfile,
+  listChromeProcesses, readManagedChromeIdentity, validateManagedSession, withChromeProfileLock,
+} from '../lib/chrome_profile_startup.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     all: false,
     stores: [],
@@ -38,8 +42,94 @@ function parseArgs(argv) {
     else if (a === '--kill-after-sec') args.killAfterSec = Number(argv[++i] || args.killAfterSec);
     else if (a === '--owned-lease-task') args.ownedLeaseTask = String(argv[++i] || '').trim();
     else if (a === '--owned-lease-run-id') args.ownedLeaseRunId = String(argv[++i] || '').trim();
+    else if (a === '--managed-session-json') args.managedSession = JSON.parse(argv[++i] || 'null');
+  }
+  if (args.managedSession !== undefined) {
+    if (args.all || args.stores.length !== 1) throw new Error('Exact managed cleanup requires one --store');
+    validateManagedSession(args.managedSession, args.stores[0]);
   }
   return args;
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+}
+
+// Exact opt-in path. Do not route this through legacy store/sub-string cleanup.
+// The physical profile lock spans terminal revalidation, signals, exit readback
+// and Singleton cleanup. All signals target only the original browser PID.
+export async function cleanupManagedStoreSession(store, session, {
+  root = ROOT, env = process.env, processes = listChromeProcesses,
+  alive = pidAlive, signal = (pid, name) => process.kill(pid, name),
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  killAfterSec = 5, exitTimeoutMs = 5000, dryRun = false,
+} = {}) {
+  validateManagedSession(session, store.storeKey);
+  if (Number(store.port) !== session.port) throw new Error('Managed cleanup configured port mismatch');
+  const dir = path.resolve(root, 'profiles', `persistent-${store.profileKey}-profile`);
+  const killed = [];
+  return await withChromeProfileLock({root, profileDir: dir, storeKey: store.storeKey, env}, async () => {
+    const assertProfile = async () => {
+      assertChromeProfileLeaseOwner({root, storeKey: store.storeKey, env});
+      if (await chromeProfileIdentity(dir) !== session.profileIdentity) throw new Error('Managed cleanup physical profile changed');
+    };
+    const targetPresent = async () => {
+      await assertProfile();
+      const observed = await processes();
+      if (!observed.some(row => row.pid === session.browserPid)) {
+        if (await alive(session.browserPid)) throw new Error('Managed cleanup PID is alive without matching Chrome identity');
+        return false;
+      }
+      await readManagedChromeIdentity({store, profileDir: dir, observed, expected: session});
+      await assertProfile();
+      return true;
+    };
+    const waitForExit = async timeoutMs => {
+      const deadline = performance.now() + Math.max(0, timeoutMs);
+      while (await alive(session.browserPid)) {
+        if (performance.now() >= deadline) return false;
+        await sleep(Math.min(100, Math.max(1, deadline - performance.now())));
+      }
+      return true;
+    };
+    if (await targetPresent()) {
+      if (dryRun) return {ok: true, dryRun: true, stores: [store.storeKey], targetPid: session.browserPid, killed: [], profileSingletons: {removed: []}};
+      // Repeat at the termination boundary; never trust an earlier admission.
+      if (await targetPresent()) {
+        await signal(session.browserPid, 'SIGTERM');
+        killed.push({pid: session.browserPid, signal: 'SIGTERM'});
+      }
+      if (!await waitForExit(Math.max(0, Number(killAfterSec) || 0) * 1000)) {
+        if (await targetPresent()) {
+          await signal(session.browserPid, 'SIGKILL');
+          killed.push({pid: session.browserPid, signal: 'SIGKILL'});
+        }
+        if (!await waitForExit(exitTimeoutMs)) return {ok: false, stores: [store.storeKey], reason: 'managed_target_exit_unconfirmed', killed, profileSingletons: {removed: []}};
+      }
+    }
+    if (dryRun) return {ok: true, dryRun: true, stores: [store.storeKey], killed: [], profileSingletons: {removed: []}};
+    await assertProfile();
+    const remaining = await processes();
+    if (await alive(session.browserPid)) throw new Error('Managed cleanup target exit unconfirmed');
+    for (const row of remaining) {
+      if (await chromeProcessOwnsProfile(row, dir)) {
+        return {ok: false, stores: [store.storeKey], reason: 'managed_profile_still_in_use', killed, profileSingletons: {removed: []}};
+      }
+    }
+    await assertProfile();
+    const removed = [];
+    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      const file = path.join(dir, name);
+      if (path.dirname(file) !== dir) throw new Error('Unsafe managed Singleton path');
+      try {
+        if (fs.lstatSync(file).isDirectory()) throw new Error('Managed Singleton is unexpectedly a directory');
+        fs.rmSync(file);
+        removed.push({storeKey: store.storeKey, name});
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return {ok: true, stores: [store.storeKey], exited: true, killed, profileSingletons: {removed, errorCount: 0}};
+  });
 }
 
 function storesConfig() {
@@ -182,8 +272,20 @@ function cleanupWindows(stores, args) {
   return {matches: [], killed: [], code: res.status, stdout: res.stdout, stderr: res.stderr};
 }
 
-const args = parseArgs(process.argv.slice(2));
+async function main(argv = process.argv.slice(2)) {
+const args = parseArgs(argv);
 const stores = selectedStores(args);
+if (args.managedSession) {
+  const env = {...process.env};
+  if (args.ownedLeaseTask || args.ownedLeaseRunId) {
+    env.SHEIN_BI_BROWSER_LEASE_TASK = args.ownedLeaseTask;
+    env.SHEIN_BI_BROWSER_LEASE_RUN_ID = args.ownedLeaseRunId;
+  }
+  const report = await cleanupManagedStoreSession(stores[0], args.managedSession, {env, killAfterSec: args.killAfterSec, dryRun: args.dryRun});
+  console.log(JSON.stringify(report, null, 2));
+  if (!report.ok) process.exitCode = 1;
+  return;
+}
 const reclaimedLeases = reclaimStaleBrowserLeases({root: ROOT});
 const activeLeases = readBrowserLeases({root: ROOT}).filter(item => item.valid);
 const isOwnedLease = item => Boolean(
@@ -267,3 +369,8 @@ else {
   }
 }
 if (!report.ok) process.exitCode = 1;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => { console.error(String(error?.message || error)); process.exitCode = 1; });
+}
