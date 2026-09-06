@@ -2,7 +2,7 @@
 
 > 适用工作区：`E:\Codex WorkSpace\Shein销售统计`；生产目录：`/opt/shein-bi/app`；时间口径：`Asia/Shanghai`。
 > 已定接口：`scripts/pending_discuss_batch.mjs` 三命令 `scan` / `preflight` / `execute`；测试文件 `scripts/test_pending_discuss_batch.mjs`。
-> 本批不改 automation prompt；不发群、不调度；真实执行仅由 shein-bi-tencent 主代理进行。
+> 业务扫描与结果交付分开核验；`daily --send` 只投递当轮报告，不授权接受或拒绝待议价。
 
 底层 OpenAPI 契约（仓库级术语）：`query-discuss-list`（3001891）以 `discussStatus=1` 查待确认；`process-discuss`（3001892）以 `discussAuditType=1` 接受建议价、`2` 拒绝/放弃。
 
@@ -30,14 +30,21 @@ node scripts/pending_discuss_batch.mjs scan \
 ### daily（每日 heartbeat 快路径）
 
 ```bash
+cd /opt/shein-bi/app
 node scripts/pending_discuss_daily.mjs daily \
   --out-dir /srv/shein-bi/runtime/pending-discuss/<YYYY-MM-DD>/<RUN_ID>-daily \
   --send
 ```
 
 - 只调用一次既有 `runPendingDiscussScan`，不做二次查询；持久化 `scan.json` 后先重算 `scanHash`，再生成 `report.txt`。
+- 交付与环境识别：
+  - 云端生产环境：当且仅当 Linux 系统且代码根目录（realpath）为 `/opt/shein-bi/app` 时识别为可信云端。产物可写入独立运行时路径（如 `/srv/shein-bi/runtime/pending-discuss/...`），直接通过 `deliverCloudTeamReport` 完成单次持久交付，使用原始 `scan.json` 和 `report.txt` 字节与相同 `automationId=pending-discuss-daily` 构造 bundle，不经过 SSH 自调用，不重排/改写原始报告字节。
+  - 本地环境：严格受限于仓库 `outputs/` 白名单与符号链接拒绝保护，通过 SSH 隧道送交云端持久交付。启动前增加预检，若 `outDir` 位于 `outputs/` 之外或路径链包含符号链接，在启动 OpenAPI 扫描前即 fail-closed 拦截，不启动业务扫描。
+  - 双发防护：`--send` 与 `--stage-delivery` / `STAGE_OPS_DELIVERY=1` 同时启用时，避免重复调用交付，标记 `shared-delivered` 保留业务与交付独立状态。
 - `--send` 只接受 `config/lark_report.json` 的团队 `recipientChatId` 和生产 bot，不回退个人；幂等键包含业务日期且不超过 50 字符。
-- 只有 `lark-cli` 退出 0、JSON `ok=true` 且存在非空 `message_id`，`delivery.json` 才为 `status=ok`；产物和终端紧凑输出均不保留群或消息 ID。
+- 正文和附件都必须取得有效消息回执，`delivery.json` 才为 `status=ok`；部分成功、未知结果或缺少消息 ID 均不能记成功。原始持久交付状态保留在受管交付目录，公开产物和终端输出不保留群或消息 ID。
+- 本机手工交付与云端日报保持相同的 `automationId=pending-discuss-daily` 和原附件字节指纹；不得通过改身份或移动旧产物绕过去重。修复上线不构成历史补发授权。
+- 扫描成功、交付失败时分别报告两者状态，不重跑扫描，不修改该轮原件或 manifest，不自行补发；非空输出目录必须拒绝复用，拒绝时不得写入错误产物覆盖旧记录。
 - scan 失败、覆盖不足、分页/身份/hash 异常时不生成 0 条报告，也不发送。正常 0 条无需再启动额外字段探索或批量归并流程。
 
 ### preflight（仅当前任务用户明确授权后）

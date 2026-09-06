@@ -6,12 +6,10 @@
  *
  * The normal path runs the existing scan exactly once, persists scan.json and
  * verifies its hash, then writes report.txt, delivery.json and manifest.json.
- * With --send the report is sent only to the recipientChatId from
- * config/lark_report.json (no user fallback) through
- * `lark-cli im +messages-send` with a business-date idempotency key, and the
- * delivery is ok only when the process exits 0, the response parses, ok is
- * true and message_id is non-empty. A failed scan never sends and is never
- * reported as zero.
+ * With --send the fixed Linux cloud checkout uses the shared durable cloud
+ * delivery directly; other checkouts validate files under outputs and send
+ * the same byte-bound bundle over SSH. Both summary and attachment receipts
+ * must be accepted. A failed scan never sends and is never reported as zero.
  *
  * Test injection (never touches the network):
  *   PENDING_DISCUSS_DAILY_LARK_BIN   fake lark binary (command or JSON array)
@@ -20,6 +18,7 @@
  *   through to the existing scan runtime.
  */
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
@@ -38,7 +37,13 @@ import {
 } from '../lib/pending_discuss_daily.mjs';
 import {stageAndDeliverBusinessResult} from '../lib/ops_business_result_pipeline.mjs';
 import {runLocalCloudTeamReport} from '../lib/cloud_team_report_local.mjs';
-import {CLOUD_TEAM_REPORT_CLOUD_HOST, sha256Bytes} from '../lib/cloud_team_report_common.mjs';
+import {deliverCloudTeamReport} from '../lib/cloud_team_report_cloud.mjs';
+import {
+  CLOUD_TEAM_REPORT_CLOUD_HOST,
+  CLOUD_TEAM_REPORT_SCHEMA_VERSION,
+  computeDeliveryFingerprint,
+  sha256Bytes,
+} from '../lib/cloud_team_report_common.mjs';
 import {runPendingDiscussScan} from './pending_discuss_batch.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,6 +52,66 @@ const DEFAULT_STORES_CONFIG = path.join(ROOT, 'config', 'stores.json');
 const DEFAULT_STORE_TRUTH = path.join(ROOT, 'config', 'store_account_truth.json');
 const DEFAULT_LARK_CONFIG = process.env.PENDING_DISCUSS_DAILY_LARK_CONFIG || path.join(ROOT, 'config', 'lark_report.json');
 const SEND_TIMEOUT_MS = 60_000;
+
+export function isCloudEnvironment(root = ROOT) {
+  if (process.platform !== 'linux') return false;
+  let resolvedRoot;
+  try {
+    resolvedRoot = fsSync.realpathSync.native ? fsSync.realpathSync.native(root) : fsSync.realpathSync(root);
+  } catch {
+    return false;
+  }
+  return resolvedRoot.replaceAll('\\', '/') === '/opt/shein-bi/app';
+}
+
+function relativeOutputsSegments(outputsRoot, target) {
+  const relative = path.relative(outputsRoot, target);
+  if (!relative || relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) {
+    const error = new Error('local report files must stay under repository outputs');
+    error.code = 'LOCAL_ARTIFACT_OUTSIDE_OUTPUTS';
+    throw error;
+  }
+  return relative.split(/[\\/]+/u).filter(Boolean);
+}
+
+async function lstatIfPresent(target) {
+  try { return await fs.lstat(target); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+export async function validateDailyDeliveryPreflight({send, outDir, root = ROOT, isCloud = false}) {
+  if (!send || isCloud) return;
+  if (process.env.PENDING_DISCUSS_DAILY_LARK_BIN) return;
+  const repositoryRoot = path.resolve(root);
+  const outputsRoot = path.join(repositoryRoot, 'outputs');
+  const target = path.resolve(repositoryRoot, String(outDir || ''));
+  const outputStat = await lstatIfPresent(outputsRoot);
+  if (outputStat && (!outputStat.isDirectory() || outputStat.isSymbolicLink())) {
+    const error = new Error('repository outputs must be a real directory');
+    error.code = 'LOCAL_OUTPUT_ROOT_INVALID';
+    throw error;
+  }
+  const segments = relativeOutputsSegments(outputsRoot, target);
+  let current = outputsRoot;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = path.join(current, segments[index]);
+    const stat = await lstatIfPresent(current);
+    if (!stat) break;
+    if (stat.isSymbolicLink()) {
+      const error = new Error('local report directory must not be a symlink');
+      error.code = 'LOCAL_ARTIFACT_SYMLINK';
+      throw error;
+    }
+    if (!stat.isDirectory()) {
+      const error = new Error('local report directory has a non-directory parent');
+      error.code = 'LOCAL_ARTIFACT_PARENT_INVALID';
+      throw error;
+    }
+  }
+}
 
 function parseArgs(argv) {
   const args = {
@@ -135,6 +200,8 @@ async function prepareOutDir(outDir) {
     await fs.mkdir(target, {mode: 0o700});
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
+    const stat = await fs.lstat(target);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('--out-dir must be a real directory');
     const entries = await fs.readdir(target);
     if (entries.length) throw new Error(`--out-dir must be new or empty: ${target}`);
   }
@@ -242,7 +309,9 @@ function compactCoverage(coverage) {
   };
 }
 
-async function runDailyCommand(args, outDir) {
+async function runDailyCommand(args, outDir, dependencies = {}) {
+  const effectiveRoot = dependencies.root || ROOT;
+  const effectiveIsCloud = typeof dependencies.isCloud === 'boolean' ? dependencies.isCloud : isCloudEnvironment(effectiveRoot);
   const scan = await runPendingDiscussScan(args);
   const scanFile = await writeArtifact(outDir, 'scan.json', scan);
   const persisted = await readJson(scanFile);
@@ -301,6 +370,39 @@ async function runDailyCommand(args, outDir) {
           status: 'ok', businessDate: verifiedScan.businessDate, idempotencyKey, at,
           scanHash: verifiedScan.scanHash, reportSha256,
         });
+      } else if (effectiveIsCloud) {
+        // Real cloud production path: deliver directly without SSHing to localhost or re-formatting bytes
+        const scanBytes = await fs.readFile(scanFile);
+        const reportBytes = await fs.readFile(reportFile);
+        const actualScanFileSha = sha256Bytes(scanBytes);
+        const fingerprint = computeDeliveryFingerprint({
+          automationId: 'pending-discuss-daily',
+          businessDate: verifiedScan.businessDate,
+          attachmentSha256: actualScanFileSha,
+        });
+        const bundle = {
+          schemaVersion: CLOUD_TEAM_REPORT_SCHEMA_VERSION,
+          automationId: 'pending-discuss-daily',
+          businessDate: verifiedScan.businessDate,
+          expectedAttachmentSha256: actualScanFileSha,
+          fingerprint,
+          attachmentName: 'scan.json',
+          summaryBase64: reportBytes.toString('base64'),
+          attachmentBase64: scanBytes.toString('base64'),
+        };
+        const deliverFn = dependencies.deliverCloudFn || deliverCloudTeamReport;
+        const cloudResult = await deliverFn({
+          bundle,
+          ...(dependencies.landingRoot ? {landingRoot: dependencies.landingRoot} : {}),
+          ...(dependencies.cloudConfig ? {config: dependencies.cloudConfig} : {}),
+          ...(dependencies.spawnImpl ? {spawnImpl: dependencies.spawnImpl} : {}),
+        });
+        if (!cloudResult.ok) throw Object.assign(new Error(cloudResult.reason || 'cloud delivery failed'), {code: cloudResult.errorCode});
+        delivery = buildDeliveryDocument({
+          status: 'ok', businessDate: verifiedScan.businessDate,
+          idempotencyKey: buildIdempotencyKey(verifiedScan.businessDate), at,
+          scanHash: verifiedScan.scanHash, reportSha256,
+        });
       } else {
         // Default local path: use shared cloud team report channel (runLocalCloudTeamReport)
         const scanBytes = await fs.readFile(scanFile);
@@ -314,13 +416,15 @@ async function runDailyCommand(args, outDir) {
               return spawn(sshBin, a, o);
             }
           : undefined;
-        const cloudResult = await runLocalCloudTeamReport({
+        const runLocalFn = dependencies.runLocalFn || runLocalCloudTeamReport;
+        const cloudResult = await runLocalFn({
           automationId: 'pending-discuss-daily',
           businessDate: verifiedScan.businessDate,
           summaryFile: reportFile,
           attachment: scanFile,
           expectedAttachmentSha256: actualScanFileSha,
           cloudSsh: process.env.CLOUD_TEAM_REPORT_SSH_HOST || CLOUD_TEAM_REPORT_CLOUD_HOST,
+          root: effectiveRoot,
           ...(sshSpawnImpl ? { spawnImpl: sshSpawnImpl } : {}),
         });
         if (!cloudResult.ok) throw Object.assign(new Error(cloudResult.reason || 'cloud delivery failed'), {code: cloudResult.errorCode});
@@ -345,22 +449,31 @@ async function runDailyCommand(args, outDir) {
   // F1 hook: stage into shared automation delivery staging area if requested via env or flag
   let stagedResult = null;
   if (process.env.STAGE_OPS_DELIVERY === '1' || args.stageDelivery) {
-    try {
-      stagedResult = await stageAndDeliverBusinessResult({
-        automationId: 'pending-discuss-daily',
-        businessDate: verifiedScan.businessDate,
-        result: {
-          action: '待议价每日巡检扫描',
-          ok: true,
-          mode: 'daily',
-          rowCount: verifiedScan.rowCount,
-          coverage: verifiedScan.coverage,
-          summary: verifiedScan.summary,
-        },
-        attachmentName: 'scan.json',
-        attachmentContent: JSON.stringify(verifiedScan, null, 2),
-      });
-    } catch {}
+    if (args.send) {
+      // Avoid duplicate delivery when --send is already active
+      stagedResult = {
+        status: delivery.status === 'ok' ? 'shared-delivered' : 'delivery-skipped',
+        skippedDuplicate: true,
+      };
+    } else {
+      try {
+        const stageFn = dependencies.stageFn || stageAndDeliverBusinessResult;
+        stagedResult = await stageFn({
+          automationId: 'pending-discuss-daily',
+          businessDate: verifiedScan.businessDate,
+          result: {
+            action: '待议价每日巡检扫描',
+            ok: true,
+            mode: 'daily',
+            rowCount: verifiedScan.rowCount,
+            coverage: verifiedScan.coverage,
+            summary: verifiedScan.summary,
+          },
+          attachmentName: 'scan.json',
+          attachmentContent: JSON.stringify(verifiedScan, null, 2),
+        });
+      } catch {}
+    }
   }
 
   const manifest = await writeManifest(outDir, [scanFile, reportFile, deliveryFile], {
@@ -385,13 +498,19 @@ async function runDailyCommand(args, outDir) {
   };
 }
 
-export async function runCli(args) {
+export async function runCli(rawArgs, dependencies = {}) {
+  const args = Array.isArray(rawArgs) ? parseArgs(rawArgs) : {...parseArgs([]), ...rawArgs};
   if (args.command === 'help') return {result: {ok: true, help: help()}, exitCode: 0};
   if (!args.outDir) throw new Error('--out-dir is required');
-  const outDir = await prepareOutDir(args.outDir);
+  const rawOutDir = path.resolve(String(args.outDir));
+  let outDir = '';
   try {
     validateArgs(args);
-    return await runDailyCommand(args, outDir);
+    const effectiveRoot = dependencies.root || ROOT;
+    const effectiveIsCloud = typeof dependencies.isCloud === 'boolean' ? dependencies.isCloud : isCloudEnvironment(effectiveRoot);
+    await validateDailyDeliveryPreflight({send: args.send, outDir: rawOutDir, root: effectiveRoot, isCloud: effectiveIsCloud});
+    outDir = await prepareOutDir(rawOutDir);
+    return await runDailyCommand(args, outDir, dependencies);
   } catch (error) {
     const failure = {
       schemaVersion: 'pending-discuss-daily-error/v1',
@@ -400,7 +519,7 @@ export async function runCli(args) {
       at: new Date().toISOString(),
       error: redactError(error),
     };
-    const failureFile = await writeArtifact(outDir, 'error.json', failure).catch(() => '');
+    const failureFile = outDir ? await writeArtifact(outDir, 'error.json', failure).catch(() => '') : '';
     const manifest = failureFile
       ? await writeManifest(outDir, [failureFile], {ok: false}).catch(() => null)
       : null;
