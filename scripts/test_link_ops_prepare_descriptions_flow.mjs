@@ -42,6 +42,7 @@ import {
 } from '../lib/link_ops_product_descriptions.mjs';
 import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 import {linkOpsPayloadHash} from '../lib/link_ops_repository.mjs';
+import {canonicalRecoveredPublishPayloadHash} from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {__testHooks as portalHooks} from './serve_bi_portal.mjs';
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
@@ -58,6 +59,7 @@ const SOURCE_STORE = 'NM';
 const SOURCE_SPU = 'v20990101999999';
 const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const DESC_SUPPLIER_CODES = [
+  'DESC-PURE-CHECK-REUSE',
   'DESC-CONCURRENT',
   'DESC-MATCH',
   'DESC-POST-COMMIT',
@@ -91,6 +93,7 @@ const DESC_SUPPLIER_CODES = [
   'DESC-EXPECTED-REVISION',
 ];
 const SOURCE_LOCKED_CODES = new Set([
+  'DESC-PURE-CHECK-REUSE',
   'DESC-MATCH',
   'DESC-POST-COMMIT',
   'DESC-NO-SUCCESS',
@@ -1028,6 +1031,47 @@ try {
   check('post-bind dry-run projected preflight ok', postBind.json?.task?.preflight?.ok, true);
   check('post-bind dry-run projected preflight equals execution', JSON.stringify(postBind.json?.task?.preflight || null), JSON.stringify(postBind.json?.task?.execution?.preflight || null));
 
+  // Real local check -> missing supply-price preparation -> same-task reuse.
+  // The platform and Portal below are isolated fixtures, never production.
+  const pureCheckId = await createTask(cookie, 'DESC-PURE-CHECK-REUSE');
+  await attachPayload(pureCheckId, publishPayloadFor('DESC-PURE-CHECK-REUSE'));
+  await updateRawTaskById(pureCheckId, task => {
+    const preparation = {...task.publishAssetBinding.publishPreparation};
+    delete preparation.supplyPrice;
+    const binding = {...task.publishAssetBinding, publishPreparation: preparation};
+    binding.evidence = {...binding.evidence, payloadHash: canonicalRecoveredPublishPayloadHash(task.openapiPublishPayload)};
+    binding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {binding, publishPreparation: preparation});
+    return {...task, publishPreparation: preparation, targets: {...task.targets, publishPreparation: preparation}, publishAssetBinding: binding};
+  });
+  check('pure check initial description bind', (await bindDescriptions(cookie, pureCheckId)).status, 200);
+  await updateRawTaskById(pureCheckId, task => ({...task, publishAssetBinding: {
+    ...task.publishAssetBinding,
+    evidence: {...task.publishAssetBinding.evidence, payloadHash: canonicalRecoveredPublishPayloadHash(task.openapiPublishPayload)},
+  }}));
+  const pureCheck = await req('/api/link-ops-execute', {method: 'POST', cookie, body: {id: pureCheckId, mode: 'check', source: 'test'}});
+  check('pure check HTTP 200', pureCheck.status, 200);
+  const pureCheckRaw = await rawTaskById(pureCheckId);
+  check('pure check missing supplyPrice lock reproduced', JSON.stringify(pureCheckRaw.execution?.preflight?.blockers), text => text.includes('supplyPrice') && text.includes('structured preparation lock'));
+  check('pure check executor record exists', asArray(pureCheckRaw.execution?.openApiProductExecutors).length > 0, true);
+  for (const field of ['actualWriteSubmitted', 'issuedExecuteToExecutor', 'sheinWriteAttempted']) {
+    check(`pure check ${field} false`, pureCheckRaw.execution?.writeAudit?.[field], false);
+  }
+  check('pure check history is neutral', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(pureCheckRaw).neutral, true);
+  const pureReuse = await req('/api/link-ops-publish-assets', {method: 'POST', cookie, body: {
+    taskId: pureCheckId, store: 'NM', reuseApprovedBinding: true, sourceApproved: true, supplyPrice: 90, inventory: 100,
+  }});
+  check('pure check same-task reuse HTTP 200', pureReuse.status, 200);
+  const pureReusedRaw = await rawTaskById(pureCheckId);
+  check('pure check same-task identity preserved', pureReusedRaw.id, pureCheckId);
+  check('pure check reuse increments revision once', pureReusedRaw.repositoryRevision, pureCheckRaw.repositoryRevision + 1);
+  check('pure check reuse locks supply price', pureReusedRaw.publishPreparation?.supplyPrice, 90);
+  check('pure check reuse locks inventory', pureReusedRaw.publishPreparation?.inventory, 100);
+  const imageContent = task => asArray(task.publishAssetBinding?.images).map(({relativePath, ...image}) => image);
+  const titleContent = task => asArray(task.openapiPublishPayload?.multi_language_name_list).map(row => ({language: row.language, name: row.name || row.product_name}));
+  check('pure check reuse preserves approved images', JSON.stringify(imageContent(pureReusedRaw)), JSON.stringify(imageContent(pureCheckRaw)));
+  check('pure check reuse preserves approved titles', JSON.stringify(titleContent(pureReusedRaw)), JSON.stringify(titleContent(pureCheckRaw)));
+  check('pure check reuse invalidates preflight', pureReusedRaw.execution?.state, 'needs_repreflight');
+
   // Blocked case: tampering only the bound ar description bytes must block
   // the next fresh dry-run, and the persisted top-level preflight must again
   // converge exactly with the execution preflight blockers.
@@ -1492,6 +1536,68 @@ try {
   check('unit: committed executor false without blockers is not top-level success', unconfirmedNoBlockerOutcome.ok, false);
   check('unit: committed executor false without blockers is unconfirmed', unconfirmedNoBlockerOutcome.outcome, 'unconfirmed');
   check('unit: explicit pre-valid rejection task passes the predicate', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask()).ok, true);
+  // YJ rev10 PostgreSQL export (2026-09-06): five blocked dry-runs,
+  // including two pre-executor failures with empty child ids. Preserve the
+  // full/history/audit projection topology with synthetic ids and no material.
+  const yjRuns = ['fixture-first', 'fixture-recovered', '', '', 'fixture-attribute-check'].map(runId => ({
+    runId, mode: 'dry-run', state: 'blocked', publishResult: null,
+    ...(runId ? {readback: {ok: false, status: 'planned_not_run', matchedCount: 0}} : {}),
+  }));
+  const yjAudit = run => ({
+    submitted: false, actualWriteSubmitted: false, issuedExecuteToExecutor: false, sheinWriteAttempted: false,
+    executorEvidence: [{...structuredClone(run), runId: undefined, childRunId: run.runId}],
+    lifecycleTransition: {status: 'preflight_blocked', submitted: false},
+  });
+  const yjHistoryTask = {
+    status: 'waiting_review',
+    execution: {
+      mode: 'openapi_product_executor', state: 'blocked',
+      openApiProductExecutors: [structuredClone(yjRuns[4])],
+      hlOpenApiExecutor: structuredClone(yjRuns[4]), writeAudit: yjAudit(yjRuns[4]),
+    },
+    history: yjRuns.map(run => ({event: 'executor_blocked', openApiProductExecutors: [structuredClone(run)], writeAudit: yjAudit(run)})),
+    executionHistory: yjRuns.map(run => ({event: 'controlled_execution_run', submitted: false, actualWriteSubmitted: false, issuedExecuteToExecutor: false, sheinWriteAttempted: false, executorRuns: [structuredClone(run)]})),
+    lifecycle: {status: 'preflight_blocked', submitted: false},
+  };
+  check('unit: YJ PostgreSQL five-run history is neutral', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(yjHistoryTask).neutral, true);
+  const yjUnknownHistory = structuredClone(yjHistoryTask);
+  yjUnknownHistory.executionHistory[2].executorRuns[0].mode = 'execute';
+  check('unit: YJ empty-id historical execute remains denied', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(yjUnknownHistory).ok, false);
+  const yjUnknownResult = structuredClone(yjHistoryTask);
+  yjUnknownResult.history[0].writeAudit.executorEvidence[0].publishResult = {code: 0};
+  check('unit: YJ historical unknown result remains denied', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(yjUnknownResult).ok, false);
+  for (const mode of ['dry-run', 'check']) {
+    const precheckRun = {mode, state: 'blocked', publishResult: null};
+    const precheckTask = {
+      execution: {openApiProductExecutors: [precheckRun], writeAudit: {requestedMode: mode, actualWriteSubmitted: false, issuedExecuteToExecutor: false, sheinWriteAttempted: false}},
+      history: [{execution: {openApiProductExecutors: [{...precheckRun, runId: 'earlier-local-check'}]}}],
+    };
+    const evidence = portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(precheckTask);
+    check(`unit: ${mode} records with history are neutral`, evidence.ok && evidence.neutral === true && evidence.proof.length === 0, true);
+    for (const [label, change] of [
+      ['execute mode', {mode: 'execute'}],
+      ['unknown mode', {mode: 'unknown'}],
+      ['missing mode', {mode: ''}],
+      ['unknown state', {state: 'unknown'}],
+      ['unknown result', {publishResult: {code: 0}}],
+      ['submitted', {actualWriteSubmitted: true}],
+      ['issued execute', {issuedExecuteToExecutor: true}],
+      ['attempted write', {sheinWriteAttempted: true}],
+      ['publish call', {openapiCalls: [{name: 'publishOrEdit'}]}],
+      ['publish ids', {readbackFingerprint: {publishSpuNames: ['fixture-spu']}}],
+      ['pending readback', {readback: {status: 'pending'}}],
+    ]) {
+      const unsafe = structuredClone(precheckTask);
+      Object.assign(unsafe.execution.openApiProductExecutors[0], change);
+      check(`unit: ${mode} cannot hide ${label}`, portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(unsafe).ok, false);
+    }
+    const aggregateWrite = structuredClone(precheckTask);
+    aggregateWrite.execution.writeAudit.issuedExecuteToExecutor = true;
+    check(`unit: ${mode} cannot explain aggregate execute flag`, portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(aggregateWrite).ok, false);
+    const locked = structuredClone(precheckTask);
+    locked.lifecycle = {locked: true};
+    check(`unit: ${mode} cannot bypass lifecycle lock`, portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(locked).ok, false);
+  }
   check('unit: explicitSuccess=false audit projection also passes', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun()], {})).ok, true);
   check('unit: code0/info{} is never explicit rejection even with pre-valid markers', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask([rejectedRun({publishResult: {httpStatus: 200, code: '0', msg: 'OK', info: {}}})])).ok, false);
   const submittedRun = rejectedRun({runId: 'lho-submitted-unit', state: 'submitted', publishResult: {httpStatus: 200, code: '0', msg: 'OK', traceId: 't', info: {success: true, taskNo: 'PUB-1', spu_name: 'v1', version: '', skc_list: []}}});
