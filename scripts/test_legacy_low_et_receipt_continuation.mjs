@@ -153,6 +153,79 @@ try {
     processOne: async (file, stores, args) => { assert.equal(args.continuation, false); manualStarted++;
       return {ok: true, storeKey: 'DL', rescuePath: file.path, status: 'restored'}; }});
   assert.equal(manualStarted, 3);
+
+  const scheduledDir = 'tmp/manual-scheduled-resume';
+  const scheduledEntries = [];
+  for (const [storeKey, skc] of [['XL', 'sv-xl'], ['TS', 'sv-ts'], ['TZZ', 'sv-tzz']]) {
+    const relative = `${scheduledDir}/manual-limited-restore-${storeKey}-fixture.json`;
+    await write(relative, {storeKey, sourceGuard, purpose: 'manual_special_limited_discount_registry_restore',
+      rows: [{storeKey, skc, limitedDiscountPrice: 100}]});
+    scheduledEntries.push({storeKey, skc, path: relative});
+  }
+  const scheduledPlanPath = await write(`${scheduledDir}/manual-limited-discount-restore-plan.json`, {
+    reportDate: date, sourceGuard, restoreCount: 3, rescueFiles: scheduledEntries,
+  });
+  const scheduledPlan = await loadExactManualRepairPlan({root, date, planPath: scheduledPlanPath, guardPath});
+  const historicalJournal = await write(`${scheduledDir}/historical-xl.journal.ndjson`, {sentinel: 'must remain unchanged'});
+  const historicalJournalBytes = await fs.readFile(historicalJournal);
+  const historicalTransaction = {
+    schemaVersion: 1,
+    transactionHash: 'ca12b07ecda70e7e78ab72bfcc5d9225715a043727efdd6850bb000a8b2306f2',
+    ok: false,
+    safe: false,
+    writeAttempted: true,
+    submitAttempted: false,
+    callbackEntered: false,
+    remoteMutationStarted: false,
+    journalPath: historicalJournal,
+    rows: [{storeKey: 'XL', skc: 'sv-xl', temporaryRaise: {writeAttempted: true, attempts: [{writeAttempt: 1}]}}],
+  };
+  const scheduledResultPath = path.join(root, scheduledDir, 'result.json');
+  await fs.writeFile(scheduledResultPath, JSON.stringify({
+    workFingerprint: scheduledPlan.workFingerprint,
+    dryRunOnly: false,
+    totals: {processed: 2, remainingItems: 1, terminalBlocked: 1},
+    results: [
+      {storeKey: 'XL', skc: 'sv-xl', rescuePath: scheduledEntries[0].path, ok: false,
+        status: 'inventory_transaction_restore_failed', terminalBlocked: false, inventoryTransaction: historicalTransaction},
+      {storeKey: 'TS', skc: 'sv-ts', rescuePath: scheduledEntries[1].path, ok: false,
+        status: 'dry_run_blocked', terminalBlocked: true},
+    ],
+  }));
+  const scheduledCalls = [];
+  const scheduledArgs = {...manualArgs, outDir: path.join(root, scheduledDir), result: scheduledResultPath,
+    expectedWorkFingerprint: scheduledPlan.workFingerprint, continuation: false, maxItems: 0};
+  const scheduledResume = await runManualRestoreBatch(scheduledArgs, {
+    launchStore: async storeKey => ({ok: true, storeKey}),
+    closeStore: async () => ({ok: true}),
+    processOne: async file => {
+      scheduledCalls.push(file.storeKey);
+      assert.equal(file.storeKey, 'TZZ', 'scheduled resume executes only the independent pending item');
+      return {ok: true, storeKey: 'TZZ', skc: 'sv-tzz', rescuePath: file.path, status: 'restored'};
+    },
+  });
+  assert.deepEqual(scheduledCalls, ['TZZ']);
+  assert.equal(scheduledResume.output.totals.remainingItems, 0);
+  assert.equal(scheduledResume.output.results.find(row => row.storeKey === 'XL').status, 'inventory_transaction_restore_failed');
+  assert.deepEqual(scheduledResume.output.results.find(row => row.storeKey === 'XL').inventoryTransaction, historicalTransaction,
+    'scheduled normalization retains the historical XL transaction evidence');
+  assert.deepEqual(await fs.readFile(historicalJournal), historicalJournalBytes, 'scheduled resume does not rewrite historical journal evidence');
+
+  const mismatchedResultPath = path.join(root, scheduledDir, 'mismatched-result.json');
+  await fs.writeFile(mismatchedResultPath, JSON.stringify({
+    workFingerprint: 'f'.repeat(64), dryRunOnly: false, results: [{...scheduledResume.output.results[0]}],
+  }));
+  const mismatchCalls = [];
+  const mismatchResume = await runManualRestoreBatch({...scheduledArgs, result: mismatchedResultPath}, {
+    launchStore: async storeKey => ({ok: true, storeKey}), closeStore: async () => ({ok: true}),
+    processOne: async file => {
+      mismatchCalls.push(file.storeKey);
+      return {ok: true, storeKey: file.storeKey, rescuePath: file.path, status: 'restored'};
+    },
+  });
+  assert.deepEqual(mismatchCalls, ['XL', 'TS', 'TZZ'], 'mismatched workFingerprint reuses no historical rows');
+  assert.equal(mismatchResume.output.totals.resumedItems, 0);
+  assert.equal(mismatchResume.output.totals.remainingItems, 0);
   const savedQueue = await persistImmediateAdmissionQueueSnapshot(proof);
   assert.deepEqual(await fs.readFile(savedQueue), originalBytes);
   const progressed = structuredClone(queue);

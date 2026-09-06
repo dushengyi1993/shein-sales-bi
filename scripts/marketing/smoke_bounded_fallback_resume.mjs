@@ -8,6 +8,17 @@ import {
 } from '../../lib/marketing_bounded_batch_resume.mjs';
 
 assert.equal(isResumableFallbackResult({ok: true, status: 'executed'}), true);
+const admissionBlock = {
+  ok: false, status: 'inventory_admission_scope_blocked', terminalBlocked: true,
+  inventoryTransaction: {currentTransactionUnsubmitted: true, writeAttempted: false,
+    submitAttempted: false, remoteMutationStarted: false},
+};
+assert.equal(isResumableFallbackResult(admissionBlock), true, 'a pre-submit admission block must not replay on fallback restart');
+assert.equal(isResumableFallbackResult({status: admissionBlock.status}), false, 'status text alone is insufficient');
+for (const field of ['writeAttempted', 'submitAttempted', 'remoteMutationStarted']) {
+  assert.equal(isResumableFallbackResult({...admissionBlock,
+    inventoryTransaction: {...admissionBlock.inventoryTransaction, [field]: true}}), false, `${field} must not be reclassified as unsubmitted`);
+}
 assert.equal(isResumableFallbackResult({
   ok: false,
   status: 'executed_subset_with_platform_or_inventory_blockers',

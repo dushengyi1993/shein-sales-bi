@@ -262,6 +262,25 @@ assert.equal(classifyActivityInventoryFailureStatus({
   safe: false,
   writeAttempted: true,
 }), 'inventory_transaction_restore_failed');
+assert.equal(classifyActivityInventoryFailureStatus({
+  ok: false,
+  safe: true,
+  writeAttempted: false,
+  currentTransactionUnsubmitted: true,
+  inventoryAdmissionRejections: [{
+    schemaVersion: 'inventory-write-admission-rejection/v1', decision: 'rejected',
+    stage: 'before_durable_intent', reasonCode: 'pending_scope_conflict',
+    currentIntentDurable: false, inventoryPostAttempted: false,
+    conflict: {intentId: 'old', scope: {storeKey: 'XL', skc: 'sv-xl', skuCode: 'sku-xl'}},
+  }],
+}), 'inventory_admission_scope_blocked');
+assert.equal(classifyActivityInventoryFailureStatus({
+  ok: false,
+  safe: false,
+  writeAttempted: true,
+  currentTransactionUnsubmitted: false,
+  inventoryAdmissionRejections: [{reasonCode: 'pending_scope_conflict'}],
+}), 'inventory_transaction_restore_failed');
 
 const sources = {
   deadlineFill: await read('scripts/marketing/dsy_marketing_deadline_fill.mjs'),

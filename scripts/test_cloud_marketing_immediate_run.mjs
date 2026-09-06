@@ -95,7 +95,7 @@ function wslExec(args, {environment = {}, extraKeys = [], timeout = 120000} = {}
 
 function bashExec(command, {environment = {}, timeout = 120000} = {}) {
   if (process.platform === 'win32') {
-    return wslExec(['bash', '-lc', command], {environment, timeout});
+    return wslExec(['bash', '-lc', command], {environment, extraKeys: ['PATH', 'NODE_OPTIONS'], timeout});
   }
   const nativeEnvironment = {...process.env};
   for (const [key, value] of Object.entries(environment)) {
@@ -1401,9 +1401,34 @@ process.kill(process.pid, 'SIGKILL');
     wslCopy(path.join(harnessStageRoot, 'lib', 'atomic_file_publish.mjs'), `${harnessRoot}/lib/atomic_file_publish.mjs`);
     wslCopy(path.join(harnessStageRoot, 'scripts', 'run_host_heavy_job.sh'), `${harnessRoot}/scripts/run_host_heavy_job.sh`);
   }
-  const harnessNow = Math.floor(Date.now() / 1000);
+  // Keep the real shell and every Node child on one business-date clock. A
+  // host run at 23:15 Shanghai would otherwise make +2700 cross midnight and
+  // correctly trip the production same-business-date authorization guard.
+  const nearMidnightEpoch = Math.floor(Date.parse(`${date}T15:15:00.000Z`) / 1000);
+  assert.notEqual(businessDateAtEpoch(nearMidnightEpoch + 2700, 'Asia/Shanghai'), date,
+    'the regression fixture must cover the old cross-midnight failure shape');
+  const harnessNow = issueEpoch;
   const harnessGraceful = harnessNow + 1800;
   const harnessOuter = harnessNow + 2700;
+  assert.equal(businessDateAtEpoch(harnessNow, 'Asia/Shanghai'), date);
+  assert.equal(businessDateAtEpoch(harnessGraceful, 'Asia/Shanghai'), date);
+  assert.equal(businessDateAtEpoch(harnessOuter, 'Asia/Shanghai'), date);
+  const harnessClockModule = path.join(harnessStageRoot, 'lib', 'clock-fixture.mjs');
+  const harnessDateShim = path.join(harnessStageRoot, 'bin', 'date');
+  await fsp.mkdir(path.dirname(harnessDateShim), {recursive: true});
+  await fsp.writeFile(harnessClockModule, `Date.now = () => ${harnessNow * 1000};\n`, 'utf8');
+  await fsp.writeFile(harnessDateShim, [
+    '#!/usr/bin/env bash',
+    `exec /bin/date -d '@${harnessNow}' "$@"`,
+    '',
+  ].join('\n'), 'utf8');
+  if (useNativeWslHarness) {
+    wslCopy(harnessClockModule, `${harnessRoot}/lib/clock-fixture.mjs`);
+    wslCopy(harnessDateShim, `${harnessRoot}/bin/date`);
+    wslChmod('755', `${harnessRoot}/bin/date`);
+  } else {
+    await fsp.chmod(harnessDateShim, 0o755);
+  }
   let harnessIssued;
   if (useNativeWslHarness) {
     wslChmod('700', `${harnessRoot}/runtime/marketing-repair-immediate`);
@@ -1452,6 +1477,12 @@ process.kill(process.pid, 'SIGKILL');
       : shellPath(harnessStateDir),
     SHEIN_BI_MARKETING_REPAIR_MIN_START_BUDGET_SEC: '900',
     SHEIN_BI_MARKETING_RUN_ID: 'immediate-wrapper-75-harness',
+    PATH: useNativeWslHarness
+      ? `${harnessRoot}/bin:/usr/bin:/bin`
+      : `${path.dirname(harnessDateShim)}${path.delimiter}${process.env.PATH || ''}`,
+    NODE_OPTIONS: `--import=${useNativeWslHarness
+      ? `${harnessRoot}/lib/clock-fixture.mjs`
+      : harnessClockModule}`,
   };
   const harnessProbe = bashExec(
     'if [[ -e "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE" ]]; then printf yes; else printf "no path=%s dir=%s\\n" "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE" "$(dirname "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE")"; ls -ld "$(dirname "$SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE")" 2>&1 || true; fi',
@@ -1525,7 +1556,7 @@ process.kill(process.pid, 'SIGKILL');
       authorizationDirectories: [`${harnessRoot}/runtime/worker`],
     });
   }
-  const workerNow = Math.floor(Date.now() / 1000);
+  const workerNow = harnessNow;
   const workerGraceful = workerNow + 1800;
   const workerOuter = workerNow + 2700;
   let workerIssued;
@@ -1672,7 +1703,7 @@ process.kill(process.pid, 'SIGKILL');
   };
   const leaseFailureRun = useNativeWslHarness
     ? spawnSync('wsl.exe', [
-      '--exec', 'env', ...wslEnvironmentArgs(leaseFailureEnv, ['SHEIN_TEST_LEASE_MARKER']),
+      '--exec', 'env', ...wslEnvironmentArgs(leaseFailureEnv, ['PATH', 'NODE_OPTIONS', 'SHEIN_TEST_LEASE_MARKER']),
       'bash', '-lc', `bash ${bashQuote(`${harnessRoot}/scripts/worker-lease-failure-harness.sh`)}`,
     ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})
     : spawnSync('bash', ['-c', `bash ${bashQuote(shellPath(leaseFailureWorkerPath))}`], {
@@ -1778,7 +1809,7 @@ process.kill(process.pid, 'SIGKILL');
     return useNativeWslHarness
       ? spawnSync('wsl.exe', [
         '--exec', 'env', ...wslEnvironmentArgs(environment, [
-          'PATH', 'SHEIN_TEST_LEASE_MARKER', 'SHEIN_TEST_SYSTEMCTL_MODE',
+          'PATH', 'NODE_OPTIONS', 'SHEIN_TEST_LEASE_MARKER', 'SHEIN_TEST_SYSTEMCTL_MODE',
         ]),
         'bash', '-lc', `bash ${bashQuote(`${harnessRoot}/scripts/worker-busy-probe-harness.sh`)}`,
       ], {cwd: root, env: process.env, encoding: 'utf8', timeout: 120000})

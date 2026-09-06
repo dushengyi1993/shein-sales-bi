@@ -75,6 +75,20 @@ const driftResults = [
     inventoryTransaction: {writeAttempted: true, safe: false},
   },
 ];
+const admissionBlock = {
+  ok: false, status: 'inventory_admission_scope_blocked', terminalBlocked: true,
+  inventoryTransaction: {currentTransactionUnsubmitted: true, writeAttempted: false,
+    submitAttempted: false, remoteMutationStarted: false},
+};
+assert.equal(isSettledDriftRepairResult(admissionBlock), true, 'pre-submit admission block is retained on drift restart');
+assert.deepEqual(summarizeDriftRepairOutcomes([admissionBlock]), {
+  completedGroups: 0, businessBlockedGroups: 1, failedGroups: 0, unsafeGroups: 0,
+});
+assert.equal(isTerminalDriftBusinessBlock({status: admissionBlock.status}), false);
+for (const field of ['writeAttempted', 'submitAttempted', 'remoteMutationStarted']) {
+  assert.equal(isTerminalDriftBusinessBlock({...admissionBlock,
+    inventoryTransaction: {...admissionBlock.inventoryTransaction, [field]: true}}), false, `${field} must not be reclassified as unsubmitted`);
+}
 assert.equal(isTerminalDriftBusinessBlock(driftResults[1]), true);
 assert.equal(isSettledDriftRepairResult(driftResults[1]), true, 'safe business blockers must not replay within the same immutable daily manifest');
 assert.equal(isTerminalDriftBusinessBlock(driftResults[2]), false, 'transport/preflight failures remain retryable system failures');

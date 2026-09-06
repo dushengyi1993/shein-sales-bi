@@ -512,6 +512,7 @@ async function processOne(file, storeMap, args, browserSession = {}) {
     const transaction = activityInventoryTransaction.commandResult;
     if (!activityInventoryTransaction.ok) {
       record.status = classifyActivityInventoryFailureStatus(activityInventoryTransaction);
+      record.classification = record.status;
       const deadlineDeferred = (activityInventoryTransaction.blockers || [])
         .some(blocker => isMarketingDeadlineError({
           code: blocker?.code,
@@ -520,7 +521,8 @@ async function processOne(file, storeMap, args, browserSession = {}) {
       record.deferred = deadlineDeferred;
       record.recoverableDeferred = deadlineDeferred;
       record.terminalBlocked = !deadlineDeferred && (activityInventoryTransaction.safe === true
-        || activityInventoryTransaction.writeAttempted !== true);
+        || activityInventoryTransaction.writeAttempted !== true
+        || record.status === 'inventory_admission_scope_blocked');
       record.error = activityInventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
         || 'activity inventory transaction failed';
       return record;
@@ -598,7 +600,37 @@ export function hasManualSubmittedPendingEvidence(result) {
 }
 
 export function normalizeManualResumeResult(result) {
-  if (!result || result.ok === true || result.terminalBlocked === true
+  if (!result) return result;
+  const inventoryRestoreFailed = result?.status === 'inventory_transaction_restore_failed'
+    || result?.classification === 'inventory_transaction_restore_failed'
+    || result?.blocked?.type === 'inventory_transaction_restore_failed';
+  if (inventoryRestoreFailed) {
+    return {
+      ...result,
+      ok: false,
+      terminal: true,
+      terminalBlocked: true,
+      deferred: false,
+      recoverableDeferred: false,
+      writeAttempted: true,
+      status: 'inventory_transaction_restore_failed',
+      classification: 'inventory_transaction_restore_failed',
+      warnings: [...new Set([
+        ...(Array.isArray(result?.warnings) ? result.warnings : []),
+        'historical inventory transaction effect remains unknown; this exact item is not replayed',
+      ])],
+      blocked: {
+        ...(result?.blocked || {}),
+        type: 'inventory_transaction_restore_failed',
+        reason: result?.blocked?.reason || result?.error
+          || 'inventory transaction effect remains unknown; this exact item is not replayed',
+        blockedSkcs: Array.isArray(result?.blocked?.blockedSkcs) && result.blocked.blockedSkcs.length
+          ? result.blocked.blockedSkcs
+          : [result?.skc].filter(Boolean),
+      },
+    };
+  }
+  if (result.ok === true || result.terminalBlocked === true
     || !hasManualSubmittedPendingEvidence(result)) return result;
   return {
     ...result,

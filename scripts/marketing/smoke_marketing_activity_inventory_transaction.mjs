@@ -97,9 +97,44 @@ assert.equal(eventuallyConsistentRestore.result.safe, true);
 assert.equal(eventuallyConsistentRestore.writeCalls, 2);
 assert.equal(eventuallyConsistentRestore.state.totalUsableInventory, 7);
 
+const pendingConflict = await scenario({preDurablePendingConflict: true});
+assert.equal(pendingConflict.result.ok, false);
+assert.equal(pendingConflict.result.safe, true);
+assert.equal(pendingConflict.result.writeAttempted, false);
+assert.equal(pendingConflict.result.currentTransactionUnsubmitted, true);
+assert.equal(pendingConflict.result.submitAttempted, false);
+assert.equal(pendingConflict.result.callbackEntered, false);
+assert.equal(pendingConflict.result.remoteMutationStarted, false);
+assert.equal(pendingConflict.result.inventoryAdmissionRejections[0].conflict.intentId, 'old-pending-intent');
+assert.equal(pendingConflict.result.rows[0].temporaryRaise.currentWriteUnsubmitted, true);
+assert.equal(pendingConflict.writeCalls, 1, 'admission rejection enters the adapter once but sends no inventory POST');
+
+const fakePendingConflict = await scenario({fakePendingConflictMessage: true});
+assert.equal(fakePendingConflict.result.currentTransactionUnsubmitted, false);
+assert.equal(fakePendingConflict.result.safe, false);
+assert.equal(fakePendingConflict.result.writeAttempted, true);
+
+const durableRejection = await scenario({durableRejection: true});
+assert.equal(durableRejection.result.currentTransactionUnsubmitted, false);
+assert.equal(durableRejection.result.safe, false);
+assert.equal(durableRejection.result.rows[0].temporaryRaise.durableIntentCreated, true);
+assert.equal(durableRejection.result.rows[0].temporaryRaise.inventoryPostAttempted, true);
+
+const transportUnknown = await scenario({transportUnknown: true});
+assert.equal(transportUnknown.result.currentTransactionUnsubmitted, false);
+assert.equal(transportUnknown.result.safe, false);
+assert.equal(transportUnknown.result.rows[0].temporaryRaise.durableIntentCreated, true);
+assert.equal(transportUnknown.result.rows[0].temporaryRaise.inventoryPostAttempted, true);
+
+const priorSkuWritten = await multiTargetPendingConflictAfterWrite();
+assert.equal(priorSkuWritten.result.currentTransactionUnsubmitted, false);
+assert.equal(priorSkuWritten.result.safe, false);
+assert.equal(priorSkuWritten.result.writeAttempted, true);
+assert.equal(priorSkuWritten.inventoryPosts, 2, 'the first SKU raise and restore are durable writes');
+assert.equal(priorSkuWritten.submitCalls, 0, 'activity submit is never entered after the second SKU admission conflict');
+
 console.log(JSON.stringify({
   ok: true,
-  checks: 37,
   scenarios: [
     'dry_run_zero_write',
     'submit_success_restore',
@@ -109,6 +144,11 @@ console.log(JSON.stringify({
     'activity_invalid_after_restore',
     'zero_usable_inventory_restore',
     'eventually_consistent_stock_readback',
+    'typed_pre_durable_pending_conflict',
+    'untyped_pending_conflict_message_fails_closed',
+    'durable_rejection_fails_closed',
+    'transport_unknown_fails_closed',
+    'prior_sku_written_then_pending_conflict_fails_closed',
   ],
 }, null, 2));
 
@@ -120,6 +160,10 @@ async function scenario({
   invalidAfterRestore = false,
   initialState = stock(9, 7, 1, 1),
   staleReadbacksAfterWrite = 0,
+  preDurablePendingConflict = false,
+  fakePendingConflictMessage = false,
+  durableRejection = false,
+  transportUnknown = false,
 } = {}) {
   const state = {...initialState};
   let enrollmentReads = 0;
@@ -139,6 +183,26 @@ async function scenario({
     },
     writeStock: async ({overwriteQuantity, desiredUsableInventory, phase}) => {
       writeCalls += 1;
+      if (phase === 'temporary_raise' && preDurablePendingConflict) {
+        const error = new Error('pending conflict');
+        error.code = 'INVENTORY_WRITE_PENDING_CONFLICT';
+        error.inventoryIntentDurable = false;
+        error.inventoryTransportAttempted = false;
+        error.inventoryAdmissionRejection = admissionRejection(target);
+        throw error;
+      }
+      if (phase === 'temporary_raise' && fakePendingConflictMessage) {
+        throw new Error('INVENTORY_WRITE_PENDING_CONFLICT: fake text only');
+      }
+      if (phase === 'temporary_raise' && durableRejection) {
+        return {ok: false, state: 'rejected', message: 'platform rejected durable request'};
+      }
+      if (phase === 'temporary_raise' && transportUnknown) {
+        const error = new Error('transport result unknown');
+        error.inventoryIntentDurable = true;
+        error.inventoryTransportAttempted = true;
+        throw error;
+      }
       if (phase === 'restore' && restoreWriteFails) return {ok: false, error: 'forced restore failure'};
       staleSnapshot = {...state};
       const unavailable = state.totalLockedQuantity + (state.temporaryInventoryQuantity || 0);
@@ -169,8 +233,63 @@ async function scenario({
     sleep: async () => {},
     readbackDelayMs: 0,
   });
-  assert.equal(enrollmentReads, submitFails ? 1 : 2);
+  assert.equal(enrollmentReads, preDurablePendingConflict || fakePendingConflictMessage
+    || durableRejection || transportUnknown ? 0 : submitFails ? 1 : 2);
   return {result, state, writeCalls};
+}
+
+async function multiTargetPendingConflictAfterWrite() {
+  const targets = [
+    {...target, skc: 'sv-a-written', skuCode: 'sku-a'},
+    {...target, skc: 'sv-b-conflict', skuCode: 'sku-b'},
+  ];
+  const states = new Map(targets.map(value => [value.skuCode, stock(9, 7, 1, 1)]));
+  let inventoryPosts = 0;
+  let submitCalls = 0;
+  const result = await runActivityInventoryTransaction({
+    targets,
+    transactionHash: hash,
+    acquireLock: async () => async () => {},
+    readStock: async value => ({...states.get(value.skuCode), skuCode: value.skuCode}),
+    writeStock: async ({target: value, overwriteQuantity, phase}) => {
+      if (value.skuCode === 'sku-b' && phase === 'temporary_raise') {
+        const error = new Error('pending conflict after prior SKU write');
+        error.code = 'INVENTORY_WRITE_PENDING_CONFLICT';
+        error.inventoryIntentDurable = false;
+        error.inventoryTransportAttempted = false;
+        error.inventoryAdmissionRejection = admissionRejection(value);
+        throw error;
+      }
+      inventoryPosts += 1;
+      const state = states.get(value.skuCode);
+      const unavailable = state.totalLockedQuantity + state.temporaryInventoryQuantity;
+      state.totalInventoryQuantity = overwriteQuantity;
+      state.totalUsableInventory = overwriteQuantity - unavailable;
+      return {ok: true, state: 'readback_matched'};
+    },
+    submit: async () => { submitCalls += 1; return {ok: true}; },
+    readEnrollment: async () => ({ok: true}),
+    validateEnrollment: value => ({ok: value?.ok === true}),
+    sleep: async () => {},
+    readbackDelayMs: 0,
+  });
+  return {result, inventoryPosts, submitCalls};
+}
+
+function admissionRejection(value) {
+  return {
+    schemaVersion: 'inventory-write-admission-rejection/v1',
+    decision: 'rejected',
+    stage: 'before_durable_intent',
+    reasonCode: 'pending_scope_conflict',
+    currentIntentDurable: false,
+    inventoryPostAttempted: false,
+    conflict: {
+      intentId: 'old-pending-intent',
+      logicalActionKey: 'f'.repeat(64),
+      scope: {storeKey: value.storeKey, skc: value.skc, skuCode: value.skuCode, warehouseCode: '', invType: 'VI'},
+    },
+  };
 }
 
 function stock(totalInventoryQuantity, totalUsableInventory, totalLockedQuantity, temporaryInventoryQuantity = 0) {

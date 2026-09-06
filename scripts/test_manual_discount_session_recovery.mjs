@@ -153,6 +153,49 @@ try {
   assert.equal(cleanupCalls, 1);
   assert.equal(launcherCalls, 1, 'all recoveries attach without a second launcher');
   assert.equal(isManualResumeResultSettled(normalizeManualResumeResult({status: 'recoverable_login_pending', transaction: {writeAttempted: true}})), true, 'pending submission remains settled: never resubmit');
+  const scopedAdmissionBlock = normalizeManualResumeResult({
+    ok: false,
+    status: 'inventory_admission_scope_blocked',
+    classification: 'inventory_admission_scope_blocked',
+    terminalBlocked: true,
+    inventoryTransaction: {writeAttempted: false, currentTransactionUnsubmitted: true},
+  });
+  assert.equal(isManualResumeResultSettled(scopedAdmissionBlock), true, 'typed scope admission blocker remains settled on restart');
+  assert.equal(scopedAdmissionBlock.classification, 'inventory_admission_scope_blocked');
+  const fakeConflict = normalizeManualResumeResult({
+    ok: false,
+    status: 'failed',
+    terminalBlocked: false,
+    error: 'INVENTORY_WRITE_PENDING_CONFLICT: fake text only',
+    inventoryTransaction: {writeAttempted: true, submitAttempted: false},
+  });
+  assert.equal(isManualResumeResultSettled(fakeConflict), false, 'a conflict string and submitAttempted=false are not settlement evidence');
+  const historicalRestoreFailure = {
+    ok: false,
+    storeKey: 'XL',
+    skc: 'sv260605191268615486197',
+    rescuePath: 'tmp/manual-xl.json',
+    status: 'inventory_transaction_restore_failed',
+    terminalBlocked: false,
+    error: 'legacy inventory transaction outcome remains unknown',
+    inventoryTransaction: {
+      transactionHash: 'ca12b07ecda70e7e78ab72bfcc5d9225715a043727efdd6850bb000a8b2306f2',
+      safe: false,
+      writeAttempted: true,
+      submitAttempted: false,
+      callbackEntered: false,
+      remoteMutationStarted: false,
+    },
+  };
+  const normalizedHistorical = normalizeManualResumeResult(historicalRestoreFailure);
+  assert.equal(normalizedHistorical.status, 'inventory_transaction_restore_failed');
+  assert.equal(normalizedHistorical.classification, 'inventory_transaction_restore_failed');
+  assert.equal(normalizedHistorical.terminalBlocked, true);
+  assert.equal(normalizedHistorical.inventoryTransaction, historicalRestoreFailure.inventoryTransaction,
+    'historical transaction evidence is retained without claiming currentTransactionUnsubmitted');
+  assert.equal(normalizedHistorical.inventoryTransaction.currentTransactionUnsubmitted, undefined);
+  assert.match(normalizedHistorical.warnings.join(' '), /effect remains unknown/);
+  assert.equal(isManualResumeResultSettled(normalizedHistorical), true, 'historical exact item is not replayed');
 
   // Exercise the actual PowerShell pipe, including a real Chinese directory.
   // A mocked spawn cannot detect Windows OEM output decoded as UTF-8.
