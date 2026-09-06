@@ -60,4 +60,94 @@ const oldQueueProbe = spawnSync('bash', [], {
 assert.equal(oldQueueProbe.status, 75);
 assert.match(oldQueueProbe.stderr, /refusing non-current repair queue/);
 
-console.log(JSON.stringify({ok: true, checks: 18}, null, 2));
+// Run the exact shell function with the real resolver on a POSIX sibling
+// checkout/data layout, including when this registered test starts on Windows.
+const pathProbe = spawnSync('bash', [], {
+  cwd: process.cwd(), encoding: 'utf8', env: process.env, timeout: 20000,
+  input: `export REPO_ROOT='${root}'\nnode --input-type=module <<'TEST_NODE'\n` + String.raw`
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {pathToFileURL} from 'node:url';
+const repo = process.env.REPO_ROOT;
+const source = await fs.readFile(path.join(repo, 'scripts/cloud_marketing_repair_worker.sh'), 'utf8');
+const fn = source.slice(source.indexOf('queue_source_guard_file_locked() {'), source.indexOf('\nguard_registry_hash_value() {')).replaceAll('\r\n', '\n');
+const policyFile = path.join(repo, 'lib/cloud_runtime_path_policy.mjs');
+const {runtimeArtifactLocation} = await import(pathToFileURL(policyFile));
+assert.equal(runtimeArtifactLocation({root:'/opt/shein-bi/app',file:'/data/shein-bi/outputs/reports/guard.json',env:{}}).path,
+  '/data/shein-bi/outputs/reports/guard.json');
+const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'marketing-guard-path-'));
+let checks = 0;
+try {
+  const root = path.join(temp, 'opt/shein-bi/app');
+  const outputs = path.join(temp, 'data/shein-bi/outputs');
+  const state = path.join(temp, 'data/shein-bi/state');
+  await fs.mkdir(path.join(root,'lib'), {recursive:true});
+  await fs.copyFile(policyFile,path.join(root,'lib/cloud_runtime_path_policy.mjs'));
+  await fs.mkdir(path.join(outputs,'reports'),{recursive:true});
+  await fs.mkdir(state,{recursive:true});
+  const name = 'marketing-daily-guard-2026-09-06.json';
+  const canonical = path.join(outputs,'reports',name);
+  const bytes = JSON.stringify({targetPlanSelection:{registryHash:'a'.repeat(64)}});
+  await fs.writeFile(canonical,bytes);
+  const queueFile = path.join(temp,'queue.json');
+  const probe = async (sourceGuard, expected, error) => {
+    const queueBytes = JSON.stringify({sourceGuard,sourceGuardHash:'b'.repeat(64)});
+    await fs.writeFile(queueFile,queueBytes);
+    const result = spawnSync('bash', [], {encoding:'utf8',timeout:3000,
+      input:fn+'\nqueue_source_guard_file_locked\n',env:{...process.env,ROOT:root,QUEUE_FILE:queueFile,
+        SHEIN_BI_OUTPUTS_ROOT:outputs,SHEIN_BI_STATE_ROOT:state}});
+    assert.equal(result.error,undefined);
+    assert.equal(result.status,expected ? 0 : 66,result.stderr);
+    if (expected) assert.equal(result.stdout,expected);
+    else {assert.equal(result.stdout,''); assert.match(result.stderr,error);}
+    assert.equal(await fs.readFile(queueFile,'utf8'),queueBytes,'function must not rewrite queue');
+    assert.equal(await fs.readFile(canonical,'utf8'),bytes,'function must not rewrite canonical guard');
+    checks++;
+  };
+  const migrated = '../../../data/shein-bi/outputs/reports/'+name;
+  assert.equal(path.relative(root,canonical),migrated);
+  await probe(migrated,canonical);
+  await probe(canonical,canonical);
+  await probe('outputs/reports/'+name,canonical);
+  await probe(path.join(root,'outputs/reports',name),canonical);
+  const local = path.join(root,'local-guard.json');
+  await fs.writeFile(local,bytes);
+  await probe('local-guard.json',local);
+  const outside = path.join(temp,'unrelated.json');
+  await fs.writeFile(outside,bytes);
+  await probe(outside,null,/escapes approved roots/);
+  await probe(path.relative(root,outside),null,/escapes approved roots/);
+  await probe(path.join(outputs+'-other','guard.json'),null,/escapes approved roots/);
+  await probe(path.join(state,'guard.json'),null,/escapes approved roots/);
+  await probe('outputs/../local-guard.json',null,/noncanonical traversal/);
+  await probe('../../../data/shein-bi/outputs/../outputs/reports/'+name,null,/noncanonical traversal/);
+  await probe('',null,/non-empty single-line/);
+  await probe(migrated+'\n',null,/non-empty single-line/);
+  await probe('outputs/reports/missing.json',null,/Artifact unavailable/);
+  await fs.symlink(outside,path.join(outputs,'reports/link.json'));
+  await probe('outputs/reports/link.json',null,/regular file/);
+  await fs.mkdir(path.join(temp,'outside-dir'));
+  await fs.writeFile(path.join(temp,'outside-dir/guard.json'),bytes);
+  await fs.symlink(path.join(temp,'outside-dir'),path.join(outputs,'escape'));
+  await probe('outputs/escape/guard.json',null,/outside its data root/);
+  await fs.symlink(outside,path.join(root,'local-link.json'));
+  await probe('local-link.json',null,/regular file/);
+  await fs.mkdir(path.join(root,'outputs/reports'),{recursive:true});
+  await fs.writeFile(path.join(root,'outputs/reports',name),'{}');
+  await probe(migrated,null,/namespace conflict/);
+  await fs.writeFile(path.join(root,'outputs/reports',name),bytes);
+  await probe(migrated,canonical);
+  console.log(JSON.stringify({ok:true,pathChecks:checks,exactShellFunction:true,realRuntimeResolver:true}));
+} finally {
+  await fs.rm(temp,{recursive:true,force:true});
+}
+` + '\nTEST_NODE\n',
+});
+assert.equal(pathProbe.error, undefined);
+assert.equal(pathProbe.status, 0, pathProbe.stderr || pathProbe.stdout);
+const pathResult = JSON.parse(pathProbe.stdout.trim());
+assert.equal(pathResult.pathChecks, 19);
+console.log(JSON.stringify({ok: true, checks: 18, ...pathResult}, null, 2));

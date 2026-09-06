@@ -407,20 +407,38 @@ NODE
 }
 
 queue_source_guard_file_locked() {
-  if ! JSON_FILE="$QUEUE_FILE" ROOT_DIR="$ROOT" node <<'NODE'
-const fs = require('node:fs');
-const path = require('node:path');
+  if ! JSON_FILE="$QUEUE_FILE" ROOT_DIR="$ROOT" node --input-type=module <<'NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
 
 const root = path.resolve(process.env.ROOT_DIR);
+const {runtimeArtifactLocation, readCloudRuntimeArtifact} = await import(
+  pathToFileURL(path.join(root, 'lib', 'cloud_runtime_path_policy.mjs')).href);
 const queue = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
-const raw = String(queue?.sourceGuard || '').trim();
-if (!raw || /[\r\n]/.test(raw)) throw new Error('queue sourceGuard must be a non-empty single-line path');
+const raw = String(queue?.sourceGuard || '');
+if (!raw || raw !== raw.trim() || /[\r\n\0]/.test(raw)) throw new Error('queue sourceGuard must be a non-empty single-line path');
 const guard = path.resolve(root, raw);
-const relative = path.relative(root, guard);
-if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-  throw new Error(`queue sourceGuard escapes worker root: ${raw}`);
+const within = (base, file) => {
+  const relative = path.relative(base, file);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+};
+const outputs = runtimeArtifactLocation({root, file: 'outputs'}).path;
+const canonicalOutput = within(outputs, guard) && guard !== outputs;
+if (!within(root, guard) && !canonicalOutput) {
+  throw new Error(`queue sourceGuard escapes approved roots: ${raw}`);
 }
-process.stdout.write(guard);
+// The queue builder serializes canonical data paths relative to the checkout.
+// Accept that exact spelling only; do not normalize arbitrary traversal input.
+if (raw.replaceAll('\\', '/').split('/').includes('..')
+  && !(canonicalOutput && !within(root, guard) && raw === path.relative(root, guard))) {
+  throw new Error(`queue sourceGuard contains noncanonical traversal: ${raw}`);
+}
+const artifact = await readCloudRuntimeArtifact({root, file: guard});
+if (!within(root, artifact.path) && !(artifact.logicalPath.startsWith('outputs/') && within(outputs, artifact.path))) {
+  throw new Error(`queue sourceGuard resolves outside approved outputs: ${raw}`);
+}
+process.stdout.write(artifact.path);
 NODE
   then
     return 66

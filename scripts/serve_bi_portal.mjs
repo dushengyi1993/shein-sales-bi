@@ -109,6 +109,7 @@ import {
 } from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
 import {isSheinSkc, normalizeSheinSkc} from '../lib/shein_product_identifiers.mjs';
 import {loadOpenApiProductDetail} from '../lib/link_ops_product_draft_mapper.mjs';
+import {resolveOpenApiProductCacheFile, updateOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 import {
   buildDescriptionPayloadRows,
   buildEmptyDescriptionAuthorization,
@@ -5271,16 +5272,40 @@ function sourceLockWriteEvidence(task) {
   return {ok: reasons.length === 0, reasons: [...new Set(reasons)]};
 }
 
-async function verifySourceLockReplacement(task, next, args) {
-  const oldSource = portalExactCopySourceLock(task);
-  const source = portalExactCopySourceLock(next);
-  if (!oldSource || oldSource.sourceStore === source?.sourceStore && oldSource.sourceSkc === source?.sourceSkc) return;
-  const historical = await descriptionBindingHistoricalAuditEvidence(args.auditFile, task.id, [], {strictSourceLock: true});
-  if (!historical.ok) throw new Error(`来源恢复历史审计不可证明未写：${historical.reasons.join(', ')}`);
-  const detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
-  if (!detail?.info || detail.conflict || detail.matchedSkcName !== source.sourceSkc) {
-    throw new Error('来源恢复缺少新来源精确商品详情或详情身份冲突，不能替换。');
+async function readSourceLockLiveDetail(source) {
+  const {store, client} = openApiClientForConfiguredStore(source.sourceStore);
+  const identity = await verifyOpenApiStoreIdentityForUtility(client, source.sourceStore, store);
+  if (!identity?.ok || identity.skipped) throw new Error('来源恢复 live 店铺身份未实际核验通过。');
+  const search = await client.request('/open-api/goods/searchProduct', {
+    method: 'POST', body: {pageNum: 1, pageSize: 10, skcNameList: [source.sourceSkc], languageList: ['en', 'ar']},
+    headers: {language: 'en'},
+  });
+  if (!search.ok || String(search.data?.code) !== '0') throw new Error('来源恢复精确 SKC searchProduct 读取失败。');
+  const matches = [];
+  for (const product of asArray(search.data?.info?.data ?? search.data?.info?.list)) {
+    const rows = product.skcName ? [product] : asArray(product.skcList ?? product.skc_info_list ?? product.skcInfoList ?? product.skc_list);
+    for (const row of rows) if ((row.skcName ?? row.skc_name) === source.sourceSkc) {
+      matches.push({spu: product.spuName ?? product.spu_name, supplierCode: row.supplierCode ?? row.supplier_code});
+    }
   }
+  if (matches.length !== 1 || typeof matches[0].spu !== 'string' || !matches[0].spu
+    || typeof matches[0].supplierCode !== 'string' || !matches[0].supplierCode) {
+    throw new Error('来源恢复 SKC searchProduct 未唯一确证 SPU/供货货号。');
+  }
+  const response = await client.request('/open-api/goods/spu-info', {
+    method: 'POST', body: {spuName: matches[0].spu, languageList: ['en', 'ar']}, headers: {language: 'en'},
+  });
+  const info = response.data?.info;
+  const skcs = asArray(info?.skcInfoList ?? info?.skc_info_list).filter(row => (row.skcName ?? row.skc_name) === source.sourceSkc);
+  if (!response.ok || String(response.data?.code) !== '0' || (info?.spuName ?? info?.spu_name) !== matches[0].spu
+    || skcs.length !== 1 || (skcs[0].supplierCode ?? skcs[0].supplier_code ?? info.supplierCode ?? info.supplier_code) !== matches[0].supplierCode) {
+    throw new Error('来源恢复 spu-info 与精确 SKC/SPU/供货货号不一致或读取失败。');
+  }
+  return {info, skcInfo: skcs[0], matchedSkcName: source.sourceSkc, matchedSpuName: matches[0].spu,
+    detailFetchedAt: new Date().toISOString(), storeIdentityVerified: true};
+}
+
+function sourceLockProductIdentity(task, detail) {
   const taskCodes = [task.standardGoodsSn, task.parameters?.standardGoodsSn, task.planning?.parameters?.standardGoodsSn,
     task.targets?.standardGoodsSn, task.publishPreparation?.standardGoodsSn,
     task.targets?.publishPreparation?.standardGoodsSn, ...asArray(task.targets?.productRefs)].filter(Boolean);
@@ -5293,10 +5318,64 @@ async function verifySourceLockReplacement(task, next, args) {
     || taskCodes.some(code => sourceCodes.some(sourceCode => areDistinctProductModels(code, sourceCode)))) {
     throw new Error('来源恢复商品身份不一致或标准货号/严格别名证据缺失，不能替换。');
   }
+  return {canonical: identities[0].canonical, aliasRegistryFingerprint: context.aliasRegistryFingerprint,
+    catalogFingerprint: context.catalogFingerprint};
+}
+
+async function cacheSourceLockLiveDetail(source, detail) {
+  const file = resolveOpenApiProductCacheFile(source.sourceStore);
+  const skcName = row => row?.skcName ?? row?.skc_name ?? row?.skc;
+  await updateOpenApiProductCacheAtomically(file, current => {
+    const base = current || {ok: true, storeKey: source.sourceStore, generatedAt: detail.detailFetchedAt,
+      fetchedAt: detail.detailFetchedAt, normalizedRows: [], detailResults: [], detailFallbackResults: []};
+    // Retain sibling SKCs even when they shared a previous SPU detail object.
+    const withoutTarget = rows => asArray(rows).flatMap(entry => {
+      const info = entry.info || entry.data;
+      const key = Array.isArray(info?.skcInfoList) ? 'skcInfoList' : 'skc_info_list';
+      const skcs = asArray(info?.[key]);
+      if (!skcs.some(row => skcName(row) === source.sourceSkc)) return [entry];
+      if (Date.parse(entry.detailFetchedAt || entry.fetchedAt || '') > Date.parse(detail.detailFetchedAt)) {
+        throw new Error('来源详情已有更新的并发缓存，本次不覆盖。');
+      }
+      const remaining = skcs.filter(row => skcName(row) !== source.sourceSkc);
+      return remaining.length ? [{...entry, [entry.info ? 'info' : 'data']: {...info, [key]: remaining}}] : [];
+    });
+    const previous = asArray(base.normalizedRows).find(row => skcName(row) === source.sourceSkc) || {};
+    const targetInfo = {...detail.info, skcInfoList: [detail.skcInfo]};
+    delete targetInfo.skc_info_list;
+    return {...base,
+      normalizedRows: [...asArray(base.normalizedRows).filter(row => skcName(row) !== source.sourceSkc), {
+        ...previous, storeKey: source.sourceStore, skc: source.sourceSkc, spu: detail.matchedSpuName,
+        sourceCompleteness: {...previous.sourceCompleteness, hasDetail: true, hasCurrentDetail: true,
+          detailSource: 'current', detailFetchedAt: detail.detailFetchedAt},
+      }],
+      detailResults: [...withoutTarget(base.detailResults), {ok: true, spuName: detail.matchedSpuName,
+        detailFetchedAt: detail.detailFetchedAt, info: targetInfo, storeIdentityVerified: true}],
+      detailFallbackResults: withoutTarget(base.detailFallbackResults),
+    };
+  }, {storeKey: source.sourceStore});
+}
+
+async function verifySourceLockReplacement(task, next, args) {
+  const oldSource = portalExactCopySourceLock(task);
+  const source = portalExactCopySourceLock(next);
+  if (!oldSource || oldSource.sourceStore === source?.sourceStore && oldSource.sourceSkc === source?.sourceSkc) return;
+  const historical = await descriptionBindingHistoricalAuditEvidence(args.auditFile, task.id, [], {strictSourceLock: true});
+  if (!historical.ok) throw new Error(`来源恢复历史审计不可证明未写：${historical.reasons.join(', ')}`);
+  let detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
+  if (!detail) {
+    const live = await readSourceLockLiveDetail(source);
+    sourceLockProductIdentity(task, live); // No cache mutation before same-product proof.
+    await cacheSourceLockLiveDetail(source, live);
+    detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
+  }
+  if (!detail?.info || detail.conflict || detail.matchedSkcName !== source.sourceSkc) {
+    throw new Error('来源恢复缺少新来源精确商品详情或详情身份冲突，不能替换。');
+  }
+  const identity = sourceLockProductIdentity(task, detail);
   const audit = next.history.findLast(row => row.event === 'source_lock_changed');
   audit.productIdentity = {
-    canonical: identities[0].canonical, sourceDetailLock: compactSourceDetailLock(detail.sourceDetailLock),
-    aliasRegistryFingerprint: context.aliasRegistryFingerprint, catalogFingerprint: context.catalogFingerprint,
+    ...identity, sourceDetailLock: compactSourceDetailLock(detail.sourceDetailLock),
   };
 }
 

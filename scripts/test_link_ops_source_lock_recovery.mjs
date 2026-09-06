@@ -7,9 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import crypto from 'node:crypto';
-import {loadOpenApiProductDetail} from '../lib/link_ops_product_draft_mapper.mjs';
+import {spawn} from 'node:child_process';
+import {loadOpenApiProductDetail, buildProductDraftFromSnapshots} from '../lib/link_ops_product_draft_mapper.mjs';
 import {buildProductAliasContext, resolveExplicitProductAlias, areDistinctProductModels} from '../lib/link_ops_product_attribute_binding.mjs';
-import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
+import {writeOpenApiProductCacheAtomically, updateOpenApiProductCacheAtomically, readOpenApiProductCache} from '../lib/shein_openapi_product_cache.mjs';
 import {createLinkOpsJsonRepository} from '../lib/link_ops_json_repository.mjs';
 import {createLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {LinkOpsValidationError} from '../lib/link_ops_repository.mjs';
@@ -45,6 +46,10 @@ const context = vm.createContext({
   LINK_OPS_ALLOWED_STATUSES: new Set(['draft', 'confirmed', 'in_progress', 'waiting_review', 'done', 'archived']),
   loadProductAliasContextSync: () => aliases,
   loadOpenApiProductDetail: (store, skc, options) => loadOpenApiProductDetail(store, skc, {...options, cacheDir}),
+  resolveOpenApiProductCacheFile: store => path.join(cacheDir, store, 'latest.json'),
+  updateOpenApiProductCacheAtomically,
+  openApiClientForConfiguredStore: () => { throw new Error('unexpected live call'); },
+  verifyOpenApiStoreIdentityForUtility: () => { throw new Error('unexpected identity call'); },
   resolveExplicitProductAlias, areDistinctProductModels, LinkOpsValidationError,
   sanitizeLinkOpsClientText: value => value,
 });
@@ -54,6 +59,7 @@ const names = ['normalizeStandardGoodsSnDisplayRef', 'normalizeLinkOpsAttributeO
   'taskCannotRepeatRealExecution',
   'patchLinkOpsTask', 'portalExactCopySourceLock', 'compactSourceDetailLock',
   'descriptionBindingHistoricalAuditEvidence', 'verifySourceLockReplacement',
+  'readSourceLockLiveDetail', 'sourceLockProductIdentity', 'cacheSourceLockLiveDetail',
   'repositoryRevisionAtRequestStart', 'linkOpsGatewayMethod', 'updateLinkOpsTaskRecord'];
 vm.runInContext(names.map(name => extract(portal, name)).join('\n'), context);
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -85,6 +91,171 @@ async function detail(code = 'MODEL-A-ALIAS', options = {}) {
 }
 try {
   await fs.writeFile(auditFile, '');
+  await detail();
+  await check('cache hit never fetches live detail', async () => {
+    const t = task(); await context.verifySourceLockReplacement(t, patch(t), {auditFile});
+  });
+  const cacheFile = path.join(cacheDir, 'BB', 'latest.json');
+  const otherSkc = 'sb20990101000000003';
+  const oldStamp = new Date(Date.now() - 3600000).toISOString();
+  const otherRow = {storeKey: 'BB', skc: otherSkc, spu: 'v209901010003', fetchedAt: oldStamp,
+    sourceCompleteness: {detailFetchedAt: oldStamp}, sheinUsableInventory: 17};
+  const otherDetail = {ok: true, detailFetchedAt: oldStamp, info: {spuName: otherRow.spu,
+    skcInfoList: [{skcName: otherSkc, supplierCode: 'MODEL-B'}]}};
+  async function missingCache() {
+    await writeOpenApiProductCacheAtomically(cacheFile, {ok: true, storeKey: 'BB', fetchedAt: oldStamp,
+      normalizedRows: [otherRow], detailResults: [otherDetail], detailFallbackResults: [],
+      productList: [{spuName: otherRow.spu}], stockResponses: [{preserved: true}]}, {storeKey: 'BB', generatedAt: oldStamp});
+  }
+  function liveInfo() {
+    return {spuName: 'v209901010001', supplierCode: 'MODEL-A', categoryId: 13127, productTypeId: 9851,
+      brandCode: '2a64l', productMultiNameList: [{language: 'en', productName: 'Fixture source'}, {language: 'ar', productName: 'منتج'}],
+      productAttributeInfoList: [{attributeId: 1000546, attributeValue: 'MODEL-A', attributeValueId: 0}, {attributeId: 160, attributeValueId: 62}],
+      skcInfoList: [{skcName: NEW, supplierCode: 'MODEL-A', skcImageInfoList: [
+        {imageUrl: 'https://example.invalid/main.jpg', imageType: 'MAIN'},
+        {imageUrl: 'https://example.invalid/square.jpg', imageType: 'SQUARE'}],
+        skuInfoList: [{skuCode: 'SKU-FIXTURE', length: 10, width: 10, height: 10, weight: 1000,
+          costInfoList: [{currency: 'SAR', costPrice: 90}], saleAttributeList: [{attributeId: 27, attributeValueId: 536}]}]}]};
+  }
+  let liveCalls = [];
+  function installLive({identity = {ok: true}, mutateSearch, mutateDetail, failSearch = false, failDetail = false, beforeDetail} = {}) {
+    liveCalls = [];
+    context.openApiClientForConfiguredStore = store => {
+      assert.equal(store, 'BB');
+      return {store: {storeKey: store}, client: {request: async (endpoint, options) => {
+        liveCalls.push(endpoint);
+        if (endpoint.endsWith('/searchProduct')) {
+          assert.deepEqual(clone(options.body.skcNameList), [NEW]);
+          // Minimal product shape observed in the owner's redacted controlled
+          // search result; identifiers/values below are synthetic.
+          const result = {ok: !failSearch, data: {code: failSearch ? '1' : '0', info: {data: [{spuName: 'v209901010001',
+            spuShelfStatus: 1, categoryId: 13127, skcList: [{skcName: NEW, skcShelfStatus: 1, supplierCode: 'MODEL-A', skuList: []}]}]}}};
+          mutateSearch?.(result); return result;
+        }
+        assert.equal(endpoint, '/open-api/goods/spu-info');
+        assert.equal(options.body.spuName, 'v209901010001');
+        await beforeDetail?.();
+        const result = {ok: !failDetail, data: {code: failDetail ? '1' : '0', info: liveInfo()}};
+        mutateDetail?.(result); return result;
+      }}};
+    };
+    context.verifyOpenApiStoreIdentityForUtility = async () => { liveCalls.push('identity'); return identity; };
+  }
+  await check('cache miss exact live read merges target and supports subsequent mapper payload', async () => {
+    await missingCache(); installLive();
+    const t = task(); const next = patch(t);
+    await context.verifySourceLockReplacement(t, next, {auditFile});
+    assert.deepEqual(liveCalls, ['identity', '/open-api/goods/searchProduct', '/open-api/goods/spu-info']);
+    const current = (await readOpenApiProductCache(cacheFile, {expectedStore: 'BB'})).data;
+    assert.equal(current.generatedAt, oldStamp); assert.equal(current.fetchedAt, oldStamp);
+    assert.deepEqual(current.normalizedRows.find(row => row.skc === otherSkc), otherRow);
+    assert.deepEqual(current.detailResults.find(row => row.info.spuName === otherRow.spu), otherDetail);
+    assert.deepEqual(current.stockResponses, [{preserved: true}]);
+    const loaded = await loadOpenApiProductDetail('BB', NEW, {cacheDir});
+    assert.equal(loaded.matchedSkcName, NEW);
+    const draft = await buildProductDraftFromSnapshots({sourceStore: 'BB', sourceSkc: NEW, targetStore: 'CC',
+      date: '2099-01-01', cacheDir});
+    assert.equal(draft.sourceDetailLock.matchedSkcName, NEW);
+    assert.equal(draft.canonicalDraft.source.skc, NEW);
+    assert.equal(draft.readyForOpenApiSubmit, true, draft.blockers.join(' | '));
+    const oldOutputDir = process.env.SHEIN_BI_OUTPUT_DIR;
+    const oldCacheDir = process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR;
+    const oldSelfTest = process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST;
+    try {
+      process.env.SHEIN_BI_OUTPUT_DIR = path.join(root, 'mapper');
+      process.env.SHEIN_OPENAPI_PRODUCT_CACHE_DIR = cacheDir;
+      process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST = '1';
+      const linkDir = path.join(process.env.SHEIN_BI_OUTPUT_DIR, 'shein_links', 'BB');
+      await fs.mkdir(linkDir, {recursive: true});
+      await fs.writeFile(path.join(linkDir, '2099-01-01.json'), JSON.stringify({linkRows: [], inventoryRows: [], performanceRows: []}));
+      const {findOrBuildPublishPayload} = await import('./link_ops_hl_openapi_executor.mjs');
+      const subsequent = await findOrBuildPublishPayload({...clone(next), assets: []}, {targetStore: 'CC'});
+      assert.ok(subsequent.payload, subsequent.generationError);
+      assert.equal(subsequent.sourceDetailLock.matchedSkcName, NEW);
+    } finally {
+      for (const [key, value] of [['SHEIN_BI_OUTPUT_DIR', oldOutputDir], ['SHEIN_OPENAPI_PRODUCT_CACHE_DIR', oldCacheDir], ['SHEIN_LINK_OPS_EXECUTOR_SELF_TEST', oldSelfTest]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+    // Independent subsequent read requires no live transport.
+    context.openApiClientForConfiguredStore = () => { throw new Error('cache hit fetched'); };
+    await context.verifySourceLockReplacement(t, patch(t), {auditFile});
+  });
+  for (const [label, options] of [
+    ['wrong identity', {identity: {ok: false}}], ['skipped identity', {identity: {ok: true, skipped: true}}],
+    ['failed search', {failSearch: true}], ['failed detail', {failDetail: true}],
+    ['wrong search SKC', {mutateSearch: r => r.data.info.data[0].skcList[0].skcName = OLD}],
+    ['ambiguous search', {mutateSearch: r => r.data.info.data.push(clone(r.data.info.data[0]))}],
+    ['wrong detail SKC', {mutateDetail: r => r.data.info.skcInfoList[0].skcName = OLD}],
+    ['wrong detail SPU', {mutateDetail: r => r.data.info.spuName = 'vwrong'}],
+    ['wrong product', {mutateSearch: r => r.data.info.data[0].skcList[0].supplierCode = 'MODEL-B',
+      mutateDetail: r => { r.data.info.supplierCode = 'MODEL-B'; r.data.info.skcInfoList[0].supplierCode = 'MODEL-B'; }}],
+  ]) await check(`live ${label} leaves cache and original task unchanged`, async () => {
+    await missingCache(); const bytes = await fs.readFile(cacheFile, 'utf8'); installLive(options);
+    const t = task(); const before = clone(t);
+    await assert.rejects(() => context.verifySourceLockReplacement(t, patch(t), {auditFile}));
+    assert.equal(await fs.readFile(cacheFile, 'utf8'), bytes); assert.deepEqual(t, before);
+    if (label.includes('identity')) assert.deepEqual(liveCalls, ['identity']);
+  });
+  await check('concurrent cache writer is preserved by locked re-read and unrelated timestamps do not advance', async () => {
+    await missingCache();
+    let releaseWriter, writerStarted;
+    const waiting = new Promise(resolve => { releaseWriter = resolve; });
+    const entered = new Promise(resolve => { writerStarted = resolve; });
+    const concurrentRow = {skc: 'sb20990101000000004', spu: 'v209901010004', fetchedAt: oldStamp};
+    const writer = updateOpenApiProductCacheAtomically(cacheFile, async current => {
+      writerStarted(); await waiting; return {...current, normalizedRows: [...current.normalizedRows, concurrentRow]};
+    }, {storeKey: 'BB'});
+    await entered;
+    installLive({beforeDetail: async () => { releaseWriter(); await writer; }});
+    const t = task(); await context.verifySourceLockReplacement(t, patch(t), {auditFile});
+    const current = (await readOpenApiProductCache(cacheFile)).data;
+    assert.deepEqual(current.normalizedRows.find(row => row.skc === concurrentRow.skc), concurrentRow);
+    assert.equal(current.generatedAt, oldStamp); assert.equal(current.normalizedRows.find(row => row.skc === otherSkc).fetchedAt, oldStamp);
+  });
+  await check('separate process cache writer shares the cache merge lock', async () => {
+    await missingCache();
+    const childScript = `import {updateOpenApiProductCacheAtomically} from ${JSON.stringify(new URL('../lib/shein_openapi_product_cache.mjs', import.meta.url).href)};
+      await updateOpenApiProductCacheAtomically(process.argv[1], async current => {
+        process.stdout.write('locked\\n');
+        await new Promise(resolve => process.stdin.once('data', resolve));
+        return {...current, concurrentMarker: 'child'};
+      }, {storeKey: 'BB'});`;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', childScript, cacheFile], {stdio: ['pipe', 'pipe', 'pipe']});
+    let errorText = '';
+    child.stderr.on('data', bytes => { errorText += bytes; });
+    const ended = new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error(errorText || `child exit ${code}`))); });
+    await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject); child.once('exit', code => { if (code) reject(new Error(errorText)); }); });
+    const live = {info: liveInfo(), skcInfo: liveInfo().skcInfoList[0], matchedSpuName: 'v209901010001', detailFetchedAt: new Date().toISOString()};
+    const merging = context.cacheSourceLockLiveDetail({sourceStore: 'BB', sourceSkc: NEW}, live);
+    child.stdin.end('release'); await ended; await merging;
+    const current = (await readOpenApiProductCache(cacheFile)).data;
+    assert.equal(current.concurrentMarker, 'child');
+    assert.ok(await loadOpenApiProductDetail('BB', NEW, {cacheDir}));
+    assert.deepEqual(current.normalizedRows.find(row => row.skc === otherSkc), otherRow);
+  });
+  await check('absent store cache can be created without inventing other product timestamps', async () => {
+    await fs.unlink(cacheFile); installLive();
+    const t = task(); await context.verifySourceLockReplacement(t, patch(t), {auditFile});
+    const current = (await readOpenApiProductCache(cacheFile)).data;
+    assert.equal(current.normalizedRows.length, 1); assert.equal(current.normalizedRows[0].skc, NEW);
+  });
+  await check('target detail replacement preserves same-SPU siblings and their original detail timestamp', async () => {
+    await missingCache();
+    const sibling = {skcName: otherSkc, supplierCode: 'MODEL-B', unchanged: 'sibling'};
+    await updateOpenApiProductCacheAtomically(cacheFile, current => ({...current,
+      detailResults: [{ok: true, detailFetchedAt: oldStamp, info: {spuName: 'v209901010001',
+        skcInfoList: [{skcName: NEW, supplierCode: 'MODEL-A'}, sibling]}}]}), {storeKey: 'BB'});
+    const info = liveInfo();
+    await context.cacheSourceLockLiveDetail({sourceStore: 'BB', sourceSkc: NEW}, {
+      info, skcInfo: info.skcInfoList[0], matchedSpuName: info.spuName, detailFetchedAt: new Date().toISOString()});
+    const current = (await readOpenApiProductCache(cacheFile)).data;
+    const preserved = current.detailResults.find(row => row.info.skcInfoList.some(skc => skc.skcName === otherSkc));
+    assert.deepEqual(preserved.info.skcInfoList, [sibling]); assert.equal(preserved.detailFetchedAt, oldStamp);
+    assert.equal(current.generatedAt, oldStamp);
+    assert.equal((await loadOpenApiProductDetail('BB', NEW, {cacheDir})).skcInfo.supplierCode, 'MODEL-A');
+  });
+  context.openApiClientForConfiguredStore = () => { throw new Error('unexpected live call'); };
   await detail();
   await check('actual compact check DTO planned_not_run semantics do not imply submission', () => {
     const projected = {preflight: {ok: false}, execution: {mode: 'openapi_product_executor', state: 'blocked',
