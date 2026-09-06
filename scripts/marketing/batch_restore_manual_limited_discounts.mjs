@@ -628,6 +628,7 @@ export function manualResultDocumentMatches(previous, workFingerprint, dryRunOnl
 export async function runManualRestoreBatch(customArgs, customOverrides = {}) {
   const args = customArgs || parseArgs(process.argv.slice(2));
   args.receiptAdmission = null;
+  let receiptAdmissionOptions = null;
   ACTIVE_DEADLINE = args.deadline;
   const effectiveLaunchStore = customOverrides.launchStore || launchStore;
   const effectiveCloseStore = customOverrides.closeStore || closeStore;
@@ -650,14 +651,15 @@ if (!args.dryRunOnly && args.skipBuild && args.continuation
   && process.env.SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION === '1'
   && process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_STATUS === 'consumed'
 ) {
-  const admission = await verifyUnstartedRepairStageContinuation({
+  receiptAdmissionOptions = {
     root: ROOT, date, stage: 'manualSpecialRestore', planPath, guardPath: args.guard, resultPath: args.result,
     expectedWorkFingerprint: args.expectedWorkFingerprint,
     queueFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE,
     receiptFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE,
     expectedReceiptSha256: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256,
     queueSnapshotBytes: readImmediateAdmissionQueueFd(process.env.SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD),
-  }).catch(error => {
+  };
+  const admission = await verifyUnstartedRepairStageContinuation(receiptAdmissionOptions).catch(error => {
     if (error.code === 'IMMEDIATE_AUTHORIZATION_TRANSACTION_CONTINUATION_REQUIRED') return null;
     throw error;
   });
@@ -677,6 +679,7 @@ const filter = new Set(args.stores);
 const files = (plan.rescueFiles || []).filter(file => !filter.size || filter.has(String(file.storeKey).toUpperCase()));
 const resultPath = args.result || path.join(args.outDir, `manual-limited-discount-restore-result-${Date.now()}.json`);
 const previous = await readJsonIfExists(resultPath);
+const currentRunId = String(process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID || process.env.SHEIN_BI_MARKETING_RUN_ID || '').trim();
 const previousResults = manualResultDocumentMatches(previous, workFingerprint, args.dryRunOnly)
   ? previous.results.map(normalizeManualResumeResult)
   : [];
@@ -690,7 +693,8 @@ if (args.receiptAdmission) {
   }
 }
 const pendingFiles = files.filter(file => !settledByPath.has(String(file.path)));
-let continuationFiles = pendingFiles;
+let continuationFiles = pendingFiles.filter(file => !currentRunId || !previousResults.some(row =>
+  row.rescuePath === file.path && row.attemptRunId === currentRunId && row.prewriteIsolated === true));
 if (args.continuation && !args.receiptAdmission) {
   continuationFiles = [];
   for (const file of pendingFiles) {
@@ -724,7 +728,7 @@ for (const [storeKey, storeFiles] of filesByStore.entries()) {
       if (group) await claimImmediateRepairGroup(args.receiptAdmission, group.path);
       const groupArgs = group ? {...args, continuation: group.mode === 'transaction'} : args;
       const res = await effectiveProcessOne(file, storeMap, groupArgs, {keepOpen: true, launchSummary});
-      processedThisRun.push(normalizeManualResumeResult(res));
+      processedThisRun.push(normalizeManualResumeResult({...res, attemptRunId: currentRunId || null}));
     }
   } finally {
     const close = await effectiveCloseStore(storeKey, launchSummary).catch(() => ({ok: false, reason: 'cleanup_failed'}));
@@ -758,19 +762,34 @@ const output = {
     blocked: results.filter(row => !row.ok).length,
     deadlineDeferred: processedThisRun.filter(row => row.deferred === true).length + (continuationDeferredWithoutMatch ? 1 : 0),
     recoverableDeferred: processedThisRun.filter(row => row.recoverableDeferred === true).length,
-    terminalBlocked: processedThisRun.filter(row => row.terminalBlocked === true).length,
+    terminalBlocked: results.filter(row => row.terminalBlocked === true).length,
+    processedThisRunTerminalBlocked: processedThisRun.filter(row => row.terminalBlocked === true).length,
   },
   processedThisRunResults: processedThisRun,
   results,
 };
 await writeJsonAtomic(resultPath, output);
+const failures = processedThisRun.filter(row => !row.ok && !row.deferred && !row.terminalBlocked);
+if (failures.length && args.receiptAdmission && currentRunId) {
+  // The just-persisted result is rechecked against both durable write domains.
+  // Only a verified unstarted group can yield to another manual item this run.
+  const refreshed = await verifyUnstartedRepairStageContinuation(receiptAdmissionOptions);
+  for (const row of failures) {
+    const group = refreshed.groups.find(group => group.path === path.resolve(ROOT, row.rescuePath));
+    if (group?.mode === 'unstarted') row.prewriteIsolated = true;
+  }
+  await writeJsonAtomic(resultPath, output);
+}
+const isolatedOnlyRemaining = remainingItems > 0 && currentRunId && files
+  .filter(file => !settledPaths.has(String(file.path)))
+  .every(file => results.some(row => row.rescuePath === file.path && row.attemptRunId === currentRunId && row.prewriteIsolated === true));
 const deadlineDeferred = continuationDeferredWithoutMatch || processedThisRun.some(row => row.deferred === true);
 const recoverableDeferred = processedThisRun.some(row => row.recoverableDeferred === true);
-const attemptedFailure = processedThisRun.some(row => !row.ok && !row.deferred && !row.terminalBlocked);
+const attemptedFailure = processedThisRun.some(row => !row.ok && !row.deferred && !row.terminalBlocked && !row.prewriteIsolated);
 const ok = !attemptedFailure && remainingItems === 0 && results.length === files.length && results.every(row => row.ok);
 console.log(JSON.stringify({ok, out: rel(resultPath), totals: output.totals}, null, 2));
   if (attemptedFailure) process.exitCode = 2;
-  else if (deadlineDeferred || recoverableDeferred) process.exitCode = 4;
+  else if (deadlineDeferred || recoverableDeferred || isolatedOnlyRemaining) process.exitCode = 4;
   else if (remainingItems > 0) process.exitCode = 3;
   return {ok, output, results, processedThisRun};
 }

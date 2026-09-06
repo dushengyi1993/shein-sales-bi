@@ -2214,7 +2214,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
   if [[ "$status" -eq 4 && ( "$PROCESSED_ITEMS" == "0" || "$DEADLINE_DEFERRED" =~ ^[1-9][0-9]*$ || "$RECOVERABLE_DEFERRED" == "1" ) ]]; then
     update_stage manualSpecialRestore pending false "deadline or recoverable item deferred; no new item will start in this slot" "$RESULT_PATH"
     write_state pending "manual-special repair paused at the deadline/recoverable boundary; exact queue preserved"
-    break
+    exit 75
   fi
   if (( PROCESSED_ITEMS == 0 )); then
     update_stage manualSpecialRestore failed false "single-item executor produced no exact new item status=$status" "$RESULT_PATH"
@@ -2222,9 +2222,9 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
     exit 66
   fi
   if [[ "$status" -eq 2 && "$PROCESSED_ITEMS" == "1" && "$REMAINING_ITEMS" =~ ^[1-9][0-9]*$ && "$TERMINAL_BLOCKED" != "1" ]]; then
-    update_stage manualSpecialRestore pending false "one exact manual item failed before a confirmed write; preserving it for a fresh authorization while independent stages continue" "$RESULT_PATH"
-    write_state pending "manual-special item deferred after a confirmed prewrite failure; continuing independent repair stages"
-    break
+    update_stage manualSpecialRestore pending false "manual item unresolved; original receipt and exact queue preserved for guarded continuation" "$RESULT_PATH"
+    write_state pending "manual-special item deferred; pending manual work must settle before fallback"
+    exit 75
   fi
   if [[ "$status" -eq 2 && "$TERMINAL_BLOCKED" != "1" ]]; then
     update_stage manualSpecialRestore failed false "execute/readback failed status=$status" "$RESULT_PATH"
@@ -2238,7 +2238,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
       exit "$status"
     fi
     update_stage manualSpecialRestore pending false "one exact manual item reached terminal readback/blocker; serial consumer continuing" "$RESULT_PATH"
-  elif [[ "$status" -eq 4 || "$TERMINAL_BLOCKED" == "1" ]]; then
+  elif [[ "$status" -eq 4 || "$(result_total "$RESULT_PATH" terminalBlocked)" =~ ^[1-9][0-9]*$ ]]; then
     update_stage manualSpecialRestore blocked false "all exact manual items accounted; terminal business blockers were preserved" "$RESULT_PATH"
     write_state blocked "manual special restore completed with terminal business blockers"
   else

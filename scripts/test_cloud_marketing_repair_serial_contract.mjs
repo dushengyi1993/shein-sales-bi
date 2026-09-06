@@ -33,8 +33,9 @@ assert.doesNotMatch(fallback, /--max-groups "\$REMAINING_GROUPS"/);
 
 assert.match(manual, /"\$status" -eq 2 && "\$PROCESSED_ITEMS" == "1"/);
 assert.match(manual, /"\$REMAINING_ITEMS" =~ \^\[1-9\]\[0-9\]\*\$/);
-assert.match(manual, /preserving it for a fresh authorization while independent stages continue/);
-assert.match(manual, /\n\s+break\n/);
+assert.match(manual, /original receipt and exact queue preserved for guarded continuation/);
+assert.doesNotMatch(manual, /fresh authorization|\n\s+break\n/);
+assert.match(manual, /pending manual work must settle before fallback"\n\s+exit 75/);
 assert.match(manual, /execute\/readback failed status=\$status/);
 
 function toBashPath(file) {
