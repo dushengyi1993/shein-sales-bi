@@ -4,9 +4,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  applyLowEtFastSellerPricePullback,
   buildLowEtFastSellerPricingContext,
   revalidateLowEtFastSellerRescueArtifact,
 } from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {loadMarketingPricingPolicy} from '../../lib/marketing_pricing_policy.mjs';
 import {buildHighClickLowConversionSpecialAudit} from '../../lib/marketing_high_click_special_policy.mjs';
 import {buildLimitedDiscountDriftRescuePlan} from './build_limited_discount_drift_rescue_plan.mjs';
 
@@ -184,6 +186,22 @@ const nonAppliedInventory = {
 const nonAppliedContext = buildLowEtFastSellerPricingContext({
   inventoryTrendDoc: nonAppliedInventory, linksDataDoc, baselineDoc, costDoc, marketingPolicy, reportDate,
 });
+const realPolicyPath = path.resolve('config/marketing_pricing_policy.json');
+const realRawPolicy = JSON.parse(await fs.readFile(realPolicyPath, 'utf8'));
+const realLoadedPolicy = await loadMarketingPricingPolicy(realPolicyPath);
+const realRawContext = buildLowEtFastSellerPricingContext({
+  inventoryTrendDoc: nonAppliedInventory, linksDataDoc, baselineDoc, costDoc,
+  marketingPolicy: realRawPolicy, reportDate,
+});
+const realLoadedContext = buildLowEtFastSellerPricingContext({
+  inventoryTrendDoc: nonAppliedInventory, linksDataDoc, baselineDoc, costDoc,
+  marketingPolicy: realLoadedPolicy, reportDate,
+});
+assert.equal(realRawContext.policyEvidenceHash, realLoadedContext.policyEvidenceHash); checks += 1;
+const realPolicyRow = {storeKey: 'DX', skc: 'link-1', canonical, finalTargetPrice: 100, targetPrice: 100};
+const realRawDecision = applyLowEtFastSellerPricePullback({row: realPolicyRow, context: realRawContext, costDoc});
+const realLoadedDecision = applyLowEtFastSellerPricePullback({row: realPolicyRow, context: realLoadedContext, costDoc});
+assert.equal(realRawDecision.audit.contextEvidenceHash, realLoadedDecision.audit.contextEvidenceHash); checks += 1;
 const nonAppliedDrift = buildLimitedDiscountDriftRescuePlan({
   reportDate,
   limitedDiscountTargetPriceDrift: {belowRows: [{
@@ -245,6 +263,37 @@ try {
     sourceStoresConfig: sources.storesConfig,
     rows: drift.groups[0].rows,
   };
+  const realPolicySource = path.join(temp, 'real-marketing-pricing-policy.json');
+  const realInventorySource = path.join(temp, 'real-inventory.json');
+  await Promise.all([
+    fs.writeFile(realPolicySource, JSON.stringify(realRawPolicy)),
+    fs.writeFile(realInventorySource, JSON.stringify(nonAppliedInventory)),
+  ]);
+  const realPolicyRescue = {
+    ...rescue,
+    sourceInventoryTrend: realInventorySource,
+    pricingPolicy: realPolicySource,
+    rows: [realLoadedDecision.row],
+  };
+  const normalizedPolicyCurrent = await revalidateLowEtFastSellerRescueArtifact({
+    root: temp, rescue: realPolicyRescue, reportDate,
+  });
+  assert.equal(normalizedPolicyCurrent.ok, true); checks += 1;
+  await fs.writeFile(realPolicySource, JSON.stringify({
+    ...realRawPolicy,
+    lowEtFastSellerPricePullback: {
+      ...(realRawPolicy.lowEtFastSellerPricePullback || {}),
+      criteria: {
+        ...(realRawPolicy.lowEtFastSellerPricePullback?.criteria || {}),
+        matchedEtOperationalSaleableMaxInclusive: 12,
+      },
+    },
+  }));
+  const realPolicyDrift = await revalidateLowEtFastSellerRescueArtifact({
+    root: temp, rescue: realPolicyRescue, reportDate,
+  });
+  assert.equal(realPolicyDrift.ok, false); checks += 1;
+  assert.equal(realPolicyDrift.rows[0].reason, 'low_et_price_pullback_context_evidence_drift'); checks += 1;
   const current = await revalidateLowEtFastSellerRescueArtifact({root: temp, rescue, reportDate});
   assert.equal(current.ok, true); checks += 1;
   assert.equal(current.rawLinkOverlay.complete, true); checks += 1;
