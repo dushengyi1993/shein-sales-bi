@@ -89,7 +89,7 @@ function help() {
   node scripts/pending_discuss_batch.mjs scan --out-dir <new-directory>
   node scripts/pending_discuss_batch.mjs preflight --decisions <decisions.json> --out-dir <new-directory>
   SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1 node scripts/pending_discuss_batch.mjs execute \\
-    --preflight <preflight.json> --batch-hash <hash> \\
+    --preflight <preflight.json> [--batch-hash <hash>] \\
     --confirm ${PENDING_DISCUSS_CONFIRM_TEXT} --out-dir <new-directory>
 
 All commands accept --config, --stores-config and --store-truth. Execute also

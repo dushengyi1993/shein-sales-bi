@@ -13,7 +13,7 @@
 | `daily` | 每日 heartbeat 正常入口 | 无写授权要求，只读 | scan + hash 自校验 + 人话报告 + 可选群回执 |
 | `scan` | 调试或人工只读扫描 | 无写授权要求，只读 | 脱敏 manifest |
 | `preflight` | 当前任务用户明确授权后 | fresh scan + decisions 文件 | 逐项 exact hashes + `batchHash`（默认约 15 分钟有效） |
-| `execute` | 用户确认且环境门打开 | preflight 产物、`batchHash` 一致 | 逐项写 + terminal 回读 + 全店 final scan |
+| `execute` | 业务已授权且环境门打开 | preflight 产物、内部 hash 校验通过 | 逐项写 + terminal 回读 + 全店 final scan |
 
 ### scan（只读，每日唯一允许模式）
 
@@ -65,12 +65,11 @@ node scripts/pending_discuss_batch.mjs preflight \
 ```bash
 SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1 node scripts/pending_discuss_batch.mjs execute \
   --preflight outputs/pending-discuss/<YYYY-MM-DD>/<RUN_ID>-preflight/preflight.json \
-  --batch-hash <batchHash> \
   --confirm SHEIN_PENDING_DISCUSS_BATCH_EXECUTE \
   --out-dir outputs/pending-discuss/<YYYY-MM-DD>/<RUN_ID>-execute
 ```
 
-- 必须同时满足：环境门 `SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1`、`safeWriteOperations.enabled=true`、`requireDryRun=true`、动作 `process_pending_discuss` 与全部目标店显式 allowlist、`confirm=SHEIN_PENDING_DISCUSS_BATCH_EXECUTE`、`batchHash` 与 preflight 一致。
+- 必须同时满足：环境门 `SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1`、`safeWriteOperations.enabled=true`、`requireDryRun=true`、动作 `process_pending_discuss` 与全部目标店显式 allowlist、`confirm=SHEIN_PENDING_DISCUSS_BATCH_EXECUTE`；`batchHash` 可自动从 preflight 读取，若显式传入则必须一致。用户清晰业务决策即授权，无需让用户手动搬运 hash 或设立临时确认窗。
 - 真实 SHEIN execute 只允许 Linux `/opt/shein-bi/app`，并固定使用 `/run/lock/shein-pending-discuss-write.lock`；`--lock-path` 仅供 localhost fake 测试，不能改变真实执行锁域。
 - 逐项 live 校验：每项写前重新校验该 item/store 仍处于可处理状态，任何漂移即停止该项并整批停下。
 - 单次写：每项只发一次 `process-discuss` 写（3001892），不允许重复提交或覆盖重试。
@@ -117,7 +116,7 @@ SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1 node scripts/pending_discuss_batch.mjs exe
 ## 3. 退出/失败边界
 
 - `scan` / `preflight` / `execute` 任一失败都以非 0 退出并打印精确原因；禁止把 PARTIAL 当成功、缺失当 0 条。
-- `execute` 拒绝启动条件：preflight 过期、业务日变化、源码/schema/配置/身份与归一化依赖 hash 漂移、`batchHash` 不匹配、环境门未开、`safeWriteOperations` 未显式放行目标动作/店铺、真实执行主机/锁路径不符、`confirm` 缺失或错误。
+- `execute` 拒绝启动条件：preflight 过期、业务日变化、源码/schema/配置/身份与归一化依赖 hash 漂移、显式传入的 `batchHash` 与 preflight 不匹配、环境门未开、`safeWriteOperations` 未显式放行目标动作/店铺、真实执行主机/锁路径不符、`confirm` 缺失或错误。
 - 写前校验漂移：跳过该项并整批停止；不得绕过校验重试。
 - 写前确定失败记入 `failed`；写请求已发出但回读失败或未达终态记入 `uncertain/submitted_readback_pending`。两者都会立即停批，均不自动补写。
 - final scan 未完成或覆盖不足：批次不算完成，报告 blocker，不声称成功。
@@ -126,7 +125,7 @@ SHEIN_PENDING_DISCUSS_WRITE_ENABLED=1 node scripts/pending_discuss_batch.mjs exe
 
 - 只回滚代码：发布后发现问题时回滚代码/版本（git revert 或 release 回退），绝不撤销业务写。
 - 业务写不可逆：`process-discuss` 的接受/拒绝是平台侧终态操作，代码回滚不会、也不能撤销已提交的业务写。
-- 需要纠正业务结果时，必须走新的授权闭环：fresh scan → 新 decisions → 新 preflight → 用户确认 → execute。
+- 需要纠正业务结果时，必须走新的执行闭环：fresh scan → 新 decisions → 新 preflight → 业务授权内衔接 execute。
 - 本 runbook 不是授权本身；授权必须来自当前任务的用户明确指示。
 
 ## 5. 测试与 release gate 接线

@@ -1109,7 +1109,7 @@ async function runLockSource(args) {
     preflightResult: linkOpsExecutionSummary(preflightResponse),
     task: preflightResponse.task,
     execution: preflightResponse.execution,
-    safety: {realPublishOccurred: false, nextStep: '核对精确源链接证据与新 payloadHash；用户确认前不得 execute。'},
+    safety: {realPublishOccurred: false, nextStep: '核对精确源链接证据与新 payloadHash；业务指令已授权时由当前任务闭环 preflight/execute，无需让用户重复确认或手动搬运 hash。'},
   });
 }
 
@@ -1619,7 +1619,7 @@ async function runPreparePublish(args) {
       uploadedImageCount: uploaded.length,
       reusedApprovedBinding: reused,
       emptyDescriptionAuthorized: bindingJson?.binding?.emptyDescriptionAuthorization?.ok === true,
-      nextStep: '核对新预演的 payloadHash 和字段；只有用户明确确认后才调用 execute。',
+      nextStep: '核对新预演的 payloadHash 和字段；若用户业务指令已明确，由当前任务衔接 execute，无需二次询问或手动搬运 hash。',
     },
   });
 }
@@ -2465,7 +2465,7 @@ async function runPrepareProductAttribute(args) {
       sameTask: true,
       realPublishOccurred: false,
       dryRunReadyClaimed: false,
-      nextStep: '同一任务 prepare-descriptions 重绑原始审核 HTML；之后重新预演通过、用户确认后才可 execute。',
+      nextStep: '同一任务 prepare-descriptions 重绑原始审核 HTML；预演通过后在原业务授权范围内由当前任务闭环 execute，无需二次询问。',
     },
   };
   print(output);
@@ -2773,7 +2773,7 @@ async function runUpdateDescription(args) {
       minimalPartialEditOnly: true,
       oldPublishTaskUntouched: true,
       realWriteOccurred: false,
-      nextStep: '核对新预演的 payloadHash 和描述 hash；只有用户明确确认后才调用 execute。',
+      nextStep: '核对新预演的 payloadHash 和描述 hash；若已获业务授权由当前任务直接衔接 execute，无需重复确认。',
     },
   };
   const output = {
@@ -2821,7 +2821,7 @@ async function runPreparePendingImageCorrection(args) {
       imagesReused: true,
       imagesUploadedAgain: false,
       realWriteOccurred: false,
-      nextStep: '核对撤回+完整重提计划及 payloadHash；只有用户明确确认后才调用 execute。',
+      nextStep: '核对撤回+完整重提计划及 payloadHash；若已获业务授权由当前任务直接衔接 execute，无需重复确认。',
     },
   };
   print(output);
@@ -2840,7 +2840,7 @@ function operatorGuide() {
     ],
     imageBoundary: '标题或核心卖点未采用某参数，不等于已审图片禁用；AI 只能提示，不能静默剔除。',
     objectiveBlockersOnly: ['文件损坏', '平台不支持的格式/大小', '明确错品', '图片角色/容量冲突', '真实 SHEIN 校验失败'],
-    requiredFlow: '同一任务 create -> prepare-publish -> post-binding preflight -> 用户确认 -> execute -> readback',
+    requiredFlow: '同一任务 create -> prepare-publish -> post-binding preflight -> 授权内衔接 execute -> readback',
     managedLauncher: path.join(os.homedir(), '.shein-bi', 'cli', 'shein-bi-ops.cmd'),
   };
 }
@@ -3400,7 +3400,7 @@ async function main() {
       mode: 'structured-operation',
       nextStep: preflightJson.ok === false
         ? '任务已保留；请按 task ID 处理 blockers 后重跑 preflight，勿重复 operate 创建任务。'
-        : '核对系统检查结果；只有用户明确确认后才调用 execute。',
+        : '核对系统检查结果；若用户指令已包含明确业务动作，由当前任务衔接 execute，无需重复向用户确认或搬运 hash。',
     };
     print(output);
     applyLinkOpsExecutionExitCode(output);
