@@ -40,9 +40,9 @@ try {
   }
   const policy = JSON.parse(await fs.readFile(path.join(root, 'config/inventory_replenishment_policy.json')));
   // No listener, socket, HTTP client, or production credentials in this suite.
-  const denyNetwork = path.join(temp, 'deny-network.cjs');
-  await fs.writeFile(denyNetwork, `require('node:net').Socket.prototype.connect = function(){throw Error('NETWORK_FORBIDDEN')}; global.fetch = () => {throw Error('NETWORK_FORBIDDEN')};`);
-  const env = {...process.env, NODE_OPTIONS: '--require=' + denyNetwork, SHEIN_BI_INVENTORY_JOURNAL_DIRS: '',
+  const denyNetwork = path.join(temp, 'deny-network.mjs');
+  await fs.writeFile(denyNetwork, `import net from 'node:net'; net.Socket.prototype.connect = function(){throw Error('NETWORK_FORBIDDEN')}; global.fetch = () => {throw Error('NETWORK_FORBIDDEN')};`);
+  const env = {...process.env, NODE_OPTIONS: '--import=' + denyNetwork, SHEIN_BI_INVENTORY_JOURNAL_DIRS: '',
     SHEIN_BI_INVENTORY_GLOBAL_LOCK_FILE: path.join(temp, 'locks/global.lock'), SHEIN_BI_INVENTORY_SKU_LOCK_DIR: path.join(temp, 'locks/sku'),
     SHEIN_BI_INVENTORY_AUTOMATION_CONTEXT: 'cloud_daily_inventory_replenishment_guard',
     SHEIN_BI_INVENTORY_AUTOMATION_AUTHORIZATION: policy.execution.automaticExecution.authorizationByContext?.cloud_daily_inventory_replenishment_guard || policy.execution.automaticExecution.authorizationId};
