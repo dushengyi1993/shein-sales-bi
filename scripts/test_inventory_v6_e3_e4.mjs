@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
-import http from 'node:http';
+import vm from 'node:vm';
 import os from 'node:os';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 
@@ -30,6 +30,8 @@ import {createLinkOpsJsonRepository} from '../lib/link_ops_json_repository.mjs';
 import {createLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
 import {appendDurableJournalRecord} from '../lib/durable_inventory_write.mjs';
+import {buildDailyInventoryPlanHashPayload, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {verifyInventoryDryRun} from '../lib/inventory_dry_run_integrity.mjs';
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -401,11 +403,22 @@ try {
     const result = structuredClone(contractResult);
     result.execute = execute;
     result.results.forEach(row => { row.state = state; });
+    if (!execute) {
+      Object.assign(plan, {commandId: options.commandId, executable: true, blockers: []});
+      plan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
+      Object.assign(result, {commandId: options.commandId, executionMode: 'dry_run', planHash: plan.payloadHash, unresolvedIntents: []});
+      result.results.forEach(row => { delete row.before; delete row.after; delete row.writes; });
+    }
     await fs.writeFile(options.stagingJournalFile, '');
     async function writeTuple(mutateMarker = () => {}) {
       await fs.writeFile(options.stagingPlanFile, crlfJson(plan));
       await fs.writeFile(options.stagingResultFile, crlfJson(result));
-      const status = evaluateResultBatchStatus(result, plan.actionable.length);
+      if (!execute) await fs.writeFile(options.stagingJournalFile, result.results.map(row => JSON.stringify({
+        kind: 'result', planHash: plan.payloadHash, row,
+      })).join('\r\n') + '\r\n');
+      const dryRunSummary = !execute ? await verifyInventoryDryRun({plan, result, commandId: options.commandId,
+        journalFile: options.stagingJournalFile}) : null;
+      const status = evaluateResultBatchStatus(result, plan.actionable.length, dryRunSummary);
       const marker = {
         stage: 'daily-inventory-guard', runDate: plan.date,
         businessDate: new Date(Date.parse(plan.date + 'T12:00:00Z') - 86_400_000).toISOString().slice(0, 10),
@@ -695,122 +708,144 @@ try {
   });
 
   // =========================================================================
-  // SUITE 3: Actual Mock HTTP Portal & CLI Flow
+  // SUITE 3: Direct CLI with in-process mock transport (no sockets or APIs).
   // =========================================================================
-  console.log('\n--- Suite 3: Actual Mock HTTP Portal & CLI Flow ---');
+  console.log('\n--- Suite 3: Direct CLI Offline Transport Contract ---');
+  const sessionDir = path.join(tempRoot, 'cli-session');
+  const sessionFile = path.join(sessionDir, 'session.json');
+  const callsFile = path.join(tempRoot, 'cli-calls.jsonl');
+  const transportFile = path.join(tempRoot, 'cli-transport.mjs');
+  await writeJson(sessionFile, {username: 'test_operator_cli'});
+  await fs.writeFile(callsFile, '');
+  await fs.writeFile(transportFile, `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs/promises';
+    import path from 'node:path';
+    import crypto from 'node:crypto';
+    globalThis.fetch = async (url, options) => {
+      assert.equal(String(url), 'https://inventory-cli.invalid/api/inventory-replenishment-run');
+      assert.equal(options.method, 'POST');
+      const payload = JSON.parse(options.body);
+      const receiptFile = path.join(process.env.CLI_FIXTURE_SESSION_DIR, 'inventory-commands',
+        crypto.createHash('sha256').update(payload.commandId).digest('hex') + '.json');
+      const receipt = JSON.parse(await fs.readFile(receiptFile, 'utf8'));
+      assert.deepEqual(receipt.request, payload, 'exact receipt must exist before dispatch');
+      assert.ok(receipt.status === 'dispatch_pending' || receipt.response);
+      await fs.appendFile(process.env.CLI_FIXTURE_CALLS, JSON.stringify(payload) + '\\n');
+      return new Response(JSON.stringify({ok: true, data: {
+        jobId: 'fixture_' + payload.commandId, commandId: payload.commandId, status: 'queued',
+      }}), {status: 202, headers: {'content-type': 'application/json'}});
+    };
+  `);
+  const cli = (command, flags = []) => execFileAsync(process.execPath, [
+    '--import', pathToFileURL(transportFile).href, path.join(SCRIPT_ROOT, 'scripts', 'bi_ops_cli.mjs'),
+    command, '--base-url', 'https://inventory-cli.invalid', '--session-file', sessionFile,
+    ...flags,
+  ], {cwd: SCRIPT_ROOT, windowsHide: true, env: {
+    ...process.env, CLI_FIXTURE_SESSION_DIR: sessionDir, CLI_FIXTURE_CALLS: callsFile,
+  }});
+  const calls = async () => (await fs.readFile(callsFile, 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+  const receiptPath = id => path.join(sessionDir, 'inventory-commands', crypto.createHash('sha256').update(id).digest('hex') + '.json');
 
-  let serverReceived = [];
-  const portalServer = http.createServer((req, res) => {
-    if (req.url === '/api/inventory-replenishment-run' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        const parsed = JSON.parse(body);
-        serverReceived.push(parsed);
-        // Server response as documented in serve_bi_portal.mjs:
-        // HTTP 202 with state: "queued"
-        res.writeHead(202, {'Content-Type': 'application/json'});
-        res.end(JSON.stringify({
-          ok: true,
-          data: {
-            jobId: 'job_portal_' + parsed.commandId,
-            status: 'queued',
-            commandId: parsed.commandId,
-            createdAt: new Date().toISOString(),
-          }
-        }));
-      });
-    } else {
-      res.writeHead(404);
-      res.end();
+  await asyncCheck('3.1: all aliases default to execution; explicit preview wins; queued is not completed', async () => {
+    for (const command of ['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory']) {
+      for (const [flags, dryRun] of [
+        [[], false], [['--dry-run'], true], [['--mode', 'dry-run'], true],
+        [['--mode', 'execute'], false], [['--mode', 'execute', '--dry-run'], true],
+        [['--dry-run', '--mode', 'execute'], true],
+        [['--mode'], true],
+      ]) {
+        const before = (await calls()).length;
+        const {stdout, stderr} = await cli(command, flags);
+        const sent = await calls();
+        assert.equal(sent.length, before + 1);
+        const payload = sent.at(-1);
+        assert.equal(payload.dryRun, dryRun, command + ' ' + flags.join(' '));
+        assert.match(payload.commandId, /^[0-9a-f-]{36}$/);
+        assert.match(stdout, /queued/);
+        assert.doesNotMatch(stdout, /completed/);
+        assert.ok(stderr.includes(payload.commandId));
+        const receipt = JSON.parse(await fs.readFile(receiptPath(payload.commandId), 'utf8'));
+        assert.deepEqual(receipt.request, payload);
+        assert.equal(receipt.response.data.status, 'queued');
+      }
     }
   });
 
-  await new Promise(r => portalServer.listen(0, '127.0.0.1', r));
-  const portalPort = portalServer.address().port;
-  const portalBase = 'http://127.0.0.1:' + portalPort;
+  await asyncCheck('3.1b: invalid inventory modes reject before receipt or dispatch, even with --dry-run', async () => {
+    for (const command of ['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory']) {
+      for (const mode of ['unsupported', 'dry_run']) {
+        for (const flags of [['--mode', mode], ['--mode', mode, '--dry-run'], ['--dry-run', '--mode', mode]]) {
+          const commandId = crypto.randomUUID();
+          const before = (await calls()).length;
+          const receiptsBefore = await fs.readdir(path.join(sessionDir, 'inventory-commands'));
+          await assert.rejects(cli(command, ['--command-id', commandId, ...flags]), /Inventory maintenance --mode must be execute or dry-run/);
+          assert.equal((await calls()).length, before, 'invalid mode must not dispatch');
+          await assert.rejects(fs.readFile(receiptPath(commandId)), {code: 'ENOENT'});
+          assert.deepEqual(await fs.readdir(path.join(sessionDir, 'inventory-commands')), receiptsBefore);
+        }
+      }
+    }
+  });
 
-  try {
-    const sessionDir = path.join(tempRoot, 'cli-session');
-    await fs.mkdir(sessionDir, {recursive: true});
-    const sessionFile = path.join(sessionDir, 'session.json');
-    await writeJson(sessionFile, {username: 'test_operator_cli'});
+  await asyncCheck('3.2: same ID preserves date and parameters; drift never dispatches', async () => {
+    const flags = ['--command-id', 'same-execution', '--date', businessDate];
+    await cli('maintain-inventory', flags);
+    const original = (await calls()).at(-1);
+    await cli('maintain-inventory', ['--command-id', 'same-execution']);
+    assert.deepEqual((await calls()).at(-1), original);
+    for (const drift of [['--max-rows', '500'], ['--dry-run'], ['--date', today]]) {
+      const before = (await calls()).length;
+      await assert.rejects(cli('maintain-inventory', [...flags, ...drift]), /already belongs to a different inventory request/);
+      assert.equal((await calls()).length, before);
+    }
+  });
 
-    // 3.1: Automatic UUID, persistent receipt written BEFORE network dispatch, stdout queued
-    await asyncCheck('3.1: CLI auto-UUID writes receipt and outputs queued status', async () => {
-      const {stdout, stderr} = await execFileAsync(process.execPath, [
-        path.join(SCRIPT_ROOT, 'scripts', 'bi_ops_cli.mjs'),
-        'maintain-inventory',
-        '--base-url', portalBase,
-        '--session-file', sessionFile,
-        '--date', today,
-      ], {cwd: SCRIPT_ROOT});
+  await asyncCheck('3.3: old dry-run receipts cannot become execution; new ID requests a fresh plan', async () => {
+    for (const status of ['dispatch_pending', 'responded']) {
+      const commandId = 'old-preview-' + status;
+      const request = {date: businessDate, commandId, dryRun: true, maxRows: 1000};
+      await writeJson(receiptPath(commandId), {commandId, request, ...(status === 'dispatch_pending'
+        ? {status} : {response: {ok: true, data: {status: 'queued'}}})});
+      const original = await fs.readFile(receiptPath(commandId), 'utf8');
+      for (const command of ['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory']) {
+        for (const mode of [[], ['--mode', 'execute']]) {
+          const before = (await calls()).length;
+          await assert.rejects(cli(command, ['--command-id', commandId, ...mode]), /new command ID and a fresh cloud plan/);
+          assert.equal((await calls()).length, before, 'old preview must not resubmit');
+          assert.equal(await fs.readFile(receiptPath(commandId), 'utf8'), original);
+        }
+      }
+      for (const preview of [['--dry-run'], ['--mode', 'dry-run']]) {
+        await cli('maintain-inventory', ['--command-id', commandId, ...preview]);
+        assert.deepEqual((await calls()).at(-1), request);
+      }
+      await cli('maintain-inventory', ['--command-id', 'fresh-execution-' + status]);
+      const fresh = (await calls()).at(-1);
+      assert.notEqual(fresh.commandId, commandId);
+      assert.equal(fresh.dryRun, false);
+      assert.equal(fresh.date, today);
+      assert.deepEqual(Object.keys(fresh), ['date', 'commandId', 'dryRun', 'maxRows'], 'no old plan is replayed');
+    }
+  });
 
-      assert.equal(serverReceived.length, 1);
-      const dispatched = serverReceived[0];
-      assert.ok(dispatched.commandId, 'auto UUID commandId must be generated');
-
-      // Verify stdout shows queued, NOT completed
-      assert(stdout.includes('queued'), 'stdout must report queued, not completed');
-      assert(!stdout.includes('completed'), 'stdout must not claim unverified completed');
-
-      // Verify receipt was written
-      const cmdHash = crypto.createHash('sha256').update(dispatched.commandId).digest('hex');
-      const receiptPath = path.join(sessionDir, 'inventory-commands', cmdHash + '.json');
-      const receipt = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
-      assert.equal(receipt.commandId, dispatched.commandId);
-      assert.equal(receipt.response.ok, true);
-      assert.equal(receipt.response.data.status, 'queued');
+  await asyncCheck('3.4: unrelated commands retain global dry-run default and explicit mode behavior', async () => {
+    const source = await fs.readFile(path.join(SCRIPT_ROOT, 'scripts', 'bi_ops_cli.mjs'), 'utf8');
+    const parser = source.slice(source.indexOf('function parseArgs('), source.indexOf('function normalizeOperationName('));
+    const parse = vm.runInNewContext(parser + '; parseArgs', {
+      DEFAULT_BASE_URL: 'https://inventory-cli.invalid', DEFAULT_SESSION_FILE: sessionFile,
+      DEFAULT_PARTNER_KNOWLEDGE_CACHE_DIR: tempRoot,
+      process: {env: {}},
     });
-
-    // 3.2: Explicit same commandId retry maintains idempotency and consistency
-    await asyncCheck('3.2: explicit same commandId retry is consistent and safe', async () => {
-      const explicitId = 'explicit-cli-cmd-009';
-      serverReceived = [];
-
-      // First run
-      const {stdout: out1} = await execFileAsync(process.execPath, [
-        path.join(SCRIPT_ROOT, 'scripts', 'bi_ops_cli.mjs'),
-        'maintain-inventory',
-        '--base-url', portalBase,
-        '--session-file', sessionFile,
-        '--command-id', explicitId,
-        '--date', today,
-      ], {cwd: SCRIPT_ROOT});
-
-      // Second run (retry)
-      const {stdout: out2} = await execFileAsync(process.execPath, [
-        path.join(SCRIPT_ROOT, 'scripts', 'bi_ops_cli.mjs'),
-        'maintain-inventory',
-        '--base-url', portalBase,
-        '--session-file', sessionFile,
-        '--command-id', explicitId,
-        '--date', today,
-      ], {cwd: SCRIPT_ROOT});
-
-      assert.equal(serverReceived.length, 2);
-      assert.equal(serverReceived[0].commandId, explicitId);
-      assert.equal(serverReceived[1].commandId, explicitId);
-      assert(out1.includes('queued'));
-      assert(out2.includes('queued'));
-
-      // Modifying parameters on same commandId is rejected locally by receipt check
-      await assert.rejects(
-        execFileAsync(process.execPath, [
-          path.join(SCRIPT_ROOT, 'scripts', 'bi_ops_cli.mjs'),
-          'maintain-inventory',
-          '--base-url', portalBase,
-          '--session-file', sessionFile,
-          '--command-id', explicitId,
-          '--date', today,
-          '--max-rows', '500', // altered payload
-        ], {cwd: SCRIPT_ROOT}),
-        /already belongs to a different inventory request/
-      );
-    });
-  } finally {
-    await new Promise(r => portalServer.close(r));
-  }
+    for (const command of ['upload-pic', 'transform-pic', 'audit-status', 'search-product', 'publish-standard', 'shelf-quota', 'query']) {
+      assert.equal(parse([command]).mode, 'dry-run');
+      assert.equal(parse([command]).modeProvided, false);
+      for (const mode of ['dry-run', 'execute', 'unsupported']) {
+        assert.equal(parse([command, '--mode', mode]).mode, mode);
+        assert.equal(parse([command, '--mode', mode]).modeProvided, true);
+      }
+    }
+  });
 
   // =========================================================================
   // Clean up temporary files

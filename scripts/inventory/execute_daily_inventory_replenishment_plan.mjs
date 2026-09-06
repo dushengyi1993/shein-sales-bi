@@ -16,6 +16,7 @@ import {
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
 import {inventoryDetailRefreshWindow} from '../../lib/inventory_detail_refresh_window.mjs';
+import {verifyInventoryDryRun} from '../../lib/inventory_dry_run_integrity.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../../lib/shein_openapi_client.mjs';
 import {selectVirtualInventoryWarehouseCode} from '../../lib/shein_inventory_warehouse.mjs';
 import {
@@ -591,8 +592,9 @@ const resultEnvelope = currentResults => ({
   unresolvedIntents: [],
   results: currentResults,
 });
-const writeResultFile = async currentResults => {
+const writeResultFile = async (currentResults, dryRunSummary = null) => {
   const envelope = resultEnvelope(currentResults);
+  if (dryRunSummary) envelope.dryRunSummary = dryRunSummary;
   await fs.mkdir(path.dirname(args.out), {recursive: true});
   await fs.writeFile(`${args.out}.tmp`, `${JSON.stringify(envelope, null, 2)}\n`, 'utf8');
   await fs.rename(`${args.out}.tmp`, args.out);
@@ -1468,23 +1470,32 @@ for (const row of rows) {
     }
   }
 }
-const unsafeResultCount = results.filter(row => ['blocked', 'pre_submit_blocked', 'blocked_by_manual_resolution_fence', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve', 'historical_readback_matched'].includes(row.state)).length;
+let dryRunSummary = null;
+let dryRunError = null;
+if (!args.execute) {
+  try {
+    dryRunSummary = await verifyInventoryDryRun({plan, result: resultEnvelope(results), journalFile, commandId: args.commandId});
+  } catch (error) { dryRunError = error.message; }
+}
+const unsafeResultCount = results.filter(row => ['blocked', ...(dryRunSummary ? [] : ['pre_submit_blocked']), 'blocked_by_manual_resolution_fence', 'submitted_but_readback_pending', 'suspicious_write_attempted', 'submitted_readback_failed', 'needs_manual_resolve', 'historical_readback_matched'].includes(row.state)).length;
 const counts = {
   total: results.length,
   updated: results.filter(row => row.state === 'updated_readback_matched').length,
   dryRunReady: results.filter(row => row.state === 'dry_run_ready').length,
+  ...(dryRunSummary ? {ready: dryRunSummary.ready, excluded: dryRunSummary.excluded} : {}),
   skipped: results.filter(row => row.state.startsWith('skipped_')).length,
   deferredHistorical: deferredHistoricalIntents.length,
   blocked: unsafeResultCount,
 };
 // Per-row progress is append-only in the journal. Publish the complete JSON
 // envelope exactly once so result-file IO stays O(N), not O(N²).
-await writeResultFile(results);
+await writeResultFile(results, dryRunSummary);
 console.log(JSON.stringify({
-  ok: counts.blocked === 0,
+  ok: counts.blocked === 0 && !dryRunError,
+  ...(!args.execute ? {state: dryRunSummary ? 'dry_run_completed' : 'dry_run_failed', error: dryRunError} : {}),
   planHash: plan.payloadHash,
   out: path.relative(ROOT, args.out).replaceAll(path.sep, '/'),
   journal: path.relative(ROOT, journalFile).replaceAll(path.sep, '/'),
   counts,
 }, null, 2));
-if (counts.blocked) process.exitCode = 1;
+if (counts.blocked || dryRunError) process.exitCode = 1;

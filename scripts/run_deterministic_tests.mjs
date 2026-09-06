@@ -3,6 +3,8 @@ import {spawnSync} from 'node:child_process';
 import {selectDeterministicTestShard} from '../lib/deterministic_test_shards.mjs';
 
 const tests = [
+  'scripts/test_link_ops_source_lock_recovery.mjs',
+  'scripts/test_inventory_dry_run_exclusion_pipeline.mjs',
   'scripts/test_pending_discuss_shared_delivery_entry.mjs',
   'scripts/test_cloud_team_report_process_lifecycle.mjs',
   'scripts/test_inventory_v6_owner_resume_validation.mjs',
