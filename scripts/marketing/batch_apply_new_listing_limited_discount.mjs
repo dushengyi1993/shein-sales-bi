@@ -37,7 +37,8 @@ import {
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
 import {createMarketingActivityInventoryOpenApiAdapter} from '../../lib/marketing_activity_inventory_openapi.mjs';
-import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {revalidateLowEtFastSellerRescueArtifact, verifyLegacyLowEtReceiptContinuation} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {readImmediateAdmissionQueueFd} from '../../lib/cloud_marketing_immediate_authorization.mjs';
 import {classifyUnifiedLoginRecovery, isMarketingLoginRedirect} from '../../lib/marketing_unified_login_recovery_contract.mjs';
 import {
   assertBeforeOuter,
@@ -663,6 +664,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       root: ROOT,
       rescue,
       reportDate: args.date,
+      legacyReceiptCapability: args.legacyReceiptCapability,
     });
     if (!record.lowEtFastSellerPricePullbackRevalidation.ok) {
       record.status = 'low_et_price_pullback_evidence_drift';
@@ -1042,6 +1044,38 @@ if (!fsSync.existsSync(planPath)) throw new Error(`New-listing plan does not exi
 const exactPlan = await loadExactFallbackRepairPlan({root: ROOT, planPath, guardPath: args.guard, date: args.date});
 if (args.expectedWorkFingerprint && exactPlan.workFingerprint !== args.expectedWorkFingerprint) {
   throw new Error(`Exact fallback work fingerprint mismatch: expected=${args.expectedWorkFingerprint} actual=${exactPlan.workFingerprint}`);
+}
+if (!args.dryRunOnly && args.skipBuild && args.continuation
+  && process.env.SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION === '1'
+  && process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_STATUS === 'consumed'
+  && exactPlan.entries.length && exactPlan.entries.every(entry => (entry.rescue.rows || []).every(row =>
+    row.lowEtFastSellerPricePullback?.applied === false
+    && !row.lowEtFastSellerPricePullback?.contextEvidenceScope
+    && !row.lowEtFastSellerPricePullback?.evidenceHash))
+  && Number(process.env.SHEIN_BI_MARKETING_IMMEDIATE_GRACEFUL_CUTOFF_EPOCH) - Math.floor(Date.now() / 1000) >= args.minStartBudgetSec) {
+  args.legacyReceiptCapability = await verifyLegacyLowEtReceiptContinuation({
+    root: ROOT, date: args.date, planPath, guardPath: args.guard,
+    queueFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE,
+    receiptFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE,
+    expectedReceiptSha256: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256,
+    expectedWorkFingerprint: args.expectedWorkFingerprint,
+    queueSnapshotBytes: /^[0-9]+$/.test(process.env.SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD || '')
+      ? readImmediateAdmissionQueueFd(process.env.SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD) : undefined,
+  }).catch(error => {
+    if (error.code === 'IMMEDIATE_AUTHORIZATION_TRANSACTION_CONTINUATION_REQUIRED') return null;
+    throw error;
+  });
+  const admission = args.legacyReceiptCapability;
+  if (admission) {
+  if (args.gracefulCutoffEpoch !== admission.gracefulCutoffEpoch
+    || args.deadline?.outerHardDeadlineEpoch !== admission.outerHardDeadlineEpoch
+    || !args.maxGroups || args.maxGroups > admission.remainingUnstartedGroups || args.minStartBudgetSec < 900) {
+    throw new Error('legacy receipt batch budget differs from the original receipt');
+  }
+  // Receipt continuation before any transaction is distinct from transaction
+  // recovery. This assignment is reachable only through the real verifier.
+  args.continuation = false;
+  }
 }
 automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
   action: MARKETING_AUTOMATION_ACTIONS.APPLY_NEW_LISTING_FALLBACK,

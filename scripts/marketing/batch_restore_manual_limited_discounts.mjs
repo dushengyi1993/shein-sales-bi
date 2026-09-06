@@ -10,6 +10,7 @@ import {
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
 import {loadExactManualRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
+import {readImmediateAdmissionQueueFd, verifyUnstartedRepairStageContinuation} from '../../lib/cloud_marketing_immediate_authorization.mjs';
 import {
   activityExecutionTransactionHash,
   classifyActivityInventoryFailureStatus,
@@ -643,6 +644,26 @@ const plan = exactPlan.plan;
 const workFingerprint = exactPlan.workFingerprint;
 if (args.expectedWorkFingerprint && args.expectedWorkFingerprint !== workFingerprint) {
   throw new Error(`Manual repair work fingerprint mismatch: expected=${args.expectedWorkFingerprint} actual=${workFingerprint}`);
+}
+if (!args.dryRunOnly && args.skipBuild && args.continuation
+  && process.env.SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION === '1'
+  && process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_STATUS === 'consumed'
+  && Number(process.env.SHEIN_BI_MARKETING_IMMEDIATE_GRACEFUL_CUTOFF_EPOCH) - Math.floor(Date.now() / 1000) >= 900) {
+  const admission = await verifyUnstartedRepairStageContinuation({
+    root: ROOT, date, stage: 'manualSpecialRestore', planPath, guardPath: args.guard,
+    expectedWorkFingerprint: args.expectedWorkFingerprint,
+    queueFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE,
+    receiptFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE,
+    expectedReceiptSha256: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256,
+    queueSnapshotBytes: readImmediateAdmissionQueueFd(process.env.SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD),
+  }).catch(error => {
+    if (error.code === 'IMMEDIATE_AUTHORIZATION_TRANSACTION_CONTINUATION_REQUIRED') return null;
+    throw error;
+  });
+  if (admission && (args.deadline?.gracefulCutoffEpoch !== admission.gracefulCutoffEpoch
+    || args.deadline?.outerHardDeadlineEpoch !== admission.outerHardDeadlineEpoch
+    || !args.maxItems || args.maxItems > (admission.remainingUnstartedGroups ?? admission.maxGroups))) throw new Error('manual admission exceeds original receipt budget');
+  if (admission) args.continuation = false;
 }
 automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
   action: MARKETING_AUTOMATION_ACTIONS.RESTORE_MANUAL_SPECIAL,
