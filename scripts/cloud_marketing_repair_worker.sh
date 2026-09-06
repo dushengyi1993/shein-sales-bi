@@ -75,7 +75,9 @@ IMMEDIATE_AUTHORIZATION_PRESENT=0
 if [[ -e "$IMMEDIATE_AUTHORIZATION_FILE" || -L "$IMMEDIATE_AUTHORIZATION_FILE" ]]; then
   IMMEDIATE_AUTHORIZATION_PRESENT=1
 fi
-if (( IMMEDIATE_AUTHORIZATION_PRESENT == 1 )); then
+if [[ "$IMMEDIATE_RUN_OVERRIDE" == "false" ]]; then
+  IMMEDIATE_MODE=0
+elif (( IMMEDIATE_AUTHORIZATION_PRESENT == 1 )); then
   IMMEDIATE_MODE=1
 elif [[ -z "$IMMEDIATE_RUN_OVERRIDE" || "$IMMEDIATE_RUN_OVERRIDE" == "false" ]]; then
   IMMEDIATE_MODE=0
@@ -2091,7 +2093,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$HIGH_CLICK_STATUS" != "not_required" &&
   ensure_fallback_start_budget
   WORK_FINGERPRINT="$(queue_value 'j.stages?.highClickSpecial?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
-  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
+  GUARD_PATH="$(queue_source_guard_file_locked)"
   HIGH_CLICK_PLAN_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.stages?.highClickSpecial?.planPath' '')")"
   RESULT_PATH="outputs/reports/high-click-low-conversion-special-execution-${DATE}.json"
   begin_stage_critical_section highClickSpecial || { status=$?; exit "$status"; }
@@ -2177,7 +2179,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
   refresh_executor_continuation_args
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint || j.stages?.manualSpecialRestore?.inputFingerprint' '')"
   WORK_FINGERPRINT="$(queue_value 'j.stages?.manualSpecialRestore?.workFingerprint' '')"
-  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
+  GUARD_PATH="$(queue_source_guard_file_locked)"
   MANUAL_PLAN_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.stages?.manualSpecialRestore?.planPath' '')")"
   MANUAL_OUT_DIR="$(dirname "$MANUAL_PLAN_PATH")"
   RESULT_PATH="tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-result.json"
@@ -2275,7 +2277,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$DRIFT_STATUS" != "not_required" && "$DR
   refresh_executor_continuation_args
   WORK_FINGERPRINT="$(queue_value 'j.stages?.driftRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
-  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
+  GUARD_PATH="$(queue_source_guard_file_locked)"
   RESULT_PATH="tmp/marketing-signup/limited-discount-rescue/batch-drift-fix-result-${DATE}.json"
   begin_stage_critical_section driftRepair || { status=$?; exit "$status"; }
   set +e
@@ -2364,7 +2366,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "
   refresh_executor_continuation_args
   WORK_FINGERPRINT="$(queue_value 'j.stages?.fallbackRepair?.workFingerprint' '')"
   export SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH="$WORK_FINGERPRINT"
-  GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
+  GUARD_PATH="$(queue_source_guard_file_locked)"
   RESULT_PATH="outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
   begin_stage_critical_section fallbackRepair || { status=$?; exit "$status"; }
   set +e

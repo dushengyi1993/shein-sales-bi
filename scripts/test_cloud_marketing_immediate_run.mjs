@@ -255,6 +255,135 @@ function runNativeWslAuthorizationVerify({moduleFile, authorizationFile, queueFi
 }
 
 try {
+  // Run the real CLI and wrapper against a migrated layout in one native
+  // process. The only execution endpoint is a local host-heavy stub.
+  const migratedProbe = bashExec(String.raw`sudo -n node --input-type=module <<'MIGRATED_NODE'
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {pathToFileURL} from 'node:url';
+const repo = ${JSON.stringify(shellPath(root))};
+const api = await import(pathToFileURL(path.join(repo, 'lib/cloud_marketing_immediate_authorization.mjs')));
+const temp = await fs.mkdtemp('/run/marketing-runtime-binding-');
+try {
+  const root = path.join(temp, 'opt/shein-bi/app');
+  const outputs = path.join(temp, 'data/shein-bi/outputs');
+  const authDir = path.join(temp, 'authorization');
+  for (const directory of [path.join(root, 'scripts'), path.join(root, 'lib'), outputs, authDir]) await fs.mkdir(directory, {recursive: true});
+  await fs.chmod(authDir, 0o700);
+  process.env.SHEIN_BI_OUTPUTS_ROOT = outputs;
+  delete process.env.SHEIN_BI_STATE_ROOT;
+  for (const file of ['scripts/manage_cloud_marketing_immediate_run.mjs', 'lib/cloud_marketing_immediate_authorization.mjs',
+    'lib/cloud_marketing_deadline_contract.mjs', 'lib/atomic_file_publish.mjs', 'lib/cloud_runtime_path_policy.mjs']) {
+    await fs.copyFile(path.join(repo, file), path.join(root, file));
+  }
+  const marker = path.join(temp, 'host.json');
+  await fs.writeFile(path.join(root, 'scripts/run_host_heavy_job.sh'),
+    '#!/bin/bash\nnode --input-type=module -e '+JSON.stringify('import fs from "node:fs"; fs.writeFileSync('+JSON.stringify(marker)+',JSON.stringify(process.env));')+'\nexit 75\n');
+  const date = api.businessDateAtEpoch(Math.floor(Date.now()/1000), 'Asia/Shanghai');
+  const now = Math.floor(Date.parse(date+'T04:00:00Z')/1000);
+  await fs.writeFile(path.join(temp,'fixture-clock.mjs'),'Date.now=()=>'+now+'000;\n');
+  process.env.NODE_OPTIONS='--import '+path.join(temp,'fixture-clock.mjs');
+  await fs.mkdir(path.join(temp,'bin'));
+  await fs.writeFile(path.join(temp,'bin/date'),'#!/bin/bash\nif [[ "$1" == +%s ]]; then echo '+now+'; else exec /bin/date "$@"; fi\n',{mode:0o755});
+  process.env.PATH=path.join(temp,'bin')+':'+process.env.PATH;
+  const guard = path.join(outputs, 'reports', 'marketing-daily-guard-'+date+'.json');
+  await fs.mkdir(path.dirname(guard), {recursive: true});
+  const bytes = Buffer.from('{"fixture":"canonical guard"}\n');
+  await fs.writeFile(guard, bytes);
+  const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  const queueFile = path.join(root, 'state/cloud_marketing_live_guard/repair-queues/marketing-repair-'+date+'.json');
+  await fs.mkdir(path.dirname(queueFile), {recursive: true});
+  const canonical = path.relative(root, guard);
+  assert.equal(canonical, '../../../data/shein-bi/outputs/reports/marketing-daily-guard-'+date+'.json');
+  let queue;
+  async function setup(sourceGuard, name, issuedAt = now, consume = true) {
+    queue = {schemaVersion: 1, date, sourceGuard, sourceGuardHash: hash,
+      queueFingerprint: '52a2e22a730073021473d4cd26696cf2d2a11c3ab6e64f53f02b752d85be2fa4', status: 'pending',
+      stages: Object.fromEntries(['highClickSpecial','manualSpecialRestore','driftRepair','fallbackRepair'].map(key=>[key,{status:'pending'}]))};
+    await fs.writeFile(queueFile, JSON.stringify(queue)+'\n');
+    const authorizationFile = path.join(authDir, name+'.json');
+    const options = {root, queueFile, date, authorizationFile, nowEpoch: issuedAt, timeZone:'Asia/Shanghai'};
+    await api.issueImmediateAuthorization({...options, sourceGuardFile:guard, maxGroups: 4, ttlSec: 3600,
+      reason:'isolated canonical continuation contract', confirmationToken:api.IMMEDIATE_CONFIRMATION_TOKEN});
+    await api.verifyIssuedImmediateAuthorization(options);
+    if (!consume) return options;
+    const consumed = await api.consumeImmediateAuthorization({...options, nowEpoch:issuedAt+1});
+    return {...options, receiptFile:consumed.consumedReceiptFile};
+  }
+  for (const [name, value] of [['legacy','outputs/reports/'+path.basename(guard)], ['canonical',canonical], ['absolute',guard]]) {
+    const options = await setup(value, name);
+    assert.equal((await api.findImmediateAuthorizationContinuation({...options, nowEpoch:now+2})).continuation, true);
+  }
+  // The receipt and queue retain their original bytes throughout discovery.
+  const options = await setup(canonical, 'expired', now-7200);
+  const savedQueue = await fs.readFile(queueFile);
+  const savedReceipt = await fs.readFile(options.receiptFile);
+  const cli = (...args) => spawnSync(process.execPath, [path.join(root,'scripts/manage_cloud_marketing_immediate_run.mjs'),
+    'find-continuation','--root',root,'--date',date,'--queue',queueFile,'--authorization-file',options.authorizationFile,
+    '--time-zone','Asia/Shanghai',...args], {encoding:'utf8',env:process.env});
+  const discovery = cli('--scheduled-discovery');
+  assert.equal(discovery.status,0,discovery.stderr);
+  assert.equal(JSON.parse(discovery.stdout).reason,'continuation_authorization_expired');
+  assert.equal(cli().status,64);
+  const env = {...process.env, SHEIN_BI_ROOT:root, SHEIN_BI_TZ:'Asia/Shanghai',
+    SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE:options.authorizationFile,
+    SHEIN_BI_MARKETING_LIVE_STATE_DIR:path.dirname(path.dirname(queueFile)),
+    SHEIN_BI_MARKETING_CLOUD_PRIMARY_ENABLED:'true', SHEIN_BI_MARKETING_REPAIR_RUN_BUDGET_SEC:'3600'};
+  delete env.SHEIN_BI_MARKETING_IMMEDIATE_RUN;
+  const wrapper = explicit => spawnSync('bash',[path.join(repo,'scripts/run_cloud_marketing_fallback_slot.sh')],
+    {encoding:'utf8',env:{...env,...(explicit?{SHEIN_BI_MARKETING_IMMEDIATE_RUN:'true'}:{})}});
+  const scheduled = wrapper(false);
+  assert.equal(scheduled.status,75,scheduled.stderr);
+  assert.match(scheduled.stderr,/stale continuation ignored/);
+  const selected = JSON.parse(await fs.readFile(marker,'utf8'));
+  assert.notEqual(selected.SHEIN_BI_MARKETING_IMMEDIATE_RUN,'true');
+  assert.ok(Number(selected.SHEIN_BI_MARKETING_REPAIR_GRACEFUL_CUTOFF_EPOCH) >= now+3600);
+  await fs.unlink(marker);
+  assert.equal(wrapper(true).status,64);
+  await assert.rejects(fs.stat(marker),{code:'ENOENT'});
+  assert.deepEqual(await fs.readFile(queueFile),savedQueue);
+  assert.deepEqual(await fs.readFile(options.receiptFile),savedReceipt);
+  const outside = path.join(temp,'unrelated.json');
+  await fs.writeFile(outside,bytes);
+  await fs.symlink(outside,path.join(outputs,'file-link.json'));
+  await fs.symlink(temp,path.join(outputs,'directory-link'));
+  for (const invalid of [outside,path.relative(root,outside),canonical+'/../'+path.basename(guard),
+    canonical+'\n', ' '+canonical, '../../../data/shein-bi/outputs/reports/missing.json',
+    '../../../data/shein-bi/outputs/file-link.json','../../../data/shein-bi/outputs/directory-link/unrelated.json']) {
+    await fs.writeFile(queueFile,JSON.stringify({...queue,sourceGuard:invalid})+'\n');
+    assert.equal(cli('--scheduled-discovery').status,64,'unsafe path must not become stale: '+invalid);
+  }
+  await fs.writeFile(queueFile,savedQueue);
+  await fs.writeFile(guard,Buffer.concat([bytes,Buffer.from(' ')]));
+  assert.equal(cli('--scheduled-discovery').status,64,'stale consumed receipt cannot hide guard hash drift');
+  await fs.writeFile(guard,bytes);
+  await fs.writeFile(options.receiptFile,'{}\n');
+  assert.equal(cli('--scheduled-discovery').status,64,'malformed immutable receipt remains blocked');
+  const issued = await setup(canonical, 'expired-issued', now-7200, false);
+  env.SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE = issued.authorizationFile;
+  const issuedBytes = await fs.readFile(issued.authorizationFile);
+  assert.equal(wrapper(false).status,75,'expired issued must reach cloud-primary');
+  assert.equal(JSON.parse(await fs.readFile(marker,'utf8')).SHEIN_BI_MARKETING_IMMEDIATE_RUN,'false');
+  await fs.unlink(marker);
+  assert.equal(wrapper(true).status,64,'explicit expired issued stays blocked');
+  await fs.writeFile(queueFile,JSON.stringify({...queue,sourceGuard:outside})+'\n');
+  assert.equal(wrapper(false).status,64,'expired issued cannot hide unsafe current guard');
+  await fs.writeFile(queueFile,JSON.stringify(queue)+'\n');
+  await fs.writeFile(issued.authorizationFile,'{}\n');
+  assert.equal(wrapper(false).status,64,'malformed issued cannot become cloud-primary');
+  await assert.rejects(fs.stat(marker),{code:'ENOENT'});
+  await fs.writeFile(issued.authorizationFile,issuedBytes);
+  console.log('canonical receipt CLI/wrapper: current legacy/canonical/absolute, expired scheduled/explicit, 8 invalid paths, malformed receipt PASS');
+} finally {
+  await fs.rm(temp,{recursive:true,force:true});
+}
+MIGRATED_NODE`, {timeout: 30000});
+  assert.equal(migratedProbe.error, undefined, migratedProbe.error?.message);
+  assert.equal(migratedProbe.status, 0, migratedProbe.stderr || migratedProbe.stdout);
+  process.stdout.write(migratedProbe.stdout);
   const date = businessDateAtEpoch(Math.floor(Date.now() / 1000), 'Asia/Shanghai');
   // Use a deterministic noon-in-business-date clock so the test remains
   // stable even when the host is close to midnight.
@@ -1195,6 +1324,7 @@ process.kill(process.pid, 'SIGKILL');
   await fsp.copyFile(path.join(root, 'lib', 'cloud_marketing_immediate_authorization.mjs'), path.join(harnessStageRoot, 'lib', 'cloud_marketing_immediate_authorization.mjs'));
   await fsp.copyFile(path.join(root, 'lib', 'cloud_marketing_deadline_contract.mjs'), path.join(harnessStageRoot, 'lib', 'cloud_marketing_deadline_contract.mjs'));
   await fsp.copyFile(path.join(root, 'lib', 'atomic_file_publish.mjs'), path.join(harnessStageRoot, 'lib', 'atomic_file_publish.mjs'));
+  await fsp.copyFile(path.join(root, 'lib', 'cloud_runtime_path_policy.mjs'), path.join(harnessStageRoot, 'lib', 'cloud_runtime_path_policy.mjs'));
   await fsp.writeFile(path.join(harnessStageRoot, 'scripts', 'run_host_heavy_job.sh'),
     `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > "${shellPath(harnessStageHostMarker)}"\nexit 75\n`, 'utf8');
   if (useNativeWslHarness) {
@@ -1216,6 +1346,7 @@ process.kill(process.pid, 'SIGKILL');
     wslCopy(harnessQueueFile, harnessQueueRuntimePath);
     wslCopy(path.join(harnessStageRoot, 'scripts', 'manage_cloud_marketing_immediate_run.mjs'), `${harnessRoot}/scripts/manage_cloud_marketing_immediate_run.mjs`);
     wslCopy(path.join(harnessStageRoot, 'lib', 'cloud_marketing_immediate_authorization.mjs'), `${harnessRoot}/lib/cloud_marketing_immediate_authorization.mjs`);
+    wslCopy(path.join(harnessStageRoot, 'lib', 'cloud_runtime_path_policy.mjs'), `${harnessRoot}/lib/cloud_runtime_path_policy.mjs`);
     wslCopy(path.join(harnessStageRoot, 'lib', 'cloud_marketing_deadline_contract.mjs'), `${harnessRoot}/lib/cloud_marketing_deadline_contract.mjs`);
     wslCopy(path.join(harnessStageRoot, 'lib', 'atomic_file_publish.mjs'), `${harnessRoot}/lib/atomic_file_publish.mjs`);
     wslCopy(path.join(harnessStageRoot, 'scripts', 'run_host_heavy_job.sh'), `${harnessRoot}/scripts/run_host_heavy_job.sh`);
@@ -1298,10 +1429,7 @@ process.kill(process.pid, 'SIGKILL');
   // failing closed before the ordinary 20:45/21:15 window logic.
   const staleHarness = {
     ...harnessIssued,
-    date: '2026-08-26',
-    queueFile: useNativeWslHarness
-      ? `${harnessRoot}/state/cloud_marketing_live_guard/repair-queues/marketing-repair-2026-08-26.json`
-      : shellPath(path.join(harnessStateDir, 'repair-queues', 'marketing-repair-2026-08-26.json')),
+    queueFingerprint: sha256('different structurally valid issued queue'),
   };
   await fsp.writeFile(harnessAuthorizationFile, `${JSON.stringify(staleHarness, null, 2)}\n`, 'utf8');
   if (useNativeWslHarness) wslCopy(harnessAuthorizationFile, harnessAuthorizationRuntimePath);

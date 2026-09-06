@@ -346,7 +346,7 @@ const V6_TEST_TIMEOUTS = {
   'scripts/test_marketing_transaction_mutation_evidence.mjs': 120000,
   'scripts/test_marketing_inventory_durable.mjs': 120000,
   'scripts/test_ops_business_delivery_hooks.mjs': 90000,
-  'scripts/test_cloud_marketing_primary_entry.mjs': 120000,
+  'scripts/test_cloud_marketing_primary_entry.mjs': 210000,
   'scripts/test_host_v6_resource_concurrency.mjs': 90000,
   'scripts/test_chrome_profile_startup.mjs': 60000,
   'scripts/test_install_cloud_runtime_path_namespaces.mjs': 120000,

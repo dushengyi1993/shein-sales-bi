@@ -12,6 +12,10 @@ const sourceFiles = [
   'scripts/resolve_cloud_runtime_artifact.mjs', 'scripts/manage_browser_task_leases.mjs',
   'scripts/manage_cloud_marketing_immediate_run.mjs', 'scripts/marketing/manage_marketing_repair_queue.mjs',
   'lib/marketing_plan_registry.mjs', 'lib/browser_task_lease.mjs',
+  'scripts/marketing/batch_restore_manual_limited_discounts.mjs',
+  'scripts/marketing/batch_apply_new_listing_limited_discount.mjs',
+  'scripts/marketing/replace_limited_discount_transactionally.mjs',
+  'scripts/marketing/manage_manual_limited_discount_override.mjs',
   'infra/systemd/shein-bi-cloud-marketing-live-guard.service',
   'infra/systemd/shein-bi-cloud-marketing-repair.service',
   'infra/systemd/shein-bi-cloud-marketing-repair.timer',
@@ -148,7 +152,9 @@ const row = {ok: true, store: 'S01', state: 'completed'};
 fs.mkdirSync(path.dirname(value('--result')), {recursive: true});
 const resultBytes = JSON.stringify({workFingerprint: value('--expected-work-fingerprint'),
   results: [row], processedThisRunResults: [row], totals: {processed: 1, processedThisRun: 1, blocked: 0, failed: 0, remainingItems: 0}}) + '\\n';
-if (process.env.FIXTURE_RESULT_KIND === 'symlink') {
+    if (process.env.FIXTURE_RESULT_KIND === 'missing') {
+      // Simulate a child that exits without publishing its promised result.
+    } else if (process.env.FIXTURE_RESULT_KIND === 'symlink') {
   const target = path.join(root, 'result-target.json');
   fs.writeFileSync(target, resultBytes);
   fs.symlinkSync(target, value('--result'));
@@ -197,9 +203,9 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
         fs.rmSync(path.join(temp, relative), {force: true});
       }
     };
-    const run = (overrides = {}, entry = 'run_cloud_marketing_fallback_slot.sh') => {
+    const run = (overrides = {}, entry = 'run_cloud_marketing_fallback_slot.sh', timeout = 20_000) => {
       const result = spawnSync('/bin/bash', [path.join(temp, 'scripts', entry)], {
-        cwd: temp, env: {...env, ...overrides}, encoding: 'utf8', timeout: 20_000, maxBuffer: 2 * 1024 * 1024,
+        cwd: temp, env: {...env, ...overrides}, encoding: 'utf8', timeout, maxBuffer: 2 * 1024 * 1024,
       });
       assert.equal(result.error, undefined, result.error?.message + '\n' + result.stderr);
       return result;
@@ -253,6 +259,22 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
       assert.deepEqual(fs.readFileSync(queueFile), queueBytes);
       assert.deepEqual(fs.readFileSync(oldQueue), originalOldBytes);
     });
+    await check('missing result cannot settle or advance the queue', async () => {
+      reset(); const before=fs.readFileSync(queueFile);
+      const result=run({FIXTURE_RESULT_KIND:'missing'});
+      assert.notEqual(result.status,0,result.stdout+result.stderr);
+      assert.equal(executors().length,1);
+      assert.deepEqual(fs.readFileSync(queueFile),before);
+    });
+    for (const [name,file] of [['guard',guard],['plan',plan]]) {
+      await check('missing '+name+' stops before executor', async () => {
+        reset(); const before=fs.readFileSync(queueFile), bytes=fs.readFileSync(file);
+        try {
+          fs.unlinkSync(file); const result=run();
+          assert.notEqual(result.status,0,result.stdout+result.stderr); noExecution(before);
+        } finally { fs.writeFileSync(file,bytes); }
+      });
+    }
     await check('real resolver rejects conflicting result namespaces instead of accepting either success', async () => {
       reset();
       const queueBytes = fs.readFileSync(queueFile);
@@ -388,6 +410,171 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
       const calendar = [...sources['infra/systemd/shein-bi-cloud-marketing-repair.timer'].matchAll(/^OnCalendar=(.+)$/gm)].map(row => row[1].trim());
       assert.deepEqual(calendar, ['*-*-* 20:45:00', '*-*-* 21:15:00']);
     });
+    await check('bound runtime: expired receipt to fresh queue and real manual/fallback transactions', async () => {
+      const startedAt=Date.now();
+      const bound = fs.mkdtempSync('/run/marketing-bound-entry-');
+      const mounted = [];
+      const command = (name, args) => {
+        const result = spawnSync(name, args, {encoding: 'utf8'});
+        assert.equal(result.status, 0, result.stderr); return result;
+      };
+      try {
+        for (const domain of ['outputs', 'state']) {
+          const physical = path.join(bound, domain);
+          fs.cpSync(path.join(temp, domain), physical, {recursive: true});
+          command('mount', ['--bind', physical, path.join(temp, domain)]);
+          mounted.push(path.join(temp, domain));
+          assert.equal(fs.statSync(physical).ino, fs.statSync(path.join(temp, domain)).ino);
+        }
+        const now = epoch;
+        write('fixture-clock.mjs','Date.now=()=>Number(process.env.FIXTURE_EPOCH)*1000;\n');
+        json('config/stores.json',{stores:stores.map((storeKey,i)=>({storeKey,enabled:true,port:9200+i}))});
+        const guardRel = 'outputs/reports/marketing-daily-guard-'+date+'.json';
+        const manualDir = 'tmp/marketing-signup/manual-limited-discount-restore/'+date;
+        const priceRel = path.relative(temp, published.priceOverrides);
+        const policy = {automationExecution: {enabled:true, authorizationId:'fixture-standing', allowedContexts:['fixture'],
+          allowedActions:['restore_manual_special_limited_discount','apply_new_listing_limited_discount_fallback','create_or_replace_limited_discount_activity'],
+          storeScope:'all_enabled_stores', perRunPayloadHashRequired:true}};
+        json('config/marketing_pricing_policy.json', policy);
+        const manualRegistry = json('manual.json', {entries:[{storeKey:'S01',skc:'manual',canonical:'SK-M',specialPrice:25,activityStock:10,
+          validFrom:date+' 00:00:00',validTo:date+' 23:59:59',reason:'fixture',sourceThreadId:'fixture',sourceArtifact:'fixture',status:'active'}]});
+        const newGuard = {...readJson(guard), manualSpecialLimitedDiscount:{actionCount:1},
+          highClickLowConversionSpecial:{actionCount:0}, limitedDiscountTargetPriceDrift:{source:'tmp/live.json',belowRows:[]},
+          targetPlanSelection:{...readJson(guard).targetPlanSelection,priceOverrides:priceRel}};
+        json(guardRel,newGuard);
+        json('outputs/reports/high-click-low-conversion-special-plan-'+date+'.json',
+          {reportDate:date,sourceGuard:guardRel,sourceGuardHash:shaFile(path.join(temp,guardRel)),actionCount:0,rows:[]});
+        const manualRescue = manualDir+'/manual-limited-restore-S01-manual.json';
+        json(manualRescue,{storeKey:'S01',sourceGuard:guardRel,purpose:'manual_special_limited_discount_registry_restore',
+          activityStock:10,rows:[{storeKey:'S01',skc:'manual',canonical:'SK-M',limitedDiscountPrice:25,manualSpecialLimitedDiscount:true}]});
+        json(manualDir+'/manual-limited-discount-restore-plan.json', {reportDate:date,sourceGuard:guardRel,restoreCount:1,
+          rescueFiles:[{storeKey:'S01',skc:'manual',path:manualRescue}]});
+        const links = {storeLinks:[{store_key:'S02',skc:'fixture-1',standard_goods_sn:'SK-F',c30_valid_sale_cnt:1,c7_eps_uv:100},
+          {store_key:'S03',skc:'fixture-2',standard_goods_sn:'SK-U',c30_valid_sale_cnt:1,c7_eps_uv:100}]};
+        const inventory = {products:['SK-F','SK-U'].map(canonical=>({canonical,inventory_match_status:'matched',operational_sellable_qty:1000,operational_snapshot_date:date}))};
+        json('outputs/bi-portal/sections/linksData.json',links);
+        json('outputs/bi-portal/sections/inventoryTrend.json',inventory);
+        const costDoc = {costMap:{'SK-F':10,'SK-U':10}};
+        json('tmp/mbrs/marketing-cost-map.json',costDoc);
+        const pricing = await import(pathToFileURL(path.join(temp,'lib/marketing_low_et_fast_seller_pricing.mjs')));
+        const context = pricing.buildLowEtFastSellerPricingContext({linksDataDoc:links,inventoryTrendDoc:inventory,
+          baselineDoc:readJson(published.priceOverrides),costDoc,marketingPolicy:policy,reportDate:date});
+        const rescues = [];
+        for (const [storeKey,skc,canonical,price] of [['S02','fixture-1','SK-F',25.01],['S03','fixture-2','SK-U',25.02]]) {
+          const row = pricing.applyLowEtFastSellerPricePullback({row:{storeKey,skc,canonical,limitedDiscountPrice:price,finalTargetPrice:price,targetPrice:price},context,costDoc}).row;
+          const file = 'tmp/fallback-'+storeKey+'.json';
+          json(file,{storeKey,createdAt:date+'T00:00:00Z',sourceGuard:guardRel,sourcePriceOverrides:priceRel,
+            sourcePriceOverridesSha256:published.priceOverridesHash,purpose:'new_listing_or_relisted_top_treatment_limited_discount_fallback_'+date,
+            activityStock:10,rows:[row]});
+          rescues.push({storeKey,path:file,count:1});
+        }
+        json('outputs/reports/new-listing-7d-limited-discount-plan-'+date+'.json',{reportDate:date,sourceGuard:guardRel,
+          sourceCurrentMarketingLiveScan:'tmp/live.json',sourcePriceOverrides:priceRel,sourcePriceOverridesSha256:published.priceOverridesHash,rescueFiles:rescues});
+        // Keep the actual batch and durable replacement code. Only browser
+        // launch/close and the platform's create/readback leaf are substituted.
+        for (const [file,entry] of [['batch_restore_manual_limited_discounts.mjs','runManualRestoreBatch'],
+          ['batch_apply_new_listing_limited_discount.mjs','runNewListingFallbackBatch']]) {
+          const relative='scripts/marketing/'+file;
+          write(relative,sources[relative].replace(entry+'().catch',entry+'(undefined, {launchStore:async()=>({ok:true}),closeStore:async()=>({ok:true})}).catch'));
+        }
+        write('scripts/marketing/apply_hl_limited_discount_rescue.mjs', `
+import fs from 'node:fs'; import path from 'node:path';
+const args=process.argv.slice(2), val=k=>args[args.indexOf(k)+1], root=process.env.SHEIN_BI_ROOT;
+const rescue=JSON.parse(fs.readFileSync(val('--rescue'),'utf8'));
+const skc=rescue.rows[0].skc, state=path.join(root,'platform-'+skc+'.json');
+if(args.includes('--execute')) {
+ fs.appendFileSync(path.join(root,'posts.log'),skc+'\\n');
+ if(skc==='fixture-2') process.exit(2);
+ fs.writeFileSync(state,'{}');
+}
+const covered=fs.existsSync(state);
+const full={ok:true,alreadyCovered:covered,createdActivityId:covered?12345:null,validation:{invalid:[],missing:[]},
+ before:{conflictActivities:[]}, after:{exactReadbackRows:covered?rescue.rows.map(row=>({skc:row.skc,ok:true})):[]},
+ createdActivity:covered?{state:2,goods:rescue.rows.map(row=>({skc:row.skc,product_act_price:row.limitedDiscountPrice,attend_num_sum:10}))}:null};
+const out=path.join(root,'platform-read-'+skc+'.json'); fs.writeFileSync(out,JSON.stringify(full)); console.log(JSON.stringify({out}));
+`);
+        const envBound = {...env,FIXTURE_EPOCH:String(now),NODE_OPTIONS:'--import '+path.join(temp,'fixture-clock.mjs'),SHEIN_BI_OUTPUTS_ROOT:path.join(bound,'outputs'),SHEIN_BI_STATE_ROOT:path.join(bound,'state'),
+          SHEIN_BI_MARKETING_REPAIR_MAX_GROUPS:'4',SHEIN_BI_MARKETING_POLICY_FILE:path.join(temp,'config/marketing_pricing_policy.json'),
+          SHEIN_BI_MARKETING_AUTOMATION_CONTEXT:'fixture',SHEIN_BI_MARKETING_AUTOMATION_AUTHORIZATION:'fixture-standing',
+          SHEIN_BI_MANUAL_LIMITED_DISCOUNT_REGISTRY:manualRegistry,SHEIN_BI_MARKETING_CLOUD_WRITE_GATE:'bounded-repair-v1'};
+        const runLeaf=(file,args=[],more={})=>spawnSync(process.execPath,[path.join(temp,file),...args],
+          {cwd:temp,env:{...envBound,...more},encoding:'utf8',timeout:20000,maxBuffer:2*1024*1024});
+        const seed=runLeaf('scripts/marketing/replace_limited_discount_transactionally.mjs',
+          ['--store','S03','--port','9222','--rescue',path.join(temp,'tmp/fallback-S03.json'),'--execute'],
+          {SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH:hash('old-work-fingerprint')});
+        assert.equal(seed.status,2,seed.stderr||seed.stdout);
+        const journals=fs.readdirSync(path.join(temp,'state/marketing-replacement-transactions'));
+        assert.equal(journals.filter(name=>name.endsWith('.json')).length,1);
+        const unknownName=journals.find(name=>name.endsWith('.json'));
+        const unknown=readJson(path.join(temp,'state/marketing-replacement-transactions',unknownName));
+        assert.equal(unknown.result.status,'submitted_without_exact_readback');
+        assert.ok(unknown.createAttempt,'real submit attempt must remain durably recorded');
+        write('posts.log','');
+        const authDir=path.join(bound,'authority');fs.mkdirSync(authDir,{mode:0o700});
+        envBound.SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE=path.join(authDir,'authorization.json');
+        const authorization = await import(pathToFileURL(path.join(temp,'lib/cloud_marketing_immediate_authorization.mjs')));
+        const physicalGuard=path.join(bound,'outputs/reports',path.basename(guardRel));
+        json(queueRelative,{...queue,sourceGuard:path.relative(temp,physicalGuard),sourceGuardHash:shaFile(physicalGuard)});
+        const authOptions={root:temp,date,queueFile,authorizationFile:envBound.SHEIN_BI_MARKETING_IMMEDIATE_AUTHORIZATION_FILE,
+          nowEpoch:now-7200,timeZone:'Asia/Shanghai'};
+        const savedEnv={...process.env};Object.assign(process.env,envBound);
+        let consumed;
+        try {
+          await authorization.issueImmediateAuthorization({...authOptions,sourceGuardFile:physicalGuard,maxGroups:4,ttlSec:3600,
+            reason:'bound stale fixture',confirmationToken:authorization.IMMEDIATE_CONFIRMATION_TOKEN});
+          consumed=await authorization.consumeImmediateAuthorization({...authOptions,nowEpoch:now-7199});
+        } finally { for(const key of Object.keys(process.env)) if(!(key in savedEnv)) delete process.env[key]; Object.assign(process.env,savedEnv); }
+        const receiptBytes=fs.readFileSync(consumed.consumedReceiptFile);
+        // The scan fixture supplies immutable facts/plans. Queue construction,
+        // manifest loading, CAS, stage loops and transaction fences are real.
+        const scanFixture='run_final_readback() { acquire_repair_artifact_registry_locks || return $?; rebuild_repair_queue_locked; local status=$?; if (( status == 0 )); then refresh_queue_pair_locked; fi; release_repair_artifact_registry_locks; return "$status"; }\nsend_daily_group_report() { :; }\n';
+        write('scripts/cloud_marketing_repair_worker.sh',workerSource.replace(anchor,scanFixture+anchor)
+          .replace('GUARD_OUT="$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json"','GUARD_OUT="$SHEIN_BI_OUTPUTS_ROOT/reports/marketing-daily-guard-${DATE}.json"'));
+        const first=run(envBound, 'run_cloud_marketing_fallback_slot.sh', 60000);
+        assert.ok([0,2,75].includes(first.status),first.stdout+'\n'+first.stderr);
+        const finalQueue=readJson(queueFile);
+        assert.notEqual(finalQueue.queueFingerprint,queue.queueFingerprint,'fresh real builder must replace old fingerprint');
+        assert.equal(finalQueue.stages.manualSpecialRestore.status,'completed',first.stdout+'\n'+first.stderr);
+        assert.equal(readJson(path.join(temp,manualDir,'manual-limited-discount-restore-result.json')).totals.remainingItems,0);
+        assert.deepEqual(fs.readFileSync(path.join(temp,'posts.log'),'utf8').trim().split('\n'),['manual','fixture-1']);
+        const again=run(envBound, 'run_cloud_marketing_fallback_slot.sh', 60000);
+        assert.ok([0,2,75].includes(again.status),again.stdout+'\n'+again.stderr);
+        assert.deepEqual(fs.readFileSync(path.join(temp,'posts.log'),'utf8').trim().split('\n'),['manual','fixture-1'],'restart must not replay known or unknown submits');
+        assert.deepEqual(fs.readFileSync(consumed.consumedReceiptFile),receiptBytes);
+        // Repeat the same non-empty manual/fallback chain with an expired
+        // unconsumed source. It must not switch the worker back to immediate.
+        for(const file of [manualDir+'/manual-limited-discount-restore-result.json',
+          'outputs/reports/new-listing-7d-limited-discount-execution-summary-'+date+'.json',
+          'platform-manual.json','platform-fixture-1.json']) fs.rmSync(path.join(temp,file),{force:true});
+        for(const name of fs.readdirSync(path.join(temp,'state/marketing-replacement-transactions'))) {
+          if(name.endsWith('.json') && name!==unknownName) fs.unlinkSync(path.join(temp,'state/marketing-replacement-transactions',name));
+        }
+        write('posts.log','');
+        json(queueRelative,{...queue,sourceGuard:path.relative(temp,physicalGuard),sourceGuardHash:shaFile(physicalGuard)});
+        Object.assign(process.env,envBound);
+        try {
+          await authorization.issueImmediateAuthorization({...authOptions,sourceGuardFile:physicalGuard,maxGroups:4,ttlSec:3600,
+            reason:'bound stale issued fixture',confirmationToken:authorization.IMMEDIATE_CONFIRMATION_TOKEN});
+        } finally { for(const key of Object.keys(process.env)) if(!(key in savedEnv)) delete process.env[key]; Object.assign(process.env,savedEnv); }
+        const issuedBytes=fs.readFileSync(authOptions.authorizationFile);
+        const issuedRun=run(envBound,'run_cloud_marketing_fallback_slot.sh',60000);
+        assert.ok([0,2,75].includes(issuedRun.status),issuedRun.stdout+'\n'+issuedRun.stderr);
+        assert.equal(readJson(queueFile).stages.manualSpecialRestore.status,'completed',issuedRun.stdout+'\n'+issuedRun.stderr);
+        assert.deepEqual(fs.readFileSync(path.join(temp,'posts.log'),'utf8').trim().split('\n'),['manual','fixture-1']);
+        const issuedRestart=run(envBound,'run_cloud_marketing_fallback_slot.sh',60000);
+        assert.ok([0,2,75].includes(issuedRestart.status),issuedRestart.stderr);
+        assert.deepEqual(fs.readFileSync(path.join(temp,'posts.log'),'utf8').trim().split('\n'),['manual','fixture-1']);
+        assert.deepEqual(fs.readFileSync(authOptions.authorizationFile),issuedBytes);
+        assert.deepEqual(fs.readFileSync(consumed.consumedReceiptFile),receiptBytes);
+        console.log(JSON.stringify({boundChain:true,elapsedMs:Date.now()-startedAt,consumed:true,issued:true,
+          realQueueBuilder:true,realBatchAndTransactions:true,unknownReplayed:0,postsPerScenario:2,restartPosts:0}));
+      } catch (error) {
+        console.error('bound chain failure:', error.stack); throw error;
+      } finally {
+        for(const directory of mounted.reverse()) command('umount',['--lazy',directory]);
+        fs.rmSync(bound,{recursive:true,force:true});
+      }
+    });
   } finally {
     for (const child of holders) { child.stdin.end('release\n'); child.kill(); }
     assert.ok(path.basename(temp).startsWith('cloud-marketing-primary-entry-') && path.dirname(temp) === os.tmpdir());
@@ -407,7 +594,7 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
 }
 
 if (process.platform === 'win32') {
-  const run = spawnSync('wsl.exe', ['--cd', '/', '--exec', 'node', '--input-type=module'], {
+  const run = spawnSync('wsl.exe', ['--cd', '/', '--exec', 'sudo', '-n', 'unshare', '--mount', 'node', '--input-type=module'], {
     input: `await (${runContracts.toString()})(${JSON.stringify(sources)});\n`, encoding: 'utf8', timeout: 180_000, maxBuffer: 3 * 1024 * 1024,
   });
   if (run.stdout) process.stdout.write(run.stdout);
@@ -415,5 +602,13 @@ if (process.platform === 'win32') {
   if (run.error) throw run.error;
   process.exitCode = run.status ?? 1;
 } else {
-  await runContracts(sources);
+  const args = ['--mount', process.execPath, '--input-type=module'];
+  const run = spawnSync(process.getuid?.() === 0 ? 'unshare' : 'sudo',
+    process.getuid?.() === 0 ? args : ['-n', 'unshare', ...args], {
+      input: `await (${runContracts.toString()})(${JSON.stringify(sources)});\n`, encoding: 'utf8', timeout: 180_000, maxBuffer: 3 * 1024 * 1024,
+    });
+  if (run.stdout) process.stdout.write(run.stdout);
+  if (run.stderr) process.stderr.write(run.stderr);
+  if (run.error) throw run.error;
+  process.exitCode = run.status ?? 1;
 }
