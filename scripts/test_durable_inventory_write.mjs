@@ -271,11 +271,65 @@ try {
     },
     readback: async () => ({ok: true, totalUsableInventory: duplicateIntent.targetUsableInventory}),
     maxReadbackAttempts: 1,
-  }), /INVENTORY_WRITE_PENDING_CONFLICT/);
+  }), error => {
+    assert.equal(error.code, 'INVENTORY_WRITE_PENDING_CONFLICT');
+    assert.deepEqual(error.inventoryAdmissionRejection, {
+      schemaVersion: 'inventory-write-admission-rejection/v1',
+      decision: 'rejected',
+      stage: 'before_durable_intent',
+      reasonCode: 'pending_scope_conflict',
+      currentIntentDurable: false,
+      inventoryPostAttempted: false,
+      conflict: {
+        intentId: releaseIntent.intentId,
+        logicalActionKey: releaseIntent.logicalActionKey,
+        scope: {storeKey: releaseIntent.storeKey, skc: releaseIntent.skc, skuCode: releaseIntent.skuCode, warehouseCode: '', invType: 'VI'},
+      },
+    });
+    assert.equal(error.inventoryIntentDurable, false);
+    assert.equal(error.inventoryTransportAttempted, false);
+    return true;
+  });
   assert.equal(duplicatePostCalls, 0, 'a second writer is blocked before transport while first readback is pending');
   assert.equal((await readInventoryIntentLifecycle(releaseJournal)).intents.size, 1, 'journal keeps exactly one intent');
   unblockReadback();
   assert.equal((await pendingSubmission).state, 'readback_matched');
+
+  const historicalPendingJournal = path.join(temp, 'historical-pending.journal.ndjson');
+  const emptyCurrentJournal = path.join(temp, 'current-empty.journal.ndjson');
+  const historicalPendingIntent = {...releaseIntent, intentId: 'historical-pending-intent'};
+  const currentRejectedIntent = {...releaseIntent, intentId: 'current-rejected-before-append'};
+  await appendDurableJournalRecord(historicalPendingJournal, historicalPendingIntent);
+  await fs.writeFile(emptyCurrentJournal, '');
+  let emptyJournalPostCalls = 0;
+  const readHistoricalConflictBundle = async () => readInventoryIntentJournals(
+    [historicalPendingJournal, emptyCurrentJournal],
+    {allowMultiplePendingByScope: true, currentJournalFile: emptyCurrentJournal},
+  );
+  await assert.rejects(submitDurableInventoryWriteOnce({
+    journalFile: emptyCurrentJournal,
+    intent: currentRejectedIntent,
+    inventoryCutoverLock: releaseLock,
+    readFenceBundle: readHistoricalConflictBundle,
+    assertInventoryAdmission: async () => assertInventoryWriteAllowed(await readHistoricalConflictBundle(), {
+      scope: currentRejectedIntent,
+      idempotencyKey: currentRejectedIntent.idempotencyKey,
+      requestPayloadHash: currentRejectedIntent.requestPayloadHash,
+      intentId: currentRejectedIntent.intentId,
+      logicalActionKey: currentRejectedIntent.logicalActionKey,
+    }),
+    submit: async () => {
+      emptyJournalPostCalls += 1;
+      return {ok: true, status: 200, data: {code: '0', info: {success: true}}};
+    },
+    readback: async () => ({ok: true, totalUsableInventory: currentRejectedIntent.targetUsableInventory}),
+    maxReadbackAttempts: 1,
+  }), error => error?.inventoryAdmissionRejection?.stage === 'before_durable_intent'
+    && error?.inventoryAdmissionRejection?.conflict?.intentId === historicalPendingIntent.intentId);
+  assert.equal(emptyJournalPostCalls, 0, 'historical pending scope rejects before the current POST');
+  assert.equal((await fs.stat(emptyCurrentJournal)).size, 0, 'current transaction journal remains exactly empty');
+  assert.equal((await readInventoryIntentLifecycle(historicalPendingJournal)).pending.size, 1,
+    'historical pending intent remains unresolved and is not closed by the rejected current attempt');
 
   const expected = {
     logicalActionKey: intent.logicalActionKey,
