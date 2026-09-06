@@ -50,6 +50,7 @@ function exportLines(values) {
   return Object.entries(values).map(([name, value]) => `export ${name}=${JSON.stringify(String(value))}`);
 }
 
+fs.mkdirSync(path.join(root, 'tmp'), {recursive: true});
 const tempRoot = fs.mkdtempSync(path.join(root, 'tmp', 'marketing-artifact-lock-'));
 const bashRoot = toBashPath(tempRoot);
 const lockFile = path.join(tempRoot, 'state', 'locks', 'artifact.lock');
