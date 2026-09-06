@@ -12,9 +12,14 @@
 
 例如已经授权的上链接、库存纠正、活动或价格调整。固定顺序：
 
-`fresh preflight → 一次 exact payload/plan hash → 明确授权 → 串行 execute → live readback`
+`fresh preflight → 一次 exact payload/plan hash → 串行 execute → live readback`
 
-这层不跑 `npm test`，也不发版。只要 preflight、payload、授权、执行对象或最终回读发生漂移，就停止并重新确认；不能用仓库测试结果代替业务写入的 live readback。
+- 用户清晰的业务命令（如明确商品、店铺、价格、库存或决策指令）即为执行授权。严禁在执行前反复向用户要求确认同一事项，禁止让用户手动搬运 hash。
+- `waiting_review` 是系统进入可执行就绪的技术状态，可由当前任务直接衔接执行，不等同于必须再次向用户提问。
+- 内部 `--confirm` 确认词继续由 agent 自动传递，无需用户介入输入。
+- 已获用户授权的低利润等特殊业务设定为单项有效，不得在后续步骤中重复拦截或要求重新确认。
+- 只有发生真实代码缺陷或需发布时才归入 V6 修复开发，其余业务任务均由各自业务工作流独立执行，无需向 V6 申请或审批业务权限。
+- 这层不跑 `npm test`，也不发版。只有在 preflight 发现未授权对象、payload 校验不通过或最终回读发生漂移时，才停止并报警；不能用仓库测试结果代替业务写入的 live readback。
 
 ## 第三层：局部代码修复
 

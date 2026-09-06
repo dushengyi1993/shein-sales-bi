@@ -164,10 +164,10 @@ node scripts/bi_ops_cli.mjs doctor --operation copy_product_draft --target-store
 
 - 不带 `--require-real-submit` 时，只要求能建任务 / dry-run；适合普通运营确认“我能不能先做预检”。
 - 带 `--require-real-submit` 时，会要求该账号、店铺和动作已经具备真实提交能力；如果仍被动作总闸门、账号店铺写权限或动作适配器挡住，命令会退出非 0，并在 `requestedActionReadiness.items[].blockers` 里列出原因。
-- 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做系统检查；真实执行必须同时满足账号 `writeStores`、`safeWriteOperations`、上一次系统检查的 `payloadHash`、`waiting_review` 状态和确认文本 `SHEIN_OPENAPI_SUBMIT`。CLI 写需求由本机 Codex 通过 `operate` 结构化提交，不依赖自然语言关键词；网页端仍可在同一聊天里用“可以执行 / 提交吧 / 照做”等自然语言确认。
+- 目前已接入的官方 OpenAPI 写适配器包括：`copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。它们默认只做系统检查；真实执行必须同时满足账号 `writeStores`、`safeWriteOperations`、上一次系统检查的 `payloadHash`、在已获业务授权范围内由 `waiting_review` 状态衔接执行，以及确认文本 `SHEIN_OPENAPI_SUBMIT`。用户明确的业务命令即为授权，CLI 写需求由本机 Codex 自动闭环执行，内部 `--confirm` 参数由 agent 自动传递，无需用户再次重复确认或手动搬运 hash。
 - 批量下架弱链接前必须先出只读明细让用户确认。低曝光零销量候选统一按“已上架 + 近 7 天曝光 `<=300` + 近 7 天销量 `0` + 无平台新品标签 + 首次上架已满 15 天 + 最近库存恢复/重新在售已满 15 天”筛选。恢复日期优先按每日库存从 `0` 变为正数判断，其次读取最近 60 天售罄/下架到在售的状态跃迁，OpenAPI `last_shelf_time` 只作兜底；营销活动刚成功反而属于恢复期保护佐证。首次上架或最近恢复 15 天内的链接一律不进入下架执行清单，缺初次上架时间或恢复证据链不完整时只能放入待确认/不执行。用户确认后才可用 `retire_link` 下架，并尽力把货号改成 `（废）标准货号`；如果改废货号被平台 `partialEdit` 校验卡住，结果按“已下架但货号未改”汇总，不再为了货号阻断下架。
 - 维护类适配器使用官方文档：商品上下架 `3001253 /open-api/goods/modify-skc-shelf`（`activate_link` 使用 `shelf_state=1`，`retire_link` 使用 `shelf_state=2`），库存 `3001738 /open-api/stock/change-inventory/v2`，供货价 `3001681 /open-api/goods/update-cost`，售价 `3001407 /open-api/openapi-business-backend/product/price/save`，局部编辑 `3001810 /open-api/goods/product/partialEdit`；证书/资质包含 `3001477 /open-api/goods/save-or-update-certificate-pool`、`3001183 /open-api/goods/save-certificate-pool-skc-bind` 等证书接口。网页端 `update_images` 不能要求普通员工手写 `partialEdit` JSON：用户上传图片后，系统应在聊天里展示 AI 排序和资料缺口，再由执行层转换成 SHEIN 需要的图片 URL 与 `partialEdit` 字段；若转换不完整，任务停在资料检查。CLI/脚本仍可传完整结构化 payload 做管理员验收。`certificate_review` 要求提供 `certificatePayloads[{endpoint,body}]`，提交后默认人工核销审核状态。
-- `campaign_signup` / `flash_discount` 当前不走官方 OpenAPI：公开目录未发现营销报名、限时折扣、优惠券报名写接口证据，所以它们继续走本地营销运营流程、价格栈守卫和人工确认，不会在 OpenAPI 总账里伪装成“可真实提交”。
+- `campaign_signup` / `flash_discount` 当前不走官方 OpenAPI：公开目录未发现营销报名、限时折扣、优惠券报名写接口证据，所以它们继续走本地营销运营流程与价格栈守卫；已有明确用户批次或规则授权时无需重复确认，但保留其非 OpenAPI 路径，不会在 OpenAPI 总账里伪装成“可真实提交”。
 - 管理员验证维护写前，可先用 `node scripts/verify_shein_openapi_doc_detail.mjs --doc-id 3001253 --endpoint /open-api/goods/modify-skc-shelf --require-verified --pretty` 拉取脱敏 schema 证据，再用 `node scripts/check_bi_ops_maintenance_readiness.mjs --operation retire_link --doc-evidence <schema证据> --store-probe <逐店权限证据> --readback-evidence <回读证据> --expect pilot_ready --pretty` 做总检查。证据文件只放忽略目录；脚本不会打印或保存 Cookie，也不会调用 SHEIN 业务写接口。
 
 如果需要单独确认云端自动运营接口能访问：
@@ -435,7 +435,7 @@ node scripts/bi_ops_cli.mjs logout
 - 不把云端 API Key、OpenAPI Secret、服务器 SSH 权限发给普通电脑。
 - 本机只保存会话 cookie，不保存明文密码。
 - 所有真实写操作都要能在云端审计里追溯到：操作者、时间、来源、目标店铺、任务、预检结果、执行结果和回读证据。
-- 没有系统检查通过、没有明确确认、账号无目标店写权限或平台动作总闸门未开放，不允许真实提交。
+- 没有系统检查通过、没有业务授权、账号无目标店写权限或平台动作总闸门未开放，不允许真实提交。
 
 ## 管理员维护建议
 

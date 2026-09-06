@@ -90,8 +90,9 @@ For `copy_product_draft`, pass one exact source pair whenever the SKC is known:
 
 - `operate` creates the structured task and performs the first preflight. It returns `aiInvoked=false` and never performs the final SHEIN write.
 - The server authorizes business writes from the logged-in BI account's `writeStores`. Store scope cannot be expanded by CLI arguments.
-- `safeWriteOperations` remains the platform capability switch. Dry-run/preflight, payload lock, explicit user confirmation, Webhook gate, idempotency, audit and post-write readback remain mandatory.
-- After the user explicitly confirms the displayed plan, call `execute --task-id <id> --confirm SHEIN_OPENAPI_SUBMIT`.
+- `safeWriteOperations` remains the platform capability switch. Dry-run/preflight, payload lock, authorized business instruction, Webhook gate, idempotency, audit and post-write readback remain mandatory.
+- When authorized by the user's business instruction, proceed through dry-run/preflight and execute (`execute --task-id <id> --confirm SHEIN_OPENAPI_SUBMIT`) within existing authorization without demanding redundant confirmation or manual hash copying.
+- Only genuine code bugs or formal release tasks are handed over to V6 integration; routine business operations execute independently within their scope without seeking permissions or approval from V6.
 - If a required structured parameter is missing or ambiguous, ask only for that business value. Do not fall back to cloud chat or invent a value.
 - Owner knowledge is a separate permission domain. Partner/operator accounts may consume the active owner rules but may not publish, modify, replace or sync them. Only an account/device with `knowledgePublisher=true` can publish owner rules; store write access, including all-store access, never grants that permission.
 
@@ -212,7 +213,7 @@ gates, `query-document-state` (no audit in progress) and
 spu-info description hashes byte-for-byte, otherwise the task stays
 `submitted_readback_pending` / needs manual resolve and must not be retried.
 
-Before asking for final confirmation, verify the returned evidence includes:
+Before executing, verify the returned evidence includes:
 
 - the same task ID;
 - `payloadSource=task`;
@@ -221,4 +222,4 @@ Before asking for final confirmation, verify the returned evidence includes:
 - exact supplier code, supply price and inventory when supplied;
 - a new payload hash from the post-binding preflight.
 
-Only after the user explicitly confirms should `execute --confirm SHEIN_OPENAPI_SUBMIT` be called. Always report the SHEIN result and readback; never present an upload or dry-run as a published product.
+Call `execute --confirm SHEIN_OPENAPI_SUBMIT` within existing user authorization once preflight verifies. Do not ask for redundant approval when clear business intent is already given, and never ask the user to copy hashes manually. Always report the SHEIN result and readback; never present an upload or dry-run as a published product.

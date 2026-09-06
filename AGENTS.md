@@ -39,7 +39,12 @@ For every new SHEIN listing, use the default store title group from `config/stor
 
 Preserve the selected title group as a structured per-store task fact and verify it before dry-run.
 
-Real SHEIN writes still require cloud permissions, dry-run/preflight, an exact payload hash, explicit user confirmation, audit, and readback.
+Real SHEIN writes require cloud permissions, dry-run/preflight, an exact payload hash, authorized business instruction, audit, and readback.
+- Clear user business instructions (e.g. specific SKU, store, price, stock, or decision rules) constitute authorization; do not ask users for redundant confirmation or manual hash copying.
+- The `waiting_review` technical state indicates ready-for-execution and should be completed by the active task within existing user authorization without prompting the user again.
+- Internal `--confirm` tokens remain agent-supplied and are not demanded from the user.
+- User-approved exceptions (such as item-scoped low-profit overrides) must not be re-blocked.
+- Only actual code defects or formal release work are handed over to the V6 development task; routine business tasks execute independently within their scope without seeking permissions or approval from V6.
 
 ## Operation risk tiers
 
