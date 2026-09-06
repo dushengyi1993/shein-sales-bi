@@ -709,6 +709,9 @@ if (lowEtFastSellerOverlay) {
       };
       continue;
     }
+    if (!decision.blocked && decision.audit) {
+      executionRows[index] = {...current, lowEtFastSellerPricePullback: decision.audit};
+    }
     if (decision.blocked) {
       const manualReview = decision.manualReview === true;
       executionRows[index] = {

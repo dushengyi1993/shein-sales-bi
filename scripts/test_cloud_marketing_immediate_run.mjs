@@ -642,6 +642,75 @@ try {
   }
   await fsp.mkdir(path.dirname(guardFile), {recursive: true});
   await fsp.writeFile(guardFile, guardBytes);
+  // Runtime bind aliases share an inode; equal bytes in a different file are
+  // deliberately insufficient. Exercise old records without reissuing them.
+  const previousStateRoot = process.env.SHEIN_BI_STATE_ROOT;
+  const aliasStateRoot = path.join(tempRoot, 'runtime-state');
+  const physicalQueue = path.join(aliasStateRoot, path.relative(path.join(tempRoot, 'state'), queueFile));
+  await fsp.mkdir(path.dirname(physicalQueue), {recursive: true});
+  await fsp.link(queueFile, physicalQueue);
+  process.env.SHEIN_BI_STATE_ROOT = aliasStateRoot;
+  try {
+    const aliasAuth = path.join(authorizationDir, 'runtime-alias.json');
+    const aliasIssued = await issueImmediateAuthorization({
+      authorizationFile: aliasAuth, queueFile, root: tempRoot, date, sourceGuardFile: hostSourceGuardFile,
+      maxGroups: 1, ttlSec: 3600, reason: 'runtime queue alias offline test',
+      confirmationToken: IMMEDIATE_CONFIRMATION_TOKEN, nowEpoch: issueEpoch,
+    });
+    assert.equal(aliasIssued.queueFile, physicalQueue, 'new issue must store the runtime path');
+    const options = {authorizationFile: aliasAuth, queueFile: physicalQueue, root: tempRoot, date, nowEpoch: issueEpoch + 1};
+    assert.equal((await verifyIssuedImmediateAuthorization({...options, queueFile})).ok, true);
+    const oldRecord = JSON.parse(await fsp.readFile(aliasAuth, 'utf8'));
+    oldRecord.queueFile = queueFile;
+    await fsp.writeFile(aliasAuth, JSON.stringify(oldRecord));
+    assert.equal((await verifyIssuedImmediateAuthorization(options)).ok, true, 'legacy host-path record accepts exact inode');
+    await fsp.unlink(physicalQueue);
+    await fsp.writeFile(physicalQueue, originalQueueBytes);
+    await expectReject(verifyIssuedImmediateAuthorization(options), 'IMMEDIATE_AUTHORIZATION_BINDING_MISMATCH');
+    await fsp.unlink(physicalQueue);
+    await fsp.link(queueFile, physicalQueue);
+    const savedQueue = `${queueFile}.saved`;
+    await fsp.rename(queueFile, savedQueue);
+    await expectReject(verifyIssuedImmediateAuthorization(options), 'IMMEDIATE_AUTHORIZATION_MISSING');
+    await fsp.writeFile(queueFile, originalQueueBytes);
+    await expectReject(verifyIssuedImmediateAuthorization(options), 'IMMEDIATE_AUTHORIZATION_BINDING_MISMATCH');
+    await fsp.unlink(queueFile);
+    await fsp.rename(savedQueue, queueFile);
+    const realOpen = fsp.open;
+    let swapped = false;
+    fsp.open = async (...args) => {
+      const handle = await realOpen(...args);
+      if (args[0] === queueFile) {
+        const read = handle.readFile.bind(handle);
+        handle.readFile = async (...readArgs) => {
+          const bytes = await read(...readArgs);
+          await fsp.rename(queueFile, savedQueue);
+          await fsp.writeFile(queueFile, originalQueueBytes);
+          swapped = true;
+          return bytes;
+        };
+      }
+      return handle;
+    };
+    try {
+      await assert.rejects(verifyIssuedImmediateAuthorization(options), error =>
+        ['IMMEDIATE_AUTHORIZATION_FILE_PATH_SWAPPED', 'IMMEDIATE_AUTHORIZATION_FILE_RACE'].includes(error.code));
+    } finally {
+      fsp.open = realOpen;
+      if (swapped) { await fsp.unlink(queueFile); await fsp.rename(savedQueue, queueFile); }
+    }
+    const consumedAlias = await consumeImmediateAuthorization(options);
+    assert.equal(consumedAlias.ok, true);
+    await expectReject(consumeImmediateAuthorization({...options, queueFile}), 'IMMEDIATE_AUTHORIZATION_ALREADY_CONSUMED');
+    const continuation = await verifyImmediateAuthorizationContinuation({
+      receiptFile: consumedAlias.receiptFile || deriveConsumedAuthorizationFile(aliasAuth, aliasIssued.authorizationId),
+      queueFile, root: tempRoot, date, nowEpoch: issueEpoch + 2,
+    });
+    assert.equal(continuation.authorizationId, aliasIssued.authorizationId, 'continuation retains original authorization');
+  } finally {
+    if (previousStateRoot === undefined) delete process.env.SHEIN_BI_STATE_ROOT;
+    else process.env.SHEIN_BI_STATE_ROOT = previousStateRoot;
+  }
   const issuedVerification = await verifyIssuedImmediateAuthorization({
     authorizationFile,
     queueFile,
@@ -2192,6 +2261,8 @@ process.kill(process.pid, 'SIGKILL');
     'lease release failure handling must not repeat business execution');
 
   const wrapper = await fsp.readFile(path.join(root, 'scripts', 'run_cloud_marketing_fallback_slot.sh'), 'utf8');
+  assert.ok(wrapper.indexOf('--location "$STATE_DIR"') < wrapper.indexOf('verify-issued'),
+    'formal wrapper must resolve the worker runtime state namespace before admission');
   const worker = await fsp.readFile(path.join(root, 'scripts', 'cloud_marketing_repair_worker.sh'), 'utf8');
   assert.equal(DEFAULT_IMMEDIATE_AUTHORIZATION_FILE, '/srv/shein-bi/marketing-repair-immediate/authorization.json');
   assert.match(wrapper, /\/srv\/shein-bi\/marketing-repair-immediate\/authorization\.json/,

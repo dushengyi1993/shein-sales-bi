@@ -37,7 +37,8 @@ import {
   planLimitedDiscountInventoryTransaction,
 } from '../../lib/marketing_activity_inventory_integration.mjs';
 import {createMarketingActivityInventoryOpenApiAdapter} from '../../lib/marketing_activity_inventory_openapi.mjs';
-import {revalidateLowEtFastSellerRescueArtifact} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {revalidateLowEtFastSellerRescueArtifact, verifyLegacyLowEtReceiptContinuation} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {readImmediateAdmissionQueueFd, claimImmediateRepairGroup} from '../../lib/cloud_marketing_immediate_authorization.mjs';
 import {classifyUnifiedLoginRecovery, isMarketingLoginRedirect} from '../../lib/marketing_unified_login_recovery_contract.mjs';
 import {
   assertBeforeOuter,
@@ -492,7 +493,7 @@ async function replaceTransactionally({storeKey, port, rescuePath, sourceRescueP
   return await loadToolOutput(result);
 }
 
-async function writeInventoryExecutableSubset({storeKey, rescue, rescuePath, blockedSkcs, outDir}) {
+export async function writeInventoryExecutableSubset({storeKey, rescue, rescuePath, blockedSkcs, outDir}) {
   const blockedSet = new Set(blockedSkcs.map(String));
   const rows = (rescue.rows || []).filter(row => !blockedSet.has(String(row.skc || '').trim()));
   const subset = {
@@ -580,7 +581,7 @@ function transactionBlockedSkcs(full, inventoryTransactionPlan = null) {
   return [...new Set(blocked.filter(Boolean))];
 }
 
-async function processStore({file, storeMap, args, manualIndex, browserSession = {}}) {
+export async function processStore({file, storeMap, args, manualIndex, browserSession = {}, operations = {}}) {
   const storeKey = String(file.storeKey || '').toUpperCase();
   const store = storeMap.get(storeKey);
   let rescuePath = path.resolve(ROOT, file.path || '');
@@ -663,6 +664,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       root: ROOT,
       rescue,
       reportDate: args.date,
+      legacyReceiptCapability: args.legacyReceiptCapability,
     });
     if (!record.lowEtFastSellerPricePullbackRevalidation.ok) {
       record.status = 'low_et_price_pullback_evidence_drift';
@@ -673,7 +675,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       ? (browserSession.launchSummary || {ok: true, reused: true})
       : summarizeRaw(await launchStore(storeKey));
     if (!record.launched.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${record.launched.stderr || record.launched.stdout || record.launched.error}`);
-    let dryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+    let dryRun = await (operations.applyRescue || applyRescue)({storeKey, port: store.port, rescuePath, execute: false});
     if (isMarketingLoginRedirect(dryRun.full || dryRun.parsed || dryRun.stdout || dryRun.stderr)) {
       const recovery = await recoverMarketingLogin(storeKey, args.date);
       record.loginRecovery = recovery;
@@ -692,7 +694,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
         record.error = recovery.assessment?.blocker || 'login recovery incomplete';
         return record;
       }
-      dryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+      dryRun = await (operations.applyRescue || applyRescue)({storeKey, port: store.port, rescuePath, execute: false});
       if (isMarketingLoginRedirect(dryRun.full || dryRun.parsed || dryRun.stdout || dryRun.stderr)) {
         record.status = 'recoverable_login_pending';
         record.classification = 'recoverable_pending';
@@ -767,7 +769,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       }
       rescuePath = subset.path;
       record.rescuePath = rel(rescuePath);
-      const subsetDryRun = await applyRescue({storeKey, port: store.port, rescuePath, execute: false});
+      const subsetDryRun = await (operations.applyRescue || applyRescue)({storeKey, port: store.port, rescuePath, execute: false});
       record.inventorySubsetDryRun = {
         ...summarizeRaw(subsetDryRun),
         out: subsetDryRun.outPath ? rel(subsetDryRun.outPath) : '',
@@ -790,7 +792,7 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
       return record;
     }
     if (args.dryRunOnly) {
-      const transactionDryRun = await replaceTransactionally({storeKey, port: store.port, rescuePath, sourceRescuePath, execute: false});
+      const transactionDryRun = await (operations.replaceTransactionally || replaceTransactionally)({storeKey, port: store.port, rescuePath, sourceRescuePath, execute: false});
       record.transactionDryRun = {
         ...summarizeRaw(transactionDryRun),
         out: transactionDryRun.outPath ? rel(transactionDryRun.outPath) : '',
@@ -829,9 +831,9 @@ async function processStore({file, storeMap, args, manualIndex, browserSession =
           reserveSec: ACTIVE_DEADLINE?.minFinalizationBudgetSec || 0,
           label: `new-listing activity submit ${storeKey}`,
         });
-        return await replaceTransactionally({storeKey, port: store.port, rescuePath, sourceRescuePath, execute: true, continuation: args.continuation});
+        return await (operations.replaceTransactionally || replaceTransactionally)({storeKey, port: store.port, rescuePath, sourceRescuePath, execute: true, continuation: args.continuation});
       },
-      runEnrollmentReadback: async context => await applyRescue({
+      runEnrollmentReadback: async context => await (operations.applyRescue || applyRescue)({
         storeKey,
         port: store.port,
         rescuePath,
@@ -1023,6 +1025,8 @@ async function writeExecutionProgress({outputJson, outputMd, common, results, pl
 
 export async function runNewListingFallbackBatch(customArgs, customOverrides = {}) {
   const args = customArgs || parseArgs(process.argv.slice(2));
+  args.receiptAdmission = null;
+  args.legacyReceiptCapability = null;
   ACTIVE_DEADLINE = args.deadline;
   const effectiveLaunchStore = customOverrides.launchStore || launchStore;
   const effectiveCloseStore = customOverrides.closeStore || closeStore;
@@ -1043,6 +1047,39 @@ const exactPlan = await loadExactFallbackRepairPlan({root: ROOT, planPath, guard
 if (args.expectedWorkFingerprint && exactPlan.workFingerprint !== args.expectedWorkFingerprint) {
   throw new Error(`Exact fallback work fingerprint mismatch: expected=${args.expectedWorkFingerprint} actual=${exactPlan.workFingerprint}`);
 }
+if (!args.dryRunOnly && args.skipBuild && args.continuation
+  && process.env.SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION === '1'
+  && process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_STATUS === 'consumed'
+  && exactPlan.entries.length && exactPlan.entries.every(entry => (entry.rescue.rows || []).every(row =>
+    row.lowEtFastSellerPricePullback?.applied === false
+    && !row.lowEtFastSellerPricePullback?.contextEvidenceScope
+    && !row.lowEtFastSellerPricePullback?.evidenceHash))
+) {
+  args.legacyReceiptCapability = await verifyLegacyLowEtReceiptContinuation({
+    root: ROOT, date: args.date, planPath, guardPath: args.guard,
+    queueFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE,
+    receiptFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE,
+    expectedReceiptSha256: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256,
+    expectedWorkFingerprint: args.expectedWorkFingerprint,
+    queueSnapshotBytes: /^[0-9]+$/.test(process.env.SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD || '')
+      ? readImmediateAdmissionQueueFd(process.env.SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD) : undefined,
+  }).catch(error => {
+    if (error.code === 'IMMEDIATE_AUTHORIZATION_TRANSACTION_CONTINUATION_REQUIRED') return null;
+    throw error;
+  });
+  const admission = args.legacyReceiptCapability;
+  if (admission) {
+  if (args.gracefulCutoffEpoch !== admission.gracefulCutoffEpoch
+    || args.deadline?.outerHardDeadlineEpoch !== admission.outerHardDeadlineEpoch
+    || !args.maxGroups || args.maxGroups > admission.maxGroups || args.minStartBudgetSec < 900) {
+    throw new Error('legacy receipt batch budget differs from the original receipt');
+  }
+  // Receipt continuation before any transaction is distinct from transaction
+  // recovery. This assignment is reachable only through the real verifier.
+  args.receiptAdmission = admission.admission;
+  args.resume = true;
+  }
+}
 automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
   action: MARKETING_AUTOMATION_ACTIONS.APPLY_NEW_LISTING_FALLBACK,
   payloadHash: exactPlan.workFingerprint,
@@ -1055,21 +1092,27 @@ const rescueFiles = exactPlan.entries
 const storeMap = storeConfigByKey();
 const outputJson = path.join(ROOT, 'outputs', 'reports', `new-listing-7d-limited-discount-execution-summary-${args.date}.json`);
 const outputMd = path.join(ROOT, 'outputs', 'reports', `new-listing-7d-limited-discount-execution-summary-${args.date}.md`);
-const resumedResults = args.resume
+let resumedResults = args.resume
   ? await loadResumableResults(outputJson, {workFingerprint: exactPlan.workFingerprint, dryRunOnly: args.dryRunOnly})
   : [];
+if (args.receiptAdmission) {
+  resumedResults = resumedResults.filter(row => args.receiptAdmission.groups.some(group =>
+    group.mode === 'settled' && group.path === path.resolve(ROOT, row.sourceRescuePath || row.rescuePath || '')));
+  for (const group of args.receiptAdmission.groups.filter(group => group.mode === 'settled')) {
+    const entry = rescueFiles.find(entry => entry.path === group.path);
+    if (!resumedResults.some(row => resultKey(row) === entry.relativePath.toLowerCase())) resumedResults.push(group.previous || {
+      ok:true, status:'executed_persisted_terminal', sourceRescuePath:entry.relativePath, rescuePath:entry.relativePath, storeKey:entry.storeKey,
+    });
+  }
+}
 const completedKeys = new Set(resumedResults.map(resultKey));
 const pendingEntries = rescueFiles.filter(entry => !completedKeys.has(entry.relativePath.toLowerCase()));
 let continuationEntries = pendingEntries;
-if (args.continuation) {
+if (args.continuation && !args.receiptAdmission) {
   continuationEntries = [];
   for (const entry of pendingEntries) {
-    if (await findPersistedMarketingTransactionContinuation({
-      root: ROOT,
-      storeKey: entry.storeKey,
-      workFingerprint: exactPlan.workFingerprint,
-      rescuePath: path.resolve(ROOT, entry.relativePath),
-    })) continuationEntries.push(entry);
+    if (await findPersistedMarketingTransactionContinuation({root: ROOT, storeKey: entry.storeKey,
+      workFingerprint: exactPlan.workFingerprint, rescuePath: entry.path})) continuationEntries.push(entry);
   }
 }
 const selectedEntries = args.maxGroups > 0 ? continuationEntries.slice(0, args.maxGroups) : continuationEntries;
@@ -1130,7 +1173,7 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
   let launchSummary = null;
   let processedInStore = 0;
   try {
-    if (args.continuation && !await findPersistedMarketingTransactionContinuation({
+    if (args.continuation && !args.receiptAdmission && !await findPersistedMarketingTransactionContinuation({
       root: ROOT,
       storeKey,
       workFingerprint: args.expectedWorkFingerprint || process.env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
@@ -1144,7 +1187,9 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
       // This is the only graceful-stop boundary: once a group has started,
       // processStore owns its complete transaction, inventory restore and
       // terminal readback. No deadline timer is allowed inside that path.
-      const startBudget = groupStartBudget(args);
+      const group = args.receiptAdmission?.groups.find(group => group.path === file.path);
+      const groupArgs = group ? {...args, continuation: group.mode === 'transaction'} : args;
+      const startBudget = groupStartBudget(groupArgs);
       if (!startBudget.ok) {
         stoppedBeforeNextGroup = true;
         stoppedReason = `graceful cutoff reached with ${startBudget.remainingSec}s remaining; no new group started`;
@@ -1153,7 +1198,7 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
       }
       try {
         assertCanStartUnit(ACTIVE_DEADLINE, {
-          continuation: args.continuation,
+          continuation: groupArgs.continuation,
           label: `new-listing group ${storeKey}`,
         });
       } catch (error) {
@@ -1163,6 +1208,7 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
         mergeUnprocessedSelectedEntriesIntoDeferred();
         break;
       }
+      if (args.receiptAdmission) await claimImmediateRepairGroup(args.receiptAdmission, file.path);
       if (!launchSummary) {
         launchSummary = summarizeRaw(await effectiveLaunchStore(storeKey));
         if (!launchSummary.ok) throw new Error(`launch_store_browser failed for ${storeKey}: ${launchSummary.stderr || launchSummary.stdout || launchSummary.error}`);
@@ -1170,7 +1216,7 @@ for (const [storeKey, storeEntries] of entriesByStore.entries()) {
       const result = await effectiveProcessStore({
         file: {...file, path: file.path},
         storeMap,
-        args,
+        args: groupArgs,
         manualIndex,
         browserSession: {ready: true, keepOpen: true, launchSummary: {...launchSummary, reusedForStoreBatch: true}},
       });

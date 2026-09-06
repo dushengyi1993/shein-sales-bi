@@ -60,7 +60,7 @@ assert.match(runSubmitBlock, /replaceTransactionally\(\{[\s\S]*sourceRescuePath,
 assert.doesNotMatch(batchSource, /remove_skc_from_limited_discount\.mjs/,
   'the batch must not contain a direct delete path outside the transaction wrapper');
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), 'marketing-repair-manifest-'));
+const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'marketing-repair-manifest-')));
 try {
   const date = '2026-07-18';
   const guardPath = path.join(root, 'outputs', 'reports', `marketing-daily-guard-${date}.json`);
@@ -306,6 +306,58 @@ try {
   assert.equal(loadedManual.entries.length, 1);
   assert.equal(loadedManual.entries[0].skc, 'sv3');
   assert.match(loadedManual.workFingerprint, /^[a-f0-9]{64}$/);
+
+  const runtimeOutputs = path.join(root, 'runtime-outputs');
+  const logicalOutputs = path.join(root, 'outputs');
+  const physicalGuard = path.join(runtimeOutputs, 'reports', path.basename(guardPath));
+  await fs.rename(logicalOutputs, runtimeOutputs);
+  await fs.symlink(runtimeOutputs, logicalOutputs, process.platform === 'win32' ? 'junction' : 'dir');
+  const mappedManual = await loadExactManualRepairPlan({root, planPath: manualPlanPath, guardPath: physicalGuard, date});
+  assert.equal(mappedManual.workFingerprint, loadedManual.workFingerprint, 'runtime alias preserves the exact work identity');
+  const mappedDrift = await loadExactDriftRepairManifest({root, planDir, guardPath: physicalGuard, date});
+  assert.equal(mappedDrift.workFingerprint, loaded.workFingerprint);
+  const runtimeState = path.join(root, 'runtime-state');
+  await fs.mkdir(runtimeState);
+  await fs.symlink(runtimeState, path.join(root, 'state'), process.platform === 'win32' ? 'junction' : 'dir');
+  const statePlan = path.join(runtimeState, 'empty-plan.json');
+  await fs.writeFile(statePlan, JSON.stringify({reportDate: date, sourceGuard, restoreCount: 0, rescueFiles: []}));
+  const stateMapped = await loadExactManualRepairPlan({root, planPath: statePlan, guardPath: physicalGuard, date});
+  assert.equal(stateMapped.planRelativePath, 'state/empty-plan.json');
+  const physicalDriftDir = path.join(runtimeState, 'drift-plans');
+  await fs.mkdir(physicalDriftDir);
+  await fs.writeFile(path.join(physicalDriftDir, `limited-discount-target-drift-rescue-plan-${date}.json`),
+    JSON.stringify({reportDate: date, sourceGuard, rescueFiles: []}));
+  const logicalDrift = await loadExactDriftRepairManifest({root,
+    planDir: path.join(root, 'state', 'drift-plans'), guardPath, date});
+  const physicalDrift = await loadExactDriftRepairManifest({root,
+    planDir: physicalDriftDir, guardPath: physicalGuard, date});
+  assert.equal(physicalDrift.workFingerprint, logicalDrift.workFingerprint);
+  assert.equal(physicalDrift.manifestRelativePath, `state/drift-plans/limited-discount-target-drift-rescue-plan-${date}.json`);
+  await assert.rejects(loadExactManualRepairPlan({
+    root, planPath: manualPlanPath, guardPath: path.join(path.dirname(root), 'external-guard.json'), date,
+  }), /escapes/);
+  await assert.rejects(loadExactManualRepairPlan({
+    root, planPath: manualPlanPath, guardPath: `${runtimeOutputs}/reports/../reports/${path.basename(guardPath)}`, date,
+  }), /invalid path/);
+  const leafLink = path.join(runtimeOutputs, 'reports', 'leaf.json');
+  await fs.symlink(process.platform === 'win32' ? runtimeOutputs : physicalGuard,
+    leafLink, process.platform === 'win32' ? 'junction' : 'file');
+  await assert.rejects(loadExactManualRepairPlan({root, planPath: manualPlanPath, guardPath: leafLink, date}), /non-symlink/);
+  await fs.unlink(leafLink);
+  const previousOutputsRoot = process.env.SHEIN_BI_OUTPUTS_ROOT;
+  const wrongOutputs = path.join(root, 'wrong-outputs');
+  await fs.mkdir(wrongOutputs);
+  process.env.SHEIN_BI_OUTPUTS_ROOT = wrongOutputs;
+  try {
+    await assert.rejects(loadExactManualRepairPlan({root, planPath: manualPlanPath, guardPath: physicalGuard, date}), /mapping mismatch/);
+  } finally {
+    if (previousOutputsRoot === undefined) delete process.env.SHEIN_BI_OUTPUTS_ROOT;
+    else process.env.SHEIN_BI_OUTPUTS_ROOT = previousOutputsRoot;
+  }
+  // Detach only these test-owned junctions before recursive fixture cleanup.
+  await fs.unlink(path.join(root, 'state'));
+  await fs.unlink(logicalOutputs);
+  await fs.rename(runtimeOutputs, logicalOutputs);
 
   await fs.writeFile(path.join(planDir, rescueName), `${JSON.stringify({...rescue, sourceGuard: 'outputs/reports/another.json'})}\n`);
   await assert.rejects(

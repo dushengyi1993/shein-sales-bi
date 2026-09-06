@@ -275,6 +275,116 @@ const drifted = revalidateLowEtFastSellerPricePullback({
 });
 assert.equal(drifted.ok, false); checks += 1;
 assert.equal(drifted.reason, 'low_et_price_pullback_context_evidence_drift'); checks += 1;
+
+// A second canonical must not become part of this row's execution lock.
+function scopedContext({otherEt = 20, targetEt = 10, ...overrides} = {}) {
+  return buildLowEtFastSellerPricingContext({
+    inventoryTrendDoc: {
+      products: [...inventory(targetEt).products, {
+        canonical: 'SK-OTHER',
+        inventory_match_status: 'matched',
+        operational_sellable_qty: otherEt,
+        operational_snapshot_date: reportDate,
+      }],
+    },
+    linksDataDoc: links(),
+    baselineDoc: baseline,
+    costDoc,
+    reportDate,
+    ...overrides,
+  });
+}
+const scopedBefore = scopedContext();
+const scopedAfter = scopedContext({otherEt: 21});
+const scopedPlan = applyLowEtFastSellerPricePullback({row: baseline.items[0], context: scopedBefore, costDoc});
+const nonAppliedContext = scopedContext({targetEt: 20});
+const nonAppliedPlan = applyLowEtFastSellerPricePullback({row: baseline.items[0], context: nonAppliedContext, costDoc});
+assert.equal(nonAppliedPlan.applied, false); checks += 1;
+assert.equal(nonAppliedPlan.audit.contextEvidenceScope, 'canonical-v2'); checks += 1;
+for (const [options, expected] of [
+  [{targetEt: 20}, true],
+  [{targetEt: 20, otherEt: 21}, true],
+  [{targetEt: 21}, false],
+  [{targetEt: 10}, false],
+]) {
+  assert.equal(revalidateLowEtFastSellerPricePullback({
+    row: nonAppliedPlan.row, context: scopedContext(options), costDoc,
+  }).ok, expected, JSON.stringify(options)); checks += 1;
+}
+const refreshedOldApplied = applyLowEtFastSellerPricePullback({
+  row: scopedPlan.row, context: nonAppliedContext, costDoc,
+});
+assert.equal(refreshedOldApplied.row.lowEtFastSellerPricePullback.applied, false); checks += 1;
+assert.equal(revalidateLowEtFastSellerPricePullback({
+  row: refreshedOldApplied.row, context: nonAppliedContext, costDoc,
+}).ok, true); checks += 1;
+const unannotated = {...nonAppliedPlan.row};
+delete unannotated.lowEtFastSellerPricePullback;
+assert.equal(revalidateLowEtFastSellerPricePullback({row: unannotated, context: nonAppliedContext, costDoc}).reason,
+  'low_et_price_pullback_context_scope_requires_rebuild'); checks += 1;
+assert.equal(revalidateLowEtFastSellerPricePullback({
+  row: explicitCurrentPrice.row, context: scopedContext({targetEt: 21}), costDoc,
+  currentLockedPriceKeys: new Set(['ZL:45589:normal-1']),
+}).ok, true); checks += 1;
+assert.equal(revalidateLowEtFastSellerPricePullback({
+  row: explicitCurrentPrice.row, context: scopedBefore, costDoc,
+}).ok, false); checks += 1;
+const refreshedHistorical = applyLowEtFastSellerPricePullback({
+  row: explicitCurrentPrice.row, context: scopedBefore, costDoc,
+});
+assert.equal(refreshedHistorical.applied, true); checks += 1;
+assert.equal(refreshedHistorical.audit.contextEvidenceScope, 'canonical-v2'); checks += 1;
+assert.notEqual(scopedBefore.evidenceHash, scopedAfter.evidenceHash); checks += 1;
+assert.equal(scopedPlan.audit.contextEvidenceScope, 'canonical-v2'); checks += 1;
+assert.equal(revalidateLowEtFastSellerPricePullback({row: scopedPlan.row, context: scopedAfter, costDoc}).ok, true); checks += 1;
+const changedExposure = links();
+changedExposure.storeLinks[0].c7_eps_uv += 1;
+const missingSales = links();
+delete missingSales.storeLinks[0].c30_valid_sale_cnt;
+for (const [label, changedContext] of [
+  ['target ET 10 to 11', scopedContext({targetEt: 11})],
+  ['target ET within threshold', scopedContext({targetEt: 9})],
+  ['target sales', scopedContext({linksDataDoc: links(32)})],
+  ['target exposure', scopedContext({linksDataDoc: changedExposure})],
+  ['target baseline', scopedContext({baselineDoc: changedLinkBaseline})],
+  ['target cost', scopedContext({costDoc: {
+    costMap: {[canonical]: 71},
+    trueCostMap: {[canonical]: {unitCostSar: 71, storageUnitCostSar: 8}},
+  }})],
+  ['missing inventory', scopedContext({inventoryTrendDoc: {products: []}})],
+  ['missing sales', scopedContext({linksDataDoc: missingSales})],
+  ['missing baseline', scopedContext({baselineDoc: {items: []}})],
+  ['stale inventory date', scopedContext({reportDate: '2026-08-03'})],
+  ['policy without price change', scopedContext({marketingPolicy: {
+    lowEtFastSellerPricePullback: {criteria: {matchedEtOperationalSaleableMaxInclusive: 12}},
+  }})],
+  ['disabled policy', scopedContext({marketingPolicy: {lowEtFastSellerPricePullback: {enabled: false}}})],
+  ['exposure policy without rank change', scopedContext({marketingPolicy: {exposureTopLinks: {onShelfOnly: false}}})],
+]) {
+  assert.equal(revalidateLowEtFastSellerPricePullback({row: scopedPlan.row, context: changedContext, costDoc}).ok, false, label);
+  checks += 1;
+}
+const missingPolicyContext = {...scopedBefore};
+delete missingPolicyContext.policyEvidenceHash;
+assert.equal(revalidateLowEtFastSellerPricePullback({row: scopedPlan.row, context: missingPolicyContext, costDoc}).ok, false); checks += 1;
+const changedPriceRow = {...scopedPlan.row, finalTargetPrice: 121};
+assert.equal(revalidateLowEtFastSellerPricePullback({row: changedPriceRow, context: scopedBefore, costDoc}).reason,
+  'low_et_price_pullback_target_price_drift'); checks += 1;
+for (const [scope, hash, expectedReason] of [
+  [undefined, scopedBefore.evidenceHash, 'low_et_price_pullback_context_scope_requires_rebuild'],
+  [undefined, undefined, 'low_et_price_pullback_context_scope_requires_rebuild'],
+  ['canonical-v99', scopedPlan.audit.contextEvidenceHash, 'low_et_price_pullback_context_scope_requires_rebuild'],
+  ['canonical-v2', undefined, 'low_et_price_pullback_context_evidence_drift'],
+]) {
+  const artifactRow = {...scopedPlan.row, lowEtFastSellerPricePullback: {
+    ...scopedPlan.audit, contextEvidenceScope: scope, contextEvidenceHash: hash,
+  }};
+  const artifactBefore = JSON.stringify(artifactRow);
+  const result = revalidateLowEtFastSellerPricePullback({row: artifactRow, context: scopedBefore, costDoc});
+  assert.equal(result.ok, false); checks += 1;
+  assert.equal(result.reason, expectedReason); checks += 1;
+  assert.equal(JSON.stringify(artifactRow), artifactBefore); checks += 1;
+}
 assert.equal(JSON.stringify(baseline), baselineBefore); checks += 1;
 
 console.log(JSON.stringify({

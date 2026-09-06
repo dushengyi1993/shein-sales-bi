@@ -863,9 +863,9 @@ processed_result_value() {
 const fs = require('node:fs');
 try {
   const value = JSON.parse(fs.readFileSync(process.env.JSON_FILE, 'utf8'));
-  const row = Array.isArray(value?.processedThisRunResults) ? value.processedThisRunResults[0] : null;
+  const rows = Array.isArray(value?.processedThisRunResults) ? value.processedThisRunResults : [];
   const field = process.env.JSON_FIELD;
-  const result = row?.[field];
+  const result = rows.length ? rows.some(row => row?.[field] === true) : undefined;
   if (result === undefined || result === null) process.stdout.write(process.env.JSON_DEFAULT || '');
   else if (typeof result === 'boolean') process.stdout.write(result ? '1' : '0');
   else process.stdout.write(String(result));
@@ -2054,6 +2054,16 @@ if [[ "$IMMEDIATE_MODE" == "1" ]]; then
     release_repair_critical_locks || true
     exit "$status"
   fi
+  if [[ "$IMMEDIATE_CONTINUATION_MODE" == "1" && "$IMMEDIATE_RECEIPT_STATUS" == "consumed" ]]; then
+    # Persist and retain the admitted inode before any stage CAS replaces queue bytes.
+    # Children recheck these exact bytes against the original consumed receipt.
+    ORIGINAL_QUEUE_SNAPSHOT="$(ROOT="$ROOT" AUDIT_DATE="$DATE" AUDIT_QUEUE="$QUEUE_FILE" AUDIT_RECEIPT="$IMMEDIATE_RECEIPT_FILE" AUDIT_SHA="$IMMEDIATE_RECEIPT_SHA256" node --input-type=module -e 'const m = await import(process.env.ROOT + "/lib/cloud_marketing_immediate_authorization.mjs"); console.log(await m.persistImmediateAdmissionQueueSnapshot({root:process.env.ROOT,date:process.env.AUDIT_DATE,queueFile:process.env.AUDIT_QUEUE,receiptFile:process.env.AUDIT_RECEIPT,expectedReceiptSha256:process.env.AUDIT_SHA}));')" || exit $?
+    exec {IMMEDIATE_ORIGINAL_QUEUE_FD}< "$ORIGINAL_QUEUE_SNAPSHOT"
+    export SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD="$IMMEDIATE_ORIGINAL_QUEUE_FD"
+    export SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE="$QUEUE_FILE"
+    export SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE="$IMMEDIATE_RECEIPT_FILE"
+    export SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256="$IMMEDIATE_RECEIPT_SHA256"
+  fi
   release_repair_critical_locks || true
 fi
 
@@ -2172,7 +2182,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
     write_state failed "manual special single-item executor produced an invalid progress count status=$status"
     exit 66
   fi
-  if (( PROCESSED_ITEMS == 1 )); then
+  if (( PROCESSED_ITEMS > 0 )); then
     consume_group_budget "$PROCESSED_ITEMS"
   fi
   if (( PROCESSED_ITEMS == 0 )); then
@@ -2356,7 +2366,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "
     write_state failed "fallback single-group executor produced an invalid progress count status=$status"
     exit 66
   fi
-  if (( PROCESSED_GROUPS == 1 )); then
+  if (( PROCESSED_GROUPS > 0 )); then
     consume_group_budget "$PROCESSED_GROUPS"
   fi
   if (( PROCESSED_GROUPS == 0 )); then

@@ -26,6 +26,11 @@ MINUTE=$((10#$MINUTE))
 TODAY="$(TZ="$TZ_NAME" date +%F)"
 NOW_EPOCH="$(date +%s)"
 QUEUE_FILE="$STATE_DIR/repair-queues/marketing-repair-${TODAY}.json"
+# Match the worker's runtime namespace before either authorization check.
+if [[ "$ROOT" == "/opt/shein-bi/app" ]]; then
+  STATE_DIR="$(node "$ROOT/scripts/resolve_cloud_runtime_artifact.mjs" --location "$STATE_DIR")"
+  QUEUE_FILE="$STATE_DIR/repair-queues/marketing-repair-${TODAY}.json"
+fi
 IMMEDIATE_CONTINUATION=0
 IMMEDIATE_RESULT=""
 IMMEDIATE_ISSUED_CURRENT=0

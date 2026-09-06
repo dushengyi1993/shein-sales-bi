@@ -44,6 +44,11 @@ const inventoryTrendDoc = {
     inventory_match_status: 'matched',
     operational_sellable_qty: 10,
     operational_snapshot_date: reportDate,
+  }, {
+    canonical: 'SK-OTHER',
+    inventory_match_status: 'matched',
+    operational_sellable_qty: 20,
+    operational_snapshot_date: reportDate,
   }],
 };
 const costDoc = {
@@ -173,6 +178,30 @@ assert.equal(drift.totals.selected, 1); checks += 1;
 assert.equal(drift.groups[0].rows[0].lowEtFastSellerPricePullback.applied, true); checks += 1;
 assert.equal(drift.groups[0].rows[0].finalTargetPrice, 120); checks += 1;
 
+const nonAppliedInventory = {
+  products: inventoryTrendDoc.products.map(row => ({...row, operational_sellable_qty: 20})),
+};
+const nonAppliedContext = buildLowEtFastSellerPricingContext({
+  inventoryTrendDoc: nonAppliedInventory, linksDataDoc, baselineDoc, costDoc, marketingPolicy, reportDate,
+});
+const nonAppliedDrift = buildLimitedDiscountDriftRescuePlan({
+  reportDate,
+  limitedDiscountTargetPriceDrift: {belowRows: [{
+    storeKey: 'DX', skc: 'link-1', canonical, finalTargetPrice: 100, limitedDiscountPrice: 90,
+  }]},
+}, {lowEtContext: nonAppliedContext, costDoc, manualRegistry: {entries: []}});
+assert.equal(nonAppliedDrift.totals.selected, 1); checks += 1;
+assert.equal(nonAppliedDrift.groups[0].rows[0].lowEtFastSellerPricePullback.applied, false); checks += 1;
+assert.equal(nonAppliedDrift.groups[0].rows[0].lowEtFastSellerPricePullback.contextEvidenceScope, 'canonical-v2'); checks += 1;
+const nonAppliedHighClick = buildHighClickLowConversionSpecialAudit({
+  linksDataDoc, inventoryTrendDoc: nonAppliedInventory, priceOverridesDoc: baselineDoc,
+  costDoc, manualRegistry: {entries: []}, marketingPolicy, reportDate,
+  now: new Date('2026-08-02T04:00:00Z'), sourceLinksDataStatus: 'ok',
+});
+assert.equal(nonAppliedHighClick.actionCount, 1); checks += 1;
+assert.equal(nonAppliedHighClick.rows[0].lowEtFastSellerPricePullback.applied, false); checks += 1;
+assert.equal(nonAppliedHighClick.rows[0].lowEtFastSellerPricePullback.contextEvidenceScope, 'canonical-v2'); checks += 1;
+
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'low-et-rescue-'));
 try {
   const sources = {
@@ -220,11 +249,45 @@ try {
   assert.equal(current.ok, true); checks += 1;
   assert.equal(current.rawLinkOverlay.complete, true); checks += 1;
   await fs.writeFile(sources.inventoryTrend, JSON.stringify({
+    products: inventoryTrendDoc.products.map(row => row.canonical === 'SK-OTHER'
+      ? {...row, operational_sellable_qty: 21} : row),
+  }));
+  const unrelatedDrift = await revalidateLowEtFastSellerRescueArtifact({root: temp, rescue, reportDate});
+  assert.notEqual(unrelatedDrift.evidenceHash, current.evidenceHash); checks += 1;
+  assert.equal(unrelatedDrift.ok, true); checks += 1;
+  const legacyRescue = {...rescue, rows: rescue.rows.map(row => {
+    const audit = {...row.lowEtFastSellerPricePullback, contextEvidenceHash: current.evidenceHash};
+    delete audit.contextEvidenceScope;
+    return {...row, lowEtFastSellerPricePullback: audit};
+  })};
+  const legacy = await revalidateLowEtFastSellerRescueArtifact({root: temp, rescue: legacyRescue, reportDate});
+  assert.equal(legacy.ok, false); checks += 1;
+  assert.equal(legacy.rows[0].reason, 'low_et_price_pullback_context_scope_requires_rebuild'); checks += 1;
+  await fs.writeFile(sources.pricingPolicy, JSON.stringify({
+    ...marketingPolicy,
+    lowEtFastSellerPricePullback: {enabled: true, criteria: {matchedEtOperationalSaleableMaxInclusive: 12}},
+  }));
+  const policyDrift = await revalidateLowEtFastSellerRescueArtifact({root: temp, rescue, reportDate});
+  assert.equal(policyDrift.ok, false); checks += 1;
+  assert.equal(policyDrift.rows[0].reason, 'low_et_price_pullback_context_evidence_drift'); checks += 1;
+  await fs.writeFile(sources.pricingPolicy, JSON.stringify(marketingPolicy));
+  await fs.writeFile(sources.inventoryTrend, JSON.stringify({
     products: [{...inventoryTrendDoc.products[0], operational_sellable_qty: 11}],
   }));
   const stale = await revalidateLowEtFastSellerRescueArtifact({root: temp, rescue, reportDate});
   assert.equal(stale.ok, false); checks += 1;
   assert.equal(stale.rows[0].reason, 'low_et_price_pullback_context_evidence_drift'); checks += 1;
+  const refreshedRescue = {...rescue, rows: nonAppliedDrift.groups[0].rows};
+  for (const [targetEt, otherEt, expected] of [[20, 20, true], [20, 21, true], [21, 20, false], [10, 20, false]]) {
+    await fs.writeFile(sources.inventoryTrend, JSON.stringify({
+      products: inventoryTrendDoc.products.map(row => ({
+        ...row, operational_sellable_qty: row.canonical === canonical ? targetEt : otherEt,
+      })),
+    }));
+    const revalidated = await revalidateLowEtFastSellerRescueArtifact({root: temp, rescue: refreshedRescue, reportDate});
+    assert.equal(revalidated.ok, expected, `non-applied rescue ET ${targetEt}/${otherEt}`); checks += 1;
+    assert.notEqual(revalidated.rows[0].reason, 'low_et_price_pullback_context_scope_requires_rebuild'); checks += 1;
+  }
 } finally {
   await fs.rm(temp, {recursive: true, force: true});
 }
@@ -249,6 +312,7 @@ const approvalBuilder = await fs.readFile(
   'utf8',
 );
 assert.match(approvalBuilder, /selectionBlockedReasons:\s*retainedExcludeReasons/); checks += 1;
+assert.match(approvalBuilder, /if \(!decision\.blocked && decision\.audit\)\s*\{\s*executionRows\[index\] = \{\.\.\.current, lowEtFastSellerPricePullback: decision\.audit\}/); checks += 1;
 assert.doesNotMatch(
   approvalBuilder,
   /\.\.\.adjusted,\s*selected:\s*true,\s*excludeReason:\s*''/,
