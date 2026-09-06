@@ -10,7 +10,7 @@ import {
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
 import {loadExactManualRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
-import {readImmediateAdmissionQueueFd, verifyUnstartedRepairStageContinuation} from '../../lib/cloud_marketing_immediate_authorization.mjs';
+import {claimImmediateRepairGroup, readImmediateAdmissionQueueFd, verifyUnstartedRepairStageContinuation} from '../../lib/cloud_marketing_immediate_authorization.mjs';
 import {
   activityExecutionTransactionHash,
   classifyActivityInventoryFailureStatus,
@@ -627,6 +627,7 @@ export function manualResultDocumentMatches(previous, workFingerprint, dryRunOnl
 
 export async function runManualRestoreBatch(customArgs, customOverrides = {}) {
   const args = customArgs || parseArgs(process.argv.slice(2));
+  args.receiptAdmission = null;
   ACTIVE_DEADLINE = args.deadline;
   const effectiveLaunchStore = customOverrides.launchStore || launchStore;
   const effectiveCloseStore = customOverrides.closeStore || closeStore;
@@ -648,9 +649,9 @@ if (args.expectedWorkFingerprint && args.expectedWorkFingerprint !== workFingerp
 if (!args.dryRunOnly && args.skipBuild && args.continuation
   && process.env.SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION === '1'
   && process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_STATUS === 'consumed'
-  && Number(process.env.SHEIN_BI_MARKETING_IMMEDIATE_GRACEFUL_CUTOFF_EPOCH) - Math.floor(Date.now() / 1000) >= 900) {
+) {
   const admission = await verifyUnstartedRepairStageContinuation({
-    root: ROOT, date, stage: 'manualSpecialRestore', planPath, guardPath: args.guard,
+    root: ROOT, date, stage: 'manualSpecialRestore', planPath, guardPath: args.guard, resultPath: args.result,
     expectedWorkFingerprint: args.expectedWorkFingerprint,
     queueFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE,
     receiptFile: process.env.SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE,
@@ -662,8 +663,8 @@ if (!args.dryRunOnly && args.skipBuild && args.continuation
   });
   if (admission && (args.deadline?.gracefulCutoffEpoch !== admission.gracefulCutoffEpoch
     || args.deadline?.outerHardDeadlineEpoch !== admission.outerHardDeadlineEpoch
-    || !args.maxItems || args.maxItems > (admission.remainingUnstartedGroups ?? admission.maxGroups))) throw new Error('manual admission exceeds original receipt budget');
-  if (admission) args.continuation = false;
+    || !args.maxItems || args.maxItems > admission.maxGroups)) throw new Error('manual admission exceeds original receipt budget');
+  if (admission) args.receiptAdmission = admission;
 }
 automationAuthorization = args.dryRunOnly ? null : await assertMarketingAutomationAuthorization({
   action: MARKETING_AUTOMATION_ACTIONS.RESTORE_MANUAL_SPECIAL,
@@ -682,9 +683,15 @@ const previousResults = manualResultDocumentMatches(previous, workFingerprint, a
 const settledByPath = new Map(previousResults
   .filter(row => isManualResumeResultSettled(row) && row?.rescuePath)
   .map(row => [String(row.rescuePath), row]));
+if (args.receiptAdmission) {
+  for (const group of args.receiptAdmission.groups.filter(group => group.mode === 'settled')) {
+    const file = files.find(file => path.resolve(ROOT, file.path) === group.path);
+    settledByPath.set(String(file.path), group.previous || {ok:true, storeKey:file.storeKey, rescuePath:file.path, status:'restored'});
+  }
+}
 const pendingFiles = files.filter(file => !settledByPath.has(String(file.path)));
 let continuationFiles = pendingFiles;
-if (args.continuation) {
+if (args.continuation && !args.receiptAdmission) {
   continuationFiles = [];
   for (const file of pendingFiles) {
     const persisted = await findPersistedMarketingTransactionContinuation({
@@ -713,7 +720,10 @@ for (const [storeKey, storeFiles] of filesByStore.entries()) {
     launchSummary = await effectiveLaunchStore(storeKey);
     for (let i = 0; i < storeFiles.length; i += 1) {
       const file = storeFiles[i];
-      const res = await effectiveProcessOne(file, storeMap, args, {keepOpen: true, launchSummary});
+      const group = args.receiptAdmission?.groups.find(group => group.path === path.resolve(ROOT, file.path));
+      if (group) await claimImmediateRepairGroup(args.receiptAdmission, group.path);
+      const groupArgs = group ? {...args, continuation: group.mode === 'transaction'} : args;
+      const res = await effectiveProcessOne(file, storeMap, groupArgs, {keepOpen: true, launchSummary});
       processedThisRun.push(normalizeManualResumeResult(res));
     }
   } finally {
@@ -723,7 +733,8 @@ for (const [storeKey, storeFiles] of filesByStore.entries()) {
     };
   }
 }
-const resultByPath = new Map(settledByPath);
+const resultByPath = new Map(previousResults.map(row => [String(row.rescuePath), row]));
+for (const [key, row] of settledByPath) resultByPath.set(key, row);
 for (const row of processedThisRun) resultByPath.set(String(row.rescuePath), row);
 const results = files.map(file => resultByPath.get(String(file.path))).filter(Boolean);
 const settledPaths = new Set(results

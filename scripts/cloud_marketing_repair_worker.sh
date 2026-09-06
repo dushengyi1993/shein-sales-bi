@@ -2059,9 +2059,6 @@ if [[ "$IMMEDIATE_MODE" == "1" ]]; then
     # Children recheck these exact bytes against the original consumed receipt.
     ORIGINAL_QUEUE_SNAPSHOT="$(ROOT="$ROOT" AUDIT_DATE="$DATE" AUDIT_QUEUE="$QUEUE_FILE" AUDIT_RECEIPT="$IMMEDIATE_RECEIPT_FILE" AUDIT_SHA="$IMMEDIATE_RECEIPT_SHA256" node --input-type=module -e 'const m = await import(process.env.ROOT + "/lib/cloud_marketing_immediate_authorization.mjs"); console.log(await m.persistImmediateAdmissionQueueSnapshot({root:process.env.ROOT,date:process.env.AUDIT_DATE,queueFile:process.env.AUDIT_QUEUE,receiptFile:process.env.AUDIT_RECEIPT,expectedReceiptSha256:process.env.AUDIT_SHA}));')" || exit $?
     exec {IMMEDIATE_ORIGINAL_QUEUE_FD}< "$ORIGINAL_QUEUE_SNAPSHOT"
-    ADMITTED_REMAINING_GROUPS="$(ROOT="$ROOT" AUDIT_DATE="$DATE" AUDIT_QUEUE="$QUEUE_FILE" AUDIT_RECEIPT="$IMMEDIATE_RECEIPT_FILE" AUDIT_SHA="$IMMEDIATE_RECEIPT_SHA256" node --input-type=module -e 'const m = await import(process.env.ROOT + "/lib/cloud_marketing_immediate_authorization.mjs"); const v = await m.verifyImmediateAuthorizationContinuation({root:process.env.ROOT,date:process.env.AUDIT_DATE,queueFile:process.env.AUDIT_QUEUE,receiptFile:process.env.AUDIT_RECEIPT,expectedReceiptSha256:process.env.AUDIT_SHA}); console.log(v.remainingUnstartedGroups ?? v.maxGroups);')" || exit $?
-    if [[ ! "$ADMITTED_REMAINING_GROUPS" =~ ^[0-9]+$ ]]; then exit 64; fi
-    if (( ADMITTED_REMAINING_GROUPS < REMAINING_GROUPS )); then REMAINING_GROUPS="$ADMITTED_REMAINING_GROUPS"; fi
     export SHEIN_BI_MARKETING_IMMEDIATE_ORIGINAL_QUEUE_FD="$IMMEDIATE_ORIGINAL_QUEUE_FD"
     export SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE="$QUEUE_FILE"
     export SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE="$IMMEDIATE_RECEIPT_FILE"
@@ -2167,12 +2164,10 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
   MANUAL_OUT_DIR="$(dirname "$MANUAL_PLAN_PATH")"
   RESULT_PATH="tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-result.json"
   begin_stage_critical_section manualSpecialRestore || { status=$?; exit "$status"; }
-  MANUAL_BATCH_LIMIT=1
-  if [[ "$IMMEDIATE_CONTINUATION_MODE" == "1" ]]; then MANUAL_BATCH_LIMIT="$REMAINING_GROUPS"; fi
   set +e
   node scripts/marketing/batch_restore_manual_limited_discounts.mjs \
     --guard "$GUARD_PATH" --out-dir "$MANUAL_OUT_DIR" --skip-build --execute \
-    --max-items "$MANUAL_BATCH_LIMIT" --result "$(runtime_location "$RESULT_PATH")" \
+    --max-items 1 --result "$(runtime_location "$RESULT_PATH")" \
     --expected-work-fingerprint "$WORK_FINGERPRINT" \
     "${EXECUTOR_CONTINUATION_ARGS[@]}" "${EXECUTOR_DEADLINE_ARGS[@]}"
   status=$?
@@ -2182,7 +2177,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
   REMAINING_ITEMS="$(result_total "$RESULT_PATH" remainingItems)"
   TERMINAL_BLOCKED="$(processed_result_value "$RESULT_PATH" terminalBlocked 0)"
   RECOVERABLE_DEFERRED="$(processed_result_value "$RESULT_PATH" recoverableDeferred 0)"
-  if [[ ! "$PROCESSED_ITEMS" =~ ^[0-9]+$ ]] || (( PROCESSED_ITEMS > MANUAL_BATCH_LIMIT )); then
+  if [[ ! "$PROCESSED_ITEMS" =~ ^[0-9]+$ ]] || (( PROCESSED_ITEMS > 1 )); then
     update_stage manualSpecialRestore failed false "single-item executor produced an invalid processedThisRun count=$PROCESSED_ITEMS status=$status" "$RESULT_PATH"
     write_state failed "manual special single-item executor produced an invalid progress count status=$status"
     exit 66
@@ -2226,7 +2221,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$MANUAL_STATUS" != "not_required" && "$M
     write_state failed "manual special single-item executor made no durable progress status=$status"
     exit 66
   fi
-  if [[ "$status" -eq 2 && "$PROCESSED_ITEMS" =~ ^[1-9][0-9]*$ && "$REMAINING_ITEMS" =~ ^[1-9][0-9]*$ && "$TERMINAL_BLOCKED" != "1" ]]; then
+  if [[ "$status" -eq 2 && "$PROCESSED_ITEMS" == "1" && "$REMAINING_ITEMS" =~ ^[1-9][0-9]*$ && "$TERMINAL_BLOCKED" != "1" ]]; then
     update_stage manualSpecialRestore pending false "one exact manual item failed before a confirmed write; preserving it for a fresh authorization while independent stages continue" "$RESULT_PATH"
     write_state pending "manual-special item deferred after a confirmed prewrite failure; continuing independent repair stages"
     break
@@ -2354,19 +2349,9 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "
   GUARD_PATH="$(node scripts/resolve_cloud_runtime_artifact.mjs "$(queue_value 'j.sourceGuard' '')")"
   RESULT_PATH="outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
   begin_stage_critical_section fallbackRepair || { status=$?; exit "$status"; }
-  FALLBACK_BATCH_LIMIT=1
-  if [[ "$IMMEDIATE_CONTINUATION_MODE" == "1" ]]; then
-    # Keep the receipt's exact queue bytes unchanged while one bounded child
-    # verifies eligibility and serially processes the original unstarted work.
-    # The child retains --continuation unless its real receipt/plan check passes.
-    FALLBACK_BATCH_LIMIT="$REMAINING_GROUPS"
-    export SHEIN_BI_MARKETING_IMMEDIATE_QUEUE_FILE="$QUEUE_FILE"
-    export SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_FILE="$IMMEDIATE_RECEIPT_FILE"
-    export SHEIN_BI_MARKETING_IMMEDIATE_RECEIPT_SHA256="$IMMEDIATE_RECEIPT_SHA256"
-  fi
   set +e
   node scripts/marketing/batch_apply_new_listing_limited_discount.mjs \
-    --date "$DATE" --guard "$GUARD_PATH" --skip-build --execute --max-groups "$FALLBACK_BATCH_LIMIT" \
+    --date "$DATE" --guard "$GUARD_PATH" --skip-build --execute --max-groups 1 \
     --graceful-cutoff-epoch "$FALLBACK_GRACEFUL_CUTOFF_EPOCH" \
     --outer-hard-deadline-epoch "$FALLBACK_OUTER_HARD_DEADLINE_EPOCH" \
     --min-start-budget-sec "$FALLBACK_MIN_START_BUDGET_SEC" \
@@ -2376,7 +2361,7 @@ while (( REMAINING_GROUPS > 0 )) && [[ "$FALLBACK_STATUS" != "not_required" && "
   set -e
   PROCESSED_GROUPS="$(new_groups_in_result "$RESULT_PATH")"
   DEADLINE_DEFERRED="$(result_top_level_value "$RESULT_PATH" deadlineDeferred 0)"
-  if [[ ! "$PROCESSED_GROUPS" =~ ^[0-9]+$ ]] || (( PROCESSED_GROUPS > FALLBACK_BATCH_LIMIT )); then
+  if [[ ! "$PROCESSED_GROUPS" =~ ^[0-9]+$ ]] || (( PROCESSED_GROUPS > 1 )); then
     update_stage fallbackRepair failed false "single-group executor produced an invalid new-group count=$PROCESSED_GROUPS status=$status" "$RESULT_PATH"
     write_state failed "fallback single-group executor produced an invalid progress count status=$status"
     exit 66
