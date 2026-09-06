@@ -8,6 +8,8 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildEtLowInventorySafetyPlan} from './inventory/build_et_low_inventory_safety_plan.mjs';
 import {assertDailyInventoryExecutionAuthorization, stableInventoryHash} from '../lib/inventory_replenishment_policy.mjs';
+import {inventoryLogicalActionKey, inventoryRecoveryScopeKey} from '../lib/durable_inventory_write.mjs';
+import {validateEtHistoricalSkipWarning} from './inventory/validate_et_historical_skip_warning.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -398,6 +400,120 @@ const toBashPath = value => {
     ? `/mnt/${match[1].toLowerCase()}/${match[2]}`
     : `/${match[1].toLowerCase()}/${match[2]}`;
 };
+function historicalWarningFixture(directory, batchId, manifestHash, mapPath = p => p) {
+  const historicalFile = path.join(directory, 'daily-inventory-replenishment-2026-08-17.json.journal.ndjson');
+  const action = {...sourcePlan.actionable[0], storeKey: 'XL', skc: 'sv260605191268615486197', skuCode: 'sku-vacuum', platformUsableInventory: 6};
+  const warningPlan = buildEtLowInventorySafetyPlan({...sourcePlan, date: boundDate, actionable: [action]}, {batchId, manifestHash});
+  warningPlan.executable = true;
+  warningPlan.blockers = [];
+  const old = {kind: 'intent', intentId: '275b9782-936b-4061-9267-9010c0dce661', runDate: '2026-08-17',
+    storeKey: action.storeKey, skc: action.skc, skuCode: action.skuCode, targetUsableInventory: 10,
+    policyVersion: '2026-08-06.1', authorizationId: 'fixture-owner', planHash: 'a'.repeat(64), recordedAt: '2026-08-17T00:00:00Z',
+    before: {skuCode: action.skuCode, totalInventoryQuantity: 6, totalUsableInventory: 6, totalLockedQuantity: 0, temporaryInventoryQuantity: 0, stockRowMissing: false, warehouseCodes: []}};
+  old.logicalActionKey = inventoryLogicalActionKey(old);
+  old.recoveryScopeKey = inventoryRecoveryScopeKey(old);
+  old.idempotencyKey = `bi-inv-${old.logicalActionKey.slice(0, 42)}`;
+  old.request = {pathname: '/open-api/stock/change-inventory/v2', method: 'POST', headers: {language: 'en'},
+    body: {updateSkuInventoryQuantityRequests: [{idempotencyKey: old.idempotencyKey, skuCode: old.skuCode, invType: 'VI', changeType: 'OVERWRITE', changeQuantity: 10,
+      changeReason: 'Owner-authorized daily inventory target after current-day ET and sales/exposure guard'}]}};
+  old.requestPayloadHash = stableInventoryHash(old.request);
+  const row = {...warningPlan.actionable[0], state: 'submitted_but_readback_pending', historicalPending: true, disposition: 'skipped',
+    historicalIntentId: old.intentId, historicalRunDate: old.runDate, historicalCommandId: '', historicalJournalFile: mapPath(historicalFile),
+    historicalTargetUsableInventory: 10, before: {...old.before, ok: true}, logicalActionKey: old.logicalActionKey,
+    idempotencyKey: old.idempotencyKey, requestPayloadHash: old.requestPayloadHash};
+  const result = {schemaVersion: 'daily-inventory-replenishment-result/v1', generatedAt: new Date().toISOString(), planHash: warningPlan.payloadHash,
+    policyVersion: warningPlan.policyVersion, execute: true, executionMode: 'automatic', executionConstraints: warningPlan.executionConstraints,
+    unresolvedIntents: [], deferredHistorical: [], results: [row]};
+  return {plan: warningPlan, old, row, result, historicalFile};
+}
+
+// Exercise the real read-only helper, including forged result/journal pairs.
+const warningRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'et-warning-validator-'));
+try {
+  const fixture = historicalWarningFixture(warningRoot, 'fixture-batch', boundManifestHash);
+  const planFile = path.join(warningRoot, 'plan.json');
+  const journalFile = path.join(warningRoot, 'et-result.json.journal.ndjson');
+  const resultFile = path.join(warningRoot, 'et-result.json.attempt-123-456');
+  const run = {kind: 'executor_run_intent', intentId: 'fixture-run', attemptId: '123-456', runDate: boundDate,
+    batchId: 'fixture-batch', manifestHash: boundManifestHash, planHash: fixture.plan.payloadHash, actionCount: 1,
+    resultAttempt: resultFile, recordedAt: new Date(Date.now() - 1000).toISOString()};
+  const baseEntries = [{...run, phase: 'prepared'}, {...run, phase: 'executing'},
+    {kind: 'result', sequence: 1, planHash: fixture.plan.payloadHash, logicalActionKey: fixture.old.logicalActionKey,
+      recordedAt: fixture.result.generatedAt, row: fixture.row}];
+  const options = {planFile, resultFile, journalFile, intentId: run.intentId, mode: 'candidate', runDate: boundDate, batchId: run.batchId, manifestHash: boundManifestHash};
+  const save = (mutate = () => {}) => {
+    const data = structuredClone({plan: fixture.plan, result: fixture.result, entries: baseEntries, old: fixture.old});
+    mutate(data);
+    fs.writeFileSync(planFile, JSON.stringify(data.plan));
+    fs.writeFileSync(resultFile, JSON.stringify(data.result));
+    fs.writeFileSync(journalFile, data.entries.map(e => JSON.stringify(e)).join('\n') + '\n');
+    fs.writeFileSync(fixture.historicalFile, JSON.stringify(data.old) + '\n');
+  };
+  save();
+  assert.equal((await validateEtHistoricalSkipWarning(options)).historicalSkipped, 1);
+  const corruptions = [
+    d => d.entries.push({kind: 'intent', planHash: 'f'.repeat(64)}),
+    d => d.entries.push({kind: 'write_outcome', disposition: 'unknown'}),
+    d => d.entries.push({kind: 'transport_unknown'}),
+    d => d.result.results[0].historicalIntentId = 'missing',
+    d => d.result.results[0].idempotencyKey = 'wrong',
+    d => d.result.results[0].requestPayloadHash = '0'.repeat(64),
+    d => d.result.results[0].historicalRunDate = boundDate,
+    d => d.result.results[0].historicalTargetUsableInventory = 11,
+    d => d.result.results[0].before.ok = false,
+    d => d.result.results[0].before.skuCode = 'wrong',
+    d => d.result.results[0].writes = [{success: true}],
+    d => d.result.results[0].writes = 'not-an-array',
+    d => d.result.results[0].state = 'blocked',
+    d => d.result.results[0].historicalPending = false,
+    d => d.result.results[0].historicalJournalFile = planFile,
+    d => d.result.results[0].skc = 'different',
+    d => d.result.results.push(d.result.results[0]),
+    d => d.entries.pop(),
+    d => d.old.request.body.updateSkuInventoryQuantityRequests[0].changeQuantity = 999,
+    d => d.plan.actionable[0].targetUsableInventory = 1,
+  ];
+  for (const corrupt of corruptions) {
+    save(d => { corrupt(d); if (d.entries[2]) d.entries[2].row = structuredClone(d.result.results[0]); });
+    await assert.rejects(validateEtHistoricalSkipWarning(options));
+  }
+  save();
+  const digest = createHash('sha256').update(fs.readFileSync(resultFile)).digest('hex');
+  fs.appendFileSync(journalFile, JSON.stringify({...run, phase: 'not_submitted', executorStatus: 1, resultHash: digest}) + '\n');
+  assert.equal((await validateEtHistoricalSkipWarning({...options, mode: 'bound'})).resultHash, digest);
+  fs.appendFileSync(resultFile, ' ');
+  await assert.rejects(validateEtHistoricalSkipWarning({...options, mode: 'bound'}), /bound result hash/);
+  save();
+  fs.appendFileSync(fixture.historicalFile, JSON.stringify({...fixture.old, intentId: 'second-same-scope'}) + '\n');
+  await assert.rejects(validateEtHistoricalSkipWarning(options));
+  save();
+  fs.appendFileSync(fixture.historicalFile, JSON.stringify({kind: 'write_outcome', intentId: fixture.old.intentId,
+    logicalActionKey: fixture.old.logicalActionKey, disposition: 'readback_matched', recordedAt: boundNow}) + '\n');
+  await assert.rejects(validateEtHistoricalSkipWarning(options));
+  save();
+  const pendingResult = JSON.parse(fs.readFileSync(resultFile));
+  for (let index = 0; index < 30; index++) {
+    const old = structuredClone(fixture.old);
+    old.intentId = `absent-${index}`;
+    old.skc = `absent-skc-${index}`;
+    old.skuCode = `absent-sku-${index}`;
+    old.before.skuCode = old.skuCode;
+    old.logicalActionKey = inventoryLogicalActionKey(old);
+    old.recoveryScopeKey = inventoryRecoveryScopeKey(old);
+    old.idempotencyKey = `bi-inv-${old.logicalActionKey.slice(0, 42)}`;
+    Object.assign(old.request.body.updateSkuInventoryQuantityRequests[0], {skuCode: old.skuCode, idempotencyKey: old.idempotencyKey});
+    old.requestPayloadHash = stableInventoryHash(old.request);
+    fs.appendFileSync(fixture.historicalFile, JSON.stringify(old) + '\n');
+    pendingResult.deferredHistorical.push({...old, state: 'deferred_historical'});
+  }
+  fs.writeFileSync(resultFile, JSON.stringify(pendingResult));
+  const thirtyPlusOne = await validateEtHistoricalSkipWarning(options);
+  assert.equal(thirtyPlusOne.historicalSkipped, 1);
+  assert.equal(thirtyPlusOne.deferredHistorical, 30);
+  pendingResult.deferredHistorical.pop();
+  fs.writeFileSync(resultFile, JSON.stringify(pendingResult));
+  await assert.rejects(validateEtHistoricalSkipWarning(options), /deferred coverage/);
+} finally { fs.rmSync(warningRoot, {recursive: true, force: true}); }
 try {
   const harnessRuntime = path.join(harnessRoot, 'runtime');
   const harnessBin = path.join(harnessRoot, 'bin');
@@ -464,12 +580,18 @@ try {
     }],
   };
   const exactExecutorResultJson = JSON.stringify(exactExecutorResult);
+  const warningFixture = historicalWarningFixture(path.join(harnessRuntime, 'results'), harnessBatch, harnessManifestHash, toBashPath);
+  const warningPlanFixture = path.join(harnessRoot, 'warning-plan.json');
+  const warningResultFixture = path.join(harnessRoot, 'warning-result.json');
+  fs.writeFileSync(warningPlanFixture, JSON.stringify(warningFixture.plan));
+  fs.writeFileSync(warningResultFixture, JSON.stringify(warningFixture.result));
   fs.writeFileSync(preseedResult, JSON.stringify(staleStableResult));
   const fakeNode = path.join(harnessBin, 'node');
   fs.writeFileSync(fakeNode, [
     '#!/usr/bin/env bash',
     'script="$1"',
     'shift',
+    `if [[ "$script" == *validate_et_historical_skip_warning.mjs ]]; then exec /usr/bin/node '${toBashPath(path.join(ROOT, 'scripts/inventory/validate_et_historical_skip_warning.mjs'))}' "$@"; fi`,
     'out=""',
     'while (( $# > 0 )); do',
     '  if [[ "$1" == "--out" && $# -ge 2 ]]; then out="$2"; shift 2; else shift; fi',
@@ -477,6 +599,7 @@ try {
     'printf "%s\\n" "$script" >> "$HARNESS_NODE_LOG"',
     'case "$script" in',
     '  *build_daily_inventory_replenishment_plan.mjs)',
+    '    if [[ "$HARNESS_SCENARIO" == "historical_warning" ]]; then printf \'%s\\n\' \'{"schemaVersion":"daily-inventory-replenishment-plan/v1","executable":true,"blockers":[],"payloadHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' > "$out"; exit 0; fi',
     '    if [[ "$HARNESS_SCENARIO" == "filter_fail" || "$HARNESS_SCENARIO" == "executor_fail" || "$HARNESS_SCENARIO" == "executor_rejected" || "$HARNESS_SCENARIO" == "executor_transport" || "$HARNESS_SCENARIO" == "sigkill_window" || "$HARNESS_SCENARIO" == "crash_result_before_return" || "$HARNESS_SCENARIO" == "executor_success" ]]; then',
     '      printf "%s\\n" \'{"schemaVersion":"daily-inventory-replenishment-plan/v1","executable":true,"blockers":[],"payloadHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\' > "$out"',
     '      exit 0',
@@ -484,6 +607,7 @@ try {
     '    exit 1',
     '    ;;',
     '  *build_et_low_inventory_safety_plan.mjs)',
+    `    if [[ "$HARNESS_SCENARIO" == "historical_warning" ]]; then cp '${toBashPath(warningPlanFixture)}' "$out"; exit 0; fi`,
     '    : > "$HARNESS_SAFETY_CALLED"',
     '    if [[ "$HARNESS_SCENARIO" == "executor_fail" || "$HARNESS_SCENARIO" == "executor_rejected" || "$HARNESS_SCENARIO" == "executor_transport" || "$HARNESS_SCENARIO" == "sigkill_window" || "$HARNESS_SCENARIO" == "crash_result_before_return" || "$HARNESS_SCENARIO" == "executor_success" ]]; then',
     `      printf "%s\\n" '{"schemaVersion":"et-low-inventory-safety-plan/v1","date":"${boundDate}","executable":true,"blockers":[],"payloadHash":"${executorPlanHash}","actionable":[{"targetUsableInventory":2}],"watch":{"active":true,"blockedLowEtCanonicalCount":0},"executionConstraints":{"decreaseOnly":true,"triggerBatchId":"${harnessBatch}","triggerManifestHash":"${harnessManifestHash}"}}' > "$out"`,
@@ -493,6 +617,11 @@ try {
     '    ;;',
     '  *execute_daily_inventory_replenishment_plan.mjs)',
     '    printf "called\\n" >> "$HARNESS_EXECUTOR_CALLED"',
+    '    if [[ "$HARNESS_SCENARIO" == "historical_warning" ]]; then',
+    `      jq --arg at "$(date -Is)" '.generatedAt=$at' '${toBashPath(warningResultFixture)}' > "$out"`,
+    '      jq -c \'{kind:"result",sequence:1,planHash,logicalActionKey:.results[0].logicalActionKey,recordedAt:.generatedAt,row:.results[0]}\' "$out" >> "$out.journal.ndjson"',
+    '      exit 1',
+    '    fi',
     '    if [[ "$HARNESS_SCENARIO" == "crash_result_before_return" ]]; then',
     `      printf '%s\\n' '${exactExecutorResultJson}' > "$out"`,
     '      kill -TERM "$PPID"',
@@ -528,6 +657,7 @@ try {
     'src="$1"',
     'dst="$2"',
     'is_result_promotion=0',
+    'if [[ "$HARNESS_CRASH_POINT" == "before_warning_state" && "$dst" == */state/latest.json ]]; then kill -TERM "$PPID"; exit 143; fi',
     'if [[ "$src" == *"/results/"*".json.attempt-"* && "$src" != *.journal.ndjson && "$dst" == *"/results/"*".json" ]]; then is_result_promotion=1; fi',
     'if [[ "$is_result_promotion" == "1" && "$HARNESS_CRASH_POINT" == "before_result_move" ]]; then',
     '  kill -TERM "$PPID"',
@@ -773,6 +903,60 @@ try {
   assert.equal(executorCallCount(), callsBeforeCrash + 1,
     'stable promotion recovery completes journal/state without executor replay');
   assert.equal(latestRunIntent().phase, 'completed');
+  resetLifecycleHarness();
+  fs.writeFileSync(warningFixture.historicalFile, JSON.stringify(warningFixture.old) + '\n');
+  const oldBytes = fs.readFileSync(warningFixture.historicalFile);
+  callsBeforeCrash = executorCallCount();
+  const warningRun = runGuardHarness('historical_warning');
+  assert.equal(warningRun.status, 0, `${warningRun.stdout}\n${warningRun.stderr}`);
+  const warningState = JSON.parse(fs.readFileSync(latestState));
+  assert.equal(warningState.ok, false);
+  assert.equal(warningState.active, true);
+  assert.equal(warningState.businessState, 'watching');
+  assert.equal(warningState.executorStatus, 1);
+  assert.equal(warningState.counts.blocked, 1);
+  assert.equal(warningState.counts.historicalSkipped, 1);
+  assert.equal(latestRunIntent().phase, 'not_submitted');
+  assert.equal(latestRunIntent().resultHash, warningState.resultHash);
+  assert.equal(fs.existsSync(localAttemptPath(latestRunIntent())), true);
+  assert.equal(JSON.parse(fs.readFileSync(localAttemptPath(latestRunIntent()))).results[0].state, 'submitted_but_readback_pending');
+  assert.equal(JSON.parse(fs.readFileSync(preseedResult)).generatedAt, 'stale-preseed-result');
+  const warningRetry = runGuardHarness('historical_warning');
+  assert.equal(warningRetry.status, 0, `${warningRetry.stdout}\n${warningRetry.stderr}`);
+  assert.equal(JSON.parse(warningRetry.stdout).ok, false);
+  assert.equal(executorCallCount(), callsBeforeCrash + 1, 'bound warning deduplicates the same batch');
+  fs.rmSync(latestState);
+  const warningRecovery = runGuardHarness('historical_warning');
+  assert.equal(warningRecovery.status, 0, warningRecovery.stderr);
+  assert.equal(JSON.parse(warningRecovery.stdout).ok, false);
+  assert.equal(executorCallCount(), callsBeforeCrash + 1, 'missing state is recovered without executor replay');
+  fs.appendFileSync(localAttemptPath(latestRunIntent()), ' ');
+  const corruptWarning = runGuardHarness('historical_warning');
+  assert.equal(corruptWarning.status, 2);
+  assert.match(corruptWarning.stderr, /replay forbidden/);
+  assert.equal(executorCallCount(), callsBeforeCrash + 1);
+  resetLifecycleHarness();
+  callsBeforeCrash = executorCallCount();
+  const warningCrash = runGuardHarness('historical_warning', 'before_warning_state');
+  assert.notEqual(warningCrash.status, 0);
+  assert.equal(latestRunIntent().phase, 'not_submitted');
+  assert.equal(fs.existsSync(latestState), false);
+  assert.equal(fs.existsSync(localAttemptPath(latestRunIntent())), true);
+  const recoverWarningCrash = runGuardHarness('historical_warning');
+  assert.equal(recoverWarningCrash.status, 0, recoverWarningCrash.stderr);
+  assert.equal(JSON.parse(recoverWarningCrash.stdout).ok, false);
+  assert.equal(executorCallCount(), callsBeforeCrash + 1);
+  assert.deepEqual(fs.readFileSync(warningFixture.historicalFile), oldBytes, 'historical journal remains byte-identical');
+  // A damaged bound receipt cannot fall through to old unconditional ok:true
+  // deduplication, even when the mutable warning state has also disappeared.
+  fs.rmSync(latestState);
+  const damagedReceipt = fs.readFileSync(journalFile, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line));
+  delete damagedReceipt.at(-1).resultHash;
+  fs.writeFileSync(journalFile, damagedReceipt.map(e => JSON.stringify(e)).join('\n') + '\n');
+  const missingWarningHash = runGuardHarness('historical_warning');
+  assert.equal(missingWarningHash.status, 2);
+  assert.match(missingWarningHash.stderr, /lacks hash binding; replay forbidden/);
+  assert.equal(executorCallCount(), callsBeforeCrash + 1);
 } finally {
   fs.rmSync(harnessRoot, {recursive: true, force: true});
 }

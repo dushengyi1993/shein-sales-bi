@@ -312,6 +312,27 @@ result_matches_promotion_evidence() {
     && result_is_complete_and_safe "$result_file" "$bound_plan_hash" "$bound_action_count"
 }
 
+validate_historical_skip_warning() {
+  node scripts/inventory/validate_et_historical_skip_warning.mjs \
+    "$PLAN" "$1" "$RESULT_JOURNAL" "$2" "$3" "$DATE" "$BATCH_ID" "$ET_MANIFEST_HASH"
+}
+
+persist_historical_skip_warning() {
+  local result_attempt="$1" intent_id="$2" audit="$3" tmp="$STATE.$$.tmp"
+  jq -n --arg at "$(date -Is)" --arg batch "$BATCH_ID" --arg manifest "$ET_MANIFEST_HASH" \
+    --arg plan "$PLAN" --arg hash "$(jq -r '.payloadHash' "$PLAN")" \
+    --arg result "$result_attempt" --arg intentId "$intent_id" --argjson audit "$audit" \
+    '{ok:false,businessState:"watching",active:true,warning:"historical_skip_no_current_submission",
+      updatedAt:$at,lastProcessedBatchId:$batch,etManifestHash:$manifest,plan:$plan,planHash:$hash,
+      result:$result,resultHash:$audit.resultHash,executorIntentId:$intentId,executorStatus:1,
+      counts:{total:$audit.total,updated:0,skipped:$audit.skipped,blocked:$audit.historicalSkipped,
+        historicalSkipped:$audit.historicalSkipped,deferredHistorical:$audit.deferredHistorical}}' >"$tmp"
+  sync_durable_path "$tmp"
+  mv "$tmp" "$STATE"
+  sync_durable_path "$(dirname "$STATE")"
+  jq '{ok,state:"historical_skip_warning",businessState,active,warning,lastProcessedBatchId,etManifestHash,planHash,result,resultHash,executorStatus,counts}' "$STATE"
+}
+
 persist_completed_state() {
   local result_file="$1"
   local blocked blocked_canonical updated skipped watch_active active tmp
@@ -434,6 +455,20 @@ NONTERMINAL_RUN_INTENTS="$(jq '[.[] | select(.phase == "prepared" or .phase == "
 NONTERMINAL_RUN_COUNT="$(jq 'length' <<<"$NONTERMINAL_RUN_INTENTS")"
 COMPLETED_RUN_INTENTS="$(jq '[.[] | select(.phase == "completed")]' <<<"$LATEST_RUN_INTENTS")"
 COMPLETED_RUN_COUNT="$(jq 'length' <<<"$COMPLETED_RUN_INTENTS")"
+WARNING_RUN_INTENTS="$(jq '[.[] | select(.phase == "not_submitted" and has("resultHash"))]' <<<"$LATEST_RUN_INTENTS")"
+WARNING_RUN_COUNT="$(jq 'length' <<<"$WARNING_RUN_INTENTS")"
+# A retained not_submitted artifact without its binding is damaged evidence,
+# not an old failed attempt eligible for replay (also covers missing state).
+while IFS= read -r UNBOUND_WARNING_RESULT; do
+  if [[ -n "$UNBOUND_WARNING_RESULT" && -e "$UNBOUND_WARNING_RESULT" ]]; then
+    echo "[et_low_inventory_guard] retained not_submitted result lacks hash binding; replay forbidden" >&2
+    exit 2
+  fi
+done < <(jq -r '.[] | select(.phase == "not_submitted" and (has("resultHash") | not)) | .resultAttempt // empty' <<<"$LATEST_RUN_INTENTS")
+if (( WARNING_RUN_COUNT > 0 && (COMPLETED_RUN_COUNT > 0 || NONTERMINAL_RUN_COUNT > 0 || WARNING_RUN_COUNT > 1) )); then
+  echo "[et_low_inventory_guard] conflicting warning evidence; replay forbidden" >&2
+  exit 2
+fi
 if (( COMPLETED_RUN_COUNT > 1 || (COMPLETED_RUN_COUNT == 1 && NONTERMINAL_RUN_COUNT > 0) )); then
   echo "[et_low_inventory_guard] conflicting executor run intents exist; reconcile-required/incomplete" >&2
   exit 2
@@ -456,6 +491,25 @@ if (( COMPLETED_RUN_COUNT == 1 )); then
 fi
 if (( NONTERMINAL_RUN_COUNT > 1 )); then
   echo "[et_low_inventory_guard] multiple nonterminal executor run intents exist; reconcile-required/incomplete" >&2
+  exit 2
+fi
+# A warning retains its attempt artifact, never promotes it to completed.
+# Recover from the bound not_submitted receipt even if state publication died.
+if (( WARNING_RUN_COUNT > 0 )); then
+  WARNING_INTENT="$(jq '.[0]' <<<"$WARNING_RUN_INTENTS")"
+  WARNING_RESULT="$(jq -r '.resultAttempt' <<<"$WARNING_INTENT")"
+  WARNING_INTENT_ID="$(jq -r '.intentId' <<<"$WARNING_INTENT")"
+  if ! executor_run_intent_binding_is_current "$WARNING_INTENT" \
+    || ! WARNING_AUDIT="$(validate_historical_skip_warning "$WARNING_RESULT" "$WARNING_INTENT_ID" bound)"; then
+    echo "[et_low_inventory_guard] bound historical warning evidence damaged; replay forbidden" >&2
+    exit 2
+  fi
+  persist_historical_skip_warning "$WARNING_RESULT" "$WARNING_INTENT_ID" "$WARNING_AUDIT"
+  exit 0
+fi
+if [[ -s "$STATE" ]] && jq -e --arg batch "$BATCH_ID" \
+  '.lastProcessedBatchId == $batch and .warning == "historical_skip_no_current_submission"' "$STATE" >/dev/null; then
+  echo "[et_low_inventory_guard] warning state lacks bound journal evidence; replay forbidden" >&2
   exit 2
 fi
 if (( NONTERMINAL_RUN_COUNT == 1 )); then
@@ -708,6 +762,27 @@ if (( EXECUTOR_STATUS != 0 )); then
       elif all($intents[]; .intentId as $id | any($outcomes[]; .intentId == $id and .disposition == "rejected")) then "rejected"
       else "ambiguous" end
   ' <(jq -s '.' "$RESULT_JOURNAL"))"
+  # Leave ordinary pre-submit failures on their existing strict failure path.
+  # Malformed results or any historical/pending claim require exact validation.
+  WARNING_CANDIDATE=true
+  if [[ -s "$RESULT_ATTEMPT" ]] && jq -e '
+    (.results | type) == "array" and all(.results[];
+      .state != "submitted_but_readback_pending" and .historicalPending != true
+      and .historicalIntentId == null)
+  ' "$RESULT_ATTEMPT" >/dev/null 2>&1; then WARNING_CANDIDATE=false; fi
+  if (( EXECUTOR_STATUS == 1 )) && [[ "$CURRENT_RUN_DISPOSITION" == "not_submitted" && -s "$RESULT_ATTEMPT" && "$WARNING_CANDIDATE" == "true" ]]; then
+    if WARNING_AUDIT="$(validate_historical_skip_warning "$RESULT_ATTEMPT" "$RUN_INTENT_ID" candidate)"; then
+      sync_durable_path "$RESULT_ATTEMPT"
+      sync_durable_path "$(dirname "$RESULT_ATTEMPT")"
+      append_executor_run_phase "$RUN_INTENT_ID" not_submitted "$ATTEMPT_ID" "$HASH" "$TOTAL" "$RESULT_ATTEMPT" "$EXECUTOR_STATUS" "" "$(jq -r '.resultHash' <<<"$WARNING_AUDIT")"
+      persist_historical_skip_warning "$RESULT_ATTEMPT" "$RUN_INTENT_ID" "$WARNING_AUDIT"
+      exit 0
+    fi
+    # A supplied but unverifiable result must never authorize a retry.
+    append_executor_run_phase "$RUN_INTENT_ID" ambiguous "$ATTEMPT_ID" "$HASH" "$TOTAL" "$RESULT_ATTEMPT" "$EXECUTOR_STATUS"
+    echo "[et_low_inventory_guard] historical warning validation failed; retained evidence; replay forbidden" >&2
+    exit 1
+  fi
   append_executor_run_phase "$RUN_INTENT_ID" "$CURRENT_RUN_DISPOSITION" "$ATTEMPT_ID" "$HASH" "$TOTAL" "$RESULT_ATTEMPT" "$EXECUTOR_STATUS"
   if [[ "$CURRENT_RUN_DISPOSITION" == "not_submitted" || "$CURRENT_RUN_DISPOSITION" == "rejected" ]]; then RETAIN_RESULT_ATTEMPT=0; fi
   echo "[et_low_inventory_guard] current executor attempt failed status=$EXECUTOR_STATUS; stale stable result is not eligible" >&2
