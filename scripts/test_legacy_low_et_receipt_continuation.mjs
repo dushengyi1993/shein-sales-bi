@@ -57,9 +57,9 @@ try {
   const guardPath = await write(sourceGuard, {reportDate: date,
     limitedDiscountTargetPriceDrift: {source: 'tmp/live.json'},
     targetPlanSelection: {priceOverrides: baseline, priceOverridesHash: baselineHash}});
-  const inventory = {products: [{canonical: 'SK-TEST', inventory_match_status: 'matched', operational_sellable_qty: 20, operational_snapshot_date: date}]};
+  const inventory = {products: ['SK-TEST', 'SK-MISSING'].map(canonical => ({canonical, inventory_match_status: 'matched', operational_sellable_qty: 20, operational_snapshot_date: date}))};
   const inventoryFile = await write('tmp/inventory.json', inventory);
-  await write('tmp/links.json', {storeLinks: [{standard_goods_sn: 'SK-TEST', store_key: 'DL', skc: 'f-0-0', c30_valid_sale_cnt: 31, c7_eps_uv: 100}]});
+  const linksFile = await write('tmp/links.json', {storeLinks: ['SK-TEST', 'SK-MISSING'].map((canonical, i) => ({standard_goods_sn: canonical, store_key: 'DL', skc: `f-0-${i ? 4 : 0}`, c30_valid_sale_cnt: 31, c7_eps_uv: 100}))});
   await write('tmp/cost.json', {costMap: {'SK-TEST': 70}});
   const manualEntries = [];
   const manualDir = 'tmp/manual';
@@ -78,7 +78,7 @@ try {
       sourcePriceOverrides: baseline, sourcePriceOverridesSha256: baselineHash,
       sourceInventoryTrend: 'tmp/inventory.json', sourceLinksData: 'tmp/links.json', sourceCostMap: 'tmp/cost.json', pricingPolicy: 'config/policy.json',
       activityStock: 10, endTime: '2026-09-13 23:59:59',
-      rows: Array.from({length: 5}, (_, j) => ({storeKey: 'DL', skc: `f-${i}-${j}`, canonical: 'SK-TEST',
+      rows: Array.from({length: 5}, (_, j) => ({storeKey: 'DL', skc: `f-${i}-${j}`, canonical: i === 0 && j === 4 ? 'SK-MISSING' : 'SK-TEST',
         action: 'create_limited_discount', finalTargetPrice: 100, targetPrice: 100, limitedDiscountPrice: 100, activityStock: 10,
         lowEtFastSellerPricePullback: {applied: false, contextEvidenceHash: 'a'.repeat(64)}}))});
     fallbackEntries.push({storeKey: 'DL', path: relative, count: 5});
@@ -198,6 +198,56 @@ try {
   assert.equal((await verifyImmediateAuthorizationContinuation({...proof,queueSnapshotBytes:undefined})).remainingUnstartedGroups,remainingBefore);
   process.env.SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION = '1';
   process.exitCode = 0;
+  const failedQueue = structuredClone(queue);
+  failedQueue.status = 'failed';
+  failedQueue.stages.manualSpecialRestore = {...failedQueue.stages.manualSpecialRestore, status: 'pending', resultPath: manualResult};
+  const failedFallbackFile = path.join(root, `outputs/reports/new-listing-7d-limited-discount-execution-summary-${date}.json`);
+  failedQueue.stages.fallbackRepair = {...failedQueue.stages.fallbackRepair, status: 'failed', resultPath: failedFallbackFile};
+  const failedFallback = {workFingerprint:fallback.workFingerprint,dryRunOnly:false,complete:false,totals:{storesProcessed:1},
+    results:[{storeKey:'DL',sourceRescuePath:fallback.entries[0].relativePath,ok:false,status:'low_et_price_pullback_evidence_drift',execute:null}]};
+  await fs.writeFile(failedFallbackFile, JSON.stringify(failedFallback));
+  await fs.writeFile(manualResult, JSON.stringify({workFingerprint:manual.workFingerprint,dryRunOnly:false,
+    totals:{processed:2,remainingItems:2,terminalBlocked:0},results:[
+      {storeKey:'DL',rescuePath:manualEntries[0].path,ok:false,terminalBlocked:true,status:'platform_blocked'},
+      {storeKey:'DL',rescuePath:manualEntries[1].path,ok:false,status:'failed',transaction:null,inventoryTransaction:null,execute:null,readback:null}]}));
+  await fs.writeFile(queueFile, JSON.stringify(failedQueue));
+  assert.equal((await verifyImmediateAuthorizationContinuation({...proof,queueSnapshotBytes:undefined})).ok,true);
+  const unknownResult = structuredClone(failedFallback); unknownResult.results[0].execute = {submitAttempted:true};
+  await fs.writeFile(failedFallbackFile,JSON.stringify(unknownResult));
+  await assert.rejects(verifyImmediateAuthorizationContinuation({...proof,queueSnapshotBytes:undefined}), /unresolved submitted/);
+  await fs.writeFile(failedFallbackFile,JSON.stringify(failedFallback));
+  const unknownOperation = await write('state/marketing-replacement-transactions/unbound.json', {runPayloadHash:fallback.workFingerprint,rescuePath:fallback.entries[0].path,phase:'create_submit_unknown'});
+  await assert.rejects(verifyImmediateAuthorizationContinuation({...proof,queueSnapshotBytes:undefined}), /unbound subset/);
+  await fs.unlink(unknownOperation);
+  const unknownInventory = await write(`inventory-runtime/runs/marketing/unknown/daily-inventory-replenishment-${date}.json.journal.ndjson`,
+    {kind:'intent',storeKey:'DL',skc:'f-0-0',status:'unknown'});
+  await assert.rejects(verifyImmediateAuthorizationContinuation({...proof,queueSnapshotBytes:undefined}), /INVENTORY_JOURNAL/);
+  await fs.unlink(unknownInventory);
+  let continuationPosts = 0;
+  let isolatedAttempts = 0;
+  process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID = 'manual-service-first';
+  const resumedManualOps = {launchStore:async()=>({ok:true}),closeStore:async()=>({ok:true}),processOne:async file=>{
+    assert.notEqual(file.path,manualEntries[0].path);
+    if (file.path === manualEntries[1].path && process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID === 'manual-service-first') {
+      isolatedAttempts++;
+      return {ok:false,status:'failed',storeKey:'DL',rescuePath:file.path,error:'prewrite fixture'};
+    }
+    continuationPosts++;
+    return {ok:true,status:'restored',storeKey:'DL',rescuePath:file.path};}};
+  const continuedOne = await runManualRestoreBatch({...manualArgs,maxItems:1},resumedManualOps);
+  assert.equal(continuedOne.output.totals.terminalBlocked,1);
+  assert.equal(continuedOne.output.totals.processedThisRunTerminalBlocked,0);
+  await runManualRestoreBatch({...manualArgs,maxItems:1},resumedManualOps);
+  await runManualRestoreBatch({...manualArgs,maxItems:1},resumedManualOps);
+  assert.equal(isolatedAttempts,1,'same-run isolated failure cannot starve the next manual item');
+  assert.equal(continuationPosts,1,'next independent manual item must execute despite the prior failed item');
+  process.env.SHEIN_BI_BROWSER_LEASE_RUN_ID = 'manual-service-second';
+  await runManualRestoreBatch({...manualArgs,maxItems:1},resumedManualOps);
+  await runManualRestoreBatch({...manualArgs,maxItems:1},resumedManualOps);
+  assert.equal(continuationPosts,2,'two original pending items execute once; repeated continuation skips settled TS and successes');
+  assert.deepEqual(await fs.readFile(receiptFile),receiptBytes);
+  await fs.unlink(failedFallbackFile);
+  process.exitCode = 0;
   await fs.writeFile(manualResult, manualResultBytes);
   await fs.writeFile(queueFile, JSON.stringify(progressed));
   await fs.writeFile(savedQueue, '{}');
@@ -215,6 +265,46 @@ node --input-type=module -e 'const {readImmediateAdmissionQueueFd}=await import(
   assert.equal(inherited.status, 0, inherited.stderr);
   assert.equal(inherited.stdout.trim(), hash(originalBytes), 'Bash must retain and inherit the admitted inode across CAS');
   const {runNewListingFallbackBatch, processStore: realProcessStore, writeInventoryExecutableSubset} = await import(pathToFileURL(path.join(root, 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs')));
+  const partialLinksBytes = await fs.readFile(linksFile);
+  const missingLinks = JSON.parse(partialLinksBytes); missingLinks.storeLinks[1].c30_valid_sale_cnt = null;
+  await fs.writeFile(linksFile,JSON.stringify(missingLinks));
+  const failedDxQueue = structuredClone(progressed); failedDxQueue.status = 'failed';
+  failedDxQueue.stages.fallbackRepair = {...failedDxQueue.stages.fallbackRepair,status:'failed',resultPath:failedFallbackFile};
+  const partialFailure = structuredClone(failedFallback);
+  partialFailure.results.push(...fallback.entries.slice(1).map(entry=>({ok:true,status:'executed',storeKey:'DL',sourceRescuePath:entry.relativePath})));
+  partialFailure.totals.storesProcessed = partialFailure.results.length;
+  await fs.writeFile(failedFallbackFile,JSON.stringify(partialFailure));
+  await fs.writeFile(queueFile,JSON.stringify(failedDxQueue));
+  let partialPosts = 0;
+  const partialArgs = {guard:guardPath,date,outDir:path.join(root,'tmp/batch'),skipBuild:true,dryRunOnly:false,
+    continuation:true,stores:[],maxGroups:1,expectedWorkFingerprint:fallback.workFingerprint,deadline,
+    gracefulCutoffEpoch:issued.gracefulCutoffEpoch,minStartBudgetSec:900,resume:true};
+  const partialOps = {launchStore:async()=>({ok:true}),closeStore:async()=>({ok:true}),processStore:async context=>{
+    assert.equal(context.args.continuation,false,'consumed failed queue selects unstarted mode before processStore');
+    const record = await realProcessStore({...context,operations:{
+      applyRescue:async request=>{
+        const executable = JSON.parse(await fs.readFile(request.rescuePath,'utf8'));
+        assert.deepEqual(executable.rows,fallback.entries[0].rescue.rows.slice(0,4),'retain exact original row bytes/prices');
+        return {ok:true,full:{ok:true,validation:{},after:{exactReadbackRows:executable.rows.map(row=>({skc:row.skc,ok:true}))}}};
+      },
+      replaceTransactionally:async request=>{assert.equal(request.continuation,false);partialPosts++;
+        return {ok:true,full:{ok:true,terminal:true,status:'offline_subset',desiredCreate:{createdActivityId:123},desiredCoveredSkcs:fallback.entries[0].rescue.rows.slice(0,4).map(row=>row.skc)}};},
+    }});
+    assert.deepEqual(record.factBlockedSkcs,['f-0-4']);
+    assert.equal(record.lowEtFastSellerPricePullbackRevalidation.rows.at(-1).current.evidence.validSales30d,null);
+    assert.equal(record.status,'executed_subset_with_platform_or_inventory_blockers',record.error);
+    return record;
+  }};
+  await runNewListingFallbackBatch({...partialArgs},partialOps);
+  await runNewListingFallbackBatch({...partialArgs},partialOps);
+  assert.equal(partialPosts,1,'failed queue continuation creates the 4 available items once and never repeats the group');
+  const partialReadback = JSON.parse(await fs.readFile(failedFallbackFile,'utf8'));
+  assert.equal(partialReadback.totals.blockedTargetCount,1);
+  assert.equal(partialReadback.totals.executedTargetCount,4);
+  await fs.writeFile(linksFile,partialLinksBytes);
+  await fs.unlink(failedFallbackFile);
+  await fs.writeFile(queueFile,JSON.stringify(progressed));
+  process.exitCode = 0;
   let fallbackStarted = 0;
   await runNewListingFallbackBatch({guard: guardPath, date, outDir: path.join(root, 'tmp/batch'), skipBuild: true, dryRunOnly: false,
     continuation: true, stores: [], maxGroups: 29, expectedWorkFingerprint: fallback.workFingerprint, deadline,
@@ -372,7 +462,7 @@ node --input-type=module -e 'const {readImmediateAdmissionQueueFd}=await import(
   const fallbackStart = worker.indexOf('FALLBACK_STATUS="$(queue_value');
   const fallbackLoop = worker.slice(fallbackStart, worker.indexOf('\ndone', fallbackStart) + 5);
   const resultReader = worker.slice(worker.indexOf('processed_result_value() {'), worker.indexOf('\nresult_top_level_value()'));
-  for (const scenario of ['success', 'recoverable', 'later-blocker']) {
+  for (const scenario of ['success', 'recoverable', 'prewrite-failed', 'later-blocker', 'earlier-blocker']) {
     const shellResult = {...JSON.parse(manualResultBytes), processedThisRunResults: [{ok:true}, {ok:true}, {ok:true}]};
     if (scenario === 'recoverable') shellResult.processedThisRunResults[2] = {recoverableDeferred:true};
     if (scenario === 'later-blocker') shellResult.processedThisRunResults[2] = {terminalBlocked:true};
@@ -406,29 +496,36 @@ defer_remaining_work() { exit 99; }
 processed_items_this_run() { echo 1; }
 new_groups_in_result() { echo 1; }
 result_top_level_value() { echo 0; }
-result_total() { if [[ "$2" == remainingItems && "$MANUAL_COUNT" -lt 3 ]]; then echo 1; else echo 0; fi; }
+result_total() { if [[ "$2" == remainingItems && ( "$MANUAL_COUNT" -lt 3 || "$SCENARIO" == prewrite-failed ) ]]; then echo 1; elif [[ "$2" == terminalBlocked && ( "$SCENARIO" == later-blocker || "$SCENARIO" == earlier-blocker ) ]]; then echo 1; else echo 0; fi; }
 node() {
  case "$*" in
  scripts/resolve_cloud_runtime_artifact.mjs*) echo fixture;;
- scripts/marketing/batch_restore_manual_limited_discounts.mjs*) [[ "$*" == *"--max-items 1"* ]] || return 88; MANUAL_COUNT=$((MANUAL_COUNT+1)); if [[ "$SCENARIO" == recoverable && "$MANUAL_COUNT" == 3 ]]; then return 4; elif [[ "$SCENARIO" == later-blocker && "$MANUAL_COUNT" == 3 ]]; then return 2; fi;;
+ scripts/marketing/batch_restore_manual_limited_discounts.mjs*) [[ "$*" == *"--max-items 1"* ]] || return 88; MANUAL_COUNT=$((MANUAL_COUNT+1)); if [[ "$SCENARIO" == recoverable && "$MANUAL_COUNT" == 3 ]]; then return 4; elif [[ "$SCENARIO" == prewrite-failed || ( "$SCENARIO" == later-blocker && "$MANUAL_COUNT" == 3 ) ]]; then return 2; fi;;
  scripts/marketing/batch_apply_new_listing_limited_discount.mjs*) [[ "$*" == *"--max-groups 1"* ]] || return 89; FALLBACK_COUNT=$((FALLBACK_COUNT+1)); if (( FALLBACK_COUNT < 18 )); then return 3; fi;;
  *) command node "$@";;
  esac
 }
 ${resultReader}
+trap 'echo "counts:$MANUAL_COUNT:$FALLBACK_COUNT:$MANUAL_STATE"' EXIT
 ${manualLoop}
 ${fallbackLoop}
 [[ "$REMAINING_GROUPS" == 11 && "$FALLBACK_STATE" == completed ]]
 echo "worker-control:$SCENARIO:$MANUAL_STATE:$FALLBACK_STATE:$REMAINING_GROUPS"
 `], {encoding:'utf8', env:{...process.env, MANUAL_RESULT:manualResult, SCENARIO:scenario}});
-    assert.equal(control.status, 0, `${scenario}: ${control.stdout}\n${control.stderr}`);
-    assert.match(control.stdout, /worker-control:/);
+    if (['recoverable', 'prewrite-failed'].includes(scenario)) {
+      assert.equal(control.status, 75, control.stderr);
+      assert.match(control.stdout, /counts:[13]:0:pending/, 'pending manual must never start fallback');
+    } else {
+      assert.equal(control.status, 0, `${scenario}: ${control.stdout}\n${control.stderr}`);
+      assert.match(control.stdout, scenario.endsWith('blocker') ? /worker-control:.*:blocked:completed/ : /worker-control:/);
+    }
   }
   await fs.writeFile(manualResult, manualResultBytes);
   assert.deepEqual(await fs.readFile(receiptFile), receiptBytes);
   assert.equal(await fs.lstat(authFile).then(() => true, () => false), false);
   assert.deepEqual(await fs.readFile(planPath), Buffer.from(JSON.stringify(fallback.plan)));
-  console.log(JSON.stringify({ok: true, manualStarted, fallbackStarted, legacyRows: 90, sameConsumedReceipt: true, offlineExecutors: true, workerControlScenarios: 3, persistentSnapshotRestart: true}));
+  console.log(JSON.stringify({ok: true, manualStarted, fallbackStarted, legacyRows: 90, sameConsumedReceipt: true, offlineExecutors: true, workerControlScenarios: 5, persistentSnapshotRestart: true,
+    failedQueueContinuation:true,isolatedManualAttempts:isolatedAttempts,independentManualPosts:continuationPosts,partialGroupPosts:partialPosts}));
 } finally {
   if (fd !== undefined) fss.closeSync(fd);
   Date.now = realNow;

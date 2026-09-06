@@ -2046,9 +2046,8 @@ process.kill(process.pid, 'SIGKILL');
   assert.equal(loopQueueAfter.stages.driftRepair.status, 'completed');
 
   // The deadline/recoverable paths must account a unit that already produced
-  // durable progress before deciding to pause. Run all three remaining
-  // runner kinds with one processed unit and a deadline result, then assert
-  // that the worker consumed exactly three of its aggregate budget units.
+  // durable progress before deciding to pause. A pending manual stage must
+  // account that one unit and defer before starting drift or fallback.
   const resetLoopHarness = async queueDocument => {
     await fsp.writeFile(loopStageQueueFile, `${JSON.stringify(queueDocument, null, 2)}\n`, 'utf8');
     const stageFiles = [
@@ -2118,17 +2117,17 @@ process.kill(process.pid, 'SIGKILL');
     if (wslExists(loopRuntimeQueueFile)) wslCopy(loopRuntimeQueueFile, loopStageQueueFile);
   }
   assert.equal(accountingRun.error, undefined, `accounting harness spawn failed: ${accountingRun.error?.message || ''}`);
-  assert.equal(accountingRun.status, 0,
+  assert.equal(accountingRun.status, 75,
     `deadline/recoverable accounting harness must complete safely: ${accountingRun.stderr || accountingRun.stdout}`);
   const accountingLogLines = (await fsp.readFile(loopStageLogFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean);
   assert.deepEqual(accountingLogLines.filter(line => /^(manual|drift|fallback):/.test(line)).map(line => line.split(':', 2).join(':')),
-    ['manual:1', 'drift:1', 'fallback:1'],
-    `all three runner deadline/recoverable paths must process one unit: ${accountingLogLines.join(' | ')}`);
+    ['manual:1'],
+    `pending manual must defer before later stages: ${accountingLogLines.join(' | ')}`);
   assert.deepEqual(accountingLogLines.filter(line => line.startsWith('budget:')).map(line => line.split(':').slice(0, 2).join(':')),
-    ['budget:1', 'budget:1', 'budget:1'],
+    ['budget:1'],
     `each processed unit must consume one aggregate budget unit: ${accountingLogLines.join(' | ')}`);
   assert.deepEqual(accountingLogLines.filter(line => line.startsWith('budget:')).map(line => line.split(':')[2]),
-    ['3', '2', '1'],
+    ['3'],
     `budget accounting must run before each deadline/recoverable pause: ${accountingLogLines.join(' | ')}`);
   const accountingQueueAfter = JSON.parse(await fsp.readFile(loopStageQueueFile, 'utf8'));
   assert.equal(accountingQueueAfter.stages.manualSpecialRestore.status, 'pending');
@@ -2149,11 +2148,11 @@ process.kill(process.pid, 'SIGKILL');
     if (wslExists(loopRuntimeQueueFile)) wslCopy(loopRuntimeQueueFile, loopStageQueueFile);
   }
   assert.equal(zeroRun.error, undefined, `zero-progress harness spawn failed: ${zeroRun.error?.message || ''}`);
-  assert.equal(zeroRun.status, 0,
+  assert.equal(zeroRun.status, 75,
     `zero-progress deadline harness must complete safely: ${zeroRun.stderr || zeroRun.stdout}`);
   const zeroLogLines = (await fsp.readFile(loopStageLogFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean);
   assert.deepEqual(zeroLogLines.filter(line => /^(manual|drift|fallback):/.test(line)).map(line => line.split(':', 2).join(':')),
-    ['manual:1', 'drift:1', 'fallback:1'],
+    ['manual:1'],
     `zero-progress deadline paths must still be recorded as attempted once: ${zeroLogLines.join(' | ')}`);
   assert.deepEqual(zeroLogLines.filter(line => line.startsWith('budget:')), [],
     `processedThisRun=0 must not consume group budget: ${zeroLogLines.join(' | ')}`);
@@ -2371,7 +2370,7 @@ process.kill(process.pid, 'SIGKILL');
       'unrelated_service_states_reach_actual_lease_conflict_without_consuming_authorization',
       'lease_release_failure_changes_nominal_success_to_explicit_failure_without_replay',
       'worker_serial_manual_and_drift_loops_consume_multiple_units_without_replay',
-      'processed_one_deadline_recoverable_units_consume_budget_for_manual_drift_fallback',
+    'processed_manual_deadline_accounts_budget_and_defers_before_later_stages',
       'processed_zero_deadline_units_do_not_consume_budget',
       'four_stage_settled_result_crash_resume_updates_queue_without_replay',
       'submitted_without_exact_readback_is_terminal_and_not_replayed',

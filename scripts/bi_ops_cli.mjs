@@ -119,6 +119,7 @@ function parseArgs(argv) {
     supplierSkuList: [],
     operation: '',
     mode: 'dry-run',
+    modeProvided: false,
     confirm: '',
     status: '',
     globalView: false,
@@ -229,7 +230,10 @@ function parseArgs(argv) {
     else if (a === '--sku-code') args.skuCodeList.push(...splitListPreserveCase(argv[++i]));
     else if (a === '--supplier-sku') args.supplierSkuList.push(...splitListPreserveCase(argv[++i]));
     else if (a === '--operation' || a === '--action' || a === '--intent') args.operation = normalizeOperationName(argv[++i]);
-    else if (a === '--mode') args.mode = String(argv[++i] || 'dry-run').trim();
+    else if (a === '--mode') {
+      args.mode = String(argv[++i] || 'dry-run').trim();
+      args.modeProvided = true;
+    }
     else if (a === '--confirm') args.confirm = String(argv[++i] || '').trim();
     else if (a === '--status') args.status = String(argv[++i] || '').trim();
     else if (a === '--all' || a === '--scope-all') args.globalView = true;
@@ -1088,6 +1092,10 @@ async function runLockSource(args) {
       sourceStore: sourceStores[0],
       sourceSkc: sourceSkcs[0],
       expectedRevision: liveRevision,
+      expectedSource: {
+        sourceStores: currentTask.targets?.sourceStores || [],
+        sourceSkc: currentTask.targets?.sourceSkc || '',
+      },
     },
   });
   const locked = json?.task?.targets || {};
@@ -1100,6 +1108,12 @@ async function runLockSource(args) {
     allowJsonFailure: true,
   });
   const preflightResponse = linkOpsExecutionResponse(preflightJson, {fallbackTask: json.task});
+  const {json: readbackJson} = await request(args, '/api/link-ops-tasks?limit=500');
+  const readbackTask = (readbackJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId);
+  if (!readbackTask || readbackTask.targets?.sourceSkc !== sourceSkcs[0]
+    || JSON.stringify(readbackTask.targets?.sourceStores) !== JSON.stringify(sourceStores)) {
+    throw new Error('预检后原 task 来源回读缺失或漂移，已停止；请核对原 task，不要重建或重试提交。');
+  }
   print({
     ok: true,
     aiInvoked: false,
@@ -1107,7 +1121,7 @@ async function runLockSource(args) {
     lockedSource: {sourceStore: sourceStores[0], sourceSkc: sourceSkcs[0]},
     preflightReady: preflightResponse.ok,
     preflightResult: linkOpsExecutionSummary(preflightResponse),
-    task: preflightResponse.task,
+    task: readbackTask,
     execution: preflightResponse.execution,
     safety: {realPublishOccurred: false, nextStep: '核对精确源链接证据与新 payloadHash；业务指令已授权时由当前任务闭环 preflight/execute，无需让用户重复确认或手动搬运 hash。'},
   });
@@ -3190,6 +3204,9 @@ async function main() {
     });
   }
   if (['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory'].includes(args.command)) {
+    if (args.modeProvided && !['execute', 'dry-run'].includes(args.mode)) {
+      throw new Error('Inventory maintenance --mode must be execute or dry-run');
+    }
     const commandId = args.commandId || crypto.randomUUID();
     const receiptFile = path.join(path.dirname(args.sessionFile), 'inventory-commands', crypto.createHash('sha256').update(commandId).digest('hex') + '.json');
     let prior = null;
@@ -3198,10 +3215,10 @@ async function main() {
     const payload = {
       date: args.date || prior?.request?.date || new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).format(new Date()),
       commandId,
-      dryRun: args.mode === 'dry-run' || args.dryRun === true,
+      dryRun: (args.modeProvided && args.mode === 'dry-run') || args.dryRun === true,
       maxRows: args.maxRows || 1000,
     };
-    if (prior && JSON.stringify(prior.request) !== JSON.stringify(payload)) throw new Error('This commandId already belongs to a different inventory request');
+    if (prior && JSON.stringify(prior.request) !== JSON.stringify(payload)) throw new Error('This commandId already belongs to a different inventory request. The same ID requires unchanged parameters; resume a dryRun:true receipt with --dry-run. To execute, use a new command ID and a fresh cloud plan.');
     // Save and display identity before network dispatch, so a disconnected
     // caller can resume the exact same request without creating another job.
     if (!prior) await writeJsonFileAtomic(receiptFile, {commandId, request: payload, status: 'dispatch_pending'}, {mode: 0o600});

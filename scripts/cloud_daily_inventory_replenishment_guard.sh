@@ -115,6 +115,13 @@ if [[ ! -f "$INDEX_FILE" && -f "$RESULT" ]]; then
 fi
 EXISTING_BATCH="$(node scripts/inventory/daily_inventory_version_publisher.mjs read "$BASE_RUNTIME_ROOT" "$DATE" "" "$COMMAND_ID")"
 if [[ "$EXISTING_BATCH" != "null" ]]; then
+  # Publication is immutable: an old dry-run command cannot be promoted by
+  # changing its dispatch flag. The business owner must create a fresh command.
+  if [[ "$(jq -r '.status' <<<"$EXISTING_BATCH")" == "dry_run_ready" && "${SHEIN_BI_INVENTORY_DRY_RUN:-0}" != "1" ]] \
+    || [[ "$(jq -r '.execute' <<<"$EXISTING_BATCH")" == "true" && "${SHEIN_BI_INVENTORY_DRY_RUN:-0}" == "1" ]]; then
+    echo "[daily_inventory_guard] immutable command mode conflict; use a new command ID under the existing user authorization" >&2
+    exit 1
+  fi
   printf '%s\n' "$EXISTING_BATCH"
   case "$(jq -r '.status' <<<"$EXISTING_BATCH")" in
     done|dry_run_ready) exit 0 ;;
@@ -893,11 +900,13 @@ node scripts/inventory/execute_daily_inventory_replenishment_plan.mjs \
 EXECUTOR_STATUS=$?
 set -e
 if [[ "${SHEIN_BI_INVENTORY_DRY_RUN:-0}" == "1" ]]; then
-  if (( EXECUTOR_STATUS != 0 )) || ! jq -e --arg hash "$HASH" --argjson total "$TOTAL" \
-    '.planHash==$hash and .execute==false and (.results|length)==$total and all(.results[]; .state=="dry_run_ready" or .state=="planned")' "$RESULT" >/dev/null; then
+  if (( EXECUTOR_STATUS != 0 )) || ! RESULT_AFTER_FINGERPRINT="$(result_fingerprint)" \
+    || [[ "$RESULT_AFTER_FINGERPRINT" == "$RESULT_BEFORE_FINGERPRINT" ]] \
+    || ! DRY_RUN_SUMMARY="$(node lib/inventory_dry_run_integrity.mjs "$PLAN" "$RESULT" "$COMMAND_ID")"; then
     exit 1
   fi
-  write_inventory_marker done "inventory dry-run completed; no inventory POST was dispatched"
+  write_inventory_marker done "inventory dry-run completed: $DRY_RUN_SUMMARY; no inventory POST was dispatched"
+  printf '%s\n' "$DRY_RUN_SUMMARY"
   exit 0
 fi
 # Exit 75 is the guard's capacity/readback-only contract. An executor 75

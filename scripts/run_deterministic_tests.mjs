@@ -3,6 +3,9 @@ import {spawnSync} from 'node:child_process';
 import {selectDeterministicTestShard} from '../lib/deterministic_test_shards.mjs';
 
 const tests = [
+  'scripts/test_marketing_historical_journal_quarantine.mjs',
+  'scripts/test_link_ops_source_lock_recovery.mjs',
+  'scripts/test_inventory_dry_run_exclusion_pipeline.mjs',
   'scripts/test_pending_discuss_shared_delivery_entry.mjs',
   'scripts/test_cloud_team_report_process_lifecycle.mjs',
   'scripts/test_inventory_v6_owner_resume_validation.mjs',
@@ -535,6 +538,8 @@ for (const file of selectedTests) {
   // without an assertion failure; its WSL pass measured 85.21s, so it uses a
   // bounded 180s tier and a 90s shard estimate. Unclassified tests keep the
   // 30s fail-fast budget.
+  // Expanded receipt continuation scenarios crossed 30s locally; the immediate
+  // worker harness crossed 90s on Windows. Keep both bounded at their own tier.
   const timeout = V6_TEST_TIMEOUTS[file] || (file === 'scripts/test_link_ops_prepare_descriptions_flow.mjs'
     ? 300_000
     : file === 'scripts/test_link_ops_uploaded_asset_binding_recovery.mjs'
@@ -565,12 +570,16 @@ for (const file of selectedTests) {
               ? 90_000
               : file === 'scripts/test_partner_cli_version_change.mjs'
                 ? 60_000
+              : file === 'scripts/test_partner_cli_package.mjs'
+                ? (process.platform === 'win32' ? 60_000 : 30_000)
               : file === 'scripts/test_partner_cli_updater.mjs'
                 ? 60_000
               : file === 'scripts/test_daily_inventory_executor_lifecycle.mjs'
                 ? 180_000
               : file === 'scripts/test_cloud_marketing_immediate_run.mjs'
-                ? 90_000
+                ? 180_000
+              : file === 'scripts/test_legacy_low_et_receipt_continuation.mjs'
+                ? 60_000
               : file === 'scripts/test_link_ops_executor_source_detail_lock.mjs'
                 ? 60_000
                 : file === 'scripts/test_et_forwarder_runtime_contract.mjs'

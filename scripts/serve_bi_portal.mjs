@@ -108,6 +108,7 @@ import {
   validateUploadedAssetBindingRecoveryReplay,
 } from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
 import {isSheinSkc, normalizeSheinSkc} from '../lib/shein_product_identifiers.mjs';
+import {loadOpenApiProductDetail} from '../lib/link_ops_product_draft_mapper.mjs';
 import {
   buildDescriptionPayloadRows,
   buildEmptyDescriptionAuthorization,
@@ -142,6 +143,8 @@ import {
   adoptablePayloadAttributeRow,
   bindProductAttributeToPayload,
   buildProductAliasContext,
+  resolveExplicitProductAlias,
+  areDistinctProductModels,
   evaluateDonorProductAttributeEvidence,
   isWhitelistedProductAttribute,
   normalizeProductAttributeId,
@@ -5230,6 +5233,73 @@ function taskCannotRepeatRealExecution(task) {
     || task?.execution?.writeAudit?.actualWriteSubmitted === true;
 }
 
+function sourceLockWriteEvidence(task) {
+  const evidence = descriptionBindingWriteEvidence(task);
+  const reasons = [...evidence.reasons];
+  // Only traverse the executor/audit projections already persisted by this
+  // server. Planning intent and nested preflight diagnostics are not writes.
+  if (taskCannotRepeatRealExecution(task)) reasons.push('task.terminal_or_submitted');
+  const inspect = (node, label, inheritedMode = '') => {
+    if (node == null) return;
+    if (typeof node !== 'object' || Array.isArray(node)) { reasons.push(`${label}.invalid_evidence`); return; }
+    const mode = [node.mode, node.requestedMode, node.writeAudit?.requestedMode, inheritedMode]
+      .find(value => ['dry-run', 'check', 'execute'].includes(value)) || '';
+    const audit = node.writeAudit || node;
+    const provenNoDispatch = audit.issuedExecuteToExecutor === false
+      && audit.sheinWriteAttempted === false && audit.actualWriteSubmitted === false;
+    if ((node.mode === 'execute' || node.requestedMode === 'execute') && !provenNoDispatch) reasons.push(`${label}.unknown_execute`);
+    if (!['dry-run', 'check'].includes(mode) && (node.aborted === true
+      || ['state', 'status', 'finalState'].some(key => ['unknown', 'aborted', 'timeout', 'timed_out', 'uncertain_write', 'executing', 'failed', 'error'].includes(node[key])))) {
+      reasons.push(`${label}.unknown_outcome`);
+    }
+    for (const key of ['actualWriteSubmitted', 'submitted', 'sheinWriteAttempted', 'issuedExecuteToExecutor', 'submittedPossibly', 'suspiciousWriteAttempted']) {
+      if (node[key] != null && node[key] !== false) reasons.push(`${label}.${key}`);
+    }
+    if (node.writeClaim || node.publishResult) reasons.push(`${label}.claim_or_publish_result`);
+    if (['publishSpuNames', 'publishSkcNames', 'publishSkuCodes'].some(key => node.readbackFingerprint?.[key]?.length)) reasons.push(`${label}.publish_identity`);
+    for (const key of ['result', 'execution', 'writeAudit', 'hlOpenApiExecutor', 'lifecycle']) inspect(node[key], `${label}.${key}`, mode);
+    for (const key of ['history', 'executionHistory', 'openApiProductExecutors', 'executorEvidence', 'executorRuns']) {
+      if (node[key] == null) continue;
+      if (!Array.isArray(node[key])) { reasons.push(`${label}.${key}.invalid_evidence`); continue; }
+      node[key].forEach((row, index) => {
+        if (row == null) reasons.push(`${label}.${key}[${index}].invalid_evidence`);
+        else inspect(row, `${label}.${key}[${index}]`, ['history', 'executionHistory'].includes(key) ? '' : mode);
+      });
+    }
+  };
+  inspect(task, 'task');
+  return {ok: reasons.length === 0, reasons: [...new Set(reasons)]};
+}
+
+async function verifySourceLockReplacement(task, next, args) {
+  const oldSource = portalExactCopySourceLock(task);
+  const source = portalExactCopySourceLock(next);
+  if (!oldSource || oldSource.sourceStore === source?.sourceStore && oldSource.sourceSkc === source?.sourceSkc) return;
+  const historical = await descriptionBindingHistoricalAuditEvidence(args.auditFile, task.id, [], {strictSourceLock: true});
+  if (!historical.ok) throw new Error(`来源恢复历史审计不可证明未写：${historical.reasons.join(', ')}`);
+  const detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
+  if (!detail?.info || detail.conflict || detail.matchedSkcName !== source.sourceSkc) {
+    throw new Error('来源恢复缺少新来源精确商品详情或详情身份冲突，不能替换。');
+  }
+  const taskCodes = [task.standardGoodsSn, task.parameters?.standardGoodsSn, task.planning?.parameters?.standardGoodsSn,
+    task.targets?.standardGoodsSn, task.publishPreparation?.standardGoodsSn,
+    task.targets?.publishPreparation?.standardGoodsSn, ...asArray(task.targets?.productRefs)].filter(Boolean);
+  const sourceCodes = [detail.skcInfo?.supplierCode, detail.skcInfo?.supplier_code,
+    detail.info?.supplierCode, detail.info?.supplier_code].filter(Boolean);
+  const context = loadProductAliasContextSync();
+  const identities = [...taskCodes, ...sourceCodes].map(code => ({code, ...resolveExplicitProductAlias(context, code)}));
+  if (!taskCodes.length || !sourceCodes.length || identities.some(row => typeof row.code !== 'string' || !row.ok)
+    || new Set(identities.map(row => row.canonical)).size !== 1
+    || taskCodes.some(code => sourceCodes.some(sourceCode => areDistinctProductModels(code, sourceCode)))) {
+    throw new Error('来源恢复商品身份不一致或标准货号/严格别名证据缺失，不能替换。');
+  }
+  const audit = next.history.findLast(row => row.event === 'source_lock_changed');
+  audit.productIdentity = {
+    canonical: identities[0].canonical, sourceDetailLock: compactSourceDetailLock(detail.sourceDetailLock),
+    aliasRegistryFingerprint: context.aliasRegistryFingerprint, catalogFingerprint: context.catalogFingerprint,
+  };
+}
+
 function patchLinkOpsTask(task, body, actor, req) {
   for (const field of Object.keys(body || {})) {
     if (LINK_OPS_PROTECTED_TASK_PATCH_FIELDS.has(field)) {
@@ -5246,11 +5316,15 @@ function patchLinkOpsTask(task, body, actor, req) {
   const event = String(body.event || body.action || 'update').slice(0, 80);
   if (body.sourceSkc !== undefined || body.sourceStore !== undefined) {
     if (event !== 'lock_source_skc_cli') throw new Error('sourceStore/sourceSkc can only be changed by lock_source_skc_cli');
+    const allowed = new Set(['id', 'event', 'action', 'sourceStore', 'sourceSkc', 'expectedRevision', 'expectedSource']);
+    if (Object.keys(body).some(key => !allowed.has(key))) throw new Error('源链接锁不能混入其他任务修改。');
     if (taskRequiresOwnerLifecycleResolve(task)) throw new Error('提交后待回读/人工处理任务不能修改源链接锁。');
     const intents = asArray(task?.intents).map(value => String(value || '').trim()).filter(Boolean);
     if (intents.length !== 1 || intents[0] !== 'copy_product_draft') throw new Error('精确源链接锁只适用于单一 copy_product_draft 任务。');
     if (['done', 'archived'].includes(String(task?.status || ''))) throw new Error(`任务状态 ${task.status} 已终结，不能修改源链接锁。`);
     if (task?.execution?.writeClaim) throw new Error('任务已有活动 write claim，不能修改源链接锁。');
+    const writeEvidence = sourceLockWriteEvidence(task);
+    if (!writeEvidence.ok) throw new Error(`源链接锁禁止覆盖历史/未知提交证据：${writeEvidence.reasons.join(', ')}`);
     if (task?.descriptionMaterialBinding) throw new Error('任务已绑定审核描述；必须在描述绑定前锁定精确源链接，禁止事后改变来源。');
     const hasExistingPayloadCarrier = Boolean(
       task?.openapiPublishPayload
@@ -5258,6 +5332,9 @@ function patchLinkOpsTask(task, body, actor, req) {
       || task?.publishPayload
       || task?.publishOrEditPayload
       || task?.publishAssetBinding
+      || task?.productAttributeBinding
+      || task?.descriptionUpdatePayloadRef
+      || task?.emptyDescriptionAuthorization
       || asArray(task?.assets).some(asset => asset?.sourceApproved === true && /json/i.test(String(asset?.mime || asset?.originalName || asset?.storedName || '')))
     );
     if (hasExistingPayloadCarrier) throw new Error('任务已绑定/物化发布 payload；必须在图片、JSON payload 和发布字段绑定前锁定精确源链接，禁止事后改变来源。');
@@ -5273,24 +5350,42 @@ function patchLinkOpsTask(task, body, actor, req) {
     const denied = requireReadStores(actor, [sourceStore]);
     if (denied) throw new Error(denied.error || '当前账号没有来源店铺读权限');
     const currentTargets = normalizeTargetsForIntents(task?.intents || [], task?.targets || {});
-    if (currentTargets.sourceSkc && currentTargets.sourceSkc !== sourceSkc) {
-      throw new Error(`任务已锁定其他 sourceSkc ${currentTargets.sourceSkc}，禁止漂移覆盖。`);
+    const oldSource = {sourceStores: currentTargets.sourceStores, sourceSkc: currentTargets.sourceSkc};
+    const sameSource = currentTargets.sourceSkc === sourceSkc
+      && currentTargets.sourceStores.length === 1 && currentTargets.sourceStores[0] === sourceStore;
+    const replacing = !sameSource && Boolean(currentTargets.sourceSkc
+      || (currentTargets.sourceStores.length && !currentTargets.sourceStores.includes(sourceStore)));
+    if (replacing || body.expectedSource !== undefined) {
+      if (!body.expectedSource || JSON.stringify(body.expectedSource.sourceStores) !== JSON.stringify(oldSource.sourceStores)
+        || body.expectedSource.sourceSkc !== oldSource.sourceSkc) {
+        throw new Error('源链接锁 CAS 失败：expectedSource 与当前旧来源不一致。');
+      }
     }
-    if (currentTargets.sourceStores.length === 1 && currentTargets.sourceStores[0] !== sourceStore) {
-      throw new Error(`任务已锁定其他 sourceStore ${currentTargets.sourceStores[0]}，禁止漂移覆盖。`);
+    if (replacing && (!currentTargets.sourceSkc || currentTargets.sourceStores.length !== 1)) {
+      throw new Error('来源恢复要求当前旧来源为精确单店/SKC，不能推断缺失来源。');
     }
-    next.targets = normalizeTargetsForIntents(task?.intents || [], {
-      ...currentTargets,
+    if (sameSource) return task;
+    // This operation owns only the source pair, never normalize away reviewed
+    // preparation or re-prune destination stores when the source changes.
+    next.targets = {
+      ...task.targets,
       sourceStores: [sourceStore],
       sourceSkc,
-    });
+    };
     next.preflight = {ok: false, blockers: ['精确源店/SKC 已锁定，需要重新预检。'], warnings: []};
     next.execution = {
-      ...(task.execution && typeof task.execution === 'object' ? task.execution : {}),
       state: 'needs_repreflight',
       openApiProductExecutors: [],
       preflight: next.preflight,
     };
+    // resolvePreflightProductLock also reads historical ready events. Preserve
+    // their audit data, but make them ineligible as an execution lock.
+    next.history = asArray(task.history).map(row => row?.event === 'openapi_product_preflight_ready'
+      ? {...row, event: 'source_lock_invalidated_preflight', invalidatedAt: next.updatedAt} : row);
+    next.history = appendTaskHistory(next, 'source_lock_changed', actor, req, {
+      oldSource, newSource: {sourceStores: [sourceStore], sourceSkc},
+      baseTaskRevision: currentRevision, replacing,
+    });
   }
   if (body.status !== undefined) {
     const status = String(body.status || '').trim();
@@ -8414,7 +8509,7 @@ function descriptionBindingPriorWriteEvidence(task) {
   return {ok: false, reasons: evidence.reasons, explicitPreValidRejection: false, proof: []};
 }
 
-async function descriptionBindingHistoricalAuditEvidence(file, taskId, legacyProofs = []) {
+async function descriptionBindingHistoricalAuditEvidence(file, taskId, legacyProofs = [], {strictSourceLock = false} = {}) {
   let text;
   try {
     text = await fs.readFile(file, 'utf8');
@@ -8452,12 +8547,12 @@ async function descriptionBindingHistoricalAuditEvidence(file, taskId, legacyPro
     if (!id || entryTaskId !== id) continue;
     const hydratedEntry = legacyProofs.length ? hydrateLegacyPreValidProofs(entry, legacyProofs) : entry;
     for (const [label, value] of [['entry', hydratedEntry], ['task', hydratedEntry?.task || {}]]) {
-      const evidence = descriptionBindingWriteEvidence(value);
+      const evidence = strictSourceLock ? sourceLockWriteEvidence(value) : descriptionBindingWriteEvidence(value);
       // Narrow exception: an audit entry whose write evidence is fully
       // explained by one explicit platform pre-validation rejection is not
       // uncertainty. All submitted/timeout/uncertain/identifier-bearing
       // entries still add reasons and block.
-      if (!evidence.ok && descriptionBindingExplicitPreValidRejectionEvidence(value).ok) continue;
+      if (!strictSourceLock && !evidence.ok && descriptionBindingExplicitPreValidRejectionEvidence(value).ok) continue;
       for (const reason of evidence.reasons) {
         const tagged = `audit.${label}.${reason}`;
         if (!reasons.includes(tagged)) reasons.push(tagged);
@@ -20523,6 +20618,9 @@ async function main() {
           let updated;
           try {
             updated = patchLinkOpsTask(access.record, body, actor, req);
+            if (String(body.event || body.action || '') === 'lock_source_skc_cli') {
+              await verifySourceLockReplacement(access.record, updated, args);
+            }
           } catch (err) {
             const error = err?.message || String(err || 'Invalid patch');
             await appendAudit(args.auditFile, {
@@ -20567,6 +20665,9 @@ async function main() {
               actor,
               ...requestMeta(req),
               task: {id, event: 'lock_source_skc_cli', status: persisted.status, progress: normalizeProgress(persisted.progress, 0)},
+              sourceChange: updated !== access.record
+                ? asArray(persisted.history).findLast(row => row.event === 'source_lock_changed') || null
+                : null,
             }); } catch {}
             return sendJson(res, 200, {ok: true, task: projectLinkOpsTaskForClient(persisted)});
           }

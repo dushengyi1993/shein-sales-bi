@@ -511,6 +511,29 @@ export async function writeInventoryExecutableSubset({storeKey, rescue, rescuePa
   return {path: file, rescue: subset};
 }
 
+export function incompleteFallbackFactSkcs(rescue, validation) {
+  const ordinary = (rescue.rows || []).filter(row => row.manualSpecialLimitedDiscount !== true);
+  if (!ordinary.length || validation?.rows?.length !== ordinary.length) return null;
+  const seen = new Set();
+  const blocked = [];
+  for (const row of ordinary) {
+    const key = `${row.storeKey}::${row.skc}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    const matches = validation.rows.filter(item => item.storeKey === row.storeKey && item.skc === row.skc);
+    if (matches.length !== 1) return null;
+    const result = matches[0];
+    if (result.ok === true) continue;
+    // No price/material/policy drift exception: only explicitly incomplete
+    // item facts can be excluded from this same locked group.
+    if (!['missing_complete_canonical_valid_sales_30d', 'low_et_price_pullback_context_scope_requires_rebuild'].includes(result.reason)
+      || result.current?.evidence?.complete !== false
+      || result.current.evidence.validSales30d !== null) return null;
+    blocked.push(String(row.skc));
+  }
+  return blocked.length ? blocked : null;
+}
+
 async function buildPlan(args, guard, guardPriceOverrides) {
   const priceOverrides = args.priceOverrides || guardPriceOverrides.path;
   if (normalizedAbsolute(priceOverrides) !== normalizedAbsolute(guardPriceOverrides.path)) {
@@ -660,6 +683,8 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
       record.rescuePath = rel(rescuePath);
     }
     record.targetSkcs = (rescue.rows || []).map(row => String(row.skc || '').trim()).filter(Boolean);
+    const pricingSourceRescue = rescue;
+    const pricingSourcePath = rescuePath;
     record.lowEtFastSellerPricePullbackRevalidation = await revalidateLowEtFastSellerRescueArtifact({
       root: ROOT,
       rescue,
@@ -667,9 +692,27 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
       legacyReceiptCapability: args.legacyReceiptCapability,
     });
     if (!record.lowEtFastSellerPricePullbackRevalidation.ok) {
-      record.status = 'low_et_price_pullback_evidence_drift';
-      record.error = record.lowEtFastSellerPricePullbackRevalidation.reason;
-      return record;
+      const incompleteSkcs = args.continuation ? null
+        : incompleteFallbackFactSkcs(rescue, record.lowEtFastSellerPricePullbackRevalidation);
+      if (!incompleteSkcs) {
+        record.status = 'low_et_price_pullback_evidence_drift';
+        record.error = record.lowEtFastSellerPricePullbackRevalidation.reason;
+        return record;
+      }
+      record.factBlockedSkcs = incompleteSkcs;
+      record.blocked = {type: 'incomplete_item_facts', blockedSkcs: incompleteSkcs,
+        reason: 'canonical item facts unavailable; locked independent rows retain their original prices'};
+      const subset = await writeInventoryExecutableSubset({storeKey, rescue, rescuePath,
+        blockedSkcs: incompleteSkcs, outDir: args.outDir});
+      if (!subset.rescue.rows.length) {
+        record.status = 'incomplete_item_facts';
+        record.terminalBlocked = true;
+        return record;
+      }
+      rescuePath = subset.path;
+      rescue = subset.rescue;
+      record.rescuePath = rel(rescuePath);
+      record.inventorySubsetRescuePath = rel(rescuePath);
     }
     record.launched = browserSession.ready
       ? (browserSession.launchSummary || {ok: true, reused: true})
@@ -751,15 +794,15 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
     if (blockedSkcs.length && !args.continuation) {
       const subset = await writeInventoryExecutableSubset({
         storeKey,
-        rescue,
-        rescuePath,
-        blockedSkcs,
+        rescue: pricingSourceRescue,
+        rescuePath: pricingSourcePath,
+        blockedSkcs: [...new Set([...(record.factBlockedSkcs || []), ...blockedSkcs])],
         outDir: args.outDir,
       });
       record.inventorySubsetRescuePath = rel(subset.path);
       record.blocked = {
         ...classifyBlockedDryRun(dryRun.full || dryRun.parsed || {}),
-        blockedSkcs,
+        blockedSkcs: [...new Set([...(record.factBlockedSkcs || []), ...blockedSkcs])],
         reason: dryRun.full?.reason || 'one or more SKCs failed the exact platform/inventory preflight',
       };
       if (!subset.rescue.rows.length) {

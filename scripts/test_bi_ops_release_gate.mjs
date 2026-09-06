@@ -305,7 +305,8 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // and 2fb4afa -> PR120 88d6140 adds 24; neither interval removes a registration.
 // PR123 adds managed-session and legacy-receipt continuation regressions;
 // no test is removed.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 90;
+// PR125 adds inventory exclusion, source recovery, and historical journal tests.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 93;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   - 1
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;

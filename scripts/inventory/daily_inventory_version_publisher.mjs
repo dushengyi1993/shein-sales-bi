@@ -35,10 +35,10 @@ export async function readDailyInventoryVersionIndex({inventoryRuntimeRoot, date
   } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
-export function evaluateResultBatchStatus(result, expectedTotal = null) {
+export function evaluateResultBatchStatus(result, expectedTotal = null, dryRunSummary = null) {
   if (!Array.isArray(result?.results) || expectedTotal === null || result.results.length !== expectedTotal) return 'failed';
   if (result.execute !== true) {
-    return result.execute === false && result.results.every(row => ['dry_run_ready', 'planned'].includes(row.state)) ? 'dry_run_ready' : 'failed';
+    return result.execute === false && dryRunSummary?.status === 'dry_run_ready' ? 'dry_run_ready' : 'failed';
   }
   if (result.executionMode !== 'automatic') return 'failed';
   let warning = false;
@@ -120,7 +120,7 @@ export async function resolveResultEvidenceArtifact({
   } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
-async function collectArtifacts({stagingPlanFile, stagingResultFile, stagingJournalFile, stagingMarkerFile}) {
+async function collectArtifacts({stagingPlanFile, stagingResultFile, stagingJournalFile, stagingMarkerFile, commandId = '', publicationJournalFiles}) {
   const files = {plan: stagingPlanFile, result: stagingResultFile, journal: stagingJournalFile || stagingResultFile + '.journal.ndjson', marker: stagingMarkerFile};
   const artifacts = {};
   const raw = {};
@@ -138,7 +138,9 @@ async function collectArtifacts({stagingPlanFile, stagingResultFile, stagingJour
   const expectedRows = plan.actionable.map(identity).sort();
   const actualRows = result.results.map(identity).sort();
   assert(new Set(expectedRows).size === expectedRows.length && JSON.stringify(expectedRows) === JSON.stringify(actualRows), 'Inventory result object/target coverage conflict');
-  const status = evaluateResultBatchStatus(result, plan.actionable.length);
+  const dryRunSummary = result.execute === false ? await (await import('../../lib/inventory_dry_run_integrity.mjs')).verifyInventoryDryRun({plan, result, commandId,
+    journalFile: files.journal, journalFiles: publicationJournalFiles}) : null;
+  const status = evaluateResultBatchStatus(result, plan.actionable.length, dryRunSummary);
   assert(marker.stage === 'daily-inventory-guard' && marker.runDate === plan.date, 'Inventory marker does not belong to this plan');
   assert(marker.status === (status === 'dry_run_ready' ? 'done' : status), 'Inventory marker/result status conflict');
   assert(marker.ok === ['done', 'warning', 'dry_run_ready'].includes(status), 'Inventory marker ok/status conflict');
@@ -151,7 +153,7 @@ async function collectArtifacts({stagingPlanFile, stagingResultFile, stagingJour
     const entry = marker.evidence.find(e => e.path && path.resolve(e.path) === expected.file && e.sha256 === expected.sha256 && e.bytes === expected.bytes);
     assert(entry, 'Inventory marker lacks exact ' + kind + ' evidence');
   }
-  return {artifacts, raw, plan, result, status};
+  return {artifacts, raw, plan, result, status, dryRunSummary};
 }
 
 async function saveSnapshot(directory, raw, artifacts, inventoryRuntimeRoot) {
@@ -208,7 +210,7 @@ async function writeImmutableFile(file, bytes) {
 }
 
 async function makeLockedEntry(options, version) {
-  const {artifacts, raw, plan, result, status} = await collectArtifacts(options);
+  const {artifacts, raw, plan, result, status, dryRunSummary} = await collectArtifacts(options);
   assert(plan.date === options.date, 'Inventory publication date/plan conflict');
   const directory = path.join(options.inventoryRuntimeRoot, 'versions', options.date, sha(options.batchId).slice(0, 40));
   await saveSnapshot(directory, raw, artifacts, options.inventoryRuntimeRoot);
@@ -246,7 +248,7 @@ async function makeLockedEntry(options, version) {
   }
   const entry = {
     batchId: options.batchId, commandId: options.commandId, version, artifacts, sourceArtifacts, journalArtifacts,
-    planHash: plan.payloadHash, status, generatedAt: result.generatedAt,
+    planHash: plan.payloadHash, status, execute: result.execute, generatedAt: result.generatedAt,
     counts: {
       total: result.results.length,
       updated: result.results.filter(r => r.state === 'updated_readback_matched').length,
@@ -254,6 +256,7 @@ async function makeLockedEntry(options, version) {
       pending: result.results.filter(r => r.state === 'submitted_but_readback_pending').length,
       fenced: result.results.filter(r => r.state === 'blocked_by_manual_resolution_fence').length,
       blocked: result.results.filter(r => r.state === 'blocked').length,
+      ...(dryRunSummary ? {ready: dryRunSummary.ready, dryRunReady: dryRunSummary.ready, excluded: dryRunSummary.excluded} : {}),
     },
   };
   await verifyEntry(entry, options.inventoryRuntimeRoot);
