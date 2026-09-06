@@ -29,6 +29,7 @@ import {
   LISTING_BIND_RECOVERY_AUDIT_TYPE,
   LISTING_IMAGE_UPLOAD_AUDIT_TYPE,
   RECOVER_UPLOADED_ASSET_BINDING_CONFIRM_TEXT,
+  canonicalRecoveredPublishPayloadHash,
 } from '../lib/link_ops_uploaded_asset_binding_recovery.mjs';
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
@@ -344,6 +345,33 @@ try {
   check(updatedTask.actualWriteSubmitted === false, 'actualWriteSubmitted is false');
   check(updatedTask.issuedExecuteToExecutor === false, 'issuedExecuteToExecutor is false');
   check(updatedTask.sheinWriteAttempted === false, 'sheinWriteAttempted is false');
+  check(updatedTask.publishAssetBinding?.evidence?.recoveredFromAudit === true, 'Real recovery records recovered provenance');
+  check(updatedTask.publishAssetBinding?.evidence?.payloadHash === canonicalRecoveredPublishPayloadHash(updatedTask.openapiPublishPayload), 'Real recovery locks the exact current payload without fixture hash rewriting');
+
+  // Negative controls alter only the unsafe input; the successful reuse below
+  // still consumes the untouched result of the real recovery endpoint.
+  const reuseSession = JSON.parse(await fs.readFile(sessionFile, 'utf8'));
+  for (const [label, tamper, expectedCode] of [
+    ['malformed neutral hash', task => { task.publishAssetBinding.evidence.payloadHash = 'not-a-sha256'; }, 'REUSE_APPROVED_BINDING_PAYLOAD_HASH_INVALID'],
+    ['unknown write with matching hash', task => { task.execution.openApiProductExecutors = [{runId: 'unknown-recovered-write', mode: 'execute', state: 'unknown', publishResult: null}]; }, 'REUSE_APPROVED_BINDING_WRITE_EVIDENCE_UNSAFE'],
+  ]) {
+    const alteredStore = structuredClone(updatedTaskData);
+    const alteredTask = alteredStore.tasks.find(task => task.id === TASK_ID);
+    tamper(alteredTask);
+    await fs.writeFile(taskFile, JSON.stringify(alteredStore, null, 2), 'utf8');
+    try {
+      const denied = await fetch('http://127.0.0.1:' + portalPort + '/api/link-ops-publish-assets', {
+        method: 'POST', headers: {'content-type': 'application/json', cookie: reuseSession.cookie},
+        body: JSON.stringify({taskId: TASK_ID, store: STORE, sourceApproved: true, reuseApprovedBinding: true, supplyPrice: 172.22, inventory: 100}),
+      });
+      const deniedBody = await denied.json();
+      check(denied.status === 409 && deniedBody.code === expectedCode, `${label} is rejected by the exact guard`);
+      const afterDenied = JSON.parse(await fs.readFile(taskFile, 'utf8'));
+      check(JSON.stringify(afterDenied.tasks.find(task => task.id === TASK_ID)) === JSON.stringify(alteredTask), `${label} leaves the task unchanged`);
+    } finally {
+      await fs.writeFile(taskFile, JSON.stringify(updatedTaskData, null, 2), 'utf8');
+    }
+  }
 
   // Step 2b: Real Portal reuse-approved-binding path accepts the recovered
   // binding and reaches a dry-run with 0.18A/304301999 without uploads,

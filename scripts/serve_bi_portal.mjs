@@ -10240,13 +10240,6 @@ function resolveApprovedBindingReusePayloadDecision(task, targetStore) {
     );
   }
 
-  // An unsubmitted task uses ordinary preparation/capture validation. The
-  // image binding's full-payload hash predates legal description/attribute
-  // preparation and is not a recovery lock for this workflow.
-  if (rejection.neutral === true) {
-    return {directReuse: false, source: 'legacy_capture'};
-  }
-
   if (evidencePayloadHash) {
     if (!/^[a-f0-9]{64}$/.test(evidencePayloadHash)) {
       throw approvedBindingReuseError(
@@ -10254,13 +10247,22 @@ function resolveApprovedBindingReusePayloadDecision(task, targetStore) {
         'approved binding evidence.payloadHash is malformed; reuse denied',
       );
     }
-    if (!payload || evidencePayloadHash !== currentPayloadHash) {
-      throw approvedBindingReuseError(
-        'REUSE_APPROVED_BINDING_PAYLOAD_HASH_MISMATCH',
-        'approved binding payload hash does not match the current openapiPublishPayload; reuse denied',
-      );
+    if (payload && evidencePayloadHash === currentPayloadHash) {
+      return {directReuse: true, source: 'binding_payload_hash'};
     }
-    return {directReuse: true, source: 'binding_payload_hash'};
+  }
+
+  // Exact recovered payloads retain direct reuse. Legal preparation can make
+  // an unsubmitted task outgrow the image binding's full-payload hash; only
+  // that no-write case may use ordinary source/binding capture validation.
+  if (rejection.neutral === true) {
+    return {directReuse: false, source: 'legacy_capture'};
+  }
+  if (evidencePayloadHash) {
+    throw approvedBindingReuseError(
+      'REUSE_APPROVED_BINDING_PAYLOAD_HASH_MISMATCH',
+      'approved binding payload hash does not match the current openapiPublishPayload; reuse denied',
+    );
   }
 
   if (!payload) {
