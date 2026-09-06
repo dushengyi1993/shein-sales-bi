@@ -1005,7 +1005,8 @@ const fallbackBatch = read('scripts/marketing/batch_apply_new_listing_limited_di
 assert.match(fallbackBatch, /DEFAULT_MIN_START_BUDGET_SEC = 15 \* 60/);
 assert.match(fallbackBatch, /--graceful-cutoff-epoch|--deadline-epoch/);
 assert.match(fallbackBatch, /Absolute graceful cutoff epoch must be a future safe integer/);
-const groupGateAt = fallbackBatch.indexOf('const startBudget = groupStartBudget(args);');
+const groupGateAt = fallbackBatch.indexOf('const startBudget = groupStartBudget(groupArgs);');
+assert.match(fallbackBatch, /const groupArgs = group \? \{\.\.\.args, continuation: group\.mode === 'transaction'\} : args/);
 assert.match(fallbackBatch, /effectiveLaunchStore = customOverrides\.launchStore \|\| launchStore/);
 assert.match(fallbackBatch, /effectiveProcessStore = customOverrides\.processStore \|\| processStore/);
 const groupLaunchAt = fallbackBatch.indexOf('launchSummary = summarizeRaw(await effectiveLaunchStore(storeKey));');
