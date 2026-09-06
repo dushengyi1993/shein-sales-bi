@@ -3,7 +3,7 @@
 > 适用工作区：`E:\Codex WorkSpace\Shein销售统计`
 > 生产目录：`/opt/shein-bi/app`
 > 时间口径：`Asia/Shanghai`
-> 当前自动化：完整巡检与修复已解耦。巡检独立完成当天 live 证据；本地 runner 优先消费队列，云端 emergency worker 仅在 `20:45/21:15` 两个既有窗口兜底，不得拖住巡检。
+> 当前自动化：完整巡检与修复解耦。11:00 guard 生成当天队列后，由 OnSuccess 启动现有云端 repair 服务；现有 repair timer 在 11–20 点每小时 :45 及 21:15 续跑。业务长期授权持续有效，无需 V6 开窗或逐批审批。
 
 本文是日常运维入口和可复用流程；[pricing-rules](marketing-campaign-signup-pricing-rules.md) 是业务政策，`skills/shein-marketing-ops/SKILL.md` 是执行指令。运行批次记录已迁至 [2026-07-13-to-2026-07-16.md](archive/marketing-runs/2026-07-13-to-2026-07-16.md)。三者必须一起阅读，但不得互相替代。
 
@@ -78,7 +78,7 @@ guard 尚未结束时，heartbeat 每 60–90 秒轮询，最长 30 分钟；结
 云端证据：`2026-07-17` 的全在售兜底差集产生 `74` 条；`2026-07-18` 基准切换产生 `61` 条、`32` 个活动组。旧流程把完整巡检与大批写入同步串行，曾在约一小时后被系统杀掉，不能再作为生产路径。
 
 - 完整巡检保持分钟级完成，最长 `30` 分钟；它生成精确 manifest/hash、活动组和可恢复队列，但不等待大批修复。
-- 云端 emergency worker 在 `20:45/21:15` 运行，分别于 `20:57/21:27` 停止派新组，单轮最多处理 `1` 个活动组；本地 runner 仍按精确队列续跑。同店复用浏览器，成功组可 resume，失败/阻断组不会被误记为完成。
+- 云端 repair 是当前主执行入口，按单项/单组串行消费，每轮最多 32 组并遵守实际预算及资源错峰。正常延期保留当前日精确队列，由同一 timer 后续续跑；已提交或回读未决项不得重放。
 - 每个替换组仍先 preflight/dry-run，再锁定旧活动完整快照和精确 hash。真实删除、目标活动创建、回读与补偿由事务执行器统一管理；目标创建失败时自动恢复旧保护。dry-run 不得进入删除或任何真实写路径。
 - 修复队列全部组完成后，最终闭环顺序固定为：先用 session HTTP 刷新 19 店普通活动/优惠券 stack review，再做 19 店价格栈 final live readback，最后重建 guard。价格栈必须最后扫，避免刚创建的待生效活动在 stack review 期间跨过开始时间后，又被旧价格快照误判为缺失。修复耗时超过同轮证据时差时，不得沿用巡检开始时的旧 stack review，让已被 live 证据替代的优惠券中间文件重新变成 stale blocker。巡检 watchdog 与修复 watchdog 分别验收，后者必须在 `20:00` 前确认修复闭环或明确剩余 blocker。
 - 最终日报必须双通道交付，二者缺一不可：飞书群固定只发“一段最终结论 + 一个 `marketing-daily-final-YYYY-MM-DD.md` 附件”；当前 Codex 本任务仍须正常输出有排版的人话日报，不能用飞书消息或附件代替本任务回复，也不能因为飞书已发送就在本任务静默。两边都只能在最终 19 店 stack review、价格栈 readback 和 guard 重建之后发送。队列刚进入 `blocked`、某个 worker 阶段结束或 execution summary 刚落盘都只是中间态；blocked 队列完成最终扫描后必须重建四类 repair plan，并用 `check_marketing_terminal_report_readiness.mjs` 按精确 `store+SKC` 核对：新出现且尚未执行/安全阻断的行必须重新入队。发送器仍须校验最终 guard 的时间晚于终态队列和执行结果；不得分别发送 guard/execution 两个附件，也不得把 guard 的只读“不能自动执行”标题当成整轮执行结论。
@@ -160,7 +160,7 @@ guard 只生成并锁定队列，不执行任何写入。价格决策先按“ET
 
 人工特殊折扣的“已覆盖”不是只看价格：live 证据必须同时证明精确价格、活动库存不少于登记 `activityStock`、活动截止时间不早于登记 `validTo`。新建/恢复后必须按活动 ID、价格、库存和截止时间逐项精确回读；缺字段也视为证据不足并进入恢复/阻断，不得报绿。
 
-guard 本身不应产生浏览器。日常 repair/write 优先由负责人本机的后台 headless Chrome 按 3–4 店一批执行，默认 4 店、机器负载较高或 Profile 启动不稳时降为 3 店，不弹前端、不抢焦点。批内不同店铺可以并行，但同一店/同一 Profile 的登录探针、dry-run、hash、execute、库存恢复和 live readback 必须严格串行；每店使用独立端口、临时目录、救援文件、输出和租约。必须等整批全部终态后逐个关闭本批 Profile、确认进程/端口/租约为 0，再开下一批；单店失败只隔离该店。云端只在当日本机没有闭环时，于 `20:45–20:57`、`21:15–21:27` 两个应急窗各处理最多 1 店/1组，并在执行前用全店只读重扫消除本地已经完成的工作，禁止重放。最终确认远程调试端口和临时 Chrome 目录为 0。
+guard 使用既有只读扫描生成当前日计划，OnSuccess 将队列交给现有云端 repair 服务。云端同店登录、preflight、内部 hash、execute、库存恢复与 live readback 保持串行。原业务任务独占执行和回读；本地接管必须先确认云端已释放租约与执行占用，不能与同店云端执行重叠。孤立商品阻断只隔离对应项，继续独立项；真实未决提交保持原回执，不重放。资源延期由原 timer 续跑，不要求人工开窗。
 
 云端 Chrome 进程归零后，清理器还必须删除已关闭店铺 profile 下的 `SingletonLock`、`SingletonCookie`、`SingletonSocket`；只能对确认无该店 Chrome 进程的精确 profile 执行。日报收口同时核对进程、调试端口、Chrome 临时目录和这些 profile 锁，避免“进程为 0 但下批浏览器仍因旧锁无法启动”。
 
