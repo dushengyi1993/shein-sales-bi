@@ -10240,6 +10240,13 @@ function resolveApprovedBindingReusePayloadDecision(task, targetStore) {
     );
   }
 
+  // An unsubmitted task uses ordinary preparation/capture validation. The
+  // image binding's full-payload hash predates legal description/attribute
+  // preparation and is not a recovery lock for this workflow.
+  if (rejection.neutral === true) {
+    return {directReuse: false, source: 'legacy_capture'};
+  }
+
   if (evidencePayloadHash) {
     if (!/^[a-f0-9]{64}$/.test(evidencePayloadHash)) {
       throw approvedBindingReuseError(
@@ -10256,9 +10263,6 @@ function resolveApprovedBindingReusePayloadDecision(task, targetStore) {
     return {directReuse: true, source: 'binding_payload_hash'};
   }
 
-  if (rejection.neutral === true) {
-    return {directReuse: false, source: 'legacy_capture'};
-  }
   if (!payload) {
     throw approvedBindingReuseError(
       'REUSE_APPROVED_BINDING_REJECTED_PAYLOAD_MISSING',
@@ -10950,6 +10954,17 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       publishPreparation,
     );
     taskForCapture = {...taskForCapture, openapiPublishPayload: replaced.payload};
+  }
+  if (isReuse && reusePayloadDecision?.directReuse === false && taskForCapture.openapiPublishPayload) {
+    // Capture validates against the new preparation lock. Project only the
+    // explicitly requested price/stock first, just as explicit titles above;
+    // leave every other payload field for ordinary source/binding validation.
+    const requested = normalizePublishPreparationOverrides(body.publishPreparation || body);
+    const projected = applyExplicitPublishPreparationOverrides(taskForCapture.openapiPublishPayload, {
+      supplyPrice: requested.supplyPrice,
+      inventory: requested.inventory,
+    });
+    taskForCapture = {...taskForCapture, openapiPublishPayload: projected.payload};
   }
   const priorBindingPreparation = task?.publishAssetBinding?.publishPreparation;
   const requiresPreparationMigration = isReuse && (

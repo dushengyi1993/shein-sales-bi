@@ -150,7 +150,7 @@ async function writeDescSourceFixtures() {
         productTypeId: 789,
         brandCode: 'BRAND_SMOKE',
         productMultiNameList: sourceNames,
-        productAttributeInfoList: [{attributeId: 1000546, attributeValueId: 0, attributeValue: 'SM-11004'}],
+        productAttributeInfoList: [{attributeId: 1000546, attributeValueId: 0, attributeValue: 'SM-11004'}, {attributeId: 1002328, attributeValueId: 777777, attributeValue: 'Not hazardous'}],
         skcInfoList: skcList.map(skc => ({
           skcName: skc,
           supplierCode: `SRC-${skc}`,
@@ -379,6 +379,8 @@ const descReadbackMode = {mode: 'exact'};
 const publishSuccessMode = {mode: 'explicit_true'};
 const readbackRouteMode = {mode: 'direct'};
 const publishedIdentities = new Map();
+const reuseDonorSkc = 'sv20991231999999';
+const reuseDonorSpu = 'v20991231999999';
 const fakeOpenApiPort = await getFreePort();
 const fakeOpenApi = http.createServer(async (req, res) => {
   const body = await readBody(req);
@@ -403,9 +405,14 @@ const fakeOpenApi = http.createServer(async (req, res) => {
     return sendJson(res, {code: '0', msg: 'OK', info: {default_language: 'ar', default_language_title_max_length: 325, language_title_max_length_list: [{language: 'ar', max_length: 325}, {language: 'en', max_length: 250}], currency: 'SAR', fill_in_standard_list: []}});
   }
   if (pathname === '/open-api/goods/query-attribute-template') {
-    return sendJson(res, {code: '0', msg: 'OK', info: {data: [{product_type_id: 789, attribute_infos: []}]}});
+    return sendJson(res, {code: '0', msg: 'OK', info: {data: [{product_type_id: 789, attribute_infos: [
+      {attribute_id: 1002328, attribute_name: 'Hazardous materials classification', attribute_mode: 1, attribute_type: 1, attribute_status: 2, attribute_value_info_list: [{attribute_value_id: 777777, attribute_value: 'Not hazardous'}]},
+    ]}]}});
   }
   if (pathname === '/open-api/goods/searchProduct') {
+    if (asArray(body.json?.skcNameList).includes(reuseDonorSkc)) {
+      return sendJson(res, {code: '0', msg: 'OK', info: {data: [{spuName: reuseDonorSpu, skcList: [{skcName: reuseDonorSkc, supplierCode: 'SM-11004', skuList: []}]}]}});
+    }
     if (publishSuccessMode.mode === 'success_without_spu') {
       return sendJson(res, {
         code: '0',
@@ -505,6 +512,13 @@ const fakeOpenApi = http.createServer(async (req, res) => {
   }
   if (pathname === '/open-api/goods/spu-info') {
     const spuName = String(body.json?.spuName || '');
+    if (spuName === reuseDonorSpu) {
+      return sendJson(res, {code: '0', msg: 'OK', info: {
+        spuName, categoryId: 123456, productTypeId: 789,
+        productAttributeInfoList: [{attributeId: 1000546, attributeValueId: 0, attributeValue: 'SM-11004'}, {attributeId: 1002328, attributeValueId: 777777, attributeValue: 'Not hazardous'}],
+        skcInfoList: [{skcName: reuseDonorSkc, supplierCode: 'SM-11004', skuInfoList: []}],
+      }});
+    }
     if (spuName === SOURCE_SPU && !publishedIdentities.has(spuName)) {
       return sendJson(res, {
         code: '0',
@@ -629,6 +643,8 @@ await fs.mkdir(portalDir, {recursive: true});
 await fs.writeFile(path.join(portalDir, 'index.html'), '<!doctype html><html><body>desc-bind-test-portal</body></html>', 'utf8');
 
 const portalPort = await getFreePort();
+const reuseAliasFile = await writeJson('reuse-aliases.json', {version: 1, aliases: [{canonical: 'SM-11004', aliases: ['SM-11004']}]});
+const reuseCatalogFile = await writeJson('reuse-catalog.json', {version: 1, standards: ['SM-11004']});
 const portal = spawn(process.execPath, [
   'scripts/serve_bi_portal.mjs',
   '--host', '127.0.0.1',
@@ -659,6 +675,8 @@ const portal = spawn(process.execPath, [
     SHEIN_BI_JOB_WORKER_ENABLED: '0',
     SHEIN_OWNER_KNOWLEDGE_GIT_REPO_DIR: '',
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
+    SHEIN_PRODUCT_ALIASES_FILE: reuseAliasFile,
+    SHEIN_PRODUCT_CATALOG_FILE: reuseCatalogFile,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
     SHEIN_OPENAPI_READ_PROBE_SUMMARY_FILE: readProbeSummaryFile,
     SHEIN_LINK_OPS_OPENAPI_EXECUTOR_TIMEOUT_MS: '15000',
@@ -1031,36 +1049,107 @@ try {
   check('post-bind dry-run projected preflight ok', postBind.json?.task?.preflight?.ok, true);
   check('post-bind dry-run projected preflight equals execution', JSON.stringify(postBind.json?.task?.preflight || null), JSON.stringify(postBind.json?.task?.execution?.preflight || null));
 
+  // YJ rev10 PostgreSQL export (2026-09-06): five blocked dry-runs,
+  // including two pre-executor failures with empty child ids. Preserve the
+  // full/history/audit projection topology with synthetic ids and no material.
+  const yjRuns = ['fixture-first', 'fixture-recovered', '', '', 'fixture-attribute-check'].map(runId => ({
+    runId, mode: 'dry-run', state: 'blocked', publishResult: null,
+    ...(runId ? {readback: {ok: false, status: 'planned_not_run', matchedCount: 0}} : {}),
+  }));
+  const yjAudit = run => ({
+    submitted: false, actualWriteSubmitted: false, issuedExecuteToExecutor: false, sheinWriteAttempted: false,
+    executorEvidence: [{...structuredClone(run), runId: undefined, childRunId: run.runId}],
+    lifecycleTransition: {status: 'preflight_blocked', submitted: false},
+  });
+  const yjHistoryTask = {
+    status: 'waiting_review',
+    execution: {
+      mode: 'openapi_product_executor', state: 'blocked',
+      openApiProductExecutors: [structuredClone(yjRuns[4])],
+      hlOpenApiExecutor: structuredClone(yjRuns[4]), writeAudit: yjAudit(yjRuns[4]),
+    },
+    history: yjRuns.map(run => ({event: 'executor_blocked', openApiProductExecutors: [structuredClone(run)], writeAudit: yjAudit(run)})),
+    executionHistory: yjRuns.map(run => ({event: 'controlled_execution_run', submitted: false, actualWriteSubmitted: false, issuedExecuteToExecutor: false, sheinWriteAttempted: false, executorRuns: [structuredClone(run)]})),
+    lifecycle: {status: 'preflight_blocked', submitted: false},
+  };
+
   // Real local check -> missing supply-price preparation -> same-task reuse.
   // The platform and Portal below are isolated fixtures, never production.
   const pureCheckId = await createTask(cookie, 'DESC-PURE-CHECK-REUSE');
-  await attachPayload(pureCheckId, publishPayloadFor('DESC-PURE-CHECK-REUSE'));
-  await updateRawTaskById(pureCheckId, task => {
-    const preparation = {...task.publishAssetBinding.publishPreparation};
-    delete preparation.supplyPrice;
-    const binding = {...task.publishAssetBinding, publishPreparation: preparation};
-    binding.evidence = {...binding.evidence, payloadHash: canonicalRecoveredPublishPayloadHash(task.openapiPublishPayload)};
-    binding.bindingFingerprint = portalHooks.canonicalPublishAssetBindingFingerprint(task, {binding, publishPreparation: preparation});
-    return {...task, publishPreparation: preparation, targets: {...task.targets, publishPreparation: preparation}, publishAssetBinding: binding};
-  });
-  check('pure check initial description bind', (await bindDescriptions(cookie, pureCheckId)).status, 200);
-  await updateRawTaskById(pureCheckId, task => ({...task, publishAssetBinding: {
-    ...task.publishAssetBinding,
-    evidence: {...task.publishAssetBinding.evidence, payloadHash: canonicalRecoveredPublishPayloadHash(task.openapiPublishPayload)},
-  }}));
+  const pureTaskCount = asArray(JSON.parse(await fs.readFile(taskFile, 'utf8')).tasks).length;
+  const pureCallsStart = fakeOpenApiCalls.length;
+  const mustSucceed = (label, response) => {
+    check(label, response.status, 200);
+    if (response.status !== 200) throw new Error(`${label}: ${response.status} ${JSON.stringify(response.json)}`);
+  };
+  const approved14 = ['mainCover', 'carouselSecondCover', ...Array(10).fill('detail'), 'squareImage', 'skuImage'].map((role, i) => ({
+    name: `reuse-${i}.jpg`, role, imageType: role === 'detail' ? 2 : role === 'squareImage' ? 5 : 1,
+    imageUrl: `https://img.shein.com/reviewed-reuse-${i}.jpg`, width: 1200, height: role === 'squareImage' ? 1200 : 1600,
+    sha256: crypto.createHash('sha256').update(`reviewed-reuse-${i}`).digest('hex'),
+  }));
+  const initialAssets = await req('/api/link-ops-publish-assets', {method: 'POST', cookie, body: {
+    taskId: pureCheckId, store: 'NM', sourceApproved: true, bindings: approved14,
+    standardGoodsSn: 'SM-11004', supplierSku: 'PURE-REUSE-SKU', titleGroup: 'title2',
+    titles: {en: 'Reviewed title two', ar: 'عنوان معتمد'},
+  }});
+  mustSucceed('pure check initial 14-image title2 binding', initialAssets);
+  const imageBoundRaw = await rawTaskById(pureCheckId);
+  const originalImageHash = imageBoundRaw.publishAssetBinding.evidence.payloadHash;
+  check('pure check image binding stores original payload hash', originalImageHash, canonicalRecoveredPublishPayloadHash(imageBoundRaw.openapiPublishPayload));
+  mustSucceed('pure check initial description bind', await bindDescriptions(cookie, pureCheckId));
+  const descBoundRaw = await rawTaskById(pureCheckId);
+  check('pure check legal description changes full payload hash', canonicalRecoveredPublishPayloadHash(descBoundRaw.openapiPublishPayload) !== originalImageHash, true);
+  check('pure check description leaves image evidence hash unchanged', descBoundRaw.publishAssetBinding.evidence.payloadHash, originalImageHash);
+  const adoptPureAttribute = async () => req('/api/link-ops-prepare-product-attribute', {method: 'POST', cookie, body: {
+    taskId: pureCheckId, store: 'NM', donorStore: 'NM', donorSkc: reuseDonorSkc, attributeId: 1002328,
+    bindingMode: 'adopt_existing', expectedRevision: (await rawTaskById(pureCheckId)).repositoryRevision,
+  }});
+  mustSucceed('pure check adopt existing attribute', await adoptPureAttribute());
+  const adoptedRaw = await rawTaskById(pureCheckId);
+  check('pure check attribute adoption preserves entire payload', JSON.stringify(adoptedRaw.openapiPublishPayload), JSON.stringify(descBoundRaw.openapiPublishPayload));
   const pureCheck = await req('/api/link-ops-execute', {method: 'POST', cookie, body: {id: pureCheckId, mode: 'check', source: 'test'}});
   check('pure check HTTP 200', pureCheck.status, 200);
+  const beforeYjHistory = await rawTaskById(pureCheckId);
+  await updateRawTaskById(pureCheckId, task => ({
+    ...task,
+    history: [...asArray(task.history), ...structuredClone(yjHistoryTask.history)],
+    executionHistory: [...asArray(task.executionHistory), ...structuredClone(yjHistoryTask.executionHistory)],
+  }));
   const pureCheckRaw = await rawTaskById(pureCheckId);
+  const withoutHistory = ({history, executionHistory, ...task}) => task;
+  check('pure check YJ history merge changes only history', JSON.stringify(withoutHistory(pureCheckRaw)), JSON.stringify(withoutHistory(beforeYjHistory)));
+  check('pure check HTTP fixture contains all five YJ history projections', JSON.stringify(pureCheckRaw.history.slice(-5)), JSON.stringify(yjHistoryTask.history));
+  check('pure check HTTP fixture contains all five YJ execution projections', JSON.stringify(pureCheckRaw.executionHistory.slice(-5)), JSON.stringify(yjHistoryTask.executionHistory));
+  check('pure check HTTP fixture contains two empty child ids', pureCheckRaw.history.slice(-5).filter(entry => entry.writeAudit.executorEvidence[0].childRunId === '').length, 2);
   check('pure check missing supplyPrice lock reproduced', JSON.stringify(pureCheckRaw.execution?.preflight?.blockers), text => text.includes('supplyPrice') && text.includes('structured preparation lock'));
   check('pure check executor record exists', asArray(pureCheckRaw.execution?.openApiProductExecutors).length > 0, true);
   for (const field of ['actualWriteSubmitted', 'issuedExecuteToExecutor', 'sheinWriteAttempted']) {
     check(`pure check ${field} false`, pureCheckRaw.execution?.writeAudit?.[field], false);
   }
   check('pure check history is neutral', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(pureCheckRaw).neutral, true);
+  const supplement = {taskId: pureCheckId, store: 'NM', reuseApprovedBinding: true, sourceApproved: true, supplyPrice: 90, inventory: 100, titleGroup: 'title2'};
+  for (const [label, tamper, errorText] of [
+    ['binding fingerprint', task => { task.publishAssetBinding.bindingFingerprint = 'f'.repeat(64); }, 'bindingFingerprint'],
+    ['payload image', task => { task.openapiPublishPayload.skc_list[0].image_info.image_info_list[0].image_url = 'https://img.shein.com/tampered.jpg'; }, 'images do not match'],
+    ['source SKC', task => { task.targets.sourceSkc = 'sv20990101987654'; }, 'source'],
+    ['unknown historical write', task => { task.executionHistory.push({executorRuns: [{runId: 'unknown-write-fixture', mode: 'execute', state: 'unknown', publishResult: null}]}); }, 'write-attempt evidence'],
+  ]) {
+    const altered = structuredClone(pureCheckRaw);
+    tamper(altered);
+    await updateRawTaskById(pureCheckId, () => altered);
+    try {
+      const deniedReuse = await req('/api/link-ops-publish-assets', {method: 'POST', cookie, body: supplement});
+      check(`pure check ${label} rejects`, deniedReuse.status, 409);
+      check(`pure check ${label} reports causal blocker`, JSON.stringify(deniedReuse.json), text => text.includes(errorText));
+      check(`pure check ${label} leaves task untouched`, JSON.stringify(await rawTaskById(pureCheckId)), JSON.stringify(altered));
+    } finally {
+      await updateRawTaskById(pureCheckId, () => structuredClone(pureCheckRaw));
+    }
+  }
   const pureReuse = await req('/api/link-ops-publish-assets', {method: 'POST', cookie, body: {
-    taskId: pureCheckId, store: 'NM', reuseApprovedBinding: true, sourceApproved: true, supplyPrice: 90, inventory: 100,
+    ...supplement,
   }});
-  check('pure check same-task reuse HTTP 200', pureReuse.status, 200);
+  mustSucceed('pure check same-task reuse HTTP 200', pureReuse);
   const pureReusedRaw = await rawTaskById(pureCheckId);
   check('pure check same-task identity preserved', pureReusedRaw.id, pureCheckId);
   check('pure check reuse increments revision once', pureReusedRaw.repositoryRevision, pureCheckRaw.repositoryRevision + 1);
@@ -1071,6 +1160,50 @@ try {
   check('pure check reuse preserves approved images', JSON.stringify(imageContent(pureReusedRaw)), JSON.stringify(imageContent(pureCheckRaw)));
   check('pure check reuse preserves approved titles', JSON.stringify(titleContent(pureReusedRaw)), JSON.stringify(titleContent(pureCheckRaw)));
   check('pure check reuse invalidates preflight', pureReusedRaw.execution?.state, 'needs_repreflight');
+  // Preparation deliberately invalidates dependent locks. Rebind the same
+  // reviewed source and adopt the same live donor value through existing APIs.
+  mustSucceed('pure check rebind original descriptions', await bindDescriptions(cookie, pureCheckId));
+  mustSucceed('pure check readopt original attribute', await adoptPureAttribute());
+  const readyCheck = await req('/api/link-ops-execute', {method: 'POST', cookie, body: {id: pureCheckId, mode: 'dry-run', source: 'test'}});
+  mustSucceed('pure check final preflight HTTP 200', readyCheck);
+  const finalPureRaw = await rawTaskById(pureCheckId);
+  check('pure check final preflight ready', finalPureRaw.execution?.state, 'openapi_product_preflight_ready');
+  check('pure check final preflight has no blockers', JSON.stringify(finalPureRaw.execution?.preflight?.blockers), '[]');
+  check('pure check final image count 14', finalPureRaw.publishAssetBinding?.images?.length, 14);
+  check('pure check final images preserved', JSON.stringify(imageContent(finalPureRaw)), JSON.stringify(imageContent(imageBoundRaw)));
+  const payloadImageContent = task => asArray(task.openapiPublishPayload?.skc_list).map(skc => ({
+    image_info: skc.image_info,
+    skuImages: asArray(skc.sku_list).map(sku => sku.image_info),
+  }));
+  check('pure check final payload image bytes references and order preserved', JSON.stringify(payloadImageContent(finalPureRaw)), JSON.stringify(payloadImageContent(imageBoundRaw)));
+  check('pure check final titles preserved', JSON.stringify(titleContent(finalPureRaw)), JSON.stringify(titleContent(imageBoundRaw)));
+  check('pure check final title group2', String(finalPureRaw.publishPreparation?.titleGroup), 'title2');
+  check('pure check final descriptions preserve reviewed five rows per language', JSON.stringify(finalPureRaw.openapiPublishPayload?.multi_language_desc_list), JSON.stringify(descBoundRaw.openapiPublishPayload?.multi_language_desc_list));
+  check('pure check final attribute value unchanged', JSON.stringify(finalPureRaw.openapiPublishPayload?.product_attribute_list), JSON.stringify(adoptedRaw.openapiPublishPayload?.product_attribute_list));
+  check('pure check final source lock unchanged', finalPureRaw.targets?.sourceSkc, imageBoundRaw.targets?.sourceSkc);
+  check('pure check final description image fingerprint current', finalPureRaw.descriptionMaterialBinding?.imageBindingFingerprint, finalPureRaw.publishAssetBinding?.bindingFingerprint);
+  check('pure check final attribute image fingerprint current', finalPureRaw.productAttributeBinding?.imageBindingFingerprint, finalPureRaw.publishAssetBinding?.bindingFingerprint);
+  check('pure check final ready hash locked', String(finalPureRaw.execution?.openApiProductExecutors?.[0]?.payload?.payloadHash).length, 64);
+  check('pure check final task retains five YJ execution projections', JSON.stringify(finalPureRaw.executionHistory.slice(beforeYjHistory.executionHistory.length, beforeYjHistory.executionHistory.length + 5)), JSON.stringify(yjHistoryTask.executionHistory));
+  check('pure check workflow kept one task', asArray(JSON.parse(await fs.readFile(taskFile, 'utf8')).tasks).filter(task => task.id === pureCheckId).length, 1);
+  check('pure check workflow creates no replacement tasks', asArray(JSON.parse(await fs.readFile(taskFile, 'utf8')).tasks).length, pureTaskCount);
+  const pureUploadCalls = fakeOpenApiCalls.slice(pureCallsStart).filter(call => /upload-pic/i.test(call.path)).length;
+  const purePublishCalls = fakeOpenApiCalls.slice(pureCallsStart).filter(call => /publishOrEdit/i.test(call.path)).length;
+  check('pure check upload-pic calls zero', pureUploadCalls, 0);
+  check('pure check publishOrEdit calls zero', purePublishCalls, 0);
+  console.log('approved_binding_workflow: ' + JSON.stringify({
+    sameTask: finalPureRaw.id === pureCheckId,
+    imageCount: finalPureRaw.publishAssetBinding?.images?.length,
+    imageEvidenceHashPredatesDescriptions: originalImageHash !== canonicalRecoveredPublishPayloadHash(descBoundRaw.openapiPublishPayload),
+    titleGroup: finalPureRaw.publishPreparation?.titleGroup,
+    supplyPrice: finalPureRaw.publishPreparation?.supplyPrice,
+    inventory: finalPureRaw.publishPreparation?.inventory,
+    descriptionLanguages: finalPureRaw.openapiPublishPayload?.multi_language_desc_list?.map(row => row.language),
+    attributeMode: finalPureRaw.productAttributeBinding?.bindingMode,
+    state: finalPureRaw.execution?.state,
+    preflightOk: finalPureRaw.execution?.preflight?.ok,
+    uploadPicCalls: pureUploadCalls, publishOrEditCalls: purePublishCalls,
+  }));
 
   // Blocked case: tampering only the bound ar description bytes must block
   // the next fresh dry-run, and the persisted top-level preflight must again
@@ -1536,29 +1669,6 @@ try {
   check('unit: committed executor false without blockers is not top-level success', unconfirmedNoBlockerOutcome.ok, false);
   check('unit: committed executor false without blockers is unconfirmed', unconfirmedNoBlockerOutcome.outcome, 'unconfirmed');
   check('unit: explicit pre-valid rejection task passes the predicate', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(predicateTask()).ok, true);
-  // YJ rev10 PostgreSQL export (2026-09-06): five blocked dry-runs,
-  // including two pre-executor failures with empty child ids. Preserve the
-  // full/history/audit projection topology with synthetic ids and no material.
-  const yjRuns = ['fixture-first', 'fixture-recovered', '', '', 'fixture-attribute-check'].map(runId => ({
-    runId, mode: 'dry-run', state: 'blocked', publishResult: null,
-    ...(runId ? {readback: {ok: false, status: 'planned_not_run', matchedCount: 0}} : {}),
-  }));
-  const yjAudit = run => ({
-    submitted: false, actualWriteSubmitted: false, issuedExecuteToExecutor: false, sheinWriteAttempted: false,
-    executorEvidence: [{...structuredClone(run), runId: undefined, childRunId: run.runId}],
-    lifecycleTransition: {status: 'preflight_blocked', submitted: false},
-  });
-  const yjHistoryTask = {
-    status: 'waiting_review',
-    execution: {
-      mode: 'openapi_product_executor', state: 'blocked',
-      openApiProductExecutors: [structuredClone(yjRuns[4])],
-      hlOpenApiExecutor: structuredClone(yjRuns[4]), writeAudit: yjAudit(yjRuns[4]),
-    },
-    history: yjRuns.map(run => ({event: 'executor_blocked', openApiProductExecutors: [structuredClone(run)], writeAudit: yjAudit(run)})),
-    executionHistory: yjRuns.map(run => ({event: 'controlled_execution_run', submitted: false, actualWriteSubmitted: false, issuedExecuteToExecutor: false, sheinWriteAttempted: false, executorRuns: [structuredClone(run)]})),
-    lifecycle: {status: 'preflight_blocked', submitted: false},
-  };
   check('unit: YJ PostgreSQL five-run history is neutral', portalHooks.descriptionBindingExplicitPreValidRejectionEvidence(yjHistoryTask).neutral, true);
   const yjUnknownHistory = structuredClone(yjHistoryTask);
   yjUnknownHistory.executionHistory[2].executorRuns[0].mode = 'execute';
