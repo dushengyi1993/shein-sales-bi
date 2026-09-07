@@ -1012,6 +1012,18 @@ try {
     const missingMorning = runInventoryCli();
     assert.notEqual(missingMorning.status, 0);
     assert.match(missingMorning.stderr, /no matching complete batch/);
+    // The strict executor validates staging before publishing the morning index.
+    const savedPlan = await fs.readFile(planFile);
+    const savedResult = await fs.readFile(resultFile);
+    try {
+      await writeJson(planFile, plan);
+      await writeJson(resultFile, goodResult);
+      const strictStaging = runInventoryCli([]);
+      assert.equal(strictStaging.status, 0, strictStaging.stderr);
+    } finally {
+      await fs.writeFile(planFile, savedPlan);
+      await fs.writeFile(resultFile, savedResult);
+    }
   } finally { await fs.unlink(indexFile); }
   await fs.unlink(path.join(markerRoot, runDate, 'daily-operating-refresh.json'));
   assert.notEqual(runInventoryCli().status, 0, 'warning CLI requires the final operating marker');

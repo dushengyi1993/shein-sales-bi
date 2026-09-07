@@ -314,6 +314,7 @@ async function writeState(file, state) {
 
 export async function deliverMarketingDailyReport({statePath, date, fingerprint, queueFingerprint,
   finalMdPath, finalMarkdown, dryRun = false, adoptExisting = false, prepareSend}) {
+  if (dryRun) return {ok: true, dryRun: true, finalReady: true, files: [finalMdPath]};
   const release = await acquireCrossProcessTicketLock(`${statePath}.lock`, {timeoutMs: 5000});
   try {
     let prior = null;
@@ -327,7 +328,16 @@ export async function deliverMarketingDailyReport({statePath, date, fingerprint,
       throw new Error('Daily report binding changed; preserve the original report and reconcile manually');
     }
     const state = prior || {schemaVersion: 'marketing-daily-delivery/v2', date, fingerprint,
-      queueFingerprint, summarySent: false, finalReportSent: false};
+      queueFingerprint, summarySent: false, finalReportSent: false,
+      summaryUnknown: false, finalReportUnknown: false};
+    if (prior?.schemaVersion === 'marketing-daily-delivery/v2'
+      && (typeof prior.summaryUnknown !== 'boolean' || typeof prior.finalReportUnknown !== 'boolean'
+        || (prior.summarySent && prior.summaryUnknown)
+        || (prior.finalReportSent && prior.finalReportUnknown)
+        || ((prior.finalReportSent || prior.finalReportUnknown) && !prior.summarySent)
+        || (!prior.summarySent && !prior.summaryUnknown))) {
+      throw new Error('Daily delivery state transition cannot be verified');
+    }
     for (const kind of ['summary', 'finalReport']) {
       if (state[`${kind}Unknown`] || (prior && prior.schemaVersion !== 'marketing-daily-delivery/v2' && !state[`${kind}Sent`])) {
         throw new Error('Daily delivery outcome is unknown; automatic resend is forbidden');
@@ -336,7 +346,6 @@ export async function deliverMarketingDailyReport({statePath, date, fingerprint,
     if (state.summarySent && state.finalReportSent) {
       return {ok: true, skipped: true, reason: 'same final report already delivered'};
     }
-    if (dryRun) return {ok: true, dryRun: true, finalReady: true, files: [finalMdPath]};
     await fs.writeFile(finalMdPath, finalMarkdown, 'utf8');
     if (adoptExisting) {
       await writeState(statePath, {...state, summarySent: true, finalReportSent: true,

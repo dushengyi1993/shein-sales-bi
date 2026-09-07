@@ -325,6 +325,8 @@ try {
       sends += 1;
       return {accepted: {ok: true}};
     }};
+  await deliverMarketingDailyReport({...input, dryRun: true});
+  assert.deepEqual(await fs.readdir(deliveryTmp), [], 'dry run must not create report, state or lock directory');
   await Promise.all([deliverMarketingDailyReport(input), deliverMarketingDailyReport(input)]);
   assert.equal(sends, 2, 'concurrent callers send exactly one summary and one attachment');
   assert.equal((await deliverMarketingDailyReport(input)).skipped, true);
@@ -353,6 +355,17 @@ try {
   await assert.rejects(deliverMarketingDailyReport(input), /cannot be verified/);
   await fs.writeFile(statePath, 'null');
   await assert.rejects(deliverMarketingDailyReport(input), /cannot be verified/);
+  for (const fields of [
+    {},
+    {summaryUnknown: 'false', finalReportUnknown: false},
+    {summaryUnknown: false, finalReportUnknown: false},
+    {summaryUnknown: false, finalReportUnknown: false, finalReportSent: true},
+    {summarySent: true, summaryUnknown: true, finalReportUnknown: false},
+  ]) {
+    await fs.writeFile(statePath, JSON.stringify({schemaVersion: 'marketing-daily-delivery/v2',
+      date: input.date, fingerprint: input.fingerprint, summarySent: false, finalReportSent: false, ...fields}));
+    await assert.rejects(deliverMarketingDailyReport(input), /state transition cannot be verified/);
+  }
   await fs.unlink(statePath);
   await assert.rejects(deliverMarketingDailyReport({...input, prepareSend: async () => { throw new Error('config missing'); }}), /config missing/);
   await assert.rejects(fs.stat(statePath), {code: 'ENOENT'}, 'pre-send config failure has no ambiguous attempt');
