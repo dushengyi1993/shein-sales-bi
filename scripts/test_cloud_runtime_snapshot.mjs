@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {buildEmergencyLocalReleaseReceipt,retireEmergencyLocalReleaseReceipt} from '../lib/emergency_local_release_receipt.mjs';
 
 import {
   CLOUD_MAINTENANCE_ABSENT_HASH,
@@ -588,3 +592,34 @@ console.log(JSON.stringify({
     'always_service_required',
   ],
 }, null, 2));
+
+const failedJobs=healthyUnits();
+failedJobs['shein-bi-db-backup.service']={...failedJobs['shein-bi-db-backup.service'],ActiveState:'failed',Result:'exit-code',ExecMainStatus:'1',ExecMainExitTimestamp:'Tue 2026-08-11 02:00:00 CST'};
+failedJobs['shein-bi-cloud-session-manager.service']={...failedJobs['shein-bi-cloud-session-manager.service'],ActiveState:'failed',Result:'exit-code',ExecMainStatus:'1',ExecMainExitTimestamp:'Tue 2026-08-11 00:45:00 CST'};
+const failedSnapshot=buildCloudRuntimeSnapshot({...base,systemdSnapshot:{...base.systemdSnapshot,units:failedJobs},jobEvidence:{sessionReport:{ok:true,generatedAt:'2026-08-11T07:34:00+08:00',summary:{failedStores:[]}}}});
+assert.equal(failedSnapshot.businessReady,false);
+assert.equal(failedSnapshot.infrastructureReady,true);
+assert.equal(failedSnapshot.releaseAuditReady,true);
+assert.deepEqual(failedSnapshot.jobs.failed.map(x=>x.unit),['shein-bi-db-backup.service']);
+assert.equal(failedSnapshot.jobs.recovered[0].unit,'shein-bi-cloud-session-manager.service');
+const oldReport=buildCloudRuntimeSnapshot({...base,systemdSnapshot:{...base.systemdSnapshot,units:failedJobs},jobEvidence:{sessionReport:{ok:true,generatedAt:'2026-08-10T07:34:00+08:00'}}});
+assert.equal(oldReport.jobs.failed.length,2);
+const skippedJobs=healthyUnits();skippedJobs['shein-bi-db-backup.service'].Result='exec-condition';skippedJobs['shein-bi-db-backup.service'].ExecMainStatus='0';
+assert.equal(buildCloudRuntimeSnapshot({...base,systemdSnapshot:{...base.systemdSnapshot,units:skippedJobs}}).businessReady,true);
+console.log('scheduled readiness: backup failure remains visible; newer session recovery and planned skips respected');
+
+const retirementRoot=fs.mkdtempSync(path.join(os.tmpdir(),'shein-retirement-fixture-'));
+try {
+  const receiptFile=path.join(retirementRoot,'emergency_local_release.json');
+  const prior=buildEmergencyLocalReleaseReceipt({commit:'e'.repeat(40),baselineCommit:'b'.repeat(40),bundleSha256:'c'.repeat(64),createdAt:'2026-08-10T12:00:00.000Z',reason:'fixture'});
+  const bytes=JSON.stringify(prior);fs.writeFileSync(receiptFile,bytes);
+  const retired=retireEmergencyLocalReleaseReceipt({receiptFile,deploymentMarker:deployedV3Marker,source:base.releaseSourceState});
+  assert.equal(retired.retired,true);
+  assert.equal(fs.readFileSync(retired.archiveFile,'utf8'),bytes);
+  assert.equal(fs.existsSync(receiptFile),false);
+  assert.equal(retireEmergencyLocalReleaseReceipt({receiptFile,deploymentMarker:deployedV3Marker,source:base.releaseSourceState}).reason,'absent');
+  const newer=buildEmergencyLocalReleaseReceipt({...prior,createdAt:'2026-08-12T12:00:00.000Z'});
+  fs.writeFileSync(receiptFile,JSON.stringify(newer));
+  assert.equal(retireEmergencyLocalReleaseReceipt({receiptFile,deploymentMarker:deployedV3Marker,source:base.releaseSourceState}).reason,'newer_receipt_preserved');
+  assert.equal(fs.existsSync(receiptFile),true);
+} finally {fs.rmSync(retirementRoot,{recursive:true,force:true});}

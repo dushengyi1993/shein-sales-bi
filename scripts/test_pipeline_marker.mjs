@@ -123,6 +123,22 @@ async function main() {
       assert.equal(dateMode & 0o0070, 0o0070);
     }
 
+    // Simulate the service's RestrictSUIDSGID syscall rule after the parent
+    // is provisioned. Existing directories must not trigger mkdir(2770), and
+    // new date/evidence directories inherit setgid without requesting it.
+    if (process.platform !== 'win32') {
+      const restrictedRoot=path.join(root,'restricted');
+      fs.mkdirSync(restrictedRoot,{mode:0o770});fs.chmodSync(restrictedRoot,0o2770);
+      const mkdir=fs.mkdirSync,chmod=fs.chmodSync;
+      fs.mkdirSync=(file,options)=>{assert.equal(Number(options?.mode||0)&0o6000,0,'setgid mkdir is forbidden');return mkdir(file,options)};
+      fs.chmodSync=(file,mode)=>{assert.equal(mode&0o6000,0,'setgid chmod is forbidden');return chmod(file,mode)};
+      const previous=process.umask(0o027);
+      try {
+        for(let i=0;i<2;i++)await writeMarker({root:restrictedRoot,stage:'nightly-backup',date:'2026-08-05',status:'done',completedAt,evidence:[chunkA],snapshotEvidence:true});
+        for(const relative of ['', '2026-08-05', 'evidence/2026-08-05/nightly-backup'])assert.equal(fs.statSync(path.join(restrictedRoot,relative)).mode&0o7777,0o2770);
+      } finally {fs.mkdirSync=mkdir;fs.chmodSync=chmod;process.umask(previous);}
+    }
+
     // write fails closed on missing / non-file evidence and writes no marker
     const missingPath = path.join(root, 'no-such-evidence.json');
     await assert.rejects(

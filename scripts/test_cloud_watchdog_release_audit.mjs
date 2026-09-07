@@ -57,8 +57,17 @@ const formalValidEmergencyValidAudit = resolveWatchdogReleaseAudit({
 });
 assert.equal(formalValidEmergencyValidAudit.releaseAuditReady, true);
 assert.deepEqual(formalValidEmergencyValidAudit.releaseAuditIssues, []);
-assert.equal(formalValidEmergencyValidAudit.expectedCommit, emergencyCommit);
-assert.equal(formalValidEmergencyValidAudit.sourceBinding, 'emergency-local-receipt-v1');
+assert.equal(formalValidEmergencyValidAudit.expectedCommit, formalCommit);
+assert.equal(formalValidEmergencyValidAudit.sourceBinding, 'formal-v3');
+
+for(const currentCommit of [formalCommit, emergencyCommit, 'a'.repeat(40)]) {
+  const selected=resolveWatchdogReleaseAudit({
+    currentCommit, deployedReleaseValidation:{ok:true},deploymentEvidence:{ok:true,commit:formalCommit},
+    emergencyLocalRelease:{exists:true,ok:true,receipt:{commit:emergencyCommit}},
+  });
+  assert.equal(selected.expectedCommit,currentCommit===emergencyCommit?emergencyCommit:formalCommit);
+  assert.equal(selected.releaseAuditReady,currentCommit!==emergencyCommit);
+}
 
 const formalValidNoEmergencyAudit = resolveWatchdogReleaseAudit({
   deployedReleaseValidation: {ok: true, issues: []},
@@ -126,7 +135,7 @@ console.log(JSON.stringify({
   checks: [
     'formal_invalid_emergency_valid_business_green_release_audit_red',
     'emergency_exact_commit_binding',
-    'formal_valid_emergency_valid_binds_emergency',
+    'formal_valid_stale_emergency_binds_formal',
     'formal_valid_no_emergency_binds_formal',
     'formal_valid_invalid_emergency_binds_formal_with_advisory',
     'dirty_source_remains_red',

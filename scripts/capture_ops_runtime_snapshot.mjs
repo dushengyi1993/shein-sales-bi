@@ -22,6 +22,7 @@ import {
   inspectRecordedDeploymentReleaseEvidence,
   inspectReleaseSourceState,
 } from './check_release_source_state.mjs';
+import {validateDailyOperatingRefresh} from './validate_daily_operating_refresh.mjs';
 import {auditCloudMaintenanceGuards} from './manage_cloud_maintenance_mode.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -30,6 +31,8 @@ const execFileAsync = promisify(execFile);
 function parseArgs(argv) {
   const args = {
     root: ROOT,
+    stateRoot: process.env.SHEIN_BI_STATE_ROOT || '/data/shein-bi/state',
+    outputsRoot: process.env.SHEIN_BI_OUTPUTS_ROOT || '/data/shein-bi/outputs',
     outDir: '',
     expectedCommit: '',
     deploymentStateFile: process.env.SHEIN_BI_DEPLOYED_RELEASE_FILE || '/srv/shein-bi/runtime/deployed_release.json',
@@ -43,6 +46,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const value = () => String(argv[++i] || '').trim();
     if (argv[i] === '--root') args.root = path.resolve(value());
+    else if (argv[i] === '--state-root') args.stateRoot = path.resolve(value());
+    else if (argv[i] === '--outputs-root') args.outputsRoot = path.resolve(value());
     else if (argv[i] === '--out-dir') args.outDir = path.resolve(value());
     else if (argv[i] === '--expected-commit') args.expectedCommit = value();
     else if (argv[i] === '--deployment-state-file') args.deploymentStateFile = path.resolve(value());
@@ -161,9 +166,31 @@ async function main() {
     fetchHealth(args.webhookUrl, 'webhook'),
     fetchHealth(args.queryUrl, 'query'),
   ]);
+  // Canonical mutable paths are used even when this read-only probe runs
+  // outside a service's bind namespace.
+  const today = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+  const previousDate = new Date(Date.parse(`${today}T12:00:00+08:00`) - 86400000).toISOString().slice(0,10);
+  const [morningMarker, sessionReport, manualLoginState, orderRecheckState] = await Promise.all([
+    readJson(path.join(args.stateRoot,'pipeline-markers',today,'daily-operating-refresh.json')).catch(()=>null),
+    readJson(path.join(args.outputsRoot,'reports/cloud-session-manager-latest.json')).catch(()=>null),
+    readJson(process.env.SHEIN_MANUAL_LOGIN_STATE_FILE || '/srv/shein-bi/runtime/cloud_manual_login_sessions.json').catch(()=>null),
+    readJson(path.join(args.stateRoot,'order_status_recheck_last.json')).catch(()=>null),
+  ]);
+  let morningMarkerEvidenceOk = false;
+  if (morningMarker?.status === 'done') {
+    try {
+      await validateDailyOperatingRefresh({root:args.root,markerRoot:path.join(args.stateRoot,'pipeline-markers'),
+        stateDir:path.join(args.stateRoot,'cloud_morning_chain'),
+        inventoryRuntimeRoot:process.env.SHEIN_BI_INVENTORY_RUNTIME_ROOT || '/srv/shein-bi/runtime/daily-inventory-replenishment',
+        runDate:today,businessDate:previousDate});
+      morningMarkerEvidenceOk = true;
+    } catch {}
+  }
+  const jobEvidence = {morningMarker,morningMarkerEvidenceOk,sessionReport,manualLoginState,orderRecheckState};
   const finishedAt = new Date().toISOString();
   const snapshot = buildCloudRuntimeSnapshot({
     generatedAt: finishedAt,
+    jobEvidence,
     releaseSourceState,
     deployedRelease,
     deploymentEvidence,

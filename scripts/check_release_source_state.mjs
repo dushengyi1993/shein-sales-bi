@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {retireEmergencyLocalReleaseReceipt} from '../lib/emergency_local_release_receipt.mjs';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
@@ -592,8 +593,14 @@ export async function recordDeploymentRelease(options = {}) {
     if (!terminalCas.exists || terminalCas.sha256 !== ownedSha256) {
       throw fail('SOURCE_RELEASE_MARKER_CAS_CONFLICT', 'Deployment marker changed before terminal readback');
     }
+    const emergencyRetirement = retireEmergencyLocalReleaseReceipt({
+      receiptFile: options.emergencyReceiptFile || path.join(path.dirname(deploymentStateFile), 'emergency_local_release.json'),
+      deploymentMarker: marker,
+      source: afterMarker,
+    });
     return Object.freeze({
       ok: true,
+      emergencyRetirement,
       source: afterMarker,
       deploymentMarker: marker,
       lockPath,
@@ -672,6 +679,7 @@ if (isMain) {
         ok: true,
         head: recorded.source.head,
         sourceFingerprint: recorded.source.sourceFingerprint,
+        emergencyRetirement: recorded.emergencyRetirement,
         deploymentMarker: {
           schemaVersion: recorded.deploymentMarker.schemaVersion,
           repository: recorded.deploymentMarker.repository,

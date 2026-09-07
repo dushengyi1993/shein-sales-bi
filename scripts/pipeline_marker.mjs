@@ -249,7 +249,16 @@ function markerDirectoryError(code, label, directory, cause = '') {
 function ensureMarkerDirectory(directory, label) {
   const resolved = path.resolve(directory);
   try {
-    fs.mkdirSync(resolved, {recursive: true, mode: MARKER_DIRECTORY_MODE});
+    if (!fs.existsSync(resolved)) {
+      // Request only ordinary permission bits. The provisioned setgid parent
+      // supplies group inheritance, including under RestrictSUIDSGID=true.
+      // mkdir is synchronous: restore umask before any other JS work can run.
+      const priorUmask = process.umask();
+      try {
+        process.umask(priorUmask & ~0o070);
+        fs.mkdirSync(resolved, {recursive: true, mode: 0o770});
+      } finally { process.umask(priorUmask); }
+    }
   } catch (error) {
     throw markerDirectoryError(
       'PIPELINE_MARKER_DIRECTORY_CREATE_FAILED',
@@ -465,7 +474,7 @@ async function resolveEvidenceRecords(evidence = [], snapshotDirectory = '', cap
     const raw = await fs.promises.readFile(candidate);
     const record = {path: candidate, bytes: raw.length, sha256: createHash('sha256').update(raw).digest('hex')};
     if (snapshotDirectory) {
-      fs.mkdirSync(snapshotDirectory, {recursive: true, mode: MARKER_DIRECTORY_MODE});
+      ensureMarkerDirectory(snapshotDirectory, 'evidence-snapshot');
       record.snapshotPath = path.join(snapshotDirectory, record.sha256);
       let handle;
       try {
@@ -561,6 +570,7 @@ export async function writeMarker({
     }
   }
   const completed = parseIso(completedAt, 'PIPELINE_MARKER_COMPLETED_AT_INVALID').text;
+  ensureMarkerDirectory(path.resolve(root), 'root');
   const evidenceRecords = await resolveEvidenceRecords(evidence, snapshotEvidence
     ? path.resolve(root, 'evidence', normalizedDate, normalizedStage) : '');
   const payload = {

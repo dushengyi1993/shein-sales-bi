@@ -26,6 +26,7 @@ import {
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const watchdog = fs.readFileSync(path.join(root, 'scripts', 'cloud_ops_watchdog.mjs'), 'utf8');
+const recovery = fs.readFileSync(path.join(root, 'lib', 'cloud_watchdog_recovery.mjs'), 'utf8');
 
 const running = {status: 'running', generatedAt: '2026-08-16T02:10:00+08:00'};
 const ok = {status: 'ok', generatedAt: '2026-08-16T03:30:00+08:00'};
@@ -158,10 +159,10 @@ assert.match(watchdog, /晨链当日失败/,
 assert.match(watchdog, /^      issues\.push\(`晨链当日失败/m,
   'the terminal-failure blocker must be pushed into issues so the alert path pages it');
 assert.match(watchdog, /export function isMorningChainTerminalFailure/, 'the terminal-failure predicate must be importable');
-assert.match(watchdog, /export function assessBusinessRecovery/, 'the business-recovery predicate must be importable');
-assert.match(watchdog, /String\(morningMarker\?\.status \|\| ''\) === 'done'/,
+assert.match(watchdog, /export \{assessBusinessRecovery\} from/, 'the shared business-recovery predicate must remain importable');
+assert.match(recovery, /String\(morningMarker\?\.status \|\| ''\) === 'done'/,
   'business recovery must require final marker status done');
-assert.doesNotMatch(watchdog, /\['done', 'warning'\]/,
+assert.doesNotMatch(recovery, /\['done', 'warning'\]/,
   'a warning marker must never be part of business recovery');
 assert.match(watchdog, /morningChainLatest,/,
   'the observed latest state must be part of the watchdog report for follow-up');

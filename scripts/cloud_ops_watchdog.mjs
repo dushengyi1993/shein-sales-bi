@@ -18,6 +18,7 @@ import {
   assessDailyOpenapiProductRecovery,
   assessDailyProfitSectionRecovery,
   assessSystemdOneshotResult,
+  assessBusinessRecovery,
   resolveMarketingScanEvidencePath,
 } from '../lib/cloud_watchdog_recovery.mjs';
 import {
@@ -145,6 +146,7 @@ export function resolveWatchdogReleaseAudit({
   deployedReleaseValidation = {},
   deploymentEvidence = {},
   emergencyLocalRelease = {},
+  currentCommit = '',
 } = {}) {
   const issueText = (value, fallback) => Array.isArray(value) && value.length
     ? value.map(String).filter(Boolean).join(',') || fallback
@@ -171,13 +173,15 @@ export function resolveWatchdogReleaseAudit({
   if (emergencyLocalRelease.exists === true && !emergencyValid) {
     releaseAuditIssues.push(`emergency_local_receipt_invalid:${issueText(emergencyLocalRelease.issues, 'receipt_invalid')}`);
   }
+  // A receipt from an older deployment cannot displace the current formal
+  // release. A host actually running a newer emergency commit still binds it.
+  const useEmergency = emergencyValid && (!formalReady
+    || (currentCommit === emergencyCommit && currentCommit !== formalCommit));
   return Object.freeze({
-    releaseAuditReady: formalReady,
+    releaseAuditReady: formalReady && !useEmergency,
     releaseAuditIssues: Object.freeze(releaseAuditIssues),
-    expectedCommit: emergencyValid
-      ? emergencyCommit
-      : formalReady ? formalCommit : '',
-    sourceBinding: emergencyValid ? 'emergency-local-receipt-v1' : formalReady ? 'formal-v3' : 'none',
+    expectedCommit: useEmergency ? emergencyCommit : formalReady ? formalCommit : '',
+    sourceBinding: useEmergency ? 'emergency-local-receipt-v1' : formalReady ? 'formal-v3' : 'none',
     emergencyValid,
   });
 }
@@ -726,11 +730,6 @@ function previousBjDateKey(now = new Date()) {
   return previous.toISOString().slice(0, 10);
 }
 
-function laterThanServiceExit(completedAt, status) {
-  const completed = parseDate(completedAt)?.getTime();
-  const exited = parseDate(status?.ExecMainExitTimestamp || status?.StateChangeTimestamp)?.getTime();
-  return Number.isFinite(completed) && (!Number.isFinite(exited) || completed >= exited);
-}
 
 /**
  * A morning-chain run must converge to a terminal non-running latest state.
@@ -763,30 +762,7 @@ export function isMorningChainTerminalFailure(latestState, unitState) {
   return ['failed', 'inactive', 'dead'].includes(activeState);
 }
 
-export function assessBusinessRecovery(unit, status, {morningMarker, morningMarkerEvidenceOk = false, orderRecheckState} = {}) {
-  const morningUnits = new Set([
-    'shein-bi-cloud-morning-chain.service',
-  ]);
-  // Only the final daily-operating-refresh marker with reverified immutable
-  // evidence may resolve a failed service exit. Earlier links/supplement
-  // markers are checkpoints, never proof that inventory completed.
-  if (morningUnits.has(unit)
-    && morningMarker?.runDate === bjDateKey()
-    && morningMarker?.businessDate === previousBjDateKey()
-    && morningMarker?.stage === 'daily-operating-refresh'
-    && String(morningMarker?.status || '') === 'done'
-    && morningMarker?.ok === true
-    && morningMarkerEvidenceOk === true
-    && laterThanServiceExit(morningMarker?.completedAt, status)) {
-    return {recovered: true, reason: 'daily_operating_refresh_after_unit_exit', completedAt: morningMarker.completedAt};
-  }
-  if (unit === 'shein-bi-cloud-order-closure.service'
-    && orderRecheckState?.ok === true
-    && laterThanServiceExit(orderRecheckState?.finishedAt, status)) {
-    return {recovered: true, reason: 'order_recheck_completed_after_unit_exit', completedAt: orderRecheckState.finishedAt};
-  }
-  return {recovered: false};
-}
+export {assessBusinessRecovery} from '../lib/cloud_watchdog_recovery.mjs';
 
 function fmtHours(n) {
   if (n === null || n === undefined || !Number.isFinite(n)) return '-';
@@ -1265,7 +1241,10 @@ async function runWatchdog(args) {
       || '/srv/shein-bi/runtime/release-attestations',
   });
   const emergencyLocalRelease = readEmergencyLocalReleaseReceipt(args.emergencyReleaseFile);
+  let currentCommit = '';
+  try { currentCommit = inspectReleaseSourceState({cwd: ROOT}).head; } catch {}
   const releaseAudit = resolveWatchdogReleaseAudit({
+    currentCommit,
     deployedReleaseValidation,
     deploymentEvidence,
     emergencyLocalRelease,

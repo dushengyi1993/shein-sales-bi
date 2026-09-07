@@ -514,6 +514,8 @@ async function buildFixture(tempDir) {
     'cloud_maintenance_mode.mjs',
     'cloud_runtime_inventory.mjs',
     'cloud_runtime_snapshot.mjs',
+    'cloud_watchdog_recovery.mjs',
+    'cloud_manual_login_recovery.mjs',
     'systemd_unit_snapshot.mjs',
     'source_release_attestation.mjs',
     'source_release_inventory_authority.mjs',
