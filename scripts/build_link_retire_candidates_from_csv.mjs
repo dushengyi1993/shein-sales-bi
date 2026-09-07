@@ -31,6 +31,9 @@ function parseArgs(argv) {
     else if (a === '--send') args.send = true;
   }
   if (!args.input) throw new Error('build_link_retire_candidates_from_csv requires --input <enriched candidate csv or query json>');
+  if (args.send || args.stageDelivery || process.env.STAGE_OPS_DELIVERY === '1') {
+    throw new Error('Legacy CSV/JSON policy output is not a complete business review. Use scripts/link_retire_review.mjs and its bound XLSX --send contract for shein-3 delivery.');
+  }
   return args;
 }
 
