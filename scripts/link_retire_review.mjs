@@ -66,7 +66,7 @@ if(args.send){
  const bundle=await buildCloudTeamReportBundle({automationId:'shein-3',businessDate:runDate,summaryFile,attachment:workbook,expectedAttachmentSha256:sha(wb),root});
  const claimCode=await fs.readFile(path.join(root,'lib/link_retire_review_delivery_guard.mjs'));
  const claimCommand=`const {claimRetireReviewDelivery}=await import("data:text/javascript;base64,${claimCode.toString('base64')}");console.log(JSON.stringify(await claimRetireReviewDelivery({root:"/srv/shein-bi/runtime/automation-delivery/shein-3",date:"${runDate}",fingerprint:"${bundle.fingerprint}"})));`;
- const claim=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,`sudo node --input-type=module -e 'await import("data:text/javascript;base64,${Buffer.from(claimCommand).toString('base64')}")'`],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
+ const claim=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,`node --input-type=module -e 'await import("data:text/javascript;base64,${Buffer.from(claimCommand).toString('base64')}")'`],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
  if(claim.status!==0)throw new Error('daily delivery claim unavailable or already used; inspect existing evidence, do not resend');
  const claimResult=JSON.parse(claim.stdout);
  if(!claimResult.claimed || claimResult.fingerprint!==bundle.fingerprint)throw new Error('daily delivery claim mismatch; do not resend');

@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {claimRetireReviewDelivery} from '../lib/link_retire_review_delivery_guard.mjs';
+import {deliverCloudTeamReport} from '../lib/cloud_team_report_cloud.mjs';
+import {sha256Bytes,computeDeliveryFingerprint} from '../lib/cloud_team_report_common.mjs';
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'retire-review-claim-'));
 try {
   const args = {root, date:'2026-09-07', fingerprint:'a'.repeat(64)};
@@ -12,5 +14,22 @@ try {
   const day = path.join(root, '2026-09-08');
   await fs.mkdir(path.join(day, 'c'.repeat(64)), {recursive:true});
   await assert.rejects(claimRetireReviewDelivery({...args,date:'2026-09-08'}), /already has delivery evidence/);
+  const landingRoot=path.join(root,'receiver');
+  const makeBundle=text=>({schemaVersion:'cloud-team-report/v1',automationId:'shein-3',businessDate:'2026-09-09',expectedAttachmentSha256:sha256Bytes(Buffer.from(text)),attachmentName:'review.xlsx',attachmentBase64:Buffer.from(text).toString('base64'),summaryBase64:Buffer.from('review').toString('base64')});
+  const bundle=makeBundle('first');
+  let calls=0;
+  const options={landingRoot,config:{},spawnImpl:()=>{calls++;throw new Error('no real send in this fixture');}};
+  const first=await deliverCloudTeamReport({...options,bundle});
+  assert.equal(first.ok,false); // confirmed preflight config failure, no send
+  await assert.rejects(deliverCloudTeamReport({...options,bundle:makeBundle('different')}), /another report|claim differs/);
+  const repeat=await deliverCloudTeamReport({...options,bundle});
+  assert.equal(repeat.fingerprint,first.fingerprint,'only same fingerprint can enter bounded retry');
+  const fingerprint=computeDeliveryFingerprint({automationId:bundle.automationId,businessDate:bundle.businessDate,attachmentSha256:bundle.expectedAttachmentSha256});
+  const stateFile=path.join(landingRoot,'shein-3',bundle.businessDate,fingerprint,'state.json');
+  const state=JSON.parse(await fs.readFile(stateFile,'utf8'));
+  state.items.summary.unknown=true;state.status='unknown';
+  await fs.writeFile(stateFile,JSON.stringify(state));
+  const unknown=await deliverCloudTeamReport({...options,config:{recipientChatId:'oc_fixture',defaultIdentity:'bot'},bundle});
+  assert.equal(unknown.status,'unknown');assert.equal(calls,0);
   console.log('PASS retire review day claim: concurrent, unknown, changed attachment, legacy evidence');
 } finally { await fs.rm(root, {recursive:true,force:true}); }
