@@ -25,3 +25,5 @@
 本入口在云端以 shein-3 + 审核日原子认领一次发送机会。该日已有任意交付工件，或已有成功、失败、部分、未知发送认领时，本入口均禁止再次发送，包括换目录或重新生成不同 XLSX 字节。云端通用接收端也持有日级跨进程锁，强制所有入口只能使用该日原指纹；原受管补投链只允许补交同一报告明确失败的部分，已成功项目跳过，未知项目禁止重发。保留原认领、receipt/readback，不能改指纹创建第二份当日报告；需要修正时先明确核验已有结果，再由人工处理。
 
 发布验证除注册的确定性 evidence/entry/day-claim 测试外，还必须运行 `node scripts/test_link_retire_review_workbook.mjs --artifact-tool-entry <bundled artifact_tool.mjs>`。该显式本地发布门禁覆盖 producer→XLSX→重新导入及五张表渲染；GitHub runner 没有桌面 artifact-tool，不能将 CI 通过冒充工作簿验收。
+
+shein-3 接收端每次外呼前先持久化该消息项的 unknown 标记；只有确认成功或明确可重试的发送前失败才能解除。历史 pending/partial 没有明确失败凭据时转为 unknown，禁止以同指纹为由盲目补投。配置校验失败属于没有外呼的明确失败；其他自动化沿用原状态机。
