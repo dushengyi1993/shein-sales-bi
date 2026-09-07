@@ -338,6 +338,15 @@ export async function deliverMarketingDailyReport({statePath, date, fingerprint,
         || (!prior.summarySent && !prior.summaryUnknown))) {
       throw new Error('Daily delivery state transition cannot be verified');
     }
+    // Explicit operator reconciliation after independently verified receipts;
+    // this path never calls the transport or retries an uncertain send.
+    if (adoptExisting) {
+      await fs.writeFile(finalMdPath, finalMarkdown, 'utf8');
+      await writeState(statePath, {...state, schemaVersion: 'marketing-daily-delivery/v2',
+        summarySent: true, finalReportSent: true, summaryUnknown: false, finalReportUnknown: false,
+        adoptedExistingAt: new Date().toISOString()});
+      return {ok: true, adoptedExisting: true, fingerprint};
+    }
     for (const kind of ['summary', 'finalReport']) {
       if (state[`${kind}Unknown`] || (prior && prior.schemaVersion !== 'marketing-daily-delivery/v2' && !state[`${kind}Sent`])) {
         throw new Error('Daily delivery outcome is unknown; automatic resend is forbidden');
@@ -347,11 +356,6 @@ export async function deliverMarketingDailyReport({statePath, date, fingerprint,
       return {ok: true, skipped: true, reason: 'same final report already delivered'};
     }
     await fs.writeFile(finalMdPath, finalMarkdown, 'utf8');
-    if (adoptExisting) {
-      await writeState(statePath, {...state, summarySent: true, finalReportSent: true,
-        adoptedExistingAt: new Date().toISOString()});
-      return {ok: true, adoptedExisting: true, fingerprint};
-    }
     // Configuration validation precedes the durable attempt: no external call
     // has happened yet if prepareSend fails.
     const send = await prepareSend();

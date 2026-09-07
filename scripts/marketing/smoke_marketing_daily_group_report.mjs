@@ -339,6 +339,9 @@ try {
   await assert.rejects(deliverMarketingDailyReport(unknown), /transport lost/);
   await assert.rejects(deliverMarketingDailyReport(unknown), /outcome is unknown/);
   assert.equal(unknownCalls, 1, 'unknown transport must not be retried');
+  await deliverMarketingDailyReport({...unknown, adoptExisting: true});
+  assert.equal(unknownCalls, 1, 'explicit adoption must not call transport');
+  assert.equal((await deliverMarketingDailyReport(unknown)).skipped, true);
   await fs.unlink(statePath);
   const partialCalls = [];
   const partial = {...input, prepareSend: async () => async kind => {
@@ -351,6 +354,10 @@ try {
   await fs.writeFile(statePath, JSON.stringify({date: input.date, fingerprint: input.fingerprint,
     summarySent: true, finalReportSent: false}));
   await assert.rejects(deliverMarketingDailyReport(input), /outcome is unknown/, 'legacy partial must not blindly resend');
+  let adoptionPrepared = false;
+  await deliverMarketingDailyReport({...input, adoptExisting: true, prepareSend: async () => { adoptionPrepared = true; }});
+  assert.equal(adoptionPrepared, false);
+  assert.equal((await deliverMarketingDailyReport(input)).skipped, true);
   await fs.writeFile(statePath, '{broken');
   await assert.rejects(deliverMarketingDailyReport(input), /cannot be verified/);
   await fs.writeFile(statePath, 'null');
@@ -365,6 +372,7 @@ try {
     await fs.writeFile(statePath, JSON.stringify({schemaVersion: 'marketing-daily-delivery/v2',
       date: input.date, fingerprint: input.fingerprint, summarySent: false, finalReportSent: false, ...fields}));
     await assert.rejects(deliverMarketingDailyReport(input), /state transition cannot be verified/);
+    await assert.rejects(deliverMarketingDailyReport({...input, adoptExisting: true}), /state transition cannot be verified/);
   }
   await fs.unlink(statePath);
   await assert.rejects(deliverMarketingDailyReport({...input, prepareSend: async () => { throw new Error('config missing'); }}), /config missing/);
