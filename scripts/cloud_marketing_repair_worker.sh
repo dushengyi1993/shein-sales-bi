@@ -1267,10 +1267,22 @@ try {
   const queueBytes = fs.readFileSync(process.env.STATE_QUEUE);
   const queue = JSON.parse(queueBytes.toString('utf8').replace(/^\uFEFF/, ''));
   state.queueStatus = queue.status;
+  state.businessStatus = queue.status;
+  if (state.status === 'ok' && queue.status === 'blocked') state.status = 'blocked';
   state.queueCounts = queue.counts;
   state.queueFingerprint = queue.queueFingerprint;
   state.queueStateSha256 = crypto.createHash('sha256').update(queueBytes).digest('hex');
 } catch {}
+state.deliveryStatus = 'pending';
+try {
+  const file = path.join(process.env.ROOT_DIR, 'state/cloud_marketing_live_guard/group-delivery', `marketing-daily-${state.date}.json`);
+  const receipt = JSON.parse(fs.readFileSync(file, 'utf8'));
+  state.deliveryStatus = receipt.date !== state.date || receipt.queueFingerprint !== state.queueFingerprint
+    ? 'binding_mismatch'
+    : receipt.summaryUnknown || receipt.finalReportUnknown ? 'unknown'
+    : receipt.summarySent && receipt.finalReportSent ? 'delivered' : 'partial';
+} catch (error) { if (error.code !== 'ENOENT') state.deliveryStatus = 'unverifiable'; }
+if (state.status === 'failed' && state.deliveryStatus === 'pending') state.deliveryStatus = 'failed';
 await writeJsonFileAtomic(process.env.STATE_FILE, state);
 NODE
 }
@@ -1413,10 +1425,27 @@ handoff_local_queue() {
 }
 
 send_daily_group_report() {
-  node scripts/marketing/send_marketing_daily_group_report.mjs \
+  local report_status
+  write_state pending "business terminal; verifying final report delivery"
+  if node scripts/marketing/send_marketing_daily_group_report.mjs \
     --date "$DATE" --queue "$QUEUE_FILE" \
     --guard "$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json" \
-    --execution "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"
+    --execution "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json"; then
+    if [[ "$QUEUE_STATUS" == "blocked" ]]; then
+      write_state blocked "terminal business blockers reported; final report delivered"
+    else
+      write_state ok "business terminal and final report delivered"
+    fi
+    return 0
+  else
+    report_status=$?
+  fi
+  if [[ "$report_status" -eq 3 ]]; then
+    write_state pending "business terminal; final report still requires final evidence"
+  else
+    write_state failed "business terminal; final report delivery not completed status=$report_status; preserve receipts before any retry"
+  fi
+  return "$report_status"
 }
 
 FINAL_SCAN_OUT=""
@@ -1924,7 +1953,7 @@ else
 fi
 release_repair_critical_locks || true
 if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
-  if [[ "$QUEUE_STATUS" == "blocked" ]]; then
+  if [[ "$QUEUE_STATUS" == "blocked" ]] && ! terminal_report_ready; then
     if run_final_readback; then
       :
     else
@@ -1948,14 +1977,15 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
   if [[ "$REPORT_STATUS" -eq 3 ]]; then
     echo "[cloud_marketing_repair] terminal queue has no post-execution final guard; refreshing final evidence"
     if run_final_readback; then
-      send_daily_group_report
+      send_daily_group_report || exit $?
     else
       status=$?
       write_state failed "terminal final guard refresh/publication failed status=$status"
       exit "$status"
     fi
   elif [[ "$REPORT_STATUS" -ne 0 ]]; then
-    echo "[cloud_marketing_repair] WARN complete group report delivery failed status=$REPORT_STATUS" >&2
+    echo "[cloud_marketing_repair] final report delivery incomplete status=$REPORT_STATUS" >&2
+    exit "$REPORT_STATUS"
   fi
   echo "[cloud_marketing_repair] queue already terminal status=$QUEUE_STATUS"
   exit 0

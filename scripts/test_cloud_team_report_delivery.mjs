@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import {EventEmitter} from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -491,6 +492,35 @@ const staleRecovered = await deliverCloudTeamReport({
 });
 assert.equal(staleRecovered.ok, true);
 await assert.rejects(fs.access(staleTicket), error => error?.code === 'ENOENT');
+
+// A real child process exits at each external-call boundary. The next
+// invocation must read its durable unknown state and never call transport.
+for (const automationId of ['inventory-replenishment','pending-discuss','shein-3']) {
+  for (const crashKind of ['summary','attachment']) {
+    const bundle=await buildCloudTeamReportBundle({automationId,businessDate:'2026-08-24',summaryFile,attachment:attachmentFile,expectedAttachmentSha256:attachmentSha256,root:repositoryRoot});
+    const landingRoot=path.join(tempRoot,`crash-${automationId}-${crashKind}`);
+    const paths=buildCloudLandingPaths({landingRoot,automationId,businessDate:bundle.businessDate,fingerprint:bundle.fingerprint});
+    const moduleUrl=new URL('../lib/cloud_team_report_cloud.mjs',import.meta.url).href;
+    const program=`import fs from 'node:fs';import {EventEmitter} from 'node:events';import {PassThrough} from 'node:stream';
+      import {deliverCloudTeamReport} from ${JSON.stringify(moduleUrl)};
+      await deliverCloudTeamReport({bundle:${JSON.stringify(bundle)},config:${JSON.stringify(config)},landingRoot:${JSON.stringify(landingRoot)},spawnImpl(bin,args){
+        const kind=args.includes('--file')?'attachment':'summary';
+        const persisted=JSON.parse(fs.readFileSync(${JSON.stringify(paths.stateFile)},'utf8'));
+        if(persisted.status!=='unknown'||!persisted.items[kind].unknown||persisted.items[kind].attempts!==1)process.exit(89);
+        if(kind===${JSON.stringify(crashKind)})process.exit(88);
+        const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.stderr=new PassThrough();
+        queueMicrotask(()=>{child.stdout.end(JSON.stringify({ok:true,message_id:'om_fixture_summary'}));child.emit('close',0)});return child;
+      }});`;
+    const child=spawnSync(process.execPath,['--input-type=module','-e',program],{encoding:'utf8',timeout:15000});
+    assert.equal(child.status,88,child.stderr);
+    const resumed=await deliverCloudTeamReport({bundle,config,landingRoot,spawnImpl(){throw new Error('must not resend after unknown child exit')}});
+    assert.equal(resumed.status,'unknown');
+    assert.equal(resumed.items[crashKind].unknown,true);
+    assert.equal(resumed.items[crashKind].attempts,1);
+  }
+}
+assert.equal(interpretLarkResult({exitCode:1,stderr:'connection timed out after sending request'}).unknown,true);
+assert.equal(interpretLarkResult({exitCode:1,stdout:'{"ok":false}'}).unknown,undefined);
 
 await fs.rm(tempRoot, {recursive: true, force: true});
 console.log('cloud_team_report_delivery: local/cloud boundary, bot lock, SHA/path guards, strict receipts, 230002 classification, resumable idempotency, stale-lock recovery, and redaction passed');
