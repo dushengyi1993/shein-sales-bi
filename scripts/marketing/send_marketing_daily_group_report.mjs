@@ -6,6 +6,8 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {resolveLarkDeliveryTarget} from '../../lib/lark_delivery_target.mjs';
 import {buildMarketingRepairBlockerNotice} from '../../lib/marketing_repair_blocker_notice.mjs';
+import {acquireCrossProcessTicketLock} from '../../lib/cross_process_ticket_lock.mjs';
+import {writeJsonFileAtomic} from '../../lib/atomic_file_publish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -307,10 +309,55 @@ export function larkSendAccepted(stdout) {
 }
 
 async function writeState(file, state) {
-  await fs.mkdir(path.dirname(file), {recursive: true});
-  const temp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-  await fs.rename(temp, file);
+  await writeJsonFileAtomic(file, state, {mode: 0o600});
+}
+
+export async function deliverMarketingDailyReport({statePath, date, fingerprint, queueFingerprint,
+  finalMdPath, finalMarkdown, dryRun = false, adoptExisting = false, prepareSend}) {
+  const release = await acquireCrossProcessTicketLock(`${statePath}.lock`, {timeoutMs: 5000});
+  try {
+    let prior = null;
+    try {
+      prior = JSON.parse(await fs.readFile(statePath, 'utf8'));
+      if (!prior || typeof prior !== 'object' || Array.isArray(prior)) throw new Error('Invalid state object');
+    }
+    catch (error) { if (error.code !== 'ENOENT') throw new Error('Daily delivery state cannot be verified'); }
+    if (prior && (prior.date !== date || prior.fingerprint !== fingerprint
+      || typeof prior.summarySent !== 'boolean' || typeof prior.finalReportSent !== 'boolean')) {
+      throw new Error('Daily report binding changed; preserve the original report and reconcile manually');
+    }
+    const state = prior || {schemaVersion: 'marketing-daily-delivery/v2', date, fingerprint,
+      queueFingerprint, summarySent: false, finalReportSent: false};
+    for (const kind of ['summary', 'finalReport']) {
+      if (state[`${kind}Unknown`] || (prior && prior.schemaVersion !== 'marketing-daily-delivery/v2' && !state[`${kind}Sent`])) {
+        throw new Error('Daily delivery outcome is unknown; automatic resend is forbidden');
+      }
+    }
+    if (state.summarySent && state.finalReportSent) {
+      return {ok: true, skipped: true, reason: 'same final report already delivered'};
+    }
+    if (dryRun) return {ok: true, dryRun: true, finalReady: true, files: [finalMdPath]};
+    await fs.writeFile(finalMdPath, finalMarkdown, 'utf8');
+    if (adoptExisting) {
+      await writeState(statePath, {...state, summarySent: true, finalReportSent: true,
+        adoptedExistingAt: new Date().toISOString()});
+      return {ok: true, adoptedExisting: true, fingerprint};
+    }
+    // Configuration validation precedes the durable attempt: no external call
+    // has happened yet if prepareSend fails.
+    const send = await prepareSend();
+    for (const kind of ['summary', 'finalReport']) {
+      if (state[`${kind}Sent`]) continue;
+      state[`${kind}Unknown`] = true;
+      await writeState(statePath, state);
+      const response = await send(kind);
+      if (response?.accepted?.ok !== true) throw new Error(`${kind} delivery outcome is unconfirmed; no automatic resend`);
+      state[`${kind}Sent`] = true;
+      state[`${kind}Unknown`] = false;
+      await writeState(statePath, state);
+    }
+    return {ok: true, delivered: true, fingerprint};
+  } finally { await release(); }
 }
 
 async function main() {
@@ -358,75 +405,25 @@ async function main() {
     executionMarkdown,
   });
   const finalMdPath = path.resolve(ROOT, `outputs/reports/marketing-daily-final-${args.date}.md`);
-  await fs.writeFile(finalMdPath, finalMarkdown, 'utf8');
   const fingerprint = crypto.createHash('sha256')
     .update([finalMarkdown, String(queue?.status || 'no_queue')].join('\n---\n'))
     .digest('hex');
-  const prior = await readJson(statePath, {});
-  const state = prior.fingerprint === fingerprint
-    ? prior
-    : {
-      date: args.date,
-      fingerprint,
-      queueFingerprint: queue?.queueFingerprint || '',
-      summarySent: false,
-      finalReportSent: false,
-    };
-
-  if (args.dryRun) {
-    console.log(JSON.stringify({
-      ok: true,
-      dryRun: true,
-      finalReady: true,
-      queueStatus: queue?.status || 'no_queue',
-      summary,
-      files: [finalMdPath],
-    }, null, 2));
-    return;
-  }
-
-  if (args.adoptExisting) {
-    await writeState(statePath, {
-      ...state,
-      summarySent: true,
-      finalReportSent: true,
-      adoptedExistingAt: new Date().toISOString(),
-    });
-    console.log(JSON.stringify({ok: true, adoptedExisting: true, fingerprint}));
-    return;
-  }
-
-  if (state.summarySent && state.finalReportSent) {
-    console.log(JSON.stringify({ok: true, skipped: true, reason: 'same final report already delivered'}));
-    return;
-  }
-
-  const config = await readJson(path.join(ROOT, 'config/lark_report.json'), {});
-  const target = resolveLarkDeliveryTarget({config});
-  if (!target) throw new Error('Feishu delivery target is not configured');
-  const identity = String(config.defaultIdentity || 'bot');
-  const shortHash = fingerprint.slice(0, 8);
-
-  if (!state.summarySent) {
-    const summarySend = await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--markdown', summary,
-      '--idempotency-key', `mkt-day-${compactDate}-sum-${shortHash}`]);
-    if (!summarySend.accepted.ok) {
-      throw new Error(`summary delivery not accepted by lark-cli (${summarySend.accepted.reason}); state stays unsent`);
-    }
-    state.summarySent = true;
-    await writeState(statePath, state);
-  }
-  if (!state.finalReportSent) {
-    const finalSend = await runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--file', path.relative(ROOT, finalMdPath),
-      '--idempotency-key', `mkt-day-${compactDate}-final-${shortHash}`]);
-    if (!finalSend.accepted.ok) {
-      throw new Error(`final report delivery not accepted by lark-cli (${finalSend.accepted.reason}); state stays unsent`);
-    }
-    state.finalReportSent = true;
-    await writeState(statePath, state);
-  }
-
-  console.log(JSON.stringify({ok: true, delivered: true, fingerprint}));
+  const delivery = await deliverMarketingDailyReport({statePath, date: args.date, fingerprint,
+    queueFingerprint: queue?.queueFingerprint || '', finalMdPath, finalMarkdown,
+    dryRun: args.dryRun, adoptExisting: args.adoptExisting,
+    prepareSend: async () => {
+      const config = await readJson(path.join(ROOT, 'config/lark_report.json'), {});
+      const target = resolveLarkDeliveryTarget({config});
+      if (!target) throw new Error('Feishu delivery target is not configured');
+      const identity = String(config.defaultIdentity || 'bot');
+      const shortHash = fingerprint.slice(0, 8);
+      return kind => kind === 'summary'
+        ? runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--markdown', summary,
+          '--idempotency-key', `mkt-day-${compactDate}-sum-${shortHash}`])
+        : runLark(['im', '+messages-send', '--as', identity, ...target.cliArgs, '--file', path.relative(ROOT, finalMdPath),
+          '--idempotency-key', `mkt-day-${compactDate}-final-${shortHash}`]);
+    }});
+  console.log(JSON.stringify({...delivery, ...(args.dryRun ? {summary, queueStatus: queue?.status || 'no_queue'} : {})}));
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

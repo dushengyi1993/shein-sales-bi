@@ -985,7 +985,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         .filter(Boolean)
         .sort();
       assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
-      console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({...args, enabledStores, requireMarker: args.preWarningAudit === true}))}, null, 2));
+      console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({
+        ...args,
+        enabledStores,
+        inventoryCommandId: args.preWarningAudit ? '' : `morning:${args.runDate}`,
+        // Strict executor validation runs before marker publication. A warning
+        // audit, however, must verify the marker pair before accepting exclusions.
+        requireMarker: args.preWarningAudit === true || args.allowItemFencedWarning === true,
+      }))}, null, 2));
     } else {
       console.log(JSON.stringify(await validateDailyOperatingRefresh(args), null, 2));
     }
