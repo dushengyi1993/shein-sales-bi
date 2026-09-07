@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
 
 import {
   buildDailyInventoryPlanHashPayload,
@@ -981,6 +982,54 @@ try {
   };
   await installExclusion();
   await expectExclusion();
+  const runInventoryCli = (extra = ['--allow-item-fenced-warning']) => spawnSync(process.execPath, [
+    path.join(sourceRoot, 'scripts/validate_daily_operating_refresh.mjs'), '--inventory-only',
+    '--root', tempRoot, '--marker-root', markerRoot, '--state-dir', stateDir,
+    '--inventory-runtime-root', runtimeRoot, '--run-date', runDate, '--business-date', businessDate,
+    ...extra,
+  ], {encoding: 'utf8', timeout: 30000});
+  const cliAccepted = runInventoryCli();
+  assert.equal(cliAccepted.status, 0, cliAccepted.stderr);
+  assert.equal(JSON.parse(cliAccepted.stdout).preSubmitBlockedCount, 1);
+  assert.notEqual(runInventoryCli([]).status, 0, 'strict CLI must not promote a pre-submit exclusion');
+  const indexFile = path.join(runtimeRoot, 'results', `daily-inventory-replenishment-${runDate}.index.json`);
+  const indexedArtifacts = {};
+  for (const [kind, file] of Object.entries({plan: planFile, result: resultFile, journal: currentJournalFile, marker: inventoryMarkerFile})) {
+    const bytes = await fs.readFile(file);
+    indexedArtifacts[kind] = {file, bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex')};
+  }
+  const morningBatch = {batchId: 'morning-batch', commandId: `morning:${runDate}`, version: 1, artifacts: indexedArtifacts};
+  const manualBatch = {batchId: 'manual-batch', commandId: 'manual:later', version: 2, artifacts: {}};
+  await writeJson(indexFile, {schemaVersion: 'daily-inventory-replenishment-index/v3', date: runDate,
+    latestBatchId: manualBatch.batchId, batches: [manualBatch, morningBatch]});
+  try {
+    const indexedCli = runInventoryCli();
+    assert.equal(indexedCli.status, 0, indexedCli.stderr);
+    assert.equal(JSON.parse(indexedCli.stdout).planHash, exclusionPlan.payloadHash,
+      'CLI must select morning even when a later manual batch is active');
+    await writeJson(indexFile, {schemaVersion: 'daily-inventory-replenishment-index/v3', date: runDate,
+      latestBatchId: manualBatch.batchId, batches: [manualBatch]});
+    const missingMorning = runInventoryCli();
+    assert.notEqual(missingMorning.status, 0);
+    assert.match(missingMorning.stderr, /no matching complete batch/);
+    // The strict executor validates staging before publishing the morning index.
+    const savedPlan = await fs.readFile(planFile);
+    const savedResult = await fs.readFile(resultFile);
+    try {
+      await writeJson(planFile, plan);
+      await writeJson(resultFile, goodResult);
+      const strictStaging = runInventoryCli([]);
+      assert.equal(strictStaging.status, 0, strictStaging.stderr);
+    } finally {
+      await fs.writeFile(planFile, savedPlan);
+      await fs.writeFile(resultFile, savedResult);
+    }
+  } finally { await fs.unlink(indexFile); }
+  await fs.unlink(path.join(markerRoot, runDate, 'daily-operating-refresh.json'));
+  assert.notEqual(runInventoryCli().status, 0, 'warning CLI requires the final operating marker');
+  const preWarningCli = runInventoryCli(['--pre-warning-audit']);
+  assert.equal(preWarningCli.status, 0, preWarningCli.stderr);
+  await installExclusion();
   const excludedResultBeforeValidation = await fs.readFile(resultFile);
   await assert.rejects(validateInventoryArtifacts({...exclusionOptions, allowItemFencedWarning: false}),
     /inventory result lacks exact terminal readback/, 'strict completion must not promote an exclusion to a readback');

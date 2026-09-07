@@ -10,6 +10,7 @@ import {
   buildMarketingDailyGroupSummary,
   countOutstandingGuardRepairs,
   larkSendAccepted,
+  deliverMarketingDailyReport,
 } from './send_marketing_daily_group_report.mjs';
 import {latestCurrentMarketingLiveScanFile, resolveEffectiveCloudBiSsh} from './build_marketing_daily_guard_report.mjs';
 
@@ -312,4 +313,75 @@ assert.match(
 );
 assert.match(workerSource, /DEFER TO LOCAL before browser lease or SHEIN mutation/);
 
-console.log('marketing daily group report: final gate and one attachment policy are enforced');
+const deliveryTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'marketing-delivery-state-'));
+try {
+  const statePath = path.join(deliveryTmp, 'state.json');
+  const finalMdPath = path.join(deliveryTmp, 'final.md');
+  let sends = 0;
+  const input = {statePath, date: '2026-09-07', fingerprint: 'original', queueFingerprint: 'queue',
+    finalMdPath, finalMarkdown: 'original report', prepareSend: async () => async kind => {
+      const persisted = JSON.parse(await fs.readFile(statePath, 'utf8'));
+      assert.equal(persisted[`${kind}Unknown`], true, 'attempt must persist before external call');
+      sends += 1;
+      return {accepted: {ok: true}};
+    }};
+  await deliverMarketingDailyReport({...input, dryRun: true});
+  assert.deepEqual(await fs.readdir(deliveryTmp), [], 'dry run must not create report, state or lock directory');
+  await Promise.all([deliverMarketingDailyReport(input), deliverMarketingDailyReport(input)]);
+  assert.equal(sends, 2, 'concurrent callers send exactly one summary and one attachment');
+  assert.equal((await deliverMarketingDailyReport(input)).skipped, true);
+  assert.equal(sends, 2);
+  await assert.rejects(deliverMarketingDailyReport({...input, fingerprint: 'changed', finalMarkdown: 'changed'}), /binding changed/);
+  assert.equal(await fs.readFile(finalMdPath, 'utf8'), 'original report', 'drift must not overwrite delivered report');
+  await fs.unlink(statePath);
+  let unknownCalls = 0;
+  const unknown = {...input, prepareSend: async () => async () => { unknownCalls += 1; throw new Error('transport lost'); }};
+  await assert.rejects(deliverMarketingDailyReport(unknown), /transport lost/);
+  await assert.rejects(deliverMarketingDailyReport(unknown), /outcome is unknown/);
+  assert.equal(unknownCalls, 1, 'unknown transport must not be retried');
+  await deliverMarketingDailyReport({...unknown, adoptExisting: true});
+  assert.equal(unknownCalls, 1, 'explicit adoption must not call transport');
+  assert.equal((await deliverMarketingDailyReport(unknown)).skipped, true);
+  await fs.unlink(statePath);
+  const partialCalls = [];
+  const partial = {...input, prepareSend: async () => async kind => {
+    partialCalls.push(kind);
+    return {accepted: {ok: kind === 'summary'}};
+  }};
+  await assert.rejects(deliverMarketingDailyReport(partial), /outcome is unconfirmed/);
+  await assert.rejects(deliverMarketingDailyReport(partial), /outcome is unknown/);
+  assert.deepEqual(partialCalls, ['summary', 'finalReport'], 'accepted summary and unknown attachment must not repeat');
+  await fs.writeFile(statePath, JSON.stringify({date: input.date, fingerprint: input.fingerprint,
+    summarySent: true, finalReportSent: false}));
+  await assert.rejects(deliverMarketingDailyReport(input), /outcome is unknown/, 'legacy partial must not blindly resend');
+  let adoptionPrepared = false;
+  await deliverMarketingDailyReport({...input, adoptExisting: true, prepareSend: async () => { adoptionPrepared = true; }});
+  assert.equal(adoptionPrepared, false);
+  assert.equal((await deliverMarketingDailyReport(input)).skipped, true);
+  await fs.writeFile(statePath, '{broken');
+  await assert.rejects(deliverMarketingDailyReport(input), /cannot be verified/);
+  await fs.writeFile(statePath, 'null');
+  await assert.rejects(deliverMarketingDailyReport(input), /cannot be verified/);
+  for (const fields of [
+    {},
+    {summaryUnknown: 'false', finalReportUnknown: false},
+    {summaryUnknown: false, finalReportUnknown: false},
+    {summaryUnknown: false, finalReportUnknown: false, finalReportSent: true},
+    {summarySent: true, summaryUnknown: true, finalReportUnknown: false},
+  ]) {
+    await fs.writeFile(statePath, JSON.stringify({schemaVersion: 'marketing-daily-delivery/v2',
+      date: input.date, fingerprint: input.fingerprint, summarySent: false, finalReportSent: false, ...fields}));
+    await assert.rejects(deliverMarketingDailyReport(input), /state transition cannot be verified/);
+    await assert.rejects(deliverMarketingDailyReport({...input, adoptExisting: true}), /state transition cannot be verified/);
+  }
+  await fs.unlink(statePath);
+  await assert.rejects(deliverMarketingDailyReport({...input, prepareSend: async () => { throw new Error('config missing'); }}), /config missing/);
+  await assert.rejects(fs.stat(statePath), {code: 'ENOENT'}, 'pre-send config failure has no ambiguous attempt');
+  await deliverMarketingDailyReport(input);
+  assert.equal(sends, 4);
+} finally {
+  assert.equal(path.dirname(deliveryTmp), os.tmpdir());
+  assert(path.basename(deliveryTmp).startsWith('marketing-delivery-state-'));
+  await fs.rm(deliveryTmp, {recursive: true, force: true});
+}
+console.log('marketing daily group report: final gate, one attachment, durable unknown and day lock enforced');

@@ -622,6 +622,7 @@ export async function validateInventoryArtifacts({
   allowPendingWarning = false,
   preWarningAudit = false,
   inventoryCommandId = '',
+  staging = false,
 }) {
   const preWarningMode = preWarningAudit === true;
   const itemFencedWarningMode = preWarningMode
@@ -634,7 +635,7 @@ export async function validateInventoryArtifacts({
   const previous = new Date(`${runDate}T12:00:00Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   assert(businessDate === previous.toISOString().slice(0, 10), 'businessDate must equal runDate minus one calendar day');
-  const index = preWarningMode ? null : await readDailyInventoryVersionIndex({inventoryRuntimeRoot, date: runDate});
+  const index = preWarningMode || staging ? null : await readDailyInventoryVersionIndex({inventoryRuntimeRoot, date: runDate});
   const version = index ? await resolveResultEvidenceArtifact({inventoryRuntimeRoot, date: runDate, commandId: inventoryCommandId, preferActive: !inventoryCommandId}) : null;
   assert(!index || version, 'inventory version index has no matching complete batch');
   const planFile = version?.planFile || path.join(inventoryRuntimeRoot, 'plans', `daily-inventory-replenishment-${runDate}.json`);
@@ -985,7 +986,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         .filter(Boolean)
         .sort();
       assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
-      console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({...args, enabledStores, requireMarker: args.preWarningAudit === true}))}, null, 2));
+      console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({
+        ...args,
+        enabledStores,
+        inventoryCommandId: args.preWarningAudit ? '' : `morning:${args.runDate}`,
+        staging: !args.preWarningAudit && !args.allowItemFencedWarning,
+        // Strict executor validation runs before marker publication. A warning
+        // audit, however, must verify the marker pair before accepting exclusions.
+        requireMarker: args.preWarningAudit === true || args.allowItemFencedWarning === true,
+      }))}, null, 2));
     } else {
       console.log(JSON.stringify(await validateDailyOperatingRefresh(args), null, 2));
     }
