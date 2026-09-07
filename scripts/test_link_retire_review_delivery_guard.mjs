@@ -34,6 +34,7 @@ try {
   assert.equal(unknown.status,'unknown');assert.equal(calls,0);
   for(const status of ['pending','partial']) {
     const legacy=structuredClone(state);
+    delete legacy.sendBoundaryVersion;
     legacy.status=status;
     for(const item of Object.values(legacy.items)){delete item.unknown;delete item.confirmedFailure;}
     if(status==='partial'){legacy.items.summary.accepted=true;legacy.items.summary.messageId='om_fixture';}

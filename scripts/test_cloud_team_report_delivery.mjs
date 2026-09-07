@@ -517,6 +517,14 @@ for (const automationId of ['inventory-replenishment','pending-discuss','shein-3
     assert.equal(resumed.status,'unknown');
     assert.equal(resumed.items[crashKind].unknown,true);
     assert.equal(resumed.items[crashKind].attempts,1);
+    const incomplete = JSON.parse(await fs.readFile(paths.stateFile, 'utf8'));
+    delete incomplete.items[crashKind].unknown;
+    delete incomplete.items[crashKind].confirmedFailure;
+    incomplete.status = 'pending';
+    await fs.writeFile(paths.stateFile, JSON.stringify(incomplete));
+    const incompleteResumed = await deliverCloudTeamReport({bundle,config,landingRoot,spawnImpl(){throw new Error('an attempted item without a definitive receipt must not be resent')}});
+    assert.equal(incompleteResumed.status, 'unknown');
+    assert.equal(incompleteResumed.items[crashKind].attempts, 1);
   }
 }
 assert.equal(interpretLarkResult({exitCode:1,stderr:'connection timed out after sending request'}).unknown,true);
