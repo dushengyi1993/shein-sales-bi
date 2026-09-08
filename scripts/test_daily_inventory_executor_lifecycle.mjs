@@ -674,6 +674,15 @@ try {
     assert.equal(resultH.results[0].historicalRunDate, historicalRunDate);
     assert.match(resultH.results[0].error, /historical durable inventory intent remains pending/);
     assert.equal(mockH.getChangeInventoryPosts(), 0, 'historical reconcile-only must never POST');
+    const changedLinks = JSON.parse(await fs.readFile(path.join(dirH, 'links.json'), 'utf8'));
+    changedLinks.data.storeLinks.push({...changedLinks.data.storeLinks[0], skc: 'NEW-HISTORICAL-SCOPE-SIBLING'});
+    await fs.writeFile(path.join(dirH, 'links.json'), JSON.stringify(changedLinks));
+    const normalHistorical = await runExecutor(argsH.filter(arg => arg !== '--reconcile-pending-only'), envH);
+    assert.equal(normalHistorical.code, 1, normalHistorical.stderr);
+    const normalHistoricalRow = JSON.parse(await fs.readFile(outH, 'utf8')).results[0];
+    assert.equal(normalHistoricalRow.state, 'submitted_but_readback_pending', JSON.stringify(normalHistoricalRow));
+    assert.equal(normalHistoricalRow.historicalIntentId, historicalIntent.intentId);
+    assert.equal(mockH.getChangeInventoryPosts(), 0, 'changed current links must not prevent historical readback or authorize a POST');
     const entriesH = await readJournalEntries(historicalJournal);
     assert.deepEqual(
       entriesH.filter(entry => entry.kind === 'intent').map(entry => entry.intentId),
