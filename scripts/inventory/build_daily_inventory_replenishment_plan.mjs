@@ -1131,6 +1131,7 @@ for (const context of rowContexts) {
     etSellableInventory: et?.current_sellable_quantity ?? et?.et_estimated_available_qty,
     etSnapshotCurrentDay: operationalDate === args.date && String(et?.inventory_match_status || '') === 'matched',
     c7SaleCount: metrics?.c7_sale_cnt,
+    operationMode: args.operationMode,
     policy,
   });
   const decision = etCanonicalAmbiguity
@@ -1199,7 +1200,8 @@ if (args.operationMode === 'daily' && !requiredDetailTargets) {
 const lowEtGroups = new Map();
 for (const item of evaluatedRows) {
   const threshold = Number(policy.lowEtAllocationAtOrBelow ?? 10);
-  const etQty = Number(item.base.etSellableInventory);
+  const rawEt = item.base.etSellableInventory;
+  const etQty = rawEt == null || String(rawEt).trim() === '' ? NaN : Number(rawEt);
   if (!item.inventoryRelevant || !Number.isFinite(etQty) || etQty > threshold) continue;
   if (!lowEtGroups.has(item.base.matchKey)) lowEtGroups.set(item.base.matchKey, []);
   lowEtGroups.get(item.base.matchKey).push(item);
@@ -1284,9 +1286,11 @@ if (args.operationMode === 'et_low_inventory_safety') {
 for (const [matchKey, group] of lowEtGroups) {
   handledLowEtKeys.add(matchKey);
   const blockingRows = group.filter(item => item.decision.action !== 'allocate');
+  const independentZero = args.operationMode === 'et_low_inventory_safety'
+    && group.every(item => Number(item.base.etSellableInventory) === 0);
   if (blockingRows.length) {
     blockedLowEtKeys.add(matchKey);
-    for (const item of group) {
+    for (const item of independentZero ? blockingRows : group) {
       linkAlerts.push({
         ...item.base,
         action: 'block',
@@ -1295,10 +1299,12 @@ for (const [matchKey, group] of lowEtGroups) {
           : 'low_et_allocation_group_has_blocked_link',
       });
     }
-    continue;
+    if (!independentZero) continue;
   }
+  const allocationGroup = independentZero ? group.filter(item => item.decision.action === 'allocate') : group;
+  if (!allocationGroup.length) continue;
   try {
-    const ranked = allocateLowEtInventory(group.map(item => item.base), Math.floor(Number(group[0].base.etSellableInventory)), policy);
+    const ranked = allocateLowEtInventory(allocationGroup.map(item => item.base), Math.floor(Number(group[0].base.etSellableInventory)), policy);
     const plannedAllocationTotal = ranked.reduce((sum, row) => sum + Number(row.targetUsableInventory || 0), 0);
     for (const allocation of ranked) {
       const allocationRow = {
@@ -1451,6 +1457,9 @@ const report = {
     lowEtCandidateCanonicalCount: lowEtGroups.size,
     lowEtAllocatedCanonicalCount: new Set(lowEtAllocations.map(row => row.matchKey)).size,
     lowEtBlockedCanonicalCount: blockedLowEtKeys.size,
+    unknownEtCanonicalCount: new Set(evaluatedRows.filter(item => item.inventoryRelevant
+      && (item.base.etSellableInventory == null || String(item.base.etSellableInventory).trim() === ''))
+      .map(item => item.base.matchKey)).size,
     detailRefreshTargetCount: detailRefreshTargets.length,
     detailRefreshTargetStores: new Set(detailRefreshTargets.map(row => row.storeKey)).size,
     crossStoreSoldOutFindings: crossStoreSoldOutFindings.length,

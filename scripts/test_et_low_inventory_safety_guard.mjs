@@ -285,8 +285,9 @@ assert.match(guard, /ET_FACT_MAX_AGE_HARD_LIMIT_SECONDS=21600/);
 assert.match(guard, /etManifestHash/);
 assert.match(guard, /\$entry\.kind == "manual_resolution"[\s\S]*del\(\.\[\$entry\.intentId\]\)/,
   'ET durable-journal parsing must recognize manual_resolution without treating it as an ordinary write outcome');
-assert.match(guard, /\{ok:\(\$blocked==0\),businessState:/);
-assert.match(guard, /pendingCanonical:\$blockedCanonical/);
+assert.match(guard, /\{ok:\(\$blocked==0 and \$blockedCanonical==0 and \$pendingCanonical==0 and \$unknownEtCanonical==0\),businessState:/);
+assert.match(guard, /pendingCanonical:\$pendingCanonical/);
+assert.doesNotMatch(guard, /pendingCanonical:\$blockedCanonical/);
 assert.doesNotMatch(guard, /BLOCKED > 0 \|\| BLOCKED_CANONICAL > 0/);
 assert.match(recheck, /SHEIN_ET_ENDPOINTS="store_stock,box_stock"/);
 assert.match(recheck, /SHEIN_ET_TRANSPORT="\$\{SHEIN_ET_TRANSPORT:-http\}"/);
@@ -316,8 +317,8 @@ assert.match(recheckTimer, /^Persistent=false$/m);
 //   blockers exit 1.
 // - manifest/lock/defer gaps exit 75, which the unit declares as success so
 //   systemd does not crash-loop on availability windows.
-assert.match(guard, /\(\.result != null\) and \(\.counts\.blocked \/\/ 0\) == 0 and \.ok != true/,
-  'only a genuinely completed run may be normalized to watching');
+assert.match(guard, /persist_completed_state "\$\(jq -r '\.result' "\$STATE"\)"/,
+  'completed batches retain business warnings derived from their bound plan and result');
 assert.match(guard, /state:"batch_already_processed"[\s\S]*exit 0/,
   'a completed batch with no pending work exits 0');
 assert.match(guard, /lastProcessedBatchId[\s\S]*jq -e '\.result != null'/,

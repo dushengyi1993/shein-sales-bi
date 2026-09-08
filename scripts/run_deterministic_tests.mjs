@@ -273,6 +273,7 @@ const tests = [
   'scripts/test_inventory_cross_day_intent.mjs',
   'scripts/test_inventory_journal_discovery_domain.mjs',
   'scripts/test_et_low_inventory_safety_guard.mjs',
+  'scripts/test_et_low_inventory_state_counts.mjs',
   'scripts/test_et_low_inventory_detail_evidence.mjs',
   'scripts/test_inventory_cost_ledger.mjs',
   'scripts/test_shein_openapi_readonly_retry.mjs',

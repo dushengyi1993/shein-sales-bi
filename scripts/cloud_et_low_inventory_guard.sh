@@ -335,14 +335,16 @@ persist_historical_skip_warning() {
 
 persist_completed_state() {
   local result_file="$1"
-  local blocked blocked_canonical updated skipped watch_active active tmp
+  local blocked blocked_canonical pending_canonical unknown_et_canonical updated skipped watch_active active tmp
   blocked="$(jq '[.results[] | select(.state == "blocked")] | length' "$result_file")"
   blocked_canonical="$(jq '.watch.blockedLowEtCanonicalCount // 0' "$PLAN")"
+  pending_canonical="$(jq '[.results[] | select(.state == "submitted_but_readback_pending") | (.matchKey // .canonical // (.storeKey + "::" + .skc))] | unique | length' "$result_file")"
+  unknown_et_canonical="$(jq '.watch.unknownEtCanonicalCount // 0' "$PLAN")"
   updated="$(jq '[.results[] | select(.state == "updated_readback_matched")] | length' "$result_file")"
   skipped="$(jq '[.results[] | select(.state | startswith("skipped_"))] | length' "$result_file")"
   watch_active="$(jq -r '.watch.active == true' "$PLAN")"
   active=false
-  if [[ "$watch_active" == "true" || "$blocked" != "0" || "$blocked_canonical" != "0" ]]; then active=true; fi
+  if [[ "$watch_active" == "true" || "$blocked" != "0" || "$blocked_canonical" != "0" || "$pending_canonical" != "0" || "$unknown_et_canonical" != "0" ]]; then active=true; fi
   tmp="$STATE.$$.tmp"
   jq -n \
     --arg at "$(date -Is)" \
@@ -357,7 +359,9 @@ persist_completed_state() {
     --argjson skipped "$skipped" \
     --argjson blocked "$blocked" \
     --argjson blockedCanonical "$blocked_canonical" \
-    '{ok:($blocked==0),businessState:(if $active then "watching" else "settled" end),active:$active,updatedAt:$at,lastProcessedBatchId:$batch,etManifestHash:$etManifestHash,plan:$plan,planHash:$hash,result:$result,counts:{total:$total,updated:$updated,skipped:$skipped,blocked:$blocked,blockedCanonical:$blockedCanonical,pendingCanonical:$blockedCanonical}}' >"$tmp"
+    --argjson pendingCanonical "$pending_canonical" \
+    --argjson unknownEtCanonical "$unknown_et_canonical" \
+    '{ok:($blocked==0 and $blockedCanonical==0 and $pendingCanonical==0 and $unknownEtCanonical==0),businessState:(if $active then "watching" else "settled" end),active:$active,updatedAt:$at,lastProcessedBatchId:$batch,etManifestHash:$etManifestHash,plan:$plan,planHash:$hash,result:$result,counts:{total:$total,updated:$updated,skipped:$skipped,blocked:$blocked,blockedCanonical:$blockedCanonical,pendingCanonical:$pendingCanonical,unknownEtCanonical:$unknownEtCanonical}}' >"$tmp"
   mv "$tmp" "$STATE"
 }
 
@@ -581,22 +585,10 @@ fi
 if [[ -s "$STATE" ]] \
   && [[ "$(jq -r '.lastProcessedBatchId // empty' "$STATE")" == "$BATCH_ID" ]] \
   && jq -e '.result != null' "$STATE" >/dev/null; then
-  # Older releases treated low-ET canonicals that still need future observation
-  # as a technical execution failure. A completed batch with no row-level
-  # blocker is healthy; keep the watchlist active without failing systemd.
-  # Only a genuinely completed run (result present) may be normalized: a
-  # plan_blocked state also writes lastProcessedBatchId but has result null and
-  # no counts, so it must keep failing closed instead of being masked as ok.
-  if jq -e '(.result != null) and (.counts.blocked // 0) == 0 and .ok != true' "$STATE" >/dev/null; then
-    tmp="$STATE.$$.tmp"
-    jq '
-      .ok = true
-      | .businessState = (if .active == true then "watching" else "settled" end)
-      | .counts.pendingCanonical = (.counts.blockedCanonical // 0)
-    ' "$STATE" >"$tmp"
-    mv "$tmp" "$STATE"
-  fi
-  jq '{ok:true,state:"batch_already_processed",lastProcessedBatchId,active,planHash,etManifestHash,result}' "$STATE"
+  # A technically completed batch can still have item-level business warnings.
+  # Recompute from the bound artifacts; never turn blocked canonicals into writes pending.
+  persist_completed_state "$(jq -r '.result' "$STATE")"
+  jq '{ok,state:"batch_already_processed",lastProcessedBatchId,active,planHash,etManifestHash,result,counts}' "$STATE"
   exit 0
 fi
 if [[ -s "$STATE" ]] && [[ "$(jq -r '.lastProcessedBatchId // empty' "$STATE")" == "$BATCH_ID" ]]; then
