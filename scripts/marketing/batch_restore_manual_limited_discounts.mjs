@@ -10,6 +10,7 @@ import {
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
 import {loadExactManualRepairPlan} from '../../lib/marketing_repair_manifest.mjs';
+import {readLimitedDiscountMutationEvidence} from '../../lib/marketing_transaction_attempt_evidence.mjs';
 import {claimImmediateRepairGroup, readImmediateAdmissionQueueFd, verifyUnstartedRepairStageContinuation} from '../../lib/cloud_marketing_immediate_authorization.mjs';
 import {
   activityExecutionTransactionHash,
