@@ -265,6 +265,54 @@ const policyPath = path.join(ROOT, 'config', 'inventory_replenishment_policy.jso
 const storesPath = path.join(tmp, 'stores.json');
 const linksPath = path.join(tmp, 'linksData.json');
 
+// Real planner fixtures: unknown ET is not stock zero; missing sales may be
+// irrelevant to a low-ET target, while daily replenishment keeps its sales gate.
+for (const scenario of ['unknown-et', 'missing-sales-daily', 'missing-sales-safety', 'zero-with-multi-sku']) {
+  const fixtureDir = path.join(tmp, scenario);
+  await fs.mkdir(fixtureDir);
+  const bi = JSON.parse(await fs.readFile(path.join(tmp, 'inventoryTrend.json'), 'utf8'));
+  const links = JSON.parse(await fs.readFile(linksPath, 'utf8'));
+  const fixtureProducts = path.join(fixtureDir, 'products');
+  await fs.cp(productsDir, fixtureProducts, {recursive: true});
+  const etRow = bi.data.inventoryDepletion.products.find(row => row.match_key === 'LOW1');
+  if (scenario === 'unknown-et') etRow.current_sellable_quantity = null;
+  else for (const row of links.data.storeLinks.filter(row => row.standard_goods_sn === 'LOW-1产品')) row.c7_sale_cnt = null;
+  if (scenario === 'zero-with-multi-sku') {
+    etRow.current_sellable_quantity = 0;
+    for (const row of links.data.storeLinks.filter(row => row.standard_goods_sn === 'LOW-1产品')) {
+      row.c7_eps_uv = null; row.c7_goods_uv = null;
+    }
+    const file = path.join(fixtureProducts, 'A', 'latest.json');
+    const products = JSON.parse(await fs.readFile(file, 'utf8'));
+    products.normalizedRows.find(row => row.skc === 'skc-low-6').skuCodes.push('second-sku');
+    await fs.writeFile(file, JSON.stringify(products));
+  }
+  const biFile = path.join(fixtureDir, 'bi.json'), linksFile = path.join(fixtureDir, 'links.json'), output = path.join(fixtureDir, 'plan.json');
+  await fs.writeFile(biFile, JSON.stringify(bi)); await fs.writeFile(linksFile, JSON.stringify(links));
+  process.argv = [process.execPath, builderPath, '--date', date, '--policy', policyPath, '--stores', storesPath,
+    '--products-dir', fixtureProducts, '--bi-data', biFile, '--links-data', linksFile, '--out', output,
+    '--operation-mode', scenario === 'missing-sales-daily' || scenario === 'unknown-et' ? 'daily' : 'et_low_inventory_safety'];
+  try { await import(`./inventory/build_daily_inventory_replenishment_plan.mjs?scenario=${scenario}-${Date.now()}`); }
+  finally { process.argv = originalArgv; process.exitCode = 0; }
+  const actual = JSON.parse(await fs.readFile(output, 'utf8'));
+  const actions = actual.actionable.filter(row => row.skc.startsWith('skc-low-'));
+  if (scenario === 'unknown-et') {
+    assert.equal(actual.counts.unknownEtCanonicalCount, 1);
+    assert.equal(actual.counts.lowEtCandidateCanonicalCount, 0);
+    assert.equal(actions.length, 0);
+  } else if (scenario === 'missing-sales-daily') assert.equal(actions.length, 0);
+  else if (scenario === 'missing-sales-safety') {
+    assert.equal(actual.executable, true, JSON.stringify(actual.blockers));
+    assert.deepEqual(actions.map(row => row.targetUsableInventory), [2, 2, 2, 1, 1, 0]);
+    assert(actions.every(row => row.c7SaleCount === null));
+  } else {
+    assert.equal(actual.executable, true, JSON.stringify(actual.blockers));
+    assert.equal(actions.length, 5);
+    assert(actions.every(row => row.targetUsableInventory === 0 && row.exposureRank === null));
+    assert(actual.linkAlerts.some(row => row.skc === 'skc-low-6' && row.decision === 'sku_count_not_one'));
+  }
+}
+
 // Global current-day ET gate: a fresh cachedAt with an all-old ET business
 // day must block the whole plan (executable=false) instead of publishing an
 // empty executable plan.

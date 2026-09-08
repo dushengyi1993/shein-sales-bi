@@ -927,7 +927,14 @@ for (const row of rows) {
       if (JSON.stringify(currentSameStoreOnShelfSkcs) !== JSON.stringify([...asArray(row.sameStoreOnShelfSkcs)].sort())) {
         throw preSubmitExclusionError('same_store_on_shelf_changed', currentSameStoreOnShelfSkcs, 'Same-store on-shelf link evidence changed after plan');
       }
-      if (Number(metrics.c7_sale_cnt) !== Number(row.c7SaleCount) || Number(metrics.c7_eps_uv) !== Number(row.c7Exposure)) {
+      const zeroEtReduction = row.ruleClass === 'low_et_top_exposure_allocation'
+        && etQty === 0 && approvedTarget === 0;
+      const sameOptionalMetric = (left, right) => (left == null && right == null)
+        || (left != null && right != null && Number(left) === Number(right));
+      if (!zeroEtReduction && (!sameOptionalMetric(metrics.c7_sale_cnt, row.c7SaleCount)
+        || !sameOptionalMetric(metrics.c7_eps_uv, row.c7Exposure)
+        || (row.ruleClass === 'low_et_top_exposure_allocation'
+          && !sameOptionalMetric(metrics.c7_goods_uv, row.c7GoodsVisitors)))) {
         throw new Error('7-day sales/exposure evidence changed after plan');
       }
       if (row.ruleClass === 'low_et_top_exposure_allocation') {

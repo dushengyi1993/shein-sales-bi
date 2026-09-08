@@ -205,10 +205,12 @@ export function buildEtLowInventorySafetyPlan(sourcePlan, {batchId, manifestHash
   });
   plan.executable = uniqueBlockers.length === 0;
   plan.watch = {
-    active: positiveLowEtCanonicalCount > 0 || Number(sourcePlan?.counts?.lowEtBlockedCanonicalCount || 0) > 0,
+    active: positiveLowEtCanonicalCount > 0 || Number(sourcePlan?.counts?.lowEtBlockedCanonicalCount || 0) > 0
+      || Number(sourcePlan?.counts?.unknownEtCanonicalCount || 0) > 0,
     positiveLowEtCanonicalCount,
     zeroEtCanonicalCount,
     blockedLowEtCanonicalCount: Number(sourcePlan?.counts?.lowEtBlockedCanonicalCount || 0),
+    unknownEtCanonicalCount: Number(sourcePlan?.counts?.unknownEtCanonicalCount || 0),
   };
   plan.counts = {
     enabledStores: Number(sourcePlan?.counts?.enabledStores || 0),
@@ -219,6 +221,7 @@ export function buildEtLowInventorySafetyPlan(sourcePlan, {batchId, manifestHash
     positiveLowEtCanonicalCount,
     zeroEtCanonicalCount,
     blockedLowEtCanonicalCount: Number(sourcePlan?.counts?.lowEtBlockedCanonicalCount || 0),
+    unknownEtCanonicalCount: Number(sourcePlan?.counts?.unknownEtCanonicalCount || 0),
     actionable: actionable.length,
     inventoryDecreases: actionable.length,
     inventoryIncreases: 0,

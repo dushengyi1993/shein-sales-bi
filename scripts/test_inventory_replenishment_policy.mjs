@@ -124,6 +124,22 @@ const allocations = allocateLowEtInventory([
 ], 8, policy);
 assert.deepEqual(allocations.map(row => row.targetUsableInventory), [2, 2, 2, 1, 1, 0]);
 assert.deepEqual(allocations.map(row => row.exposureRank), [1, 2, 3, 4, 5, 6]);
+const lowEtMissingSales = {shelfStatusCode: '1', skuCount: 1, platformUsableInventory: 20,
+  etSellableInventory: 9, etSnapshotCurrentDay: true, c7SaleCount: null, policy};
+assert.equal(decideDailyInventoryReplenishment(lowEtMissingSales).reason, 'missing_c7_sale_count');
+assert.equal(decideDailyInventoryReplenishment({...lowEtMissingSales, operationMode: 'et_low_inventory_safety'}).action, 'allocate');
+assert.equal(decideDailyInventoryReplenishment({...lowEtMissingSales, operationMode: 'et_low_inventory_safety', skuCount: 2}).reason, 'sku_count_not_one');
+assert.equal(decideDailyInventoryReplenishment({...lowEtMissingSales, operationMode: 'et_low_inventory_safety', etSellableInventory: null}).reason, 'missing_et_inventory');
+const missingSalesRows = [
+  {storeKey: 'A', skc: 'a', c7Exposure: 100, c7GoodsVisitors: 10, c7SaleCount: null},
+  {storeKey: 'B', skc: 'b', c7Exposure: 50, c7GoodsVisitors: 10, c7SaleCount: 2},
+];
+assert.deepEqual(allocateLowEtInventory(missingSalesRows, 3, policy).map(r => r.targetUsableInventory), [2, 1]);
+const ambiguousSalesRows = missingSalesRows.map(r => ({...r, c7Exposure: 100}));
+assert.throws(() => allocateLowEtInventory(ambiguousSalesRows, 3, policy), /missing tie-break evidence/);
+assert.deepEqual(allocateLowEtInventory(ambiguousSalesRows, 4, policy).map(r => r.targetUsableInventory), [2, 2]);
+assert.deepEqual(allocateLowEtInventory(missingSalesRows.map(r => ({...r, c7Exposure: null, c7GoodsVisitors: null})), 0, policy)
+  .map(r => ({target: r.targetUsableInventory, rank: r.exposureRank})), [{target: 0, rank: null}, {target: 0, rank: null}]);
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 0}, policy).severity, 'critical');
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: null}, policy).severity, 'unknown');
 assert.deepEqual(classifyEtInventoryAlert({current_sellable_quantity: 80, days_of_supply_on_hand: 119}, policy).reason, 'et_days_of_supply_below_replenishment_threshold');
