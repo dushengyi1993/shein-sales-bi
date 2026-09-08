@@ -154,6 +154,8 @@ const lowEtFastSellerContext = buildLowEtFastSellerPricingContext({
       reportDate: DATE_TAG,
     });
 
+lowEtFastSellerContext.fixedTierOnly = !(baselinePriceOverridesDoc && inventoryTrendDoc);
+
 const TRUE_COSTS = cloudCostDoc.trueCostMap || {};
 const COSTS = cloudCostDoc.costMap || {};
 const profitProducts = cloudBi?.profit?.products || [];
@@ -689,7 +691,7 @@ if (lowEtFastSellerOverlay) {
         preLowEtTargetPrice: current.targetPrice,
         targetPrice: finalTargetPrice,
         finalTargetPrice,
-        intendedFinalTargetPrice: finalTargetPrice,
+        intendedFinalTargetPrice: adjusted.intendedFinalTargetPrice ?? finalTargetPrice,
         marginBeforeStorage: roundOrNull(marginBeforeStorage, 4),
         marginAfterStorage: roundOrNull(marginAfterStorage, 4),
         marginForSelection: roundOrNull(marginForSelection, 4),

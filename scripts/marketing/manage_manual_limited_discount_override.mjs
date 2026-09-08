@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {verifyPlatformPriceAudit} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -111,9 +112,14 @@ async function main() {
       required(args, ['store', 'skc', 'activityId']);
       const key = manualLimitedDiscountKey(args.store, args.skc);
       let found = false;
+      let readback=null;
+      if(args.readbackArtifact) {try {readback=JSON.parse(await fs.readFile(path.resolve(String(args.readbackArtifact)),'utf8'));} catch(error) {if(error.code!=='ENOENT') throw error;}}
+      const audits=readback?.platformPriceAudits || readback?.desiredCreate?.platformPriceAudits || [];
       const entries = registry.entries.map(row => {
         if (manualLimitedDiscountKey(row.storeKey, row.skc) !== key) return row;
         found = true;
+        const platform=verifyPlatformPriceAudit(row,audits.find(a=>a?.skc===row.skc));
+        if(platform && readback?.ok===true) row={...row,originalSpecialPrice:row.originalSpecialPrice ?? row.specialPrice,specialPrice:platform.actualPrice,platformPriceAudit:platform,fixedTierPricing:row.fixedTierPricing?{...row.fixedTierPricing,price:platform.actualPrice,platform}:null};
         return {...row, currentActivityId: Number(args.activityId), status: String(args.status || row.status || 'active'), lastReadbackAt: formatShanghaiDateTime(), lastReadbackArtifact: args.readbackArtifact || row.lastReadbackArtifact || ''};
       });
       if (!found) throw new Error(`Registry entry not found for ${key}`);

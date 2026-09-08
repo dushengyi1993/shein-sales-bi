@@ -302,7 +302,7 @@
   "fixedTierStandard": {
     "path": "config/marketing_fixed_tier_standard.json",
     "priority": "later_explicit_user_exception_then_fixed_tier_before_et_and_margin",
-    "platformConflict": "block_without_changing_price",
+    "platformConflict": "use_platform_maximum_and_audit_original_actual_margin_difference",
     "missingTierEvidence": "block",
     "executionBinding": "latest_rule_hash_and_live_tier_evidence"
   }

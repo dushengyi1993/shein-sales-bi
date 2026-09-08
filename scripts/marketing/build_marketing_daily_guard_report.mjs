@@ -1960,7 +1960,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
   });
   const mergedLinks = mergeMarketingLinkRows(baseLinks, latestRawLinks.rows);
   const links = mergedLinks.rows;
-  const fixedTierContext = buildFixedTierContext({storeLinks:links},{reportDate});
+  const fixedTierContext = buildFixedTierContext({storeLinks:links},{reportDate,costDoc:costMapDoc,baselineDoc:priceOverridesDoc});
   const effectiveBiSource = (Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length)
     ? linksDataSource
     : biSource;

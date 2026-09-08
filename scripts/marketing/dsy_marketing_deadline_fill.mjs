@@ -1759,13 +1759,16 @@ function computeTarget(storeKey, activityId, row) {
     if (current > 0 && minDiscount > 0) {
       const maxPrice = floor2(current * (1 - minDiscount / 100));
       if (target > maxPrice) {
-        if (fixedBinding) return {ok:false,reason:'fixed_tier_platform_maximum_below_fixed_price',canonical,requiredPrice:target,platformMaximum:maxPrice,fixedTierPricing:fixedBinding};
         target = maxPrice;
         platformAdjusted = true;
       }
     }
+    const fullCostValue = fixedBinding?.evidence?.cost?.fullUnitCostSar ?? override.fullCost;
+    const fullCost = fullCostValue === null || fullCostValue === undefined ? null : Number(fullCostValue);
+    const actualFullMargin = Number.isFinite(fullCost) && fullCost > 0 && target > 0 ? (target-fullCost)/target : null;
+    if (platformAdjusted && actualFullMargin === null) return {ok:false,reason:'missing_product_or_storage_cost_for_platform_adjustment',canonical};
     const projectedMargin = cost && target > 0 ? (target - cost) / target : null;
-    const floorBreached = !fixedBinding && marginFloor !== null && projectedMargin !== null && projectedMargin < marginFloor;
+    const floorBreached = !platformAdjusted && !fixedBinding && marginFloor !== null && projectedMargin !== null && projectedMargin < marginFloor;
     const discountPct = discountPctForTarget(current, minDiscount, target);
     const platformAdjustmentAudit = buildOrdinaryPlatformPriceAdjustmentAudit({
       rule: override,
@@ -1778,6 +1781,7 @@ function computeTarget(storeKey, activityId, row) {
       supplierNo: supplier,
       canonical,
       fixedTierPricing: fixedBinding || null,
+      platformPriceAudit: {originalTargetPrice:fixedBinding?.originalTargetPrice ?? targetBase,actualPrice:target,differenceSar:round2(target-(fixedBinding?.originalTargetPrice ?? targetBase)),actualMargin:actualFullMargin,fullUnitCostSar:fullCost,platformAdjusted},
       source: override.rule || 'price_override',
       ruleType: 'price_override',
       basePrice: targetBase,
