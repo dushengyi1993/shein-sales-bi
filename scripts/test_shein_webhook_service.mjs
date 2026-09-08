@@ -312,3 +312,18 @@ try{
  assert.notEqual(deliveries.at(-1).normalized.appScopedOnly,true,'primary authorization must retain business handling');
  assert.notEqual(deliveries.at(-1).idempotencyKey,deliveries.at(-2).idempotencyKey,'app authorization changes are distinct');
 }finally{await dualService.stop()}
+
+const {createSheinWebhookEventProcessor}=await import('../lib/shein_webhook_handlers.mjs');
+let queuedBackupCompleted,queuedBackupAlerted=false;
+const queuedBackup={...deliveries.at(-2),id:'queued-backup',attempt:1,normalized:{},severity:'P0',alertedAt:null};
+const queuedBackupWorker=createSheinWebhookService({
+ credentialRegistry:dualRegistry,workerEnabled:false,workerId:'test-dual-queue',logger:{warn(){},error(){}},
+ repository:{...workerRepository,claimNext:async()=>queuedBackup,markProcessed:async(id,value)=>{queuedBackupCompleted=value}},
+ eventProcessor:createSheinWebhookEventProcessor({webhookRepository:new Proxy({},{get(){throw Error('backup event attempted a store mutation')}})}),
+ notifier:{notify:async()=>{queuedBackupAlerted=true}},
+});
+await queuedBackupWorker.processOne();
+assert.equal(queuedBackupCompleted?.status,'succeeded','old queued backup receipt must complete under new topology');
+assert.equal(queuedBackupCompleted?.normalized?.deliveryScope,'backup_app_status');
+assert.equal(queuedBackupCompleted?.severity,'P3');
+assert.equal(queuedBackupAlerted,false,'queued backup revocation must not trigger a primary P0 alert');
