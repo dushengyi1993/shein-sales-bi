@@ -1034,7 +1034,7 @@ function configuredSheinStoreKeysSync() {
     const config = JSON.parse(fssync.readFileSync(STORES_PATH, 'utf8'));
     const stores = Array.isArray(config?.stores) ? config.stores : [];
     const storeKeys = stores
-      .filter(s => s && s.enabled !== false && s.storeKey)
+      .filter(s => s && (s.enabled !== false || s.biEnabled === true) && s.storeKey)
       .map(s => String(s.storeKey || '').trim().toUpperCase())
       .filter(Boolean);
     const groupKeys = Object.keys(config?.groups || {})

@@ -275,3 +275,40 @@ assert.equal(processedDespiteNotifierFailure, true, 'P0 business gate must still
 assert.equal(workerCalls.find(row => row[0] === 'released' && row[1] === '11')?.[2]?.status, 'retry');
 
 console.log('shein_webhook_service: durable ingress, leased completion, P0 alert and retry passed');
+
+// One real store authorizes two apps; preserve the existing central receipt key
+// while authenticating/decrypting each delivery with its actual app.
+const {loadSheinWebhookCredentialRegistry}=await import('../lib/shein_webhook_config.mjs');
+const dualRegistry=await loadSheinWebhookCredentialRegistry({config:{
+ apps:{OWN:{appId:'own-app',appSecretKey:'own-secret'},DL:{appId:'central-app',appSecretKey:'central-secret',webhookValidationStoreKey:'AA'}},
+ stores:[{storeKey:'AA',appKey:'OWN',openKeyId:'own-open'}],
+ webhookAdditionalAuthorizations:[{storeKey:'AA',appKey:'DL',openKeyId:'central-open'}],webhookDeduplicationAppKey:'DL',
+}});
+const uniqueReceipts=new Map(),deliveries=[];
+const dualService=createSheinWebhookService({credentialRegistry:dualRegistry,workerEnabled:false,callbackPath,now:()=>1_700_000_000_000,logger:{warn(){},error(){}},repository:{storeReceipt:async row=>{
+ deliveries.push(row);const duplicate=uniqueReceipts.has(row.idempotencyKey);if(!duplicate)uniqueReceipts.set(row.idempotencyKey,row);return {duplicate};
+}}});
+const dualAddress=await dualService.start({host:'127.0.0.1',port:0});
+async function deliverDual(appId,appSecret,openKey,eventCode,payload){
+ const key=Buffer.alloc(16);Buffer.from(appSecret).copy(key);
+ const cipher=crypto.createCipheriv('aes-128-cbc',key,Buffer.from('space-station-default-iv').subarray(0,16));
+ const data=Buffer.concat([cipher.update(JSON.stringify(payload),'utf8'),cipher.final()]).toString('base64');
+ const hex=crypto.createHmac('sha256',appSecret+'abc12').update(`${appId}&${timestamp}&${callbackPath}`).digest('hex');
+ const response=await fetch(`http://127.0.0.1:${dualAddress.port}${callbackPath}`,{method:'POST',headers:{'content-type':'application/json','x-lt-appid':appId,'x-lt-openkeyid':openKey,'x-lt-eventcode':eventCode,'x-lt-timestamp':timestamp,'x-lt-signature':'abc12'+Buffer.from(hex).toString('base64')},body:JSON.stringify({eventData:data})});
+ assert.equal(response.status,200);return response.json();
+}
+try{
+ const payload={orderNo:'DUAL-ORDER',changeTime:'2026-07-19 12:00:00'};
+ assert.equal((await deliverDual('central-app','central-secret','central-open','3001442',payload)).duplicate,false);
+ assert.equal((await deliverDual('own-app','own-secret','own-open','3001442',payload)).duplicate,true);
+ assert.equal(uniqueReceipts.size,1,'two apps must enqueue one logical order event');
+ assert.notEqual(deliveries[0].eventData,deliveries[1].eventData,'different app encryption must still deduplicate');
+ assert.equal((await deliverDual('own-app','own-secret','own-open','3001442',{...payload,changeTime:'2026-07-19 12:01:00'})).duplicate,false);
+ await deliverDual('central-app','central-secret','central-open','3001503',{status:'revoked',supplierId:'merchant-aa'});
+ assert.equal(deliveries.at(-1).normalized.appScopedOnly,true,'backup authorization must not close primary store gate');
+ assert.equal(deliveries.at(-1).normalized.deliveryScope,'backup_app_status');
+ assert.equal(deliveries.at(-1).severity,'P3');
+ await deliverDual('own-app','own-secret','own-open','3001503',{status:'revoked',supplierId:'merchant-aa'});
+ assert.notEqual(deliveries.at(-1).normalized.appScopedOnly,true,'primary authorization must retain business handling');
+ assert.notEqual(deliveries.at(-1).idempotencyKey,deliveries.at(-2).idempotencyKey,'app authorization changes are distinct');
+}finally{await dualService.stop()}

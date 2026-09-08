@@ -407,7 +407,7 @@
     },
     {
       "storeKey": "LG",
-      "enabled": true,
+      "enabled": false,
       "productStatsEnabled": false,
       "profileKey": "hy",
       "port": 9352,
@@ -418,7 +418,9 @@
       "shopName": "LOGE-SA",
       "accountNo": "GS2091518",
       "accountUtcOffsetHours": 8,
-      "salesTransport": "openapi"
+      "salesTransport": "openapi",
+      "biEnabled": true,
+      "onboardingStatus": "data_pending"
     }
   ],
   "businessUtcOffsetHours": 8
