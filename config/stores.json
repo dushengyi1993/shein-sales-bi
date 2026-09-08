@@ -94,7 +94,8 @@
       "stores": [
         "FY",
         "QH",
-        "ZL"
+        "ZL",
+        "LG"
       ],
       "color": "#14b8a6"
     },
@@ -110,7 +111,7 @@
     },
     {
       "key": "ZHENGYIHANG",
-      "name": "郑裔航",
+      "name": "裔航",
       "stores": [
         "JSH",
         "CX",
@@ -403,6 +404,23 @@
       "profileName": "XC - 鑫诚 - GS2944318",
       "accountUtcOffsetHours": 8,
       "salesTransport": "auto"
+    },
+    {
+      "storeKey": "LG",
+      "enabled": false,
+      "productStatsEnabled": false,
+      "profileKey": "hy",
+      "port": 9352,
+      "profileName": "LG",
+      "groupKey": "",
+      "companyName": "广州洛格网络科技有限公司",
+      "merchantId": "16024247",
+      "shopName": "LOGE-SA",
+      "accountNo": "GS2091518",
+      "accountUtcOffsetHours": 8,
+      "salesTransport": "openapi",
+      "biEnabled": true,
+      "onboardingStatus": "data_pending"
     }
   ],
   "businessUtcOffsetHours": 8

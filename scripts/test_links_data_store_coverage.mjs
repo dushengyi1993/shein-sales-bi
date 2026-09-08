@@ -38,9 +38,9 @@ assert.ok(
 // 2. Behavioral verification of SQL logic simulation
 // All 19 SHEIN stores from config/stores.json
 const storesConfig = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
-const allStores = (storesConfig.stores ? storesConfig.stores.map(s => s.storeKey) : storesConfig).sort();
+const allStores = (storesConfig.stores ? storesConfig.stores.filter(s => s.enabled !== false).map(s => s.storeKey) : storesConfig).sort();
 
-assert.equal(allStores.length, 19, 'Expected exactly 19 stores in stores.json');
+assert.equal(allStores.length, 19, 'Expected exactly 19 enabled automation stores in stores.json');
 assert.ok(allStores.includes('ZL'), 'Store list must include ZL');
 assert.equal(allStores[allStores.length - 1], 'ZL', 'ZL must be the last store alphabetically to test starvation edge cases');
 

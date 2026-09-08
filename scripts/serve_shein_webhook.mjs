@@ -315,10 +315,12 @@ export function createSheinWebhookService({
       const eventCode = resolveIncomingWebhookEventCode(headers['x-lt-eventcode']);
       if (!eventCode) throw Object.assign(new Error('Unsupported SHEIN webhook event code'), {statusCode: 400, code: 'WEBHOOK_EVENT_UNSUPPORTED'});
       const receivedAt = new Date(now()).toISOString();
-      const appScopedOnly = identity.identityScope === 'app_only';
+      const preliminary = normalizeWebhookBusinessEvent({eventCode, payload, storeKey: identity.storeKey, receivedAt});
+      const backupAppStatus = identity.credentialRole === 'backup' && ['authorization','quota'].includes(preliminary.eventFamily);
+      const appScopedOnly = identity.identityScope === 'app_only' || backupAppStatus;
       const normalizedBase = {
         ...normalizeWebhookBusinessEvent({eventCode, payload, storeKey: identity.storeKey, receivedAt}),
-        ...(appScopedOnly ? {appScopedOnly: true, deliveryScope: 'app_only'} : {}),
+        ...(appScopedOnly ? {appScopedOnly: true, deliveryScope: backupAppStatus ? 'backup_app_status' : 'app_only'} : {}),
       };
       // Subscription validation and the official debug tool use an app-signed
       // synthetic openKeyId.  Record those deliveries for end-to-end audit,
@@ -328,7 +330,8 @@ export function createSheinWebhookService({
         ? {severity: 'P3', reason: 'app_scoped_delivery', notifyFeishu: false}
         : classifyWebhookSeverity({normalizedEvent: normalizedBase});
       const normalized = {...normalizedBase, severityReason: severity.reason, notifyFeishu: severity.notifyFeishu};
-      const idempotencyKey = computeWebhookIdempotencyKey({headers, eventCode, payload, eventData, businessId: normalized.businessId, platformTimestamp: headers['x-lt-timestamp']});
+      const idempotencyHeaders = !appScopedOnly && !['authorization','quota'].includes(normalized.eventFamily) && identity.deduplicationHeaders ? {...headers,...identity.deduplicationHeaders} : headers;
+      const idempotencyKey = computeWebhookIdempotencyKey({headers:idempotencyHeaders, eventCode, payload, eventData, businessId: normalized.businessId, platformTimestamp: headers['x-lt-timestamp']});
       const cipherHash = crypto.createHash('sha256').update(eventData, 'utf8').digest('hex');
       const remainingForDatabase = Math.floor(deadlineAt - Date.now() - 100);
       if (remainingForDatabase < 50) {
@@ -347,8 +350,8 @@ export function createSheinWebhookService({
           eventData,
           normalized,
           severity: severity.severity,
-          title: appScopedOnly ? `${identity.storeKey} Webhook 应用级验证` : `${identity.storeKey} ${normalized.eventLabel}`,
-          summary: appScopedOnly
+          title: backupAppStatus ? `${identity.storeKey} 备用应用状态` : appScopedOnly ? `${identity.storeKey} Webhook 应用级验证` : `${identity.storeKey} ${normalized.eventLabel}`,
+          summary: backupAppStatus ? '备用应用的授权或额度发生变化，已记录；主用应用及店铺执行状态保持不变。' : appScopedOnly
             ? '签名与接收链路验证通过；未携带已授权店铺 OpenKey，不执行任何业务动作。'
             : normalized.businessId ? `业务单号 ${normalized.businessId}` : '平台事件已可靠接收，等待异步处理。',
           businessKey: normalized.businessId,
@@ -419,7 +422,8 @@ export function createSheinWebhookService({
       const actualCipherHash = crypto.createHash('sha256').update(String(receipt.eventData || ''), 'utf8').digest('hex');
       if (actualCipherHash !== receipt.cipherHash) throw Object.assign(new Error('Stored webhook ciphertext hash mismatch'), {code: 'WEBHOOK_CIPHERTEXT_CORRUPT'});
       const payload = decryptWebhookEventData(receipt.eventData, identity.appSecretKey);
-      const persistedAppScope = receipt.normalized?.appScopedOnly === true;
+      const backupAppStatus = identity.credentialRole === 'backup' && ['authorization','quota'].includes(normalizeWebhookBusinessEvent({eventCode:receipt.eventCode,payload}).eventFamily);
+      const persistedAppScope = receipt.normalized?.appScopedOnly === true || backupAppStatus;
       let normalizedBase = {
         ...normalizeWebhookBusinessEvent({
           eventCode: receipt.eventCode,
@@ -429,7 +433,7 @@ export function createSheinWebhookService({
         }),
         ...(persistedAppScope ? {
           appScopedOnly: true,
-          deliveryScope: String(receipt.normalized?.deliveryScope || 'app_only'),
+          deliveryScope: backupAppStatus ? 'backup_app_status' : String(receipt.normalized?.deliveryScope || 'app_only'),
         } : {}),
       };
       if (!persistedAppScope && eventProcessor?.enrich) {

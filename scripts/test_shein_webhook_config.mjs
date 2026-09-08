@@ -93,3 +93,19 @@ await assert.rejects(() => loadSheinWebhookCredentialRegistry({config: {
 }}), /also marked as retired/);
 
 console.log('shein_webhook_config: app/store identity mapping passed');
+
+const dualConfig = {
+  apps:{OWN:{appId:'own-app',appSecretKey:'own-secret'},DL:{appId:'central-app',appSecretKey:'central-secret',webhookValidationStoreKey:'AA'}},
+  stores:[{storeKey:'AA',appKey:'OWN',openKeyId:'own-open'}],
+  webhookAdditionalAuthorizations:[{storeKey:'AA',appKey:'DL',openKeyId:'central-open'}],
+  webhookDeduplicationAppKey:'DL',
+};
+const dual=await loadSheinWebhookCredentialRegistry({config:dualConfig,expectedStoreKeys:['AA']});
+assert.equal(dual.summary.storeCount,1);
+assert.equal(dual.summary.appCount,2);
+assert.equal(dual.resolve({'x-lt-appid':'own-app','x-lt-openkeyid':'own-open'}).credentialRole,'primary');
+assert.equal(dual.resolve({'x-lt-openkeyid':'central-open'}).credentialRole,'backup');
+assert.deepEqual(dual.resolve({'x-lt-openkeyid':'own-open'}).deduplicationHeaders,{'x-lt-appid':'central-app','x-lt-openkeyid':'central-open'});
+assert.throws(()=>dual.resolve({'x-lt-appid':'own-app','x-lt-openkeyid':'central-open'}),/mismatch/);
+await assert.rejects(()=>loadSheinWebhookCredentialRegistry({config:{...dualConfig,webhookAdditionalAuthorizations:[...dualConfig.webhookAdditionalAuthorizations,...dualConfig.webhookAdditionalAuthorizations]}}),/Duplicate store\/app/);
+await assert.rejects(()=>loadSheinWebhookCredentialRegistry({config:{...dualConfig,webhookAdditionalAuthorizations:[]}}),/Canonical webhook/);

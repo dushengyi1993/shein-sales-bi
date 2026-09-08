@@ -5839,7 +5839,7 @@ const DEFAULT_STORE_OWNER_GROUPS = Object.freeze([
   {key:'JIAYIN', name:'嘉茵', stores:['NM','YJ','MZ'], color:'#db2777'},
   {key:'LUOFANG', name:'罗芳', stores:['FY','QH','ZL'], color:'#14b8a6'},
   {key:'TIANHAO', name:'天浩', stores:['HL','TZ','TS'], color:'#84cc16'},
-  {key:'ZHENGYIHANG', name:'郑裔航', stores:['JSH','CX','TZZ'], color:'#06b6d4'}
+  {key:'ZHENGYIHANG', name:'裔航', stores:['JSH','CX','TZZ'], color:'#06b6d4'}
 ]);
 
 function normalizeOwnerGroupKey(value) {
