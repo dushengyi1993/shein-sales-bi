@@ -34,6 +34,7 @@ const guard = read('scripts/cloud_daily_inventory_replenishment_guard.sh');
 const reconciliation = read('scripts/cloud_openapi_product_reconciliation.sh');
 const planner = read('scripts/inventory/build_daily_inventory_replenishment_plan.mjs');
 const executor = read('scripts/inventory/execute_daily_inventory_replenishment_plan.mjs');
+const {evaluateResultBatchStatus} = await import('./inventory/daily_inventory_version_publisher.mjs');
 function runFixtureShell(script, temp) {
   if (process.platform !== 'win32') {
     return spawnSync('bash', ['--noprofile', '--norc'], {input: script + '\n', encoding: 'utf8', timeout: 60_000});
@@ -805,6 +806,28 @@ match('exact pending readback remains retryable in same run', guard,
 match('executor result freshness uses atomic identity and content evidence', guard,
   /result_fingerprint\(\)[\s\S]*sha256[\s\S]*stat\.mtimeNs[\s\S]*stat\.dev[\s\S]*stat\.ino/,
   'freshness must distinguish an atomic replacement from an old result that merely still exists');
+check('historical pending uses warning in both guard and immutable publication', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'inventory-guard-journal-only-'));
+  try {
+    const value = {execute: true, executionMode: 'automatic', generatedAt: '2026-09-08T01:00:00Z', results: [
+      {state: 'submitted_but_readback_pending', historicalPending: true, historicalRunDate: '2026-08-17', disposition: 'skipped'},
+      {state: 'updated_readback_matched', targetUsableInventory: 10, after: {totalUsableInventory: 10}, writes: [{}]},
+    ]};
+    fs.writeFileSync(path.join(temp, 'result.json'), JSON.stringify(value));
+    assert.equal(evaluateResultBatchStatus(value, 2), 'warning');
+    const warning = guard.slice(guard.indexOf('result_has_item_warning() {'), guard.indexOf('\n}\n', guard.indexOf('result_has_item_warning() {')) + 3);
+    const complete = guard.slice(guard.indexOf('result_is_complete_and_safe() {'), guard.indexOf('\n}\n', guard.indexOf('result_is_complete_and_safe() {')) + 3);
+    const shellTemp = process.platform === 'win32'
+      ? temp.replace(/^([A-Za-z]):/, (_match, drive) => `/mnt/${drive.toLowerCase()}`).replaceAll('\\', '/')
+      : temp;
+    const run = runFixtureShell([
+      'set -eu', `cd '${shellTemp}'`, 'DATE=2026-09-08', 'RESULT=result.json',
+      warning, complete, 'result_has_item_warning',
+      'if result_is_complete_and_safe; then echo unexpected-clean-completion; exit 1; fi',
+    ].join('\n'), temp);
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+  } finally { fs.rmSync(temp, {recursive: true, force: true}); }
+});
 check('only a fresh complete result may enter the pending classifier', () => {
   const beforeAt = guard.indexOf('RESULT_BEFORE_FINGERPRINT=');
   const afterAt = guard.indexOf('RESULT_AFTER_FINGERPRINT=');
