@@ -422,7 +422,8 @@ export function createSheinWebhookService({
       const actualCipherHash = crypto.createHash('sha256').update(String(receipt.eventData || ''), 'utf8').digest('hex');
       if (actualCipherHash !== receipt.cipherHash) throw Object.assign(new Error('Stored webhook ciphertext hash mismatch'), {code: 'WEBHOOK_CIPHERTEXT_CORRUPT'});
       const payload = decryptWebhookEventData(receipt.eventData, identity.appSecretKey);
-      const persistedAppScope = receipt.normalized?.appScopedOnly === true;
+      const backupAppStatus = identity.credentialRole === 'backup' && ['authorization','quota'].includes(normalizeWebhookBusinessEvent({eventCode:receipt.eventCode,payload}).eventFamily);
+      const persistedAppScope = receipt.normalized?.appScopedOnly === true || backupAppStatus;
       let normalizedBase = {
         ...normalizeWebhookBusinessEvent({
           eventCode: receipt.eventCode,
@@ -432,7 +433,7 @@ export function createSheinWebhookService({
         }),
         ...(persistedAppScope ? {
           appScopedOnly: true,
-          deliveryScope: String(receipt.normalized?.deliveryScope || 'app_only'),
+          deliveryScope: backupAppStatus ? 'backup_app_status' : String(receipt.normalized?.deliveryScope || 'app_only'),
         } : {}),
       };
       if (!persistedAppScope && eventProcessor?.enrich) {
