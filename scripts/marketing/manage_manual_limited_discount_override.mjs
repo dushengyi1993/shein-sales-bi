@@ -93,6 +93,7 @@ async function main() {
         reason: args.reason,
         sourceThreadId: args.sourceThreadId,
         sourceArtifact: args.sourceArtifact,
+        fixedTierPricing: args.fixedTierPricing ? JSON.parse(args.fixedTierPricing) : null,
         originalActivityId: args.originalActivityId || null,
         currentActivityId: args.activityId || null,
         status: args.status || 'active',

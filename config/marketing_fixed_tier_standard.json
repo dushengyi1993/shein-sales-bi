@@ -1,0 +1,85 @@
+{
+  "effectiveDate": "2026-09-08",
+  "source": "用户在营销活动决策V5明确指定固定三档价",
+  "currency": "SAR",
+  "scope": [
+    "ordinary_campaign",
+    "limited_discount"
+  ],
+  "priority": "用户后续修正或明确特殊要求 > 本固定价标准 > 默认利润率及ET价格收回规则",
+  "tiers": [
+    "高曝光/高点击",
+    "曝光前五/新链接",
+    "普通"
+  ],
+  "classification": "第一档沿用既有高点击低转化资格：在售、7日销量0，并且曝光>3000且点击率>4%，或曝光>=3000且加车访客>=20；第二档沿用同货号跨店全局曝光前五或新链接待遇；其余普通。缺少分层指标不得猜测。",
+  "items": [
+    {
+      "canonical": "SK-GT-3065蒸汽熨烫机",
+      "prices": [
+        84,
+        88,
+        92
+      ]
+    },
+    {
+      "canonical": "SK-04031胶囊咖啡机",
+      "prices": [
+        241,
+        241,
+        250
+      ]
+    },
+    {
+      "canonical": "SK-3378杆式吸尘器",
+      "prices": [
+        141,
+        145,
+        149
+      ]
+    },
+    {
+      "canonical": "KJ-102三明治机和早餐机",
+      "prices": [
+        58,
+        62,
+        66
+      ]
+    },
+    {
+      "canonical": "SK-223三明治机和早餐机",
+      "prices": [
+        81,
+        86,
+        91
+      ]
+    },
+    {
+      "canonical": "SK-7025A绞肉机",
+      "prices": [
+        76,
+        81,
+        86
+      ]
+    },
+    {
+      "canonical": "BHRL-09激光脱毛仪",
+      "prices": [
+        132,
+        138,
+        144
+      ]
+    },
+    {
+      "canonical": "SK-6863半自动意式咖啡机",
+      "prices": [
+        285,
+        293,
+        306
+      ]
+    }
+  ],
+  "schemaVersion": "marketing-fixed-tier-standard/v1",
+  "version": "2026-09-08.1",
+  "exceptions": []
+}

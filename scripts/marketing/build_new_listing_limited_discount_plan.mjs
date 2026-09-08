@@ -7,6 +7,7 @@
  * apply_hl_limited_discount_rescue.mjs; execution still goes through that
  * browser/dry-run/readback guarded script.
  */
+import {resolveFixedTierPrice} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import crypto from 'node:crypto';
@@ -313,7 +314,9 @@ for (const link of storeLinks) {
     costTopTier,
     isTopExposureLink: currentExposureRank.isTopExposureLink,
   });
-  const resolvedTopTier = manualSpecialEntry
+  const fixedTier = manualSpecialEntry ? {applies:false} : resolveFixedTierPrice({canonical,storeKey,skc}, lowEtContext.fixedTierContext);
+  if (fixedTier.blocked) {blocked.push({canonical,storeKey,skc,reason:fixedTier.reason,fixedTierPricing:fixedTier});continue;}
+  const resolvedTopTier = fixedTier.applies ? {price:fixedTier.price,source:'user_fixed_tier'} : manualSpecialEntry
     ? {price: manualSpecialEntry.specialPrice, source: 'manual_special_limited_discount_override'}
     : treatmentType === 'existing_on_shelf_missing_limited_discount'
       ? mandatoryTier
@@ -372,7 +375,7 @@ for (const link of storeLinks) {
     });
     continue;
   }
-  if (!manualSpecialEntry && !priceEvidence && !costTopTier.available) {
+  if (!fixedTier.applies && !manualSpecialEntry && !priceEvidence && !costTopTier.available) {
     blocked.push({
       ...common,
       reason: 'missing_price_and_product_cost_evidence_for_canonical',
@@ -431,6 +434,7 @@ for (const link of storeLinks) {
     ...common,
     action,
     needsLimitedDiscount: true,
+    fixedTierPricing: lowEtDecision.row?.fixedTierPricing || null,
     limitedDiscountPrice: topTierPrice,
     finalTargetPrice: topTierPrice,
     targetPrice: topTierPrice,

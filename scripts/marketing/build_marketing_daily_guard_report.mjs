@@ -7,6 +7,7 @@
  * only summarizes existing scan/audit artifacts so heartbeat automation can
  * report from stable evidence instead of re-interpreting files ad hoc.
  */
+import {buildFixedTierContext,resolveFixedTierPrice} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import crypto from 'node:crypto';
@@ -1959,6 +1960,7 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
   });
   const mergedLinks = mergeMarketingLinkRows(baseLinks, latestRawLinks.rows);
   const links = mergedLinks.rows;
+  const fixedTierContext = buildFixedTierContext({storeLinks:links},{reportDate});
   const effectiveBiSource = (Array.isArray(unwrappedLinksData.storeLinks) && unwrappedLinksData.storeLinks.length)
     ? linksDataSource
     : biSource;
@@ -2059,7 +2061,9 @@ function summarizeNewSkcCandidates({biDoc, biSource, linksDataDoc, linksDataSour
       const planTopTier = resolveNewListingTopTierPrice(priceEvidence);
       const costTopTier = deriveTopTreatmentTargetFromCost({canonical, costDoc: costMapDoc, policy: newListingPolicy});
       const ordinaryTopTier = Number.isFinite(planTopTier.price) && planTopTier.price > 0 ? planTopTier : costTopTier;
-      const resolvedTopTier = manualEntry
+      const fixedTier = manualEntry ? {applies:false} : resolveFixedTierPrice({canonical,storeKey,skc},fixedTierContext);
+      if (fixedTier.blocked) {rows.push({storeKey,skc,canonical,decision:'blocked',reason:fixedTier.reason,fixedTierPricing:fixedTier});continue;}
+      const resolvedTopTier = fixedTier.applies ? {price:fixedTier.price,source:'user_fixed_tier'} : manualEntry
         ? {price: manualEntry.specialPrice, source: 'manual_special_limited_discount_override'}
         : ordinaryTopTier;
       const liveLimitedCoveredAtTarget = (manualEntry ? manualLiveState?.status === 'covered_exact' : liveLimitedCoveredByName)

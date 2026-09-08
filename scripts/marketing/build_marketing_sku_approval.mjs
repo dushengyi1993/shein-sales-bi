@@ -145,16 +145,14 @@ const manualLimitedDiscountIndex = buildManualLimitedDiscountIndex(
   manualLimitedRegistryDoc,
   new Date(),
 );
-const lowEtFastSellerContext = baselinePriceOverridesDoc && inventoryTrendDoc
-  ? buildLowEtFastSellerPricingContext({
+const lowEtFastSellerContext = buildLowEtFastSellerPricingContext({
       inventoryTrendDoc,
       linksDataDoc: exposureBi,
-      baselineDoc: baselinePriceOverridesDoc,
+      baselineDoc: baselinePriceOverridesDoc || {items:[]},
       costDoc: cloudCostDoc,
       marketingPolicy: pricingPolicy,
       reportDate: DATE_TAG,
-    })
-  : null;
+    });
 
 const TRUE_COSTS = cloudCostDoc.trueCostMap || {};
 const COSTS = cloudCostDoc.costMap || {};
@@ -676,7 +674,8 @@ if (lowEtFastSellerOverlay) {
         retainedExcludeReasons.push(`missing_row_${selectionMarginBasis}_margin`);
       }
       if (
-        current.marginFloorExempt !== true
+        decision.audit?.mode !== 'user_fixed_tier'
+        && current.marginFloorExempt !== true
         && marginForSelection !== null
         && marginForSelection < targetFloorMargin - 1e-9
       ) {
@@ -698,10 +697,10 @@ if (lowEtFastSellerOverlay) {
           ...adjusted.lowEtFastSellerPricePullback,
           selectionBlockedReasons: retainedExcludeReasons,
         },
-        rule: 'low_et_fast_seller_price_pullback',
+        rule: decision.audit?.mode === 'user_fixed_tier' ? 'user_fixed_tier' : 'low_et_fast_seller_price_pullback',
         note: [
           current.note,
-          decision.audit.mode === 'top5_restore_latest_approved_canonical_ordinary_price'
+          decision.audit.mode === 'user_fixed_tier' ? '用户最新固定三档价；不受ET或默认利润率改写' : decision.audit.mode === 'top5_restore_latest_approved_canonical_ordinary_price'
             ? 'ET<=10且跨19店30天销量>30：Top5恢复该标准货号统一普通档已批准价'
             : 'ET<=10且跨19店30天销量>30：普通链接目标利润率提高5个百分点',
           decision.audit.platformClipped ? '已按平台允许报名价上限裁剪' : '',

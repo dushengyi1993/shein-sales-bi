@@ -190,6 +190,7 @@ async function registerCandidate(row, exactPlan, sourceArtifact) {
     '--status', 'active',
     '--replace', 'true',
   ];
+  if (row.fixedTierPricing) args.push('--fixed-tier-pricing',JSON.stringify(row.fixedTierPricing));
   if (row.previousRegistryEntry?.currentActivityId) {
     args.push('--original-activity-id', String(row.previousRegistryEntry.currentActivityId));
   }

@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+import {fixedTierItem, verifyFixedTierRescue} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -220,6 +222,7 @@ function normalizeTargetRows(rescue, manualIndex, execute) {
         storeKey: String(row.storeKey || rescue.storeKey || '').trim().toUpperCase(),
         skc: String(row.skc || '').trim(),
         canonical: row.canonical || '',
+        fixedTierPricing: row.fixedTierPricing || row.lowEtFastSellerPricePullback?.fixedTierPricing || null,
         supplierNo: row.supplierNo || row.currentSupplierNo || '',
         limitedDiscountPrice,
         finalTargetPrice: Number.isFinite(finalTargetPrice) ? finalTargetPrice : null,
@@ -284,6 +287,10 @@ const rescue = JSON.parse(rescueText);
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
 const targetRows = normalizeTargetRows(rescue, manualIndex, args.execute);
+if (targetRows.some(row => fixedTierItem(row.canonical))) {
+  const fixedValidation = await verifyFixedTierRescue({root:ROOT,rescue:{...rescue,rows:targetRows},reportDate:new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date())});
+  if (!fixedValidation.ok) throw Error(`fixed_tier_preflight_failed:${JSON.stringify(fixedValidation.rows?.map(r=>({skc:r.skc,reason:r.reason})))}`);
+}
 const manualRows = targetRows.filter(row => row.manualSpecialLimitedDiscount === true);
 if (manualRows.length && manualRows.length !== targetRows.length) {
   throw new Error('A rescue file cannot mix active manual-special and ordinary limited-discount rows; split by protection window before execute.');
@@ -1057,6 +1064,7 @@ try {
     loginRecovery,
     automationAuthorization,
     targetEndTime: effectiveEndTime,
+    fixedTierBindings: targetRows.filter(r=>r.fixedTierPricing).map(r=>({skc:r.skc,...r.fixedTierPricing})),
     targetEndTimeForApi: effectiveEndTimeForApi,
     activityNamePrefix: effectiveActivityNamePrefix,
     ...result,
