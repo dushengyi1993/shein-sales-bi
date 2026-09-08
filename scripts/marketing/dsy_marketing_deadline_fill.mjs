@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {verifyFixedTierBinding, fixedTierItem} from '../../lib/marketing_fixed_tier_pricing.mjs';
 // SHEIN 营销活动报名半自动助手：
 // - 只做商品勾选、活动价/降幅预填和页面复核。
 // - 默认不点击最终“提交报名”；只有显式传入 --submit 且选择/填价复核通过后才会提交。
@@ -213,6 +214,10 @@ async function loadPriceOverrides() {
     marketingPolicy: PRICING_POLICY,
     reportDate: formatShanghaiDate(now),
   });
+  for (const row of (doc.items || []).filter(isSelectedPriceRow)) {
+    const fixed = verifyFixedTierBinding(row,lowEtContext.fixedTierContext);
+    if (!fixed.ok) throw Error(`${fixed.reason}:${row.storeKey}/${row.skc}`);
+  }
   const adjusted = applyLowEtFastSellerPricePullbackToRows({
     rows: Array.isArray(doc.items) ? doc.items : [],
     context: lowEtContext,
@@ -1740,7 +1745,9 @@ function computeTarget(storeKey, activityId, row) {
       ? null
       : (keys.map(k => storePriceOverrideRules.get(`${storeKey}:${k}`)).find(Boolean)
         || keys.map(k => priceOverrideRules.get(k)).find(Boolean)));
+  if (fixedTierItem(canonical) && !(override?.fixedTierPricing || override?.lowEtFastSellerPricePullback?.fixedTierPricing)) return {ok:false,reason:'fixed_tier_binding_missing',canonical};
   if (override) {
+    const fixedBinding = override.fixedTierPricing || override.lowEtFastSellerPricePullback?.fixedTierPricing;
     const targetBase = Number(override.targetPrice);
     const cost = override.cost === null || override.cost === undefined ? null : Number(override.cost);
     const marginFloor = override.minMarginFloor === null || override.minMarginFloor === undefined ? null : Number(override.minMarginFloor);
@@ -1756,8 +1763,12 @@ function computeTarget(storeKey, activityId, row) {
         platformAdjusted = true;
       }
     }
+    const fullCostValue = fixedBinding?.evidence?.cost?.fullUnitCostSar ?? override.fullCost;
+    const fullCost = fullCostValue === null || fullCostValue === undefined ? null : Number(fullCostValue);
+    const actualFullMargin = Number.isFinite(fullCost) && fullCost > 0 && target > 0 ? (target-fullCost)/target : null;
+    if (platformAdjusted && actualFullMargin === null) return {ok:false,reason:'missing_product_or_storage_cost_for_platform_adjustment',canonical};
     const projectedMargin = cost && target > 0 ? (target - cost) / target : null;
-    const floorBreached = marginFloor !== null && projectedMargin !== null && projectedMargin < marginFloor;
+    const floorBreached = !platformAdjusted && !fixedBinding && marginFloor !== null && projectedMargin !== null && projectedMargin < marginFloor;
     const discountPct = discountPctForTarget(current, minDiscount, target);
     const platformAdjustmentAudit = buildOrdinaryPlatformPriceAdjustmentAudit({
       rule: override,
@@ -1769,6 +1780,8 @@ function computeTarget(storeKey, activityId, row) {
       ok: true,
       supplierNo: supplier,
       canonical,
+      fixedTierPricing: fixedBinding || null,
+      platformPriceAudit: {originalTargetPrice:fixedBinding?.originalTargetPrice ?? targetBase,actualPrice:target,differenceSar:round2(target-(fixedBinding?.originalTargetPrice ?? targetBase)),actualMargin:actualFullMargin,fullUnitCostSar:fullCost,platformAdjusted},
       source: override.rule || 'price_override',
       ruleType: 'price_override',
       basePrice: targetBase,

@@ -7,6 +7,7 @@ import {spawnSync} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sourceFiles = [
+  'config/marketing_fixed_tier_standard.json',
   'scripts/run_cloud_marketing_fallback_slot.sh', 'scripts/cloud_marketing_repair_worker.sh',
   'scripts/run_host_heavy_job.sh', 'scripts/lib/shared_lock.sh',
   'scripts/resolve_cloud_runtime_artifact.mjs', 'scripts/manage_browser_task_leases.mjs',
@@ -496,6 +497,10 @@ exec bash "$SHEIN_BI_ROOT/scripts/real_run_host_heavy_job.sh" "\${args[@]}"
           allowedActions:['restore_manual_special_limited_discount','apply_new_listing_limited_discount_fallback','create_or_replace_limited_discount_activity'],
           storeScope:'all_enabled_stores', perRunPayloadHashRequired:true}};
         json('config/marketing_pricing_policy.json', policy);
+        // This fixture tests legacy transaction replay, independently of current pricing authority.
+        const fixtureStandard=JSON.parse(sources['config/marketing_fixed_tier_standard.json']);
+        fixtureStandard.effectiveDate='2099-01-01';
+        json('config/marketing_fixed_tier_standard.json',fixtureStandard);
         const manualRegistry = json('manual.json', {entries:[{storeKey:'S01',skc:'manual',canonical:'SK-M',specialPrice:25,activityStock:10,
           validFrom:date+' 00:00:00',validTo:date+' 23:59:59',reason:'fixture',sourceThreadId:'fixture',sourceArtifact:'fixture',status:'active'}]});
         const newGuard = {...readJson(guard), manualSpecialLimitedDiscount:{actionCount:1},

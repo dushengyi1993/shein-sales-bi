@@ -1,0 +1,595 @@
+{
+  "effectiveDate": "2026-09-08",
+  "source": "用户在营销活动决策V5明确指定固定三档价",
+  "currency": "SAR",
+  "scope": [
+    "ordinary_campaign",
+    "limited_discount"
+  ],
+  "priority": "用户后续修正或明确特殊要求 > 本固定价标准 > 默认利润率及ET价格收回规则",
+  "tiers": [
+    "高曝光/高点击",
+    "曝光前五/新链接",
+    "普通"
+  ],
+  "classification": "第一档沿用既有高点击低转化资格：在售、7日销量0，并且曝光>3000且点击率>4%，或曝光>=3000且加车访客>=20；第二档沿用同货号跨店全局曝光前五或新链接待遇；其余普通。缺少分层指标不得猜测。",
+  "items": [
+    {
+      "canonical": "SK-GT-3065蒸汽熨烫机",
+      "prices": [
+        84,
+        88,
+        92
+      ]
+    },
+    {
+      "canonical": "SK-04031胶囊咖啡机",
+      "prices": [
+        241,
+        241,
+        250
+      ]
+    },
+    {
+      "canonical": "SK-3378杆式吸尘器",
+      "prices": [
+        141,
+        145,
+        149
+      ]
+    },
+    {
+      "canonical": "KJ-102三明治机和早餐机",
+      "prices": [
+        58,
+        62,
+        66
+      ]
+    },
+    {
+      "canonical": "SK-223三明治机和早餐机",
+      "prices": [
+        81,
+        86,
+        91
+      ]
+    },
+    {
+      "canonical": "SK-7025A绞肉机",
+      "prices": [
+        76,
+        81,
+        86
+      ]
+    },
+    {
+      "canonical": "BHRL-09激光脱毛仪",
+      "prices": [
+        132,
+        138,
+        144
+      ]
+    },
+    {
+      "canonical": "SK-6863半自动意式咖啡机",
+      "prices": [
+        285,
+        293,
+        306
+      ]
+    }
+  ],
+  "platformConstraint": {
+    "priority": "platform_max_overrides_target",
+    "rule": "平台最高报名价低于目标价时按平台最高允许价报名，保留基准价、实际价、实际利润率及差额"
+  },
+  "missingStandardMargins": {
+    "tiers": [
+      0.23,
+      0.25,
+      0.3
+    ],
+    "basis": "full_cost_including_storage",
+    "scope": "only_missing_price_standard_tiers",
+    "source": "用户2026-09-08本轮修正",
+    "missingCosts": "补同货号权威共享证据，仍缺失时不得猜测",
+    "confirmedMissingCanonicals": []
+  },
+  "schemaVersion": "marketing-fixed-tier-standard/v1",
+  "version": "2026-09-08.3",
+  "exceptions": [],
+  "inheritedStandards": [
+    {
+      "canonical": "SK-1914热风梳",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2332,
+      "regularMargin": 0.2843,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-13015杆式吸尘器",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2141,
+      "regularMargin": 0.26649999999999996,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SM-961厨师机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.18,
+      "regularMargin": 0.25,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按18%利润率，非前五按25%利润率"
+    },
+    {
+      "canonical": "SK-185台式榨汁机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.22,
+      "regularMargin": 0.27,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五基准利润率22%，普通基准利润率27%"
+    },
+    {
+      "canonical": "SM-505A电动缝纫机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.34,
+      "regularMargin": 0.39,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按34%利润率，非前五按39%利润率"
+    },
+    {
+      "canonical": "FZ-666颈部按摩器",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.15,
+      "regularMargin": 0.2,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五基准利润率15%，普通基准利润率20%"
+    },
+    {
+      "canonical": "SK-7027绞肉机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.1654,
+      "regularMargin": 0.2175,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-JFB-794卷发钳和卷发棒",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.18,
+      "regularMargin": 0.23,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按18%利润率，非前五按23%利润率"
+    },
+    {
+      "canonical": "S1810电热水壶",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.1998,
+      "regularMargin": 0.2531,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "KF-JN-02便携咖啡机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.15,
+      "regularMargin": 0.2,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五基准利润率15%，普通基准利润率20%"
+    },
+    {
+      "canonical": "SK-03012台式榨汁机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2,
+      "regularMargin": 0.25,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按20%利润率，非前五按25%利润率"
+    },
+    {
+      "canonical": "SK-999食品料理机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.15,
+      "regularMargin": 0.2,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按15%利润率，非前五按20%利润率"
+    },
+    {
+      "canonical": "SK-03038制冰机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.31,
+      "regularMargin": 0.36,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按31%利润率，非前五按36%利润率"
+    },
+    {
+      "canonical": "SK-271厨师机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2263,
+      "regularMargin": 0.2779,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-15032热风梳",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.18,
+      "regularMargin": 0.23,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按18%利润率，非前五按23%利润率"
+    },
+    {
+      "canonical": "SK-JB-175离心式榨汁机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.19899999999999998,
+      "regularMargin": 0.2523,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-1713-4手持搅拌器",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.22,
+      "regularMargin": 0.27,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按22%利润率，非前五按27%利润率"
+    },
+    {
+      "canonical": "WK-1710-4手持搅拌器",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.21,
+      "regularMargin": 0.26,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按21%利润率，非前五按26%利润率"
+    },
+    {
+      "canonical": "SK-11004蒸汽熨烫机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.22519999999999998,
+      "regularMargin": 0.2768,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-13034杆式吸尘器",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.23420000000000002,
+      "regularMargin": 0.2853,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-5110电磁炉",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.25,
+      "regularMargin": 0.3,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按25%利润率，非前五按30%利润率"
+    },
+    {
+      "canonical": "SK-088绞肉机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2284,
+      "regularMargin": 0.2798,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-777碎冰机和刨冰机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.21989999999999998,
+      "regularMargin": 0.27190000000000003,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "BY-506空气炸锅",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.25,
+      "regularMargin": 0.3,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五基准利润率25%，普通基准利润率30%"
+    },
+    {
+      "canonical": "SM-520A电动缝纫机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.25,
+      "regularMargin": 0.3,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "current_policy_fallback",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SM-825电动缝纫机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.25,
+      "regularMargin": 0.3,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "current_policy_fallback",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-7028绞肉机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.1386,
+      "regularMargin": 0.1924,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-15061热风梳",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2164,
+      "regularMargin": 0.2687,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-270厨师机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.22719999999999999,
+      "regularMargin": 0.2787,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-11041蒸汽熨烫机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2,
+      "regularMargin": 0.25,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按20%利润率，非前五按25%利润率"
+    },
+    {
+      "canonical": "SK-YM-7032绞肉机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.18,
+      "regularMargin": 0.23,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按18%利润率，非前五按23%利润率"
+    },
+    {
+      "canonical": "SK-JFB-675B卷发钳和卷发棒",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.18,
+      "regularMargin": 0.23,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按18%利润率，非前五按23%利润率"
+    },
+    {
+      "canonical": "SK-15013卷发钳和卷发棒",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.18,
+      "regularMargin": 0.23,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五按18%利润率，非前五按23%利润率"
+    },
+    {
+      "canonical": "SK-13065吸尘器",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.22210000000000002,
+      "regularMargin": 0.27399999999999997,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "KJ-102S三明治机和早餐机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.2245,
+      "regularMargin": 0.2762,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "previous_confirmed_plan",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "PA4-6L便携式冰箱",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.45,
+      "regularMargin": 0.48,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五基准利润率45%，普通基准利润率48%"
+    },
+    {
+      "canonical": "BY-506S空气炸锅",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.25,
+      "regularMargin": 0.3,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Candidate",
+      "sourceRule": "current_policy_fallback",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "candidate_parameters_matched_to_user_notes_or_prior_directory_not_new_execution_receipt"
+    },
+    {
+      "canonical": "SK-272厨师机",
+      "type": "inherited_full_cost_margins",
+      "top5Margin": 0.22,
+      "regularMargin": 0.27,
+      "basis": "full_cost_including_storage",
+      "sourceKey": "sep02Notes",
+      "sourceRule": "user_workbook_current_remark",
+      "highClickRule": "derive_from_top5_product_margin_minus_0.02_floor_0.15",
+      "evidenceStatus": "explicit_user_remark_verified",
+      "userRemark": "前五基准利润率22%，普通基准利润率27%"
+    },
+    {
+      "canonical": "HS-025直发夹板",
+      "type": "historical_standard_exists_requires_latest_reconciliation",
+      "sourceKey": "olderApprovedBaseline",
+      "note": "继承上期最终版策略：继承上期最终版策略：命中本标准货号7天曝光全局前五；继承上期最终版策略：利润率继承：前五 25% / 其他 30.01%",
+      "defaultEligible": false
+    },
+    {
+      "canonical": "SK-13014杆式吸尘器",
+      "type": "historical_standard_exists_requires_latest_reconciliation",
+      "sourceKey": "olderApprovedBaseline",
+      "note": "继承上期最终版策略：继承上期最终版策略：继承上期最终版策略：利润率继承：前五 24.85% / 其他 30%；整数报价 170 SAR 已按店铺/SKC稳定微调为 169.83 SAR",
+      "defaultEligible": false
+    },
+    {
+      "canonical": "JD-389空气炸锅",
+      "type": "historical_standard_exists_requires_latest_reconciliation",
+      "sourceKey": "olderApprovedBaseline",
+      "note": "命中本标准货号7天曝光全局前五；继承上期最终版策略：命中本标准货号7天曝光全局前五；继承上期最终版策略：命中本标准货号7天曝光全局前五；继承上期最终版策略：利润率继承：前五 25% / 其他 30%",
+      "defaultEligible": false
+    },
+    {
+      "canonical": "SK-7015绞肉机",
+      "type": "historical_standard_exists_requires_latest_reconciliation",
+      "sourceKey": "olderApprovedBaseline",
+      "note": "继承上期最终版策略：命中本标准货号7天曝光全局前五；继承上期最终版策略：继承上期最终版策略：利润率继承：前五 25.01% / 其他 30%",
+      "defaultEligible": false
+    },
+    {
+      "canonical": "SK-15030热风梳",
+      "type": "historical_standard_exists_requires_latest_reconciliation",
+      "sourceKey": "olderApprovedBaseline",
+      "note": "继承上期最终版策略：命中本标准货号7天曝光全局前五；继承上期最终版策略：继承上期最终版策略：利润率继承：前五 30% / 其他 30%",
+      "defaultEligible": false
+    },
+    {
+      "canonical": "SK-446",
+      "type": "historical_standard_exists_requires_latest_reconciliation",
+      "sourceKey": "remainingHistoryHits",
+      "defaultEligible": false,
+      "note": "Historical pricing exists; latest executed baseline reconciliation required."
+    }
+  ],
+  "inheritedEvidence": {
+    "registrySha256": "79fe9d60df2a3e120af7e42ada5470fc00f32cda84734797a8b1866d2298d5e5",
+    "sources": {
+      "sep02Notes": "3a9f03c84da110a6ad0ceaaa9ef8e222038a536bf1b71b3facbf62d50564397c",
+      "sep02Candidate": "e83a544e76407bbeadfd98dd0631613b8024f106eb50fb1c02ab667a360a0303",
+      "sep02PriorDirectory": "13a1658e0fe75a40a31c87f48d810e511da1c72a2ef44ad69f16932d6a0ecc02",
+      "olderApprovedBaseline": "950aefb758b9bec64a5ad84fe38745fdddfaa4a1fbecb0ecb2f18aa5089885f4",
+      "todayOverrides": "e4f807219b84ee75e5f462a4b828d695c1aaf78fc95e962041426454f6bd92bd",
+      "highClickPolicy": "00a355f2366f446d4f338422992b3bad6a5c88a64ccb717c94a438011da7019d"
+    },
+    "remainingHistoryHitsSha256": "a46148e9c2aa910ee832218a7466ec6f9e8d3107632327a9acc8a97240cd5289"
+  }
+}

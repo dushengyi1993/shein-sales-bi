@@ -12,6 +12,7 @@
  * apply_hl_limited_discount_rescue.mjs is deliberately create-only. All
  * replacement writes must pass through this wrapper.
  */
+import {verifyPlatformPriceAudit} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -342,6 +343,7 @@ function commandSummary(result) {
     timedOut: result?.timedOut === true,
     out: result?.outPath ? rel(result.outPath) : (result?.parsed?.out || ''),
     createdActivityId: result?.full?.createdActivityId || null,
+    platformPriceAudits: result?.full?.platformPriceAudits || [],
     writeAttempted: result?.full?.writeAttempted === true
       || result?.full?.submitAttempted === true
       || result?.full?.mutationsStarted === true,
@@ -434,7 +436,8 @@ function exactCoveredSkcs(full, rows, rescue) {
       const skc = String(good.skc || '');
       const row = expected.get(skc);
       if (!row) continue;
-      const priceOk = Math.abs(Number(good.product_act_price) - Number(row.limitedDiscountPrice)) <= 0.01;
+      const platform=verifyPlatformPriceAudit(row,(full.platformPriceAudits || []).find(a=>a?.skc===skc));
+      const priceOk = Math.abs(Number(good.product_act_price) - Number(platform?.actualPrice ?? row.limitedDiscountPrice)) <= 0.01;
       const stockOk = Number(good.attend_num_sum || 0) >= Number(row.activityStock || rescue.activityStock || 10);
       const endOk = !expectedEnd || Boolean(end && end >= expectedEnd);
       if (priceOk && stockOk && endOk && [2, 3].includes(Number(activity.state))) covered.add(skc);

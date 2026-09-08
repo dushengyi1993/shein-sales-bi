@@ -51,17 +51,31 @@
   "activityMinimumInventoryTransaction": {
     "enabled": true,
     "implementationStatus": "implemented",
-    "appliesTo": ["ordinary_marketing_signup", "limited_discount_signup"],
-    "platformMinimumSources": ["activity_live_page", "query_goods", "dry_run"],
+    "appliesTo": [
+      "ordinary_marketing_signup",
+      "limited_discount_signup"
+    ],
+    "platformMinimumSources": [
+      "activity_live_page",
+      "query_goods",
+      "dry_run"
+    ],
     "biPlatformSaleableStockRole": "signal_only",
     "lockScope": "store_key_plus_skc_or_sku",
-    "beforeSnapshotFields": ["totalUsableInventory", "totalInventoryQuantity", "totalLockedQuantity"],
+    "beforeSnapshotFields": [
+      "totalUsableInventory",
+      "totalInventoryQuantity",
+      "totalLockedQuantity"
+    ],
     "temporaryRaiseMode": "exact_platform_minimum_usable_inventory",
     "preserveCurrentLockedAndUnavailableInventory": true,
     "allowWhenMatchedEtOperationalSaleableAtOrBelow": 10,
     "finallyRestoreOriginalUsableInventory": true,
     "restoreUsesCurrentLockedAndUnavailableInventory": true,
-    "postRestoreReadback": ["inventory", "activity_enrollment_status"],
+    "postRestoreReadback": [
+      "inventory",
+      "activity_enrollment_status"
+    ],
     "failClosedConditions": [
       "restore_failed",
       "activity_invalid_or_withdrawn_after_restore",
@@ -145,7 +159,10 @@
     "defaultExecutableRatePct": 15,
     "higherCouponResearch": {
       "enabled": true,
-      "ratesPct": [30, 50],
+      "ratesPct": [
+        30,
+        50
+      ],
       "mode": "research_only",
       "executeAutomatically": false
     },
@@ -153,7 +170,11 @@
     "defaultWeeklySiteBudgetSarDeprecated": 1000,
     "mustPairWithTargetPlan": true,
     "isGuaranteedPriceLayer": false,
-    "allowedUseCases": ["high_exposure_support", "slow_moving_high_inventory_traffic", "clearance_experiment"],
+    "allowedUseCases": [
+      "high_exposure_support",
+      "slow_moving_high_inventory_traffic",
+      "clearance_experiment"
+    ],
     "priceGuaranteeUseCase": "forbidden"
   },
   "limitedDiscount": {
@@ -185,7 +206,14 @@
     "enabled": true,
     "topN": 5,
     "groupScope": "global_standard_goods_sn",
-    "metricFields": ["c7_eps_uv", "c7EpsUv", "c30_eps_uv", "c30EpsUv", "eps_uv", "epsUv"],
+    "metricFields": [
+      "c7_eps_uv",
+      "c7EpsUv",
+      "c30_eps_uv",
+      "c30EpsUv",
+      "eps_uv",
+      "epsUv"
+    ],
     "onShelfOnly": true,
     "marginDeltaPct": 5,
     "floorMarginPct": 15,
@@ -231,7 +259,12 @@
     "windowDays": 7,
     "onShelfOnly": true,
     "requireNoOrdinaryMarketing": true,
-    "platformNewLabelPatterns": ["新款", "新品", "New Arrivals", "new arrival"],
+    "platformNewLabelPatterns": [
+      "新款",
+      "新品",
+      "New Arrivals",
+      "new arrival"
+    ],
     "pricingTreatment": "same_as_global_exposure_top5",
     "limitedDiscount": {
       "autoFallbackWhenNoOrdinaryMarketing": true,
@@ -242,7 +275,11 @@
     },
     "ordinaryMarketing": {
       "applyTopTreatmentForFirstNewListingSignup": true,
-      "activityNamePatterns": ["New Arrivals", "新品", "超级新品"],
+      "activityNamePatterns": [
+        "New Arrivals",
+        "新品",
+        "超级新品"
+      ],
       "ruleNote": "新上架7天内链接首次进入新品/超级新品类普通营销活动时，也按全局曝光Top5力度定价，而不是普通链接力度。"
     }
   },
@@ -261,5 +298,12 @@
       "activityNamePrefix": "重新上架无活动Top5兜底限时折扣",
       "ruleNote": "历史快照曾为已下架/已售罄、当前恢复在售，并且最新商品源、BI营销标签及完整营销live scan都没有当前生效活动证据时，按全局曝光Top5/新链接力度自动报一周限时折扣。“即将开始/待生效”不算当前生效，不能用来跳过当前兜底。"
     }
+  },
+  "fixedTierStandard": {
+    "path": "config/marketing_fixed_tier_standard.json",
+    "priority": "later_explicit_user_exception_then_fixed_tier_before_et_and_margin",
+    "platformConflict": "use_platform_maximum_and_audit_original_actual_margin_difference",
+    "missingTierEvidence": "block",
+    "executionBinding": "latest_rule_hash_and_live_tier_evidence"
   }
 }

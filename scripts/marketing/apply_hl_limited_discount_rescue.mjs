@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+import {fixedTierItem, verifyFixedTierRescue, loadFixedTierStandard, fullTierCost} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -220,6 +222,7 @@ function normalizeTargetRows(rescue, manualIndex, execute) {
         storeKey: String(row.storeKey || rescue.storeKey || '').trim().toUpperCase(),
         skc: String(row.skc || '').trim(),
         canonical: row.canonical || '',
+        fixedTierPricing: row.fixedTierPricing || row.lowEtFastSellerPricePullback?.fixedTierPricing || null,
         supplierNo: row.supplierNo || row.currentSupplierNo || '',
         limitedDiscountPrice,
         finalTargetPrice: Number.isFinite(finalTargetPrice) ? finalTargetPrice : null,
@@ -284,6 +287,10 @@ const rescue = JSON.parse(rescueText);
 const manualRegistry = await loadManualLimitedDiscountRegistry();
 const manualIndex = buildManualLimitedDiscountIndex(manualRegistry, new Date());
 const targetRows = normalizeTargetRows(rescue, manualIndex, args.execute);
+if (targetRows.some(row => fixedTierItem(row.canonical) || row.fixedTierPricing)) {
+  const fixedValidation = await verifyFixedTierRescue({root:ROOT,rescue:{...rescue,rows:targetRows},reportDate:new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai'}).format(new Date())});
+  if (!fixedValidation.ok) throw Error(`fixed_tier_preflight_failed:${JSON.stringify(fixedValidation.rows?.map(r=>({skc:r.skc,reason:r.reason})))}`);
+}
 const manualRows = targetRows.filter(row => row.manualSpecialLimitedDiscount === true);
 if (manualRows.length && manualRows.length !== targetRows.length) {
   throw new Error('A rescue file cannot mix active manual-special and ordinary limited-discount rows; split by protection window before execute.');
@@ -307,6 +314,9 @@ const effectiveEndTimeForApi = formatChinaBusinessDateTime(end);
 const store = STORES.find(s => String(s.storeKey).toUpperCase() === args.storeKey);
 if (!store) throw new Error(`Unknown store for identity guard: ${args.storeKey}`);
 
+let platformCostDoc={};
+try {platformCostDoc=JSON.parse(await fs.readFile(path.resolve(ROOT,rescue.sourceCostMap || 'tmp/mbrs/marketing-cost-map.json'),'utf8'));} catch(error) {if(error.code!=='ENOENT') throw error;}
+for(const row of targetRows) row.fullUnitCostSar=fullTierCost(row.canonical,platformCostDoc).fullUnitCostSar ?? null;
 const cdp = await connect(args.port);
 let outPath;
 try {
@@ -330,6 +340,7 @@ try {
       activityNamePrefix,
       replaceActivityIds,
       registrySource,
+      pricingRuleHash,
     } = __arg;
 
     const headers = {'content-type': 'application/json;charset=UTF-8'};
@@ -596,9 +607,18 @@ try {
         const good = goodsBySkc.get(target.skc);
         if (!good) continue;
         const supplyInfo = good.supply_price_info || {};
-        const price = round2(target.limitedDiscountPrice);
+        let price = round2(target.limitedDiscountPrice);
         const supplyPrice = Number(supplyInfo.supply_price);
         const maxSupplyPrice = Number(supplyInfo.max_supply_price);
+        const skuCaps=(good.sku_info_list || []).map(sku=>Number(sku.supply_price_info?.max_supply_price)).filter(n=>Number.isFinite(n) && n>0);
+        const maximum=Number.isFinite(maxSupplyPrice) && maxSupplyPrice>0 ? Math.min(maxSupplyPrice,...skuCaps) : null;
+        const originalTarget=Number(target.fixedTierPricing?.originalTargetPrice ?? target.limitedDiscountPrice);
+        if(maximum!==null) price=round2(Math.min(price,maximum));
+        const fullCost=target.fullUnitCostSar ?? target.fixedTierPricing?.evidence?.cost?.fullUnitCostSar;
+        if(price<originalTarget && !Number.isFinite(fullCost)) invalid.push({skc:target.skc,reason:'missing_product_or_storage_cost_for_platform_adjustment'});
+        target.platformPriceAudit={ruleHash:pricingRuleHash,skc:target.skc,originalTargetPrice:originalTarget,actualPrice:price,platformMaximum:maximum,differenceSar:round2(price-originalTarget),actualMargin:Number.isFinite(fullCost)?(price-fullCost)/price:null,fullUnitCostSar:fullCost ?? null};
+        target.limitedDiscountPrice=price;
+        target.finalTargetPrice=price;
         const interceptSupplyPrice = Number(
           supplyInfo.intercept_supply_price ??
           (Number.isFinite(supplyPrice) && Number.isFinite(Number(good.rate_intercept))
@@ -845,6 +865,7 @@ try {
         addRows: goodsBuild.addRows.length,
       },
       activityBase,
+      platformPriceAudits: targetRows.map(row=>row.platformPriceAudit || null),
       plannedGoods: goodsBuild.detailRows,
       createPayload,
       endedActivities: [],
@@ -1043,6 +1064,7 @@ try {
       activityNamePrefix: effectiveActivityNamePrefix,
       replaceActivityIds: args.replaceActivityIds,
       registrySource: manualRegistry.sourcePath,
+      pricingRuleHash:loadFixedTierStandard().sha256,
     },
   );
 
@@ -1057,6 +1079,7 @@ try {
     loginRecovery,
     automationAuthorization,
     targetEndTime: effectiveEndTime,
+    fixedTierBindings: targetRows.filter(r=>r.fixedTierPricing).map(r=>({skc:r.skc,...r.fixedTierPricing})),
     targetEndTimeForApi: effectiveEndTimeForApi,
     activityNamePrefix: effectiveActivityNamePrefix,
     ...result,
