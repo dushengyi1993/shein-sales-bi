@@ -76,7 +76,7 @@
       "writeStores": ["HL", "TZ", "TS"]
     },
     "郑裔航": {
-      "displayName": "郑裔航",
+      "displayName": "裔航",
       "role": "operator",
       "ownerKey": "ZHENGYIHANG",
       "readStores": ["*"],
