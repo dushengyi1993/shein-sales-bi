@@ -219,6 +219,9 @@ publish_audited_inventory_warning() {
 }
 
 result_is_complete_and_safe() {
+  # Keep the marker status aligned with the immutable version publisher.
+  # Historical pending is an audited item warning, never a clean done marker.
+  if result_has_item_warning; then return 1; fi
   jq -e --arg hash "$HASH" --argjson total "$TOTAL" '
     . as $result
     | .planHash == $hash
@@ -302,7 +305,7 @@ result_has_item_warning() {
   jq -e --arg date "$DATE" '
     type == "object"
     and ([.results[]?
-      | select((.state == "submitted_but_readback_pending" and (.historicalPending != true or .historicalRunDate == $date))
+      | select(.state == "submitted_but_readback_pending"
         or .state == "historical_readback_matched"
         or .state == "blocked_by_manual_resolution_fence"
         or .state == "pre_submit_blocked")]

@@ -12,12 +12,39 @@ import {
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 import {buildLimitedDiscountDriftRescuePlan} from './build_limited_discount_drift_rescue_plan.mjs';
 import {buildManualLimitedDiscountRestorePlan} from './build_manual_limited_discount_restore_plan.mjs';
+import {assessRecoverableDryRun} from './batch_restore_manual_limited_discounts.mjs';
 import {
   formatChinaBusinessDateTime,
   parseChinaBusinessDateTime,
 } from '../../lib/marketing_datetime.mjs';
 
 assert.equal(parseChinaBusinessDateTime('2026-09-10 23:59:59')?.toISOString(), '2026-09-10T15:59:59.000Z');
+const zeroStockPreflight = {
+  ok: false,
+  validation: {missing: [], invalid: [
+    {skc: 'TARGET', reason: 'query_goods error_code', error_code: 'mrs-simple_platform_limit_discounts-0006'},
+    {skc: 'TARGET', reason: 'inventory below min_stock', inventory: 0, minStock: 3},
+    {skc: 'TARGET', reason: 'inventory below configured activity stock', inventory: 0, attendNum: 10},
+  ]},
+  before: {conflictActivities: [{extraCount: 3}]},
+  unsafeExistingLimitedDiscounts: [{reason: 'activity contains non-target goods'}],
+};
+assert.equal(assessRecoverableDryRun(zeroStockPreflight).recoverable, true,
+  'zero stock with mixed old activity must reach the controlled inventory/replacement transaction');
+const platformMinimum = structuredClone(zeroStockPreflight);
+platformMinimum.validation.invalid[0].error_code = 'mrs-simple_platform_limit_discounts-101018';
+assert.equal(assessRecoverableDryRun(platformMinimum).recoverable, true);
+for (const invalid of [
+  {skc: 'OTHER', reason: 'inventory below min_stock', inventory: 0, minStock: 3},
+  {skc: 'TARGET', reason: 'query_goods error_code', error_code: 'mrs-simple_platform_limit_discounts-0004'},
+]) {
+  const rejected = structuredClone(zeroStockPreflight);
+  rejected.validation.invalid.push(invalid);
+  assert.equal(assessRecoverableDryRun(rejected).recoverable, false);
+}
+const missingInventoryProof = structuredClone(zeroStockPreflight);
+missingInventoryProof.validation.invalid.pop();
+assert.equal(assessRecoverableDryRun(missingInventoryProof).recoverable, false);
 assert.equal(parseChinaBusinessDateTime('2026-09-10T23:59:59+08:00')?.toISOString(), '2026-09-10T15:59:59.000Z');
 assert.equal(parseChinaBusinessDateTime('2026-09-10T15:59:59Z')?.toISOString(), '2026-09-10T15:59:59.000Z');
 assert.equal(formatChinaBusinessDateTime(parseChinaBusinessDateTime('2026-09-10T23:59:59+08:00')), '2026-09-10 23:59:59');

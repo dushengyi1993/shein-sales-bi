@@ -651,6 +651,11 @@ case "$STAGE" in
     fi
     if inventory_marker_warning; then
       echo "[cloud_morning_chain] verified inventory warning already completed; bypassing expired catch-up startup window" >&2
+    elif pipeline_marker_done "inventory-started" \
+      && node "$ROOT/scripts/pipeline_marker.mjs" require \
+        --stage inventory-started --date "$RUN_DATE" --status done --require-evidence >/dev/null; then
+      require_run_budget "inventory-resume"
+      echo "[cloud_morning_chain] verified inventory already started; resuming within the original absolute deadline" >&2
     else
       wait_for_catchup_startup_window
     fi

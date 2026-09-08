@@ -865,6 +865,12 @@ for (const row of rows) {
   // `ReferenceError: activeIntent is not defined` instead of recording
   // `blocked` (production 2026.08.16.10 regression).
   let activeIntent = null;
+  const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
+  // An existing intent owns this scope. Today's merchandising rules cannot
+  // authorize another write or prevent read-only reconciliation of that intent.
+  // Keep the row read-only even if another owner closes it before the lock.
+  const rowReconcileOnly = args.reconcilePendingOnly
+    || (journalBundle.pendingByScope.get(recoveryScopeKey) || []).length > 0;
   const preSubmitExclusionError = (reasonCode, observedOnShelfSkcs, message) => Object.assign(new Error(message), {
     preSubmitExclusion: {
       schemaVersion: 'inventory-pre-submit-exclusion/v1', planHash: plan.payloadHash,
@@ -877,7 +883,7 @@ for (const row of rows) {
     if (!Number.isInteger(approvedTarget) || approvedTarget < 0 || approvedTarget > Number(policy.targetUsableInventory || 100)) {
       throw new Error(`Invalid approved target usable inventory: ${row.targetUsableInventory}`);
     }
-    if (!args.reconcilePendingOnly) {
+    if (!rowReconcileOnly) {
       const et = etByKey.get(String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase());
       const etQty = Number(et?.current_sellable_quantity ?? et?.et_estimated_available_qty);
       const etDate = String(
@@ -954,7 +960,6 @@ for (const row of rows) {
       policyVersion: plan.policyVersion,
       authorizationId: executionAuthorization?.authorizationId || '',
     });
-    const recoveryScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
     // Intercept a permanently resolved historical scope before even opening
     // a store client. This keeps a reappearing XL plan blocked with zero
     // OpenAPI calls (including the otherwise harmless store-identity POST),
@@ -1207,7 +1212,7 @@ for (const row of rows) {
         }
         continue;
       }
-      if (args.reconcilePendingOnly) {
+      if (rowReconcileOnly) {
         const lifecycleCandidates = (planDateInventoryIntentsByScope.get(recoveryScopeKey) || [])
           .filter(intent => !recoveredInventoryIntentMismatch(intent, {
             logicalActionKey,

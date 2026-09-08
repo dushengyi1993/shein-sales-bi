@@ -747,10 +747,19 @@ NODE
 }
 OLD_BYTES="\$(wc -c < "\$RESULT_FILE" | tr -d ' ')"
 OLD_HASH="\$(hash_file "\$RESULT_FILE")"
+node "\$SB/scripts/pipeline_marker.mjs" write \
+  --stage inventory-started --date "\$RUN_DATE" --business-date "\$BUSINESS_DATE" \
+  --status done --message inventory-started-before-restart --root "\$SB/state/pipeline-markers" \
+  --evidence "\$RESULT_FILE" >/dev/null
+# The pre-inventory cutoff has elapsed, but the original run still has time.
+export SHEIN_BI_MORNING_RUN_DEADLINE_EPOCH="\$((\$(date +%s) + 900))"
+export SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=4500
 export STUB_RESUME_EVIDENCE_VERSION=after-restart
 bash "\$CHAIN" all > "\$SB/t8.out" 2>&1
 RC=\$?
 if [[ "\$RC" -ne 0 ]]; then echo "FAIL[t8 exit=\$RC]"; cat "\$SB/t8.out"; exit 1; fi
+grep -q 'verified inventory already started' "\$SB/t8.out" \
+  || { echo 'FAIL[t8 did not resume past pre-inventory cutoff]'; cat "\$SB/t8.out"; exit 1; }
 [[ ! -e "\$SYNC_COUNT_FILE" && ! -e "\$STUB_REFRESH_COUNT_FILE" ]] \
   || { echo 'FAIL[t8 restart reran link collection or supplements/Portal]'; exit 1; }
 [[ -f "\$INVENTORY_COUNT_FILE" && "\$(wc -l < "\$INVENTORY_COUNT_FILE")" -eq 1 ]] \

@@ -301,7 +301,7 @@ function summarizeDryRun(full, outPath = '') {
   };
 }
 
-function assessRecoverableDryRun(full) {
+export function assessRecoverableDryRun(full) {
   if (!full) return {ok: false, recoverable: false, reasons: ['missing dry-run artifact']};
   if (full.ok === true) return {ok: true, recoverable: false, reasons: []};
 
@@ -309,9 +309,18 @@ function assessRecoverableDryRun(full) {
   const invalid = full?.validation?.invalid || [];
   const unsafe = full?.unsafeExistingLimitedDiscounts || [];
   const conflicts = mixedConflicts(full);
+  const inventoryRecoverySkcs = new Set(invalid
+    .filter(row => row?.reason === 'inventory below configured activity stock'
+      && Number.isSafeInteger(row.inventory) && row.inventory >= 0
+      && Number.isSafeInteger(row.attendNum) && row.attendNum > row.inventory)
+    .map(row => row.skc));
   const allowedInvalid = invalid.every(row => (
     row?.reason === 'inventory below configured activity stock'
     || (row?.reason === 'query_goods error_code' && row?.error_code === 'mrs-simple_platform_limit_discounts-0006')
+    || (inventoryRecoverySkcs.has(row?.skc) && (
+      row?.reason === 'inventory below min_stock'
+      || (row?.reason === 'query_goods error_code' && row?.error_code === 'mrs-simple_platform_limit_discounts-101018')
+    ))
   ));
   const allowedUnsafe = unsafe.every(row => row?.reason === 'activity contains non-target goods');
   const hasInventoryRecovery = invalid.some(row => row?.reason === 'inventory below configured activity stock');
