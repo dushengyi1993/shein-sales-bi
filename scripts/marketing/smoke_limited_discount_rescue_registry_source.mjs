@@ -5,7 +5,12 @@ import fs from 'node:fs';
 const file = 'scripts/marketing/apply_hl_limited_discount_rescue.mjs';
 const source = fs.readFileSync(file, 'utf8');
 
-assert.match(source, /replaceActivityIds,\s+registrySource,\s+}\s*=\s*__arg;/);
+const injected = source.match(/const\s*\{([^{}]+)\}\s*=\s*__arg;/)?.[1];
+assert.ok(injected, 'browser argument destructuring must be explicit');
+const fields = injected.split(',').map(field => field.trim()).filter(Boolean);
+assert.ok(fields.includes('replaceActivityIds'));
+assert.ok(fields.includes('registrySource'));
+assert.ok(fields.includes('pricingRuleHash'));
 assert.match(source, /manualSpecialProtection\s*=\s*{\s+registrySource,/);
 assert.match(source, /registrySource:\s*manualRegistry\.sourcePath,/);
 assert.doesNotMatch(
