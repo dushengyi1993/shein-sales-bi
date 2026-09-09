@@ -1,12 +1,12 @@
 {
   "effectiveDate": "2026-09-08",
-  "source": "用户在营销活动决策V5明确指定固定三档价",
+  "source": "用户在营销活动决策V5指定三档基准，并于2026-09-09明确包括八品和KF在内均允许小幅浮动，偏好链接报价有差异",
   "currency": "SAR",
   "scope": [
     "ordinary_campaign",
     "limited_discount"
   ],
-  "priority": "用户后续修正或明确特殊要求 > 本固定价标准 > 默认利润率及ET价格收回规则",
+  "priority": "用户后续修正或明确特殊要求 > 本三档基准及允许浮动规则 > 默认利润率及ET价格收回规则",
   "tiers": [
     "高曝光/高点击",
     "曝光前五/新链接",
@@ -96,7 +96,14 @@
     "confirmedMissingCanonicals": []
   },
   "schemaVersion": "marketing-fixed-tier-standard/v1",
-  "version": "2026-09-08.3",
+  "version": "2026-09-09.1",
+  "priceVariation": {
+    "version": "marketing-link-variation/2026-09-09.1",
+    "effectiveDate": "2026-09-09",
+    "priceRangeSar": [-2, 1],
+    "marginRangePercentagePoints": [-2, 1],
+    "rule": "价格基准或利润率基准仅选对应一种浮动；按链接确定性生成并锁定执行价，保留三档顺序、适用底线和例外；平台约束优先，不为已提交单元重新采样"
+  },
   "exceptions": [],
   "inheritedStandards": [
     {

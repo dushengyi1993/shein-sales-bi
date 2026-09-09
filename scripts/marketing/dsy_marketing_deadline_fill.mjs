@@ -213,6 +213,7 @@ async function loadPriceOverrides() {
     costDoc: COST_DOC,
     marketingPolicy: PRICING_POLICY,
     reportDate: formatShanghaiDate(now),
+    reviewedWorkbookPriceCapability: EXECUTION_APPROVAL?.reviewedWorkbookPriceCapability,
   });
   for (const row of (doc.items || []).filter(isSelectedPriceRow)) {
     const fixed = verifyFixedTierBinding(row,lowEtContext.fixedTierContext);
@@ -270,6 +271,8 @@ async function loadPriceOverrides() {
     if (item.storeKey && item.activityId && item.skc) {
       rowPriceOverrideRules.set(`${String(item.storeKey).trim().toUpperCase()}:${Number(item.activityId)}:${String(item.skc).trim().toLowerCase()}`, item);
     }
+    // A reviewed workbook exception never becomes a store-wide fallback.
+    if (item.reviewedWorkbookPrice) continue;
     if (storeKeys.length) {
       const before = new Map();
       registerRuleKeys(before, label, item);
@@ -1784,8 +1787,9 @@ function computeTarget(storeKey, activityId, row) {
       platformPriceAudit: {originalTargetPrice:fixedBinding?.originalTargetPrice ?? targetBase,actualPrice:target,differenceSar:round2(target-(fixedBinding?.originalTargetPrice ?? targetBase)),actualMargin:actualFullMargin,fullUnitCostSar:fullCost,platformAdjusted},
       source: override.rule || 'price_override',
       ruleType: 'price_override',
-      basePrice: targetBase,
-      randomOffset: 0,
+      basePrice: fixedBinding?.baselinePrice ?? targetBase,
+      randomOffset: fixedBinding?.priceVariation ? round2(fixedBinding.priceVariation.prePlatformPrice-fixedBinding.priceVariation.baselinePrice) : 0,
+      priceVariation: fixedBinding?.priceVariation || null,
       marginTarget: null,
       marginUsed: projectedMargin === null ? null : round2(projectedMargin * 100),
       currentPrice: current,

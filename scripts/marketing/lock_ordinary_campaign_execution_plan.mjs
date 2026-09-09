@@ -3,9 +3,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import crypto from 'node:crypto';
 import {
   sha256Text,
   validateOrdinaryCampaignDocuments,
+  validateReviewedWorkbookPriceRows,
 } from '../../lib/marketing_ordinary_campaign_approval.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -21,6 +23,7 @@ function parseArgs(argv) {
     outputDir: '',
     label: '',
     workbookSha256: '',
+    reviewedWorkbook: '',
     approvalText: '',
     approvalSource: '',
   };
@@ -31,6 +34,7 @@ function parseArgs(argv) {
     else if (key === '--output-dir') args.outputDir = path.resolve(argv[++i] || '');
     else if (key === '--label') args.label = String(argv[++i] || '').trim();
     else if (key === '--workbook-sha256') args.workbookSha256 = String(argv[++i] || '').trim().toUpperCase();
+    else if (key === '--reviewed-workbook') args.reviewedWorkbook = path.resolve(argv[++i] || '');
     else if (key === '--approval-text') args.approvalText = String(argv[++i] || '').trim();
     else if (key === '--approval-source') args.approvalSource = String(argv[++i] || '').trim();
     else throw new Error(`Unknown argument: ${key}`);
@@ -53,6 +57,19 @@ const selection = JSON.parse(selectionRaw);
 const prices = JSON.parse(pricesRaw);
 const validated = validateOrdinaryCampaignDocuments(selection, prices);
 const {selectionRows: selectedRows, priceRows} = validated;
+let reviewedWorkbook;
+if (priceRows.some(row => row.reviewedWorkbookPrice !== undefined)) {
+  if (!args.reviewedWorkbook || !args.workbookSha256) throw Error('Reviewed price rows require --reviewed-workbook and --workbook-sha256');
+  const relative = path.relative(ROOT, args.reviewedWorkbook);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw Error('--reviewed-workbook must stay inside repository root');
+  const stat = await fs.lstat(args.reviewedWorkbook);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw Error('--reviewed-workbook must be a regular file');
+  const sha = crypto.createHash('sha256').update(await fs.readFile(args.reviewedWorkbook)).digest('hex');
+  if (sha !== args.workbookSha256.toLowerCase()) throw Error('Reviewed workbook SHA-256 mismatch');
+  const businessDate = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Shanghai'}).format(new Date());
+  validateReviewedWorkbookPriceRows(priceRows, {workbookSha256:sha,businessDate});
+  reviewedWorkbook = {path:rel(args.reviewedWorkbook),businessDate};
+}
 const activityCounts = Object.fromEntries(Object.entries(selectedRows.reduce((acc, row) => {
   const key = String(Number(row.activityId || 0));
   acc[key] = (acc[key] || 0) + 1;
@@ -105,6 +122,7 @@ const manifest = {
   outputSelection: rel(selectionFile),
   outputPrices: rel(priceFile),
   workbookSha256: args.workbookSha256,
+  ...(reviewedWorkbook ? {reviewedWorkbook} : {}),
   counts: {
     selectedRows: selectedRows.length,
     priceRows: priceRows.length,
