@@ -269,6 +269,31 @@ throws('legacy partial labels keep strict rejection', () => extractTrilingualCor
   legacyPartiallyLabeled,
 ), /DESCRIPTION_HTML_EXTRACT_INVALID/);
 
+const plainPre = (id, label, lines) => `<div class="lang-card"><h3>${label}</h3><pre${id ? ` id="${id}"` : ''}>${lines.join('\n')}</pre></div>`;
+const plainV4 = `<section id="s09"><h2>9. 三语核心卖点</h2>${plainPre('sp-en', 'English Selling Points', enLines)}${plainPre('sp-ar', 'Arabic Selling Points', arLines)}${plainPre('sp-zh', 'Chinese Selling Points', zhLines)}</section>`;
+const headingV4 = plainV4.replace(' id="s09"', '').replace(/ id="sp-(?:en|ar|zh)"/g, '');
+for (const [label, html, section] of [['plain pre V4', plainV4, 's09'], ['numbered V4', headingV4, 'heading9'], ['s9 displaybox', validHtml().replace('id="s09"', 'id="s9"'), 's9']]) {
+  const bytes = Buffer.from(html);
+  const verified = verifyDescriptionMaterialAgainstHtml(html, bytes, {sourceFileBasename: 'review.html', section: 'auto'});
+  check(`${label} source identity`, verified.sectionUsed, section);
+  for (const [language, expected] of [['en', enLines], ['ar', arLines], ['zh-cn', zhLines]]) {
+    check(`${label} exact ${language}`, JSON.stringify(verified.extracted[language].lines), JSON.stringify(expected));
+  }
+  const drift = structuredClone(verified.material); drift.rows.en.lines[0] += ' changed';
+  throws(`${label} row byte lock`, () => verifyDescriptionMaterialAgainstHtml(html, bytes, {material: drift, sourceFileBasename: 'review.html', section: 'auto'}), /DESCRIPTION_/);
+  throws(`${label} original byte lock`, () => verifyDescriptionMaterialAgainstHtml(html, Buffer.from(html + ' '), {material: verified.material, sourceFileBasename: 'review.html', section: 'auto'}), /DESCRIPTION_SOURCE_SHA_MISMATCH/);
+}
+for (const [label, html] of [
+  ['duplicate numbered section', headingV4 + headingV4],
+  ['heading outside section', headingV4.replace('<section>', '').replace('</section>', '')],
+  ['unknown section ID', headingV4.replace('<section>', '<section id="s08">')],
+  ['missing language', plainV4.replace('<h3>Arabic Selling Points</h3>', '')],
+  ['duplicate language', plainV4.replace('Arabic Selling Points', 'English Selling Points')],
+  ['conflicting ID', plainV4.replace('id="sp-ar"', 'id="sp-en"')],
+  ['six lines', plainV4.replace(enLines.join('\n'), [...enLines, 'Sixth'].join('\n'))],
+  ['extra copy box', plainV4.replace('</section>', `${plainPre('', 'English', enLines)}</section>`)],
+]) throws(label, () => extractTrilingualCoreSellingPointsAuto(html), /DESCRIPTION_HTML_EXTRACT_INVALID/);
+
 const failed = checks.filter(row => !row.pass);
 for (const row of failed) console.error(`FAIL ${row.label}\n  expected: ${row.expected}\n  actual:   ${row.actual}`);
 console.log(`link_ops_description_material_extract: ${checks.length - failed.length}/${checks.length} passed`);

@@ -29,7 +29,6 @@ const requiredRunnerTests = [
 const intentionalManualTests = Object.freeze({
   'scripts/test_link_retire_review_workbook.mjs': 'manual release gate: desktop artifact-tool dependency; run producer-to-XLSX import and render verification per docs/link-retire-review-contract.md.',
   'scripts/test_bi_portal_section_enqueue_coalescing.mjs': 'manual: queue coalescing requires an isolated Portal fixture.',
-  'scripts/test_link_ops_docx_ingestion.mjs': 'manual: DOCX ingestion depends on operator-provided document fixtures.',
   'scripts/test_link_ops_exact_source_hazard_gate.mjs': 'manual: hazard-gate validation requires a reviewed source fixture.',
   'scripts/test_link_ops_exact_source_input_current_projection.mjs': 'manual: current-source projection requires a live reviewed input.',
   'scripts/test_link_ops_job_worker_shutdown.mjs': 'manual: worker shutdown owns process teardown outside deterministic shards.',

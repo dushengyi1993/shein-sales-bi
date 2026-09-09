@@ -295,6 +295,35 @@ try {
     const t = task(); const b = {...body(t), sourceStore: 'AA', sourceSkc: OLD};
     assert.equal(patch(t, b), t);
   });
+  for (const kind of ['missing', 'expired-fallback']) {
+    await check(`same source ${kind} hydrates exact detail without changing task evidence`, async () => {
+      await missingCache(); installLive();
+      if (kind === 'expired-fallback') await updateOpenApiProductCacheAtomically(cacheFile, cache => ({...cache,
+        detailFallbackResults: [{ok: true, detailFetchedAt: '2000-01-01T00:00:00Z', info: liveInfo()}],
+      }), {storeKey: 'BB'});
+      assert.equal(await loadOpenApiProductDetail('BB', NEW, {cacheDir}), null);
+      const t = task(); t.targets.sourceStores = ['BB']; t.targets.sourceSkc = NEW;
+      const before = clone(t); const next = patch(t, body(t));
+      const receipt = await context.verifySourceLockReplacement(t, next, {auditFile});
+      assert.deepEqual(t, before); assert.equal(next, t);
+      assert.equal(receipt.sourceSkc, NEW);
+      assert.equal(receipt.productIdentity.canonical, 'MODEL-A');
+      assert.deepEqual(liveCalls, ['identity', '/open-api/goods/searchProduct', '/open-api/goods/spu-info']);
+      assert.equal((await loadOpenApiProductDetail('BB', NEW, {cacheDir})).matchedSkcName, NEW);
+      const priorCalls = liveCalls.length;
+      await context.verifySourceLockReplacement(t, patch(t, body(t)), {auditFile});
+      assert.equal(liveCalls.length, priorCalls, 'fresh same-source replay does not fetch again');
+    });
+  }
+  await check('same source refresh failure leaves original cache and task intact', async () => {
+    await missingCache(); installLive({failDetail: true});
+    const beforeCache = await fs.readFile(cacheFile, 'utf8');
+    const t = task(); t.targets.sourceStores = ['BB']; t.targets.sourceSkc = NEW;
+    const before = clone(t);
+    await assert.rejects(() => context.verifySourceLockReplacement(t, patch(t, body(t)), {auditFile}));
+    assert.deepEqual(t, before); assert.equal(await fs.readFile(cacheFile, 'utf8'), beforeCache);
+  });
+  await detail();
   await check('unbound replacement verifies identity and preserves business facts/raw reviewed assets', async () => {
     const t = task(); const n = patch(t);
     await context.verifySourceLockReplacement(t, n, {auditFile});

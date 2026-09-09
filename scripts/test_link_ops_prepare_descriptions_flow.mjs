@@ -59,6 +59,7 @@ const SOURCE_STORE = 'NM';
 const SOURCE_SPU = 'v20990101999999';
 const SOURCE_DETAIL_AT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const DESC_SUPPLIER_CODES = [
+  'DESC-CLI-HEADING9',
   'DESC-PURE-CHECK-REUSE',
   'DESC-CONCURRENT',
   'DESC-MATCH',
@@ -93,6 +94,7 @@ const DESC_SUPPLIER_CODES = [
   'DESC-EXPECTED-REVISION',
 ];
 const SOURCE_LOCKED_CODES = new Set([
+  'DESC-CLI-HEADING9',
   'DESC-PURE-CHECK-REUSE',
   'DESC-MATCH',
   'DESC-POST-COMMIT',
@@ -1994,6 +1996,23 @@ try {
   ]);
   check('managed CLI legacy s9 idempotent replay exits zero', legacyReplay.code, 0);
   check('managed CLI legacy s9 replay keeps source proof', legacyReplay.json?.bound?.sourceProof, 'server_verified_html_section_s9');
+
+  const headingSourceFile = path.join(tmpRoot, 'numbered-core-source.html');
+  const headingHtml = `<section><h2>9. 三语核心卖点</h2><h3>English</h3><pre>${enLines.join('\n')}</pre><h3>Arabic</h3><pre>${arLines.join('\n')}</pre><h3>中文</h3><pre>${zhLines.join('\n')}</pre></section>`;
+  await fs.writeFile(headingSourceFile, headingHtml);
+  const headingTaskId = await createTask(cookie, 'DESC-CLI-HEADING9');
+  await attachPayload(headingTaskId, publishPayloadFor('DESC-CLI-HEADING9'));
+  for (const run of ['first binding', 'idempotent replay']) {
+    const result = await runCli(['prepare-descriptions', '--task-id', headingTaskId, '--store', 'NM', '--source-file', headingSourceFile, '--section', 'auto']);
+    check(`numbered heading ${run} CLI exit`, result.code, 0);
+    check(`numbered heading ${run} server proof`, result.json?.bound?.sourceProof, 'server_verified_html_numbered_heading_9');
+    check(`numbered heading ${run} immutable row lock`, result.json?.dryRun?.descriptionBindingLocked, true);
+  }
+  const headingBound = await rawTaskById(headingTaskId);
+  check('numbered heading server persists original bytes SHA', headingBound.descriptionMaterialBinding.sourceFileSha256, crypto.createHash('sha256').update(headingHtml).digest('hex'));
+  const forgedHeading = structuredClone(headingBound);
+  forgedHeading.descriptionMaterialBinding.sourceProof = 'server_verified_html_section_s09';
+  check('numbered heading proof flip breaks binding', validateDescriptionBindingLock(forgedHeading, forgedHeading.openapiPublishPayload).ok, false);
 
   const invalidSection = await runCli([
     'prepare-descriptions',

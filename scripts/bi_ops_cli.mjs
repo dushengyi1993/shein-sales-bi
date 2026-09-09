@@ -33,6 +33,7 @@ import {
   descriptionBindingRequestKey,
   DESCRIPTION_SOURCE_PROOF,
   DESCRIPTION_SOURCE_PROOF_S9,
+  DESCRIPTION_SOURCE_PROOF_HEADING9,
   DESCRIPTION_SOURCE_PROOF_DOCX,
   EMPTY_DESCRIPTION_CONFIRM_TEXT,
   validateDescriptionMaterialJson,
@@ -480,7 +481,7 @@ Options:
                    prepare-publish 用；同一 copy_product_draft 任务已有服务端已审图片绑定时，仅复用该绑定并更新
                    publishPreparation（如 --input-current-ma），不扫描/读取/上传本地图片；与 --image-dir 互斥，
                    不能与 update_images 维护模式的 --source-task-id 组合
-  --source-file     prepare-descriptions 必填；审核资料 HTML（唯一 section#s09/s9）或普通 OOXML DOCX 固定标题/卖点结构；工具从文件字节计算 SHA 并逐字提取三语各5行
+  --source-file     prepare-descriptions 必填；审核资料 HTML（唯一 section#s09/s9 或无ID第9节标题）或普通 OOXML DOCX 审核标题/卖点结构；工具从文件字节计算 SHA 并逐字提取三语各5行
   --material-json   prepare-descriptions 可选；提供时逐字核验其 ar/en/zh-cn 行与实际 section#s09 一致，任一字节不同即拒绝
   --expected-revision prepare-descriptions 用；任务当前 repository revision，可选项，绑定前做 CAS 校验
   --donor-store / --donor-skc / --attribute-id
@@ -1684,7 +1685,9 @@ async function runPrepareDescriptions(args) {
     ? DESCRIPTION_SOURCE_PROOF_DOCX
     : verified.sectionUsed === 's9'
       ? DESCRIPTION_SOURCE_PROOF_S9
-      : DESCRIPTION_SOURCE_PROOF;
+      : verified.sectionUsed === 'heading9'
+        ? DESCRIPTION_SOURCE_PROOF_HEADING9
+        : DESCRIPTION_SOURCE_PROOF;
   const {json: taskListJson} = await request(args, '/api/link-ops-tasks?limit=500');
   const currentTask = (taskListJson?.data?.tasks || []).find(task => String(task?.id || '') === args.taskId) || null;
   if (!currentTask) throw new Error('当前账号无法精确读取目标 task，描述未绑定');
