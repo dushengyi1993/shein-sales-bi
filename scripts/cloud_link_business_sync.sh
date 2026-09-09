@@ -119,6 +119,7 @@ if (!contained(allowedState, stateParentReal) || !contained(root, stateFile)) {
 const config = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8'));
 const configured = (config.stores || []).map(row => ({
   key: String(row?.storeKey || '').trim().toUpperCase(), enabled: row?.enabled !== false,
+  biOnly: row?.enabled === false && row?.biEnabled === true,
 }));
 if (configured.some(row => !/^[A-Z][A-Z0-9]{1,7}$/.test(row.key))) throw new Error('illegal store key in config');
 const enabled = configured.filter(row => row.enabled).map(row => row.key);
@@ -126,7 +127,9 @@ if (enabled.length !== canonical.length || new Set(enabled).size !== canonical.l
   || enabled.some(key => !canonicalSet.has(key)) || canonical.some(key => !enabled.includes(key))) {
   throw new Error(`store config drift: require exact canonical ${canonical.length} unique enabled keys; actual=${enabled.join(',')}`);
 }
-if (configured.length !== canonical.length) throw new Error(`store config drift: disabled/extra rows are not legal for metric source commit`);
+// BI-only onboarding stores do not participate in the canonical business source batch.
+if (new Set(configured.map(row => row.key)).size !== configured.length) throw new Error('duplicate store key in config');
+if (configured.some(row => !row.enabled && !row.biOnly)) throw new Error('disabled extra store must explicitly opt into BI-only visibility');
 NODE
 }
 
