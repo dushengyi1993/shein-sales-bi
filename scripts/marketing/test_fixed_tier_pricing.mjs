@@ -47,6 +47,33 @@ assert.equal(aliasApplied.applied,true);
 assert.equal(aliasApplied.row.fixedTierPricing.platform.actualPrice,91.88);
 assert.ok(Math.abs(aliasApplied.row.fixedTierPricing.platform.actualMargin-(91.88-55.0938)/91.88)<1e-10);
 assert.equal(verifyFixedTierBinding(aliasApplied.row,aliasContext).ok,true);
+// Unknown peer exposure stays unknown; only a proven tier may proceed.
+const boundedPeers=peers(aliasCanonical);
+boundedPeers[1].c7_eps_uv=null;
+const boundedContext=buildFixedTierContext({storeLinks:boundedPeers},{reportDate,costDoc:aliasCosts});
+const ordinaryBound=resolveFixedTierPrice(boundedPeers[6],boundedContext);
+assert.equal(ordinaryBound.price,92);
+assert.equal(ordinaryBound.binding.evidence.rank,null);
+assert.deepEqual(ordinaryBound.binding.evidence.rankBounds,{minimum:6,maximum:7,missingKeys:['S1::k1']});
+assert.equal(ordinaryBound.binding.evidence.ranking.length,6);
+assert.equal(boundedPeers[1].c7_eps_uv,null);
+const topBound=resolveFixedTierPrice(boundedPeers[0],boundedContext);
+assert.equal(topBound.price,88);
+assert.deepEqual(topBound.binding.evidence.rankBounds,{minimum:1,maximum:2,missingKeys:['S1::k1']});
+const boundary=resolveFixedTierPrice(boundedPeers[5],boundedContext);
+assert.equal(boundary.reason,'fixed_tier_global_exposure_evidence_incomplete');
+assert.deepEqual(boundary.evidence.rankBounds,{minimum:5,maximum:6,missingKeys:['S1::k1']});
+assert.equal(resolveFixedTierPrice(boundedPeers[1],boundedContext).reason,'fixed_tier_missing_classification_metrics');
+const boundedApplied=applyFixedTierPrice(boundedPeers[6],boundedContext);
+assert.equal(verifyFixedTierBinding(boundedApplied.row,boundedContext).ok,true);
+const newlyKnown=structuredClone(boundedPeers);newlyKnown[1].c7_eps_uv=100;
+assert.equal(verifyFixedTierBinding(boundedApplied.row,buildFixedTierContext({storeLinks:newlyKnown},{reportDate,costDoc:aliasCosts})).ok,false);
+for(const invalidPeer of [{...boundedPeers[1],is_on_shelf:null},{...boundedPeers[1],c7_eps_uv:-1}]) {
+ const invalidRows=structuredClone(boundedPeers);invalidRows[1]=invalidPeer;
+ assert.equal(resolveFixedTierPrice(invalidRows[6],buildFixedTierContext({storeLinks:invalidRows},{reportDate})).blocked,true);
+}
+const hiddenPeer=structuredClone(boundedPeers);hiddenPeer[1].is_on_shelf=false;
+assert.equal(resolveFixedTierPrice(hiddenPeer[6],buildFixedTierContext({storeLinks:hiddenPeer},{reportDate})).binding.evidence.rank,6);
 let checks=0;
 function peers(canonical) {return Array.from({length:7},(_,i)=>({storeKey:'S'+i,skc:'k'+i,canonical,standard_goods_sn:canonical,is_on_shelf:true,c7_eps_uv:2900-i*100,c7_goods_uv:10,c7_cart_uv:0,c7_sale_cnt:0,shelf_age_days:30}));}
 for (const [index,item] of standard.doc.items.entries()) {
