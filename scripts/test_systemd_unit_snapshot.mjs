@@ -200,6 +200,23 @@ const readOnlyOmitted = parseSystemdShowMany(
 );
 assert.equal(readOnlyOmitted['readonly-omitted.service'].complete, true);
 assert.equal(readOnlyOmitted['readonly-omitted.service'].ReadOnlyPaths, '');
+// Exercise the real collector request: a handcrafted snapshot would hide an
+// omitted systemctl property and falsely pass the intentional-pause policy.
+const {intentionalCloudTimerPause} = await import('../lib/cloud_runtime_inventory.mjs');
+const repairTimer = 'shein-bi-cloud-marketing-repair.timer';
+for (const state of ['disabled', 'enabled', '']) {
+  const collected = await collectSystemdUnitSnapshot([repairTimer], {
+    execute: async args => args[0] === 'show'
+      ? {code: 0, stdout: [
+        `Id=${repairTimer}`, 'LoadState=loaded', 'ActiveState=inactive', 'SubState=dead',
+        ...(args.some(arg => arg.startsWith('--property=') && arg.slice(11).split(',').includes('UnitFileState')) && state
+          ? [`UnitFileState=${state}`] : []),
+      ].join('\n'), stderr: ''}
+      : {code: 0, stdout: `${repairTimer} ${state || 'disabled'} enabled\n`, stderr: ''},
+  });
+  assert.equal(collected.units[repairTimer].UnitFileState, state);
+  assert.equal(Boolean(intentionalCloudTimerPause(repairTimer, collected.units[repairTimer])), state === 'disabled');
+}
 console.log(JSON.stringify({
   ok: true,
   unitCount: snapshot.requested.length,
