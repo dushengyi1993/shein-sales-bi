@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {normalizeSafeWriteOperations, safeWriteOperationAllowed} from '../lib/bi_ops_safe_write_policy.mjs';
 /**
  * Read-only production safety checker for BI Ops real-submit pilot config.
  *
@@ -137,19 +138,6 @@ function loadKnownStores() {
   }
 }
 
-function normalizeSafeWriteOperations(config) {
-  const source = config?.safeWriteOperations && typeof config.safeWriteOperations === 'object'
-    ? config.safeWriteOperations
-    : {};
-  const allowedOperations = normalizeTokenList(source.allowedOperations || source.operations || [], {caseMode: 'lower'});
-  const allowedStores = normalizeStoreList(source.allowedStores || source.stores || []);
-  return {
-    enabled: Boolean(source.enabled),
-    requireDryRun: source.requireDryRun !== false,
-    allowedOperations,
-    allowedStores,
-  };
-}
 
 function normalizeWhitelistRule(input = {}, defaults = {}) {
   const rule = input && typeof input === 'object' ? input : {};
@@ -268,6 +256,9 @@ function auditConfig({safeWrite, whitelist, knownStores, tracked, openapiFile, w
   }
   for (const op of requireOperations) {
     if (!hasToken(safeWrite.allowedOperations, op)) errors.push(`--require-operation ${op} 未进入 safeWriteOperations.allowedOperations。`);
+  }
+  for (const store of requireStores) for (const operation of requireOperations) {
+    if (!safeWriteOperationAllowed({safeWriteOperations: safeWrite}, {storeKey: store, operation}).allowed) errors.push(`Requested store/operation is not enabled: ${store}/${operation}`);
   }
   if (requireUsers.length) warnings.push('--require-user 已废弃；人员权限请用 BI 账号 writeStores 和权限矩阵 smoke 验证。');
 

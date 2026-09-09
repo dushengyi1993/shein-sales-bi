@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import {normalizeSafeWriteOperations, safeWriteOperationAllowed} from '../lib/bi_ops_safe_write_policy.mjs';
 /**
  * Serve the generated local SHEIN BI portal as a static website.
  *
@@ -1256,35 +1257,7 @@ function normalizeTokenList(value, {caseMode = 'lower'} = {}) {
     }))];
 }
 
-function normalizeSafeWriteOperations(config) {
-  const source = config?.safeWriteOperations && typeof config.safeWriteOperations === 'object'
-    ? config.safeWriteOperations
-    : {};
-  const allowedOperations = normalizeTokenList(source.allowedOperations || source.operations || [], {caseMode: 'lower'});
-  const allowedStores = normalizeStoreList(source.allowedStores || source.stores || []);
-  return {
-    enabled: Boolean(source.enabled),
-    requireDryRun: source.requireDryRun !== false,
-    allowedOperations,
-    allowedStores,
-  };
-}
 
-function safeWriteOperationAllowed(config, {operation = '', storeKey = ''} = {}) {
-  const safe = normalizeSafeWriteOperations(config);
-  const op = String(operation || '').trim().toLowerCase();
-  const store = String(storeKey || '').trim().toUpperCase();
-  const operationAllowed = Boolean(op) && (safe.allowedOperations.includes('*') || safe.allowedOperations.includes(op));
-  const storeAllowed = Boolean(store) && (safe.allowedStores.includes('*') || safe.allowedStores.includes(store));
-  return {
-    ...safe,
-    operation,
-    storeKey: store,
-    operationAllowed,
-    storeAllowed,
-    allowed: Boolean(safe.enabled && operationAllowed && storeAllowed),
-  };
-}
 
 function loadBiOpsWriteWhitelistSync() {
   try {
@@ -1370,10 +1343,15 @@ function biOpsWriteWhitelistRuleMatches(rule, {operation = '', storeKey = ''} = 
   return operationAllowed && storeAllowed;
 }
 
+function controlledWriteStoreSupported(operation, store) {
+  return DEFAULT_SHEIN_STORE_KEYS.includes(store)
+    || (operation === 'copy_product_draft' && ['LG', 'HY'].includes(store) && SHEIN_STORE_KEYS.has(store));
+}
+
 function biOpsWriteWhitelistConfigured({operation = '', storeKey = ''} = {}) {
   const op = String(operation || '').trim().toLowerCase();
   const store = String(storeKey || '').trim().toUpperCase();
-  const supported = BI_OPS_STRUCTURED_WRITE_INTENTS.has(op) && DEFAULT_SHEIN_STORE_KEYS.includes(store);
+  const supported = BI_OPS_STRUCTURED_WRITE_INTENTS.has(op) && controlledWriteStoreSupported(op, store);
   return {
     enabled: true,
     configured: supported,
@@ -1389,7 +1367,7 @@ function biOpsWriteWhitelistAllowedForActor(actor, {operation = '', storeKey = '
   const role = actorRoleCandidate(actor);
   const concreteActor = actor && !isInternalSystemActor(actor) && ['admin', 'owner', 'operator'].includes(role);
   const operationSupported = BI_OPS_STRUCTURED_WRITE_INTENTS.has(op);
-  const storeSupported = DEFAULT_SHEIN_STORE_KEYS.includes(store);
+  const storeSupported = controlledWriteStoreSupported(op, store);
   const storeAllowed = storeSupported && actorCanWriteStores(actor, [store]);
   const allowed = Boolean(concreteActor && operationSupported && storeAllowed);
   const reason = !concreteActor
@@ -1418,7 +1396,7 @@ function biOpsWriteWhitelistSummary() {
     enabled: true,
     ruleCount: 0,
     operations: [...BI_OPS_STRUCTURED_WRITE_INTENTS].sort(),
-    stores: [...DEFAULT_SHEIN_STORE_KEYS].sort(),
+    stores: [...DEFAULT_SHEIN_STORE_KEYS, 'LG', 'HY'].filter(key => SHEIN_STORE_KEYS.has(key)).sort(),
     source: 'BI account writeStores',
     mode: 'account_write_scope',
     legacyWhitelistIgnored: true,
@@ -1962,6 +1940,7 @@ function openApiCapabilityLedger() {
         requireDryRun: safeWriteOperations.requireDryRun,
         allowedOperations: safeWriteOperations.allowedOperations,
         allowedStores: safeWriteOperations.allowedStores,
+        allowedOperationsByStore: safeWriteOperations.allowedOperationsByStore,
       },
       realSubmitWhitelist,
       maintenanceWrites: 'dry_run_only_until_official_endpoint_and_readback_verified',

@@ -227,6 +227,7 @@ async function main() {
       requiredServicesInactive: snapshot.runtimeProbe.inactiveAlwaysRunning.length,
       requiredServicesRestarted: snapshot.runtimeProbe.restartedAlwaysRunning.length,
       timersInactive: snapshot.runtimeProbe.inactiveTimers.length,
+      timersIntentionallyPaused: snapshot.runtimeProbe.intentionallyPausedTimers.length,
       timersMaintenanceInactive: snapshot.runtimeProbe.maintenanceInactiveTimers.length,
       portalHealthy: snapshot.health.portal.ok,
       webhookHealthy: snapshot.health.webhook.ok,

@@ -40,6 +40,7 @@ import {
   CLOUD_SERVICE_UNITS,
   CLOUD_TIMER_MAINTENANCE_POLICY,
   CLOUD_TIMER_UNITS,
+  intentionalCloudTimerPause,
 } from '../lib/cloud_runtime_inventory.mjs';
 import {collectSystemdUnitSnapshot} from '../lib/systemd_unit_snapshot.mjs';
 import {validateCloudRuntimeEffectiveControls} from '../lib/cloud_runtime_snapshot.mjs';
@@ -1429,6 +1430,11 @@ async function runWatchdog(args) {
       continue;
     }
     if (status.LoadState === 'not-found') continue;
+    const intentionalPause = intentionalCloudTimerPause(timer, status);
+    if (intentionalPause) {
+      status.intentionalPause = intentionalPause;
+      continue;
+    }
     if (status.ActiveState !== 'active') {
       issues.push(`定时器未运行：${timer} state=${status.ActiveState || '-'} result=${status.Result || '-'}`);
     }

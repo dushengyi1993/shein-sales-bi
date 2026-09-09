@@ -623,3 +623,13 @@ try {
   assert.equal(retireEmergencyLocalReleaseReceipt({receiptFile,deploymentMarker:deployedV3Marker,source:base.releaseSourceState}).reason,'newer_receipt_preserved');
   assert.equal(fs.existsSync(receiptFile),true);
 } finally {fs.rmSync(retirementRoot,{recursive:true,force:true});}
+
+const pausedRepairUnits = healthyUnits();
+const repairTimer = 'shein-bi-cloud-marketing-repair.timer';
+pausedRepairUnits[repairTimer] = {...pausedRepairUnits[repairTimer], UnitFileState: 'disabled', ActiveState: 'inactive'};
+const pausedRepair = buildCloudRuntimeSnapshot({...base, systemdSnapshot: {...base.systemdSnapshot, units: pausedRepairUnits}});
+assert.equal(pausedRepair.businessReady, true);
+assert.equal(pausedRepair.runtimeProbe.intentionallyPausedTimers[0].name, repairTimer);
+pausedRepairUnits[repairTimer].UnitFileState = 'enabled';
+const stoppedRepair = buildCloudRuntimeSnapshot({...base, systemdSnapshot: {...base.systemdSnapshot, units: pausedRepairUnits}});
+assert.ok(stoppedRepair.blockers.some(row => row.code === 'SCHEDULE_TIMER_INACTIVE'));
