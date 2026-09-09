@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import {safeWriteOperationAllowed} from '../lib/bi_ops_safe_write_policy.mjs';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
@@ -230,3 +231,16 @@ main().catch(err => {
   console.error(JSON.stringify({ok: false, error: err?.message || String(err), stack: err?.stack || ''}, null, 2));
   process.exit(1);
 });
+
+const scopedConfig = {safeWriteOperations: {enabled: true, requireDryRun: true, allowedStores: ['DL','LG','HY'], allowedOperations: ['copy_product_draft','update_inventory'], allowedOperationsByStore: {LG:['copy_product_draft'],HY:['copy_product_draft']}}};
+for (const storeKey of ['LG','HY']) {
+  assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey,operation:'copy_product_draft'}).allowed,true);
+  assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey,operation:'update_inventory'}).allowed,false);
+}
+assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'DL',operation:'update_inventory'}).allowed,true);
+assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'TZ',operation:'copy_product_draft'}).allowed,false);
+scopedConfig.safeWriteOperations.allowedOperationsByStore.LG = [];
+assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'LG',operation:'copy_product_draft'}).allowed,false);
+
+scopedConfig.safeWriteOperations.allowedOperationsByStore = null;
+assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'LG',operation:'copy_product_draft'}).allowed,false);

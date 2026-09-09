@@ -19,7 +19,7 @@ import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const KEEP_TEMP = process.argv.includes('--keep-temp');
-const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
+const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC', 'LG', 'HY'];
 const tmpBase = path.join(ROOT, 'tmp');
 await fs.mkdir(tmpBase, {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(tmpBase, 'bi-ops-copy-all-stores-capability-'));
@@ -85,7 +85,8 @@ const openapiConfigFile = await writeJson('openapi.json', {
   safeWriteOperations: {
     enabled: true,
     requireDryRun: true,
-    allowedOperations: ['copy_product_draft'],
+    allowedOperations: ['copy_product_draft','update_inventory'],
+    allowedOperationsByStore: {LG:['copy_product_draft'],HY:['copy_product_draft']},
     allowedStores: STORE_KEYS,
   },
 });
@@ -273,7 +274,7 @@ try {
     copyRows,
   };
   check('capabilities status', caps.status, 200);
-  check('all 19 store rows present', STORE_KEYS.every(storeKey => byStore.has(storeKey)), true);
+  check('all 21 store rows present', STORE_KEYS.every(storeKey => byStore.has(storeKey)), true);
   check('safeWrite enabled in isolated config', Boolean(caps.json?.safety?.safeWriteOperations?.enabled), true);
   check('whitelist enabled in isolated config', Boolean(caps.json?.safety?.realSubmitWhitelist?.enabled), true);
   check('canSilentWrite remains false', Boolean(caps.json?.safety?.canSilentWrite), false);
@@ -281,6 +282,11 @@ try {
   check('daily product reconciliation is fresh for all stores', Number(caps.json?.counts?.productReconciliationReady || 0), STORE_KEYS.length);
   check('current owner is allowed into controlled submit flow for all stores', Number(caps.json?.counts?.actorControlledSubmitReady || 0), STORE_KEYS.length);
   check('every store copy_product_draft confirmable', failedStores.length, 0);
+
+  for (const storeKey of ['LG','HY']) {
+    check(`${storeKey} inventory remains disabled`, Boolean(actionFor(byStore.get(storeKey),'update_inventory')?.realSubmitSupported), false);
+  }
+  check('existing DL inventory capability unchanged', Boolean(actionFor(byStore.get('DL'),'update_inventory')?.realSubmitSupported), true);
 
   await fs.writeFile(productReconciliationFile, `${JSON.stringify(productReconciliationPayload({invalidStore: 'TZ', invalidMode: 'empty-row'}), null, 2)}\n`, 'utf8');
   const emptyEvidenceCaps = await req('/api/openapi-capabilities', {cookie});

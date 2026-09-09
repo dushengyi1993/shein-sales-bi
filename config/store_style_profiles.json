@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "updatedAt": "2026-07-24",
+  "updatedAt": "2026-09-09",
   "purpose": "跨店铺新发品时按店铺默认标题组并优先选择与店铺定位相近的套图；没有匹配套图时允许借用，但不得将货号标记为（全）。",
   "rules": {
     "preferMatchingStyle": true,
@@ -30,7 +30,9 @@
     "XL": "title3",
     "FY": "title3",
     "QH": "title3",
-    "ZL": "title3"
+    "ZL": "title3",
+    "LG": "title3",
+    "HY": "title3"
   },
   "profiles": {
     "DL": ["简约", "现代", "都市", "白灰"],

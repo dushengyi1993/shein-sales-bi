@@ -17,11 +17,11 @@ const storeProfiles = JSON.parse(await fs.readFile(path.join(ROOT, 'config', 'st
 const expectedTitleGroups = {
   title1: ['JSH', 'DL', 'TZZ', 'CX', 'HL', 'TS', 'TZ'],
   title2: ['DX', 'LQ', 'XC', 'MZ', 'NM', 'YJ'],
-  title3: ['JY', 'QY', 'XL', 'FY', 'QH', 'ZL'],
+  title3: ['JY', 'QY', 'XL', 'FY', 'QH', 'ZL', 'LG', 'HY'],
 };
 const configuredTitleGroups = storeProfiles.defaultTitleGroups || {};
 const configuredStores = Object.keys(configuredTitleGroups);
-if (configuredStores.length !== 19 || new Set(configuredStores).size !== 19) throw new Error('default title groups must cover 19 unique stores');
+if (configuredStores.length !== 21 || new Set(configuredStores).size !== 21) throw new Error('default title groups must cover 21 unique stores');
 for (const [titleGroup, stores] of Object.entries(expectedTitleGroups)) {
   for (const store of stores) {
     if (configuredTitleGroups[store] !== titleGroup) throw new Error(`${store} default title group must be ${titleGroup}`);

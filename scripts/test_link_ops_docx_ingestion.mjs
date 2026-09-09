@@ -239,3 +239,26 @@ assert.throws(
 );
 
 console.log('link_ops_docx_ingestion: fixed and reviewed-V3 OOXML, directory/thumbnail compatibility, byte SHA/material binding, title-only, corrupt, macro, external-link, embedded-object, malformed-XML, and section fail-closed checks passed');
+
+const rtlDocument = reviewedV3DocumentXml().replaceAll('<w:p>', '<w:p><w:pPr><w:bidi w:val="1"/></w:pPr>').replaceAll('<w:r>', '<w:r><w:rPr><w:rtl/></w:rPr>');
+const rtlBytes = zip(baseEntries({document:rtlDocument}));
+const rtlVerified = verifyDescriptionMaterialAgainstDocx(rtlBytes, {sourceFileBasename:'rtl.docx',section:'auto'});
+assert.deepEqual(rtlVerified.material.rows.ar.lines, arLines);
+assert.deepEqual(rtlVerified.material.rows.en.lines, enLines);
+assert.equal(rtlVerified.material.sourceFileSha256,sha256Bytes(rtlBytes));
+const badDirection = zip(baseEntries({document:reviewedV3DocumentXml().replace('<w:body>','<w:body><w:bidi/>')}));
+assert.throws(()=>verifyDescriptionMaterialAgainstDocx(badDirection,{sourceFileBasename:'bad-rtl.docx',section:'auto'}),error=>error.code==='DESCRIPTION_DOCX_STRUCTURE_INVALID');
+
+const labelledDocument = reviewedV3DocumentXml()
+  .replace('Main Title 3｜reviewed', 'Main Title 3 - reviewed')
+  .replace(plainParagraph(['英文评分'])+plainParagraph(['95/100']), plainParagraph(['英文标题']))
+  .replace(plainParagraph(['阿文中文释义'])+plainParagraph(['内部中文释义']), plainParagraph(['阿文标题']))
+  .replace('英文卖点评分：96/100。','English Selling Points')
+  .replace('阿文卖点评分：97/100。','Arabic Selling Points')
+  .replace('中文仅用于内部核对','中文卖点');
+const labelledVerified = verifyDescriptionMaterialAgainstDocx(zip(baseEntries({document:labelledDocument})),{sourceFileBasename:'labelled.docx',section:'auto'});
+assert.deepEqual(labelledVerified.material.rows.en.lines,enLines);
+assert.deepEqual(labelledVerified.material.rows.ar.lines,arLines);
+assert.equal(labelledVerified.extracted.title.en,reviewedV3.extracted.title.en);
+assert.equal(labelledVerified.extracted.title.ar,reviewedV3.extracted.title.ar);
+assert.throws(()=>verifyDescriptionMaterialAgainstDocx(zip(baseEntries({document:labelledDocument.replace('English Selling Points','Arabic Selling Points')})),{sourceFileBasename:'ambiguous.docx',section:'auto'}),error=>error.code==='DESCRIPTION_DOCX_STRUCTURE_INVALID');
