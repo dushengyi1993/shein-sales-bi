@@ -12,7 +12,7 @@
     "曝光前五/新链接",
     "普通"
   ],
-  "classification": "第一档沿用既有高点击低转化资格：在售、7日销量0，并且曝光>3000且点击率>4%，或曝光>=3000且加车访客>=20；第二档沿用同货号跨店全局曝光前五或新链接待遇；其余普通。缺少分层指标不得猜测。",
+  "classification": "先补抓分层指标；仍缺失时沿用已审档位，无已审档位按普通档。未知指标保持未知。价格分层不判定报名资格，实时平台核对身份、可报名和真实库存。自2026-09-10对新执行单元启用，不重提历史已提交项。",
   "items": [
     {
       "canonical": "SK-GT-3065蒸汽熨烫机",
@@ -96,12 +96,18 @@
     "confirmedMissingCanonicals": []
   },
   "schemaVersion": "marketing-fixed-tier-standard/v1",
-  "version": "2026-09-09.1",
+  "version": "2026-09-10.1",
   "priceVariation": {
     "version": "marketing-link-variation/2026-09-09.1",
     "effectiveDate": "2026-09-09",
-    "priceRangeSar": [-2, 1],
-    "marginRangePercentagePoints": [-2, 1],
+    "priceRangeSar": [
+      -2,
+      1
+    ],
+    "marginRangePercentagePoints": [
+      -2,
+      1
+    ],
     "rule": "价格基准或利润率基准仅选对应一种浮动；按链接确定性生成并锁定执行价，保留三档顺序、适用底线和例外；平台约束优先，不为已提交单元重新采样"
   },
   "exceptions": [],
@@ -598,5 +604,136 @@
       "highClickPolicy": "00a355f2366f446d4f338422992b3bad6a5c88a64ccb717c94a438011da7019d"
     },
     "remainingHistoryHitsSha256": "a46148e9c2aa910ee832218a7466ec6f9e8d3107632327a9acc8a97240cd5289"
-  }
+  },
+  "reviewedWorkbookBases": [
+    {
+      "canonical": "JD-389空气炸锅",
+      "effectiveDate": "2026-09-10",
+      "basis": {
+        "kind": "price",
+        "tiers": [
+          124.8,
+          128.12,
+          137.28
+        ]
+      },
+      "workbookSha256": "47f25895b196596e7eec4e0811d302d62f8ee2aa718216bc4f0039e390ff156e",
+      "sourceCells": [
+        "按货号汇总!I18",
+        "按货号汇总!K18",
+        "按货号汇总!M18",
+        "按货号汇总!Q18"
+      ],
+      "businessDate": "2026-09-09",
+      "reason": "JD-389空气炸锅继承已审三档价格基准及最新允许小幅浮动的授权；继承历史商品成本利润率：前五25%、普通30%；9月2日无新增修改；高点击沿用前五商品利润率减2点规则，低于15%底线时不生成专属价",
+      "sourcePriceOverridesSha256": "e6a5f73ae08c8a3827af61beeb208a764a9f84c16141149610f5d70abb064f19"
+    },
+    {
+      "canonical": "SK-15030热风梳",
+      "effectiveDate": "2026-09-10",
+      "basis": {
+        "kind": "price",
+        "tiers": [
+          115.3,
+          118.58,
+          118.58
+        ]
+      },
+      "workbookSha256": "47f25895b196596e7eec4e0811d302d62f8ee2aa718216bc4f0039e390ff156e",
+      "sourceCells": [
+        "按货号汇总!I32",
+        "按货号汇总!K32",
+        "按货号汇总!M32",
+        "按货号汇总!Q32"
+      ],
+      "businessDate": "2026-09-09",
+      "reason": "SK-15030热风梳继承已审三档价格基准及最新允许小幅浮动的授权；继承历史商品成本利润率：前五30%、普通30%；9月2日无新增修改；高点击沿用前五商品利润率减2点规则，低于15%底线时不生成专属价",
+      "sourcePriceOverridesSha256": "e6a5f73ae08c8a3827af61beeb208a764a9f84c16141149610f5d70abb064f19"
+    },
+    {
+      "canonical": "SK-446电动刀与切片器",
+      "effectiveDate": "2026-09-10",
+      "basis": {
+        "kind": "price",
+        "tiers": [
+          210.27,
+          215.68,
+          231.43
+        ]
+      },
+      "workbookSha256": "47f25895b196596e7eec4e0811d302d62f8ee2aa718216bc4f0039e390ff156e",
+      "sourceCells": [
+        "按货号汇总!I43",
+        "按货号汇总!K43",
+        "按货号汇总!M43",
+        "按货号汇总!Q43"
+      ],
+      "businessDate": "2026-09-09",
+      "reason": "SK-446电动刀与切片器继承已审三档价格基准及最新允许小幅浮动的授权；9月2日未出现；沿用已找到的7月8日历史前五215.68、普通231.43，保留来源供复核；高点击沿用前五商品利润率减2点规则，低于15%底线时不生成专属价",
+      "sourcePriceOverridesSha256": "e6a5f73ae08c8a3827af61beeb208a764a9f84c16141149610f5d70abb064f19"
+    },
+    {
+      "canonical": "KF-JN-02便携咖啡机",
+      "effectiveDate": "2026-09-10",
+      "basis": {
+        "kind": "price",
+        "tiers": [
+          91.53,
+          91.53,
+          97.25
+        ]
+      },
+      "workbookSha256": "47f25895b196596e7eec4e0811d302d62f8ee2aa718216bc4f0039e390ff156e",
+      "sourceCells": [
+        "按货号汇总!I19",
+        "按货号汇总!K19",
+        "按货号汇总!M19",
+        "按货号汇总!Q19"
+      ],
+      "businessDate": "2026-09-09",
+      "reason": "KF-JN-02便携咖啡机继承已审三档价格基准及最新允许小幅浮动的授权；前五基准利润率15%，普通基准利润率20%",
+      "sourcePriceOverridesSha256": "e6a5f73ae08c8a3827af61beeb208a764a9f84c16141149610f5d70abb064f19"
+    },
+    {
+      "canonical": "SK-1714-5手持搅拌器",
+      "effectiveDate": "2026-09-10",
+      "basis": {
+        "kind": "full_cost_margin",
+        "tiers": [
+          0.23,
+          0.25,
+          0.3
+        ]
+      },
+      "workbookSha256": "47f25895b196596e7eec4e0811d302d62f8ee2aa718216bc4f0039e390ff156e",
+      "sourceCells": [
+        "按货号汇总!R37"
+      ],
+      "businessDate": "2026-09-09",
+      "reason": "用户已保存的R37备注按23%/25%/30%，覆盖旧待核标记；含仓储成本口径",
+      "sourcePriceOverridesSha256": "e6a5f73ae08c8a3827af61beeb208a764a9f84c16141149610f5d70abb064f19"
+    },
+    {
+      "canonical": "HS-025直发夹板",
+      "effectiveDate": "2026-09-10",
+      "basis": {
+        "kind": "price",
+        "tiers": [
+          53.25,
+          54.67,
+          58.58
+        ]
+      },
+      "workbookSha256": "47f25895b196596e7eec4e0811d302d62f8ee2aa718216bc4f0039e390ff156e",
+      "sourceCells": [
+        "按货号汇总!I17",
+        "按货号汇总!K17",
+        "按货号汇总!M17",
+        "按货号汇总!Q17"
+      ],
+      "businessDate": "2026-09-09",
+      "reason": "继承已审三档价格基准及Q17原备注；缺曝光补抓后仍未知按普通档，不让旧待核标记覆盖已审工作簿。",
+      "primaryEvidenceSha256": "c334ff15ca37e04e553b6212e18325dadae3169295a3ea2728a0a8e85fe2796b"
+    }
+  ]
 }

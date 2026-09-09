@@ -110,8 +110,14 @@ try {
   assert.equal(verifyFixedTierBinding(changedPrice,context).ok,false);
   assert.equal(applyFixedTierPrice(changedPrice,context).blocked,true);checks++;
   const liveKey=`${row.storeKey}::${row.skc}`;
-  for(const edit of [{is_on_shelf:false},{c7_eps_uv:null},{c7_sale_cnt:1},{fixedTierDuplicateConflict:true}]) {
+  for(const edit of [{c7_sale_cnt:1},{fixedTierDuplicateConflict:true}]) {
     const byKey=new Map(context.byKey);byKey.set(liveKey,{...byKey.get(liveKey),...edit});checkBlocked(row,{...context,byKey});
+  }
+  if (date >= '2026-09-10') for (const edit of [{is_on_shelf:false},{c7_eps_uv:null}]) {
+    const byKey=new Map(context.byKey);byKey.set(liveKey,{...byKey.get(liveKey),...edit});
+    const recovered=resolveFixedTierPrice(row,{...context,byKey});
+    assert.equal(recovered.blocked,false);assert.equal(recovered.binding.tier,row.reviewedWorkbookPrice.tier);
+    assert.equal(recovered.binding.evidence.pricingClassificationFallback.source,'current_reviewed_workbook_tier');checks++;
   }
   checkBlocked(row,{...context,costDoc:{trueCostMap:{[row.canonical]:{productUnitCostSar:77,storageUnitCostSar:.9}}}},'reviewed_workbook_price_cost_changed');
   const applied=applyFixedTierPrice(row,context).row;
@@ -131,7 +137,10 @@ try {
   assert.equal(applyFixedTierPrice({...originallyCapped,platformMaximumActivityPrice:89.995},context).row.targetPrice,89.99);checks++;
   const unproved={...row};delete unproved.reviewedWorkbookPrice;
   const noAuthority={...context,reviewedWorkbookPriceCapability:null};
-  checkBlocked(unproved,noAuthority,'inherited_high_click_margin_below_floor');
+  if (date>='2026-09-10') {
+    const published=resolveFixedTierPrice(unproved,noAuthority);
+    assert.equal(published.blocked,false);assert.equal(published.binding.mode,'inherited_reviewed_workbook_basis');checks++;
+  } else checkBlocked(unproved,noAuthority,'inherited_high_click_margin_below_floor');
   for(const index of [7,8]) {
     const legacy={...rows[index]};delete legacy.reviewedWorkbookPrice;
     assert.equal(resolveFixedTierPrice(legacy,noAuthority).binding.priceVariation.policyVersion,'marketing-link-variation/2026-09-09.1');

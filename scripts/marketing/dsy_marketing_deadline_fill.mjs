@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import {verifyFixedTierBinding, fixedTierItem} from '../../lib/marketing_fixed_tier_pricing.mjs';
+import {verifyFixedTierBinding, fixedTierItem, fixedTierCanonicalKey} from '../../lib/marketing_fixed_tier_pricing.mjs';
 // SHEIN 营销活动报名半自动助手：
 // - 只做商品勾选、活动价/降幅预填和页面复核。
 // - 默认不点击最终“提交报名”；只有显式传入 --submit 且选择/填价复核通过后才会提交。
@@ -1752,6 +1752,12 @@ function computeTarget(storeKey, activityId, row) {
   if (fixedTierItem(canonical) && !(override?.fixedTierPricing || override?.lowEtFastSellerPricePullback?.fixedTierPricing)) return {ok:false,reason:'fixed_tier_binding_missing',canonical};
   if (override) {
     const fixedBinding = override.fixedTierPricing || override.lowEtFastSellerPricePullback?.fixedTierPricing;
+    if (fixedBinding?.evidence?.pricingClassificationFallback) {
+      const expected = normalizeGoodsSnDetailed(override.canonical || fixedBinding.canonical || '').canonical;
+      if (!supplier || !expected || !normalized.canonical || fixedTierCanonicalKey(expected) !== fixedTierCanonicalKey(normalized.canonical)) {
+        return {ok:false,reason:'ordinary_pricing_fallback_live_product_identity_mismatch',canonical};
+      }
+    }
     const targetBase = Number(override.targetPrice);
     const cost = override.cost === null || override.cost === undefined ? null : Number(override.cost);
     const marginFloor = override.minMarginFloor === null || override.minMarginFloor === undefined ? null : Number(override.minMarginFloor);

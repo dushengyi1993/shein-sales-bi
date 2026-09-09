@@ -8,6 +8,7 @@
  * report from stable evidence instead of re-interpreting files ad hoc.
  */
 import {buildFixedTierContext,resolveFixedTierPrice} from '../../lib/marketing_fixed_tier_pricing.mjs';
+import {buildMarketingObligationLedger} from '../../lib/marketing_obligation_ledger.mjs';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import crypto from 'node:crypto';
@@ -151,6 +152,7 @@ function parseArgs(argv) {
     biPortalInventoryTrend: BI_PORTAL_INVENTORY_TREND_DEFAULT,
     targetPlan: '',
     priceOverrides: '',
+    obligationLedger: process.env.SHEIN_BI_MARKETING_OBLIGATION_LEDGER || '',
     marketingCostMap: MARKETING_COST_MAP_DEFAULT,
     expectedMarketingCostMapSha256: '',
     targetPlanExplicit: false,
@@ -169,6 +171,7 @@ function parseArgs(argv) {
     if (a === '--date') args.date = String(argv[++i] || '').trim();
     else if (a === '--out-dir') args.outDir = path.resolve(argv[++i]);
     else if (a === '--max-age-hours') args.maxAgeHours = Number(argv[++i]);
+    else if (a === '--obligation-ledger') args.obligationLedger = path.resolve(argv[++i]);
     else if (a === '--bi-portal-data') args.biPortalData = path.resolve(argv[++i]);
     else if (a === '--bi-portal-links-data') args.biPortalLinksData = path.resolve(argv[++i]);
     else if (a === '--bi-portal-inventory-trend') args.biPortalInventoryTrend = path.resolve(argv[++i]);
@@ -3986,6 +3989,10 @@ function humanBlockerText(blocker) {
 
 function buildHumanSummary(report) {
   const actions = [];
+  if (report.obligationLedger?.counts.unfinished || report.obligationLedger?.counts.pendingOriginalSubmission) {
+    const c=report.obligationLedger.counts;
+    actions.push({level:'必须处理',text:`原报名名单共${c.total}项：普通核回${c.ordinaryConfirmed}项、限时兜底核回${c.limitedFallbackConfirmed}项、仍未完成${c.unfinished}项；${c.pendingOriginalSubmission}项保留原提交待核回。未完成项按清单逐条补报/兜底，不能排除或重复提交。`});
+  }
   const watches = [];
   const ok = [];
   const guard = report.knownOrdinaryActivityGuard || {};
@@ -4122,6 +4129,12 @@ function buildHumanSummary(report) {
 function buildMarkdown(report) {
   const summary = report.humanSummary || buildHumanSummary(report);
   const lines = [];
+  if (report.obligationLedger) {
+    const c=report.obligationLedger.counts;
+    lines.push(`报名原名单：${c.total}项 / ${c.uniqueLinks}个店铺+SKC；普通核回${c.ordinaryConfirmed}项，限时兜底核回${c.limitedFallbackConfirmed}项，仍未完成${c.unfinished}项。`);
+    for (const row of report.obligationLedger.rows.filter(r=>r.state==='unfinished' || r.ordinarySubmissionLocked)) lines.push(`- ${row.key}：${row.reason}；下一步：${row.nextAction}`);
+    lines.push('');
+  }
   lines.push(`# SHEIN 营销每日巡检 ${report.reportDate}`);
   lines.push('');
   lines.push('## 先看结论');
@@ -4252,6 +4265,17 @@ function num(value) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const now = args.now ? parseAnyDateTime(args.now) : new Date();
+  let obligationLedger=null;
+  if (args.obligationLedger) {
+    obligationLedger=JSON.parse((await fs.readFile(args.obligationLedger,'utf8')).replace(/^\uFEFF/,''));
+    if (obligationLedger.schemaVersion!=='marketing-obligation-ledger/v1' || !Array.isArray(obligationLedger.rows)
+      || obligationLedger.counts?.total!==obligationLedger.rows.length
+      || obligationLedger.counts?.unfinished!==obligationLedger.rows.filter(r=>r.state==='unfinished').length
+      || obligationLedger.complete!==(obligationLedger.counts.unfinished===0)) throw Error('invalid_marketing_obligation_ledger');
+    const current=buildMarketingObligationLedger({roster:obligationLedger.sourceRoster,observations:obligationLedger.observations,asOf:now});
+    if (current.rosterSha256!==obligationLedger.rosterSha256 || current.counts.total!==obligationLedger.counts.total) throw Error('marketing_obligation_roster_changed');
+    obligationLedger=current;
+  }
   const marketingCostMap = await readMarketingCostMap(
     args.marketingCostMap,
     args.expectedMarketingCostMapSha256,
@@ -5005,6 +5029,7 @@ async function main() {
   }
 
   const report = {
+    obligationLedger,
     schemaVersion: 1,
     mode: 'read-only',
     createdAt: now.toISOString(),
@@ -5093,6 +5118,7 @@ async function main() {
   };
   report.changesSincePrevious = buildChangesSincePrevious(report, loadPreviousGuardReport(args.date));
   const canNoAction = !report.blockers.length
+    && (!report.obligationLedger || (report.obligationLedger.complete && report.obligationLedger.counts.pendingOriginalSubmission===0))
     && !report.sourceWarnings.length
     && !report.unknownSources.length
     && !report.t3MarketingCandidates.length
@@ -5126,7 +5152,9 @@ async function main() {
     && !report.knownOrdinaryActivityGuard.belowTargetCount
     && !report.knownOrdinaryActivityGuard.evidenceIncompleteCount
     && !report.knownOrdinaryActivityGuard.missingFinalTargetPriceCount;
-  if (canNoAction) {
+  if (report.obligationLedger?.counts.unfinished || report.obligationLedger?.counts.pendingOriginalSubmission) {
+    report.noActionSummary = `报名原名单仍有${report.obligationLedger.counts.unfinished}项未完成覆盖，${report.obligationLedger.counts.pendingOriginalSubmission}项需核回原提交；按逐项下一动作继续补报或限时兜底。`;
+  } else if (canNoAction) {
     report.noActionSummary = '当前已有证据未显示需要动作；仅保持每日巡检。';
   } else if (!report.blockers.length) {
     report.noActionSummary = '无阻塞项，但存在观察/建议项或数据源提醒；请按报告查看是否需要人工确认。';
