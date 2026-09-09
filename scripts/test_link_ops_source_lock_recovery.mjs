@@ -90,6 +90,24 @@ async function detail(code = 'MODEL-A-ALIAS', options = {}) {
   }, {storeKey: 'BB', generatedAt: fetchedAt});
 }
 try {
+  await check('confirmed BY506 catalog identity permits recovery without merging BY506S', async () => {
+    const aliasRegistryJson = JSON.parse(await fs.readFile(new URL('../config/product_aliases.json', import.meta.url), 'utf8'));
+    const catalogJson = JSON.parse(await fs.readFile(new URL('../config/product_catalog.json', import.meta.url), 'utf8'));
+    const current = buildProductAliasContext({aliasRegistryJson, catalogJson});
+    const oldLoader = context.loadProductAliasContextSync;
+    const sameTask = {targets: {productRefs: ['BY506']}};
+    const sameDetail = {skcInfo: {supplierCode: 'BY-506空气炸锅'}, info: {supplierCode: 'BY-506空气炸锅'}};
+    try {
+      context.loadProductAliasContextSync = () => current;
+      assert.equal(context.sourceLockProductIdentity(sameTask, sameDetail).canonical, 'BY-506空气炸锅');
+      assert.notEqual(resolveExplicitProductAlias(current, 'BY506S').canonical, 'BY-506空气炸锅');
+      assert.throws(() => context.sourceLockProductIdentity(sameTask, {info: {supplierCode: 'BY-506S空气炸锅'}}), /身份不一致/);
+      const missing = buildProductAliasContext({aliasRegistryJson, catalogJson: {...catalogJson, standards: catalogJson.standards.filter(code => code !== 'BY-506空气炸锅')}});
+      context.loadProductAliasContextSync = () => missing;
+      assert.throws(() => context.sourceLockProductIdentity(sameTask, sameDetail), /身份不一致/);
+      assert.equal(resolveExplicitProductAlias(missing, 'BY506').blockers[0].code, 'PRODUCT_ALIAS_CANONICAL_NOT_IN_CATALOG');
+    } finally { context.loadProductAliasContextSync = oldLoader; }
+  });
   await fs.writeFile(auditFile, '');
   await detail();
   await check('cache hit never fetches live detail', async () => {
