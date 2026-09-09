@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import {fileURLToPath} from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -319,3 +320,45 @@ console.log(JSON.stringify({
     'repeatable-read mart publication and production regressions guarded',
   ],
 }, null, 2));
+
+// Exercise the actual COPY builder and collector without database access.
+{
+  const loader = read('scripts/load_bi_warehouse.mjs');
+  const declarations = loader.slice(loader.indexOf('function csvEscape('), loader.indexOf('function shellQuote('))
+    + loader.slice(loader.indexOf('async function upsertRows('), loader.indexOf('function sqlLiteral('))
+    + loader.slice(loader.indexOf('async function collectStores('), loader.indexOf('async function collectSales('));
+  let config = JSON.parse(read('config/stores.json'));
+  let sql = '';
+  const context = vm.createContext({
+    path, ROOT: root, int: value => Number(value),
+    readJson: async () => config,
+    runPsqlScript: async (_args, value) => { sql = value; },
+  });
+  vm.runInContext(declarations + '\nthis.collect = collectStores; this.upsert = upsertRows;', context);
+  const stores = await context.collect();
+  assert.equal(stores.length, config.stores.length);
+  for (const key of ['LG', 'HY']) {
+    const store = stores.find(row => row.store_key === key);
+    assert.equal(store.group_key, '');
+    assert.equal(store.enabled, false);
+  }
+  await context.upsert({}, 'dim.store', ['store_key', 'group_key', 'enabled'], ['store_key'], stores);
+  assert.match(sql, /COPY[^\n]*FORCE_NOT_NULL \("group_key"\)/,
+    'a blank BI-only group must load as empty text, not SQL NULL');
+  assert.match(sql, /\nLG,,false\n/);
+  assert.match(sql, /\nHY,,false\n/);
+  assert.match(sql, /ON CONFLICT \("store_key"\) DO UPDATE/);
+  await context.upsert({}, 'fact.fixture', ['id', 'optional_date'], ['id'], [{id: 'x', optional_date: ''}]);
+  assert.doesNotMatch(sql, /FORCE_NOT_NULL/);
+  assert.match(sql, /\nx,\n/, 'legacy optional-date NULL handling must not change');
+  for (const bad of [
+    {storeKey: 'ZZ', enabled: false, biEnabled: true},
+    {storeKey: 'ZZ', enabled: false, biEnabled: true, groupKey: null},
+    {storeKey: 'ZZ', enabled: true, groupKey: ''},
+    {storeKey: 'ZZ', enabled: false, groupKey: ''},
+  ]) {
+    config = {stores: [bad]};
+    await assert.rejects(context.collect(), /groupKey/);
+  }
+  console.log('BI-only empty group COPY contract: ok');
+}
