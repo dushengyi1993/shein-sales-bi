@@ -308,7 +308,8 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // PR125 adds inventory exclusion, source recovery, and historical journal tests.
 // PR144 adds workbook approval and permitted price variation regressions;
 // both are owned only by the deterministic runner, with no removals.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 102;
+// PR147 promotes the self-contained DOCX fixture test from manual to CI.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 103;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   - 1
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
