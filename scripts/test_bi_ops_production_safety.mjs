@@ -241,3 +241,6 @@ assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'DL',operation:'up
 assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'TZ',operation:'copy_product_draft'}).allowed,false);
 scopedConfig.safeWriteOperations.allowedOperationsByStore.LG = [];
 assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'LG',operation:'copy_product_draft'}).allowed,false);
+
+scopedConfig.safeWriteOperations.allowedOperationsByStore = null;
+assert.equal(safeWriteOperationAllowed(scopedConfig,{storeKey:'LG',operation:'copy_product_draft'}).allowed,false);

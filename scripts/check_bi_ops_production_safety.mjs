@@ -233,6 +233,7 @@ function auditConfig({safeWrite, whitelist, knownStores, tracked, openapiFile, w
     }
   }
 
+  if (safeWrite.valid !== true) errors.push('safeWriteOperations.allowedOperationsByStore is malformed');
   if (!safeWrite.enabled) {
     notes.push('safeWriteOperations.enabled=false；平台动作真实写总闸门关闭。');
   } else {
