@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import {createHash} from 'node:crypto';
+import {Writable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 
 import {__testHooks} from './serve_bi_portal.mjs';
@@ -45,6 +48,60 @@ async function waitFor(read, label, timeoutMs = 5_000) {
     await delay(10);
   }
   throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function testAbortedSnapshotReuse(tmpDir) {
+  const root = path.join(tmpDir, 'aborted-root');
+  const snapshotDir = path.join(tmpDir, 'aborted-snapshots');
+  await writeCore(path.join(root, 'data.json'), '2026-09-09T15:00:00.000Z', 2 * MiB);
+  const manager = createBiPortalCoreSnapshotCache({root, snapshotDir});
+  const leases = [];
+  const acquire = async gzip => {
+    const lease = await manager.acquire({gzip, evidence: null});
+    leases.push(lease);
+    return lease;
+  };
+  try {
+    for (const gzip of [false, true]) {
+      const aborted = await acquire(gzip);
+      const concurrent = await acquire(gzip);
+      const controller = new AbortController();
+      let received = 0;
+      await assert.rejects(pipeline(aborted.createReadStream(), new Writable({
+        write(chunk, encoding, callback) {
+          received += chunk.length;
+          controller.abort();
+          callback();
+        },
+      }), {signal: controller.signal}), {code: 'ABORT_ERR'});
+      aborted.release();
+      assert.ok(received > 0, 'abort must happen after the snapshot descriptor is open');
+      // A disconnected client must not invalidate either a concurrent lease or a later request.
+      for (const lease of [concurrent, await acquire(gzip)]) {
+        const digest = createHash('sha256');
+        let bytes = 0;
+        await pipeline(lease.createReadStream(), new Writable({
+          write(chunk, encoding, callback) {
+            bytes += chunk.length;
+            digest.update(chunk);
+            callback();
+          },
+        }));
+        assert.equal(bytes, lease.byteLength);
+        assert.equal(digest.digest('hex'), lease.sha256);
+        lease.release();
+      }
+      assert.equal(manager.status().requestLeases, 0);
+      assert.equal(manager.status().builds, 1, 'client abort must not force a snapshot rebuild');
+      assert.equal(manager.status().openHandles, 2);
+    }
+  } finally {
+    for (const lease of leases) lease.release();
+    const status = await manager.shutdown({timeoutMs: 5_000});
+    assert.equal(status.openHandles, 0);
+    assert.equal(status.retired, 0);
+    assert.deepEqual(await fs.readdir(snapshotDir), []);
+  }
 }
 
 async function testSnapshotReuseAndLifecycle(tmpDir) {
@@ -197,6 +254,12 @@ async function testSnapshotReuseAndLifecycle(tmpDir) {
   assert.equal(leasedRetiredHealth.ok, true,
     'a retired generation protected by a live request lease must remain healthy');
   assert.equal(leasedRetiredHealth.expectedOwnerOpenHandles, 4);
+  const retiredDigest = createHash('sha256');
+  await pipeline(generation1Lease.createReadStream(), new Writable({
+    write(chunk, encoding, callback) { retiredDigest.update(chunk); callback(); },
+  }));
+  assert.equal(retiredDigest.digest('hex'), generation1Lease.sha256,
+    'a retired snapshot must remain readable until its final request completes');
   generation1Lease.release();
   const leasedRetirementRecovered = await waitFor(() => {
     const status = leasedRetirementManager.status();
@@ -308,6 +371,7 @@ async function main() {
     assert.equal(env2.generatedAt, gen2);
     assert.equal(biPortalCoreEnvelopeScanCount(), 3, 'replacement triggered exactly scan + 1');
 
+    await testAbortedSnapshotReuse(tmpDir);
     await testSnapshotReuseAndLifecycle(tmpDir);
 
     console.log('test_bi_core_stream_reuse: passed (failure recovery, envelope singleflight, 200MiB unchanged generation build=1, cache-hit path-swap rejection, leased retirement health, owner/lease separation, startup prefix cleanup, terminal autonomous close retry)');

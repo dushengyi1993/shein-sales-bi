@@ -12911,7 +12911,12 @@ export function createBiPortalCoreSnapshotCache(options = {}) {
     : handle => handle.close();
   const createReadStream = typeof options.createReadStream === 'function'
     ? options.createReadStream
-    : (handle, stat) => handle.createReadStream({start: 0, end: Number(stat.size) - 1, autoClose: false});
+    // pipeline destroys its input on client abort; a FileHandle stream then closes
+    // even a shared handle with autoClose:false. Give each response its own fd.
+    // The request lease keeps this immutable snapshot path alive until completion.
+    : (_handle, stat, {entry, kind}) => fssync.createReadStream(entry.paths[kind === 'gzip' ? 1 : 0], {
+      start: 0, end: Number(stat.size) - 1, autoClose: true,
+    });
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   let started = false;
   let startPromise = null;
