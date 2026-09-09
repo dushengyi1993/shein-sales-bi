@@ -9,6 +9,7 @@ import {buildOwnerKnowledgeDistribution} from '../lib/owner_knowledge_distributi
 import {provisionBiSessionSecret} from './provision_bi_session_secret.mjs';
 import {createLinkOpsJsonRepository} from '../lib/link_ops_json_repository.mjs';
 import {createLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
+import {writeOpenApiProductCacheAtomically} from '../lib/shein_openapi_product_cache.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cliSource = await fs.readFile(path.join(ROOT, 'scripts', 'bi_ops_cli.mjs'), 'utf8');
@@ -187,6 +188,17 @@ const accessRolesFile = await writeJson('access_roles.json', {
   users: {},
 });
 const openapiConfigFile = await writeJson('openapi.json', {stores: {}});
+// The idempotent lock-source flow now checks exact-detail availability. Keep
+// this transport fixture offline with its own canonical, fresh source cache.
+const sourceCacheDir = path.join(tmpRoot, 'source-cache');
+const sourceFetchedAt = new Date().toISOString();
+await writeOpenApiProductCacheAtomically(path.join(sourceCacheDir, 'CX', 'latest.json'), {
+  ok: true, storeKey: 'CX', fetchedAt: sourceFetchedAt,
+  normalizedRows: [{storeKey: 'CX', skc: 'sb260619161490554120094', spu: 'v209901010001'}],
+  detailResults: [{ok: true, detailFetchedAt: sourceFetchedAt, info: {
+    spuName: 'v209901010001', skcInfoList: [{skcName: 'sb260619161490554120094', supplierCode: 'SM-961'}],
+  }}], detailFallbackResults: [],
+}, {storeKey: 'CX', generatedAt: sourceFetchedAt});
 const whitelistFile = await writeJson('whitelist.json', {enabled: false, rules: []});
 const htpasswdFile = path.join(tmpRoot, 'empty.htpasswd');
 await fs.writeFile(htpasswdFile, '', 'utf8');
@@ -258,6 +270,7 @@ const server = spawn(process.execPath, [
     SHEIN_BI_CODEX_BIN: process.execPath,
     SHEIN_BI_CODEX_ARGS_PREFIX_JSON: JSON.stringify([fakeCodexJs]),
     SHEIN_OPENAPI_CONFIG_FILE: openapiConfigFile,
+    SHEIN_OPENAPI_PRODUCT_CACHE_DIR: sourceCacheDir,
     SHEIN_BI_OPS_WRITE_WHITELIST_FILE: whitelistFile,
   },
   stdio: ['ignore', 'pipe', 'pipe'],

@@ -5339,7 +5339,7 @@ async function cacheSourceLockLiveDetail(source, detail) {
 async function verifySourceLockReplacement(task, next, args) {
   const oldSource = portalExactCopySourceLock(task);
   const source = portalExactCopySourceLock(next);
-  if (!source) return;
+  if (!oldSource || !source) return;
   const sameSource = oldSource?.sourceStore === source.sourceStore && oldSource?.sourceSkc === source.sourceSkc;
   let detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
   // An idempotent exact-source lock also hydrates a missing/expired detail.
