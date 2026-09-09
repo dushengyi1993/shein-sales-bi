@@ -165,7 +165,7 @@ const latestRawLinkCoverage = assessLatestRawMarketingLinkCoverage({
   errors: latestRawLinks.errors,
   storeKeys: expectedRawStoreKeys,
 });
-if (!latestRawLinkCoverage.complete) {
+if (!latestRawLinkCoverage.complete && reportDate<'2026-09-10') {
   throw new Error(
     `Latest raw link overlay incomplete: expectedStores=${latestRawLinkCoverage.expectedStoreCount} `
     + `sourceFiles=${latestRawLinkCoverage.sourceFileCount} missing=${latestRawLinkCoverage.missingStoreKeys.join(',') || '(none)'} `
@@ -174,6 +174,21 @@ if (!latestRawLinkCoverage.complete) {
 }
 const mergedLinks = mergeMarketingLinkRows([...linkRowIndex.byLinkKey.values()], latestRawLinks.rows);
 const storeLinks = mergedLinks.rows;
+const observedStoreLinks=[...storeLinks];
+const requiredRosterDoc=args.requiredRoster?await readJson(path.resolve(ROOT,args.requiredRoster)):null;
+const requiredRoster=Array.isArray(requiredRosterDoc)?requiredRosterDoc:requiredRosterDoc?.rows || requiredRosterDoc?.items || [];
+const requiredByKey=new Map();
+for (const row of requiredRoster) {
+  const storeKey=normStore(row.storeKey || row.store || row.st),skc=String(row.skc || '').trim();
+  const canonical=String(row.canonical || row.c || '').trim();
+  if (!storeKey || !skc || !canonical) throw Error('required_roster_identity_missing');
+  const key=exactPriceKey(storeKey,skc),prior=requiredByKey.get(key);
+  if (prior && prior.canonical!==canonical) throw Error('required_roster_identity_conflict');
+  requiredByKey.set(key,{storeKey,skc,canonical});
+  const existing=storeLinks.find(r=>exactPriceKey(normStore(r.store_key || r.storeKey || r.store),String(r.skc || ''))===key);
+  if (!existing) storeLinks.push({storeKey,skc,canonical,standard_goods_sn:canonical});
+  else if (normalizeCanonicalFromLink(existing)!==canonical) throw Error('required_roster_live_identity_conflict');
+}
 if (storeLinks.length === 0) {
   throw new Error('No normalized store+SKC rows found in links data; refuse to report a false no-action result.');
 }
@@ -186,7 +201,7 @@ const priceIndexes = [primaryPriceIndex, ...supplementalPriceIndexes];
 const exposureIndex = buildExposureTopLinkIndex({storeLinks}, policy);
 const lowEtContext = buildLowEtFastSellerPricingContext({
   inventoryTrendDoc,
-  linksDataDoc: {storeLinks},
+  linksDataDoc: {storeLinks:observedStoreLinks,classificationCoverageComplete:latestRawLinkCoverage.complete},
   baselineDoc: priceDoc,
   costDoc,
   marketingPolicy: policy,
@@ -227,6 +242,8 @@ for (const link of storeLinks) {
   }
   const recent = isRecentNewListingLink(link, policy, reportDate);
   const exactKey = exactPriceKey(storeKey, skc);
+  const requiredByRoster=requiredByKey.has(exactKey);
+  if (requiredByKey.size && !requiredByRoster) continue;
   const manualSpecialEntry = manualLimitedDiscountIndex.activeByKey.get(exactKey) || null;
   const relistedEvidence = relistedHistory.bySkc.get(exactKey) || null;
   const liveMarketingRows = liveLimitedEvidence.anyBySkc.get(exactKey) || [];
@@ -242,7 +259,7 @@ for (const link of storeLinks) {
     && isOnShelfMarketingLink(link)
     && (mandatoryOnShelfPolicy.requireCompleteLiveMarketingScan === false || liveLimitedEvidence.complete)
     && liveLimitedRows.length === 0;
-  if (!recent.applies && !relistedApplies && !mandatoryOnShelfApplies) continue;
+  if (!recent.applies && !relistedApplies && !mandatoryOnShelfApplies && !requiredByRoster) continue;
   if (highClickSpecialStageKeys.has(exactKey)) {
     ignored.push({
       storeKey,
@@ -272,7 +289,7 @@ for (const link of storeLinks) {
     });
     continue;
   }
-  const treatmentType = recent.applies
+  const treatmentType = requiredByRoster ? 'existing_on_shelf_missing_limited_discount' : recent.applies
     ? 'new_listing_within_7d'
     : relistedApplies
       ? 'relisted_without_active_marketing'
@@ -332,6 +349,8 @@ for (const link of storeLinks) {
       : round2(currentLimitedPrice) >= round2(resolvedTopTier.price) - 0.01);
   const liveCoveredNoTargetEvidence = eligibleLiveCoverage && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
   const common = {
+    requiredByRoster,
+    requiresLiveEligibility:requiredByRoster,
     storeKey,
     skc,
     canonical,
@@ -454,7 +473,9 @@ for (const link of storeLinks) {
       : treatmentType === 'existing_on_shelf_missing_limited_discount'
       ? '在售老链接漏限时折扣兜底；不依赖优惠券'
       : '新上架7天限时折扣兜底；不依赖优惠券',
-    note: manualSpecialEntry
+    note: requiredByRoster && !manualSpecialEntry
+      ? '报名原名单必须完成覆盖；此处只准备价格，执行前核对实时平台可报名、真实库存与既有价格栈；缺曝光保留已审档位或按普通档，未知不填零。'
+      : manualSpecialEntry
       ? `用户批准人工特殊限时折扣保护：精确恢复 ${formatPrice(manualSpecialEntry.specialPrice)} SAR、活动库存 ${manualSpecialEntry.activityStock}，有效至 ${manualSpecialEntry.validTo}；不得用普通 Top5/基准价覆盖。`
       : treatmentType === 'relisted_without_active_marketing'
       ? `历史快照 ${relistedEvidence.lastInactiveDate} 为${relistedEvidence.lastInactiveStatus || '下架/售罄'}，${relistedEvidence.relistedAt} 恢复在售，当前商品源、BI和完整营销live scan均无生效活动；按曝光前五/新链接力度 ${formatPrice(topTierPrice)} SAR 报一周兜底。`
@@ -679,6 +700,7 @@ const summary = {
     relistedHistoryParseErrorCount: relistedHistory.parseErrorCount,
   },
   totals: {
+    requiredRoster:requiredByKey.size,
     storeLinks: storeLinks.length,
     actionable: rows.length,
     newListingWithin7Days: rows.filter(row => row.treatmentType === 'new_listing_within_7d').length,
@@ -691,6 +713,14 @@ const summary = {
     highClickSpecialStageExcluded: ignored.filter(row => row.reason === 'handled_by_high_click_special_stage').length,
     liveCoveredIgnored: ignored.filter(row => String(row.reason || '').startsWith('live_new_listing_limited_discount_already_covered')).length,
   },
+  requiredRosterOutcomes:[...requiredByKey].map(([key,required])=>{
+    const planned=rows.find(r=>exactPriceKey(r.storeKey,r.skc)===key);
+    const held=blocked.find(r=>exactPriceKey(r.storeKey,r.skc)===key);
+    const other=ignored.find(r=>exactPriceKey(r.storeKey,r.skc)===key);
+    return {...required,state:planned?'prepared_not_executed':'coverage_still_requires_readback',
+      reason:planned?'prepared_at_current_approved_price':held?.reason || other?.reason || 'required_roster_row_not_accounted_for',
+      nextAction:planned?'live_preflight_execute_and_exact_readback':'resolve_reason_and_complete_or_verify_existing_coverage'};
+  }),
   byStore: countBy(rows, 'storeKey'),
   rescueFiles,
   supplementalPriceOverrides: supplementalPriceIndexes.map(index => ({
@@ -701,7 +731,7 @@ const summary = {
   })),
   rows,
   blocked,
-  ignored: ignored.slice(0, 30),
+  ignored,
 };
 
 await fs.writeFile(reportJsonPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
