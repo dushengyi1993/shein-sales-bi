@@ -127,6 +127,7 @@ import {
   DESCRIPTION_PUBLISH_LANGUAGES,
   DESCRIPTION_SOURCE_PROOF,
   DESCRIPTION_SOURCE_PROOF_S9,
+  DESCRIPTION_SOURCE_PROOF_HEADING9,
   DESCRIPTION_SOURCE_PROOF_DOCX,
   EMPTY_DESCRIPTION_CONFIRM_TEXT,
   verifyDescriptionMaterialAgainstDocx,
@@ -5338,24 +5339,35 @@ async function cacheSourceLockLiveDetail(source, detail) {
 async function verifySourceLockReplacement(task, next, args) {
   const oldSource = portalExactCopySourceLock(task);
   const source = portalExactCopySourceLock(next);
-  if (!oldSource || oldSource.sourceStore === source?.sourceStore && oldSource.sourceSkc === source?.sourceSkc) return;
+  if (!source) return;
+  const sameSource = oldSource?.sourceStore === source.sourceStore && oldSource?.sourceSkc === source.sourceSkc;
+  let detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
+  // An idempotent exact-source lock also hydrates a missing/expired detail.
+  // patchLinkOpsTask has already rejected bound, submitted and active tasks;
+  // preserve their original source and all task evidence on a cache refresh.
+  if (sameSource && detail?.info && !detail.conflict && detail.matchedSkcName === source.sourceSkc) return;
   const historical = await descriptionBindingHistoricalAuditEvidence(args.auditFile, task.id, [], {strictSourceLock: true});
   if (!historical.ok) throw new Error(`来源恢复历史审计不可证明未写：${historical.reasons.join(', ')}`);
-  let detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
+  let hydrated = false;
   if (!detail) {
     const live = await readSourceLockLiveDetail(source);
     sourceLockProductIdentity(task, live); // No cache mutation before same-product proof.
     await cacheSourceLockLiveDetail(source, live);
+    hydrated = true;
     detail = await loadOpenApiProductDetail(source.sourceStore, source.sourceSkc, {includeConflict: true});
   }
   if (!detail?.info || detail.conflict || detail.matchedSkcName !== source.sourceSkc) {
     throw new Error('来源恢复缺少新来源精确商品详情或详情身份冲突，不能替换。');
   }
   const identity = sourceLockProductIdentity(task, detail);
-  const audit = next.history.findLast(row => row.event === 'source_lock_changed');
-  audit.productIdentity = {
+  const productIdentity = {
     ...identity, sourceDetailLock: compactSourceDetailLock(detail.sourceDetailLock),
   };
+  if (!sameSource) {
+    const audit = next.history.findLast(row => row.event === 'source_lock_changed');
+    audit.productIdentity = productIdentity;
+  }
+  return hydrated ? {sourceStore: source.sourceStore, sourceSkc: source.sourceSkc, productIdentity} : null;
 }
 
 function patchLinkOpsTask(task, body, actor, req) {
@@ -7848,6 +7860,7 @@ function decodeReviewedDescriptionSourceFile(value) {
 function descriptionSourceProofForSection(sectionUsed) {
   const normalized = String(sectionUsed || 's09').trim().toLowerCase();
   if (normalized === 'docx') return DESCRIPTION_SOURCE_PROOF_DOCX;
+  if (normalized === 'heading9') return DESCRIPTION_SOURCE_PROOF_HEADING9;
   return normalized === 's9' ? DESCRIPTION_SOURCE_PROOF_S9 : DESCRIPTION_SOURCE_PROOF;
 }
 
@@ -20705,10 +20718,11 @@ async function main() {
           }
           current.tasks[idx] = access.record;
           let updated;
+          let sourceDetailHydration = null;
           try {
             updated = patchLinkOpsTask(access.record, body, actor, req);
             if (String(body.event || body.action || '') === 'lock_source_skc_cli') {
-              await verifySourceLockReplacement(access.record, updated, args);
+              sourceDetailHydration = await verifySourceLockReplacement(access.record, updated, args);
             }
           } catch (err) {
             const error = err?.message || String(err || 'Invalid patch');
@@ -20754,6 +20768,7 @@ async function main() {
               actor,
               ...requestMeta(req),
               task: {id, event: 'lock_source_skc_cli', status: persisted.status, progress: normalizeProgress(persisted.progress, 0)},
+              sourceDetailHydration,
               sourceChange: updated !== access.record
                 ? asArray(persisted.history).findLast(row => row.event === 'source_lock_changed') || null
                 : null,

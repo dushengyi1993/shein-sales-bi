@@ -8,6 +8,7 @@ const tests = [
   'scripts/marketing/test_price_variation.mjs',
   'scripts/test_marketing_historical_journal_quarantine.mjs',
   'scripts/test_link_ops_source_lock_recovery.mjs',
+  'scripts/test_link_ops_docx_ingestion.mjs',
   'scripts/test_inventory_dry_run_exclusion_pipeline.mjs',
   'scripts/test_pending_discuss_shared_delivery_entry.mjs',
   'scripts/test_cloud_team_report_process_lifecycle.mjs',

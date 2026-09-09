@@ -238,7 +238,43 @@ assert.throws(
   error => error?.code === 'DESCRIPTION_DOCX_SECTION_INVALID',
 );
 
-console.log('link_ops_docx_ingestion: fixed and reviewed-V3 OOXML, directory/thumbnail compatibility, byte SHA/material binding, title-only, corrupt, macro, external-link, embedded-object, malformed-XML, and section fail-closed checks passed');
+const enTitle = reviewedV3.extracted.title.en;
+const arTitle = reviewedV3.extracted.title.ar;
+const wrapDocument = body => `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr/></w:body></w:document>`;
+const metadata = '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wpsCustomData="http://www.wps.cn/officeDocument/2013/wpsCustomData"><mc:AlternateContent><mc:Choice Requires="wpsCustomData"><wpsCustomData:typoFeatureVersion val="1"/></mc:Choice></mc:AlternateContent></w:settings>';
+const directBody = `${plainParagraph(['Main Title 3｜reviewed'])}${reviewedCopyBox([enTitle])}${reviewedCopyBox([arTitle])}
+${plainParagraph(['9. 三语核心卖点'])}${plainParagraph(['三种语言独立展示，便于直接复制；每种语言 5 条，逐行事实对应，卖点内容本身不加序号、不加项目符号。'])}
+${reviewedCopyBox(enLines)}${reviewedCopyBox(arLines)}${reviewedCopyBox(zhLines)}${plainParagraph(['10. next'])}`;
+const paragraphBody = `${plainParagraph(['Main Title 3'])}${plainParagraph(['英文标题'])}${plainParagraph([enTitle])}${plainParagraph(['阿拉伯语标题'])}${plainParagraph([arTitle])}
+${plainParagraph(['9. 三语核心卖点'])}${plainParagraph(['English Selling Points'])}${enLines.map(line => plainParagraph([line])).join('')}
+${plainParagraph(['Arabic Selling Points'])}${arLines.map(line => plainParagraph([line])).join('')}${plainParagraph(['中文卖点'])}${zhLines.map(line => plainParagraph([line])).join('')}${plainParagraph(['10. next'])}`;
+const ordinaryFormatting = '<w:tbl><w:tblPr><w:tblBorders><w:insideH/><w:insideV/><w:left/><w:right/></w:tblBorders><w:tblCellMar><w:left/><w:right/></w:tblCellMar><w:tblInd/></w:tblPr><w:tr><w:tblPrEx/><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:pPr><w:keepNext/></w:pPr><w:bookmarkStart w:id="1"/><w:bookmarkEnd w:id="1"/></w:p></w:tc></w:tr></w:tbl>';
+for (const [name, body] of [['direct', directBody], ['paragraph', paragraphBody]]) {
+  const document = wrapDocument(body + reviewedCopyBox(['Main Title 3']) + ordinaryFormatting);
+  const bytes = zip(baseEntries({document, extra: [['word/settings.xml', metadata], ['docProps/thumbnail.wmf', Buffer.from([0xd7, 0xcd, 0xc6, 0x9a])]]}));
+  const opts = {sourceFileBasename: `${name}.docx`, section: 'auto'};
+  const result = verifyDescriptionMaterialAgainstDocx(bytes, opts);
+  assert.deepEqual(result.extracted.title, {en: enTitle, ar: arTitle});
+  for (const [language, lines] of [['en', enLines], ['ar', arLines], ['zh-cn', zhLines]]) assert.deepEqual(result.material.rows[language].lines, lines);
+  assert.deepEqual(verifyDescriptionMaterialAgainstDocx(bytes, {...opts, material: result.material}).material.rows, result.material.rows);
+  const drift = structuredClone(result.material); drift.rows.en.lines[0] += ' changed';
+  assert.throws(() => verifyDescriptionMaterialAgainstDocx(bytes, {...opts, material: drift}));
+  assert.throws(() => verifyDescriptionMaterialAgainstDocx(bytes, {...opts, material: result.material, sourceFileSha256: '0'.repeat(64)}), error => error.code === 'DESCRIPTION_SOURCE_SHA_MISMATCH');
+}
+for (const body of [
+  directBody.replace(reviewedCopyBox(zhLines), reviewedCopyBox(enLines)),
+  directBody.replace(reviewedCopyBox(enLines), reviewedCopyBox([...enLines, 'sixth'])),
+  directBody.replace(reviewedCopyBox(arLines), reviewedCopyBox([...arLines.slice(0, 4), '中文'])),
+  directBody.replace(reviewedCopyBox(enLines), plainParagraph(enLines)),
+  paragraphBody.replace(plainParagraph(['Arabic Selling Points']), plainParagraph(['sixth']) + plainParagraph(['Arabic Selling Points'])),
+  paragraphBody.replace(plainParagraph([enLines[0]]), plainParagraph([enLines[0], ''])),
+  paragraphBody.replace('Arabic Selling Points', 'English Selling Points'),
+  paragraphBody + plainParagraph(['Main Title 3']),
+]) assert.throws(() => verifyDescriptionMaterialAgainstDocx(zip(baseEntries({document: wrapDocument(body)})), {sourceFileBasename: 'invalid.docx'}));
+for (const value of [metadata.replace('val="1"', 'val="x"'), metadata.replace('</mc:Choice>', '<w:object/></mc:Choice>'), metadata.replace('</mc:AlternateContent>', '<mc:Fallback/></mc:AlternateContent>')]) {
+  assert.throws(() => verifyDescriptionMaterialAgainstDocx(zip(baseEntries({document: wrapDocument(directBody), extra: [['word/settings.xml', value]]})), {sourceFileBasename: 'invalid.docx'}), error => error.code === 'DESCRIPTION_DOCX_FORBIDDEN_CONTENT');
+}
+console.log('link_ops_docx_ingestion: fixed and reviewed layouts, ordinary metadata, exact source/row locks and incomplete/ambiguous structure checks passed');
 
 const rtlDocument = reviewedV3DocumentXml().replaceAll('<w:p>', '<w:p><w:pPr><w:bidi w:val="1"/></w:pPr>').replaceAll('<w:r>', '<w:r><w:rPr><w:rtl/></w:rPr>');
 const rtlBytes = zip(baseEntries({document:rtlDocument}));
