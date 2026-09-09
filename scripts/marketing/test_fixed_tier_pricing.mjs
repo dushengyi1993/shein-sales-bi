@@ -4,7 +4,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
-import {loadFixedTierStandard, fixedTierItem, buildFixedTierContext, resolveFixedTierPrice, applyFixedTierPrice, verifyFixedTierBinding,applyPlatformPriceConstraint,verifyPlatformPriceAudit} from '../../lib/marketing_fixed_tier_pricing.mjs';
+import {loadFixedTierStandard, fixedTierItem, fullTierCost, buildFixedTierContext, resolveFixedTierPrice, applyFixedTierPrice, verifyFixedTierBinding,applyPlatformPriceConstraint,verifyPlatformPriceAudit} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import {buildLowEtFastSellerPricingContext, applyLowEtFastSellerPricePullback, revalidateLowEtFastSellerPricePullback} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
 import {buildHighClickLowConversionSpecialAudit} from '../../lib/marketing_high_click_special_policy.mjs';
 
@@ -12,6 +12,41 @@ const standard=loadFixedTierStandard();
 assert.equal(standard.doc.items.length,8);
 const expected=[[84,88,92],[241,241,250],[141,145,149],[58,62,66],[81,86,91],[76,81,86],[132,138,144],[285,293,306]];
 const reportDate='2026-09-08';
+const aliasCanonical='SK-GT-3065蒸汽熨烫机';
+const aliasCosts={trueCostMap:{
+ 'SK-GT-3065':{unitCostSar:54.4737},
+ 'SKGT3065':{unitCostSar:54.4737},
+ [aliasCanonical]:{unitCostSar:54.4737,storageUnitCostSar:.6201},
+ 'SKGT3065蒸汽熨烫机':{unitCostSar:54.4737,storageUnitCostSar30d:.6201},
+ 'SK-GT-3065W':{unitCostSar:55,storageUnitCostSar:2}
+},costMap:{'SK-GT-3065':54.4737}};
+const aliasCost=fullTierCost(aliasCanonical,aliasCosts);
+assert.equal(aliasCost.complete,true);
+assert.equal(aliasCost.costKey,aliasCanonical);
+assert.ok(Math.abs(aliasCost.fullUnitCostSar-55.0938)<1e-10);
+assert.deepEqual(fullTierCost(aliasCanonical,{...aliasCosts,trueCostMap:Object.fromEntries(Object.entries(aliasCosts.trueCostMap).reverse())}),aliasCost);
+assert.deepEqual(fullTierCost('SKGT3065',aliasCosts),fullTierCost('SKGT3065',{...aliasCosts,trueCostMap:Object.fromEntries(Object.entries(aliasCosts.trueCostMap).reverse())}));
+for(const [alias,field,value] of [['SKGT3065蒸汽熨烫机','unitCostSar',56],['SKGT3065蒸汽熨烫机','storageUnitCostSar30d',1],['SKGT3065','unitCostSar',56]]) {
+ const conflicting=structuredClone(aliasCosts);conflicting.trueCostMap[alias][field]=value;
+ assert.equal(fullTierCost(aliasCanonical,conflicting).reason,'missing_or_ambiguous_product_cost');
+}
+for(const trueCostMap of [
+ {'SKGT3065':{unitCostSar:54},'SK-GT-3065':{unitCostSar:54}},
+ {'SKGT3065':{unitCostSar:54},'SK-GT-3065':{storageUnitCostSar:1}},
+ {'SKGT3065':{unitCostSar:0,storageUnitCostSar:1}},
+ {'SKGT3065':{unitCostSar:54,storageUnitCostSar:-1}}
+]) {
+ const incomplete=fullTierCost(aliasCanonical,{trueCostMap});
+ assert.equal(incomplete.complete,false);assert.equal(incomplete.fullUnitCostSar,null);
+}
+assert.equal(fullTierCost(aliasCanonical,{}).complete,false);
+const aliasRows=peers(aliasCanonical);
+const aliasContext=buildFixedTierContext({storeLinks:aliasRows},{reportDate,costDoc:aliasCosts});
+const aliasApplied=applyFixedTierPrice({...aliasRows[6],platformMaximumActivityPrice:91.88},aliasContext);
+assert.equal(aliasApplied.applied,true);
+assert.equal(aliasApplied.row.fixedTierPricing.platform.actualPrice,91.88);
+assert.ok(Math.abs(aliasApplied.row.fixedTierPricing.platform.actualMargin-(91.88-55.0938)/91.88)<1e-10);
+assert.equal(verifyFixedTierBinding(aliasApplied.row,aliasContext).ok,true);
 let checks=0;
 function peers(canonical) {return Array.from({length:7},(_,i)=>({storeKey:'S'+i,skc:'k'+i,canonical,standard_goods_sn:canonical,is_on_shelf:true,c7_eps_uv:2900-i*100,c7_goods_uv:10,c7_cart_uv:0,c7_sale_cnt:0,shelf_age_days:30}));}
 for (const [index,item] of standard.doc.items.entries()) {
