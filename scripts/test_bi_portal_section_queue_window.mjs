@@ -316,10 +316,58 @@ async function runWindowCase({
   }
 }
 
+async function testLargeReconciliationReports() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bi-enqueue-large-'));
+  const fixture = path.join(dir, 'root');
+  fs.mkdirSync(path.join(fixture, 'scripts', 'lib'), {recursive: true});
+  fs.copyFileSync(path.join(root, 'scripts', 'enqueue_bi_portal_sections.sh'),
+    path.join(fixture, 'scripts', 'enqueue_bi_portal_sections.sh'));
+  // The fixture owns all files and supplies only lock setup, never production configuration.
+  fs.writeFileSync(path.join(fixture, 'scripts', 'lib', 'shared_lock.sh'),
+    'prepare_shared_lock_file() { mkdir -p -- "$(dirname -- "$1")"; touch -- "$1"; }\n');
+  fs.writeFileSync(path.join(fixture, 'scripts', 'manage_bi_portal_section_queue.mjs'), `
+import fs from 'node:fs';
+const args=process.argv.slice(2),get=key=>args[args.indexOf(key)+1];
+const phase=get('--phase'),mode=process.env.FIXTURE_RECONCILE_MODE;
+fs.appendFileSync(process.env.SHEIN_BI_ROOT+'/phases.txt',phase+'\\n');
+const snapshotHash='a'.repeat(64),validationResult=Buffer.from('valid').toString('base64url');
+const padding='x'.repeat(1024*1024);
+if(phase==='snapshot') {
+  if(mode==='malformed') console.log('{');
+  else console.log(JSON.stringify({ok:true,readyForValidation:mode!=='queued',snapshotHash,padding}));
+} else if(phase==='validate') {
+  if(get('--snapshot-hash')!==snapshotHash) throw Error('snapshot hash drift');
+  console.log(JSON.stringify({ok:true,validationResult,padding}));
+} else if(phase==='commit') {
+  if(get('--snapshot-hash')!==snapshotHash||get('--validation-result')!==validationResult) throw Error('validation binding drift');
+  console.log(JSON.stringify({ok:true,completed:true}));
+} else throw Error('unexpected phase');
+`);
+  try {
+    for (const mode of ['ready', 'queued', 'malformed']) {
+      fs.writeFileSync(path.join(fixture, 'phases.txt'), '');
+      const command = `env SHEIN_BI_ROOT=${shellQuote(toPosixPath(fixture))} FIXTURE_RECONCILE_MODE=${shellQuote(mode)} bash ${shellQuote(toPosixPath(path.join(fixture, 'scripts', 'enqueue_bi_portal_sections.sh')))} reconcile-generation --sections orders --core-generated-at G1`;
+      const run = await spawnCapture('bash', ['-c', command]);
+      assert.equal(run.timedOut, false);
+      assert.equal(run.status, mode === 'malformed' ? 70 : 0, `${mode}: ${run.stderr}`);
+      assert.deepEqual(fs.readFileSync(path.join(fixture, 'phases.txt'), 'utf8').trim().split('\n'),
+        mode === 'ready' ? ['snapshot', 'validate', 'commit'] : ['snapshot']);
+      if (mode === 'ready') assert.equal(JSON.parse(run.stdout).completed, true);
+      if (mode === 'queued') assert.equal(JSON.parse(run.stdout).readyForValidation, false);
+    }
+  } finally {
+    assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir()));
+    assert(path.basename(dir).startsWith('bi-enqueue-large-'));
+    assert(!fs.lstatSync(dir).isSymbolicLink());
+    fs.rmSync(dir, {recursive: true, force: true});
+  }
+}
+
 const tools = spawnSync('bash', ['-lc', 'command -v flock >/dev/null && command -v mktemp >/dev/null && command -v node >/dev/null && command -v timeout >/dev/null'], {encoding: 'utf8'});
 if (tools.status !== 0) {
   console.log('SKIP bi_portal_section_queue_window: worker integration needs bash+flock+mktemp+node');
 } else {
+  await testLargeReconciliationReports();
   const unscheduledEntry = await runWindowCase({
     name: 'unscheduled-direct-entry',
     hour: '14',
