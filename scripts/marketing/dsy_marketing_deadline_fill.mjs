@@ -35,6 +35,7 @@ import {
   buildLowEtFastSellerPricingContext,
 } from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
 import {assertCloudMarketingWriteGate} from '../../lib/cloud_marketing_write_gate.mjs';
+import {resolveOrdinaryTierInputs} from '../../lib/marketing_editor_fields.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -1946,7 +1947,7 @@ async function collectVisibleRows(cdp, sessionId) {
       if (!minDiscount && discountMatches.length) minDiscount = Math.max(...discountMatches);
       if (!minDiscount) minDiscount = 10;
       let editMode = 'price';
-      if (radioInputs.length >= 2 && /VIP档|普通档/.test(discountText)) editMode = 'vip_discount';
+      if (radioInputs.length >= 1 && /VIP档|普通档/.test(discountText)) editMode = 'vip_discount';
       if (!idx || !skc || (textInputs.length < 1 && editMode !== 'vip_discount')) continue;
       rows.push({idx, key: skc.toLowerCase(), skc, supplierNo, currentPrice, minDiscount, editMode, goodsName: info.slice(0, 200)});
     }
@@ -1956,6 +1957,7 @@ async function collectVisibleRows(cdp, sessionId) {
 
 async function fillVisibleRows(cdp, sessionId, fills) {
   return await evalJs(cdp, sessionId, `
+    const resolveTierInputs = ${resolveOrdinaryTierInputs.toString()};
     const fills = new Map(__arg.map(x => [String(x.key || x.skc || x.idx).toLowerCase(), x]));
     const bySkc = new Map(__arg.filter(x => x.skc).map(x => [String(x.skc).toLowerCase(), x]));
     const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -1995,7 +1997,7 @@ async function fillVisibleRows(cdp, sessionId, fills) {
       const textInputs = inputs.filter(x => /^(text|number)$/.test(x.type || 'text'));
       const radioInputs = inputs.filter(x => x.type === 'radio');
       const discountText = cells.join(' ');
-      const vipMode = radioInputs.length >= 2 && /VIP档|普通档/.test(discountText);
+      const vipMode = radioInputs.length >= 1 && /VIP档|普通档/.test(discountText);
       if (textInputs.length < 1 && !vipMode) continue;
       const baseFill = fills.get(key) || bySkc.get(key);
       const f = {...baseFill};
@@ -2006,14 +2008,16 @@ async function fillVisibleRows(cdp, sessionId, fills) {
         f.targetPriceText = floor2(rowCurrentPrice * (1 - f.discountPct / 100)).toFixed(2);
       }
       if (f.editMode === 'vip_discount' || vipMode) {
-        clickInput(radioInputs[1] || radioInputs[0]);
+        const selectedTier = radioInputs[1] || radioInputs[0];
+        if (!selectedTier || selectedTier.disabled) throw new Error('ordinary_tier_radio_unavailable:' + skc);
+        if (!selectedTier.checked) clickInput(selectedTier);
         await sleep(180);
-        const freshTextInputs = [...tr.querySelectorAll('input')].filter(x => /^(text|number)$/.test(x.type || 'text'));
-        if (!freshTextInputs.length) continue;
-        const discountInput = freshTextInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || freshTextInputs[0];
+        const tierInputs = resolveTierInputs(tr.querySelectorAll('input'));
+        if (!selectedTier.checked || !tierInputs || tierInputs.discountInput.disabled || tierInputs.discountInput.readOnly
+          || !tierInputs.discountInput.getClientRects().length) throw new Error('ordinary_tier_inputs_unavailable:' + skc);
+        const {discountInput, priceInput} = tierInputs;
         setNativeValue(discountInput, String(f.discountPct));
         await sleep(160);
-        const priceInput = freshTextInputs.find(x => String(x.className || '').includes('ant-input-number-input')) || freshTextInputs[1];
         done.push({
           idx,
           key,
@@ -2026,13 +2030,13 @@ async function fillVisibleRows(cdp, sessionId, fills) {
           inheritedSkc: !explicitSkc,
         });
       } else {
+        if (textInputs.length < 2 || textInputs.length % 2 !== 0) throw new Error('ordinary_price_input_pairs_unavailable:' + skc);
         const pairs = [];
         for (let i = 0; i < textInputs.length; i += 2) {
           const priceInput = textInputs[i];
-          const discountInput = textInputs[i + 1] || inputs[i + 1];
+          const discountInput = textInputs[i + 1];
           if (priceInput && discountInput) pairs.push({priceInput, discountInput});
         }
-        if (!pairs.length) pairs.push({priceInput: textInputs[0], discountInput: textInputs[1] || inputs[1]});
         for (const pair of pairs) {
           setNativeValue(pair.discountInput, String(f.discountPct));
           await sleep(30);
@@ -2226,6 +2230,7 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
       await scrollTo(cdp, sessionId, scanTop);
       await sleep(sweep === 1 ? 200 : 350);
       const rows = await evalJs(cdp, sessionId, `
+      const resolveTierInputs = ${resolveOrdinaryTierInputs.toString()};
       const rows = [];
       let lastSkc = '';
       for (const tr of document.querySelectorAll('tr')) {
@@ -2244,12 +2249,16 @@ async function fillEditPage(cdp, sessionId, storeKey, activityId, allowSkcs = nu
         const radioInputs = inputs.filter(x => x.type === 'radio');
         if (!idx || textInputs.length < 1) continue;
         const discountText = cells.join(' ');
-        const editMode = radioInputs.length >= 2 && /VIP档|普通档/.test(discountText) ? 'vip_discount' : 'price';
+        const editMode = radioInputs.length >= 1 && /VIP档|普通档/.test(discountText) ? 'vip_discount' : 'price';
         if (editMode === 'vip_discount') {
-          const discountInput = textInputs.find(x => !String(x.className || '').includes('ant-input-number-input')) || textInputs[0];
-          const priceInput = textInputs.find(x => String(x.className || '').includes('ant-input-number-input')) || textInputs[1];
+          const tierInputs = resolveTierInputs(inputs);
+          if (!tierInputs || !radioInputs.some(x => x.checked)) throw new Error('ordinary_tier_readback_inputs_unavailable:' + skc);
+          const {discountInput, priceInput} = tierInputs;
           rows.push({idx, key, skc, sku, currentPrice, price: priceInput?.value || '', discount: String(parseInt(discountInput?.value || '', 10)), editMode});
-        } else rows.push({idx, key, skc, sku, currentPrice, price: textInputs[0].value, discount: String(parseInt((textInputs[1] || inputs[1]).value, 10)), editMode});
+        } else {
+          if (textInputs.length < 2 || textInputs.length % 2 !== 0) throw new Error('ordinary_price_readback_pairs_unavailable:' + skc);
+          rows.push({idx, key, skc, sku, currentPrice, price: textInputs[0].value, discount: String(parseInt(textInputs[1].value, 10)), editMode});
+        }
       }
       return rows;
       `);

@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import vm from 'node:vm';
+import {resolveOrdinaryTierInputs} from '../lib/marketing_editor_fields.mjs';
 import {validateOrdinaryActivityEnrollmentReadback} from '../lib/marketing_activity_inventory_integration.mjs';
 import {
   scopeOrdinaryEnrollmentReadbackToApprovedRows,
@@ -142,5 +144,111 @@ assert.match(pricing, /currentLockedPriceKeys instanceof Set/,
   'explicit price overrides must require a current locked-plan key set');
 assert.match(pricing, /user_explicit_current_price_override_invalid_target/,
   'explicit price override target mismatches must fail closed');
+
+// Execute the actual browser bodies with disposable DOM fixtures. No browser,
+// profile, configuration, network or business runner is initialized by this test.
+function browserFunction(name, nextName, evaluate) {
+  const start = deadlineFill.indexOf(`async function ${name}(`);
+  const end = deadlineFill.indexOf(`async function ${nextName}(`, start);
+  assert(start >= 0 && end > start);
+  return new Function('evalJs', 'resolveOrdinaryTierInputs',
+    `${deadlineFill.slice(start, end)}; return ${name};`)(evaluate, resolveOrdinaryTierInputs);
+}
+const verifyBodyStart = deadlineFill.indexOf('      const rows = await evalJs(cdp, sessionId, `',
+  deadlineFill.indexOf('const verifySteps ='));
+const verifyBodyEnd = deadlineFill.indexOf('      `);', verifyBodyStart);
+assert(verifyBodyStart >= 0 && verifyBodyEnd > verifyBodyStart);
+const makeVerifyBody = new Function('resolveOrdinaryTierInputs', 'return `'
+  + deadlineFill.slice(verifyBodyStart + '      const rows = await evalJs(cdp, sessionId, `'.length, verifyBodyEnd)
+  + '`;');
+
+function editorFixture({current = 161, radios = 1, missingDiscount = false, disabledDiscount = false} = {}) {
+  const skc = 'sb260102124269230805635';
+  const writes = [];
+  let controls;
+  class Input {
+    constructor(type, id, className, value, visible = true) {
+      Object.assign(this, {type, id, className, _value: value, visible, checked: false, disabled: false, readOnly: false});
+    }
+    get value() { return this._value; }
+    set value(value) {
+      writes.push({id: this.id, value});
+      this._value = value;
+      if (this === discount && radios) price._value = (Math.floor(current * (1 - Number(value) / 100) * 100 + 1e-9) / 100).toFixed(2);
+    }
+    getClientRects() { return this.visible ? [{}] : []; }
+    dispatchEvent() {}
+    click() {
+      for (const radio of radioInputs) radio.checked = false;
+      this.checked = true;
+      controls = [...radioInputs, ...(missingDiscount ? [] : [discount]), price];
+    }
+  }
+  const price = new Input('text', 'goods_info_list_0_enroll_site_info_list_0_enroll_cost_price', 'ant-input-number-input', '', !radios);
+  const discount = new Input('text', 'goods_info_list_0_enroll_site_info_list_0_enroll_cost_price_rate', 'ant-input', '1');
+  discount.disabled = disabledDiscount;
+  const radioInputs = Array.from({length: radios}, () => new Input('radio', '', 'ant-radio-input', 'on'));
+  controls = radios ? [...radioInputs, price] : [price, discount];
+  const cells = ['', '1', `SKC: ${skc}\n供方货号: TEST`, 'SKU: TestSku', `SAR${current.toFixed(2)}`,
+    radios ? (radios === 1 ? '普通档\n1%价格降幅' : 'VIP档\n普通档\n1%价格降幅') : '降幅要求：1%'];
+  const row = {innerText: cells.join('\n'), querySelectorAll(selector) {
+    if (selector === 'input') return controls;
+    if (selector === 'td') return cells.map(innerText => ({innerText}));
+    throw new Error('Unexpected fixture query: ' + selector);
+  }};
+  const evaluate = async (_cdp, _session, body, argument) => vm.runInNewContext(
+    `(async () => {${body}})()`, {
+      __arg: argument,
+      document: {querySelectorAll(selector) { assert.equal(selector, 'tr'); return [row]; }},
+      Event: class {}, FocusEvent: class {}, setTimeout: callback => callback(),
+    });
+  return {skc, writes, price, discount, radioInputs, evaluate};
+}
+
+for (const [current, targetPrice, expectedDiscount, expectedPrice] of [
+  [161, 144.29, '10', '144.90'],
+  [699.61, 305.38, '56', '307.82'],
+  [300, 119.27, '60', '120.00'],
+]) {
+  const fixture = editorFixture({current});
+  const collect = browserFunction('collectVisibleRows', 'fillVisibleRows', fixture.evaluate);
+  const [row] = await collect(null, null);
+  assert.equal(row.editMode, 'vip_discount', 'a single ordinary tier must be selected before resolving inputs');
+  assert.equal(row.minDiscount, 1);
+  const fill = browserFunction('fillVisibleRows', 'getScrollInfo', fixture.evaluate);
+  const [filled] = await fill(null, null, [{...row, targetPrice, minDiscount: 1}]);
+  assert.equal(fixture.radioInputs[0].checked, true);
+  assert.equal(fixture.writes.length, 1, 'only the generated discount input is writable in tier mode');
+  assert.equal(fixture.writes[0].id, fixture.discount.id);
+  assert.equal(filled.actualDiscount, expectedDiscount);
+  assert.equal(filled.actualPrice, expectedPrice);
+  const [verified] = await fixture.evaluate(null, null, makeVerifyBody(resolveOrdinaryTierInputs));
+  assert.equal(verified.editMode, 'vip_discount');
+  assert.equal(verified.discount, expectedDiscount);
+  assert.equal(verified.price, expectedPrice, 'verification must read the generated price, not treat it as a discount');
+}
+for (const radios of [0, 2]) {
+  const fixture = editorFixture({radios});
+  const [row] = await browserFunction('collectVisibleRows', 'fillVisibleRows', fixture.evaluate)(null, null);
+  const [filled] = await browserFunction('fillVisibleRows', 'getScrollInfo', fixture.evaluate)(null, null, [{...row, targetPrice: 144.29}]);
+  assert.equal(filled.actualDiscount, '10', 'existing direct-price and two-tier editors remain supported');
+  assert.equal(filled.actualPrice, '144.90');
+  if (radios) assert.equal(fixture.radioInputs[1].checked, true);
+  const [verified] = await fixture.evaluate(null, null, makeVerifyBody(resolveOrdinaryTierInputs));
+  assert.equal(verified.discount, '10');
+  assert.equal(verified.price, '144.90');
+}
+for (const options of [{missingDiscount: true}, {disabledDiscount: true}]) {
+  const fixture = editorFixture(options);
+  const [row] = await browserFunction('collectVisibleRows', 'fillVisibleRows', fixture.evaluate)(null, null);
+  await assert.rejects(browserFunction('fillVisibleRows', 'getScrollInfo', fixture.evaluate)(null, null,
+    [{...row, targetPrice: 144.29}]), /ordinary_tier_inputs_unavailable/);
+  assert.equal(fixture.writes.length, 0, 'missing or disabled discount fields must fail before value writes');
+}
+const malformed = editorFixture();
+assert.equal(resolveOrdinaryTierInputs([malformed.price]), null, 'one price input must never stand in for both fields');
+assert.equal(resolveOrdinaryTierInputs([malformed.price, malformed.price]), null, 'duplicate price references must be rejected');
+assert.equal(resolveOrdinaryTierInputs([malformed.discount, malformed.discount]), null);
+assert.equal(resolveOrdinaryTierInputs([malformed.price, malformed.discount, malformed.discount]), null);
 
 console.log('marketing visible fast-path contract: PASS');
