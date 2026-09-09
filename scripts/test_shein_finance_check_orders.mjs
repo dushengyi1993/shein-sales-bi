@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import vm from 'node:vm';
+import {EventEmitter} from 'node:events';
+import {buildFinanceArtifactSql, buildFinanceEnsureSql} from './load_shein_openapi_finance_warehouse.mjs';
 import {
   dateWindows,
   mapFinanceCheckOrder,
@@ -36,5 +39,38 @@ assert.match(fetchScript,/get-check-order-list/);
 assert.match(fetchScript,/get-check-order-detail/);
 assert.match(loadScript,/DELETE FROM fact\.openapi_finance_check_order_item WHERE check_order_key IN/);
 assert.match(loadScript,/ON CONFLICT/);
+
+const artifactSql = buildFinanceArtifactSql({orders: [mapped.order], items: mapped.items});
+const ensureSql = buildFinanceEnsureSql();
+const emptySql = buildFinanceArtifactSql({orders: [], items: []});
+for (const sql of [artifactSql, ensureSql, emptySql]) {
+  assert.match(sql, /^BEGIN;\nSELECT pg_advisory_xact_lock\(hashtextextended\('shein-bi:finance-warehouse-load:v1', 0\)\);\n/);
+  assert(sql.indexOf('pg_advisory_xact_lock') < sql.indexOf('CREATE TABLE'));
+  assert.equal((sql.match(/pg_advisory_xact_lock/g) || []).length, 1);
+  assert.match(sql, /COMMIT;\n$/);
+  assert.doesNotMatch(sql, /pg_advisory_lock\(/, 'the lock must release on transaction end, including rollback');
+}
+assert(artifactSql.indexOf('pg_advisory_xact_lock') < artifactSql.indexOf('DELETE FROM'));
+assert.match(artifactSql, /DL__B1/);
+assert.doesNotMatch(ensureSql, /DELETE FROM|COPY /);
+
+// Simulate PostgreSQL rejecting COPY before stdin has drained; no process is spawned.
+{
+  const child = new EventEmitter();
+  child.stdin = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin.end = () => setImmediate(() => {
+    child.stderr.emit('data', Buffer.from('ERROR: deadlock detected'));
+    child.stdin.emit('error', Object.assign(new Error('write EPIPE'), {code: 'EPIPE'}));
+    child.emit('close', 3);
+  });
+  const context = vm.createContext({
+    spawn: () => child, ROOT: '/', Buffer, process: {platform: 'linux', env: {}},
+  });
+  const run = loadScript.slice(loadScript.indexOf('async function runPsql('), loadScript.indexOf('const DDL ='));
+  vm.runInContext(run + '\nthis.run = runPsql;', context);
+  await assert.rejects(context.run({}, 'fixture SQL'), /psql failed \(3\): ERROR: deadlock detected/);
+}
 
 console.log(JSON.stringify({ok:true,tests:['seven-day-window','detail-mapping','net-return-cost','finance-over-return-actual-over-estimate','idempotent-load-contract']},null,2));
