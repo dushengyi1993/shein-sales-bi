@@ -48,15 +48,16 @@ if [[ "$COMMAND" == "reconcile-generation" ]]; then
     exit 64
   fi
   SNAPSHOT="$(locked_manager reconcile-generation --phase snapshot "$@")" || exit $?
-  READY="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(x.readyForValidation === true ? "1" : "0")' "$SNAPSHOT")" || exit 70
+  # Manager reports contain retained queue history and can exceed Linux argv limits.
+  READY="$(printf '%s' "$SNAPSHOT" | node -e 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(x.readyForValidation === true ? "1" : "0")')" || exit 70
   if [[ "$READY" != "1" ]]; then
     printf '%s\n' "$SNAPSHOT"
     exit 0
   fi
-  SNAPSHOT_HASH="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.snapshotHash || ""))' "$SNAPSHOT")" || exit 70
+  SNAPSHOT_HASH="$(printf '%s' "$SNAPSHOT" | node -e 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.snapshotHash || ""))')" || exit 70
   VALIDATION="$(node "$ROOT/scripts/manage_bi_portal_section_queue.mjs" reconcile-generation \
     --phase validate --snapshot-hash "$SNAPSHOT_HASH" --file "$QUEUE_FILE" "$@")" || exit $?
-  VALIDATION_RESULT="$(node -e 'const x=JSON.parse(process.argv[1]); process.stdout.write(String(x.validationResult || ""))' "$VALIDATION")" || exit 70
+  VALIDATION_RESULT="$(printf '%s' "$VALIDATION" | node -e 'const x=JSON.parse(require("node:fs").readFileSync(0,"utf8")); process.stdout.write(String(x.validationResult || ""))')" || exit 70
   locked_manager reconcile-generation --phase commit \
     --snapshot-hash "$SNAPSHOT_HASH" --validation-result "$VALIDATION_RESULT" "$@"
   exit $?

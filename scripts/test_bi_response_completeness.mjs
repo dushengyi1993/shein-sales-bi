@@ -227,6 +227,12 @@ async function testHttpStreaming(tmpDir) {
       'Accept-Encoding': 'identity',
     });
     assert.equal(JSON.parse(healthyAfterFailure.body.toString('utf8')).generatedAt, gen);
+    // The client can receive the final byte before the server pipeline has
+    // finished closing its request-owned descriptor and recorded completion.
+    for (let attempt = 0; attempt < 100 && manager.status().requestLeases !== 0; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(manager.status().requestLeases, 0, 'successful response must finish server cleanup');
     const recoveredStatus = biPortalCoreRouteLifecycleStatus();
     const recoveredHealth = evaluateBiPortalCoreRouteLifecycleHealth(recoveredStatus);
     assert.equal(recoveredHealth.ok, true);
