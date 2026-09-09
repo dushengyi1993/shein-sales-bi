@@ -242,7 +242,10 @@ async function upsertRows(args, table, columns, conflictColumns, rows) {
   let script = '';
   script += 'BEGIN;\n';
   script += `CREATE TEMP TABLE "${stage}" (LIKE ${qIdent(table)} INCLUDING DEFAULTS) ON COMMIT DROP;\n`;
-  script += `COPY "${stage}" (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL '');\n`;
+  // BI-only stores intentionally have no business group. Preserve that empty
+  // text in dim.store without changing legacy NULL handling in fact columns.
+  const copyOptions = table === 'dim.store' ? ', FORCE_NOT_NULL ("group_key")' : '';
+  script += `COPY "${stage}" (${sqlColumns}) FROM STDIN WITH (FORMAT csv, NULL ''${copyOptions});\n`;
   for (const row of rows) script += csvLine(columns.map(c => row[c]));
   script += '\\.\n';
   script += `INSERT INTO ${qIdent(table)} (${sqlColumns})\n`;
@@ -341,6 +344,12 @@ function addSkc(skcMap, row) {
 
 async function collectStores() {
   const config = await readJson(path.join(ROOT, 'config', 'stores.json'));
+  for (const store of config.stores || []) {
+    const biOnly = store.enabled === false && store.biEnabled === true;
+    if (typeof store.groupKey !== 'string' || (!store.groupKey.trim() && !biOnly)) {
+      throw new Error(`Invalid groupKey for ${store.storeKey}: only explicit BI-only stores may have an empty group`);
+    }
+  }
   return (config.stores || []).map(s => ({
     store_key: s.storeKey,
     group_key: s.groupKey,
