@@ -74,7 +74,8 @@
       "stores": [
         "QY",
         "JY",
-        "XL"
+        "XL",
+        "HY"
       ],
       "color": "#7c3aed"
     },
@@ -413,7 +414,7 @@
       "port": 9352,
       "profileName": "LG",
       "groupKey": "",
-      "companyName": "广州洛格网络科技有限公司",
+      "companyName": "洛格",
       "merchantId": "16024247",
       "shopName": "LOGE-SA",
       "accountNo": "GS2091518",
@@ -421,6 +422,23 @@
       "salesTransport": "openapi",
       "biEnabled": true,
       "onboardingStatus": "data_pending"
+    },
+    {
+      "storeKey": "HY",
+      "enabled": false,
+      "productStatsEnabled": false,
+      "profileKey": "lg",
+      "port": 9353,
+      "profileName": "HY",
+      "groupKey": "",
+      "companyName": "寰宇",
+      "accountUtcOffsetHours": 8,
+      "salesTransport": "openapi",
+      "biEnabled": true,
+      "onboardingStatus": "data_pending",
+      "merchantId": "16024598",
+      "accountNo": "GS1946575",
+      "shopName": "FANS YOUNG-SA"
     }
   ],
   "businessUtcOffsetHours": 8
