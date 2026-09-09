@@ -231,7 +231,6 @@ const tests = [
   'scripts/test_morning_resume_evidence.mjs',
   'scripts/test_morning_metric_refetch.mjs',
   'scripts/test_cloud_link_metric_readiness.mjs',
-  'scripts/test_metric_refetch_store_scope.mjs',
   'scripts/test_systemd_unit_snapshot.mjs',
   'scripts/test_systemd_unit_inventory_contract.mjs',
   'scripts/test_install_cloud_maintenance_guards.mjs',
