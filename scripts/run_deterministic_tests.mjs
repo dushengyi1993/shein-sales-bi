@@ -5,6 +5,7 @@ import {selectDeterministicTestShard} from '../lib/deterministic_test_shards.mjs
 const tests = [
   'scripts/marketing/test_fixed_tier_pricing.mjs',
   'scripts/marketing/test_reviewed_workbook_price.mjs',
+  'scripts/marketing/test_price_variation.mjs',
   'scripts/test_marketing_historical_journal_quarantine.mjs',
   'scripts/test_link_ops_source_lock_recovery.mjs',
   'scripts/test_inventory_dry_run_exclusion_pipeline.mjs',

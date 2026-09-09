@@ -9,6 +9,7 @@ import {spawnSync} from 'node:child_process';
 import {loadOrdinaryCampaignApproval,validateReviewedWorkbookPriceRows} from '../../lib/marketing_ordinary_campaign_approval.mjs';
 import {buildFixedTierContext,classifyFixedTierLink,resolveFixedTierPrice,applyFixedTierPrice,verifyFixedTierBinding} from '../../lib/marketing_fixed_tier_pricing.mjs';
 import {buildLowEtFastSellerPricingContext,applyLowEtFastSellerPricePullback,revalidateLowEtFastSellerPricePullback} from '../../lib/marketing_low_et_fast_seller_pricing.mjs';
+import {priceVariationSeed,resolveTierPriceVariation} from '../../lib/marketing_price_variation.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 const tempRoot=path.join(root,'tmp');
@@ -39,11 +40,22 @@ try {
     ['BY-506S空气炸锅',225.40,169,.0502,1],
     ['KF-JN-02便携咖啡机',97.25,77,.8092,2],
   ];
-  const rows=products.map(([canonical,targetPrice,cost,storageUnitCostSar,tier],index)=>({
-    storeKey:'FIXTURE',activityId:123,skc:`fixture-${index}`,canonical,targetPrice,finalTargetPrice:targetPrice,cost,storageUnitCostSar,
-    userExplicitCurrentPriceOverride:true,
-    reviewedWorkbookPrice:{schemaVersion:'ordinary-reviewed-workbook-price/v1',workbookSha256,businessDate:date,tier,targetPrice,sourceCells:[`价格表!I${index+2}`],reason:'fixture current workbook decision'},
-  }));
+  const bases={
+    'KF-JN-02便携咖啡机':{kind:'price',tiers:[91.53,91.53,97.25]},
+    'JD-389空气炸锅':{kind:'full_cost_margin',tiers:[.23,.25,.30]},
+    'SK-15030热风梳':{kind:'full_cost_margin',tiers:[.28,.30,.30]},
+    'SK-446电动刀与切片器':{kind:'price',tiers:[65,68,70]},
+    'SK-1714-5手持搅拌器':{kind:'full_cost_margin',tiers:[.23,.25,.30]},
+    'BY-506S空气炸锅':{kind:'full_cost_margin',tiers:[.23,.25,.30]},
+  };
+  const rows=products.map(([canonical,referencePrice,cost,storageUnitCostSar,tier],index)=>{
+    const row={storeKey:'FIXTURE',activityId:123,skc:`fixture-${index}`,canonical,cost,storageUnitCostSar};
+    const basis=bases[canonical];
+    const resolution=resolveTierPriceVariation({basis,tier,fullUnitCostSar:cost+storageUnitCostSar,seedKey:priceVariationSeed(row,date),platformMaximum:index===8?90.005:null});
+    return {...row,targetPrice:resolution.price,finalTargetPrice:resolution.price,
+      reviewedWorkbookPrice:{schemaVersion:'ordinary-reviewed-workbook-price/v2',workbookSha256,businessDate:date,tier,targetPrice:resolution.price,
+        basis,resolution,sourceCells:[`价格表!I${index+2}`],reason:'fixture current workbook baseline with permitted variation'}};
+  });
   const links=[];
   for(const row of rows) {
     const tier=row.reviewedWorkbookPrice.tier;
@@ -58,6 +70,12 @@ try {
   assert.equal(lock.status,0,lock.stderr);
   const manifestPath=path.join(dir,'locked','approval-manifest-fixture.json');
   const approval=await loadOrdinaryCampaignApproval({root,manifestPath});
+  const beforeHistoricalRead=JSON.stringify(approval.prices);
+  const tomorrow=new Date(Date.now()+86400000);
+  const historical=await loadOrdinaryCampaignApproval({root,manifestPath,now:tomorrow});
+  assert.equal(historical.reviewedWorkbookPriceStatus,'historical_readback_only');
+  assert.equal(historical.reviewedWorkbookPriceCapability,null);
+  assert.equal(JSON.stringify(historical.prices),beforeHistoricalRead);checks++;
   const context=buildFixedTierContext({storeLinks:links},{reportDate:date,costDoc,baselineDoc:prices,reviewedWorkbookPriceCapability:approval.reviewedWorkbookPriceCapability});
   for(const row of rows) {
     const current=resolveFixedTierPrice(row,context);
@@ -88,7 +106,7 @@ try {
     {reviewedWorkbookPrice:{...row.reviewedWorkbookPrice,targetPrice:90}},
     {reviewedWorkbookPrice:{...row.reviewedWorkbookPrice,sourceCells:['other!I1']}},
     {reviewedWorkbookPrice:undefined},{manualSpecialLimitedDiscount:true}]) checkBlocked({...row,...edit},context);
-  const changedPrice={...row,targetPrice:90};
+  const changedPrice={...row,targetPrice:row.targetPrice-.01};
   assert.equal(verifyFixedTierBinding(changedPrice,context).ok,false);
   assert.equal(applyFixedTierPrice(changedPrice,context).blocked,true);checks++;
   const liveKey=`${row.storeKey}::${row.skc}`;
@@ -99,33 +117,40 @@ try {
   const applied=applyFixedTierPrice(row,context).row;
   const changedLinks=new Map(context.byKey);changedLinks.set(liveKey,{...changedLinks.get(liveKey),c7_eps_uv:4100});
   assert.equal(verifyFixedTierBinding(applied,{...context,byKey:changedLinks}).reason,'fixed_tier_rule_or_evidence_changed_rebuild_required');checks++;
-  const capped=applyFixedTierPrice({...row,platformMaximumActivityPrice:90},context);
-  assert.equal(verifyFixedTierBinding({...row,platformMaximumActivityPrice:90},context).ok,true);
-  assert.equal(capped.row.targetPrice,90);assert.equal(capped.row.intendedFinalTargetPrice,91.53);
+  const cap=row.targetPrice-1;
+  const capped=applyFixedTierPrice({...row,platformMaximumActivityPrice:cap},context);
+  assert.equal(verifyFixedTierBinding({...row,platformMaximumActivityPrice:cap},context).ok,true);
+  assert.equal(capped.row.targetPrice,cap);assert.equal(capped.row.intendedFinalTargetPrice,row.targetPrice);
   assert.equal(verifyFixedTierBinding(capped.row,context).ok,true);checks++;
-  assert.equal(verifyFixedTierBinding({...capped.row,targetPrice:91.53},context).ok,false);checks++;
+  assert.equal(verifyFixedTierBinding({...capped.row,targetPrice:row.targetPrice},context).ok,false);checks++;
+  assert.equal(applyFixedTierPrice({...row,platformMaximumActivityPrice:row.targetPrice+10},context).row.targetPrice,row.targetPrice);checks++;
+  const originallyCapped=rows[8];
+  assert.equal(originallyCapped.targetPrice,90);
+  assert.ok(originallyCapped.reviewedWorkbookPrice.resolution.prePlatformPrice>90);
+  assert.equal(applyFixedTierPrice({...originallyCapped,platformMaximumActivityPrice:110},context).row.targetPrice,90,'a later higher cap must not raise the locked final price');
+  assert.equal(applyFixedTierPrice({...originallyCapped,platformMaximumActivityPrice:89.995},context).row.targetPrice,89.99);checks++;
   const unproved={...row};delete unproved.reviewedWorkbookPrice;
   const noAuthority={...context,reviewedWorkbookPriceCapability:null};
   checkBlocked(unproved,noAuthority,'inherited_high_click_margin_below_floor');
-  for(const [index,recomputed] of [[7,225.41],[8,97.27]]) {
+  for(const index of [7,8]) {
     const legacy={...rows[index]};delete legacy.reviewedWorkbookPrice;
-    assert.equal(resolveFixedTierPrice(legacy,noAuthority).price,recomputed);
+    assert.equal(resolveFixedTierPrice(legacy,noAuthority).binding.priceVariation.policyVersion,'marketing-link-variation/2026-09-09.1');
     assert.equal(resolveFixedTierPrice(rows[index],context).price,rows[index].targetPrice);checks++;
   }
   const manifestOriginal=await fs.readFile(manifestPath,'utf8');
   const manifest=JSON.parse(manifestOriginal);
   await fs.writeFile(manifestPath,JSON.stringify({...manifest,reviewedWorkbook:{...manifest.reviewedWorkbook,businessDate:'2000-01-01'}}));
-  await assert.rejects(loadOrdinaryCampaignApproval({root,manifestPath}),/current business date/);checks++;
+  await assert.rejects(loadOrdinaryCampaignApproval({root,manifestPath}),/Invalid reviewed workbook price/);checks++;
   await fs.writeFile(manifestPath,manifestOriginal);
   await fs.writeFile(workbookPath,Buffer.from('changed workbook'));
   await assert.rejects(loadOrdinaryCampaignApproval({root,manifestPath}),/workbook changed/);checks++;
   await fs.writeFile(workbookPath,workbook);
   const lockedPricesPath=approval.pricesPath;
   const originalPrices=await fs.readFile(lockedPricesPath,'utf8');
-  await fs.writeFile(lockedPricesPath,originalPrices.replace('91.53','91.54'));
+  await fs.writeFile(lockedPricesPath,originalPrices+' ');
   await assert.rejects(loadOrdinaryCampaignApproval({root,manifestPath}),/changed after authorization/);checks++;
   assert.equal(sha(await fs.readFile(workbookPath)),workbookSha256);
-  console.log(JSON.stringify({ok:true,checks,offline:true,productionWrites:0,covered:['KF exact current price','three historical reconciliation products','SK1714-5 approved tiers','lock CLI and actual workbook hash','current scope and live evidence','platform cap and manual protection']}));
+  console.log(JSON.stringify({ok:true,checks,offline:true,productionWrites:0,covered:['KF baseline variation','three historical reconciliation products','SK1714-5 approved tiers','lock CLI and actual workbook hash','current scope and live evidence','platform cap and manual protection']}));
 } finally {
   const relative=path.relative(tempRoot,dir);
   assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
