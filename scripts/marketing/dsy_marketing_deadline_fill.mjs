@@ -213,6 +213,7 @@ async function loadPriceOverrides() {
     costDoc: COST_DOC,
     marketingPolicy: PRICING_POLICY,
     reportDate: formatShanghaiDate(now),
+    reviewedWorkbookPriceCapability: EXECUTION_APPROVAL?.reviewedWorkbookPriceCapability,
   });
   for (const row of (doc.items || []).filter(isSelectedPriceRow)) {
     const fixed = verifyFixedTierBinding(row,lowEtContext.fixedTierContext);
@@ -270,6 +271,8 @@ async function loadPriceOverrides() {
     if (item.storeKey && item.activityId && item.skc) {
       rowPriceOverrideRules.set(`${String(item.storeKey).trim().toUpperCase()}:${Number(item.activityId)}:${String(item.skc).trim().toLowerCase()}`, item);
     }
+    // A reviewed workbook exception never becomes a store-wide fallback.
+    if (item.reviewedWorkbookPrice) continue;
     if (storeKeys.length) {
       const before = new Map();
       registerRuleKeys(before, label, item);
