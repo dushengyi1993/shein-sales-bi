@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import crypto from 'node:crypto';
+import {persistPublishDiagnostic} from '../lib/link_ops_publish_diagnostics.mjs';
 import {SheinOpenApiClient, SHEIN_OPENAPI_BASE_URLS} from '../lib/shein_openapi_client.mjs';
 import {
   buildProductDraftFromSnapshots,
@@ -5308,6 +5309,7 @@ async function main() {
 
   const readyForSubmit = blockers.length === 0 && Boolean(publishPayload);
   let publishResult = null;
+  let publishDiagnostic = null;
   if (shouldIssuePublishOrEdit(args.mode, readyForSubmit)) {
     const testWebhookGuard = createLoopbackTestWebhookWriteGuard({baseUrl: client.baseUrl});
     const guardedWrite = await runSheinWebhookExternalWriteGuarded({
@@ -5330,6 +5332,17 @@ async function main() {
         traceId: response.data?.traceId ?? null,
         info: response.data?.info ?? null,
       };
+      if(!testWebhookGuard && (String(publishResult.code)!=='0'||publishResult.info?.success!==true)){
+        try{
+          publishDiagnostic=await persistPublishDiagnostic({result:publishResult,taskId:task.id,runId,storeKey:targetStore,
+            sensitiveValues:[store.openKeyId,store.secretKey,...descriptionSensitiveFragments(publishPayload)]});
+        }catch{
+          // A diagnostic I/O failure must never erase an already attempted
+          // submission or change its accepted/rejected/unknown classification.
+          publishDiagnostic={ok:false,code:'PUBLISH_DIAGNOSTIC_PERSIST_FAILED'};
+          warnings.push('平台诊断留存失败；原提交状态仍保留，禁止因此重试提交。');
+        }
+      }
       calls.push({
         name: 'publishOrEdit',
         path: '/open-api/goods/product/publishOrEdit',
@@ -5466,6 +5479,7 @@ async function main() {
     blockers,
     warnings,
     publishResult: storedPublishResult,
+    publishDiagnostic,
     safety: {
       canSilentWrite: false,
       executeRequiresConfirm: SUBMIT_CONFIRM_TEXT,
