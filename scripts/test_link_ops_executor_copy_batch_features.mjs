@@ -785,6 +785,32 @@ check('exact source keeps DL/sourceSkc', scopeExact175.sourceStore, 'DL');
 check('exact source keeps the skc', scopeExact175.sourceSkc, 'sv25082902871830770');
 check('exact source has no blockers', scopeExact175.blockers.length, 0);
 
+// Private diagnostic artifacts preserve useful unknown field errors without
+// changing the existing public/hash-only task result. All I/O uses a fixture.
+{
+  const fs=await import('node:fs/promises'),os=await import('node:os'),path=await import('node:path');
+  const {buildPublishDiagnostic,persistPublishDiagnostic,readPublishDiagnostic}=await import('../lib/link_ops_publish_diagnostics.mjs');
+  const fixture=await fs.mkdtemp(path.join(os.tmpdir(),'publish-diagnostic-test-'));
+  const input={taskId:'fixture-task',runId:'fixture-run',storeKey:'FIXTURE',sensitiveValues:['credential-fixture','reviewed private sentence'],result:{code:'0',traceId:'trace-fixture',info:{success:false,pre_valid_result:[{module:'basic_info',form_name:'商品名称',messages:['seller_sku length must be <= 64','secretKey=credential-fixture reviewed private sentence','Bearer token-fixture']}]},headers:{authorization:'never-store'},payload:{title:'never-store'}}};
+  try{
+    const diagnostic=buildPublishDiagnostic(input),serialized=JSON.stringify(diagnostic);
+    check('private diagnostic retains unknown field reason',diagnostic.preValidResult[0].messages[0].text,'seller_sku length must be <= 64');
+    check('private diagnostic excludes credentials and reviewed fragments',serialized.includes('credential-fixture')||serialized.includes('reviewed private sentence')||serialized.includes('token-fixture'),false);
+    check('private diagnostic excludes arbitrary response properties',serialized.includes('never-store'),false);
+    const receipt=await persistPublishDiagnostic(input,{root:fixture});
+    check('public diagnostic reference contains no validation text',JSON.stringify(receipt).includes('seller_sku'),false);
+    const loaded=await readPublishDiagnostic(receipt.id,{root:fixture,expectedSha256:receipt.sha256});
+    check('exact diagnostic can be read without platform request',loaded.record.traceId.text,'trace-fixture');
+    let duplicate=false;try{await persistPublishDiagnostic(input,{root:fixture});}catch(e){duplicate=e.code==='EEXIST';}
+    check('private diagnostics are append-only',duplicate,true);
+    let drift=false;try{await readPublishDiagnostic(receipt.id,{root:fixture,expectedSha256:'0'.repeat(64)});}catch{drift=true;}
+    check('diagnostic reader rejects changed evidence',drift,true);
+    if(process.platform!=='win32')check('diagnostic file is owner-only',(await fs.stat(path.join(fixture,receipt.id+'.json'))).mode&0o777,0o600);
+  }finally{
+    if(path.dirname(fixture)!==os.tmpdir()||!path.basename(fixture).startsWith('publish-diagnostic-test-'))throw Error('Unexpected fixture root');
+    await fs.rm(fixture,{recursive:true,force:true});
+  }
+}
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
 if (!ok) process.exit(1);
