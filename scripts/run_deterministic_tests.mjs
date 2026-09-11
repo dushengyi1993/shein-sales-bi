@@ -78,6 +78,7 @@ const tests = [
   'scripts/marketing/smoke_order_target_price_windows.mjs',
   'scripts/marketing/smoke_ordinary_composite_plan_tools.mjs',
   'scripts/marketing/smoke_ordinary_platform_price_policy.mjs',
+  'scripts/smoke_ordinary_cap_fill_evidence.mjs',
   'scripts/marketing/smoke_ordinary_platform_tier_evidence.mjs',
   'scripts/marketing/smoke_platform_new_label_policy.mjs',
   'scripts/marketing/smoke_relisted_link_cost_fallback.mjs',
