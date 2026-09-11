@@ -314,10 +314,10 @@ const result = spawnSync(process.execPath, [
 
 assert.equal(result.status, 0, result.stderr || result.stdout);
 const payload = JSON.parse(result.stdout);
-assert.equal(payload.actionable, 5);
+assert.equal(payload.actionable, 6);
 
 const report = JSON.parse(await fs.readFile(reportJson, 'utf8'));
-assert.equal(report.rows.length, 5);
+assert.equal(report.rows.length, 6);
 assert.equal(report.rows[0].storeKey, 'JY');
 assert.equal(report.rows[0].skc, 'new-skc');
 assert.equal(report.rows[0].limitedDiscountPrice, 96.17);
@@ -335,7 +335,7 @@ assert.equal(rawOnlyRow.topTierPriceSource, 'explicit_top_tier_price');
 assert.equal(report.latestRawLinkOverlay.addedRowCount, 1);
 assert.equal(report.latestRawLinkOverlay.addedRows[0].skc, 'raw-only-skc');
 assert.equal(report.latestRawLinkOverlay.updatedRowCount, 0);
-assert.equal(report.totals.liveCoveredIgnored, 2);
+assert.equal(report.totals.liveCoveredIgnored, 1);
 const oldMissingRow = report.rows.find(row => row.skc === 'old-missing-limited');
 assert.equal(oldMissingRow.treatmentType, 'existing_on_shelf_missing_limited_discount');
 assert.equal(oldMissingRow.currentExposureIsTop5, false);
@@ -350,7 +350,7 @@ assert.equal(report.rows.some(row => row.skc === 'high-click-overlap-skc'), fals
 assert.equal(report.ignored.some(row => row.skc === 'high-click-overlap-skc' && row.reason === 'handled_by_high_click_special_stage'), true);
 assert.equal(report.rule.liveLimitedEvidenceComplete, true);
 assert.equal(report.ignored.some(row => row.skc === 'covered-skc' && row.reason === 'live_new_listing_limited_discount_already_covered_at_target'), true);
-assert.equal(report.ignored.some(row => row.skc === 'covered-higher-skc' && row.reason === 'live_new_listing_limited_discount_already_covered_at_target'), true);
+assert.equal(report.ignored.some(row => row.skc === 'covered-higher-skc' && row.reason === 'live_new_listing_limited_discount_already_covered_at_target'), false);
 const coveredLowerRow = report.rows.find(row => row.skc === 'covered-lower-skc');
 assert.equal(coveredLowerRow.action, 'replace_existing_limited_discount');
 assert.equal(coveredLowerRow.currentLimitedPrice, 80);
