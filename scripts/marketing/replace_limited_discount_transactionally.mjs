@@ -254,7 +254,20 @@ async function writeJsonAtomic(file, value) {
   await fs.mkdir(path.dirname(file), {recursive: true});
   const temporary = `${file}.${process.pid}.tmp`;
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await fs.rename(temporary, file);
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await fs.rename(temporary, file);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== 'EPERM' && error?.code !== 'EACCES' && error?.code !== 'EBUSY') throw error;
+      await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  // Preserve both bytes for manual reconciliation. Never overwrite an
+  // existing journal with a non-atomic copy.
+  throw lastError;
 }
 
 async function pathExists(file) {
