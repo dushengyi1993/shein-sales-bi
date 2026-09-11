@@ -21,6 +21,7 @@ import {
 import {recoverSheinLoginIfNeeded} from '../../lib/shein_login_recovery.mjs';
 import {isOrdinaryPlatformTierRewriteAccepted} from '../../lib/marketing_ordinary_platform_price_policy.mjs';
 import {ordinaryActivityListGap} from '../../lib/marketing_ordinary_activity_list_gap.mjs';
+import {verifyOrdinaryCapFill} from '../../lib/marketing_ordinary_cap_fill_evidence.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIST_URL = 'https://sso.geiwohuo.com/#/mbrs/marketing/list';
@@ -53,6 +54,7 @@ function parseArgs(argv) {
     pollMs: 5_000,
     pageSize: 500,
     priceTolerance: 0.06,
+    executionWorkFingerprint: '',
     portOverrides: new Map(),
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -68,6 +70,7 @@ function parseArgs(argv) {
     else if (a === '--poll-ms') out.pollMs = Number(argv[++i] || out.pollMs);
     else if (a === '--page-size') out.pageSize = Number(argv[++i] || out.pageSize);
     else if (a === '--price-tolerance') out.priceTolerance = Number(argv[++i] || out.priceTolerance);
+    else if (a === '--execution-work-fingerprint') out.executionWorkFingerprint = argv[++i] || '';
     else if (a === '--port-overrides') {
       for (const entry of splitList(argv[++i])) {
         const [storeKey, rawPort] = entry.split(':');
@@ -86,6 +89,7 @@ function parseArgs(argv) {
   if (!out.activityIds.length) throw new Error('Missing --activity, e.g. --activity 43914,43915,45488');
   if (!out.selectionPlan) throw new Error('Missing --selection-plan');
   if (!out.priceOverrides) throw new Error('Missing --price-overrides');
+  if (out.executionWorkFingerprint && !/^[a-f0-9]{64}$/.test(out.executionWorkFingerprint)) throw new Error('Invalid execution work fingerprint');
   if (!Number.isFinite(out.waitMs) || out.waitMs < 10_000) out.waitMs = 90_000;
   if (!Number.isFinite(out.pollMs) || out.pollMs < 2_000) out.pollMs = 5_000;
   if (!Number.isFinite(out.pageSize) || out.pageSize < 50) out.pageSize = 500;
@@ -164,6 +168,7 @@ function evaluateFillEvidenceDoc(doc, sourceFile, storeKey, activityId) {
       canonical: row.canonical || '',
       targetPrice: Number(row.targetPrice ?? NaN),
       targetPriceText: row.targetPriceText || '',
+      capSourceDoc: doc,
     });
   }
   for (const row of Array.isArray(fill.platformRewrites) ? fill.platformRewrites : []) {
@@ -702,7 +707,7 @@ function comparePrice(actual, expected) {
   return {ok: Math.abs(diff) <= args.priceTolerance, reason: Math.abs(diff) <= args.priceTolerance ? '' : 'activity_price_mismatch', diff};
 }
 
-function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
+function compareWithFillEvidence({actual, expected, fillEvidence, skc, storeKey, activityId}) {
   const direct = comparePrice(actual, expected);
   if (direct.ok) {
     return {
@@ -712,6 +717,18 @@ function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
       unavailableButFillVerified: false,
       fillTargetPrice: null,
     };
+  }
+  const capRow = fillEvidence?.targetBySkc?.get(String(skc || '').trim());
+  const capped = verifyOrdinaryCapFill(capRow?.capSourceDoc, {
+    storeKey, activityId, skc, approvedPrice: expected,
+    workFingerprint: args.executionWorkFingerprint,
+  });
+  if (capped.ok && (direct.reason === 'missing_actual_price'
+    || (Number.isFinite(actual) && Math.abs(actual-capped.price)<0.005))) {
+    return {ok:true, reason:'', diff:direct.diff,
+      source:direct.reason === 'missing_actual_price' ? capped.source : 'enrolled_goods_and_submitted_platform_cap_verified',
+      usedFillFallback:true, unavailableButFillVerified:direct.reason === 'missing_actual_price',
+      fillTargetPrice:capped.price};
   }
   if (direct.reason !== 'missing_actual_price') {
     const rewritePrice = fillEvidence?.platformRewriteBySkc?.get(String(skc || '').trim());
@@ -757,12 +774,10 @@ function compareWithFillEvidence({actual, expected, fillEvidence, skc}) {
       fillTargetPrice: fillRow?.targetPrice ?? null,
     };
   }
-  // P0-#5 fix: when API returns no price and no fill evidence is available,
-  // do NOT treat as hard mismatch. Structural coverage (enrolled) is confirmed;
-  // price evidence incomplete != price error.
+  // Enrollment may be present, but missing price evidence is not acceptance.
   return {
-    ok: true,
-    reason: '',
+    ok: false,
+    reason: 'price_unavailable_without_clean_fill_evidence',
     diff: null,
     source: fillEvidence?.exists ? 'enrolled_goods_missing_price_and_fill_result_not_clean' : 'enrolled_goods_missing_price_and_no_fill_result',
     usedFillFallback: false,
@@ -828,6 +843,8 @@ async function verifyStore(store, planRows) {
           expected: row.expectedActivityPrice,
           fillEvidence,
           skc: row.skc,
+          storeKey: row.storeKey,
+          activityId: row.activityId,
         });
         activityRows.push({
           storeKey: row.storeKey,
