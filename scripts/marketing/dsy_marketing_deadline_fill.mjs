@@ -203,7 +203,7 @@ function modelCode(s) {
 async function loadPriceOverrides() {
   if (!args.priceOverrides) return;
   const doc = JSON.parse(await fs.readFile(args.priceOverrides, 'utf8'));
-  const evidenceBaselineDoc = EXECUTION_APPROVAL?.prices || doc;
+  const evidenceBaselineDoc = EXECUTION_APPROVAL?.baselinePrices || EXECUTION_APPROVAL?.prices || doc;
   const currentLockedPriceKeys = EXECUTION_APPROVAL?.priceByKey instanceof Map
     ? new Set(EXECUTION_APPROVAL.priceByKey.keys())
     : null;

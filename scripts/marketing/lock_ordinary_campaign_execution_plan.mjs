@@ -26,6 +26,9 @@ function parseArgs(argv) {
     reviewedWorkbook: '',
     approvalText: '',
     approvalSource: '',
+    baselineSourcePrices: '',
+    baselineSourcePricesSha256: '',
+    baselineManifest: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -37,12 +40,22 @@ function parseArgs(argv) {
     else if (key === '--reviewed-workbook') args.reviewedWorkbook = path.resolve(argv[++i] || '');
     else if (key === '--approval-text') args.approvalText = String(argv[++i] || '').trim();
     else if (key === '--approval-source') args.approvalSource = String(argv[++i] || '').trim();
+    else if (key === '--baseline-source-prices') args.baselineSourcePrices = path.resolve(argv[++i] || '');
+    else if (key === '--baseline-source-prices-sha256') args.baselineSourcePricesSha256 = String(argv[++i] || '').trim().toLowerCase();
+    else if (key === '--baseline-manifest') args.baselineManifest = path.resolve(argv[++i] || '');
     else throw new Error(`Unknown argument: ${key}`);
   }
   if (!args.selection || !args.prices || !args.outputDir || !args.label || !args.approvalText || !args.approvalSource) {
     throw new Error('Required: --selection <json> --prices <json> --output-dir <dir> --label <name> --approval-text <exact user words> --approval-source <task/message reference>');
   }
   if (args.workbookSha256 && !/^[A-F0-9]{64}$/.test(args.workbookSha256)) throw new Error('Invalid --workbook-sha256');
+  if (args.baselineSourcePrices || args.baselineSourcePricesSha256 || args.baselineManifest) {
+    if (!args.baselineSourcePrices || !/^[a-f0-9]{64}$/.test(args.baselineSourcePricesSha256) || !args.baselineManifest) throw Error('Baseline source prices require path, SHA-256, and --baseline-manifest');
+    for (const [value,label] of [[args.baselineSourcePrices,'baseline source prices'],[args.baselineManifest,'baseline manifest']]) {
+      const relative = path.relative(ROOT, value);
+      if (relative.startsWith('..') || path.isAbsolute(relative)) throw Error(label + ' must stay inside repository root');
+    }
+  }
   const relativeOutput = path.relative(ROOT, args.outputDir);
   if (relativeOutput.startsWith('..') || path.isAbsolute(relativeOutput)) throw new Error('--output-dir must stay inside repository root');
   return args;
@@ -53,6 +66,14 @@ const [selectionRaw, pricesRaw] = await Promise.all([
   fs.readFile(args.selection, 'utf8'),
   fs.readFile(args.prices, 'utf8'),
 ]);
+if (args.baselineSourcePrices) {
+  const stat = await fs.lstat(args.baselineSourcePrices);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw Error('--baseline-source-prices must be a regular file');
+  const actual = crypto.createHash('sha256').update(await fs.readFile(args.baselineSourcePrices)).digest('hex');
+  if (actual !== args.baselineSourcePricesSha256) throw Error('Baseline source prices SHA-256 mismatch');
+  const manifestStat = await fs.lstat(args.baselineManifest);
+  if (!manifestStat.isFile() || manifestStat.isSymbolicLink()) throw Error('--baseline-manifest must be a regular file');
+}
 const selection = JSON.parse(selectionRaw);
 const prices = JSON.parse(pricesRaw);
 const validated = validateOrdinaryCampaignDocuments(selection, prices);
@@ -119,6 +140,7 @@ const manifest = {
   approvalSource: args.approvalSource,
   sourceSelection: rel(args.selection),
   sourcePrices: rel(args.prices),
+  ...(args.baselineSourcePrices ? {baselineSourcePrices: rel(args.baselineSourcePrices), baselineSourcePricesSha256: args.baselineSourcePricesSha256, baselineManifest: rel(args.baselineManifest)} : {}),
   outputSelection: rel(selectionFile),
   outputPrices: rel(priceFile),
   workbookSha256: args.workbookSha256,

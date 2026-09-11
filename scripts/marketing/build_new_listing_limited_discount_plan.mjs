@@ -346,7 +346,8 @@ for (const link of storeLinks) {
     && currentLimitedPrice !== null
     && (manualSpecialEntry
       ? Math.abs(round2(currentLimitedPrice) - round2(resolvedTopTier.price)) <= 0.01
-      : round2(currentLimitedPrice) >= round2(resolvedTopTier.price) - 0.01);
+      : round2(currentLimitedPrice) >= round2(resolvedTopTier.price) - 0.01
+        && round2(currentLimitedPrice) <= round2(resolvedTopTier.price) + 0.01);
   const liveCoveredNoTargetEvidence = eligibleLiveCoverage && (!Number.isFinite(resolvedTopTier.price) || resolvedTopTier.price <= 0);
   const common = {
     requiredByRoster,
