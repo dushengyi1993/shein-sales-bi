@@ -12,6 +12,7 @@ import {
   assertMarketingAutomationAuthorization,
   MARKETING_AUTOMATION_ACTIONS,
 } from '../../lib/marketing_automation_authorization.mjs';
+import {validateRemovalMutationContract} from './_managed_limited_discount_conflict.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -26,6 +27,8 @@ function parseArgs(argv) {
     skcs: [],
     execute: false,
     outDir: DEFAULT_OUT_DIR,
+    expectedSnapshot: '',
+    expectedSnapshotHash: '',
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -40,6 +43,10 @@ function parseArgs(argv) {
     else if (arg === '--execute') args.execute = true;
     else if (arg === '--out-dir') args.outDir = path.resolve(argv[++i] || '');
     else if (arg.startsWith('--out-dir=')) args.outDir = path.resolve(arg.slice('--out-dir='.length));
+    else if (arg === '--expected-snapshot') args.expectedSnapshot = path.resolve(argv[++i] || '');
+    else if (arg.startsWith('--expected-snapshot=')) args.expectedSnapshot = path.resolve(arg.slice('--expected-snapshot='.length));
+    else if (arg === '--expected-snapshot-hash') args.expectedSnapshotHash = String(argv[++i] || '').trim().toLowerCase();
+    else if (arg.startsWith('--expected-snapshot-hash=')) args.expectedSnapshotHash = String(arg.slice('--expected-snapshot-hash='.length)).trim().toLowerCase();
     else throw new Error(`Unknown argument: ${arg}`);
   }
   args.stores = [...new Set(args.stores.map(value => value.toUpperCase()))];
@@ -47,6 +54,9 @@ function parseArgs(argv) {
   if (!args.stores.length) throw new Error('Missing --stores <storeKey[,storeKey...]>');
   if (!Number.isFinite(args.activityId) || args.activityId <= 0) throw new Error('Missing/invalid --activity-id');
   if (!args.skcs.length) throw new Error('Missing --skcs <skc[,skc...]>');
+  if (args.execute && (!args.expectedSnapshot || !/^[a-f0-9]{64}$/.test(args.expectedSnapshotHash))) {
+    throw new Error('--execute requires --expected-snapshot and its exact SHA-256 --expected-snapshot-hash');
+  }
   return args;
 }
 
@@ -161,11 +171,20 @@ async function assertCurrentStoreIdentity(cdp, store, context) {
 }
 
 async function removeForStore(store, args) {
+  const expectedContract = args.mutationContract || null;
+  if (args.execute && (
+    String(expectedContract?.storeKey || '').toUpperCase() !== store.storeKey
+    || Number(expectedContract?.activityId) !== Number(args.activityId)
+    || JSON.stringify([...(expectedContract?.plannedSkcs || [])].map(String).sort()) !== JSON.stringify([...args.skcs].map(String).sort())
+  )) {
+    throw new Error('locked removal snapshot does not exactly bind store, activity, and target SKCs');
+  }
   const payloadHash = crypto.createHash('sha256').update(JSON.stringify({
     action: 'remove_skc_from_limited_discount',
     storeKey: store.storeKey,
     activityId: args.activityId,
     skcs: args.skcs.slice().sort(),
+    expectedSnapshotHash: args.expectedSnapshotHash || null,
   })).digest('hex');
   const automationAuthorization = args.execute ? await assertMarketingAutomationAuthorization({
     action: MARKETING_AUTOMATION_ACTIONS.CREATE_OR_REPLACE_ACTIVITY,
@@ -186,8 +205,10 @@ async function removeForStore(store, args) {
       };
     }
     const identity = await assertCurrentStoreIdentity(cdp, store, 'remove_skc_from_limited_discount');
+    const validatorDeclaration = `const validateRemovalMutationContract = ${validateRemovalMutationContract.toString()};`;
     const result = await cdp.eval(`
-      const {activityId, skcsToRemove, execute} = __arg;
+      ${validatorDeclaration}
+      const {activityId, skcsToRemove, execute, expectedContract} = __arg;
       const headers = {'content-type': 'application/json;charset=UTF-8'};
 
       async function post(api, body) {
@@ -243,12 +264,42 @@ async function removeForStore(store, args) {
         };
       }
 
+      function arrayFrom(value) {
+        if (Array.isArray(value)) return value;
+        if (Array.isArray(value?.data)) return value.data;
+        if (Array.isArray(value?.list)) return value.list;
+        if (Array.isArray(value?.records)) return value.records;
+        return [];
+      }
+
+      async function queryActivity() {
+        const pageSize = 200;
+        for (let pageNum = 1; pageNum <= 20; pageNum += 1) {
+          const packet = await post('/promotion/obm/query_obm_activity_list', {
+            page_num: pageNum,
+            page_size: pageSize,
+            system: 'mrs',
+            ref_tools_id: 175,
+          });
+          const activities = arrayFrom(packet.info);
+          const match = activities.find(activity => Number(activity?.activity_id) === Number(activityId));
+          if (match) return match;
+          const total = Number(packet.info?.total ?? packet.info?.total_count ?? packet.info?.page_info?.total ?? NaN);
+          if (!activities.length || activities.length < pageSize || (Number.isFinite(total) && pageNum * pageSize >= total)) break;
+        }
+        return null;
+      }
+
+      const beforeActivity = expectedContract ? await queryActivity() : null;
       const before = await queryGoods();
       const beforeSkcs = [...new Set(before.goods.map(row => row.skc).filter(Boolean))].sort();
       const removeSet = new Set(skcsToRemove);
       const presentToRemove = skcsToRemove.filter(skc => beforeSkcs.includes(skc));
       const missingToRemove = skcsToRemove.filter(skc => !beforeSkcs.includes(skc));
       const preserveBefore = beforeSkcs.filter(skc => !removeSet.has(skc));
+      const beforeContractValidation = expectedContract
+        ? validateRemovalMutationContract({expected: expectedContract, currentActivity: beforeActivity, currentGoods: before.goods, phase: 'before'})
+        : {ok: true, errors: [], changedSkcs: []};
       const result = {
         href: location.href,
         title: document.title,
@@ -262,13 +313,17 @@ async function removeForStore(store, args) {
           missingToRemove,
           preserveSkcs: preserveBefore,
           goods: before.goods,
+          activity: beforeActivity,
+          contractValidation: beforeContractValidation,
         },
         deleteResponse: null,
         after: null,
         ok: false,
       };
-      if (missingToRemove.length) {
-        result.reason = 'requested SKCs are not currently in old activity; aborting before write';
+      if (missingToRemove.length || !beforeContractValidation.ok) {
+        result.reason = missingToRemove.length
+          ? 'requested SKCs are not currently in old activity; aborting before write'
+          : 'locked activity or goods attributes changed immediately before delete; aborting before write';
         return result;
       }
       if (!execute) {
@@ -289,11 +344,18 @@ async function removeForStore(store, args) {
         info: deletePacket.info,
       };
       await new Promise(resolve => setTimeout(resolve, 1200));
+      const afterActivity = preserveBefore.length ? await queryActivity() : null;
       const after = await queryGoods();
       const afterSkcs = [...new Set(after.goods.map(row => row.skc).filter(Boolean))].sort();
       const stillPresent = skcsToRemove.filter(skc => afterSkcs.includes(skc));
       const missingPreserved = preserveBefore.filter(skc => !afterSkcs.includes(skc));
       const unexpectedAdded = afterSkcs.filter(skc => !beforeSkcs.includes(skc));
+      const afterContractValidation = validateRemovalMutationContract({
+        expected: expectedContract,
+        currentActivity: afterActivity,
+        currentGoods: after.goods,
+        phase: 'after',
+      });
       result.after = {
         totalSkcs: afterSkcs.length,
         skcs: afterSkcs,
@@ -301,18 +363,22 @@ async function removeForStore(store, args) {
         missingPreserved,
         unexpectedAdded,
         goods: after.goods,
+        activity: afterActivity,
+        contractValidation: afterContractValidation,
       };
       result.ok =
         String(result.deleteResponse.code) === '0' &&
         stillPresent.length === 0 &&
         missingPreserved.length === 0 &&
-        unexpectedAdded.length === 0;
+        unexpectedAdded.length === 0 &&
+        afterContractValidation.ok;
       if (!result.ok) result.reason = 'post-delete readback verification failed';
       return result;
     `, {
       activityId: args.activityId,
       skcsToRemove: args.skcs,
       execute: args.execute,
+      expectedContract,
     });
     return {storeKey: store.storeKey, port: store.port, identity, loginRecovery, automationAuthorization, payloadHash, ...result};
   } catch (error) {
@@ -333,6 +399,14 @@ async function removeForStore(store, args) {
 }
 
 const args = parseArgs(process.argv.slice(2));
+if (args.expectedSnapshot) {
+  const snapshotBytes = await fs.readFile(args.expectedSnapshot);
+  const snapshotHash = crypto.createHash('sha256').update(snapshotBytes).digest('hex');
+  if (snapshotHash !== args.expectedSnapshotHash) {
+    throw new Error(`expected snapshot hash mismatch: expected=${args.expectedSnapshotHash} actual=${snapshotHash}`);
+  }
+  args.mutationContract = JSON.parse(snapshotBytes.toString('utf8'));
+}
 await fs.mkdir(args.outDir, {recursive: true});
 
 const results = [];

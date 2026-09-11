@@ -133,7 +133,7 @@ try {
 
   await fs.symlink(path.join(repo, 'lib'), path.join(root, 'lib'), process.platform === 'win32' ? 'junction' : 'dir');
   await fs.mkdir(path.join(root, 'scripts/marketing'), {recursive: true});
-  for (const name of ['batch_restore_manual_limited_discounts.mjs', 'batch_apply_new_listing_limited_discount.mjs']) {
+  for (const name of ['batch_restore_manual_limited_discounts.mjs', 'batch_apply_new_listing_limited_discount.mjs', '_managed_limited_discount_conflict.mjs']) {
     await fs.copyFile(path.join(repo, 'scripts/marketing', name), path.join(root, 'scripts/marketing', name));
   }
   process.env.SHEIN_BI_MARKETING_IMMEDIATE_CONTINUATION = '1';

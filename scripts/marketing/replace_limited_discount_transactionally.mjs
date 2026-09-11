@@ -24,9 +24,16 @@ import {
 } from '../../lib/marketing_automation_authorization.mjs';
 import {
   assertBeforeOuter,
+  boundedRecoveryTimeoutMs,
+  boundedTimeoutMs,
   createDeadlineContract,
   DEADLINE_FINALIZATION_RESERVE_SEC,
 } from '../../lib/cloud_marketing_deadline_contract.mjs';
+import {
+  partitionManagedLimitedDiscountPreflight,
+  validateLimitedDiscountActivitySnapshot,
+  validateSelectiveLimitedDiscountRemoval,
+} from './_managed_limited_discount_conflict.mjs';
 
 const ROOT = path.resolve(
   process.env.SHEIN_BI_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..'),
@@ -35,6 +42,7 @@ const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-r
 const DEFAULT_JOURNAL_DIR = path.join(ROOT, 'state/marketing-replacement-transactions');
 const APPLY_SCRIPT = process.env.SHEIN_MARKETING_APPLY_SCRIPT || 'scripts/marketing/apply_hl_limited_discount_rescue.mjs';
 const REMOVE_SCRIPT = process.env.SHEIN_MARKETING_REMOVE_SCRIPT || 'scripts/marketing/remove_skc_from_limited_discount.mjs';
+const STEP_TERMINAL_PUBLISH_RESERVE_MS = 5000;
 
 export class MarketingTransactionJournalError extends Error {
   constructor(message, code, options = {}) {
@@ -117,6 +125,7 @@ function parseArgs(argv) {
     gracefulCutoffEpoch: undefined,
     outerHardDeadlineEpoch: undefined,
     minFinalizationBudgetSec: DEADLINE_FINALIZATION_RESERVE_SEC,
+    parentHardDeadlineEpoch: undefined,
     continuation: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -148,6 +157,8 @@ function parseArgs(argv) {
     else if (arg.startsWith('--outer-hard-deadline-epoch=')) args.outerHardDeadlineEpoch = arg.slice('--outer-hard-deadline-epoch='.length);
     else if (arg === '--min-finalization-budget-sec') args.minFinalizationBudgetSec = Number(argv[++i]);
     else if (arg.startsWith('--min-finalization-budget-sec=')) args.minFinalizationBudgetSec = Number(arg.slice('--min-finalization-budget-sec='.length));
+    else if (arg === '--parent-hard-deadline-epoch') args.parentHardDeadlineEpoch = argv[++i];
+    else if (arg.startsWith('--parent-hard-deadline-epoch=')) args.parentHardDeadlineEpoch = arg.slice('--parent-hard-deadline-epoch='.length);
     else if (arg === '--continuation') args.continuation = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -170,6 +181,13 @@ function parseArgs(argv) {
     // assertCanBeginIrreversibleMutation checks below.
     allowExpiredOuter: true,
   });
+  if (args.parentHardDeadlineEpoch !== undefined) {
+    const raw = String(args.parentHardDeadlineEpoch || '').trim();
+    if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      throw new Error(`Invalid --parent-hard-deadline-epoch: ${raw}`);
+    }
+    args.parentHardDeadlineEpoch = Number(raw);
+  }
   return args;
 }
 
@@ -201,11 +219,16 @@ async function validateCreateAttemptFence({journal, args, rescueHash, sourceResc
   if (attempt?.schemaVersion !== 1) errors.push('createAttempt_schemaVersion');
   if (attempt?.operation !== 'limited_discount_create') errors.push('createAttempt_operation');
   if (!['create_only', 'replacement_desired'].includes(attempt?.role)) errors.push('createAttempt_role');
-  if (attempt?.state !== 'create_started') errors.push('createAttempt_state');
+  const createKind = attempt?.createKind || attempt?.role;
+  if (!['create_only', 'replacement_desired', 'compensation_restore'].includes(createKind)) errors.push('createAttempt_createKind');
+  if (scope?.createKind && scope.createKind !== createKind) errors.push('exactScope_createKind');
+  if (createKind === 'compensation_restore' && attempt?.role !== 'replacement_desired') errors.push('createAttempt_compensation_role');
+  if (!['create_started', 'submission_uncertain'].includes(attempt?.state)) errors.push('createAttempt_state');
   if (String(attempt?.workFingerprint || '').toLowerCase() !== expectedWorkFingerprint) errors.push('createAttempt_workFingerprint');
   if (!scope || typeof scope !== 'object' || Array.isArray(scope)) errors.push('exactScope_missing_or_invalid');
   if (String(scope?.storeKey || '').toUpperCase() !== args.storeKey) errors.push('exactScope_storeKey');
   if (String(scope?.transactionId || '') !== args.transactionId) errors.push('exactScope_transactionId');
+  if (Number(scope?.transactionAttempt) !== Number(attempt?.attempt)) errors.push('exactScope_transactionAttempt');
   if (!/^[a-f0-9]{64}$/.test(String(scope?.rescueHash || '').toLowerCase())) errors.push('exactScope_rescueHash');
   const targetSkcs = Array.isArray(scope?.targetSkcs)
     ? [...new Set(scope.targetSkcs.map(value => String(value || '').trim()).filter(Boolean))].sort()
@@ -308,6 +331,45 @@ async function runCommand(command, commandArgs, timeoutMs = 1200000) {
   });
 }
 
+function stepTimeoutMs(args, {
+  capMs,
+  reserveFinalization = false,
+  recovery = false,
+  label,
+} = {}) {
+  let bounded = capMs;
+  if (args.deadline && !recovery) {
+    bounded = boundedTimeoutMs(args.deadline, {
+      capMs,
+      reserveSec: reserveFinalization ? args.deadline.minFinalizationBudgetSec : 0,
+      label,
+    });
+  } else if (args.deadline) {
+    const recoveryBounded = boundedRecoveryTimeoutMs(args.deadline, {capMs, label});
+    if (recoveryBounded <= STEP_TERMINAL_PUBLISH_RESERVE_MS) {
+      const error = new Error(`${label} has no time left before terminal journal publication reserve`);
+      error.code = 'MARKETING_DEADLINE_RECOVERY_EXPIRED';
+      throw error;
+    }
+    bounded = recoveryBounded - STEP_TERMINAL_PUBLISH_RESERVE_MS;
+  }
+  if (args.parentHardDeadlineEpoch) {
+    const parentRemainingMs = args.parentHardDeadlineEpoch * 1000 - Date.now() - STEP_TERMINAL_PUBLISH_RESERVE_MS;
+    if (parentRemainingMs <= 0) {
+      const error = new Error(`${label} has no time left before parent hard deadline publication reserve`);
+      error.code = 'MARKETING_PARENT_DEADLINE_EXPIRED';
+      throw error;
+    }
+    bounded = Math.min(bounded, parentRemainingMs);
+  }
+  if (!Number.isFinite(bounded) || bounded <= 0) {
+    const error = new Error(`${label} has no time left before terminal journal publication reserve`);
+    error.code = 'MARKETING_DEADLINE_RECOVERY_EXPIRED';
+    throw error;
+  }
+  return Math.max(1, Math.floor(bounded));
+}
+
 function parseLastJson(text) {
   const source = String(text || '').trim();
   for (let start = source.lastIndexOf('{'); start >= 0; start = source.lastIndexOf('{', start - 1)) {
@@ -324,7 +386,17 @@ async function loadToolResult(commandResult) {
   return {...commandResult, parsed, full, outPath};
 }
 
-async function applyRescue({args, rescuePath, execute, startDelayMinutes = 20}) {
+async function applyRescue({
+  args,
+  rescuePath,
+  execute,
+  startDelayMinutes = 20,
+  recovery = false,
+  reserveFinalization = false,
+  label = 'limited-discount apply',
+  timeoutMs: suppliedTimeoutMs,
+  capMs = 1200000,
+}) {
   const rescueText = await fs.readFile(rescuePath, 'utf8');
   const rescueHash = sha256(rescueText);
   const commandArgs = [
@@ -336,17 +408,45 @@ async function applyRescue({args, rescuePath, execute, startDelayMinutes = 20}) 
     '--start-delay-minutes', String(startDelayMinutes),
     execute ? '--execute' : '--dry-run',
   ];
-  return await loadToolResult(await runCommand(process.execPath, commandArgs));
+  const timeoutMs = suppliedTimeoutMs ?? stepTimeoutMs(args, {
+    capMs,
+    recovery,
+    reserveFinalization,
+    label,
+  });
+  return await loadToolResult(await runCommand(process.execPath, commandArgs, timeoutMs));
 }
 
-async function removeSkcs({args, activityId, skcs, execute}) {
+async function removeSkcs({
+  args,
+  activityId,
+  skcs,
+  execute,
+  onExecutionStarted,
+  recovery = false,
+  reserveFinalization = false,
+  expectedSnapshotPath = '',
+  expectedSnapshotHash = '',
+}) {
+  const timeoutMs = stepTimeoutMs(args, {
+    capMs: 600000,
+    recovery,
+    reserveFinalization,
+    label: `${execute ? 'delete' : 'read'} activity ${activityId}`,
+  });
+  const snapshotArgs = expectedSnapshotPath ? [
+    '--expected-snapshot', expectedSnapshotPath,
+    '--expected-snapshot-hash', expectedSnapshotHash,
+  ] : [];
+  if (execute) onExecutionStarted?.();
   return await loadToolResult(await runCommand(process.execPath, [
     REMOVE_SCRIPT,
     '--store', args.storeKey,
     '--activity-id', String(activityId),
     '--skcs', skcs.join(','),
+    ...snapshotArgs,
     execute ? '--execute' : '--dry-run',
-  ], 600000));
+  ], timeoutMs));
 }
 
 function commandSummary(result) {
@@ -387,52 +487,7 @@ function conflictActivities(full) {
 }
 
 function invalidBySkc(full) {
-  const result = new Map();
-  for (const row of full?.validation?.invalid || []) {
-    const skc = String(row?.skc || '').trim();
-    if (!skc) continue;
-    const conflictCode = String(row.error_code || '');
-    // 0004 can mean the SKC is no longer on shelf even when a stale activity
-    // still lists it. Only the explicit 0006 activity-occupancy code is safe
-    // to defer until after the old protection is transactionally removed.
-    const oldConflictOnly = row.reason === 'query_goods error_code'
-      && conflictCode === 'mrs-simple_platform_limit_discounts-0006';
-    if (oldConflictOnly) continue;
-    if (!result.has(skc)) result.set(skc, []);
-    result.get(skc).push(row);
-  }
-  for (const skc of full?.validation?.missing || []) {
-    const value = String(skc || '').trim();
-    if (!value) continue;
-    if (!result.has(value)) result.set(value, []);
-    result.get(value).push({skc: value, reason: 'query_goods missing'});
-  }
-  return result;
-}
-
-function initialInvalidBySkc(full, conflicts = []) {
-  const result = invalidBySkc(full);
-  const explicitActivityConflictSkcs = new Set(
-    (full?.validation?.invalid || [])
-      .filter(row => row?.reason === 'query_goods error_code'
-        && row?.error_code === 'mrs-simple_platform_limit_discounts-0006')
-      .map(row => String(row?.skc || '').trim())
-      .filter(Boolean),
-  );
-  const conflictingSkcs = new Set(
-    conflicts.flatMap(activity => activity.targetSkcs || [])
-      .map(skc => String(skc || '').trim())
-      .filter(Boolean),
-  );
-  for (const skc of conflictingSkcs) {
-    if (explicitActivityConflictSkcs.has(skc)) continue;
-    if (!result.has(skc)) result.set(skc, []);
-    result.get(skc).push({
-      skc,
-      reason: 'limited-discount conflict lacks explicit 0006 occupancy evidence',
-    });
-  }
-  return result;
+  return new Map(Object.entries(partitionManagedLimitedDiscountPreflight(full).blockedBySkc));
 }
 
 function exactCoveredSkcs(full, rows, rescue) {
@@ -493,10 +548,19 @@ function snapshotRows(snapshot) {
     .filter(row => row.skc && Number.isFinite(row.limitedDiscountPrice) && row.limitedDiscountPrice > 0);
 }
 
-async function restorePreviousProtection({args, baseRescue, snapshots, journal, persistJournal}) {
+async function restorePreviousProtection({
+  args,
+  baseRescue,
+  snapshots,
+  journal,
+  persistJournal,
+  armCreateAttempt,
+  settleCreateAttempt,
+  markCreateAttemptUncertain,
+}) {
   const desiredCovered = new Set(journal.desiredCoveredSkcs || []);
-  const restoredCovered = new Set();
-  const claimed = new Set(desiredCovered);
+  const restoredCovered = new Set(journal.restoredCoveredSkcs || []);
+  const claimed = new Set([...desiredCovered, ...restoredCovered]);
   const attempts = [];
   for (const snapshot of snapshots) {
     const rows = snapshotRows(snapshot).filter(row => !claimed.has(row.skc));
@@ -509,7 +573,15 @@ async function restorePreviousProtection({args, baseRescue, snapshots, journal, 
       endTime: restoreEnd,
       activityStock: undefined,
     });
-    const dryRun = await applyRescue({args, rescuePath: prepared.file, execute: false, startDelayMinutes: 1});
+    const dryRun = await applyRescue({
+      args,
+      rescuePath: prepared.file,
+      execute: false,
+      startDelayMinutes: 1,
+      recovery: true,
+      capMs: 120000,
+      label: `compensation preflight ${snapshot.activityId}`,
+    });
     const alreadyCovered = exactCoveredSkcs(dryRun.full, rows, prepared.value);
     for (const skc of alreadyCovered) {
       claimed.add(skc);
@@ -537,7 +609,15 @@ async function restorePreviousProtection({args, baseRescue, snapshots, journal, 
       : await writeSubsetRescue(prepared.value, uncoveredRows, args, `restore-uncovered-${snapshot.activityId}`);
     const executableDryRun = uncoveredRows.length === rows.length
       ? dryRun
-      : await applyRescue({args, rescuePath: executable.file, execute: false, startDelayMinutes: 1});
+      : await applyRescue({
+        args,
+        rescuePath: executable.file,
+        execute: false,
+        startDelayMinutes: 1,
+        recovery: true,
+        capMs: 120000,
+        label: `compensation subset preflight ${snapshot.activityId}`,
+      });
     attempt.executableDryRun = commandSummary(executableDryRun);
     if (!executableDryRun.full?.ok || executableDryRun.full?.requiresTransactionalReplacement) {
       attempt.error = 'compensation preflight failed or found a conflicting activity';
@@ -546,15 +626,58 @@ async function restorePreviousProtection({args, baseRescue, snapshots, journal, 
       await persistJournal('compensation_failed');
       continue;
     }
-    const execute = await applyRescue({args, rescuePath: executable.file, execute: true, startDelayMinutes: 1});
+    const createTimeoutMs = stepTimeoutMs(args, {
+      capMs: 1200000,
+      recovery: true,
+      label: `compensation create ${snapshot.activityId}`,
+    });
+    await armCreateAttempt({
+      role: 'compensation_restore',
+      rescuePath: executable.file,
+      rescueHash: executable.hash,
+      targetRows: uncoveredRows,
+    });
+    const execute = await applyRescue({
+      args,
+      rescuePath: executable.file,
+      execute: true,
+      startDelayMinutes: 1,
+      recovery: true,
+      label: `compensation create ${snapshot.activityId}`,
+      timeoutMs: createTimeoutMs,
+    });
+    if (process.env.SHEIN_MARKETING_FAULT_AFTER_COMPENSATION_CREATE_RETURN_BEFORE_JOURNAL === '1') {
+      throw new Error('fault injection after compensation create return before journal result persistence');
+    }
     attempt.execute = commandSummary(execute);
     const exact = exactCoveredSkcs(execute.full, uncoveredRows, executable.value);
+    const exactResult = execute.full?.ok === true && exact.size === uncoveredRows.length;
+    if (!exactResult) {
+      await markCreateAttemptUncertain({command: execute, coveredSkcs: [...exact]});
+      attempt.restoredSkcs = [...exact];
+      attempt.error = 'compensation create was submitted without exact complete readback';
+      attempts.push(attempt);
+      journal.compensationAttempts = attempts;
+      await persistJournal('compensation_create_uncertain');
+      const removed = unique(snapshots.flatMap(item => item.plannedSkcs || []));
+      const protectedSkcs = new Set([...desiredCovered, ...restoredCovered, ...exact]);
+      return {
+        ok: false,
+        uncertainCreate: true,
+        attempts,
+        desiredCoveredSkcs: [...desiredCovered].sort(),
+        restoredCoveredSkcs: [...restoredCovered].sort(),
+        protectedSkcs: [...protectedSkcs].sort(),
+        uncoveredSkcs: removed.filter(skc => !protectedSkcs.has(skc)),
+      };
+    }
+    await settleCreateAttempt({command: execute, coveredSkcs: [...exact]});
     for (const skc of exact) {
       claimed.add(skc);
       restoredCovered.add(skc);
     }
     attempt.restoredSkcs = [...exact];
-    attempt.ok = execute.full?.ok === true && exact.size === uncoveredRows.length;
+    attempt.ok = true;
     if (!attempt.ok) attempt.error = 'compensation create/readback did not cover every expected SKC';
     attempts.push(attempt);
     journal.compensationAttempts = attempts;
@@ -625,6 +748,7 @@ async function main() {
     desiredCoveredSkcs: [],
     restoredCoveredSkcs: [],
     compensationAttempts: [],
+    createAttemptHistory: [],
     attempt: 1,
     attemptStartedAt: new Date().toISOString(),
     attemptHistory: [],
@@ -637,9 +761,18 @@ async function main() {
   };
 
   const armCreateAttempt = async ({role, rescuePath: createRescuePath, rescueHash: createRescueHash, targetRows}) => {
+    if (['create_started', 'submission_uncertain'].includes(journal.createAttempt?.state)) {
+      throw new Error(`unresolved create fence ${journal.createAttempt.operationId} forbids another create`);
+    }
+    journal.createAttemptHistory = journal.createAttemptHistory || [];
+    if (journal.createAttempt) journal.createAttemptHistory.push(journal.createAttempt);
+    const createKind = role;
+    const fenceRole = createKind === 'compensation_restore' ? 'replacement_desired' : createKind;
     const exactScope = {
       storeKey: args.storeKey,
       transactionId: args.transactionId,
+      transactionAttempt: Number(journal.attempt || 1),
+      createKind,
       rescuePath: rel(createRescuePath),
       rescueHash: createRescueHash,
       targetSkcs: unique((targetRows || []).map(row => row?.skc)).sort(),
@@ -648,8 +781,9 @@ async function main() {
     journal.createAttempt = {
       schemaVersion: 1,
       operation: 'limited_discount_create',
-      operationId: sha256(JSON.stringify({role, workFingerprint, exactScope})),
-      role,
+      operationId: sha256(JSON.stringify({role: fenceRole, workFingerprint, exactScope})),
+      role: fenceRole,
+      createKind,
       state: 'create_started',
       attempt: Number(journal.attempt || 1),
       startedAt: new Date().toISOString(),
@@ -662,7 +796,44 @@ async function main() {
       operationId: journal.createAttempt.operationId,
       startedAt: journal.createAttempt.startedAt,
     };
-    await persistJournal('desired_create_started');
+    await persistJournal(`${createKind}_create_started`);
+  };
+
+  const settleCreateAttempt = async ({command, coveredSkcs = []}) => {
+    if (journal.createAttempt?.state !== 'create_started') {
+      throw new Error('cannot settle a create without an armed durable create_started fence');
+    }
+    journal.createAttempt.state = 'result_persisted';
+    journal.createAttempt.resultPersistedAt = new Date().toISOString();
+    journal.createAttempt.result = commandSummary(command);
+    journal.createAttempt.coveredSkcs = unique(coveredSkcs).sort();
+    journal.currentMutation = null;
+    const createKind = journal.createAttempt.createKind || journal.createAttempt.role;
+    if (createKind === 'replacement_desired') {
+      journal.desiredCoveredSkcs = unique([
+        ...(journal.desiredCoveredSkcs || []),
+        ...coveredSkcs,
+      ]).sort();
+    } else if (createKind === 'compensation_restore') {
+      journal.restoredCoveredSkcs = unique([
+        ...(journal.restoredCoveredSkcs || []),
+        ...coveredSkcs,
+      ]).sort();
+    }
+    await persistJournal(`${createKind}_create_result_persisted`);
+  };
+
+  const markCreateAttemptUncertain = async ({command, coveredSkcs = []}) => {
+    if (journal.createAttempt?.state !== 'create_started') {
+      throw new Error('cannot mark create uncertainty without an armed durable create_started fence');
+    }
+    journal.createAttempt.state = 'submission_uncertain';
+    journal.createAttempt.uncertainAt = new Date().toISOString();
+    journal.createAttempt.result = commandSummary(command);
+    journal.createAttempt.coveredSkcs = unique(coveredSkcs).sort();
+    journal.currentMutation = null;
+    const createKind = journal.createAttempt.createKind || journal.createAttempt.role;
+    await persistJournal(`${createKind}_create_uncertain`);
   };
 
   if (args.execute && journal.result && (
@@ -676,31 +847,23 @@ async function main() {
     return;
   }
 
-  // Empty-snapshot journals cannot prove that an accepted create is
-  // compensable. Any phase that says a mutation may have started therefore
-  // requires a complete, self-authenticating create fence. Old, truncated, or
-  // malicious journals are terminally fenced before any readback or write.
-  const mutationBearingPhases = new Set([
-    'deleting_old_protection',
-    'old_protection_removed',
-    'post_delete_preflight',
+  // Snapshot presence cannot make an unresolved create replay-safe. Every
+  // normal and compensation create is fenced before submission; any restart
+  // while that fence is create_started is permanently readback-only.
+  const createBearingPhases = new Set([
+    'create_only_create_started',
+    'replacement_desired_create_started',
+    'compensation_restore_create_started',
+    // Legacy phase emitted by the previous implementation.
     'desired_create_started',
-    'desired_create_readback',
-    'compensating',
-    'compensation_failed',
-    'unsafe_uncovered',
-    'uncertain_readback_only',
   ]);
-  const journalSignalsUnresolvedMutation = journal.mutationsStarted === true
-    || mutationBearingPhases.has(String(journal.phase || ''))
-    || journal.currentMutation != null
-    || journal.createAttempt != null;
-  const emptySnapshotsWithUnresolvedMutation = args.execute
+  const createMayBeUnresolved = args.execute
     && !journal.result
-    && journalSignalsUnresolvedMutation
-    && (!Array.isArray(journal.snapshots) || journal.snapshots.length === 0);
+    && (['create_started', 'submission_uncertain'].includes(journal.createAttempt?.state)
+      || journal.currentMutation?.type === 'create'
+      || createBearingPhases.has(String(journal.phase || '')));
   let validatedCreateFence = null;
-  if (emptySnapshotsWithUnresolvedMutation) {
+  if (createMayBeUnresolved) {
     validatedCreateFence = await validateCreateAttemptFence({journal, args, rescueHash, sourceRescueHash});
     if (!validatedCreateFence.ok) {
       const result = {
@@ -740,7 +903,6 @@ async function main() {
   if (args.execute
     && validatedCreateFence?.ok
     && !journal.result) {
-    const fencedScope = journal.createAttempt.exactScope || {};
     const fencedRescuePath = validatedCreateFence.fencedRescuePath;
     let uncertainReadback = null;
     try {
@@ -748,13 +910,15 @@ async function main() {
         args,
         rescuePath: fencedRescuePath,
         execute: false,
+        recovery: true,
+        label: 'uncertain create readback',
       }));
     } catch (error) {
       uncertainReadback = {ok: false, error: String(error?.message || error)};
     }
     const result = {
       ok: false,
-      safe: true,
+      safe: (journal.snapshots || []).length === 0,
       terminal: true,
       status: 'submitted_without_exact_readback',
       classification: 'submitted_without_exact_readback',
@@ -778,7 +942,7 @@ async function main() {
     await persistJournal('uncertain_readback_only');
     await writeJsonAtomic(outputPath, result);
     console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
-    process.exitCode = 2;
+    process.exitCode = result.safe ? 2 : 4;
     return;
   }
 
@@ -797,15 +961,23 @@ async function main() {
       snapshots: journal.snapshots || [],
       journal,
       persistJournal,
+      armCreateAttempt,
+      settleCreateAttempt,
+      markCreateAttemptUncertain,
     });
     journal.recovery = recovery;
-    journal.terminal = !recovery.ok;
-    await persistJournal(recovery.ok ? 'recovered_after_interruption' : 'unsafe_uncovered');
+    const uncertainRecoveryCreate = recovery.uncertainCreate === true;
     const result = {
       ok: false,
       safe: recovery.ok,
-      terminal: !recovery.ok,
-      status: recovery.ok ? 'recovered_after_interruption' : 'unsafe_uncovered',
+      terminal: !recovery.ok || uncertainRecoveryCreate,
+      status: uncertainRecoveryCreate ? 'submitted_without_exact_readback'
+        : recovery.ok ? 'recovered_after_interruption' : 'unsafe_uncovered',
+      ...(uncertainRecoveryCreate ? {
+        classification: 'submitted_without_exact_readback',
+        submittedWithoutExactReadback: true,
+        readbackOnly: true,
+      } : {}),
       execute: true,
       writeAttempted: true,
       mutationsStarted: true,
@@ -814,6 +986,10 @@ async function main() {
       journalPath: rel(journalPath),
       recovery,
     };
+    journal.result = result;
+    journal.terminal = result.terminal;
+    await persistJournal(uncertainRecoveryCreate ? 'uncertain_readback_only'
+      : recovery.ok ? 'recovered_after_interruption' : 'unsafe_uncovered');
     await writeJsonAtomic(outputPath, result);
     console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
     process.exitCode = recovery.ok ? 2 : 4;
@@ -860,8 +1036,8 @@ async function main() {
   if (!initial.full) {
     throw new Error(`Initial transactional preflight did not produce a readable artifact: ${initial.stderr || initial.stdout || 'no child output'}`);
   }
-  const initialConflicts = conflictActivities(initial.full);
-  const initialInvalid = initialInvalidBySkc(initial.full, initialConflicts);
+  const initialPartition = partitionManagedLimitedDiscountPreflight(initial.full);
+  const initialInvalid = invalidBySkc(initial.full);
   const initiallyBlockedSkcs = [...initialInvalid.keys()];
   const eligibleRows = rows.filter(row => !initialInvalid.has(String(row.skc)));
   const result = {
@@ -881,8 +1057,14 @@ async function main() {
     targetSkcs: rows.map(row => String(row.skc)),
     initiallyBlockedSkcs,
     initialBlockers: Object.fromEntries(initialInvalid),
+    managedConflictReplacement: {
+      skcs: initialPartition.managedConflictSkcs,
+      evidenceBySkc: initialPartition.managedEvidenceBySkc,
+    },
     initialDryRun: commandSummary(initial),
     snapshots: [],
+    preDeleteActivityChecks: [],
+    preDeleteMembershipChecks: [],
     removals: [],
     postDeleteDryRun: null,
     desiredCreate: null,
@@ -893,8 +1075,8 @@ async function main() {
 
   // The initial preflight is atomic for the whole activity group. A blocked
   // SKC must not be silently removed from a subset while sibling SKCs proceed.
-  // This gate deliberately runs before the exact-coverage shortcut because an
-  // off-shelf 0004 row can remain in a stale activity at the requested price.
+  // Only 0006 is deferred when this exact SKC is also an active member of a
+  // concrete old activity. 0004 and every other validation row remain blocked.
   if (initiallyBlockedSkcs.length) {
     result.status = 'initial_platform_blocked_preserved';
     result.terminal = true;
@@ -952,6 +1134,11 @@ async function main() {
       return;
     }
     assertCanBeginIrreversibleMutation(args, `limited-discount create ${args.storeKey}`);
+    const createTimeoutMs = stepTimeoutMs(args, {
+      capMs: 1200000,
+      reserveFinalization: true,
+      label: `limited-discount create ${args.storeKey}`,
+    });
     result.mutationsStarted = true;
     await armCreateAttempt({
       role: 'create_only',
@@ -959,34 +1146,31 @@ async function main() {
       rescueHash: prepared.hash,
       targetRows: eligibleRows,
     });
-    try {
-      assertCanBeginIrreversibleMutation(args, `limited-discount create ${args.storeKey}`);
-    } catch (error) {
-      journal.mutationsStarted = false;
-      journal.currentMutation = null;
-      journal.createAttempt = null;
-      result.mutationsStarted = false;
-      await persistJournal('pre_mutation_deadline_deferred');
-      throw error;
-    }
     result.writeAttempted = true;
-    const created = await applyRescue({args, rescuePath: prepared.file, execute: true});
+    const created = await applyRescue({
+      args,
+      rescuePath: prepared.file,
+      execute: true,
+      reserveFinalization: true,
+      label: `limited-discount create ${args.storeKey}`,
+      timeoutMs: createTimeoutMs,
+    });
     if (process.env.SHEIN_MARKETING_FAULT_AFTER_CREATE_RETURN_BEFORE_JOURNAL === '1') {
       throw new Error('fault injection after create return before journal result persistence');
     }
     const covered = exactCoveredSkcs(created.full, eligibleRows, prepared.value);
+    const exactCreate = created.full?.ok === true && covered.size === eligibleRows.length;
+    if (exactCreate) await settleCreateAttempt({command: created, coveredSkcs: [...covered]});
+    else await markCreateAttemptUncertain({command: created, coveredSkcs: [...covered]});
     result.desiredCreate = commandSummary(created);
     result.desiredCoveredSkcs = [...covered].sort();
-    result.ok = created.full?.ok === true && covered.size === eligibleRows.length && initiallyBlockedSkcs.length === 0;
+    result.ok = exactCreate && initiallyBlockedSkcs.length === 0;
     result.status = result.ok ? 'created_without_replacement' : 'submitted_without_exact_readback';
     result.classification = result.ok ? 'completed' : 'submitted_without_exact_readback';
     result.submittedWithoutExactReadback = !result.ok;
     result.safe = true;
     result.terminal = !result.ok || initiallyBlockedSkcs.length > 0;
     journal.result = result;
-    journal.createAttempt.state = 'result_persisted';
-    journal.createAttempt.resultPersistedAt = new Date().toISOString();
-    journal.currentMutation = null;
     journal.desiredCoveredSkcs = result.desiredCoveredSkcs;
     journal.terminal = result.terminal;
     await persistJournal(result.ok ? 'completed' : 'safe_blocked');
@@ -1002,8 +1186,15 @@ async function main() {
     if (!skcs.length) continue;
     const snapshotResult = await removeSkcs({args, activityId: conflict.activityId, skcs, execute: false});
     const before = snapshotResult.full?.results?.[0]?.before;
-    if (!snapshotResult.full?.ok || !before || (before.missingToRemove || []).length) {
-      throw new Error(`Could not lock pre-delete snapshot for activity ${conflict.activityId}`);
+    const membershipVerification = validateSelectiveLimitedDiscountRemoval({
+      full: snapshotResult.full,
+      plannedSkcs: skcs,
+      expectedPreserveSkcs: conflict.extraSkcs,
+      expectedBeforeSkcs: [...skcs, ...conflict.extraSkcs],
+      requireAfter: false,
+    });
+    if (!membershipVerification.ok || !before) {
+      throw new Error(`Could not lock exact pre-delete membership for activity ${conflict.activityId}: ${membershipVerification.errors.join(',')}`);
     }
     snapshots.push({
       storeKey: args.storeKey,
@@ -1012,10 +1203,35 @@ async function main() {
       state: conflict.state,
       startTime: conflict.startTime,
       endTime: conflict.endTime,
+      activityContract: conflict,
       plannedSkcs: skcs,
-      beforeGoods: before.goods || [],
+      beforeMemberSkcs: membershipVerification.expectedBeforeSkcs,
+      preserveSkcs: membershipVerification.preservedSkcs,
+      beforeGoods: membershipVerification.beforeGoodsSnapshot,
+      membershipVerification,
       snapshotArtifact: snapshotResult.outPath ? rel(snapshotResult.outPath) : '',
     });
+  }
+  for (const snapshot of snapshots) {
+    const contract = {
+      schemaVersion: 1,
+      storeKey: snapshot.storeKey,
+      activityId: snapshot.activityId,
+      state: snapshot.state,
+      startTime: snapshot.startTime,
+      endTime: snapshot.endTime,
+      plannedSkcs: snapshot.plannedSkcs,
+      preserveSkcs: snapshot.preserveSkcs,
+      beforeGoods: snapshot.beforeGoods,
+    };
+    const contractFile = path.join(
+      args.outDir,
+      `limited-discount-tx-${args.storeKey}-${args.transactionId}-remove-${snapshot.activityId}.json`,
+    );
+    await writeJsonAtomic(contractFile, contract);
+    snapshot.removalContract = contract;
+    snapshot.removalContractPath = contractFile;
+    snapshot.removalContractHash = sha256(await fs.readFile(contractFile));
   }
   const snapshottedSkcs = new Set(snapshots.flatMap(snapshot => snapshot.plannedSkcs));
   const conflictingTargetSkcs = new Set(conflicts.flatMap(c => c.targetSkcs || []).filter(skc => eligibleRows.some(row => String(row.skc) === skc)));
@@ -1035,6 +1251,85 @@ async function main() {
     return;
   }
 
+  let freshActivityPreflight = null;
+  try {
+    freshActivityPreflight = await applyRescue({
+      args,
+      rescuePath: prepared.file,
+      execute: false,
+      reserveFinalization: true,
+      label: 'pre-delete activity attribute readback',
+    });
+  } catch (error) {
+    result.preDeleteActivityChecks.push({ok: false, errors: [error?.code || error?.message || 'pre-delete readback failed']});
+  }
+  const freshConflicts = freshActivityPreflight?.full ? conflictActivities(freshActivityPreflight.full) : [];
+  const freshPartition = freshActivityPreflight?.full
+    ? partitionManagedLimitedDiscountPreflight(freshActivityPreflight.full)
+    : {blockedSkcs: result.targetSkcs};
+  for (const snapshot of snapshots) {
+    const current = freshConflicts.find(conflict => conflict.activityId === snapshot.activityId);
+    const verification = validateLimitedDiscountActivitySnapshot({
+      current,
+      expected: snapshot.activityContract,
+    });
+    if (freshPartition.blockedSkcs.some(skc => snapshot.plannedSkcs.includes(skc))) {
+      verification.ok = false;
+      verification.errors = unique([...verification.errors, 'fresh_platform_validation_blocked']);
+    }
+    result.preDeleteActivityChecks.push({
+      activityId: snapshot.activityId,
+      command: commandSummary(freshActivityPreflight),
+      verification,
+    });
+  }
+  if (!freshActivityPreflight?.full || result.preDeleteActivityChecks.some(check => check.verification?.ok === false || check.ok === false)) {
+    result.status = 'pre_delete_activity_drift_old_protection_preserved';
+    result.terminal = true;
+    journal.result = result;
+    journal.terminal = true;
+    await persistJournal('safe_blocked');
+    await writeJsonAtomic(outputPath, result);
+    console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
+    process.exitCode = 2;
+    return;
+  }
+
+  for (const snapshot of snapshots) {
+    const membershipCheck = await removeSkcs({
+      args,
+      activityId: snapshot.activityId,
+      skcs: snapshot.plannedSkcs,
+      execute: false,
+      expectedSnapshotPath: snapshot.removalContractPath,
+      expectedSnapshotHash: snapshot.removalContractHash,
+    });
+    const beforeMutationVerification = validateSelectiveLimitedDiscountRemoval({
+      full: membershipCheck.full,
+      plannedSkcs: snapshot.plannedSkcs,
+      expectedPreserveSkcs: snapshot.preserveSkcs,
+      expectedBeforeSkcs: snapshot.beforeMemberSkcs,
+      expectedBeforeGoods: snapshot.beforeGoods,
+      requireAfter: false,
+    });
+    result.preDeleteMembershipChecks.push({
+      activityId: snapshot.activityId,
+      command: commandSummary(membershipCheck),
+      verification: beforeMutationVerification,
+    });
+    if (!beforeMutationVerification.ok) {
+      result.status = 'pre_delete_membership_drift_old_protection_preserved';
+      result.terminal = true;
+      journal.result = result;
+      journal.terminal = true;
+      await persistJournal('safe_blocked');
+      await writeJsonAtomic(outputPath, result);
+      console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
+      process.exitCode = 2;
+      return;
+    }
+  }
+
   assertCanBeginIrreversibleMutation(args, `limited-discount replacement ${args.storeKey}`);
   journal.mutationsStarted = true;
   result.mutationsStarted = true;
@@ -1047,16 +1342,81 @@ async function main() {
     await persistJournal('pre_mutation_deadline_deferred');
     throw error;
   }
-  result.writeAttempted = true;
+  const finalizeRemovalFailure = async ({safeStatus, collateralUncoveredSkcs = []}) => {
+    let compensation;
+    try {
+      compensation = await restorePreviousProtection({
+        args,
+        baseRescue: rescue,
+        snapshots,
+        journal,
+        persistJournal,
+        armCreateAttempt,
+        settleCreateAttempt,
+        markCreateAttemptUncertain,
+      });
+    } catch (error) {
+      compensation = {
+        ok: false,
+        attempts: journal.compensationAttempts || [],
+        desiredCoveredSkcs: journal.desiredCoveredSkcs || [],
+        restoredCoveredSkcs: journal.restoredCoveredSkcs || [],
+        protectedSkcs: unique([...(journal.desiredCoveredSkcs || []), ...(journal.restoredCoveredSkcs || [])]),
+        uncoveredSkcs: unique(snapshots.flatMap(snapshot => snapshot.plannedSkcs || [])),
+        error: {code: error?.code || 'COMPENSATION_FAILED', message: error?.message || String(error)},
+      };
+    }
+    const uncoveredSkcs = unique([...(compensation.uncoveredSkcs || []), ...collateralUncoveredSkcs]);
+    result.compensation = compensation;
+    result.safe = compensation.ok && uncoveredSkcs.length === 0;
+    result.status = compensation.uncertainCreate ? 'submitted_without_exact_readback'
+      : result.safe ? safeStatus
+      : collateralUncoveredSkcs.length ? 'unsafe_non_target_protection_changed' : 'unsafe_uncovered';
+    if (compensation.uncertainCreate) {
+      result.classification = 'submitted_without_exact_readback';
+      result.submittedWithoutExactReadback = true;
+      result.terminal = true;
+      result.safe = false;
+    }
+    result.uncoveredSkcs = uncoveredSkcs;
+    journal.result = result;
+    journal.terminal = result.terminal === true || !result.safe;
+    await persistJournal(compensation.uncertainCreate ? 'uncertain_readback_only'
+      : result.safe ? 'recovered_after_interruption' : 'unsafe_uncovered');
+    await writeJsonAtomic(outputPath, result);
+    console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
+    process.exitCode = result.safe ? 2 : 4;
+  };
+  let deletionMayHaveOccurred = false;
+  try {
   for (const snapshot of snapshots) {
     journal.currentMutation = {activityId: snapshot.activityId, skcs: snapshot.plannedSkcs, startedAt: new Date().toISOString()};
     await persistJournal('deleting_old_protection');
-    const removed = await removeSkcs({args, activityId: snapshot.activityId, skcs: snapshot.plannedSkcs, execute: true});
+    result.writeAttempted = true;
+    const removed = await removeSkcs({
+      args,
+      activityId: snapshot.activityId,
+      skcs: snapshot.plannedSkcs,
+      execute: true,
+      onExecutionStarted: () => { deletionMayHaveOccurred = true; },
+      reserveFinalization: true,
+      expectedSnapshotPath: snapshot.removalContractPath,
+      expectedSnapshotHash: snapshot.removalContractHash,
+    });
+    const membershipVerification = validateSelectiveLimitedDiscountRemoval({
+      full: removed.full,
+      plannedSkcs: snapshot.plannedSkcs,
+      expectedPreserveSkcs: snapshot.preserveSkcs,
+      expectedBeforeSkcs: snapshot.beforeMemberSkcs,
+      expectedBeforeGoods: snapshot.beforeGoods,
+      requireAfter: true,
+    });
     const removal = {
       activityId: snapshot.activityId,
       skcs: snapshot.plannedSkcs,
       command: commandSummary(removed),
-      ok: removed.full?.ok === true,
+      membershipVerification,
+      ok: membershipVerification.ok,
       artifact: removed.outPath ? rel(removed.outPath) : '',
     };
     result.removals.push(removal);
@@ -1064,24 +1424,38 @@ async function main() {
     journal.currentMutation = null;
     await persistJournal(removal.ok ? 'old_protection_removed' : 'delete_failed');
     if (!removal.ok) {
-      const compensation = await restorePreviousProtection({args, baseRescue: rescue, snapshots, journal, persistJournal});
-      result.compensation = compensation;
-      result.safe = compensation.ok;
-      result.status = compensation.ok ? 'delete_failed_restored' : 'unsafe_uncovered';
-      result.uncoveredSkcs = compensation.uncoveredSkcs;
-      journal.result = result;
-      journal.terminal = !compensation.ok;
-      await persistJournal(compensation.ok ? 'recovered_after_interruption' : 'unsafe_uncovered');
-      await writeJsonAtomic(outputPath, result);
-      console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
-      process.exitCode = compensation.ok ? 2 : 4;
+      await finalizeRemovalFailure({
+        safeStatus: 'delete_failed_restored',
+        collateralUncoveredSkcs: unique([
+          ...membershipVerification.missingPreservedSkcs,
+          ...membershipVerification.changedPreservedSkcs,
+        ]),
+      });
       return;
     }
   }
 
-  const postDelete = await applyRescue({args, rescuePath: prepared.file, execute: false});
-  result.postDeleteDryRun = commandSummary(postDelete);
-  const postInvalid = invalidBySkc(postDelete.full);
+  let postDelete = null;
+  try {
+    postDelete = await applyRescue({
+      args,
+      rescuePath: prepared.file,
+      execute: false,
+      reserveFinalization: true,
+      label: 'post-delete replacement preflight',
+    });
+    result.postDeleteDryRun = commandSummary(postDelete);
+  } catch (error) {
+    result.postDeleteDryRun = {
+      ok: false,
+      deferredByDeadline: true,
+      code: error?.code || '',
+      reason: error?.message || String(error),
+    };
+  }
+  const postInvalid = postDelete?.full
+    ? invalidBySkc(postDelete.full)
+    : new Map(eligibleRows.map(row => [String(row.skc), [{skc: row.skc, reason: 'post-delete preflight unavailable'}]]));
   const executableRows = eligibleRows.filter(row => !postInvalid.has(String(row.skc)));
   const postBlockedSkcs = [...postInvalid.keys()];
   result.postDeleteBlockedSkcs = postBlockedSkcs;
@@ -1092,28 +1466,83 @@ async function main() {
     const executable = executableRows.length === eligibleRows.length
       ? prepared
       : await writeSubsetRescue(prepared.value, executableRows, args, 'post-delete-executable-subset');
-    const executablePreflight = executableRows.length === eligibleRows.length
-      ? postDelete
-      : await applyRescue({args, rescuePath: executable.file, execute: false});
-    result.executablePreflight = commandSummary(executablePreflight);
-    if (executablePreflight.full?.ok && !executablePreflight.full?.requiresTransactionalReplacement) {
-      await armCreateAttempt({
-        role: 'replacement_desired',
-        rescuePath: executable.file,
-        rescueHash: executable.hash,
-        targetRows: executableRows,
-      });
-      desiredCreateAttempted = true;
-      const created = await applyRescue({args, rescuePath: executable.file, execute: true});
-      result.desiredCreate = commandSummary(created);
-      desiredCovered = exactCoveredSkcs(created.full, executableRows, executable.value);
+    let executablePreflight = executableRows.length === eligibleRows.length ? postDelete : null;
+    if (!executablePreflight) {
+      try {
+        executablePreflight = await applyRescue({
+          args,
+          rescuePath: executable.file,
+          execute: false,
+          reserveFinalization: true,
+          label: 'post-delete executable subset preflight',
+        });
+      } catch (error) {
+        result.executablePreflight = {
+          ok: false,
+          deferredByDeadline: true,
+          code: error?.code || '',
+          reason: error?.message || String(error),
+        };
+      }
+    }
+    if (executablePreflight) result.executablePreflight = commandSummary(executablePreflight);
+    if (executablePreflight?.full?.ok && !executablePreflight.full?.requiresTransactionalReplacement) {
+      let createTimeoutMs = null;
+      try {
+        assertCanBeginIrreversibleMutation(args, `replacement desired create ${args.storeKey}`);
+        createTimeoutMs = stepTimeoutMs(args, {
+          capMs: 1200000,
+          reserveFinalization: true,
+          label: `replacement desired create ${args.storeKey}`,
+        });
+      } catch (error) {
+        result.desiredCreate = {ok: false, deferredByDeadline: true, code: error?.code || '', reason: error?.message || String(error)};
+      }
+      if (createTimeoutMs != null) {
+        await armCreateAttempt({
+          role: 'replacement_desired',
+          rescuePath: executable.file,
+          rescueHash: executable.hash,
+          targetRows: executableRows,
+        });
+        desiredCreateAttempted = true;
+        const created = await applyRescue({
+          args,
+          rescuePath: executable.file,
+          execute: true,
+          reserveFinalization: true,
+          label: `replacement desired create ${args.storeKey}`,
+          timeoutMs: createTimeoutMs,
+        });
+        if (process.env.SHEIN_MARKETING_FAULT_AFTER_CREATE_RETURN_BEFORE_JOURNAL === '1') {
+          throw new Error('fault injection after create return before journal result persistence');
+        }
+        result.desiredCreate = commandSummary(created);
+        desiredCovered = exactCoveredSkcs(created.full, executableRows, executable.value);
+        const exactDesiredCreate = created.full?.ok === true && desiredCovered.size === executableRows.length;
+        if (exactDesiredCreate) {
+          await settleCreateAttempt({command: created, coveredSkcs: [...desiredCovered]});
+        } else {
+          await markCreateAttemptUncertain({command: created, coveredSkcs: [...desiredCovered]});
+          result.desiredCoveredSkcs = [...desiredCovered].sort();
+          result.safe = false;
+          result.terminal = true;
+          result.status = 'submitted_without_exact_readback';
+          result.classification = 'submitted_without_exact_readback';
+          result.submittedWithoutExactReadback = true;
+          result.uncoveredSkcs = eligibleRows.filter(row => !desiredCovered.has(String(row.skc))).map(row => String(row.skc));
+          journal.result = result;
+          journal.terminal = true;
+          await persistJournal('uncertain_readback_only');
+          await writeJsonAtomic(outputPath, result);
+          console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
+          process.exitCode = 4;
+          return;
+        }
+      }
     }
   }
   journal.desiredCoveredSkcs = [...desiredCovered].sort();
-  if (journal.createAttempt?.role === 'replacement_desired') {
-    journal.createAttempt.state = 'result_persisted';
-    journal.createAttempt.resultPersistedAt = new Date().toISOString();
-  }
   result.desiredCoveredSkcs = [...desiredCovered].sort();
   await persistJournal('desired_create_readback');
 
@@ -1123,17 +1552,26 @@ async function main() {
     snapshots,
     journal,
     persistJournal,
+    armCreateAttempt,
+    settleCreateAttempt,
+    markCreateAttemptUncertain,
   });
   result.compensation = compensation;
   result.uncoveredSkcs = compensation.uncoveredSkcs;
   result.safe = compensation.ok;
   const desiredAll = eligibleRows.every(row => desiredCovered.has(String(row.skc)));
   result.ok = desiredAll && initiallyBlockedSkcs.length === 0 && postBlockedSkcs.length === 0 && compensation.ok;
-  if (result.ok) result.status = 'replaced_all';
+  if (compensation.uncertainCreate) {
+    result.status = 'submitted_without_exact_readback';
+    result.classification = 'submitted_without_exact_readback';
+    result.submittedWithoutExactReadback = true;
+  } else if (result.ok) result.status = 'replaced_all';
   else if (!compensation.ok) result.status = 'unsafe_uncovered';
   else if (postBlockedSkcs.length || initiallyBlockedSkcs.length) result.status = 'platform_blocked_old_protection_restored';
   else result.status = 'replacement_failed_old_protection_restored';
-  result.terminal = result.status === 'platform_blocked_old_protection_restored' || !result.safe;
+  result.terminal = compensation.uncertainCreate
+    || result.status === 'platform_blocked_old_protection_restored'
+    || !result.safe;
   if (!result.ok && desiredCreateAttempted && desiredCovered.size !== executableRows.length) {
     result.status = 'submitted_without_exact_readback';
     result.classification = 'submitted_without_exact_readback';
@@ -1147,6 +1585,20 @@ async function main() {
   await writeJsonAtomic(outputPath, result);
   console.log(JSON.stringify({...result, out: rel(outputPath)}, null, 2));
   if (!result.ok) process.exitCode = result.safe ? 2 : 4;
+  } catch (error) {
+    if (!deletionMayHaveOccurred) throw error;
+    if (['create_started', 'submission_uncertain'].includes(journal.createAttempt?.state)) {
+      // The create may already have been accepted. Preserve its durable fence
+      // for the next invocation's readback-only path; compensation would be a
+      // second create with unknown overlap.
+      throw error;
+    }
+    result.postDeleteException = {
+      code: error?.code || 'POST_DELETE_TRANSACTION_FAILED',
+      message: error?.message || String(error),
+    };
+    await finalizeRemovalFailure({safeStatus: 'post_delete_exception_old_protection_restored'});
+  }
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : '';

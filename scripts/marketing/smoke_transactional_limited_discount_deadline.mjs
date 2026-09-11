@@ -10,6 +10,7 @@ import {
   loadMarketingTransactionJournal,
   MarketingTransactionJournalError,
 } from './replace_limited_discount_transactionally.mjs';
+import {findPersistedMarketingTransactionContinuation} from '../../lib/cloud_marketing_deadline_contract.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CHILD = 'scripts/marketing/replace_limited_discount_transactionally.mjs';
@@ -70,6 +71,7 @@ try {
   const removeFile = path.join(temp, 'fake-remove.mjs');
   const preloadFile = path.join(temp, 'clock-preload.cjs');
   const rescueFile = path.join(temp, 'rescue.json');
+  const twoActivityRescueFile = path.join(temp, 'rescue-two-activities.json');
   const baseEpoch = 2_000_000_000;
   const gracefulEpoch = baseEpoch + 300;
   const outerEpoch = baseEpoch + 1_200;
@@ -84,6 +86,14 @@ try {
   };
   await fs.writeFile(rescueFile, JSON.stringify(rescue));
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescueFile)).digest('hex');
+  await fs.writeFile(twoActivityRescueFile, JSON.stringify({
+    ...rescue,
+    rows: [
+      rescue.rows[0],
+      {...rescue.rows[0], skc: 'DEADLINE-SKC-2', limitedDiscountPrice: 81},
+    ],
+  }));
+  const twoActivityRescueHash = crypto.createHash('sha256').update(await fs.readFile(twoActivityRescueFile)).digest('hex');
   const commonJsRequire = 'requ' + 'ire';
   await fs.writeFile(preloadFile, `const fs=${commonJsRequire}('node:fs');Date.now=()=>Number(fs.readFileSync(process.env.FOCUSED_CLOCK,'utf8'))*1000;`);
   await fs.writeFile(applyFile, `
@@ -91,12 +101,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 const argv=process.argv.slice(2);const value=k=>argv[argv.indexOf(k)+1];const execute=argv.includes('--execute');
 const rescue=JSON.parse(await fs.readFile(value('--rescue'),'utf8'));const state=JSON.parse(await fs.readFile(process.env.FOCUSED_STATE,'utf8'));
-const compensation=String(rescue.purpose||'').includes('compensation_restore');const skc=String(rescue.rows[0].skc);
+const compensation=String(rescue.purpose||'').includes('compensation_restore');const rows=rescue.rows;const skc=String(rows[0].skc);
 const epoch=Number(await fs.readFile(process.env.FOCUSED_CLOCK,'utf8'));
 await fs.appendFile(process.env.FOCUSED_EVENTS,JSON.stringify({tool:'apply',execute,compensation,epoch})+'\\n');
+if(state.hangAfterDelete&&!state.oldCovered&&!execute){await new Promise(resolve=>setTimeout(resolve,Number(state.hangMs||5000)));}
 let full;
 if(state.oldCovered){
-  full={ok:false,before:{conflictActivities:[{activity_id:111,act_name:'old activity',state:3,start_time:'2026-01-01 00:00:00',end_time:'2099-12-31 23:59:59',targetSkcs:[skc],extraSkcs:[],targetGoods:[{skc,sku_supplier_no:'OLD',product_act_price:70,attend_num_sum:10,stock_num:10}]}]},validation:{missing:[],invalid:[{skc,reason:'query_goods error_code',error_code:'mrs-simple_platform_limit_discounts-0006'}]}};
+  const conflictActivities=state.splitActivities?rows.map((row,index)=>({activity_id:111+index,act_name:'old activity '+index,state:3,start_time:'2026-01-01 00:00:00',end_time:'2099-12-31 23:59:59',targetSkcs:[String(row.skc)],extraSkcs:[],targetGoods:[{skc:String(row.skc),sku_supplier_no:'OLD-'+index,product_act_price:70+index,attend_num_sum:10,stock_num:10}]})):[{activity_id:111,act_name:'old activity',state:3,start_time:'2026-01-01 00:00:00',end_time:'2099-12-31 23:59:59',targetSkcs:rows.map(row=>String(row.skc)),extraSkcs:[],targetGoods:rows.map((row,index)=>({skc:String(row.skc),sku_supplier_no:'OLD-'+index,product_act_price:70+index,attend_num_sum:10,stock_num:10}))}];
+  full={ok:false,before:{conflictActivities},validation:{missing:[],invalid:rows.map(row=>({skc:String(row.skc),reason:'query_goods error_code',error_code:'mrs-simple_platform_limit_discounts-0006'}))}};
 }else if(compensation&&execute){
   full={ok:true,writeAttempted:true,createdActivityId:222,before:{conflictActivities:[]},validation:{missing:[],invalid:[]},after:{exactReadbackRows:[{skc,ok:true}],conflictActivities:[]}};
 }else if(compensation){
@@ -114,11 +126,12 @@ console.log(JSON.stringify({ok:full.ok,out}));if(!full.ok)process.exitCode=2;
 `);
   await fs.writeFile(removeFile, `
 import fs from 'node:fs/promises';import path from 'node:path';
-const argv=process.argv.slice(2);const execute=argv.includes('--execute');const state=JSON.parse(await fs.readFile(process.env.FOCUSED_STATE,'utf8'));
+const argv=process.argv.slice(2);const value=k=>argv[argv.indexOf(k)+1];const execute=argv.includes('--execute');const state=JSON.parse(await fs.readFile(process.env.FOCUSED_STATE,'utf8'));
 const epoch=Number(await fs.readFile(process.env.FOCUSED_CLOCK,'utf8'));await fs.appendFile(process.env.FOCUSED_EVENTS,JSON.stringify({tool:'remove',execute,epoch})+'\\n');
-const before={missingToRemove:[],goods:[{skc:'DEADLINE-SKC-1',sku_supplier_no:'OLD',product_act_price:70,attend_num_sum:10,stock_num:10}]};
-if(execute){state.oldCovered=false;await fs.writeFile(process.env.FOCUSED_STATE,JSON.stringify(state));await fs.writeFile(process.env.FOCUSED_CLOCK,String(Number(process.env.FOCUSED_OUTER)+1));}
-const full={ok:true,writeAttempted:execute,results:[{ok:true,before,after:execute?{stillPresent:[],missingPreserved:[],unexpectedAdded:[]}:null}]};
+const requested=value('--skcs').split(',').filter(Boolean);const activityId=Number(value('--activity-id'));const price=70+Math.max(0,activityId-111);
+const before={totalSkcs:requested.length,skcs:[...requested].sort(),removeSkcsPresent:[...requested].sort(),missingToRemove:[],preserveSkcs:[],goods:requested.map((skc,index)=>({skc,sku_supplier_no:'OLD-'+index,product_act_price:price+index,attend_num_sum:10,stock_num:10}))};
+if(execute){state.removeExecuteCount=Number(state.removeExecuteCount||0)+1;state.oldCovered=false;await fs.writeFile(process.env.FOCUSED_STATE,JSON.stringify(state));if(state.moveClockAfterFirstDeleteToOuterMinus&&state.removeExecuteCount===1){await fs.writeFile(process.env.FOCUSED_CLOCK,String(Number(process.env.FOCUSED_OUTER)-Number(state.moveClockAfterFirstDeleteToOuterMinus)));}else if(state.crossOuterOnDelete){await fs.writeFile(process.env.FOCUSED_CLOCK,String(Number(process.env.FOCUSED_OUTER)+Number(state.crossOuterOffsetSec||1)));}}
+const full={ok:true,writeAttempted:execute,results:[{ok:true,before,after:execute?{totalSkcs:0,skcs:[],stillPresent:[],missingPreserved:[],unexpectedAdded:[],goods:[]}:null}]};
 const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random()+'.json');await fs.writeFile(out,JSON.stringify(full));console.log(JSON.stringify({ok:true,out}));
 `);
 
@@ -243,6 +256,7 @@ const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random
     const exactScope = {
       storeKey: 'DL',
       transactionId: malicious.createAttempt?.exactTransactionId || transactionId,
+      transactionAttempt: 1,
       rescuePath: path.relative(ROOT, rescueFile).replaceAll(path.sep, '/'),
       rescueHash,
       targetSkcs: ['DEADLINE-SKC-1'],
@@ -292,7 +306,101 @@ const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random
   }
 
   await fs.writeFile(clockFile, String(baseEpoch));
-  await fs.writeFile(stateFile, JSON.stringify({oldCovered: true, failDesired: true}));
+  await fs.writeFile(stateFile, JSON.stringify({oldCovered: true}));
+  await fs.writeFile(eventsFile, '');
+  const replacementPendingArgs = [
+    ...commonArgs, '--transaction-id', 'replacement-create-pending-with-snapshot',
+    '--out-dir', path.join(temp, 'replacement-pending-out'), '--journal-dir', path.join(temp, 'replacement-pending-journal'),
+  ];
+  const interruptedReplacement = await run(replacementPendingArgs, {
+    ...env,
+    SHEIN_MARKETING_FAULT_AFTER_CREATE_RETURN_BEFORE_JOURNAL: '1',
+  });
+  assert.equal(interruptedReplacement.code, 4, interruptedReplacement.stderr || interruptedReplacement.stdout);
+  assert.match(interruptedReplacement.stderr || interruptedReplacement.stdout, /fault injection after create return before journal result persistence/);
+  const replacementResume = await run(replacementPendingArgs, env);
+  assert.equal(replacementResume.code, 4, replacementResume.stderr || replacementResume.stdout);
+  const replacementResumeResult = parseLastJson(replacementResume.stdout || replacementResume.stderr);
+  assert.equal(replacementResumeResult.classification, 'submitted_without_exact_readback', JSON.stringify(replacementResumeResult));
+  assert.equal(replacementResumeResult.readbackOnly, true);
+  assert.equal(replacementResumeResult.safe, false, 'a pending create after deletion cannot be declared safely restored');
+  events = (await fs.readFile(eventsFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  assert.equal(events.filter(event => event.tool === 'apply' && event.execute && !event.compensation).length, 1,
+    'non-empty snapshots must not bypass the pending desired-create fence');
+  assert.equal(events.filter(event => event.tool === 'apply' && event.execute && event.compensation).length, 0,
+    'unknown desired create permits readback only and forbids compensation create');
+
+  await fs.writeFile(clockFile, String(baseEpoch));
+  await fs.writeFile(stateFile, JSON.stringify({oldCovered: true, crossOuterOnDelete: true}));
+  await fs.writeFile(eventsFile, '');
+  const compensationPendingArgs = [
+    ...commonArgs, '--transaction-id', 'compensation-create-pending-with-snapshot',
+    '--out-dir', path.join(temp, 'compensation-pending-out'), '--journal-dir', path.join(temp, 'compensation-pending-journal'),
+  ];
+  const interruptedCompensation = await run(compensationPendingArgs, {
+    ...env,
+    SHEIN_MARKETING_FAULT_AFTER_COMPENSATION_CREATE_RETURN_BEFORE_JOURNAL: '1',
+  });
+  assert.equal(interruptedCompensation.code, 4, interruptedCompensation.stderr || interruptedCompensation.stdout);
+  assert.match(interruptedCompensation.stderr, /fault injection after compensation create return before journal result persistence/);
+  const compensationResume = await run(compensationPendingArgs, env);
+  assert.equal(compensationResume.code, 4, compensationResume.stderr || compensationResume.stdout);
+  assert.equal(parseLastJson(compensationResume.stdout).readbackOnly, true);
+  events = (await fs.readFile(eventsFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  assert.equal(events.filter(event => event.tool === 'apply' && event.execute && event.compensation).length, 1,
+    'pending compensation create must be fenced and never submitted twice');
+
+  const compatibleJournalDir = path.join(temp, 'compatible-compensation-continuation');
+  await fs.mkdir(compatibleJournalDir, {recursive: true});
+  const compatibleTransactionId = crypto.createHash('sha256').update(`DL\n${rescueHash}`).digest('hex').slice(0, 24);
+  const compatibleScope = {
+    storeKey: 'DL',
+    transactionId: compatibleTransactionId,
+    transactionAttempt: 1,
+    createKind: 'compensation_restore',
+    rescuePath: path.relative(ROOT, rescueFile).replaceAll(path.sep, '/'),
+    rescueHash,
+    targetSkcs: ['DEADLINE-SKC-1'],
+  };
+  const compatibleAttempt = {
+    schemaVersion: 1,
+    operation: 'limited_discount_create',
+    role: 'replacement_desired',
+    createKind: 'compensation_restore',
+    state: 'create_started',
+    attempt: 1,
+    workFingerprint: env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+    exactScope: compatibleScope,
+  };
+  compatibleAttempt.operationId = crypto.createHash('sha256').update(JSON.stringify({
+    role: compatibleAttempt.role,
+    workFingerprint: compatibleAttempt.workFingerprint,
+    exactScope: compatibleScope,
+  })).digest('hex');
+  await fs.writeFile(path.join(compatibleJournalDir, `limited-discount-tx-DL-${compatibleTransactionId}.json`), JSON.stringify({
+    schemaVersion: 1,
+    transactionId: compatibleTransactionId,
+    storeKey: 'DL',
+    rescuePath: compatibleScope.rescuePath,
+    rescueHash,
+    runPayloadHash: env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+    phase: 'compensation_restore_create_started',
+    mutationsStarted: true,
+    snapshots: [{activityId: 111}],
+    createAttempt: compatibleAttempt,
+  }));
+  const compatibleContinuation = await findPersistedMarketingTransactionContinuation({
+    root: ROOT,
+    storeKey: 'DL',
+    workFingerprint: env.SHEIN_BI_MARKETING_RUN_PAYLOAD_HASH,
+    rescuePath: rescueFile,
+    journalDir: compatibleJournalDir,
+  });
+  assert.equal(compatibleContinuation.journal.createAttempt.createKind, 'compensation_restore',
+    'the existing parent continuation reader must accept a hash-bound compensation fence');
+
+  await fs.writeFile(clockFile, String(baseEpoch));
+  await fs.writeFile(stateFile, JSON.stringify({oldCovered: true, failDesired: true, crossOuterOnDelete: true}));
   await fs.writeFile(eventsFile, '');
   const mutationArgs = [
     ...commonArgs, '--transaction-id', 'mutation-crosses-outer-continues-finalization',
@@ -301,25 +409,72 @@ const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random
   const crossedAfterMutation = await run(mutationArgs, env);
   assert.equal(crossedAfterMutation.code, 2, crossedAfterMutation.stderr || crossedAfterMutation.stdout);
   const mutationResult = parseLastJson(crossedAfterMutation.stdout);
-  assert.equal(mutationResult.classification, 'submitted_without_exact_readback');
+  assert.equal(mutationResult.status, 'platform_blocked_old_protection_restored');
   assert.equal(mutationResult.safe, true, 'compensation/readback must leave exact old protection safely restored');
   events = (await fs.readFile(eventsFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
   const deleteWrite = events.findIndex(event => event.tool === 'remove' && event.execute);
   const postDeleteReadback = events.findIndex((event, index) => index > deleteWrite && event.tool === 'apply' && !event.execute && !event.compensation);
   const desiredWrite = events.findIndex((event, index) => index > deleteWrite && event.tool === 'apply' && event.execute && !event.compensation);
-  const compensationWrite = events.findIndex((event, index) => index > desiredWrite && event.tool === 'apply' && event.execute && event.compensation);
-  assert.ok(deleteWrite >= 0 && postDeleteReadback > deleteWrite && desiredWrite > postDeleteReadback && compensationWrite > desiredWrite,
-    'a started transaction must continue post-delete readback, desired create, and compensation after outer');
-  assert.ok(events[desiredWrite].epoch > outerEpoch && events[compensationWrite].epoch > outerEpoch,
-    'outer is a no-new-transaction boundary, not an interruption of an already-started transaction');
-  const eventCountAfterTerminalPublish = events.length;
-  const resumedPending = await run(mutationArgs, env);
-  assert.equal(resumedPending.code, 2, resumedPending.stderr || resumedPending.stdout);
-  assert.equal(parseLastJson(resumedPending.stdout).resumedFromTerminalJournal, true,
-    'same-fingerprint submitted/readback-pending journal must be terminally resumed');
+  const compensationWrite = events.findIndex((event, index) => index > deleteWrite && event.tool === 'apply' && event.execute && event.compensation);
+  assert.ok(deleteWrite >= 0 && postDeleteReadback === -1 && desiredWrite === -1 && compensationWrite > deleteWrite,
+    'after the normal deadline closes, the transaction must skip nonessential readback and desired create, then use the reserved compensation path');
+  assert.ok(events[compensationWrite].epoch > outerEpoch,
+    'compensation remains available inside the bounded recovery window');
+
+  await fs.writeFile(clockFile, String(baseEpoch));
+  await fs.writeFile(stateFile, JSON.stringify({
+    oldCovered: true,
+    splitActivities: true,
+    moveClockAfterFirstDeleteToOuterMinus: 899,
+  }));
+  await fs.writeFile(eventsFile, '');
+  const secondDeleteDeadline = await run([
+    '--store', 'DL', '--port', '9999', '--rescue', twoActivityRescueFile,
+    '--expected-rescue-hash', twoActivityRescueHash, '--execute',
+    '--graceful-cutoff-epoch', String(gracefulEpoch),
+    '--outer-hard-deadline-epoch', String(outerEpoch),
+    '--min-finalization-budget-sec', '900',
+    '--transaction-id', 'second-delete-step-budget-recovery',
+    '--out-dir', path.join(temp, 'second-delete-out'), '--journal-dir', path.join(temp, 'second-delete-journal'),
+  ], env);
+  assert.equal(secondDeleteDeadline.code, 2, secondDeleteDeadline.stderr || secondDeleteDeadline.stdout);
+  const secondDeleteResult = parseLastJson(secondDeleteDeadline.stdout);
+  assert.equal(secondDeleteResult.status, 'post_delete_exception_old_protection_restored');
+  assert.match(secondDeleteResult.postDeleteException.code, /MARKETING_DEADLINE_OUTER_BUDGET/);
+  assert.equal(secondDeleteResult.safe, true);
   events = (await fs.readFile(eventsFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
-  assert.equal(events.length, eventCountAfterTerminalPublish,
-    'same-fingerprint terminal pending result must not replay delete/create/compensation');
+  assert.equal(events.filter(event => event.tool === 'remove' && event.execute).length, 1,
+    'the second activity delete must not start without its own fresh deadline budget');
+  assert.equal(events.filter(event => event.tool === 'apply' && event.execute && event.compensation).length, 2,
+    'an exception after the first delete must enter the unified compensation path for every locked snapshot');
+
+  await fs.writeFile(clockFile, String(baseEpoch));
+  await fs.writeFile(stateFile, JSON.stringify({
+    oldCovered: true,
+    crossOuterOnDelete: true,
+    crossOuterOffsetSec: 894,
+    hangAfterDelete: true,
+    hangMs: 5000,
+  }));
+  await fs.writeFile(eventsFile, '');
+  const boundedChildArgs = [
+    ...commonArgs, '--transaction-id', 'dynamic-child-deadline-budget',
+    '--out-dir', path.join(temp, 'dynamic-child-out'), '--journal-dir', path.join(temp, 'dynamic-child-journal'),
+  ];
+  const boundedStartedAt = Date.now();
+  const boundedChild = await run(boundedChildArgs, env);
+  const boundedElapsedMs = Date.now() - boundedStartedAt;
+  assert.equal(boundedChild.code, 4, boundedChild.stderr || boundedChild.stdout);
+  const boundedResult = parseLastJson(boundedChild.stdout);
+  assert.equal(boundedResult.postDeleteDryRun.deferredByDeadline, true,
+    'the real replacement entry must preserve the recovery budget instead of starting a post-delete child');
+  assert.equal(boundedResult.compensation.attempts[0].dryRun.timedOut, true,
+    'the compensation child must be killed at its dynamic remaining recovery budget');
+  assert.ok(boundedElapsedMs < 4500,
+    `dynamic child budgets must leave time for parent journal publication; elapsed=${boundedElapsedMs}`);
+  events = (await fs.readFile(eventsFile, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+  assert.equal(events.some(event => event.execute && event.tool === 'apply'), false,
+    'an exhausted post-delete readback budget must never start desired or compensation create');
 
   const parentFiles = [
     'batch_restore_manual_limited_discounts.mjs',
@@ -328,10 +483,13 @@ const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random
   ];
   for (const parent of parentFiles) {
     const source = await fs.readFile(path.join(ROOT, 'scripts/marketing', parent), 'utf8');
-    assert.match(source, /execute && ACTIVE_DEADLINE \? \[/);
+    assert.match(source, /execute && (?:ACTIVE_DEADLINE|deadline) \? \[/);
     assert.match(source, /--graceful-cutoff-epoch[\s\S]*--outer-hard-deadline-epoch[\s\S]*--min-finalization-budget-sec/);
     assert.match(source, /--continuation/, `${parent} must pass continuation to the transaction child`);
   }
+  const fallbackParentSource = await fs.readFile(path.join(ROOT, 'scripts/marketing/batch_apply_new_listing_limited_discount.mjs'), 'utf8');
+  assert.match(fallbackParentSource, /--parent-hard-deadline-epoch/,
+    'the fallback parent must pass its actual absolute kill deadline to the transaction child');
 
   const manualSource = await fs.readFile(path.join(ROOT, 'scripts/marketing/batch_restore_manual_limited_discounts.mjs'), 'utf8');
   const manual = loadResumeFunctions(manualSource, [
@@ -423,5 +581,13 @@ const out=path.join(process.env.FOCUSED_DIR,'remove-'+Date.now()+'-'+Math.random
     test: 'transaction_deadline_fenced_create_crash_malicious_journal_and_nonreplay_resume_contracts',
   }));
 } finally {
-  await fs.rm(temp, {recursive: true, force: true});
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await fs.rm(temp, {recursive: true, force: true, maxRetries: 2, retryDelay: 50});
+      break;
+    } catch (error) {
+      if (!['EBUSY', 'EPERM', 'EACCES'].includes(error?.code) || attempt === 7) throw error;
+      await new Promise(resolve => setTimeout(resolve, 75 * (attempt + 1)));
+    }
+  }
 }
