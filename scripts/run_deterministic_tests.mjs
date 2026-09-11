@@ -62,6 +62,8 @@ const tests = [
   'scripts/marketing/smoke_low_et_fast_seller_integrations.mjs',
   'scripts/marketing/smoke_transactional_limited_discount_replacement.mjs',
   'scripts/marketing/smoke_transactional_limited_discount_deadline.mjs',
+  'scripts/marketing/smoke_managed_limited_discount_conflict_entry.mjs',
+  'scripts/marketing/smoke_remove_limited_discount_mutation_contract.mjs',
   'scripts/marketing/smoke_marketing_pricing_policy.mjs',
   'scripts/marketing/smoke_authorized_fallback_inventory_top_up.mjs',
   'scripts/marketing/smoke_latest_raw_marketing_link_overlay.mjs',

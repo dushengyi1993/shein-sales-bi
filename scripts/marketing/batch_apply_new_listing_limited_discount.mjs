@@ -50,6 +50,7 @@ import {
   findPersistedMarketingTransactionContinuation,
   isMarketingDeadlineError,
 } from '../../lib/cloud_marketing_deadline_contract.mjs';
+import {partitionManagedLimitedDiscountPreflight} from './_managed_limited_discount_conflict.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_OUT_DIR = path.join(ROOT, 'tmp/marketing-signup/limited-discount-rescue');
@@ -470,16 +471,41 @@ async function applyRescue({storeKey, port, rescuePath, execute, recovery = fals
   return await loadToolOutput(result);
 }
 
-async function replaceTransactionally({storeKey, port, rescuePath, sourceRescuePath = rescuePath, execute, continuation = false}) {
+export function replacementParentDeadlinePlan({
+  deadline,
+  execute,
+  nowMs = Date.now(),
+  defaultTimeoutMs = 1800000,
+} = {}) {
+  const fallbackHardDeadlineEpoch = Math.ceil((Number(nowMs) + defaultTimeoutMs) / 1000);
+  const parentHardDeadlineEpoch = execute && deadline
+    ? Number(deadline.outerHardDeadlineEpoch) + Number(deadline.minFinalizationBudgetSec)
+    : fallbackHardDeadlineEpoch;
+  const timeoutMs = Math.max(1, Math.floor(parentHardDeadlineEpoch * 1000 - Number(nowMs)));
+  return {parentHardDeadlineEpoch, timeoutMs};
+}
+
+async function replaceTransactionally({
+  storeKey,
+  port,
+  rescuePath,
+  sourceRescuePath = rescuePath,
+  execute,
+  continuation = false,
+  deadline = ACTIVE_DEADLINE,
+}) {
   const rescueHash = crypto.createHash('sha256').update(await fs.readFile(rescuePath)).digest('hex');
   const sourceRescueHash = crypto.createHash('sha256').update(await fs.readFile(sourceRescuePath)).digest('hex');
-  const deadlineArgs = execute && ACTIVE_DEADLINE ? [
-    '--graceful-cutoff-epoch', String(ACTIVE_DEADLINE.gracefulCutoffEpoch),
-    '--outer-hard-deadline-epoch', String(ACTIVE_DEADLINE.outerHardDeadlineEpoch),
-    '--min-finalization-budget-sec', String(ACTIVE_DEADLINE.minFinalizationBudgetSec),
+  const deadlineArgs = execute && deadline ? [
+    '--graceful-cutoff-epoch', String(deadline.gracefulCutoffEpoch),
+    '--outer-hard-deadline-epoch', String(deadline.outerHardDeadlineEpoch),
+    '--min-finalization-budget-sec', String(deadline.minFinalizationBudgetSec),
   ] : [];
-  const result = await runBounded(process.execPath, [
-    'scripts/marketing/replace_limited_discount_transactionally.mjs',
+  const parentDeadline = replacementParentDeadlinePlan({deadline, execute});
+  const transactionScript = process.env.SHEIN_MARKETING_REPLACE_SCRIPT
+    || 'scripts/marketing/replace_limited_discount_transactionally.mjs';
+  const result = await runCommand(process.execPath, [
+    transactionScript,
     '--store', storeKey,
     '--port', String(port),
     '--rescue', rescuePath,
@@ -487,9 +513,10 @@ async function replaceTransactionally({storeKey, port, rescuePath, sourceRescueP
     '--source-rescue', sourceRescuePath,
     '--expected-source-rescue-hash', sourceRescueHash,
     ...deadlineArgs,
+    '--parent-hard-deadline-epoch', String(parentDeadline.parentHardDeadlineEpoch),
     ...(execute && continuation ? ['--continuation'] : []),
     execute ? '--execute' : '--dry-run',
-  ], {timeoutMs: 1800000, recovery: execute, label: `${execute ? 'activity submit' : 'activity dry-run'} ${storeKey}`});
+  ], {timeoutMs: parentDeadline.timeoutMs});
   return await loadToolOutput(result);
 }
 
@@ -575,33 +602,15 @@ function classifyBlockedDryRun(full) {
   return {type: 'dry_run_not_ok', reason};
 }
 
-function transactionBlockedSkcs(full, inventoryTransactionPlan = null) {
-  const blocked = [];
-  const inventoryTransactionSkcs = new Set(
-    (inventoryTransactionPlan?.rows || [])
-      .filter(row => row?.requiresTemporaryRaise === true)
-      .map(row => String(row?.skc || '').trim())
-      .filter(Boolean),
-  );
-  for (const row of full?.validation?.invalid || []) {
-    const skc = String(row?.skc || '').trim();
-    const isExistingActivityConflict = row?.reason === 'query_goods error_code'
-      && row?.error_code === 'mrs-simple_platform_limit_discounts-0006';
-    const handledByInventoryTransaction = row?.reason === 'inventory below configured activity stock';
-    const sameSkcHasInventoryTransaction = inventoryTransactionSkcs.has(skc);
-    const inventoryMinimumOrPlatformGate = sameSkcHasInventoryTransaction && (
-      row?.reason === 'inventory below min_stock'
-      || row?.error_code === 'mrs-simple_platform_limit_discounts-101018'
-    );
-    if (!isExistingActivityConflict && !handledByInventoryTransaction && !inventoryMinimumOrPlatformGate && skc) {
-      blocked.push(skc);
-    }
-  }
-  for (const skc of full?.validation?.missing || []) blocked.push(String(skc));
-  for (const row of full?.skippedUnreportable || []) {
-    if (row?.skc) blocked.push(String(row.skc));
-  }
-  return [...new Set(blocked.filter(Boolean))];
+export function transactionPreflightPartition(full, inventoryTransactionPlan = null) {
+  const inventoryMinimumOrPlatformGate = inventoryTransactionPlan?.ok === true
+    ? inventoryTransactionPlan.rows || []
+    : [];
+  // The pure partition accepts mrs-simple_platform_limit_discounts-101018 only
+  // when the same SKC has an exact temporary-inventory transaction plan.
+  return partitionManagedLimitedDiscountPreflight(full, {
+    inventoryPlanRows: inventoryMinimumOrPlatformGate,
+  });
 }
 
 export async function processStore({file, storeMap, args, manualIndex, browserSession = {}, operations = {}}) {
@@ -685,7 +694,9 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
     record.targetSkcs = (rescue.rows || []).map(row => String(row.skc || '').trim()).filter(Boolean);
     const pricingSourceRescue = rescue;
     const pricingSourcePath = rescuePath;
-    record.lowEtFastSellerPricePullbackRevalidation = await revalidateLowEtFastSellerRescueArtifact({
+    record.lowEtFastSellerPricePullbackRevalidation = await (
+      operations.revalidateLowEtFastSellerRescueArtifact || revalidateLowEtFastSellerRescueArtifact
+    )({
       root: ROOT,
       rescue,
       reportDate: args.date,
@@ -769,7 +780,9 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
       rescue,
       dryRun.full?.validation || null,
     );
-    record.inventoryTransactionPlan = await planLimitedDiscountInventoryTransaction({
+    record.inventoryTransactionPlan = await (
+      operations.planLimitedDiscountInventoryTransaction || planLimitedDiscountInventoryTransaction
+    )({
       root: ROOT,
       storeKey,
       rescue,
@@ -787,10 +800,17 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
       return record;
     }
 
-    const blockedSkcs = transactionBlockedSkcs(
+    const transactionPreflight = transactionPreflightPartition(
       dryRun.full,
       record.inventoryTransactionPlan,
     );
+    record.managedConflictReplacement = {
+      skcs: transactionPreflight.managedConflictSkcs,
+      evidenceBySkc: transactionPreflight.managedEvidenceBySkc,
+      inventoryTransactionSkcs: transactionPreflight.inventoryHandledSkcs,
+      inventoryValidationBySkc: transactionPreflight.inventoryRowsBySkc,
+    };
+    const blockedSkcs = transactionPreflight.blockedSkcs;
     if (blockedSkcs.length && !args.continuation) {
       const subset = await writeInventoryExecutableSubset({
         storeKey,
@@ -803,6 +823,7 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
       record.blocked = {
         ...classifyBlockedDryRun(dryRun.full || dryRun.parsed || {}),
         blockedSkcs: [...new Set([...(record.factBlockedSkcs || []), ...blockedSkcs])],
+        blockedValidationBySkc: transactionPreflight.blockedBySkc,
         reason: dryRun.full?.reason || 'one or more SKCs failed the exact platform/inventory preflight',
       };
       if (!subset.rescue.rows.length) {
@@ -825,6 +846,7 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
       record.blocked = {
         ...classifyBlockedDryRun(dryRun.full || dryRun.parsed || {}),
         blockedSkcs,
+        blockedValidationBySkc: transactionPreflight.blockedBySkc,
         reason: dryRun.full?.reason || 'continuation retains its previously fenced executable rescue',
       };
     }
@@ -859,7 +881,9 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
       continuation: args.continuation,
       label: `new-listing inventory transaction ${storeKey}`,
     });
-    const inventoryTransaction = await executeLimitedDiscountWithInventoryTransaction({
+    const inventoryTransaction = await (
+      operations.executeLimitedDiscountWithInventoryTransaction || executeLimitedDiscountWithInventoryTransaction
+    )({
       root: ROOT,
       storeKey,
       rescue,
@@ -874,7 +898,15 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
           reserveSec: ACTIVE_DEADLINE?.minFinalizationBudgetSec || 0,
           label: `new-listing activity submit ${storeKey}`,
         });
-        return await (operations.replaceTransactionally || replaceTransactionally)({storeKey, port: store.port, rescuePath, sourceRescuePath, execute: true, continuation: args.continuation});
+        return await (operations.replaceTransactionally || replaceTransactionally)({
+          storeKey,
+          port: store.port,
+          rescuePath,
+          sourceRescuePath,
+          execute: true,
+          continuation: args.continuation,
+          deadline: args.deadline || ACTIVE_DEADLINE,
+        });
       },
       runEnrollmentReadback: async context => await (operations.applyRescue || applyRescue)({
         storeKey,
