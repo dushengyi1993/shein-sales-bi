@@ -111,7 +111,7 @@ assert.match(deadlineFill, /selectAllGoodsAndNext\(cdp, sessionId, allowSkcs\)/,
   '500 visible rows must still use the approved SKC allowlist');
 assert.match(deadlineFill, /outOfPlanRows\.set\(/,
   'rows outside the approved batch must remain observable and blocking');
-assert.match(deadlineFill, /const evidenceBaselineDoc = EXECUTION_APPROVAL\?\.prices \|\| doc;/,
+assert.match(deadlineFill, /const evidenceBaselineDoc = EXECUTION_APPROVAL\?\.baselinePrices \|\| EXECUTION_APPROVAL\?\.prices \|\| doc;/,
   'approved batches must share one low-ET evidence baseline across subsets');
 assert.match(deadlineFill, /currentLockedPriceKeys/,
   'explicit prices must be gated by the current approved price key set');
