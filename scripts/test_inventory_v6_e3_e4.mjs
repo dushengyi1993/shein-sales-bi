@@ -748,7 +748,7 @@ try {
   const receiptPath = id => path.join(sessionDir, 'inventory-commands', crypto.createHash('sha256').update(id).digest('hex') + '.json');
 
   await asyncCheck('3.1: all aliases default to execution; explicit preview wins; queued is not completed', async () => {
-    for (const command of ['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory']) {
+    for (const command of ['maintenance', 'maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory']) {
       for (const [flags, dryRun] of [
         [[], false], [['--dry-run'], true], [['--mode', 'dry-run'], true],
         [['--mode', 'execute'], false], [['--mode', 'execute', '--dry-run'], true],
@@ -808,7 +808,7 @@ try {
       await writeJson(receiptPath(commandId), {commandId, request, ...(status === 'dispatch_pending'
         ? {status} : {response: {ok: true, data: {status: 'queued'}}})});
       const original = await fs.readFile(receiptPath(commandId), 'utf8');
-      for (const command of ['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory']) {
+      for (const command of ['maintenance', 'maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory']) {
         for (const mode of [[], ['--mode', 'execute']]) {
           const before = (await calls()).length;
           await assert.rejects(cli(command, ['--command-id', commandId, ...mode]), /new command ID and a fresh cloud plan/);

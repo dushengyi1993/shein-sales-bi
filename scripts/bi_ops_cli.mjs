@@ -391,6 +391,7 @@ Usage:
   node scripts/bi_ops_cli.mjs login --username <账号> --password <密码>
   node scripts/bi_ops_cli.mjs doctor
   node scripts/bi_ops_cli.mjs maintain-inventory [--date YYYY-MM-DD] [--command-id <id>] [--force] [--dry-run]
+  node scripts/bi_ops_cli.mjs maintenance [--date YYYY-MM-DD] [--command-id <id>] [--force] [--dry-run]  # 兼容旧自动化命令
   node scripts/bi_ops_cli.mjs knowledge-status
   node scripts/bi_ops_cli.mjs version
   node scripts/bi_ops_cli.mjs update
@@ -3206,7 +3207,7 @@ async function main() {
       allowTransientCacheFallback: true,
     });
   }
-  if (['maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory'].includes(args.command)) {
+  if (['maintenance', 'maintain-inventory', 'maintain_inventory', 'replenish-inventory', 'replenish_inventory'].includes(args.command)) {
     if (args.modeProvided && !['execute', 'dry-run'].includes(args.mode)) {
       throw new Error('Inventory maintenance --mode must be execute or dry-run');
     }
