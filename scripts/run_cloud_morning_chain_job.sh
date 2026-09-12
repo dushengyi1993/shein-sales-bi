@@ -311,21 +311,26 @@ daily_run_warning_completed() {
   # Keep the ordinary warning marker on the full strict validator path first.
   # Only its explicit same-day pending/fence allowance may use the controlled
   # warning mode; that mode still validates every plan/result/journal binding.
+  local strict_validation_log="$STATE_DIR/daily-operating-refresh-strict-validation-${run_date}.log"
   if ! node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
     --root "$ROOT" \
     --marker-root "$MARKER_ROOT" \
     --state-dir "$STATE_DIR" \
     --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
     --run-date "$run_date" \
-    --business-date "$business_date" >/dev/null; then
-    node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
+    --business-date "$business_date" > /dev/null 2> "$strict_validation_log"; then
+    if ! node "$ROOT/scripts/validate_daily_operating_refresh.mjs" \
       --allow-item-fenced-warning \
       --root "$ROOT" \
       --marker-root "$MARKER_ROOT" \
       --state-dir "$STATE_DIR" \
       --inventory-runtime-root "$INVENTORY_RUNTIME_ROOT" \
       --run-date "$run_date" \
-      --business-date "$business_date" >/dev/null || return 1
+      --business-date "$business_date" > /dev/null 2> "${strict_validation_log}.warning"; then
+      cat "$strict_validation_log" >&2
+      cat "${strict_validation_log}.warning" >&2
+      return 1
+    fi
   fi
   node "$ROOT/scripts/pipeline_marker.mjs" require \
     --stage daily-operating-refresh \
