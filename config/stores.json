@@ -408,7 +408,7 @@
     },
     {
       "storeKey": "LG",
-      "enabled": true,
+      "enabled": false,
       "productStatsEnabled": true,
       "profileKey": "hy",
       "port": 9352,
@@ -425,7 +425,7 @@
     },
     {
       "storeKey": "HY",
-      "enabled": true,
+      "enabled": false,
       "productStatsEnabled": true,
       "profileKey": "lg",
       "port": 9353,
