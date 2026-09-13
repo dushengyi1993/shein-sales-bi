@@ -417,7 +417,7 @@ async function main() {
       selection,
       prices,
       requireCurrentBaseline: true,
-      expectedStoreCount: 21,
+      expectedStoreCount: 19,
       expectedStoreKeys,
     });
   }

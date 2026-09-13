@@ -340,13 +340,13 @@ console.log(JSON.stringify({
   for (const key of ['LG', 'HY']) {
     const store = stores.find(row => row.store_key === key);
     assert.equal(store.group_key, '');
-    assert.equal(store.enabled, true);
+    assert.equal(store.enabled, false);
   }
   await context.upsert({}, 'dim.store', ['store_key', 'group_key', 'enabled'], ['store_key'], stores);
   assert.match(sql, /COPY[^\n]*FORCE_NOT_NULL \("group_key"\)/,
     'a blank BI-only group must load as empty text, not SQL NULL');
-  assert.match(sql, /LG,,true/);
-  assert.match(sql, /HY,,true/);
+  assert.match(sql, /\nLG,,false\n/);
+  assert.match(sql, /\nHY,,false\n/);
   assert.match(sql, /ON CONFLICT \("store_key"\) DO UPDATE/);
   await context.upsert({}, 'fact.fixture', ['id', 'optional_date'], ['id'], [{id: 'x', optional_date: ''}]);
   assert.doesNotMatch(sql, /FORCE_NOT_NULL/);

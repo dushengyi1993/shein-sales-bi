@@ -40,7 +40,7 @@ assert.ok(
 const storesConfig = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'stores.json'), 'utf8'));
 const allStores = (storesConfig.stores ? storesConfig.stores.filter(s => s.enabled !== false).map(s => s.storeKey) : storesConfig).sort();
 
-assert.equal(allStores.length, 21, 'Expected exactly 21 enabled automation stores in stores.json');
+assert.equal(allStores.length, 19, 'Expected exactly 19 enabled automation stores in stores.json');
 assert.ok(allStores.includes('ZL'), 'Store list must include ZL');
 assert.equal(allStores[allStores.length - 1], 'ZL', 'ZL must be the last store alphabetically to test starvation edge cases');
 
@@ -111,7 +111,7 @@ assert.equal(patchedResults.length, 2200, 'Patched query must respect global lim
 
 // 2. All 19 stores have links represented (zero starvation)
 const coveredStores = new Set(patchedResults.map(r => r.store_key));
-assert.equal(coveredStores.size, 21, 'All 21 stores must be covered in store_links');
+assert.equal(coveredStores.size, 19, 'All 19 stores must be covered in store_links');
 for (const store of allStores) {
   assert.ok(coveredStores.has(store), 'Store ' + store + ' must be present in store_links');
 }
@@ -119,8 +119,8 @@ for (const store of allStores) {
 // 3. ZL has full fair allocation (at least 2200 / 19 = ~115 links)
 const zlLinks = patchedResults.filter(r => r.store_key === 'ZL');
 assert.ok(
-  zlLinks.length >= 104,
-  'Store ZL must receive its fair round-robin quota: received ' + zlLinks.length + ' >= 104'
+  zlLinks.length >= 115,
+  'Store ZL must receive its fair round-robin quota: received ' + zlLinks.length + ' >= 115'
 );
 
 // 4. Per-store ranking priority is strictly preserved

@@ -345,7 +345,7 @@ function addSkc(skcMap, row) {
 async function collectStores() {
   const config = await readJson(path.join(ROOT, 'config', 'stores.json'));
   for (const store of config.stores || []) {
-    const biOnly = store.biEnabled === true && !store.groupKey;
+    const biOnly = store.enabled === false && store.biEnabled === true;
     if (typeof store.groupKey !== 'string' || (!store.groupKey.trim() && !biOnly)) {
       throw new Error(`Invalid groupKey for ${store.storeKey}: only explicit BI-only stores may have an empty group`);
     }
