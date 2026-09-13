@@ -188,7 +188,7 @@ match('budget overrun message names the limit',
 // ---------------------------------------------------------------------------
 match('refresh passes the full 19-store STORES set',
   guard,
-  /RECONCILE_STORES="\$\{SHEIN_BI_INVENTORY_RECONCILE_STORES:-CX,DL,DX,FY,HL,JSH,JY,LQ,MZ,NM,QH,QY,TS,TZ,TZZ,XC,XL,YJ,ZL\}"/,
+  /RECONCILE_STORES="\$\{SHEIN_BI_INVENTORY_RECONCILE_STORES:-CX,DL,DX,FY,HL,HY,JSH,JY,LG,LQ,MZ,NM,QH,QY,TS,TZ,TZZ,XC,XL,YJ,ZL\}"/,
   'list + stock must refresh every plan store, not a narrowed subset');
 match('refresh passes STORES into the reconciliation env',
   guard,
@@ -590,7 +590,7 @@ noMatch('no hardcoded executor row limit remains',
     const norm = value => value.split(',').map(item => item.trim()).filter(Boolean).sort().join(',');
     assert.equal(norm(guardStores), norm(reconciliationStores),
       'guard and reconciliation must agree on the full store set');
-    assert.equal(guardStores.split(',').length, 19, 'the full daily store set is 19 stores');
+    assert.equal(guardStores.split(',').length, 21, 'the full daily store set is 21 stores');
   });
 }
 

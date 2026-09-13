@@ -55,7 +55,7 @@ MAX_ROWS="${SHEIN_BI_INVENTORY_MAX_ROWS:-1000}"
 # (test_daily_inventory_guard_targeted_detail.mjs asserts both constants stay
 # identical). Never narrow it to the target subset: the refresh is not a
 # detail-only pass for the allowlisted SPUs.
-RECONCILE_STORES="${SHEIN_BI_INVENTORY_RECONCILE_STORES:-CX,DL,DX,FY,HL,JSH,JY,LQ,MZ,NM,QH,QY,TS,TZ,TZZ,XC,XL,YJ,ZL}"
+RECONCILE_STORES="${SHEIN_BI_INVENTORY_RECONCILE_STORES:-CX,DL,DX,FY,HL,HY,JSH,JY,LG,LQ,MZ,NM,QH,QY,TS,TZ,TZZ,XC,XL,YJ,ZL}"
 PLAN="$RUNTIME_ROOT/plans/daily-inventory-replenishment-$DATE.json"
 RESULT="$RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.json"
 DETAIL_TARGETS_DIR="$RUNTIME_ROOT/detail-targets"

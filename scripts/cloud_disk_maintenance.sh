@@ -11,6 +11,10 @@ LOG_DIR="${SHEIN_BI_DISK_MAINTENANCE_LOG_DIR:-/srv/shein-bi/logs/disk-maintenanc
 LOCK_FILE="${SHEIN_BI_DISK_MAINTENANCE_LOCK_FILE:-$ROOT/state/locks/shein-bi-cloud-disk-maintenance.lock}"
 OUTPUT_RETENTION_DAYS="${SHEIN_BI_OUTPUT_RETENTION_DAYS:-30}"
 TMP_RETENTION_DAYS="${SHEIN_BI_TMP_RETENTION_DAYS:-7}"
+RUNTIME_ROOT="${SHEIN_BI_RUNTIME_ROOT:-/srv/shein-bi/runtime}"
+RUNTIME_USAGE_ROOT="${SHEIN_BI_RUNTIME_USAGE_ROOT:-$RUNTIME_ROOT}"
+ET_EVIDENCE_ROOT="${SHEIN_BI_ET_LOW_INVENTORY_EVIDENCE_ROOT:-$RUNTIME_ROOT/et-low-inventory-guard/source-plans/source-evidence}"
+ET_EVIDENCE_RETENTION_DAYS="${SHEIN_BI_ET_LOW_INVENTORY_EVIDENCE_RETENTION_DAYS:-2}"
 CACHE_THRESHOLD_PERCENT="${SHEIN_BI_PROFILE_CACHE_THRESHOLD_PERCENT:-80}"
 TZ_NAME="${SHEIN_BI_TZ:-Asia/Shanghai}"
 
@@ -58,7 +62,18 @@ LOG_FILE="$LOG_DIR/disk-maintenance-$STAMP.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 disk_percent() {
-  df -P "$ROOT" | awk 'NR==2 {gsub(/%/, "", $5); print $5}'
+  df -P "$RUNTIME_USAGE_ROOT" | awk 'NR==2 {gsub(/%/, "", $5); print $5}'
+}
+
+cleanup_et_source_evidence() {
+  [[ -d "$ET_EVIDENCE_ROOT" ]] || return 0
+  local count bytes
+  count="$(find "$ET_EVIDENCE_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +"$ET_EVIDENCE_RETENTION_DAYS" | wc -l)"
+  bytes="$(find "$ET_EVIDENCE_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +"$ET_EVIDENCE_RETENTION_DAYS" -exec du -sx {} + 2>/dev/null | awk '{total+=$1} END {printf "%.0f", total+0}')"
+  echo "[et-source-evidence] selected_count=$count selected_kib=$bytes retention_days=$ET_EVIDENCE_RETENTION_DAYS dry_run=$DRY_RUN"
+  if (( ! DRY_RUN )); then
+    find "$ET_EVIDENCE_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +"$ET_EVIDENCE_RETENTION_DAYS" -exec rm -rf -- {} +
+  fi
 }
 
 cos_ready() {
@@ -303,4 +318,5 @@ echo "[cloud_disk_maintenance] start stamp=$STAMP disk=$(disk_percent)% dry_run=
 cleanup_profile_caches
 archive_old_outputs
 cleanup_stale_tmp
+cleanup_et_source_evidence
 echo "[cloud_disk_maintenance] done disk=$(disk_percent)% log=$LOG_FILE"

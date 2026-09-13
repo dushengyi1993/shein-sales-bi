@@ -21,7 +21,7 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = path.join(ROOT, 'config', 'shein_openapi.local.json');
 const DEFAULT_OUT = path.join(ROOT, 'state', 'openapi-probes', 'product-reconciliation.latest.json');
-const DEFAULT_STORES = ['CX', 'DL', 'DX', 'FY', 'HL', 'JSH', 'JY', 'LQ', 'MZ', 'NM', 'QH', 'QY', 'TS', 'TZ', 'TZZ', 'XC', 'XL', 'YJ', 'ZL'];
+const DEFAULT_STORES = ['CX', 'DL', 'DX', 'FY', 'HL', 'HY', 'JSH', 'JY', 'LG', 'LQ', 'MZ', 'NM', 'QH', 'QY', 'TS', 'TZ', 'TZZ', 'XC', 'XL', 'YJ', 'ZL'];
 
 function defaultProductCacheDir() {
   return resolveOpenApiProductCacheDir({rootDir: ROOT});
@@ -571,9 +571,7 @@ export async function main(argv = process.argv.slice(2)) {
     .filter(([key]) => key));
   const requested = (args.stores.length ? args.stores : DEFAULT_STORES).filter((x, i, arr) => arr.indexOf(x) === i);
   const authorized = requested.filter(storeKey => isAuthorized(configured.get(storeKey)));
-  const allAuthorized = [...configured.entries()]
-    .filter(([, entry]) => isAuthorized(entry))
-    .map(([storeKey]) => storeKey);
+  const allAuthorized = DEFAULT_STORES.filter(storeKey => isAuthorized(configured.get(storeKey)));
   const reportTargets = resolveProductReconciliationReportTargets({
     out: args.out,
     latestOut: args.latestOut,
