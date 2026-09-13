@@ -24,6 +24,7 @@ import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
 } from '../lib/chrome_profile_hygiene.mjs';
+import {resolvePersistentStoreProfile} from '../lib/shein_workspace_paths.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -157,7 +158,7 @@ function chromePath() {
 }
 
 function profileDir(store) {
-  return path.join(ROOT, 'profiles', `persistent-${store.profileKey}-profile`);
+  return resolvePersistentStoreProfile(store, {requireExistingRoot: true});
 }
 
 async function isPortOpen(port) {

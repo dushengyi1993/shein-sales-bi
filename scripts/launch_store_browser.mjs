@@ -16,6 +16,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import http from 'node:http';
 import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage, inspectManagedStoreSession, validateManagedSession} from '../lib/chrome_profile_startup.mjs';
 import {cleanupManagedStoreSession} from './cleanup_shein_store_browsers.mjs';
+import {resolvePersistentStoreProfile, resolveSheinPrimaryWorkspace} from '../lib/shein_workspace_paths.mjs';
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
@@ -154,7 +155,7 @@ if (cliArgs.port !== null) {
   }
   store.port = cliArgs.port;
 }
-const profileDir = path.join(ROOT, 'profiles', `persistent-${store.profileKey}-profile`);
+const profileDir = resolvePersistentStoreProfile(store, {requireExistingRoot: true});
 // Keep disposable browser cache outside the persistent login profile.  The old
 // layout placed it below every store profile and allowed Chromium to grow an
 // unbounded copy per store.  Login state (Cookies/Local Storage/IndexedDB)
@@ -375,7 +376,7 @@ let completion;
 try {
 completion = await completeManagedLauncherStartup({
 start: () => withChromeProfileStartup({
-  root: ROOT, profileDir, storeKey: store.storeKey, port: store.port,
+  root: resolveSheinPrimaryWorkspace(), profileDir, storeKey: store.storeKey, port: store.port,
   captureManagedSession: true,
   probe: () => probeChromeDebugPort(store.port),
   prepare: () => {

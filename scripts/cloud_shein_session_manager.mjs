@@ -13,6 +13,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
+import {resolvePersistentStoreProfile} from '../lib/shein_workspace_paths.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STORES_PATH = path.join(ROOT, 'config', 'stores.json');
@@ -337,7 +338,7 @@ function parseLastJson(stdout) {
 }
 
 function profileDirForStore(store) {
-  return path.join(ROOT, 'profiles', `persistent-${store.profileKey}-profile`);
+  return resolvePersistentStoreProfile(store, {requireExistingRoot: true});
 }
 
 function safeInside(parent, child) {
