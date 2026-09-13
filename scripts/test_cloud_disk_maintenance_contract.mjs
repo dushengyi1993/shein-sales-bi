@@ -91,6 +91,7 @@ const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'shein-cloud-disk-cont
 const appRoot = path.join(fixtureRoot, 'app');
 const outputRoot = path.join(appRoot, 'outputs');
 const profilesRoot = path.join(appRoot, 'profiles');
+const runtimeRoot = path.join(fixtureRoot, 'runtime');
 const tmpRoot = path.join(appRoot, 'tmp');
 const outsideRoot = path.join(fixtureRoot, 'outside');
 const logRoot = path.join(fixtureRoot, 'logs');
@@ -102,6 +103,7 @@ const lockRoot = path.join(appRoot, 'state', 'locks');
 const cosRoot = path.join(fixtureRoot, 'cos');
 fs.mkdirSync(outputRoot, {recursive: true});
 fs.mkdirSync(profilesRoot, {recursive: true});
+fs.mkdirSync(runtimeRoot, {recursive: true});
 fs.mkdirSync(tmpRoot, {recursive: true});
 fs.mkdirSync(outsideRoot, {recursive: true});
 fs.mkdirSync(logRoot, {recursive: true});
@@ -147,6 +149,8 @@ function diskEnv(overrides = {}) {
     SHEIN_BI_ROOT: toBashPath(appRoot),
     SHEIN_BI_OUTPUT_DIR: toBashPath(outputRoot),
     SHEIN_BI_PROFILES_DIR: toBashPath(profilesRoot),
+    SHEIN_BI_RUNTIME_ROOT: toBashPath(runtimeRoot),
+    SHEIN_BI_RUNTIME_USAGE_ROOT: toBashPath(runtimeRoot),
     SHEIN_BI_COS_MOUNT: toBashPath(path.join(fixtureRoot, 'missing-cos-mount')),
     SHEIN_BI_COS_ARCHIVE_ROOT: toBashPath(cosRoot),
     SHEIN_BI_DISK_MAINTENANCE_LOG_DIR: toBashPath(logRoot),
