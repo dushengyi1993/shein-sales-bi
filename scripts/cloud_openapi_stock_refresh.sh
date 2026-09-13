@@ -65,8 +65,8 @@ SHEIN_OPENAPI_PRODUCT_KEEP_SNAPSHOTS=1 \
 jq -e '
   .ok == true
   and .reportScope.complete == true
-  and .counts.total == 19
-  and .counts.succeeded == 19
+  and .counts.total == 21
+  and .counts.succeeded == 21
   and .counts.stockMissing == 0
 ' "$REPORT_FILE" >/dev/null
 
@@ -100,7 +100,7 @@ jq -n \
     ok: true,
     startedAt: $startedAt,
     generatedAt: $generatedAt,
-    stores: 19,
+    stores: 21,
     mode: $mode,
     runDate: $runDate,
     reportFile: $reportFile,
@@ -113,7 +113,7 @@ node "$ROOT/scripts/pipeline_marker.mjs" write \
   --date "$RUN_DATE" \
   --business-date "$RUN_DATE" \
   --status done \
-  --message "19-store OpenAPI virtual stock refreshed" \
+  --message "21-store OpenAPI virtual stock refreshed" \
   --evidence "$STATE_FILE" \
   --evidence "$REPORT_FILE" \
   >/dev/null

@@ -831,10 +831,10 @@ function normalizedStoreKey(value) {
 // semantic result based on current OpenAPI, prior OpenAPI, and Webhook proof.
 function assessOpenapiProductReport(report, expectedStoreKeys, nowMs = Date.now()) {
   const expected = [...new Set((expectedStoreKeys || []).map(normalizedStoreKey).filter(Boolean))].sort();
-  if (!report || typeof report !== 'object') return {healthy: false, reason: 'report_missing', messages: ['OpenAPI 商品对账报告不存在；请运行完整 19 店对账。']};
+  if (!report || typeof report !== 'object') return {healthy: false, reason: 'report_missing', messages: ['OpenAPI 商品对账报告不存在；请运行完整 21 店对账。']};
   const reportAt = Date.parse(report.generatedAt || report.endedAt || '');
   if (!Number.isFinite(reportAt) || nowMs - reportAt > 48 * 3600_000) {
-    return {healthy: false, reason: 'report_stale', messages: ['OpenAPI 商品对账报告超过 48 小时未更新；请运行完整 19 店对账。']};
+    return {healthy: false, reason: 'report_stale', messages: ['OpenAPI 商品对账报告超过 48 小时未更新；请运行完整 21 店对账。']};
   }
   const rows = Array.isArray(report.results) ? report.results : [];
   const byStore = new Map(rows.map(row => [normalizedStoreKey(row?.storeKey), row]).filter(([storeKey]) => storeKey));
