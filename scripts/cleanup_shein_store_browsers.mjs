@@ -15,6 +15,7 @@ import {
   assertChromeProfileLeaseOwner, chromeProfileIdentity, chromeProcessOwnsProfile,
   listChromeProcesses, readManagedChromeIdentity, validateManagedSession, withChromeProfileLock,
 } from '../lib/chrome_profile_startup.mjs';
+import {resolvePersistentStoreProfile, resolveSheinPrimaryWorkspace} from '../lib/shein_workspace_paths.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -67,11 +68,13 @@ export async function cleanupManagedStoreSession(store, session, {
 } = {}) {
   validateManagedSession(session, store.storeKey);
   if (Number(store.port) !== session.port) throw new Error('Managed cleanup configured port mismatch');
-  const dir = path.resolve(root, 'profiles', `persistent-${store.profileKey}-profile`);
+  const workspaceOptions = path.resolve(root) === ROOT ? {} : {primaryWorkspace: root};
+  const profileWorkspace = resolveSheinPrimaryWorkspace({env, ...workspaceOptions});
+  const dir = resolvePersistentStoreProfile(store, {requireExistingRoot: true, primaryWorkspace: profileWorkspace});
   const killed = [];
-  return await withChromeProfileLock({root, profileDir: dir, storeKey: store.storeKey, env}, async () => {
+  return await withChromeProfileLock({root: profileWorkspace, profileDir: dir, storeKey: store.storeKey, env}, async () => {
     const assertProfile = async () => {
-      assertChromeProfileLeaseOwner({root, storeKey: store.storeKey, env});
+      assertChromeProfileLeaseOwner({root: profileWorkspace, storeKey: store.storeKey, env});
       if (await chromeProfileIdentity(dir) !== session.profileIdentity) throw new Error('Managed cleanup physical profile changed');
     };
     const targetPresent = async () => {
@@ -147,7 +150,7 @@ function selectedStores(args) {
 }
 
 function profileDir(store) {
-  return path.join(ROOT, 'profiles', `persistent-${store.profileKey}-profile`);
+  return resolvePersistentStoreProfile(store, {requireExistingRoot: true});
 }
 
 function readText(file) {

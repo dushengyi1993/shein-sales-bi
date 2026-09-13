@@ -10,6 +10,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import {withChromeProfileStartup, probeChromeDebugPort, openExistingChromePage, waitForChromeDebugPort} from '../lib/chrome_profile_startup.mjs';
+import {resolvePersistentMainProfile, resolveSheinPrimaryWorkspace} from '../lib/shein_workspace_paths.mjs';
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
@@ -108,7 +109,7 @@ function parseArgs(argv) {
 
 const cliArgs = parseArgs(process.argv.slice(2));
 const chrome = chromeExecutablePath();
-const profileDir = path.join(ROOT, 'profiles', 'persistent-shein-main-profile');
+const profileDir = resolvePersistentMainProfile({requireExistingRoot: true});
 const cacheDir = path.join(profileDir, 'cache');
 const logDir = path.join(ROOT, 'logs');
 
@@ -154,7 +155,7 @@ function quoteWindowsArg(value) {
 }
 
 const startup = await withChromeProfileStartup({
-  root: ROOT, profileDir, port: cliArgs.port,
+  root: resolveSheinPrimaryWorkspace(), profileDir, port: cliArgs.port,
   probe: () => probeChromeDebugPort(cliArgs.port),
   prepare: () => { ensureProfileName(profileDir); onDeviceAi = disableChromeOnDeviceAiForProfile(profileDir); },
   reuse: () => openExistingChromePage(cliArgs.port, cliArgs.url),

@@ -38,6 +38,7 @@ const tests = [
   'scripts/test_legacy_low_et_receipt_continuation.mjs',
   'scripts/test_marketing_runtime_artifacts.mjs',
   'scripts/test_chrome_profile_startup.mjs',
+  'scripts/test_shein_workspace_paths.mjs',
   'scripts/marketing/smoke_coupon_budget_guard.mjs',
   'scripts/marketing/smoke_known_ordinary_price_guard.mjs',
   'scripts/marketing/smoke_limited_discount_drift_rescue_files.mjs',
