@@ -58,8 +58,8 @@ assert.match(refresh, /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$DETAIL_BUD
   'the daily detail rotation must enforce its per-store request budget');
 assert.match(refresh, /SHEIN_OPENAPI_PRODUCT_RECONCILE_SKIP_STOCK=0/,
   'the frequent inventory refresh must fetch stock');
-assert.match(refresh, /\.counts\.total == 19[\s\S]*\.counts\.succeeded == 19[\s\S]*\.counts\.stockMissing == 0/,
-  'the inventory refresh must fail closed unless all 19 stores return stock');
+assert.match(refresh, /\.counts\.total == 21[\s\S]*\.counts\.succeeded == 21[\s\S]*\.counts\.stockMissing == 0/,
+  'the inventory refresh must fail closed unless all 21 stores return stock');
 assert.match(refresh, /api\/bi\/section\/inventoryStock\?refresh=1/,
   'a successful stock load must rebuild only the lightweight current-stock section');
 assert.match(refresh, /pg_notify[\s\S]*shein_bi_live_update/,
@@ -69,7 +69,7 @@ assert.doesNotMatch(refresh, /:'payload'/,
 assert.match(refresh, /inventory_refresh/,
   'the live event must have a dedicated inventory refresh kind');
 assert.match(refresh, /pipeline_marker\.mjs[\s\S]*--stage stock-refresh/,
-  'a successful 19-store refresh must publish the inventory dependency marker');
+  'a successful 21-store refresh must publish the inventory dependency marker');
 assert.match(refresh, /RUN_DATE="\$\{SHEIN_OPENAPI_STOCK_REFRESH_RUN_DATE:-/,
   'the morning coordinator must inject the immutable stock-refresh run date');
 assert.match(refresh, /stock refresh runDate drift:/,
@@ -92,4 +92,4 @@ assert.ok(CLOUD_TIMER_UNITS.includes('shein-bi-cloud-openapi-stock-refresh.timer
 assert.match(portalService, /ExecStartPre=\/usr\/bin\/node scripts\/generate_bi_portal_shell\.mjs/,
   'every Portal restart must rebuild the deployed shell from the current client source');
 
-console.log('openapi_stock_refresh_contract: current-stock source, 19-store gate, scheduling, and live refresh passed');
+console.log('openapi_stock_refresh_contract: current-stock source, 21-store gate, scheduling, and live refresh passed');

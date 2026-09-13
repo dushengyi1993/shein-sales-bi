@@ -132,11 +132,11 @@ function normalizedStoreKey(value) {
 export function assessOpenapiProductReconciliationReport(report, expectedStoreKeys, nowMs = Date.now()) {
   const expected = [...new Set((expectedStoreKeys || []).map(normalizedStoreKey).filter(Boolean))].sort();
   if (!report || typeof report !== 'object') {
-    return {status: 'warning', warnings: ['尚未找到 OpenAPI 商品对账报告；请运行完整 19 店商品对账。'], notes: [], affectedStores: []};
+    return {status: 'warning', warnings: ['尚未找到 OpenAPI 商品对账报告；请运行完整 21 店商品对账。'], notes: [], affectedStores: []};
   }
   const generatedAt = Date.parse(report.generatedAt || report.endedAt || '');
   if (!Number.isFinite(generatedAt) || nowMs - generatedAt > 48 * 3600_000) {
-    return {status: 'warning', warnings: ['OpenAPI 商品对账报告超过 48 小时未更新；请运行完整 19 店商品对账。'], notes: [], affectedStores: []};
+    return {status: 'warning', warnings: ['OpenAPI 商品对账报告超过 48 小时未更新；请运行完整 21 店商品对账。'], notes: [], affectedStores: []};
   }
   const rows = Array.isArray(report.results) ? report.results : [];
   const byStore = new Map(rows.map(row => [normalizedStoreKey(row?.storeKey), row]).filter(([key]) => key));
