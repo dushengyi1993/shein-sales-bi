@@ -19,7 +19,7 @@ const date = '2026-08-24';
 const stores = JSON.parse(fs.readFileSync(path.join(root, 'config', 'stores.json'), 'utf8')).stores
   .filter(store => store.enabled !== false)
   .map(store => store.storeKey);
-assert.equal(stores.length, 19);
+assert.equal(stores.length, 21);
 
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -49,7 +49,7 @@ function writeRegistryPair(selectionPath, pricePath) {
     selection: {items: selectionRows},
     prices: {items: priceRows},
     requireCurrentBaseline: false,
-    expectedStoreCount: 19,
+    expectedStoreCount: 21,
     expectedStoreKeys: stores,
   });
   const planMetadata = {

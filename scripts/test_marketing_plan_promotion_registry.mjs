@@ -16,8 +16,8 @@ const stores = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'stores.json
   .filter(store => store.enabled !== false)
   .map(store => String(store.storeKey || store.store_key || store.key || '').trim().toUpperCase())
   .filter(Boolean);
-assert.equal(stores.length, 19, 'fixture must bind the fixed config/stores.json enabled set');
-assert.equal(new Set(stores).size, 19, 'fixed enabled store keys must be unique');
+assert.equal(stores.length, 21, 'fixture must bind the fixed config/stores.json enabled set');
+assert.equal(new Set(stores).size, 21, 'fixed enabled store keys must be unique');
 
 function restoreFixturePermissions(root) {
   let rootStat;
@@ -467,7 +467,7 @@ try {
     ...commonArgs(wrongStoreFixture, wrongStoreReadback, 'wrong-store-registry'),
     '--registry-file', wrongStoreRegistryFile,
   ], {cwd: tempRoot});
-  assert.notEqual(wrongStorePublish.status, 0, 'registry promotion must reject a wrong 19-store set');
+  assert.notEqual(wrongStorePublish.status, 0, 'registry promotion must reject a wrong 21-store set');
   assert.match(`${wrongStorePublish.stdout}\n${wrongStorePublish.stderr}`, /enabled store coverage mismatch/i);
   assert.equal(fs.existsSync(wrongStoreRegistryFile), false, 'wrong store set must not publish current');
   assert.equal(fs.readFileSync(wrongStoreFixture.selectionPath, 'utf8'), wrongStoreSelectionBefore);

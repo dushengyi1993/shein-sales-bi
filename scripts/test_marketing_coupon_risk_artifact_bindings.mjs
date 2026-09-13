@@ -130,7 +130,7 @@ try {
     .filter(store => store.enabled !== false)
     .map(store => String(store.storeKey).toUpperCase())
     .sort();
-  assert.equal(storeKeys.length, 19, 'fixture expects the managed 19-store config');
+  assert.equal(storeKeys.length, 21, 'fixture expects the managed 21-store config');
 
   const rows = storeKeys.map((storeKey, index) => ({
     storeKey,
