@@ -1200,7 +1200,15 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
     const explicitPolicySupplierSku = task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
       ? safeString(task?.notes?.supplierSkuPolicy?.value, 240)
       : '';
-    const acceptedSupplierSkus = [...new Set([expectedSupplierSku, explicitPolicySupplierSku].filter(Boolean))];
+    const acceptedSupplierSkus = [...new Set([
+      expectedSupplierSku,
+      explicitPolicySupplierSku,
+      // With the structured unique-per-link policy the snapshot still carries
+      // the normalised 标准货号 until the override is applied, so the
+      // pre-override value must stay acceptable. Without an explicit policy the
+      // normalised value is already expectedSupplierSku, so this adds nothing.
+      explicitPolicySupplierSku ? overrides.standardGoodsSn : '',
+    ].filter(Boolean))];
     if (supplierSkus.length && (!acceptedSupplierSkus.length || supplierSkus.some(value => !acceptedSupplierSkus.includes(value)))) {
       throw new Error('existing task payload supplierSku has no matching structured preparation lock');
     }
@@ -5579,6 +5587,7 @@ if (process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST !== '1') main().catch(err => {
 
 export const __testHooks = {
   exactCopySourceLock,
+  buildProtectedDestinationProjection,
   publishPreValidDuplicateSellerSku,
   publishPreValidHasHashOnlyText,
   exactSourceRequiresHazardTemplateDerivation,
