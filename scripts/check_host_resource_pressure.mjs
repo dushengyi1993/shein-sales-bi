@@ -41,6 +41,72 @@ export const HOST_RESOURCE_PRESSURE_PROFILES = Object.freeze({
 
 export const HOST_RESOURCE_DEFER_EXIT_CODE = 75;
 
+// These numbers were tuned on a 2 vCPU cloud host. The fnOS VM is a different
+// machine (4 vCPU / 8 GiB per the migration plan), so every threshold can be
+// re-set per host through the environment instead of a code edit. Defaults stay
+// exactly as compiled, an out-of-range value fails closed, and the effective
+// profile is printed whenever it differs from the default so release readback
+// shows the measured basis rather than an invisible relaxation.
+const HOST_RESOURCE_PROFILE_FIELDS = Object.freeze([
+  'minimumUptimeSeconds',
+  'minimumAvailableMemoryMiB',
+  'maximumLoadPerCpu',
+  'maximumCpuBusyRatioWhenLoadHigh',
+  'maximumMemoryFullAvg10',
+  'maximumIoFullAvg10',
+]);
+const INTEGER_PROFILE_FIELDS = new Set(['minimumUptimeSeconds', 'minimumAvailableMemoryMiB']);
+const RATIO_PROFILE_FIELDS = new Set(['maximumCpuBusyRatioWhenLoadHigh']);
+// Explicit tokens keep acronyms such as MiB intact; a generic camel-to-snake
+// conversion would emit MINIMUM_AVAILABLE_MEMORY_MI_B.
+const HOST_RESOURCE_PROFILE_FIELD_TOKENS = Object.freeze({
+  minimumUptimeSeconds: 'MINIMUM_UPTIME_SECONDS',
+  minimumAvailableMemoryMiB: 'MINIMUM_AVAILABLE_MEMORY_MIB',
+  maximumLoadPerCpu: 'MAXIMUM_LOAD_PER_CPU',
+  maximumCpuBusyRatioWhenLoadHigh: 'MAXIMUM_CPU_BUSY_RATIO_WHEN_LOAD_HIGH',
+  maximumMemoryFullAvg10: 'MAXIMUM_MEMORY_FULL_AVG10',
+  maximumIoFullAvg10: 'MAXIMUM_IO_FULL_AVG10',
+});
+
+export function hostResourcePressureOverrideName(resourceClass, field) {
+  const classToken = String(resourceClass).toUpperCase().replace(/[^A-Z0-9]+/gu, '_');
+  const fieldToken = HOST_RESOURCE_PROFILE_FIELD_TOKENS[field];
+  if (!fieldToken) throw new TypeError(`HOST_RESOURCE_PRESSURE_UNKNOWN_FIELD:${field}`);
+  return `SHEIN_BI_HOST_PRESSURE_${classToken}_${fieldToken}`;
+}
+
+export function resolveHostResourcePressureProfiles(env = process.env) {
+  const resolved = {};
+  for (const [resourceClass, profile] of Object.entries(HOST_RESOURCE_PRESSURE_PROFILES)) {
+    const next = {...profile};
+    for (const field of HOST_RESOURCE_PROFILE_FIELDS) {
+      const name = hostResourcePressureOverrideName(resourceClass, field);
+      const raw = env?.[name];
+      if (raw === undefined || raw === null || String(raw).trim() === '') continue;
+      const value = Number(String(raw).trim());
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new TypeError(`HOST_RESOURCE_PRESSURE_THRESHOLD_INVALID:${name}`);
+      }
+      if (INTEGER_PROFILE_FIELDS.has(field) && !Number.isInteger(value)) {
+        throw new TypeError(`HOST_RESOURCE_PRESSURE_THRESHOLD_INVALID:${name}`);
+      }
+      if (RATIO_PROFILE_FIELDS.has(field) && value > 1) {
+        throw new TypeError(`HOST_RESOURCE_PRESSURE_THRESHOLD_INVALID:${name}`);
+      }
+      next[field] = value;
+    }
+    resolved[resourceClass] = Object.freeze(next);
+  }
+  return Object.freeze(resolved);
+}
+
+export function hostResourcePressureOverrides(resourceClass, profile) {
+  const defaults = HOST_RESOURCE_PRESSURE_PROFILES[resourceClass];
+  return Object.fromEntries(HOST_RESOURCE_PROFILE_FIELDS
+    .filter(field => profile?.[field] !== defaults?.[field])
+    .map(field => [field, profile[field]]));
+}
+
 function finiteNonNegative(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
@@ -185,17 +251,23 @@ export async function readHostResourcePressureSnapshot({
 
 export async function main(argv = process.argv.slice(2), dependencies = {}) {
   const {resourceClass} = parseArgs(argv);
+  const profiles = resolveHostResourcePressureProfiles(dependencies.env || process.env);
+  const profile = profiles[resourceClass];
   const snapshot = await readHostResourcePressureSnapshot(dependencies);
   const result = evaluateHostResourcePressure(
     snapshot,
-    HOST_RESOURCE_PRESSURE_PROFILES[resourceClass],
+    profile,
   );
+  const overrides = hostResourcePressureOverrides(resourceClass, profile);
   console.log(JSON.stringify({
     ok: result.ready,
     status: result.ready ? 'READY' : 'DEFERRED',
     resourceClass,
     reasonCodes: result.reasons,
     ...result.evidence,
+    ...(Object.keys(overrides).length
+      ? {thresholdOverrides: overrides, defaultProfile: HOST_RESOURCE_PRESSURE_PROFILES[resourceClass]}
+      : {}),
   }));
   return result.ready ? 0 : HOST_RESOURCE_DEFER_EXIT_CODE;
 }

@@ -20,9 +20,8 @@ import {resolvePersistentStoreProfile, resolveSheinPrimaryWorkspace} from '../li
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
+  ensureProfileName,
   readJsonFileSync,
-  writeJsonFileAtomicSync,
-  writeTextFileAtomicSync,
 } from '../lib/chrome_profile_hygiene.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,45 +47,6 @@ function getStore(key) {
 
 function loadJson(file) {
   return readJsonFileSync(file, {allowMissing: true}) || {};
-}
-
-function saveJson(file, obj) {
-  fs.mkdirSync(path.dirname(file), {recursive: true});
-  return writeJsonFileAtomicSync(file, obj);
-}
-
-function childObject(parent, key, label) {
-  if (parent[key] === undefined) parent[key] = {};
-  if (!parent[key] || typeof parent[key] !== 'object' || Array.isArray(parent[key])) {
-    throw new Error(`Chrome profile metadata ${label} must be an object`);
-  }
-  return parent[key];
-}
-
-function ensureProfileName(profileDir, store) {
-  const profileName = store.profileName || `${store.storeKey} - ${store.shopName}`;
-  const chromeProfileDir = path.join(profileDir, 'Profile 1');
-  fs.mkdirSync(chromeProfileDir, {recursive: true});
-
-  const prefsPath = path.join(chromeProfileDir, 'Preferences');
-  const prefs = loadJson(prefsPath);
-  const prefsProfile = childObject(prefs, 'profile', 'Preferences.profile');
-  prefsProfile.name = profileName;
-  prefsProfile.is_using_default_name = false;
-  saveJson(prefsPath, prefs);
-
-  const localStatePath = path.join(profileDir, 'Local State');
-  const localState = loadJson(localStatePath);
-  const profile = childObject(localState, 'profile', 'Local State.profile');
-  const infoCache = childObject(profile, 'info_cache', 'Local State.profile.info_cache');
-  const profileInfo = childObject(infoCache, 'Profile 1', 'Local State.profile.info_cache[Profile 1]');
-  profileInfo.name = profileName;
-  profileInfo.is_using_default_name = false;
-  profileInfo.avatar_icon ||= 'chrome://theme/IDR_PROFILE_AVATAR_26';
-  saveJson(localStatePath, localState);
-
-  writeTextFileAtomicSync(path.join(profileDir, 'PROFILE_NAME.txt'), `${profileName}\n`);
-  return profileName;
 }
 
 function parseArgs(argv) {

@@ -23,6 +23,7 @@ import {
 import {
   chromeDisabledFeaturesArg,
   disableChromeOnDeviceAiForProfile,
+  ensureProfileName,
 } from '../lib/chrome_profile_hygiene.mjs';
 import {resolvePersistentStoreProfile} from '../lib/shein_workspace_paths.mjs';
 
@@ -249,6 +250,7 @@ function publicSession(session, options = {}) {
     id: session.id,
     storeKey: session.storeKey,
     shopName: session.shopName,
+    profileName: session.profileName || '',
     target: session.target,
     status: session.status,
     createdAt: session.createdAt,
@@ -681,6 +683,10 @@ async function cmdStart(args) {
 
   const prof = profileDir(store);
   await fs.mkdir(prof, {recursive: true});
+  // Chrome's visible profile label must be set before the temporary login
+  // window creates the profile, otherwise a brand-new store profile keeps the
+  // "Your Chrome" default name.
+  const profileName = ensureProfileName(prof, store);
   disableChromeOnDeviceAiForProfile(prof);
   const chromeArgs = [
     `--user-data-dir=${prof}`,
@@ -717,6 +723,7 @@ async function cmdStart(args) {
     token,
     storeKey: store.storeKey,
     shopName: store.shopName || '',
+    profileName,
     target: args.target,
     status: 'active',
     createdAt: createdAt.toISOString(),

@@ -1193,7 +1193,15 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
     if (standardGoods.length && (!overrides.standardGoodsSn || standardGoods.some(value => value !== overrides.standardGoodsSn))) {
       throw new Error('existing task payload standardGoodsSn has no matching structured preparation lock');
     }
-    if (supplierSkus.length && (!expectedSupplierSku || supplierSkus.some(value => value !== expectedSupplierSku))) {
+    // A task that declares the structured unique-per-link policy owns an
+    // explicit Seller SKU. The payload may still carry the normalised 标准货号
+    // (before the policy is applied) or the policy value itself; anything else
+    // is still an unexplained supplier SKU and fails closed.
+    const explicitPolicySupplierSku = task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
+      ? safeString(task?.notes?.supplierSkuPolicy?.value, 240)
+      : '';
+    const acceptedSupplierSkus = [...new Set([expectedSupplierSku, explicitPolicySupplierSku].filter(Boolean))];
+    if (supplierSkus.length && (!acceptedSupplierSkus.length || supplierSkus.some(value => !acceptedSupplierSkus.includes(value)))) {
       throw new Error('existing task payload supplierSku has no matching structured preparation lock');
     }
   }
@@ -1953,7 +1961,7 @@ function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
       task?.targets?.standardGoodsSn,
       task?.standardGoodsSn,
     ),
-    supplierSku: firstNonEmpty(
+   supplierSku: firstNonEmpty(
       executionPreparation.supplierSku,
       executionPreparation.supplier_sku,
       taskPreparation.supplierSku,
@@ -1962,10 +1970,17 @@ function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
       metadataPreparation.supplier_sku,
       targetPreparation.supplierSku,
       targetPreparation.supplier_sku,
-      task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
-        ? task?.notes?.supplierSkuPolicy?.value
-        : '',
-    ),
+     task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
+       ? task?.notes?.supplierSkuPolicy?.value
+       : '',
+   ),
+   // An additional link of an existing 标准货号 must give every SKU its own
+   // seller SKU (the platform rejects a store-owned seller SKU and also rejects
+   // two SKUs of one request sharing a value). The 货号 stays in supplier_code.
+   uniqueSupplierSkuDiscriminator: (task?.allowDuplicateNewPublish === true
+     || task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link')
+     ? safeString(task?.id || task?.taskId || '', 80)
+     : '',
     supplyPrice: firstNonEmpty(
       executionPreparation.supplyPrice,
       executionPreparation.supply_price,
@@ -4041,12 +4056,54 @@ function publishTextContainsReviewedFragment(raw, fragments) {
 // remain readable; everything else is hash-only.  The allowlist deliberately
 // contains no arbitrary field/value capture.
 const SAFE_PUBLISH_VALIDATION_PATTERNS = [
-  /^(?:商品属性|商品标题|基础信息|平台预校验)$/u,
+  /^(?:商品属性|商品标题|基础信息|供应信息|分类|商品图片|图片信息|平台预校验)$/u,
   /^商品标题不能为空[。.]?$/u,
   /^Because Power Supply\(\d+\) selected (?:Wall Plug|Power Adapter)\(\d+\), Input (?:current|voltage)\(\d+\) is required\.?$/u,
   /^(?:产品型号|输入电流|输入电压|危险品分类)(?:\(\d+\))?[，,]\s*为必填项[。.]?$/u,
   /^(?:Hazardous materials classification|Input current|Input voltage)(?:\(\d+\))?\s*[:：]\s*The template attribute under type is required\.?$/u,
+  // Structural supply-info diagnostics: the platform names the duplicated
+  // seller SKU and the SKC that already owns it. The token classes admit only
+  // SKU-ish text (no arbitrary prose), so an echoed reviewed description can
+  // never ride along inside this message.
+  /^卖家SKU重复。卖家sku：[\w\u4e00-\u9fa5()（）/\-—. ]{1,160}与SKC：s[avb]\d{8,}对应的卖家sku：[\w\u4e00-\u9fa5()（）/\-—. ]{1,160}重复\(SKU: [^()]{0,80}(?:\([^()]{0,40}\)[^()]{0,80})*\)$/u,
+  /^Product category not available for sale in this store\.?$/u,
 ];
+
+// A seller SKU must be unique inside one store. The platform rejects a
+// duplicate with this exact sentence, so it is classified into a blocker that
+// names the payload field and the required business input instead of leaving
+// the operator with an opaque pre-validation failure.
+const DUPLICATE_SELLER_SKU_PATTERN = /卖家sku：(.+?)与SKC：(s[avb]\d{8,})对应的卖家sku：(.+?)重复/u;
+
+function publishPreValidDuplicateSellerSku(info) {
+  for (const row of asArray(info?.pre_valid_result || info?.preValidResult)) {
+    for (const message of asArray(row?.messages || row?.message)) {
+      const match = DUPLICATE_SELLER_SKU_PATTERN.exec(String(message ?? ''));
+      if (match) {
+        return {
+          supplierSku: safeString(match[1], 160),
+          conflictingSkc: match[2],
+          existingSku: safeString(match[3], 160),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+// True when at least one platform form/message still had to be reduced to a
+// hash. The readable text always exists in the private diagnostic artifact, so
+// the operator gets an exact pointer instead of an opaque failure.
+function publishPreValidHasHashOnlyText(info, payload) {
+  for (const row of asArray(info?.pre_valid_result || info?.preValidResult)) {
+    const rawForm = String(row?.form_name ?? row?.form ?? row?.module ?? '');
+    if (rawForm && /平台回显内容已脱敏/u.test(sanitizePublishPlatformText(rawForm, payload, 80))) return true;
+    for (const message of asArray(row?.messages || row?.message)) {
+      if (/平台回显内容已脱敏/u.test(sanitizePublishPlatformText(message, payload, 300))) return true;
+    }
+  }
+  return false;
+}
 
 function safeStructuredPublishDiagnostic(raw) {
   const normalized = normalizeMatchWhitespace(raw);
@@ -5359,6 +5416,20 @@ async function main() {
       } else if (publishInfoExplicitlyFalse(publishResult)) {
         const preValidMessages = publishPreValidMessages(publishResult.info, publishPayload);
         blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || sanitizePublishPlatformText(publishResult.msg || '未知原因', publishPayload, 300)}`);
+        const duplicateSellerSku = publishPreValidDuplicateSellerSku(publishResult.info);
+        if (duplicateSellerSku) {
+          // One 货号 may legitimately own several links in one store; the
+          // platform only requires a distinct seller SKU per link. The payload
+          // writes the 货号 itself into supplier_code, so adding an Nth link
+          // resubmits the seller SKU that the existing link already owns.
+          blockers.push(`卖家SKU重复：payload.skc_list[].supplier_code=${duplicateSellerSku.supplierSku} 与目标店已有 SKC ${duplicateSellerSku.conflictingSkc} 的卖家SKU相同。同一货号允许多条链接，但每条链接的卖家SKU/供应商SKU必须不同；当前 payload 把货号原样写进了 supplier_code。请确认该店该货号是应新建独立卖家SKU，还是应复用已有 SKC/SPU，不要重复提交同一卖家SKU。`);
+        }
+        if (publishPreValidHasHashOnlyText(publishResult.info, publishPayload)) {
+          const reference = publishDiagnostic?.ok && publishDiagnostic.id
+            ? `node scripts/read_link_ops_publish_diagnostic.mjs ${publishDiagnostic.id} ${publishDiagnostic.sha256}`
+            : '本次未留存私有诊断（见 PUBLISH_DIAGNOSTIC_PERSIST_FAILED 告警），无法还原原文';
+          blockers.push(`部分平台报文按隐私规则只保留了哈希；云端可按精确证据读取原文：${reference}`);
+        }
       } else {
         blockers.push('publishOrEdit 返回 code=0 但未显式 info.success；无法确认平台是否已接收写请求，禁止重试，需人工核销。');
       }
@@ -5508,6 +5579,8 @@ if (process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST !== '1') main().catch(err => {
 
 export const __testHooks = {
   exactCopySourceLock,
+  publishPreValidDuplicateSellerSku,
+  publishPreValidHasHashOnlyText,
   exactSourceRequiresHazardTemplateDerivation,
   shouldIssuePublishOrEdit,
   applyExactSourceLockedInputCurrentOverride,

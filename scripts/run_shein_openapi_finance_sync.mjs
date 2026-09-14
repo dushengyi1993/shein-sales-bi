@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-/** Orchestrate 19-store read-only finance collection and warehouse loading. */
+/** Orchestrate 21-store read-only finance collection and warehouse loading. */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ALL_STORES = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+const ALL_STORES = ['CX','DL','DX','FY','HL','HY','JSH','JY','LG','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
 
 function parseArgs(argv) {
   const args = {

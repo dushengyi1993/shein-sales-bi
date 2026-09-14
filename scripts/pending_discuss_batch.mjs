@@ -37,6 +37,7 @@ import {
   storeIdentityMatchesMerchantOnly,
   validateStoreIdentity,
 } from '../lib/shein_store_identity.mjs';
+import {enabledStoreKeysFromConfig} from '../lib/shein_store_config.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -55,7 +56,10 @@ function parseArgs(argv) {
     storeTruth: DEFAULT_STORE_TRUTH, decisions: '', preflight: '', batchHash: '', confirm: '',
     lockPath: DEFAULT_LOCK_PATH, pageSize: 200, readAttempts: 3, readDelayMs: 250,
     requestTimeoutMs: 20_000, terminalAttempts: 8, terminalDelayMs: 1_500,
-    preflightMinutes: 15, expectedStoreCount: Number(process.env.SHEIN_PENDING_DISCUSS_EXPECTED_STORE_COUNT || 19), quiet: false,
+    preflightMinutes: 15,
+    expectedStoreCount: process.env.SHEIN_PENDING_DISCUSS_EXPECTED_STORE_COUNT
+      ? Number(process.env.SHEIN_PENDING_DISCUSS_EXPECTED_STORE_COUNT) : null,
+    quiet: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -113,7 +117,7 @@ function validateArgs(args) {
   requireInteger(args.terminalAttempts, '--terminal-attempts', {min: 1, max: 120});
   requireInteger(args.terminalDelayMs, '--terminal-delay-ms', {min: 0, max: 60_000});
   requireInteger(args.preflightMinutes, '--preflight-minutes', {min: 1, max: 60});
-  requireInteger(args.expectedStoreCount, '--expected-store-count', {min: 1, max: 100});
+  if (args.expectedStoreCount !== null) requireInteger(args.expectedStoreCount, '--expected-store-count', {min: 1, max: 100});
   if (args.command === 'preflight' && !args.decisions) throw new Error('preflight requires --decisions');
   if (args.command === 'execute') {
     if (!args.preflight) throw new Error('execute requires --preflight');
@@ -263,11 +267,11 @@ export async function loadPendingDiscussRuntime(args) {
   const [openApiConfig, storesConfig, truth] = await Promise.all([
     readJson(args.config), readJson(args.storesConfig), readJson(args.storeTruth),
   ]);
-  const expectedStores = (storesConfig?.stores || []).filter(row => row?.enabled !== false)
-    .map(row => storeKey(row.storeKey)).filter(Boolean);
+  const expectedStores = enabledStoreKeysFromConfig(storesConfig);
   if (!expectedStores.length) throw new Error('stores config has no enabled stores');
-  if (expectedStores.length !== args.expectedStoreCount) {
-    throw Object.assign(new Error(`enabled store coverage mismatch: expected=${args.expectedStoreCount} configured=${expectedStores.length}`), {code: 'EXPECTED_STORE_COUNT_MISMATCH'});
+  const expectedStoreCount = args.expectedStoreCount ?? expectedStores.length;
+  if (expectedStores.length !== expectedStoreCount) {
+    throw Object.assign(new Error(`enabled store coverage mismatch: expected=${expectedStoreCount} configured=${expectedStores.length}`), {code: 'EXPECTED_STORE_COUNT_MISMATCH'});
   }
   const configured = new Map(normalizeConfiguredStores(openApiConfig).map(row => [storeKey(row.storeKey || row.key || row.store), row]));
   const baseUrl = openApiConfig?.apiBaseUrls?.prodSemiManaged || SHEIN_OPENAPI_BASE_URLS.prodSemiManaged;

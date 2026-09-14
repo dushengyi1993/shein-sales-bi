@@ -207,7 +207,7 @@ function classify(row) {
     owner = endpoint === '/open-api/goods/discuss/query-discuss-list' ? 'pending_discuss_batch' : 'openapi_reconciliation_layer';
     evidence = endpoint === '/open-api/goods/discuss/query-discuss-list'
       ? 'pending_discuss_batch scan 已按 enabled 店铺串行查询、完整分页、身份校验和脱敏落盘。'
-      : '已进入 19 店 OpenAPI 授权/探针/隔离对账或现有只读探针链路。';
+      : '已进入 21 店 OpenAPI 授权/探针/隔离对账或现有只读探针链路。';
     nextStep = endpoint === '/open-api/goods/discuss/query-discuss-list'
       ? '每日只读巡检仅使用专用 scan；缺店、失败或重复键均 fail closed。'
       : '继续按数据域双跑对账；稳定前不替换生产事实源。';
@@ -432,7 +432,7 @@ function generateMarkdown(inventory) {
   lines.push('');
   lines.push('## 项目状态口径');
   lines.push('');
-  lines.push('- `integrated_read_parallel`：已进入 19 店 OpenAPI 授权/探针/隔离双跑或现有只读探针链路，不直接覆盖生产事实源。');
+  lines.push('- `integrated_read_parallel`：已进入 21 店 OpenAPI 授权/探针/隔离双跑或现有只读探针链路，不直接覆盖生产事实源。');
   lines.push('- `controlled_write_adapter`：已有受控写适配器；真实提交仍必须经过 BI 权限、`safeWriteOperations`、真实写白名单、dry-run `payloadHash`、确认和回读/人工核销。');
   lines.push('- `schema_ready_adapter_next`：官方能力已确认，适合优先补 CLI/执行器适配，但未完成前不得承诺可真实写。');
   lines.push('- `support_candidate`：可作为资料检查、payload mapper 或回读辅助能力排期。');

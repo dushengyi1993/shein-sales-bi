@@ -165,6 +165,61 @@ let rejected = false;
 try { applyApprovedImageBindingsToPublishPayload(payload, bindings, {sourceApproved: false}); } catch { rejected = true; }
 check('unapproved source cannot use deterministic binding path', rejected, true);
 
+// An additional link of an existing 标准货号 must give every SKU its own seller
+// SKU (the platform rejects a store-owned seller SKU and also rejects two SKUs of
+// one request sharing a value), while supplier_code keeps the 标准货号.
+const multiSkuPayload = {
+  skc_list: [{
+    supplier_code: 'source-raw-code',
+    sku_list: [
+      {sale_attribute_list: [{attribute_value_name: 'White'}, {attribute_value_name: 'UK Plug(220-240V)'}], stock_info_list: [{inventory_num: 5}]},
+      {sale_attribute_list: [{attribute_value_name: 'Black'}], stock_info_list: [{inventory_num: 5}]},
+    ],
+  }],
+};
+const legacy = applyExplicitPublishPreparationOverrides(multiSkuPayload, {standardGoodsSn: 'SM-505A电动缝纫机', targetStore: 'CX'});
+check('without a discriminator the legacy single value is kept',
+  legacy.payload.skc_list[0].sku_list.map(row => row.supplier_sku).join(','),
+  'SM-505A电动缝纫机,SM-505A电动缝纫机');
+check('legacy path keeps the explicit applied tag',
+  legacy.applied.filter(row => row.includes('supplier_sku')).every(row => row.endsWith('.explicit')), true);
+
+const perLink = applyExplicitPublishPreparationOverrides(multiSkuPayload, {
+  standardGoodsSn: 'SM-505A电动缝纫机',
+  targetStore: 'CX',
+  uniqueSupplierSkuDiscriminator: 'lot_20260914130359_b176de60',
+});
+const perLinkSkus = perLink.payload.skc_list[0].sku_list.map(row => row.supplier_sku);
+check('additional link gives each SKU a distinct seller SKU', new Set(perLinkSkus).size, 2);
+check('derived seller SKUs follow the production 货号-YYMMDD-链接 shape',
+  perLinkSkus.every(value => value.startsWith('SM-505A电动缝纫机-260914-b176de60') && value.length <= 64), true);
+check('a multi-SKU link disambiguates each SKU position',
+  perLinkSkus.join(','), 'SM-505A电动缝纫机-260914-b176de60-1,SM-505A电动缝纫机-260914-b176de60-2');
+const singleSkuLink = applyExplicitPublishPreparationOverrides(
+  {skc_list: [{supplier_code: 'raw-source-code', sku_list: [{stock_info_list: [{inventory_num: 5}]}]}]},
+  {standardGoodsSn: 'SM-505A电动缝纫机', targetStore: 'CX', uniqueSupplierSkuDiscriminator: 'lot_20260914130359_b176de60'},
+);
+check('a single-SKU link matches the historical format exactly',
+  singleSkuLink.payload.skc_list[0].sku_list[0].supplier_sku, 'SM-505A电动缝纫机-260914-b176de60');
+check('supplier_code stays the standard goods SN even for an additional link',
+  perLink.payload.skc_list[0].supplier_code, 'SM-505A电动缝纫机');
+check('the additional-link path is auditable through the applied tag',
+  perLink.applied.filter(row => row.includes('supplier_sku')).every(row => row.endsWith('.unique_per_sku')), true);
+check('derivation is deterministic for the same link',
+  JSON.stringify(applyExplicitPublishPreparationOverrides(multiSkuPayload, {standardGoodsSn: 'SM-505A电动缝纫机', targetStore: 'CX', uniqueSupplierSkuDiscriminator: 'lot_20260914130359_b176de60'}).payload.skc_list[0].sku_list.map(row => row.supplier_sku)),
+  JSON.stringify(perLinkSkus));
+
+const explicitWins = applyExplicitPublishPreparationOverrides(multiSkuPayload, {
+  standardGoodsSn: 'SM-505A电动缝纫机',
+  targetStore: 'CX',
+  supplierSku: 'OPERATOR-SUPPLIED-SKU',
+  uniqueSupplierSkuDiscriminator: 'b176de60',
+});
+check('an operator-supplied supplierSku still wins over derivation',
+  explicitWins.payload.skc_list[0].sku_list.every(row => row.supplier_sku === 'OPERATOR-SUPPLIED-SKU'), true);
+check('the operator-supplied path is tagged as an override',
+  explicitWins.applied.filter(row => row.includes('supplier_sku')).every(row => row.endsWith('.unique_override')), true);
+
 const ok = checks.every(row => row.pass);
 console.log(JSON.stringify({ok, checks}, null, 2));
 if (!ok) process.exitCode = 1;

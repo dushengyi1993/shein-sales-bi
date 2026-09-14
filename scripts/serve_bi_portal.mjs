@@ -74,6 +74,7 @@ import {
 } from '../lib/bi_ops_direct_query.mjs';
 import {loadBiOpsQueryData} from '../lib/bi_ops_query_context.mjs';
 import {createConfiguredLinkOpsStoreGateway} from '../lib/link_ops_store_gateway.mjs';
+import {DEFAULT_SHEIN_STORE_KEYS, loadEnabledStoreKeysSync} from '../lib/shein_store_config.mjs';
 import {createLinkOpsJobWorker} from '../lib/link_ops_job_worker.mjs';
 import {
   enqueueInventoryMaintenance,
@@ -116,6 +117,7 @@ import {
   buildEmptyDescriptionAuthorization,
   descriptionBindingRequestKey,
   describeDescriptionMaterial,
+  hasPublishDescriptionState,
   sha256StableJson,
   stripPublishPayloadDescriptions,
   validateCopyProductDescriptionPolicy,
@@ -305,8 +307,7 @@ const LINK_OPS_MAX_UPLOAD_TOTAL_BYTES = 120 * 1024 * 1024;
 const OPENAPI_IMAGE_ASSET_MAX_FILE_BYTES = 3 * 1024 * 1024;
 const OPENAPI_IMAGE_ASSET_ALLOWED_MIME = new Set(['image/jpeg', 'image/png']);
 const OPENAPI_IMAGE_ASSET_TYPES = new Set([1, 2, 5, 6, 7]);
-const DEFAULT_SHEIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
-const DEFAULT_MANUAL_LOGIN_STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
+const DEFAULT_MANUAL_LOGIN_STORE_KEYS = DEFAULT_SHEIN_STORE_KEYS;
 const BI_PORTAL_SECTION_KEYS = new Set(['homeProfit', 'homeRankings', 'rankings', 'profit', 'actions', 'linksData', 'inventoryStock', 'productState', 'productSalesDaily', 'homeTrafficDaily', 'productTrafficDaily', 'inventoryTrend', 'comments', 'orders', 'liveSalesToday', 'priceScatter', 'afterSales', 'rtvData', 'waybills']);
 const BI_PORTAL_SECTION_TIMEOUT_MS = Math.max(60_000, Number(process.env.SHEIN_BI_SECTION_TIMEOUT_MS || 900_000));
 const BI_DIRECT_RECEIPT_MAX_BYTES = 64 * 1024;
@@ -1042,7 +1043,7 @@ function configuredSheinStoreKeysSync() {
     const groupKeys = Object.keys(config?.groups || {})
       .map(k => String(k || '').trim().toUpperCase())
       .filter(Boolean);
-    return new Set([...DEFAULT_SHEIN_STORE_KEYS, ...storeKeys, ...groupKeys]);
+    return new Set([...storeKeys, ...groupKeys, ...DEFAULT_SHEIN_STORE_KEYS]);
   } catch {
     return new Set(DEFAULT_SHEIN_STORE_KEYS);
   }
@@ -3554,8 +3555,8 @@ function inferLinkOpsTargets(command, options = {}) {
   const productInferenceText = text
     .replace(/["“][^"”\r\n]*[\\/][^"”\r\n]*["”]/gu, ' ')
     .replace(/(?:[A-Za-z]:)?(?:[\\/][^\\/\s，。；;"“”]+){2,}/gu, ' ');
-  const allStoreMentioned = /全店|所有店|所有店铺|全部店|全部店铺|19\s*店|十九\s*店|各店|每个店/.test(text);
-  const allStoresAsSourceScope = /(?:全店|所有店|所有店铺|全部店|全部店铺|19\s*店|十九\s*店|各店|每个店)(?:里|中|内|范围|里面)?[\s\S]{0,36}?(?:流量|曝光|销量|最高|最好|现有|已有|源链接|挑|选|找)/.test(text);
+  const allStoreMentioned = /全店|所有店|所有店铺|全部店|全部店铺|\d+\s*店|十九\s*店|各店|每个店/.test(text);
+  const allStoresAsSourceScope = /(?:全店|所有店|所有店铺|全部店|全部店铺|\d+\s*店|十九\s*店|各店|每个店)(?:里|中|内|范围|里面)?[\s\S]{0,36}?(?:流量|曝光|销量|最高|最好|现有|已有|源链接|挑|选|找)/.test(text);
   const allStoresRequested = allStoreMentioned && !allStoresAsSourceScope;
   const storeMatches = allStoresRequested
     ? DEFAULT_MANUAL_LOGIN_STORE_KEYS
@@ -9497,7 +9498,7 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       throw error;
     }
     const descriptionPolicy = validateCopyProductDescriptionPolicy(task, originalPayload);
-    if (!descriptionPolicy.ok) {
+    if (hasPublishDescriptionState(task, originalPayload) && !descriptionPolicy.ok) {
       const error = new Error(`adopt_existing 要求当前描述策略锁完全有效；先修复描述绑定或空描述授权：${descriptionPolicy.blockers.slice(0, 3).join('；')}`);
       error.status = 409;
       error.code = 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID';
@@ -10915,6 +10916,13 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     );
     publishPreparation.targetStore = targetStore;
   }
+  if (task?.allowDuplicateNewPublish === true || task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link') {
+    // Additional link of an existing 标准货号: derive a distinct seller SKU per
+    // SKU, so the payload the binding evidence is computed from already carries
+    // the store-unique seller SKU the platform requires. supplier_code keeps the
+    // 标准货号, and the default first-link path is untouched.
+    publishPreparation = {...publishPreparation, uniqueSupplierSkuDiscriminator: String(task?.id || '')};
+  }
   let taskForCapture = {
     ...task,
     status: String(task.status || '') === 'draft' ? 'confirmed' : task.status,
@@ -10933,6 +10941,19 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       ? {publishAssetBinding: {...task.publishAssetBinding, publishPreparation}}
       : {}),
   };
+  if (publishPreparation.supplierSku) {
+    // `--supplier-sku` is the owner-specified unique Seller SKU for an
+    // additional link of an existing 标准货号. Persist it as the structured
+    // policy the executor already honours, so supplier_code keeps the 标准货号
+    // while the Seller SKU stays distinct per link.
+    taskForCapture = {
+      ...taskForCapture,
+      notes: {
+        ...(taskForCapture.notes && typeof taskForCapture.notes === 'object' ? taskForCapture.notes : {}),
+        supplierSkuPolicy: {mode: 'unique-per-link', value: publishPreparation.supplierSku},
+      },
+    };
+  }
   // Every publish preparation revokes a prior empty marker first. The caller
   // must explicitly request and re-bind it to the newly prepared payload.
   delete taskForCapture.emptyDescriptionAuthorization;
@@ -22755,7 +22776,7 @@ async function main() {
               });
             }
             const adoptDescriptionPolicy = validateCopyProductDescriptionPolicy(operationTask, payload);
-            if (!resignExistingBinding && !adoptDescriptionPolicy.ok) {
+            if (!resignExistingBinding && hasPublishDescriptionState(operationTask, payload) && !adoptDescriptionPolicy.ok) {
               return sendJson(res, 409, {
                 ok: false,
                 error: `adopt_existing 要求当前描述策略锁对 payload 完全有效：${adoptDescriptionPolicy.blockers.slice(0, 3).join('；')}`,
@@ -23660,12 +23681,12 @@ ${uploadCheckAnswer}` : `
           await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'inventory-replenishment-denied', actor, ...requestMeta(req), denied: actorGate});
           return sendJson(res, 403, actorGate);
         }
-        // Strict gate: full 19-store write permission required
+        // Strict gate: full current-store write permission required
         const allStores = [...SHEIN_STORE_KEYS];
         const writeStoresDenied = requireWriteStores(actor, allStores);
         if (writeStoresDenied) {
           await appendAudit(args.auditFile, {at: new Date().toISOString(), type: 'inventory-replenishment-denied', actor, ...requestMeta(req), denied: writeStoresDenied});
-          return sendJson(res, 403, {ok: false, error: '自动补库存维护必须具备全部 19 店写权限'});
+          return sendJson(res, 403, {ok: false, error: `自动补库存维护必须具备全部 ${DEFAULT_SHEIN_STORE_KEYS.length} 店写权限`});
         }
         // Worker availability gate: prevent queueing jobs when no worker will ever consume them
         const hasSharedWorker = linkOpsStoreGateway.mode === 'postgres' && (
@@ -23905,7 +23926,7 @@ ${uploadCheckAnswer}` : `
                       ? '本条最新用户消息是对上文方案的确认执行。系统会继承上文用户意图和智能体定位，在同一会话里继续处理。'
                       : '本条最新用户消息已识别为明确运营动作命令。系统会在当前会话里开始处理，并立刻做一次不提交 SHEIN 的资料检查。',
                     '你的回复不能声称已经执行，也不要只说“没有权限所以不能”；应像 Codex 一样说明“我先查了什么、选中了哪个源链接、还缺什么、用户补哪一句就能继续”。',
-                    '如果目标店铺属于 19 店已授权范围，应说明该店 OpenAPI 已授权且只读探针通过；复制/补链会优先从源链接自动取类目、属性、图片、SKU、价格、库存、尺寸重量等参数，只有自动还原失败才需要补资料；不能一上来就说缺 payload 或没有权限。',
+                    `如果目标店铺属于 ${DEFAULT_SHEIN_STORE_KEYS.length} 店已授权范围，应说明该店 OpenAPI 已授权且只读探针通过；复制/补链会优先从源链接自动取类目、属性、图片、SKU、价格、库存、尺寸重量等参数，只有自动还原失败才需要补资料；不能一上来就说缺 payload 或没有权限。`,
                   ]
                 : [
                     '每一轮都要根据整段会话和最新 BI JSON 上下文重新查数；如果最新用户消息换了店铺、货号或指标，以最新消息为准，缺省时再沿用上文。',

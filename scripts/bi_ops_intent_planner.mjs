@@ -70,7 +70,7 @@ Options:
   --text, --message <text>   User message. If omitted, read stdin.
   --context-json <json>      Existing task/session context as inline JSON.
   --context-file <path>      Existing task/session context JSON file (max 256 KiB).
-  --allowed-stores <list>    Server-side store allowlist; defaults to the current 19 stores.
+  --allowed-stores <list>    Server-side store allowlist; defaults to the current 21 stores.
   --codex-bin <path>         Codex executable; defaults to SHEIN_BI_INTENT_PLANNER_CODEX_BIN or codex.
   --model <name>             Optional model override.
   --reasoning <level>        minimal|low|medium|high|xhigh; default low.

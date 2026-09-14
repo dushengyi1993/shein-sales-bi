@@ -24,7 +24,7 @@ const SALES_DIR = path.join(ROOT, 'outputs', 'shein_fetch');
 const REPORT_DIR = path.join(ROOT, 'outputs', 'reports');
 const OUT_DIR = path.join(ROOT, 'outputs', 'link-dashboard');
 
-const STORE_ORDER = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ'];
+const STORE_ORDER = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC', 'LG', 'HY'];
 const HIGH = '高';
 const MID = '中';
 const LOW = '低';

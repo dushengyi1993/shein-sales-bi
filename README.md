@@ -1,6 +1,6 @@
 # SHEIN 销售统计与 BI 经营系统
 
-SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / 自动运营工作区。生产以云端 BI、PostgreSQL warehouse、Metabase、19 店独立半托 OpenAPI App 授权、DL 中央 Webhook 验签与受控执行链为准。
+SHEIN 当前 21 店销售、库存、链接、营销活动和利润经营 BI / 自动运营工作区。生产以云端 BI、PostgreSQL warehouse、Metabase、21 店独立半托 OpenAPI App 授权、DL 中央 Webhook 验签与受控执行链为准。
 
 ## 核心规则
 
@@ -16,8 +16,8 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 
 | 项 | 值 |
 |---|---|
-| 店铺范围 | 19 店：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL` |
-| 分组 | DSY：`DL DX FY LQ NM HL JY ZL TS MZ`；LGM：`CX YJ XL QY QH TZ JSH TZZ XC` |
+| 店铺范围 | 21 店：`CX DL DX FY HL HY JSH JY LG LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL` |
+| 分组 | DSY：`DL DX FY LQ NM HL JY ZL TS MZ`；LGM：`CX YJ XL QY QH TZ JSH TZZ XC LG HY` |
 | BI 入口 | `https://sa.dushengyi.cc/`（应用内登录 + `bi_session`） |
 | 云端进程 | Portal `8787`；认证只读 Query `8791`；Webhook `8792`（均仅 loopback） |
 | 云端维护入口 | `https://sa.dushengyi.cc/cloud-login-maintenance` |
@@ -48,7 +48,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 > 生产命令默认在云端 `/opt/shein-bi/app` 执行；本地命令主要用于开发、dry-run、审计或受控执行。
 
 - 人工灾备刷新当天销售 + BI Portal：`bash scripts/cloud_bi_refresh.sh today intraday`（日常当天销售由 Webhook 实时触发，不运行每小时全店轮询）
-- 收口前一天最终版：`bash scripts/cloud_bi_refresh.sh yesterday final`（WebAPI 仅作独立核对；19/19 OpenAPI 深度匹配后才原子晋升正式日切片）
+- 收口前一天最终版：`bash scripts/cloud_bi_refresh.sh yesterday final`（WebAPI 仅作独立核对；21/21 OpenAPI 深度匹配后才原子晋升正式日切片）
 - 备份数据库：`bash scripts/cloud_db_backup.sh`
 - 同步 ET 货代仓：`bash scripts/cloud_et_forwarder_sync.sh <scope>`（`<scope>` 按运维文档取值）
 - 同步/回灌 ET 仓储费：`bash scripts/cloud_et_storage_fee_sync.sh daily [YYYY-MM-DD]` / `bash scripts/cloud_et_storage_fee_sync.sh backfill YYYY-MM-DD`
@@ -80,7 +80,7 @@ SHEIN 当前 19 店销售、库存、链接、营销活动和利润经营 BI / �
 ## 工具说明
 
 - 默认用后台、headless、HTTP/CDP、日志、JSON、静态检查和 UI 冒烟脚本验证；只有登录、人机校验、用户明确要求或必须排查交互问题时才打开可见窗口，完成后关闭。
-- 2026-07-23 起，半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实；在线 BI 通过 PostgreSQL `NOTIFY` + SSE 增量刷新。每日 `03:00` WebAPI 只保留独立核对文件，19/19 店深度匹配后才由 OpenAPI 原子晋升前一日正式切片。商品流量、四档状态、营销和部分编辑级详情仍按各自日更或 WebAPI/headless 边界运行，不能把“销售已切 OpenAPI”误写成“所有数据域都不再使用浏览器/WebAPI”。
+- 2026-07-23 起，半托当天销售由订单 Webhook 触发按单 OpenAPI 查询并写正式事实；在线 BI 通过 PostgreSQL `NOTIFY` + SSE 增量刷新。每日 `03:00` WebAPI 只保留独立核对文件，21/21 店深度匹配后才由 OpenAPI 原子晋升前一日正式切片。商品流量、四档状态、营销和部分编辑级详情仍按各自日更或 WebAPI/headless 边界运行，不能把“销售已切 OpenAPI”误写成“所有数据域都不再使用浏览器/WebAPI”。
 - 飞书消息/Base 使用 `lark-cli`；`config/lark_report.json` 必须保持合法 UTF-8 JSON。
 - ET 货代仓默认 headless；OCR/验证码连续失败、登录态人工维护或用户明确要求时才临时打开可见窗口。
 - 云端上传的临时文件、OpenAPI 素材、登录维护文件用完必须清理；状态、token、session、密钥和数据库 dump 不写入仓库、文档或聊天。

@@ -45,6 +45,7 @@ import {
   sha256Bytes,
 } from '../lib/cloud_team_report_common.mjs';
 import {runPendingDiscussScan} from './pending_discuss_batch.mjs';
+import {enabledStoreKeysFromConfig} from '../lib/shein_store_config.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_CONFIG = process.env.SHEIN_OPENAPI_CONFIG_FILE || path.join(ROOT, 'config', 'shein_openapi.local.json');
@@ -117,7 +118,8 @@ function parseArgs(argv) {
   const args = {
     command: '', outDir: '', config: DEFAULT_CONFIG, storesConfig: DEFAULT_STORES_CONFIG,
     storeTruth: DEFAULT_STORE_TRUTH, larkConfig: DEFAULT_LARK_CONFIG,
-    expectedStoreCount: Number(process.env.SHEIN_PENDING_DISCUSS_EXPECTED_STORE_COUNT || 19),
+    expectedStoreCount: process.env.SHEIN_PENDING_DISCUSS_EXPECTED_STORE_COUNT
+      ? Number(process.env.SHEIN_PENDING_DISCUSS_EXPECTED_STORE_COUNT) : null,
     pageSize: 200, readAttempts: 3, readDelayMs: 250, requestTimeoutMs: 20_000,
     send: false, quiet: false,
   };
@@ -153,7 +155,7 @@ Options:
   --config <file>            SHEIN OpenAPI config (default config/shein_openapi.local.json)
   --stores-config <file>     stores config (default config/stores.json)
   --store-truth <file>       store account truth (default config/store_account_truth.json)
-  --expected-store-count <n> enabled store coverage (default 19)
+  --expected-store-count <n> enabled store coverage (default: enabled stores in config/stores.json)
   --page-size <n>            scan page size (default 200)
   --read-attempts <n>        scan read attempts (default 3)
   --read-delay-ms <n>        scan read delay (default 250)
@@ -182,7 +184,7 @@ function validateArgs(args) {
   requireInteger(args.readAttempts, '--read-attempts', {min: 1, max: 8});
   requireInteger(args.readDelayMs, '--read-delay-ms', {min: 0, max: 60_000});
   requireInteger(args.requestTimeoutMs, '--request-timeout-ms', {min: 100, max: 120_000});
-  requireInteger(args.expectedStoreCount, '--expected-store-count', {min: 1, max: 100});
+  if (args.expectedStoreCount !== null) requireInteger(args.expectedStoreCount, '--expected-store-count', {min: 1, max: 100});
 }
 
 async function readJson(file) {

@@ -19,7 +19,7 @@ set -Eeuo pipefail
 #      with an exact, unique per-store result set: every enabled storeKey
 #      appears exactly once, each row is ok=true, and each row carries the
 #      WebAPI probe proof the current producer actually writes
-#      (exportSession.stores[].webApiProbe.ok).  A forged summary 19/19 with
+#      (exportSession.stores[].webApiProbe.ok).  A forged full-store summary with
 #      results=[] (or any missing / extra / duplicate / probe-less store row)
 #      is NOT completed and never skips the run.  The same predicate is
 #      exposed as --check-only for the morning chain gate, so no other
@@ -200,16 +200,16 @@ marker_status() {
 #        - summary agrees with the expected enabled store count (exact set);
 #        - results is a NON-EMPTY exact permutation of the enabled storeKey
 #          set: every enabled store appears exactly once (unique storeKey, no
-#          extra store can satisfy a forged 19/19 summary);
+#          extra store can satisfy a forged full-store summary);
 #        - every result row is ok=true AND carries the WebAPI probe proof the
 #          current producer actually writes: result.exportSession.stores[]
 #          contains the same storeKey with webApiProbe.ok === true.  A forged
-#          summary 19/19 + results=[] (or results without per-store probe
+#          summary with results=[] (or results without per-store probe
 #          proof) must fail.
 # A warning marker, a bare done marker, a stale/partial report or a missing
 # probe proof is NOT completed, so it always triggers a fresh attempt instead
 # of a skip.  An unreadable/empty store config fails closed too (an empty
-# enabled-store set can never prove 19/19).
+# enabled-store set can never prove full-store coverage).
 nightly_session_completed() {
   MARKER_ROOT="$MARKER_ROOT" MARKER_STAGE="$MARKER_STAGE" \
   RUN_DATE="$RUN_DATE" REPORT_FILE="$REPORT_FILE" \
