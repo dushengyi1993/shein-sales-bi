@@ -848,7 +848,7 @@ try {
   result.summary.writeConfirmable = operatorCapabilities.json?.counts?.writeConfirmable ?? null;
   result.summary.safeWriteEnabled = operatorCapabilities.json?.safety?.safeWriteOperations?.enabled ?? null;
   result.summary.whitelistEnabled = operatorCapabilities.json?.safety?.realSubmitWhitelist?.enabled ?? null;
-  check('operator capabilities include 19 stores', result.summary.capabilityCount, 19);
+  check('operator capabilities include 21 stores', result.summary.capabilityCount, 21);
   check('safe write remains disabled in smoke', result.summary.safeWriteEnabled, false);
   check('account-scoped write authorization is enabled in smoke', result.summary.whitelistEnabled, true);
 

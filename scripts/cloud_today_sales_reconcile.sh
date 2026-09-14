@@ -36,7 +36,7 @@ node - "$REPORT_FILE" <<'NODE'
 const fs = require('node:fs');
 const file = process.argv[2];
 const report = JSON.parse(fs.readFileSync(file, 'utf8'));
-const expectedStores = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+const expectedStores = ['CX','DL','DX','FY','HL','HY','JSH','JY','LG','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
 const counts = report.counts || {};
 const authorizedStores = [...new Set((report.authorizedStores || [])
   .map(value => String(value || '').trim().toUpperCase()))].sort();

@@ -33,7 +33,7 @@
       "secretKey": "解密后的店铺 secretKey；不要提交真实值",
       "encryptedSecretKey": "平台返回的加密 secretKey，可选；不要提交真实值",
       "authorizedAt": null,
-      "notes": "先用一个真实店铺试点；同一 App 可授权 19 店，但每店仍必须保存各自唯一 OpenKey"
+      "notes": "同一 App 可授权当前 21 店，但每店仍必须保存各自唯一 OpenKey"
     }
   ],
   "safeWriteOperations": {

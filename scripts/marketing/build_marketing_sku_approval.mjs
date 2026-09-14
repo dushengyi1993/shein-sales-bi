@@ -1731,7 +1731,7 @@ async function loadUserRemarkRules(filePath) {
 const KNOWN_STORE_KEYS = new Set([
   'DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL',
   'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ',
-  'JSH', 'TZZ', 'XC',
+  'JSH', 'TZZ', 'XC', 'LG', 'HY',
 ]);
 
 function parseRemarkRule(canonical, remark) {
@@ -1740,7 +1740,7 @@ function parseRemarkRule(canonical, remark) {
   if (!name || !text) return null;
 
   // Detect storeKey in canonical or remark (e.g. "FY 37 SAR", "FY: 37", "FY店 37 SAR", or canonical is "FY")
-  const storeMatch = text.match(/\b(DL|DX|FY|LQ|NM|HL|JY|ZL|TS|MZ|CX|YJ|XL|QY|QH|TZ|JSH|TZZ|XC)\b/i)
+  const storeMatch = text.match(/\b(DL|DX|FY|LQ|NM|HL|JY|ZL|TS|MZ|CX|YJ|XL|QY|QH|TZ|JSH|TZZ|XC|LG|HY)\b/i)
     || (KNOWN_STORE_KEYS.has(name.toUpperCase()) ? [name, name] : null);
   const explicitStoreKey = storeMatch ? storeMatch[1].toUpperCase() : null;
 

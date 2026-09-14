@@ -51,7 +51,7 @@ PRODUCT_CACHE_DIR="${SHEIN_OPENAPI_PRODUCT_CACHE_DIR:-/srv/shein-bi/runtime/open
 # no executor call and no inventory write. Both gates must stay in sync.
 MAX_ROWS="${SHEIN_BI_INVENTORY_MAX_ROWS:-1000}"
 # The targeted refresh must cover list + stock for every plan store, so STORES
-# stays on the same full 19-store set the reconciliation script defaults to
+# stays on the same full 21-store set the reconciliation script defaults to
 # (test_daily_inventory_guard_targeted_detail.mjs asserts both constants stay
 # identical). Never narrow it to the target subset: the refresh is not a
 # detail-only pass for the allowlisted SPUs.

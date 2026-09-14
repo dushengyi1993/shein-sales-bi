@@ -117,7 +117,7 @@ function nowStamp() { return new Date().toISOString().replace(/[-:.TZ]/g, '').sl
 function asArray(v) { if (v == null) return []; return Array.isArray(v) ? v : [v]; }
 function uniq(xs) { return [...new Set(xs.filter(Boolean))]; }
 function storeSort(a, b) {
-  const order = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ','TZZ','JSH','XC'];
+  const order = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ','TZZ','JSH','XC','LG','HY'];
   const ia = order.indexOf(a), ib = order.indexOf(b);
   return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || String(a).localeCompare(String(b));
 }

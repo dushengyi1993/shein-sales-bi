@@ -27,7 +27,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 店铺：DSY=`DL DX FY LQ NM HL JY ZL TS MZ`；LGM=`CX YJ XL QY QH TZ JSH TZZ XC`。
 - 云端 BI 正式入口：`https://sa.dushengyi.cc/`，旧 IP `http://43.165.167.135/` 仅作兜底；正式入口使用应用内登录和 `bi_session`。本地 `8787` 服务和 `SHEIN-*` Windows 任务已封存禁用，除非明确回滚不要重启。
 - V2 是当前正式 BI Portal；V1 已封存到 `/v1/` 和 GitHub final/archive release，不再进入正式 release，也不纳入日常自动刷新。
-- 云端生产调度：半托当天销售由订单 Webhook 触发按单 OpenAPI 增量更新，不启用 `shein-bi-cloud-today.timer`；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 生成 WebAPI 独立核对并在 19/19 深度匹配后原子晋升 OpenAPI 最终日切片；`shein-bi-cloud-morning-chain.timer` 每天 `08:00` 启动前一完整日慢变补采；数据库备份、ET、登录态、营销 guard/repair、孤儿浏览器清理和 watchdog 各由独立 timer 负责。飞书日报仅保留手动入口，飞书只读问数 service 保持暂停。
+- 云端生产调度：半托当天销售由订单 Webhook 触发按单 OpenAPI 增量更新，不启用 `shein-bi-cloud-today.timer`；`shein-bi-cloud-yesterday.timer` 每天 `03:00` 生成 WebAPI 独立核对并在 21/21 深度匹配后原子晋升 OpenAPI 最终日切片；`shein-bi-cloud-morning-chain.timer` 每天 `08:00` 启动前一完整日慢变补采；数据库备份、ET、登录态、营销 guard/repair、孤儿浏览器清理和 watchdog 各由独立 timer 负责。飞书日报仅保留手动入口，飞书只读问数 service 保持暂停。
 - 2026-07-26 起，19 店半托 OpenAPI 生产数据面统一为 DL 单一 App + 每店唯一 OpenKey；原 18 个独立 App 只作回滚，不进入生产读写或 Webhook 业务处理。当天销售已切正式事实；退货退款、商品/链接、营销和编辑级资料继续按各自 OpenAPI、WebAPI/headless 与日更边界逐项收口。
 - WebAPI/session 与店铺 Chrome profile 仍用于最终日独立核对、尚未 API 化的数据域、登录续期和人工灾备；不能因为销售已切 Webhook/OpenAPI 就删除这些能力，也不能把它们说成当天销售主链路。
 - ET 货代仓已接入仓库和 BI；云端 ET 同步已启用并验证成功。RTV 复核耗时长是正常现象，滚动销售刷新不应等待完整 RTV。
@@ -89,7 +89,7 @@ description: SHEIN/希音销售统计自动化项目专用工作流。用户提�
 - 当前 V2 正式门户生成/刷新优先走云端 `scripts/cloud_bi_refresh.sh` 和 section warmup；历史平行预览生成器已移除。运行态验收必须看云端页面和线上 `/api/bi/section/*`，仓库 `outputs/bi-portal/data.json` 只作灾备兼容。
 - 云端 ET 每日同步：服务器执行 `bash scripts/cloud_et_forwarder_sync.sh today`；本地回滚参考才用 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scheduled_et_forwarder_daily.ps1`
 - 云端链接/业务域日更：服务器执行 `bash scripts/cloud_link_business_sync.sh yesterday`；不要回退到本机补抓冒充云端日更。
-- 云端登录态管家：服务器执行 `bash scripts/cloud_shein_session_manager.sh`；会顺序巡检/恢复当前 19 店 WebAPI + SBN 登录态。
+- 云端登录态管家：服务器执行 `bash scripts/cloud_shein_session_manager.sh`；会顺序巡检/恢复当前 21 店 WebAPI + SBN 登录态。
 - 云端异常通知：服务器执行 `node scripts/cloud_ops_watchdog.mjs --dry-run` 先看巡检结果；当前日事件驱动合法零销量不得误报，提醒必须给出具体原因、影响与下一步。
 - 飞书只读问数机器人代码只作恢复参考；`shein-bi-lark-sales-qa.service` 必须保持 `disabled + inactive`，不得在发版或巡检时为了“全绿”启动。
 - RTV 换单复核：`node scripts/verify_shein_rtv_tracking.mjs --priority high,medium,low --include-no-cases --limit 120 --case-limit 60 --max-runtime-ms 3600000`

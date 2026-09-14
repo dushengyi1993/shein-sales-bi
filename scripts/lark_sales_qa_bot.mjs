@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import readline from 'node:readline';
 import os from 'node:os';
 import {buildProductDisplayName} from '../lib/product_display_name.mjs';
+import {DEFAULT_SHEIN_STORE_KEYS} from '../lib/shein_store_config.mjs';
 import {inventoryMatchStatusLabel, normalizeInventoryProjection} from '../lib/inventory_projection_contract.mjs';
 import {
   buildBiOpsQueryContext,
@@ -44,7 +45,7 @@ const CONVERSATION_DIR = process.env.SHEIN_QA_CONVERSATION_DIR || path.join(STAT
 const CONVERSATION_TTL_MS = Math.max(0, Number(process.env.SHEIN_QA_CONVERSATION_TTL_MS || 0));
 const LINK_OPS_TASK_FILE = process.env.SHEIN_QA_LINK_OPS_TASK_FILE || path.join(ROOT, 'state', 'bi_link_ops_tasks.json');
 const LARK_LINK_OPS_TASK_WRITE_ENABLED = !['0', 'false', 'no'].includes(String(process.env.SHEIN_QA_LINK_OPS_TASK_WRITE_ENABLED || '0').toLowerCase());
-const STORE_KEYS = ['DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ', 'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC'];
+const STORE_KEYS = DEFAULT_SHEIN_STORE_KEYS;
 const biQueryMetaByData = new WeakMap();
 
 function parseArgList(raw) {
@@ -2270,7 +2271,7 @@ async function inferControlledChartIntent(question, data, conversation = null) {
                 properties: {
                   level: {type: 'string'},
                   allItems: {type: 'boolean'},
-                  stores: {type: 'array', items: {type: 'string'}, maxItems: 19},
+                  stores: {type: 'array', items: {type: 'string'}, maxItems: DEFAULT_SHEIN_STORE_KEYS.length},
                   product: {type: 'string'},
                 },
               },

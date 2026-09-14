@@ -306,7 +306,7 @@ run_nightly_session_readiness_gate() {
     --marker-stage nightly-session \
     --marker-root "$ROOT/state/pipeline-markers" \
     --run-date "$RUN_DATE"; then
-    echo "[cloud_morning_chain] session-ready strong evidence (done marker + same-day 19/19 report) runDate=$RUN_DATE; no session-manager work started"
+    echo "[cloud_morning_chain] session-ready strong evidence (done marker + same-day full-store report) runDate=$RUN_DATE; no session-manager work started"
     return 0
   fi
 
@@ -358,11 +358,11 @@ run_nightly_session_readiness_gate() {
     --marker-root "$ROOT/state/pipeline-markers" \
     --run-date "$RUN_DATE"; then
     write_state "running" "nightly session recovery evidence verified; all-store link collection is starting"
-    echo "[cloud_morning_chain] session-recovery evidence verified (done marker + same-day 19/19 report); continuing to all-store fetch"
+    echo "[cloud_morning_chain] session-recovery evidence verified (done marker + same-day full-store report); continuing to all-store fetch"
     return 0
   fi
 
-  write_state "failed" "nightly session recovery exited 0 but completion evidence (done marker + same-day 19/19 report) is missing; manual login or scheduled session manager run required before link collection; all-store fetch skipped"
+  write_state "failed" "nightly session recovery exited 0 but completion evidence (done marker + same-day full-store report) is missing; manual login or scheduled session manager run required before link collection; all-store fetch skipped"
   write_marker "morning-all" "failed" "nightly-session recovery evidence missing after exit 0" "$LOG_FILE" >/dev/null || true
   echo "[cloud_morning_chain] ERROR session recovery evidence missing after exit 0; all-store fetch skipped" >&2
   return 79
