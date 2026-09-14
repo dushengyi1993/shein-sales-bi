@@ -147,7 +147,7 @@ PRIMARY_SALES_ACTIVE="$(
 )"
 if [[ "$PRIMARY_SALES_ACTIVE" == "true" && "${SHEIN_BI_PRIMARY_SALES_FINALIZE:-1}" != "0" ]]; then
   # Webhook + official OpenAPI are the production sales sources after cutover.
-  # Finalize the complete day from all 19 authorized stores without depending
+  # Finalize the complete day from all enabled authorized stores without depending
   # on expiring Seller Center cookies or browser profiles.  The OpenAPI fetch,
   # load, and per-store daily-row checks below are the completeness gate; the
   # reconciliation status against any old WebAPI artifact is diagnostic only.
@@ -160,11 +160,17 @@ if [[ "$PRIMARY_SALES_ACTIVE" == "true" && "${SHEIN_BI_PRIMARY_SALES_FINALIZE:-1
     --out "$OPENAPI_RECON_FILE"
   node - "$OPENAPI_RECON_FILE" <<'NODE'
 const fs = require('fs');
+const path = require('path');
 const file = process.argv[2];
 const report = JSON.parse(fs.readFileSync(file, 'utf8'));
 const counts = report.counts || {};
-const expected = 19;
-const expectedStores = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+const config = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'config', 'stores.json'), 'utf8'));
+const expectedStores = (config.stores || [])
+  .filter(row => row?.enabled !== false)
+  .map(row => String(row?.storeKey || '').trim().toUpperCase())
+  .filter(Boolean)
+  .sort();
+const expected = expectedStores.length;
 const authorizedStores = [...new Set((report.authorizedStores || []).map(value => String(value || '').trim().toUpperCase()))].sort();
 const results = Array.isArray(report.results) ? report.results : [];
 const ok = report.ok === true

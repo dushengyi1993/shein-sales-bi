@@ -321,12 +321,12 @@ try {
   await writeJson(resultFile, goodResult);
   await writeMarkers();
 
-  const emptyPlan = {...plan, actionable: [], sourceEvidence: [], counts: {enabledStores: 19}};
+  const emptyPlan = {...plan, actionable: [], sourceEvidence: [], counts: {enabledStores: storeKeys.length}};
   emptyPlan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(emptyPlan));
   await writeJson(planFile, emptyPlan);
   await writeJson(resultFile, {...goodResult, planHash: emptyPlan.payloadHash, results: []});
   await writeMarkers();
-  await assert.rejects(validateDailyOperatingRefresh(options), /sourceEvidence must contain ET, BI_LINKS and 19 unique OpenAPI stores/);
+  await assert.rejects(validateDailyOperatingRefresh(options), /sourceEvidence must contain ET, BI_LINKS and one unique OpenAPI row per enabled store/);
   await writeJson(planFile, plan);
   await writeJson(resultFile, goodResult);
   await writeMarkers();

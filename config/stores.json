@@ -25,7 +25,9 @@
       "TZ",
       "JSH",
       "TZZ",
-      "XC"
+      "XC",
+      "LG",
+      "HY"
     ],
     "ALL": [
       "DL",
@@ -46,7 +48,9 @@
       "TZ",
       "JSH",
       "TZZ",
-      "XC"
+      "XC",
+      "LG",
+      "HY"
     ]
   },
   "ownerGroups": [
@@ -413,7 +417,7 @@
       "profileKey": "lg",
       "port": 9352,
       "profileName": "LG - 洛格",
-      "groupKey": "",
+      "groupKey": "LGM",
       "companyName": "洛格",
       "merchantId": "16024247",
       "shopName": "LOGE-SA",
@@ -430,7 +434,7 @@
       "profileKey": "hy",
       "port": 9353,
       "profileName": "HY - 寰宇",
-      "groupKey": "",
+      "groupKey": "LGM",
       "companyName": "寰宇",
       "accountUtcOffsetHours": 8,
       "salesTransport": "openapi",
