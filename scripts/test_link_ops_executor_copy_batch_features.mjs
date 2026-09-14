@@ -67,6 +67,30 @@ const spacedLongPayload = {multi_language_desc_list: [
 const wrappedCollapsedEcho = __testHooks.sanitizePublishPlatformText(spacedLongLine.replace(/\s+/g, ' ').slice(0, 160), spacedLongPayload, 300);
 check('whitespace-collapsed truncated long echo is hash-only', wrappedCollapsedEcho, value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value) && !value.includes('Reviewed double-spaced long point'));
 
+// --- Structural supply-info / category diagnostics must stay readable, and a
+// duplicate seller SKU must become an actionable blocker instead of an opaque
+// hash. The 2026-09-14 CX/ZL rejects were exactly this message. ---
+check('supply-info form label stays readable', __testHooks.sanitizePublishPlatformText('供应信息', descPayload, 80), '供应信息');
+check('category form label stays readable', __testHooks.sanitizePublishPlatformText('分类', descPayload, 80), '分类');
+const duplicateSellerSkuMessage = '卖家SKU重复。卖家sku：SM-505A电动缝纫机与SKC：sv260717125648424668640对应的卖家sku：SM-505A电动缝纫机重复(SKU: UK Plug(220-240V)/White)';
+check('duplicate seller SKU diagnostic stays readable', __testHooks.sanitizePublishPlatformText(duplicateSellerSkuMessage, descPayload, 300), duplicateSellerSkuMessage);
+check('category-not-available diagnostic stays readable', __testHooks.sanitizePublishPlatformText('Product category not available for sale in this store', descPayload, 300), 'Product category not available for sale in this store');
+check('description echo hidden inside the duplicate template is still hash-only',
+  __testHooks.sanitizePublishPlatformText('卖家SKU重复。卖家sku：Reviewed EN five lines与SKC：sv260717125648424668640对应的卖家sku：Reviewed EN five lines重复(SKU: White/UK Plug(220-240V))', descPayload, 300),
+  value => /^\[平台回显内容已脱敏 sha256=[a-f0-9]{64}\]$/.test(value));
+check('duplicate seller SKU is classified with the payload field and conflicting SKC',
+  __testHooks.publishPreValidDuplicateSellerSku({pre_valid_result: [{form_name: '供应信息', messages: [duplicateSellerSkuMessage]}]}),
+  value => value?.supplierSku === 'SM-505A电动缝纫机' && value?.conflictingSkc === 'sv260717125648424668640');
+check('an unrelated pre-valid failure is not classified as a duplicate seller SKU',
+  __testHooks.publishPreValidDuplicateSellerSku({pre_valid_result: [{form_name: '商品属性', messages: ['Because Power Supply(147) selected Power Adapter(1007239), Input current(1002323) is required']}]}),
+  null);
+check('a readable pre-valid result needs no evidence hint',
+  __testHooks.publishPreValidHasHashOnlyText({pre_valid_result: [{form_name: '供应信息', messages: [duplicateSellerSkuMessage]}]}, descPayload),
+  false);
+check('unknown hidden pre-valid text requires the readable-evidence hint',
+  __testHooks.publishPreValidHasHashOnlyText({pre_valid_result: [{form_name: 'unknown_form', messages: ['opaque platform sentence']}]}, descPayload),
+  true);
+
 // --- 6863 redaction boundaries: complete short reviewed lines (1-3 chars)
 // and partial echoes below the long-window threshold still redact, while a
 // one-character token inside an unrelated larger diagnostic stays visible. ---

@@ -116,6 +116,7 @@ import {
   buildEmptyDescriptionAuthorization,
   descriptionBindingRequestKey,
   describeDescriptionMaterial,
+  hasPublishDescriptionState,
   sha256StableJson,
   stripPublishPayloadDescriptions,
   validateCopyProductDescriptionPolicy,
@@ -9497,7 +9498,7 @@ function bindApprovedProductAttributeToTask(task, targetStore, {
       throw error;
     }
     const descriptionPolicy = validateCopyProductDescriptionPolicy(task, originalPayload);
-    if (!descriptionPolicy.ok) {
+    if (hasPublishDescriptionState(task, originalPayload) && !descriptionPolicy.ok) {
       const error = new Error(`adopt_existing 要求当前描述策略锁完全有效；先修复描述绑定或空描述授权：${descriptionPolicy.blockers.slice(0, 3).join('；')}`);
       error.status = 409;
       error.code = 'PRODUCT_ATTRIBUTE_ADOPT_DESCRIPTION_INVALID';
@@ -22755,7 +22756,7 @@ async function main() {
               });
             }
             const adoptDescriptionPolicy = validateCopyProductDescriptionPolicy(operationTask, payload);
-            if (!resignExistingBinding && !adoptDescriptionPolicy.ok) {
+            if (!resignExistingBinding && hasPublishDescriptionState(operationTask, payload) && !adoptDescriptionPolicy.ok) {
               return sendJson(res, 409, {
                 ok: false,
                 error: `adopt_existing 要求当前描述策略锁对 payload 完全有效：${adoptDescriptionPolicy.blockers.slice(0, 3).join('；')}`,

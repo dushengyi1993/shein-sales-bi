@@ -4041,12 +4041,54 @@ function publishTextContainsReviewedFragment(raw, fragments) {
 // remain readable; everything else is hash-only.  The allowlist deliberately
 // contains no arbitrary field/value capture.
 const SAFE_PUBLISH_VALIDATION_PATTERNS = [
-  /^(?:商品属性|商品标题|基础信息|平台预校验)$/u,
+  /^(?:商品属性|商品标题|基础信息|供应信息|分类|商品图片|图片信息|平台预校验)$/u,
   /^商品标题不能为空[。.]?$/u,
   /^Because Power Supply\(\d+\) selected (?:Wall Plug|Power Adapter)\(\d+\), Input (?:current|voltage)\(\d+\) is required\.?$/u,
   /^(?:产品型号|输入电流|输入电压|危险品分类)(?:\(\d+\))?[，,]\s*为必填项[。.]?$/u,
   /^(?:Hazardous materials classification|Input current|Input voltage)(?:\(\d+\))?\s*[:：]\s*The template attribute under type is required\.?$/u,
+  // Structural supply-info diagnostics: the platform names the duplicated
+  // seller SKU and the SKC that already owns it. The token classes admit only
+  // SKU-ish text (no arbitrary prose), so an echoed reviewed description can
+  // never ride along inside this message.
+  /^卖家SKU重复。卖家sku：[\w\u4e00-\u9fa5()（）/\-—. ]{1,160}与SKC：s[avb]\d{8,}对应的卖家sku：[\w\u4e00-\u9fa5()（）/\-—. ]{1,160}重复\(SKU: [^()]{0,80}(?:\([^()]{0,40}\)[^()]{0,80})*\)$/u,
+  /^Product category not available for sale in this store\.?$/u,
 ];
+
+// A seller SKU must be unique inside one store. The platform rejects a
+// duplicate with this exact sentence, so it is classified into a blocker that
+// names the payload field and the required business input instead of leaving
+// the operator with an opaque pre-validation failure.
+const DUPLICATE_SELLER_SKU_PATTERN = /卖家sku：(.+?)与SKC：(s[avb]\d{8,})对应的卖家sku：(.+?)重复/u;
+
+function publishPreValidDuplicateSellerSku(info) {
+  for (const row of asArray(info?.pre_valid_result || info?.preValidResult)) {
+    for (const message of asArray(row?.messages || row?.message)) {
+      const match = DUPLICATE_SELLER_SKU_PATTERN.exec(String(message ?? ''));
+      if (match) {
+        return {
+          supplierSku: safeString(match[1], 160),
+          conflictingSkc: match[2],
+          existingSku: safeString(match[3], 160),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+// True when at least one platform form/message still had to be reduced to a
+// hash. The readable text always exists in the private diagnostic artifact, so
+// the operator gets an exact pointer instead of an opaque failure.
+function publishPreValidHasHashOnlyText(info, payload) {
+  for (const row of asArray(info?.pre_valid_result || info?.preValidResult)) {
+    const rawForm = String(row?.form_name ?? row?.form ?? row?.module ?? '');
+    if (rawForm && /平台回显内容已脱敏/u.test(sanitizePublishPlatformText(rawForm, payload, 80))) return true;
+    for (const message of asArray(row?.messages || row?.message)) {
+      if (/平台回显内容已脱敏/u.test(sanitizePublishPlatformText(message, payload, 300))) return true;
+    }
+  }
+  return false;
+}
 
 function safeStructuredPublishDiagnostic(raw) {
   const normalized = normalizeMatchWhitespace(raw);
@@ -5359,6 +5401,16 @@ async function main() {
       } else if (publishInfoExplicitlyFalse(publishResult)) {
         const preValidMessages = publishPreValidMessages(publishResult.info, publishPayload);
         blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || sanitizePublishPlatformText(publishResult.msg || '未知原因', publishPayload, 300)}`);
+        const duplicateSellerSku = publishPreValidDuplicateSellerSku(publishResult.info);
+        if (duplicateSellerSku) {
+          blockers.push(`目标店已存在相同卖家SKU：payload.skc_list[].supplier_code=${duplicateSellerSku.supplierSku}，与 SKC ${duplicateSellerSku.conflictingSkc} 的卖家SKU重复。卖家SKU必须在目标店唯一：请提供唯一卖家SKU（例如按店铺加后缀），或改为维护已存在的链接，不要重复新建。`);
+        }
+        if (publishPreValidHasHashOnlyText(publishResult.info, publishPayload)) {
+          const reference = publishDiagnostic?.ok && publishDiagnostic.id
+            ? `node scripts/read_link_ops_publish_diagnostic.mjs ${publishDiagnostic.id} ${publishDiagnostic.sha256}`
+            : '本次未留存私有诊断（见 PUBLISH_DIAGNOSTIC_PERSIST_FAILED 告警），无法还原原文';
+          blockers.push(`部分平台报文按隐私规则只保留了哈希；云端可按精确证据读取原文：${reference}`);
+        }
       } else {
         blockers.push('publishOrEdit 返回 code=0 但未显式 info.success；无法确认平台是否已接收写请求，禁止重试，需人工核销。');
       }
@@ -5508,6 +5560,8 @@ if (process.env.SHEIN_LINK_OPS_EXECUTOR_SELF_TEST !== '1') main().catch(err => {
 
 export const __testHooks = {
   exactCopySourceLock,
+  publishPreValidDuplicateSellerSku,
+  publishPreValidHasHashOnlyText,
   exactSourceRequiresHazardTemplateDerivation,
   shouldIssuePublishOrEdit,
   applyExactSourceLockedInputCurrentOverride,

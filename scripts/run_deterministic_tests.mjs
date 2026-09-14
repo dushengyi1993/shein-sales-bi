@@ -332,6 +332,7 @@ const tests = [
   'scripts/test_shein_store_identity_merchant_fallback.mjs',
   'scripts/test_shein_browser_cdp.mjs',
   'scripts/test_local_browser_profile_cache_cleanup.mjs',
+  'scripts/test_link_ops_attribute_adopt_description_order.mjs',
   'scripts/test_chrome_profile_atomic_metadata.mjs',
   'scripts/test_local_repo_hygiene_contract.mjs',
   'scripts/test_chrome_tmp_hygiene.mjs',
