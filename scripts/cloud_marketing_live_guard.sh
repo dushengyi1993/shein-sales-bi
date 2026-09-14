@@ -652,7 +652,7 @@ try {
   const stores = JSON.parse(fs.readFileSync(storesConfigPath, 'utf8'))?.stores || [];
   expectedStoreKeys = [...new Set(stores.filter(store => store?.enabled !== false)
     .map(store => String(store?.storeKey || '').trim().toUpperCase()).filter(Boolean))].sort();
-  if (expectedStoreKeys.length !== 19) throw new Error(`expected exactly 19 enabled stores, got=${expectedStoreKeys.length}`);
+  if (!expectedStoreKeys.length) throw new Error('expected at least one enabled store');
 } catch (error) {
   throw new Error(`stores config preflight failed: ${error.message}`);
 }
@@ -964,7 +964,7 @@ fi
 # Ordinary marketing is the highest-priority layer. Refresh its full-store live
 # evidence every day before evaluating limited-discount drift or fallback work.
 # Session HTTP reuses the session-manager evidence and does not open browsers;
-# the guard report below verifies 19/19 explicit store coverage and freshness.
+# the guard report below verifies full enabled-store coverage and freshness.
 echo "[cloud_marketing_live_guard] refresh ordinary marketing stack review via session HTTP"
 if run_stage_with_retry "ordinary-stack-review" run_marketing_stack_review; then
   echo "[cloud_marketing_live_guard] ordinary marketing stack review refreshed"

@@ -11,7 +11,7 @@ import {fileURLToPath} from 'node:url';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const date = '2026-08-21';
-const stores = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+const stores = ['CX','DL','DX','FY','HL','HY','JSH','JY','LG','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), {recursive: true}); fs.writeFileSync(file, value); };
 const writeJson = (file, value) => write(file, `${JSON.stringify(value, null, 2)}\n`);
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -439,12 +439,12 @@ if (!targetSlice && process.env.SHEIN_MORNING_REFETCH_TEST_ONLY !== 'daily') {
 
   const expected = [
     'zero_to_full_batch_metrics_refetch_to_source_committed_once',
-    'exact_canonical_nineteen_store_config_required',
+    'exact_canonical_twenty_one_store_config_required',
     'strict_finite_json_number_semantics_and_proven_zero',
     'transaction_paths_reject_symlink_redirection',
     'missing_backup_and_rollback_write_failure_are_rollback_failed',
     'same_run_source_and_completed_phases_are_reused',
-    'one_of_nineteen_ready_preserves_all_formal_artifacts',
+    'one_of_twenty_one_ready_preserves_all_formal_artifacts',
     'missing_null_string_whitespace_array_fields_preserve_all_formal_artifacts',
     'downstream_failure_preserves_source_committed_and_resumes',
     'each_link_phase_crash_window_reconciles_same_identity',
@@ -510,8 +510,8 @@ try {
   roots.push(oneReady.root);
   const oneReadyBefore = new Map(stores.map(store => [store, hash(path.join(oneReady.root, 'outputs', 'shein_links', store, `${date}.json`))]));
   const oneReadyResult = runSync({...oneReady, deadline: Math.floor(Date.now() / 1000) + 60, maxAttempts: 1});
-  assert.equal(oneReadyResult.status, 75, `1/19 source availability must fail closed\n${combined(oneReadyResult)}`);
-  assert.equal(fs.existsSync(oneReady.publishLog), false, '1/19 source availability must run zero publish steps');
+  assert.equal(oneReadyResult.status, 75, `1/21 source availability must fail closed\n${combined(oneReadyResult)}`);
+  assert.equal(fs.existsSync(oneReady.publishLog), false, '1/21 source availability must run zero publish steps');
   for (const store of stores) {
     assert.equal(hash(path.join(oneReady.root, 'outputs', 'shein_links', store, `${date}.json`)), oneReadyBefore.get(store), `${store} formal artifact changed before full-batch validation`);
   }
@@ -539,17 +539,17 @@ try {
   writeJson(path.join(configDrift.root, 'config', 'stores.json'), {stores: stores.slice(0, 18).map(storeKey => ({storeKey, enabled: true}))});
   const configDriftBefore = new Map(stores.map(store => [store, hash(path.join(configDrift.root, 'outputs', 'shein_links', store, `${date}.json`))]));
   const configDriftResult = runSync({...configDrift, deadline: Math.floor(Date.now() / 1000) + 60});
-  assert.notEqual(configDriftResult.status, 0, `18-store config must fail closed\n${combined(configDriftResult)}`);
+  assert.notEqual(configDriftResult.status, 0, `20-store config must fail closed\n${combined(configDriftResult)}`);
   assert.equal(fs.existsSync(configDrift.metricLog), false);
     assert.equal(fs.existsSync(configDrift.publishLog), false);
     for (const store of stores) assert.equal(hash(path.join(configDrift.root, 'outputs', 'shein_links', store, `${date}.json`)), configDriftBefore.get(store));
     console.log(JSON.stringify({ok: true, slice: 1, checks: [
       'zero_to_full_batch_metrics_refetch_to_source_committed_once',
       'same_run_source_and_completed_phases_are_reused',
-      'one_of_nineteen_ready_preserves_all_formal_artifacts',
+      'one_of_twenty_one_ready_preserves_all_formal_artifacts',
       'missing_null_string_whitespace_array_fields_preserve_all_formal_artifacts',
       'strict_finite_json_number_semantics_and_proven_zero',
-      'exact_canonical_nineteen_store_config_required',
+      'exact_canonical_twenty_one_store_config_required',
     ]}));
   }
 

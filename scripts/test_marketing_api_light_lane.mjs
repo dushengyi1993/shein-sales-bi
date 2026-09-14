@@ -145,7 +145,7 @@ try {
     selection: {items: rows},
     prices: {items: rows},
     requireCurrentBaseline: false,
-    expectedStoreCount: 19,
+    expectedStoreCount: storeKeys.length,
     expectedStoreKeys: storeKeys,
   });
   const planMetadata = {

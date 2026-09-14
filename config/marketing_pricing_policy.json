@@ -116,10 +116,10 @@
     "retroactivelyRewriteHealthyRunningActivities": false,
     "criteria": {
       "matchedEtOperationalSaleableMaxInclusive": 10,
-      "canonicalGoodsValidSales30dAcross19StoresMinExclusive": 30
+      "canonicalGoodsValidSales30dAcrossEnabledStoresMinExclusive": 30
     },
-    "top5Scope": "same_standard_goods_sn_across_19_stores_all_links_latest_7d_exposure",
-    "sales30dScope": "same_standard_goods_sn_across_19_stores",
+    "top5Scope": "same_standard_goods_sn_across_all_enabled_stores_all_links_latest_7d_exposure",
+    "sales30dScope": "same_standard_goods_sn_across_all_enabled_stores",
     "pricingAction": {
       "mode": "move_up_one_price_tier",
       "globalExposureTop5": "restore_latest_approved_canonical_ordinary_price",

@@ -25,7 +25,9 @@
       "TZ",
       "JSH",
       "TZZ",
-      "XC"
+      "XC",
+      "LG",
+      "HY"
     ],
     "ALL": [
       "DL",
@@ -46,7 +48,9 @@
       "TZ",
       "JSH",
       "TZZ",
-      "XC"
+      "XC",
+      "LG",
+      "HY"
     ]
   },
   "ownerGroups": [
@@ -408,12 +412,12 @@
     },
     {
       "storeKey": "LG",
-      "enabled": false,
+      "enabled": true,
       "productStatsEnabled": true,
-      "profileKey": "hy",
+      "profileKey": "lg",
       "port": 9352,
-      "profileName": "LG",
-      "groupKey": "",
+      "profileName": "LG - 洛格",
+      "groupKey": "LGM",
       "companyName": "洛格",
       "merchantId": "16024247",
       "shopName": "LOGE-SA",
@@ -425,12 +429,12 @@
     },
     {
       "storeKey": "HY",
-      "enabled": false,
+      "enabled": true,
       "productStatsEnabled": true,
-      "profileKey": "lg",
+      "profileKey": "hy",
       "port": 9353,
-      "profileName": "HY",
-      "groupKey": "",
+      "profileName": "HY - 寰宇",
+      "groupKey": "LGM",
       "companyName": "寰宇",
       "accountUtcOffsetHours": 8,
       "salesTransport": "openapi",

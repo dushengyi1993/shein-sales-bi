@@ -51,7 +51,7 @@ METRIC_REFETCH_PERSISTED_TRANSACTION_ROOT=""
 METRIC_REFETCH_SKIP_PUBLISH=0
 METRIC_REFETCH_SOURCE_STATUS=""
 METRIC_REFETCH_SOURCE_FINGERPRINT=""
-CANONICAL_METRIC_STORES="CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL"
+CANONICAL_METRIC_STORES="CX DL DX FY HL HY JSH JY LG LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL"
 
 source "$ROOT/scripts/lib/shared_lock.sh"
 
@@ -1613,6 +1613,7 @@ fi
 calculate_metric_readiness() {
   local staging_root="${1:-}"
   local staging_stores="${2:-}"
+  ROOT="$ROOT" \
   DATE="$DATE" \
   SUCCESS_STORES="${SUCCESS_STORES[*]}" \
   METRIC_STAGING_ROOT="$staging_root" \
@@ -1630,7 +1631,12 @@ const successSet = new Set(successStores);
 const stagingRoot = String(process.env.METRIC_STAGING_ROOT || '');
 const stagingStores = new Set(String(process.env.METRIC_STAGING_STORES || '')
   .split(/[\s,]+/).map(s => s.trim().toUpperCase()).filter(Boolean));
-  const expectedStores = 'CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL'.split(' ');
+const config = JSON.parse(fs.readFileSync(path.join(process.env.ROOT, 'config', 'stores.json'), 'utf8'));
+const expectedStores = (config.stores || [])
+  .filter(row => row?.enabled !== false)
+  .map(row => String(row?.storeKey || '').trim().toUpperCase())
+  .filter(Boolean)
+  .sort();
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
   const finiteMetric = (object, names) => {
     const key = names.find(name => own(object, name));

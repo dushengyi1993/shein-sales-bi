@@ -440,7 +440,7 @@ for (const link of storeLinks) {
         evidence: lowEtDecision.evidence || null,
         rank: lowEtDecision.rank || null,
       },
-      note: '低 ET 畅销货号的新建/重建价格必须有当天 ET、跨19店30天销量、Top5及基准证据；证据不全时拒绝沿用旧价。',
+      note: '低 ET 畅销货号的新建/重建价格必须有当天 ET、跨全量启用店铺30天销量、Top5及基准证据；证据不全时拒绝沿用旧价。',
     });
     continue;
   }

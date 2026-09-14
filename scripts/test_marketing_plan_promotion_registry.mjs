@@ -16,8 +16,8 @@ const stores = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'stores.json
   .filter(store => store.enabled !== false)
   .map(store => String(store.storeKey || store.store_key || store.key || '').trim().toUpperCase())
   .filter(Boolean);
-assert.equal(stores.length, 19, 'fixture must bind the fixed config/stores.json enabled set');
-assert.equal(new Set(stores).size, 19, 'fixed enabled store keys must be unique');
+assert.ok(stores.length > 0, 'fixture requires at least one enabled store');
+assert.equal(new Set(stores).size, stores.length, 'enabled store keys must be unique');
 
 function restoreFixturePermissions(root) {
   let rootStat;

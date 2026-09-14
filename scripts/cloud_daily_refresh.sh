@@ -121,7 +121,7 @@ const crypto = require('node:crypto');
 const root = fs.realpathSync(process.env.ROOT || '');
 const state = JSON.parse(fs.readFileSync(process.env.STATE_FILE, 'utf8'));
 const date = process.env.DATE;
-const canonical = 'CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL'.split(' ');
+const canonical = 'CX DL DX FY HL HY JSH JY LG LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL'.split(' ');
 if (state.date !== date || state.runKey !== process.env.RUN_KEY || state.source?.status !== 'source_committed') {
   throw new Error('source journal identity is not committed');
 }
@@ -159,7 +159,7 @@ NODE
   status=$?
   set -e
   if (( status != 0 )); then
-    invalidate_morning_source "canonical 19 formal artifact fingerprint drift"
+    invalidate_morning_source "canonical 21 formal artifact fingerprint drift"
     echo "[cloud_daily_refresh] source fingerprint drift; downstream receipts invalidated and publication blocked" >&2
     return 70
   fi
