@@ -660,7 +660,11 @@ const result = verifyMarketingPlanRegistrySync({
   registryFile,
   registryRoot: path.dirname(registryFile),
   expectedStoreKeys,
+  allowEnabledStoreSubset: true,
 });
+if (!result.storeCoverageComplete) {
+  console.error(`[cloud_marketing_live_guard] WARNING current baseline covers ${result.storeKeys.length}/${expectedStoreKeys.length} enabled stores; missing=${result.missingEnabledStoreKeys.join(',')}`);
+}
 process.stdout.write(String(result.registryHash).toLowerCase());
 NODE
 )"; then

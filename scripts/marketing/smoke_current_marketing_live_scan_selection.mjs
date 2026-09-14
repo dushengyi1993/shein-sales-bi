@@ -7,7 +7,7 @@ import {latestCurrentMarketingLiveScanFile} from './build_marketing_daily_guard_
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'marketing-live-scan-selection-'));
 try {
-  const stores = Array.from({length: 19}, (_, index) => ({
+  const stores = Array.from({length: 21}, (_, index) => ({
     storeKey: `S${String(index + 1).padStart(2, '0')}`,
     enabled: true,
   }));
@@ -49,7 +49,7 @@ try {
     selectedStores: stores.slice(0, 4),
     createdAt: '2026-08-28T03:05:00.000Z',
   })));
-  assert.equal(select(completeScenario), full, 'a newer targeted scan must not replace a successful 19-store baseline');
+  assert.equal(select(completeScenario), full, 'a newer targeted scan must not replace a successful 21-store baseline');
 
   const recoveryScenario = path.join(dir, 'failed-then-targeted');
   await fs.mkdir(recoveryScenario);
@@ -65,7 +65,7 @@ try {
     selectedStores: stores.slice(0, 5),
     createdAt: '2026-08-28T03:05:00.000Z',
   })));
-  assert.equal(select(recoveryScenario), failedFull, 'a targeted recovery must not hide the failed 19-store attempt');
+  assert.equal(select(recoveryScenario), failedFull, 'a targeted recovery must not hide the failed 21-store attempt');
 
   const merged = path.join(recoveryScenario, 'current-marketing-price-live-merged.json');
   await fs.writeFile(merged, JSON.stringify(snapshot({
