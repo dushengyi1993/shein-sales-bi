@@ -123,13 +123,13 @@ async function validateMorningEvidence({root, businessDate, file, enabledStores,
   const document = await readJson(evidenceRecord?.snapshotPath || file);
   assert(document?.schemaVersion === 'shein-morning-resume-evidence/v1', 'morning evidence schema mismatch');
   assert(document?.ok === true && document?.date === businessDate, 'morning evidence date/status mismatch');
-  assert(document?.expectedStoreCount === 19, 'morning evidence expectedStoreCount must be 19');
-  assert(document?.artifactCount === 38, 'morning evidence artifactCount must be 38');
+  assert(document?.expectedStoreCount === enabledStores.length, `morning evidence expectedStoreCount must be ${enabledStores.length}`);
+  assert(document?.artifactCount === enabledStores.length * DOMAINS.length, `morning evidence artifactCount must be ${enabledStores.length * DOMAINS.length}`);
   const stores = [...new Set((document?.stores || []).map(value => String(value).toUpperCase()))].sort();
-  assert(JSON.stringify(stores) === JSON.stringify(enabledStores), 'morning evidence 19-store set mismatch');
+  assert(JSON.stringify(stores) === JSON.stringify(enabledStores), 'morning evidence enabled-store set mismatch');
   assert(JSON.stringify([...(document?.domains || [])].sort()) === JSON.stringify([...DOMAINS]), 'morning evidence domain set mismatch');
   const artifacts = Array.isArray(document?.artifacts) ? document.artifacts : [];
-  assert(artifacts.length === 38, 'morning evidence must contain 38 store/domain artifacts');
+  assert(artifacts.length === enabledStores.length * DOMAINS.length, 'morning evidence must contain one artifact per enabled store/domain pair');
   const seen = new Set();
   for (const artifact of artifacts) {
     const storeKey = String(artifact?.storeKey || '').toUpperCase();
@@ -376,8 +376,8 @@ async function validatePlanSourceEvidence(plan, enabledStores, policy, reference
   const links = evidence.filter(row => row?.store === 'BI_LINKS');
   const openApi = evidence.filter(row => enabledStores.includes(String(row?.store || '').toUpperCase()));
   const detailClosure = evidence.filter(row => row?.store === 'DETAIL_MANIFEST');
-  assert(et.length === 1 && links.length === 1 && openApi.length === 19, 'inventory plan sourceEvidence must contain ET, BI_LINKS and 19 unique OpenAPI stores');
-  assert(new Set(openApi.map(row => String(row.store).toUpperCase())).size === 19, 'inventory plan OpenAPI sourceEvidence store set is duplicate/incomplete');
+  assert(et.length === 1 && links.length === 1 && openApi.length === enabledStores.length, 'inventory plan sourceEvidence must contain ET, BI_LINKS and one unique OpenAPI row per enabled store');
+  assert(new Set(openApi.map(row => String(row.store).toUpperCase())).size === enabledStores.length, 'inventory plan OpenAPI sourceEvidence store set is duplicate/incomplete');
   assert(Number(et[0].totalEtRows) > 0 && Number(et[0].matchedCurrentDayEtRows) > 0, 'inventory plan ET sourceEvidence has no matched current-day rows');
   const now = Number(referenceTime);
   assert(Number.isFinite(now), 'inventory plan sourceEvidence reference time is invalid');
@@ -401,7 +401,7 @@ async function validatePlanSourceEvidence(plan, enabledStores, policy, reference
     assert(detailClosure.length === 1, 'inventory plan must contain exactly one daily detail manifest closure evidence');
   }
   if (!validateExternalFiles) {
-    assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
+    assert(Number(plan?.counts?.enabledStores) === enabledStores.length, 'inventory plan counts.enabledStores does not match config');
     return;
   }
   for (const closure of detailClosure) {
@@ -427,7 +427,7 @@ async function validatePlanSourceEvidence(plan, enabledStores, policy, reference
       `inventory detail target timestamp invalid: ${binding.storeKey}::${binding.spu}`);
     }
   }
-  assert(Number(plan?.counts?.enabledStores) === 19, 'inventory plan counts.enabledStores must be 19');
+  assert(Number(plan?.counts?.enabledStores) === enabledStores.length, 'inventory plan counts.enabledStores does not match config');
 }
 
 function foreignInventoryWarningAudit(row, planRow, plan, result, context = {}) {
@@ -908,7 +908,7 @@ export async function validateDailyOperatingRefresh(options) {
     .map(row => String(row?.storeKey || '').toUpperCase())
     .filter(Boolean)
     .sort();
-  assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
+  assert(enabledStores.length > 0 && new Set(enabledStores).size === enabledStores.length, 'configured enabled store set must contain unique enabled stores');
   const morningFile = path.join(args.stateDir, `${args.runDate}-all.json`);
   const finalMarkerFile = path.join(args.markerRoot, args.runDate, 'daily-operating-refresh.json');
   const marker = args.preWarningAudit === true ? null : await readJson(finalMarkerFile);
@@ -985,7 +985,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         .map(row => String(row?.storeKey || '').toUpperCase())
         .filter(Boolean)
         .sort();
-      assert(enabledStores.length === 19 && new Set(enabledStores).size === 19, 'configured enabled store set must contain exactly 19 unique stores');
+      assert(enabledStores.length > 0 && new Set(enabledStores).size === enabledStores.length, 'configured enabled store set must contain unique enabled stores');
       console.log(JSON.stringify({ok: true, ...(await validateInventoryArtifacts({
         ...args,
         enabledStores,

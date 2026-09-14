@@ -400,7 +400,7 @@ async function main() {
       selection,
       prices,
       requireCurrentBaseline: true,
-      expectedStoreCount: 19,
+      expectedStoreCount: expectedStoreKeys.length,
       expectedStoreKeys,
     });
   }

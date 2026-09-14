@@ -383,7 +383,7 @@ try {
     .filter(store => store?.enabled !== false)
     .map(store => String(store?.storeKey || store?.store_key || store?.key || '').trim().toUpperCase())
     .filter(Boolean))].sort();
-  if (expectedStoreKeys.length !== 19) throw new Error(`expected exactly 19 enabled stores, got=${expectedStoreKeys.length}`);
+  if (!expectedStoreKeys.length) throw new Error('expected at least one enabled store');
 } catch (error) {
   throw new Error(`stores config preflight failed: ${error.message}`);
 }
@@ -1455,7 +1455,7 @@ run_terminal_final_snapshot() {
   stamp="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)-repair-final"
   scan_out="$ROOT/tmp/marketing-signup/current-price-live/current-marketing-price-live-${DATE}-${stamp}.json"
   # Every terminal report is built after a fresh browserless ordinary/coupon
-  # snapshot and a final 19-store price readback. A blocked queue is not a
+  # snapshot and a final full enabled-store price readback. A blocked queue is not a
   # report-ready state by itself.
   ensure_browser_lease || return $?
   lease_action heartbeat || return $?
@@ -2040,7 +2040,7 @@ REMAINING_GROUPS="$MAX_GROUPS"
 
 # A local runner may have completed writes without mutating the cloud queue.
 # The emergency cloud slot therefore rebuilds the exact queue from a fresh
-# browserless 19-store snapshot before it is allowed to open any cloud Chrome.
+# browserless full enabled-store snapshot before it is allowed to open any cloud Chrome.
 # This prevents replaying work already completed on the owner's computer.
 if (( IS_CLOUD_EXECUTION == 1 )) && [[ "$CLOUD_FALLBACK_ENABLED" == "true" ]]; then
   if [[ "$IMMEDIATE_MODE" == "1" ]]; then

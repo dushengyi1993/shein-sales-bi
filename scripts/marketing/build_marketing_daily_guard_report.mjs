@@ -4593,7 +4593,7 @@ async function main() {
     contextWarnings.push({
       code: 'legacy_coupon_evidence_superseded',
       label: 'liveCouponLimitedOverlap',
-      message: '本轮已直接读取 19 店实时 15% 券 active 集合并与当次限时折扣 live scan 交叉校验；旧 coupon submit/low-price 中间文件仅留历史审计，不再作为当前阻断。',
+      message: `本轮已直接读取 ${freshLiveLowPriceOverlap.storeCount} 店实时 15% 券 active 集合并与当次限时折扣 live scan 交叉校验；旧 coupon submit/low-price 中间文件仅留历史审计，不再作为当前阻断。`,
       evidence: {
         source: freshLiveLowPriceOverlap.source,
         storeCount: freshLiveLowPriceOverlap.storeCount,

@@ -299,7 +299,7 @@ function renderMarkdown({
   const previewHeaders = ['店铺','活动ID','标准货号','当前售价SAR','本次建议普通活动价SAR','优惠券券档/风险折扣','叠加后最终成交价SAR','含仓储费利润率','风险提示','修改意见/备注'];
   const topRiskRows = detailRows.filter(r => r['风险提示']).slice(0, 80);
   return [
-    `# 19 店营销活动叠加安全审核（${dateTag}）`,
+    `# ${completed.length} 店营销活动叠加安全审核（${dateTag}）`,
     '',
     '- 状态：只读扫描输出；未报名、未提交、未取消或调价限时折扣。',
     `- 当前覆盖：${completed.length}/${storeStatuses.length} 店`,

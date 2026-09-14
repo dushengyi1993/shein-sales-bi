@@ -703,8 +703,8 @@ if (lowEtFastSellerOverlay) {
         note: [
           current.note,
           decision.audit.mode === 'user_fixed_tier' ? '用户最新固定三档价；不受ET或默认利润率改写' : decision.audit.mode === 'top5_restore_latest_approved_canonical_ordinary_price'
-            ? 'ET<=10且跨19店30天销量>30：Top5恢复该标准货号统一普通档已批准价'
-            : 'ET<=10且跨19店30天销量>30：普通链接目标利润率提高5个百分点',
+            ? 'ET<=10且跨全量启用店铺30天销量>30：Top5恢复该标准货号统一普通档已批准价'
+            : 'ET<=10且跨全量启用店铺30天销量>30：普通链接目标利润率提高5个百分点',
           decision.audit.platformClipped ? '已按平台允许报名价上限裁剪' : '',
         ].filter(Boolean).join('；'),
       };
@@ -1116,7 +1116,7 @@ for (let c = 0; c < riskHeaders.length; c++) riskSheet.getRangeByIndexes(0, c, r
 riskSheet.tables.add(`A1:${colName(riskHeaders.length)}${riskRows.length + 1}`, true, `RiskItems${safeTableSuffix(OUTPUT_VERSION)}`).style = 'TableStyleMedium5';
 
 const lowEtHeaders = [
-  '店铺','活动ID','标准货号','SKC','ET当日可售','跨19店30天销量','Top5身份','原方案价SAR','收回后价格SAR',
+  '店铺','活动ID','标准货号','SKC','ET当日可售','跨全量启用店铺30天销量','Top5身份','原方案价SAR','收回后价格SAR',
   '处理状态','原因','备注/修改意见',
 ];
 const lowEtRows = lowEtFastSellerOverlay
@@ -2173,7 +2173,7 @@ function humanLowEtReason(reason) {
     active_manual_special_requires_user_review: '有效人工特殊折扣仍在保护期，保持原价，不自动覆盖',
     top5_missing_canonical_ordinary_approved_price: '低库存Top5缺该标准货号统一普通档已批准价',
     missing_current_day_matched_et_inventory: 'ET当天库存未匹配，不能判定为低库存',
-    missing_complete_canonical_valid_sales_30d: '缺同货号跨19店完整30天销量证据',
+    missing_complete_canonical_valid_sales_30d: '缺同货号跨全量启用店铺完整30天销量证据',
   };
   return labels[text] || text;
 }
