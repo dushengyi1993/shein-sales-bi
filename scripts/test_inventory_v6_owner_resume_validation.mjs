@@ -14,7 +14,10 @@ import {
 } from '../lib/inventory_replenishment_policy.mjs';
 import {
   appendDurableJournalRecord,
+  appendInventoryReconciliationRecord,
   INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
+  INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
+  INVENTORY_SUPERSEDED_BY_LATER_PLAN_RULE,
   inventoryIntentScopeKey,
   inventoryLogicalActionKey,
   inventoryRecoveryScopeKey,
@@ -507,6 +510,57 @@ try {
     );
   }
 
+  // 2026-09-14 owner decision: an intent an EARLIER daily run left pending
+  // must not freeze its store/SKC/SKU scope forever. The later plan
+  // supersedes it - the original effect stays recorded as unknown - so the
+  // scope is written from the current plan, and the abandoned idempotency
+  // key can never be replayed. The same day is still refused, so
+  // duplicate-submission protection is unchanged.
+  {
+    const staleSource = path.resolve(tempRoot, 'stale-later-plan-source.ndjson');
+    const laterPlanJournal = path.resolve(tempRoot, 'stale-later-plan-resolution.ndjson');
+    const staleIntentBody = makeIntent(oldDate, actionableRow, 'intent-stale-later-plan-1', 100);
+    await fs.writeFile(staleSource, JSON.stringify(staleIntentBody) + '\n', 'utf8');
+    await fs.writeFile(laterPlanJournal, '', 'utf8');
+    const staleIntent = {...staleIntentBody, journalFile: staleSource};
+    const staleKey = staleSource + '\u0000' + staleIntentBody.intentId;
+    const readPair = () => readInventoryIntentJournals([staleSource, laterPlanJournal], {
+      maxRunDate: runDate,
+      currentJournalFile: laterPlanJournal,
+      allowMultiplePendingByScope: true,
+      quarantineHistoricalDanglingSupersedes: true,
+    });
+    const makeLaterPlanOutcome = newRunDate => ({
+      kind: 'write_outcome',
+      intentId: staleIntentBody.intentId,
+      logicalActionKey: staleIntentBody.logicalActionKey,
+      disposition: INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
+      originalEffectUnknown: true,
+      oldRunDate: staleIntentBody.runDate,
+      newRunDate,
+      supersedeRule: INVENTORY_SUPERSEDED_BY_LATER_PLAN_RULE,
+      recordedAt: new Date().toISOString(),
+    });
+
+    const beforeSupersede = await readPair();
+    assert.equal(beforeSupersede.pending.has(staleKey), true, 'an abandoned earlier-day intent starts pending');
+
+    await appendInventoryReconciliationRecord(laterPlanJournal, staleIntent, makeLaterPlanOutcome(staleIntentBody.runDate));
+    await assert.rejects(readPair, /INVENTORY_JOURNAL_(OUTCOME|CROSS_REFERENCE)_INVALID/,
+      'a same-day supersede must fail closed so duplicate-submission protection is unchanged');
+
+    await fs.writeFile(laterPlanJournal, '', 'utf8');
+    await appendInventoryReconciliationRecord(laterPlanJournal, staleIntent, makeLaterPlanOutcome(runDate));
+    const afterSupersede = await readPair();
+    assert.equal(afterSupersede.pending.has(staleKey), false, 'a superseded intent must leave the pending set');
+    assert.equal((afterSupersede.pendingByScope.get(inventoryIntentScopeKey(staleIntentBody)) || []).length, 0,
+      'no pending intent may remain in a superseded scope');
+    assert.equal(afterSupersede.terminalOutcomes.get(staleKey)?.disposition, INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
+      'the supersede must be recorded as the intent terminal outcome');
+    assert.equal(afterSupersede.tombstonedIdempotencyKeys.has(staleIntentBody.idempotencyKey), true,
+      'the abandoned idempotency key must be tombstoned');
+  }
+
   console.log(JSON.stringify({
     ok: true,
     suite: 'test_inventory_v6_owner_resume_validation',
@@ -528,6 +582,9 @@ try {
       'lifecycle_quarantine_historical_dangling_supersede_item_pending',
       'lifecycle_current_journal_dangling_supersede_fails_closed',
       'lifecycle_duplicate_global_intent_id_fails_closed',
+      'lifecycle_stale_earlier_day_intent_superseded_by_later_plan_leaves_pending',
+      'lifecycle_same_day_later_plan_supersede_fails_closed',
+      'lifecycle_later_plan_supersede_clears_scope_and_tombstones_idempotency_key',
     ],
   }, null, 2));
 } finally {

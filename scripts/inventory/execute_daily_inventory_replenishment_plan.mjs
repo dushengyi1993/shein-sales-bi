@@ -38,6 +38,8 @@ import {
   isForeignInventoryIntent,
   isInventoryPreSubmitExclusion,
   INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
+  INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
+  INVENTORY_SUPERSEDED_BY_LATER_PLAN_RULE,
   inventoryIntentScopeKey,
   inventoryScopeFromIntent,
   inventoryLogicalActionKey,
@@ -568,6 +570,10 @@ if (args.execute) {
 let deferredHistoricalIntents = [];
 let manualResolutionFences = [];
 let manualResolutionTombstoneCount = 0;
+// Durable intents an earlier run left pending that this plan superseded. Kept
+// in the business result so the voiding is visible next to the writes it
+// unblocked, not only in the append-only journal.
+const supersededHistoricalIntents = [];
 const resultEnvelope = currentResults => ({
   schemaVersion: 'daily-inventory-replenishment-result/v1',
   ...(args.commandId ? {commandId: args.commandId} : {}),
@@ -584,6 +590,7 @@ const resultEnvelope = currentResults => ({
   // write to suppress. Keep the unresolved warning visible for audit and
   // future reappearance interception, but do not turn it into a run blocker.
   deferredHistorical: deferredHistoricalIntents,
+  supersededHistorical: supersededHistoricalIntents,
   manualResolutionFences,
   manualResolutionTombstoneCount,
   // Keep the established validator contract: only a current-plan unresolved
@@ -844,6 +851,54 @@ deferredHistoricalIntents = [...pendingIntentsByScope.entries()]
 // every current row: doing so duplicates result rows and blocks unrelated
 // item scopes.  A current row is blocked only when its own scope is reached
 // in the serial loop below.
+// Owner-authorized aging rule (2026-09-14): a durable intent that an EARLIER
+// daily run left pending must not freeze its store/SKC/SKU scope forever. The
+// abandoned submission's effect is genuinely unknown, but this plan is a
+// fresh owner-authorized decision derived from current-day ET, sales and
+// exposure evidence, and its write is an absolute OVERWRITE whose terminal
+// proof is an exact post-write readback. So the later plan supersedes the
+// abandoned intent and the scope is written from the plan instead of being
+// skipped on every future run. Same-day uncertainty keeps the existing
+// duplicate-submission protection: only a strictly earlier runDate qualifies.
+for (const row of rows) {
+  const staleScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
+  const stalePending = (pendingIntentsByScope.get(staleScopeKey) || [])
+    .filter(intent => /^\d{4}-\d{2}-\d{2}$/.test(String(intent.runDate || '')) && intent.runDate < plan.date);
+  if (!stalePending.length) continue;
+  for (const intent of stalePending) {
+    await appendInventoryReconciliationRecord(journalFile, intent, {
+      kind: 'write_outcome',
+      intentId: intent.intentId,
+      logicalActionKey: intent.logicalActionKey,
+      disposition: INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
+      originalEffectUnknown: true,
+      oldRunDate: intent.runDate,
+      newRunDate: plan.date,
+      supersedeRule: INVENTORY_SUPERSEDED_BY_LATER_PLAN_RULE,
+      recordedAt: new Date().toISOString(),
+    });
+    supersededHistoricalIntents.push({
+      intentId: intent.intentId,
+      logicalActionKey: intent.logicalActionKey,
+      runDate: intent.runDate,
+      storeKey: intent.storeKey,
+      skc: intent.skc,
+      skuCode: intent.skuCode,
+      targetUsableInventory: intent.targetUsableInventory,
+      state: 'superseded_by_later_plan',
+      disposition: 'original_effect_unknown',
+    });
+    pendingIntents.delete(journalIntentKey(intent));
+    journalBundle.pending.delete(journalIntentKey(intent));
+  }
+  const remainingScope = (pendingIntentsByScope.get(staleScopeKey) || []).filter(intent => !stalePending.includes(intent));
+  if (remainingScope.length) pendingIntentsByScope.set(staleScopeKey, remainingScope);
+  else pendingIntentsByScope.delete(staleScopeKey);
+  const remainingBundleScope = (journalBundle.pendingByScope.get(staleScopeKey) || []).filter(intent => !stalePending.includes(intent));
+  if (remainingBundleScope.length) journalBundle.pendingByScope.set(staleScopeKey, remainingBundleScope);
+  else journalBundle.pendingByScope.delete(staleScopeKey);
+  console.error(`[daily_inventory_executor] superseded ${stalePending.length} stale pending durable intent(s) for ${row.storeKey}/${row.skc} by the later plan ${plan.date}`);
+}
 for (const row of rows) {
   const preservedPreSubmit = preservedPreSubmitRows.get(`${row.storeKey}::${row.skc}::${row.skuCode}`);
   if (preservedPreSubmit) {
