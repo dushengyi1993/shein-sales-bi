@@ -311,7 +311,12 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // PR147 promotes the self-contained DOCX fixture test from manual to CI.
 // Added scripts/smoke_ordinary_cap_fill_evidence.mjs to deterministic ownership.
 // Added managed conflict entry and remove mutation contract smokes.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 107;
+// This branch adds five deterministic registrations, all owned only by the
+// runner and with no removals: test_manual_login_profile_naming,
+// test_marketing_write_pause_contract, test_local_marketing_repair_entry,
+// test_host_pressure_threshold_overrides and
+// test_link_ops_attribute_adopt_description_order.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 112;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
 const OWNERSHIP_CURRENT_UNION_COUNT = OWNERSHIP_BASELINE_UNION_COUNT
