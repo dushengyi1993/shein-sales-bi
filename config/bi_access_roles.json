@@ -80,7 +80,7 @@
       "role": "operator",
       "ownerKey": "ZHENGYIHANG",
       "readStores": ["*"],
-      "writeStores": ["JSH", "CX", "TZZ"]
+      "writeStores": ["JSH", "CX", "TZZ", "LG"]
     }
   }
 }

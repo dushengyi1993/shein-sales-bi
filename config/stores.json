@@ -95,8 +95,7 @@
       "stores": [
         "FY",
         "QH",
-        "ZL",
-        "LG"
+        "ZL"
       ],
       "color": "#14b8a6"
     },
@@ -116,7 +115,8 @@
       "stores": [
         "JSH",
         "CX",
-        "TZZ"
+        "TZZ",
+        "LG"
       ],
       "color": "#06b6d4"
     }
