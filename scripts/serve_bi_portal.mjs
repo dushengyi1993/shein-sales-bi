@@ -10941,6 +10941,19 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
       ? {publishAssetBinding: {...task.publishAssetBinding, publishPreparation}}
       : {}),
   };
+  if (publishPreparation.supplierSku) {
+    // `--supplier-sku` is the owner-specified unique Seller SKU for an
+    // additional link of an existing 标准货号. Persist it as the structured
+    // policy the executor already honours, so supplier_code keeps the 标准货号
+    // while the Seller SKU stays distinct per link.
+    taskForCapture = {
+      ...taskForCapture,
+      notes: {
+        ...(taskForCapture.notes && typeof taskForCapture.notes === 'object' ? taskForCapture.notes : {}),
+        supplierSkuPolicy: {mode: 'unique-per-link', value: publishPreparation.supplierSku},
+      },
+    };
+  }
   // Every publish preparation revokes a prior empty marker first. The caller
   // must explicitly request and re-bind it to the newly prepared payload.
   delete taskForCapture.emptyDescriptionAuthorization;

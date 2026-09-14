@@ -1193,7 +1193,15 @@ function buildProtectedDestinationProjection(task, existingPayload, targetStore)
     if (standardGoods.length && (!overrides.standardGoodsSn || standardGoods.some(value => value !== overrides.standardGoodsSn))) {
       throw new Error('existing task payload standardGoodsSn has no matching structured preparation lock');
     }
-    if (supplierSkus.length && (!expectedSupplierSku || supplierSkus.some(value => value !== expectedSupplierSku))) {
+    // A task that declares the structured unique-per-link policy owns an
+    // explicit Seller SKU. The payload may still carry the normalised 标准货号
+    // (before the policy is applied) or the policy value itself; anything else
+    // is still an unexplained supplier SKU and fails closed.
+    const explicitPolicySupplierSku = task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
+      ? safeString(task?.notes?.supplierSkuPolicy?.value, 240)
+      : '';
+    const acceptedSupplierSkus = [...new Set([expectedSupplierSku, explicitPolicySupplierSku].filter(Boolean))];
+    if (supplierSkus.length && (!acceptedSupplierSkus.length || supplierSkus.some(value => !acceptedSupplierSkus.includes(value)))) {
       throw new Error('existing task payload supplierSku has no matching structured preparation lock');
     }
   }
