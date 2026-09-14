@@ -344,6 +344,21 @@ function markerSiblingPath(file, label) {
   return path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${nonce}.${label}`);
 }
 
+// The deployment marker is the inventory writer's release authority, and it
+// is read by the same service account (sheinops) that runs the writer. A
+// marker published as root:root 0640 is unreadable for that account and fails
+// the whole inventory run closed (INVENTORY_CUTOVER_AUTHORITY_UNREADABLE).
+// Relying on the parent directory's setgid bit is not enough: that bit has
+// been missing in production, so the group is pinned to the target
+// directory's group here. The owner deliberately stays the publishing user,
+// because root ownership is what stops the service account from rewriting the
+// deployed release authority.
+async function deploymentMarkerOwnership(file) {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function') return {};
+  const directory = await fs.stat(path.dirname(path.resolve(file)));
+  return {uid: process.getuid(), gid: Number(directory.gid)};
+}
+
 async function fsyncMarkerDirectory(file) {
   if (process.platform === 'win32') return;
   const handle = await fs.open(path.dirname(file), 'r');
@@ -371,7 +386,7 @@ async function publishDeploymentMarkerCas(file, marker, expectedCas, hooks = {})
   let durable = false;
   let failure = null;
 
-  await writeJsonFileAtomic(candidate, marker, {mode: 0o640});
+  await writeJsonFileAtomic(candidate, marker, {mode: 0o640, ...(await deploymentMarkerOwnership(target))});
   try {
     candidateCas = await captureFileCas(candidate);
     if (!candidateCas.exists) {
