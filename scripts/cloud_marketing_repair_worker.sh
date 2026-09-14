@@ -393,7 +393,11 @@ const result = verifyMarketingPlanRegistrySync({
   registryFile,
   registryRoot,
   expectedStoreKeys,
+  allowEnabledStoreSubset: true,
 });
+if (!result.storeCoverageComplete) {
+  console.error(`[cloud_marketing_repair] WARNING current baseline covers ${result.storeKeys.length}/${expectedStoreKeys.length} enabled stores; missing=${result.missingEnabledStoreKeys.join(',')}`);
+}
 process.stdout.write(String(result.registryHash).toLowerCase());
 NODE
 )"; then
