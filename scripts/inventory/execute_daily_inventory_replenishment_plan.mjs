@@ -851,54 +851,6 @@ deferredHistoricalIntents = [...pendingIntentsByScope.entries()]
 // every current row: doing so duplicates result rows and blocks unrelated
 // item scopes.  A current row is blocked only when its own scope is reached
 // in the serial loop below.
-// Owner-authorized aging rule (2026-09-14): a durable intent that an EARLIER
-// daily run left pending must not freeze its store/SKC/SKU scope forever. The
-// abandoned submission's effect is genuinely unknown, but this plan is a
-// fresh owner-authorized decision derived from current-day ET, sales and
-// exposure evidence, and its write is an absolute OVERWRITE whose terminal
-// proof is an exact post-write readback. So the later plan supersedes the
-// abandoned intent and the scope is written from the plan instead of being
-// skipped on every future run. Same-day uncertainty keeps the existing
-// duplicate-submission protection: only a strictly earlier runDate qualifies.
-for (const row of rows) {
-  const staleScopeKey = inventoryRecoveryScopeKey({runDate: plan.date, storeKey: row.storeKey, skc: row.skc, skuCode: row.skuCode});
-  const stalePending = (pendingIntentsByScope.get(staleScopeKey) || [])
-    .filter(intent => /^\d{4}-\d{2}-\d{2}$/.test(String(intent.runDate || '')) && intent.runDate < plan.date);
-  if (!stalePending.length) continue;
-  for (const intent of stalePending) {
-    await appendInventoryReconciliationRecord(journalFile, intent, {
-      kind: 'write_outcome',
-      intentId: intent.intentId,
-      logicalActionKey: intent.logicalActionKey,
-      disposition: INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
-      originalEffectUnknown: true,
-      oldRunDate: intent.runDate,
-      newRunDate: plan.date,
-      supersedeRule: INVENTORY_SUPERSEDED_BY_LATER_PLAN_RULE,
-      recordedAt: new Date().toISOString(),
-    });
-    supersededHistoricalIntents.push({
-      intentId: intent.intentId,
-      logicalActionKey: intent.logicalActionKey,
-      runDate: intent.runDate,
-      storeKey: intent.storeKey,
-      skc: intent.skc,
-      skuCode: intent.skuCode,
-      targetUsableInventory: intent.targetUsableInventory,
-      state: 'superseded_by_later_plan',
-      disposition: 'original_effect_unknown',
-    });
-    pendingIntents.delete(journalIntentKey(intent));
-    journalBundle.pending.delete(journalIntentKey(intent));
-  }
-  const remainingScope = (pendingIntentsByScope.get(staleScopeKey) || []).filter(intent => !stalePending.includes(intent));
-  if (remainingScope.length) pendingIntentsByScope.set(staleScopeKey, remainingScope);
-  else pendingIntentsByScope.delete(staleScopeKey);
-  const remainingBundleScope = (journalBundle.pendingByScope.get(staleScopeKey) || []).filter(intent => !stalePending.includes(intent));
-  if (remainingBundleScope.length) journalBundle.pendingByScope.set(staleScopeKey, remainingBundleScope);
-  else journalBundle.pendingByScope.delete(staleScopeKey);
-  console.error(`[daily_inventory_executor] superseded ${stalePending.length} stale pending durable intent(s) for ${row.storeKey}/${row.skc} by the later plan ${plan.date}`);
-}
 for (const row of rows) {
   const preservedPreSubmit = preservedPreSubmitRows.get(`${row.storeKey}::${row.skc}::${row.skuCode}`);
   if (preservedPreSubmit) {
@@ -924,7 +876,9 @@ for (const row of rows) {
   // An existing intent owns this scope. Today's merchandising rules cannot
   // authorize another write or prevent read-only reconciliation of that intent.
   // Keep the row read-only even if another owner closes it before the lock.
-  const rowReconcileOnly = args.reconcilePendingOnly
+  // Recomputable: the later-plan aging rule below releases this row's scope
+  // after it supersedes an abandoned intent, so the plan may write it now.
+  let rowReconcileOnly = args.reconcilePendingOnly
     || (journalBundle.pendingByScope.get(recoveryScopeKey) || []).length > 0;
   const preSubmitExclusionError = (reasonCode, observedOnShelfSkcs, message) => Object.assign(new Error(message), {
     preSubmitExclusion: {
@@ -1135,6 +1089,67 @@ for (const row of rows) {
         continue;
       }
       let scopeIntents = freshScopeIntents;
+      // Owner-authorized aging rule (2026-09-14): an intent an EARLIER daily
+      // run left pending must not freeze its store/SKC/SKU scope forever. Its
+      // submission outcome is genuinely unknown, but this plan is a fresh
+      // owner-authorized decision derived from current-day ET, sales and
+      // exposure evidence, and its write is an absolute OVERWRITE whose
+      // terminal proof is an exact post-write readback. The later plan
+      // therefore supersedes the abandoned intent, recorded as
+      // originalEffectUnknown, and writes the scope from today's plan. An
+      // intent whose live value already matches its recorded target is left to
+      // the exact readback path below, which closes it as readback_matched
+      // instead. The same day and reconcile-only readback keep the existing
+      // duplicate-submission protection untouched.
+      if (!args.reconcilePendingOnly && scopeIntents.length === 1
+        && isForeignInventoryIntent(scopeIntents[0], {runDate: plan.date, commandId: args.commandId, journalFile})
+        && /^\d{4}-\d{2}-\d{2}$/.test(String(scopeIntents[0].runDate || ''))
+        && scopeIntents[0].runDate < plan.date
+        && Number(before.totalUsableInventory) !== Number(scopeIntents[0].targetUsableInventory)
+        && String(scopeIntents[0].logicalActionKey || '').trim() !== ''
+        && (!inventoryScopeFromIntent(scopeIntents[0]).warehouseCode
+          || (before.warehouseCodes?.length === 1
+            && String(before.warehouseCodes[0]).toUpperCase() === inventoryScopeFromIntent(scopeIntents[0]).warehouseCode))) {
+        const abandonedIntent = scopeIntents[0];
+        await appendInventoryReconciliationRecord(journalFile, abandonedIntent, {
+          kind: 'write_outcome',
+          intentId: abandonedIntent.intentId,
+          logicalActionKey: abandonedIntent.logicalActionKey,
+          disposition: INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
+          originalEffectUnknown: true,
+          oldRunDate: abandonedIntent.runDate,
+          newRunDate: plan.date,
+          supersedeRule: INVENTORY_SUPERSEDED_BY_LATER_PLAN_RULE,
+          recordedAt: new Date().toISOString(),
+        });
+        supersededHistoricalIntents.push({
+          intentId: abandonedIntent.intentId,
+          logicalActionKey: abandonedIntent.logicalActionKey,
+          runDate: abandonedIntent.runDate,
+          storeKey: abandonedIntent.storeKey,
+          skc: abandonedIntent.skc,
+          skuCode: abandonedIntent.skuCode,
+          targetUsableInventory: abandonedIntent.targetUsableInventory,
+          state: 'superseded_by_later_plan',
+          disposition: 'original_effect_unknown',
+        });
+        pendingIntents.delete(journalIntentKey(abandonedIntent));
+        journalBundle.pending.delete(journalIntentKey(abandonedIntent));
+        // The per-row write path re-checks the durable journal before it may
+        // POST. Re-read it now that the abandoned intent is terminal, so the
+        // released scope is not still reported as a pending-write conflict.
+        freshJournalBundle = await readInventoryIntentJournals(freshJournalFiles, {
+          maxRunDate: today, allowMultiplePendingByScope: true,
+          currentJournalFile: journalFile, quarantineHistoricalDanglingSupersedes: true,
+        });
+        const releasedScope = (journalBundle.pendingByScope.get(recoveryScopeKey) || [])
+          .filter(intent => intent.intentId !== abandonedIntent.intentId);
+        if (releasedScope.length) journalBundle.pendingByScope.set(recoveryScopeKey, releasedScope);
+        else journalBundle.pendingByScope.delete(recoveryScopeKey);
+        rowReconcileOnly = false;
+        scopeIntents = [];
+        console.error(`[daily_inventory_executor] superseded stale pending durable intent ${abandonedIntent.intentId} (${abandonedIntent.runDate}) for ${row.storeKey}/${row.skc} by the later plan ${plan.date}`);
+      }
       if (scopeIntents.length) {
         if (scopeIntents.length > 1) {
           await recordResult({
