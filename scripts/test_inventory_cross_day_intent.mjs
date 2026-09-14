@@ -530,6 +530,12 @@ try {
   assert.equal(firstResult.supersededHistorical.length, 1, 'the voided intent must stay visible in the business result');
   assert.equal(firstResult.supersededHistorical[0].intentId, historicalIntent.intentId);
   assert.equal(firstResult.supersededHistorical[0].runDate, priorDate);
+  const firstLifecycle = await readInventoryIntentJournals([
+    first.currentIntentFile,
+    path.join(firstRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`),
+  ], {maxRunDate: today, allowMultiplePendingByScope: true});
+  assert.equal(firstResult.manualResolutionTombstoneCount, firstLifecycle.tombstonedIdempotencyKeys.size,
+    'the reported tombstone count must match the journal after a later-plan supersede');
   assert.equal(firstResult.deferredHistorical.length, 0, 'legacy audit rows must not create lifecycle intents or warnings');
   assert.equal((await journalEntries(first.currentIntentFile)).filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 1, 'the later plan must create its own intent for the superseded scope');
   assert.equal((await journalEntries(first.currentIntentFile)).filter(row => row.kind === 'cross_journal_resolution').length, 1, 'the supersede must be recorded against the older journal');

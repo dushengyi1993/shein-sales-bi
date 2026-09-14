@@ -1142,6 +1142,18 @@ for (const row of rows) {
           maxRunDate: today, allowMultiplePendingByScope: true,
           currentJournalFile: journalFile, quarantineHistoricalDanglingSupersedes: true,
         });
+        // The shared validator asserts that the business result reports the exact
+        // journal tombstone count. Superseding the abandoned intent tombstones its
+        // idempotency key, so it must be counted here and not only at startup.
+        if (abandonedIntent.idempotencyKey
+          && !journalBundle.tombstonedIdempotencyKeys.has(abandonedIntent.idempotencyKey)) {
+          journalBundle.tombstonedIdempotencyKeys.set(abandonedIntent.idempotencyKey, {
+            key: journalIntentKey(abandonedIntent),
+            intent: abandonedIntent,
+            event: {disposition: INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION, intentId: abandonedIntent.intentId},
+          });
+          manualResolutionTombstoneCount += 1;
+        }
         const releasedScope = (journalBundle.pendingByScope.get(recoveryScopeKey) || [])
           .filter(intent => intent.intentId !== abandonedIntent.intentId);
         if (releasedScope.length) journalBundle.pendingByScope.set(recoveryScopeKey, releasedScope);
