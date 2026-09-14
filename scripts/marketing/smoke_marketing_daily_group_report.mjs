@@ -18,7 +18,7 @@ const guardMarkdown = `# report
 ## 先看结论
 - 没有需要立即止损的风险。
 ## 限时折扣兜底情况
-- 巡检：覆盖 19/19 店，读到当前限时折扣 604 行。
+- 巡检：覆盖 21/21 店，读到当前限时折扣 604 行。
 ## 高点击低转化专属折扣
 - 本轮候选：符合 7 条；已保护 7 条。
 - 效果跟踪：共 24 条；最新7日已出单 14 条。
@@ -129,7 +129,7 @@ const summary = buildMarketingDailyGroupSummary({
     limitedDiscountTargetPriceDrift: {belowTarget: 2},
     manualSpecialLimitedDiscount: {activeCount: 24, checked: 24},
     mandatoryLimitedDiscountStatus: {
-      live: {storeCount: 19, okStoreCount: 19, limitedRows: 604},
+      live: {storeCount: 21, okStoreCount: 21, limitedRows: 604},
       latestAutoRepair: {blockedCount: 2},
     },
     orderPriceAudit: {auditedRows: 65, below: 0, above: 0},
@@ -140,7 +140,7 @@ const summary = buildMarketingDailyGroupSummary({
   executionReport,
 });
 assert.match(summary, /巡检和授权修复已完成/);
-assert.match(summary, /最终回读 19\/19 店/);
+assert.match(summary, /最终回读 21\/21 店/);
 assert.match(summary, /可安全执行的动作均已处理/);
 assert.match(summary, /人工特殊折扣 24\/24 精确覆盖/);
 assert.doesNotMatch(summary, /不能自动执行/);
@@ -256,7 +256,7 @@ const localSummary = buildMarketingDailyGroupSummary({
   queue: localHandoffQueue,
   guardMarkdown,
   guardReport: {
-    mandatoryLimitedDiscountStatus: {live: {storeCount: 19, okStoreCount: 19, limitedRows: 604}},
+    mandatoryLimitedDiscountStatus: {live: {storeCount: 21, okStoreCount: 21, limitedRows: 604}},
     manualSpecialLimitedDiscount: {},
     limitedDiscountTargetPriceDrift: {},
     orderPriceAudit: {},
