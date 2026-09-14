@@ -1953,7 +1953,7 @@ function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
       task?.targets?.standardGoodsSn,
       task?.standardGoodsSn,
     ),
-    supplierSku: firstNonEmpty(
+   supplierSku: firstNonEmpty(
       executionPreparation.supplierSku,
       executionPreparation.supplier_sku,
       taskPreparation.supplierSku,
@@ -1962,10 +1962,17 @@ function taskPublishPreparationOverrides(task = {}, executionContext = {}) {
       metadataPreparation.supplier_sku,
       targetPreparation.supplierSku,
       targetPreparation.supplier_sku,
-      task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
-        ? task?.notes?.supplierSkuPolicy?.value
-        : '',
-    ),
+     task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link'
+       ? task?.notes?.supplierSkuPolicy?.value
+       : '',
+   ),
+   // An additional link of an existing 标准货号 must give every SKU its own
+   // seller SKU (the platform rejects a store-owned seller SKU and also rejects
+   // two SKUs of one request sharing a value). The 货号 stays in supplier_code.
+   uniqueSupplierSkuDiscriminator: (task?.allowDuplicateNewPublish === true
+     || task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link')
+     ? safeString(task?.id || task?.taskId || '', 80)
+     : '',
     supplyPrice: firstNonEmpty(
       executionPreparation.supplyPrice,
       executionPreparation.supply_price,

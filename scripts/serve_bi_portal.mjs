@@ -10916,6 +10916,13 @@ async function prepareApprovedPublishAssetsForTask(task, args, body, actor, req,
     );
     publishPreparation.targetStore = targetStore;
   }
+  if (task?.allowDuplicateNewPublish === true || task?.notes?.supplierSkuPolicy?.mode === 'unique-per-link') {
+    // Additional link of an existing 标准货号: derive a distinct seller SKU per
+    // SKU, so the payload the binding evidence is computed from already carries
+    // the store-unique seller SKU the platform requires. supplier_code keeps the
+    // 标准货号, and the default first-link path is untouched.
+    publishPreparation = {...publishPreparation, uniqueSupplierSkuDiscriminator: String(task?.id || '')};
+  }
   let taskForCapture = {
     ...task,
     status: String(task.status || '') === 'draft' ? 'confirmed' : task.status,
