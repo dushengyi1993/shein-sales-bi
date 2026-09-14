@@ -551,6 +551,21 @@ run_inventory_stage() {
 
   local inventory_status retry_delay
   retry_delay="${SHEIN_BI_MORNING_RESOURCE_RETRY_DELAY_SEC:-60}"
+  # A deterministic fail-closed guard result (unreadable release authority,
+  # non-matching terminal readback, invalid plan hash, ...) re-reads the same
+  # immutable plan and result, so an unbounded service restart cannot repair
+  # it.  On 2026-09-14 the coordinator was restarted 34 times over the same
+  # authority fault and still burned the entire window into an exit-76
+  # deadline failure.  Retry this class a bounded number of times inside the
+  # run, then converge to the restart-prevented terminal code so systemd stays
+  # visibly failed instead of spinning until the deadline.
+  local failure_attempts inventory_failure_retries
+  inventory_failure_retries="${SHEIN_BI_MORNING_INVENTORY_FAILURE_RETRIES:-2}"
+  if [[ ! "$inventory_failure_retries" =~ ^[0-9]+$ ]]; then
+    echo "[cloud_morning_chain] invalid SHEIN_BI_MORNING_INVENTORY_FAILURE_RETRIES=$inventory_failure_retries" >&2
+    return 78
+  fi
+  failure_attempts=0
   while true; do
     require_run_budget "daily inventory guard"
     # Keep the command in an if-condition so the inherited ERR trap does not
@@ -595,7 +610,13 @@ run_inventory_stage() {
       sleep "$retry_delay"
       continue
     fi
-    return "$inventory_status"
+    failure_attempts=$((failure_attempts + 1))
+    if (( failure_attempts > inventory_failure_retries )); then
+      echo "[cloud_morning_chain] inventory guard failed terminally status=$inventory_status after $failure_attempts attempt(s); the immutable plan/result cannot be repaired by restarting this run" >&2
+      return 78
+    fi
+    echo "[cloud_morning_chain] inventory guard failed status=$inventory_status; bounded retry $failure_attempts/$inventory_failure_retries in ${retry_delay}s" >&2
+    sleep "$retry_delay"
   done
 }
 

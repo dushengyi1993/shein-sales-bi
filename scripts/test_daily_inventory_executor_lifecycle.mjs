@@ -631,7 +631,15 @@ try {
   const dirH = path.join(temp, 'historical-pending-reconcile-only');
   await fs.mkdir(dirH);
   const {plan: planH} = await buildPlanFixture(dirH, {etProducts: [etRow]});
-  const mockH = createMockOpenApiServer({});
+  // This scenario reaches a write now that an earlier day's abandoned intent is
+  // superseded by the later plan, so the mock must answer the inventory POST
+  // instead of leaving the request open (a silent handler hangs the fetch).
+  const mockH = createMockOpenApiServer({
+    onChangeInventory: ({json, setCurrent}) => {
+      setCurrent(15);
+      json({code: '0', msg: 'success', traceId: 'trace-h', info: {success: true}});
+    },
+  });
   mockH.url = await new Promise(resolve => mockH.server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + mockH.server.address().port)));
   await fs.writeFile(path.join(dirH, 'config.json'), JSON.stringify({
     stores: [{storeKey: STORE_KEY, enabled: true, openKeyId: 'test-open-key', secretKey: 'test-secret', shopName: 'TEST', profileKey: 'dl', port: 0}],
@@ -678,16 +686,21 @@ try {
     changedLinks.data.storeLinks.push({...changedLinks.data.storeLinks[0], skc: 'NEW-HISTORICAL-SCOPE-SIBLING'});
     await fs.writeFile(path.join(dirH, 'links.json'), JSON.stringify(changedLinks));
     const normalHistorical = await runExecutor(argsH.filter(arg => arg !== '--reconcile-pending-only'), envH);
-    assert.equal(normalHistorical.code, 1, normalHistorical.stderr);
+    assert.equal(normalHistorical.code, 0, normalHistorical.stderr);
     const normalHistoricalRow = JSON.parse(await fs.readFile(outH, 'utf8')).results[0];
-    assert.equal(normalHistoricalRow.state, 'submitted_but_readback_pending', JSON.stringify(normalHistoricalRow));
-    assert.equal(normalHistoricalRow.historicalIntentId, historicalIntent.intentId);
-    assert.equal(mockH.getChangeInventoryPosts(), 0, 'changed current links must not prevent historical readback or authorize a POST');
+    assert.equal(normalHistoricalRow.state, 'updated_readback_matched', JSON.stringify(normalHistoricalRow));
+    assert.equal(normalHistoricalRow.historicalPending, undefined,
+      'a superseded earlier-day intent is terminal, not a pending historical row');
+    assert.equal(mockH.getChangeInventoryPosts(), 1,
+      'the superseded scope must be written exactly once from the later plan');
+    const supersededEntry = JSON.parse(await fs.readFile(outH, 'utf8')).supersededHistorical;
+    assert.equal(supersededEntry.length, 1);
+    assert.equal(supersededEntry[0].intentId, historicalIntent.intentId);
     const entriesH = await readJournalEntries(historicalJournal);
     assert.deepEqual(
-      entriesH.filter(entry => entry.kind === 'intent').map(entry => entry.intentId),
+      entriesH.filter(entry => entry.kind === 'intent' && entry.intentId === historicalIntent.intentId).map(entry => entry.intentId),
       [historicalIntent.intentId],
-      'hard-linked historical recovery must retain only the original intent',
+      'hard-linked historical recovery must retain the original intent exactly once',
     );
   } finally {
     mockH.server.close();

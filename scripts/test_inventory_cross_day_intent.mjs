@@ -501,7 +501,10 @@ try {
     'explicit multi-pending recovery must sort by runDate, recordedAt, then intentId',
   );
 
-  // 1) D-day pending intent freezes only ZX; independent ZY completes on D+1.
+  // 1) An earlier day's unresolved intent no longer freezes its scope forever:
+  // the later plan supersedes it (its original effect stays recorded as
+  // unknown) and writes the scope from today's plan, while the independent
+  // current scope still completes on its own row.
   const firstRoot = path.join(temp, 'historical-pending');
   const historicalIntent = makeIntent({runDate: priorDate, row: ROWS[0], planHash: 'd'.repeat(64), intentId: 'historical-pending-1'});
   const first = await writeFixture(firstRoot, {oldIntent: historicalIntent});
@@ -513,19 +516,23 @@ try {
   state.requestCount = 0;
   state.stock = new Map([[ROWS[0].skuCode, 2], [ROWS[1].skuCode, 2]]);
   const firstRun = await runExecutor(first);
-  assert.equal(firstRun.code, 1, `historical mismatch must remain blocked\nstdout=${firstRun.stdout}\nstderr=${firstRun.stderr}`);
+  assert.equal(firstRun.code, 0, `the later plan must supersede and write the historical scope\nstdout=${firstRun.stdout}\nstderr=${firstRun.stderr}`);
   const firstResult = await readJson(first.resultFile);
-  assert.equal(state.postCount, 1,
-    `independent current scope must issue exactly one POST\nresult=${JSON.stringify(firstResult)}\nstdout=${firstRun.stdout}\nstderr=${firstRun.stderr}`);
-  assert.deepEqual(state.postSkus, [ROWS[1].skuCode], 'historical ZX scope must receive zero POSTs');
+  assert.equal(state.postCount, 2,
+    `both the superseded scope and the independent current scope must POST\nresult=${JSON.stringify(firstResult)}\nstdout=${firstRun.stdout}\nstderr=${firstRun.stderr}`);
+  assert.deepEqual(state.postSkus, [ROWS[0].skuCode, ROWS[1].skuCode], 'the superseded historical scope must be written from the later plan');
   const historicalResult = firstResult.results.find(row => row.storeKey === ROWS[0].storeKey);
   const independentResult = firstResult.results.find(row => row.storeKey === ROWS[1].storeKey);
-  assert.equal(historicalResult.state, 'submitted_but_readback_pending');
-  assert.equal(historicalResult.historicalPending, true);
-  assert.equal(historicalResult.disposition, 'skipped');
+  assert.equal(historicalResult.state, 'updated_readback_matched');
+  assert.equal(historicalResult.historicalPending, undefined, 'a superseded intent is terminal, not a pending historical row');
+  assert.equal(historicalResult.after.totalUsableInventory, historicalResult.targetUsableInventory);
   assert.equal(independentResult.state, 'updated_readback_matched');
+  assert.equal(firstResult.supersededHistorical.length, 1, 'the voided intent must stay visible in the business result');
+  assert.equal(firstResult.supersededHistorical[0].intentId, historicalIntent.intentId);
+  assert.equal(firstResult.supersededHistorical[0].runDate, priorDate);
   assert.equal(firstResult.deferredHistorical.length, 0, 'legacy audit rows must not create lifecycle intents or warnings');
-  assert.equal((await journalEntries(first.currentIntentFile)).filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 0, 'historical reappearance must not create a current intent');
+  assert.equal((await journalEntries(first.currentIntentFile)).filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 1, 'the later plan must create its own intent for the superseded scope');
+  assert.equal((await journalEntries(first.currentIntentFile)).filter(row => row.kind === 'cross_journal_resolution').length, 1, 'the supersede must be recorded against the older journal');
   assert.equal((await journalEntries(path.join(firstRoot, 'runtime', 'results', `daily-inventory-replenishment-${priorDate}.json.journal.ndjson`))).filter(row => row.kind === 'write_outcome').length, 0);
 
   // 1b) The shared executor must also discover ET/non-daily journal prefixes
@@ -560,13 +567,16 @@ try {
   state.requestCount = 0;
   state.stock = new Map([[ROWS[0].skuCode, 2], [ROWS[1].skuCode, 2]]);
   const nonDailyRun = await runExecutor(nonDaily);
-  assert.equal(nonDailyRun.code, 1, `non-daily historical pending scope must remain intercepted\nstdout=${nonDailyRun.stdout}\nstderr=${nonDailyRun.stderr}`);
-  assert.deepEqual(state.postSkus, [ROWS[1].skuCode], 'non-daily historical ZX scope must receive zero duplicate POSTs');
+  assert.equal(nonDailyRun.code, 0, `non-daily historical scope must be superseded and written\nstdout=${nonDailyRun.stdout}\nstderr=${nonDailyRun.stderr}`);
+  assert.deepEqual(state.postSkus, [ROWS[0].skuCode, ROWS[1].skuCode], 'non-daily historical scope must be written once from the later plan');
   const nonDailyResult = await readJson(nonDaily.resultFile);
   const nonDailyHistorical = nonDailyResult.results.find(row => row.storeKey === ROWS[0].storeKey);
-  assert.equal(nonDailyHistorical.historicalPending, true);
-  assert.equal(nonDailyHistorical.disposition, 'skipped');
-  assert.equal((await journalEntries(nonDaily.currentIntentFile)).filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 1, 'hard-linked ET attempt must retain exactly one original intent without duplicate discovery');
+  assert.equal(nonDailyHistorical.state, 'updated_readback_matched');
+  assert.equal(nonDailyHistorical.historicalPending, undefined);
+  assert.equal(nonDailyResult.supersededHistorical.length, 1);
+  const nonDailyEntries = await journalEntries(nonDaily.currentIntentFile);
+  assert.equal(nonDailyEntries.filter(row => row.kind === 'intent' && row.intentId === nonDailyIntent.intentId).length, 1, 'hard-linked ET attempt must retain the original intent without duplicate discovery');
+  assert.equal(nonDailyEntries.filter(row => row.kind === 'intent' && row.storeKey === ROWS[0].storeKey).length, 2, 'the later plan adds exactly one intent for the superseded scope');
 
   // 2) A historical pending scope absent from today's plan is audit-only:
   // it must not duplicate or block the independent current result row.
@@ -1131,9 +1141,9 @@ try {
   console.log(JSON.stringify({ok: true, checks: [
     'additional_daily_et_journal_discovery_deduplicates_paths_and_inodes',
     'default_pending_scope_conflict_and_explicit_chronology_order',
-    'historical_pending_freezes_one_scope_independent_current_posts',
+    'historical_pending_superseded_by_later_plan_writes_scope',
     'valid_legacy_audit_rows_are_ignored_alongside_durable_journals',
-    'non_daily_prefix_historical_pending_intercepts_scope',
+    'non_daily_prefix_historical_pending_superseded_by_later_plan',
     'absent_historical_scope_is_audit_only_without_duplicate_rows',
     'historical_readback_match_closes_original_journal_and_defers_current_scope',
     'generic_executor_does_not_startup_supersede_historical_pending',
