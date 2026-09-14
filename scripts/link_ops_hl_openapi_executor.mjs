@@ -5403,7 +5403,11 @@ async function main() {
         blockers.push(`publishOrEdit 平台预校验失败，未创建新链接：${preValidMessages.join('；') || sanitizePublishPlatformText(publishResult.msg || '未知原因', publishPayload, 300)}`);
         const duplicateSellerSku = publishPreValidDuplicateSellerSku(publishResult.info);
         if (duplicateSellerSku) {
-          blockers.push(`目标店已存在相同卖家SKU：payload.skc_list[].supplier_code=${duplicateSellerSku.supplierSku}，与 SKC ${duplicateSellerSku.conflictingSkc} 的卖家SKU重复。卖家SKU必须在目标店唯一：请提供唯一卖家SKU（例如按店铺加后缀），或改为维护已存在的链接，不要重复新建。`);
+          // One 货号 may legitimately own several links in one store; the
+          // platform only requires a distinct seller SKU per link. The payload
+          // writes the 货号 itself into supplier_code, so adding an Nth link
+          // resubmits the seller SKU that the existing link already owns.
+          blockers.push(`卖家SKU重复：payload.skc_list[].supplier_code=${duplicateSellerSku.supplierSku} 与目标店已有 SKC ${duplicateSellerSku.conflictingSkc} 的卖家SKU相同。同一货号允许多条链接，但每条链接的卖家SKU/供应商SKU必须不同；当前 payload 把货号原样写进了 supplier_code。请确认该店该货号是应新建独立卖家SKU，还是应复用已有 SKC/SPU，不要重复提交同一卖家SKU。`);
         }
         if (publishPreValidHasHashOnlyText(publishResult.info, publishPayload)) {
           const reference = publishDiagnostic?.ok && publishDiagnostic.id
