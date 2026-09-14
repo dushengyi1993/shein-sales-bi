@@ -91,13 +91,19 @@ for (const source of [launcher, mainLauncher, etLauncher, manualLoginLauncher]) 
   assert.match(source, /chromeDisabledFeaturesArg/);
 }
 for (const source of [launcher, mainLauncher]) {
-  assert.match(source, /writeJsonFileAtomicSync/,
-    'launcher Preferences and Local State writes must use the synchronous atomic JSON helper');
-  assert.match(source, /writeTextFileAtomicSync/,
-    'launcher PROFILE_NAME.txt writes must use the synchronous atomic text helper');
+  assert.match(source, /ensureProfileName/,
+    'launchers must name the Chrome profile through the one shared helper');
   assert.doesNotMatch(source, /writeFileSync\(prefsPath|writeFileSync\(localStatePath/,
     'launcher must not directly overwrite Chrome JSON metadata');
+  assert.doesNotMatch(source, /function ensureProfileName\(/,
+    'a launcher must import the shared naming helper instead of keeping a private copy');
 }
+assert.match(hygiene, /writeJsonFileAtomicSync\(prefsPath, prefs\)/,
+  'Preferences must be published through the synchronous atomic JSON helper');
+assert.match(hygiene, /writeJsonFileAtomicSync\(localStatePath, localState\)/,
+  'Local State must be published through the synchronous atomic JSON helper');
+assert.match(hygiene, /writeTextFileAtomicSync\(path\.join\(resolvedProfile, 'PROFILE_NAME\.txt'\), `\$\{profileName\}\\n`\)/,
+  'PROFILE_NAME.txt must be published through the synchronous atomic text helper');
 
 await fs.rm(root, {recursive: true, force: true});
 console.log(JSON.stringify({ok: true, preserved: preserved.length, removed: disposable.length}));
