@@ -20,6 +20,10 @@ assert.doesNotMatch(reconcile, /if \(changed && \(differences === 0 \|\| written
 assert.match(reconcile, /if \[\[ \"\$PROMOTION_CHANGED_FLAG\" == 1 \]\]; then/);
 
 // Execute the exact bounded promotion-result parser embedded in the shell.
+assert.match(reconcile, /--max-time 180 "\$PORTAL_URL\/api\/bi\/section\/liveSalesToday\?refresh=1"/,
+  'the liveSalesToday refresh must keep the widened timeout that covers a promotion lock drain');
+assert.equal((reconcile.match(/liveSalesToday\?refresh=1/g) || []).length, 2,
+  'the liveSalesToday refresh must be attempted twice (one bounded retry) instead of failing the run');
 // This keeps the deletion-only contract from becoming a comment-only guard.
 const parserStart = reconcile.indexOf('PROMOTION_RESULT="$PROMOTION_RESULT" node - <<\'NODE\'');
 assert.ok(parserStart >= 0, 'reconcile must keep its strict promotion parser');
