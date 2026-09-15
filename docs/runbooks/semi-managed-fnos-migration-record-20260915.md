@@ -262,6 +262,11 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 
 投递验收：用 `notify_sync_issue.mjs` 按 watchdog 的原参数（`--kind cloud-watchdog --mode watchdog --force --idempotency-key sync-watchdog-alert-batch-6995f04d48c413ff9bc7`）把那条卡了 5 次（22:50/23:50/00:50/01:50/02:50）的订单闭环告警真实投递出去：Feishu 返回 `message_id=om_x100b65ad171dc0a0c4a024d386003ac`（2026-09-16 02:59:41）；随后用 `lib/cloud_watchdog_alert_state.mjs` 的 `markWatchdogDispatchSent` + `markWatchdogOutboxSent` 把 dispatch/outbox 标为 `sent`，避免下一轮重复发送。`systemctl --failed` 已清空。
 
+### 家目录隐藏状态对照（2026-09-16 约 03:20，已补齐）
+
+用「路径集合对照」（只比路径、不比大小，过滤备份/缓存噪声）把 root 与 sheinops 的家目录过了一遍，补上运行真正需要的四项：`/root/.gitconfig`（`safe.directory`）、`/root/.npmrc`（registry）、`/home/sheinops/.agents/`（Codex 插件市场 16 K）、`/home/sheinops/.codex/{agent-packs,agents}`（2.8 M + 876 K；`enabled-agent-packs.txt` 启用了 engineering/design/testing，此前是「启用但没装」）。加上先前的 `/root/.local/share/lark-cli/` 密钥库，家目录侧的运行态缺口已闭环。其余差异（各类 agent CLI 的 skills 目录、`.bun`、`.docker/buildx`、历史 `.bak`/`.tgz`）与本项目运行无关，判定为可不搬。
+
+
 
 
 - 注意：仓库里记录的代码改动（浏览器 lane 数可配置、默认仍是 2）在部署前**不改变现网行为**；主机侧的 tmpfiles、压力阈值、时钟自愈、CJK 字体、局域网监听都已经在 VM 上生效。

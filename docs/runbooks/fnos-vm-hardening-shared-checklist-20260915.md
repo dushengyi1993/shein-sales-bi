@@ -185,3 +185,14 @@ sudo ls /etc/cloud/cloud.cfg.d/; grep -c openapi /etc/hosts
 - 验证（只读、不发消息）：上面那个探针返回 `ok:true` 且能列出目标群。
 - 投递验证：用 watchdog 自己的 `scripts/notify_sync_issue.mjs --kind cloud-watchdog --mode watchdog --message '<原文>' --force --idempotency-key <dispatch key>`；成功后必须用 `lib/cloud_watchdog_alert_state.mjs` 的 `markWatchdogDispatchSent` / `markWatchdogOutboxSent` 把状态标 `sent`，否则下一轮 watchdog 会再发一条重复告警。
 
+**4.7 家目录隐藏状态要按「路径集合」对照，别只看显眼目录**
+
+- 半托实测：迁移时搬了 `.lark-cli`、`.gitconfig`、`.local` 这些「显眼」项，仍然漏了：
+  - `/root/.local/share/lark-cli/`（密钥库，见 4.6——漏了它告警投递全断）；
+  - `/root/.gitconfig`（`[safe] directory = /opt/shein-bi/app`，root 跑 git 时需要）与 `/root/.npmrc`（registry 指向）；
+  - `/home/sheinops/.agents/`（Codex 插件市场状态）与 `/home/sheinops/.codex/{agent-packs,agents}`（约 3.7 MB；`enabled-agent-packs.txt` 里启用了 engineering/design/testing，缺 packs 就出现「已启用但不存在」）。
+- 方法：两台机分别跑
+  `find /root /home/<service-user> -maxdepth 3 \( -name .cache -o -name .npm -o -name node_modules -o -name tmp -o -name logs -o -name .git \) -prune -o -printf '%p\n' | sort`
+  然后**只比较路径集合**（不比大小，避免日志/缓存噪声），过滤掉 `.bak*/backups/cache/skills/bun/docker` 等噪声，剩下的就是真正要搬的。
+- 判断标准：服务运行需要的是「状态 / 凭据 / 配置」；其它 agent CLI 的 skills 目录（`~/.config/<agent>/skills`、`~/.rovodev/skills` 等）与本项目运行无关，可以不管。
+
