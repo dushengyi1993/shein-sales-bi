@@ -35,7 +35,12 @@ Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=/srv/shein-bi/runtime/daily-inventor
 Environment=SHEIN_LINK_BUSINESS_STORE_ATTEMPTS=2
 Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRIES=12
 Environment=SHEIN_LINK_BUSINESS_RESOURCE_RETRY_SLEEP_SEC=30
-Environment=SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=2
+# The fnOS VM runs four browser-read lanes (shein-browser-read-0..3 locks, see
+# infra/tmpfiles.d/shein-bi-scheduler.conf). Keep the lane count and the per-store
+# worker concurrency equal: each worker takes exactly one lane and exits 75 once
+# every lane is held, so a larger concurrency only leaves surplus workers polling.
+Environment=SHEIN_BROWSER_READ_SLOTS=4
+Environment=SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=4
 Environment=SHEIN_BI_MORNING_RUN_BUDGET_SEC=10200
 Environment=SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=2700
 Environment=SHEIN_BI_MORNING_STORE_RETRY_DELAY_SEC=120
@@ -51,8 +56,15 @@ Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 CPUWeight=60
-MemoryHigh=2600M
-MemoryMax=3400M
+# Four browser lanes need roughly 3.3 GiB in this cgroup: a five-store probe driven
+# exactly like this service (same wrapper, concurrency 4, lanes 4) measured
+# memory.current = 3,470,336,000 bytes with four chrome lanes busy. The previous
+# 2600M throttled the cgroup into continuous reclaim, which slowed the fetch (that
+# five-store run needed >7 minutes instead of ~1) and pushed host-wide memory PSI to
+# ~95 -- the very signal the browser/heavy admission gate reads -- so the chain's own
+# per-store jobs deferred each other with MEMORY_STALL_PRESSURE.
+MemoryHigh=4000M
+MemoryMax=5000M
 OOMPolicy=stop
 KillMode=control-group
 # The wrapper owns the single daily run: it atomically persists the active
