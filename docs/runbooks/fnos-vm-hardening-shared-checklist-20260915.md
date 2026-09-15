@@ -196,3 +196,14 @@ sudo ls /etc/cloud/cloud.cfg.d/; grep -c openapi /etc/hosts
   然后**只比较路径集合**（不比大小，避免日志/缓存噪声），过滤掉 `.bak*/backups/cache/skills/bun/docker` 等噪声，剩下的就是真正要搬的。
 - 判断标准：服务运行需要的是「状态 / 凭据 / 配置」；其它 agent CLI 的 skills 目录（`~/.config/<agent>/skills`、`~/.rovodev/skills` 等）与本项目运行无关，可以不管。
 
+**4.8 部署交接：三个会让你以为「迁移坏了」的坑**
+
+- **只 chown 目录行不够**：`git fetch` 要写已存在的 `.git/FETCH_HEAD`（root 属主），目录可写无效 → `error: cannot open '.git/FETCH_HEAD': Permission denied`。交接清单（`*plan.json` 的 `managedSourcePaths`）里的**文件也要一起临时 chown**，检出后再由加固器统一收回 root。
+- **不要给 git 传 `GIT_SSH_COMMAND`**：部署密钥是在仓库 `core.sshCommand` 里声明的（形如 `ssh -i ~/.ssh/<deploy_key> -o IdentitiesOnly=yes`）；用环境变量覆盖会把它整体顶掉，报 `git@github.com: Permission denied (publickey)`。以服务用户跑 git 时保持环境干净即可。
+- **轮转预检工件是 no-replace**：同一路径重复 dry-run 报 `EEXIST`；重跑换文件名，不要删旧工件（activation/compatibility/receipt 文件更是禁止手删改）。
+- 附带一条发布侧的：`gh release view <version>` 查不到不代表没发布——远端 release 的 tag_name 是 `untagged-<hex>`，用 `gh release list` 按标题找。
+
+**4.9 宿主机的「网页密码」不等于 Linux 密码**
+
+- 飞牛（fnOS）账号密码只在网页后台生效。Linux 侧 `sshd`、`sudo` 都走 `common-auth`（`pam_unix.so nullok` + `pam_winbind.so … try_first_pass`），实测该口令被拒：`ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no <user>@<host>` → `Permission denied (publickey,password)`，`sudo` 报 `no password was provided` / `incorrect password attempt`。`root` 同样不可用口令登录。
+- 影响：想「不走浏览器直接改宿主机」（例如开虚拟机的开机自启动、改宿主机网络/存储）就必须二选一——① 在网页后台给账号设一个 Linux 密码；② 加一条免密 sudoers。否则宿主机层只能由用户在网页后台操作。VM 内部的运维不受影响（VM 的 `dushengyi` 免密 sudo 正常）。
