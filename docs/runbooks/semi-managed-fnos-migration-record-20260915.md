@@ -345,3 +345,27 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - `ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no dushengyi@192.168.1.59` → `Permission denied (publickey,password)`；`root` 同样被拒（登录仍只能用 `fnos_shein_fm_ed25519` 密钥）。
 - `sudo` 走 `/etc/pam.d/sudo` → `common-auth` = `pam_unix.so nullok` + `pam_winbind.so … try_first_pass`；实测 `sudo: no password was provided` / `1 incorrect password attempt`，即该口令在 Linux/PAM 侧不可用（飞牛网页后台用自己的账号库）。
 - 现状：`/etc/sudoers.d/` 只有 README，`dushengyi` 组为 `Users + Administrators`，但没有可用认证凭据。要免浏览器操作宿主机，需要二选一：① 在飞牛网页后台给该账号设一个 Linux 密码；② 加一条免密 sudoers（都需要用户在网页后台先拿到一次 root）。
+
+### 迁移后第 4 批：Portal cgroup 的软上限把整机内存压力信号打到 90，所有闸门任务集体让位（2026-09-16 06:00–06:15，已修）
+
+**现象**：晨链前的 4 lane 实测里 DX/FY/TS/TZ 四个店**全部** deferred（`reason=MEMORY_STALL_PRESSURE`、`status=75`），chunk 结果 `successfulStores: []`。判据是 `check_host_resource_pressure.mjs` 读 `/proc/pressure/memory` 的 `full avg10`（browser/browser-secondary 阈值 4，默认档 1），而实测该值常年 **85–98**。
+
+**定位链**（每一步都有实测）：
+
+- `MemAvailable` 5.7 GiB、`SwapTotal=0`、CPU idle 90%、`vmstat` 无 `si/so`——不是真的缺内存。
+- `/proc/pressure/memory` 在**叶子 cgroup 里读与在 root 读完全同值**（97.98 / 97.56）→ 闸门拿到的是全局量，任何一个 cgroup 自造的 stall 都能让所有任务让位。
+- 唯一超出软上限的 cgroup 是 Portal：`memory.current 1.36 GiB` > `MemoryHigh 1200M`，`memory.events.high` 已 66 万次（持续回收），其自身 `memory.pressure` full avg10 95.55 ≈ 全局值。
+- 追到进程：`generate_bi_portal.mjs --section profit --direct-cache-publish`（pid 248687，Portal cgroup 内的子进程）RSS **1.28 GiB**、已运行 **13:49**，8 秒内 CPU ticks 不涨（1355→1355）——**被回收卡死**，既不出结果也不退出。
+
+**根因**：Portal 的 cgroup 不只装 Portal（152 MiB），还装 `generate_bi_portal.mjs` 的 section 生成子进程（`KillMode=control-group`）。子进程只受 `NODE_OPTIONS=--max-old-space-size=1536` 约束，RSS 可到约 1.8 GiB；而 `MemoryHigh=1200M` 是按「Portal 自己」定的，低于子进程工作集 → 该 cgroup 被内核持续回收 → 全局 PSI 被打高 → 所有走闸门的浏览器/重任务让位。这条链路在旧云同样成立，只是没赶上「生成子进程 + 闸门任务」同时活跃。
+
+**修复与验证**：
+
+- Portal 软上限抬到 `MemoryHigh=1900M`（`systemctl set-property` 即时生效 + 写回 `/etc/systemd/system/shein-bi-portal.service.d/60-resource-guard.conf`），硬上限同步抬到 `MemoryMax=2600M`，保留 `OOMPolicy=stop` / `Restart=always`（改前已备份 `.bak-20260916`）。
+- 效果：**12 秒内**卡死的生成进程退出，cgroup 1380 MiB → 227 MiB，PSI full avg10 94 → **0.20**；业务侧 `sections/profit.query.json`、`sections/homeProfit.json` 于 06:06 正常发布（此前一直因 stall 出不来，日志里还有 `bi-live-accounting ... profit mart freshness check failed: timedOut=true`）。
+- 复跑 4 lane：DX/FY/TS/TZ **4/4 成功**（`failedStores: []`），峰值 48 个 chrome（四店真并发），跑完 0 残留，全程 PSI ≤ 0.86，耗时约 50 秒。
+- 代码侧同步：`infra/systemd/shein-bi-portal.service`、`infra/systemd/README.md` 不变式，以及 `scripts/test_systemd_security_contract.mjs` 新增两条断言（`MemoryHigh` 必须高于 V8 堆上限；`MemoryMax` 必须高于 `MemoryHigh`），可直接拦住这次回归。
+
+**顺带核实（避免误判）**：journal 里 `2026-09-16T07:09:xx` 的 kernel/dockerd/Portal 记录是**迁移期错误时钟留下的未来时间戳**（旧 boot 残留），不是现在的时间跳变——`timedatectl` 显示 clock synchronized / Asia/Shanghai / RTC 非本地，`uptime -s` = 23:35:30，与本地时间一致；warehouse Postgres 正常（`select now(), count(*) from fact.order_item` → `2026-09-16 06:10:46+08 | 13810`）。
+
+**留给后续的设计问题（本轮不改）**：闸门用全局 PSI 做容量判据，会被任意一个 cgroup 的软上限节流污染。要么让闸门读「本任务自己 cgroup 子树」的压力，要么在判定时排除「仅由某服务自身 MemoryHigh 节流贡献」的 stall。

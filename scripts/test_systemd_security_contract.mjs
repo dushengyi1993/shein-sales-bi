@@ -59,8 +59,8 @@ assert.equal(property(portal, 'User'), 'sheinops');
 assert.equal(property(portal, 'Group'), 'sheinops');
 assert.equal(property(portal, 'OOMPolicy'), 'stop');
 assert.equal(property(portal, 'Restart'), 'always');
-assert.equal(property(portal, 'MemoryHigh'), '1200M');
-assert.equal(property(portal, 'MemoryMax'), '2200M');
+assert.equal(property(portal, 'MemoryHigh'), '1900M');
+assert.equal(property(portal, 'MemoryMax'), '2600M');
 assert.doesNotMatch(portal, /SHEIN_BI_OPS_CLI_(?:MIN|RECOMMENDED)_VERSION=/,
   'Portal CLI version policy must follow the packaged BI_OPS_CLI_VERSION instead of a stale systemd override');
 assert.match(portal, /^Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=\/srv\/shein-bi\/partner-cli$/m,
@@ -72,6 +72,11 @@ const v8HeapCapMb = Number(/--max-old-space-size=(\d+)/.exec(nodeOptions[0][1])[
 const memoryMaxMb = Number(property(portal, 'MemoryMax').replace(/M$/, ''));
 assert.ok(Number.isInteger(v8HeapCapMb) && v8HeapCapMb > 0, 'V8 heap cap must be a positive integer of MiB');
 assert.ok(memoryMaxMb > v8HeapCapMb, 'V8 heap cap must stay below the systemd MemoryMax cap so cgroup OOM recovery stays effective');
+const memoryHighMb = Number(property(portal, 'MemoryHigh').replace(/M$/, ''));
+assert.ok(memoryHighMb > v8HeapCapMb,
+  'Portal MemoryHigh must sit above the V8 heap cap: the cgroup also runs section generator children, and a soft limit below their working set throttles the cgroup into chronic reclaim, which surfaces as host-wide memory PSI and defers every resource-gated job');
+assert.ok(memoryMaxMb > memoryHighMb,
+  'Portal MemoryMax must stay above MemoryHigh so throttling, not killing, is the first response');
 assertCommonHardening(portal, 'portal');
 assert.doesNotMatch(portal, /^NoNewPrivileges=true$/m, 'portal uses audited sudo child commands and cannot enable this yet');
 assert.doesNotMatch(portal, /^PrivateTmp=true$/m, 'portal browser maintenance must share the host temporary namespace');
