@@ -283,6 +283,15 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y fonts-noto-cjk
 #    /etc/nginx/sites-available/shein-bi 的 server 块内与 127.0.0.1:8080 并列：
 #      listen <LAN_IP>:80;
 #    然后 sudo nginx -t && sudo systemctl reload nginx。改完公网入口不变。
+
+# 9. 备份异机同步：unit 以 root 跑 ProtectSystem=strict，指向 /opt/shein-bi/maintenance/ 下的副本；
+#    发布时从仓库复制一份，并重新安装维护守卫（新服务必须在策略表里，否则 pause 会拒绝启动）。
+sudo install -d -m 0755 /opt/shein-bi/maintenance/backup-nas-sync-20260915
+sudo install -m 0755 scripts/sync_shein_bi_backup_nas.mjs /opt/shein-bi/maintenance/backup-nas-sync-20260915/sync_shein_bi_backup_nas.mjs
+sudo install -m 0644 infra/systemd/shein-bi-backup-sync-nas.service /etc/systemd/system/
+sudo install -d -m 0755 /etc/systemd/system/shein-bi-db-backup.service.d
+sudo install -m 0644 infra/systemd/shein-bi-db-backup-nas-sync.conf /etc/systemd/system/shein-bi-db-backup.service.d/60-nas-sync.conf
+bash scripts/install_cloud_maintenance_guards.sh --systemd-root /etc/systemd/system --apply --confirm APPLY_CLOUD_MAINTENANCE_GUARDS_V1
 sudo systemctl daemon-reload
 ```
 
