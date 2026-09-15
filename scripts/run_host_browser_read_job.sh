@@ -11,6 +11,24 @@ HOST_LOCK="${SHEIN_HOST_HEAVY_LOCK_FILE:-/run/lock/shein-host-heavy.lock}"
 BROWSER_SLOT_0="${SHEIN_BROWSER_READ_SLOT_0:-/run/lock/shein-browser-read-0.lock}"
 BROWSER_SLOT_1="${SHEIN_BROWSER_READ_SLOT_1:-/run/lock/shein-browser-read-1.lock}"
 PROJECT_LOCK="${SHEIN_BI_HOST_PROJECT_LOCK_FILE:-$ROOT/state/locks/shein-bi-host-heavy.lock}"
+# Browser capacity is a set of neutral lock files. Slots 0 and 1 keep their
+# historical overrides; any further slot follows the same naming pattern, so a
+# host with more capacity only has to raise SHEIN_BROWSER_READ_SLOTS and create
+# the matching /run/lock entries through tmpfiles.d. Half-managed work takes the
+# highest free index and leaves the lower slots to the full-managed project.
+BROWSER_SLOT_COUNT="${SHEIN_BROWSER_READ_SLOTS:-2}"
+BROWSER_SLOT_DIR="${SHEIN_BROWSER_READ_SLOT_DIR:-/run/lock}"
+build_browser_slot_files() {
+  local slot_index
+  BROWSER_SLOT_FILES=()
+  for (( slot_index = 0; slot_index < BROWSER_SLOT_COUNT; slot_index++ )); do
+    case "$slot_index" in
+      0) BROWSER_SLOT_FILES+=("$BROWSER_SLOT_0") ;;
+      1) BROWSER_SLOT_FILES+=("$BROWSER_SLOT_1") ;;
+      *) BROWSER_SLOT_FILES+=("$BROWSER_SLOT_DIR/shein-browser-read-$slot_index.lock") ;;
+    esac
+  done
+}
 DOMAIN=""
 LOCK_WAIT_SEC=0
 DEADLINE_MINUTE=""
@@ -48,6 +66,8 @@ done
 
 [[ "$DOMAIN" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || usage
 [[ "$LOCK_WAIT_SEC" =~ ^[0-9]+$ ]] || usage
+[[ "$BROWSER_SLOT_COUNT" =~ ^[1-9][0-9]*$ ]] || usage
+build_browser_slot_files
 if [[ -n "$DEADLINE_MINUTE" ]]; then
   [[ "$DEADLINE_MINUTE" =~ ^[0-9]+$ ]] || usage
   (( DEADLINE_MINUTE >= 0 && DEADLINE_MINUTE <= 59 )) || usage
@@ -101,8 +121,9 @@ validate_neutral_lock() {
 }
 
 validate_neutral_lock "$HOST_LOCK"
-validate_neutral_lock "$BROWSER_SLOT_0"
-validate_neutral_lock "$BROWSER_SLOT_1"
+for slot_file in "${BROWSER_SLOT_FILES[@]}"; do
+  validate_neutral_lock "$slot_file"
+done
 
 # --- Effective deadline resolution, BEFORE any flock ---
 #
@@ -196,34 +217,35 @@ if ! flock -w "$(lock_wait_remaining)" 7; then
 fi
 
 BROWSER_SLOT=""
-exec 6<>"$BROWSER_SLOT_1"
-if flock -n 6; then
-  BROWSER_SLOT=1
-else
-  exec 6>&-
-  exec 6<>"$BROWSER_SLOT_0"
+BROWSER_SLOT_INDEX=-1
+for (( slot_index = ${#BROWSER_SLOT_FILES[@]} - 1; slot_index >= 0; slot_index-- )); do
+  exec 6<>"${BROWSER_SLOT_FILES[$slot_index]}"
   if flock -n 6; then
-    BROWSER_SLOT=0
-  else
-    exec 6>&-
-    echo "[host-browser-read] defer domain=$DOMAIN reason=browser_slots_busy" >&2
-    record_defer "${DEFER_REASON}:browser_slots_busy"
-    exit 75
+    BROWSER_SLOT="$slot_index"
+    BROWSER_SLOT_INDEX="$slot_index"
+    break
   fi
+  exec 6>&-
+done
+if (( BROWSER_SLOT_INDEX < 0 )); then
+  echo "[host-browser-read] defer domain=$DOMAIN reason=browser_slots_busy" >&2
+  record_defer "${DEFER_REASON}:browser_slots_busy"
+  exit 75
 fi
 
-OTHER_SLOT=0
-[[ "$BROWSER_SLOT" == "0" ]] && OTHER_SLOT=1
-OTHER_SLOT_FILE="$BROWSER_SLOT_0"
-[[ "$OTHER_SLOT" == "1" ]] && OTHER_SLOT_FILE="$BROWSER_SLOT_1"
-PRESSURE_CLASS=browser
-exec 5<>"$OTHER_SLOT_FILE"
-if flock -n 5; then
-  flock -u 5
-else
-  PRESSURE_CLASS=browser-secondary
-fi
-exec 5>&-
+# The pressure class only depends on whether any other browser lane is free.
+PRESSURE_CLASS=browser-secondary
+for (( slot_index = 0; slot_index < ${#BROWSER_SLOT_FILES[@]}; slot_index++ )); do
+  [[ "$slot_index" == "$BROWSER_SLOT_INDEX" ]] && continue
+  exec 5<>"${BROWSER_SLOT_FILES[$slot_index]}"
+  if flock -n 5; then
+    flock -u 5
+    exec 5>&-
+    PRESSURE_CLASS=browser
+    break
+  fi
+  exec 5>&-
+done
 
 set +e
 node "$ROOT/scripts/check_host_resource_pressure.mjs" "--class=$PRESSURE_CLASS"

@@ -889,7 +889,7 @@ cp -a "\${src}." "\${dst}/"
     SHEIN_BI_SYSTEMCTL_SHOW_HELPER: m(systemctlShowHelper),
   };
 
-  // Settle the 28-service maintenance guards and namespace drop-ins. On
+// Settle the 30-service maintenance guards and namespace drop-ins. On
   // Windows the guard manager spawns systemctl directly from Node, so the
   // apply phase uses node.exe plus exact daemon-reload/show subcommand shims.
   // The show shim emits daemon-loaded properties in systemctl's block format;

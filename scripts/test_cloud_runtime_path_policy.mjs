@@ -17,6 +17,8 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const services = await discoverCloudRuntimeServices(path.join(ROOT, 'infra', 'systemd'));
 const expected = [
+  'shein-bi-backup-sync-nas.service',
+  'shein-bi-clock-sanity.service',
   'shein-bi-cloud-browser-cleanup.service',
   'shein-bi-cloud-daily-lark-report.service',
   'shein-bi-cloud-daily-refresh.service',
@@ -49,6 +51,8 @@ const expected = [
 assert.deepEqual(services, expected);
 assert.deepEqual(Object.keys(CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE).sort(), expected);
 assert.deepEqual(CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE, {
+  'shein-bi-backup-sync-nas.service': {profiles: 'none', state: 'ro', outputs: 'ro'},
+  'shein-bi-clock-sanity.service': {profiles: 'none', state: 'ro', outputs: 'ro'},
   'shein-bi-cloud-browser-cleanup.service': {profiles: 'rw', state: 'rw', outputs: 'ro'},
   'shein-bi-cloud-daily-lark-report.service': {profiles: 'host-ro', state: 'rw', outputs: 'rw'},
   'shein-bi-cloud-daily-refresh.service': {profiles: 'rw', state: 'rw', outputs: 'rw'},
@@ -80,8 +84,8 @@ assert.deepEqual(CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE, {
 });
 assert.deepEqual(validateCloudRuntimePathPolicy(services), {
   ok: true,
-  repositoryServiceCount: 28,
-  policyServiceCount: 28,
+  repositoryServiceCount: 30,
+  policyServiceCount: 30,
   issues: [],
 });
 

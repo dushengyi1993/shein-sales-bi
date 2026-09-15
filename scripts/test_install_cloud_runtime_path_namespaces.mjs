@@ -127,7 +127,7 @@ try {
   const audit = invoke(base);
   assert.equal(audit.status, 0, audit.stderr);
   assert.deepEqual(JSON.parse(audit.stdout), {
-    ok: true, mode: 'audit', policyCount: 28, plannedInstall: 28, unchanged: 0, confirmation: CONFIRMATION,
+    ok: true, mode: 'audit', policyCount: 30, plannedInstall: 30, unchanged: 0, confirmation: CONFIRMATION,
   });
   assert.deepEqual(await fs.readdir(fixtureTarget), before, 'audit must not write target systemd directory');
   assert.deepEqual(await fs.readdir(locks), [], 'audit must not provision browser directories');
@@ -136,7 +136,7 @@ try {
   assert.equal(invoke([...base, '--apply', '--confirm', 'WRONG']).status, 64);
   const apply = invoke([...base, '--apply', '--confirm', CONFIRMATION]);
   assert.equal(apply.status, 0, apply.stderr);
-  assert.equal(JSON.parse(apply.stdout).installed, 28);
+  assert.equal(JSON.parse(apply.stdout).installed, 30);
   assert.equal(await fs.readFile(systemctlLog, 'utf8'), 'daemon-reload\n');
   const startup = path.join(locks, 'chrome-profile-startup');
   const startupStat = await fs.stat(startup);
@@ -157,7 +157,7 @@ try {
   const settled = invoke(base);
   assert.equal(settled.status, 0, settled.stderr);
   assert.equal(JSON.parse(settled.stdout).plannedInstall, 0);
-  assert.equal(JSON.parse(settled.stdout).unchanged, 28);
+  assert.equal(JSON.parse(settled.stdout).unchanged, 30);
 
   const portal = path.join(fixtureTarget, 'shein-bi-portal.service.d', '50-runtime-paths.conf');
   const portalText = await fs.readFile(portal, 'utf8');
@@ -202,7 +202,7 @@ const sessionSecret = await fs.readFile(path.join(fixtureTarget, 'shein-bi-sessi
   assert.match(sectionQueue, /^ReadOnlyPaths=\/data\/shein-bi\/profiles \/data\/shein-bi\/outputs$/m);
   assert.match(sectionQueue, /BindPaths=\/data\/shein-bi\/state:/);
 
-  console.log(JSON.stringify({ok: true, auditNoWrite: true, installed: 28, daemonReloadOnly: true,
+  console.log(JSON.stringify({ok: true, auditNoWrite: true, installed: 30, daemonReloadOnly: true,
     startupDirectory: true, parentPermissionsUnchanged: true,
     unixOwnershipVerified: !isWindows, windowsOwnershipArgumentsOnly: isWindows}, null, 2));
 } finally {

@@ -1,0 +1,17 @@
+[Unit]
+Description=SHEIN BI boot clock sanity (timezone, local RTC, NTP wait, persistent timer stamp repair)
+After=network-online.target systemd-timesyncd.service
+Wants=network-online.target systemd-timesyncd.service
+# Run before the timers evaluate, so Persistent= catch-up decisions never use a
+# skewed boot clock. The NTP wait inside the script is bounded, so a boot without
+# a reachable NTP server still proceeds.
+Before=timers.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/shein-bi-clock-sanity.sh
+
+[Install]
+WantedBy=multi-user.target
+

@@ -230,7 +230,75 @@ systemctl show shein-bi-portal.service shein-bi-query.service shein-bi-webhook.s
 
 权限护栏：部署前后先运行 `sudo bash scripts/harden_cloud_runtime_permissions.sh` 审计；确认清单后再运行 `sudo bash scripts/harden_cloud_runtime_permissions.sh --apply`。该通用脚本的旧 `sheinops:sheinops` app-root 结果不满足库存 writer 的 check-to-exec 威胁模型；安装库存兼容 guard 后，必须再按本节运行 `harden_inventory_writer_checkout_permissions.py`，以 root-owned tracked source 和精确运行态 allowlist 结果为最终权限合同。所有库存 cutover 操作只使用 `/srv/shein-bi/runtime/locks/inventory-v2-cutover.lock`（或显式的全局 override）；`SHEIN_BI_RUNTIME_ROOT` 与 cwd 不得改变该默认锁。其他生产 `flock` 仍通过 `scripts/lib/shared_lock.sh` 管理，且不得使用 `/tmp/*.lock` 或 `0666` 共享锁。
 
+## fnOS VM 主机加固（2026-09-15 迁移）
+
+半托迁到飞牛独立 Linux VM 后，主机侧不再由全托的共享 tmpfiles/slice 代管，下面这些条目由本仓库负责安装。它们不是可选优化：缺 tmpfiles 会以 73 defer，缺压力阈值和时钟自愈会让任务以 75 defer 或静默丢班（2026-09-15 就真的丢掉了 `shein-bi-db-backup.timer` 当晚三次备份）。
+
+```bash
+# 1. /run/lock 协调文件：host / project / domain / browser lane
+sudo install -d -m 0755 /etc/tmpfiles.d
+sudo install -m 0644 infra/tmpfiles.d/shein-bi-scheduler.conf /etc/tmpfiles.d/
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/shein-bi-scheduler.conf
+
+# 2. 浏览器 lane 数量：shein-browser-read-N.lock 的个数必须等于 SHEIN_BROWSER_READ_SLOTS。
+#    两个 wrapper 都支持按 lane 数取锁（半托取最高空闲 lane，低位留给全托），
+#    /etc/systemd/system/shein-bi-cloud-morning-chain.service.d/60-browser-concurrency.conf 里：
+#      [Service]
+#      Environment=SHEIN_BROWSER_READ_SLOTS=4
+#      Environment=SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=4
+
+# 3. 主机资源压力阈值：把 2 核时代编译进 check_host_resource_pressure.mjs 的默认值调到本机档位
+sudo install -d -m 0755 /etc/systemd/system.conf.d
+sudo install -m 0644 infra/systemd/60-shein-bi-host-pressure.conf /etc/systemd/system.conf.d/
+
+# 4. OpenAPI / 营销价格会话并发：tracked unit 保留可移植默认，用 drop-in 覆盖本机档位
+sudo install -d -m 0755 /etc/systemd/system/shein-bi-cloud-morning-chain.service.d
+sudo install -m 0644 infra/systemd/shein-bi-cloud-morning-chain-openapi-concurrency.conf /etc/systemd/system/shein-bi-cloud-morning-chain.service.d/70-concurrency.conf
+sudo install -d -m 0755 /etc/systemd/system/shein-bi-cloud-daily-refresh.service.d
+sudo install -m 0644 infra/systemd/shein-bi-cloud-daily-refresh-concurrency.conf /etc/systemd/system/shein-bi-cloud-daily-refresh.service.d/70-concurrency.conf
+sudo install -d -m 0755 /etc/systemd/system/shein-bi-cloud-today-sales-reconcile.service.d
+sudo install -m 0644 infra/systemd/shein-bi-cloud-today-sales-reconcile-concurrency.conf /etc/systemd/system/shein-bi-cloud-today-sales-reconcile.service.d/70-concurrency.conf
+sudo install -d -m 0755 /etc/systemd/system/shein-bi-cloud-marketing-live-guard.service.d
+sudo install -m 0644 infra/systemd/shein-bi-cloud-marketing-live-guard-concurrency.conf /etc/systemd/system/shein-bi-cloud-marketing-live-guard.service.d/70-concurrency.conf
+sudo install -d -m 0755 /etc/systemd/system/shein-bi-cloud-marketing-repair.service.d
+sudo install -m 0644 infra/systemd/shein-bi-cloud-marketing-repair-concurrency.conf /etc/systemd/system/shein-bi-cloud-marketing-repair.service.d/70-concurrency.conf
+
+# 5. 6 vCPU / 8 GiB 档位的 NTP 与时区（IPv6 关闭后不要再指向 IPv6-only 的默认池）
+sudo install -d -m 0755 /etc/systemd/timesyncd.conf.d
+printf '[Time]\nNTP=ntp.aliyun.com cn.pool.ntp.org ntp.tencent.com\nFallbackNTP=ntp.ubuntu.com\n' | sudo tee /etc/systemd/timesyncd.conf.d/60-shein-bi-ntp.conf >/dev/null
+printf 'timezone: Asia/Shanghai\n' | sudo tee /etc/cloud/cloud.cfg.d/99-shein-bi-time.cfg >/dev/null
+
+# 6. 开机时钟自愈：按 RTC 实际内容对齐 /etc/adjtime、等 NTP、修复被错误时钟写坏的 timer stamp。
+#    必须在 timers.target 之前跑完，否则 Persistent= timer 会用跳变后的时钟判断 catch-up。
+sudo install -d -m 0755 /usr/local/libexec
+sudo install -m 0755 infra/libexec/shein-bi-clock-sanity.sh /usr/local/libexec/shein-bi-clock-sanity.sh
+sudo install -m 0644 infra/systemd/shein-bi-clock-sanity.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now shein-bi-clock-sanity.service
+
+# 7. 中文字体：云端登录窗口（noVNC 里的 Chrome）没有 CJK 字体时页面中文全是乱码
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y fonts-noto-cjk
+
+# 8. 办公网直连 portal（可选）：VM 直接挂在办公网时，给站点加一个局域网监听。
+#    /etc/nginx/sites-available/shein-bi 的 server 块内与 127.0.0.1:8080 并列：
+#      listen <LAN_IP>:80;
+#    然后 sudo nginx -t && sudo systemctl reload nginx。改完公网入口不变。
+
+# 9. 备份异机同步：unit 以 root 跑 ProtectSystem=strict，指向 /opt/shein-bi/maintenance/ 下的副本；
+#    发布时从仓库复制一份，并重新安装维护守卫（新服务必须在策略表里，否则 pause 会拒绝启动）。
+sudo install -d -m 0755 /opt/shein-bi/maintenance/backup-nas-sync-20260915
+sudo install -m 0755 scripts/sync_shein_bi_backup_nas.mjs /opt/shein-bi/maintenance/backup-nas-sync-20260915/sync_shein_bi_backup_nas.mjs
+sudo install -m 0644 infra/systemd/shein-bi-backup-sync-nas.service /etc/systemd/system/
+sudo install -d -m 0755 /etc/systemd/system/shein-bi-db-backup.service.d
+sudo install -m 0644 infra/systemd/shein-bi-db-backup-nas-sync.conf /etc/systemd/system/shein-bi-db-backup.service.d/60-nas-sync.conf
+bash scripts/install_cloud_maintenance_guards.sh --systemd-root /etc/systemd/system --apply --confirm APPLY_CLOUD_MAINTENANCE_GUARDS_V1
+sudo systemctl daemon-reload
+```
+
+浏览器 lane 数、压力阈值和并发都是**主机容量决策**，不是跨项目合同：unit 里的值保持可移植默认，本机档位一律放 drop-in，方便换机时只改 drop-in。
+
 部署到服务器后执行：
+
 
 ```bash
 cp infra/systemd/*.service infra/systemd/*.timer infra/systemd/*.path infra/systemd/shein-host-heavy-bi.slice /etc/systemd/system/

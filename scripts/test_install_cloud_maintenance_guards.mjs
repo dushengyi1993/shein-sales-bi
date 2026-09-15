@@ -153,11 +153,11 @@ process.stdout.write(blocks.join('\\n\\n') + '\\n');
   assert.deepEqual(JSON.parse(audit.stdout), {
     ok: true,
     mode: 'audit',
-    policyCount: 28,
-    plannedInstall: 23,
+    policyCount: 30,
+    plannedInstall: 24,
     plannedReplace: 0,
     plannedRemove: 0,
-    unchanged: 5,
+    unchanged: 6,
     confirmation: CONFIRMATION,
   });
   assert.deepEqual(await fs.readdir(systemdRoot), [], 'audit must not mutate the target root');
@@ -170,8 +170,8 @@ process.stdout.write(blocks.join('\\n\\n') + '\\n');
   assert.equal(apply.status, 0, apply.stderr);
   const applyResult = JSON.parse(apply.stdout);
   assert.equal(applyResult.mode, 'apply');
-  assert.equal(applyResult.policyCount, 28);
-  assert.equal(applyResult.installed, 23);
+  assert.equal(applyResult.policyCount, 30);
+  assert.equal(applyResult.installed, 24);
   assert.equal(applyResult.daemonReload, true);
   assert.equal(applyResult.effectiveGuardReadback, true);
 
@@ -191,7 +191,7 @@ process.stdout.write(blocks.join('\\n\\n') + '\\n');
     );
     assert.equal(await fs.readFile(guard, 'utf8'), await fs.readFile(template, 'utf8'));
   }
-  assert.equal(installedGuards, 23);
+  assert.equal(installedGuards, 24);
   assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-session-secret.service'], 'always');
   await assert.rejects(
     fs.lstat(path.join(systemdRoot, 'shein-bi-session-secret.service.d', '40-cloud-maintenance.conf')),
@@ -204,11 +204,11 @@ process.stdout.write(blocks.join('\\n\\n') + '\\n');
   assert.deepEqual(JSON.parse(settledAudit.stdout), {
     ok: true,
     mode: 'audit',
-    policyCount: 28,
+    policyCount: 30,
     plannedInstall: 0,
     plannedReplace: 0,
     plannedRemove: 0,
-    unchanged: 28,
+    unchanged: 30,
     confirmation: CONFIRMATION,
   });
 

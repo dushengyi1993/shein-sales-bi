@@ -1,0 +1,202 @@
+# 半托迁移飞牛 + 新云边缘：2026-09-15 现场记录
+
+## 结果
+
+半托（`E:\Codex WorkSpace\Shein销售统计`）已从旧云 `43.165.167.135` 整体迁到飞牛 VM `192.168.1.200`（`shein-bi-half`），公网入口与 OpenAPI 固定出口在 `43.165.185.3`。DNS `sa.dushengyi.cc` A 已由用户切到 `43.165.185.3`，旧云保留兼容转发。
+
+冻结前基线（旧云 20:14:54 停写）→ 新库恢复后**逐项一致**：
+
+| 对象 | 冻结基线 | 新库 |
+| --- | --- | --- |
+| 表 / 索引 | 154 / 244 | 154 / 244 |
+| `raw.et_endpoint_row` | 2,100,530 | 2,100,530 |
+| `fact.et_box_stock_snapshot` | 625,661 | 625,661 |
+| `fact.quality_skc_snapshot` | 302,214 | 302,214 |
+| `fact.visible_inventory_snapshot` | 308,899 | 308,899 |
+| `fact.link_suggestion` | 161,929 | 161,929 |
+| `fact.order_item` / `order_header` | 13,783 / 13,354 | 13,783 / 13,354 |
+| `ops.link_ops_event` / `_idempotency` | 43,841 / 43,811 | 43,841 / 43,811 |
+| `ops.shein_webhook_receipt` | 28,514 | 28,514 |
+
+生产动作验收：
+
+- 真实回调已落新机：`ops.shein_webhook_receipt` 28,514 → 28,518，nginx 记录希音推送 IP `8.219.56.57` 200。
+- 定时任务首次实跑成功：`today-sales-reconcile` 13:00:47 success（含 OpenAPI 调用与飞书通知）、`portal-section-queue` 修复后 success（`[portal-section-worker] section=rankings`）。
+- 公网：DNS 解析（8.8.8.8/1.1.1.1/旧云本地）均为 `43.165.185.3`；`/` 302、`/api/health` 401、`/cloud-login-maintenance` 200、webhook POST 401（验签拒），旧云兼容转发同样 302。
+- 代码出处：`/opt/shein-bi/app` 为 git 仓库，`describe=2026.09.15.1`、`HEAD=0e0f2bd4cd534572d9e9ad13db090bdec5143296`、工作区无漂移。
+
+## 关键搬迁事实
+
+- 回调端口经抓包确认走**标准 443**（2026-09-15 18:04:21，`8.219.56.57` → 旧云 :443 两个 SYN 与两条 nginx 200 对应；8443 整段 0 包）。因此**无需改希音后台、无需登录 21 个店铺的开放平台**；8443 仅是受限回退。
+- 传输链路：旧云→飞牛直连只有约 200 KB/s（港陆线路）；改用**本机中转**（旧云→本机 8 流 ≈10 MB/s，本机→飞牛走局域网）后全量约 6 GB 在半小时内完成，所有文件 sha256 双端一致。
+- 按价值裁剪：不搬 `runs/**/plans/source-evidence/**`（3.4 GB，希音 API 原始响应缓存）、`pipeline-markers/evidence/**`（2.5 GB）、`*/source-evidence/**`（6.3 GB）、`/data/shein-bi/outputs` 中 6.5 GB 历史按日归档；搬 `bi-portal` + 近 24h 活跃产物（677 MB）、守卫对账证据（journal/results/state/versions/最近 24 份计划）、代码树 + `.git`、21 店 profile、secrets/config。
+
+## 迁移中修掉的真实问题（均为旧云有、新机缺）
+
+1. **`/data/shein-bi/*` 是软链**：unit 的 `BindPaths/BindReadOnlyPaths` 需要真实目录，且 `provision_bi_session_secret.mjs` 有『父目录必须是真实目录』的硬校验 → 改为真实 bind mount 并写入 fstab。
+2. **缺 `/data/shein-bi/outputs`**：补 bind mount（旧云 `/data` 是独立盘，新机数据盘挂 `/srv/shein-bi`）。
+3. **`/opt/shein-bi/app/config` 属主被改坏**（误执行 `chown -R root:sheinops`）：重新解包 config 包恢复 `sheinops:sheinops 0600`，否则 webhook 读 `shein_openapi.local.json` 报 EACCES。
+4. **`sheinops` 没有免密 sudo**：旧云有 `/etc/sudoers.d/90-sheinops-codex`（门户用 `sudo psql` 生成 BI 分区）→ 原样补齐。
+5. **`/run/lock` 协调锁缺失**：`run_host_heavy_job.sh` 要求 `/run/lock/shein-host-heavy.lock` 等已存在且可读写 → 新增 `/etc/tmpfiles.d/shein-bi-scheduler.conf`（旧云由 `shein-fm-scheduler.conf` 兼任）。
+6. **pg_restore 不支持 stdin 并行**：改为 `docker cp` 进容器后 `pg_restore -j 4 <文件>`。
+7. **IPv6 无出口**：VM 有全局 IPv6 地址但无路由，docker/npm/curl 会先试 IPv6 超时 → 已 `disable_ipv6=1`（`/etc/sysctl.d/99-disable-ipv6.conf`）。
+8. **旧云 sshd 并发限制**（`PerSourceMaxStartups 3`）挡住并行搬运 → 临时放开，搬运后已还原（备份 `.pre-migration-20260915`）。
+
+## 未搬 / 待办
+
+- `/data/shein-bi/outputs` 的 6.5 GB 历史按日归档仍在旧云（未删除）。如需冷备可整体复制到飞牛 `/vol3`。
+- **备份异盘改造未做**：`shein-bi-db-backup` 仍写 `/srv/shein-bi/backups`（与数据同盘）。全托最低要求是异盘，建议改到飞牛 `/vol3`。
+- 明日 07:10 晨链是本迁移后的第一次完整日常链路，需要检查一次结果。
+- 旧云 `sa` 兼容转发建议保留 ≥7 天（等旧 NS 缓存消退），之后再删旧 Caddy 的 `sa` site 与相关残留。
+- 本地中转缓存目录 `E:\migration-transit`（含 `pull.mjs` 工具与已下载数据）可自行删除。
+
+## 回滚
+
+旧云源码、数据、配置、备份均未删除；其 18 个 timer 与服务已 stop + **disable**（禁用不删除，重启也不会复活写入者）。回滚＝在旧云 `systemctl enable --now` 对应 timer/服务，并把 DNS 指回 `43.165.167.135`。
+
+## 重启验证发现的三个持久化问题（2026-09-15 21:20-21:30，已修复并复验）
+
+首次开机自启验证时重启了一次 VM，暴露出 3 个只在重启后才显形的问题——这类问题白天跑一轮是发现不了的：
+
+1. **系统时区是 `Etc/UTC`**（旧云是 `Asia/Shanghai`）。所有固定时刻的定时任务会按 UTC 执行，整体错 8 小时（晨链会变成 15:10 CST）。
+   修复：`timedatectl set-timezone Asia/Shanghai`；因 systemd 缓存了旧时区下算出的 next_elapse，需显式 `systemctl restart` 每个 timer（`daemon-reload` 不够）。复验：`list-timers` 全为 CST 且与旧云排班逐条一致（晨链 07:10、昨日终稿 02:45、备份 01:45、营销 11..20:45、看门狗 :50…）。
+2. **cloud-init 重置 `/etc/hosts`**（`manage_etc_hosts: True`），把 `openapi.sheincorp.com → 127.0.0.1` 这条隧道入口删掉了。后果：应用的希音调用绕过隧道、从办公室 IP 直连 → 平台报 `IP is not in the whitelist: 14.145.63.180`，商品对账整批失败。
+   修复（双重保险）：把两条映射写进 `/etc/cloud/templates/hosts.debian.tmpl`，并新增 `/etc/cloud/cloud.cfg.d/99-shein-bi-hosts.cfg` 的 `bootcmd` 每次开机幂等重写。复验：重启后映射仍在，`curl` 出口为 `127.0.0.1`，商品对账服务 exit=0。
+3. **`state/pipeline-markers` 目录属主被 tar 隐式创建成 `root:root 755`**（打包清单只列了日期子目录，没列这一层）。应用要求 `2770`，而 unit 启用了 `RestrictSUIDSGID`，无法自行补 setgid 位 → `PIPELINE_MARKER_DIRECTORY_MODE_FIX_FAILED cause=EPERM`。
+   修复：`chown sheinops:sheinops` + `chmod 2770`（与旧云一致），同时把 `state/locks`、`state/cloud_morning_chain` 一并校正为 2770。对照确认：`state/cloud_ops_watchdog`、`state/order_status_recheck_last.json` 的 root 属主旧云本来如此，不是迁移引入。
+
+第二轮重启复验（uptime 2 分钟时检查）：时区 CST、hosts 映射在、sysctl 443 在、marker 目录 2770、6 个 bind 挂载、数据库容器 healthy、四个服务 active、出口 `127.0.0.1`、定时任务 CST 排程、真实回调持续入库（28,514 → 28,524）。
+
+## 开机自启
+
+飞牛 VM `shein-bi-half` 的「开机自动开启」原为**否**，已按用户要求改为**是**（VM 需先关机才能编辑；已在关机状态下修改并确认，随后开机）。
+
+VM 内部的开机自恢复也已逐项验证：fstab 六个 bind 挂载、`/etc/tmpfiles.d/shein-bi-scheduler.conf` 重建 `/run/lock` 协调锁、Docker 容器 `unless-stopped`、门户/查询/webhook/隧道四个 unit `enabled`、18 个 timer `enabled`（另 2 个按旧云保持 masked）。
+
+## 备份异盘改造（NAS /vol3）完成 2026-09-15 21:30-21:50
+
+背景：迁移后备份仍写 `/srv/shein-bi/backups`（与数据同盘，不满足全托定下的最低要求）。按全托 2026-09-05 已跑通的模式实现半托版本。
+
+**组成**
+
+| 部件 | 位置 |
+| --- | --- |
+| NAS 接收器（forced-command，Python 标准库） | `/home/dushengyi/.local/libexec/shein-bi-backup-receiver.py`，sha256 `4feb7340531d23692bce0953c3a89ee177e780b05c1a65beedc50f479783aa05` |
+| NAS 目标目录 | `/vol3/shein-bi-backups`（0700，dushengyi，独立盘，可用 306 G） |
+| VM 专用身份 | `/srv/shein-bi/secrets/backup-nas-sync/{id_ed25519,known_hosts}`（私钥只在 VM 内生成，0600） |
+| NAS 授权行 | `from="192.168.1.200",restrict,command="…/shein-bi-backup-receiver.py"`（不改动其他行，改前已备份） |
+| VM 发送器 | `/opt/shein-bi/maintenance/backup-nas-sync-20260915/sync_shein_bi_backup_nas.mjs`（release 树之外，同全托） |
+| 同步服务 | `/etc/systemd/system/shein-bi-backup-sync-nas.service` |
+| 触发接线 | `shein-bi-db-backup.service.d/60-nas-sync.conf` → `OnSuccess=shein-bi-backup-sync-nas.service`（已读回） |
+| 仓库模板 | `scripts/receive_shein_bi_backup_nas.py`、`scripts/sync_shein_bi_backup_nas.mjs`、`infra/systemd/shein-bi-backup-sync-nas.service`、`infra/systemd/shein-bi-db-backup-nas-sync.conf` |
+
+**协议与安全边界**：发送端以只读 fd 固定源文件（dev/inode/size/mtime/ctime 二次核验）、校验 PGDMP 魔数，并用容器内 `pg_restore --list` 验证归档；接收端只接受一行 JSON 头（version/name/bytes/sha256），无目标路径参数、无 shell；写 0600 临时文件 → fsync → 哈希校验 → 硬链接发布（同名不同哈希一律拒绝）→ 清理临时文件。SSH 侧 `-F /dev/null`、BatchMode、IdentitiesOnly、独立 known_hosts 严格校验。
+
+**保留与容量**：接收端内置有界保留 `KEEP_COPIES=14`（只匹配自己命名空间 `shein-bi-YYYYMMDD-HHMMSS.dump` 的普通文件，绝不触碰锁文件、临时文件、符号链接或其他命名；本次刚收到的那份永不删除）。加上本地 7 天保留，NAS 稳态约 15 份 × 1.1 G ≈ 16 G，远低于 306 G 可用。单文件上限 100 GiB。
+
+**已验证证据（2026-09-15）**
+
+1. 合成数据自测：首发 copied、重发 already_present、坏哈希 HASH_MISMATCH 拒绝、落盘 0600、无残留。
+2. 真实归档 #1：`20260915-213622/shein_bi.dump`（1,105,243,651 B）→ NAS `shein-bi-20260915-213622.dump`，NAS 独立回读大小与 sha256 一致、mode 0600；重跑返回 already_present、不覆盖。
+3. 真实归档 #2 走 systemd 服务（含沙箱）：state=copied、name=shein-bi-20260915-214023.dump、archiveVerified=true，28 秒完成，Deactivated successfully。
+4. 保留策略测试：连送 15 份合成旧归档 → 只保留最新 14 份（本轮新收的那份不受影响），两份真实备份未被触碰，随后合成文件全部清理。
+
+**尚未自动验收的一环**：OnSuccess 由「备份服务成功」触发，而手动跑备份会被 `--deadline-at 02:37` 判为已过截止线而暂缓（exit 75，属设计内行为）。因此「真实备份成功 → 自动触发同步 → NAS 回执」这条完整链路要等今晚 01:45/02:05/02:25 的备份定时器实际跑一次才会经过。届时检查：
+
+```bash
+sudo systemctl status shein-bi-backup-sync-nas.service --no-pager | tail -5
+sudo cat /srv/shein-bi/runtime/backup-nas-sync/latest.json
+ls -l /vol3/shein-bi-backups/
+```
+
+**待办（建议走发版流程）**：最近成功时间检查与失败告警目前只有 systemd 失败状态与 `runtime/backup-nas-sync/latest.json`，watchdog 尚未纳入（`cloud_ops_watchdog.mjs` 现在没有任何备份检查）。建议在已有 watchdog 排班里增加 NAS 同步新鲜度检查，复用既有告警通道，不新增 timer。
+
+## 店铺自动化路径验证与又一个缺项（2026-09-15 21:50-22:00）
+
+用迁移过去的浏览器 profile 做了一次真实无头探针（`node scripts/launch_store_browser.mjs DL --headless`）：
+
+- 结果：`debugPort.ok=true`（pageCount 5）、`profileDir=/opt/shein-bi/app/profiles/persistent-dl-profile`（数据盘 bind ✓）、店铺身份 `DL - 地利 - GS5337922`、`onDeviceAiDisabled=true`（项目要求的禁用本机大模型标记生效 ✓）、目标 URL 为店铺订单管理页。
+- 探针结束按项目规矩关闭任务自有浏览器：`cleanup_shein_store_browsers.mjs` → `profileSingletons removed=3 errors=0`，Chrome 进程归零。
+
+**探针暴露的缺项**：`/opt/shein-bi/app/logs` 不存在 → 启动器 `mkdir` 报 EACCES，店铺浏览器任务会直接失败。已按旧云补齐 `sheinops:sheinops 775`（旧云该目录同样是 0775 且含 link-ops 等子目录）。
+
+随后做了 `/opt/shein-bi/app` 顶层目录逐项对比：新机 30 项 vs 旧云 33 项，差异只有 ①一个名为 `"` 的垃圾文件、②`tmpcloud-marketing-local-runtime-20260816-…`（8 月陈旧临时目录，按项目卫生规则本就该清）、③`backups/`（内含历史 release 备份）。三者都无功能影响，无遗漏的运行目录。
+
+顺带确认：`manual-login-recovery` 21:47 成功（队列为空，未起浏览器）、`openapi-stock-refresh` 21:49 exit=0（21 店商品对账经隧道走新云出口）、`browser-cleanup` 21:20 因刚重启后 `BOOT_SETTLING`+`IO_STALL_PRESSURE` 正常延迟到 03:20。
+
+## 服务用户家目录遗漏项（2026-09-15 21:52-21:56，已补齐并验证）
+
+打包清单覆盖了 `/srv/shein-bi/*`、`/opt/shein-bi/app` 与 `/data/shein-bi/*`，但**没有覆盖 `sheinops` 的家目录**，因此这些运行依赖当时并未随迁移过去：
+
+| 遗漏项 | 后果 | 处理 |
+| --- | --- | --- |
+| `/opt/shein-bi/app/logs`（gitignore 目录） | 店铺浏览器启动器 `mkdir` 报 EACCES，浏览器类任务直接失败 | 按旧云补 `sheinops:sheinops 775` |
+| `/home/sheinops/.ssh/shein_bi_deploy`（**实际在用**的 GitHub 部署密钥，指纹 `SHA256:Wjwphs7nms7kbuyIxXzlgv9jIEf8GV8a1g3p0e8kk5Q`） | 新主机无法 fetch/push；`secrets/github_deploy_key` 是另一把（`SHA256:x6wKr+p4…`），GitHub 不认 | 从旧云复制该私钥与 known_hosts，0600 sheinops |
+| `/home/sheinops/.gitconfig`（含 `safe.directory=/opt/shein-bi/app`、`core.hookspath`） | git 对 root 属主的仓库报 `dubious ownership`，任何 git 操作失败 | 复制 .gitconfig 与 `.codex/git-hooks` |
+| `/home/sheinops/.lark-cli`、`.local`、`.config` | 飞书相关任务缺少 CLI 状态 | 一并复制（合计约 6 MB；`.cache` 831 MB 未搬） |
+
+验证：`git ls-remote --heads origin` 返回分支列表（与旧云一致）、`git fetch --dry-run origin main` 成功、标签可达 → **新主机具备发布/拉取能力**（push 仍按项目规矩走开发机 + PR）。
+
+教训：迁移清单应显式包含「服务用户家目录 + gitignore 运行目录」两类，本次是逐个探针（浏览器启动、git、备份）才暴露的。
+
+## 发布来源审计（fail-closed）红转绿：数据盘绑定目录必须带仓库跟踪文件（2026-09-15 22:00-22:05）
+
+watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=246`。排查链：
+
+1. 宿主机上 `git status --porcelain` 是**干净的**（0 项），说明不是普通工作区漂移。
+2. 差异来自 **unit 沙箱**：watchdog/backup 等 unit 都有 `BindPaths=/data/shein-bi/outputs:/opt/shein-bi/app/outputs`，即在服务命名空间里 `outputs` 被替换成**数据盘那份**。旧云的 `/data/shein-bi/outputs` 里除了活跃产物，还包含 **247 个被仓库跟踪的历史文件**（`outputs/cleanup/…`、`outputs/cloud-migration/…`、`outputs/product-image-suite/…` 等）。迁移时我按「历史归档无价值」把数据盘 outputs 裁成近 24 小时活跃子集，**把这 247 个仓库跟踪文件一起裁掉了** → 沙箱里看就是 246 个已跟踪文件被删除，触发 `check_release_source_state.mjs` 的 fail-closed 判定。
+
+**修复**：`git archive HEAD -- outputs | tar x -C /srv/shein-bi`（用发布 tag 的内容补齐，权威一致），随后 `chown -R sheinops:sheinops`。
+
+**验证**：在与 unit 等价的 systemd 沙箱（同样三条 BindPaths）里运行真正的检查脚本，结果 `ok: true`、`dirtyEntries: []`、`hiddenIndexEntries: []`、`missingTrackedFiles: []`、`trackedFileCount: 1447`。
+
+**教训（写入迁移清单）**：凡是 unit 用 `BindPaths` 把数据盘目录绑到应用路径的（`outputs`、`state`、`profiles`），迁移后该数据盘目录**必须包含仓库跟踪的全部文件**（`git ls-files <dir>`），否则沙箱内的工作区看起来缺文件，会触发 fail-closed 的源码审计。`state`/`profiles` 经查跟踪文件数为 0，无此问题。
+
+另：watchdog 当时还报了两条与我手动操作/切换窗口直接相关的项——`shein-bi-db-backup.service failed exit=75`（我按 unit 同一环境手动跑备份，21:36 已过 `--deadline-at 02:37`，属设计内暂缓；已 `systemctl reset-failed` 清除）与 `营销修复队列未闭环 rows=354`（切换冻结使 20:45 那次 marketing-repair 未执行，队列会等到次日 11:45 窗口处理；旧云 19:50 的 watchdog 无此告警，故非迁移缺陷而是切换窗口的直接后果）。`订单闭环待复查` 是旧云同样存在的既有业务项。
+
+## 日更前提排查：按店按日证据文件的 24 小时窗口代价（2026-09-15 22:00-22:15）
+
+晨链会读按店按日的续跑证据 `outputs/<domain>/<store>/<businessDate>.json`（`lib/morning_resume_evidence.mjs`，DOMAINS = shein_links / shein_business_domains），并校验 `payload.ok===true`、`date`、`store` 三者一致，不一致即 fail-closed。
+
+**发现**：我按「近 24 小时」裁 outputs 时，`shein_business_domains` 的 **LG、HY 两家 09-14 文件是 09-14 16:58 写的**（早于窗口）被裁掉 → 该日 business_domains 只有 19/21 ✗。
+
+先确认这**不是**「今天的数据没产出」：旧云的 `2026-09-15.json` 同样为 0 个（晨链的 businessDate 就是 09-14，09-15 的文件明天才会写），故只是窗口裁剪问题。
+
+**修复**：直取 LG、HY 的 09-14 两个文件（286 KB / 320 KB）补入 `/srv/shein-bi/outputs/shein_business_domains/`（曾试打包近 7 天 723 MB 走中转，但当时链路只有约 100 KB/s，遂改为按需取 2 个文件）。
+
+**验证**：① 计数 21/21（两个域）；② 用应用自己的构建器在等价沙箱里跑 `buildMorningResumeEvidence({root:'/opt/shein-bi/app', date:'2026-09-14'})` → `ok: true`、`storeCount: 21`。
+
+同批排查的其它前提：`outputs/et-forwarder/latest-manifest.json` ✓、当日 `outputs/reports/marketing-daily-guard-*.{json,md}` ✓、`state/openapi-probes/*.latest.json` ✓、`outputs/order_status_recheck/` ✓、`state/order_status_recheck_last.json` ✓、`runtime/{host-scheduler,et-low-inventory-guard,daily-inventory-replenishment,openapi-product-cache,cloud_manual_login_recovery,bi_link_ops_assets}` ✓、营销折扣人工覆盖注册表 ✓。
+
+两个看似缺失但**良性**的项：`runtime/et-low-inventory-guard.json`（旧云也没有、代码不引用）、`outputs/et-storage-fee/`（`cloud_et_storage_fee_sync.sh` 自己 `mkdir -p` 后读自己刚写的 manifest，不对历史数据有依赖）。
+
+结论：按店按日的证据类文件才受 24 小时窗口影响，而运行只读**业务日期当天**，补齐当天即可；其余「最近一次」指针类输入都是近期写入，未受窗口影响。
+
+## 打包目录之外的缺口：控制面 / 运行时权威证据 / ET 运行时（2026-09-15 22:15-22:40）
+
+做了一次系统性的「源与目标对照 + 逐任务前提核查」，又发现 5 处真实缺口，全部修复并验证：
+
+1. **systemd 控制面零漂移（对照确认，非缺陷）**：把旧云与新机 `/etc/systemd/system` 下 151 个 shein-bi unit/drop-in 逐文件哈希对比 → **VM 缺失 0 个、共有文件内容差异 0 个**，新机多出的恰好是 `shein-bi-backup-sync-nas.service`、`shein-bi-db-backup.service.d/60-nas-sync.conf`（本次新增）与 `shein-bi-edge-tunnel.service`（迁移引入）。
+2. **`/etc/shein-bi/partner-cli-release.env` 缺失**（105 B，root:root 0600）：portal 的 `75-partner-cli-release.conf` 以可选方式引用它，内含 partner CLI 发布用的 GitHub token。已按旧云字节一致补入。**注意**：排查时我把该文件内容打印到了会话输出里（我的失误），如需可将该 token 视作已暴露处理；后续同类凭据一律只比对哈希、不打印内容。
+3. **`/var/lib/shein-bi-control/` 整个缺失** ✗ —— 这是控制面，不只是维护模式标记：`cloud-maintenance.json`（活标记，generation 363）与 **`inventory-writer-compatibility/`（库存写入兼容守卫的激活/兼容记录）**。缺它的后果是库存写入 fail-closed。已补 `cloud-maintenance.json` + `inventory-writer-compatibility/`（`root:sheinops 2750`，26 项，15 MB）；其余 38 个条目里的 `deployments/`(205 M) 与 `v7-*`(各 35 M) 经查代码零引用，属归档不搬。验证：`manage_cloud_maintenance_mode.mjs status` → `ok:true, active:false, generation:363`。
+4. **发布权威证据链缺失** ✗：`/srv/shein-bi/runtime/deployed_release.json`（formal 部署凭据 v3）与 `release-attestations/2026.09.15.1/release-attestation.json`（CI provenance）都没随迁移过去（前者因 runtime2 包的通配在错误 cwd 展开、错误又被 `2>/dev/null` 吞掉）。补齐后守卫断言从 `INVENTORY_WRITER_RELEASE_RECEIPT_INVALID` → `INVENTORY_WRITER_AUTHORITY_INVALID` → **`[OK] 与 inventory compatibility authority 已对齐（generation 105, commit 0e0f2bd4…）`** ✓。
+5. **ET 运行时未安装（真实生产故障）** ✗✗：22:20 的 `et-low-inventory-recheck` 实际失败并报 `ET runtime is not installed; run ensure_et_forwarder_runtime.sh --install during deployment`。旧云装有 `python3-pip`/`python3-venv`，新机没有，且 `runtime/et-forwarder/` 下只有空脚手架。处理：装 pip/venv → 跑项目自己的 `ensure_et_forwarder_runtime.sh --install`（按 `requirements-et-forwarder.lock` 下载哈希锁定的 wheel）→ `current` 指向 `venvs/60da40cbccfa9b04a4a6e429decf819ce19503a00c42a9876247777ec63f7337`，**与该锁的 sha256 完全一致、与旧云同名**，`--verify` 通过，`import ddddocr` 成功。ET HTTP 登录态（`et-forwarder/session/…local.json`，582 B，root:sheinops 600）同时补入。
+
+同批补入的小件：portal 状态文件 `bi_action_state.json` / `bi_link_ops_tasks.json`(3.3 M) / `bi_link_ops_chats.json`，以及 `/srv/shein-bi/{marketing-repair-immediate,audit,uploads,data}`（营销即时授权的邮箱目录，README 要求 root 预建、服务不自建）。
+
+**未搬（已判定为归档，非必需）**：`runtime/source-release-bundles`(244 M)、`source-release-candidates`(236 M)（源码包，仅重跑激活流程才需要）、`runtime/automation-delivery`(63 M，通知投递去重状态；本次链路太差未取，待补)、`release-attestations` 中历史 tag。
+
+## 时钟跳变的第二个后果：当晚数据库备份会被整夜跳过（2026-09-15 23:20 修复）
+
+开机瞬间 `rtc_cmos` 被当 UTC 读，内核先把系统时间设成 `2026-09-16T07:09`，systemd 的 `Persistent=true` 计时器据此把「上次触发」记成了 9/16 07:09。
+
+后果不只是那两个 `deadline_elapsed` 失败：`shein-bi-db-backup.timer` 的三次机会是 `01:45 / 02:05 / 02:25`，而 `LastTriggerUSec=2026-09-16 07:09:10` 已经晚于这三个点，`NextElapseUSecRealtime` 被推到 **9/17 01:45** —— 等于 9/16 整晚不备份，NAS 的 `OnSuccess` 同步也一并不会触发。其它 timer 要么频率更密，要么下一次合法时点仍在当天，所以没被跳掉。
+
+取证与修复：
+
+- `systemctl show shein-bi-db-backup.timer -p LastTriggerUSec -p NextElapseUSecRealtime` → `2026-09-16 07:09:10` / `2026-09-17 01:45:00`；
+- `ls -l /var/lib/systemd/timers/stamp-shein-bi-db-backup.timer` → mtime `2026-09-16 07:09:10`，stamp 就是错误「上次触发」的来源；
+- 修复：把 stamp 的 mtime 改回最后一次真实备份时间（9/15 21:43，即 `backups/auto/20260915-214023/` 的落盘时间），再 `systemctl restart shein-bi-db-backup.timer`；
+- 读回：`LastTriggerUSec=2026-09-15 21:43:00`、`NextElapseUSecRealtime=2026-09-16 01:45:00` ✓，并且重启 timer 没有触发追赶运行。
+
+教训：这台机器上 `set-local-rtc 1` 是必须的，但时钟纠正完成后要单独检查 `Persistent=true` 计时器的 `LastTriggerUSec`，它可能停在「错误的未来」，从而静默吃掉当天剩下的全部时点。
