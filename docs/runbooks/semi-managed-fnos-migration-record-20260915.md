@@ -369,3 +369,13 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 **顺带核实（避免误判）**：journal 里 `2026-09-16T07:09:xx` 的 kernel/dockerd/Portal 记录是**迁移期错误时钟留下的未来时间戳**（旧 boot 残留），不是现在的时间跳变——`timedatectl` 显示 clock synchronized / Asia/Shanghai / RTC 非本地，`uptime -s` = 23:35:30，与本地时间一致；warehouse Postgres 正常（`select now(), count(*) from fact.order_item` → `2026-09-16 06:10:46+08 | 13810`）。
 
 **留给后续的设计问题（本轮不改）**：闸门用全局 PSI 做容量判据，会被任意一个 cgroup 的软上限节流污染。要么让闸门读「本任务自己 cgroup 子树」的压力，要么在判定时排除「仅由某服务自身 MemoryHigh 节流贡献」的 stall。
+
+### 同一个失效模式在晨链自己身上也成立（2026-09-16 06:20–06:50，已修）
+
+- 用「与晨链完全同构」的一次性单元（同 slice、同 wrapper、`SHEIN_BROWSER_READ_SLOTS=4`、`SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=4`）跑 4 个店，并把 cgroup 上限设成晨链当时的 `MemoryHigh=2600M`：`memory.current` 冲到 **2,796 MB**（超软上限），host PSI full avg10 47 → 65。
+- 再跑 5 个店（必然出现「4 条 lane 满、第 5 个要拿 lane」的路径）：`memory.current` = **3,470,336,000 B ≈ 3.31 GiB**，PSI 94–98；同一次 run 的 5 个店耗时 **超过 7 分钟**（无 cgroup 上限的 4 店 run 只要约 50 秒）——节流本身就把它拖慢。
+- 结论：4 条 lane 的晨链工作集约 **3.3 GB**，而旧 unit 的 `MemoryHigh=2600M / MemoryMax=3400M`（当年按 2 条 lane 定的）必然被持续回收；cgroup 一超软上限，全局 PSI 就长期高于闸门阈值 4，链内后续店会被自己人「让位」。
+- 修法：`MemoryHigh=4000M`、`MemoryMax=5000M`；同时把仓库 unit 里的 `SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=2` 与缺失的 `SHEIN_BROWSER_READ_SLOTS` 一起对齐成 **4/4**（此前只有 VM 上的 drop-in 是 4、仓库里还是 2，属迁移时留下的不一致）。
+- 测试拦回归：`test_systemd_security_contract.mjs` 新增四条——lane 数必须显式声明、per-store 并发必须等于 lane 数、`MemoryHigh ≥ 900 MiB × lane 数`、`MemoryMax > MemoryHigh`。
+- 收尾：停掉探针、按受控路径关闭全部浏览器（`cleanup_shein_store_browsers.mjs --all`，0 残留）、确认 4 条 lane 全部 free、Avail 6.98 GB、PSI 回落，然后交给 07:10 的定时链路跑。
+- 同一类风险提醒：`shein-bi-cloud-manual-login-recovery.service` 也是 `2600M/3400M` 且会经浏览器 wrapper 启动登录窗口，本轮无实测证据，暂不改，待它下次真正跑队列时量一次。

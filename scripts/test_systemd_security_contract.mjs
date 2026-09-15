@@ -575,6 +575,19 @@ assert.match(morningService, /SHEIN_BI_MORNING_INVENTORY_RESERVE_SEC=2700/,
   'the production unit reserves the bounded stock-refresh plus inventory window');
 assert.match(morningService, /^Environment=SHEIN_BI_INVENTORY_JOURNAL_DIRS=\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/results:\/srv\/shein-bi\/runtime\/et-low-inventory-guard\/results$/m,
   'the direct morning-chain guard must scan the daily and ET durable journal domains');
+const chainLaneMatches = [...morningService.matchAll(/^Environment=SHEIN_BROWSER_READ_SLOTS=(\d+)$/gm)];
+assert.equal(chainLaneMatches.length, 1, 'the morning chain must declare exactly one browser lane count');
+const chainLaneCount = Number(chainLaneMatches[0][1]);
+const chainConcurrencyMatches = [...morningService.matchAll(/^Environment=SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=(\d+)$/gm)];
+assert.equal(chainConcurrencyMatches.length, 1, 'the morning chain must declare exactly one per-store browser concurrency');
+assert.equal(Number(chainConcurrencyMatches[0][1]), chainLaneCount,
+  'per-store concurrency must equal the browser lane count: a surplus worker only polls for a free lane');
+const chainMemoryHighMb = Number(property(morningService, 'MemoryHigh').replace(/M$/, ''));
+const chainMemoryMaxMb = Number(property(morningService, 'MemoryMax').replace(/M$/, ''));
+assert.ok(chainMemoryHighMb >= 900 * chainLaneCount,
+  `the morning chain MemoryHigh must cover its browser lanes (~900 MiB each including wrapper overhead), got ${chainMemoryHighMb}M for ${chainLaneCount} lanes`);
+assert.ok(chainMemoryMaxMb > chainMemoryHighMb,
+  'the morning chain MemoryMax must stay above MemoryHigh so throttling, not killing, is the first response');
 assert.doesNotMatch(morningService, /^SuccessExitStatus=.*75$/m,
   'the morning chain must surface real failures, never mask them');
 assert.match(morningScript, /daily_operating_refresh_done/);
