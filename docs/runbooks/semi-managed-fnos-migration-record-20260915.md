@@ -216,6 +216,31 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 
 - PR #169 已合并（`b19ddc1`），main-push CI 全绿；源码版本 **`2026.09.16.1`** 已通过 `source-release.yml` 发布：annotated tag `2026.09.16.1` → `b19ddc1`，Release 非 draft 且 `immutable=true`，两份资产（`release-attestation.json` + `.sha256`）下载后校验一致，attestation 绑定 `commit=b19ddc1…`、CI run `34994917632`（main push）、trust policy `590280…`。
 - **云端尚未部署**：部署要跑库存轮转（`rotation-stage → 部署 → rotation-finalize`），必须在 `maintenance=all` 下进行，而该模式会把 `00:45` 登录态维护、`01:45/02:05/02:25` 备份、`02:45/03:05/03:20` 昨日定稿整段取消。因此本晚只发布不动生产，部署窗口安排在 **03:30–06:50** 或晨链之后。
+
+### 部署已完成（2026-09-16 01:12 CST，库存 generation 106）
+
+- 维护窗口：`pause --mode all`（generation 364）→ 01:11:40 `resume`（generation 365），全程约 9 分钟；01:45 那次备份机会未受影响。
+- 交接与检出：按 `source-permissions-fnos20260916.plan.json` 的 2511 条 managedSource 路径临时 chown 给 sheinops（不递归整个 app），`git fetch --tags` 拿到 `2026.09.16.1`，然后 `git reset --hard b19ddc1…`（clean，1464 个 tracked 文件）。
+- bundle：`/srv/shein-bi/runtime/source-release-bundles/2026.09.16.1.bundle`，sha256 `b9e69dd4bdac6343601ec4d8e5f41c03e30863ffec97f90637fcc142698bb8b5`。
+- 新代际加固：audit → apply（generation `deploy2-2026.09.16.1`），`issues: []`；app 根 `root:sheinops 0750`、managed 运行态根 `1770` sticky、tracked 清单非组可写。
+- 部署标记：`check_release_source_state.mjs --expected-commit 2026.09.16.1 --record-deployment 2026.09.16.1 --source-bundle … --expected-source-bundle-sha256 …` → `deploymentMarker{schemaVersion: v3, commit: b19ddc1…, tagObject: 54cfb7a1…, releaseId: 389308354, ciRunId: 34994917632, runAttempt: 1, warnings: 0}`。
+- 库存轮转：stage（预检 `050b1691…`、工件 sha `61f709d9…`）→ finalize（预检 `8c031a63…`、工件 sha `6798819d…`）→ generation **106**；`assert_inventory_writer_release_aligned.mjs` 返回 `aligned: true`，三个库存守卫 `rc=0`。
+- 主机侧：维护守卫重装（30 服务，installed 1 / unchanged 29）、运行时路径策略（30，installed 2 / unchanged 28）、tmpfiles 升到 4 条 lane、morning-chain drop-in 设 `SHEIN_BROWSER_READ_SLOTS=4` + `SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=4`（已读回）。
+- 验收：`check_release_source_state.mjs --expected-commit 2026.09.16.1` → ok（head `b19ddc1`、clean、fingerprint `520c3c1c…`）；重启 Portal 后 loopback 200、局域网 302（登录跳转）、Query PID 未变（932→932）；`systemctl --failed` 只剩 watchdog 的业务告警。
+
+**新增运维前提：部署需要 GitHub token。** `--record-deployment` 必须在线校验 GitHub release，而 VM 上两个现成 token（`/etc/shein-bi/partner-cli-release.env`、`/srv/shein-bi/secrets/portal-warehouse.env`）实测都是 **401**。本次用本机已认证的 `gh auth token` 通过 stdin 管道传入（不落盘、不打印内容）。建议后续在 VM 上落一个只读（`contents:read` + `actions:read`）的专用 token，例如 `/srv/shein-bi/secrets/release-verify.env`（0600 root），否则每次部署都会卡在这一步。
+
+### 剩余语义约束复核（2026-09-16）
+
+按「能放开就放开」逐条核了一遍，结论是纯容量类已经在这次放开，剩下的是刻意窗口、没有值得动的：
+
+- 库存刷新第二轮的「让位全托首页车道」**只写在 README，代码里没有实现**（`git grep` 只命中文档），所以无需放开；实测 `:18` 与 `:48` 两轮都在跑。
+- `et-low-inventory-recheck.timer` 的 `00,02,05,06,08,09,11,12,15,16,18,19,22:20` 是显式避让夜间备份、昨日定稿、晨链和营销窗口的清单，属语义排班。
+- 夜间 `00:45 / 01:45–02:37 / 02:45–03:27` 三段共享 `nightly-maintenance.lock`：备份与昨日定稿都要压库，重叠没有收益（那段本来就是空闲时段）。
+- `SHEIN_ET_WAIT_SERVICES`（ET 等 today/yesterday/session-manager/db-backup）与 portal-section-queue 拒绝 `01:*`：同一不可逆资源或必须先后读。
+- 死配置：`config/cloud_marketing_busy_services.json` 没有任何代码引用（测试还断言守卫里不许出现 busy 逻辑），建议下个版本删掉或标注为历史文档。
+- 待测：07:10 晨链在 4 lane + 放宽阈值 + OpenAPI/营销并发 6 下的实际耗时，用它的数据再决定要不要继续放开并发。
+
 - 注意：仓库里记录的代码改动（浏览器 lane 数可配置、默认仍是 2）在部署前**不改变现网行为**；主机侧的 tmpfiles、压力阈值、时钟自愈、CJK 字体、局域网监听都已经在 VM 上生效。
 
 ### 部署执行清单（供 03:30–06:50 窗口内逐条执行）
