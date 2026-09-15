@@ -590,10 +590,18 @@ async function main(argv = process.argv.slice(2)) {
     failedStores: results.filter(r => !r.ok).map(r => r.storeKey),
     results,
   };
-  await fs.mkdir(path.join(ROOT, 'outputs', 'reports'), {recursive: true});
-  const reportFile = path.join(ROOT, 'outputs', 'reports', `auto-relogin-${Date.now()}.json`);
+  // Audit reports belong in the canonical outputs root: on the production host the
+  // app-side outputs/ tree stays root-owned (the inventory writer requires every
+  // tracked parent to remain non group-writable), so writing there raised EACCES and
+  // aborted the entire session restore -- which the per-store link fetch then reported
+  // as a failed store. The data-side outputs root is the writable one.
+  const outputsRoot = process.env.SHEIN_BI_OUTPUTS_ROOT
+    || (path.resolve(ROOT) === '/opt/shein-bi/app' ? '/data/shein-bi/outputs' : path.join(ROOT, 'outputs'));
+  const reportsDir = path.join(outputsRoot, 'reports');
+  await fs.mkdir(reportsDir, {recursive: true});
+  const reportFile = path.join(reportsDir, `auto-relogin-${Date.now()}.json`);
   await fs.writeFile(reportFile, JSON.stringify(summary, null, 2), 'utf8');
-  console.log(JSON.stringify({...summary, results: undefined, reportFile: path.relative(ROOT, reportFile)}, null, 2));
+  console.log(JSON.stringify({...summary, results: undefined, reportFile}, null, 2));
   return summary.ok ? 0 : 1;
 }
 
