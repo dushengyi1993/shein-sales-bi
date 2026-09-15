@@ -142,3 +142,30 @@ sudo ls /etc/cloud/cloud.cfg.d/; grep -c openapi /etc/hosts
 - 浏览器 lane 从写死的 2 个改成可配置，本机设 4；压力阈值按 6 vCPU 重设；OpenAPI 与营销并发 3 到 6。
 - 局域网 `http://<VM_IP>/` 与公网同一页面：2.2 ms 对 3.24 s。
 
+## 4. 迁移后第 2 批发现（半托 2026-09-16 凌晨补充）
+
+**4.1 外部 guard 二进制没跟着搬 → 库存写入类服务全部 203/EXEC**
+
+- 症状：`ExecStartPre` 报 `status=203/EXEC`，三个库存写入服务（日更补货守卫、ET 低库存守卫、ET 低库存复检）全部起不来。因为是 fail-closed，业务表现是「不补货」，不会报数据错误。
+- 根因：`/usr/local/libexec/<guard>` 是**部署时安装**的外部文件，不在 tracked source 里；迁移只搬了 systemd 的 drop-in，没搬二进制。
+- 自查：`ls -l /usr/local/libexec/`；老云上应有一个 43 KB 左右的 guard（半托是 `shein-bi-inventory-writer-compatibility-guard`）。
+- 修复：用仓库自己的安装器 `scripts/install_inventory_writer_compatibility_guard.sh`，先跑一次默认 audit 拿 `manifest=<hash>`，再用 `--replace --expected-installed-manifest-sha256 <hash> --confirm REPLACE_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1`。装完对每个服务单独跑一次 guard（带 `--unit <service>` 和 activation/compatibility 文件参数）必须返回 ok=true。
+
+**4.2 app 根与 tracked 树的权限漂移（解包 umask 不对）**
+
+- 症状：guard 报 `INVENTORY_WRITER_GUARD_SOURCE_PERMISSION_DRIFT`，按顺序会点出 `app root must be root-owned 0750-compatible` → `runtime allowlist root:tmp` → `mutable tracked source:<file>`。
+- 根因：迁移解包时用了普通用户 umask 002，展开出 `app` 根 `<user>:<user> 0755`、tracked 文件 664/775（group-writable）。半托实测 1220 个文件受影响。
+- 期望（以老云为基准逐条比对）：app 根 `root:sheinops 0750`；tracked 文件 `root` 属主且 group/other 不可写（多为 0640/0644）；tracked 文件的父目录 `root:sheinops 0750`；运行态可写根只有 `state/tmp/outputs/profiles/node_modules`，其中 managed 的（半托是 `tmp/outputs/node_modules`）必须 `root:sheinops 1770`（sticky）。
+- 修复：按 tracked 清单逐条对齐，不要 `chmod -R` 一把梭，也别改 `state/tmp/outputs/profiles/node_modules` 自身。注意数据侧与 app 侧要分别对齐（半托数据侧 `outputs` 是 `sheinops:sheinops 0775`，app 侧是 `root:sheinops 1770`）。
+
+**4.3 新增 systemd 单元要同时登记四处，否则维护窗口根本开不起来**
+
+- 症状：`manage_cloud_maintenance_mode.mjs pause` 返回 64 `repository service policy contract is invalid`（`SERVICE_POLICY_NOT_UNIQUE` / `RUNTIME_PATH_POLICY_MISSING`）。这会直接堵死部署轮转，因为轮转必须在 `maintenance=all` 下跑。
+- 必须同步的位置：`lib/cloud_runtime_inventory.mjs` 的 `CLOUD_MAINTENANCE_POLICY_ROWS`、`lib/cloud_runtime_path_policy.mjs` 的 `CLOUD_RUNTIME_PATH_POLICY_BY_SERVICE`，以及各契约测试里硬编码的服务数/安装数（半托这次动了 4 个测试文件里的 28→30、23→24、47→49 等）。
+- 教训：加一个 unit 不是只放 `.service` 文件，等于同时声明维护策略、运行时路径策略和清单计数。维护策略的类要选对：开机自愈类用 `always`（不装守卫），跟随备份的拷贝类用 `infrastructure`。
+
+**4.4 源码轮转必须 `maintenance=all`，所以要避开夜间任务**
+
+- `lib/inventory_write_cutover.mjs` 明确要求 `maintenanceMode === 'all'`；该模式下被暂停的服务**不是延后执行，而是当天取消**（ExecCondition 不满足即不启动，timer 推到下一个时点）。
+- 半托夜间窗口：`00:45` 登录态维护（deadline 01:27）、`01:45/02:05/02:25` 数据库备份（deadline 02:37）、`02:45/03:05/03:20` 昨日定稿（deadline 03:27）。因此部署窗口应选 **03:30 之后到 06:50（订单闭环）之前**，或晨链跑完之后。
+

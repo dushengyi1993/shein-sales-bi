@@ -200,3 +200,20 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 读回：`LastTriggerUSec=2026-09-15 21:43:00`、`NextElapseUSecRealtime=2026-09-16 01:45:00` ✓，并且重启 timer 没有触发追赶运行。
 
 教训：这台机器上 `set-local-rtc 1` 是必须的，但时钟纠正完成后要单独检查 `Persistent=true` 计时器的 `LastTriggerUSec`，它可能停在「错误的未来」，从而静默吃掉当天剩下的全部时点。
+
+## 迁移后第 2 批发现：库存写入守卫被两处缺口挡住（2026-09-16 凌晨，已修）
+
+`systemctl --failed` 在 00:20 冒出 `shein-bi-et-low-inventory-recheck.service failed`，顺着查出一条真链路：**三个库存写入服务的 `ExecStartPre` 全部 `203/EXEC`，库存写入等于被 fail-closed 挡住**。两个缺口：
+
+1. **外部 guard 二进制没搬**：`/usr/local/libexec/shein-bi-inventory-writer-compatibility-guard` 在 VM 上不存在（迁移只搬了 `10-inventory-writer-compatibility.conf` drop-in）。用仓库安装器修复：先 audit 得 `manifest=7c02752d…`，再 `--replace --expected-installed-manifest-sha256 7c02752d… --confirm REPLACE_INVENTORY_WRITER_COMPATIBILITY_GUARD_V1` → 返回 `{"ok":true,"mode":"replace","serviceCount":3}`；装出的二进制 sha256 `1a977a8a9fe8f5c0a2fb5b0f9623c42a440d33e3d3b3dd390a58b28856099306` 与旧云字节一致。
+2. **权限漂移**：`/opt/shein-bi/app` 是 `dushengyi:dushengyi 0755`（旧云 `root:sheinops 0750`），tracked 树 **1220 个**路径 group-writable（迁移解包 umask 002）。按旧云逐项对齐后：app 根 `root:sheinops 0750`；`app/tmp`、`app/node_modules`、`app/outputs` → `root:sheinops 1770`（sticky）；tracked 清单逐条 `chown root:sheinops` + `chmod g-w,o-w`，父目录同样处理；数据侧 `/srv/shein-bi/outputs` 保持 `sheinops:sheinops 0775`（与旧云数据侧一致）。
+
+读回：三个服务单独跑 guard 全部 `rc=0`（返回 `{"ok":true,"activated":true,"state":"activated_exact","activeGeneration":105}`）；`systemctl --failed` 只剩 watchdog（它 exit 1 是因为有两条真实业务告警：营销修复队列 rows=354、订单闭环待复查，都是既有或切换窗口产物，不是技术故障）。
+
+同批还发现：**加固器 `harden_inventory_writer_checkout_permissions.py` 在新机拒绝启动**（`completed generation runtime mount identity drift`：新机的 runtime bind mount 与 8/27 那代 completion 记录不一致）。这不影响 guard 通过（guard 只看权限），但**下次正式部署走到权限交接那一步时会遇到**，需要按新代际重新生成 plan/receipt/completion。
+
+### 已发布的版本与部署状态
+
+- PR #169 已合并（`b19ddc1`），main-push CI 全绿；源码版本 **`2026.09.16.1`** 已通过 `source-release.yml` 发布：annotated tag `2026.09.16.1` → `b19ddc1`，Release 非 draft 且 `immutable=true`，两份资产（`release-attestation.json` + `.sha256`）下载后校验一致，attestation 绑定 `commit=b19ddc1…`、CI run `34994917632`（main push）、trust policy `590280…`。
+- **云端尚未部署**：部署要跑库存轮转（`rotation-stage → 部署 → rotation-finalize`），必须在 `maintenance=all` 下进行，而该模式会把 `00:45` 登录态维护、`01:45/02:05/02:25` 备份、`02:45/03:05/03:20` 昨日定稿整段取消。因此本晚只发布不动生产，部署窗口安排在 **03:30–06:50** 或晨链之后。
+- 注意：仓库里记录的代码改动（浏览器 lane 数可配置、默认仍是 2）在部署前**不改变现网行为**；主机侧的 tmpfiles、压力阈值、时钟自愈、CJK 字体、局域网监听都已经在 VM 上生效。
