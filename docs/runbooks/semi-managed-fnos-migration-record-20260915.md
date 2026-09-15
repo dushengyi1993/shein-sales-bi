@@ -215,7 +215,7 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 ### 已发布的版本与部署状态
 
 - PR #169 已合并（`b19ddc1`），main-push CI 全绿；源码版本 **`2026.09.16.1`** 已通过 `source-release.yml` 发布：annotated tag `2026.09.16.1` → `b19ddc1`，Release 非 draft 且 `immutable=true`，两份资产（`release-attestation.json` + `.sha256`）下载后校验一致，attestation 绑定 `commit=b19ddc1…`、CI run `34994917632`（main push）、trust policy `590280…`。
-- **云端尚未部署**：部署要跑库存轮转（`rotation-stage → 部署 → rotation-finalize`），必须在 `maintenance=all` 下进行，而该模式会把 `00:45` 登录态维护、`01:45/02:05/02:25` 备份、`02:45/03:05/03:20` 昨日定稿整段取消。因此本晚只发布不动生产，部署窗口安排在 **03:30–06:50** 或晨链之后。
+- **云端部署**：2026-09-16 01:12 CST 在维护窗口内完成（库存 generation 106，详见下节），窗口占用约 9 分钟；01:45 那次备份机会未受影响。
 
 ### 部署已完成（2026-09-16 01:12 CST，库存 generation 106）
 
@@ -289,3 +289,17 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 11. 安装/更新 systemd 单元与 drop-in（按 `infra/systemd/README.md` 的「fnOS VM 主机加固」一节），`daemon-reload`，重启 Portal/Query/Webhook。
 12. 放开浏览器 lane：按 `infra/tmpfiles.d/shein-bi-scheduler.conf` 建出 4 个 lane 锁，并把 `SHEIN_BROWSER_READ_SLOTS=4`、`SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=4` 写进 morning-chain 的 drop-in；随后做一次真实并发实测（4 个作业各占一条 lane，第 5 个应以 `browser_slots_exhausted` defer）。
 13. 退出维护，观察下一次定时任务与 watchdog，确认没有 `Persistent` catch-up 意外拉起。
+
+### 第二轮发布与部署（2026-09-16 04:19–04:21 CST，库存 generation 107）
+
+- **修掉今天销售对账的间歇超时**（`curl: (28)`）：`cloud_today_sales_reconcile.sh` 里那句 `liveSalesToday?refresh=1` 从 `--max-time 60` 单次改为 **180 秒 + 失败后 15 秒重试一次**，两次都失败仍让本班失败（保留真实故障信号）。PR #174 合并（`0e0c916`），CI 全绿。
+- 三层验证：契约测试 `test_cloud_primary_sales_finalize_contract` 通过（含新增两条断言）→ 目标机 `bash -n` = `BASH_SYNTAX_OK` → 隔离行为测试：坏端口时「警告 + 等 15 秒 + 第二次失败即终止」（15s、退出码 7，未走到成功分支），真实 Portal 时「一次成功、不等待」（1s、退出码 0）。
+- 发版：源码 **`2026.09.16.2`**（annotated tag → `0e0c916`，Release `immutable=true`）。第一次 dispatch 在创建 draft 这步失败，但 tag 已精确推上；按工作流自带的「tag-only 恢复」用同一版本重跑即成功 —— 这条恢复路径值得记住。
+- 部署：维护窗口 `pause --mode all`（generation 366）→ 冻结清单交接（2641 条）→ `git reset --hard 0e0c916` → 新代际加固（`deploy3-2026.09.16.2`，0 issues）→ 写部署标记（`releaseId 389449846`、`ciRunId 35017796515`）→ 轮转 stage+finalize → 库存 generation **107**、`assert_inventory_writer_release_aligned` = `aligned: true`、三个库存守卫 `rc=0` → `resume`（generation 367）。全程约 2.5 分钟，`--failed` 为 0。
+- 部署后读回：源码态 exact/clean（`head=0e0c9166`）、线上脚本含修复、**04:30 那班 reconcile 实跑成功并写入 marker**（无 `timed out`）。
+
+### 每 lane 内存实测与整夜总检（2026-09-16 03:55–04:55）
+
+- **4 lane 内存实测**（并发拉起 DL/DX/FY/HL 四个真实 profile 的无头浏览器）：可用内存 6943 → 4713 MB，即 4 条 lane 实际约 **2.2 GB（≈550–600 MB/店）**；`ps` 按进程求和 6.2 GB 是共享页重复计算的虚高值。按项目受控路径逐个关闭（`profileSingletons removed=3 errors=0`），0 chrome 进程 / 0 调试端口，内存回到 7005 MB，21 个会话文件与 22 个持久 profile 完好。结论：4 lane 在 8 GiB 上余量充足，离守卫 1 GiB 下限很远。
+- **整夜总检全绿**：登录态维护 00:45 ✔、数据库备份 01:45 跑 / 01:49 落盘（02:25 幂等跳过）✔、昨日定稿 03:20 ✔、ET 前向器 01:15 ✔、ET 低库存复检 02:20 ✔、当日销售对账 04:30 ✔（含新修复）、库存刷新 04:18 ✔、磁盘维护 00:10 ✔、浏览器清理 03:20 ✔、Portal 段队列 04:32 ✔、手动登录恢复 03:47（约定内的 75 = 队列为空）、watchdog 03:50 ✔（`releaseAuditReady=true`、维护守卫 `policyCount=30 / unchanged=30`）；夜间 marker 齐备，`systemctl --failed` = 0。
+- RTV 全量验证 04:50 起跑正常（维护条件放行、资源闸门 READY、拿到 host-heavy 锁并以 materializer 类运行、`stage=rtv-verify businessDate=2026-09-15`，硬窗口 05:27）。
