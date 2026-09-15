@@ -601,12 +601,12 @@ const runtimeSnapshot = await import(pathToFileURL(runtimeSnapshotFile).href);
 const systemdSnapshot = await import(pathToFileURL(systemdSnapshotFile).href);
 const expectedServices = [...inventory.CLOUD_EXPECTED_SERVICE_UNITS].sort();
 const installed = [...new Set(installedServices)].sort();
-if (expectedServices.length !== 28) {
-  throw new Error(`effective control policy must bind exactly 28 services, got ${expectedServices.length}`);
+if (expectedServices.length !== 30) {
+  throw new Error(`effective control policy must bind exactly 30 services, got ${expectedServices.length}`);
 }
 if (installed.length !== expectedServices.length
   || installed.some((service, index) => service !== expectedServices[index])) {
-  throw new Error(`installed service inventory differs from the 28-service policy at ${label}: ${JSON.stringify({expectedServices, installed})}`);
+  throw new Error(`installed service inventory differs from the 30-service policy at ${label}: ${JSON.stringify({expectedServices, installed})}`);
 }
 const raw = String(process.env.EFFECTIVE_SYSTEMD_SHOW || '');
 const units = systemdSnapshot.parseSystemdShowMany(raw, expectedServices, {code: 0});
