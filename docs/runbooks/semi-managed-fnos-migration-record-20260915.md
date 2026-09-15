@@ -45,8 +45,8 @@
 ## 未搬 / 待办
 
 - `/data/shein-bi/outputs` 的 6.5 GB 历史按日归档仍在旧云（未删除）。如需冷备可整体复制到飞牛 `/vol3`。
-- **备份异盘改造未做**：`shein-bi-db-backup` 仍写 `/srv/shein-bi/backups`（与数据同盘）。全托最低要求是异盘，建议改到飞牛 `/vol3`。
-- 明日 07:10 晨链是本迁移后的第一次完整日常链路，需要检查一次结果。
+- **备份异盘改造（原待办，当晚已完成）**：见「备份异盘改造（NAS /vol3）完成 2026-09-15 21:30-21:50」——备份落在飞牛 `/vol3/shein-bi-backups`（保留 14 份、`OnSuccess` 同步、真实 dump 已双向校验）。
+- 07:10 晨链是迁移后的第一次完整日常链路，仍需跑完检查一次结果。**注意：05:20 发现并修掉了一个会让 21 店全部失败的缺陷**（见文末「第三轮发布与部署」），已发版 `2026.09.16.3` 并部署（库存 generation 108），单店抓取已实跑通过。
 - 旧云 `sa` 兼容转发建议保留 ≥7 天（等旧 NS 缓存消退），之后再删旧 Caddy 的 `sa` site 与相关残留。
 - 本地中转缓存目录 `E:\migration-transit`（含 `pull.mjs` 工具与已下载数据）可自行删除。
 
@@ -303,3 +303,45 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - **4 lane 内存实测**（并发拉起 DL/DX/FY/HL 四个真实 profile 的无头浏览器）：可用内存 6943 → 4713 MB，即 4 条 lane 实际约 **2.2 GB（≈550–600 MB/店）**；`ps` 按进程求和 6.2 GB 是共享页重复计算的虚高值。按项目受控路径逐个关闭（`profileSingletons removed=3 errors=0`），0 chrome 进程 / 0 调试端口，内存回到 7005 MB，21 个会话文件与 22 个持久 profile 完好。结论：4 lane 在 8 GiB 上余量充足，离守卫 1 GiB 下限很远。
 - **整夜总检全绿**：登录态维护 00:45 ✔、数据库备份 01:45 跑 / 01:49 落盘（02:25 幂等跳过）✔、昨日定稿 03:20 ✔、ET 前向器 01:15 ✔、ET 低库存复检 02:20 ✔、当日销售对账 04:30 ✔（含新修复）、库存刷新 04:18 ✔、磁盘维护 00:10 ✔、浏览器清理 03:20 ✔、Portal 段队列 04:32 ✔、手动登录恢复 03:47（约定内的 75 = 队列为空）、watchdog 03:50 ✔（`releaseAuditReady=true`、维护守卫 `policyCount=30 / unchanged=30`）；夜间 marker 齐备，`systemctl --failed` = 0。
 - RTV 全量验证 04:50 起跑正常（维护条件放行、资源闸门 READY、拿到 host-heavy 锁并以 materializer 类运行、`stage=rtv-verify businessDate=2026-09-15`，硬窗口 05:27）。
+
+### 第三轮发布与部署：07:10 晨链会全店失败的根因（2026-09-16 05:20–05:37 CST，库存 generation 108）
+
+**真缺陷（旧云就存在的隐藏依赖，不是迁移造成的）**。用晨链完全相同的路径跑 DL 单店抓取复现：`current_profile_probe skipped_fast_start` → `direct_relogin failed`（`EACCES: permission denied, open '/opt/shein-bi/app/outputs/reports/auto-relogin-*.json'`）→ `bootstrap_fallback ok` → `fallback_relogin failed` → 整店 `ok:false`。按这个路径，07:10 晨链会让 21 个店全部失败。
+
+- 根因：`scripts/auto_relogin_shein_store.mjs` 把会话恢复的审计报告写到 **app 侧** `outputs/reports/`，而生产上那里是 `750 root:sheinops`（库存守卫要求 tracked 父目录不可组写），**且这次写入没有 try/catch**，异常直接让 relogin 退出 1；而每店抓取走 `--fast-start`（跳过探针、必经 relogin）。
+- ACL 这条路走不通：`setfacl -m g:sheinops:rwx` 会把有效 mode 变成 770，守卫立刻报 `mutable tracked parent:outputs/reports`；已 `setfacl -b` 撤销，守卫恢复 `activated_exact`。
+- 修法：报告改写到 canonical outputs 根（`SHEIN_BI_OUTPUTS_ROOT`，生产默认 `/data/shein-bi/outputs`），日志打绝对路径 → PR #176（`d96956c`）。
+
+**发布 `2026.09.16.3`：两条失败路径都要认得**
+
+- 第一次 dispatch 失败是 `SOURCE_RELEASE_CI_ATTEMPT_MISMATCH`：main 推送触发的 CI（run 35025090021）当时还没跑完，`run.status !== 'completed'` 判不通过，**这一路不推 tag**。等 CI 绿了再 dispatch：第二次在 draft 阶段失败但 **tag 已推上**（即 09.16.2 记录过的 tag-only 恢复路径），第三次同版本重跑即成功 → Release `SHEIN BI Ops 2026.09.16.3`、`immutable=true`、releaseId 389492826、CI run 35025090021。
+- 判据提醒：`gh release view <version>` 查不到不代表没发布——远端 release 的 tag_name 是 `untagged-<hex>`，要用 `gh release list` 按名字找。
+
+**部署（05:31:19 pause → 05:33:26 resume，约 2 分 10 秒，maintenance generation 368 → 369）**
+
+- 交接：把 `source-permissions-deploy3-20260916.plan.json` 里 2692 条 managedSourcePaths **全部（文件+目录）** 临时 chown 给 sheinops → `git reset --hard 06da4d3`（clean，1464 tracked）→ bundle `/srv/shein-bi/runtime/source-release-bundles/2026.09.16.3.bundle` sha256 `1ab9fa8d…`。
+- 加固：新代际 `deploy4-20260916`，audit（planSha256 `9005776b…`）→ apply `issues: []`，generationHash `e5256970…`。
+- 部署标记：`check_release_source_state.mjs --expected-commit 2026.09.16.3 --record-deployment 2026.09.16.3 --source-bundle … --expected-source-bundle-sha256 …` → `deploymentMarker{commit 06da4d3…, tagObject 06ab6e99…, releaseId 389492826, ciRunId 35025090021, warnings 0}`，sourceFingerprint `c162ebe6…`。
+- 轮转：stage 预检 `39823290…`/工件 `67a734eb…` → finalize 预检 `e8896eee…`/工件 `c645e63b…` → 库存 generation **108**；`assert_inventory_writer_release_aligned` = `aligned: true`；三个库存守卫各自单独跑 `rc=0`、`state=activated_exact`、`activeGeneration=108`；外部 guard 安装器 audit `unchanged`（manifest `a716be5d…`）。
+- 收尾：`resume`（generation 369）、`systemctl --failed` = 0、portal/query/webhook 均 active、局域网 `http://192.168.1.200/` 302、`check_release_source_state` ok（head=06da4d3、clean、fingerprint 与标记一致）。
+- 探活注意：Portal 的 **loopback 入口是 `127.0.0.1:8080`**；`:80` 只监听局域网 `192.168.1.200`，所以对 loopback 打 `:80` 本来就拒连（不是故障）。`:8080` 返回 302（登录跳转）。
+
+**验收：真跑一次单店抓取（与晨链同一条路）**
+
+- 用 `systemd-run` 起一次性单元 `dl-acceptance-verify`，属性与 `shein-bi-cloud-morning-chain.service` 对齐（同用户/工作目录/三处绑定挂载，加 `SHEIN_LINK_BUSINESS_STORES=DL`、businessDate `2026-09-15`）。
+- 结果：relogin 报告落到 **`/data/shein-bi/outputs/reports/auto-relogin-1789508137032.json`**（不再是 app 侧）；`[DL] ok`（`linkRows 212 / inventoryRows 300 / performanceRows 151`）；两个日档都写出：`shein_links/DL/2026-09-15.json`（3.97 MB，05:35）与 `shein_business_domains/DL/2026-09-15.json`（4.14 MB，05:36）；chunk 结果 `{"ok":true,"status":"done","successfulStores":["DL"],"failedStores":[]}`；跑完 0 chrome 残留。
+- 顺手清掉了 05:06 那次探针留下的 13 个孤儿 chrome（`cleanup_shein_store_browsers.mjs --stores DL --kill-after-sec 10`，13 → 0，SingletonLock/Cookie/Socket 一并清掉）。
+
+### 部署交接的三个坑（这次踩到的）
+
+1. **只 chown 目录行不够**：`git fetch` 要写已存在的 `.git/FETCH_HEAD`（root 属主），目录可写也没用 → `Permission denied`。必须把 managedSourcePaths 的**文件**也一起临时 chown。
+2. **不要给 git 传 `GIT_SSH_COMMAND`**：仓库 `.git/config` 里的 `core.sshCommand = ssh -i /home/sheinops/.ssh/shein_bi_deploy -o IdentitiesOnly=yes` 才是部署密钥的生效路径；环境变量会把它整体顶掉 → `git@github.com: Permission denied (publickey)`。
+3. **轮转预检工件是 no-replace**：同一路径重复 dry-run 报 `EEXIST`；重跑换文件名，不要删旧工件（激活/兼容/回执文件更是禁止手删）。
+
+### 主机特权：飞牛账号密码不是 Linux 密码（2026-09-16 05:25 核实）
+
+用户给的主机账号/密码（`dushengyi`）在**主机 Linux 侧不成立**，所以「不走浏览器直接改宿主机」这条暂时走不通：
+
+- `ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no dushengyi@192.168.1.59` → `Permission denied (publickey,password)`；`root` 同样被拒（登录仍只能用 `fnos_shein_fm_ed25519` 密钥）。
+- `sudo` 走 `/etc/pam.d/sudo` → `common-auth` = `pam_unix.so nullok` + `pam_winbind.so … try_first_pass`；实测 `sudo: no password was provided` / `1 incorrect password attempt`，即该口令在 Linux/PAM 侧不可用（飞牛网页后台用自己的账号库）。
+- 现状：`/etc/sudoers.d/` 只有 README，`dushengyi` 组为 `Users + Administrators`，但没有可用认证凭据。要免浏览器操作宿主机，需要二选一：① 在飞牛网页后台给该账号设一个 Linux 密码；② 加一条免密 sudoers（都需要用户在网页后台先拿到一次 root）。
