@@ -40,6 +40,15 @@ if [[ "$HOST_LOCKED_WORKER" == "1" || "$HOST_LOCKED_WORKER" == "true" || "$ASYNC
 fi
 
 mkdir -p "$LOG_DIR"
+# The ET forwarder (root) and the daily refresh / morning chain (sheinops) both call
+# this script, so whichever runs first owns $LOG_DIR. A root caller used to leave a
+# root:sheinops 0750 directory that sheinops could not write into; the next sheinops
+# run then died on the stdout/stderr redirection below with "Permission denied", and
+# the inventory-critical linksData section was never refreshed. Pin the owner here.
+if [[ "$(id -u)" == "0" ]] && id sheinops >/dev/null 2>&1; then
+  chown sheinops:sheinops "$LOG_DIR"
+  chmod 0750 "$LOG_DIR"
+fi
 STAMP="$(TZ="$TZ_NAME" date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/prewarm-${STAMP}.log"
 
