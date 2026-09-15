@@ -29,7 +29,7 @@ const serviceFiles = entries
   .filter(entry => entry.isFile() && /^shein-bi-[A-Za-z0-9_.@-]+\.service$/.test(entry.name))
   .map(entry => entry.name)
   .sort();
-assert.equal(serviceFiles.length, 28, 'repository service count changed; every service requires an explicit policy');
+assert.equal(serviceFiles.length, 30, 'repository service count changed; every service requires an explicit policy');
 assert.deepEqual([...CLOUD_EXPECTED_SERVICE_UNITS].sort(), serviceFiles);
 assert.deepEqual(Object.keys(CLOUD_MAINTENANCE_POLICY_BY_SERVICE).sort(), serviceFiles,
   'repository service files and maintenance policy keys must be an exact set match');
@@ -64,6 +64,7 @@ assert.equal(
 for (const service of serviceFiles) {
   const expectedPolicy = [
     'shein-bi-cloud-watchdog.service',
+    'shein-bi-clock-sanity.service',
     'shein-bi-portal.service',
     'shein-bi-query.service',
     'shein-bi-session-secret.service',
@@ -71,6 +72,7 @@ for (const service of serviceFiles) {
   ].includes(service)
     ? 'always'
     : [
+        'shein-bi-backup-sync-nas.service',
         'shein-bi-db-backup.service',
         'shein-bi-cloud-disk-maintenance.service',
         'shein-bi-cloud-portal-section-queue.service',
@@ -84,6 +86,10 @@ assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-webhook.service'], 'a
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-query.service'], 'always');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-session-secret.service'], 'always');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-watchdog.service'], 'always');
+assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-clock-sanity.service'], 'always',
+  'the boot clock self-heal must run even while maintenance is active');
+assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-backup-sync-nas.service'], 'infrastructure',
+  'the NAS copy follows the database backup and is paused the same way');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-db-backup.service'], 'infrastructure');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-disk-maintenance.service'], 'infrastructure');
 assert.equal(CLOUD_MAINTENANCE_POLICY_BY_SERVICE['shein-bi-cloud-portal-section-queue.service'], 'infrastructure');
@@ -140,7 +146,7 @@ const repositoryUnitFiles = entries
   .filter(entry => entry.isFile() && /^shein-bi-[A-Za-z0-9_.@-]+\.(?:service|timer|path)$/.test(entry.name))
   .map(entry => entry.name)
   .sort();
-assert.equal(repositoryUnitFiles.length, 47);
+assert.equal(repositoryUnitFiles.length, 49);
 assert.deepEqual([...CLOUD_EXPECTED_INSTALLED_UNITS].sort(), repositoryUnitFiles,
   'expected installed inventory must exactly match tracked service/timer/path files');
 assert.deepEqual([...CLOUD_LEGACY_MASKED_UNIT_ALLOWLIST].sort(), [
