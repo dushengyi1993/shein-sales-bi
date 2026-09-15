@@ -241,6 +241,16 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 死配置：`config/cloud_marketing_busy_services.json` 没有任何代码引用（测试还断言守卫里不许出现 busy 逻辑），建议下个版本删掉或标注为历史文档。
 - 待测：07:10 晨链在 4 lane + 放宽阈值 + OpenAPI/营销并发 6 下的实际耗时，用它的数据再决定要不要继续放开并发。
 
+### 迁移后第 3 批：告警投递链路缺失（2026-09-16 约 02:00，已修）
+
+`systemctl --failed` 里 watchdog 长期 failed，拆开看它的 `notified: false / notifyCode: 1` —— 这不是业务告警本身，而是**告警投递失败**：VM 上没有 `lark-cli`。
+
+- 老云：`/usr/bin/lark-cli` → `/usr/lib/node_modules/@larksuite/cli/scripts/run.js`（v1.0.80），另有 `/root/.lark-cli/config.json`（241 B、0600 root）。VM 两样都缺（dpkg 对比看不到，因为它是全局 npm 包）。
+- 修复：`sudo npm install -g @larksuite/cli@1.0.80`（29 秒，装完 `/usr/bin/lark-cli` 自动就位，`lark-cli --version` = 1.0.80），并把老云的 `config.json` 通过管道搬过去（241 B 一致，全程不打印内容）。
+- 验证（不真发消息）：按脚本自身的解析逻辑取投递目标 → masked `chat:oc_fb…b180`、identity `bot`、app `cli_aa8d61df6f381bc6`；执行 `lark-cli im +messages-send … --dry-run` → **rc=0**、`dry_run: true`、请求体指向 `/open-apis/im/v1/messages`。真实投递交给下一次定时 watchdog 自然验证。
+- 同类清单对比结论：dpkg 上 VM 比老云少 261 个包，但几乎全是老云历史包袱（guestfs/autotools/gstreamer/旧反代 caddy+haproxy/微码等），对半托运行无影响；全局 npm 现在四处一致（`@larksuite/cli`、`@openai/codex`、`corepack`、`npm`）；`/usr/local/libexec/` 有两件（时钟自愈脚本 + 库存写入 guard）。
+
+
 - 注意：仓库里记录的代码改动（浏览器 lane 数可配置、默认仍是 2）在部署前**不改变现网行为**；主机侧的 tmpfiles、压力阈值、时钟自愈、CJK 字体、局域网监听都已经在 VM 上生效。
 
 ### 部署执行清单（供 03:30–06:50 窗口内逐条执行）
