@@ -169,3 +169,11 @@ sudo ls /etc/cloud/cloud.cfg.d/; grep -c openapi /etc/hosts
 - `lib/inventory_write_cutover.mjs` 明确要求 `maintenanceMode === 'all'`；该模式下被暂停的服务**不是延后执行，而是当天取消**（ExecCondition 不满足即不启动，timer 推到下一个时点）。
 - 半托夜间窗口：`00:45` 登录态维护（deadline 01:27）、`01:45/02:05/02:25` 数据库备份（deadline 02:37）、`02:45/03:05/03:20` 昨日定稿（deadline 03:27）。因此部署窗口应选 **03:30 之后到 06:50（订单闭环）之前**，或晨链跑完之后。
 
+**4.5 主机上的「非 dpkg」依赖最容易漏：lark-cli 与外部 guard**
+
+- 症状：watchdog 日志里 `"notified": false, "notifyCode": 1`（这是**投递失败**，不是业务告警本身）；每日 Lark 报表同理。
+- 根因：告警投递走 `scripts/notify_sync_issue.mjs` → 全局 npm 包 `@larksuite/cli`（老云 `/usr/bin/lark-cli` → `/usr/lib/node_modules/@larksuite/cli/scripts/run.js`）+ `/root/.lark-cli/config.json`（241 B、0600 root）。这两样都不在 dpkg 里，整包对比看不出来；同类还有 `/usr/local/libexec/` 下的外部 guard。
+- 自查：`npm ls -g --depth=0`、`ls -l /usr/local/libexec/`、`ls -l /usr/bin/lark-cli`、`ls -l /root/.lark-cli/`。
+- 修复：`sudo npm install -g @larksuite/cli@<老云版本>`（半托是 1.0.80），再把老云的 `/root/.lark-cli/config.json` 搬过来（只搬不打印）；验证用 `lark-cli im +messages-send --as <identity> --chat-id <id> --text x --dry-run`：dry-run 只校验请求、不发消息，rc=0 且返回 `/open-apis/im/v1/messages` 即链路通。
+- 教训：迁移后要做三类清单对比——① `dpkg --get-selections`；② `npm ls -g --depth=0`；③ `/usr/local/libexec/` 与 `/usr/bin` 下的符号链接。半托实测 dpkg 差 261 个包但几乎全是历史包袱，真正影响运行的恰恰是第②③类。
+
