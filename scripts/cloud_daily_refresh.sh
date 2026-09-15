@@ -750,7 +750,7 @@ prepare_shared_lock_file "$PORTAL_REFRESH_LOCK_FILE"
         fi
       else
         # The morning coordinator enters the reserved inventory window as soon
-        # as the 19-store merge and inventory-critical linksData are complete.
+        # as the enabled-store merge and inventory-critical linksData are complete.
         # Homepage-critical sections are handed to the bounded host-locked
         # queue worker (lease + per-section timeout + dependency barriers), so
         # a slow homeRankings/profit refresh can never consume the inventory

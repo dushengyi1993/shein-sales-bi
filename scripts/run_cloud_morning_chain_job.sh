@@ -96,6 +96,29 @@ now_iso() {
   TZ="$TZ_NAME" date --iso-8601=seconds
 }
 
+# Operator-facing store scope text is always derived from the single source of
+# truth (config/stores.json) so no message, marker or state file can drift from
+# the enabled store set again.
+enabled_store_label() {
+  local count=""
+  count="$(ROOT="$ROOT" node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const config = JSON.parse(fs.readFileSync(path.join(process.env.ROOT, "config", "stores.json"), "utf8"));
+  process.stdout.write(String((config.stores || [])
+    .filter(store => store.enabled !== false)
+    .map(store => String(store.storeKey || "").trim().toUpperCase())
+    .filter(Boolean).length));
+} catch { process.exit(1); }
+' 2>/dev/null || true)"
+  if [[ "$count" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s stores' "$count"
+  else
+    printf 'all enabled stores'
+  fi
+}
+
 # A recovered context is trustworthy only when the date pair is calendar-valid
 # AND businessDate is exactly runDate - 1 AND the persisted first-start
 # deadline is a positive number.  Anything else (missing, malformed,
@@ -355,18 +378,47 @@ daily_run_pre_warning_audit() {
     --business-date "$business_date" >/dev/null
 }
 
+# The immutable run-scoped inventory artifacts are authoritative for one
+# runDate.  The version index resolves them exactly the way the child chain and
+# the shared validator do; the canonical plan/result/marker paths are only the
+# legacy fallback for a run with no version index.  Sets INVENTORY_PLAN,
+# INVENTORY_RESULT and INVENTORY_MARKER in the caller.
+resolve_inventory_artifacts_for_run() {
+  local run_date="$1"
+  local command_id="${SHEIN_BI_INVENTORY_COMMAND_ID:-morning:$run_date}"
+  local index_file="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$run_date.index.json"
+  local publisher="$ROOT/scripts/inventory/daily_inventory_version_publisher.mjs"
+  local entry="null"
+  if [[ -f "$index_file" && -f "$publisher" ]]; then
+    entry="$(node "$publisher" read "$INVENTORY_RUNTIME_ROOT" "$run_date" "" "$command_id" 2>/dev/null)" || entry="null"
+  fi
+  if [[ "$entry" != "null" ]]; then
+    INVENTORY_PLAN="$(jq -r '.planFile' <<<"$entry")"
+    INVENTORY_RESULT="$(jq -r '.file' <<<"$entry")"
+    INVENTORY_MARKER="$(jq -r '.markerFile' <<<"$entry")"
+  elif [[ ! -f "$index_file" ]]; then
+    INVENTORY_PLAN="$INVENTORY_RUNTIME_ROOT/plans/daily-inventory-replenishment-$run_date.json"
+    INVENTORY_RESULT="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$run_date.json"
+    INVENTORY_MARKER="$MARKER_ROOT/$run_date/daily-inventory-guard.json"
+  else
+    return 1
+  fi
+  [[ -n "$INVENTORY_PLAN" && -n "$INVENTORY_RESULT" && -n "$INVENTORY_MARKER" \
+    && "$INVENTORY_PLAN" != "null" && "$INVENTORY_RESULT" != "null" && "$INVENTORY_MARKER" != "null" ]]
+}
+
 inventory_warning_marker_present() {
   local run_date="$1"
   local business_date="$2"
-  RUN_DATE="$run_date" BUSINESS_DATE="$business_date" MARKER_ROOT="$MARKER_ROOT" node - <<'NODE' 2>/dev/null
+  local INVENTORY_PLAN INVENTORY_RESULT INVENTORY_MARKER
+  resolve_inventory_artifacts_for_run "$run_date" || return 1
+  RUN_DATE="$run_date" BUSINESS_DATE="$business_date" INVENTORY_MARKER_FILE="$INVENTORY_MARKER" node - <<'NODE' 2>/dev/null
 const fs = require('fs');
 const path = require('path');
-const markerRoot = process.env.MARKER_ROOT;
 const runDate = process.env.RUN_DATE;
 const businessDate = process.env.BUSINESS_DATE;
 try {
-  const file = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
-  const marker = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const marker = JSON.parse(fs.readFileSync(process.env.INVENTORY_MARKER_FILE, 'utf8'));
   process.exit(marker?.ok === true
     && marker?.stage === 'daily-inventory-guard'
     && marker?.status === 'warning'
@@ -383,22 +435,27 @@ complete_inventory_warning_without_child() {
     return 1
   fi
   # This is the only pre-final-marker escape hatch.  It checks the warning
-  # marker, immutable plan/result hashes, the current journal, all 38 morning
+  # marker, immutable plan/result hashes, the current journal, all configured morning
   # artifacts, exact dates, and the absence of the operating marker.
   if ! daily_run_pre_warning_audit "$run_date" "$business_date"; then
     echo "[cloud-morning-chain-wrapper] inventory warning pre-audit failed; child not started and warning not promoted runDate=$run_date businessDate=$business_date" >&2
     return 78
   fi
   local morning_file="$STATE_DIR/${run_date}-all.json"
-  local inventory_marker_file="$MARKER_ROOT/$run_date/daily-inventory-guard.json"
-  local plan_file="$INVENTORY_RUNTIME_ROOT/plans/daily-inventory-replenishment-$run_date.json"
-  local result_file="$INVENTORY_RUNTIME_ROOT/results/daily-inventory-replenishment-$run_date.json"
+  local INVENTORY_PLAN INVENTORY_RESULT INVENTORY_MARKER
+  if ! resolve_inventory_artifacts_for_run "$run_date"; then
+    echo "[cloud-morning-chain-wrapper] could not resolve the inventory artifact set for the warning audit runDate=$run_date" >&2
+    return 78
+  fi
+  local inventory_marker_file="$INVENTORY_MARKER"
+  local plan_file="$INVENTORY_PLAN"
+  local result_file="$INVENTORY_RESULT"
   if ! node "$ROOT/scripts/pipeline_marker.mjs" write \
     --stage daily-operating-refresh \
     --date "$run_date" \
     --business-date "$business_date" \
     --status warning \
-    --message "all 19 stores and supplements completed; inventory completed with an audited same-day item warning" \
+    --message "all $(enabled_store_label) and supplements completed; inventory completed with an audited same-day item warning" \
     --root "$MARKER_ROOT" \
     --evidence "$morning_file" \
     --evidence "$inventory_marker_file" \
@@ -411,7 +468,7 @@ complete_inventory_warning_without_child() {
     echo "[cloud-morning-chain-wrapper] post-write warning evidence audit failed; active context retained and child not started runDate=$run_date businessDate=$business_date" >&2
     return 78
   fi
-  write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with an audited same-day item warning"
+  write_completed_latest_state "$run_date" "$business_date" "warning" "all $(enabled_store_label) and supplements completed; inventory completed with an audited same-day item warning"
   clear_active_context "$run_date"
   echo "[cloud-morning-chain-wrapper] converged audited inventory warning without child or inventory rerun runDate=$run_date businessDate=$business_date"
   return 0
@@ -583,7 +640,7 @@ run_chain_once() {
     return 0
   fi
   if daily_run_warning_completed "$run_date" "$business_date"; then
-    write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+    write_completed_latest_state "$run_date" "$business_date" "warning" "all $(enabled_store_label) and supplements completed; inventory completed with item-level business blockers"
     clear_active_context "$run_date"
     echo "[cloud-morning-chain-wrapper] run completed with warning marker evidence runDate=$run_date businessDate=$business_date"
     return 0
@@ -611,7 +668,7 @@ run_one_date() {
     return 0
   fi
   if daily_run_warning_completed "$run_date" "$business_date"; then
-    write_completed_latest_state "$run_date" "$business_date" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+    write_completed_latest_state "$run_date" "$business_date" "warning" "all $(enabled_store_label) and supplements completed; inventory completed with item-level business blockers"
     clear_active_context "$run_date"
     echo "[cloud-morning-chain-wrapper] verified warning completion already exists runDate=$run_date businessDate=$business_date; no child started"
     return 0

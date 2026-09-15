@@ -4,7 +4,7 @@
  *
  * The historical probe script name contains `hl` because HL was the first
  * pilot. The implementation already accepts `--store`; this wrapper is the
- * stable command for all 19 stores.
+ * stable command for every enabled store.
  */
 import {spawn} from 'node:child_process';
 import path from 'node:path';

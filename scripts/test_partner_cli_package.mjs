@@ -49,7 +49,14 @@ const expectedStyleProfiles = {
   TZ: ['深色奢华系', '黑金'],
 };
 const configuredProfiles = storeProfiles.profiles || {};
-if (Object.keys(configuredProfiles).length !== 19) throw new Error('store style profiles must cover 19 stores');
+// The exact count is derived from the reviewed map below so an onboarding
+// change cannot leave a stale literal here.  LG and HY are enabled stores that
+// still have no owner-assigned image style set, so they stay out of this map
+// until that business decision is made; defaultTitleGroups already covers all
+// 21 enabled stores.
+if (Object.keys(configuredProfiles).length !== Object.keys(expectedStyleProfiles).length) {
+  throw new Error('store style profiles must contain exactly the reviewed store set');
+}
 for (const [store, styles] of Object.entries(expectedStyleProfiles)) {
   if (JSON.stringify(configuredProfiles[store]) !== JSON.stringify(styles)) {
     throw new Error(`${store} style profile must be ${styles.join(',')}`);

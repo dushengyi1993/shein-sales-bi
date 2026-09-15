@@ -50,9 +50,8 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-// The production enabled-store fixture.  The current config enables all 19
-// stores; keeping the fixture explicit makes this test deterministic even if
-// the config drifts.
+// An explicit enabled-store fixture.  The store list is fixed here so the test
+// stays deterministic even when config/stores.json changes.
 const ENABLED = [
   'DL', 'DX', 'FY', 'LQ', 'NM', 'HL', 'JY', 'ZL', 'TS', 'MZ',
   'CX', 'YJ', 'XL', 'QY', 'QH', 'TZ', 'JSH', 'TZZ', 'XC',

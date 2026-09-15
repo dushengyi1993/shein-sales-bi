@@ -35,7 +35,10 @@ const runDate = new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai'}).fo
 const date = new Date(`${runDate}T12:00:00Z`);
 date.setUTCDate(date.getUTCDate() - 1);
 const businessDate = date.toISOString().slice(0, 10);
-const stores = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+// The current production enabled-store set.  Every derived count below is
+// computed from this list so a store-onboarding change cannot leave the
+// fixture asserting the old store count.
+const stores = ['CX','DL','DX','FY','HL','HY','JSH','JY','LG','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
 const runtime = path.join(root, 'runtime');
 const markerRoot = path.join(root, 'state', 'pipeline-markers');
 const stateDir = path.join(root, 'state', 'cloud_morning_chain');
@@ -60,7 +63,7 @@ try {
     artifacts.push({storeKey,domain,path:path.relative(root,file).split(path.sep).join('/'),bytes:fs.statSync(file).size,sha256:hashFile(file)});
   }
   const morningFile = path.join(stateDir, `${runDate}-all.json`);
-  write(morningFile,{schemaVersion:'shein-morning-resume-evidence/v1',ok:true,date:businessDate,generatedAt:new Date().toISOString(),source:'existing_exact_date_store_artifacts',expectedStoreCount:19,artifactCount:38,stores,domains:['shein_links','shein_business_domains'],artifacts});
+  write(morningFile,{schemaVersion:'shein-morning-resume-evidence/v1',ok:true,date:businessDate,generatedAt:new Date().toISOString(),source:'existing_exact_date_store_artifacts',expectedStoreCount:stores.length,artifactCount:stores.length * 2,stores,domains:['shein_links','shein_business_domains'],artifacts});
   const policy = JSON.parse(fs.readFileSync(path.join(root,'config','inventory_replenishment_policy.json'),'utf8'));
   const fetchedAt = new Date().toISOString();
   const sourceEvidence = [
@@ -68,7 +71,7 @@ try {
     {store:'BI_LINKS',file:'outputs/bi-portal/sections/linksData.json',fetchedAt},
     ...stores.map(store => ({store,file:`outputs/shein_openapi_products/${store}/latest.json`,fetchedAt,stockFailedChunkCount:0,sha256:'0'.repeat(64)})),
   ];
-  const plan = {schemaVersion:'daily-inventory-replenishment-plan/v1',date:runDate,policyVersion:policy.policyVersion,executable:true,blockers:[],actionable:[],lowEtAllocations:[],sourceEvidence,counts:{enabledStores:19}};
+  const plan = {schemaVersion:'daily-inventory-replenishment-plan/v1',date:runDate,policyVersion:policy.policyVersion,executable:true,blockers:[],actionable:[],lowEtAllocations:[],sourceEvidence,counts:{enabledStores:stores.length}};
   plan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
   const planFile = path.join(runtime,'plans',`daily-inventory-replenishment-${runDate}.json`);
   const resultFile = path.join(runtime,'results',`daily-inventory-replenishment-${runDate}.json`);

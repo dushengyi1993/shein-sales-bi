@@ -94,7 +94,7 @@ if (!changed && (differences !== 0 || written !== 0 || daily !== 0)) {
   throw new Error('contradictory no-change promotion result: ' + JSON.stringify(raw));
 }
 // Delete-only replacement is valid: it can write zero source rows while the
-// semantic diff and the 19-store daily refresh still prove a real promotion.
+// semantic diff and the full enabled-store daily refresh still prove a real promotion.
 if (changed && (differences === 0 || daily === 0)) {
   throw new Error('contradictory changed promotion result: ' + JSON.stringify(raw));
 }

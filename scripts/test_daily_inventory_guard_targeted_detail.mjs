@@ -11,7 +11,7 @@
  * 1. writes an atomic `daily-inventory-detail-targets/v1` manifest under the
  *    runtime root, deduplicated per store+SPU, validated nonempty with
  *    max per-store <= default budget 64;
- * 2. calls cloud_openapi_product_reconciliation.sh with STORES (full 19-store
+ * 2. calls cloud_openapi_product_reconciliation.sh with STORES (full enabled-store
  *    set), MAX_DETAILS=exact maxTargets (bounded by the 64 ceiling check),
  *    SKIP_DETAILS=0, DETAIL_PRIORITY_FILE and PRIORITY_DETAILS_ONLY=1;
  * 3. rebuilds the same-day plan with --required-detail-targets;
@@ -182,11 +182,11 @@ match('budget overrun message names the limit',
   'the fail-closed message must carry maxTargets and budget');
 
 // ---------------------------------------------------------------------------
-// Reconciliation call: STORES (full 19-store set), MAX_DETAILS=budget,
+// Reconciliation call: STORES (full enabled-store set), MAX_DETAILS=budget,
 // SKIP_DETAILS=0, DETAIL_PRIORITY_FILE, PRIORITY_DETAILS_ONLY=1; never
 // MAX_DETAILS=0 blind full scan
 // ---------------------------------------------------------------------------
-match('refresh passes the full 19-store STORES set',
+match('refresh passes the full enabled-store STORES set',
   guard,
   /RECONCILE_STORES="\$\{SHEIN_BI_INVENTORY_RECONCILE_STORES:-CX,DL,DX,FY,HL,HY,JSH,JY,LG,LQ,MZ,NM,QH,QY,TS,TZ,TZZ,XC,XL,YJ,ZL\}"/,
   'list + stock must refresh every plan store, not a narrowed subset');

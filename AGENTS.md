@@ -35,7 +35,7 @@ For every new SHEIN listing, use the default store title group from `config/stor
 
 - Title 1: JSH, DL, TZZ, CX, HL, TS, TZ.
 - Title 2: DX, LQ, XC, MZ, NM, YJ.
-- Title 3: JY, QY, XL, FY, QH, ZL.
+- Title 3: JY, QY, XL, FY, QH, ZL, LG, HY.
 
 Preserve the selected title group as a structured per-store task fact and verify it before dry-run.
 

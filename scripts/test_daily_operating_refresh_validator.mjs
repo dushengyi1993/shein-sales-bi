@@ -29,7 +29,10 @@ const tempParent = path.resolve(process.env.SHEIN_TEST_TMP_ROOT || os.tmpdir());
 const tempRoot = await fs.mkdtemp(path.join(tempParent, 'daily-operating-validator-'));
 const runDate = '2026-08-16';
 const businessDate = '2026-08-15';
-const storeKeys = ['CX', 'DL', 'DX', 'FY', 'HL', 'JSH', 'JY', 'LQ', 'MZ', 'NM', 'QH', 'QY', 'TS', 'TZ', 'TZZ', 'XC', 'XL', 'YJ', 'ZL'];
+// The current production enabled-store set (21 stores, 42 artifacts).  Every
+// derived count in this fixture is computed from this list, so the coverage
+// contract can never silently drift back to a hardcoded store count.
+const storeKeys = ['CX', 'DL', 'DX', 'FY', 'HL', 'HY', 'JSH', 'JY', 'LG', 'LQ', 'MZ', 'NM', 'QH', 'QY', 'TS', 'TZ', 'TZZ', 'XC', 'XL', 'YJ', 'ZL'];
 const markerRoot = path.join(tempRoot, 'state', 'pipeline-markers');
 const stateDir = path.join(tempRoot, 'state', 'cloud_morning_chain');
 const runtimeRoot = path.join(tempRoot, 'runtime');
@@ -95,7 +98,7 @@ try {
       {store: 'BI_LINKS', file: 'outputs/bi-portal/sections/linksData.json', fetchedAt: new Date().toISOString()},
       ...openApiEvidence,
     ],
-    counts: {enabledStores: 19},
+    counts: {enabledStores: storeKeys.length},
   };
   plan.payloadHash = stableInventoryHash(buildDailyInventoryPlanHashPayload(plan));
   await writeJson(planFile, plan);
@@ -132,8 +135,8 @@ try {
   );
   await writeJson(resultFile, goodResult);
   await writeMarkers();
-  assert.equal(valid.storeCount, 19);
-  assert.equal(valid.artifactCount, 38);
+  assert.equal(valid.storeCount, storeKeys.length);
+  assert.equal(valid.artifactCount, storeKeys.length * 2);
 
   const volatileAgePlan = {
     ...plan,
@@ -1136,7 +1139,7 @@ try {
     }
   }
   const morning = await writeMorningResumeEvidence({root: tempRoot, date: businessDate, outputFile: morningFile});
-  assert.equal(morning.artifacts.length, 38);
+  assert.equal(morning.artifacts.length, storeKeys.length * 2);
   assert(morning.artifacts.every(artifact => !path.isAbsolute(artifact.path)));
   const originalCwd = process.cwd();
   let snapshotMarker;
@@ -1147,7 +1150,7 @@ try {
   } finally { process.chdir(originalCwd); }
   assert.deepEqual(snapshotMarker.evidence.map(record => record.path), [morningFile, inventoryMarkerFile, planFile, resultFile]);
   const savedMorning = snapshotMarker.evidence.find(record => record.path === morningFile);
-  assert.equal(savedMorning.dependencies.length, 38);
+  assert.equal(savedMorning.dependencies.length, storeKeys.length * 2);
   assert.deepEqual(savedMorning.dependencies.map(record => record.path), morning.artifacts.map(artifact => artifact.path));
   assert.equal((await validateDailyOperatingRefresh(options)).ok, true);
   for (const artifact of morning.artifacts) {
@@ -1156,10 +1159,10 @@ try {
   await writeJson(morningFile, {ok: false, laterRun: true});
   const frozenValid = await validateDailyOperatingRefresh(options);
   assert.equal(frozenValid.ok, true, 'later changes to all original morning sources must not invalidate the saved run');
-  assert.equal(frozenValid.artifactCount, 38);
-  assert.equal(frozenValid.storeCount, 19);
+  assert.equal(frozenValid.artifactCount, storeKeys.length * 2);
+  assert.equal(frozenValid.storeCount, storeKeys.length);
   const savedRecords = [...snapshotMarker.evidence, ...savedMorning.dependencies];
-  assert.equal(new Set(savedRecords.map(record => record.snapshotPath)).size, 42);
+  assert.equal(new Set(savedRecords.map(record => record.snapshotPath)).size, savedRecords.length);
   for (const [index, record] of savedRecords.entries()) {
     const original = await fs.readFile(record.snapshotPath);
     // Equal-size, JSON-preserving mutation forces SHA verification of every
@@ -1175,17 +1178,17 @@ try {
   incompleteClosure.evidence.find(record => record.path === morningFile).dependencies.pop();
   await writeJson(operatingMarkerFile, incompleteClosure);
   await assert.rejects(validateDailyOperatingRefresh(options), /morning evidence snapshot closure missing/,
-    'the manifest snapshot alone must not stand in for all 38 dependencies');
+    'the manifest snapshot alone must not stand in for every dependency');
   await writeJson(operatingMarkerFile, snapshotMarker);
   assert.equal((await validateDailyOperatingRefresh(options)).ok, true);
   console.log(JSON.stringify({ok: true, historicalQuarantine: {
     sameScopePendingConflictRejected: true, originalJournalUnchanged: true, scenarioIsolated: true}, preSubmitExclusion: {
     exactJournalWarningAccepted: true, preWarningWithoutFinalMarker: true, bothReasonsAccepted: true,
     strictCompletionRejected: true, rejected: preSubmitRejections}, immutableMorning: {
-    artifactCount: 38, changedOriginalFiles: 39, snapshotHashTamperRejections: savedRecords.length,
+    artifactCount: storeKeys.length * 2, changedOriginalFiles: storeKeys.length * 2 + 1, snapshotHashTamperRejections: savedRecords.length,
     completeDailyValidator: true, incompleteClosureRejected: true}}));
 
-  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'nineteen_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'same_day_pending_warning_accepted_with_exact_journal', 'same_day_pending_warning_strict_rejected', 'same_day_pending_warning_requires_both_warning_markers', 'same_day_pending_warning_journal_missing_rejected', 'same_day_pending_warning_retry_rejected', 'same_day_pending_warning_scope_drift_rejected', 'same_day_pending_warning_binding_drift_rejected', 'same_day_pending_warning_success_confirmed_rejected', 'same_day_pending_warning_terminal_conflict_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected', 'inventory_only_warning_marker_freezes_freshness', 'inventory_only_corrupted_marker_uses_now', 'inventory_only_no_marker_uses_now']}, null, 2));
+  console.log(JSON.stringify({ok: true, checks: ['exact_four_evidence_paths', 'configured_store_artifacts', 'plan_hash', 'automatic_authorization', 'row_identity_and_readback', 'closed_terminal_drift_requires_exact_journal_audit', 'final_freshness_anchored_to_completion', 'write_time_freshness_uses_now', 'zero_rows_require_complete_sources', 'arbitrary_marker_rejected', 'pending_write_rejected', 'orphan_intent_rejected', 'artifact_drift_rejected', 'same_day_pending_warning_accepted_with_exact_journal', 'same_day_pending_warning_strict_rejected', 'same_day_pending_warning_requires_both_warning_markers', 'same_day_pending_warning_journal_missing_rejected', 'same_day_pending_warning_retry_rejected', 'same_day_pending_warning_scope_drift_rejected', 'same_day_pending_warning_binding_drift_rejected', 'same_day_pending_warning_success_confirmed_rejected', 'same_day_pending_warning_terminal_conflict_rejected', 'warning_markers_accepted', 'warning_evidence_drift_rejected', 'failed_marker_rejected', 'warning_non_executable_plan_rejected', 'warning_unsafe_row_rejected', 'inventory_only_warning_marker_freezes_freshness', 'inventory_only_corrupted_marker_uses_now', 'inventory_only_no_marker_uses_now']}, null, 2));
 } finally {
   assert.equal(path.dirname(path.resolve(tempRoot)), tempParent);
   assert(path.basename(tempRoot).startsWith('daily-operating-validator-'));
