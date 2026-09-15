@@ -63,8 +63,14 @@ CPUWeight=60
 # five-store run needed >7 minutes instead of ~1) and pushed host-wide memory PSI to
 # ~95 -- the very signal the browser/heavy admission gate reads -- so the chain's own
 # per-store jobs deferred each other with MEMORY_STALL_PRESSURE.
-MemoryHigh=4000M
-MemoryMax=5000M
+# Measured on the migrated VM: the four-lane browser phase peaked at 4,075 MiB
+# (memory.peak) while MemoryHigh was 4000M, so the cgroup still throttled part of the
+# fetch and its own stall re-appeared as host-wide memory PSI -- the admission gate
+# turns that into MEMORY_STALL_PRESSURE deferrals for the chain's own later stores.
+# 4600M clears the measured ceiling with ~500 MiB of margin, and 5600M keeps a real
+# band above the soft limit so throttling, not killing, stays the first response.
+MemoryHigh=4600M
+MemoryMax=5600M
 OOMPolicy=stop
 KillMode=control-group
 # The wrapper owns the single daily run: it atomically persists the active
