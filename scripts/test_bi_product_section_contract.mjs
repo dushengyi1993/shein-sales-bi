@@ -28,6 +28,8 @@ assert.match(productSql, /AS quantity/);
 assert.match(productSql, /AS orders/);
 assert.match(productSql, /profitMart\('profit_order_item'\)/);
 assert.doesNotMatch(productSql, /gross_sales_sar|goods_title|skc_list/, 'slim product section must not reintroduce large unused fields');
+assert.match(prewarm, /chown sheinops:sheinops "\$LOG_DIR"/,
+  'the prewarm must pin its shared log directory to the service account: the root ET forwarder and the sheinops daily refresh share that directory, and a root-owned one makes the sheinops run die on its own log redirection');
 assert.match(client, /productGroupLimit:40/);
 assert.match(client, /data-product-matrix-more/);
 
