@@ -135,6 +135,10 @@ assert.match(hostWrapper, /shein-browser-read-0\.lock/,
   'browser jobs must share capacity slot 0 with run_host_browser_read_job.sh');
 assert.match(hostWrapper, /shein-browser-read-1\.lock/,
   'browser jobs must share capacity slot 1 with run_host_browser_read_job.sh');
+assert.match(hostWrapper, /SHEIN_BROWSER_READ_SLOTS:-2/,
+  'browser capacity must stay a configurable slot count with a two-slot default');
+assert.match(hostWrapper, /BROWSER_SLOT_FILES\+=/,
+  'browser jobs must build their slot list from the configured count');
 assert.match(hostWrapper, /--deadline-at/);
 assert.match(hostWrapper, /--deadline-epoch/,
   'the morning inventory lane needs an immutable absolute deadline');
@@ -410,6 +414,10 @@ assert.match(browserReadWrapper, /flock -w "\$\(lock_wait_remaining\)" 7/,
   'the domain lock wait must be clamped to the remaining deadline');
 assert.match(browserReadWrapper, /shein-browser-read-0\.lock/);
 assert.match(browserReadWrapper, /shein-browser-read-1\.lock/);
+assert.match(browserReadWrapper, /SHEIN_BROWSER_READ_SLOTS:-2/,
+  'browser read capacity must stay a configurable slot count with a two-slot default');
+assert.match(browserReadWrapper, /BROWSER_SLOT_FILES\+=/,
+  'the read wrapper must build its slot list from the configured count');
 assert.match(browserReadWrapper, /PRESSURE_CLASS=browser-secondary/);
 assert.match(browserReadWrapper, /SHEIN_BI_HOST_RESOURCE_LANE=browser-read/);
 assert.ok(

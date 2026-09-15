@@ -258,23 +258,51 @@ PRESSURE_CLASS="$RESOURCE_CLASS"
 if [[ "$RESOURCE_CLASS" == "browser" ]]; then
   BROWSER_SLOT_0="${SHEIN_BROWSER_READ_SLOT_0:-/run/lock/shein-browser-read-0.lock}"
   BROWSER_SLOT_1="${SHEIN_BROWSER_READ_SLOT_1:-/run/lock/shein-browser-read-1.lock}"
-  for slot_file in "$BROWSER_SLOT_0" "$BROWSER_SLOT_1"; do
+  # Browser capacity is a set of neutral lock files; slots 0 and 1 keep their
+  # historical overrides and any further slot follows the same naming pattern,
+  # so a host with more capacity only raises SHEIN_BROWSER_READ_SLOTS.
+  BROWSER_SLOT_COUNT="${SHEIN_BROWSER_READ_SLOTS:-2}"
+  BROWSER_SLOT_DIR="${SHEIN_BROWSER_READ_SLOT_DIR:-/run/lock}"
+  if [[ ! "$BROWSER_SLOT_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[host-heavy] invalid SHEIN_BROWSER_READ_SLOTS=$BROWSER_SLOT_COUNT" >&2
+    exit 64
+  fi
+  BROWSER_SLOT_FILES=()
+  for (( slot_index = 0; slot_index < BROWSER_SLOT_COUNT; slot_index++ )); do
+    case "$slot_index" in
+      0) BROWSER_SLOT_FILES+=("$BROWSER_SLOT_0") ;;
+      1) BROWSER_SLOT_FILES+=("$BROWSER_SLOT_1") ;;
+      *) BROWSER_SLOT_FILES+=("$BROWSER_SLOT_DIR/shein-browser-read-$slot_index.lock") ;;
+    esac
+  done
+  for slot_file in "${BROWSER_SLOT_FILES[@]}"; do
     if [[ -L "$slot_file" || ! -f "$slot_file" || ! -r "$slot_file" || ! -w "$slot_file" ]]; then
       record_defer "browser_slot_invalid"
       exit 73
     fi
   done
-  exec 6<>"$BROWSER_SLOT_1"
-  OTHER_SLOT_FILE="$BROWSER_SLOT_0"
-  if ! flock -n 6; then
+  BROWSER_SLOT_INDEX=-1
+  for (( slot_index = ${#BROWSER_SLOT_FILES[@]} - 1; slot_index >= 0; slot_index-- )); do
+    exec 6<>"${BROWSER_SLOT_FILES[$slot_index]}"
+    if flock -n 6; then
+      BROWSER_SLOT_INDEX="$slot_index"
+      break
+    fi
     exec 6>&-
-    exec 6<>"$BROWSER_SLOT_0"
-    if ! flock -n 6; then defer_lock_busy "browser_slots_busy"; fi
-    OTHER_SLOT_FILE="$BROWSER_SLOT_1"
-  fi
-  exec 5<>"$OTHER_SLOT_FILE"
-  if flock -n 5; then flock -u 5; else PRESSURE_CLASS=browser-secondary; fi
-  exec 5>&-
+  done
+  if (( BROWSER_SLOT_INDEX < 0 )); then defer_lock_busy "browser_slots_busy"; fi
+  PRESSURE_CLASS=browser-secondary
+  for (( slot_index = 0; slot_index < ${#BROWSER_SLOT_FILES[@]}; slot_index++ )); do
+    [[ "$slot_index" == "$BROWSER_SLOT_INDEX" ]] && continue
+    exec 5<>"${BROWSER_SLOT_FILES[$slot_index]}"
+    if flock -n 5; then
+      flock -u 5
+      exec 5>&-
+      PRESSURE_CLASS=browser
+      break
+    fi
+    exec 5>&-
+  done
 fi
 
 set +e
