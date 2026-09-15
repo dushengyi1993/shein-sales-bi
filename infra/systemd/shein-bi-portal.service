@@ -83,8 +83,15 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=20
 KillMode=control-group
-MemoryHigh=1200M
-MemoryMax=2200M
+# The Portal cgroup also owns the section generator children (generate_bi_portal.mjs,
+# KillMode=control-group). A single child is bounded only by
+# NODE_OPTIONS=--max-old-space-size=1536, so its RSS can reach ~1.8 GiB and MemoryHigh
+# must sit above that. With 1200M the kernel reclaimed this cgroup continuously: the
+# profit generator stalled for 14 minutes without finishing, and the cgroup's own stall
+# made /proc/pressure/memory report full avg10 ~= 90 host-wide, which deferred every
+# resource-gated browser/heavy job with MEMORY_STALL_PRESSURE.
+MemoryHigh=1900M
+MemoryMax=2600M
 OOMPolicy=stop
 ProtectSystem=full
 ProtectKernelTunables=true
