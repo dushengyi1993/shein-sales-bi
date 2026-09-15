@@ -177,3 +177,11 @@ sudo ls /etc/cloud/cloud.cfg.d/; grep -c openapi /etc/hosts
 - 修复：`sudo npm install -g @larksuite/cli@<老云版本>`（半托是 1.0.80），再把老云的 `/root/.lark-cli/config.json` 搬过来（只搬不打印）；验证用 `lark-cli im +messages-send --as <identity> --chat-id <id> --text x --dry-run`：dry-run 只校验请求、不发消息，rc=0 且返回 `/open-apis/im/v1/messages` 即链路通。
 - 教训：迁移后要做三类清单对比——① `dpkg --get-selections`；② `npm ls -g --depth=0`；③ `/usr/local/libexec/` 与 `/usr/bin` 下的符号链接。半托实测 dpkg 差 261 个包但几乎全是历史包袱，真正影响运行的恰恰是第②③类。
 
+**4.6 飞书告警投递：三层依赖，最容易漏的是密钥库**
+
+- 症状：watchdog 日志 `"notified": false, "notifyCode": 1`；`state/cloud_ops_watchdog/alert-state.json` 里 dispatch 一直是 `pending`、`attemptCount` 递增。
+- 三层依赖（半托实测，缺任何一层都失败）：① 全局 npm 包 `@larksuite/cli`（`/usr/bin/lark-cli`）；② `~/.lark-cli/config.json`（appId/brand/lang/users，**不含明文 secret**）；③ **`~/.local/share/lark-cli/` 里的 `appsecret_<appid>.enc` + `master.key`（0600）** ← 真正的密钥库，最容易漏，dpkg 和 `npm ls -g` 都看不到。
+- 定位方法：把 `HOME` 指到一个只放 `~/.lark-cli` 的临时目录，跑同一个只读探针 `lark-cli api GET /open-apis/im/v1/chats`。半托实测：临时 HOME 里失败、`HOME=/root` 成功 → 说明生效凭据在 HOME 的其他位置（就是 `.local/share/lark-cli`）。
+- 验证（只读、不发消息）：上面那个探针返回 `ok:true` 且能列出目标群。
+- 投递验证：用 watchdog 自己的 `scripts/notify_sync_issue.mjs --kind cloud-watchdog --mode watchdog --message '<原文>' --force --idempotency-key <dispatch key>`；成功后必须用 `lib/cloud_watchdog_alert_state.mjs` 的 `markWatchdogDispatchSent` / `markWatchdogOutboxSent` 把状态标 `sent`，否则下一轮 watchdog 会再发一条重复告警。
+

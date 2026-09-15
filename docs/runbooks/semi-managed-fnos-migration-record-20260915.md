@@ -250,6 +250,19 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 验证（不真发消息）：按脚本自身的解析逻辑取投递目标 → masked `chat:oc_fb…b180`、identity `bot`、app `cli_aa8d61df6f381bc6`；执行 `lark-cli im +messages-send … --dry-run` → **rc=0**、`dry_run: true`、请求体指向 `/open-apis/im/v1/messages`。真实投递交给下一次定时 watchdog 自然验证。
 - 同类清单对比结论：dpkg 上 VM 比老云少 261 个包，但几乎全是老云历史包袱（guestfs/autotools/gstreamer/旧反代 caddy+haproxy/微码等），对半托运行无影响；全局 npm 现在四处一致（`@larksuite/cli`、`@openai/codex`、`corepack`、`npm`）；`/usr/local/libexec/` 有两件（时钟自愈脚本 + 库存写入 guard）。
 
+### 告警投递链路：三层依赖，靠「临时 HOME 探针」定位（2026-09-16 约 03:00 修好）
+
+把 watchdog 的 `notifyCode: 1` 拆到底，发现飞书投递缺的是**三层**里的第三层，而前两层只是必要条件：
+
+1. `@larksuite/cli` 全局包（`/usr/bin/lark-cli`）——VM 缺失，已装（顺带升到 CLI 自己提示的 1.0.95；老云仍是 1.0.80）。
+2. `/root/.lark-cli/config.json`——VM 缺失，已按老云管道搬入（sha256 `d40d8612…` 字节一致）。装上这两层后**仍然失败**（`invalid_client / code 20140`）。
+3. **`/root/.local/share/lark-cli/`——真正的密钥库**（`appsecret_cli_aa8d61df6f381bc6.enc` 60 B + `master.key` 32 B，0600 root）。这一层缺失才是根因，已同样搬入。
+
+定位方法（值得复用）：老云的 CLI 用 `HOME=/root` 成功、把**整个** `~/.lark-cli` 复制到临时 HOME 却失败 → 说明生效凭据在 HOME 的 `.lark-cli` 之外；随后在 `/root/.local/share/` 下找到 `lark-cli/` 密钥库。修复后只读探针 `lark-cli api GET /open-apis/im/v1/chats` 返回 `ok:true`。
+
+投递验收：用 `notify_sync_issue.mjs` 按 watchdog 的原参数（`--kind cloud-watchdog --mode watchdog --force --idempotency-key sync-watchdog-alert-batch-6995f04d48c413ff9bc7`）把那条卡了 5 次（22:50/23:50/00:50/01:50/02:50）的订单闭环告警真实投递出去：Feishu 返回 `message_id=om_x100b65ad171dc0a0c4a024d386003ac`（2026-09-16 02:59:41）；随后用 `lib/cloud_watchdog_alert_state.mjs` 的 `markWatchdogDispatchSent` + `markWatchdogOutboxSent` 把 dispatch/outbox 标为 `sent`，避免下一轮重复发送。`systemctl --failed` 已清空。
+
+
 
 - 注意：仓库里记录的代码改动（浏览器 lane 数可配置、默认仍是 2）在部署前**不改变现网行为**；主机侧的 tmpfiles、压力阈值、时钟自愈、CJK 字体、局域网监听都已经在 VM 上生效。
 
