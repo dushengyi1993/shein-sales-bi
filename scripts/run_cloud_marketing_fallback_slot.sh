@@ -288,7 +288,7 @@ fi
 
 # The worker owns the real outer deadline. Keep the host-heavy watchdog alive
 # through the sequential inventory-recovery reserve followed by the declared
-# terminal 19-store snapshot bound. This does not extend the executor write
+# terminal enabled-store snapshot bound. This does not extend the executor write
 # window: every executor still receives OUTER_HARD_DEADLINE_EPOCH unchanged.
 HOST_HARD_DEADLINE_EPOCH="$OUTER_HARD_DEADLINE_EPOCH"
 # This applies to both the ordinary fallback and the immediate path: the

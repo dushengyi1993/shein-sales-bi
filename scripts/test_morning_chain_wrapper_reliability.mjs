@@ -21,6 +21,9 @@
 //    runDate == businessDate or any other mismatched pair fails closed and is
 //    replaced by a correctly derived fresh pair;
 //  - idempotent-skip completion and malformed/future context handling.
+//  - the immutable run-scoped inventory tuple (version index) is authoritative
+//    for the warning convergence path, with the canonical pipeline-marker path
+//    only as the legacy fallback;
 //  - recovery binding fields survive active-context rewrites/restarts, while a
 //    malformed partial binding fails closed before child invocation or write.
 //  The copied validator is intentionally a deterministic wrapper-only stub: it
@@ -111,6 +114,9 @@ exit 0
 STUB
 chmod +x "\$SB/scripts/cloud_morning_chain.sh"
 cp "\$REPO/scripts/pipeline_marker.mjs" "\$SB/scripts/pipeline_marker.mjs"
+mkdir -p "\$SB/scripts/inventory" "\$SB/lib"
+cp "\$REPO/scripts/inventory/daily_inventory_version_publisher.mjs" "\$SB/scripts/inventory/daily_inventory_version_publisher.mjs"
+cp -R "\$REPO/lib/." "\$SB/lib/"
 cat > "\$SB/scripts/validate_daily_operating_refresh.mjs" <<'NODE'
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -135,12 +141,26 @@ const verifyEvidence = (marker, files) => {
 };
 try {
   const finalFile = path.join(markerRoot, runDate, 'daily-operating-refresh.json');
-  const inventoryFile = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  const canonicalInventory = path.join(markerRoot, runDate, 'daily-inventory-guard.json');
+  const canonicalPlan = path.join(markerRoot, '..', '..', 'runtime', 'plans', 'daily-inventory-replenishment-' + runDate + '.json');
+  const canonicalResult = path.join(markerRoot, '..', '..', 'runtime', 'results', 'daily-inventory-replenishment-' + runDate + '.json');
+  // Mirrors the production validator's resolution order: the immutable version
+  // index tuple is authoritative and the canonical pipeline-marker paths are
+  // only the legacy fallback.
+  const fromIndex = (() => {
+    try {
+      const runtimeRoot = path.resolve(argument('--inventory-runtime-root'));
+      const index = JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'results', 'daily-inventory-replenishment-' + runDate + '.index.json'), 'utf8'));
+      const entry = (index.batches || []).find(batch => batch.commandId === 'morning:' + runDate);
+      return entry ? {marker: entry.artifacts.marker.file, plan: entry.artifacts.plan.file, result: entry.artifacts.result.file} : null;
+    } catch { return null; }
+  })();
+  const inventoryFile = fromIndex?.marker || canonicalInventory;
   let valid = false;
   if (preWarning) {
     const inventory = JSON.parse(fs.readFileSync(inventoryFile, 'utf8'));
-    const plan = path.join(markerRoot, '..', '..', 'runtime', 'plans', 'daily-inventory-replenishment-' + runDate + '.json');
-    const result = path.join(markerRoot, '..', '..', 'runtime', 'results', 'daily-inventory-replenishment-' + runDate + '.json');
+    const plan = fromIndex?.plan || canonicalPlan;
+    const result = fromIndex?.result || canonicalResult;
     valid = !fs.existsSync(finalFile)
       && inventory?.ok === true
       && inventory?.status === 'warning'
@@ -166,14 +186,20 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 const root = process.env.SB;
-const [runDate, businessDate, mode = 'inventory-only'] = process.argv.slice(2);
+const [runDate, businessDate, mode = 'inventory-only', markerOverride = ''] = process.argv.slice(2);
 const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const write = (file, value) => { fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\\n'); };
 const evidence = files => files.map(file => ({path:file,bytes:fs.statSync(file).size,sha256:hashFile(file)}));
 const morning = path.join(root,'state','cloud_morning_chain',runDate+'-all.json');
 const planFile = path.join(root,'runtime','plans','daily-inventory-replenishment-'+runDate+'.json');
 const resultFile = path.join(root,'runtime','results','daily-inventory-replenishment-'+runDate+'.json');
-const inventoryMarker = path.join(root,'state','pipeline-markers',runDate,'daily-inventory-guard.json');
+const inventoryMarker = markerOverride || path.join(root,'state','pipeline-markers',runDate,'daily-inventory-guard.json');
+if (mode === 'versioned') {
+  // A version-index tuple whose plan/result evaluate to an item-fenced warning
+  // status, so the published batch is accepted exactly like a real guard run.
+  write(planFile,{date:runDate,payloadHash:'a'.repeat(64),actionable:[{storeKey:'DL',skc:'skc-1',skuCode:'sku-1',targetUsableInventory:100}]});
+  write(resultFile,{planHash:'a'.repeat(64),execute:true,executionMode:'automatic',results:[{storeKey:'DL',skc:'skc-1',skuCode:'sku-1',targetUsableInventory:100,state:'pre_submit_blocked',before:{totalUsableInventory:100}}]});
+}
 if (!fs.existsSync(morning)) write(morning,{ok:true,date:businessDate});
 if (!fs.existsSync(planFile)) write(planFile,{date:runDate,payloadHash:'a'.repeat(64),actionable:[]});
 if (!fs.existsSync(resultFile)) write(resultFile,{planHash:'a'.repeat(64),execute:true,executionMode:'automatic',results:[]});
@@ -190,7 +216,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 const root = process.env.SB;
 const [runDate, businessDate] = process.argv.slice(2);
-const stores = ['CX','DL','DX','FY','HL','JSH','JY','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
+// The current production enabled-store set.  Every derived count below is
+// computed from this list so a store-onboarding change cannot leave the
+// fixture asserting the old store count.
+const stores = ['CX','DL','DX','FY','HL','HY','JSH','JY','LG','LQ','MZ','NM','QH','QY','TS','TZ','TZZ','XC','XL','YJ','ZL'];
 const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
 const hashValue = value => crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
@@ -205,7 +234,7 @@ for (const storeKey of stores) for (const domain of ['shein_links','shein_busine
   artifacts.push({storeKey,domain,path:path.relative(root,file).split(path.sep).join('/'),bytes:stat.size,sha256:hashFile(file)});
 }
 const morning = path.join(root, 'state', 'cloud_morning_chain', runDate+'-all.json');
-write(morning, {schemaVersion:'shein-morning-resume-evidence/v1',ok:true,date:businessDate,generatedAt:new Date().toISOString(),source:'existing_exact_date_store_artifacts',expectedStoreCount:19,artifactCount:38,stores,domains:['shein_links','shein_business_domains'],artifacts});
+write(morning, {schemaVersion:'shein-morning-resume-evidence/v1',ok:true,date:businessDate,generatedAt:new Date().toISOString(),source:'existing_exact_date_store_artifacts',expectedStoreCount:stores.length,artifactCount:stores.length * 2,stores,domains:['shein_links','shein_business_domains'],artifacts});
 const policy = JSON.parse(fs.readFileSync(path.join(root,'config','inventory_replenishment_policy.json'),'utf8'));
 const fetchedAt = new Date().toISOString();
 const sourceEvidence = [
@@ -213,7 +242,7 @@ const sourceEvidence = [
   {store:'BI_LINKS',file:'outputs/bi-portal/sections/linksData.json',fetchedAt},
   ...stores.map(store => ({store,file:'outputs/shein_openapi_products/'+store+'/latest.json',fetchedAt,stockFailedChunkCount:0})),
 ];
-const plan = {schemaVersion:'daily-inventory-replenishment-plan/v1',date:runDate,policyVersion:policy.policyVersion,executable:true,blockers:[],actionable:[],lowEtAllocations:[],sourceEvidence,counts:{enabledStores:19}};
+const plan = {schemaVersion:'daily-inventory-replenishment-plan/v1',date:runDate,policyVersion:policy.policyVersion,executable:true,blockers:[],actionable:[],lowEtAllocations:[],sourceEvidence,counts:{enabledStores:stores.length}};
 plan.payloadHash = hashValue({schemaVersion:plan.schemaVersion,date:plan.date,policyVersion:plan.policyVersion,actionable:plan.actionable,lowEtAllocations:plan.lowEtAllocations,sourceEvidence:plan.sourceEvidence});
 const planFile = path.join(root,'runtime','plans','daily-inventory-replenishment-'+runDate+'.json');
 const resultFile = path.join(root,'runtime','results','daily-inventory-replenishment-'+runDate+'.json');
@@ -356,6 +385,33 @@ check t2e_rc 0 "\$?"
 check t2e_no_child 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
 check t2e_latest_warning warning "\$(latest_status)"
 [[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t2e warning context cleared]' || { echo 'FAIL[t2e context not cleared]'; FAIL=1; }
+
+# t2f: the immutable run-scoped inventory tuple published in the version index
+# is authoritative. A warning whose plan/result/marker live only under the run
+# directory (no canonical pipeline-marker copy) still converges without a child
+# and without rerunning inventory.
+rm -f "\$CALLS_LOG" "\$STATE/latest.json"
+rm -rf "\$SB/state/pipeline-markers" "\$SB/runtime/runs" "\$SB/runtime/versions"
+mkdir -p "\$SB/state/pipeline-markers"
+rm -f "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.index.json"
+RUN_MARKER="\$SB/runtime/runs/\$TODAY/cmdversioned/markers/\$TODAY/daily-inventory-guard.json"
+node "\$SB/scripts/write_warning_bundle.mjs" "\$TODAY" "\$YESTERDAY" versioned "\$RUN_MARKER"
+: > "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json.journal.ndjson"
+node "\$SB/scripts/inventory/daily_inventory_version_publisher.mjs" publish "\$SB/runtime" "\$TODAY" "batch-versioned-\$TODAY" "morning:\$TODAY" "\$SB/runtime/plans/daily-inventory-replenishment-\$TODAY.json" "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.json" "\$RUN_MARKER" "" >/dev/null
+[[ ! -e "\$SB/state/pipeline-markers/\$TODAY/daily-inventory-guard.json" ]] && echo 'PASS[t2f no canonical inventory marker]' || { echo 'FAIL[t2f canonical marker unexpectedly written]'; FAIL=1; }
+cat > "\$STATE/active.json" <<JSON
+{"runDate":"\$TODAY","businessDate":"\$YESTERDAY","deadlineEpoch":\$EXPIRED,"startedAt":"x","pid":1,"attempt":1}
+JSON
+export STUB_MODE=warning_resume
+bash "\$WRAPPER" >/dev/null 2>&1
+check t2f_rc 0 "\$?"
+check t2f_child_not_called 0 "\$(wc -l < "\$CALLS_LOG" 2>/dev/null || echo 0)"
+check t2f_latest_warning warning "\$(latest_status)"
+[[ ! -e "\$STATE/active.json" ]] && echo 'PASS[t2f versioned warning context cleared]' || { echo 'FAIL[t2f context not cleared]'; FAIL=1; }
+# Restore the index-free layout so later scenarios keep exercising the
+# canonical fallback instead of this versioned tuple.
+rm -rf "\$SB/runtime/runs" "\$SB/runtime/versions"
+rm -f "\$SB/runtime/results/daily-inventory-replenishment-\$TODAY.index.json"
 
 # t3: an unfinished OLD runDate is never executed across midnight. The same
 # activation records its terminal evidence, then starts TODAY only.

@@ -233,7 +233,9 @@ assert.equal(livePolicy.execution.automaticExecution.authorizationByContext.clou
 assert.match(guardScript, /flock (-n|-w [^;]+) 9/);
 assert.match(guardScript, /ensure_links_data_fresh/);
 assert.match(guardScript, /api\/bi\/section\/linksData\?refresh=1/);
-assert.match(guardScript, /refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=/);
+assert.match(guardScript, /refresh \$\{RECONCILE_STORE_COUNT\}-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=/);
+assert.doesNotMatch(guardScript, /19-store/,
+  'the guard must derive every operator-facing store count from RECONCILE_STORES instead of a stale literal');
 assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_MAX_DETAILS="\$max_targets"/);
 assert.match(guardScript, /SHEIN_OPENAPI_PRODUCT_RECONCILE_PRIORITY_DETAILS_ONLY=1/);
 assert.match(guardScript, /^[ \t]+ensure_inventory_trend_fresh 1$/m);

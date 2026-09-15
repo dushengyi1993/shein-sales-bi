@@ -109,7 +109,7 @@ const patchedResults = [...rankedRows].sort((a, b) => {
 // 1. Total count equals 2200
 assert.equal(patchedResults.length, 2200, 'Patched query must respect global limit of 2200');
 
-// 2. All 19 stores have links represented (zero starvation)
+// 2. All enabled stores have links represented (zero starvation)
 const coveredStores = new Set(patchedResults.map(r => r.store_key));
 assert.equal(coveredStores.size, allStores.length, 'All enabled stores must be covered in store_links');
 for (const store of allStores) {

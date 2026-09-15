@@ -1,5 +1,5 @@
 [Unit]
-Description=SHEIN BI unified daily operating refresh (19 stores, supplements and inventory)
+Description=SHEIN BI unified daily operating refresh (all enabled stores, supplements and inventory)
 Wants=network-online.target docker.service shein-bi-portal.service
 After=network-online.target docker.service shein-bi-portal.service systemd-tmpfiles-setup.service
 StartLimitIntervalSec=900

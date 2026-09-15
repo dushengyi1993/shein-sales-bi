@@ -56,6 +56,9 @@ MAX_ROWS="${SHEIN_BI_INVENTORY_MAX_ROWS:-1000}"
 # identical). Never narrow it to the target subset: the refresh is not a
 # detail-only pass for the allowlisted SPUs.
 RECONCILE_STORES="${SHEIN_BI_INVENTORY_RECONCILE_STORES:-CX,DL,DX,FY,HL,HY,JSH,JY,LG,LQ,MZ,NM,QH,QY,TS,TZ,TZZ,XC,XL,YJ,ZL}"
+# Operator-facing text always states the store scope actually being refreshed,
+# so an onboarding change cannot leave a stale store count in the logs.
+RECONCILE_STORE_COUNT="$(awk -F, '{print NF}' <<<"$RECONCILE_STORES")"
 PLAN="$RUNTIME_ROOT/plans/daily-inventory-replenishment-$DATE.json"
 RESULT="$RUNTIME_ROOT/results/daily-inventory-replenishment-$DATE.json"
 DETAIL_TARGETS_DIR="$RUNTIME_ROOT/detail-targets"
@@ -608,8 +611,8 @@ build_plan() {
 }
 
 # Write the managed daily detail-target manifest from the current plan's
-# detailRefreshTargets (store+SPU pairs), then refresh list + stock for all 19
-# stores and current detail only for the allowlisted targets, bounded by the
+# detailRefreshTargets (store+SPU pairs), then refresh list + stock for every
+# configured store and current detail only for the allowlisted targets, bounded by the
 # per-store budget. The manifest is written atomically (tmp + mv) and must be
 # nonempty with max per-store <= budget before any reconciliation runs.
 # Return codes: 0 refreshed, 1 refresh/build failed or empty targets
@@ -784,7 +787,7 @@ elif [[ "$REFRESH_DETAIL_TARGETS_ON_BLOCKED" == "1" ]] \
   REFRESH_REASON="current_detail_blocked"
 fi
   if [[ -n "$REFRESH_REASON" ]]; then
-    echo "[daily_inventory_guard] refresh 19-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=$REFRESH_REASON"
+    echo "[daily_inventory_guard] refresh ${RECONCILE_STORE_COUNT}-store read-only OpenAPI sources with targeted current-detail budget and rebuild plan reason=$REFRESH_REASON"
     DETAIL_REBUILD_ATTEMPTS=0
     while :; do
       REFRESH_STATUS=0

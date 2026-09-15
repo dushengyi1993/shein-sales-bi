@@ -119,6 +119,30 @@ async function verifyEvidenceRecords(entries, expectedFiles, root, label) {
   }
 }
 
+// Warning-mode operating markers may record the inventory guard marker either
+// at the immutable run-scoped path published by the version index or at the
+// canonical pipeline-marker path used before versioned runs existed.  Both
+// candidates are the same logical artifact, so each evidence entry is still
+// bound to a required slot and verified by size and hash.
+async function verifyWarningMarkerEvidence(entries, slots, root, label) {
+  assert(Array.isArray(entries), `${label} evidence is not an array`);
+  assert(entries.length === slots.length, `${label} evidence must contain exactly one record per required artifact`);
+  const used = new Set();
+  for (const entry of entries) {
+    const recorded = storedPath(root, entry?.path);
+    const index = slots.findIndex((candidates, position) => !used.has(position)
+      && candidates.some(candidate => path.resolve(candidate) === recorded));
+    assert(index >= 0, `${label} evidence is not bound to a required artifact: ${recorded}`);
+    used.add(index);
+    const file = storedPath(root, entry.snapshotPath || entry.path);
+    const stat = await fs.lstat(file);
+    assert(stat.isFile() && !stat.isSymbolicLink(), `${label} evidence is not a regular file: ${file}`);
+    assert(Number(entry.bytes) === stat.size, `${label} evidence size mismatch: ${file}`);
+    assert(String(entry.sha256 || '') === await fileHash(file), `${label} evidence hash mismatch: ${file}`);
+  }
+  assert(used.size === slots.length, `${label} evidence is missing a required artifact`);
+}
+
 async function validateMorningEvidence({root, businessDate, file, enabledStores, evidenceRecord}) {
   const document = await readJson(evidenceRecord?.snapshotPath || file);
   assert(document?.schemaVersion === 'shein-morning-resume-evidence/v1', 'morning evidence schema mismatch');
@@ -152,7 +176,7 @@ async function validateMorningEvidence({root, businessDate, file, enabledStores,
     assert(payload?.ok === true && payload?.date === businessDate, `morning evidence payload date/status mismatch: ${key}`);
     assert(String(payload?.store?.storeKey || '').toUpperCase() === storeKey, `morning evidence payload store mismatch: ${key}`);
   }
-  assert(seen.size === 38, 'morning evidence store/domain coverage is incomplete');
+  assert(seen.size === enabledStores.length * DOMAINS.length, 'morning evidence store/domain coverage is incomplete');
 }
 
 function expectedPlanHash(plan) {
@@ -704,11 +728,11 @@ export async function validateInventoryArtifacts({
       warningMarkersAreValid = isWarningMarker(operatingMarker, 'daily-operating-refresh', runDate, businessDate);
       if (warningMarkersAreValid) {
         const effectiveStateDir = path.resolve(stateDir || path.join(root, 'state', 'cloud_morning_chain'));
-        await verifyEvidenceRecords(operatingMarker.evidence, [
-          path.join(effectiveStateDir, `${runDate}-all.json`),
-          inventoryMarkerFile,
-          planFile,
-          resultFile,
+        await verifyWarningMarkerEvidence(operatingMarker.evidence, [
+          [path.join(effectiveStateDir, `${runDate}-all.json`)],
+          [inventoryMarkerFile, path.join(markerRoot, runDate, 'daily-inventory-guard.json')],
+          [planFile],
+          [resultFile],
         ], root, 'daily operating marker');
       }
     } catch {

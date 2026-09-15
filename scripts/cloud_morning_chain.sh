@@ -333,7 +333,7 @@ run_nightly_session_readiness_gate() {
     --run-date "$RUN_DATE" \
     -- /usr/bin/env bash "$ROOT/scripts/run_pipeline_stage.sh" \
       --stage nightly-session \
-      --message "19-store session maintenance completed" \
+      --message "session maintenance completed for $(enabled_store_label)" \
       -- /usr/bin/flock -w "${SHEIN_BI_MORNING_SESSION_INNER_LOCK_WAIT_SEC:-120}" \
         "${SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE:-$ROOT/state/locks/shein-bi-nightly-maintenance.lock}" \
         /usr/bin/env bash "$ROOT/scripts/cloud_shein_session_manager.sh"; then
@@ -455,6 +455,29 @@ process.stdout.write((config.stores || [])
 NODE
 }
 
+# Operator-facing store scope text is always derived from the single source of
+# truth (config/stores.json) so no message, marker or state file can drift from
+# the enabled store set again.
+enabled_store_label() {
+  local count=""
+  count="$(ROOT="$ROOT" node -e '
+const fs = require("fs");
+const path = require("path");
+try {
+  const config = JSON.parse(fs.readFileSync(path.join(process.env.ROOT, "config", "stores.json"), "utf8"));
+  process.stdout.write(String((config.stores || [])
+    .filter(store => store.enabled !== false)
+    .map(store => String(store.storeKey || "").trim().toUpperCase())
+    .filter(Boolean).length));
+} catch { process.exit(1); }
+' 2>/dev/null || true)"
+  if [[ "$count" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s stores' "$count"
+  else
+    printf 'all enabled stores'
+  fi
+}
+
 missing_exact_date_stores() {
   DATA_DATE="$DATA_DATE" node - <<'NODE'
 const fs = require('fs');
@@ -490,7 +513,7 @@ run_supplements_stage() {
   local remaining=$((PRE_INVENTORY_DEADLINE_EPOCH - $(date +%s)))
   if (( remaining <= 0 )); then return 76; fi
   # The inventory coordinator enters the reserved inventory window as soon as
-  # the 19-store merge and the inventory-critical linksData section are
+  # the enabled-store merge and the inventory-critical linksData section are
   # complete.  Homepage-critical Portal sections (homeRankings..homeProfit)
   # are NOT on this critical path: cloud_daily_refresh enqueues them for the
   # bounded host-locked queue worker instead of a synchronous prewarm that can
@@ -518,7 +541,7 @@ run_supplements_stage() {
   if [[ "$status" -ne 0 ]]; then
     return "$status"
   fi
-  write_marker "morning-links-ready" "done" "all 19 stores merged and published in the unified daily run" \
+  write_marker "morning-links-ready" "done" "all $(enabled_store_label) merged and published in the unified daily run" \
     "$STATE_DIR/${RUN_DATE}-all.json" >/dev/null
   write_marker "morning-supplements" "done" "daily supplements completed inside the unified run" \
     "$LOG_FILE" >/dev/null
@@ -531,7 +554,7 @@ run_inventory_stage() {
   fi
   write_state "running" "refreshing current OpenAPI stock and running the one daily inventory guard"
   # OpenAPI stock is an api-light phase.  It must not reserve the exclusive
-  # browser/DB lane for the whole 19-store request.
+  # browser/DB lane for the whole enabled-store request.
   local stock_remaining stock_budget
   stock_remaining=$((RUN_DEADLINE_EPOCH - $(date +%s)))
   if (( stock_remaining <= 0 )); then return 76; fi
@@ -623,7 +646,7 @@ run_inventory_stage() {
 if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
   echo "[cloud_morning_chain] start stage=$STAGE runDate=$RUN_DATE businessDate=$DATA_DATE dryRun=$DRY_RUN"
   case "$STAGE" in
-    all) echo "[cloud_morning_chain] dry-run: one coordinator fetches all 19 stores, publishes once, then runs supplements and inventory" ;;
+    all) echo "[cloud_morning_chain] dry-run: one coordinator fetches all $(enabled_store_label), publishes once, then runs supplements and inventory" ;;
     inventory|replenishment) echo "[cloud_morning_chain] dry-run: inventory stage only" ;;
     *) exit 64 ;;
   esac
@@ -680,7 +703,7 @@ case "$STAGE" in
     else
       wait_for_catchup_startup_window
     fi
-    write_state "running" "one daily coordinator is refreshing all 19 stores; the previous complete BI snapshot stays visible until the run is complete"
+    write_state "running" "one daily coordinator is refreshing all $(enabled_store_label); the previous complete BI snapshot stays visible until the run is complete"
     RESULT_FILE="$STATE_DIR/${RUN_DATE}-all.json"
     MISSING_STORES="$(missing_exact_date_stores)"
     if [[ -z "$MISSING_STORES" ]]; then
@@ -728,7 +751,7 @@ case "$STAGE" in
       done
     fi
 
-    # Normalize the initial fetch and every retry into one immutable 19-store
+    # Normalize the initial fetch and every retry into one immutable enabled-store
     # bundle.  A chunk result can retain stores that succeeded in a later
     # retry, so chunk status is never accepted as final completion evidence.
     node scripts/build_morning_resume_evidence.mjs --date "$DATA_DATE" --out "$RESULT_FILE"
@@ -739,7 +762,7 @@ case "$STAGE" in
       # hash even though supplements/Portal are already complete.  Re-sign
       # only this marker with the current bundle before entering inventory;
       # the exact-store gate above still forbids incomplete data here.
-      write_marker "morning-links-ready" "done" "all 19 stores merged and published in the unified daily run" \
+      write_marker "morning-links-ready" "done" "all $(enabled_store_label) merged and published in the unified daily run" \
         "$RESULT_FILE" >/dev/null
       echo "[cloud_morning_chain] resume-skip completed supplements/Portal checkpoint; continuing with inventory in the same logical daily run"
     else
@@ -757,7 +780,7 @@ case "$STAGE" in
           exit "$SUPPLEMENT_STATUS"
         fi
         SUPPLEMENT_RETRY_ROUND=$((SUPPLEMENT_RETRY_ROUND + 1))
-        write_state "waiting" "all 19 stores are collected but the platform daily metrics are not ready; the same run will retry without publishing partial data"
+        write_state "waiting" "all $(enabled_store_label) are collected but the platform daily metrics are not ready; the same run will retry without publishing partial data"
         echo "[cloud_morning_chain] waiting platform readiness retryRound=$SUPPLEMENT_RETRY_ROUND"
         sleep "${SHEIN_BI_MORNING_PLATFORM_RETRY_DELAY_SEC:-300}"
       done
@@ -778,19 +801,19 @@ case "$STAGE" in
     fi
     resolve_inventory_artifacts
     if [[ "$INVENTORY_STAGE_STATUS" -eq 102 ]]; then
-      write_marker "daily-operating-refresh" "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers" \
+      write_marker "daily-operating-refresh" "warning" "all $(enabled_store_label) and supplements completed; inventory completed with item-level business blockers" \
         "$RESULT_FILE" "$INVENTORY_MARKER" \
         "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
       printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
         > "$STATE_DIR/${RUN_DATE}.done"
-      write_state "warning" "all 19 stores and supplements completed; inventory completed with item-level business blockers"
+      write_state "warning" "all $(enabled_store_label) and supplements completed; inventory completed with item-level business blockers"
     else
-      write_marker "daily-operating-refresh" "done" "all 19 stores, supplements and inventory completed in one run" \
+      write_marker "daily-operating-refresh" "done" "all $(enabled_store_label), supplements and inventory completed in one run" \
         "$RESULT_FILE" "$INVENTORY_MARKER" \
         "$INVENTORY_PLAN" "$INVENTORY_RESULT" >/dev/null
       printf 'completed_at=%s\nbusiness_date=%s\nlog=%s\n' "$(now_iso)" "$DATA_DATE" "$LOG_FILE" \
         > "$STATE_DIR/${RUN_DATE}.done"
-      write_state "ok" "all 19 stores, supplements and inventory completed; the complete daily snapshot was published once"
+      write_state "ok" "all $(enabled_store_label), supplements and inventory completed; the complete daily snapshot was published once"
     fi
     ;;
   *)

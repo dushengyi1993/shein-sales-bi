@@ -4,7 +4,7 @@
  *
  * This is a thin compatibility wrapper around the original HL pilot script,
  * which already supports `--store` and `--port`. Keep the generic filename as
- * the operator-facing command so 19-store onboarding does not look HL-specific.
+ * the operator-facing command so store onboarding does not look HL-specific.
  */
 import {spawn} from 'node:child_process';
 import path from 'node:path';
