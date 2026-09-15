@@ -217,3 +217,22 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - PR #169 已合并（`b19ddc1`），main-push CI 全绿；源码版本 **`2026.09.16.1`** 已通过 `source-release.yml` 发布：annotated tag `2026.09.16.1` → `b19ddc1`，Release 非 draft 且 `immutable=true`，两份资产（`release-attestation.json` + `.sha256`）下载后校验一致，attestation 绑定 `commit=b19ddc1…`、CI run `34994917632`（main push）、trust policy `590280…`。
 - **云端尚未部署**：部署要跑库存轮转（`rotation-stage → 部署 → rotation-finalize`），必须在 `maintenance=all` 下进行，而该模式会把 `00:45` 登录态维护、`01:45/02:05/02:25` 备份、`02:45/03:05/03:20` 昨日定稿整段取消。因此本晚只发布不动生产，部署窗口安排在 **03:30–06:50** 或晨链之后。
 - 注意：仓库里记录的代码改动（浏览器 lane 数可配置、默认仍是 2）在部署前**不改变现网行为**；主机侧的 tmpfiles、压力阈值、时钟自愈、CJK 字体、局域网监听都已经在 VM 上生效。
+
+### 部署执行清单（供 03:30–06:50 窗口内逐条执行）
+
+前置：窗口要避开 `00:45` 登录态维护、`01:45/02:05/02:25` 备份、`02:45/03:05/03:20` 昨日定稿；执行前 `systemctl list-jobs` 确认没有正在跑的重任务。
+
+1. 在 VM 上下载并校验证明资产到 `/srv/shein-bi/runtime/release-attestations/2026.09.16.1/`（`gh release download --pattern 'release-attestation.json*'`），下载后 sha256 必须与 `.sha256` 一致。
+2. 以 `sheinops` 取 tag 并固化 bundle：`git fetch --tags origin` → `git bundle create <file> 2026.09.16.1` → 记录 bundle 的 sha256（后续 `--record-deployment` 要成对传入）。
+3. 进维护：`node scripts/manage_cloud_maintenance_mode.mjs pause --mode all --reason "deploy 2026.09.16.1" --requested-by codex --expected-generation <g> --expected-hash <h>`（`--mode all` 是轮转的硬要求）。
+4. 权限交接：只把当前代 plan 里的 managedSource **目录行** 临时 chown 给 `sheinops`，不要递归 chown 整个 app。
+   ⚠️ 加固器在新机必须走新代际路径：`--receipt` / `--plan-file` / `--completion-attestation` 都指向新文件名并带 `--generation-id`，才会进 `audit_new_generation` 分支；用默认路径会拿 8/27 的 completion 做 mount 校验，并因新机 bind mount 不同而拒绝（`completed generation runtime mount identity drift`）。
+5. 以 `sheinops` 检出 attested commit（禁止 `sudo git`，禁止逐文件 scp 长期维持生产）。
+6. 检出后**重新生成**该代际的 plan 并 `--apply`（新 generation-id），产出新的 receipt + completion。
+7. `rotation-stage`：先 dry-run 出不可变预检工件，再用 `--preflight-artifact` + 文件 sha + preflightHash + `--confirm STAGE_INVENTORY_COMPATIBILITY_ROTATION_V1` 执行。
+8. `node scripts/check_release_source_state.mjs --expected-commit 2026.09.16.1 --record-deployment 2026.09.16.1 --source-bundle <file> --expected-source-bundle-sha256 <sha>`。
+9. `rotation-finalize`：同样 dry-run → `--confirm FINALIZE_INVENTORY_COMPATIBILITY_ROTATION_V1` 执行。
+10. `node scripts/inventory/assert_inventory_writer_release_aligned.mjs --cwd /opt/shein-bi/app --expected-commit <exact commit> --json` 必须 exit 0，否则不得退出维护。
+11. 安装/更新 systemd 单元与 drop-in（按 `infra/systemd/README.md` 的「fnOS VM 主机加固」一节），`daemon-reload`，重启 Portal/Query/Webhook。
+12. 放开浏览器 lane：按 `infra/tmpfiles.d/shein-bi-scheduler.conf` 建出 4 个 lane 锁，并把 `SHEIN_BROWSER_READ_SLOTS=4`、`SHEIN_LINK_BUSINESS_BROWSER_CONCURRENCY=4` 写进 morning-chain 的 drop-in；随后做一次真实并发实测（4 个作业各占一条 lane，第 5 个应以 `browser_slots_exhausted` defer）。
+13. 退出维护，观察下一次定时任务与 watchdog，确认没有 `Persistent` catch-up 意外拉起。
