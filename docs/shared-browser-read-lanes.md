@@ -9,7 +9,7 @@
 
 半托下列生产任务使用 `run_host_browser_read_job.sh`：
 
-- 19 店会话续期；
+- 21 店会话续期；
 - ET forwarder 与仓储费读取；
 - RTV 只读核验；
 - 晨间 link/business 两个分块。
