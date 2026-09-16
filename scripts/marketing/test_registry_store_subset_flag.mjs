@@ -8,16 +8,25 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const read = rel => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 // A newly enabled store can legitimately have no enrollable ordinary campaign yet: the
-// platform returns no eligible entries for it, so the store has zero baseline rows. The
-// publish path must stay usable behind one explicit, auditable flag instead of failing the
-// whole run, mirroring the enabled-store-subset semantics the guard already relies on.
+// platform returns no eligible entries for it, so it contributes zero baseline rows. That
+// must stay publishable behind one explicit, auditable flag - and the flag has to mean the
+// same thing in every coverage check the publish path performs, not just the first one.
 const cli = read('scripts/marketing/manage_marketing_plan_registry.mjs');
-assert.match(cli, /--allow-enabled-store-subset/, 'registry CLI must expose --allow-enabled-store-subset');
-assert.match(cli, /allowStoreCoverageSubset: args\.allowEnabledStoreSubset === true/, 'registry CLI must forward the subset flag into publish');
+assert.ok(cli.includes('--allow-enabled-store-subset'), 'registry CLI exposes --allow-enabled-store-subset');
+assert.ok(cli.includes('allowStoreCoverageSubset: args.allowEnabledStoreSubset === true'), 'registry CLI forwards the subset flag');
 
 const lib = read('lib/marketing_plan_registry.mjs');
-assert.match(lib, /allowStoreCoverageSubset = false,/, 'registry lib must default the subset flag to false');
-assert.match(lib, /allowStoreCoverageSubset,/, 'registry lib must forward the subset flag into pair validation');
-assert.match(lib, /if \(!allowStoreCoverageSubset && expectedStoreCount/, 'coverage equality must stay gated on the flag');
+assert.ok(lib.includes('allowStoreCoverageSubset = false,'), 'registry lib defaults the subset flag to false');
+assert.ok(lib.includes('allowEnabledStoreSubset: allowStoreCoverageSubset,'), 'candidate readback honours the same subset allowance as the pair check');
+assert.ok(lib.includes('if (!allowStoreCoverageSubset && expectedStoreCount'), 'coverage equality stays gated on the flag');
 
-console.log(JSON.stringify({ok: true, test: 'registry_publish_enabled_store_subset_flag'}));
+// Real enrollment arrives in ordered waves (base -> exec -> run -> run2, then supplements and
+// re-reports). A later manifest supersedes an earlier row; treating that as a hard duplicate
+// error forced operators to hand-derive a pruned partition before anything could be published.
+const promoter = read('scripts/marketing/promote_composite_ordinary_campaign_baseline.mjs');
+assert.ok(promoter.includes('function resolveApprovedUnion('), 'approval waves resolve in manifest order');
+assert.ok(!promoter.includes('Duplicate ${label} row across approval manifests'), 'supersession is no longer a hard duplicate error');
+assert.ok(promoter.includes('--allow-enabled-store-subset'), 'composite promoter exposes the subset flag');
+assert.ok(promoter.includes('allowStoreCoverageSubset: args.allowEnabledStoreSubset === true'), 'composite promoter forwards the subset flag');
+
+console.log(JSON.stringify({ok: true, test: 'registry_publish_enabled_store_subset_and_superseding_approvals'}));
