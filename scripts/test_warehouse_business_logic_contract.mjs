@@ -180,6 +180,12 @@ assert.match(audit, /SELECT store_key FROM fact\.openapi_store_daily_sales WHERE
   'sales coverage must count a successful zero-sale OpenAPI probe instead of treating no order row as a missing store');
 assert.match(audit, /sales_probe_store_count/);
 assert.match(audit, /sales_coverage_is_event_driven_today/);
+
+// The gsfs finance-detail domain is not collected on the cloud host (newest
+// snapshot 2026-06-21, finance absent from the collected domain list), so
+// per-store coverage stays an informational note rather than a warning.
+assert.ok(audit.includes('不作为体检告警'), 'gsfs finance-detail coverage must be reported as a note');
+assert.ok(!audit.includes('warnings.push(`gsfs 财务明细覆盖'), 'gsfs finance-detail coverage must not raise a warehouse warning');
 assert.match(audit, /ops\.shein_webhook_primary_sales_enabled\(current_date\)/);
 assert.match(audit, /按 0 销量处理，不判为数据缺失/);
 assert.doesNotMatch(audit, /linkLagDaysFromSales/,
