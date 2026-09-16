@@ -413,3 +413,21 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 宿主机特权：飞牛网页密码不是 Linux 密码，「不走浏览器改宿主机」需要用户先在网页后台设 Linux 密码或加免密 sudoers。
 - 旧云 `sa` 兼容转发保留 ≥7 天；`/data/shein-bi/outputs` 的 6.5 GB 历史按日归档仍在旧云未删。
 - 09:50 的 watchdog 会对 `2026.09.16.4` 做一次 release audit 复核（`releaseAuditReady` 应为 true）。
+
+### 迁移后第 6 批：把「cgroup 软上限低于工作集」这一类全量扫一遍（2026-09-16 09:00–09:35，已修并部署）
+
+- 做法：对每个 `shein-bi-*` 服务，把 cgroup 的 `memory.peak`（停掉的用 systemd 记账的 `MemoryPeak`）与它自己的 `MemoryHigh` 比一遍，并看 `/sys/fs/cgroup/.../memory.events` 的 `high` 计数。
+- 结果只有两个服务贴着自己的软上限：
+  1. `shein-bi-portal.service`：修完 1200M→1900M 之后实测 `memory.peak=1,781.8 MiB`（距 1900M 只剩 120 MiB），且 `high` 计数三小时又涨 1.3 万次 → 抬到 **`2400M/3000M`**（约 620 MiB 余量）。
+  2. `shein-bi-cloud-session-manager.service`：systemd 记账 `MemoryPeak=1,468,776,448` 字节，比它自己的 1400M 软上限还高 0.7 MiB → 抬到 **`1800M/2400M`**（它 00:45 跑，机器空闲）。
+  其余都宽松：query 53/1024、webhook 41/600、et-forwarder 43/800、rtv-verify 66/1000、et-low-inventory-recheck 77/800、watchdog 37/无上限。
+- 复核（09:32 那次段队列是最能压 Portal cgroup 的负载）：队列 **14 秒**跑完并清空（`entries 0`），此前一直失败、`lastError=core generatedAt changed during child publication` 的 `inventoryTrend` 段在 09:32 正常发布；Portal cgroup 的 `high` 计数抬高之后一小时纹丝不动（693,998），全机 PSI 0，`systemctl --failed` 空。
+- 落地：PR #183（unit + 契约断言 + README 口径），随后随 `2026.09.16.5` 部署。
+
+### 第五轮发布与部署（2026-09-16 09:24 CST，库存 generation 110）
+
+- 发布 `2026.09.16.5`（tag → `a754742`；第一次 dispatch 仍停在 draft、tag 已推上，同版本重跑发布成功）。
+- 部署：`pause`（generation 372）→ 交接 2766 条 → `git reset --hard a754742`（clean；checkout 里的 portal unit 已是 `MemoryHigh=2400M`）→ bundle `773af87c…` → 加固 `deploy6-20260916`（0 issues）→ 部署标记（fingerprint `1c467cdb…`）→ 轮转 generation **110** → `assert aligned: true` → 三个守卫 `rc=0 / activated_exact / 110` → resume（generation 373）。**全程 40 秒**。
+- 代价与补偿：这个窗口正好压掉 `09:25` 那次 browser-cleanup 槽位，部署后手动跑了一次同一服务补偿（`Result=success`、`chrome=0`）。
+- 读回：`check_release_source_state` exact/clean（head `a754742`、dirty 0）、watchdog 重跑 `releaseAuditReady=true` / `releaseAuditIssues=[]` / `deployedRelease.tag=2026.09.16.5`、portal/query/webhook active、局域网 302、`systemctl --failed` 空。
+- 至此 main 与部署源一致（含今天的 docs 提交）；今天累计 6 个 PR 合并（#178–#183）。**本文件后续的 docs-only 提交属于两次发布之间的正常状态，会在下一个代码版本一起进部署源。**
