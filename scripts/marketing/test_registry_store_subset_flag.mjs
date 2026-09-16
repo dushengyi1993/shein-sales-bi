@@ -29,4 +29,7 @@ assert.ok(!promoter.includes('Duplicate ${label} row across approval manifests')
 assert.ok(promoter.includes('--allow-enabled-store-subset'), 'composite promoter exposes the subset flag');
 assert.ok(promoter.includes('allowStoreCoverageSubset: args.allowEnabledStoreSubset === true'), 'composite promoter forwards the subset flag');
 
+// The promoter performs its own coverage pre-check before publishing; that check must use
+// the same allowance, otherwise the flag only half-applies and the publish still refuses.
+assert.equal((promoter.match(/allowStoreCoverageSubset: args\.allowEnabledStoreSubset === true/g) || []).length >= 2, true, 'every promoter coverage check carries the subset flag');
 console.log(JSON.stringify({ok: true, test: 'registry_publish_enabled_store_subset_and_superseding_approvals'}));

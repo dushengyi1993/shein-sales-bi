@@ -432,6 +432,7 @@ async function main() {
       requireCurrentBaseline: true,
       expectedStoreCount: expectedStoreKeys.length,
       expectedStoreKeys,
+      allowStoreCoverageSubset: args.allowEnabledStoreSubset === true,
     });
   }
   const selectionText = serializedJson(selection);
