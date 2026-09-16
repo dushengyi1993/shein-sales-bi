@@ -227,7 +227,12 @@ function evaluate(summary, metabase, productReconciliation = null) {
   if (expectedStoreCount && (storeCoverage.inventory_store_count || 0) < expectedStoreCount) warnings.push(`库存最新日覆盖 ${storeCoverage.inventory_store_count || 0}/${expectedStoreCount} 店${miss('inventory_missing_stores')}`);
   if (expectedStoreCount && (storeCoverage.quality_store_count || 0) < expectedStoreCount) warnings.push(`质量最新日覆盖 ${storeCoverage.quality_store_count || 0}/${expectedStoreCount} 店${miss('quality_missing_stores')}`);
   if (expectedStoreCount && (storeCoverage.finance_detail_store_count || 0) > 0 && (storeCoverage.finance_detail_store_count || 0) < expectedStoreCount) {
-    warnings.push(`gsfs 财务明细覆盖 ${storeCoverage.finance_detail_store_count}/${expectedStoreCount} 店${miss('finance_detail_missing_stores')}；未覆盖店铺不要把财务明细空值当 0。`);
+      // The gsfs finance-detail domain is intentionally not collected on the cloud
+      // host: its newest snapshot is 2026-06-21 and finance is absent from the
+      // collected domain list, so per-store coverage here is not a warehouse health
+      // signal. Keep the fact visible as a note, and keep the rule that an empty
+      // finance detail must never be read as zero.
+      notes.push(`gsfs 财务明细覆盖 ${storeCoverage.finance_detail_store_count}/${expectedStoreCount} 店${miss('finance_detail_missing_stores')}；该域自 2026-06-21 起未再采集，不作为体检告警；未覆盖店铺仍不要把财务明细空值当 0。`);
   }
 
   const counts = s.latestCounts || {};
