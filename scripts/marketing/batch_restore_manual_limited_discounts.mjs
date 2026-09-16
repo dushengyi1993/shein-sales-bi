@@ -302,6 +302,22 @@ function summarizeDryRun(full, outPath = '') {
   };
 }
 
+// A fixed-tier preflight refusal is a terminal business blocker, not an execution
+// failure: the registered special price contradicts the current fixed-tier rule or
+// evidence, so the row goes back to the operator instead of being retried.
+// Classifying it keeps the serial single-item consumer moving; an unclassified
+// throw would let the first blocked row starve every later row in the plan.
+export function fixedTierPrewriteBlocker(result) {
+  const text = String(result?.stderr || "") + String.fromCharCode(10) + String(result?.stdout || "");
+  const marker = "fixed_tier_preflight_failed:";
+  const at = text.indexOf(marker);
+  if (at < 0) return "";
+  const open = text.indexOf("[", at);
+  const close = open < 0 ? -1 : text.indexOf("]", open);
+  if (open < 0 || close < 0) return "";
+  return marker + text.slice(open, close + 1);
+}
+
 export function assessRecoverableDryRun(full) {
   if (!full) return {ok: false, recoverable: false, reasons: ['missing dry-run artifact']};
   if (full.ok === true) return {ok: true, recoverable: false, reasons: []};
@@ -443,7 +459,18 @@ async function processOne(file, storeMap, args, browserSession = {}) {
       }
     }
     record.dryRun = summarizeDryRun(dry.full, dry.outPath);
-    if (!dry.full) throw new Error('dry-run produced no readable output');
+    if (!dry.full) {
+      const blocker = fixedTierPrewriteBlocker(dry);
+      if (blocker) {
+        record.status = 'manual_special_fixed_tier_review_blocked';
+        record.classification = 'manual_special_fixed_tier_review_blocked';
+        record.terminalBlocked = true;
+        record.writeAttempted = false;
+        record.error = blocker;
+        return record;
+      }
+      throw new Error('dry-run produced no readable output');
+    }
     let dryAssessment = assessRecoverableDryRun(dry.full);
     if (!dryAssessment.ok && !dryAssessment.recoverable) {
       record.status = 'dry_run_blocked';

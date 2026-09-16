@@ -12,7 +12,7 @@ import {
 } from '../../lib/marketing_manual_limited_discount_overrides.mjs';
 import {buildLimitedDiscountDriftRescuePlan} from './build_limited_discount_drift_rescue_plan.mjs';
 import {buildManualLimitedDiscountRestorePlan} from './build_manual_limited_discount_restore_plan.mjs';
-import {assessRecoverableDryRun} from './batch_restore_manual_limited_discounts.mjs';
+import {assessRecoverableDryRun, fixedTierPrewriteBlocker} from './batch_restore_manual_limited_discounts.mjs';
 import {
   formatChinaBusinessDateTime,
   parseChinaBusinessDateTime,
@@ -205,6 +205,15 @@ assert.match(highClickSource, /findPersistedMarketingTransactionContinuation/,
 assert.match(highClickSource, /manualContinuation/);
 assert.doesNotMatch(highClickSource, /'restore_failed'/);
 assert.match(restoreBatchSource, /assessRecoverableDryRun/);
+assert.match(restoreBatchSource, /export function fixedTierPrewriteBlocker/,
+  'a fixed-tier preflight refusal must be classified as a terminal review blocker');
+assert.match(restoreBatchSource, /manual_special_fixed_tier_review_blocked/);
+assert.doesNotMatch(restoreBatchSource, /if \(!dry\.full\) throw new Error/);
+const fixedTierRefusal = 'Error: fixed_tier_preflight_failed:' + JSON.stringify([{skc: 'sv9001', reason: 'fixed_tier_rule_or_evidence_changed_rebuild_required'}]);
+assert.equal(fixedTierPrewriteBlocker({stderr: fixedTierRefusal}), fixedTierRefusal.replace('Error: ', ''),
+  'a fixed-tier refusal must be surfaced as a classified blocker instead of a generic failure');
+assert.equal(fixedTierPrewriteBlocker({stderr: 'target page, context or browser has been closed'}), '');
+assert.equal(fixedTierPrewriteBlocker({}), '');
 assert.match(restoreBatchSource, /replace_limited_discount_transactionally\.mjs/);
 assert.doesNotMatch(restoreBatchSource, /remove_skc_from_limited_discount\.mjs/);
 assert.match(applySource, /exactReadbackRows/);
