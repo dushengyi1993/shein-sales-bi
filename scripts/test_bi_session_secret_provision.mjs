@@ -238,7 +238,12 @@ function runProcess(command, args, {cwd, env, timeoutMs = 10_000}) {
       clearTimeout(timer);
       reject(error);
     });
-    child.once('exit', (code, signal) => {
+    // Resolve on close, not exit: exit can fire before the child final stdout chunk
+    // is delivered on a loaded CI runner, and this helper returns the accumulated output
+    // for the caller to JSON.parse; resolving early intermittently produced
+    // "Unexpected end of JSON input" (observed twice on 2026-09-16). close fires only
+    // after stdout/stderr have been fully closed.
+    child.once('close', (code, signal) => {
       clearTimeout(timer);
       if (timedOut) return reject(new Error(`process timed out: ${command} ${args.join(' ')}`));
       resolve({code, signal, stdout, stderr});
