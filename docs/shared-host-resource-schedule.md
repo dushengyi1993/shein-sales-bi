@@ -19,17 +19,17 @@
 | 逻辑任务 | 入口 | 完整边界 | 目标 |
 | --- | --- | --- | --- |
 | 实时销售 | Webhook + 每15分钟 reconciliation | 只更新受影响订单/当天事实与轻量投影 | 分钟级 |
-| 当前库存 | 每小时 `:18/:48` OpenAPI | 与 `:00/:15/:30/:45` 销售 reconciliation 错峰；19店本轮全部成功后切换 `inventoryStock` | 当前实测约1分钟；分别在 `:20` ET、`:50` watchdog/RTV 前收口 |
-| 登录态维护 | 每天仅一个 `00:45` `shein-bi-cloud-session-manager.timer` | 只有同日 `done` marker + 同日启用店铺19/19报告才幂等跳过；共享 browser-read lane defer(75) 在同一 service/run 内重试到 `01:27`，失败写 marker/alert 并返回非成功 | 晨间链路前完成；无证据 warning 不算完成；不创建第二 timer/queue |
-| 每日经营刷新 | 每天 `07:10` 一个 `shein-bi-cloud-morning-chain.service` | wrapper 保存 active run（含 first-start 绝对 deadline）；同日失败自动重启恢复同一 runDate/businessDate；跨日不再执行旧 child，只保留旧失败证据后推进当天；19店链接/业务域与补充阶段不得越过库存前置截止，生产 unit 的库存独占最后2700秒窗口 | 单 timer；`daily-operating-refresh` done marker 直接绑定19店结果、库存 marker、plan 与 result；deadline 到期以 restart-prevented exit 76 保持 systemd failed，不假成功 |
-| 昨日销售定稿 | 每天 `02:45` | 19店OpenAPI完整门禁后一次晋升 | 03:30前 |
+| 当前库存 | 每小时 `:18/:48` OpenAPI | 与 `:00/:15/:30/:45` 销售 reconciliation 错峰；21店本轮全部成功后切换 `inventoryStock` | 当前实测约1分钟；分别在 `:20` ET、`:50` watchdog/RTV 前收口 |
+| 登录态维护 | 每天仅一个 `00:45` `shein-bi-cloud-session-manager.timer` | 只有同日 `done` marker + 同日启用店铺21/21报告才幂等跳过；共享 browser-read lane defer(75) 在同一 service/run 内重试到 `01:27`，失败写 marker/alert 并返回非成功 | 晨间链路前完成；无证据 warning 不算完成；不创建第二 timer/queue |
+| 每日经营刷新 | 每天 `07:10` 一个 `shein-bi-cloud-morning-chain.service` | wrapper 保存 active run（含 first-start 绝对 deadline）；同日失败自动重启恢复同一 runDate/businessDate；跨日不再执行旧 child，只保留旧失败证据后推进当天；21店链接/业务域与补充阶段不得越过库存前置截止，生产 unit 的库存独占最后2700秒窗口 | 单 timer；`daily-operating-refresh` done marker 直接绑定21店结果、库存 marker、plan 与 result；deadline 到期以 restart-prevented exit 76 保持 systemd failed，不假成功 |
+| 昨日销售定稿 | 每天 `02:45` | 21店OpenAPI完整门禁后一次晋升 | 03:30前 |
 | RTV | 每天一次独立业务run | 完整追踪复核后更新RTV投影 | 日结前 |
 | 订单闭环 | 每天一次独立业务run | 只重查未终态订单，完成后一次刷新订单投影 | 上班前 |
 | ET | 8个经营检查点 | 每个检查点是一次完整增量；HTTP优先，不为读请求预留Chrome | 对应检查点后及时 |
 | 仓储费 | 每天账单ready后一次 | canonical明细、利润cache和四层对账完整后发布 | 当日账单ready后 |
 | 营销 | 只读guard与受控write分开 | `cloud_marketing_live_guard.service` 属于 `api-light`，直接运行 session HTTP/OpenAPI 只读检查，不等待 heavy/browser 锁；普通活动和需要大量浏览器的工作默认本机；写事务单店终态后回读 | 不阻塞实时/日结 |
 
-半托每日经营刷新允许同一个 coordinator 内最多两个不同店铺的只读浏览器 worker。第二个槽只有在主机可用内存和负载门禁通过时才启动；任一店完成立即关闭自己的 Profile 并释放槽位。并行 worker 不是独立业务任务，最终仍只有一份19店 manifest 和一次发布。
+半托每日经营刷新允许同一个 coordinator 内最多两个不同店铺的只读浏览器 worker。第二个槽只有在主机可用内存和负载门禁通过时才启动；任一店完成立即关闭自己的 Profile 并释放槽位。并行 worker 不是独立业务任务，最终仍只有一份21店 manifest 和一次发布。
 
 旧的 `chunk-2 / recovery / supplements / inventory-retry` timer 已废弃，不得重新启用。失败店由原 run 的 checkpoint 定向续跑，不能从头重跑已完成店铺。
 

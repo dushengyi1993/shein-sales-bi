@@ -21,12 +21,12 @@
 | 云端 SSH | `ssh shein-bi-tencent` |
 | 应用目录 | `/opt/shein-bi/app` |
 | 数据底座 | PostgreSQL warehouse + Metabase |
-| 半托 OpenAPI | 出站19店独立App；Webhook入站由DL中央App统一验签 |
+| 半托 OpenAPI | 出站21店独立App；Webhook入站由DL中央App统一验签 |
 | 当天销售 | 订单 Webhook → 按单 OpenAPI → 正式事实 → Portal SSE |
-| 最终日销售 | 19/19 OpenAPI 完整性门禁通过后原子晋升 |
+| 最终日销售 | 21/21 OpenAPI 完整性门禁通过后原子晋升 |
 | 飞书 | Base/看板暂停；日报手动；P0 异常提醒保留；问数 service 停用 |
 
-19 店：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL`。
+21 店：`CX DL DX FY HL JSH JY LQ MZ NM QH QY TS TZ TZZ XC XL YJ ZL`。
 
 ## 3. 当前关键服务
 
@@ -35,7 +35,7 @@
 - `shein-bi-webhook.service`：半托 Webhook 接收、幂等队列、按单同步与经营风险事件。
 - `shein-warehouse-db` / `shein-metabase` / `shein-metabase-db`：Docker 数据与分析层。
 - `shein-bi-cloud-yesterday.timer`：最终日核对与 OpenAPI 晋升门禁。
-- `shein-bi-cloud-morning-chain.timer`：单 run 完成前一完整日19店慢变补采、补充域、一次发布和库存维护。
+- `shein-bi-cloud-morning-chain.timer`：单 run 完成前一完整日21店慢变补采、补充域、一次发布和库存维护。
 - `shein-bi-cloud-marketing-live-guard.timer`：每日单次只读巡检；失败阶段在同一个 coordinator 内有界重试。
 - `shein-bi-cloud-marketing-repair.timer`：有界营销修复与最终回读。
 - `shein-bi-cloud-watchdog.timer`：只读体检、维护 class 抑制、持久告警/recovery outbox 与异常提醒。
@@ -58,7 +58,7 @@ systemctl cat shein-bi-cloud-browser-cleanup.timer
 
 - 2026-07-23 起，半托当天销售由 Webhook 触发按单 OpenAPI 写正式事实，不再运行每小时全店 `today` timer。
 - `03:00` WebAPI 只生成独立核对文件；切换日以后不得成为第二份正式事实。
-- 只有 19/19 店 OpenAPI 与 WebAPI 深度匹配，才调用受限数据库函数原子晋升最终日切片。
+- 只有 19/21 店 OpenAPI 与 WebAPI 深度匹配，才调用受限数据库函数原子晋升最终日切片。
 - 当天无订单可以是合法零值；事件驱动日不能仅因缺销售行报警。
 
 ### 其它数据域

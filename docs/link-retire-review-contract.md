@@ -12,7 +12,7 @@
 
 ## 来源与缺项
 
-- query manifest 校验成功、字节数、SHA-256、两 section 与 19 店 storeLinks，拒绝重复店铺+SKC和日期回退。
+- query manifest 校验成功、字节数、SHA-256、两 section 与 21 店 storeLinks，拒绝重复店铺+SKC和日期回退。
 - PostgreSQL READ ONLY 事务：指定表现日 raw_summary 的新品标签/7天曝光/销量，当前 OpenAPI SPU、状态、库存、首次/最新上架时间，逐店SKC库存日序列。空值不转0。
 - 状态历史直接读取 `fact.link_master_snapshot`，并与当日 marker 依赖中的不可变原始工件比对 hash/bytes；无 snapshot 时读取原始工件，检查店铺、日期、成功状态。数据库可覆盖缺失原文件，但两者冲突、缺SKC日期或重复记录均待确认，不能用全店覆盖代表单SKC覆盖。
 - 营销读取已完成的 live scan，验证店铺成功、北京时间当日采集和有效活动起止时间。历史业务标签不等于当日活动。

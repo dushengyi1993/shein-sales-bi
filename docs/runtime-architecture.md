@@ -4,10 +4,10 @@
 
 - SHEIN 销售抓数、BI 后置刷新和数据库备份已切到云端 systemd；本地 BI 和 `SHEIN-*` Windows 计划任务已封存禁用。
 - 飞书多维表格 / 原生看板写入已临时暂停；异常通知 watchdog 保留。飞书日报脚本只作手动入口，自动发送停用；飞书只读问数 service 必须保持 `disabled + inactive`，团队问数走 BI 网页或 CLI。
-- 半托当天销售主入口为 Webhook + 按单 OpenAPI；前一天最终日由 WebAPI 独立文件与 19 店 OpenAPI 深度匹配后原子晋升。`salesTransport=auto` 与浏览器继续服务最终日核对、登录续期和其它未完全 API 化的数据域。
+- 半托当天销售主入口为 Webhook + 按单 OpenAPI；前一天最终日由 WebAPI 独立文件与 21 店 OpenAPI 深度匹配后原子晋升。`salesTransport=auto` 与浏览器继续服务最终日核对、登录续期和其它未完全 API 化的数据域。
 - 当天订单入仓后，Portal 通过 PostgreSQL `NOTIFY` + SSE 立即更新销售，不再每 60 秒轮询；新订单或已有订单金额/数量变化都先显示正式事实值并标记利润待补账，相同内容重放不误报。订单/退货事件按 45 秒合并，自动重建移动加权成本与利润 cache，完成后再次推送。补账期间只显示“利润正自动补成本”，不以旧成本或假零值替代；服务重启会追赶、失败 5 分钟后重试。
 - 暂停开关为 `state/feishu-base-sync-paused.flag`；存在该文件时跳过飞书事实表、产品表、月表、宽表和看板写入，删除后可恢复。
-- 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；半托出站 OpenAPI 为19店独立 App，Webhook 入站由 DL 中央 App 统一验签。
+- 云端当前自动覆盖 Webhook/OpenAPI 当天销售、最终日核对与晋升、BI Portal、数据库备份、ET 货代仓、晨间慢变日更、异常通知、登录态巡检、残留浏览器清理和网页/CLI 问数；半托出站 OpenAPI 为21店独立 App，Webhook 入站由 DL 中央 App 统一验签。
 - 公网入口在 Nginx 精确拆分：完整 Portal `8787`、认证只读 Query `8791`、Webhook `8792`。Query 与 Portal 共享登录 cookie 语义，但不共享进程、heap、cgroup、worker 或生成副作用；Portal 重启不能中断已经独立运行的 CLI 查询面。
 - 云端运行态 canonical 路径是 `/data/shein-bi/{profiles,state,outputs}`。宿主 app 下 profiles/state 只读，outputs 无宿主 bind；28 个 service 通过独立 systemd namespace 获得最小读写权限，Query 完全不可见 profile。
 - systemd、watchdog 与 Codex heartbeat 统一读取 `/var/lib/shein-bi-control/cloud-maintenance.json`，通过 CAS generation/hash 切换 `business|all`；canonical marker 由 root 原子写、服务用户只读，marker 非法时 scheduled/infrastructure fail closed，不另建 timer、queue 或巡检副本。
@@ -36,7 +36,7 @@
 
 调度事实在 `infra/systemd/*.timer` 的 `OnCalendar`；生产操作与验证只维护在 [cloud-bi-operations.md](cloud-bi-operations.md)。本运行环境文档不重复时间表。
 
-- 会写当前 19 店 SHEIN Chrome profile 的云端任务必须以 `sheinops` 运行；`shein-bi-cloud-daily-refresh.service` 不能用 root，否则会留下 root-owned profile 文件，导致登录态管家次日 `EACCES`。登录态恢复入口为 `restore_shein_store_session.mjs`，先回灌 browser/WebAPI session，再验证 GSP + SBN。
+- 会写当前 21 店 SHEIN Chrome profile 的云端任务必须以 `sheinops` 运行；`shein-bi-cloud-daily-refresh.service` 不能用 root，否则会留下 root-owned profile 文件，导致登录态管家次日 `EACCES`。登录态恢复入口为 `restore_shein_store_session.mjs`，先回灌 browser/WebAPI session，再验证 GSP + SBN。
 - 本地 `SHEIN-*` Windows 计划任务已全部禁用，只保留为回滚和 Linux 迁移参考。
 
 本地回滚时的 Windows 安装/更新入口：
@@ -96,7 +96,7 @@
 
 ## 浏览器 profile 与磁盘瘦身边界（2026-05-02）
 
-当前 19 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
+当前 21 店 SHEIN 登录态保存在工作区内的独立 Chrome profile。不要删除整个 `persistent-*` 目录；登录态通常在 `Profile 1`、`Default`、`Network`、`Local Storage`、Cookies/Session 相关文件中。
 
 2026-06-05 已修正并覆盖旧的 YJ/XL/QY 交叉 profile 结论。当前正确映射必须与 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录店铺名/账号和 live 抓数归属一致：`YJ=profileKey yj/accountNo GS8146729`、`XL=profileKey xl/accountNo GS9307061`、`QY=profileKey qy/accountNo GS7451160`。不得再按 `2026-05-10` 的交叉目录名结论操作生产 profile。
 
@@ -262,7 +262,7 @@
 - 实现链路：`scripts/cloud_manual_login_session.mjs` 启动 `Xvfb + Chrome + x11vnc + websockify/noVNC`，`scripts/serve_bi_portal.mjs` 提供 `/api/cloud-login/sessions`、`/cloud-login/session/:id` 和 noVNC WebSocket 代理。
 - 安全边界：外网仍只经过现有 HTTPS 网关和 BI 应用内登录；临时维护会话 token 只短时存在于服务器私有状态文件，完成/关闭后会清空 token 和入口 URL；不保存密码、cookie、localStorage 或请求头值到 GitHub、文档或聊天。
 - 资源边界：一次只允许一个临时登录窗口。若某店 CDP 端口被已完成/已关闭的临时窗口残留占用，脚本会在确认没有生产同步 service 运行时清理孤儿 Chrome/VNC 进程；若生产同步正在运行，则拒绝开启并提示等待。
-- 验证边界：创建会话后应能获得 noVNC `101 Switching Protocols`；点击“我已完成并关闭”后应完成 `export_shein_browser_session.mjs --no-launch` 与 `bootstrap_shein_browser_session.mjs --no-launch`，两者均通过才标记完成，且不残留 Chrome/Xvfb/x11vnc/websockify 进程。若该店仍在当天链接/业务域失败清单中，系统会把任务写入私有队列，由独立 systemd path/timer 定向续跑该店、合并完整 19 店证据并刷新 BI。
+- 验证边界：创建会话后应能获得 noVNC `101 Switching Protocols`；点击“我已完成并关闭”后应完成 `export_shein_browser_session.mjs --no-launch` 与 `bootstrap_shein_browser_session.mjs --no-launch`，两者均通过才标记完成，且不残留 Chrome/Xvfb/x11vnc/websockify 进程。若该店仍在当天链接/业务域失败清单中，系统会把任务写入私有队列，由独立 systemd path/timer 定向续跑该店、合并完整 21 店证据并刷新 BI。
 ## 2026-07-26 对账与凌晨互斥约束
 
 商品可售状态的生产权威是 OpenAPI 当前快照；前一版 OpenAPI 用于识别状态回退，Webhook 用于确认正常的平台上下架变化。浏览器链接快照因四态词典和刷新时点不同，只作为诊断，不可直接判定 OpenAPI 失败。

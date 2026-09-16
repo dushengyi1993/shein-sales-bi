@@ -20,9 +20,9 @@
 ## 当前收口（2026-06-28）
 
 - 2026-07-26 起，19 店生产凭据统一挂在 DL 半托 App 下；每个店铺仍使用自己的 OpenKey/secretKey，不能跨店复制。切换后只读探测为 19/19，受控写前检为 19/19。
-- 19 店官方 OpenAPI 授权、云端白名单、只读探针和脱敏能力总账已完成；销售、退货退款、商品/链接基础资料仍写 `fact.openapi_*` / `mart.openapi_*_reconciliation` 隔离层，不直接覆盖生产事实源。
+- 21 店官方 OpenAPI 授权、云端白名单、只读探针和脱敏能力总账已完成；销售、退货退款、商品/链接基础资料仍写 `fact.openapi_*` / `mart.openapi_*_reconciliation` 隔离层，不直接覆盖生产事实源。
 - 自动化运营受控写适配器已接入 `copy_product_draft`、`activate_link`、`retire_link`、`update_inventory`、`update_supply_price`、`update_product_price`、`update_title`、`update_images`、`certificate_review`。真实提交必须走 BI 账号 `writeStores`、`safeWriteOperations` 动作总闸门、dry-run `payloadHash`、任务 `waiting_review`、确认和回读/审计。
-- 待议价另有主代理专用 `pending_discuss_batch`：`scan` 只读覆盖 19 店，`preflight` 锁定逐项/逐店/整批 hash，`execute` 使用动作总闸门 `process_pending_discuss`、固定云端根目录/锁路径、当前任务确认、单次写和 status 3/4 终态回读；它不进入合作方通用 CLI，也不授权每日 automation 执行写入。
+- 待议价另有主代理专用 `pending_discuss_batch`：`scan` 只读覆盖 21 店，`preflight` 锁定逐项/逐店/整批 hash，`execute` 使用动作总闸门 `process_pending_discuss`、固定云端根目录/锁路径、当前任务确认、单次写和 status 3/4 终态回读；它不进入合作方通用 CLI，也不授权每日 automation 执行写入。
 - `copy_product_draft` 已使用 OpenAPI 商品详情 / `spu-info` mapper 还原类目、属性、图片、SKU、供货价、库存和尺寸重量等关键发布字段；强指纹回读未命中时只能人工核销，不能用平台 SKU、源 SKC 或货号文本弱匹配自动判完成。
 - 新上品、复制上品、补链接等从未上过架的新链接默认 `shelf_way=2`，并写入约十年后的 `hope_on_sale_date`；短期内不能自动上架。维护已有链接的 `activate_link` / `retire_link` 才按用户指令改变现有链接状态。
 - TZ/JSH/TZZ/XC 等店铺身份校验允许静态 `merchantId` fallback，但只能在配置真相匹配且无 GS 账号冲突时使用；不得运行时自动回填或放宽 `account_mismatch`。
@@ -42,7 +42,7 @@
 - 库存管理：查询和调整库存。
 - 财务管理：收入账单、对账单。
 
-读数据 / 对账 / 入仓已形成 19 店隔离并行层；价格、库存、上下架、复制上品、标题/图片、证书等写操作必须走自动化运营任务池，不得绕过 `safeWriteOperations`、账号店铺写权限、dry-run `payloadHash`、确认、回读和审计。
+读数据 / 对账 / 入仓已形成 21 店隔离并行层；价格、库存、上下架、复制上品、标题/图片、证书等写操作必须走自动化运营任务池，不得绕过 `safeWriteOperations`、账号店铺写权限、dry-run `payloadHash`、确认、回读和审计。
 
 ## 授权与密钥流程
 
@@ -167,7 +167,7 @@ node scripts/load_bi_warehouse.mjs --sales-dir outputs/shein_openapi_fetch --sal
 - HL 店铺已完成真实授权。
 - 只读接入已验证：站点 / 币种、商品列表、订单列表 / 详情、库存、财务对账、退货。
 - 初步订单销售对账已通过。
-- 历史已更新：HL 单店 OpenAPI 销售试点已升级为 19 店 OpenAPI 销售双跑并行层。官方 OpenAPI 结果只写 `fact.openapi_*`、`fact.openapi_order_payment_flag` 和 `mart.openapi_sales_reconciliation`，不覆盖正式销售事实表；切生产源前仍需连续日期对账。
+- 历史已更新：HL 单店 OpenAPI 销售试点已升级为 21 店 OpenAPI 销售双跑并行层。官方 OpenAPI 结果只写 `fact.openapi_*`、`fact.openapi_order_payment_flag` 和 `mart.openapi_sales_reconciliation`，不覆盖正式销售事实表；切生产源前仍需连续日期对账。
 - 2026-05-18 起，链接管理中台已把 HL 识别为“OpenAPI 已授权店铺”，不会再把 HL 补链/复制上品请求笼统回复为“无权限”。2026-05-20 后，HL `copy_product_draft` 任务可从 BI 当前会话直接进入 `/api/link-ops-execute`，由 `scripts/link_ops_hl_openapi_executor.mjs` 做 OpenAPI 权限、站点、品牌、仓库和 payload 预检；真实 `publishOrEdit` 仍必须 payload 完整且用户二次确认。
 
 ### P3：当前启用店铺分批替换
@@ -267,7 +267,7 @@ node scripts/run_shein_openapi_products_reconciliation.mjs
 - `outputs/bi-portal/data.json` 已包含 `openapiReconciliation`。
 - `outputs/bi-portal/index.html` 曾在系统状态页展示 “SHEIN OpenAPI 试点对账” 卡片；2026-06-17 起该卡片默认关闭，不再作为生产验收项。
 
-历史结论：HL 销售入口曾具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；该 单店 入口已被 19 店销售/退货/商品隔离双跑层取代。
+历史结论：HL 销售入口曾具备“官方 OpenAPI 与当前生产销售源双跑、并行入仓、BI 可见对账”的最小闭环；该 单店 入口已被 21 店销售/退货/商品隔离双跑层取代。
 
 ## 2026-05-19 进展：HL 商品写执行器预检接入
 
@@ -399,7 +399,7 @@ node scripts/link_ops_build_product_draft_from_webapi.mjs --source-store DL --so
 
 ## 历史归档：2026-05-07 HL OpenAPI 固定双跑计划任务
 
-历史说明：以下 Windows 计划任务是早期 HL 单店试点任务，当前已被云端 19 店 `cloud_openapi_*_reconciliation.sh` 与 `shein-bi-cloud-daily-refresh.service` 取代：
+历史说明：以下 Windows 计划任务是早期 HL 单店试点任务，当前已被云端 21 店 `cloud_openapi_*_reconciliation.sh` 与 `shein-bi-cloud-daily-refresh.service` 取代：
 
 - `SHEIN-Sales-OpenAPI-HL-YesterdayFinal-0025`：每天 `00:25` 抓取并对账前一天最终版销售。
 - `SHEIN-Sales-OpenAPI-HL-Intraday-1225`：每天 `12:25` 抓取并对账当天日内销售。

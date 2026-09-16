@@ -8,7 +8,7 @@
 - BI 系统当前以云端为正式入口，负责 PostgreSQL 数据仓库、Metabase 和 BI 经营门户。
 - 当前不能直接停用或删除 Metabase：PostgreSQL 是数据底座，Metabase 是正式深度分析/自由钻取层，BI Portal 是日常经营入口；只有等自研门户完全覆盖深钻能力后，才能重新评估是否降级 Metabase。
 - 不从飞书反抓数据做 BI 源头；BI 源头来自 SHEIN 后台抓取后的私有源文件 / PostgreSQL。
-- 半托当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；前一天最终收口由19店 OpenAPI 完整性门禁通过后原子晋升日切片。订单生命周期复查也优先使用 OpenAPI，并结合 Webhook、售后和 ET 证据；Chrome profile 只保留给商品流量、营销与编辑级资料等尚未完成 API 化的数据域。
+- 半托当天销售由订单 Webhook 触发按单 OpenAPI 写正式事实；前一天最终收口由21店 OpenAPI 完整性门禁通过后原子晋升日切片。订单生命周期复查也优先使用 OpenAPI，并结合 Webhook、售后和 ET 证据；Chrome profile 只保留给商品流量、营销与编辑级资料等尚未完成 API 化的数据域。
 - BI 后置刷新失败不应反向影响 SHEIN 抓数、异常通知或后续手动日报入口。
 - 暂停开关：`state/feishu-base-sync-paused.flag`。存在该文件时，跳过飞书事实表、产品表、月表、宽表和看板写入；删除该文件后可恢复写表链路。
 - 营销折扣自动化仍按“只读巡检 / 精确队列 / 受控修复 / live 回读”分层；长期路线图见 `docs/marketing-automation-roadmap.md`。guard 使用 session HTTP，一次读取 19 店普通活动、15% 券 active 集合与当前/未来活动价，不启动浏览器、不持有租约或写授权。`2026-07-18` 生产实测完整巡检 `157s`、1516 行、19/19 店成功、Chrome `0 -> 0`。本地 runner 优先消费精确队列；云端 emergency worker 仅在 `20:45/21:15` 两个既有窗口兜底、单轮最多 1 个活动组，继续强制精确 hash、旧保护快照、事务 journal、失败补偿和最终全店 readback。
@@ -92,7 +92,7 @@
 ## 6. 链接表现更新规则
 
 - 链接表现每天更新一次即可，适合放在后半夜。
-- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；当前生产由云端 `shein-bi-cloud-morning-chain.timer` 在 07:10 启动一个完整19店日更 run，内部调用补充域并在完整门禁后一次发布。
+- 本地历史任务 `SHEIN-Sales-15Stores-LinkManagement-0530` 已封存禁用；当前生产由云端 `shein-bi-cloud-morning-chain.timer` 在 07:10 启动一个完整21店日更 run，内部调用补充域并在完整门禁后一次发布。
 - 云端手动补链接/业务域和价格线索应在服务器运行 `scripts/cloud_daily_refresh.sh yesterday` 或指定日期。低层诊断仍可用 `scripts/cloud_link_business_sync.sh yesterday`，但生产日更入口以 daily refresh 为准。不要用本机补抓冒充云端日更。
 - BI 门户侧栏的“链接表现数据”更新时间应显示源文件抓取时间：`outputs/shein_links/<店铺>/<链接日>.json` 内 `fetchTime` 的最大值；“售后/库存/财务数据”更新时间应显示业务域源文件抓取时间：`outputs/shein_business_domains/<店铺>/<业务日>.json` 内 `fetchTime` 的最大值；BI 重跑重新入仓时产生的数据库 `updated_at` 只可作为内部排障字段，不作为主要更新时间展示。
 - 如果部分店失败：尽量同步成功店铺，并发送飞书异常提醒。

@@ -80,7 +80,7 @@
 BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和库存线索”，不能证明营销后台真的报了普通活动或限时折扣。后续巡检和补救必须按下面证据链执行：
 
 1. **是否已报普通活动 / 限时折扣 / 优惠券，只认 SHEIN 后台 live scan/readback。** BI 标签、历史计划文件、历史提交成功提示只能作为线索，不能输出 no-action。
-2. **每日巡检必须有 live 覆盖。** 只读审核和最终 19 店回读由云端 session HTTP/live scan 为主；真实报名写入默认使用本机后台 headless 店铺 profile，不弹可见前端、不抢焦点。跨店默认 4 个独立 profile 一批，负载高或 profile 不稳时降为 3 个；批内跨店并行，同店操作链严格串行，且 profile、端口、临时目录、救援文件和可变输出不得共享。单店失败不得拖住同批其他店；全批终态后逐店清理并验证进程、端口、租约为 0。每日长期授权限时折扣和每周已授权普通活动都适用该边界；只有本机不可用且当天必须闭环时才启用受控云端浏览器 fallback，云端每段最多 1 店/1 组。
+2. **每日巡检必须有 live 覆盖。** 只读审核和最终 21 店回读由云端 session HTTP/live scan 为主；真实报名写入默认使用本机后台 headless 店铺 profile，不弹可见前端、不抢焦点。跨店默认 4 个独立 profile 一批，负载高或 profile 不稳时降为 3 个；批内跨店并行，同店操作链严格串行，且 profile、端口、临时目录、救援文件和可变输出不得共享。单店失败不得拖住同批其他店；全批终态后逐店清理并验证进程、端口、租约为 0。每日长期授权限时折扣和每周已授权普通活动都适用该边界；只有本机不可用且当天必须闭环时才启用受控云端浏览器 fallback，云端每段最多 1 店/1 组。
    - 用户明确要求可见前端时，允许使用受管可见 Profile。每次新开活动标签后必须先 `Page.reload(ignoreCache=true)` 强刷一次，再等待活动页就绪、恢复登录和校验身份；首次空白页面不得直接操作。
    - 受管单店 Profile 会话生命周期（B2）：恢复、预检、提交、核对在同一个正确店铺受管 Profile 会话生命周期内衔接，保持窗口连续复用，运行完按闲置策略关闭，不按每个小步骤开关；严格遵守店铺隔离，不同店铺互不关窗。登录恢复判定必须通过营销子系统接口探测，仅订单页成功不等于营销接口已恢复。
 3. **限时折扣是所有在售运营链接必备层。**
@@ -100,12 +100,12 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 
 该规则只作用于新报名、补报、重建普通活动或限时折扣，不追溯改写正在正常运行的旧活动：
 
-1. 触发条件同时满足：ET 当天已匹配运营可售库存 `<= 10`，且同一标准货号跨 19 店近 30 天有效销量合计 `> 30`。
-2. 价格按“档位上移一级”处理，不机械把页面折扣率减少 5%。同标准货号跨 19 店、全部链接的最新 7 天曝光 Top5，恢复为该货号普通链接的最新已批准价格；普通链接则在普通链接目标利润率基础上提高 5 个百分点重新算价。
+1. 触发条件同时满足：ET 当天已匹配运营可售库存 `<= 10`，且同一标准货号跨 21 店近 30 天有效销量合计 `> 30`。
+2. 价格按“档位上移一级”处理，不机械把页面折扣率减少 5%。同标准货号跨 21 店、全部链接的最新 7 天曝光 Top5，恢复为该货号普通链接的最新已批准价格；普通链接则在普通链接目标利润率基础上提高 5 个百分点重新算价。
 3. 平台最低折扣或最高允许报名价优先，能收回多少收回多少；商品成本、底价和利润安全线仍是硬门禁。
 4. ET 恢复到 `> 10` 后，后续新活动恢复原批准价格档位；这次收回不得写回或污染“最新已批准基准”。
 5. 价格决策优先级固定为：ET 低库存畅销品收回折扣 > 自动高点击专属折扣 > 新链接/新品 Top5 待遇 > 普通活动基准。已登记人工特殊折扣不自动覆盖，单独列给用户审核。
-6. Top5 口径仍是同一标准货号跨 19 店、全部链接的最新 7 天曝光；30 天销量口径是标准货号跨 19 店有效销量汇总，不是单链接销量。
+6. Top5 口径仍是同一标准货号跨 21 店、全部链接的最新 7 天曝光；30 天销量口径是标准货号跨 21 店有效销量汇总，不是单链接销量。
 7. Top5 收回价按标准货号统一：读取最新批准全量 baseline 中该标准货号的普通链接档批准价，同一货号跨店统一恢复，不再要求同一 `store + SKC` 存在单店历史价。缺该标准货号统一普通档价时才 fail closed。
 8. ET 当天完整库存快照省略零库存商品时，必须继续读取 ET 09 散件仓最新库存流水；若该货号最新余额明确为 `0`，按“当天已匹配、运营可售 0”处理。货号仅因是否带中文品名产生差异时按标准货号代码归并，不能报成 ET 未匹配。
 
@@ -200,7 +200,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 
 ### 持久 current baseline registry
 
-生产 current baseline 的唯一精确指针是环境变量 `SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE` 指向的 registry；生产默认值固定为 `/srv/shein-bi/runtime/marketing-plans/current.json`。registry 必须指向 `/srv/shein-bi/runtime/marketing-plans/baselines/<baselineId>/selection-plan.json` 和 `price-overrides.json`，并绑定两份文件 SHA-256、pair 行数与 19 店覆盖、`storeKey + activityId + SKC` 对齐、payload hash、work fingerprint、`activityBatch`、`promotedAt`、完成态及 `planMetadata.status=current_baseline`。缺文件、解析/普通文件门禁、哈希漂移、任一 baseline flag 为 false、`executionStatus` 非 `completed`、或 `supersededBy` 非空都必须 fail closed。
+生产 current baseline 的唯一精确指针是环境变量 `SHEIN_BI_MARKETING_PLAN_REGISTRY_FILE` 指向的 registry；生产默认值固定为 `/srv/shein-bi/runtime/marketing-plans/current.json`。registry 必须指向 `/srv/shein-bi/runtime/marketing-plans/baselines/<baselineId>/selection-plan.json` 和 `price-overrides.json`，并绑定两份文件 SHA-256、pair 行数与 21 店覆盖、`storeKey + activityId + SKC` 对齐、payload hash、work fingerprint、`activityBatch`、`promotedAt`、完成态及 `planMetadata.status=current_baseline`。缺文件、解析/普通文件门禁、哈希漂移、任一 baseline flag 为 false、`executionStatus` 非 `completed`、或 `supersededBy` 非空都必须 fail closed。
 
 `tmp/marketing-signup` 只允许通过明确的 `discoverOfflineMarketingPlanPair` API 做非权威离线发现；受管 current 解析没有 registry 就 fail closed，绝不按 mtime 自动挑选。旧 `2026-06-03 ALL-ready` 不再是默认或 fallback。生产发布/核验使用受控 `scripts/marketing/manage_marketing_plan_registry.mjs publish|verify`；两种 baseline promotion 都必须把终态 readback 的计划路径、payload hash/work fingerprint 和逐行 `store + activity + SKC + target price` 绑定到同一 pair，再明确选择 `--registry-file <absolute-file>` 完成同命令发布回读，或用 `--no-registry-publish` 标成仅离线候选，禁止静默产生第二个 current。managed guard/repair 默认禁用目录 supplemental 价格扫描，并把实际 `marketing-cost-map` 路径与 SHA-256 同时写入 guard 和 fallback plan；repair worker 的单个业务 stage 按 `artifact publication lock -> registry .publish.lock -> queue mutation lock` 固定顺序持锁，覆盖最终校验、executor 内置 readback 和 queue stage 原子提交，并以完整 queue 文件 SHA-256 加 `queueFingerprint/sourceGuardHash` 做 CAS。受控复验如显式传计划，必须同时提供已完成且标记为 `current_baseline` 的 `--target-plan` 与 `--price-overrides`。日报异常时保留原 run report、source log、scan、stack-review、cost map 和 current registry 的精确 SHA-256 作为 warning 证据；不得从日志重建 queue 或重放旧 queue/hash，下一次 scheduled daily run 从 fresh、coherent 的 scan + plan + queue 开始。repair stage-level resume 仅适用于已创建的 exact queue，不等同于 guard-run resume。
 
@@ -372,7 +372,7 @@ BI 只能告诉我们“哪些链接在卖、有哪些订单价格、曝光和�
 - 脚本默认只完成勾选商品、填写活动价/降幅和复核；只有在用户明确授权“可以提交/自己提交/全自动报完”后，才允许传 `--submit` 点击最终 `提交报名`。首店仍必须先预填不提交，让用户确认页面无误；批量 runner 还必须验证不可变 approval manifest。
 - 下一次报新活动前，审核导出入口必须升级或补充为“叠加安全审核”版本：除了现有普通营销活动字段，还必须读取/合并当前和未来可能重叠的普通营销活动、优惠券和限时折扣。若脚本暂时只能导出普通活动，不得把它当作最终可报名审核表。
 - 按货号汇总的确认表由 `scripts/marketing/build_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN` 生成；交付前必须跑 `scripts/marketing/verify_marketing_sku_approval.mjs --date YYYY-MM-DD --version vN`。校验至少覆盖：用户标注回归、仓储费缺失不伪装成 0、含仓储利润率不高于不含仓储利润率、利润率与建议最终成交价同口径、券策略明确“仅 15%”或“15/30/50 都禁止”、旧别名不独立出现。仓储证据缺失会告警并要求补证，但不再把不含仓储商品成本口径误判为整份表不可用。
-- 普通活动方案含 `New Arrivals / 新品 / 超级新品` 时，生成器必须同时读取生成日期不早于报告日的 `outputs/bi-portal/sections/linksData.json`，以及截至报告日、覆盖活动报告 `selectedStores` 全范围（全店批次为 19 店）的 `outputs/shein_links/<STORE>/<DATE>.json`。前者提供最新 7 日全局曝光排名，后者补 `firstShelfTime/createTime` 与上下架状态；原始快照只回填 BI 缺失字段，不覆盖 BI 已有曝光指标。原始快照缺店/解析失败、`linksData` 过期，或没有任何正向曝光指标时直接失败，禁止静默使用旧 Top5 或把“有原始链接行”冒充“有曝光数据”。
+- 普通活动方案含 `New Arrivals / 新品 / 超级新品` 时，生成器必须同时读取生成日期不早于报告日的 `outputs/bi-portal/sections/linksData.json`，以及截至报告日、覆盖活动报告 `selectedStores` 全范围（全店批次为 21 店）的 `outputs/shein_links/<STORE>/<DATE>.json`。前者提供最新 7 日全局曝光排名，后者补 `firstShelfTime/createTime` 与上下架状态；原始快照只回填 BI 缺失字段，不覆盖 BI 已有曝光指标。原始快照缺店/解析失败、`linksData` 过期，或没有任何正向曝光指标时直接失败，禁止静默使用旧 Top5 或把“有原始链接行”冒充“有曝光数据”。
 - 重扫漏报或用户质疑漏报时，不要只处理上一次报错活动；必须逐店重新扫描 DSY 店铺（含 `MZ`，除非用户明确排除）在时间窗内仍可报名的活动，发现新增抓入商品就补填。
 - 报名方案生成时，BI/链接抓取可能尚未覆盖全部可报名 SKC；执行页才出现的新 SKC 必须补进系统，不得当作“计划外所以跳过”：
   - 若活动页 `totalGoods > expectedSelectedCount`、`selection.outOfPlanRows` 非空，或后台活动列表 `已报数量 < 可报总数`（即 `applyGoodsNum < allowGoodsNum`）存在不在当前最终计划里的差额，必须生成 supplement `selection-plan` / `price-overrides`；不能因为计划内 `missingRows=0` 就宣布没漏。

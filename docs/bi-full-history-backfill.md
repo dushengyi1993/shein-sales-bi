@@ -2,7 +2,7 @@
 
 最后更新：2026-05-09
 
-> 历史快照：本文记录当时 16 店本地回填结果，不代表当前 19 店云端覆盖或生产数据。当前覆盖必须查询云端 warehouse 与 `audit_cloud_data_coverage.mjs`。
+> 历史快照：本文记录当时 16 店本地回填结果，不代表当前 21 店云端覆盖或生产数据。当前覆盖必须查询云端 warehouse 与 `audit_cloud_data_coverage.mjs`。
 
 ## 当前结论
 

@@ -14,7 +14,7 @@
 
 ## 店铺与账号真相
 
-- 当前 19 店：DSY `DL DX FY LQ NM HL JY ZL TS MZ`；LGM `CX YJ XL QY QH TZ JSH TZZ XC`。
+- 当前 21 店：DSY `DL DX FY LQ NM HL JY ZL TS MZ`；LGM `CX YJ XL QY QH TZ JSH TZZ XC LG HY`（LG/HY 的 groupKey 见 `config/stores.json`）。
 - 店铺身份以 `config/stores.json`、`config/store_account_truth.json`、浏览器保存账号、实际登录店铺名/账号和 live 抓数归属共同确认；不要沿用旧交叉 profile 结论。
 - 正确映射：`YJ=profileKey yj/accountNo GS8146729/port 9346`、`XL=profileKey xl/accountNo GS9307061/port 9344`、`QY=profileKey qy/accountNo GS7451160/port 9345`。
 - HL 使用主账号 profile：`profileKey=shein-main`、CDP `9360`、`profiles/persistent-shein-main-profile`；LGM 组本身就是主账号。
