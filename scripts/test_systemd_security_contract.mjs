@@ -59,8 +59,8 @@ assert.equal(property(portal, 'User'), 'sheinops');
 assert.equal(property(portal, 'Group'), 'sheinops');
 assert.equal(property(portal, 'OOMPolicy'), 'stop');
 assert.equal(property(portal, 'Restart'), 'always');
-assert.equal(property(portal, 'MemoryHigh'), '1900M');
-assert.equal(property(portal, 'MemoryMax'), '2600M');
+assert.equal(property(portal, 'MemoryHigh'), '2400M');
+assert.equal(property(portal, 'MemoryMax'), '3000M');
 assert.doesNotMatch(portal, /SHEIN_BI_OPS_CLI_(?:MIN|RECOMMENDED)_VERSION=/,
   'Portal CLI version policy must follow the packaged BI_OPS_CLI_VERSION instead of a stale systemd override');
 assert.match(portal, /^Environment=SHEIN_PARTNER_CLI_RELEASE_DIR=\/srv\/shein-bi\/partner-cli$/m,
@@ -242,6 +242,12 @@ const sessionManagerCoordinator = fs.readFileSync(new URL('./run_cloud_session_m
 assert.equal(property(sessionManager, 'User'), 'sheinops');
 assert.equal(property(sessionManager, 'Group'), 'sheinops');
 assert.equal(property(sessionManager, 'UMask'), '0077', 'session manager persists browser credentials and must create private files');
+const sessionManagerHighMb = Number(property(sessionManager, 'MemoryHigh').replace(/M$/, ''));
+const sessionManagerMaxMb = Number(property(sessionManager, 'MemoryMax').replace(/M$/, ''));
+assert.ok(sessionManagerHighMb > 1400,
+  'session manager MemoryHigh must sit above the 1,400 MiB it was measured to reach: a cgroup pinned on its own soft limit is reclaimed continuously, and that stall is host-wide memory PSI which defers every resource-gated job');
+assert.ok(sessionManagerMaxMb > sessionManagerHighMb,
+  'session manager MemoryMax must stay above MemoryHigh so throttling, not killing, is the first response');
 assertCommonHardening(sessionManager, 'session manager', {allowAuditedSudo: true, umask: '0077'});
 assert.match(sessionManager, /SHEIN_BI_NIGHTLY_MAINTENANCE_LOCK_FILE=\/opt\/shein-bi\/app\/state\/locks\/shein-bi-nightly-maintenance\.lock/);
 assert.match(sessionManager, /SHEIN_BI_SESSION_MANAGER_RETRY_MAX=0/,

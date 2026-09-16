@@ -90,8 +90,14 @@ KillMode=control-group
 # profit generator stalled for 14 minutes without finishing, and the cgroup's own stall
 # made /proc/pressure/memory report full avg10 ~= 90 host-wide, which deferred every
 # resource-gated browser/heavy job with MEMORY_STALL_PRESSURE.
-MemoryHigh=1900M
-MemoryMax=2600M
+# Measured after the 1200M -> 1900M fix: the same cgroup reached memory.peak of
+# 1,781.8 MiB during a section generation, i.e. within 120 MiB of the soft limit, and
+# memory.events.high kept climbing (13k events in three hours) -- every such excursion
+# is host-wide memory PSI, which the admission gate turns into MEMORY_STALL_PRESSURE
+# for unrelated jobs. 2400M leaves ~620 MiB over the measured ceiling, and 3000M keeps
+# a real band above it so throttling, not killing, stays the first response.
+MemoryHigh=2400M
+MemoryMax=3000M
 OOMPolicy=stop
 ProtectSystem=full
 ProtectKernelTunables=true
