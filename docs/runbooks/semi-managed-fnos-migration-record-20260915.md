@@ -379,3 +379,37 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 测试拦回归：`test_systemd_security_contract.mjs` 新增四条——lane 数必须显式声明、per-store 并发必须等于 lane 数、`MemoryHigh ≥ 900 MiB × lane 数`、`MemoryMax > MemoryHigh`。
 - 收尾：停掉探针、按受控路径关闭全部浏览器（`cleanup_shein_store_browsers.mjs --all`，0 残留）、确认 4 条 lane 全部 free、Avail 6.98 GB、PSI 回落，然后交给 07:10 的定时链路跑。
 - 同一类风险提醒：`shein-bi-cloud-manual-login-recovery.service` 也是 `2600M/3400M` 且会经浏览器 wrapper 启动登录窗口，本轮无实测证据，暂不改，待它下次真正跑队列时量一次。
+
+### 第一次完整晨链验收（2026-09-16 07:10–08:03，53 分钟，`Result=success`）
+
+- 07:10:04 起跑、08:03:06 结束（53 分 2 秒，预算 2h50m），`Result=success` / `ExecMainStatus=0` / `NRestarts=0`。
+- marker：`state/pipeline-markers/2026-09-16/daily-operating-refresh.json` → `ok: true, status: warning`，`message="all 21 stores and supplements completed; inventory completed with item-level business blockers"`，evidence 带 sha256 快照；`state/cloud_morning_chain/2026-09-16.done` = `completed_at=08:03:03 / business_date=2026-09-15`。
+- 逐店日档 **21/21 全齐**（`shein_links` + `shein_business_domains`，missing 为空）。
+- 库存阶段 `[host-heavy] done domain=daily-operating-inventory status=2`、batch `status=warning`、`counts={"total":36,"updated":34,"skipped":0,"pending":0,"fenced":0,"blocked":0}` → 业务级 item 例外，不是技术故障。
+- 4 lane 浏览器阶段实测：cgroup `memory.peak=4,075 MiB`（当时 `MemoryHigh=4000M`，仍被轻微节流），8 次让位（`MEMORY_STALL_PRESSURE`+`IO_STALL_PRESSURE`），让位时的 gate 证据是 `availableMemoryMiB`≈6.9 GiB、`memoryFullAvg10` 7.3–19.6（阈值 4）、`ioFullAvg10` 43–51（阈值 20）、`shortCpuIdleOverride=true`；全部被链路自带的 12 次重试吸收，日档没有丢。
+- 之后按实测峰值把链路软上限提到 `MemoryHigh=4600M / MemoryMax=5600M`（PR #180，已随 09.16.4 部署）。
+
+### 迁移后第 5 批：prewarm 日志目录属主错位，库存关键的 linksData 段没刷新（2026-09-16 07:32–07:56，已修）
+
+- 现象：晨链 daily-refresh 报 `scripts/prewarm_bi_portal_sections.sh: line 46: /srv/shein-bi/logs/cloud-portal-prewarm/prewarm-20260916-073208.log: Permission denied` → `WARN linksData section refresh failed` → `inventory-critical linksData was not synchronously published; unified coordinator must retry`，`linksData.json` 停在 03:52。
+- 根因：这个目录被两个不同用户的调用者共用——`cloud_et_forwarder_sync.sh` 来自 `User=root` 的服务，`cloud_daily_refresh.sh` 来自 sheinops 的晨链；谁先跑谁建目录，root 那次把它建成了 `root:sheinops 0750`，sheinops 无法在其中创建日志文件，脚本在 `exec >>"$LOG_FILE"` 这一步就死了。
+- 修法：① 现场 `chown sheinops:sheinops` + `chmod 0750`（并校正目录内遗留的 root 属主日志）；② `prewarm_bi_portal_sections.sh` 在以 root 运行时把该目录钉回服务账号，`test_bi_product_section_contract.mjs` 断言这条 —— PR #181（已随 09.16.4 部署）。
+- 复核：晨链自己的重试在 07:53–07:56 成功（`section=linksData ok duration_sec=131`、`[cloud_daily_refresh] inventory-critical linksData section refreshed`），下游守卫确认 `[daily_inventory_guard] linksData fresh ageSeconds=67`；integrity 的 `generatedAt=2026-09-16T07:31:25` 与当次 portal core 一致。
+- 顺带把 `/srv/shein-bi/logs/` 逐目录核对了一遍：只有这一处是「目录属主 root、写入者 sheinops」；`cloud-et-forwarder` / `cloud-watchdog` / `disk-maintenance` 都是 root 自己写，不算错位。
+
+### 第四轮发布与部署（2026-09-16 08:37–08:38 CST，库存 generation 109）
+
+- 发布 `2026.09.16.4`（annotated tag → `b53ebfe`，Release 非 draft、immutable）。第一次 dispatch 在 draft 阶段失败但 tag 已推上，同版本重跑即成功 —— 这条 tag-only 恢复路径已第三次复现。
+- 部署：`pause --mode all`（generation 370）→ 交接 2708 条 → `git reset --hard b53ebfe`（clean，1464 tracked）→ bundle sha256 `f7634d6b…` → 加固 `deploy5-20260916`（0 issues）→ 部署标记（sourceFingerprint `77816af2…`）→ 轮转 stage/finalize → generation **109** → `assert_inventory_writer_release_aligned` = `aligned: true` → 三个库存守卫 `rc=0 / state=activated_exact / generation 109` → resume（generation 371）。
+- 全程 **53 秒**（08:37:20 → 08:38:13）；`systemctl --failed` 为空，portal/query/webhook 均 active，局域网 302，`check_release_source_state` = exact/clean（head `b53ebfe`）。
+- 读回一致性：链路单 `MemoryHigh=4600M / MemoryMax=5600M`、Portal drop-in `1900M / 2600M`，与仓库 unit 一致。
+
+### 还留着的事项
+
+- **I/O 让位**：4 条 lane 自己造成的 `ioFullAvg10` 43–51（browser 档阈值 20）。本轮故意不动阈值 —— 让位都被重试吸收、日档 21/21、抓取约 5 分钟；要动应先把 virtio 盘与 profile 写入量量清楚。
+- `shein-bi-cloud-manual-login-recovery.service` 也是 `2600M/3400M` 且会经浏览器 wrapper 起登录窗口：等它真正抽一次队列时量一次再定。
+- 闸门用全局 PSI 做容量判据的设计问题（见「迁移后第 4 批」末段）。
+- 仓库根目录 `tmp-browser-concurrency.conf`（迁移草稿、未跟踪，内容是被 4 lane 取代的旧 2 lane 版本）。
+- 宿主机特权：飞牛网页密码不是 Linux 密码，「不走浏览器改宿主机」需要用户先在网页后台设 Linux 密码或加免密 sudoers。
+- 旧云 `sa` 兼容转发保留 ≥7 天；`/data/shein-bi/outputs` 的 6.5 GB 历史按日归档仍在旧云未删。
+- 09:50 的 watchdog 会对 `2026.09.16.4` 做一次 release audit 复核（`releaseAuditReady` 应为 true）。
