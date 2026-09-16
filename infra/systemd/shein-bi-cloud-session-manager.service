@@ -25,8 +25,12 @@ TimeoutStartSec=7200
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-MemoryHigh=1400M
-MemoryMax=1800M
+# systemd recorded MemoryPeak = 1,468,776,448 bytes for this unit, i.e. 0.7 MiB ABOVE
+# its own 1400M MemoryHigh -- the same self-throttling shape that blocked the browser
+# lanes through host-wide PSI. It runs at 00:45 on an otherwise idle host, so give it
+# room instead of letting it sit on its soft limit.
+MemoryHigh=1800M
+MemoryMax=2400M
 OOMPolicy=stop
 KillMode=control-group
 ProtectSystem=full
