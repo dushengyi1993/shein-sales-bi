@@ -176,6 +176,7 @@ sudo ls /etc/cloud/cloud.cfg.d/; grep -c openapi /etc/hosts
 - 自查：`npm ls -g --depth=0`、`ls -l /usr/local/libexec/`、`ls -l /usr/bin/lark-cli`、`ls -l /root/.lark-cli/`。
 - 修复：`sudo npm install -g @larksuite/cli@<老云版本>`（半托是 1.0.80），再把老云的 `/root/.lark-cli/config.json` 搬过来（只搬不打印）；验证用 `lark-cli im +messages-send --as <identity> --chat-id <id> --text x --dry-run`：dry-run 只校验请求、不发消息，rc=0 且返回 `/open-apis/im/v1/messages` 即链路通。
 - 教训：迁移后要做三类清单对比——① `dpkg --get-selections`；② `npm ls -g --depth=0`；③ `/usr/local/libexec/` 与 `/usr/bin` 下的符号链接。半托实测 dpkg 差 261 个包但几乎全是历史包袱，真正影响运行的恰恰是第②③类。
+**4.5 补充（2026-09-16）：第④类——apt 装、但只被脚本 import 的 Python 模块。** 半托当天营销巡检首跑失败（报告绑定报 `marketingCostMapSource.sha256 ... missing`、`guardStatus=66`、当天报告没发布），根因是 `scripts/marketing/build_marketing_cost_map.py` 崩在 `from openpyxl import load_workbook`；老云有 `python3-openpyxl 3.1.2+dfsg-6` + `python3-et-xmlfile 1.0.1-2.1`，这两个包就在那 261 个「历史包袱」差集里，看包名看不出危害。核对法：把仓库所有 `*.py` 的顶层 import 收一遍，在目标机逐个 `python3 -c import <mod>` 试，而不是只比 `dpkg` 包名差。另一个连带教训是「命名空间」：在服务 bind mount 之外手动跑同一个脚本会读到空的 `outputs/`，得到看似成功但内容缺失的产物（半托这次先得到 25 KB / `trueCostCount=0` 的错误成本图，在正确的服务环境里重建后是 403,828 字节 / `trueCostCount=263`）。要么用 `systemd-run` 带上同款挂载，要么直接重跑那个 unit。
 
 **4.6 飞书告警投递：三层依赖，最容易漏的是密钥库**
 
