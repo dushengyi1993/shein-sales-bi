@@ -2,6 +2,12 @@
 
 When a request is an actual SHEIN listing, image, title, inventory, price, link, or marketing operation, use the repository's controlled BI/Ops tooling rather than inventing an alternative workflow.
 
+## Production host
+
+- Production runs on the fnOS VM: `ssh shein-bi-fnos` (`dushengyi@192.168.1.200`), app checkout `/opt/shein-bi/app`, warehouse container `shein-warehouse-db`, BI entry `sa.dushengyi.cc`.
+- The former cloud host `shein-bi-tencent` was stopped on 2026-09-15 for the semi-managed migration. Every `shein-bi*` timer there is disabled and its portal, query and webhook services are inactive. Treat it as historical evidence only, never as current production state, and do not restart its schedulers or read its stale markers as today result.
+- An instruction that says cloud (云端) without naming a host means the fnOS VM. Diagnose a run on the host that actually performs it; do not conclude that an automation was switched off from a stopped host.
+
 ## Direct investigation rule
 
 When the user asks the current Codex agent to investigate, verify, calculate, repair, or execute work:
