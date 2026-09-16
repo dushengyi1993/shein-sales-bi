@@ -207,3 +207,20 @@ sudo ls /etc/cloud/cloud.cfg.d/; grep -c openapi /etc/hosts
 
 - 飞牛（fnOS）账号密码只在网页后台生效。Linux 侧 `sshd`、`sudo` 都走 `common-auth`（`pam_unix.so nullok` + `pam_winbind.so … try_first_pass`），实测该口令被拒：`ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no <user>@<host>` → `Permission denied (publickey,password)`，`sudo` 报 `no password was provided` / `incorrect password attempt`。`root` 同样不可用口令登录。
 - 影响：想「不走浏览器直接改宿主机」（例如开虚拟机的开机自启动、改宿主机网络/存储）就必须二选一——① 在网页后台给账号设一个 Linux 密码；② 加一条免密 sudoers。否则宿主机层只能由用户在网页后台操作。VM 内部的运维不受影响（VM 的 `dushengyi` 免密 sudo 正常）。
+
+**4.10 cgroup 软上限低于真实工作集，会「毒化」全机的压力信号**
+
+- 症状：所有走资源闸门的浏览器/重任务集体以 `MEMORY_STALL_PRESSURE` 让位，但机器其实很闲——`MemAvailable` 5.7–6.9 GiB、无 swap、CPU idle 90%、`vmstat` 无 `si/so`。
+- 机制：`scripts/check_host_resource_pressure.mjs` 读的是 `/proc/pressure/memory` 的 `full avg10`（半托实测：在叶子 cgroup 里读与在 root 读**完全同值**，即全局量）。任何 cgroup 超过自己的 `MemoryHigh`，内核就会持续回收它，这份 stall 立刻变成全机 PSI，于是**所有**闸门任务一起让位。
+- 半托踩了两处，都是「按主进程估的软上限，没算 cgroup 里的子进程」：
+  1. `shein-bi-portal.service` 的 cgroup 还装着 `generate_bi_portal.mjs --section ...` 的子进程（只受 `NODE_OPTIONS=--max-old-space-size=1536` 约束，RSS 可到约 1.8 GiB）。`MemoryHigh=1200M` 下那个 profit 生成进程卡死 14 分钟、`memory.events.high` 66 万次、PSI 常年 90；抬到 `1900M/2600M` 后 **12 秒**退出、cgroup 1380→227 MiB、PSI 94→0.20。
+  2. 晨链自己：4 条 lane 的工作集实测 **3.3–4.1 GiB**（5 店探针峰值 3,470,336,000 B；真实链路 `memory.peak` 4,075 MiB），旧 `2600M/3400M` 同样自锁。抬到 `4600M/5600M`。
+- 自查：`systemctl show <unit> -p MemoryHigh -p MemoryPeak`，再看 `/sys/fs/cgroup/.../<unit>/memory.events` 的 `high` 计数（持续增长 = 长期在软上限之上被回收）。
+- 口径：软上限要高于「该 cgroup 内所有进程（含子进程/worker）」的最坏工作集，而不是只按主进程估；硬上限留出足够带宽，让节流（而不是 OOM）成为第一反应。
+
+**4.11 共享日志目录的属主要钉在服务账号上**
+
+- 症状：某个阶段静默失败，日志里只有一行 `.../<name>-<stamp>.log: Permission denied`。
+- 机制：同一个日志目录被不同用户的调用者共用（半托是 `User=root` 的 ET forwarder 与 sheinops 的晨链共用 `/srv/shein-bi/logs/cloud-portal-prewarm`）。谁先跑谁建目录；root 建出来的是 `root:sheinops 0750`，sheinops 连自己的日志文件都建不了，脚本在 `exec >>"$LOG_FILE"` 这一步就退出。
+- 修法：脚本在以 root 运行时 `chown <service-user>:<service-group> "$LOG_DIR"` 再 `chmod 0750`；迁移完成后顺手机核对 `logs/*/` 每个目录的属主是否等于实际写入者（半托只有这一处不符，其它 root 属主的目录都是 root 自己写）。
+- 影响面（半托实例）：库存关键的 `linksData` 段因此整段没刷新，晨链落到 warning 并需要重试；修完在链路自己的重试里 131 秒内恢复。
