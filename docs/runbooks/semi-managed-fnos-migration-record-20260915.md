@@ -431,3 +431,15 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 代价与补偿：这个窗口正好压掉 `09:25` 那次 browser-cleanup 槽位，部署后手动跑了一次同一服务补偿（`Result=success`、`chrome=0`）。
 - 读回：`check_release_source_state` exact/clean（head `a754742`、dirty 0）、watchdog 重跑 `releaseAuditReady=true` / `releaseAuditIssues=[]` / `deployedRelease.tag=2026.09.16.5`、portal/query/webhook active、局域网 302、`systemctl --failed` 空。
 - 至此 main 与部署源一致（含今天的 docs 提交）；今天累计 6 个 PR 合并（#178–#183）。**本文件后续的 docs-only 提交属于两次发布之间的正常状态，会在下一个代码版本一起进部署源。**
+
+### 迁移后第 7 批：营销巡检首跑在新机失败——缺一个 apt 装的 Python 模块（2026-09-16 11:00–11:15，已修）
+
+- 现象：11:00 的 `shein-bi-cloud-marketing-live-guard.service` 第一次在飞牛跑就失败（`ExecMainStatus=1`、单元进 failed）：报告绑定校验报 `guard marketingCostMapSource.sha256 must be a 64-hex SHA-256; got=missing`（`guardStatus=66`），当天的 `marketing-daily-guard-<date>.{md,json}` 没有发布。
+- 根因：成本证据构建器 `scripts/marketing/build_marketing_cost_map.py` 直接崩在 `from openpyxl import load_workbook` → `ModuleNotFoundError: No module named 'openpyxl'`。旧云是 apt 装的 `python3-openpyxl 3.1.2+dfsg-6` + `python3-et-xmlfile 1.0.1-2.1`，这两个包就落在迁移时那 261 个「看着像历史包袱」的 dpkg 差集里。
+- 修法：新机 `apt-get install -y python3-openpyxl python3-et-xmlfile`（版本与旧云一致，装完 `dpkg -l` 为 `ii`），再 `systemctl start shein-bi-cloud-marketing-live-guard.service` 重跑。
+- 复核：
+  - 成本图 `tmp/mbrs/marketing-cost-map.json`：我先在**服务命名空间之外**手动跑过一次，只得到 25 KB / `trueCostCount=0`——因为那条路径在 bind mount 之外读不到 portal 数据（同一个坑今天第三次出现）；在正确的服务环境里重建后是 **403,828 字节、`count=134` / `trueCostCount=263`**，与旧云 09-15 11:00 的产物逐字段一致。
+  - 巡检自身：日志 `marketing cost evidence refreshed` → `done ok date=2026-09-16`；`marketing-daily-guard-2026-09-16.{md,json}`（10,785 B / 1.18 MB）已发布，`marketingCostMapSource.sha256` 已绑定并通过校验；`systemctl --failed` 清空。
+  - **业务结论与旧云一致**：今天报告的 6 条 blocker（5 条 `critical_source_missing` + `manual_special_limited_discount_restore_required=15`）与旧云 09-14、09-15 的报告**逐条相同**。那 5 个证据文件（`tmp/marketing-signup/{coupon-submit-results,low-price-overlap-risk,old-ordinary-overlap-risk}`）在**旧云上同样不存在**——它们只在真的有提交/取消动作时生成，是 guard 的 fail-closed 语义，不是迁移丢失。
+  - 同批观察：`tmp/marketing-signup/` 新机缺 `cloud-once-20260908`（09-08 的一次性产物）与 `limited-discount-rescue`（按需生成的救援目录），都不在 guard 的证据源列表里，判定可不搬。
+- 教训（已并入共用清单 4.5）：迁移后的依赖核对不能只比包名差集，要**把脚本真正 import 的模块逐个试一遍**；`python3-openpyxl` 这类「脚本依赖、不是服务依赖」的包最容易漏，而且漏了只在特定日更任务上才暴露。
