@@ -97,6 +97,7 @@ async function main() {
       registryFile: args.registryFile,
       registryRoot: args.registryRoot,
       expectedStoreKeys: stores,
+      allowEnabledStoreSubset: args.allowEnabledStoreSubset === true,
     });
     console.log(JSON.stringify({
       ok: true,
@@ -112,6 +113,8 @@ async function main() {
       priceOverridesHash: result.priceOverridesHash,
       rowCount: result.rowCount,
       storeKeys: result.storeKeys,
+      storeCoverageComplete: result.storeCoverageComplete,
+      missingEnabledStoreKeys: result.missingEnabledStoreKeys,
       activityBatch: result.activityBatch,
       promotedAt: result.promotedAt,
       workFingerprint: result.workFingerprint,
