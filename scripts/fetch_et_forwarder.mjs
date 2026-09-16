@@ -1140,29 +1140,50 @@ async function fetchStorageFeeDetails(cdp, args, listRows) {
     ids.push(id);
   }
   const start = args.detailOffset || 0;
+  const detailAttempts = Math.max(1, Number(process.env.SHEIN_ET_STORAGE_FEE_DETAIL_ATTEMPTS || 3));
   const end = args.maxDetails ? start + args.maxDetails : undefined;
   const limited = ids.slice(start, end);
   for (const id of limited) {
     const parent = parentById.get(id) || {};
-    try {
-      const file = await browserFetchStorageFeeCsv(cdp, args, id);
-      const parsed = parseCsvText(file.text);
-      rows.push(...parsed.map((r, i) => ({
-        ...r,
-        __parent_id: id,
-        __source_row_no: i + 2,
-        __download_url: file.fileUrl || '',
-        __download_content_type: file.contentType || '',
-        __download_content_disposition: file.contentDisposition || '',
-        __download_byte_length: file.byteLength || 0,
-        __download_encoding: file.encoding || '',
-        __bill_sort_name: parent.SortName || '',
-        __bill_ship_time: parent.ShipTime || '',
-        __bill_create_time: parent.Createtime || '',
-        __bill_other_income: parent.OtherIncome ?? '',
-      })));
-    } catch (err) {
-      const message = err?.message || String(err);
+    // One transient network failure out of a few dozen detail exports used to abort the
+    // whole daily batch (the HTTP transport's postJson+file read has no retry of its own),
+    // and the run is fail-closed, so a single `fetch failed` / `terminated` download meant
+    // no storage-fee data at all for the day. Retry the export the same way the ET read
+    // path already retries (`SHEIN_ET_HTTP_READ_ATTEMPTS`), keeping the terminal error
+    // behaviour unchanged when every attempt fails.
+    let failure = null;
+    for (let attempt = 1; attempt <= detailAttempts; attempt += 1) {
+      try {
+        const file = await browserFetchStorageFeeCsv(cdp, args, id);
+        const parsed = parseCsvText(file.text);
+        rows.push(...parsed.map((r, i) => ({
+          ...r,
+          __parent_id: id,
+          __source_row_no: i + 2,
+          __download_url: file.fileUrl || '',
+          __download_content_type: file.contentType || '',
+          __download_content_disposition: file.contentDisposition || '',
+          __download_byte_length: file.byteLength || 0,
+          __download_encoding: file.encoding || '',
+          __bill_sort_name: parent.SortName || '',
+          __bill_ship_time: parent.ShipTime || '',
+          __bill_create_time: parent.Createtime || '',
+          __bill_other_income: parent.OtherIncome ?? '',
+        })));
+        failure = null;
+        break;
+      } catch (err) {
+        failure = err;
+        const retryMessage = err?.message || String(err);
+        const retryable = /timeout|aborted|terminated|ECONNRESET|EPIPE|socket hang up|fetch failed|network/i.test(retryMessage);
+        if (!retryable || attempt >= detailAttempts) break;
+        const delayMs = Math.min(4_000, 750 * attempt);
+        console.warn(`[fetch_et_forwarder] storage fee detail retry incomeBillId=${id} attempt=${attempt}/${detailAttempts} delayMs=${delayMs} reason=${retryMessage}`);
+        await sleep(delayMs);
+      }
+    }
+    if (failure) {
+      const message = failure?.message || String(failure);
       errors.push({incomeBillId: id, message});
       console.error(`[fetch_et_forwarder] WARN storage fee detail download failed incomeBillId=${id}: ${message}`);
     }
