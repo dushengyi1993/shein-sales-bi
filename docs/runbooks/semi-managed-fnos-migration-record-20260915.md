@@ -445,3 +445,14 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 教训（已并入共用清单 4.5）：迁移后的依赖核对不能只比包名差集，要**把脚本真正 import 的模块逐个试一遍**；`python3-openpyxl` 这类「脚本依赖、不是服务依赖」的包最容易漏，而且漏了只在特定日更任务上才暴露。
 - **当天整条营销链已与旧云对齐**：11:11 那次 repair（由 guard 触发）与 **11:45 的定时槽**都真实跑起来了（`ExecMainStartTimestamp` 11:45:06 → 11:46:33），退出码 **75**（项目约定的「deferred / 可重试」）。它的 `state/cloud_ops_alerts/marketing-repair-last.json` 是 `status=pending / businessStatus=pending / queueStatus=pending`、`message="manual-special item deferred; pending manual work must settle before fallback"`、`manualRows=15 / manualGroups=15`——与旧云 09-15 的同一文件**逐字段一致**（旧云每小时一跑、每次都停在同一个 75）。所以营销这条链在新机上已等价于旧云，剩下的 15 条人工特殊限时折扣是业务待办，不是迁移问题。
 - 顺带发现（业务，非迁移）：guard 与 repair 都报 `current baseline covers 19/21 enabled stores; missing=HY,LG`，且 11:45 那次扫描里 `HY: rows=0` —— 两个最新店（HY、LG）还没进营销基线/计划登记，需要按 21 店口径补建。
+
+### 迁移后第 8 批：把「19 店」残留按 21 店口径清一遍（2026-09-16 12:00，已修）
+
+- 方法：对 `origin/main` 的 `scripts/`、`lib/`、`config/`、`infra/` 逐个搜「形如旧 19 店集合」的硬编码（判据是列表里没有 `LG`/`HY`）。
+- 已修的三处生产代码：
+  1. `lib/product_sku_normalizer.mjs` 的 `KNOWN_STORE_PREFIXES` 仍只有 19 个 → 补 `LG`、`HY`。这个集合决定「从导出字段里剥掉店号前缀」，缺了 LG/HY 会让这两个店的前缀被当成未知前缀保留下来（注释里写的是保持可见待审，不是静默出错，但确实是新店行为缺口）。
+  2. `scripts/generate_bi_portal.mjs` 前端 `STORE_ORDER` 只有 16 个（DL…TZ）→ 补成 21 店的规范顺序（与 `generate_link_ops_web_dashboard.mjs`、`execute_retire_candidates_openapi.mjs` 等一致）。未知店本来会被兜底排在最后，所以这是显示顺序问题，不是数据问题。
+  3. `scripts/bi_app/client.js` 里写死的无障碍标签 `aria-label="19 个店铺的 API 能力状态"` → 改成按当前店铺数动态生成（`${M(total)} 个店铺`）。
+- 核对过、**已经**是 21 店的：`cloud_openapi_{finance_sync,reconciliation,return_reconciliation,product_reconciliation}.sh` 的 `DEFAULT_STORES`、`lib/bi_ops_{intent_planner,direct_query,query_context}.mjs`、`lib/shein_store_config.mjs`、`lib/shein_webhook_config.mjs`、`scripts/cloud_today_sales_reconcile.sh` 的 `expectedStores`、`scripts/lib/store_config.sh` 的 fallback、`run_shein_openapi_*` 系列、`cloud_daily_inventory_replenishment_guard.sh` 的 `RECONCILE_STORES`。
+- 剩余「19」字样都在测试夹具/测试文案与文档里（例如 `test_link_ops_a2_c1_integrated.mjs` 的检查名、`test_host_resource_schedule_contract.mjs` 的注释），不影响行为；仓库根 `README.md`、`MEMORY.md`、`infra/systemd/README.md`、`skills/*` 里还大量写着「19 店」，属文档口径，建议按 21 店统一改写。
+- 本地验证：`test_product_sku_normalizer`、`test_bi_product_section_contract`、`test_bi_portal_section_terminal`、`test_bi_v6_d1_d2_identity_and_display`、`test_bi_ops_query_context`、`test_bi_ops_copy_product_all_stores_capability` 全部 exit 0（最后那个需要先生成 `outputs/bi-portal/index.html`，否则报的是环境缺件、不是代码问题）。

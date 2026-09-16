@@ -7372,7 +7372,7 @@ const NO_GROUPS_SURFACE_LABEL_PREFIX = ${JSON.stringify(noGroupsSurfaceLabelPref
 const NO_GROUPS_TREND_SURFACE_PREFIX = ${JSON.stringify(noGroupsTrendSurfacePrefix)};
 let DATA = JSON.parse(document.getElementById('portal-data').textContent);
 let STORE_CODES = new Set((DATA.stores || []).map(s => s.store_key));
-const STORE_ORDER = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ'];
+const STORE_ORDER = ['DL','DX','FY','LQ','NM','HL','JY','ZL','TS','MZ','CX','YJ','XL','QY','QH','TZ','JSH','TZZ','XC','LG','HY'];
 function orderedStoreCodes(){
   const known = STORE_ORDER.filter(s => STORE_CODES.has(s));
   const extra = [...STORE_CODES].filter(s => !STORE_ORDER.includes(s)).sort();
