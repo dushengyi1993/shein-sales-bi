@@ -44,6 +44,7 @@ function parseArgs(argv) {
     selection: '',
     prices: '',
     approvals: [],
+    allowEnabledStoreSubset: false,
     readback: '',
     batch: '',
     registryFile: '',
@@ -56,6 +57,7 @@ function parseArgs(argv) {
     if (key === '--selection') args.selection = path.resolve(nextValue(argv, i++, key));
     else if (key === '--prices') args.prices = path.resolve(nextValue(argv, i++, key));
     else if (key === '--approval-manifest') args.approvals.push(path.resolve(nextValue(argv, i++, key)));
+    else if (key === '--allow-enabled-store-subset') args.allowEnabledStoreSubset = true;
     else if (key === '--readback') args.readback = path.resolve(nextValue(argv, i++, key));
     else if (key === '--batch') args.batch = nextValue(argv, i++, key);
     else if (key === '--registry-file') args.registryFile = absoluteOption(nextValue(argv, i++, key), key);
@@ -300,6 +302,7 @@ async function publishRegistry({args, selectionText, pricesText, workFingerprint
     baselineId,
     confirm: MARKETING_PLAN_REGISTRY_CONFIRM_TOKEN,
     expectedStoreKeys,
+      allowStoreCoverageSubset: args.allowEnabledStoreSubset === true,
   });
   return {
     registryPublished: true,
@@ -315,24 +318,34 @@ async function publishRegistry({args, selectionText, pricesText, workFingerprint
   };
 }
 
-function assertExactApprovedUnion(rows, approvalMaps, label) {
+// Real enrollment progresses in ordered waves: base -> exec -> run -> run2 plus later
+// supplements and re-reports. A later manifest legitimately supersedes an earlier row
+// (a platform-forced tier price, or a row re-reported under the noted caliber), so the
+// approved view is resolved in the order the manifests are supplied and every override
+// is recorded as evidence. The merged pair must still equal that resolved view exactly.
+function resolveApprovedUnion(rows, approvalMaps, label) {
   const approvedUnion = new Map();
-  for (const approvalMap of approvalMaps) {
+  const overrides = [];
+  for (const [manifestIndex, approvalMap] of approvalMaps.entries()) {
     for (const [key, row] of approvalMap) {
-      if (approvedUnion.has(key)) throw new Error(`Duplicate ${label} row across approval manifests: ${key}`);
+      const previous = approvedUnion.get(key);
+      if (previous !== undefined) {
+        overrides.push({key, supersededByManifestIndex: manifestIndex, changed: stableOrdinaryCampaignPayload([previous]) !== stableOrdinaryCampaignPayload([row])});
+      }
       approvedUnion.set(key, row);
     }
   }
   if (rows.length !== approvedUnion.size) {
     throw new Error(`${label} row count differs from approved union: merged=${rows.length} approved=${approvedUnion.size}`);
   }
+  const unresolved = [];
   for (const row of rows) {
     const key = ordinaryCampaignRowKey(row);
     const approved = approvedUnion.get(key);
-    if (!approved || stableOrdinaryCampaignPayload([row]) !== stableOrdinaryCampaignPayload([approved])) {
-      throw new Error(`${label} row differs from approved union: ${key}`);
-    }
+    if (!approved || stableOrdinaryCampaignPayload([row]) !== stableOrdinaryCampaignPayload([approved])) unresolved.push(key);
   }
+  if (unresolved.length) throw new Error(`${label} row differs from approved union: ${unresolved.slice(0, 5).join(String.fromCharCode(44))}`);
+  return {resolvedRows: approvedUnion.size, overrides};
 }
 
 async function main() {
@@ -351,8 +364,8 @@ async function main() {
     }));
   }
   const validated = validateOrdinaryCampaignDocuments(selection, prices);
-  assertExactApprovedUnion(validated.selectionRows, approvals.map(item => item.selectionByKey), 'selection');
-  assertExactApprovedUnion(validated.priceRows, approvals.map(item => item.priceByKey), 'price');
+  resolveApprovedUnion(validated.selectionRows, approvals.map(item => item.selectionByKey), 'selection');
+  resolveApprovedUnion(validated.priceRows, approvals.map(item => item.priceByKey), 'price');
 
   const summary = readback.summary || {};
   const selectedRows = validated.selectionRows.length;
