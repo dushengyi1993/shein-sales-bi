@@ -456,3 +456,20 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 核对过、**已经**是 21 店的：`cloud_openapi_{finance_sync,reconciliation,return_reconciliation,product_reconciliation}.sh` 的 `DEFAULT_STORES`、`lib/bi_ops_{intent_planner,direct_query,query_context}.mjs`、`lib/shein_store_config.mjs`、`lib/shein_webhook_config.mjs`、`scripts/cloud_today_sales_reconcile.sh` 的 `expectedStores`、`scripts/lib/store_config.sh` 的 fallback、`run_shein_openapi_*` 系列、`cloud_daily_inventory_replenishment_guard.sh` 的 `RECONCILE_STORES`。
 - 剩余「19」字样都在测试夹具/测试文案与文档里（例如 `test_link_ops_a2_c1_integrated.mjs` 的检查名、`test_host_resource_schedule_contract.mjs` 的注释），不影响行为；仓库根 `README.md`、`MEMORY.md`、`infra/systemd/README.md`、`skills/*` 里还大量写着「19 店」，属文档口径，建议按 21 店统一改写。
 - 本地验证：`test_product_sku_normalizer`、`test_bi_product_section_contract`、`test_bi_portal_section_terminal`、`test_bi_v6_d1_d2_identity_and_display`、`test_bi_ops_query_context`、`test_bi_ops_copy_product_all_stores_capability` 全部 exit 0（最后那个需要先生成 `outputs/bi-portal/index.html`，否则报的是环境缺件、不是代码问题）。
+
+### 迁移后第 8 批：第 7 次发布与部署（2026-09-16，`2026.09.16.8` → `e89b7c5`，库存 generation 113）
+
+合并 #192–#195（死锁分类修复、希音底价以平台为准、gsfs 降为说明、生产主机说明 + Partner CLI 版本号），发布 `2026.09.16.8`（annotated tag `59a66ab7…`，releaseId 389745124，immutable），维护窗口 **16:34:42 → 16:38:39（约 4 分钟）**，`assert_inventory_writer_release_aligned` rc=0，源码态 `head=e89b7c50…`、dirty/hidden/missing 全 0、`systemctl --failed` 空，resume 后 maintenance generation 379。
+
+这次把一批「只有真跑一遍才会撞上」的细节确认清楚，记在这里供下次照抄：
+
+1. **发版第一次 dispatch 必须等 main 的 push CI 跑完。** 我在 main CI 还在 `in_progress` 时就 dispatch，工作流报 `Exact CI run attempt does not match the tracked trust policy`（`SOURCE_RELEASE_CI_ATTEMPT_MISMATCH`）。等 CI 成功后再用**同一版本**重发即通过——和 `.5`/`.6` 的恢复路径一致，不是新问题。
+2. **`git bundle` 不能写到 `source-release-bundles/`。** 该目录 `root:sheinops 0750`，sheinops 写不了（`Unable to create …bundle.lock: Permission denied`）。做法：sheinops 生成到 `/tmp`，root `install -o root -g sheinops -m 0640` 安装到位。
+3. **权限交接要覆盖 `.git`（递归）和 tracked 文件所在目录（非递归）。** 交接前 sheinops 连 `git fetch --tags` 都报 `.git/FETCH_HEAD: Permission denied`；`git reset --hard` 靠目录写权限即可（替换文件不需要改文件本身的属主），所以只 chown 目录行就够，不要递归整个 app。
+4. **加固器必须带全套新代际参数，`apply` 还要 plan 的内部 hash。** 只给 `--app-root` 审计会报 `completed generation runtime mount identity drift`（拿 8/27 的 completion 做 mount 校验）。正确姿势：`--receipt/--plan-file/--completion-attestation` 指向新代际文件名 + `--generation-id <label>` 先审计（会写出 `<label>.plan.json`），再 `--expected-recovery-plan-sha256 <plan 里的 planHash>` + `--apply --confirm HARDEN_INVENTORY_WRITER_CHECKOUT_V1`。注意那个参数要的是 **plan 文档里的 `planHash`**，不是 plan 文件的 sha256（传文件 sha 会报 `permission plan SHA-256 mismatch`）。
+5. **`rotation-stage` 的两个身份参数容易传错。** `--candidate-release-receipt-file/hash` 要用 `deployed_release.json` 里 `inventoryWriterAuthority.receiptFile/receiptSha256` 指向的** attestation 文件**（本次 `release-attestations/2026.09.16.8/release-attestation.json`，`72ebfa33…`），不是部署标记文件本身；传错会报 `current checkout is neither active nor exact staged candidate`。`--expected-preflight-hash` 要用 artifact 文档里的 **`preflightHash`** 字段（不是 `controllerPreflightHash`，也不是 `currentStateHash`），`--expected-artifact-sha256` 才是 artifact 文件的 sha256。
+6. **代码缺陷与业务阻断要在计划层/执行层分开处理。** 第 7 批那 16 条人工特殊折扣此前一条都跑不动，根因是恢复计划把 QH 排在第一位、而该行被固定价预检拒绝时抛的是**未分类异常**（父进程只看到「没有可读 JSON」），于是每小时那一班永远重试同一条、把后面 15 条全部饿死。#192 把它归为终态前置阻断（`manual_special_fixed_tier_review_blocked`）后，同一班内跑出 10 条恢复。
+7. **平台底价是平台标准，不是业务异常。** NM/QY `SM-825电动缝纫机` 登记价 115.62/116.28 低于希音 `rate_intercept` 地板价 120，原实现把整行判为不可恢复阻断。#194 改为抬到平台仍接受的最低价位（地板 + 0.01，因为平台的判定含 `<= 地板` 即拒），并在 `platformPriceAudit` 里留 `platformFloor`/`platformFloorAdjustment`。部署后这两条都 `restored` 且有 live 回读。
+8. **结果文件的记账口径。** 手工让已结清的行重新入队时，删的是结果文件 `results` 里的记录（备份成 `…pre-platform-floor-deploy.json`），队列里 `manualSpecialRestore` 的 `workFingerprint` 不用动。注意执行器每一班会重写该文件为本轮结果，跨班的「已恢复」以平台 live 回读为准；被重复扫到只会命中 `already_covered_exact`，不会重复写。
+9. **`deployed_release.json` 的 `sourceFingerprint` 是下一次 `rotation-stage` 的候选指纹来源**，`check_release_source_state.mjs --expected-commit <tag>` 的读回里也有同一个值（本次 `cd18ce51…`），两者应当一致。
+
