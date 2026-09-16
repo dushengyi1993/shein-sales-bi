@@ -13,6 +13,10 @@ const service = read('infra/systemd/shein-bi-cloud-et-storage-fee.service');
 const timer = read('infra/systemd/shein-bi-cloud-et-storage-fee.timer');
 
 assert.match(fetcher, /sort:\s*ctx\.storageFeeOnly\s*\?\s*2\s*:\s*''/, 'storage-fee-only must request IncomeBill sort=2');
+assert.match(fetcher, /SHEIN_ET_STORAGE_FEE_DETAIL_ATTEMPTS \|\| 3/,
+  'a transient storage-fee detail export failure must be retried, not failed closed on the first attempt');
+assert.match(fetcher, /storage fee detail retry incomeBillId=/,
+  'each retried detail export must be logged with its bill id so the rarity stays visible');
 assert.match(fetcher, /if \(args\.storageFeeOnly\) keys = \['income_bill'\]/, 'storage-fee-only must not include generic finance endpoints');
 assert.equal(addDays('2026-07-19', -2), '2026-07-17', 'Beijing calendar overlap must not shift back one day');
 assert.equal(addDays('2026-03-01', -1), '2026-02-28', 'calendar arithmetic must cross month boundaries');
