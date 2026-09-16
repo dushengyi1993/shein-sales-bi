@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 import {
@@ -265,6 +266,42 @@ async function main() {
     2,
     'the CLI forwards the allowance in both verify and publish',
   );
+  assert.ok(
+    cli.includes('const storesConfig = args.storesConfig || defaultStoresConfig();'),
+    'the CLI defaults the coverage expectation instead of verifying nothing',
+  );
+
+  // 3b. The CLI verify run must really enforce coverage: without --stores-config it uses this
+  // repository's config/stores.json, which cannot contain these fixture stores, so a clean report
+  // is impossible. A silently empty expectation used to make verify print a green coverage line
+  // while checking nothing.
+  const cliPath = path.join(ROOT, 'scripts', 'marketing', 'manage_marketing_plan_registry.mjs');
+  const runCli = extraArgs =>
+    spawnSync(process.execPath, [
+      cliPath,
+      'verify',
+      '--registry-file', registryFile,
+      '--registry-root', registryRoot,
+      ...extraArgs,
+    ], {cwd: ROOT, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024});
+
+  const defaultConfigVerify = runCli([]);
+  assert.notEqual(defaultConfigVerify.status, 0, 'verify without --stores-config must apply the repository enabled-store expectation');
+  assert.match(
+    `${defaultConfigVerify.stdout}\n${defaultConfigVerify.stderr}`,
+    /enabled store coverage mismatch/i,
+    'verify without --stores-config reports the real coverage mismatch',
+  );
+
+  const fixtureStoresConfig = path.join(tmpRoot, 'config', 'stores.json');
+  writeJson(fixtureStoresConfig, {stores: enabledStores.map(storeKey => ({storeKey}))});
+  const fixtureVerify = runCli(['--stores-config', fixtureStoresConfig, '--allow-enabled-store-subset']);
+  assert.equal(fixtureVerify.status, 0, `${fixtureVerify.stdout}\n${fixtureVerify.stderr}`);
+  const fixtureResult = JSON.parse(fixtureVerify.stdout);
+  assert.equal(fixtureResult.storeCoverageComplete, false, 'the CLI reports the uncovered enabled store as advice');
+  assert.deepEqual(fixtureResult.missingEnabledStoreKeys, ['CCC'], 'the CLI names the uncovered enabled store');
+  assert.equal(fixtureResult.storesConfig, fixtureStoresConfig, 'the CLI reports which enabled-store config it applied');
+  assert.deepEqual(fixtureResult.enabledStoreKeys, [...enabledStores].sort(), 'the CLI reports the enabled-store expectation it applied');
 
   // 4. Real enrollment arrives in ordered waves (base -> exec -> run -> run2, then supplements and
   // re-reports). A later manifest supersedes an earlier row; treating that as a hard duplicate

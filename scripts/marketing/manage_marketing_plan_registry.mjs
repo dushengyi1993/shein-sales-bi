@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 
 import {
   MARKETING_PLAN_REGISTRY_CONFIRM_TOKEN,
@@ -17,7 +18,17 @@ function usage() {
     --expected-selection-sha256 <sha256> --expected-prices-sha256 <sha256> \
     --confirm ${MARKETING_PLAN_REGISTRY_CONFIRM_TOKEN}
   node scripts/marketing/manage_marketing_plan_registry.mjs verify \
-    --registry-file <absolute-file> [--registry-root <absolute-dir>]`;
+    --registry-file <absolute-file> [--registry-root <absolute-dir>] [--stores-config <absolute-file>]
+
+  The enabled-store coverage expectation defaults to this repository's config/stores.json, so a
+  verify run cannot report a clean coverage result while checking nothing. Pass --stores-config to
+  point at another enabled-store config.`;
+}
+
+// Resolved from this script rather than the working directory: an operator can run the command
+// from anywhere, and a silently empty expectation would make the coverage report meaningless.
+function defaultStoresConfig() {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'stores.json');
 }
 
 function nextValue(argv, index, option) {
@@ -81,8 +92,7 @@ function parseArgs(argv) {
 }
 
 function expectedStoreKeys(storesConfigPath) {
-  if (!storesConfigPath) return [];
-  const doc = JSON.parse(fs.readFileSync(storesConfigPath, 'utf8'));
+  const doc = JSON.parse(fs.readFileSync(path.resolve(String(storesConfigPath)), 'utf8'));
   return [...new Set((doc?.stores || [])
     .filter(store => store?.enabled !== false)
     .map(store => String(store?.storeKey || store?.store_key || store?.key || '').trim().toUpperCase())
@@ -91,7 +101,9 @@ function expectedStoreKeys(storesConfigPath) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const stores = expectedStoreKeys(args.storesConfig);
+  const storesConfig = args.storesConfig || defaultStoresConfig();
+  const stores = expectedStoreKeys(storesConfig);
+  if (!stores.length) throw new Error(`enabled stores config has no enabled store: ${storesConfig}`);
   if (args.command === 'verify') {
     const result = verifyMarketingPlanRegistrySync({
       registryFile: args.registryFile,
@@ -113,6 +125,8 @@ async function main() {
       priceOverridesHash: result.priceOverridesHash,
       rowCount: result.rowCount,
       storeKeys: result.storeKeys,
+      storesConfig,
+      enabledStoreKeys: stores,
       storeCoverageComplete: result.storeCoverageComplete,
       missingEnabledStoreKeys: result.missingEnabledStoreKeys,
       activityBatch: result.activityBatch,
