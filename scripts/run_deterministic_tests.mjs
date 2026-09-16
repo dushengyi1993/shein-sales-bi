@@ -75,6 +75,7 @@ const tests = [
   'scripts/marketing/smoke_current_marketing_live_scan_selection.mjs',
   'scripts/marketing/smoke_ordinary_activity_list_gap.mjs',
   'scripts/marketing/smoke_limited_discount_default_activity_stock.mjs',
+  'scripts/marketing/test_registry_store_subset_flag.mjs',
   'scripts/marketing/smoke_manual_limited_discount_protection.mjs',
   'scripts/marketing/smoke_marketing_link_key_index.mjs',
   'scripts/marketing/smoke_merge_current_marketing_price_scans.mjs',
