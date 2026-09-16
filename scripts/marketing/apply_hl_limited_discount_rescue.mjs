@@ -613,18 +613,29 @@ try {
         const skuCaps=(good.sku_info_list || []).map(sku=>Number(sku.supply_price_info?.max_supply_price)).filter(n=>Number.isFinite(n) && n>0);
         const maximum=Number.isFinite(maxSupplyPrice) && maxSupplyPrice>0 ? Math.min(maxSupplyPrice,...skuCaps) : null;
         const originalTarget=Number(target.fixedTierPricing?.originalTargetPrice ?? target.limitedDiscountPrice);
-        if(maximum!==null) price=round2(Math.min(price,maximum));
         const fullCost=target.fullUnitCostSar ?? target.fixedTierPricing?.evidence?.cost?.fullUnitCostSar;
         if(price<originalTarget && !Number.isFinite(fullCost)) invalid.push({skc:target.skc,reason:'missing_product_or_storage_cost_for_platform_adjustment'});
-        target.platformPriceAudit={ruleHash:pricingRuleHash,skc:target.skc,originalTargetPrice:originalTarget,actualPrice:price,platformMaximum:maximum,differenceSar:round2(price-originalTarget),actualMargin:Number.isFinite(fullCost)?(price-fullCost)/price:null,fullUnitCostSar:fullCost ?? null};
-        target.limitedDiscountPrice=price;
-        target.finalTargetPrice=price;
         const interceptSupplyPrice = Number(
           supplyInfo.intercept_supply_price ??
           (Number.isFinite(supplyPrice) && Number.isFinite(Number(good.rate_intercept))
             ? supplyPrice * (1 - Number(good.rate_intercept) / 100)
             : NaN),
         );
+        if(maximum!==null) price=round2(Math.min(price,maximum));
+        // SHEIN rejects any activity price at or below its rate-intercept supply
+        // floor. The platform standard is authoritative, so clamp the price up to
+        // the lowest value the platform still accepts and record the adjustment
+        // instead of blocking the row.
+        let platformFloorAdjustment = null;
+        if (Number.isFinite(interceptSupplyPrice) && interceptSupplyPrice > 0 && price <= interceptSupplyPrice + 0.0001) {
+          const adjustedPrice = round2(Math.max(price, interceptSupplyPrice) + 0.01);
+          platformFloorAdjustment = {skc: target.skc, requestedPrice: price, interceptSupplyPrice, adjustedPrice};
+          target.platformFloorAdjustment = platformFloorAdjustment;
+          price = adjustedPrice;
+        }
+        target.platformPriceAudit={ruleHash:pricingRuleHash,skc:target.skc,originalTargetPrice:originalTarget,actualPrice:price,platformMaximum:maximum,differenceSar:round2(price-originalTarget),actualMargin:Number.isFinite(fullCost)?(price-fullCost)/price:null,fullUnitCostSar:fullCost ?? null,platformFloor:Number.isFinite(interceptSupplyPrice)&&interceptSupplyPrice>0?interceptSupplyPrice:null,platformFloorAdjustment};
+        target.limitedDiscountPrice=price;
+        target.finalTargetPrice=price;
         const inventory = Number(good.inventory_num ?? good.ivt_num ?? 0);
         const minStock = Number(good.check_stock?.min_stock ?? defaultMinStock);
         const maxStock = Number(good.check_stock?.max_stock ?? defaultMaxStock);
@@ -636,9 +647,6 @@ try {
         if (!Number.isFinite(price) || price <= 0) invalid.push({skc: target.skc, reason: 'invalid target price', price});
         if (!Number.isFinite(maxSupplyPrice) || price > maxSupplyPrice + 0.0001) {
           invalid.push({skc: target.skc, reason: 'price exceeds max_supply_price', price, maxSupplyPrice});
-        }
-        if (Number.isFinite(interceptSupplyPrice) && price <= interceptSupplyPrice + 0.0001) {
-          invalid.push({skc: target.skc, reason: 'price hits rate_intercept floor', price, interceptSupplyPrice});
         }
         if (!Number.isFinite(inventory) || inventory < minStock) {
           invalid.push({skc: target.skc, reason: 'inventory below min_stock', inventory, minStock});
