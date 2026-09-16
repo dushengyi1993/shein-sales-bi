@@ -45,6 +45,7 @@ function parseArgs(argv) {
     expectedPriceOverridesSha256: '',
     confirm: '',
     storesConfig: '',
+    allowEnabledStoreSubset: false,
   };
   for (let i = 1; i < argv.length; i += 1) {
     const option = argv[i];
@@ -57,6 +58,7 @@ function parseArgs(argv) {
     else if (option === '--expected-prices-sha256' || option === '--expected-price-overrides-sha256' || option === '--expected-prices-sha') args.expectedPriceOverridesSha256 = nextValue(argv, i++, option).toLowerCase();
     else if (option === '--confirm') args.confirm = nextValue(argv, i++, option);
     else if (option === '--stores-config') args.storesConfig = path.resolve(nextValue(argv, i++, option));
+    else if (option === '--allow-enabled-store-subset') args.allowEnabledStoreSubset = true;
     else if (option === '--help' || option === '-h') {
       console.log(usage());
       process.exit(0);
@@ -126,6 +128,7 @@ async function main() {
     baselineId: args.baselineId,
     confirm: args.confirm,
     expectedStoreKeys: stores,
+    allowStoreCoverageSubset: args.allowEnabledStoreSubset === true,
   });
   console.log(JSON.stringify({...result, mode: 'publish'}, null, 2));
 }
