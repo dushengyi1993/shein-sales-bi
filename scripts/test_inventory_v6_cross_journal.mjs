@@ -238,10 +238,44 @@ try {
       await unchanged(oldSaved);
     });
   }
-  await check('duplicate cross-journal terminal events fail closed', async () => {
-    const duplicate = path.join(temp, 'duplicate-resolution.journal.ndjson');
-    await appendInventoryReconciliationRecord(duplicate, {...intent, journalFile: oldJournal}, readback(intent));
-    await assert.rejects(readInventoryIntentJournals([oldJournal, newJournal, duplicate], {maxRunDate: date}), /CROSS_REFERENCE_INVALID:duplicate resolution/);
+  await check('the reconciliation writer refuses to record a redundant closure', async () => {
+    const redundant = path.join(temp, 'redundant-resolution.journal.ndjson');
+    const appended = await appendInventoryReconciliationRecord(redundant, {...intent, journalFile: oldJournal}, readback(intent));
+    assert.equal(appended.appended, false, 'a second closure for one intent must not be written');
+    assert.equal(appended.skipped, true);
+    assert.equal(appended.reason, 'intent_already_terminal_in_journal_domain');
+    assert.ok(appended.closures.length >= 1, 'the existing closure must be reported as evidence');
+    await assert.rejects(fs.stat(redundant), {code: 'ENOENT'}, 'a skipped closure must not create a journal');
+    await unchanged(oldSaved);
+  });
+
+  await check('duplicate cross-journal terminal events: identical tolerated, conflicting fatal', async () => {
+    const first = path.join(temp, 'duplicate-first.journal.ndjson');
+    const second = path.join(temp, 'duplicate-second.journal.ndjson');
+    const rejected = code => ({
+      kind: 'write_outcome', intentId: intent.intentId, logicalActionKey: intent.logicalActionKey,
+      disposition: 'rejected', code, httpOk: true, httpStatus: 200, success: false,
+      recordedAt: date + 'T01:30:00.000Z',
+    });
+    const writeRejected = async (file, code) => {
+      await fs.writeFile(file, JSON.stringify({
+        kind: 'cross_journal_resolution', schemaVersion: 'inventory-cross-journal-resolution/v1',
+        sourceJournal: path.resolve(oldJournal), sourceSha256: sha(oldRaw),
+        intentHash: inventoryIntentHash(intent), event: rejected(code),
+      }) + '\n');
+    };
+    // Historical data can already hold the same closure twice; identical
+    // semantics is an idempotent no-op rather than a permanent fail-closed.
+    await writeRejected(first, 'FIRST');
+    await writeRejected(second, 'FIRST');
+    const tolerated = await readInventoryIntentJournals([oldJournal, first, second], {maxRunDate: date});
+    assert.equal(tolerated.pending.size, 0);
+    assert.equal(tolerated.terminalOutcomes.size, 1);
+    assert.equal(tolerated.duplicateCrossJournalResolutions.length, 1);
+    assert.equal(tolerated.duplicateCrossJournalResolutions[0].intentId, intent.intentId);
+    // A real disagreement between two closures stays a conflict.
+    await writeRejected(second, 'DIFFERENT');
+    await assert.rejects(readInventoryIntentJournals([oldJournal, first, second], {maxRunDate: date}), /CROSS_REFERENCE_INVALID:duplicate resolution/);
     await unchanged(oldSaved);
   });
 

@@ -197,15 +197,22 @@ try {
     'an unconfigured validator must remain local and fail closed rather than masking the missing reference',
   );
 
-  const [guardSource, executorSource, validatorSource, morningUnit] = await Promise.all([
+  const [guardSource, executorSource, validatorSource, morningUnit, discoverySource] = await Promise.all([
     fs.readFile(path.join(ROOT, 'scripts', 'cloud_daily_inventory_replenishment_guard.sh'), 'utf8'),
     fs.readFile(path.join(ROOT, 'scripts', 'inventory', 'execute_daily_inventory_replenishment_plan.mjs'), 'utf8'),
     fs.readFile(path.join(ROOT, 'scripts', 'validate_daily_operating_refresh.mjs'), 'utf8'),
     fs.readFile(path.join(ROOT, 'infra', 'systemd', 'shein-bi-cloud-morning-chain.service'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'lib', 'inventory_journal_discovery.mjs'), 'utf8'),
   ]);
-  assert.match(guardSource, /String\(process\.env\.SHEIN_BI_INVENTORY_JOURNAL_DIRS \|\| ''\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal, \{[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories: inventoryJournalDirectories/);
+  // The domain is declared once, in the shared module, and includes the
+  // run-scoped journals where a morning chain closes an abandoned intent.
+  assert.match(discoverySource, /SHEIN_BI_INVENTORY_JOURNAL_DIRS[\s\S]*?split\(path\.delimiter\)[\s\S]*?DEFAULT_INVENTORY_JOURNAL_DOMAIN_DIRECTORIES/);
+  assert.match(discoverySource, /'\/srv\/shein-bi\/runtime\/daily-inventory-replenishment\/runs'/);
+  assert.match(guardSource, /inventoryJournalDomainDirectories\(\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal, \{[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories: inventoryJournalDirectories/);
   assert.match(guardSource, /currentJournalFile: currentJournal,[\s\S]*?quarantineHistoricalDanglingSupersedes: true/);
   assert.ok((executorSource.match(/currentJournalFile: journalFile,[\s\S]{0,120}?quarantineHistoricalDanglingSupersedes: true/g) || []).length >= 2, 'executor startup and locked fresh reread must share the quarantine contract');
+  assert.match(executorSource, /const inventoryJournalDirectories = inventoryJournalDomainDirectories\(\)/,
+    'the executor must plan against the shared managed journal domain, not only the declared env directories');
   assert.match(validatorSource, /discoverInventoryJournalAuditFiles\(currentJournal, environment = process\.env\)[\s\S]*?split\(path\.delimiter\)[\s\S]*?includeAll: true,[\s\S]*?additionalDirectories/);
   assert.match(validatorSource, /const journalFiles = [\s\S]*?await discoverInventoryJournalAuditFiles\(currentJournal\);[\s\S]*?const lifecycle = await readInventoryValidationLifecycle\(journalFiles, \{currentJournal, maxRunDate: runDate, journalSnapshots\}\);/);
   assert.match(validatorSource, /async function readInventoryValidationLifecycle\(journalFiles,[\s\S]*?readInventoryIntentJournals\(journalFiles, \{\s*maxRunDate,\s*journalSnapshots,\s*currentJournalFile: currentJournal,\s*quarantineHistoricalDanglingSupersedes: true,/);
