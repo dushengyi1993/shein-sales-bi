@@ -7,12 +7,14 @@ import {
   assertDailyInventoryExecutionAuthorization,
   assertCurrentInventoryListingIdentity,
   buildDailyInventoryPlanHashPayload,
+  buildSameStoreOnShelfSkcIndex,
   canonicalInventoryKey,
   computeInventoryOverwriteQuantity,
   normalizeInventoryOccupancy,
   INVENTORY_OVERWRITE_COMPUTATION_VERSION,
   resolveInventoryIdentityKey,
   resolveInventoryShelfStatus,
+  sameStoreOnShelfIndexKey,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
 import {inventoryDetailRefreshWindow} from '../../lib/inventory_detail_refresh_window.mjs';
@@ -685,25 +687,14 @@ const linkMetricsByKey = new Map(linkMetricRows.map(row => [
   `${String(row.store_key || row.storeKey || '').toUpperCase()}::${String(row.skc || '').trim()}`,
   row,
 ]));
-const onShelfSkcsByStoreMatchKey = new Map();
-for (const metrics of linkMetricRows) {
-  if (resolveInventoryShelfStatus(metrics).code !== '1') continue;
-  const matchKey = resolveInventoryIdentityKey(
-    metrics.standard_goods_sn
-    ?? metrics.standardGoodsSn
-    ?? metrics.raw_goods_sn
-    ?? metrics.rawGoodsSn,
-  ) || canonicalInventoryKey(
-    metrics.standard_goods_sn
-    ?? metrics.standardGoodsSn
-    ?? metrics.raw_goods_sn
-    ?? metrics.rawGoodsSn,
-  );
-  if (!matchKey) continue;
-  const key = `${String(metrics.store_key || metrics.storeKey || '').toUpperCase()}::${matchKey}`;
-  if (!onShelfSkcsByStoreMatchKey.has(key)) onShelfSkcsByStoreMatchKey.set(key, new Set());
-  onShelfSkcsByStoreMatchKey.get(key).add(String(metrics.skc || ''));
-}
+// Same evidence base as the planner (see buildSameStoreOnShelfSkcIndex): the
+// guard compares this index against the plan row's recorded sibling set, so a
+// narrower or differently derived set here turns a completed run into a
+// permanent false same_store_on_shelf_changed pre-submit exclusion.
+const onShelfSkcsByStoreMatchKey = buildSameStoreOnShelfSkcIndex({
+  storeLinks: linkMetricRows,
+  matrix: links?.matrix,
+});
 const clients = new Map();
 const pendingIntentsByScope = new Map();
 for (const intent of pendingIntents.values()) {
@@ -925,7 +916,7 @@ for (const row of rows) {
         throw new Error(`Link is not inventory-relevant: ${currentShelfStatus.name}`);
       }
       const currentSameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
-        `${String(row.storeKey || '').toUpperCase()}::${String(row.matchKey || canonicalInventoryKey(row.canonical)).toUpperCase()}`,
+        sameStoreOnShelfIndexKey(row.storeKey, row.matchKey || canonicalInventoryKey(row.canonical)),
       ) || [])]
         .filter(skc => skc && skc !== String(row.skc || ''))
         .sort();
