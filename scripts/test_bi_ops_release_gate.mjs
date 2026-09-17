@@ -319,10 +319,12 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // The duplicate cross-journal closure regression, the production cloud host
 // regression and its history-retention companion are registered in the
 // deterministic shards and owned by no other runner, so the post-baseline
-// deterministic registration count reached 117.
-// The same-store on-shelf sibling parity regression is registered the same way,
-// so the count is 118.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 118;
+// The duplicate cross-journal closure regression, the production cloud host
+// regression, its history-retention companion and the same-store on-shelf
+// sibling parity regression are registered in the deterministic shards and
+// owned by no other runner. This change adds the repair-stage notification
+// regression, so the post-baseline deterministic registration count is 119.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 119;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
 const OWNERSHIP_CURRENT_UNION_COUNT = OWNERSHIP_BASELINE_UNION_COUNT

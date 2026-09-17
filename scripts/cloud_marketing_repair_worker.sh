@@ -1235,7 +1235,19 @@ update_stage() {
   if (( command_status == QUEUE_CONFLICT_STATUS )); then
     mark_queue_conflict "$stage" after-execution "$result_path"
   fi
-  if (( command_status == 0 )) && [[ -n "$result_path" && "$ROOT" == "/opt/shein-bi/app" && "${SHEIN_OPS_BUSINESS_DELIVERY_ENABLED:-1}" == "1" ]]; then
+  # Notify only a terminal stage outcome. The highClickSpecial /
+  # manualSpecialRestore / fallbackRepair loops are serial single-item (or
+  # single-group) consumers that call this function once per item with status
+  # "pending" while work continues; notifying those intermediate steps posted
+  # one Feishu message per item (2026-09-17: 161 fallback + 37 manual + 2
+  # high-click messages for a single day). The day's own summary is delivered
+  # once by send_daily_group_report, so an intermediate "pending" must stay
+  # silent and a non-final result path must never be announced as finished.
+  local terminal_stage=0
+  case "$status" in
+    completed|blocked|failed) terminal_stage=1 ;;
+  esac
+  if (( command_status == 0 && terminal_stage == 1 )) && [[ -n "$result_path" && "$ROOT" == "/opt/shein-bi/app" && "${SHEIN_OPS_BUSINESS_DELIVERY_ENABLED:-1}" == "1" ]]; then
     local report_file
     if report_file="$(node scripts/resolve_cloud_runtime_artifact.mjs "$result_path")"; then
       timeout -k 2 50 node scripts/cloud_team_report_delivery.mjs \
