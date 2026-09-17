@@ -1181,6 +1181,15 @@ try {
     'the manifest snapshot alone must not stand in for every dependency');
   await writeJson(operatingMarkerFile, snapshotMarker);
   assert.equal((await validateDailyOperatingRefresh(options)).ok, true);
+  // The audited warning escape hatch re-runs this pre-warning audit AFTER the
+  // guard published its run-scoped batch, when only the version index still
+  // resolves the plan and result.  Skipping the index made that recovery path
+  // unusable for every run-scoped inventory run (2026-09-17).
+  const validatorSource = await fs.readFile(path.resolve('scripts', 'validate_daily_operating_refresh.mjs'), 'utf8');
+  assert.match(validatorSource, /const index = staging \? null : await readDailyInventoryVersionIndex/,
+    'the pre-warning audit must resolve a published run-scoped batch through the version index');
+  assert.ok(!/preWarningMode \|\| staging \? null/.test(validatorSource),
+    'the pre-warning audit must not skip the version index');
   console.log(JSON.stringify({ok: true, historicalQuarantine: {
     sameScopePendingConflictRejected: true, originalJournalUnchanged: true, scenarioIsolated: true}, preSubmitExclusion: {
     exactJournalWarningAccepted: true, preWarningWithoutFinalMarker: true, bothReasonsAccepted: true,

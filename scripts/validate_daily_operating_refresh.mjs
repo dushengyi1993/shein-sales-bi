@@ -659,7 +659,14 @@ export async function validateInventoryArtifacts({
   const previous = new Date(`${runDate}T12:00:00Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   assert(businessDate === previous.toISOString().slice(0, 10), 'businessDate must equal runDate minus one calendar day');
-  const index = preWarningMode || staging ? null : await readDailyInventoryVersionIndex({inventoryRuntimeRoot, date: runDate});
+  // Resolve through the immutable version index whenever one exists, including
+  // the pre-warning audit. The guard runs that audit before it publishes the
+  // version (so no index yet, legacy canonical paths), but the morning-chain
+  // wrapper re-runs the very same audit after publication, when the canonical
+  // paths are gone and the run-scoped batch plus index are the only surviving
+  // evidence. Skipping the index there made the audited warning escape hatch
+  // unusable for every run-scoped inventory run.
+  const index = staging ? null : await readDailyInventoryVersionIndex({inventoryRuntimeRoot, date: runDate});
   const version = index ? await resolveResultEvidenceArtifact({inventoryRuntimeRoot, date: runDate, commandId: inventoryCommandId, preferActive: !inventoryCommandId}) : null;
   assert(!index || version, 'inventory version index has no matching complete batch');
   const planFile = version?.planFile || path.join(inventoryRuntimeRoot, 'plans', `daily-inventory-replenishment-${runDate}.json`);
