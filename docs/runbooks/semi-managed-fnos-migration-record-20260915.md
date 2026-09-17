@@ -485,3 +485,6 @@ watchdog 21:50 报 `云端源码不一致：commitMatch=true dirty=246 missing=2
 - 验收：以生产那两行为夹具的 scripts/test_inventory_cross_journal_duplicate_tolerance.mjs 覆盖乱序容忍、冲突失败、写入侧跳过、审计工具；当天库存 guard 产出 plan/result 并写出 daily-operating-refresh marker。
 - 附带：/srv/shein-bi/runtime 恢复 setgid（2750），使 root 在该目录下新建的部署标记自动继承 sheinops 组，避免再次出现 sheinops 读不到标记。
 
+- 同批第二个缺陷（当天实操中发现）：morning-chain wrapper 的「库存 warning 已审计、无需子链即收敛」口子（complete_inventory_warning_without_child → validate_daily_operating_refresh.mjs --pre-warning-audit）在 pre-warning 模式下**故意跳过版本索引**，只认老的 canonical plans/results/daily-inventory-replenishment-<date>.json。而 guard 的发布顺序是：写 canonical plan/result → 写 warning 候选 marker → 跑 pre-warning 审计（此时老路径还在，通过）→ 发布 run 目录版本 + 索引（canonical 被收走）。于是 wrapper 在**发布之后**再跑同一个审计时老路径已空 → ENOENT → inventory warning pre-audit failed → 收敛失败（exit 78）。修法：pre-warning 审计改为「有索引就用索引，没有才退回老路径」（const index = staging ? null : await readDailyInventoryVersionIndex(...)），guard 发布前那次调用的行为不变。
+- 当天验收实跑（14:00–14:13 CST，临时 drop-in 把 stock 窗口对齐 morning 链口径、跑完即撤）：stock-refresh 重跑 40s 成功；inventory guard 跑 661s 后 **completed_with_warning**（exit 2），产物落在 runs/2026-09-17/80ccc308…/ 下，索引里 commandId 正是 morning:2026-09-17（plan 3,574,655 B / result 79,126 B / marker 1,030 B，journal 已封）。全程**没有再出现 INVENTORY_JOURNAL_CROSS_REFERENCE_INVALID**。
+
