@@ -6,11 +6,13 @@ import {fileURLToPath} from 'node:url';
 import {
   allocateLowEtInventory,
   buildDailyInventoryPlanHashPayload,
+  buildSameStoreOnShelfSkcIndex,
   canonicalInventoryKey,
   classifyEtInventoryAlert,
   decideDailyInventoryReplenishment,
   resolveInventoryIdentityKey,
   resolveInventoryShelfStatus,
+  sameStoreOnShelfIndexKey,
   stableInventoryHash,
 } from '../../lib/inventory_replenishment_policy.mjs';
 import {inventoryDetailRefreshWindow} from '../../lib/inventory_detail_refresh_window.mjs';
@@ -1065,31 +1067,17 @@ const rowContexts = linkRows.map(row => {
     shelfStatus: resolveInventoryShelfStatus(metrics, row.shelfStatusCode),
   };
 });
-const onShelfSkcsByStoreMatchKey = new Map();
-for (const metrics of linkMetricRows) {
-  if (resolveInventoryShelfStatus(metrics).code !== '1') continue;
-  const matchKey = resolveInventoryIdentityKey(
-    metrics.standard_goods_sn
-    ?? metrics.standardGoodsSn
-    ?? metrics.raw_goods_sn
-    ?? metrics.rawGoodsSn,
-  ) || canonicalInventoryKey(
-    metrics.standard_goods_sn
-    ?? metrics.standardGoodsSn
-    ?? metrics.raw_goods_sn
-    ?? metrics.rawGoodsSn,
-  );
-  if (!matchKey) continue;
-  const key = `${String(metrics.store_key || metrics.storeKey || '').toUpperCase()}::${matchKey}`;
-  if (!onShelfSkcsByStoreMatchKey.has(key)) onShelfSkcsByStoreMatchKey.set(key, new Set());
-  onShelfSkcsByStoreMatchKey.get(key).add(String(metrics.skc || ''));
-}
-for (const context of rowContexts) {
-  if (context.shelfStatus.code !== '1' || !context.matchKey) continue;
-  const key = `${String(context.row.storeKey || '').toUpperCase()}::${context.matchKey}`;
-  if (!onShelfSkcsByStoreMatchKey.has(key)) onShelfSkcsByStoreMatchKey.set(key, new Set());
-  onShelfSkcsByStoreMatchKey.get(key).add(String(context.row.skc || ''));
-}
+// The sibling set is shared evidence with the executor. It must come from the
+// same two published link sources there (storeLinks union the complete
+// store+canonical coverage matrix) and never from the OpenAPI product snapshot
+// itself: the cache cannot distinguish 已售罄 from 已上架, and a plan row with no
+// published link evidence would otherwise contribute a sibling the executor can
+// never reproduce, which is exactly the permanent false
+// same_store_on_shelf_changed exclusion this replaces.
+const onShelfSkcsByStoreMatchKey = buildSameStoreOnShelfSkcIndex({
+  storeLinks: linkMetricRows,
+  matrix: links?.matrix,
+});
 const sellingStoresByMatchKey = new Map();
 for (const context of rowContexts) {
   if (context.shelfStatus.code !== '1' || Number(context.row.sheinUsableInventory) <= 0 || !context.matchKey) continue;
@@ -1112,7 +1100,7 @@ for (const context of rowContexts) {
     .filter(storeKey => storeKey && storeKey !== row.storeKey)
     .sort();
   const sameStoreOnShelfSkcs = [...(onShelfSkcsByStoreMatchKey.get(
-    `${String(row.storeKey || '').toUpperCase()}::${matchKey}`,
+    sameStoreOnShelfIndexKey(row.storeKey, matchKey),
   ) || [])]
     .filter(skc => skc && skc !== String(row.skc || ''))
     .sort();

@@ -7,6 +7,8 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// tmp/ is gitignored, so a fresh checkout does not have it; create it explicitly.
+await fs.mkdir(path.join(ROOT, 'tmp'), {recursive: true});
 const tmpRoot = await fs.mkdtemp(path.join(ROOT, 'tmp', 'openapi-order-fulfillment-smoke-'));
 const checks = [];
 function check(label, actual, expected) { const pass = typeof expected === 'function' ? expected(actual) : actual === expected; checks.push({label, actual, expected: typeof expected === 'function' ? 'predicate' : expected, pass}); }

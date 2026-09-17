@@ -282,6 +282,7 @@ const tests = [
   'scripts/test_inventory_write_cutover_activation.mjs',
   'scripts/test_inventory_writer_release_alignment.mjs',
   'scripts/test_daily_inventory_replenishment_plan.mjs',
+  'scripts/test_inventory_same_store_on_shelf_evidence.mjs',
   'scripts/test_daily_inventory_current_detail_targeting.mjs',
   'scripts/test_daily_inventory_guard_targeted_detail.mjs',
   'scripts/test_durable_inventory_write.mjs',

@@ -15,6 +15,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENTRY = path.join(ROOT, 'scripts', 'run_local_marketing_repair_slot.sh');
 const SLOT = path.join(ROOT, 'scripts', 'run_cloud_marketing_fallback_slot.sh');
 const WORKER = path.join(ROOT, 'scripts', 'cloud_marketing_repair_worker.sh');
+// tmp/ is gitignored, so a fresh checkout does not have it and shard membership
+// decides whether a creator test happens to run first. Create it explicitly,
+// like the other repo-scratch tests do.
+await fsp.mkdir(path.join(ROOT, 'tmp'), {recursive: true});
 const tempRoot = await fsp.mkdtemp(path.join(ROOT, 'tmp', 'local-marketing-entry-'));
 let checks = 0;
 const ok = label => { checks += 1; console.log(`PASS ${label}`); };
