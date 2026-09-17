@@ -5,10 +5,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import {pathToFileURL} from 'node:url';
 
 export const SCHEMA_VERSION = 'link-retire-evidence/v1';
-export const COLLECTOR_HOST = 'shein-bi-tencent';
+// This module is shipped to the host as a self-contained data: URL, so it cannot
+// import lib/production_cloud_host.mjs. The caller injects request.host (resolved
+// from that single source) and the collector records it after a safe-token check,
+// together with the hostname it actually ran on.
+export const COLLECTOR_HOST = 'shein-bi-fnos';
+const CLOUD_HOST_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const DEPLOYED_RELEASE_FILE = '/srv/shein-bi/runtime/deployed_release.json';
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const safe = value => { if (!/^[A-Za-z0-9_-]+$/.test(value || '')) throw new Error('invalid key/date'); return value; };
@@ -17,6 +24,27 @@ const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const uniquePush = (list, value) => { if (!list.includes(value)) list.push(value); };
 const shiftDate = (date, days) => new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0,10);
 const isValidDate = value => DATE_RE.test(value || '') && new Date(`${value}T00:00:00Z`).toISOString().slice(0,10) === value;
+
+function collectorHost(request) {
+  const host = String(request?.host || process.env.SHEIN_BI_PRODUCTION_CLOUD_HOST || COLLECTOR_HOST).trim();
+  if (!CLOUD_HOST_RE.test(host)) throw new Error('invalid collector host');
+  return host;
+}
+
+// Independent identity evidence: which machine and which deployed release
+// produced this material. The caller-provided host is the ssh alias it reached;
+// the hostname and release are read from this machine, so a mismatch is visible
+// in the evidence instead of being asserted by one side alone.
+function collectorIdentity() {
+  let deployedRelease = null;
+  try {
+    const doc = JSON.parse(fs.readFileSync(DEPLOYED_RELEASE_FILE, 'utf8'));
+    deployedRelease = {tag: String(doc?.tag || ''), commit: String(doc?.commit || '')};
+  } catch {
+    deployedRelease = null;
+  }
+  return {collectorHostname: os.hostname(), deployedRelease};
+}
 
 function exactKeyCoverage(rows, keys) {
   if (!Array.isArray(rows) || !Array.isArray(keys)) return false;
@@ -42,6 +70,7 @@ export function validateCollectorRequest(request) {
   if (!request || typeof request !== 'object') throw new Error('invalid request');
   const {runDate, performanceDate, querySha256, keys} = request;
   safe(runDate); safe(performanceDate);
+  const host = collectorHost(request);
   if (!isValidDate(runDate) || !isValidDate(performanceDate) || performanceDate > runDate || !SHA256_RE.test(querySha256 || '')) throw new Error('invalid request');
   if (!Array.isArray(keys)) throw new Error('invalid keys');
   for (const key of keys) { safe(key?.store_key); safe(key?.skc); }
@@ -49,7 +78,7 @@ export function validateCollectorRequest(request) {
   // This validation intentionally precedes runtime policy imports, file reads,
   // and database access in supplement mode.
   if (request.priorEvidence) validatePriorEvidence(request.priorEvidence, {runDate, performanceDate, querySha256, keys});
-  return {runDate, performanceDate, querySha256, keys, priorEvidence:request.priorEvidence};
+  return {host, runDate, performanceDate, querySha256, keys, priorEvidence:request.priorEvidence};
 }
 
 function sqlValues(keys) {
@@ -160,7 +189,7 @@ function mergeVerifiedHistoryDocument({doc, rows, byKey, store, date}) {
 
 export async function collectLinkRetireReviewEvidence(inputRequest, options = {}) {
   const request = validateCollectorRequest(inputRequest);
-  const {runDate, performanceDate, querySha256, keys, priorEvidence} = request;
+  const {host, runDate, performanceDate, querySha256, keys, priorEvidence} = request;
   const start = shiftDate(runDate, -15);
   const values = sqlValues(keys);
   const runSql = options.runSql || defaultRunSql;
@@ -287,7 +316,7 @@ export async function collectLinkRetireReviewEvidence(inputRequest, options = {}
 
   const now = options.now ? new Date(options.now) : new Date();
   if (!Number.isFinite(now.getTime())) throw new Error('invalid collector time');
-  return {schemaVersion:SCHEMA_VERSION, host:COLLECTOR_HOST, runDate, performanceDate, querySha256, generatedAt:now.toISOString(), sources, databaseSource, marketingError, rows};
+  return {schemaVersion:SCHEMA_VERSION, host, ...collectorIdentity(), runDate, performanceDate, querySha256, generatedAt:now.toISOString(), sources, databaseSource, marketingError, rows};
 }
 
 async function main() {

@@ -5,7 +5,7 @@ import fssync from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import {classifyEvidence,shiftDate} from '../lib/link_retire_review_evidence.mjs';
+import {EVIDENCE_HOST,classifyEvidence,shiftDate} from '../lib/link_retire_review_evidence.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_DIR = path.resolve(SCRIPT_DIR, '..');
@@ -207,7 +207,7 @@ async function main() {
   // evidence, while missing values are tested on the pending sheet below.
   const runDate=document.summary.runDate,performanceDate=document.summary.performanceDate,querySha256='a'.repeat(64);
   const pool=[{store_key:'JSH',skc:'SKC-CANDIDATE',spu:'SPU1',standard_goods_sn:'SK-001',c7_eps_uv:100,c7_sale_cnt:0}];
-  const evidence={schemaVersion:'link-retire-evidence/v1',host:'shein-bi-tencent',runDate,performanceDate,querySha256,generatedAt:'2026-09-07T05:00:00Z',sources:[],rows:[{
+  const evidence={schemaVersion:'link-retire-evidence/v1',host:EVIDENCE_HOST,runDate,performanceDate,querySha256,generatedAt:'2026-09-07T05:00:00Z',sources:[],rows:[{
     store_key:'JSH',skc:'SKC-CANDIDATE',performance:{found:true,date:performanceDate,newTagPresent:true,newTag:'',sales7:0,exposure7:100},openapiCount:1,
     openapi:{found:true,spu:'SPU1',status:'已上架',firstShelf:'2026-07-01',lastShelf:'2026-07-01',fetchedAt:runDate,inventory:10},
     inventory:Array.from({length:15},(_,i)=>({date:shiftDate(runDate,i-15),usable:10})),

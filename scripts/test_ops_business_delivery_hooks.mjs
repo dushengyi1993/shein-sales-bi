@@ -12,6 +12,7 @@ import {
   OPS_BUSINESS_STAGING_ROOT,
 } from '../lib/ops_business_result_pipeline.mjs';
 import {formatOpsBusinessResult} from '../lib/ops_business_result_formatter.mjs';
+import {CLOUD_TEAM_REPORT_CLOUD_HOST} from '../lib/cloud_team_report_common.mjs';
 
 console.log('Testing F1 hooks, single business execution, durable staging on missing config, byte/hash immutability, and retry idempotency...');
 
@@ -632,7 +633,9 @@ process.exit(0);
     summaryFile: reportFile,
     attachment: scanFile,
     expectedAttachmentSha256: actualRawBytesSha,
-    cloudSsh: 'shein-bi-tencent',
+    // The delivery host is resolved by lib/production_cloud_host.mjs; the test
+    // must not pin a literal alias.
+    cloudSsh: CLOUD_TEAM_REPORT_CLOUD_HOST,
     root: repoFakeRoot,
     spawnImpl: (bin, args, options) => {
       sshCalls.push({bin, args});
@@ -675,7 +678,7 @@ process.exit(0);
   assert.equal(cloudResult.items.attachment.accepted, true);
   assert.equal(sshCalls.length, 1);
   assert.equal(sshCalls[0].bin, 'ssh');
-  assert.equal(sshCalls[0].args[0], 'shein-bi-tencent');
+  assert.equal(sshCalls[0].args[0], CLOUD_TEAM_REPORT_CLOUD_HOST);
 
   console.log('✓ Default --send shared cloud team report channel verified with raw bytes SHA and SSH bundle');
 }
