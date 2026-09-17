@@ -20,6 +20,7 @@ const tests = [
   'scripts/test_inventory_v6_cross_journal.mjs',
   'scripts/test_inventory_cross_journal_duplicate_tolerance.mjs',
   'scripts/test_production_cloud_host.mjs',
+  'scripts/test_marketing_repair_stage_notification.mjs',
   'scripts/test_link_retire_history_retention.mjs',
   'scripts/test_inventory_sealed_batch_reconciliation.mjs',
   'scripts/test_inventory_v6_occupancy.mjs',
