@@ -5,6 +5,7 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {validateSavedQuery,initialPool,classifyEvidence,missingMetricReviewRows,sha,validDate} from '../lib/link_retire_review_evidence.mjs';
 import {runLocalCloudTeamReport,buildCloudTeamReportBundle} from '../lib/cloud_team_report_local.mjs';
+import {resolveProductionCloudHost} from '../lib/production_cloud_host.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const args={};
@@ -17,8 +18,11 @@ for(let i=2;i<process.argv.length;i++){
 }
 for(const k of ['query','run-date','performance-date','out-dir'])if(!args[k])throw new Error(`missing --${k}`);
 const runDate=validDate(args['run-date']),performanceDate=validDate(args['performance-date']);
-const cloudHost='shein-bi-tencent';
-if(args['cloud-ssh'] && args['cloud-ssh']!==cloudHost)throw new Error('evidence and delivery host must be shein-bi-tencent');
+// The production host is no longer hardcoded: the migration moved production to
+// shein-bi-fnos, and forcing one alias made this entrypoint ssh to a stopped
+// host. An explicit --cloud-ssh wins, otherwise the environment or the tracked
+// default decides (lib/production_cloud_host.mjs).
+const cloudHost=resolveProductionCloudHost({explicit:args['cloud-ssh']||''});
 const bytes=await fs.readFile(args.query),manifest=JSON.parse(await fs.readFile(`${args.query}.manifest.json`,'utf8'));
 const query=validateSavedQuery(bytes,manifest),pool=initialPool(query,performanceDate),querySha256=sha(bytes);
 const out=path.resolve(args['out-dir']);await fs.mkdir(out,{recursive:true});
@@ -39,7 +43,7 @@ else {
  try{await fs.access(evidenceFile);throw new Error('evidence exists: use --evidence to resume without collection');}catch(e){if(e.code!=='ENOENT')throw e;}
  const priorBytes=args['supplement-evidence']?await readBoundEvidence(args['supplement-evidence']):null;
  const priorEvidence=priorBytes?JSON.parse(priorBytes):undefined;
- const request=JSON.stringify({...requestIdentity,priorEvidence});
+  const request=JSON.stringify({...requestIdentity,host:cloudHost,priorEvidence});
  const cmd=`cd /opt/shein-bi/app && node --input-type=module -e 'await import("data:text/javascript;base64,${code.toString('base64')}")'`;
  const result=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,cmd],{input:request,encoding:'utf8',timeout:120000,maxBuffer:40*1024*1024});
  if(result.status!==0)throw new Error(`direct evidence collection failed: ${result.error?.code || String(result.stderr).slice(0,2000)}`);
@@ -71,14 +75,14 @@ if(args.send){
  const claimResult=JSON.parse(claim.stdout);
  if(!claimResult.claimed || claimResult.fingerprint!==bundle.fingerprint)throw new Error('daily delivery claim mismatch; do not resend');
  await fs.writeFile(path.join(out,'delivery-attempt.json'),JSON.stringify(claimResult,null,2),{flag:'wx'});
- delivery=await runLocalCloudTeamReport({automationId:'shein-3',businessDate:runDate,summaryFile,attachment:workbook,expectedAttachmentSha256:sha(wb),root,cloudSsh:args['cloud-ssh'] || 'shein-bi-tencent'});
+  delivery=await runLocalCloudTeamReport({automationId:'shein-3',businessDate:runDate,summaryFile,attachment:workbook,expectedAttachmentSha256:sha(wb),root,cloudSsh:cloudHost});
  await fs.writeFile(receiptFile,JSON.stringify(delivery,null,2),{flag:'wx'});
  if(delivery.ok){
   const readbackCode=`import fs from 'node:fs';import crypto from 'node:crypto';import path from 'node:path';
   const r=JSON.parse(fs.readFileSync(0,'utf8'));if(!/^[a-f0-9]{64}$/.test(r.fingerprint)||!/^\\d{4}-\\d{2}-\\d{2}$/.test(r.date)||path.basename(r.name)!==r.name)throw new Error('invalid binding');
   const dir=path.join('/srv/shein-bi/runtime/automation-delivery/shein-3',r.date,r.fingerprint),s=JSON.parse(fs.readFileSync(path.join(dir,'state.json'))),b=fs.readFileSync(path.join(dir,r.name)),m=fs.readFileSync(path.join(dir,'summary.md'));
   const hash=x=>crypto.createHash('sha256').update(x).digest('hex');console.log(JSON.stringify({status:s.status,fingerprint:s.fingerprint,attachmentSha256:hash(b),attachmentBytes:b.length,summarySha256:hash(m),summaryAccepted:s.items?.summary?.accepted===true,attachmentAccepted:s.items?.attachment?.accepted===true,summaryMessageId:s.items?.summary?.messageId,attachmentMessageId:s.items?.attachment?.messageId}));`;
-  const remote=spawnSync('ssh',['-o','BatchMode=yes','shein-bi-tencent',`sudo node --input-type=module -e 'await import("data:text/javascript;base64,${Buffer.from(readbackCode).toString('base64')}")'`],{input:JSON.stringify({fingerprint:delivery.fingerprint,date:runDate,name:path.basename(workbook)}),encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
+  const remote=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,`sudo node --input-type=module -e 'await import("data:text/javascript;base64,${Buffer.from(readbackCode).toString('base64')}")'`],{input:JSON.stringify({fingerprint:delivery.fingerprint,date:runDate,name:path.basename(workbook)}),encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
   if(remote.status!==0)throw new Error('delivery accepted; persistent readback unavailable, do not resend');
   const readback=JSON.parse(remote.stdout);
   readback.ok=readback.status==='ok' && readback.fingerprint===delivery.fingerprint && readback.attachmentSha256===sha(wb) && readback.attachmentBytes===wb.length && readback.summarySha256===sha(await fs.readFile(summaryFile)) && readback.summaryAccepted && readback.attachmentAccepted && readback.summaryMessageId===delivery.items.summary.messageId && readback.attachmentMessageId===delivery.items.attachment.messageId;
