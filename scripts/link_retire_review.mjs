@@ -30,6 +30,14 @@ const evidenceFile=path.join(out,'evidence.json'),analysisFile=path.join(out,'an
 const code=await fs.readFile(path.join(root,'scripts/collect_link_retire_review_evidence.mjs'));
 const requestIdentity={runDate,performanceDate,querySha256,keys:pool.map(r=>({store_key:r.store_key,skc:r.skc}))};
 const requestSha256=sha(JSON.stringify(requestIdentity));
+const CLOUD_APP_ROOT='/opt/shein-bi/app';
+// The production host is reached as an unprivileged operator account (on fnOS:
+// dushengyi@192.168.1.200), which cannot enter the root-owned app checkout or run
+// the collector's sudo docker exec psql. The retired cloud host logged in as
+// sheinops, so a bare cd-into-app command used to work; after the migration it
+// failed with cd: /opt/shein-bi/app: Permission denied. Every remote command now
+// runs through one privileged shell with an explicit working directory.
+const remoteNodeCommand=source=>`sudo -n sh -c "cd ${CLOUD_APP_ROOT} && exec node --input-type=module -e 'await import(\\"data:text/javascript;base64,${Buffer.from(source).toString('base64')}\\")'"`;
 async function readBoundEvidence(file) {
  const raw=await fs.readFile(file),binding=JSON.parse(await fs.readFile(`${file}.manifest.json`,'utf8'));
  const doc=JSON.parse(raw);
@@ -44,7 +52,7 @@ else {
  const priorBytes=args['supplement-evidence']?await readBoundEvidence(args['supplement-evidence']):null;
  const priorEvidence=priorBytes?JSON.parse(priorBytes):undefined;
   const request=JSON.stringify({...requestIdentity,host:cloudHost,priorEvidence});
- const cmd=`cd /opt/shein-bi/app && node --input-type=module -e 'await import("data:text/javascript;base64,${code.toString('base64')}")'`;
+ const cmd=remoteNodeCommand(code);
  const result=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,cmd],{input:request,encoding:'utf8',timeout:120000,maxBuffer:40*1024*1024});
  if(result.status!==0)throw new Error(`direct evidence collection failed: ${result.error?.code || String(result.stderr).slice(0,2000)}`);
  evidenceBytes=Buffer.from(result.stdout.trim());const doc=JSON.parse(evidenceBytes);await fs.writeFile(evidenceFile,evidenceBytes,{flag:'wx'});
@@ -70,7 +78,7 @@ if(args.send){
  const bundle=await buildCloudTeamReportBundle({automationId:'shein-3',businessDate:runDate,summaryFile,attachment:workbook,expectedAttachmentSha256:sha(wb),root});
  const claimCode=await fs.readFile(path.join(root,'lib/link_retire_review_delivery_guard.mjs'));
  const claimCommand=`const {claimRetireReviewDelivery}=await import("data:text/javascript;base64,${claimCode.toString('base64')}");console.log(JSON.stringify(await claimRetireReviewDelivery({root:"/srv/shein-bi/runtime/automation-delivery/shein-3",date:"${runDate}",fingerprint:"${bundle.fingerprint}"})));`;
- const claim=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,`node --input-type=module -e 'await import("data:text/javascript;base64,${Buffer.from(claimCommand).toString('base64')}")'`],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
+ const claim=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,remoteNodeCommand(claimCommand)],{encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
  if(claim.status!==0)throw new Error('daily delivery claim unavailable or already used; inspect existing evidence, do not resend');
  const claimResult=JSON.parse(claim.stdout);
  if(!claimResult.claimed || claimResult.fingerprint!==bundle.fingerprint)throw new Error('daily delivery claim mismatch; do not resend');
@@ -82,7 +90,7 @@ if(args.send){
   const r=JSON.parse(fs.readFileSync(0,'utf8'));if(!/^[a-f0-9]{64}$/.test(r.fingerprint)||!/^\\d{4}-\\d{2}-\\d{2}$/.test(r.date)||path.basename(r.name)!==r.name)throw new Error('invalid binding');
   const dir=path.join('/srv/shein-bi/runtime/automation-delivery/shein-3',r.date,r.fingerprint),s=JSON.parse(fs.readFileSync(path.join(dir,'state.json'))),b=fs.readFileSync(path.join(dir,r.name)),m=fs.readFileSync(path.join(dir,'summary.md'));
   const hash=x=>crypto.createHash('sha256').update(x).digest('hex');console.log(JSON.stringify({status:s.status,fingerprint:s.fingerprint,attachmentSha256:hash(b),attachmentBytes:b.length,summarySha256:hash(m),summaryAccepted:s.items?.summary?.accepted===true,attachmentAccepted:s.items?.attachment?.accepted===true,summaryMessageId:s.items?.summary?.messageId,attachmentMessageId:s.items?.attachment?.messageId}));`;
-  const remote=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,`sudo node --input-type=module -e 'await import("data:text/javascript;base64,${Buffer.from(readbackCode).toString('base64')}")'`],{input:JSON.stringify({fingerprint:delivery.fingerprint,date:runDate,name:path.basename(workbook)}),encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
+  const remote=spawnSync('ssh',['-o','BatchMode=yes',cloudHost,remoteNodeCommand(readbackCode)],{input:JSON.stringify({fingerprint:delivery.fingerprint,date:runDate,name:path.basename(workbook)}),encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
   if(remote.status!==0)throw new Error('delivery accepted; persistent readback unavailable, do not resend');
   const readback=JSON.parse(remote.stdout);
   readback.ok=readback.status==='ok' && readback.fingerprint===delivery.fingerprint && readback.attachmentSha256===sha(wb) && readback.attachmentBytes===wb.length && readback.summarySha256===sha(await fs.readFile(summaryFile)) && readback.summaryAccepted && readback.attachmentAccepted && readback.summaryMessageId===delivery.items.summary.messageId && readback.attachmentMessageId===delivery.items.attachment.messageId;
