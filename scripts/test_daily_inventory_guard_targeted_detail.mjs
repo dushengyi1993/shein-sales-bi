@@ -329,6 +329,7 @@ check('inventoryTrend ack and cache postconditions fail closed without retries',
       'prepare_shared_lock_file(){ mkdir -p "$(dirname "$1")"; touch "$1"; }\n');
     fs.writeFileSync(path.join(temp, 'lib', 'durable_inventory_write.mjs'), `
 export async function discoverInventoryJournalFiles(file) { return [file]; }
+export function inventoryJournalDomainDirectories() { return []; }
 export async function readInventoryIntentLifecycle() {
   return {intents: new Map(), pending: new Map(), terminalOutcomes: new Map()};
 }
@@ -894,7 +895,7 @@ match('shared executor discovers every journal prefix in its result directory', 
   /discoverInventoryJournalFiles\(journalFile,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories[\s\S]*?\}\)/,
   'daily and ET low-inventory sidecars must share cross-day durable recovery through configured journal directories');
 match('daily guard shares the executor journal discovery domain', guard,
-  /SHEIN_BI_INVENTORY_JOURNAL_DIRS[\s\S]*?split\(path\.delimiter\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories/,
+  /inventoryJournalDomainDirectories\(\)[\s\S]*?discoverInventoryJournalFiles\(currentJournal,\s*\{[\s\S]*?includeAll:\s*true[\s\S]*?additionalDirectories:\s*inventoryJournalDirectories/,
   'daily and ET low-inventory journals must share the configured durable recovery domain');
 match('historical omission is a warning, not a current-run blocker', executor,
   /deferredHistorical: deferredHistoricalIntents[\s\S]*unresolvedIntents: \[\][\s\S]*blocked: unsafeResultCount/,
@@ -1006,6 +1007,7 @@ export async function readInventoryIntentLifecycle(file) {
   return {intents, pending, terminalOutcomes};
 }
 export async function discoverInventoryJournalFiles(file) { return [file]; }
+export function inventoryJournalDomainDirectories() { return []; }
 export async function readInventoryIntentJournals(files) {
   const records = [];
   const intents = new Map();

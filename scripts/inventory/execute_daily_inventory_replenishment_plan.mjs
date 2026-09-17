@@ -37,6 +37,7 @@ import {
   findInventoryWriteFence,
   isForeignInventoryIntent,
   isInventoryPreSubmitExclusion,
+  inventoryJournalDomainDirectories,
   INVENTORY_OWNER_CONFIRMED_SAME_TARGET_SUPERSEDE_DISPOSITION,
   INVENTORY_SUPERSEDED_BY_LATER_PLAN_DISPOSITION,
   INVENTORY_SUPERSEDED_BY_LATER_PLAN_RULE,
@@ -609,10 +610,12 @@ const writeResultFile = async (currentResults, dryRunSummary = null) => {
 const journalFile = `${args.out}.journal.ndjson`;
 await fs.mkdir(path.dirname(args.out), {recursive: true});
 const results = [];
-const inventoryJournalDirectories = String(process.env.SHEIN_BI_INVENTORY_JOURNAL_DIRS || '')
-  .split(path.delimiter)
-  .map(directory => directory.trim())
-  .filter(Boolean);
+// One inventory write domain, resolved by the shared module. The env var alone
+// names only the stable results directories, which omits the run-scoped
+// journals (runs/<date>/<hash>/results) where a morning chain closes an
+// abandoned intent; a producer that cannot see that closure treats a terminal
+// intent as pending and records a second, redundant one.
+const inventoryJournalDirectories = inventoryJournalDomainDirectories();
 const inventorySkuLockDirectory = path.resolve(String(
   process.env.SHEIN_BI_INVENTORY_SKU_LOCK_DIR
   || path.join(ROOT, 'state', 'locks'),
@@ -1111,7 +1114,7 @@ for (const row of rows) {
           || (before.warehouseCodes?.length === 1
             && String(before.warehouseCodes[0]).toUpperCase() === inventoryScopeFromIntent(scopeIntents[0]).warehouseCode))) {
         const abandonedIntent = scopeIntents[0];
-        await appendInventoryReconciliationRecord(journalFile, abandonedIntent, {
+        const supersedeAppend = await appendInventoryReconciliationRecord(journalFile, abandonedIntent, {
           kind: 'write_outcome',
           intentId: abandonedIntent.intentId,
           logicalActionKey: abandonedIntent.logicalActionKey,
@@ -1132,6 +1135,13 @@ for (const row of rows) {
           targetUsableInventory: abandonedIntent.targetUsableInventory,
           state: 'superseded_by_later_plan',
           disposition: 'original_effect_unknown',
+          // Another producer already closed this intent from a journal this run
+          // did not scan. The scope is still free to be overwritten, but this
+          // run must not claim a supersede it never wrote: keep the evidence.
+          ...(supersedeAppend?.skipped ? {
+            supersedeRecord: 'already_terminal_in_journal_domain',
+            alreadyTerminalClosures: supersedeAppend.closures,
+          } : {}),
         });
         pendingIntents.delete(journalIntentKey(abandonedIntent));
         journalBundle.pending.delete(journalIntentKey(abandonedIntent));

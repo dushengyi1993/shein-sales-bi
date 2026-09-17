@@ -376,6 +376,7 @@ LIFECYCLE_JSON="$(node --input-type=module - "$JOURNAL" "$DATE" <<'NODE'
 import path from 'node:path';
 import {
   discoverInventoryJournalFiles,
+  inventoryJournalDomainDirectories,
   readInventoryIntentLifecycle,
   readInventoryIntentJournals,
 } from './lib/durable_inventory_write.mjs';
@@ -383,10 +384,9 @@ import {
 // directory helper aggregates its strict results without trusting RESULT files.
 const currentJournal = path.resolve(process.argv[2]);
 const maxRunDate = process.argv[3];
-const inventoryJournalDirectories = String(process.env.SHEIN_BI_INVENTORY_JOURNAL_DIRS || '')
-  .split(path.delimiter)
-  .map(directory => directory.trim())
-  .filter(Boolean);
+// Resolved by the shared module so the run-scoped journals below runs/ are
+// always part of the domain, whatever the environment declares.
+const inventoryJournalDirectories = inventoryJournalDomainDirectories();
 const files = await discoverInventoryJournalFiles(currentJournal, {
   includeAll: true,
   additionalDirectories: inventoryJournalDirectories,
