@@ -241,6 +241,8 @@ export async function collectLinkRetireReviewEvidence(inputRequest, options = {}
   }
 
   const historySnapshots = new Map();
+  // Days resolved through the canonical original because the marker snapshot was absent.
+  const historyLocatorFallbacks = [];
   for (let date = start; date < runDate; date = shiftDate(date, 1)) {
     const next = shiftDate(date, 1);
     try {
@@ -259,17 +261,36 @@ export async function collectLinkRetireReviewEvidence(inputRequest, options = {}
     for (let date = start; date <= runDate; date = shiftDate(date, 1)) {
       const original = path.join(directory, `${date}.json`);
       const saved = historySnapshots.get(original);
-      const sourceFile = saved ? resolveRuntime(saved.snapshotPath) : original;
-      let loaded;
-      try {
-        loaded = readEvidence(sourceFile);
-      } catch (error) {
-        if (error?.code === 'ENOENT') markUnavailableWhereNeeded(rows, store, date);
-        else {
-          issueRows(rows, store, date, error?.evidenceContract ? 'history_contract_mismatch' : 'history_read_error');
-          markUnavailableWhereNeeded(rows, store, date);
+      const snapshotFile = saved ? resolveRuntime(saved.snapshotPath) : '';
+      let loaded = null;
+      let locatorFallback = null;
+      if (saved) {
+        try {
+          loaded = readEvidence(snapshotFile);
+        } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            issueRows(rows, store, date, error?.evidenceContract ? 'history_contract_mismatch' : 'history_read_error');
+            markUnavailableWhereNeeded(rows, store, date);
+            continue;
+          }
+          // The marker locates this day but the snapshot copy it points at is
+          // not on this host (the daily link documents were migrated without
+          // their evidence snapshots). Fall back to the canonical original and
+          // still verify it against the hash the marker recorded for it.
+          locatorFallback = {store, date, path: original, missingSnapshotPath: snapshotFile};
         }
-        continue;
+      }
+      if (!loaded) {
+        try {
+          loaded = readEvidence(original);
+        } catch (error) {
+          if (error?.code === 'ENOENT') markUnavailableWhereNeeded(rows, store, date);
+          else {
+            issueRows(rows, store, date, error?.evidenceContract ? 'history_contract_mismatch' : 'history_read_error');
+            markUnavailableWhereNeeded(rows, store, date);
+          }
+          continue;
+        }
       }
       if (saved) {
         let mismatched = false;
@@ -286,6 +307,7 @@ export async function collectLinkRetireReviewEvidence(inputRequest, options = {}
           continue;
         }
       }
+      if (locatorFallback) historyLocatorFallbacks.push(locatorFallback);
       mergeVerifiedHistoryDocument({doc:loaded.doc, rows, byKey, store, date});
     }
   }
@@ -316,7 +338,7 @@ export async function collectLinkRetireReviewEvidence(inputRequest, options = {}
 
   const now = options.now ? new Date(options.now) : new Date();
   if (!Number.isFinite(now.getTime())) throw new Error('invalid collector time');
-  return {schemaVersion:SCHEMA_VERSION, host, ...collectorIdentity(), runDate, performanceDate, querySha256, generatedAt:now.toISOString(), sources, databaseSource, marketingError, rows};
+  return {schemaVersion:SCHEMA_VERSION, host, ...collectorIdentity(), runDate, performanceDate, querySha256, historyLocatorFallbacks, generatedAt:now.toISOString(), sources, databaseSource, marketingError, rows};
 }
 
 async function main() {
