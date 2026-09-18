@@ -603,6 +603,38 @@ function classifyBlockedDryRun(full) {
 }
 
 export function transactionPreflightPartition(full, inventoryTransactionPlan = null) {
+
+// Every SKC that the platform itself refused must appear in the terminal
+// evidence. classifyBlockedDryRun already carries `invalid`/`skipped` rows with
+// their platform error codes, but the blocked record used to derive blockedSkcs
+// only from extractedTargets (inventory-minimum targets). A platform refusal
+// such as mrs-simple_platform_limit_discounts-0006 therefore produced
+// blockedSkcs: [] and the row could never be accounted for by
+// check_marketing_terminal_report_readiness, so the queue never reached a
+// terminal state and the daily report was never sent (2026-09-18: 33 fallback
+// rows unhandled for this reason alone).
+function platformRefusedSkcs(blocked, allowedSkcs = []) {
+  const known = new Set((allowedSkcs || []).map(value => String(value || '').trim()).filter(Boolean));
+  const out = new Set();
+  for (const row of [...(blocked?.invalid || []), ...(blocked?.skipped || [])]) {
+    const skc = String(row?.skc || '').trim();
+    if (!skc) continue;
+    if (known.size && !known.has(skc)) continue;
+    out.add(skc);
+  }
+  // An existing limited-discount activity that carries SKCs outside the plan
+  // must be split by a human before any replacement, so it is a terminal,
+  // operator-facing blocker rather than a silent failure. Name its target SKCs
+  // so the daily report can list exactly what needs the decision.
+  for (const row of blocked?.unsafeExistingLimitedDiscounts || []) {
+    const skc = String(row?.targetGood?.skc || row?.skc || '').trim();
+    if (!skc) continue;
+    if (known.size && !known.has(skc)) continue;
+    out.add(skc);
+  }
+  return [...out].sort();
+}
+
   const inventoryMinimumOrPlatformGate = inventoryTransactionPlan?.ok === true
     ? inventoryTransactionPlan.rows || []
     : [];
@@ -920,11 +952,18 @@ export async function processStore({file, storeMap, args, manualIndex, browserSe
     });
     record.inventoryTransaction = inventoryTransaction;
     if (!inventoryTransaction.ok) {
+      const blockedDryRun = classifyBlockedDryRun(inventoryTransaction.commandResult?.full
+        || inventoryTransaction.commandResult?.parsed
+        || inventoryTransaction.submit?.result?.full
+        || {});
       record.blocked = {
         type: classifyActivityInventoryFailureStatus(inventoryTransaction),
         reason: inventoryTransaction.blockers?.map(item => item.error || item.reason).join('; ')
           || 'activity inventory transaction failed',
-        blockedSkcs: inventoryTransaction.extractedTargets?.map(item => item.skc) || [],
+        blockedSkcs: [...new Set([
+          ...(inventoryTransaction.extractedTargets?.map(item => item.skc) || []),
+          ...platformRefusedSkcs(blockedDryRun, record.targetSkcs || (rescue?.rows || []).map(row => row?.skc)),
+        ])].sort(),
       };
       record.status = record.blocked.type;
       const deadlineDeferred = (inventoryTransaction.blockers || [])

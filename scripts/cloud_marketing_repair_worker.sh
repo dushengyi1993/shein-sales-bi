@@ -1306,8 +1306,13 @@ NODE
 defer_remaining_work() {
   local message="$1"
   if (( IS_CLOUD_EXECUTION == 1 )); then
-    write_state deferred_to_local "$message; remaining exact queue preserved for local-browser continuation"
-    exit 75
+    # The cloud lane now owns its own continuation: the local browser
+    # continuation this used to hand back to is retired, so exiting 75 here only
+    # parked the remaining exact queue forever (2026-09-18: 11 runs, 14 groups,
+    # queue still pending). Stay pending and let the next scheduled run in the
+    # same day window resume the exact queue.
+    write_state pending "$message; cloud lane keeps the exact queue for its next scheduled run"
+    exit 0
   fi
   write_state pending "$message"
   exit 0
@@ -1625,6 +1630,26 @@ rebuild_repair_queue() {
 }
 
 terminal_report_ready() {
+
+# Compact, single-line summary of what the terminal-readiness check still
+# considers unhandled, so the daily report and the state file can name the exact
+# rows and platform reasons instead of only saying "pending".
+terminal_readiness_summary() {
+  node scripts/marketing/check_marketing_terminal_report_readiness.mjs \
+    --guard "$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json" \
+    --high-click-plan "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json" \
+    --manual-plan "$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-plan.json" \
+    --drift-plan "$ROOT/tmp/marketing-signup/limited-discount-fallback/target-price-drift-${DATE}/limited-discount-target-drift-rescue-plan-${DATE}.json" \
+    --fallback-plan "$ROOT/outputs/reports/new-listing-7d-limited-discount-plan-${DATE}.json" \
+    --high-click-result "$ROOT/outputs/reports/high-click-low-conversion-special-execution-${DATE}.json" \
+    --manual-result "$ROOT/tmp/marketing-signup/manual-limited-discount-restore/${DATE}/manual-limited-discount-restore-result.json" \
+    --drift-result "$ROOT/tmp/marketing-signup/limited-discount-rescue/batch-drift-fix-result-${DATE}.json" \
+    --fallback-result "$ROOT/outputs/reports/new-listing-7d-limited-discount-execution-summary-${DATE}.json" \
+    2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const parts=Object.entries(j.stages||{}).filter(([,v])=>Number(v?.unhandledCount||0)>0).map(([k,v])=>k+"="+v.unhandledCount+"["+String((v.unhandledKeys||[]).slice(0,6).join(" "))+"]");process.stdout.write(parts.length?parts.join("; "):"none");}catch{process.stdout.write("unreadable");}})' \
+    || printf 'unreadable'
+}
+
   node scripts/marketing/check_marketing_terminal_report_readiness.mjs \
     --guard "$ROOT/outputs/reports/marketing-daily-guard-${DATE}.json" \
     --high-click-plan "$ROOT/outputs/reports/high-click-low-conversion-special-plan-${DATE}.json" \
@@ -1978,8 +2003,23 @@ if [[ "$QUEUE_STATUS" == "completed" || "$QUEUE_STATUS" == "blocked" ]]; then
       exit "$status"
     fi
     if ! terminal_report_ready; then
-      write_state pending "final snapshot found new authorized repair work; final report delivery deferred"
-      echo "[cloud_marketing_repair] final report deferred because final snapshot added unhandled repair work"
+      # The daily report is the only channel that tells the operator which rows
+      # are still unaccounted for, so silently deferring it hides exactly the
+      # information needed to decide (2026-09-08..09-18: no daily report at all
+      # because a single unhandled stage kept this branch permanently true).
+      # Record the unhandled rows with their reasons and still deliver the
+      # report, then leave the queue non-terminal for the next run.
+      UNHANDLED_SUMMARY="$(terminal_readiness_summary)"
+      echo "[cloud_marketing_repair] terminal report delivered with unhandled rows: $UNHANDLED_SUMMARY" >&2
+      write_state pending "final snapshot found unhandled repair rows; daily report delivered for operator decision: $UNHANDLED_SUMMARY"
+      set +e
+      send_daily_group_report
+      REPORT_STATUS=$?
+      set -e
+      if [[ "$REPORT_STATUS" -ne 0 && "$REPORT_STATUS" -ne 3 ]]; then
+        echo "[cloud_marketing_repair] unhandled-row report delivery failed status=$REPORT_STATUS" >&2
+        exit "$REPORT_STATUS"
+      fi
       exit 0
     fi
     write_state blocked "repair queue reached terminal business blockers and final-snapshot work is fully accounted"
