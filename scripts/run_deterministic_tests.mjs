@@ -21,6 +21,7 @@ const tests = [
   'scripts/test_inventory_cross_journal_duplicate_tolerance.mjs',
   'scripts/test_production_cloud_host.mjs',
   'scripts/test_marketing_repair_stage_notification.mjs',
+  'scripts/test_ops_business_result_semantic_dedupe.mjs',
   'scripts/test_link_retire_history_retention.mjs',
   'scripts/test_link_retire_missing_day_window.mjs',
   'scripts/test_inventory_sealed_batch_reconciliation.mjs',
