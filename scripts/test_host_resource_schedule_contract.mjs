@@ -1001,7 +1001,13 @@ assert.match(marketingRepairUnit, /^Environment=SHEIN_BI_MARKETING_CLOUD_PRIMARY
 assert.match(marketingRepairUnit, /^Environment=SHEIN_BI_MARKETING_REPAIR_RUN_BUDGET_SEC=3600$/m);
 assert.match(unit('shein-bi-cloud-marketing-live-guard.service'), /^OnSuccess=shein-bi-cloud-marketing-repair\.service$/m);
 assert.match(repairSlot, /elif \[\[ "\$CLOUD_PRIMARY_ENABLED" == "true" \]\]; then/);
-assert.match(repair, /remaining exact queue preserved for local-browser continuation/);
+// The cloud lane keeps its own remaining exact queue: it must not hand the
+// queue back to the retired local-browser continuation, because that parked
+// the queue forever (2026-09-18: 11 runs, queue still pending).
+assert.match(repair, /cloud lane keeps the exact queue for its next scheduled run/,
+  'the cloud lane must keep its own remaining queue instead of deferring to a retired local continuation');
+assert.doesNotMatch(repair, /remaining exact queue preserved for local-browser continuation/,
+  'the retired local-browser continuation hand-back must be gone');
 assert.match(repair, /IS_CLOUD_EXECUTION=1/);
 assert.doesNotMatch(repair, /AUTOMATION_CONTEXT.*== "cloud_timer"/);
 assert.match(repair, /SHEIN_BI_MARKETING_CLOUD_WRITE_GATE=bounded-repair-v1/);
