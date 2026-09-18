@@ -2443,7 +2443,21 @@ function parseCookies(req) {
     if (idx < 0) continue;
     const key = part.slice(0, idx).trim();
     if (!key) continue;
-    out[key] = decodeURIComponent(part.slice(idx + 1).trim());
+    let value;
+    try {
+      value = decodeURIComponent(part.slice(idx + 1).trim());
+    } catch {
+      // A single percent-encoding-malformed cookie fragment must never fail the
+      // whole request: this runs inside actor resolution, so an uncaught
+      // URIError turned every otherwise-valid session into a 401 (2026-09-18:
+      // the query surface rejected a valid bi_session while the portal section
+      // endpoints accepted it, because one unrelated fragment was malformed).
+      // Skip only that fragment; an already-decoded value for the same key is
+      // kept, and a malformed bi_session simply stays absent so the basic-auth
+      // branch can still authenticate the request.
+      continue;
+    }
+    out[key] = value;
   }
   return out;
 }
