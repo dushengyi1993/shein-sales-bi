@@ -493,6 +493,28 @@ process.exit(0);
   queryUnavailable = null;
   assert.match(cookie, /^bi_session=/);
 
+  // Regression (2026-09-18): a single percent-encoding-malformed cookie
+  // fragment used to throw URIError inside actor resolution, so every otherwise
+  // valid session became a 401 on the query surface while the portal section
+  // endpoints still answered 200. A malformed fragment must be skipped, not
+  // allowed to fail the whole request.
+  const malformedFragments = ['bi_theme=%E0%A4%A', 'bi_theme=%', 'bi_theme=%ZZ'];
+  for (const malformed of malformedFragments) {
+    const withMalformed = `${cookie}; ${malformed}`;
+    const malformedMe = await fetchJson(`${queryBase}/api/auth/me`, {headers: {cookie: withMalformed}});
+    assert.equal(malformedMe.response.status, 200,
+      `a malformed cookie fragment (${malformed}) must not invalidate a valid session`);
+    assert.equal(malformedMe.body.user.username, 'query-test');
+  }
+  const malformedBefore = await fetchJson(`${queryBase}/api/auth/me`,
+    {headers: {cookie: `bi_theme=%E0%A4%A; ${cookie}`}});
+  assert.equal(malformedBefore.response.status, 200, 'order of the malformed fragment must not matter');
+  assert.equal(malformedBefore.body.user.username, 'query-test');
+  const duplicateKey = await fetchJson(`${queryBase}/api/auth/me`,
+    {headers: {cookie: `${cookie}; bi_theme=%E0%A4%A; bi_theme=dark`}});
+  assert.equal(duplicateKey.response.status, 200, 'a later valid duplicate key must still be usable');
+  console.error('MARK: malformed cookie tolerated');
+
   const meOnQuery = await fetchJson(`${queryBase}/api/auth/me`, {headers: {cookie}});
   assert.equal(meOnQuery.response.status, 200);
   assert.equal(meOnQuery.body.user.username, 'query-test');
