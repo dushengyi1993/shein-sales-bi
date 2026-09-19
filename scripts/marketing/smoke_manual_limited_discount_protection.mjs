@@ -203,6 +203,12 @@ const highClickSource = await fs.readFile('scripts/marketing/batch_apply_high_cl
 assert.match(highClickSource, /findPersistedMarketingTransactionContinuation/,
   'high-click restore invocation must check for persisted transactions before passing --continuation');
 assert.match(highClickSource, /manualContinuation/);
+// The high-click plan nests the pricing decision under `pricing`, so the binding
+// is at row.pricing.fixedTierPricing. Reading only the top-level field silently
+// omitted --fixed-tier-pricing and left a fixed-price canonical with no binding
+// to verify, which failed every later restore.
+assert.match(highClickSource, /row\.fixedTierPricing \|\| row\.pricing\?\.fixedTierPricing/,
+  'the high-click registry write must read the fixed-tier binding from either location');
 assert.doesNotMatch(highClickSource, /'restore_failed'/);
 assert.match(restoreBatchSource, /assessRecoverableDryRun/);
 assert.match(restoreBatchSource, /export function fixedTierPrewriteBlocker/,
