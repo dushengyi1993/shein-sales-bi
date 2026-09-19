@@ -218,6 +218,22 @@ const built=build([{skc:'ui-test',supply_price_info:{supply_price:200,max_supply
 assert.deepEqual(built.invalid,[]);assert.equal(target.limitedDiscountPrice,110);assert.equal(built.addRows[0].add_sku_list[0].product_act_price,110);assert.equal(target.platformPriceAudit.originalTargetPrice,141);assert.equal(target.platformPriceAudit.actualMargin,(110-100)/110);
 assert.equal(verifyPlatformPriceAudit({...target,limitedDiscountPrice:141},target.platformPriceAudit)?.actualPrice,110);
 assert.equal(verifyPlatformPriceAudit({...target,limitedDiscountPrice:141},{...target.platformPriceAudit,actualPrice:111}),null);
+// The executor also clamps UP to the platform's rate-intercept supply floor and
+// records that adjustment. Verifying only the downward cap rejected every
+// floor-raised row, so the audit the executor had just produced could never be
+// written back and the recorded special price stayed permanently out of step
+// with the live platform price.
+const floorRow={skc:'floor-1',limitedDiscountPrice:115.62,specialPrice:115.62};
+const floorAudit={ruleHash:standard.sha256,skc:'floor-1',originalTargetPrice:115.62,actualPrice:120.01,platformMaximum:570,differenceSar:4.39,platformFloor:120,platformFloorAdjustment:{skc:'floor-1',requestedPrice:115.62,interceptSupplyPrice:120,adjustedPrice:120.01}};
+assert.equal(verifyPlatformPriceAudit(floorRow,floorAudit)?.actualPrice,120.01);
+for(const tampered of [
+  {...floorAudit,actualPrice:121},
+  {...floorAudit,differenceSar:5},
+  {...floorAudit,platformFloor:null},
+  {...floorAudit,platformFloor:118},
+  {...floorAudit,platformFloorAdjustment:{...floorAudit.platformFloorAdjustment,skc:'other'}},
+  {...floorAudit,platformFloorAdjustment:{...floorAudit.platformFloorAdjustment,requestedPrice:100}},
+]) assert.equal(verifyPlatformPriceAudit(floorRow,tampered),null,'a tampered floor audit must be rejected');
 const historical446=peers('SK-446');
 // SK-446 now carries an approved reviewed-workbook price basis, so it prices
 // from that basis (and still fails closed without complete cost evidence)
