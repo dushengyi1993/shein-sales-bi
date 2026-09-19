@@ -602,8 +602,6 @@ function classifyBlockedDryRun(full) {
   return {type: 'dry_run_not_ok', reason};
 }
 
-export function transactionPreflightPartition(full, inventoryTransactionPlan = null) {
-
 // Every SKC that the platform itself refused must appear in the terminal
 // evidence. classifyBlockedDryRun already carries `invalid`/`skipped` rows with
 // their platform error codes, but the blocked record used to derive blockedSkcs
@@ -634,6 +632,8 @@ function platformRefusedSkcs(blocked, allowedSkcs = []) {
   }
   return [...out].sort();
 }
+
+export function transactionPreflightPartition(full, inventoryTransactionPlan = null) {
 
   const inventoryMinimumOrPlatformGate = inventoryTransactionPlan?.ok === true
     ? inventoryTransactionPlan.rows || []
