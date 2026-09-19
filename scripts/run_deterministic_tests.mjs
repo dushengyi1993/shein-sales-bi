@@ -25,6 +25,7 @@ const tests = [
   'scripts/test_marketing_repair_terminal_chain.mjs',
   'scripts/test_marketing_fallback_helper_scope.mjs',
   'scripts/test_marketing_coupon_not_participating.mjs',
+  'scripts/test_marketing_stale_inventory_intent_aging.mjs',
   'scripts/test_link_retire_history_retention.mjs',
   'scripts/test_link_retire_missing_day_window.mjs',
   'scripts/test_inventory_sealed_batch_reconciliation.mjs',
