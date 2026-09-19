@@ -40,21 +40,36 @@ assert.throws(()=>resolveTierPriceVariation({...input,fullUnitCostSar:null}),/in
 const floor=resolveTierPriceVariation({...input,basis:{kind:'full_cost_margin',tiers:[.15,.2,.3]},tier:0});
 assert.ok(floor.actualFullMargin>=.15-1e-9);
 
-// Actual shared binding path for all eight products, with complete cost.
+// Actual shared binding path for every approved product, with complete cost.
+//
+// The effective three-tier basis is the approved workbook basis when one is in
+// force for the canonical, otherwise the standard's own price list. Asserting
+// baselineValue against item.prices was only correct while no reviewed workbook
+// basis existed for any item; the current standard carries five, and one of
+// them is a full-cost-margin basis rather than a price basis.
+const REPORT_DATE='2026-09-16';
+const workbookBasisFor=canonical=>(standard.doc.reviewedWorkbookBases||[])
+  .find(r=>REPORT_DATE>=r.effectiveDate&&r.canonical===canonical);
 for(const item of standard.doc.items) {
   const rows=Array.from({length:7},(_,i)=>({storeKey:`S${i}`,skc:`k${i}`,activityId:123,canonical:item.canonical,is_on_shelf:true,
     shelf_age_days:30,c7_eps_uv:2900-i*100,c7_goods_uv:10,c7_cart_uv:0,c7_sale_cnt:0}));
   const costDoc={trueCostMap:{[item.canonical]:{unitCostSar:20,storageUnitCostSar:1}}};
+  const basis=(workbookBasisFor(item.canonical)||{basis:{kind:'price',tiers:item.prices}}).basis;
   for(const tier of [0,1,2]) {
     const cases=structuredClone(rows),row=cases[tier===2?6:0];
     if(tier===0) Object.assign(row,{c7_eps_uv:4000,c7_goods_uv:200});
-    const context=buildFixedTierContext({storeLinks:cases},{reportDate:'2026-09-09',costDoc});
+    // The loaded standard's own effectiveDate gates `applies`; use a date at or
+    // after it so this exercises the current approved standard rather than
+    // silently skipping it (which returned null and broke the assertions).
+    const context=buildFixedTierContext({storeLinks:cases},{reportDate:REPORT_DATE,costDoc});
     const value=applyFixedTierPrice(row,context);
     assert.equal(value.blocked,false);
-    assert.equal(value.row.fixedTierPricing.priceVariation.baselineValue,item.prices[tier]);
+    assert.equal(value.row.fixedTierPricing.priceVariation.baselineValue,basis.tiers[tier]);
     assert.equal(verifyFixedTierBinding(value.row,context).ok,true);
-    assert.ok(value.row.targetPrice>=item.prices[tier]-2 && value.row.targetPrice<=item.prices[tier]+1);
-    const priorContext=buildFixedTierContext({storeLinks:cases},{reportDate:'2026-09-08',costDoc});
+    const range=basis.kind==='price'?PRICE_VARIATION_POLICY.price:PRICE_VARIATION_POLICY.margin;
+    const observed=basis.kind==='price'?value.row.targetPrice:value.row.fixedTierPricing.priceVariation.actualFullMargin;
+    assert.ok(observed>=basis.tiers[tier]+range.min-1e-9 && observed<=basis.tiers[tier]+range.max+1e-9);
+    const priorContext=buildFixedTierContext({storeLinks:cases},{reportDate:'2026-09-15',costDoc});
     const prior=applyFixedTierPrice(row,priorContext).row,priorSnapshot=JSON.stringify(prior);
     assert.equal(verifyFixedTierBinding(prior,context).ok,false);
     assert.equal(JSON.stringify(prior),priorSnapshot,'old locked/submitted price must not be changed by verification');
