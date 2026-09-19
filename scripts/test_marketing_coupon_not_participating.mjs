@@ -31,8 +31,20 @@ assert.match(guard, /if \(rule\?\.notParticipating === true\) return false;/,
   'a not-participating row must not count as a coupon rule failure');
 assert.match(guard, /couponNotParticipatingRows/,
   'not-participating rows must be collected separately');
-assert.match(guard, /expectedCouponRowsExcludingNotParticipating/,
-  'the coupon row count expectation must exclude not-enrolled stores');
+// The exporter emits exactly one coupon row per enabled store, including a
+// verified not-enrolled store (whose row carries the notParticipating fact),
+// and storeStatuses counts that row too. So the two sides stay directly
+// comparable and subtracting not-enrolled stores would manufacture a
+// permanent count mismatch - which is what produced the five misleading
+// critical_source_missing blockers on 2026-09-19.
+assert.match(guard, /const missingCouponSummaryStores = \[\.\.\.expectedCouponStoreKeys\]/,
+  'the coupon summary must compare expected vs actual stores');
+assert.match(guard, /expectedCouponStoreKeys\.add\(storeKey\);\n  \}/,
+  'a verified not-enrolled store is still an expected coupon row');
+assert.doesNotMatch(guard, /expectedCouponRowsExcludingNotParticipating/,
+  'not-enrolled stores must not be subtracted from the expected coupon row count');
+assert.doesNotMatch(guard, /expectedCouponRows - notParticipatingStoreCount/,
+  'not-enrolled stores must not be subtracted from the expected coupon row count');
 assert.match(guard, /notParticipatingStores: \[\.\.\.new Set\(couponNotParticipatingRows/,
   'the report must name the not-enrolled stores so the fact stays visible');
 checks.push('guard_reports_instead_of_blocking');
@@ -52,4 +64,3 @@ assert.equal(Number(stores.CX?.levelRuleId), 2000, 'the existing per-store ids m
 checks.push('config_records_verified_fact_without_inventing_ids');
 
 console.log(JSON.stringify({ok: true, test: 'marketing_coupon_not_participating_contract', checks}));
-

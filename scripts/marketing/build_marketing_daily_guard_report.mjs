@@ -1271,13 +1271,31 @@ function summarizeFreshLiveLowPriceOverlap({
   const reasons = [];
   if (stackSource?.status !== 'ok') reasons.push(`marketing_stack_source_${stackSource?.status || 'missing'}`);
   if (!stackCoverage?.coverageComplete) reasons.push('marketing_stack_store_coverage_incomplete');
-  // Not-enrolled stores legitimately contribute no coupon row, so the expected
-  // count must exclude them before a mismatch is treated as a defect.
-  const notParticipatingStoreCount = new Set(couponNotParticipatingRows
+  // Compare the two sides as STORE SETS rather than as a bare count. A verified
+  // not-enrolled store still emits exactly one coupon row (carrying the
+  // notParticipating fact) and storeStatuses counts that row too, so the two
+  // sides stay directly comparable; subtracting the not-enrolled stores made
+  // every day with such a store report a count mismatch, which dropped the
+  // fresh live-coupon evidence and fell back to five legacy files that never
+  // existed on this host (2026-09-19: LG and HY not enrolled in activity
+  // 34810). Set comparison is also robust to either exporter accounting shape
+  // and names the offending stores instead of only a delta.
+  const couponNotParticipatingStoreKeys = new Set(couponNotParticipatingRows
     .map(row => normKey(row?.['店铺'] || row?.storeKey || row?.store))
-    .filter(Boolean)).size;
-  const expectedCouponRowsExcludingNotParticipating = Math.max(0, expectedCouponRows - notParticipatingStoreCount);
-  if (couponRowsByEnabledStore.length !== expectedCouponRowsExcludingNotParticipating) reasons.push('coupon_summary_count_mismatch');
+    .filter(Boolean));
+  const expectedCouponStoreKeys = new Set();
+  for (const status of storeStatuses) {
+    const storeKey = normKey(status?.storeKey || status?.store);
+    if (enabledSet.has(storeKey) && Number(status?.couponCount || 0) > 0) expectedCouponStoreKeys.add(storeKey);
+  }
+  for (const storeKey of couponNotParticipatingStoreKeys) {
+    if (enabledSet.has(storeKey)) expectedCouponStoreKeys.add(storeKey);
+  }
+  const actualCouponStoreKeys = new Set(couponRowsByEnabledStore
+    .map(row => normKey(row?.['店铺'] || row?.storeKey || row?.store)).filter(Boolean));
+  const missingCouponSummaryStores = [...expectedCouponStoreKeys].filter(key => !actualCouponStoreKeys.has(key)).sort();
+  const unexpectedCouponSummaryStores = [...actualCouponStoreKeys].filter(key => !expectedCouponStoreKeys.has(key)).sort();
+  if (missingCouponSummaryStores.length || unexpectedCouponSummaryStores.length) reasons.push('coupon_summary_count_mismatch');
   if (couponRuleFailures.length) reasons.push('coupon_rule_query_failed');
   if (liveScanSource?.source?.status !== 'ok') reasons.push(`current_marketing_live_scan_${liveScanSource?.source?.status || 'missing'}`);
   if (liveDoc.ok !== true || liveDoc.partial === true) reasons.push('current_marketing_live_scan_not_complete');
@@ -1295,6 +1313,8 @@ function summarizeFreshLiveLowPriceOverlap({
     notParticipatingStores: [...new Set(couponNotParticipatingRows
       .map(row => normKey(row?.['店铺'] || row?.storeKey || row?.store))
       .filter(Boolean))].sort(),
+    missingCouponSummaryStores,
+    unexpectedCouponSummaryStores,
     belowTarget: 0,
     missingEvidence: 0,
     matchesTarget: 0,
