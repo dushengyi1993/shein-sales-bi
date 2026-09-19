@@ -190,7 +190,14 @@ async function registerCandidate(row, exactPlan, sourceArtifact) {
     '--status', 'active',
     '--replace', 'true',
   ];
-  if (row.fixedTierPricing) args.push('--fixed-tier-pricing',JSON.stringify(row.fixedTierPricing));
+  // The high-click plan nests the pricing decision under `pricing`, so the
+  // fixed-tier binding lives at row.pricing.fixedTierPricing. Reading only the
+  // top-level field silently omitted --fixed-tier-pricing, and a fixed-price
+  // canonical then failed every later restore with
+  // fixed_tier_rule_or_evidence_changed_rebuild_required because the registry
+  // carried no binding to verify against (2026-09-20: QY SK-223).
+  const fixedTierPricing=row.fixedTierPricing || row.pricing?.fixedTierPricing || null;
+  if (fixedTierPricing) args.push('--fixed-tier-pricing',JSON.stringify(fixedTierPricing));
   if (row.previousRegistryEntry?.currentActivityId) {
     args.push('--original-activity-id', String(row.previousRegistryEntry.currentActivityId));
   }
