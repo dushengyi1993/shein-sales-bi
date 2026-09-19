@@ -324,7 +324,10 @@ const OWNERSHIP_BASELINE_UNION_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COU
 // sibling parity regression are registered in the deterministic shards and
 // owned by no other runner. This change adds the repair-stage notification
 // regression, so the post-baseline deterministic registration count is 119.
-const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 124;
+// Later additions: the coupon not-participating contract regression and the
+// stale-inventory-intent aging regression are both owned only by the
+// deterministic runner, with no removals, so the count is now 125.
+const OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS = 125;
 const OWNERSHIP_CURRENT_DETERMINISTIC_TEST_COUNT = OWNERSHIP_BASELINE_DETERMINISTIC_TEST_COUNT
   + OWNERSHIP_POST_BASELINE_DETERMINISTIC_ADDITIONS;
 const OWNERSHIP_CURRENT_UNION_COUNT = OWNERSHIP_BASELINE_UNION_COUNT
