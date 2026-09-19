@@ -24,7 +24,9 @@
         "TZ": {"levelRuleId": 23220},
         "JSH": {"levelRuleId": 26939},
         "TZZ": {"levelRuleId": 30104},
-        "XC": {"levelRuleId": 26929}
+        "XC": {"levelRuleId": 26929},
+        "LG": {"notParticipating": true, "verifiedAt": "2026-09-19", "evidence": "coupon activity 34810 detail page shows the site is not enrolled (该站点未参与活动) with an empty coupon list for LG (GS2091518); no levelRuleId exists for this store in this activity"},
+        "HY": {"notParticipating": true, "verifiedAt": "2026-09-19", "evidence": "coupon activity 34810 detail page shows the site is not enrolled (该站点未参与活动) with an empty coupon list for HY (GS1946575); no levelRuleId exists for this store in this activity"}
       }
     }
   }

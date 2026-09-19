@@ -1241,7 +1241,17 @@ function summarizeFreshLiveLowPriceOverlap({
   const expectedCouponRows = storeStatuses
     .filter(status => enabledSet.has(normKey(status?.storeKey || status?.store)))
     .reduce((sum, status) => sum + Number(status?.couponCount || 0), 0);
-  const couponRuleFailures = stackCouponRows.filter(row => row?._raw?.coupon15Rule?.ok !== true);
+  // A store that is verified as not enrolled in the coupon activity has no 15%
+  // tier to query; that is a fact, not a rule failure. Counting it as one made
+  // the whole fresh live-coupon evidence untrusted, which then fell back to five
+  // legacy files that never existed and produced five misleading blockers
+  // (2026-09-19: LG and HY are not enrolled in activity 34810).
+  const couponRuleFailures = stackCouponRows.filter(row => {
+    const rule = row?._raw?.coupon15Rule;
+    if (rule?.notParticipating === true) return false;
+    return rule?.ok !== true;
+  });
+  const couponNotParticipatingRows = stackCouponRows.filter(row => row?._raw?.coupon15Rule?.notParticipating === true);
   const couponRowsByEnabledStore = stackCouponRows.filter(row => enabledSet.has(normKey(row?.['店铺'] || row?.storeKey || row?.store)));
 
   const liveDoc = liveScanSource?.data || {};
@@ -1261,7 +1271,13 @@ function summarizeFreshLiveLowPriceOverlap({
   const reasons = [];
   if (stackSource?.status !== 'ok') reasons.push(`marketing_stack_source_${stackSource?.status || 'missing'}`);
   if (!stackCoverage?.coverageComplete) reasons.push('marketing_stack_store_coverage_incomplete');
-  if (couponRowsByEnabledStore.length !== expectedCouponRows) reasons.push('coupon_summary_count_mismatch');
+  // Not-enrolled stores legitimately contribute no coupon row, so the expected
+  // count must exclude them before a mismatch is treated as a defect.
+  const notParticipatingStoreCount = new Set(couponNotParticipatingRows
+    .map(row => normKey(row?.['店铺'] || row?.storeKey || row?.store))
+    .filter(Boolean)).size;
+  const expectedCouponRowsExcludingNotParticipating = Math.max(0, expectedCouponRows - notParticipatingStoreCount);
+  if (couponRowsByEnabledStore.length !== expectedCouponRowsExcludingNotParticipating) reasons.push('coupon_summary_count_mismatch');
   if (couponRuleFailures.length) reasons.push('coupon_rule_query_failed');
   if (liveScanSource?.source?.status !== 'ok') reasons.push(`current_marketing_live_scan_${liveScanSource?.source?.status || 'missing'}`);
   if (liveDoc.ok !== true || liveDoc.partial === true) reasons.push('current_marketing_live_scan_not_complete');
@@ -1276,6 +1292,9 @@ function summarizeFreshLiveLowPriceOverlap({
     source: 'fresh_marketing_stack_plus_current_price_live_scan',
     trusted: reasons.length === 0,
     reasons,
+    notParticipatingStores: [...new Set(couponNotParticipatingRows
+      .map(row => normKey(row?.['店铺'] || row?.storeKey || row?.store))
+      .filter(Boolean))].sort(),
     belowTarget: 0,
     missingEvidence: 0,
     matchesTarget: 0,

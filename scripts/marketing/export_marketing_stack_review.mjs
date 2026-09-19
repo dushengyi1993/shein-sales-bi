@@ -632,13 +632,30 @@ async function fetchCouponSummaryHttp(session, store, activity) {
 }
 
 async function fetchCoupon15PctRuleStatsHttp(session, store, activityId) {
-  const levelRuleId = configuredCouponLevelRuleId(store.storeKey, activityId);
+  const ruleStatus = couponLevelRuleStatus(store.storeKey, activityId);
+  if (ruleStatus.status === 'not_participating') {
+    // Not enrolled: no tier exists to query, and that is a fact rather than a
+    // failure. Report it as a distinct, non-blocking state instead of letting
+    // it make the whole fresh live-coupon evidence untrusted.
+    return {
+      ok: true,
+      notParticipating: true,
+      levelRuleId: 0,
+      levelRuleIdSource: 'verified_not_participating',
+      available: 0,
+      enrolled: 0,
+      total: 0,
+      list: [],
+      reason: store.storeKey + ' is verified as not enrolled in coupon activity ' + activityId + '; no 15% tier exists',
+    };
+  }
+  const levelRuleId = ruleStatus.levelRuleId;
   if (!levelRuleId) {
     return {
       ok: false,
       levelRuleId: 0,
       levelRuleIdSource: 'config',
-      reason: `configured 15% coupon levelRuleId missing for ${store.storeKey}/${activityId}`,
+      reason: 'configured 15% coupon levelRuleId missing for ' + store.storeKey + '/' + activityId,
     };
   }
   const route = `/mbrs/marketing/coupon/rule/signup/${activityId}/${levelRuleId}`;
@@ -1088,6 +1105,24 @@ function configuredCouponLevelRuleId(storeKey, activityId) {
   const storeRules = activityRules?.stores?.[String(storeKey || '').toUpperCase()] || {};
   const id = Number(storeRules.levelRuleId || 0);
   return Number.isFinite(id) && id > 0 ? id : 0;
+}
+
+/**
+ * A store that is verifiably not enrolled in this coupon activity has no
+ * 15% tier and therefore no levelRuleId, which is not a configuration defect.
+ * Treating it as one made the whole fresh live-coupon evidence untrusted and
+ * replaced it with five legacy files that never existed, producing five
+ * misleading blockers (2026-09-19). Verified on the activity detail page:
+ * LG (GS2091518) and HY (GS1946575) both show "该站点未参与活动" with an empty
+ * coupon list.
+ */
+function couponLevelRuleStatus(storeKey, activityId) {
+  const activityRules = COUPON_LEVEL_RULES?.activities?.[String(activityId)] || {};
+  const storeRules = activityRules?.stores?.[String(storeKey || '').toUpperCase()] || {};
+  const id = Number(storeRules.levelRuleId || 0);
+  if (Number.isFinite(id) && id > 0) return {status: 'configured', levelRuleId: id};
+  if (storeRules.notParticipating === true) return {status: 'not_participating', levelRuleId: 0};
+  return {status: 'missing', levelRuleId: 0};
 }
 
 async function fetchCoupon15PctRuleStats(cdp, sessionId, store, activityId) {
